@@ -156,7 +156,7 @@ function loadCfgOptions() {
   if (skillSelect) {
     let repo = '';
     try {
-      const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+      const c = app.currentRepo();
       repo = c ? (c.fullName || '') : '';
     } catch {}
     const scope = _skillScope || 'official';

@@ -4,6 +4,7 @@
 重注册、主循环（claim 去重 / D9 串行冲突 / 并发上限 / 心跳失败自动重注册）。
 """
 import asyncio
+import io
 import json
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -13,6 +14,66 @@ import pytest
 from src.runtime import agent as ra
 
 _is_win = sys.platform == "win32"
+
+
+class TestCollectWorkerMetrics:
+    """覆盖 _collect_worker_metrics 的 bandwidth_percent 指标。
+
+    边端 worker 用标准库 /proc/net/dev 做两次采样差分：
+    占用率 = 差分速率(Mbps) / RUNTIME_BANDWIDTH_THRESHOLD_MBPS 阈值，上限 100%，首次采样返回 0.0。
+    """
+
+    def test_metrics_include_bandwidth_percent(self):
+        with patch.object(ra.time, "sleep", return_value=None):
+            metrics = ra._collect_worker_metrics()
+        assert "bandwidth_percent" in metrics
+        assert 0.0 <= metrics["bandwidth_percent"] <= 100.0
+
+    def test_bandwidth_first_sample_zero(self, monkeypatch):
+        monkeypatch.setenv("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1")
+        if hasattr(ra._collect_worker_metrics, "_bw_prev"):
+            del ra._collect_worker_metrics._bw_prev
+        real_open = open
+
+        def fake_open(path, *a, **k):
+            if path == "/proc/net/dev":
+                data = "Inter-|   Receive                                                |  Transmit\n" \
+                       " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n" \
+                       "  eth0: 500000 0 0 0 0 0 0 0 500000 0 0 0 0 0 0 0\n"
+                return io.StringIO(data)
+            return real_open(path, *a, **k)
+
+        with patch("builtins.open", side_effect=fake_open):
+            metrics = ra._collect_worker_metrics()
+        assert metrics["bandwidth_percent"] == 0.0
+
+    def test_bandwidth_diff_sampling(self, monkeypatch):
+        monkeypatch.setenv("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "1")
+        if hasattr(ra._collect_worker_metrics, "_bw_prev"):
+            del ra._collect_worker_metrics._bw_prev
+        samples = iter([
+            "Inter-|   Receive                                                |  Transmit\n" \
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n" \
+            "  eth0: 500000 0 0 0 0 0 0 0 500000 0 0 0 0 0 0 0\n",
+            "Inter-|   Receive                                                |  Transmit\n" \
+            " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n" \
+            "  eth0: 562500 0 0 0 0 0 0 0 562500 0 0 0 0 0 0 0\n",
+        ])
+
+        def fake_open(path, *a, **k):
+            if path == "/proc/net/dev":
+                return io.StringIO(next(samples))
+            return real_open(path, *a, **k)
+
+        real_open = open
+        real_open = open
+        with patch("builtins.open", side_effect=fake_open), \
+                patch.object(ra.time, "time", side_effect=[1000.0, 1001.0]):
+            ra._collect_worker_metrics()          # 第一次采样：仅记录快照
+            metrics = ra._collect_worker_metrics()  # 第二次：差分计算
+        # Δbytes = (562500+562500)-(500000+500000) = 125000，dt=1s，
+        # 速率 = 125000*8/1e6 = 1.0 Mbps，阈值 1 Mbps → 100%
+        assert metrics["bandwidth_percent"] == 100.0
 
 
 class TestEnvHelpers:

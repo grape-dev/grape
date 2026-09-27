@@ -405,8 +405,9 @@ def sweep_once() -> int:
         # /tmp 全局兜底清理（2026-08-29 修复）：
         # worker /tmp 是 tmpfs（3.7G），被 hermes-acp-*/hermes-results/hermes-iso-*/
         # pytest-of-root/pip-unpack-* 等残留堆积撑满 → curl ENOSPC → 静默安装失败。
+        # issue #238: hermes 隔离目录已迁移到 ~/.cache，此处同步扫描新路径。
         # _cleanup_task_tmp 在任务完成时清理已知的 agent 工作产物，但异常退出/进程被杀
-        # 时残留不被清理。这里在 sweeper 周期（15min）兜底扫描 /tmp 清理过期文件。
+        # 时残留不被清理。这里在 sweeper 周期（15min）兜底扫描清理过期文件。
         tmp_cleaned = _sweep_tmp_residuals()
         if tmp_cleaned:
             log.info(f"sweeper cleaned {tmp_cleaned} /tmp residual dir(s)/file(s)")
@@ -426,17 +427,18 @@ def sweep_once() -> int:
 
 
 def _sweep_tmp_residuals() -> int:
-    """兜底清理 /tmp 下 agent 残留（sweeper 每 15min 调一次）。
+    """兜底清理 /tmp 及 ~/.cache 下 agent 残留（sweeper 每 15min 调一次）。
 
     清理目标：
-    - hermes-acp-* / hermes-iso-* / hermes-sandbox-* / hermes-snap-*：hermes 引擎隔离目录残留
+    - hermes-iso-* / hermes-sandbox-* / hermes-snap-*：hermes 引擎隔离目录残留
+      （issue #238: 已从 /tmp 迁移到 ~/.cache；hermes-acp-homes 是持久化目录不清理）
     - hermes-results：agent call 结果缓存（只增不删）
     - pytest-of-root：测试残留
     - pip-unpack-* / pip-metadata-*：pip 安装临时目录
     - tf-deploy-* / blog-* / ptmpl_*：SRE/VOD agent 工作产物
 
     安全策略：
-    - 只清理 /tmp 下已知前缀的文件/目录，不碰其他进程
+    - 只清理已知前缀的文件/目录，不碰其他进程
     - 目录按 mtime 判断：超过 1 小时未修改才清理（避免清到正在执行的任务）
     - 单文件（如 hermes-results 内的文件）同样按 mtime 判断
     """
@@ -448,7 +450,14 @@ def _sweep_tmp_residuals() -> int:
     cleaned = 0
 
     # 目录类清理（按前缀 glob + mtime 判断）
+    # hermes 隔离目录已迁移到 ~/.cache（issue #238），同时保留 /tmp 旧路径兜底
+    # 注意：~/.cache/hermes-acp-homes 是 ACP 模式持久化目录（state.db 续传），不清理；
+    # 只清理 hermes-iso-*（executor 临时隔离目录，异常退出时残留）。
+    _cache_home = os.path.expanduser("~/.cache")
     _dir_prefixes = [
+        f"{_cache_home}/hermes-iso-*",
+        f"{_cache_home}/hermes-sandbox-*",
+        f"{_cache_home}/hermes-snap-*",
         "/tmp/hermes-acp-*",
         "/tmp/hermes-iso-*",
         "/tmp/hermes-sandbox-*",

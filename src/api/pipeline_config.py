@@ -104,6 +104,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     _has_icon = False
     _has_st = False
     _has_pr_sub = False
+    _has_linked_repos = False
     with lock:
         c = db.cursor()
         try:
@@ -120,6 +121,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
                 _has_icon = "icon" in _cols
                 _has_st = "scene_type" in _cols
                 _has_pr_sub = "pr_subscription_enabled" in _cols
+                _has_linked_repos = "linked_repos" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
@@ -127,6 +129,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
                 if _has_icon: _extra += ", icon"
                 if _has_st: _extra += ", scene_type"
                 if _has_pr_sub: _extra += ", pr_subscription_enabled"
+                if _has_linked_repos: _extra += ", linked_repos"
                 c.execute(
                     f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                     "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
@@ -171,6 +174,13 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
         pr_subscription_enabled = 0
         if _has_pr_sub and len(r) > col_offset:
             pr_subscription_enabled = int(r[col_offset] or 0)
+            col_offset += 1
+        linked_repos = []
+        if _has_linked_repos and len(r) > col_offset:
+            try:
+                linked_repos = json.loads(r[col_offset] or "[]") if r[col_offset] else []
+            except Exception:
+                linked_repos = []
         result.append({
             "scene_id": scene_id, "name": r[1], "description": r[2],
             "display_name": (r[5] if _has_dn and len(r) > 5 else "") or r[1],
@@ -178,6 +188,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
             "work_branch": work_branch, "created_by": created_by,
             "icon": icon, "scene_type": scene_type,
             "pr_subscription_enabled": pr_subscription_enabled,
+            "linked_repos": linked_repos,
         })
     return result
 
@@ -194,6 +205,7 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
             _has_dn = False
             _has_st = False
             _has_pr_sub = False
+            _has_linked_repos = False
             try:
                 # PRAGMA 在 MySQL 上列不全，用 SHOW COLUMNS 替代
                 try:
@@ -204,6 +216,7 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
                 _has_dn = "display_name" in _cols
                 _has_st = "scene_type" in _cols
                 _has_pr_sub = "pr_subscription_enabled" in _cols
+                _has_linked_repos = "linked_repos" in _cols
             except Exception:
                 pass
             _extra = ", display_name" if _has_dn else ""
@@ -211,6 +224,8 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
                 _extra += ", scene_type"
             if _has_pr_sub:
                 _extra += ", pr_subscription_enabled"
+            if _has_linked_repos:
+                _extra += ", linked_repos"
             c.execute(
                 f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                 "WHERE is_active=1 AND scene_id=? AND repo_key=? LIMIT 1",
@@ -220,6 +235,7 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
                 nodes = json.loads(row[3] or "[]") if row[3] else []
                 _scene_type = "standard"
                 _pr_sub = 0
+                _linked_repos = []
                 _col_idx = 5  # after onboarding (index 4)
                 if _has_dn:
                     _col_idx += 1  # display_name at index 5
@@ -228,12 +244,19 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
                     _col_idx += 1
                 if _has_pr_sub and len(row) > _col_idx:
                     _pr_sub = int(row[_col_idx] or 0)
+                    _col_idx += 1
+                if _has_linked_repos and len(row) > _col_idx:
+                    try:
+                        _linked_repos = json.loads(row[_col_idx] or "[]") if row[_col_idx] else []
+                    except Exception:
+                        _linked_repos = []
                 return {
                     "scene_id": row[0], "name": row[1], "description": row[2],
                     "display_name": (row[5] if _has_dn and len(row) > 5 else "") or row[1],
                     "nodes": nodes, "onboarding": row[4] or "repo-onboarding",
                     "scene_type": _scene_type,
                     "pr_subscription_enabled": _pr_sub,
+                    "linked_repos": _linked_repos,
                 }
         except Exception as e:
             log.warning(f"_query_scene_by_id failed: {e}")
@@ -253,7 +276,8 @@ def get_scenes(repo_key: str = "") -> list[dict]:
              "nodes": s.get("nodes") or [],
              "onboarding": s.get("onboarding") or "repo-onboarding",
              "scene_type": s.get("scene_type") or "standard",
-             "pr_subscription_enabled": s.get("pr_subscription_enabled", 0)} for s in db_scenes]
+             "pr_subscription_enabled": s.get("pr_subscription_enabled", 0),
+             "linked_repos": s.get("linked_repos") or []} for s in db_scenes]
 
 
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
@@ -352,10 +376,12 @@ def is_node_skipped(scene_id: str, node_id: str) -> bool:
 def create_custom_scene(scene_id: str, name: str, description: str,
                         repo_key: str, nodes: list, onboarding: str = "repo-onboarding",
                         display_name: str = "", created_by: str = "", icon: str = "",
-                        scene_type: str = "standard", pr_subscription_enabled: int = 0) -> int:
+                        scene_type: str = "standard", pr_subscription_enabled: int = 0,
+                        linked_repos: list = None) -> int:
     """Create or reactivate a repo-scoped custom scene in DB. Returns DB id."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
+    linked_repos_json = json.dumps(linked_repos or [], ensure_ascii=False)
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     with lock:
@@ -375,6 +401,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             _try_set_icon(c, existing[0], icon)
             _try_set_scene_type(c, existing[0], scene_type)
             _try_set_pr_sub_enabled(c, existing[0], pr_subscription_enabled)
+            _try_set_linked_repos(c, existing[0], linked_repos_json)
             db.commit()
             return existing[0]
         # Insert new record
@@ -388,6 +415,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         _try_set_icon(c, new_id, icon)
         _try_set_scene_type(c, new_id, scene_type)
         _try_set_pr_sub_enabled(c, new_id, pr_subscription_enabled)
+        _try_set_linked_repos(c, new_id, linked_repos_json)
         db.commit()
         return new_id
 
@@ -425,6 +453,14 @@ def _try_set_pr_sub_enabled(c, row_id: int, enabled: int):
         pass
 
 
+def _try_set_linked_repos(c, row_id: int, linked_repos_json: str):
+    """幂等写入 linked_repos（列不存在时忽略）。"""
+    try:
+        c.execute("UPDATE devops_pipeline_scene SET linked_repos=? WHERE id=?", (linked_repos_json, row_id))
+    except Exception:
+        pass
+
+
 def _try_set_display_name(c, row_id: int, display_name: str):
     """幂等写入 display_name（列不存在时忽略，兼容旧库）。"""
     try:
@@ -435,7 +471,8 @@ def _try_set_display_name(c, row_id: int, display_name: str):
 
 def update_custom_scene(scene_id: str, repo_key: str,
                         nodes: list, name: str | None = None, description: str | None = None,
-                        icon: str | None = None, pr_subscription_enabled: int | None = None):
+                        icon: str | None = None, pr_subscription_enabled: int | None = None,
+                        linked_repos: list | None = None):
     """Update a repo-scoped custom scene."""
     db, lock = _db()
     nodes_json = json.dumps(nodes, ensure_ascii=False)
@@ -459,6 +496,9 @@ def update_custom_scene(scene_id: str, repo_key: str,
         if pr_subscription_enabled is not None:
             sets.append("pr_subscription_enabled=?")
             params.append(int(pr_subscription_enabled))
+        if linked_repos is not None:
+            sets.append("linked_repos=?")
+            params.append(json.dumps(linked_repos, ensure_ascii=False))
         params.extend([scene_id, repo_key])
         c.execute(
             f"UPDATE devops_pipeline_scene SET {','.join(sets)} WHERE scene_id=? AND repo_key=? AND is_active=1",

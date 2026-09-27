@@ -1,52 +1,69 @@
-# Spec: Issue #162 — 系统监控分页增加「每页条数」选择器
+# Spec: Issue #242 — 支持跨仓库需求开发（副本）
 
 ## Objective
-系统监控页面中概览的两处分页（Worker 卡片 / Runtime 引擎表格）增加「每页条数」可选（10/20/50）；任务 Tab（timeline 任务列表）新增分页（含相同的「每页条数」选择器），避免数据量大时一次性渲染过多 DOM 元素。
 
-## 背景
-- 概览 Worker / Runtime 分页已在 Issue #117 实现，固定 `_OBS_PAGE_SIZE = 10`，仅有翻页按钮
-- 异常任务 Tab 已在 Issue #123 实现 `anomalyPageSize` + `rows_per_page` 选择器（10/20/50）
-- 任务 Tab（timeline issue 列表）目前无分页，所有 issue 一次性渲染
+在场景详情中增加「关联仓库」配置项（仓库 + 分支多选），支持一次需求开发同时操作多个仓库，开发完成后向每个有改动的仓库分别提交 PR。
 
-## 技术方案
+- **用户**：使用 Grape 平台进行多仓库项目开发的开发者/团队
+- **成功标准**：场景详情可配置多个关联仓库及分支；一次需求开发可同时操作多个仓库；开发完成后能向每个有改动的仓库分别提交 PR
 
-### 概览：Worker 卡片 & Runtime 引擎
-1. 将 `const _OBS_PAGE_SIZE = 10` 替换为独立状态：`_workerPageSize = 10`、`_runtimePageSize = 10`
-2. 新增 `_paginationWithPageSizeHTML(page, totalPages, prevExpr, nextExpr, pageSize, pageSizeVar, rerenderExpr)` 通用分页栏，包含翻页按钮 + 页码 + `rows_per_page` 选择器（10/20/50）
-3. `_rerenderWorkerGrid()` / `_rerenderRuntimeTable()` / `renderOverview()` / `updateOverview()` 均改为使用对应 `_*PageSize` 变量
-4. 空列表（`workers.length === 0` / `_filteredRuntimes.length === 0`）时不渲染分页栏
+## Tech Stack
 
-### 任务 Tab
-5. 新增状态：`_timelinePage = 0`、`_timelinePageSize = 10`
-6. `_filterTimelineIssues()` 增加分页逻辑：先按搜索条件筛选，再按 `_timelinePage/_timelinePageSize` 切片渲染
-7. 渲染后追加 `_paginationWithPageSizeHTML` 分页栏
-8. `#N` 定位搜索：当 `locateIssueId` 存在时，将 `_timelinePage` 调整到包含目标 issue 的页
-9. 搜索输入 `oninput` 重置 `_timelinePage = 0`
+- Python 3.12 + FastAPI（后端 API）
+- SQLite/MySQL（devops_pipeline_scene 表）
+- 原生 JS（前端，无框架）
+- grape CLI（VCS 操作）
 
-### 状态重置
-10. `switchObsTab()` 切换 tab 时重置 `_timelinePage = 0`
+## Commands
 
-## 验收标准
-- [ ] 概览 Worker 分页：10/20/50 选择器存在，切换后正确渲染对应数量卡片，页码正确
-- [ ] 概览 Runtime 分页：10/20/50 选择器存在，切换后正确渲染对应行数，页码正确
-- [ ] 任务 Tab 分页：10/20/50 选择器存在，切换后正确渲染，页码正确
-- [ ] 空列表/少量数据时，选择器仍可见，无翻页按钮，页码显示 "1 / 1"
-- [ ] `switchObsTab` 切换 tab 后分页状态正确重置
-- [ ] 搜索筛选后分页正确
-- [ ] `#N` 定位搜索自动跳到目标页
-- [ ] 现有 Issue #117 / #123 测试全部通过
-- [ ] Issue #162 新增回归测试全部通过
+```bash
+# 测试
+pytest tests/ -x -q
 
-## 代码风格
-- JS（浏览器脚本），无模块化
-- 全局变量/函数风格（遵循现有代码库风格）
-- HTML 字符串模板（`innerHTML`）
+# 启动（验证用）
+python -m src.api.run  # 或 uvicorn
+```
 
-## 测试策略
-- 框架：Node.js 单文件测试（`node tests/js/*.js`）
-- 现有：`test_observability_pagination.js`（#117，已更新）、`test_anomaly_page_size.js`（#123）
-- 新增：`test_observability_page_size_162.js`（#162 回归测试）
+## Project Structure
 
-## 边界
-- Always: 测试通过后提交
-- Never: 修改非 Issue 相关代码，修改后端逻辑，引入外部依赖
+```
+src/api/db_setup.py              # DB schema 迁移
+src/api/pipeline_config.py       # 场景 CRUD 数据层
+src/api/routes/scenes.py         # 场景 API 路由
+src/api/routes/webhook.py        # A2A dispatch
+src/api/event_pipeline.py        # env_extra 注入
+src/runtime/repogit.py           # git worktree 基建
+src/runtime/agent.py             # coding agent 执行
+src/vcs/api_client.py            # VCS PR 操作
+src/api/static/js/pages/dashboard.js  # 前端场景详情页
+tests/                           # 测试
+```
+
+## Code Style
+
+- 后端：Python type hints，现有 `_ensure_column` 幂等迁移模式
+- 前端：原生 JS，Apple 设计风格（rounded-lg, 0.5px border, SF Pro）
+- DB：新增字段用 `_ensure_column` 幂等添加，TEXT DEFAULT '[]'
+
+## Testing Strategy
+
+- pytest 单元测试：场景 CRUD 含 linked_repos、A2A payload 携带 linked_repos
+- 测试位置：tests/test_linked_repos.py
+
+## Boundaries
+
+- Always: 运行测试后提交、幂等迁移、向后兼容
+- Ask first: 无
+- Never: 修改非 Issue 相关代码、提交 secrets
+
+## Success Criteria
+
+- [ ] 场景详情提供关联仓库配置（仓库 + 分支，支持多选）
+- [ ] 一次需求开发可同时操作多个关联仓库（各仓库独立 worktree）
+- [ ] 开发完成后能向每个有改动的仓库分别提交 PR
+- [ ] 方案包含跨仓库协同开发的技术设计
+- [ ] 所有现有测试通过 + 新增测试覆盖
+
+## Open Questions
+
+- 无（Spec 已明确）

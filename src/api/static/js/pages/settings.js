@@ -280,7 +280,7 @@ function unhostFromSettings(fullName) {
       const cur = app.currentRepo();
       const wasCurrent = cur && cur.fullName === fullName;
       if (wasCurrent) {
-        localStorage.removeItem('currentRepo');
+        sessionStorage.removeItem('currentRepo');
       }
       app.initSidebarRepos();
       API.get('/repos/managed').then(md => {

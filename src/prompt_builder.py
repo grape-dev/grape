@@ -588,6 +588,21 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append(f"A2A target PR: #{pr_num}\n")
         parts.append("Continue processing based on the context above.\n")
 
+    # 关联仓库提示（QA/SRE agent 需要知道关联仓库信息以做联合验证/部署）
+    _linked_repos_env = evt.get("_env_extra", {}).get("GRAPE_LINKED_REPOS", "") or os.environ.get("GRAPE_LINKED_REPOS", "")
+    if _linked_repos_env and agent_type in ("qa", "sre"):
+        try:
+            _lr_list = json.loads(_linked_repos_env) if isinstance(_linked_repos_env, str) else _linked_repos_env
+            if _lr_list:
+                _lr_names = ", ".join(r.get("repo_key", "").replace("gitcode:", "") for r in _lr_list if isinstance(r, dict))
+                if _lr_names:
+                    parts.append(f"\n## 关联仓库\n本 Issue 涉及多仓库开发，关联仓库: {_lr_names}\n")
+                    if agent_type == "qa":
+                        parts.append("请对每个关联仓库的 PR 也进行代码审查，并做联合验证（接口契约一致性、数据模型匹配等）。\n")
+                    parts.append(f"环境变量 $GRAPE_LINKED_REPOS 和 $GRAPE_LINKED_WORKTREES 包含关联仓库的完整列表和 worktree 路径。\n")
+        except Exception:
+            pass
+
     if evt_type == "issue_comment":
         note = ""
         if isinstance(payload.get("object_attributes"), dict):
@@ -631,13 +646,34 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")
 
+    # VOD issue_opened：用户已选场景时跳过查重（复制需求选不同场景流水线不应被判重复）
+    _user_selected_scene = False
+    if agent_type == "vod" and evt_type == "issue_opened":
+        _issue_id_for_scene = evt.get("issue_id", "") or str(number or "")
+        if _issue_id_for_scene and _rk:
+            try:
+                from src.api.session_store import get_issue_scene
+                _scene_tuple = get_issue_scene(_rk, _issue_id_for_scene)
+                if _scene_tuple and _scene_tuple[0]:
+                    _user_selected_scene = True
+            except Exception:
+                pass
+
     try:
         from src.api.event_store import get_issue_summary
         repo_key = f"{evt['source']}:{evt['repository']}"
         _current_issue = str(evt.get("issue_id") or number or "").lstrip("#")
         issue_summary = get_issue_summary(repo_key, exclude_issue=_current_issue)
         if issue_summary:
-            parts.append(issue_summary)
+            if _user_selected_scene:
+                parts.append(issue_summary)
+                parts.append(
+                    "\n⚠️ **重要：用户已为此 Issue 指定了开发场景，请直接按场景流水线执行，"
+                    "不要因为标题或内容与已有 Issue 相似而判断为重复需求或跳过执行。"
+                    "复制需求使用不同场景流水线是正常操作。**"
+                )
+            else:
+                parts.append(issue_summary)
     except Exception:
         pass
 

@@ -4,7 +4,7 @@ M2：任务状态轮询 / 取消（用户 token）。
 M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_ 凭据可过（D2 凭据隔离）。
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
-import hashlib, json, os
+import hashlib, json, os, threading
 from datetime import datetime, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
@@ -15,6 +15,11 @@ from src.session_manager import db, db_lock
 from src.runtime import service
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
+
+# Worker 包下载并发限制（防止多 worker 同时下载占满带宽）
+_PKG_DOWNLOAD_LIMIT = int(os.environ.get("PKG_DOWNLOAD_MAX_CONCURRENT", "5"))
+_pkg_download_count = 0
+_pkg_download_lock = threading.Lock()
 
 
 # ===== rta_ 凭据认证中间件（M3，D2 凭据隔离）=====
@@ -67,6 +72,7 @@ class HeartbeatBody(BaseModel):
     disk_percent: float = 0.0
     tmp_percent: float = 0.0
     bandwidth_percent: float = 0.0
+    bandwidth_mbps: float = 0.0
     load_avg: str = ""
     spec: str = ""
     log_lines: list[LogLineBody] = []
@@ -224,11 +230,11 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
         c = db.cursor()
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.load_avg, body.spec, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, credential_id))
         else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.load_avg, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
@@ -323,10 +329,10 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                 }
                 _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
 
-    # Auto-upgrade disabled: stop returning latest_version to prevent worker
-    # from repeatedly downloading install-worker.sh and saturating bandwidth.
-    # Workers should be upgraded manually via the install script.
-    _latest_ver = ""
+    # 返回 worker 代码版本（仅 git commit，不含 wheels/python 指纹）
+    # worker 端对比此版本号决定是否自动升级
+    from src.worker_package import worker_code_version
+    _latest_ver = worker_code_version()
 
     return {"status": "ok", "cancelled_tasks": cancelled_tasks, "latest_version": _latest_ver}
 
@@ -889,14 +895,56 @@ def runtime_install_script():
     return PlainTextResponse(content, media_type="text/plain")
 
 
+@router.get("/install.ps1")
+def runtime_install_script_ps1():
+    """返回 Windows Worker PowerShell 一键安装脚本（只读，无敏感信息）。
+
+    用法（Windows 设备上执行）：
+      irm <server>/api/runtime/install.ps1 | iex
+    或带参数：
+      & ([scriptblock]::Create((irm <server>/api/runtime/install.ps1))) -Token <rta_...> -Server <server>
+    """
+    from fastapi.responses import PlainTextResponse
+    script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                               "scripts", "install-worker.ps1")
+    if not os.path.isfile(script_path):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "install script not found"})
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "read install script failed"})
+    return PlainTextResponse(content, media_type="text/plain")
+
+
+@router.get("/start-worker.ps1")
+def runtime_start_worker_script_ps1():
+    """返回 Windows Worker 启动脚本 start-worker.ps1（只读）。
+
+    供 install-worker.ps1 下载后写入文件，避免 here-string 转义问题。
+    """
+    from fastapi.responses import PlainTextResponse
+    script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
+                               "scripts", "start-worker.ps1")
+    if not os.path.isfile(script_path):
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "start-worker script not found"})
+    try:
+        with open(script_path, "r", encoding="utf-8") as f:
+            content = f.read()
+    except Exception:
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "read start-worker script failed"})
+    return PlainTextResponse(content, media_type="text/plain")
+
+
 @router.get("/install/latest")
 def runtime_install_latest(credential_id: int = Depends(_require_credential)):
-    """返回当前 Worker 安装包版本号（rta_ 鉴权）。
+    """返回当前 Worker 代码版本号（rta_ 鉴权）。
 
     供 worker 启动自检（见 worker-server-delivery-design.md §2.4）。
+    返回 worker_code_version（仅 git commit），与 heartbeat latest_version 一致。
     """
-    from src.worker_package import package_version
-    return {"version": package_version()}
+    from src.worker_package import worker_code_version
+    return {"version": worker_code_version()}
 
 
 @router.get("/grape-worker.tar.gz")
@@ -907,16 +955,28 @@ def runtime_worker_package_public():
     供「凭据申请页一键安装命令」直接 curl 下载：
       curl -fsSL <server>/api/runtime/grape-worker.tar.gz -o grape-worker.tar.gz
     首次请求动态打包 + 缓存（代码变更自动重建，见 src/worker_package.py）。
+
+    并发限制：同时下载不超过 PKG_DOWNLOAD_MAX_CONCURRENT（默认 3），
+    超出返回 429 让 worker 重试。
     """
-    from fastapi.responses import FileResponse
-    from src.worker_package import build_package
+    global _pkg_download_count
+    with _pkg_download_lock:
+        if _pkg_download_count >= _PKG_DOWNLOAD_LIMIT:
+            raise HTTPException(status_code=429, detail={"code": 429, "message": "too many concurrent downloads, retry later"})
+        _pkg_download_count += 1
     try:
-        pkg = build_package()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"build worker package failed: {e}"})
-    if not pkg or not os.path.isfile(pkg):
-        raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
-    return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
+        from fastapi.responses import FileResponse
+        from src.worker_package import build_package
+        try:
+            pkg = build_package()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"build worker package failed: {e}"})
+        if not pkg or not os.path.isfile(pkg):
+            raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
+        return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
+    finally:
+        with _pkg_download_lock:
+            _pkg_download_count -= 1
 
 
 @router.get("/install/package")
@@ -952,19 +1012,9 @@ def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
             skill_names = entry.get("skills") or []
             break
 
-    home = _os.path.expanduser("~")
-    engine_dirs = {
-        "hermes": [_os.path.join(home, ".hermes", "skills")],
-        "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
-        "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
-    }
-    extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
-    scan_dirs = list(engine_dirs.get(engine_key, []))
-    if extra:
-        for d in extra.split(":"):
-            d = d.strip()
-            if d and _os.path.isdir(d):
-                scan_dirs.append(d)
+    from src.runtime.os_adapter import engine_skill_dirs, extra_skill_dirs
+    scan_dirs = list(engine_skill_dirs(engine_key))
+    scan_dirs.extend(extra_skill_dirs())
 
     skill_details = []
     for sname in skill_names:

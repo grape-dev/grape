@@ -1129,6 +1129,35 @@ def _build_assignee_filter(assignees: str, clauses: list, params: list):
         clauses.append(f"assignee IN ({','.join('?' * len(_list))})")
         params.extend(_list)
 
+def _batch_fetch_pr_issue_keys(keys: list) -> set:
+    """批量查 events 表，返回 issue 关联了 PR 事件的 (repo_key, issue_id) 集合。
+
+    跨仓库 A2A 场景中，agent 在目标仓库创建 PR（而非 Issue），
+    issue 表存的 issue_number 实际是 PR 编号，前端链接应用 /pull/ 而非 /issues/。
+    """
+    from src.vcs.event_types import ALL_PR_EVENTS
+    _pr_types = tuple(ALL_PR_EVENTS)
+    out: set = set()
+    if not keys:
+        return out
+    for i in range(0, len(keys), 200):
+        _chunk = keys[i:i + 200]
+        _ors = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
+        _flat = [v for k in _chunk for v in k]
+        try:
+            with db_lock:
+                c = db.cursor()
+                _ph = ",".join("?" * len(_pr_types))
+                c.execute(
+                    f"SELECT DISTINCT repo_key, issue_id FROM events "
+                    f"WHERE ({_ors}) AND event_type IN ({_ph})",
+                    _flat + list(_pr_types))
+                for row in c.fetchall():
+                    out.add((row[0], row[1]))
+        except Exception as e:
+            log.warning(f"batch pr_issue_keys fetch failed: {e}")
+    return out
+
 def _batch_fetch_issue_state(keys: list) -> dict:
     """批量查 issue 单表的 stage/scene_id，返回 {(repo_key, issue_id): {"stage":..,"scene_id":..}}（防 N+1）。
 
@@ -1248,11 +1277,12 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
 
 
 def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False) -> list[dict]:
-    """查询 tasks 并富化（scene / stage / is_running）为对外 dict（my_tasks / repo_all_tasks 共享）。
+    """查询 tasks 并富化（scene / stage / is_running / is_pr）为对外 dict（my_tasks / repo_all_tasks 共享）。
 
     - where / params / order_by 由调用方构造（列与排序方向经白名单，值参数化，防注入）
     - include_user_id: 结果是否包含 user_id（repo_all 需要）
     - issue_state / agent_tasks 均批量查询，避免逐任务 N+1
+    - is_pr: 批量查 events 表 event_type 判断是否为 PR 事件（跨仓库 A2A 场景 issue_number 实际是 PR 编号）
     """
     _select = (
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
@@ -1277,6 +1307,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     _stage_map = _batch_fetch_issue_state(_keys)
     _running = _batch_running_agent_tasks(_keys)
     _agent_status_map = _batch_fetch_agent_statuses(_keys)
+    _pr_issue_keys = _batch_fetch_pr_issue_keys(_keys)
 
     tasks_out = []
     for idx, r in enumerate(rows):
@@ -1300,7 +1331,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             pass
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)
         item = {
-            "id": r[0], "assignee": r[1], "repo_key": from_repo_key(r[2]), "issue_number": r[3],
+            "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": r[3],
             "title": r[4] or "", "task_description": r[5] or "",
             "conversation_id": r[6] or "", "status": r[7],
             "completed_reason": r[8] or "", "created_at": normalize_event_time(r[9]), "completed_at": normalize_event_time(r[10]),
@@ -1313,6 +1344,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "stage": _stage,
             "is_running": _has_running_agent,
             "agent_statuses": _agent_status_map.get((_rk, _issue_id), []),
+            "is_pr": (_rk, _issue_id) in _pr_issue_keys,
         }
         if include_user_id:
             item["user_id"] = r[14] or 0

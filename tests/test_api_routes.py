@@ -1087,6 +1087,108 @@ class TestSettings:
         assert d["page_size"] == 10
         assert len(d["devices"]) <= 10
 
+    def test_runtime_devices_filter_scope(self):
+        """Issue #245: scope 筛选后 total 与筛选结果一致"""
+        # 先取全量 total
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        assert r_all.status_code == 200
+        d_all = r_all.json()
+        total_all = d_all["total"]
+        # avail_scopes 应存在
+        assert "avail_scopes" in d_all
+        avail = d_all["avail_scopes"] or []
+        if not avail:
+            return  # 测试库无设备，跳过
+        # 选一个存在的 scope 过滤
+        target_scope = avail[0]
+        r_f = client.get(f"/api/settings/runtime-devices?page=1&page_size=100&scope={target_scope}",
+                         headers=_headers)
+        assert r_f.status_code == 200
+        d_f = r_f.json()
+        # 筛选后 total <= 全量 total
+        assert d_f["total"] <= total_all
+        # 每个返回设备的 scope 应匹配（local → credential_id==0）
+        for dev in d_f["devices"]:
+            if target_scope == "local":
+                assert dev["credential_id"] == 0
+            else:
+                assert (dev.get("scope") or "global") == target_scope
+        # avail_scopes 取自全部可见设备（不依赖当前筛选），target_scope 仍应存在
+        assert target_scope in (d_f["avail_scopes"] or [])
+
+    def test_runtime_devices_filter_type(self):
+        """Issue #245: type 筛选后 total 与筛选结果一致"""
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        d_all = r_all.json()
+        # 从全量设备中提取一个引擎 type 关键字
+        types = set()
+        for dev in d_all["devices"]:
+            for rt in dev.get("runtimes", []):
+                n = (rt.get("name") or "").lower()
+                for kw in ("opencode", "hermes", "codearts", "codex"):
+                    if kw in n:
+                        types.add(kw)
+        if not types:
+            return  # 测试库无引擎，跳过
+        target_type = next(iter(types))
+        r_f = client.get(f"/api/settings/runtime-devices?page=1&page_size=100&type={target_type}",
+                         headers=_headers)
+        assert r_f.status_code == 200
+        d_f = r_f.json()
+        # 筛选后 total <= 全量 total
+        assert d_f["total"] <= d_all["total"]
+        # 每个返回设备应至少有一个引擎名包含 type 关键字
+        for dev in d_f["devices"]:
+            names = " ".join((rt.get("name") or "").lower() for rt in dev.get("runtimes", []))
+            assert target_type in names
+
+    def test_runtime_devices_filter_q(self):
+        """Issue #245: q 搜索筛选后 total 与筛选结果一致"""
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        d_all = r_all.json()
+        if not d_all["devices"]:
+            return
+        # 取第一个设备的 name 作为搜索关键字
+        sample = d_all["devices"][0]
+        keyword = (sample.get("name") or sample.get("device_name") or "").strip()
+        if not keyword:
+            return
+        # 用 name 的一部分做模糊搜索
+        q = keyword[:3] if len(keyword) >= 3 else keyword
+        r_f = client.get(f"/api/settings/runtime-devices?page=1&page_size=100&q={q}", headers=_headers)
+        assert r_f.status_code == 200
+        d_f = r_f.json()
+        # 筛选后 total <= 全量 total
+        assert d_f["total"] <= d_all["total"]
+        assert d_f["total"] >= 1
+        # 每个返回设备应匹配关键字
+        for dev in d_f["devices"]:
+            hay = " ".join([
+                dev.get("name") or "", dev.get("device_name") or "",
+                dev.get("owner") or "", dev.get("worker_ip") or "",
+                " ".join((rt.get("name") or "") for rt in dev.get("runtimes", []))
+            ]).lower()
+            assert q.lower() in hay
+
+    def test_runtime_devices_filter_total_consistency(self):
+        """Issue #245: 筛选后 total 与分页切片数据一致性（跨页验证）"""
+        r_all = client.get("/api/settings/runtime-devices?page=1&page_size=100", headers=_headers)
+        d_all = r_all.json()
+        if d_all["total"] <= 1:
+            return
+        # 用 page_size=1 分页，验证 total 跨页不变
+        r_p1 = client.get("/api/settings/runtime-devices?page=1&page_size=1", headers=_headers)
+        r_p2 = client.get("/api/settings/runtime-devices?page=2&page_size=1", headers=_headers)
+        assert r_p1.status_code == 200 and r_p2.status_code == 200
+        d_p1, d_p2 = r_p1.json(), r_p2.json()
+        assert d_p1["total"] == d_all["total"] == d_p2["total"]
+        assert len(d_p1["devices"]) == 1
+        # 第一页和第二页不应是同一设备
+        if d_all["total"] >= 2:
+            id1 = d_p1["devices"][0].get("credential_id")
+            id2 = d_p2["devices"][0].get("credential_id")
+            assert id1 != id2
+
 
 # ===================== 10. Skills =====================
 class TestSkills:

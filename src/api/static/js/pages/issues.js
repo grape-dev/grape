@@ -360,7 +360,7 @@ window._openBoardDetail = function(taskId) {
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, '/issues/' + t.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}','_blank')">${t.is_pr ? '查看 PR' : I18N.t('tasks.detail.view_issue')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('tasks.detail.go_conversation')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
@@ -520,9 +520,9 @@ window._jumpToPipeline = function(nodeId) {
   const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
   const parts = repoKey.split('/');
   if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
-  // 设置当前 repo 到 localStorage（app.currentRepo 从这里读）
+  // 设置当前 repo 到 sessionStorage（app.currentRepo 从这里读）
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   // 导航到流水线页面
   if (typeof app !== 'undefined' && app.nav) {
     app.nav('pipe');
@@ -542,13 +542,13 @@ window._jumpToNodeEvent = function(seq) {
   window._eventFromTask = (t && t.id) ? { taskId: t.id } : null;
   // 标记本次进入事件页来自任务详情，供 app.nav('event') 路由入口识别
   window._eventNavFromTask = true;
-  // 设置当前 repo 到 localStorage（与 _jumpToPipePage 一致）
+  // 设置当前 repo 到 sessionStorage（与 _jumpToPipePage 一致）
   if (t && t.repo_key) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
     if (parts.length >= 2) {
       const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-      localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+      sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
     }
   }
   // 直接修改 hash 跳转事件详情页（#event/seq），触发 hashchange → app.nav('event', seq)
@@ -563,7 +563,7 @@ window._jumpToPipePage = function() {
   const parts = repoKey.split('/');
   if (parts.length < 2) return;
   const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
-  localStorage.setItem('currentRepo', JSON.stringify(repoObj));
+  sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
     // 传递 issue_number 让流水线页高亮对应任务
     var issueNum = t.issue_number || '';
@@ -745,7 +745,7 @@ function _renderBoard(filtered) {
           </div>
           <p style="margin:0 0 6px;font-size:13px;font-weight:600;color:var(--t1,#1d1d1f);line-height:1.35;font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden">${t.title || ''}</p>
           <div style="display:flex;align-items:center;gap:4px;font-size:10px;color:var(--t3,#86868b)">
-            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : (t.repo_key || '')}</span>
+            <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:120px">${t.assignee ? '👤 ' + t.assignee : ((t.repo_key || '').replace(/^(github|gitcode):/, ''))}</span>
             <span style="margin-left:auto;white-space:nowrap">${(t.created_at||'').substring(5,10)}</span>
           </div>
         </div>`;
@@ -973,7 +973,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, (_taskSel.is_pr ? '/pull/' : '/issues/') + _taskSel.issue_number)}','_blank')">${_taskSel.is_pr ? '查看 PR' : I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
@@ -1062,7 +1062,7 @@ function _detailHtml(t) {
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">Issue</span><b style="${_valueStyle}"><a href="https://${t.repo_key.startsWith('github:') ? 'github.com' : 'gitcode.com'}/${t.repo_key.replace(/^(github|gitcode):/, '')}/issues/${t.issue_number}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${t.is_pr ? 'PR' : 'Issue'}</span><b style="${_valueStyle}"><a href="${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.pipeline_scene')||'流水线场景'}</span><b style="${_valueStyle}">${sceneName}${sceneBadge}</b></div>

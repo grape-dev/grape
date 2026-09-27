@@ -113,9 +113,24 @@ const app = (() => {
     } catch (e) {}
   }
 
+  // Issue #231: currentRepo 从 localStorage 迁移到 sessionStorage，实现页签级项目选择隔离。
+  // localStorage 跨页签共享会导致页签2切换项目后页签1对话列表串扰；sessionStorage 页签级隔离，
+  // 刷新保留、关闭清除，符合「每个页签独立维护当前选中项目」的期望。
+  // 一次性迁移逻辑见 _migrateCurrentRepo()，在 init() 最先执行，兼容已有用户会话无感知。
+  function _migrateCurrentRepo() {
+    try {
+      const inSession = sessionStorage.getItem('currentRepo');
+      const inLocal = localStorage.getItem('currentRepo');
+      if (!inSession && inLocal) {
+        sessionStorage.setItem('currentRepo', inLocal);
+        localStorage.removeItem('currentRepo');
+      }
+    } catch (e) {}
+  }
+
   function currentRepo() {
     try {
-      const r = JSON.parse(localStorage.getItem('currentRepo'));
+      const r = JSON.parse(sessionStorage.getItem('currentRepo'));
       if (r && r.fullName) {
         // GitCode 仓库 name 是显示名（可≠URL path，如 shelltest 显示 skillstest）——
         // 所有 API 路径/链接都用 owner/name 拼接，必须强制 URL 语义（fullName 拆分），
@@ -123,7 +138,7 @@ const app = (() => {
         const parts = String(r.fullName).split('/');
         if (parts.length === 2 && r.name !== parts[1]) {
           r.name = parts[1];
-          localStorage.setItem('currentRepo', JSON.stringify(r));
+          sessionStorage.setItem('currentRepo', JSON.stringify(r));
         }
       }
       return r;
@@ -245,8 +260,8 @@ function loadAgentTypes() {
     // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
     if (!current) {
       const r = managedRepos[0];
-      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
-      else localStorage.removeItem('currentRepo');
+      if (r) sessionStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
+      else sessionStorage.removeItem('currentRepo');
     }
     nav('dash');
   }
@@ -286,7 +301,7 @@ function loadAgentTypes() {
     }
     const parts = val.split('/');
     const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
-    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
+    sessionStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
     if (sel) sel.value = val;
@@ -1166,6 +1181,7 @@ function loadAgentTypes() {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('currentRepo');
+    sessionStorage.removeItem('currentRepo');
     localStorage.removeItem(REPO_CACHE_KEY);
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
@@ -1253,10 +1269,13 @@ function loadAgentTypes() {
   }
 
   function init() {
+    // Issue #231: 最先执行 currentRepo 迁移（localStorage → sessionStorage），
+    // 必须在 cache 版本检查之前，避免 localStorage.clear() 抹掉待迁移值，保证已有用户无感知。
+    _migrateCurrentRepo();
     console.log("[init] start", JSON.stringify({
       hasToken: !!localStorage.getItem('token'),
       cacheVer: localStorage.getItem('app_cache_ver'),
-      currentRepo: localStorage.getItem('currentRepo'),
+      currentRepo: sessionStorage.getItem('currentRepo'),
       url: window.location.href
     }));
     // 同步可折叠分组的持久化状态（Issue #66）
@@ -1287,12 +1306,13 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '35');
+      localStorage.setItem('app_cache_ver', '36');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
+      sessionStorage.removeItem('currentRepo');
       if (p.get('first_login') === '1') {
-        localStorage.removeItem('currentRepo');
+        sessionStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
         $('sidebar').style.display = 'none';
         $('tb').style.display = 'none';
@@ -1314,13 +1334,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '35') {
+    if (localStorage.getItem('app_cache_ver') !== '36') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '35');
+      localStorage.setItem('app_cache_ver', '36');
     }
 
     const token = localStorage.getItem('token');

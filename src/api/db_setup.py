@@ -648,7 +648,6 @@ CREATE TABLE IF NOT EXISTS scene_market (
     author      VARCHAR(64) DEFAULT '',
     content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
     obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
-    preset_custom_fields TEXT DEFAULT '[]',  -- 场景预置自定义参数声明（scene.json custom_fields 数组，Issue #246）
     is_active   INTEGER DEFAULT 1,
     scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
     repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
@@ -1232,10 +1231,11 @@ def _init_scene_category_data():
         categories = [
             ("通用", "general", "⚙", 1),
             ("移动开发", "mobile", "🍃", 2),
-            ("基础设施", "iac", "☁", 3),
-            ("技能开发", "skill-dev", "🔧", 4),
-            ("AI应用", "ai", "🤖", 5),
-            ("内容创作", "content", "📝", 6),
+            ("云原生", "cloud-native", "☁", 3),
+            ("IaC", "iac", "🏗️", 4),
+            ("技能开发", "skill-dev", "🔧", 5),
+            ("AI应用", "ai", "🤖", 6),
+            ("内容创作", "content", "📝", 7),
         ]
         with db_lock:
             c = db.cursor()
@@ -1349,12 +1349,12 @@ def _init_scene_market_data():
             init_scenes = [
                 ("harmony", "鸿蒙开发", 2, 0, "harmony-ecommerce", "鸿蒙应用开发场景，适合 HarmonyOS 应用开发", None),
                 ("default", "通用开发", 1, 1, "hello-flask", "通用的全链路开发场景，从需求收集到部署运维，适合大多数项目", "default"),
-                ("iac", "IaC开发", 3, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
-                ("skill-dev", "华为云Skill开发", 4, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
+                ("iac", "IaC开发", 4, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
+                ("skill-dev", "华为云Skill开发", 5, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
                 ("cloud-native", "云原生开发", 3, 0, "micro-svc", "云原生开发场景，适合微服务和容器化项目", "cloud-native"),
-                ("agent-dev", "Agent开发", 5, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
-                ("api-skill-dev", "通用Skill开发", 4, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
-                ("blog-publish", "博客发布", 6, 0, "", "博客系统开发与发布场景", "blog-publish"),
+                ("agent-dev", "Agent开发", 6, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
+                ("api-skill-dev", "通用Skill开发", 5, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
+                ("blog-publish", "博客发布", 7, 0, "", "博客系统开发与发布场景", "blog-publish"),
             ]
             imported = 0
             for name, display_name, cat_id, featured, template, mkt_desc, src_scene_id in init_scenes:
@@ -1658,9 +1658,6 @@ def _migrate_knowledge_dedup_and_ref():
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
-
-        # 3.0 scene_market 加 preset_custom_fields 列（Issue #246：场景预置自定义参数声明）
-        _ensure_column(c, "scene_market", "preset_custom_fields", "TEXT DEFAULT '[]'")
 
         # 3.1 MySQL: 修复 UNIQUE 索引——老索引缺 issue_num，删旧建新
         if _is_mysql:
@@ -2298,6 +2295,7 @@ def _migrate_tables():
         "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
         # ===== Issue #180: 带宽占用率指标 =====
         "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
+        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_mbps DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -2364,8 +2362,8 @@ def _migrate_tables():
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
-        ("general", "通用"), ("mobile", "移动开发"), ("iac", "基础设施"),
-        ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
+        ("general", "通用"), ("mobile", "移动开发"), ("cloud-native", "云原生"),
+        ("iac", "IaC"), ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
     ]
     for slug, name in _category_slugs:
         try:
@@ -2954,6 +2952,15 @@ def _migrate_tables():
                 log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
     except Exception as e:
         log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
+    # ===== Issue #242: devops_pipeline_scene 关联仓库列（跨仓库协同开发）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "linked_repos", "TEXT DEFAULT '[]'")
+            db.commit()
+            log.info("Added devops_pipeline_scene.linked_repos column")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.linked_repos column failed: {e}")
     # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
     try:
         with db_lock:
@@ -3014,6 +3021,7 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "spec", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (
