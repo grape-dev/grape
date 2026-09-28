@@ -260,7 +260,19 @@ def _zip_write_index(index: dict) -> None:
 
 
 def zip_cache_get(object_key: str) -> bytes | None:
-    """磁盘 zip 缓存读取；miss 返回 None。"""
+    """磁盘 zip 缓存读取；miss 返回 None。
+
+    返回纯 bytes（向后兼容）；如需同时获取 content_hash 用 zip_cache_get_with_hash()。
+    """
+    result = zip_cache_get_with_hash(object_key)
+    return result[0] if result else None
+
+
+def zip_cache_get_with_hash(object_key: str) -> tuple[bytes, str] | None:
+    """磁盘 zip 缓存读取（含 content_hash）；miss 返回 None。
+
+    返回 (data, content_hash)，content_hash 可能为空串（旧数据无 hash 字段）。
+    """
     try:
         with _zip_lock:
             index = _zip_index()
@@ -273,14 +285,18 @@ def zip_cache_get(object_key: str) -> bytes | None:
                 _zip_write_index(index)
                 return None
             with open(path, "rb") as f:
-                return f.read()
+                data = f.read()
+            return (data, entry.get("hash", ""))
     except Exception as e:
         log.warning(f"zip cache get failed: {e}")
         return None
 
 
-def zip_cache_put(object_key: str, data: bytes) -> None:
-    """写入磁盘 zip 缓存（原子替换 + LRU 清理）。"""
+def zip_cache_put(object_key: str, data: bytes, content_hash: str = "") -> None:
+    """写入磁盘 zip 缓存（原子替换 + LRU 清理）。
+
+    content_hash: 技能内容哈希（可选），用于缓存命中时校验是否过期（Issue #254）。
+    """
     try:
         with _zip_lock:
             os.makedirs(ZIP_CACHE_DIR, exist_ok=True)
@@ -293,7 +309,8 @@ def zip_cache_put(object_key: str, data: bytes) -> None:
             index = _zip_index()
             index[object_key] = {"file": fname, "size": len(data),
                                  "mtime": os.path.getmtime(path),
-                                 "tag": skill_tag_from_key(object_key)}
+                                 "tag": skill_tag_from_key(object_key),
+                                 "hash": content_hash or ""}
             _zip_write_index(index)
             _zip_evict(index)
     except Exception as e:
@@ -352,30 +369,47 @@ def zip_cache_invalidate(object_key: str) -> None:
 
 # ===== 内存 LRU 提取缓存（SKILL.md 文本） =====
 
-_mem_cache: dict[str, tuple[str, int]] = {}  # skill_name -> (content, size)
+_mem_cache: dict[str, tuple[str, int, str]] = {}  # skill_name -> (content, size, content_hash)
 _mem_lock = threading.Lock()
 
 
 def mem_cache_get(skill_name: str) -> str | None:
+    """内存缓存读取（向后兼容，返回纯 content）；miss 返回 None。
+
+    如需同时获取 content_hash 用 mem_cache_get_with_hash()。
+    """
+    result = mem_cache_get_with_hash(skill_name)
+    return result[0] if result else None
+
+
+def mem_cache_get_with_hash(skill_name: str) -> tuple[str, str] | None:
+    """内存缓存读取（含 content_hash）；miss 返回 None。
+
+    返回 (content, content_hash)，content_hash 可能为空串（旧数据/未传入时）。
+    """
     with _mem_lock:
         hit = _mem_cache.get(skill_name)
         if hit:
             _mem_cache.pop(skill_name)
             _mem_cache[skill_name] = hit  # LRU 触碰
-            return hit[0]
+            return (hit[0], hit[2] if len(hit) > 2 else "")
         return None
 
 
-def mem_cache_put(skill_name: str, content: str) -> None:
+def mem_cache_put(skill_name: str, content: str, content_hash: str = "") -> None:
+    """写入内存缓存。
+
+    content_hash: 技能内容哈希（可选），用于缓存命中时校验是否过期（Issue #254）。
+    """
     if not content:
         return
     with _mem_lock:
-        _mem_cache[skill_name] = (content, len(content.encode("utf-8")))
+        _mem_cache[skill_name] = (content, len(content.encode("utf-8")), content_hash or "")
         total = sum(v[1] for v in _mem_cache.values())
         while total > MEM_CACHE_MAX_BYTES and len(_mem_cache) > 1:
-            _, (_, sz) = next(iter(_mem_cache.items()))
+            _, v = next(iter(_mem_cache.items()))
             _mem_cache.pop(next(iter(_mem_cache.keys())))
-            total -= sz
+            total -= v[1]
 
 
 def mem_cache_invalidate(skill_name: str) -> None:
@@ -407,6 +441,75 @@ def get_skill_zip_bytes(object_key: str) -> bytes | None:
     return data
 
 
+def _verify_skill_cache_hash(skill_name: str, cached_hash: str) -> bool:
+    """校验缓存的 content_hash 是否与 DB 最新 hash 一致（Issue #254）。
+
+    - 缓存无 hash（旧数据/未传入）→ 不校验，返回 True（向后兼容）
+    - DB 查询失败/技能不存在 → 不校验，返回 True（降级，不阻塞读）
+    - hash 一致 → True（走快路径）
+    - hash 不一致 → False（需失效回源）
+    """
+    if not cached_hash:
+        return True  # 缓存无 hash，不校验（向后兼容）
+    try:
+        from src.user.db import get_skill_content_hash
+        _, db_hash, _ = get_skill_content_hash(skill_name)
+        if not db_hash:
+            return True  # DB 无记录或 hash 为空，不阻塞
+        return db_hash == cached_hash
+    except Exception as e:
+        log.warning(f"cache hash verify failed for '{skill_name}': {e}")
+        return True  # 查询异常，降级不阻塞
+
+
+def skill_md_content(object_key: str, skill_name: str) -> str | None:
+    """详情接口用：内存缓存 → 磁盘/OBS 获取 zip → 提取 SKILL.md（v2.4 固定 key，无版本）。
+
+    Issue #254：缓存命中后校验 content_hash，DB hash 不一致则失效缓存回源 OBS，
+    保证跨节点缓存一致性。hash 一致走快路径不退化性能。
+    """
+    # 内存缓存命中 → 校验 hash
+    mem_hit = mem_cache_get_with_hash(skill_name)
+    if mem_hit is not None:
+        content, cached_hash = mem_hit
+        if _verify_skill_cache_hash(skill_name, cached_hash):
+            return content  # hash 一致，走快路径
+        # hash 不一致 → 失效内存缓存，回源
+        mem_cache_invalidate(skill_name)
+
+    # 磁盘缓存 → OBS 回源
+    zip_hit = zip_cache_get_with_hash(object_key)
+    if zip_hit is not None:
+        zip_bytes, cached_hash = zip_hit
+        if _verify_skill_cache_hash(skill_name, cached_hash):
+            content = extract_skill_md(zip_bytes, skill_name) if zip_bytes else None
+            if content:
+                mem_cache_put(skill_name, content, cached_hash)
+            return content
+        # hash 不一致 → 失效磁盘缓存，回源 OBS
+        zip_cache_invalidate(object_key)
+
+    # 回源 OBS
+    storage = get_storage()
+    if storage is None:
+        return None
+    data = storage.read_bytes(object_key)
+    if data is None:
+        return None
+    # 回源后获取最新 hash 写入缓存
+    content = extract_skill_md(data, skill_name)
+    db_hash = ""
+    try:
+        from src.user.db import get_skill_content_hash
+        _, db_hash, _ = get_skill_content_hash(skill_name)
+    except Exception:
+        pass
+    zip_cache_put(object_key, data, db_hash)
+    if content:
+        mem_cache_put(skill_name, content, db_hash)
+    return content
+
+
 def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
     """从技能 zip 中提取 SKILL.md 文本（按 entry 解压，不全量解压；文件名大小写容错）。"""
     if not zip_bytes:
@@ -431,15 +534,3 @@ def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
     except Exception as e:
         log.warning(f"extract_skill_md failed: {e}")
         return None
-
-
-def skill_md_content(object_key: str, skill_name: str) -> str | None:
-    """详情接口用：内存缓存 → 磁盘/OBS 获取 zip → 提取 SKILL.md（v2.4 固定 key，无版本）。"""
-    hit = mem_cache_get(skill_name)
-    if hit is not None:
-        return hit
-    zip_bytes = get_skill_zip_bytes(object_key)
-    content = extract_skill_md(zip_bytes, skill_name) if zip_bytes else None
-    if content:
-        mem_cache_put(skill_name, content)
-    return content

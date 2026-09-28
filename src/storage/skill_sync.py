@@ -186,8 +186,8 @@ async def sync_official_skills_to_obs() -> dict:
             try:
                 zip_data = await loop.run_in_executor(None, _pack_skill_zip, skill_dir)
                 await loop.run_in_executor(None, storage.save_bytes, object_key, zip_data)
-                # 失效两级缓存：磁盘 zip 缓存用新数据覆盖，内存 SKILL.md 缓存直接清除
-                zip_cache_put(object_key, zip_data)
+                # 失效两级缓存：磁盘 zip 缓存用新数据覆盖（带 content_hash 供跨节点校验），内存 SKILL.md 缓存直接清除
+                zip_cache_put(object_key, zip_data, current_hash)
                 mem_cache_invalidate(skill_name)
                 logger.info(f"uploaded skill to OBS: {skill_name} -> {object_key}")
             except Exception as e:
