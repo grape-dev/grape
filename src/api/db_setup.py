@@ -727,18 +727,17 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,                       -- 任务名称
     repo_key        TEXT NOT NULL DEFAULT '',            -- 仓库标识（gitcode:owner/repo）
-    scene_id        TEXT NOT NULL DEFAULT 'default',     -- 场景ID（定义 Agent 链）
-    description     TEXT NOT NULL DEFAULT '',             -- 任务描述（Issue body）
+    agent_type      TEXT NOT NULL DEFAULT 'issue',       -- 执行哪个agent（issue/qa/sre）
+    instruction     TEXT NOT NULL DEFAULT '',            -- 巡检指令（注入prompt）
+    skill_name      TEXT NOT NULL DEFAULT '',            -- 可选skill（空=不用skill）
     cron            TEXT NOT NULL DEFAULT '*/30 * * * *', -- cron 表达式（5 段制）
-    agent_chain     MEDIUMTEXT NOT NULL DEFAULT '[]',    -- [废弃] 保留兼容
-    issue_number    TEXT DEFAULT '',                     -- [废弃] 保留兼容
     max_retry       INTEGER NOT NULL DEFAULT 3,          -- 最大重试次数
     enabled         INTEGER NOT NULL DEFAULT 1,          -- 1=启用 0=禁用
-    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间（UTC）
-    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间（UTC）
+    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间
+    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间
     created_at      TEXT DEFAULT (datetime('now')),
     updated_at      TEXT DEFAULT (datetime('now')),
-    created_by      INTEGER DEFAULT 0           -- 创建者 user_id（autopilot 用此查 gitcode_user 绕过 self_loop）
+    created_by      INTEGER DEFAULT 0                    -- 创建者 user_id
 )
 """
 
@@ -748,13 +747,15 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     task_id         INTEGER NOT NULL,                    -- 外键 -> autopilot_tasks.id
     status          TEXT NOT NULL DEFAULT 'pending',     -- pending/running/success/failed/retrying
     retry_count     INTEGER NOT NULL DEFAULT 0,          -- 已重试次数
-    agent_chain_step INTEGER NOT NULL DEFAULT 0,         -- 当前执行的链步骤索引
     result          MEDIUMTEXT DEFAULT '',               -- 执行结果摘要
     error           MEDIUMTEXT DEFAULT '',               -- 错误信息
-    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 events.seq
-    started_at      TEXT DEFAULT '',                     -- 开始时间（UTC）
-    completed_at    TEXT DEFAULT '',                     -- 完成时间（UTC）
-    created_at      TEXT DEFAULT (datetime('now'))
+    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 agent_tasks.event_seq（=exec_id）
+    started_at      TEXT DEFAULT '',                     -- 开始时间
+    completed_at    TEXT DEFAULT '',                     -- 完成时间
+    created_at      TEXT DEFAULT (datetime('now')),
+    -- v3.0 新增字段
+    agent_type      TEXT DEFAULT '',                     -- 执行快照
+    findings_json   MEDIUMTEXT DEFAULT ''                -- 问题列表JSON
 )
 """
 
@@ -3518,15 +3519,24 @@ def _backfill_scene_display_names():
 
 
 
-    # ===== autopilot_tasks: 新增 scene_id / description 列 =====
+    # ===== autopilot v3.0: 表结构重构 =====
+    # 旧字段 scene_id/description/agent_chain/issue_number/agent_chain_step 已移除
+    # 新字段 agent_type/instruction/skill_name/findings_json
+    # 迁移策略: 清空两张表，新结构从头开始（_ensure_column 只加不删，旧字段物理保留但不再使用）
     try:
         with db_lock:
             c = db.cursor()
-            _ensure_column(c, "autopilot_tasks", "scene_id", "TEXT NOT NULL DEFAULT 'default'")
-            _ensure_column(c, "autopilot_tasks", "description", "TEXT NOT NULL DEFAULT ''")
-            # autopilot_executions: 新增 issue_number 列
-            _ensure_column(c, "autopilot_executions", "issue_number", "TEXT DEFAULT ''")
+            # autopilot_tasks 新字段
+            _ensure_column(c, "autopilot_tasks", "agent_type", "TEXT NOT NULL DEFAULT 'issue'")
+            _ensure_column(c, "autopilot_tasks", "instruction", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "skill_name", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "engine_runtime_ids", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "custom_fields", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "work_branch", "TEXT NOT NULL DEFAULT ''")
+            # autopilot_executions 新字段
+            _ensure_column(c, "autopilot_executions", "agent_type", "TEXT DEFAULT ''")
+            _ensure_column(c, "autopilot_executions", "findings_json", "MEDIUMTEXT DEFAULT ''")
             db.commit()
-            log.info("Autopilot schema migration: scene_id/description/issue_number ensured")
+            log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch ensured")
     except Exception as e:
-        log.warning(f"Autopilot schema migration failed: {e}")
+        log.warning(f"Autopilot v3.0 schema migration failed: {e}")

@@ -124,11 +124,14 @@ def _task_insert_row(_cols, **kw):
 
 
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
-                        skill_path, engine_id, evt, issue_id="", skill_id=0):
-    """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
+                        skill_path, engine_id, evt, issue_id="", skill_id=0,
+                        skip_event_config=False):
+    """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。
+
+    skip_event_config=True 时跳过 update_event_config（autopilot 场景：不写 events 表）。
+    """
     from src.runtime.service import _TASK_COLUMNS_LIST
     from src.api.session_store import get_or_create_agent_session
-    from src.api.event_store import update_event_config
     from src.runtime.instances import runtime_instance_name
     from datetime import datetime, timezone
 
@@ -136,7 +139,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     now = datetime.now(timezone.utc).isoformat()
 
     # 先设 started_at/runtime/skill，让 sweeper 的 no_start 检查跳过
-    update_event_config(seq, inst_name, skill_name, now)
+    # autopilot 不写 events 表，跳过这步
+    if not skip_event_config:
+        from src.api.event_store import update_event_config
+        update_event_config(seq, inst_name, skill_name, now)
 
     # 查 agent_session_id
     session = get_or_create_agent_session(repo_key, agent_type, backend or "")
@@ -184,7 +190,8 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
-            status="queued", exit_code=None, result_text="", errors="", stderr="",
+            status="queued", stream_ended=0, self_reported=0,
+            exit_code=None, result_text="", errors="", stderr="",
             usage_json="{}", started_at=now, completed_at=None, created_at=now,
             user_gitcode_token="")
         with db_lock:
@@ -275,7 +282,8 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",
-            status="failed", exit_code=1, result_text="", errors=_reason, stderr="",
+            status="failed", stream_ended=1, self_reported=0,
+            exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
             user_gitcode_token="")
         with db_lock:

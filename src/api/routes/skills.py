@@ -57,7 +57,7 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
                 agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
-    scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
+    scope 参数：official/repo/user 按维度过滤；all = 不限 scope（官方+个人+所有仓库）；不传 = 返回全部（兼容旧逻辑）。
     agent_type 参数：按 agent_type 过滤（vod/issue/coding/qa/sre/chat）。
     category_id 参数：按分类 ID 过滤（Issue #179）。
     q 参数：搜索词，按 skill_name / display_name / description 模糊匹配。
@@ -76,7 +76,9 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
     # 构建查询条件
     conditions = ["is_active=1"]
     params = []
-    if scope == "official":
+    if scope == "all":
+        pass  # 不加 scope 条件，查全部（官方+个人+所有仓库）
+    elif scope == "official":
         conditions.append("scope='official'")
     elif scope == "repo":
         if not repo:
@@ -620,7 +622,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
                        category_id: int = Form(0)):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
-    VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat"}
+    VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
     if scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user 或 repo"})
     if scope == "repo" and not repo:

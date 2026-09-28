@@ -371,7 +371,7 @@ def is_github_user_allowed(github_login: str) -> bool:
 
 
 # ====== 技能目录解析（按 agent_type 一层分组：skills/<agent_type>/<skill>/SKILL.md）======
-_OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat")
+_OFFICIAL_AGENT_TYPES = ("vod", "issue", "coding", "qa", "sre", "chat", "auto")
 
 
 def resolve_official_skill_path(skill_name: str) -> str:

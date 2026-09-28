@@ -341,5 +341,40 @@
     "sub_scene": "app-release",
     "path": "sre/app-release/devbridge-deploy",
     "description": "DevBridge 隧道部署：在 Grape 服务器本地部署用户项目，经 DevBridge 隧道生成公网可访问 URL（替代 simple-flask-deploy，解决高端口安全组不可达问题），系统级 API Key 认证一次配置"
+  },
+  "grape-vod-cli": {
+    "name": "开发者声音（VOD）分析与 Issue 审视（grape CLI）",
+    "agent_type": "vod",
+    "sub_scene": "feedback-loop",
+    "path": "vod/feedback-loop/grape-vod-cli",
+    "description": "开发者声音分析技能：从 Issue/飞书收集开发者声音，多轮引导收敛为清晰需求并建 Issue；接管 issue_opened 审视非 VOD 创建的 Issue，澄清后结构化总结并 A2A 交办 Issue Agent"
+  },
+  "grape-skill-issue": {
+    "name": "Grape Skill 开发 · Issue 运营（含危险操作门控）",
+    "agent_type": "issue",
+    "sub_scene": "feedback-loop",
+    "path": "issue/feedback-loop/grape-skill-issue",
+    "description": "skill-dev 专用 Issue 运营：知识基线→可开发性分析→Spec→危险场景识别→用户确认门控→A2A 触发开发。基于 issue skill，新增危险场景识别+用户确认门控+华为云 Spec 字段+skill 路由"
+  },
+  "grape-skill-generator": {
+    "name": "Grape Skill 生成器（grape-cli skill）",
+    "agent_type": "coding",
+    "sub_scene": "scaffolding",
+    "path": "coding/scaffolding/grape-skill-generator",
+    "description": "skill-generator：按撰写规范为指定 agent_type 生成 grape-cli skill。接收 agent_type+需求描述→查重→读取 references 三件套→生成 SKILL.md+references→自检→建 PR→A2A 交棒 QA"
+  },
+  "grape-skill-validator": {
+    "name": "Grape Skill 合规检查器",
+    "agent_type": "qa",
+    "sub_scene": "auto-testing",
+    "path": "qa/auto-testing/grape-skill-validator",
+    "description": "skill 合规检查器：QA Agent 加载后接收 skill_path 参数，按撰写规范逐项验证 skill 是否合规。读取 skill 文件→按 §8 质量检查清单逐项验证→交叉验证命令/schema/不存在能力一致性→输出检查报告。只读不写"
+  },
+  "grape-skill-uploader": {
+    "name": "Grape Skill 上传注册",
+    "agent_type": "sre",
+    "sub_scene": "app-release",
+    "path": "sre/app-release/grape-skill-uploader",
+    "description": "skill 上传注册技能：在 skill 创建流水线末端将新 skill 打包 ZIP 并上传为仓库级 skill。QA 审查通过后预注册上传；PR 合并后正式上传，scope=repo"
   }
 }
