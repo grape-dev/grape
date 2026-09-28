@@ -1010,6 +1010,19 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
   };
 }
 
+// Issue #249: 过滤 engine_runtime_ids，仅保留可用（online/recently_lost）引擎
+// agentEngines 为空或该 agentType 无列表时退回原始 engineIds（不劣于现状）
+function _filterAvailableEngineIds(engineIds, agentEngines, agentType) {
+  if (!agentEngines || !agentEngines[agentType] || !agentEngines[agentType].length) {
+    return engineIds || [];
+  }
+  const availMap = {};
+  agentEngines[agentType].forEach(e => {
+    if (e.status === 'online' || e.status === 'recently_lost') availMap[e.id] = true;
+  });
+  return (engineIds || []).filter(id => availMap[id]);
+}
+
 // 渲染执行流程卡片（查看模式只显示 enabled 的 agent）
 function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, colors, descs, editMode, editNodes) {
   let html = '';
@@ -1023,7 +1036,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
     const skillName = node.skill_display_name || node.skill || agent.skill_display_name || agent.skill || '';
-    const engineIds = node.engine_runtime_ids || agent.engine_runtime_ids || [];
+    const engineIds = _filterAvailableEngineIds(node.engine_runtime_ids || agent.engine_runtime_ids || [], agentEngines, tag);
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
     const enabled = editMode ? (en ? en.enabled : true) : (node.enabled !== false);
@@ -1223,7 +1236,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     const skLabel = meta.label || tag;
     const ag = agents.find(a => a.agent_type === tag) || {};
     const skillDisplay = node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '';
-    const engineIds = node.engine_runtime_ids || [];
+    const engineIds = _filterAvailableEngineIds(node.engine_runtime_ids || [], agentEngines, tag);
     const enabled = node.enabled !== false;
 
     let toggleBtn = '';
@@ -1808,7 +1821,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
     const skill = node ? (node.skill || '') : (ag.skill || '');
     const skillDisplay = node ? (node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '') : (ag.skill_display_name || ag.skill || '');
-    const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
+    const engineIds = _filterAvailableEngineIds(node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []), agentEngines, at);
     const accentColor = meta.color || colors[at] || '#86868b';
     // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
     const desc = descs[at] || meta.description || '';

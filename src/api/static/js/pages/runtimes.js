@@ -416,6 +416,7 @@ function renderWorkers(data, devices) {
         <div style="display:flex;gap:16px;flex:1;min-width:0">
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.owner')}</span> ${d.owner || '—'}</div>
           <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.credential')}</span> <b style="color:${credColor}">${d.credential_status || ''}</b></div>
+          ${(_curScope === 'repo' && d.repo_key) ? `<div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.repo_key')}</span> ${d.repo_key}</div>` : ''}
         </div>
         ${d.credential_id && _isOwner ? `<button class="bt bt-r" style="font-size:11px;padding:6px 10px;border-radius:4px;flex-shrink:0" onclick="revokeCredential(${d.credential_id})">${I18N.t('runtimes.action.revoke')}</button>` : ''}
       </div>
@@ -449,6 +450,7 @@ function openScopeSwitcher(cid, currentScope) {
   var scopes = ['repo', 'user'];
   var existing = document.getElementById('scopeSwitcherOverlay');
   if (existing) { existing.remove(); return; }
+  var curRepo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   var overlay = document.createElement('div');
   overlay.id = 'scopeSwitcherOverlay';
   overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
@@ -464,7 +466,7 @@ function openScopeSwitcher(cid, currentScope) {
     '<div style="font-weight:600;font-size:14px;margin-bottom:14px">' + I18N.t('runtimes.label.scope_short') + '</div>' +
     items +
     '<div id="scopeRepoKeyWrap" style="display:none;margin-bottom:12px">' +
-      '<input id="scopeRepoKeyInput" placeholder="' + I18N.t('runtimes.label.repo_key_prompt') + '" style="width:100%;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);color:var(--t1);outline:none">' +
+      '<input id="scopeRepoKeyInput" value="' + curRepo + '" placeholder="' + I18N.t('runtimes.label.repo_key_prompt') + '" style="width:100%;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);color:var(--t1);outline:none">' +
     '</div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:4px">' +
       '<button class="bt bt-o" style="font-size:12px;padding:6px 14px;border-radius:6px" onclick="document.getElementById(\'scopeSwitcherOverlay\').remove()">' + I18N.t('runtimes.action.close') + '</button>' +
@@ -616,6 +618,7 @@ function _renderAddDeviceCredForm() {
   var area = document.getElementById('addDeviceCredArea');
   if (!area) return;
   var cur = _currentUser();
+  var curRepo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   area.innerHTML = '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
     '<div style="font-size:13px;font-weight:600;margin-bottom:14px;color:var(--t1)">' + I18N.t('runtimes.credential.gen_title') + '</div>' +
     // 凭据名称
@@ -633,10 +636,10 @@ function _renderAddDeviceCredForm() {
       '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">' + I18N.t('runtimes.label.scope') + '</label>' +
       '<select id="credScope" onchange="toggleRepoKey()" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1)"><option value="user">' + I18N.t('runtimes.scope.user') + '</option><option value="repo">' + I18N.t('runtimes.scope.repo') + '</option><option value="global">' + I18N.t('runtimes.scope.global') + '</option></select>' +
     '</div>' +
-    // 仓库（条件显示）
+    // 仓库（条件显示，自动填充当前登录仓库）
     '<div id="repoKeyRow" style="display:none;margin-bottom:12px">' +
       '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">' + I18N.t('runtimes.label.repo_key') + '</label>' +
-      '<input id="credRepoKey" placeholder="owner/repo" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1)">' +
+      '<input id="credRepoKey" value="' + curRepo + '" placeholder="owner/repo" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1)">' +
     '</div>' +
     // 按钮
     '<div style="display:flex;gap:8px;margin-top:16px">' +

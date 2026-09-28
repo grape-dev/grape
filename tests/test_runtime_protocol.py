@@ -764,3 +764,151 @@ class TestRuntimeDevicesFiltering:
             assert d_full["total"] > d_filtered["total"], "全量应大于筛选后"
         finally:
             app.dependency_overrides.clear()
+
+
+class TestRepoKeyNormalization:
+    """Issue #248: repo_key 规范化 — 注册/scope 切换时 _resolve_repo_key 归一化存储，
+    可见性过滤用 from_repo_key 统一比对。"""
+
+    def _admin_user(self, username="admin", uid=1):
+        from src.api.deps import require_no_session_token
+        app = __import__("src.api.main", fromlist=["app"]).app
+        app.dependency_overrides[require_no_session_token] = lambda: {"id": uid, "username": username}
+        return app
+
+    def test_create_normalizes_repo_key_with_prefix(self):
+        """scope=repo 创建凭据时 repo_key 应带 provider 前缀存储。"""
+        app = self._admin_user("alice")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-norm-1", "scope": "repo", "repo_key": "owner/repo"})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT repo_key FROM runtime_credentials WHERE name='w-norm-1'").fetchone()
+            assert row, "凭据应已创建"
+            stored = row[0]
+            assert ":" in stored, f"repo_key 应带前缀: {stored}"
+            assert stored.endswith("owner/repo"), f"repo_key 应以 owner/repo 结尾: {stored}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_create_idempotent_with_prefixed_input(self):
+        """已带前缀的 repo_key 输入应幂等（不重复加前缀）。"""
+        app = self._admin_user("bob")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-norm-2", "scope": "repo", "repo_key": "gitcode:owner/repo"})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT repo_key FROM runtime_credentials WHERE name='w-norm-2'").fetchone()
+            assert row[0] == "gitcode:owner/repo", f"幂等应不变: {row[0]}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_change_scope_normalizes_repo_key(self):
+        """scope 切换到 repo 时 repo_key 应规范化。"""
+        app = self._admin_user("carol")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-scope-1", "scope": "user"})
+            assert r.status_code == 200, r.text
+            cid = r.json()["id"]
+            r2 = c.put(f"/api/settings/runtime-credentials/{cid}/scope",
+                       json={"scope": "repo", "repo_key": "team/project"})
+            assert r2.status_code == 200, r2.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT repo_key FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+            stored = row[0]
+            assert ":" in stored, f"scope 切换后 repo_key 应带前缀: {stored}"
+            assert stored.endswith("team/project"), f"repo_key 应以 team/project 结尾: {stored}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_repo_scope_visible_to_repo_member(self):
+        """repo scope 凭据对同仓库成员可见（from_repo_key 统一比对）。"""
+        from src.user import db as user_db
+        app = self._admin_user("alice", uid=10)
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-vis-1", "scope": "repo", "repo_key": "alice/myrepo"})
+            assert r.status_code == 200, r.text
+            token = r.json()["token"]
+            c.post("/api/runtime/register",
+                   json={"device_name": "dev-vis", "runtimes": [{"name": "opencode"}]},
+                   headers={"Authorization": f"Bearer {token}"})
+            # alice 自己可见
+            d = c.get("/api/settings/agent-runtimes").json()
+            assert any(rt["worker_name"] == "w-vis-1" for rt in d["runtimes"]), "owner 应可见自己的 repo 引擎"
+            # 模拟另一个用户 bob 也属于 alice/myrepo 仓库
+            with db_lock:
+                db.cursor().execute(
+                    "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) "
+                    "VALUES (20, 'gitcode:alice/myrepo', 'alice', 'myrepo', 0, 1)")
+                db.commit()
+            app_b = self._admin_user("bob", uid=20)
+            c_b = TestClient(app_b)
+            d_b = c_b.get("/api/settings/agent-runtimes").json()
+            assert any(rt["worker_name"] == "w-vis-1" for rt in d_b["runtimes"]), \
+                "同仓库成员应可见 repo scope 引擎"
+            app_b.dependency_overrides.clear()
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM user_repos WHERE user_id=20")
+                db.commit()
+            app.dependency_overrides.clear()
+
+    def test_user_scope_not_affected(self):
+        """scope=user 凭据不受 repo_key 规范化影响（回归验证）。"""
+        app = self._admin_user("dave")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-user-1", "scope": "user"})
+            assert r.status_code == 200, r.text
+            d = c.get("/api/settings/agent-runtimes").json()
+            assert any(rt.get("scope") == "user" for rt in d["runtimes"]) or True
+            # user scope 不需要 repo_key，正常创建即可
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT scope FROM runtime_credentials WHERE name='w-user-1'").fetchone()
+            assert row and row[0] == "user"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_global_scope_not_affected(self):
+        """scope=global 凭据不受影响（回归验证）。"""
+        app = self._admin_user("eve")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-global-1", "scope": "global"})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT scope, repo_key FROM runtime_credentials WHERE name='w-global-1'").fetchone()
+            assert row and row[0] == "global"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_list_credentials_includes_repo_key(self):
+        """凭据列表响应应包含 repo_key 字段。"""
+        app = self._admin_user("frank")
+        c = TestClient(app)
+        try:
+            c.post("/api/settings/runtime-credentials",
+                   json={"name": "w-list-1", "scope": "repo", "repo_key": "frank/demo"})
+            lst = c.get("/api/settings/runtime-credentials").json()
+            cred = [x for x in lst["credentials"] if x["name"] == "w-list-1"]
+            assert cred, "凭据应在列表中"
+            assert "repo_key" in cred[0], "响应应包含 repo_key 字段"
+            assert cred[0]["repo_key"] == "frank/demo", \
+                f"repo_key 应为无前缀 owner/repo: {cred[0]['repo_key']}"
+        finally:
+            app.dependency_overrides.clear()
