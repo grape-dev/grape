@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS events (
     duration REAL DEFAULT NULL,
     agent_logs MEDIUMTEXT DEFAULT '[]',
     result MEDIUMTEXT DEFAULT '',
+    entity_type TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
@@ -2275,6 +2276,7 @@ def _migrate_tables():
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
         "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN entity_type TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
         # ===== 发布配置(skill-publish v1.1)=====
         # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
