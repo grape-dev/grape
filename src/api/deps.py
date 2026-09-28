@@ -52,7 +52,9 @@ def get_current_user(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
     # 记录活跃状态——O(1)，不阻塞
     mark_user_active(uid)
-    return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER}
+    login_provider = payload.get("login_provider", "")
+    return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER,
+            "login_provider": login_provider}
 
 
 def _extract_api_token(request) -> str:
