@@ -41,10 +41,13 @@ def validate_jwt_secret() -> bool:
     return JWT_SECRET not in _INSECURE_SECRETS
 
 
-def create_access_token(user_id: int, username: str, token_version: int = 0) -> str:
+def create_access_token(user_id: int, username: str, token_version: int = 0,
+                        login_provider: str = "") -> str:
     """签发 access token——短有效期（15 分钟），用于 API 请求。
 
     access_token 不带 max_exp——30 天上限只管控 refresh 长令牌。
+    login_provider：登录来源平台（gitcode/github），用于 _get_user_provider_and_token
+    按登录平台优先返回对应 token。密码登录/旧 token 缺省空值，fallback 到现有逻辑。
     """
     payload = {
         "sub": str(user_id),
@@ -54,16 +57,20 @@ def create_access_token(user_id: int, username: str, token_version: int = 0) -> 
         "iat": int(time.time()),
         "exp": int(time.time()) + ACCESS_TOKEN_TTL,
     }
+    if login_provider:
+        payload["login_provider"] = login_provider
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
 def create_refresh_token(user_id: int, username: str, token_version: int = 0,
-                         max_exp: int = None) -> str:
+                         max_exp: int = None, login_provider: str = "") -> str:
     """签发 refresh token——长有效期（7 天滚动）+ 绝对上限（30 天）。
 
     max_exp：绝对过期时间戳（首次签发时 = now + 30 天）。
     refresh 换新 refresh 时继承旧 max_exp 不重新生成。
     到达 max_exp 后强制登录——防止 token 永久存活。
+    login_provider：登录来源平台（gitcode/github），滚动续期时继承，
+    使刷新后的 access_token 仍携带登录来源。
     """
     now = int(time.time())
     if max_exp is None:
@@ -78,6 +85,8 @@ def create_refresh_token(user_id: int, username: str, token_version: int = 0,
         "iat": now,
         "exp": now + REFRESH_TOKEN_TTL,  # 滚动续期——每次 refresh 重新算 7 天
     }
+    if login_provider:
+        payload["login_provider"] = login_provider
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 

@@ -21,7 +21,8 @@ class RuntimeClient:
     def __init__(self, server: str, token: str, max_connections: int = 10, timeout: float = 30.0):
         self.base = server.rstrip("/")
         self.token = token
-        self._timeout = timeout
+        self._timeout_secs = timeout
+        self._timeout = None  # aiohttp.ClientTimeout, built in _ensure_session
         self._connector = None
         self._session = None
         self._max_connections = max_connections
@@ -29,10 +30,25 @@ class RuntimeClient:
     async def _ensure_session(self):
         if self._session is None or self._session.closed:
             import aiohttp
-            # force_close=True: 服务端用短连接，不复用避免 CLOSE-WAIT 僵尸连接
+            # force_close=False + keepalive: 复用 TCP 连接减少握手开销，
+            # 配合 enable_cleanup_closed 清理半关闭连接，避免 CLOSE-WAIT 僵尸。
             # ssl=False: 内网 IP 访问时 SSL 证书 SAN 不包含 IP 地址，跳过验证
-            self._connector = aiohttp.TCPConnector(limit=self._max_connections, force_close=True, ssl=False)
-            self._session = aiohttp.ClientSession(connector=self._connector)
+            self._connector = aiohttp.TCPConnector(
+                limit=self._max_connections,
+                force_close=False,
+                enable_cleanup_closed=True,
+                keepalive_timeout=30,
+                ssl=False,
+            )
+            self._timeout = aiohttp.ClientTimeout(
+                total=self._timeout_secs,
+                connect=10,
+                sock_read=30,
+            )
+            self._session = aiohttp.ClientSession(
+                connector=self._connector,
+                timeout=self._timeout,
+            )
 
     async def reset_session(self):
         """强制关闭并重建连接池（处理 CLOSE-WAIT 死连接）。"""
@@ -49,8 +65,7 @@ class RuntimeClient:
             await self._ensure_session()
             headers = {"Authorization": f"Bearer {self.token}", "Content-Type": "application/json"}
             try:
-                async with self._session.request(method, self.base + path, json=body, headers=headers,
-                                                 timeout=self._timeout) as resp:
+                async with self._session.request(method, self.base + path, json=body, headers=headers) as resp:
                     if resp.status in (408, 429) or resp.status >= 500:
                         raise RetryableError(f"http {resp.status}")
                     if resp.status == 404 and "runtime" in path:

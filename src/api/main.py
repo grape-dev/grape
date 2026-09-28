@@ -290,6 +290,38 @@ async def lifespan(app: FastAPI):
                         except Exception:
                             _tmp = 0.0
                         _load = ",".join(f"{x:.2f}" for x in _ps.getloadavg())
+                        # BANDWIDTH: 读 /proc/net/dev，两次采样差分算速率
+                        _bw_mbps = 0.0
+                        _bw_pct = 0.0
+                        try:
+                            import time as _bt
+                            _rx = _tx = 0
+                            with open("/proc/net/dev") as _bf:
+                                for _bl in _bf:
+                                    if ":" not in _bl:
+                                        continue
+                                    _bn, _br = _bl.split(":", 1)
+                                    _bn = _bn.strip()
+                                    if _bn == "lo":
+                                        continue
+                                    _bf2 = _br.split()
+                                    if len(_bf2) >= 9:
+                                        _rx += int(_bf2[0])
+                                        _tx += int(_bf2[8])
+                            _bw_now = _bt.time()
+                            _bw_prev = getattr(_server_metrics_loop, "_bw_prev", None)
+                            if _bw_prev:
+                                _bpts, _bpbytes = _bw_prev
+                                _bdt = _bw_now - _bpts
+                                _bdb = (_rx + _tx) - _bpbytes
+                                if _bdt > 0 and _bdb >= 0:
+                                    _bw_mbps = round(_bdb * 8 / _bdt / 1e6, 1)
+                                    _bw_thr = float(os.environ.get("RUNTIME_BANDWIDTH_THRESHOLD_MBPS", "10"))
+                                    if _bw_thr > 0:
+                                        _bw_pct = round(min(_bw_mbps / _bw_thr * 100, 100.0), 1)
+                            _server_metrics_loop._bw_prev = (_bw_now, _rx + _tx)
+                        except Exception:
+                            pass
                     except Exception:
                         pass
                     _now = datetime.now(timezone.utc).isoformat()
@@ -298,9 +330,10 @@ async def lifespan(app: FastAPI):
                         c = db.cursor()
                         c.execute(
                             "UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, "
-                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, load_avg=? "
+                            "cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, "
+                            "bandwidth_percent=?, bandwidth_mbps=?, load_avg=? "
                             "WHERE device_name=? AND scope='global'",
-                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _load, _hostname))
+                            (_now, _local_ip, _cpu, _mem, _disk, _tmp, _bw_pct, _bw_mbps, _load, _hostname))
                         db.commit()
                 except Exception as e:
                     log.warning(f"Server metrics: upload failed: {e}")
@@ -487,7 +520,7 @@ def _redact_path(path: str) -> str:
 # 健康探针路径不记请求日志（参考 multica isHealthProbePath）
 _LOG_SKIP_PATHS = frozenset({"/health", "/healthz", "/readyz", "/metrics"})
 # Worker 轮询路径跳过请求日志（13 台 worker × 3s × 3 请求 = ~24 行/秒, 膨胀日志）
-_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/")
+_LOG_SKIP_PREFIXES = ("/api/runtime/runtimes/", "/api/runtime/heartbeat", "/api/runtime/tasks/", "/api/ping")
 
 
 @app.middleware("http")
@@ -597,6 +630,15 @@ async def request_id_and_log_middleware(request: Request, call_next):
         request_id_var.reset(token_rid)
         repo_var.reset(token_repo)
         user_var.reset(token_uid)
+
+@app.get("/api/ping", include_in_schema=False)
+async def api_ping():
+    """前端会话保活 / Failed to fetch 恢复预检的轻量探针（无鉴权、不查 DB、浏览器可达）。
+
+    - `/health` 仅 loopback（nginx 外网 403），浏览器用不了；
+    - 本端点对任何来源返回 200，零 IO，供 heartbeat 60s 与 unhandledrejection 恢复预检。
+    """
+    return {"ok": True, "ts": _dt.now(_tz.utc).isoformat()}
 
 app.include_router(auth.router)
 app.include_router(repos.router)

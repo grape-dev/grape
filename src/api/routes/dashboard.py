@@ -248,7 +248,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                 _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, owner_name "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
                     "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?) OR repo_key=? OR repo_key=?) ORDER BY id",
@@ -260,14 +260,14 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                 _stale_cutoff = (datetime.now(timezone.utc) - timedelta(days=7)).isoformat()
                 c.execute(
                     "SELECT id, name, device_name, status, last_seen_at, last_ip, "
-                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, load_avg, owner_name "
+                    "cpu_percent, memory_percent, disk_percent, tmp_percent, bandwidth_percent, bandwidth_mbps, load_avg, owner_name "
                     "FROM runtime_credentials WHERE status != 'revoked' "
                     "AND last_seen_at IS NOT NULL AND last_seen_at >= ? "
                     "AND (scope='global' OR (scope='user' AND owner_name=?)) ORDER BY id",
                     (_stale_cutoff, _uname),
                 )
             for w in c.fetchall():
-                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wbw, wload, wowner = w
+                wid, wname, wdevice, wstatus, wlast_seen, wip, wcpu, wmem, wdisk, wtmp, wbw, wbm, wload, wowner = w
                 worker_total += 1
                 w_health = derive_runtime_health(wstatus or "offline", wlast_seen, now_ts)
                 w_online = w_health == "online"
@@ -280,7 +280,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
                     "cpu_percent": wcpu or 0, "memory_percent": wmem or 0,
                     "disk_percent": wdisk or 0, "tmp_percent": wtmp or 0,
                     "bandwidth_percent": wbw or 0,
-                    "bandwidth_mbps": 0,
+                    "bandwidth_mbps": wbm or 0,
                     "load_avg": wload or "",
                     "owner_name": wowner or "",
                 })

@@ -678,6 +678,12 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
       <div id="advCustomFieldsInline" style="display:flex;flex-direction:column;gap:8px"></div>
       <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
     </div>
+    <div style="padding:12px 0 4px;border-top:1px solid rgba(0,0,0,.04);margin-top:12px">
+      <div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">关联仓库</div>
+      <div style="font-size:11px;color:#a1a1a6;margin-bottom:8px;line-height:1.5">配置关联仓库后，一次需求开发可同时操作多个仓库，开发完成后向每个有改动的仓库分别提交 PR</div>
+      <div id="advLinkedReposInline" style="display:flex;flex-direction:column;gap:8px"></div>
+      <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addLinkedRepoInline()">+ 添加关联仓库</button>
+    </div>
   </div>`;
 
   // 相关流水线（统计 + 表格，无流程图）— 只显示当前场景的流水线
@@ -828,6 +834,120 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     container.appendChild(row);
   };
 
+  // Issue #242: 关联仓库配置
+  window._linkedRepoOptions = [];
+  window._linkedRepoBranchCache = {};  // repo_key -> branches[]
+  window._addLinkedRepoInline = function(repoKey, branch) {
+    var container = document.getElementById('advLinkedReposInline');
+    if (!container) return;
+    var row = document.createElement('div');
+    row.className = 'adv-kv';
+    row.style.alignItems = 'center';
+    var selId = 'lrRepo_' + Math.random().toString(36).slice(2,8);
+    var brId = 'lrBranch_' + Math.random().toString(36).slice(2,8);
+    // 用 DOM API 构造 select/option，避免 HTML 字符串拼接导致 XSS（Issue #242 审查 Optional 加固）
+    var sel = document.createElement('select');
+    sel.className = 'adv-kv-key';
+    sel.id = selId;
+    sel.style.cssText = 'flex:0 0 200px;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
+    var defOpt = document.createElement('option');
+    defOpt.value = '';
+    defOpt.textContent = '选择仓库';
+    sel.appendChild(defOpt);
+    (window._linkedRepoOptions || []).forEach(function(r) {
+      var rk = r.repo_key || r.full_name || '';
+      var fn = r.full_name || rk;
+      var opt = document.createElement('option');
+      opt.value = rk;
+      opt.textContent = fn;
+      if (rk === repoKey) opt.selected = true;
+      sel.appendChild(opt);
+    });
+    // 分支下拉框
+    var brSel = document.createElement('select');
+    brSel.className = 'adv-kv-val';
+    brSel.id = brId;
+    brSel.style.cssText = 'flex:1;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
+    var brDefOpt = document.createElement('option');
+    brDefOpt.value = '';
+    brDefOpt.textContent = '分支（默认 main）';
+    brSel.appendChild(brDefOpt);
+
+    // 加载分支列表
+    function _loadBranches(rk, selectedBranch) {
+      brSel.innerHTML = '';
+      var def = document.createElement('option');
+      def.value = '';
+      def.textContent = '分支（默认 main）';
+      brSel.appendChild(def);
+      if (!rk) return;
+      // 解析 owner/repo
+      var parts = rk.replace(/^gitcode:/, '').split('/');
+      if (parts.length < 2) { brDefOpt.textContent = '分支（默认 main）'; return; }
+      var owner = parts[0], repo = parts[1];
+      // 优先用缓存
+      if (window._linkedRepoBranchCache[rk]) {
+        _fillBranchOptions(window._linkedRepoBranchCache[rk], selectedBranch);
+        return;
+      }
+      // 临时 loading 状态
+      var loadOpt = document.createElement('option');
+      loadOpt.value = '';
+      loadOpt.textContent = '加载中...';
+      brSel.appendChild(loadOpt);
+      API.get('/scenes/branches/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)).then(function(b) {
+        var branches = (b && b.branches) || [];
+        window._linkedRepoBranchCache[rk] = branches;
+        brSel.removeChild(loadOpt);
+        _fillBranchOptions(branches, selectedBranch);
+      }).catch(function() {
+        brSel.removeChild(loadOpt);
+        // 加载失败回退为手动输入提示
+        var failOpt = document.createElement('option');
+        failOpt.value = '';
+        failOpt.textContent = '加载失败，默认 main';
+        brSel.appendChild(failOpt);
+      });
+    }
+    function _fillBranchOptions(branches, selectedBranch) {
+      branches.forEach(function(br) {
+        var opt = document.createElement('option');
+        opt.value = br.name;
+        opt.textContent = br.name + (br.protected ? ' 🔒' : '');
+        if (selectedBranch && br.name === selectedBranch) opt.selected = true;
+        brSel.appendChild(opt);
+      });
+      // 如果指定分支不在列表中，追加一个自定义选项
+      if (selectedBranch && !branches.some(function(br) { return br.name === selectedBranch; })) {
+        var opt = document.createElement('option');
+        opt.value = selectedBranch;
+        opt.textContent = selectedBranch + ' (自定义)';
+        opt.selected = true;
+        brSel.appendChild(opt);
+      }
+    }
+
+    // 仓库选择变更时重新加载分支
+    sel.addEventListener('change', function() {
+      var rk = this.value;
+      _loadBranches(rk, '');
+    });
+
+    // 初始加载分支
+    if (repoKey) {
+      _loadBranches(repoKey, branch);
+    }
+
+    var delBtn = document.createElement('button');
+    delBtn.className = 'adv-del';
+    delBtn.textContent = '×';
+    delBtn.onclick = function() { this.parentElement.remove(); };
+    row.appendChild(sel);
+    row.appendChild(brSel);
+    row.appendChild(delBtn);
+    container.appendChild(row);
+  };
+
   window._createNewBranchInline = function(owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
     var refs = (document.getElementById('newBranchRefInline') || {}).value || 'main';
@@ -851,7 +971,16 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
     var _collected = _cfCollectFields('#advCustomFieldsInline');
     if (_collected.error) { app.showToast && app.showToast(_collected.error); return; }
-    API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: _collected.fields })
+    // Issue #242: 收集关联仓库
+    var linkedRepos = [];
+    document.querySelectorAll('#advLinkedReposInline .adv-kv').forEach(function(row) {
+      var sel = row.querySelector('select.adv-kv-key');
+      var brSel = row.querySelector('select.adv-kv-val');
+      var rk = sel ? sel.value : '';
+      var bn = brSel ? brSel.value.trim() : '';
+      if (rk) linkedRepos.push({ repo_key: rk, branch: bn || 'main' });
+    });
+    API.put('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(repoParam), { work_branch: workBranch, custom_fields: _collected.fields, linked_repos: linkedRepos })
       .then(function() { app.showToast && app.showToast(I18N.t('dashboard.adv_options_saved')||'高级选项已保存'); })
       .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
   };
@@ -881,6 +1010,19 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
   };
 }
 
+// Issue #249: 过滤 engine_runtime_ids，仅保留可用（online/recently_lost）引擎
+// agentEngines 为空或该 agentType 无列表时退回原始 engineIds（不劣于现状）
+function _filterAvailableEngineIds(engineIds, agentEngines, agentType) {
+  if (!agentEngines || !agentEngines[agentType] || !agentEngines[agentType].length) {
+    return engineIds || [];
+  }
+  const availMap = {};
+  agentEngines[agentType].forEach(e => {
+    if (e.status === 'online' || e.status === 'recently_lost') availMap[e.id] = true;
+  });
+  return (engineIds || []).filter(id => availMap[id]);
+}
+
 // 渲染执行流程卡片（查看模式只显示 enabled 的 agent）
 function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, colors, descs, editMode, editNodes) {
   let html = '';
@@ -894,7 +1036,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
     const skillName = node.skill_display_name || node.skill || agent.skill_display_name || agent.skill || '';
-    const engineIds = node.engine_runtime_ids || agent.engine_runtime_ids || [];
+    const engineIds = _filterAvailableEngineIds(node.engine_runtime_ids || agent.engine_runtime_ids || [], agentEngines, tag);
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
     const enabled = editMode ? (en ? en.enabled : true) : (node.enabled !== false);
@@ -1094,7 +1236,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     const skLabel = meta.label || tag;
     const ag = agents.find(a => a.agent_type === tag) || {};
     const skillDisplay = node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '';
-    const engineIds = node.engine_runtime_ids || [];
+    const engineIds = _filterAvailableEngineIds(node.engine_runtime_ids || [], agentEngines, tag);
     const enabled = node.enabled !== false;
 
     let toggleBtn = '';
@@ -1629,6 +1771,11 @@ function _enterCreateStandardMode(data, owner, name) {
 
 // 加载高级选项到详情页内联区域
 function _loadAdvancedOptionsInline(sceneId, owner, name) {
+  // Issue #242: 加载托管仓库列表供关联仓库选择
+  API.get('/repos/managed').then(function(d) {
+    window._linkedRepoOptions = (d && d.repos) || [];
+  }).catch(function() { window._linkedRepoOptions = []; });
+
   API.get('/scenes/' + sceneId + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name)).then(function(d) {
     var sel = document.getElementById('advWorkBranchInline');
     if (sel) {
@@ -1652,6 +1799,13 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
       container.innerHTML = '';
       fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
     }
+    // Issue #242: 加载关联仓库
+    var linkedRepos = d.linked_repos || [];
+    var lrContainer = document.getElementById('advLinkedReposInline');
+    if (lrContainer) {
+      lrContainer.innerHTML = '';
+      linkedRepos.forEach(function(lr) { window._addLinkedRepoInline(lr.repo_key, lr.branch); });
+    }
   }).catch(function() {});
 }
 
@@ -1667,7 +1821,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
     const skill = node ? (node.skill || '') : (ag.skill || '');
     const skillDisplay = node ? (node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '') : (ag.skill_display_name || ag.skill || '');
-    const engineIds = node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []);
+    const engineIds = _filterAvailableEngineIds(node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []), agentEngines, at);
     const accentColor = meta.color || colors[at] || '#86868b';
     // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
     const desc = descs[at] || meta.description || '';

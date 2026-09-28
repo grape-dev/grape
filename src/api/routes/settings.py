@@ -6,6 +6,7 @@ from src.user import db as user_db
 from src.api.deps import require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.repo_key import from_repo_key
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -422,6 +423,7 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
         else:
             rt["owner"] = cred["owner_name"]
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
+            rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         # 引擎健康分（Issue #134 展示增强）
         try:
@@ -518,19 +520,20 @@ def _build_cred_map(db, db_lock) -> dict:
     cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key = r
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
-                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
+                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
+                             "repo_key": crepo_key or ""}
     return cred_map
 
 
 def _make_visible_credential_fn(uname: str, user_repos: set):
     """返回 _visible_credential 闭包，两个端点共用。
     uname: 当前登录用户名
-    user_repos: 用户可访问的仓库 full_name 集合
+    user_repos: 用户可访问的仓库 full_name 集合（无前缀 owner/repo）
     """
     def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
         if not cid:                      # credential_id=0（历史本机引擎）
@@ -540,7 +543,11 @@ def _make_visible_credential_fn(uname: str, user_repos: set):
         if cscope == "user":
             return cowner_name == uname
         if cscope == "repo":
-            return cowner_name == uname or cowner_id in user_repos
+            if cowner_name == uname:
+                return True
+            # repo_key 存储为 gitcode:owner/repo（带前缀），user_repos 无前缀
+            # 统一用 from_repo_key 剥前缀后比对（Issue #248）
+            return from_repo_key(cowner_id) in user_repos
         return False
     return _visible_credential
 
@@ -591,6 +598,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
                             "owner": cred.get("owner_name", ""),
+                            "repo_key": from_repo_key(cred.get("repo_key", "")),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
 
@@ -837,9 +845,11 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     owner = user.get("username") or ""
     repo_key = ""
     if scope in ("repo", "user"):
-        repo_key = (body.repo_key or "").strip()
-        if scope == "repo" and not repo_key:
+        raw_key = (body.repo_key or "").strip()
+        if scope == "repo" and not raw_key:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
+        if raw_key:
+            repo_key = _resolve_repo_key(raw_key)
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
@@ -906,9 +916,10 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
     scope = _normalize_scope(body.scope)
     if scope == "global":
         raise HTTPException(status_code=400, detail={"code": 400, "message": "不允许设为全局，仅可切换仓库/个人"})
-    repo_key = (body.repo_key or "").strip()
-    if scope == "repo" and not repo_key:
+    raw_key = (body.repo_key or "").strip()
+    if scope == "repo" and not raw_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 scope 需填写 repo_key"})
+    repo_key = _resolve_repo_key(raw_key) if raw_key else ""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
@@ -933,12 +944,58 @@ def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at FROM runtime_credentials ORDER BY id DESC")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
-             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8])}
+             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8]),
+             "repo_key": from_repo_key(r[9] or "")}
             for r in c.fetchall()
         ]}
+
+
+def _cleanup_scene_engine_runtime_ids(rid_list: list):
+    """清理场景配置中引用了即将被删除的 runtime_id 的 engine_runtime_ids（Issue #250）。
+
+    扫描 devops_pipeline_scene 所有活跃场景的 nodes_json，
+    从每个 node 的 engine_runtime_ids 中移除在 rid_list 中的 ID，回写 DB。
+    """
+    if not rid_list:
+        return
+    import json as _json
+    from datetime import datetime, timezone
+    from src.session_manager import db, db_lock
+    rid_set = set(rid_list)
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
+        except Exception as _e:
+            log.warning(f"_cleanup_scene_engine_runtime_ids: query scenes failed: {_e}")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for row_id, nodes_str in rows:
+            try:
+                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
+            except Exception:
+                continue
+            changed = False
+            for node in nodes:
+                eids = node.get("engine_runtime_ids") or []
+                if not eids:
+                    continue
+                new_eids = [eid for eid in eids if eid not in rid_set]
+                if len(new_eids) != len(eids):
+                    node["engine_runtime_ids"] = new_eids
+                    changed = True
+            if changed:
+                try:
+                    c.execute(
+                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
+                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
+                except Exception as _e:
+                    log.warning(f"_cleanup_scene_engine_runtime_ids: update scene {row_id} failed: {_e}")
+        db.commit()
 
 
 @router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")
@@ -950,6 +1007,7 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
     级联清理：
     - agent_runtimes：该凭据注册的引擎行一并删除
     - devops_agent_session.runtime_id：置 0（dashboard 红字「无 engine」，如实反映）
+    - devops_pipeline_scene.nodes_json：清理 engine_runtime_ids 中对被删 runtime 的悬空引用（Issue #250）
     历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
     （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
     """
@@ -967,6 +1025,8 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
             except Exception as _e:
                 log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
+        # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
+        _cleanup_scene_engine_runtime_ids(rid_list)
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
         db.commit()

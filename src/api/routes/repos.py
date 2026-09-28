@@ -29,8 +29,20 @@ class CreateRepoBody(BaseModel):
     host_after_create: bool = False
 
 
-def _get_user_provider_and_token(username: str) -> tuple[str, str]:
-    """根据用户已绑定的令牌自动选择 provider，返回 (provider, token)。"""
+def _get_user_provider_and_token(username: str, login_provider: str = "") -> tuple[str, str]:
+    """根据用户已绑定的令牌自动选择 provider，返回 (provider, token)。
+
+    login_provider：登录来源平台（gitcode/github），优先返回对应平台 token；
+    缺失或对应平台无 token 时 fallback 到现有优先级逻辑（github 优先）。
+    """
+    if login_provider == "gitcode":
+        gitcode_token = get_user_token(username)
+        if gitcode_token:
+            return "gitcode", gitcode_token
+    elif login_provider == "github":
+        github_token = get_user_github_token(username)
+        if github_token:
+            return "github", github_token
     github_token = get_user_github_token(username)
     if github_token:
         return "github", github_token
@@ -228,7 +240,7 @@ def list_member_repos(user: dict = Depends(require_no_session_token)):
     """
     from datetime import datetime, timezone
 
-    provider, api_token = _get_user_provider_and_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
@@ -279,7 +291,7 @@ def list_member_repos(user: dict = Depends(require_no_session_token)):
 @router.post("/sync", operation_id="repos_sync", summary="Sync repo list from VCS", description="Manually syncs the repository list from VCS, refreshes the user_repos cache and probes/cleans stale managed records.")
 def sync_repos(user: dict = Depends(require_no_session_token)):
     """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
-    provider, api_token = _get_user_provider_and_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
@@ -297,7 +309,7 @@ def sync_repos(user: dict = Depends(require_no_session_token)):
 @router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")
 def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
     """检查当前用户名下是否已存在同名仓库"""
-    provider, api_token = _get_user_provider_and_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
@@ -351,7 +363,7 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     else:
         private = body.private
 
-    provider, api_token = _get_user_provider_and_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
@@ -497,7 +509,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
-    provider, api_token = _get_user_provider_and_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     from src.user.db import get_webhook_url
     webhook_url = get_webhook_url()
     # GitHub 仓库用 /webhook/github 路由

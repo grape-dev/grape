@@ -588,6 +588,21 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
             parts.append(f"A2A target PR: #{pr_num}\n")
         parts.append("Continue processing based on the context above.\n")
 
+    # 关联仓库提示（QA/SRE agent 需要知道关联仓库信息以做联合验证/部署）
+    _linked_repos_env = evt.get("_env_extra", {}).get("GRAPE_LINKED_REPOS", "") or os.environ.get("GRAPE_LINKED_REPOS", "")
+    if _linked_repos_env and agent_type in ("qa", "sre"):
+        try:
+            _lr_list = json.loads(_linked_repos_env) if isinstance(_linked_repos_env, str) else _linked_repos_env
+            if _lr_list:
+                _lr_names = ", ".join(r.get("repo_key", "").replace("gitcode:", "") for r in _lr_list if isinstance(r, dict))
+                if _lr_names:
+                    parts.append(f"\n## 关联仓库\n本 Issue 涉及多仓库开发，关联仓库: {_lr_names}\n")
+                    if agent_type == "qa":
+                        parts.append("请对每个关联仓库的 PR 也进行代码审查，并做联合验证（接口契约一致性、数据模型匹配等）。\n")
+                    parts.append(f"环境变量 $GRAPE_LINKED_REPOS 和 $GRAPE_LINKED_WORKTREES 包含关联仓库的完整列表和 worktree 路径。\n")
+        except Exception:
+            pass
+
     if evt_type == "issue_comment":
         note = ""
         if isinstance(payload.get("object_attributes"), dict):

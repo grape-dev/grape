@@ -72,6 +72,7 @@ class HeartbeatBody(BaseModel):
     disk_percent: float = 0.0
     tmp_percent: float = 0.0
     bandwidth_percent: float = 0.0
+    bandwidth_mbps: float = 0.0
     load_avg: str = ""
     spec: str = ""
     log_lines: list[LogLineBody] = []
@@ -217,7 +218,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
 
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
     防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
-    （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
+    （revoke 物理删除 agent_runtimes 行；无校验则吊销的设备行会被残留 agent 复活）。
 
     响应携带 cancelled_tasks 列表——worker 收到后立即杀引擎进程，
     实现任务取消实时感知（延迟 15 秒，覆盖 step 很长时 report_messages 410 不触发的场景）。
@@ -229,11 +230,11 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
         c = db.cursor()
         # spec 为空时不覆盖（兼容旧版 worker 不上报 spec）
         if body.spec:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, load_avg=?, spec=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.load_avg, body.spec, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=?, spec=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, body.spec, credential_id))
         else:
-            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, load_avg=? WHERE id=?",
-                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.load_avg, credential_id))
+            c.execute("UPDATE runtime_credentials SET last_seen_at=?, last_ip=?, cpu_percent=?, memory_percent=?, disk_percent=?, tmp_percent=?, bandwidth_percent=?, bandwidth_mbps=?, load_avg=? WHERE id=?",
+                      (now, client_ip, body.cpu_percent, body.memory_percent, body.disk_percent, body.tmp_percent, body.bandwidth_percent, body.bandwidth_mbps, body.load_avg, credential_id))
         if body.runtime_ids:
             ph = ",".join("?" for _ in body.runtime_ids)
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",

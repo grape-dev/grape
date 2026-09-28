@@ -11,7 +11,7 @@
 - `--unshare-all`：隔离所有 namespace，仅 `--share-net` 保留网络（A2A/GitCode/OBS/云）。
 - `--chdir {cwd}` + `--bind {cwd} {cwd}`：保持 /proc/{pid}/cwd == cwd，_kill_stale_engine
   的 readlink startswith 判活不受影响（§6 #10）。
-- `/tmp` 用 tmpfs 隔离；hermes 会话 overlay（/tmp/hermes-acp-homes/{md5(cwd)[:12]}）
+- `/tmp` 用 tmpfs 隔离；hermes 会话 overlay（~/.cache/hermes-acp-homes/{md5(cwd)[:12]}）
   单独 rw-bind 回宿主机（§6 #12：不割断 state.db 续传）。
 """
 import os
@@ -78,10 +78,11 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
             opts += ["--bind", p, p]
 
     # /tmp 隔离（tmpfs）；hermes 会话 overlay 单独 rw-bind（在 tmpfs 之上叠加）
+    # issue #238: hermes overlay 已从 /tmp 迁移到 ~/.cache/hermes-acp-homes
     opts += ["--tmpfs", "/tmp"]
     if backend_name == "hermes":
         _h = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
-        _overlay = os.path.join("/tmp", "hermes-acp-homes", _h)
+        _overlay = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes", _h)
         os.makedirs(_overlay, exist_ok=True)
         opts += ["--bind", _overlay, _overlay]
 
@@ -102,7 +103,7 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
     opts += ["--bind", cwd, cwd]
     opts += ["--chdir", cwd]
 
-    # hermes 需要写 /tmp 下临时 overlay？ACP 只写 /tmp/hermes-acp-homes/{hash}（已 bind）。
+    # hermes 需要写临时 overlay？ACP 只写 ~/.cache/hermes-acp-homes/{hash}（已 bind）。
     # 其余引擎的 /tmp 临时文件落沙箱 tmpfs，任务结束丢弃（更干净）。
 
     opts.append("--")

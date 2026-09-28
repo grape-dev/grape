@@ -85,8 +85,8 @@ class HermesACPBackend:
         # 下次同一 cwd 执行时 session/resume 能找到历史会话数据（chat-ctx-fix §方向一）。
         import hashlib
         _cwd_hash = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
-        import tempfile
-        _hermes_homes_root = os.path.join(tempfile.gettempdir(), "hermes-acp-homes")
+        # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
+        _hermes_homes_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes")
         os.makedirs(_hermes_homes_root, exist_ok=True)
         iso_home = os.path.join(_hermes_homes_root, _cwd_hash)
         os.makedirs(iso_home, exist_ok=True)

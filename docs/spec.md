@@ -1,52 +1,65 @@
-# Spec: Issue #162 — 系统监控分页增加「每页条数」选择器
+# Issue #254 — 技能详情内容同步问题：缓存命中校验 content_hash 回源
 
-## Objective
-系统监控页面中概览的两处分页（Worker 卡片 / Runtime 引擎表格）增加「每页条数」可选（10/20/50）；任务 Tab（timeline 任务列表）新增分页（含相同的「每页条数」选择器），避免数据量大时一次性渲染过多 DOM 元素。
+## 1. 问题概述
 
-## 背景
-- 概览 Worker / Runtime 分页已在 Issue #117 实现，固定 `_OBS_PAGE_SIZE = 10`，仅有翻页按钮
-- 异常任务 Tab 已在 Issue #123 实现 `anomalyPageSize` + `rows_per_page` 选择器（10/20/50）
-- 任务 Tab（timeline issue 列表）目前无分页，所有 issue 一次性渲染
+官方技能（official）通过 `skill_sync` 定时任务（每 30 分钟）同步到 OBS 后，`zip_cache_put` + `mem_cache_invalidate` 仅在执行 sync 的那一台节点生效，其他节点的磁盘 zip 缓存和内存 LRU 缓存未被失效，导致详情接口 `skill_md_content()` 命中旧缓存返回旧 content，而下载接口 `temporary_url()` 实时签名永远返回最新——出现"下载新、详情旧"不一致。
 
-## 技术方案
+本周同一根因已发生两次（上传覆盖一次、sync 更新一次），需治本修复。
 
-### 概览：Worker 卡片 & Runtime 引擎
-1. 将 `const _OBS_PAGE_SIZE = 10` 替换为独立状态：`_workerPageSize = 10`、`_runtimePageSize = 10`
-2. 新增 `_paginationWithPageSizeHTML(page, totalPages, prevExpr, nextExpr, pageSize, pageSizeVar, rerenderExpr)` 通用分页栏，包含翻页按钮 + 页码 + `rows_per_page` 选择器（10/20/50）
-3. `_rerenderWorkerGrid()` / `_rerenderRuntimeTable()` / `renderOverview()` / `updateOverview()` 均改为使用对应 `_*PageSize` 变量
-4. 空列表（`workers.length === 0` / `_filteredRuntimes.length === 0`）时不渲染分页栏
+## 2. 根因分析
 
-### 任务 Tab
-5. 新增状态：`_timelinePage = 0`、`_timelinePageSize = 10`
-6. `_filterTimelineIssues()` 增加分页逻辑：先按搜索条件筛选，再按 `_timelinePage/_timelinePageSize` 切片渲染
-7. 渲染后追加 `_paginationWithPageSizeHTML` 分页栏
-8. `#N` 定位搜索：当 `locateIssueId` 存在时，将 `_timelinePage` 调整到包含目标 issue 的页
-9. 搜索输入 `oninput` 重置 `_timelinePage = 0`
+**代码位置**：
+- `src/storage/skill_sync.py` → `sync_official_skills_to_obs()`：上传新 zip 到 OBS 后调用 `zip_cache_put` + `mem_cache_invalidate`，但仅在当前节点生效
+- `src/storage/__init__.py` → `skill_md_content()`：三级读取链 "内存 LRU → 磁盘 zip 缓存 → OBS 回源"，缓存命中时不校验 content_hash
+- PR #349 已在单节点层面修复 sync 后缓存失效，但跨节点未覆盖
 
-### 状态重置
-10. `switchObsTab()` 切换 tab 时重置 `_timelinePage = 0`
+**核心缺陷**：缓存无版本校验——命中缓存时不比对 DB 中的 `content_hash`，无法发现内容已更新。
 
-## 验收标准
-- [ ] 概览 Worker 分页：10/20/50 选择器存在，切换后正确渲染对应数量卡片，页码正确
-- [ ] 概览 Runtime 分页：10/20/50 选择器存在，切换后正确渲染对应行数，页码正确
-- [ ] 任务 Tab 分页：10/20/50 选择器存在，切换后正确渲染，页码正确
-- [ ] 空列表/少量数据时，选择器仍可见，无翻页按钮，页码显示 "1 / 1"
-- [ ] `switchObsTab` 切换 tab 后分页状态正确重置
-- [ ] 搜索筛选后分页正确
-- [ ] `#N` 定位搜索自动跳到目标页
-- [ ] 现有 Issue #117 / #123 测试全部通过
-- [ ] Issue #162 新增回归测试全部通过
+## 3. 修复方案
 
-## 代码风格
-- JS（浏览器脚本），无模块化
-- 全局变量/函数风格（遵循现有代码库风格）
-- HTML 字符串模板（`innerHTML`）
+### 方案 A（主）：缓存命中时校验 content_hash 回源
 
-## 测试策略
-- 框架：Node.js 单文件测试（`node tests/js/*.js`）
-- 现有：`test_observability_pagination.js`（#117，已更新）、`test_anomaly_page_size.js`（#123）
-- 新增：`test_observability_page_size_162.js`（#162 回归测试）
+在 `skill_md_content()` 的缓存命中路径增加 content_hash 校验：
 
-## 边界
-- Always: 测试通过后提交
-- Never: 修改非 Issue 相关代码，修改后端逻辑，引入外部依赖
+```
+skill_md_content(object_key, skill_name)
+  → mem_cache_get(skill_name)
+    → 命中 → 查 DB content_hash（按 skill_name + scope=official）
+      → DB hash 与缓存记录的 hash 一致 → 返回缓存（快路径）
+      → DB hash 与缓存记录的 hash 不一致 → 失效缓存 → 回源 OBS（慢路径）
+  → get_skill_zip_bytes(object_key) 
+    → 磁盘缓存命中 → 同样校验 content_hash
+```
+
+### 改动点
+
+1. **`src/storage/__init__.py`**：
+   - `_mem_cache` 结构：`{skill_name: (content, size, content_hash)}` → 存入时记录 hash
+   - `mem_cache_put(skill_name, content, content_hash="")` → 新增可选 hash 参数
+   - `mem_cache_get(skill_name)` → 返回 `(content, content_hash)` 元组
+   - `zip_cache_put(object_key, data, content_hash="")` → index 记录 hash
+   - `zip_cache_get(object_key)` → 返回 `(data, content_hash)` 元组
+   - `skill_md_content()` → 缓存命中后比对 DB hash，不一致则失效回源
+   - `get_skill_zip_bytes()` → 磁盘缓存命中后校验 hash
+
+2. **`src/storage/skill_sync.py`**：
+   - `sync_official_skills_to_obs()` → `zip_cache_put` 传入 `current_hash`
+
+3. **`src/user/db.py`**：
+   - 复用已有 `get_skill_content_hash(skill_name, scope)` 供缓存校验
+
+## 4. 验收标准
+
+1. `sync_official_skills_to_obs()` 上传新 zip 后，**所有节点**的 `skill_md_content()` 返回最新 content
+2. 缓存命中且 hash 一致时走快路径（不回源 OBS），性能不退化
+3. hash 不一致时失效缓存回源 OBS
+4. 回归测试覆盖：缓存命中 + hash 变更 → 回源；hash 不变 → 走缓存
+5. PR #349 + #350 的修复与测试保留，本方案在其基础上增强
+
+## 5. 涉及文件
+
+| 文件 | 改动 |
+|------|------|
+| `src/storage/__init__.py` | mem_cache/zip_cache 结构加 hash 字段；skill_md_content 增加缓存命中校验 |
+| `src/storage/skill_sync.py` | zip_cache_put 传 content_hash |
+| `tests/test_skill_sync_obs.py` | 新增缓存命中 + hash 校验场景测试 |
