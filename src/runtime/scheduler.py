@@ -59,23 +59,45 @@ _FINDINGS_FORMAT_TEMPLATE = """\
 - 即使未发现问题也要包含空数组：{"summary":"未发现问题","findings":[]}"""
 
 
+def _heal_findings_marker(text: str) -> str:
+    """修复 ACP 流式输出在标记头中插入的换行符。
+
+    流式 chunk 边界可能在 <!-- autopilot-findings 中插入 \\n，
+    如 <!-- autop\\nilot-findings，导致正则匹配失败。
+    """
+    idx = text.find('<!-- autop')
+    if idx < 0:
+        return text
+    fidx = text.find('findings', idx)
+    if fidx < 0:
+        return text
+    header_end = fidx + len('findings')
+    header = text[idx:header_end]
+    if '\n' not in header:
+        return text
+    return text[:idx] + header.replace('\n', '') + text[header_end:]
+
+
 def parse_findings(agent_output: str) -> dict:
     """从 agent 产出中解析问题列表。
 
     返回: {"summary": str, "findings": list, "parse_error": str}
     解析失败时 findings 为空列表。
     """
+    # 修复 ACP 流式输出在标记头中插入的换行符（如 autop\nilot → autopilot）
+    _text = _heal_findings_marker(agent_output or "")
+
     # 宽松匹配：允许 autopilot 和 -findings 之间有换行/空格
-    # 先尝试严格匹配（结尾 -->），再降级宽松匹配（结尾 --，chunk 可能拆断 -->）
+    # 先尝试严格匹配（结尾 -->），再降级宽松匹配（结尾 --，chunk 可能拆断 --> 为 --\n>）
     match = re.search(
         r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)\n-->',
-        agent_output or "",
+        _text,
         re.DOTALL
     )
     if not match:
         match = re.search(
             r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)(?:\n-->|\n--\s*$)',
-            agent_output or "",
+            _text,
             re.DOTALL
         )
     if not match:
@@ -91,11 +113,15 @@ def parse_findings(agent_output: str) -> dict:
         except ImportError:
             pass  # hermes_acp 不可用时回退原有容错
         data = json.loads(raw)
+        # 修复流式输出在 JSON key 中插入的换行符（如 "description\n" → "description"）
+        data = {k.replace('\n', '') if isinstance(k, str) else k: v for k, v in data.items()}
         findings = data.get("findings", [])
         valid = []
         for f in findings:
             if not isinstance(f, dict):
                 continue
+            # 同上，修复 finding 对象 key 中的换行符
+            f = {k.replace('\n', '') if isinstance(k, str) else k: v for k, v in f.items()}
             if not f.get("id") or not f.get("title") or not f.get("description"):
                 continue
             f.setdefault("severity", "medium")
@@ -116,10 +142,10 @@ def parse_findings(agent_output: str) -> dict:
 def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     """构建定时任务的 prompt。不依赖 issue/scene/pipeline 上下文。"""
     parts = []
-    parts.append("## 定时巡检任务\n")
+    parts.append("## 定时任务\n")
     parts.append(f"任务名称: {task['name']}\n")
     parts.append(f"仓库: {repository}\n")
-    parts.append(f"巡检指令:\n{task.get('instruction', '')}\n")
+    parts.append(f"任务指令:\n{task.get('instruction', '')}\n")
 
     # skill 注入（可选）
     skill_name = task.get("skill_name", "")
@@ -128,7 +154,28 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
         parts.append(f"Skill 文件：{{{{SKILL_DIR}}}}/{skill_name}/SKILL.md\n")
         parts.append("**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令。\n")
 
-    parts.append("\n请执行以上巡检指令，分析仓库代码/依赖/文档/配置等。")
+    # 环境变量提示（custom_fields + work_branch）
+    env_lines = []
+    wb = task.get("work_branch", "")
+    if wb:
+        env_lines.append("- GRAPE_WORK_BRANCH")
+    cf_raw = task.get("custom_fields", "")
+    if cf_raw:
+        try:
+            cf_list = json.loads(cf_raw) if isinstance(cf_raw, str) else cf_raw
+            for f in cf_list:
+                fname = (f.get("name") or "").strip()
+                if fname:
+                    env_lines.append(f"- {fname}")
+        except Exception:
+            pass
+    if env_lines:
+        parts.append("\n## 环境变量\n")
+        parts.append("以下环境变量已注入，执行前请先读取（printenv）:")
+        parts.extend(env_lines)
+        parts.append("")
+
+    parts.append("\n请执行以上任务指令，分析仓库代码/依赖/文档/配置等。")
     parts.append("\n## 输出格式要求\n")
     parts.append(_FINDINGS_FORMAT_TEMPLATE)
     parts.append("\n## 项目知识\n")
@@ -207,6 +254,23 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
         "REPO_FULL_NAME": repository,
         "ACCOUNT": repository,
     }
+    # 注入 custom_fields（自定义环境变量）和 work_branch
+    _task_custom_fields = task.get("custom_fields") or ""
+    if _task_custom_fields:
+        try:
+            _cf_list = json.loads(_task_custom_fields) if isinstance(_task_custom_fields, str) else _task_custom_fields
+            from src.scene_custom_env import is_upper_name, is_reserved_name
+            for _f in _cf_list:
+                _fname = (_f.get("name") or "").strip()
+                if not _fname or not is_upper_name(_fname) or is_reserved_name(_fname):
+                    log.warning(f"Autopilot exec {exec_id}: custom env '{_fname}' rejected")
+                    continue
+                env_extra[_fname] = str(_f.get("value", ""))
+        except Exception as _e:
+            log.warning(f"Autopilot exec {exec_id}: inject custom_fields failed: {_e}")
+    _task_work_branch = task.get("work_branch") or ""
+    if _task_work_branch:
+        env_extra["GRAPE_WORK_BRANCH"] = _task_work_branch
 
     # 7. 分流执行
     if _is_direct:
@@ -288,8 +352,16 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     # 广播模式设 pool_tag
     _pool_tag = agent_type if engine_id == 0 else ""
 
-    # 广播模式不限定引擎类型，由场景 engine_runtime_ids 或全量广播
+    # 任务级引擎限定：task 有 engine_runtime_ids 时用它限定广播范围
     _pool_engine_ids = ""
+    if engine_id == 0:
+        _task_engine_ids = task.get("engine_runtime_ids") or ""
+        if _task_engine_ids:
+            try:
+                _pool_engine_ids = _task_engine_ids if isinstance(_task_engine_ids, str) else json.dumps(_task_engine_ids)
+                log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
+            except Exception:
+                _pool_engine_ids = ""
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
 
@@ -409,7 +481,7 @@ def _get_enabled_tasks() -> list[dict]:
         c = db.cursor()
         rows = c.execute(
             "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, created_by FROM autopilot_tasks WHERE enabled=1"
+            "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE enabled=1"
         ).fetchall()
     tasks = []
     for r in rows:
@@ -417,6 +489,9 @@ def _get_enabled_tasks() -> list[dict]:
             "id": r[0], "name": r[1], "repo_key": r[2],
             "agent_type": r[3], "instruction": r[4], "skill_name": r[5],
             "cron": r[6], "max_retry": r[7], "created_by": r[8] if len(r) > 8 else 0,
+            "engine_runtime_ids": r[9] if len(r) > 9 else "",
+            "custom_fields": r[10] if len(r) > 10 else "",
+            "work_branch": r[11] if len(r) > 11 else "",
         })
     return tasks
 
@@ -497,7 +572,7 @@ def _update_task_run_info(task_id: int, next_run: str):
         db.commit()
 
 
-async def _poll_dispatched_completion(exec_id: int, timeout: int = 600) -> str:
+async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
     """轮询 dispatched 状态的 exec 等待 worker 完成执行。
 
     通过查 agent_tasks（event_seq=exec_id）的状态推断 autopilot_executions 终态：
@@ -579,7 +654,7 @@ async def _execute_task(task: dict):
             # REMOTE 模式下状态为 "dispatched"，需要轮询等待 worker 完成
             if exec_status == "dispatched":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} dispatched, polling worker completion...")
-                exec_status = await _poll_dispatched_completion(exec_id, timeout=600)
+                exec_status = await _poll_dispatched_completion(exec_id, timeout=3600)
 
             if exec_status == "success":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} success (attempt {attempt})")
@@ -655,7 +730,7 @@ async def trigger_task_now(task_id: int) -> dict:
         c = db.cursor()
         row = c.execute(
             "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, created_by FROM autopilot_tasks WHERE id=?",
+            "cron, max_retry, created_by, engine_runtime_ids, custom_fields, work_branch FROM autopilot_tasks WHERE id=?",
             (task_id,)
         ).fetchone()
     if not row:
@@ -664,6 +739,9 @@ async def trigger_task_now(task_id: int) -> dict:
         "id": row[0], "name": row[1], "repo_key": row[2],
         "agent_type": row[3], "instruction": row[4], "skill_name": row[5],
         "cron": row[6], "max_retry": row[7], "created_by": row[8] if len(row) > 8 else 0,
+        "engine_runtime_ids": row[9] if len(row) > 9 else "",
+        "custom_fields": row[10] if len(row) > 10 else "",
+        "work_branch": row[11] if len(row) > 11 else "",
     }
     if task["id"] in _RUNNING_TASKS:
         return {"ok": False, "message": "task already running"}

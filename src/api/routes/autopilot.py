@@ -84,6 +84,20 @@ def _check_exec_access(user: dict, exec_id: int) -> dict:
 
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
+    import json as _json
+    engine_ids = []
+    if len(row) > 14 and row[14]:
+        try:
+            engine_ids = _json.loads(row[14])
+        except Exception:
+            engine_ids = []
+    custom_fields = []
+    if len(row) > 15 and row[15]:
+        try:
+            custom_fields = _json.loads(row[15])
+        except Exception:
+            custom_fields = []
+    work_branch = row[16] if len(row) > 16 else ""
     return {
         "id": row[0],
         "name": row[1],
@@ -99,6 +113,9 @@ def _row_to_task(row) -> dict:
         "created_at": row[11] or "",
         "updated_at": row[12] or "",
         "created_by": row[13] if len(row) > 13 else 0,
+        "engine_runtime_ids": engine_ids,
+        "custom_fields": custom_fields,
+        "work_branch": work_branch or "",
     }
 
 
@@ -112,6 +129,9 @@ class CreateTaskBody(BaseModel):
     cron: str = "0 9 * * *"
     max_retry: int = 3
     enabled: bool = True
+    engine_runtime_ids: list = []
+    custom_fields: list = []
+    work_branch: str = ""
 
     @field_validator("name")
     @classmethod
@@ -149,7 +169,10 @@ class UpdateTaskBody(BaseModel):
     skill_name: Optional[str] = None
     cron: Optional[str] = None
     max_retry: Optional[int] = None
+    engine_runtime_ids: Optional[list] = None
     enabled: Optional[bool] = None
+    custom_fields: Optional[list] = None
+    work_branch: Optional[str] = None
 
     @field_validator("max_retry")
     @classmethod
@@ -179,7 +202,7 @@ def list_tasks(
     if repo_key:
         check_repo_access(user, repo_key)
     sql = ("SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-           "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by "
+           "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch "
            "FROM autopilot_tasks")
     conditions = []
     params = []
@@ -210,7 +233,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         c = db.cursor()
         row = c.execute(
             "SELECT id, name, repo_key, agent_type, instruction, skill_name, "
-            "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by "
+            "cron, max_retry, enabled, last_run_at, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch "
             "FROM autopilot_tasks WHERE id=?", (task_id,)
         ).fetchone()
     if not row:
@@ -225,14 +248,17 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
         check_repo_access(user, body.repo_key)
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
+    engine_ids_json = json.dumps(body.engine_runtime_ids) if body.engine_runtime_ids else ""
+    custom_fields_json = json.dumps(body.custom_fields, ensure_ascii=False) if body.custom_fields else ""
     with db_lock:
         c = db.cursor()
         c.execute(
             "INSERT INTO autopilot_tasks "
-            "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "(name, repo_key, agent_type, instruction, skill_name, cron, max_retry, enabled, next_run_at, created_at, updated_at, created_by, engine_runtime_ids, custom_fields, work_branch) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (body.name, body.repo_key, _FIXED_AGENT_TYPE, body.instruction, body.skill_name,
-             body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0)
+             body.cron, body.max_retry, 1 if body.enabled else 0, next_run, now_str, now_str, user.get("id", 0) or 0,
+             engine_ids_json, custom_fields_json, body.work_branch or "")
         )
         db.commit()
         task_id = c.lastrowid
@@ -260,6 +286,12 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
             next_run = _compute_next_run(val)
             fields.append("next_run_at=?")
             params.append(next_run)
+        elif key == "engine_runtime_ids":
+            fields.append("engine_runtime_ids=?")
+            params.append(json.dumps(val) if val else "")
+        elif key == "custom_fields":
+            fields.append("custom_fields=?")
+            params.append(json.dumps(val, ensure_ascii=False) if val else "")
         else:
             fields.append(f"{key}=?")
             params.append(val)
@@ -340,6 +372,17 @@ def list_executions(
         total = c.execute(count_sql, params[:-2]).fetchone()[0]
     executions = []
     for r in rows:
+        # 反查 agent_task_id（event_seq = exec_id）
+        agent_task_id = ""
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (r[0],))
+                at_row = c2.fetchone()
+                if at_row:
+                    agent_task_id = at_row[0]
+        except Exception:
+            pass
         executions.append({
             "id": r[0],
             "task_id": r[1],
@@ -352,6 +395,7 @@ def list_executions(
             "created_at": r[8] or "",
             "agent_type": r[9] or "",
             "has_findings": bool(r[10]),
+            "agent_task_id": agent_task_id,
         })
     return {"executions": executions, "total": total, "limit": limit, "offset": offset}
 
@@ -482,7 +526,7 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     if not body.instruction or not body.instruction.strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "巡检指令不能为空"})
 
-    import os, json, urllib.request
+    import os, json, urllib.request, time
     import yaml
 
     # 从 hermes config.yaml 读 LLM 配置
@@ -496,7 +540,8 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 
     model_cfg = hermes_cfg.get("model", {})
     base_url = model_cfg.get("base_url", "").rstrip("/")
-    model_name = model_cfg.get("default") or model_cfg.get("model") or ""
+    # 润色用轻量模型，不走默认的 glm-5.2（响应慢）
+    model_name = "deepseek-v4-flash-0731"
     api_key = ""
 
     # api_key 可能是 ${ENV_VAR} 格式
@@ -523,13 +568,13 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
     if not base_url or not api_key or not model_name:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "LLM 配置不完整（缺 base_url/api_key/model）"})
 
-    polish_prompt = f"""请优化以下 DevOps 巡检指令，使其更清晰、更结构化。
+    polish_prompt = f"""请优化以下自动化任务指令，使其更清晰、更结构化。
 
 要求：
-1. 补充巡检步骤的细节和顺序（编号列表）
-2. 明确输出要求（分析什么、报告什么）
-3. 不要凭空发明用户意图之外的巡检范围
-4. 输出纯文本指令，不要 markdown 标题语法（不要用 #）
+1. 理清执行步骤，用编号列表排列
+2. 明确期望的输出或完成标准
+3. 不要扩展用户意图之外的内容
+4. 输出纯文本，不要 markdown 标题语法（不要用 #）
 
 任务名称：{body.name}
 初步指令：
@@ -538,18 +583,24 @@ async def polish_instruction(body: PolishBody, user: dict = Depends(get_current_
 请直接输出优化后的指令内容，不要加任何解释说明。"""
 
     def _call_llm():
+        _t0 = time.time()
         body_json = json.dumps({
             "model": model_name,
             "messages": [{"role": "user", "content": polish_prompt}],
             "temperature": 0.3,
-            "max_tokens": 2000,
+            "max_tokens": 1000,
+            "thinking": {"type": "disabled"},
         }).encode("utf-8")
         req = urllib.request.Request(f"{base_url}/chat/completions", data=body_json, method="POST")
         req.add_header("Content-Type", "application/json")
         req.add_header("Authorization", f"Bearer {api_key}")
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        _t1 = time.time()
+        with urllib.request.urlopen(req, timeout=30) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        return data["choices"][0]["message"]["content"].strip()
+        _t2 = time.time()
+        log.info(f"Autopilot polish LLM: build={(_t1-_t0)*1000:.0f}ms request={(_t2-_t1)*1000:.0f}ms total={(_t2-_t0)*1000:.0f}ms finish={data.get('choices',[{}])[0].get('finish_reason','?')}")
+        content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "") or ""
+        return content.strip()
 
     try:
         import asyncio

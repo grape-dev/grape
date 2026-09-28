@@ -1,4 +1,4 @@
-// Issue #150: Autopilot 自动化管理页面
+// Issue #150: Autopilot 定时任务管理页面
 // 参照 multica AutopilotsPage 风格设计
 var $ = function(id) { return document.getElementById(id); };
 
@@ -7,10 +7,10 @@ var _apScope = 'all';           // all / enabled / disabled
 var _apSortField = 'name';      // name / lastRun / nextRun / created
 var _apSortDir = 'asc';         // asc / desc
 var _apSearch = '';             // 搜索关键词
-var _apSelected = new Set();    // 选中的需求ID
-var _apEditingId = null;        // 编辑模式时的需求ID
+var _apSelected = new Set();    // 选中的任务ID
+var _apEditingId = null;        // 编辑模式时的任务ID
 var _apCronMode = 'at';      // daily / weekly / custom
-var _apDetailId = null;         // 详情页需求ID
+var _apDetailId = null;         // 详情页任务ID
 
 // ===== 模板 =====
 var _AP_TEMPLATES = [
@@ -36,9 +36,9 @@ function _apListHTML() {
   return '<div class="cd">' +
     '<div class="cd-h" style="display:flex;justify-content:space-between;align-items:center">' +
       '<div style="display:flex;align-items:center;gap:12px">' +
-        '<h2><span style="margin-right:6px">⏰</span>自动化</h2>' +
+        '<h2><span style="margin-right:6px">⏰</span>定时任务</h2>' +
       '</div>' +
-      '<button class="bt bt-p" onclick="_apShowCreate()">+ 新建需求</button>' +
+      '<button class="bt bt-p" onclick="_apShowCreate()">+ 新建任务</button>' +
     '</div>' +
     // Toolbar
     '<div style="display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap">' +
@@ -47,7 +47,7 @@ function _apListHTML() {
         '<button class="bt bt-s ' + (_apScope==='enabled'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'enabled\')">启用 <span id="apCountEnabled" class="c"></span></button>' +
         '<button class="bt bt-s ' + (_apScope==='disabled'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'disabled\')">暂停 <span id="apCountDisabled" class="c"></span></button>' +
       '</div>' +
-      '<input type="text" placeholder="搜索需求名称..." value="' + _apSearch + '" oninput="_apSearch=this.value;_apRenderTable()" style="flex:1;min-width:120px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
+      '<input type="text" placeholder="搜索任务名称..." value="' + _apSearch + '" oninput="_apSearch=this.value;_apRenderTable()" style="flex:1;min-width:120px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
       '<select onchange="_apSortField=this.value;_apRenderTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t)">' +
         '<option value="name"' + (_apSortField==='name'?' selected':'')+ '>按名称</option>' +
         '<option value="lastRun"' + (_apSortField==='lastRun'?' selected':'')+ '>按上次运行</option>' +
@@ -81,14 +81,14 @@ function _apEmptyHTML() {
   }).join('');
   return '<div style="padding:40px 0;text-align:center">' +
     '<div style="font-size:32px;margin-bottom:8px">⏰</div>' +
-    '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">暂无自动化</p>' +
+    '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">暂无定时任务</p>' +
     '<p style="font-size:12px;color:var(--t3);margin-bottom:24px">选择一个模板快速创建，或从空白开始</p>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;max-width:720px;margin:0 auto">' + cards + '</div>' +
     '<button class="bt bt-o" style="margin-top:16px" onclick="_apShowCreate()">+ 从空白创建</button>' +
   '</div>';
 }
 
-// ===== 加载需求 =====
+// ===== 加载任务 =====
 function _apLoadTasks() {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   var url = '/autopilot/tasks?repo_key=gitcode:' + repo;
@@ -145,7 +145,7 @@ function _apRenderTable() {
     return;
   }
   if (tasks.length === 0) {
-    container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">无匹配需求</div>';
+    container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">无匹配任务</div>';
     _apUpdateBatchBar();
     return;
   }
@@ -208,7 +208,7 @@ function _apRenderTable() {
 }
 
 // ===== Scope/Sort =====
-function _apSetScope(s) { _apScope = s; renderAutopilot(); }
+function _apSetScope(s) { _apScope = s; _apRenderTable(); }
 function _apToggleSortDir() { _apSortDir = _apSortDir === 'asc' ? 'desc' : 'asc'; _apRenderTable(); }
 
 // ===== 选中 =====
@@ -289,7 +289,7 @@ function _apToggleTask(id) {
   });
 }
 function _apBatchDelete() {
-  if (!confirm('确定删除选中的 ' + _apSelected.size + ' 个需求吗？')) return;
+  if (!confirm('确定删除选中的 ' + _apSelected.size + ' 个任务吗？')) return;
   var ids = Array.from(_apSelected);
   ids.forEach(function(id) {
     API.del('/autopilot/tasks/' + id).catch(function(){});
@@ -303,12 +303,16 @@ function _apTrigger(id) {
   API.post('/autopilot/tasks/' + id + '/trigger').then(function(d) {
     if (app && app.showToast) app.showToast(d.message || '已触发');
     _apLoadTasks();
+    // 如果在详情页，延迟刷新执行历史（触发后需要时间执行）
+    if (window._currentView === 'autopilot-detail' && String(_apDetailId) === String(id)) {
+      setTimeout(function() { _apLoadExecutions(id); }, 2000);
+    }
   }).catch(function(e) {
     if (app && app.showToast) app.showToast('触发失败: ' + (e.message||e));
   });
 }
 function _apDelete(id) {
-  if (!confirm('确定删除此需求吗？')) return;
+  if (!confirm('确定删除此任务吗？')) return;
   API.del('/autopilot/tasks/' + id).then(function() {
     if (app && app.showToast) app.showToast('已删除');
     _apLoadTasks();
@@ -339,7 +343,10 @@ function _apShowDialog(tpl, existing) {
   var instruction = existing ? (existing.instruction || '') : (tpl ? tpl.instruction : '');
   var cron = existing ? existing.cron : (tpl ? tpl.cron : '0 9 * * *');
   var maxRetry = existing ? (existing.max_retry || 3) : 3;
-  var title = existing ? '编辑自动化' : '新建自动化';
+  var engineIds = existing ? (existing.engine_runtime_ids || []) : [];
+  var customFields = existing ? (existing.custom_fields || []) : [];
+  var workBranch = existing ? (existing.work_branch || '') : '';
+  var title = existing ? '编辑定时任务' : '新建定时任务';
   var btnText = existing ? '保存' : '创建';
 
   // Shared input style
@@ -368,7 +375,7 @@ function _apShowDialog(tpl, existing) {
       '</div>' +
       // Body: two columns (left=content, right=config)
       '<div style="flex:1;min-height:0;display:flex;flex-direction:row;overflow:hidden">' +
-        // Left column: name + skill + instruction
+        // Left column: name + engine + skill + instruction
         '<div style="flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--b);overflow-y:auto">' +
           '<div style="padding:16px 20px 8px">' +
             '<label style="' + _lbl2 + '">任务名称 <span style="color:var(--r)">*</span></label>' +
@@ -376,9 +383,18 @@ function _apShowDialog(tpl, existing) {
             '<div style="' + _hint + '">定时任务的名称，用于列表展示</div>' +
           '</div>' +
           '<div style="padding:8px 20px">' +
+            '<label style="' + _lbl2 + '">执行引擎</label>' +
+            '<div onclick="_apOpenEnginePicker()" style="' + _inp + ';cursor:pointer;display:flex;align-items:center;justify-content:center;min-height:38px">' +
+              '<span id="apEnginePill" style="font-size:13px;font-weight:500;color:#34c759">广播</span>' +
+            '</div>' +
+            '<div style="' + _hint + '">选择引擎限定执行范围，不选=所有在线引擎均可认领</div>' +
+          '</div>' +
+          '<div style="padding:8px 20px">' +
             '<label style="' + _lbl2 + '">Skill（可选）</label>' +
-            '<input id="apFormSkill" type="text" value="' + _esc(skillName) + '" placeholder="留空=纯指令模式" style="' + _inp + '">' +
-            '<div style="' + _hint + '">填写 skill 名可加载 SKILL.md（如 issue-advance），留空则按巡检指令直接执行</div>' +
+            '<div onclick="_apOpenSkillPicker()" style="' + _inp + ';cursor:pointer;display:flex;align-items:center;justify-content:center;min-height:38px">' +
+              '<span id="apSkillPill" style="font-size:13px;font-weight:500;color:#86868b">' + (skillName ? _esc(skillName) : '留空=纯指令模式') + '</span>' +
+            '</div>' +
+            '<div style="' + _hint + '">选择技能加载 SKILL.md，留空则按指令直接执行</div>' +
           '</div>' +
           '<div style="padding:8px 20px 16px;flex:1;display:flex;flex-direction:column;min-height:0">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
@@ -389,8 +405,8 @@ function _apShowDialog(tpl, existing) {
             '<div style="' + _hint + '">写个大概，点润色可让 AI 优化指令内容</div>' +
           '</div>' +
         '</div>' +
-        // Right column: schedule + retry
-        '<aside style="flex:1;min-width:0;overflow-y:auto;padding:16px 20px;background:var(--bg,rgba(0,0,0,0.02))">' +
+        // Right column: schedule + retry + advanced options
+        '<aside style="flex:1.2;min-width:340px;overflow-y:auto;padding:16px 20px;background:var(--bg,rgba(0,0,0,0.02))">' +
           '<div style="margin-bottom:16px">' +
             '<div style="' + _sectionLbl + '">时间表 <span style="color:var(--r)">*</span></div>' +
             '<div id="apScheduleEditor" style="border:1px solid var(--b);border-radius:8px;padding:12px;background:var(--c,#fff)"></div>' +
@@ -398,10 +414,32 @@ function _apShowDialog(tpl, existing) {
           '</div>' +
           '<div>' +
             '<div style="' + _sectionLbl + '">执行设置</div>' +
-            '<div style="display:flex;align-items:center;gap:8px">' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
               '<label style="font-size:13px;color:var(--t3);white-space:nowrap">最大重试</label>' +
               '<input id="apFormRetry" type="number" min="0" max="10" value="' + maxRetry + '" style="width:50px;padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:13px;background:var(--c,#fff);color:var(--t);outline:none;text-align:center">' +
               '<span style="font-size:11px;color:var(--t3)">0-10，默认3</span>' +
+            '</div>' +
+          '</div>' +
+          '<div style="margin-top:12px">' +
+            '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+              '<span style="font-size:13px;font-weight:600;color:var(--t2)">高级选项</span>' +
+            '</div>' +
+            '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+              '<label style="font-size:12px;font-weight:600;color:var(--t2)">工作分支</label>' +
+              '<span onclick="_apToggleWorkBranch()" id="apWbToggle" style="position:relative;width:32px;height:18px;border-radius:9px;background:var(--b);transition:background .2s;cursor:pointer;flex-shrink:0">' +
+                '<span id="apWbKnob" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:left .2s"></span>' +
+              '</span>' +
+              '<span id="apWbLabel" style="font-size:11px;color:var(--t3)">未启用</span>' +
+            '</div>' +
+            '<div id="apWorkBranchSection" style="margin-bottom:12px;padding:10px;border:1px solid var(--b);border-radius:8px;background:var(--c,#fff);opacity:.5;pointer-events:none">' +
+              '<select id="apFormWorkBranch" style="' + _inp + ';cursor:pointer;min-height:34px"></select>' +
+              '<div style="' + _hint + '">启用后注入 GRAPE_WORK_BRANCH 环境变量</div>' +
+            '</div>' +
+            '<div>' +
+              '<label style="' + _lbl2 + '">自定义配置</label>' +
+              '<div id="apCustomFields" style="display:flex;flex-direction:column;gap:8px"></div>' +
+              '<button type="button" class="bt bt-o bt-s" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="_apAddCustomField()">+ 添加配置项</button>' +
+              '<div style="' + _hint + '">配置项以环境变量形式注入 agent，密钥不暴露在 prompt 中</div>' +
             '</div>' +
           '</div>' +
         '</aside>' +
@@ -416,10 +454,329 @@ function _apShowDialog(tpl, existing) {
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
-  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+  // 不允许点击外部关闭，防止误丢内容（只能点叉号或取消按钮关闭）
   // 存储初始cron
   _apFormCron = cron;
   _apRenderScheduleEditor();
+  // 先加载引擎列表，再初始化选中状态
+  _apSelectedEngines = new Set(engineIds);
+  _apSelectedSkill = skillName;
+  if (!_apAllEngines.length) {
+    _apLoadEngineList();
+  } else {
+    _apUpdateEngineLabel();
+  }
+  // 加载工作分支列表（编辑时用 task.repo_key，新建时用当前仓库）
+  var _taskRepoKey = existing ? (existing.repo_key || '') : '';
+  if (!_taskRepoKey && typeof app !== 'undefined' && app.currentRepo()) {
+    _taskRepoKey = 'gitcode:' + (app.currentRepo().fullName || '');
+  }
+  if (_taskRepoKey) {
+    var _rk = _taskRepoKey.replace(/^(gitcode|github):/, '');
+    var _parts = _rk.split('/');
+    if (_parts.length === 2) {
+      API.get('/scenes/branches/' + _parts[0] + '/' + _parts[1]).then(function(b) {
+        var branches = (b && b.branches) || [];
+        var sel = document.getElementById('apFormWorkBranch');
+        if (!sel) return;
+        var html = '';
+        branches.forEach(function(br, idx) {
+          var sel = (!workBranch && idx === 0) || (br.name === workBranch);
+          html += '<option value="' + br.name + '"' + (sel ? ' selected' : '') + '>' + br.name + (br.protected ? ' 🔒' : '') + '</option>';
+        });
+        sel.innerHTML = html;
+      }).catch(function() {});
+    }
+  }
+  // 已有 work_branch 时自动开启开关
+  if (workBranch) {
+    _apWorkBranchEnabled = false;  // reset to let toggle turn it on
+    _apToggleWorkBranch();
+  }
+  // 回填 custom_fields
+  if (customFields && customFields.length) {
+    customFields.forEach(function(f) {
+      _apAddCustomField(f.name, f.value, f.is_secret, f.scope);
+    });
+  }
+}
+
+var _apSelectedEngines = new Set();
+var _apAllEngines = [];
+function _apLoadEngineList() {
+  API.get('/settings/agent-runtimes').then(function(d) {
+    _apAllEngines = (d.runtimes || d || []).filter(function(e) { return e.status === 'online'; });
+    _apUpdateEngineLabel();
+  }).catch(function() { _apAllEngines = []; _apUpdateEngineLabel(); });
+}
+function _apUpdateEngineLabel() {
+  var pill = $('apEnginePill');
+  if (!pill) return;
+  if (_apSelectedEngines.size === 0) {
+    pill.textContent = '广播';
+    pill.style.color = '#34c759';
+  } else {
+    pill.textContent = '已选择 ' + _apSelectedEngines.size + ' 个引擎';
+    pill.style.color = '#0071e3';
+  }
+}
+function _apOpenEnginePicker() {
+  console.log('[autopilot] _apOpenEnginePicker called, engines:', _apAllEngines.length);
+  if (_apAllEngines.length === 0) {
+    API.get('/settings/agent-runtimes').then(function(d) {
+      _apAllEngines = (d.runtimes || d || []).filter(function(e) { return e.status === 'online'; });
+      console.log('[autopilot] engines loaded:', _apAllEngines.length);
+      _apOpenEnginePickerInner();
+    }).catch(function(e) {
+      console.error('[autopilot] engine load failed:', e);
+    });
+  } else {
+    _apOpenEnginePickerInner();
+  }
+}
+function _apOpenEnginePickerInner() {
+  // 与 dashboard _openEngineModalImpl 相同的外观
+  var _ENG_TAG_COLORS = {all:'#6366f1',vod:'#ec4899',issue:'#ef4444',coding:'#3b82f6',qa:'#a855f7',sre:'#f59e0b'};
+  var _tagBadge = function(tags) { return (tags||[]).map(function(t) { var tn = typeof t === 'string' ? t : (t.tag || ''); return '<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:' + (_ENG_TAG_COLORS[tn]||'#999') + ';margin-left:4px;font-weight:500">' + (tn==='all'?'All':tn.charAt(0).toUpperCase()+tn.slice(1)) + '</span>'; }).join(''); };
+  var _SCOPE_COLORS = {global:'#6366f1',user:'#34c759',repo:'#f59e0b',local:'#86868b'};
+  var _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+  var _scopeBadge = function(s) { return s ? '<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:' + (_SCOPE_COLORS[s]||'#999') + ';margin-left:4px;font-weight:500">' + (_SCOPE_LABELS[s]||s) + '</span>' : ''; };
+  var _SCOPE_ORDER = ['user','repo','global','local'];
+  var sorted = _apAllEngines.slice().sort(function(a,b) {
+    var sa = _SCOPE_ORDER.indexOf(a.scope || 'global');
+    var sb = _SCOPE_ORDER.indexOf(b.scope || 'global');
+    return (sa < 0 ? 9 : sa) - (sb < 0 ? 9 : sb);
+  });
+  // 筛选状态
+  var _engFilterType = '';
+  var _engFilterScope = '';
+  var _availTypes = [];
+  var _availScopes = [];
+  sorted.forEach(function(e) {
+    var n = (e.name || '').toLowerCase();
+    var tn = n.includes('hermes') ? 'hermes' : n.includes('opencode') ? 'opencode' : n.includes('codearts') ? 'codearts' : n.includes('codex') ? 'codex' : '';
+    if (tn && _availTypes.indexOf(tn) < 0) _availTypes.push(tn);
+    var sc = e.scope || 'global';
+    if (_availScopes.indexOf(sc) < 0) _availScopes.push(sc);
+  });
+
+  function _renderFilterTags() {
+    var html = '<div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:10px;flex-shrink:0;align-items:center">';
+    _availTypes.forEach(function(t) {
+      var act = _engFilterType === t;
+      html += '<span onclick="window._apEngToggleType(\'' + t + '\')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ' + (act?'#0071e3':'#e8e8ed') + ';color:' + (act?'#fff':'#1d1d1f') + ';background:' + (act?'#0071e3':'#f5f5f7') + ';font-weight:500;transition:all .15s">' + t + '</span>';
+    });
+    if (_availTypes.length > 0) html += '<span style="width:1px;background:#e8e8ed;margin:2px 4px"></span>';
+    _SCOPE_ORDER.forEach(function(s) {
+      if (_availScopes.indexOf(s) < 0) return;
+      var act = _engFilterScope === s;
+      html += '<span onclick="window._apEngToggleScope(\'' + s + '\')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ' + (act?'#0071e3':'#e8e8ed') + ';color:' + (act?'#fff':'#1d1d1f') + ';background:' + (act?'#0071e3':'#f5f5f7') + ';font-weight:500;transition:all .15s">' + (_SCOPE_LABELS[s]||s) + '</span>';
+    });
+    html += '<span style="flex:1"></span>';
+    html += '<span onclick="window._apEngClearAll()" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e8e8ed;color:#86868b;background:#f5f5f7;font-weight:500;transition:all .15s" onmouseover="this.style.color=\'#d32f2f\'" onmouseout="this.style.color=\'#86868b\'">全不选</span>';
+    html += '</div>';
+    return html;
+  }
+
+  function _renderEngineList(filter) {
+    var q = (filter || '').toLowerCase().trim();
+    var filtered = sorted.filter(function(e) {
+      if (q) { var hay = [e.name, e.alias, e.host_name, e.worker_name, e.instance_name, e.scope, (e.tags||[]).join(' ')].join(' ').toLowerCase(); if (hay.indexOf(q) < 0) return false; }
+      if (_engFilterType) { var ename = (e.name || '').toLowerCase(); if (ename.indexOf(_engFilterType) < 0) return false; }
+      if (_engFilterScope && (e.scope || 'global') !== _engFilterScope) return false;
+      return true;
+    });
+    var groups = {};
+    filtered.forEach(function(e) { var s = e.scope || 'global'; if (!groups[s]) groups[s] = []; groups[s].push(e); });
+    if (filtered.length === 0) return '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">暂无可用引擎，将使用广播模式</div>';
+    var html = '';
+    _SCOPE_ORDER.forEach(function(s) {
+      if (!groups[s]) return;
+      html += '<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">' + (_SCOPE_LABELS[s]||s) + ' (' + groups[s].length + ')</div>';
+      html += groups[s].map(function(e) {
+        var checked = _apSelectedEngines.has(e.id);
+        var inst = e.instance_name || '';
+        var host = e.host_name || e.worker_name || '';
+        var tags = e.tags || [];
+        // agent_tags 兼容
+        if (e.agent_tags && !tags.length) tags = e.agent_tags;
+        return '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (checked ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
+          '<input type="checkbox" data-eid="' + e.id + '" ' + (checked ? 'checked' : '') + ' onchange="window._apEngToggle(' + e.id + ')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
+          '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + (e.alias || e.name) + (e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : '') + _tagBadge(tags) + _scopeBadge(e.scope) + '</div>' +
+          '<div style="font-size:10px;color:#86868b;margin-top:3px">' + (inst || e.name) + (host ? ' · ' + host : '') + '</div></div>' +
+          '<span style="font-size:11px;font-weight:500;color:#34c759;flex-shrink:0">在线</span></label>';
+      }).join('');
+    });
+    return html;
+  }
+
+  function _refreshAll() {
+    var tagsEl = document.getElementById('apEngFilterTags');
+    if (tagsEl) tagsEl.innerHTML = _renderFilterTags();
+    var c = document.getElementById('apEngListContainer');
+    if (c) c.innerHTML = _renderEngineList(document.getElementById('apEngSearchInput') ? document.getElementById('apEngSearchInput').value : '');
+  }
+
+  window._apEngToggleType = function(t) { _engFilterType = (_engFilterType === t) ? '' : t; _refreshAll(); };
+  window._apEngToggleScope = function(s) { _engFilterScope = (_engFilterScope === s) ? '' : s; _refreshAll(); };
+  window._apEngClearAll = function() { _apSelectedEngines.clear(); _refreshAll(); _apUpdateEngineLabel(); };
+  window._apEngToggle = function(id) {
+    if (_apSelectedEngines.has(id)) _apSelectedEngines.delete(id);
+    else _apSelectedEngines.add(id);
+    _refreshAll();
+    _apUpdateEngineLabel();
+  };
+
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  overlay.innerHTML = '<div id="apEngModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">' +
+    '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">选择执行引擎</h3>' +
+    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">可用引擎: ' + sorted.length + '</div>' +
+    '<div id="apEngFilterTags" style="flex-shrink:0">' + _renderFilterTags() + '</div>' +
+    '<div style="margin-bottom:12px;flex-shrink:0"><input id="apEngSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>' +
+    '<div id="apEngListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">' + _renderEngineList('') + '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">' +
+      '<button class="bt bt-o" onclick="this.closest(\'[style*=fixed]\').remove()">取消</button>' +
+      '<button class="bt bt-p" id="apEngConfirmBtn">确认</button>' +
+    '</div></div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+  var _engInput = document.getElementById('apEngSearchInput');
+  var _engComposing = false;
+  _engInput.addEventListener('compositionstart', function() { _engComposing = true; });
+  _engInput.addEventListener('compositionend', function() { _engComposing = false; _refreshAll(); });
+  _engInput.addEventListener('input', function() { if (!_engComposing) { var c = document.getElementById('apEngListContainer'); if (c) c.innerHTML = _renderEngineList(_engInput.value); } });
+
+  document.getElementById('apEngConfirmBtn').onclick = function() {
+    overlay.remove();
+  };
+}
+
+var _apSelectedSkill = '';
+var _apAllAutoSkills = [];
+
+// 自定义配置项（复用 app.js 的 _cfCollectFields / _cfNameError）
+var _apWorkBranchEnabled = false;
+function _apToggleWorkBranch() {
+  _apWorkBranchEnabled = !_apWorkBranchEnabled;
+  var section = document.getElementById('apWorkBranchSection');
+  var toggle = document.getElementById('apWbToggle');
+  var knob = document.getElementById('apWbKnob');
+  var label = document.getElementById('apWbLabel');
+  if (!section) return;
+  if (_apWorkBranchEnabled) {
+    section.style.opacity = '1';
+    section.style.pointerEvents = 'auto';
+    if (toggle) toggle.style.background = '#28a745';
+    if (knob) knob.style.left = '16px';
+    if (label) { label.textContent = '已启用'; label.style.color = '#28a745'; }
+  } else {
+    section.style.opacity = '.5';
+    section.style.pointerEvents = 'none';
+    if (toggle) toggle.style.background = 'var(--b)';
+    if (knob) knob.style.left = '2px';
+    if (label) { label.textContent = '未启用'; label.style.color = 'var(--t3)'; }
+  }
+}
+function _apAddCustomField(name, value, isSecret, scope) {
+  var container = document.getElementById('apCustomFields');
+  if (!container) return;
+  var row = document.createElement('div');
+  row.className = 'adv-kv';
+  row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:nowrap';
+  var valId = 'apCfVal_' + Math.random().toString(36).slice(2,8);
+  var _isSec = _cfComputeIsSecret(name, isSecret);
+  var _vType = _isSec ? 'password' : 'text';
+  var _vEye = _isSec ? '👁' : '🙈';
+  row.innerHTML =
+    '<input class="adv-kv-key" placeholder="NAME" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" style="width:130px;flex-shrink:0;padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
+    '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + (value || '') + '" style="flex:1;min-width:0;padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
+    '<button type="button" style="border:1px solid var(--b);background:var(--c);border-radius:6px;width:26px;height:26px;padding:0;font-size:12px;cursor:pointer;color:var(--t3);flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+    '<button class="adv-del" onclick="this.parentElement.remove()" style="border:none;background:transparent;font-size:16px;cursor:pointer;color:var(--t3);padding:0 4px;flex-shrink:0">×</button>';
+  container.appendChild(row);
+}
+function _apLoadAutoSkills() {
+  return API.get('/skills?agent_type=auto&scope=all&page_size=0').then(function(d) {
+    _apAllAutoSkills = (d.skills || []).map(function(s) {
+      return { skill_name: s.name || s.skill_name, display_name: s.display_name || s.name || s.skill_name, description: s.description || '', scope: s.scope || '' };
+    });
+  }).catch(function() { _apAllAutoSkills = []; });
+}
+function _apUpdateSkillLabel() {
+  var pill = $('apSkillPill');
+  if (!pill) return;
+  if (_apSelectedSkill) {
+    pill.textContent = _apSelectedSkill;
+    pill.style.color = '#0071e3';
+  } else {
+    pill.textContent = '留空=纯指令模式';
+    pill.style.color = '#86868b';
+  }
+}
+function _apOpenSkillPicker() {
+  if (_apAllAutoSkills.length === 0) {
+    _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
+  } else {
+    _apOpenSkillPickerInner();
+  }
+}
+function _apOpenSkillPickerInner() {
+  var _SCOPE_COLORS = {official:'#6366f1',user:'#34c759',repo:'#f59e0b'};
+  var _SCOPE_LABELS = {official:'官方', user:'个人', repo:'仓库'};
+  var _scopeBadge = function(s) { return s && _SCOPE_LABELS[s] ? '<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:' + (_SCOPE_COLORS[s]||'#999') + ';margin-left:6px;font-weight:500">' + _SCOPE_LABELS[s] + '</span>' : ''; };
+
+  function _renderSkillList(filter) {
+    var q = (filter || '').toLowerCase().trim();
+    var filtered = _apAllAutoSkills.filter(function(s) {
+      if (!q) return true;
+      var hay = [s.skill_name, s.display_name, s.description].join(' ').toLowerCase();
+      return hay.indexOf(q) >= 0;
+    });
+    if (filtered.length === 0) return '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">暂无 auto 类型技能，可在技能市场上传</div>';
+    var html = '';
+    // "不选择"选项
+    html += '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (!_apSelectedSkill ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
+      '<input type="radio" name="apSkillRadio" ' + (!_apSelectedSkill ? 'checked' : '') + ' onchange="window._apSkillPick(\'\')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
+      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f">不选择技能</div>' +
+      '<div style="font-size:11px;color:#86868b;margin-top:2px">纯指令模式，直接按巡检指令执行</div></div></label>';
+    filtered.forEach(function(s) {
+      var checked = _apSelectedSkill === s.skill_name;
+      html += '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (checked ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
+        '<input type="radio" name="apSkillRadio" ' + (checked ? 'checked' : '') + ' onchange="window._apSkillPick(\'' + s.skill_name.replace(/'/g, "\\'") + '\')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
+        '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + _esc(s.display_name) + _scopeBadge(s.scope) + '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + _esc(s.skill_name) + ')</span></div>' +
+        '<div style="font-size:11px;color:#86868b;margin-top:3px">' + _esc(s.description || '暂无描述') + '</div></div></label>';
+    });
+    return html;
+  }
+
+  var overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  overlay.innerHTML = '<div style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:560px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">' +
+    '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">选择技能</h3>' +
+    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">可用技能: ' + _apAllAutoSkills.length + '</div>' +
+    '<div style="margin-bottom:12px;flex-shrink:0"><input id="apSkillSearchInput" placeholder="搜索技能名称/描述..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>' +
+    '<div id="apSkillListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">' + _renderSkillList('') + '</div>' +
+    '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">' +
+      '<button class="bt bt-p" id="apSkillConfirmBtn">确认</button>' +
+    '</div></div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+
+  window._apSkillPick = function(name) {
+    _apSelectedSkill = name;
+    var c = document.getElementById('apSkillListContainer');
+    if (c) c.innerHTML = _renderSkillList(document.getElementById('apSkillSearchInput') ? document.getElementById('apSkillSearchInput').value : '');
+    _apUpdateSkillLabel();
+  };
+
+  var _input = document.getElementById('apSkillSearchInput');
+  var _composing = false;
+  _input.addEventListener('compositionstart', function() { _composing = true; });
+  _input.addEventListener('compositionend', function() { _composing = false; var c = document.getElementById('apSkillListContainer'); if (c) c.innerHTML = _renderSkillList(_input.value); });
+  _input.addEventListener('input', function() { if (!_composing) { var c = document.getElementById('apSkillListContainer'); if (c) c.innerHTML = _renderSkillList(_input.value); } });
+
+  document.getElementById('apSkillConfirmBtn').onclick = function() { overlay.remove(); };
 }
 
 var _apExpanded = false;
@@ -993,11 +1350,16 @@ function _apPolishInstruction(btn) {
 // ===== 提交表单 =====
 function _apSubmitForm() {
   var name = $('apFormName').value.trim();
-  var skillName = $('apFormSkill').value.trim();
+  var skillName = _apSelectedSkill;
   var instruction = $('apFormInstruction').value.trim();
   var retry = parseInt($('apFormRetry').value) || 3;
   if (!name) { if (app&&app.showToast) app.showToast('请填写任务名称'); return; }
-  if (!instruction) { if (app&&app.showToast) app.showToast('请填写巡检指令'); return; }
+  if (!instruction) { if (app&&app.showToast) app.showToast('请填写任务指令'); return; }
+  // 收集自定义配置项
+  var _cf = _cfCollectFields('#apCustomFields');
+  if (_cf.error) { if (app&&app.showToast) app.showToast(_cf.error); return; }
+  // 工作分支（开关未开启时提交空）
+  var _wb = _apWorkBranchEnabled ? ((document.getElementById('apFormWorkBranch') || {}).value || '') : '';
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   var body = {
     name: name,
@@ -1006,8 +1368,12 @@ function _apSubmitForm() {
     skill_name: skillName,
     cron: _apFormCron,
     max_retry: retry,
-    enabled: true
+    engine_runtime_ids: Array.from(_apSelectedEngines || []),
+    custom_fields: _cf.fields,
+    work_branch: _wb
   };
+  // 新建时默认启用，编辑时不改 enabled 状态
+  if (!_apEditingId) body.enabled = true;
   var btn = $('apDialog').querySelector('.bt-p');
   if (btn) { btn.disabled = true; btn.textContent = '提交中...'; }
   if (_apEditingId) {
@@ -1015,6 +1381,38 @@ function _apSubmitForm() {
       if (app&&app.showToast) app.showToast('已保存');
       $('apDialog').remove();
       _apLoadTasks();
+      // 如果在详情页，重新拉取任务数据并更新任务信息卡片
+      if (window._currentView === 'autopilot-detail' && String(_apDetailId) === String(_apEditingId)) {
+        API.get('/autopilot/tasks/' + _apEditingId).then(function(task) {
+          var card = document.getElementById('apTaskInfoCard');
+          if (card) {
+            // 重建任务信息卡片内容
+            var engineNames = '不限定（广播）';
+            if (task.engine_runtime_ids && task.engine_runtime_ids.length) {
+              engineNames = task.engine_runtime_ids.length + ' 个引擎';
+            }
+            card.innerHTML =
+              '<div class="cd-h"><h2>任务信息</h2></div>' +
+              '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
+                '<div><span style="color:var(--t2)">名称:</span> <b>' + _esc(task.name) + '</b></div>' +
+                '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(task.repo_key) + '</div>' +
+                '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(task.skill_name||'—') + '</div>' +
+                '<div><span style="color:var(--t2)">引擎:</span> ' + engineNames + '</div>' +
+                '<div><span style="color:var(--t2)">最大重试:</span> ' + (task.max_retry||3) + '</div>' +
+                '<div><span style="color:var(--t2)">创建时间:</span> ' + _apFormatTime(task.created_at) + '</div>' +
+              '</div>' +
+              '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">任务指令:</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(task.instruction||'') + '</pre></div>';
+          }
+          // 刷新高级选项卡片（重新加载分支列表和回填配置）
+          var advCard = document.getElementById('apAdvancedCard');
+          if (advCard) {
+            advCard.outerHTML = _apAdvancedOptionsHTML(task);
+          } else {
+            var taskCard = document.getElementById('apTaskInfoCard');
+            if (taskCard) taskCard.insertAdjacentHTML('afterend', _apAdvancedOptionsHTML(task));
+          }
+        });
+      }
     }).catch(function(e) {
       if (app&&app.showToast) app.showToast('保存失败: ' + (e.message||e));
       if (btn) { btn.disabled = false; btn.textContent = '保存'; }
@@ -1047,15 +1445,15 @@ function renderAutopilotDetail(id) {
 }
 
 function _apDetailHTML(t) {
-  // Toggle switch moved to title bar (multica-style)
+  // 引擎名称显示
+  var engineNames = '不限定（广播）';
+  if (t.engine_runtime_ids && t.engine_runtime_ids.length) {
+    engineNames = t.engine_runtime_ids.length + ' 个引擎';
+  }
   return '<div>' +
-    // Breadcrumb
+    // 标题行：返回按钮 + 右侧操作
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">' +
-      '<a onclick="app.nav(\'autopilot\')" style="cursor:pointer;color:var(--a);font-size:13px">自动化</a>' +
-      '<span style="color:var(--t3)">/</span>' +
-      '<span style="font-size:13px;font-weight:600">' + _esc(t.name) + '</span>' +
-      '<div style="flex:1"></div>' +
-      // Toggle switch (multica-style)
+      '<button class="bt bt-o bt-s" onclick="app.nav(\'autopilot\')" style="margin-right:auto">← 定时任务</button>' +
       '<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
         '<span style="font-size:12px;color:var(--t2)">' + (t.enabled ? '启用' : '暂停') + '</span>' +
         '<span data-ap-toggle="' + t.id + '" onclick="event.stopPropagation();_apToggleEnabled(' + t.id + ', ' + (!t.enabled) + ')" style="position:relative;width:36px;height:20px;border-radius:10px;background:' + (t.enabled ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
@@ -1065,13 +1463,14 @@ function _apDetailHTML(t) {
       '<button class="bt bt-o" onclick="_apEdit(' + t.id + ')">编辑</button>' +
       '<button class="bt bt-p" onclick="_apTrigger(' + t.id + ')">立即触发</button>' +
     '</div>' +
-    // 需求信息
-    '<div class="cd" style="margin-bottom:16px">' +
-      '<div class="cd-h"><h2>需求信息</h2></div>' +
+    // 任务信息
+    '<div class="cd" id="apTaskInfoCard" style="margin-bottom:16px">' +
+      '<div class="cd-h"><h2>任务信息</h2></div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
         '<div><span style="color:var(--t2)">名称:</span> <b>' + _esc(t.name) + '</b></div>' +
         '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(t.repo_key) + '</div>' +
         '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(t.skill_name||'—') + '</div>' +
+        '<div><span style="color:var(--t2)">引擎:</span> ' + engineNames + '</div>' +
         '<div><span style="color:var(--t2)">最大重试:</span> ' + (t.max_retry||3) + '</div>' +
         '<div><span style="color:var(--t2)">创建时间:</span> ' + _apFormatTime(t.created_at) + '</div>' +
       '</div>' +
@@ -1088,6 +1487,8 @@ function _apDetailHTML(t) {
       (t.next_run_at ? '<div style="margin-top:8px;font-size:12px;color:var(--t2)">下次运行: ' + _apFormatTime(t.next_run_at) + '</div>' : '') +
       (t.last_run_at ? '<div style="margin-top:4px;font-size:12px;color:var(--t2)">上次运行: ' + _apFormatTime(t.last_run_at) + '</div>' : '') +
     '</div>' +
+    // 高级选项
+    _apAdvancedOptionsHTML(t) +
     // 执行历史
     '<div class="cd">' +
       '<div class="cd-h"><h2>执行历史</h2></div>' +
@@ -1096,26 +1497,137 @@ function _apDetailHTML(t) {
   '</div>';
 }
 
+function _apAdvancedOptionsHTML(t) {
+  var wb = t.work_branch || '';
+  var cf = t.custom_fields || [];
+  var _wbOn = !!wb;
+  var html = '<div class="cd" id="apAdvancedCard" style="margin-bottom:16px">' +
+    '<div class="cd-h" style="display:flex;justify-content:space-between;align-items:center">' +
+      '<h2>高级选项</h2>' +
+      '<button class="bt bt-p bt-s" onclick="_apSaveAdvanced()">保存</button>' +
+    '</div>';
+  // 工作分支（开关 + 下拉框）
+  html += '<div style="margin-bottom:12px">' +
+    '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
+      '<label style="font-size:12px;font-weight:600;color:var(--t2)">工作分支</label>' +
+      '<span onclick="_apToggleDetailWb()" id="apDetailWbToggle" style="position:relative;width:32px;height:18px;border-radius:9px;background:' + (_wbOn ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
+        '<span id="apDetailWbKnob" style="position:absolute;top:2px;left:' + (_wbOn ? '16px' : '2px') + ';width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:left .2s"></span>' +
+      '</span>' +
+      '<span id="apDetailWbLabel" style="font-size:11px;color:' + (_wbOn ? '#28a745' : 'var(--t3)') + '">' + (_wbOn ? '已启用' : '未启用') + '</span>' +
+    '</div>' +
+    '<div id="apDetailWbSection" style="' + (_wbOn ? '' : 'opacity:.5;pointer-events:none') + '">' +
+      '<select id="apDetailWorkBranch" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t);outline:none;cursor:pointer;min-height:34px"></select>' +
+    '</div>' +
+  '</div>';
+  // 自定义配置
+  html += '<div>' +
+    '<label style="display:block;font-size:12px;font-weight:600;color:var(--t2);margin-bottom:4px">自定义配置</label>' +
+    '<div id="apDetailCustomFields" style="display:flex;flex-direction:column;gap:8px"></div>' +
+    '<button type="button" class="bt bt-o bt-s" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="_apAddDetailCustomField()">+ 添加配置项</button>' +
+  '</div>';
+  html += '</div>';
+  // 延迟加载分支列表和回填配置
+  setTimeout(function() {
+    // 加载分支列表
+    var repoKey = t.repo_key || '';
+    if (repoKey) {
+      var rk = repoKey.replace(/^(gitcode|github):/, '');
+      var parts = rk.split('/');
+      if (parts.length === 2) {
+        API.get('/scenes/branches/' + parts[0] + '/' + parts[1]).then(function(b) {
+          var branches = (b && b.branches) || [];
+          var sel = document.getElementById('apDetailWorkBranch');
+          if (!sel) return;
+          var h = '';
+          branches.forEach(function(br, idx) {
+            var isSel = (!wb && idx === 0) || (br.name === wb);
+            h += '<option value="' + br.name + '"' + (isSel ? ' selected' : '') + '>' + br.name + (br.protected ? ' 🔒' : '') + '</option>';
+          });
+          sel.innerHTML = h;
+        }).catch(function() {});
+      }
+    }
+    // 回填 custom_fields
+    var container = document.getElementById('apDetailCustomFields');
+    if (container && cf.length) {
+      cf.forEach(function(f) {
+        _apAddDetailCustomField(f.name, f.value, f.is_secret);
+      });
+    }
+  }, 50);
+  return html;
+}
+
+function _apToggleDetailWb() {
+  var section = document.getElementById('apDetailWbSection');
+  var toggle = document.getElementById('apDetailWbToggle');
+  var knob = document.getElementById('apDetailWbKnob');
+  var label = document.getElementById('apDetailWbLabel');
+  if (!section) return;
+  var isOn = toggle.style.background === 'rgb(40, 167, 69)' || toggle.style.background === '#28a745';
+  if (isOn) {
+    // 关闭
+    section.style.opacity = '.5';
+    section.style.pointerEvents = 'none';
+    if (toggle) toggle.style.background = 'var(--b)';
+    if (knob) knob.style.left = '2px';
+    if (label) { label.textContent = '未启用'; label.style.color = 'var(--t3)'; }
+  } else {
+    // 开启
+    section.style.opacity = '1';
+    section.style.pointerEvents = 'auto';
+    if (toggle) toggle.style.background = '#28a745';
+    if (knob) knob.style.left = '16px';
+    if (label) { label.textContent = '已启用'; label.style.color = '#28a745'; }
+  }
+}
+
+function _apAddDetailCustomField(name, value, isSecret) {
+  var container = document.getElementById('apDetailCustomFields');
+  if (!container) return;
+  var row = document.createElement('div');
+  row.className = 'adv-kv';
+  row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:nowrap';
+  var valId = 'apDcfVal_' + Math.random().toString(36).slice(2,8);
+  var _isSec = _cfComputeIsSecret(name, isSecret);
+  var _vType = _isSec ? 'password' : 'text';
+  var _vEye = _isSec ? '👁' : '🙈';
+  row.innerHTML =
+    '<input class="adv-kv-key" placeholder="NAME" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" style="width:120px;flex-shrink:0;padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
+    '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + (value || '') + '" style="flex:1;min-width:0;padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
+    '<button type="button" style="border:1px solid var(--b);background:var(--c);border-radius:6px;width:26px;height:26px;padding:0;font-size:12px;cursor:pointer;color:var(--t3);flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
+    '<button class="adv-del" onclick="this.parentElement.remove()" style="border:none;background:transparent;font-size:16px;cursor:pointer;color:var(--t3);padding:0 4px;flex-shrink:0">×</button>';
+  container.appendChild(row);
+}
+
+function _apSaveAdvanced() {
+  if (!_apDetailId) return;
+  // 开关关闭时 work_branch 提交空
+  var _wbToggle = document.getElementById('apDetailWbToggle');
+  var _wbOn = _wbToggle && (_wbToggle.style.background === 'rgb(40, 167, 69)' || _wbToggle.style.background === '#28a745');
+  var _wb = _wbOn ? ((document.getElementById('apDetailWorkBranch') || {}).value || '') : '';
+  var _cf = _cfCollectFields('#apDetailCustomFields');
+  if (_cf.error) { if (app&&app.showToast) app.showToast(_cf.error); return; }
+  API.put('/autopilot/tasks/' + _apDetailId, { work_branch: _wb, custom_fields: _cf.fields }).then(function() {
+    if (app&&app.showToast) app.showToast('高级选项已保存');
+  }).catch(function(e) {
+    if (app&&app.showToast) app.showToast('保存失败: ' + (e.message||e));
+  });
+}
+
 function _apToggleEnabled(id, enabled) {
   API.put('/autopilot/tasks/' + id, {enabled: !!enabled}).then(function() {
     if (app&&app.showToast) app.showToast(enabled ? '已启用' : '已暂停');
-    // 更新本地数据
     var t = _apAllTasks.find(function(x) { return x.id === id; });
     if (t) t.enabled = enabled;
-    // 直接操作DOM更新开关样式（不重新渲染整个页面）
-    var labels = document.querySelectorAll('.cd-h label, [data-toggle-id]');
-    // 通过onclick属性找到对应的开关元素
+    // 只更新开关样式，不重建页面
     var switchEl = document.querySelector('[data-ap-toggle="' + id + '"]');
     if (switchEl) {
-      // 更新背景色
       switchEl.style.background = enabled ? '#28a745' : 'var(--b)';
-      // 更新圆点位置
       var dot = switchEl.querySelector('span');
       if (dot) dot.style.left = enabled ? '18px' : '2px';
-      // 更新文字
       var label = switchEl.parentElement.querySelector('span:first-child');
       if (label) label.textContent = enabled ? '启用' : '暂停';
-      // 更新onclick为新值
       switchEl.setAttribute('onclick', 'event.stopPropagation();_apToggleEnabled(' + id + ', ' + !enabled + ')');
     }
   }).catch(function(e) {
@@ -1143,6 +1655,7 @@ function _apLoadExecutions(taskId) {
       '.ap-exec-detail.open{max-height:800px;opacity:1}' +
       '</style>';
 
+    _apExecMap = {};
     execs.forEach(function(e) {
       var icon = statusIcons[e.status] || '•';
       var color = statusColors[e.status] || 'var(--t3)';
@@ -1150,6 +1663,7 @@ function _apLoadExecutions(taskId) {
       var time = _apFormatTime(e.started_at || e.created_at);
       var hasFindings = e.has_findings;
       var eid = e.id;
+      _apExecMap[eid] = e;
 
       html += '<div class="ap-exec-row" onclick="_apToggleExecDetail(' + eid + ', this)">' +
         '<div style="display:flex;align-items:center;gap:10px;padding:10px 12px">' +
@@ -1195,7 +1709,60 @@ function _apToggleExecDetail(execId, rowEl) {
       findingsContainer.dataset.loaded = '1';
       _apLoadFindingsInline(execId, findingsContainer);
     }
+    // 如果任务还在进行中，启动日志轮询
+    var exec = _apExecMap[execId];
+    if (exec && (exec.status === 'running' || exec.status === 'dispatched') && exec.agent_task_id) {
+      _apStartLogPoll(execId, exec.agent_task_id);
+    }
   }
+}
+
+var _apExecMap = {};
+var _apLogPollTimers = {};
+function _apStartLogPoll(execId, agentTaskId) {
+  // 停止旧轮询
+  if (_apLogPollTimers[execId]) clearInterval(_apLogPollTimers[execId]);
+  var since = 0;
+  var preEl = document.querySelector('#apExecDetail_' + execId + ' pre');
+  if (preEl) {
+    preEl.textContent = '正在执行中...\n';
+    preEl.style.color = '#3168e0';
+  }
+  _apLogPollTimers[execId] = setInterval(function() {
+    API.get('/task-logs/' + agentTaskId + '/messages?since=' + since).then(function(d) {
+      var msgs = d.messages || [];
+      if (msgs.length === 0) return;
+      since = msgs[msgs.length - 1].seq;
+      var lines = msgs.map(function(m) {
+        var t = m.type || '';
+        var content = m.content || m.tool || '';
+        if (t === 'text') return content.substring(0, 200);
+        if (t === 'step_start') return '▶ ' + content;
+        if (t === 'step_finish') return '✓ ' + content;
+        if (t === 'tool_use') return '🔧 ' + (m.tool || '');
+        if (t === 'error') return '❌ ' + content;
+        return '';
+      }).filter(Boolean);
+      if (lines.length) {
+        var pre = document.querySelector('#apExecDetail_' + execId + ' pre');
+        if (pre) {
+          pre.textContent += lines.join('\n') + '\n';
+          pre.scrollTop = pre.scrollHeight;
+        }
+      }
+    }).catch(function() {});
+    // 同时检查执行状态是否结束
+    API.get('/autopilot/executions?task_id=' + _apDetailId + '&limit=50').then(function(d) {
+      var execs = d.executions || [];
+      var cur = execs.find(function(e) { return e.id === execId; });
+      if (cur && cur.status !== 'running' && cur.status !== 'dispatched') {
+        // 任务结束，停止轮询，重新加载执行历史
+        clearInterval(_apLogPollTimers[execId]);
+        delete _apLogPollTimers[execId];
+        _apLoadExecutions(_apDetailId);
+      }
+    }).catch(function() {});
+  }, 3000);
 }
 
 function _apLoadFindingsInline(execId, container) {

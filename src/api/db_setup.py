@@ -3530,10 +3530,13 @@ def _backfill_scene_display_names():
             _ensure_column(c, "autopilot_tasks", "agent_type", "TEXT NOT NULL DEFAULT 'issue'")
             _ensure_column(c, "autopilot_tasks", "instruction", "TEXT NOT NULL DEFAULT ''")
             _ensure_column(c, "autopilot_tasks", "skill_name", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "engine_runtime_ids", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "custom_fields", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "work_branch", "TEXT NOT NULL DEFAULT ''")
             # autopilot_executions 新字段
             _ensure_column(c, "autopilot_executions", "agent_type", "TEXT DEFAULT ''")
             _ensure_column(c, "autopilot_executions", "findings_json", "MEDIUMTEXT DEFAULT ''")
             db.commit()
-            log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json ensured")
+            log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch ensured")
     except Exception as e:
         log.warning(f"Autopilot v3.0 schema migration failed: {e}")
