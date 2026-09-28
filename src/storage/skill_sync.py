@@ -132,7 +132,7 @@ async def sync_official_skills_to_obs() -> dict:
     DB 同步由调用方（_skill_sync_worker）负责，此函数只做 hash + OBS 上传。
     返回 {"added": N, "updated": N, "skipped": N}。
     """
-    from src.storage import get_storage, skill_key
+    from src.storage import get_storage, skill_key, zip_cache_put, mem_cache_invalidate
     from src.user.db import get_skill_content_hash, update_skill_content_hash
 
     # 读 skill-description.json 获取官方技能清单
@@ -186,6 +186,9 @@ async def sync_official_skills_to_obs() -> dict:
             try:
                 zip_data = await loop.run_in_executor(None, _pack_skill_zip, skill_dir)
                 await loop.run_in_executor(None, storage.save_bytes, object_key, zip_data)
+                # 失效两级缓存：磁盘 zip 缓存用新数据覆盖，内存 SKILL.md 缓存直接清除
+                zip_cache_put(object_key, zip_data)
+                mem_cache_invalidate(skill_name)
                 logger.info(f"uploaded skill to OBS: {skill_name} -> {object_key}")
             except Exception as e:
                 logger.error(f"upload skill {skill_name} to OBS failed: {e}")
