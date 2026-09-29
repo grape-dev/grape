@@ -6,6 +6,9 @@
 > = **user_only**（`tk_` → 403）——避免 Agent 任意改写需求状态干扰 pipeline。
 > 以 **Issue 为中心**聚合：pipeline 阶段（`stage`）+ 需求中心状态（`status`）+ 事件流（`events`）+ 路线图（`pipeline`）。
 > 设计：`docs/weekly-03/issues-api-design.md`。
+> **CLI 映射**：CLI 命令由 **`operation_id`** 派生——`{根组 issues}_{动词}` → `grape issues <动词>`；
+> 查命令：`grape issues -h` / `grape issues <动词> -h`。参数与 API path/query/body 对应（`--owner/--repo/--number/--issue_id/--json/--file/--json-out`）。
+> `--json` = JSON 请求体（或 `@file.json`）。
 
 ## 概念速览
 
@@ -120,6 +123,8 @@ Issue 对象字段：
 
 ## GET /api/issues/{owner}/{repo}/{number} — 单个 Issue 详情
 
+> CLI：grape issues detail --owner {owner} --repo {repo} --number {number} --json-out（operation_id=issues_detail）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
@@ -155,18 +160,25 @@ Issue 对象字段：
 
 ## GET /api/issues/{owner}/{repo}/{number}/events — 该 Issue 的事件列表
 
+> CLI：grape issues events --owner {owner} --repo {repo} --number {number} --json-out（operation_id=issues_events）。
+
 | 项 | 值 |
 |----|-----|
-| scope（x-token-scope） | **dual**（三通道） |
-| Path | `{owner}` / `{repo}` / `{number}` |
-| 出参 | `{events: Event[], total: int}` |
-| 返回 | 200 成功（含空列表）；404 Issue 不存在；401 未认证 |
+| scope（x-token-scope） | **dual**（`grape_`/JWT/`tk_`）；`tk_` 限定其绑定仓库（跨仓库 → 403） |
+| Path | `{owner}` / `{repo}` / `{number}`（`5` 或 `#5` 均可，`#` 需 URL 编码 `%23`） |
+| 出参 | `{events: Event[], segments: 同 events, total: int}` |
+| segments[].output | `{actions, conclusion, artifacts, next_step, issue_summary}`（来自 events.structured_output，无则省略） |
+| segments[].logs | 执行消息列表（来自 events.agent_logs） |
+| 返回 | 200（含空列表 → segments=[]）；403（tk_ 跨仓库）；404 Issue 不存在；401 未认证 |
 
-> 仅返回该 Issue 的事件，seq 升序；只读聚合，不影响 issue_state/events。
+> 仅返回该 Issue 的事件，seq 升序；只读聚合，不影响 issue_state/events。该接口是事件数据在
+> Issues 主题下的按 Issue 聚合视图（operation_id=`issues_events`，CLI 根组为 `issues`）。
 
 ---
 
 ## GET /api/issues/{owner}/{repo}/{number}/pipeline — Issue pipeline 路线图
+
+> CLI：grape issues pipeline --owner {owner} --repo {repo} --number {number} --json-out（operation_id=issues_pipeline）。
 
 | 项 | 值 |
 |----|-----|
@@ -202,6 +214,8 @@ Issue 对象字段：
 
 ### POST /api/issues/{issue_id}/start — 打开会话
 
+> CLI：grape issues start --issue_id {issue_id} --json-out（operation_id=issues_start）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
@@ -213,6 +227,8 @@ Issue 对象字段：
 
 ### GET /api/issues/{issue_id}/status — 查询状态（轮询）
 
+> **GET 轮询（issues_status_get）无独立 CLI 子命令**：grape issues status 仅暴露 PUT 迁移（issues_status）——轮询用 grape issues detail/grape issues events 的 status 段或前端。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
@@ -220,9 +236,11 @@ Issue 对象字段：
 | 出参 | `{"id", "status", "repo_key", "issue_number", "title", "completed_reason", "completed_at"}` |
 | 返回 | 200；404 需求不存在；401 |
 
-> 供 CLI `grape issues wait` 轮询至终态（completed/cancelled）。
+> 供轮询至终态（completed/cancelled）：调用 `grape issues status --issue_id {issue_id}`（GET 无 body 分支）或 `grape issues detail` 查看。
 
 ### PUT /api/issues/{issue_id}/status — 状态迁移
+
+> CLI：grape issues status --issue_id {issue_id} --json '{"status":"processing"}' --json-out（operation_id=issues_status）。
 
 | 项 | 值 |
 |----|-----|
@@ -238,6 +256,8 @@ Issue 对象字段：
 
 ### POST /api/issues/{issue_id}/confirm-done — 确认完成
 
+> CLI：grape issues confirm done --issue_id {issue_id} [--json '{"confirmation":"user_confirmed"}'] --json-out（operation_id=issues_confirm_done）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
@@ -250,6 +270,8 @@ Issue 对象字段：
 
 ### POST /api/issues/{issue_id}/cancel — 取消
 
+> CLI：grape issues cancel --issue_id {issue_id} --json-out（operation_id=issues_cancel）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
@@ -261,6 +283,8 @@ Issue 对象字段：
 
 ### POST /api/issues/{issue_id}/resume — 恢复
 
+> CLI：grape issues resume --issue_id {issue_id} --json-out（operation_id=issues_resume）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
@@ -269,6 +293,8 @@ Issue 对象字段：
 | 返回 | 200；400 仅已取消可恢复；403；404 |
 
 ### GET /api/issues/{issue_id}/pipeline — 流水线路线图
+
+> CLI：grape issues detail --owner {owner} --repo {repo} --number {number} 更常用；或按 op issues_pipeline_detail（无独立命令，CLI 合并到 detail/pipeline）——查 grape issues -h。
 
 | 项 | 值 |
 |----|-----|
@@ -281,6 +307,8 @@ Issue 对象字段：
 
 ### GET /api/issues/{issue_id}/clarifications — 澄清历史
 
+> CLI：grape issues clarifications --issue_id {issue_id} --json-out（operation_id=issues_clarifications）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
@@ -289,6 +317,8 @@ Issue 对象字段：
 | 返回 | 200；403；404 |
 
 ### POST /api/issues/{issue_id}/clarify — 回复澄清
+
+> CLI：grape issues clarify --issue_id {issue_id} --json '{"message":"..."}' --json-out（operation_id=issues_clarify）。
 
 | 项 | 值 |
 |----|-----|
@@ -302,6 +332,8 @@ Issue 对象字段：
 
 ### POST /api/issues/{issue_id}/attachments — 上传附件
 
+> CLI：grape issues upload attachment --issue_id {issue_id} --file {path} --json-out（operation_id=issues_upload_attachment）。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
@@ -312,6 +344,8 @@ Issue 对象字段：
 
 ### GET /api/issues/{issue_id}/attachments — 列出附件
 
+> CLI：grape issues delete attachment 同组；列出附件无独立命令（API/前端使用），或经 detail 富化字段。
+
 | 项 | 值 |
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
@@ -320,6 +354,8 @@ Issue 对象字段：
 | 返回 | 200；403；404 |
 
 ### DELETE /api/issues/{issue_id}/attachments/{filename} — 删除附件
+
+> CLI：grape issues delete attachment --issue_id {issue_id} --filename {filename} --json-out（operation_id=issues_delete_attachment）。
 
 | 项 | 值 |
 |----|-----|

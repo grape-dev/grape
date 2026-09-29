@@ -1446,6 +1446,33 @@ def report_messages(task_id, messages):
                                              issue_num_hint=hint)
         except Exception as e:
             log.warning(f"report_messages archive failed: {e}")
+    # weekly-05：执行消息同时落 events.agent_logs（详情页「处理记录」，替代 event.json logs 依赖）
+    if task.get("event_seq"):
+        try:
+            import json as _json
+            _logs = [{"type": m.get("type", "log"),
+                      "data": m.get("data"),
+                      "ts": datetime.now(timezone.utc).isoformat()}
+                     for m in (messages or []) if isinstance(m, dict)]
+            if _logs:
+                from src.session_manager import db as _edb, db_lock as _edbl
+                with _edbl:
+                    _c2 = _edb.cursor()
+                    _c2.execute(
+                        "SELECT agent_logs FROM events WHERE seq=?",
+                        (task["event_seq"],))
+                    _row = _c2.fetchone()
+                    _prev = []
+                    try:
+                        _prev = _json.loads(_row[0]) if (_row and _row[0]) else []
+                    except Exception:
+                        _prev = []
+                    _c2.execute(
+                        "UPDATE events SET agent_logs=? WHERE seq=?",
+                        (_json.dumps(_prev + _logs, ensure_ascii=False), task["event_seq"]))
+                    _edb.commit()
+        except Exception as e:
+            log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
     try:
         with db_lock:
@@ -1636,7 +1663,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             update_event_complete(task["event_seq"], status, exit_code=exit_code,
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=_conclusion or (result_text or "")[:200])
+                                  result=_conclusion or (result_text or "")[:200],
+                                  structured_output=output or None)
             # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
             # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
             if status == "completed" and task.get("issue_id"):

@@ -429,6 +429,25 @@ def update_event_status(seq: int, status: str):
             log.warning(f"Failed to update event {seq}: {e}")
 
 
+def reset_event_terminal(seq: int):
+    """redispatch 专用：无视终态保护重置事件为 running 并清结构化产出。
+
+    语义：事件被人工重派/重试 → 视为重新处理中，允许重跑成功后 complete_task 写入
+    structured_output/result（避免「事件首次 failed 后 redispatch 成功却无法覆盖」）。
+    仅 redispatch 调用；普通 complete 仍走 update_event_complete 终态保护。
+    """
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute(
+                "UPDATE events SET status='running', exit_code=NULL, completed_at='', "
+                "structured_output=NULL, result='' WHERE seq=?",
+                (seq,))
+            db.commit()
+        except Exception as e:
+            log.warning(f"reset_event_terminal failed seq={seq}: {e}")
+
+
 def update_event_issue_id(seq: int, issue_id: str):
     """回写事件归属 Issue（用于引导主事件 issue_id 预分配后的实际号校准）"""
     with db_lock:
@@ -454,13 +473,16 @@ def update_event_config(seq: int, runtime: str, skill: str, started_at: str):
 
 def update_event_complete(seq: int, status: str, exit_code: int = None,
                           duration: float = None, agent_logs: list = None,
-                          completed_at: str = "", result: str = ""):
-    """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result）
+                          completed_at: str = "", result: str = "",
+                          structured_output: dict = None):
+    """写入执行结果（status, exit_code, duration, agent_logs, completed_at, result, structured_output）
 
     幂等保护：终态事件不允许被其他终态覆盖。
     - 已 completed 的事件不允许被 failed 覆盖（防止 complete→fail 竞态）。
     - 已 failed 的事件不允许被 completed 覆盖（防止用户终止后残留进程跑完
       调 complete 把 failed 覆盖成 completed，2026-08-24 seq#2488 实例）。
+    - structured_output：完整结构化产出（actions/conclusion/artifacts/next_step/issue_summary），
+      weekly-05 起落库替代 event.json seg.output；None 不覆盖旧值。
     """
     with db_lock:
         try:
@@ -471,10 +493,20 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
             if row and row[0] in ("completed", "failed", "cancelled") and status in ("completed", "failed", "cancelled"):
                 log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (result={result[:60]})")
                 return
-            c.execute(
-                "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, result=? WHERE seq=?",
-                (status, exit_code, duration, json.dumps(agent_logs or []), completed_at, result, seq)
-            )
+            _structured = json.dumps(structured_output, ensure_ascii=False) if structured_output is not None else None
+            cols = [r[1] for r in c.execute(f"PRAGMA table_info(events)").fetchall()]
+            if "structured_output" in cols and _structured is not None:
+                c.execute(
+                    "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
+                    "result=?, structured_output=? WHERE seq=?",
+                    (status, exit_code, duration, json.dumps(agent_logs or []),
+                     completed_at, result, _structured, seq))
+            else:
+                c.execute(
+                    "UPDATE events SET status=?, exit_code=?, duration=?, agent_logs=?, completed_at=?, "
+                    "result=? WHERE seq=?",
+                    (status, exit_code, duration, json.dumps(agent_logs or []),
+                     completed_at, result, seq))
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event complete {seq}: {e}")

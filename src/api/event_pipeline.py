@@ -1887,6 +1887,31 @@ def _fail_event(seq: int, reason: str):
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
 
 
+def _pool_only_local_direct() -> int | None:
+    """方案 B（weekly-05）：广播无 worker 时，若全局可执行引擎全为「本机 direct」则回落本机执行。
+
+    判定：所有 status='online' AND healthy=1 的 agent_runtimes 的 credential_id 是否全为 0
+    （credential_id=0 = 本机 direct 引擎；>0 = 远端 worker 引擎池）。
+    - 全本机 → 返回首个在线健康引擎 id（服务端 self-run）
+    - 无在线引擎 或 存在远端 worker 引擎 → None（保持广播/等待 worker）
+    """
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT id, credential_id FROM agent_runtimes "
+                "WHERE status='online' AND healthy=1 ORDER BY id").fetchall()
+        if not rows:
+            return None
+        if all((r[1] or 0) == 0 for r in rows):
+            return int(rows[0][0])
+        return None
+    except Exception as e:
+        log.warning(f"_pool_only_local_direct failed: {e}")
+        return None
+
+
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0,
                            is_scene_recommend=False):
@@ -2069,6 +2094,29 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         return
     _mode_tag = "plugin" if is_plugin_mode() else "legacy"
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
+
+    # 方案 B（weekly-05）：plugin 广播无 worker 认领时，若全局引擎全为本机 direct → 服务端 self-run
+    if not runtime_id and _pool_agent_type:
+        try:
+            _local_rid = _pool_only_local_direct()
+            if _local_rid:
+                log.info(f"Pipeline enqueue: pool only local direct, self-run seq={seq} rid={_local_rid}")
+                from src.runtime.engine_select import engine_name as _en
+                from src.runtime.instances import runtime_instance_name as _rin
+                _be = _en(_local_rid) or _rin(_local_rid) or backend or ""
+                _evt2 = dict(evt)
+                _evt2.setdefault("repo_key", repo_key)
+                _evt2.setdefault("issue_id", issue_id)
+                _evt2.setdefault("repository", from_repo_key(repo_key))
+                _evt2.setdefault("skill_path", skill_path)
+                # 从本地 import（模块内协程函数）
+                from src.api.event_pipeline import _execute_agent as _exe_agent
+                from src.api.event_pipeline import start_direct_agent as _sda
+                _sda(_exe_agent, (
+                    repo_key, seq, agent_type, _be, skill_name, _evt2, _local_rid, tid,
+                ), name=f"self-{seq}")
+        except Exception as e:
+            log.warning(f"Pipeline enqueue: local self-run failed for seq={seq}: {e}")
 
 
 def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
@@ -2850,6 +2898,20 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
+    # ── direct 自报技能双信号收敛（方案 A，weekly-05）──
+    # worker 模式的 stream_ended 由远端 /api/runtime/tasks/{id}/complete 置位；
+    # direct 模式无 worker 回调，需在本机引擎流结束后补置 stream_ended，使
+    # self_reported(agent grape tasks complete) + stream_ended 双信号齐后 finalize_task 收敛。
+    if task_id:
+        try:
+            from src.runtime.service import skill_self_reports, set_task_signal, finalize_task
+            if skill_self_reports(skill_name):
+                log.info(f"Exec agent: seq={seq} direct self-report skill, set stream_ended + finalize")
+                set_task_signal(task_id, "stream_ended")
+                finalize_task(task_id, exit_code or 0)
+        except Exception as _e:
+            log.warning(f"Exec agent: direct self-report finalize failed for {task_id}: {_e}")
+
     # 判定 Agent 是否有明确答复产出
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
     if repo_gitcode_token and result_text:
@@ -2869,7 +2931,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             try:
                 from src.runtime.service import get_task
                 _t = get_task(task_id) or {}
-                if _t.get("status") == "completed":
+                # 自报技能：self_reported 已置（finalize_task 可能尚未收敛 task.status）→ 也视为完成，不标 failed
+                if _t.get("status") == "completed" or _t.get("self_reported") == 1:
                     log.info(f"Exec agent: task {task_id} self-reported completed, skip no-output fail")
                     return
             except Exception as _e:
