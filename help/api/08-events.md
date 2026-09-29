@@ -19,8 +19,21 @@ Event 字段：`seq / repo_key / issue_id / event_type / source / agent_type / t
 > scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
 
 | Path | `{seq}` int |
-| 出参 | Event 完整对象（含 payload、agent_logs、result） |
+| 出参 | Event 完整对象（含 payload、agent_logs、result、archive） |
+| archive | 结构化产出段 `{seq, agent, event_type, status, runtime, skill, output, logs}`；优先 `events.structured_output`，无则回退 event.json（weekly-05 起） |
 | 返回 | 200；404 |
+
+---
+
+## GET /api/issues/{owner}/{repo}/{number}/events — Issue 事件摘要（平替 event.json）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> 作用：按 Issue 获取该 issue 下全部事件 + 每个事件的结构化产出/执行日志（Agent 与前端平替 event.json 的读取入口）。
+
+| Path | `{owner}` `{repo}` `{number}`（`5` 或 `#5` 均可，`#` 需 URL 编码 `%23`） |
+| 出参 | `{events: [{seq, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, output?, logs?}], segments: 同 events, total}` |
+| `output` | `{actions, conclusion, artifacts, next_step, issue_summary}`（来自 events.structured_output，无则省略） |
+| `logs` | 执行消息列表（来自 events.agent_logs） |
+| 返回 | 200（无事件 → segments=[]）；404（issue/仓库不存在） |
 
 ---
 

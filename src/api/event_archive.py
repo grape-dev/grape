@@ -291,8 +291,42 @@ def load_event_json(repo_key, issue_num) -> dict | None:
 
 
 def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:
-    """生成富上下文文本（供 build_prompt 注入）"""
-    arch = load_event_json(repo_key, issue_num)
+    """生成富上下文文本（供 build_prompt 注入）。
+
+    weekly-05：优先从 events 表组装（结构化 output），无事件时回退 event.json 档案。
+    """
+    lines = [f"## Issue #{issue_num} 档案摘要"]
+    gathered = False
+    try:
+        from src.api.routes.issues import _group_events_by_issue
+        rk = repo_key or ""
+        keys = [rk]
+        if ":" in rk:
+            prov, rest = rk.split(":", 1)
+            keys.append((f"github:{rest}" if prov == "gitcode" else f"gitcode:{rest}"))
+        _num = str(issue_num).lstrip("#")
+        gmap = _group_events_by_issue(keys)
+        events = gmap.get(_num) or []
+        if events:
+            for ev in events:
+                agent = ev.get("agent_type", "?")
+                st = ev.get("status", "")
+                icon = {"completed": "✓", "running": "▶", "failed": "✗", "pending": "○"}.get(st, "?")
+                _o = ev.get("output") or {}
+                concl = _o.get("conclusion", "") if isinstance(_o, dict) else ev.get("summary", "")
+                arts = ", ".join(_o.get("artifacts", [])) if isinstance(_o, dict) else ""
+                nxt = _o.get("next_step", "") if isinstance(_o, dict) else ""
+                lines.append(f"- [{icon}] {agent}: {concl}{(' | 产出: ' + arts) if arts else ''}{(' | 下一步: ' + nxt) if nxt else ''}")
+            if events:
+                _last = events[-1].get("summary", "")
+                if _last:
+                    lines.append(f"Summary: {_last}")
+                gathered = True
+    except Exception:
+        gathered = False
+    if gathered:
+        return "\n".join(lines)[:max_chars]
+    arch = load_event_json(repo_key, str(issue_num).lstrip("#"))
     if not arch:
         return ""
     lines = [f"## Issue #{issue_num} 档案摘要"]

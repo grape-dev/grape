@@ -217,16 +217,20 @@ def _task_status_map(repo_keys: list[str]) -> dict:
 
 
 def _group_events_by_issue(repo_keys: list[str]) -> dict:
-    """仓库内 issue_id → events 列表（seq 升序），带时间格式化。"""
+    """仓库内 issue_id → events 列表（seq 升序），带时间格式化 + 结构化产出（weekly-05）。"""
+    import json as _json
     from src.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
         c = db.cursor()
         try:
+            cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
+            _has_so = "structured_output" in cols
+            _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill"
+                    + (", structured_output, agent_logs" if _has_so else ""))
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at "
-                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!='' ORDER BY seq ASC",
+                f"{_sel} FROM events WHERE repo_key IN ({placeholders}) AND issue_id!='' ORDER BY seq ASC",
                 repo_keys)
             rows = c.fetchall()
         except Exception:
@@ -236,12 +240,26 @@ def _group_events_by_issue(repo_keys: list[str]) -> dict:
         n = _num_from_issue_id(iid)
         if not n:
             continue
-        out.setdefault(n, []).append({
+        item = {
             "seq": r[0], "event_type": r[2], "agent_type": r[3] or "",
             "title": r[4] or r[2], "actor": r[5] or "",
             "summary": r[6] or r[4] or r[2],
             "status": r[7], "created_at": normalize_event_time(r[8]),
-        })
+            "runtime": r[9] if len(r) > 9 else "",
+            "skill": r[10] if len(r) > 10 else "",
+        }
+        if len(r) > 11:  # structured_output / agent_logs 存在
+            raw_so = r[11]
+            try:
+                item["output"] = _json.loads(raw_so) if raw_so else None
+            except Exception:
+                item["output"] = None
+            try:
+                raw_logs = r[12] if len(r) > 12 else None
+                item["logs"] = _json.loads(raw_logs) if raw_logs else []
+            except Exception:
+                item["logs"] = []
+        out.setdefault(n, []).append(item)
     return out
 
 
@@ -316,14 +334,36 @@ def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
 
 
 def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dict:
-    """无 event.json 时，由 events 表降级重构 pipeline（分号 view）。"""
-    segments = [{
-        "seq": ev["seq"], "agent": ev.get("agent_type", ""),
-        "event_type": ev.get("event_type", ""),
-        "status": ev.get("status", ""),
-        "output": {"conclusion": ev.get("summary", ""), "next_step": "", "actions": [], "artifacts": []},
-    } for ev in events]
-    return {"issue": {"number": int(number)}, "summary": "", "status": "unknown", "segments": segments}
+    """由 events 表重构 pipeline（weekly-05 主路径），output 用 structured_output。"""
+    segments = []
+    for ev in events:
+        seg = {
+            "seq": ev["seq"], "agent": ev.get("agent_type", ""),
+            "event_type": ev.get("event_type", ""),
+            "status": ev.get("status", ""),
+            "runtime": ev.get("runtime", ""), "skill": ev.get("skill", ""),
+            "output": {
+                "conclusion": ev.get("summary", ""),
+                "next_step": "",
+                "actions": [], "artifacts": [],
+                "issue_summary": ev.get("summary", ""),
+            },
+            "logs": ev.get("logs", []),
+        }
+        _out = ev.get("output")
+        if isinstance(_out, dict):
+            seg["output"] = {
+                "conclusion": _out.get("conclusion", ev.get("summary", "")),
+                "next_step": _out.get("next_step", ""),
+                "actions": _out.get("actions", []),
+                "artifacts": _out.get("artifacts", []),
+                "issue_summary": _out.get("issue_summary", ev.get("summary", "")),
+            }
+        segments.append(seg)
+    return {"issue": {"number": int(number)} if str(number).isdigit() else {"number": number},
+            "summary": (segments[-1]["output"]["issue_summary"] if segments else ""),
+            "status": "completed" if any(s["status"] == "completed" for s in segments) else "unknown",
+            "segments": segments}
 
 
 # ===================== 端点 =====================
@@ -1098,20 +1138,20 @@ def get_issue_detail(owner: str, repo: str, number: int,
     return {**base, "events": events, "pipeline": pipeline}
 
 
-@router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list", description="Event list of an issue (paged, seq asc).")
-def get_issue_events(owner: str, repo: str, number: int,
+@router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list (with structured output)", description="Event list of an issue (seq asc), each with structured output/logs when present. `number` accepts `5` or `#5`.")
+def get_issue_events(owner: str, repo: str, number: str,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
     group_map = _group_events_by_issue(repo_keys)
-    num = str(number)
+    num = _num_from_issue_id(number) or number.replace("#", "")
     if num not in group_map:
         stage_map = _issue_stage_map(repo_keys)
         status_map = _task_status_map(repo_keys)
         if num not in stage_map and num not in status_map:
             raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
-        return {"events": [], "total": 0}
+        return {"events": [], "segments": [], "total": 0}
     events = group_map[num]
-    return {"events": events, "total": len(events)}
+    return {"events": events, "segments": events, "total": len(events)}
 
 
 @router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments.")
@@ -1121,7 +1161,12 @@ def get_issue_pipeline(owner: str, repo: str, number: int,
     num = str(number)
     group_map = _group_events_by_issue(repo_keys)
     events = group_map.get(num) or []
-    pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
+    # weekly-05：优先 events 表（含结构化 output）；无事件时回退 event.json 档案
+    if events:
+        pipeline = _pipeline_from_events(repo_keys[0], num, events)
+    else:
+        pipeline = _pipeline_from_archive(repo_keys, num) or {
+            "issue": {"number": number}, "summary": "", "status": "unknown", "segments": []}
     if not pipeline.get("segments") and num not in _issue_stage_map(repo_keys):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
     return pipeline

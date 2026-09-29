@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS events (
     duration REAL DEFAULT NULL,
     agent_logs MEDIUMTEXT DEFAULT '[]',
     result MEDIUMTEXT DEFAULT '',
+    structured_output MEDIUMTEXT DEFAULT NULL,  -- 结构化产出（actions/conclusion/artifacts/next_step/issue_summary JSON），替代 event.json seg.output（weekly-05）
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
@@ -2970,6 +2971,15 @@ def _migrate_tables():
             log.info("Added events.scene_id column")
     except Exception as e:
         log.warning(f"Add events.scene_id column failed: {e}")
+    # ===== events 表补 structured_output 列（weekly-05：结构化产出落库替代 event.json seg.output）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "structured_output", "MEDIUMTEXT DEFAULT NULL")
+            db.commit()
+            log.info("Added events.structured_output column")
+    except Exception as e:
+        log.warning(f"Add events.structured_output column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
