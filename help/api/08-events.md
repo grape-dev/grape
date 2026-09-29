@@ -5,8 +5,10 @@
 > （terminate/redispatch/thread/chat/knowledge/stream） = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 > **CLI 说明**：grape CLI 命令与 API 的 **`operation_id` 精确关联**——`operation_id` 按
 > `{根组}_{动词}` 拆分：`_` 前为 CLI 根命令组（`events`/`issues`/`tasks`/`scenes`...），`_` 后为组内子命令。
-> 例：`events_list`→`grape events list`、`issues_events`→`grape issues events`、`issues_detail`→`grape issues detail`。
+> 例：`events_list`→`grape events list`、`events_detail`→`grape events detail`、`events_chat_task_status`→`grape events chat task status`。
 > 查命令：`grape <组> -h` / `grape <组> <动词> -h`；认证用 `GRAPE_API_TOKEN`/Web JWT（`tk_` 会话 → 403 的记 user_only）。
+> ℹ️ **按 Issue 获取事件**（`GET /api/issues/{owner}/{repo}/{number}/events`，operation_id=`issues_events`）属
+> Issues 接口，文档见 `11-issues.md`——CLI：`grape issues events --owner --repo --number`。
 
 ## GET /api/events/{owner}/{repo} — 仓库事件列表（operation_id=events_list）
 > scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）；`tk_` 限定其绑定仓库（跨仓库 → 403）。
@@ -28,19 +30,6 @@ Event 字段：`seq / repo_key / issue_id / event_type / source / agent_type / t
 | archive | 结构化产出段 `{seq, agent, event_type, status, runtime, skill, output, logs}`；优先 `events.structured_output`，无则回退 event.json（weekly-05 起） |
 | 返回 | 200；404 |
 | CLI | `grape events detail --seq {seq} --json-out` |
-
----
-
-## GET /api/issues/{owner}/{repo}/{number}/events — Issue 事件摘要（operation_id=issues_events）
-> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）——Agent 执行期（tk_）通过本接口获取 issue 事件。
-> `tk_` 会话 token：**限定其绑定仓库**（请求 repo 与 token 的 repo_key 匹配才放行，否则 403）。
-
-| Path | `{owner}` `{repo}` `{number}`（`5` 或 `#5` 均可，`#` 需 URL 编码 `%23`） |
-| 出参 | `{events: [{seq, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill, output?, logs?}], segments: 同 events, total}` |
-| `output` | `{actions, conclusion, artifacts, next_step, issue_summary}`（来自 events.structured_output，无则省略） |
-| `logs` | 执行消息列表（来自 events.agent_logs） |
-| 返回 | 200（无事件 → segments=[]）；403（tk_ 跨仓库）；404（issue/仓库不存在） |
-| CLI | `grape issues events --owner {owner} --repo {repo} --number {number} --json-out`（**注意根组是 issues**，由 operation_id `issues_events` 决定） |
 
 ---
 

@@ -164,12 +164,15 @@ Issue 对象字段：
 
 | 项 | 值 |
 |----|-----|
-| scope（x-token-scope） | **dual**（三通道） |
-| Path | `{owner}` / `{repo}` / `{number}` |
-| 出参 | `{events: Event[], total: int}` |
-| 返回 | 200 成功（含空列表）；404 Issue 不存在；401 未认证 |
+| scope（x-token-scope） | **dual**（`grape_`/JWT/`tk_`）；`tk_` 限定其绑定仓库（跨仓库 → 403） |
+| Path | `{owner}` / `{repo}` / `{number}`（`5` 或 `#5` 均可，`#` 需 URL 编码 `%23`） |
+| 出参 | `{events: Event[], segments: 同 events, total: int}` |
+| segments[].output | `{actions, conclusion, artifacts, next_step, issue_summary}`（来自 events.structured_output，无则省略） |
+| segments[].logs | 执行消息列表（来自 events.agent_logs） |
+| 返回 | 200（含空列表 → segments=[]）；403（tk_ 跨仓库）；404 Issue 不存在；401 未认证 |
 
-> 仅返回该 Issue 的事件，seq 升序；只读聚合，不影响 issue_state/events。
+> 仅返回该 Issue 的事件，seq 升序；只读聚合，不影响 issue_state/events。该接口是事件数据在
+> Issues 主题下的按 Issue 聚合视图（operation_id=`issues_events`，CLI 根组为 `issues`）。
 
 ---
 
