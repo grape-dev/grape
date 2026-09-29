@@ -2338,6 +2338,20 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
             _log.warning(f"direct linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
             continue
 
+        # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
+        try:
+            _r_br = _sp.run(["git", "-C", _wt_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+                            capture_output=True, text=True, timeout=10)
+            _current_branch = (_r_br.stdout or "").strip()
+            if _current_branch and _current_branch != _wt_branch:
+                _log.warning(f"direct linked PR: branch guard — {_rk} on '{_current_branch}', switching to {_wt_branch}")
+                _r_co = _sp.run(["git", "-C", _wt_dir, "checkout", "-b", _wt_branch, f"origin/{_base_branch}"],
+                                capture_output=True, text=True, timeout=30)
+                if _r_co.returncode != 0:
+                    _log.warning(f"direct linked PR: branch guard checkout failed {_rk}: {(_r_co.stderr or '')[:200]}")
+        except Exception as _bg_e:
+            _log.warning(f"direct linked PR: branch guard check failed {_rk}: {_bg_e}")
+
         try:
             # 1. git identity（防 commit 被拒）
             _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],
