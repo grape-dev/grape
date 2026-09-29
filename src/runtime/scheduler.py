@@ -633,6 +633,15 @@ async def _execute_task(task: dict):
         log.info(f"Autopilot: task {task_id} already running, skip")
         return
     _RUNNING_TASKS.add(task_id)
+    # 触发即写 last_run_at/next_run_at（防执行窗口内主控重启导致 cron 重新判定到期：
+    # _is_cron_due 用 last_run_at 推算，若只在任务结束后写，执行期间的 20 分钟窗口内
+    # 服务重启会丢失 _RUNNING_TASKS 内存互斥 → 同一 cron 被再次触发 → 自触发循环。
+    # 2026-09-28 实际发生：8 次重启 + 17 个僵尸 execution + 生产被误停一轮）
+    try:
+        _early_next = _compute_next_run(task["cron"])
+        _update_task_run_info(task_id, _early_next)
+    except Exception as _e:
+        log.warning(f"Autopilot: task {task_id} early next_run write failed: {_e}")
     try:
         max_retry = task["max_retry"]
         agent_type = _FIXED_AGENT_TYPE
