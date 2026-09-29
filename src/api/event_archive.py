@@ -163,127 +163,35 @@ def _locate_by_seq(repo_key: str, seq: int, issue_num_hint: str = "") -> tuple[s
 
 
 def init_event_json(repo_key, seq, evt, agent_type, runtime="", skill="", tokens=None):
-    """触发时建/追加 pipeline 段。runtime = 执行该段的 runtime 名（M0 术语统一）。#0 跳过。"""
+    """触发时建/追加 pipeline 段（阶段 B：停写 event.json——数据由 events 表承载）。
+
+    仅保留日志，不再写文件；段数据（seq/agent/status 等）由事件入队/`append_event`/complete 路径写 events 表。
+    #0 跳过。
+    """
     issue_num = _extract_num(evt.get("issue_id", ""))
     if not issue_num:
         return
-    path = get_event_json_path(repo_key, issue_num)
-    with _lock_for(repo_key):
-        data = _load(path) or {
-            "issue": {"number": int(issue_num), "title": evt.get("title", ""),
-                      "status": "open", "created_at": evt.get("created_at", "")},
-            "status": "running", "created_at": _now(), "updated_at": _now(),
-            "pipeline": [],
-            "summary": f"Issue #{issue_num} 处理中，尚无结论",
-        }
-        seg = {
-            "seq": seq, "agent": agent_type, "event_type": evt.get("type", ""),
-            "runtime": runtime or "", "skill": skill or "",
-            "status": "running", "exit_code": None, "duration": None,
-            "trigger": {"actor": evt.get("actor", ""), "branch": evt.get("branch", ""),
-                        "raw_type": evt.get("_raw_type", "")},
-            "input": {"issue_id": f"#{issue_num}", "summary": evt.get("summary", "")},
-            "output": {"actions": [], "conclusion": "", "artifacts": [], "next_step": "", "issue_summary": ""},
-            "a2a_to": None, "logs": [], "started_at": _now(), "completed_at": "",
-        }
-        data["pipeline"].append(seg)
-        data["updated_at"] = _now()
-        try:
-            _atomic_write(path, data)
-        except Exception as e:
-            log.warning(f"Archive init failed: repo={repo_key}, issue=#{issue_num}, seq={seq}: {e}")
-            return
-    log.info(f"Archive init: repo={repo_key}, issue=#{issue_num}, seq={seq}")
+    log.debug(f"Archive init (NOTE: stopped writing event.json): repo={repo_key}, issue=#{issue_num}, seq={seq}")
 
 
 def append_event_archive_log(repo_key, seq, evt_type, data, tokens=None, issue_num_hint=""):
-    """执行中增量写 logs（全量、脱敏）"""
-    issue_num, path = _locate_by_seq(repo_key, seq, issue_num_hint)
-    if not issue_num or not path:
-        return
-    with _lock_for(repo_key):
-        arch = _load(path)
-        if not arch:
-            return
-        for seg in arch.get("pipeline", []):
-            if seg.get("seq") == seq:
-                entry = {"time": _now(), "type": evt_type, "msg": _redact(_trunc_safe(data), tokens)}
-                seg["logs"].append(entry)
-        arch["updated_at"] = _now()
-        try:
-            _atomic_write(path, arch)
-        except Exception as e:
-            log.warning(f"Archive append failed: repo={repo_key}, seq={seq}: {e}")
+    """执行中增量写 logs（阶段 B：停写 event.json——执行日志由 report_messages → events.agent_logs 承载）。"""
+    log.debug(f"Archive append (NOTE: stopped writing event.json): repo={repo_key}, seq={seq}, type={evt_type}")
 
 
 def record_a2a_to(repo_key, issue_num, target_agent):
-    """A2A 交办记录：在该 Issue 最新 pipeline 段写入 a2a_to（仅记录，不作状态指引）。
-
-    见 vod-skill-upgrade-plan.md §3.0.2（event.json 仅背景档案，非状态权威）。
-    """
-    path = _resolve_event_json_path(repo_key, issue_num)
-    with _lock_for(repo_key):
-        arch = _load(path)
-        if not arch:
-            return
-        for seg in reversed(arch.get("pipeline", [])):
-            if seg.get("status") in ("running", "completed"):
-                seg["a2a_to"] = target_agent
-                break
-        arch["updated_at"] = _now()
-        try:
-            _atomic_write(path, arch)
-        except Exception as e:
-            log.warning(f"Archive a2a_to failed: repo={repo_key}, issue={issue_num}: {e}")
+    """A2A 交办记录（阶段 B：停写 event.json——a2a 目标由 A2A 事件（events 表）承载，无需文件）。"""
+    log.debug(f"Archive a2a_to (NOTE: stopped writing event.json): repo={repo_key}, issue={issue_num}, target={target_agent}")
 
 
 def finalize_event_archive(repo_key, seq, status, exit_code=None, duration=None,
                            output=None, tokens=None, issue_num_hint=""):
-    """完成时写 output + 整链 status + 覆盖 summary（有 issue_summary 才覆盖）
+    """完成收尾（阶段 B：停写 event.json——结构化产出由 update_event_complete → events.structured_output 承载）。
 
-    - output 非空 → 写/升级结构化段（幂等）
-    - output 为空且段**已有结构化** → 保护不降级（跳过 seg.output 写，仅更新状态）
-    - output 为空且段从未结构化 → 保持 init 空模板（旧语义）
+    仅保留 debug 日志，不再写 archive 文件；events 表已由 complete_task/finalize_task 路径写 status/exit_code/
+    duration/structured_output/agent_logs。
     """
-    issue_num, path = _locate_by_seq(repo_key, seq, issue_num_hint)
-    if not issue_num or not path:
-        log.warning(f"Archive finalize skipped: cannot locate event archive repo={repo_key} seq={seq} "
-                    f"(hint={issue_num_hint!r})")
-        return
-    with _lock_for(repo_key):
-        arch = _load(path)
-        if not arch:
-            return
-        for seg in arch.get("pipeline", []):
-            if seg.get("seq") == seq:
-                seg["status"] = status
-                seg["exit_code"] = exit_code
-                seg["duration"] = duration
-                seg["completed_at"] = _now()
-                if output:
-                    seg["output"] = {
-                        "actions": output.get("actions", []),
-                        "conclusion": output.get("conclusion", ""),
-                        "artifacts": output.get("artifacts", []),
-                        "next_step": output.get("next_step", ""),
-                        "issue_summary": output.get("issue_summary", ""),
-                    }
-                    if output.get("issue_summary"):
-                        arch["summary"] = output["issue_summary"]
-                else:
-                    # 非结构化收尾：已有结构化段不降级
-                    _had = seg.get("output") or {}
-                    _was_structured = bool(_had.get("actions") or _had.get("conclusion")
-                                           or _had.get("artifacts"))
-                    if _was_structured:
-                        log.info(f"Archive seg seq={seq} already structured, skip non-structured finalize "
-                                 f"(repo={repo_key})")
-        arch["status"] = "completed" if status == "completed" else "failed"
-        arch["updated_at"] = _now()
-        try:
-            _atomic_write(path, arch)
-        except Exception as e:
-            log.warning(f"Archive finalize failed: repo={repo_key}, seq={seq}: {e}")
+    log.debug(f"Archive finalize (NOTE: stopped writing event.json): repo={repo_key}, seq={seq}, status={status}")
 
 
 def load_event_json(repo_key, issue_num) -> dict | None:

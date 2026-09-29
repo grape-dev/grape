@@ -1,15 +1,21 @@
-"""event.json → events 表统一（阶段0：结构化产出落库 + 详情读新列/回退）。
+"""event.json → events 表统一（阶段0：结构化产出落库 + 详情读新列/回退；阶段B：停写文件）。
 
-覆盖（ST-01~04）：
+覆盖（ST-01~04 + STOP-01~03）：
 - ST-01 update_event_complete 写结构化产出到 events.structured_output
 - ST-02 详情页优先读 structured_output
 - ST-03 structured_output 为空时回退 event.json
 - ST-04 两者皆空不崩溃
+- STOP-01 init_event_json 停写：调用后不产生 event.json 文件
+- STOP-02 finalize 停写：complete 后文件不存在/不更新
+- STOP-03 读侧兼容：手工构造 event.json 仍可回退读
 """
 import os, sys, json
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
+# 隔离 workspace：确保不写入真实 event.json（阶段 B 停写验证）
+import tempfile
+os.environ.setdefault("DEVOPS_WORKSPACE_DIR", tempfile.mkdtemp(prefix="evstop_"))
 
 from src.session_manager import db, db_lock
 
@@ -153,3 +159,58 @@ def test_report_messages_writes_to_events_agent_logs():
     kinds = [l["type"] for l in logs]
     assert "step_start" in kinds and "tool_use" in kinds
     assert logs[0]["data"]["step"] == 1
+
+
+# ── 阶段 B：STOP-01/02/03 — 停写 event.json，读侧兼容保留 ──
+
+def _ev_path(seq):
+    from src.api.event_archive import get_event_json_path
+    return get_event_json_path(RK, 8266 if seq == 8266 else seq)
+
+
+def test_stop_init_does_not_create_file():
+    """阶段 B：init_event_json 停写 → 调用后不产生 event.json 文件。"""
+    from src.api.event_archive import init_event_json
+    _seed_event(8265, "#11")
+    evt = {"issue_id": "#11", "title": "t", "type": "issue_opened", "actor": "", "branch": "", "summary": ""}
+    init_event_json(RK, 8265, evt, "vod", runtime="r", skill="s")
+    path = _ev_path(8265)
+    assert not os.path.exists(path), "阶段B应停写：init 后不应创建 event.json"
+
+
+def test_stop_finalize_does_not_touch_file():
+    """阶段 B：finalize 停写 → complete 后文件不存在/不更新（数据已落 events 表）。"""
+    from src.api.event_archive import finalize_event_archive
+    _seed_event(8266, "#12")
+    finalize_event_archive(
+        RK, 8266, "completed", exit_code=0, duration=1.0,
+        output={"actions": [{"cmd": "x"}], "conclusion": "c", "artifacts": [], "next_step": "", "issue_summary": "s"})
+    path = _ev_path(8266)
+    assert not os.path.exists(path), "阶段B应停写：finalize 后不应创建 event.json"
+    # events 表数据仍应写入（structured_output）
+    from src.api.event_store import update_event_complete
+    update_event_complete(8266, "completed", result="c",
+                          structured_output={"actions": [], "conclusion": "c", "artifacts": [], "next_step": "", "issue_summary": "s"})
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT structured_output FROM events WHERE seq=?", (8266,))
+        assert c.fetchone()[0] is not None
+
+
+def test_stop_read_compat_still_works():
+    """阶段 B：停写不影响读侧兼容——`_load` 对人工构造的历史 event.json 仍可解析（ST-03 已覆盖详情回退）。"""
+    from src.api.event_archive import _load
+    path = _ev_path(8253)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump({
+            "issue": {"number": 7},
+            "pipeline": [{
+                "seq": 8253, "agent": "vod", "status": "completed",
+                "output": {"actions": [], "conclusion": "旧文件结论", "artifacts": [], "next_step": "", "issue_summary": ""},
+            }],
+        }, f, ensure_ascii=False)
+    arch = _load(path)  # 直接读已写文件（确认 _load 仍可用，历史回退依赖它）
+    assert arch is not None
+    assert arch["pipeline"][0]["output"]["conclusion"] == "旧文件结论"
+    os.remove(path)

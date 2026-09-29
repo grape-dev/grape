@@ -1,6 +1,7 @@
 # 方案：去掉 event.json，事件数据统一由 events 表承载（含按 Issue 查询接口）
 
-> 状态：技术方案（2026-09-25）｜目标分支：weekly-05
+> 状态：✅ **阶段 A、B 已实施并部署**（阶段 A `083be623`；阶段 B 待部署提交）
+> 目标分支：weekly-05（实际在 weekly-04-lyz 部署）
 > 关联：#206（前端 fetch 恢复，无直接关系）、集群事件 archive 空模板问题
 > （VOD 完成信号未达 master / event.json 跨 worker 不共享 → 详情页「处理记录/答复结论」空）
 
@@ -24,6 +25,11 @@
 3. 保留对存量 event.json 的**读取兼容**（历史 issue 详情不回退）。
 4. 修复伴随项：`events.agent_logs`「处理记录」落地（当前偶发恒空）。
 
+### 1.3 阶段划分（已定）
+
+- **阶段 A ✅**：结构化产出 + 日志落 events 表；读侧优先 DB（回退文件）；新增 Issue 事件 API；详情/路线图/VOD 改读 DB
+- **阶段 B ⏳**：写侧停写 event.json（双写→单写 DB）；清理 worker_package/cleanup 依赖；存量文件补全（可选）
+
 ---
 
 ## 2. 现状梳理：event.json 消费方（写完评估）
@@ -41,86 +47,85 @@
 
 ## 3. 关键前提（先补洞，再移文件）
 
-### 3.1 events 表缺「结构化产出」列 —— 必须新增
+### 3.1 events 表缺「结构化产出」列 —— 必须新增 ✅ 已实施
 
 现状 `complete_task` 把结构化 output 写给 `event.json.seg.output`，但 `events.result` 只存 conclusion 文本
 （`update_event_complete` 传 `_conclusion or result[:200]`）。**去掉文件前必须先落库**：
 
-- **新增列** `events.structured_output TEXT DEFAULT NULL`（JSON：`{actions, conclusion, artifacts, next_step, issue_summary}`）
-- **写**：`update_event_complete` 增加 `structured_output` 参数，`complete_task`（service.py:1616 附近）传入完整 `output`
-- **读**：详情页 / 路线图 / VOD 摘要改读该列
-- **迁移**：`db_setup._ensure_column(events, "structured_output", "TEXT DEFAULT NULL")`（幂等，兼容 SQLite/MySQL）
+- **新增列** `events.structured_output TEXT DEFAULT NULL`（JSON：`{actions, conclusion, artifacts, next_step, issue_summary}`）✅
+- **写**：`update_event_complete` 增加 `structured_output` 参数，`complete_task`（service.py）传入完整 `output` ✅
+- **读**：详情页 / 路线图 / VOD 摘要改读该列 ✅
+- **迁移**：`db_setup._ensure_column(events, "structured_output", "MEDIUMTEXT DEFAULT NULL")`（幂等，SQLite/MySQL）✅
 
-### 3.2 `events.agent_logs` 落地 ——「处理记录」伴随修复
+### 3.2 `events.agent_logs` 落地 ——「处理记录」伴随修复 ✅ 已实施
 
 现状 worker `report_messages`（service.py:1413）→ `append_event_archive_log` 写 event.json；`events.agent_logs`
 恒空是因为该列只由 `update_event_complete(agent_logs=...)` 写入，而执行中消息未回填。改为：
 
-- `update_event_complete`/`report_messages` 路径把消息 JSON 写入 `events.agent_logs`
+- `report_messages` 路径把消息 JSON 追加写入 `events.agent_logs` ✅
 
-### 3.3 存量 event.json 读取兼容
+### 3.3 存量 event.json 读取兼容 ✅ 已实施
 
-- 读侧**双通道**：先查 events 表（新列），缺失/为空时回退读 event.json（`load_event_json` 保留）——历史 issue 详情不回退。
-- **迁移/数据补全（可选）**：后台任务把存量 event.json 的 `output`/`logs` 写入 events 新列（低优先级，读兼容已兜底）。
+- 读侧**双通道**：先查 events 表（新列），缺失/为空时回退读 event.json（`load_event_json` 保留）——历史 issue 详情不回退 ✅
+- **迁移/数据补全（阶段 B 可选）**：后台任务把存量 event.json 的 `output`/`logs` 写入 events 新列（低优先级，读兼容已兜底）。
 
 ---
 
-## 4. 新 API：按 Issue 获取事件（平替 event.json）
+## 4. 新 API：按 Issue 获取事件（平替 event.json）✅ 已实施
 
-新增接口（满足 `help/api/08-events.md` 评审要求）：
+接口（满足 `help/api/08-events.md` 评审要求，已落地）：
 
 ```
-GET /api/issues/{owner}/{repo}/{number}/events
-   或  GET /api/events?repo_key=...&issue=#5
+GET /api/issues/{owner}/{repo}/{number}/events    # 已实施；number 支持 5 / #5（%23）
 ```
 
 返回（结构化摘要，等价于原 `event.json` 的一维视图）：
 
 ```json
 {
-  "repo_key": "gitcode:org/repo",
-  "issue_id": "#5",
-  "issue": {"number": 5},
-  "summary": "Issue #5 ... 结论",
-  "status": "completed",
-  "segments": [
+  "events": [
     {
-      "seq": 8250, "agent": "vod", "event_type": "issue_opened",
+      "seq": 8250, "event_type": "issue_opened", "agent_type": "vod",
       "status": "completed", "runtime": "opencode-worker-...", "skill": "vod-cli",
+      "summary": "...", "created_at": "...",
       "output": {"actions": [...], "conclusion": "...", "artifacts": [...],
                  "next_step": "...", "issue_summary": "..."},
       "logs": [...]
     }
-  ]
+  ],
+  "segments": [...同 events...],
+  "total": 2
 }
 ```
 
-- 数据源：`events` 表（`WHERE repo_key=? AND issue_id=?`，按 seq 升序）+ 新列 `structured_output` + `agent_logs`
-- 无鉴权限制沿用 `get_current_user_or_api_key`；`issue_id` 支持 `#5` / `5`
-- 同时更新 `help/api/08-events.md` 补该端点文档
+- 数据源：`events` 表（`WHERE repo_key IN (双 provider) AND issue_id` 归一化后匹配，seq 升序）+ 新列 `structured_output` + `agent_logs` ✅
+- **鉴权 dual**：`get_current_user_or_api_key`——`grape_`/JWT/`tk_` 均可；**tk_ 限定绑定仓库**（跨仓库 403）✅
+- `help/api/08-events.md` 已补该端点文档 ✅
+- 仓库事件列表 `GET /api/events/{owner}/{repo}` 同步 dual + tk_ repo 隔离 ✅
 
 ---
 
 ## 5. 改动清单
 
-| 模块 | 改动 | 说明 |
-|------|------|------|
-| `src/api/db_setup.py` | 加列 | `events.structured_output TEXT DEFAULT NULL`（`_ensure_column` 幂等） |
-| `src/api/event_store.py` | 修改 | `update_event_complete` 增 `structured_output` 参数；新增 `get_issue_events_structured(repo_key, issue_id)` 查询封装 |
-| `src/runtime/service.py` | 修改 | `complete_task` 调 `update_event_complete` 时传完整 `output`→structured_output；`report_messages` 落 `events.agent_logs` |
-| `src/api/routes/issues.py` | 修改 | `_pipeline_from_events` 升级为主路径（读新列填 output）；`_pipeline_from_archive` 降为回退 |
-| `src/api/routes/events.py` | 修改 | 详情页优先读 events 新列；回退 event.json |
-| `src/im/vod_handler_async.py` | 修改 | `build_issue_context` 改查 events（或新 API） |
-| 新：`src/api/routes/issues.py` 或 `events.py` | 新增 | `GET .../events` 按 Issue 结构化摘要接口 |
-| `help/api/08-events.md` | 修改 | 补 Issue 事件查询端点 |
-| `src/api/event_archive.py` | 保留（读兼容） | 写侧改 DB，读侧兼容存量 |
-| `src/worker_package.py` / `runtime/cleanup.py` | 调整 | event_archive 随读兼容保留 |
+| 模块 | 改动 | 说明 | 状态 |
+|------|------|------|------|
+| `src/api/db_setup.py` | 加列 | `events.structured_output MEDIUMTEXT DEFAULT NULL`（`_ensure_column` 幂等） | ✅ |
+| `src/api/event_store.py` | 修改 | `update_event_complete` 增 `structured_output` 参数 | ✅ |
+| `src/runtime/service.py` | 修改 | `complete_task` 传完整 output→structured_output；`report_messages` 落 `events.agent_logs` | ✅ |
+| `src/api/routes/issues.py` | 修改 | `_pipeline_from_events` 升为主路径（读新列 output）；`_pipeline_from_archive` 降为回退；`get_issue_events` 返回 segments；tk_ repo 作用域校验 | ✅ |
+| `src/api/routes/events.py` | 修改 | 详情页优先读 `structured_output`（回退文件）；仓库事件列表 dual + tk_ 隔离 | ✅ |
+| `src/api/event_archive.py` | 修改 | `build_issue_context` 优先查 events（回退文件）；`_locate_by_seq` 保持 | ✅ |
+| `src/api/routes/issues.py` | 新增 | `GET .../{number}/events`（Issue 事件摘要） | ✅ |
+| `help/api/08-events.md` | 修改 | 补 Issue 事件端点 + 仓库事件列表 dual | ✅ |
+| `src/runtime/service.py` / `event_pipeline.py` / `agent.py` | 修改 | **停写 event.json**（init/finalize/append/record_a2a 移除写文件，仅写 DB） | ⏳ 阶段 B |
+| `src/worker_package.py` / `runtime/cleanup.py` | 修改 | 移除 event_archive 打包/清理依赖（或标注仅读兼容） | ⏳ 阶段 B |
+| 存量补全脚本 | 新增（可选） | 存量 event.json → events 新列后台补全 | ⏳ 阶段 B 可选 |
 
 ---
 
-## 6. 测试用例设计（先行，先写测试再实施）
+## 6. 测试用例设计（✅ 阶段 A 已实施 12 用例全过）
 
-> 实施前先按本设计补齐测试（红）→ 再实现功能（变绿），保证每步可验证。
+> 阶段 A 测试已落地：`tests/test_event_structured.py`（5）+ `tests/test_issue_events_api.py`（7）。阶段 B 需增补「停写」用例。
 
 ### 6.1 测试文件规划
 
@@ -172,31 +177,40 @@ GET /api/issues/{owner}/{repo}/{number}/events
 
 - 既有：事件详情 / Issue 路线图 / 上传 / worker 消息上报（`test_event_conversation.py` 等）
 - 迁移：`_ensure_column(events, structured_output)` 幂等（SQLite + MySQL 各一）
-- 端到端（阶段 C 后）：集群 VOD 段 archive 不再空模板（events 表承载）
+- 端到端（阶段 A/B 后）：集群 VOD 段 archive 不再空模板（events 表承载）；阶段 B 后 event.json 不再新增
 
 ---
 
-## 7. 分步实施（建议，测试先行）
+## 7. 分步实施
 
-**阶段 0（先做）：按 §6 补齐测试（红）**
-- 新建 §6.1 的 4 个测试文件，包含全部用例断言；当前实现尚未改，`structured_output`/新 API 不存在 → 预期红
+### 阶段 0 + A：✅ 已完成（已部署 `083be623`）
 
-**阶段 A（先干，解决当前空显示）**
-1. `events.structured_output` 列 + `update_event_complete` 写结构化 → 过 ST-01/02/04
-2. `report_messages` → `events.agent_logs` → 过 LOG-01
-3. 新增「按 Issue 事件摘要」API + 更新 `08-events.md` → 过 API-01~05
-4. 详情页/路线图/VOD 摘要改读 DB（回退 event.json）→ 过 ST-03/ROUTE-01/02/VOD-01
+| 步骤 | 内容 | 用例 | 状态 |
+|------|------|------|------|
+| 0 | 补测试（红） | ST-01~04 / API-01~05 / LOG-01 | ✅ |
+| A-1 | `events.structured_output` 列 + `update_event_complete` 写 | ST-01 | ✅ |
+| A-2 | `report_messages` 落 `events.agent_logs` | LOG-01 | ✅ |
+| A-3 | Issue 事件摘要 API + `08-events.md`（含 dual + tk_ 隔离） | API-01~07 | ✅ |
+| A-4 | 详情页/路线图/VOD 改读 DB + 回退 | ST-02/03/04 / ROUTE-01/02 / VOD-01 | ✅ |
 
-**阶段 B（后收敛）**
-5. 写侧（init/finalize/append/record_a2a）停写 event.json → 回归 ST/LOG/ROUTE
-6. cleanup/worker_package 移除 event_archive 打包依赖
-7. (可选) 存量 event.json → events 新列后台补全
+### 阶段 B：✅ 已实施（停写 event.json，双写→单写 DB）
+
+**目标**：新事件不再写 event.json 文件，仅写 events 表；读侧保留文件回退（历史兼容）。
+
+| 步骤 | 内容 | 状态 |
+|------|------|------|
+| B-0 | 测试：STOP-01 init 不建文件 / STOP-02 finalize 不建文件 / STOP-03 读侧 `_load` 兼容 | ✅ |
+| B-1 | `event_archive.py` init/append/finalize/record_a2a 改为 log.debug（不再写文件）；保留 `_load`/`load_event_json`/`_locate_by_seq`/`_resolve_event_json_path` 只读 | ✅ |
+| B-2 | `worker_package.py` MANIFEST 移除 `event_archive.py`（worker 端已不引用） | ✅ |
+| B-3 | 新增 `scripts/backfill_event_archive_to_events.py`（一次性补写存量文件→events，`--dry-run` 支持） | ✅ |
+| B-4 | 回归：ST/API/LOG/ROUTE/VOD + event_conversation 均通过（既有失败除外） | ✅ |
 
 ---
 
 ## 8. 风险与兼容
 
-- **历史 issue**：读侧双通道回退，详情不回退 ✅
+- **历史 issue**：读侧双通道回退（阶段 B 后仍保留文件读），详情不回退 ✅
 - **集群跨节点**：events 表是 MySQL 中心化 → archive 空模板问题根治（写入不再依赖文件系统共享）✅
-- **agent 依赖**：prompt 不依赖 event.json 路径（已验证）；Agent 读事件需调用新 API → 更新相关 SKILL.md 指引（后续）
-- **回退**：保留 event_archive.py 读兼容；阶段 B 若出问题可回退到写文件
+- **agent 依赖**：prompt 不依赖 event.json 路径（已验证）；Agent 读事件走 issue 事件 API（dual / tk_ 隔离）✅
+- **停写风险（阶段 B）**：`event_archive` 只读保留，若发现遗漏写路径可回退写文件（读兼容仍在）
+- **部署顺序**：阶段 B 上线前必须确认线上已无依赖文件写入的读路径（历史详情靠读兼容）
