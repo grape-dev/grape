@@ -488,8 +488,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 log.info(f"[redispatch] seq={seq} local_only: direct execution started on rid={_orig_rid}")
             except Exception as e:
                 log.warning(f"[redispatch] seq={seq} local_only: direct execution failed: {e}")
-        # 事件状态回写 running
-        update_event_status(seq, "running")
+        # 事件状态回写 running（redispatch 语义：重置终态，允许重跑成功后 complete 覆盖）
+        from src.api.event_store import reset_event_terminal
+        reset_event_terminal(seq)
         try:
             from src.user.db import set_meta_value
             import time as _time
@@ -930,8 +931,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 log.warning(f"[redispatch] seq={seq} re-run_pipeline failed: {e}")
                 raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
 
-    # 4) 事件状态回写 running
-    update_event_status(seq, "running")
+    # 4) 事件状态回写 running（redispatch 语义：重置终态，允许重跑成功后 complete 覆盖）
+    from src.api.event_store import reset_event_terminal
+    reset_event_terminal(seq)
 
     # 5) 记录幂等时间戳
     try:

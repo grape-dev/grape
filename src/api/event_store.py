@@ -409,6 +409,25 @@ def update_event_status(seq: int, status: str):
             log.warning(f"Failed to update event {seq}: {e}")
 
 
+def reset_event_terminal(seq: int):
+    """redispatch 专用：无视终态保护重置事件为 running 并清结构化产出。
+
+    语义：事件被人工重派/重试 → 视为重新处理中，允许重跑成功后 complete_task 写入
+    structured_output/result（避免「事件首次 failed 后 redispatch 成功却无法覆盖」）。
+    仅 redispatch 调用；普通 complete 仍走 update_event_complete 终态保护。
+    """
+    with db_lock:
+        try:
+            c = db.cursor()
+            c.execute(
+                "UPDATE events SET status='running', exit_code=NULL, completed_at='', "
+                "structured_output=NULL, result='' WHERE seq=?",
+                (seq,))
+            db.commit()
+        except Exception as e:
+            log.warning(f"reset_event_terminal failed seq={seq}: {e}")
+
+
 def update_event_issue_id(seq: int, issue_id: str):
     """回写事件归属 Issue（用于引导主事件 issue_id 预分配后的实际号校准）"""
     with db_lock:
