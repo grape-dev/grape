@@ -5,7 +5,7 @@
 > （terminate/redispatch/thread/chat/knowledge/stream） = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
 ## GET /api/events/{owner}/{repo} — 仓库事件列表
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）；`tk_` 限定其绑定仓库（跨仓库 → 403）。
 
 | Path | `{owner}` `{repo}` |
 | Query | `page`、`limit`、`event_type`、`issue_id`、`status`（可选中） |

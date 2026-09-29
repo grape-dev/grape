@@ -133,3 +133,18 @@ def test_api_issue_events_session_token_cross_repo_forbidden():
     r = _client.get("/api/issues/org/evapi/5/events",
                     headers={"Authorization": "Bearer " + tok})
     assert r.status_code == 403    # 跨仓库拒绝
+
+
+def test_api_repo_events_dual_session_token_ok_and_cross_forbidden():
+    """仓库事件列表 /api/events/{owner}/{repo}：tk_ 可读同仓库、拒跨仓库。"""
+    _seed(9050, "gitcode:org/evapi", "#5", "vod")
+    # 同仓库 → 200
+    tok_ok = _session_token(repo_key="gitcode:org/evapi")
+    r_ok = _client.get("/api/events/org/evapi",
+                       headers={"Authorization": "Bearer " + tok_ok})
+    assert r_ok.status_code == 200
+    # 跨仓库 → 403
+    tok_bad = _session_token(repo_key="github:other/repo")
+    r_bad = _client.get("/api/events/org/evapi",
+                        headers={"Authorization": "Bearer " + tok_bad})
+    assert r_bad.status_code == 403

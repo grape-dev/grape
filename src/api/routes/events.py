@@ -1740,9 +1740,15 @@ def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
-                      user: dict = Depends(require_no_session_token)):
+                      user: dict = Depends(get_current_user_or_api_key)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
+
+    # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
+    if user.get("auth_type") == "session_token":
+        _tok_repo = user.get("repo_key") or ""
+        if _tok_repo and _tok_repo not in (repo_key, f"github:{owner}/{repo}", f"gitcode:{owner}/{repo}"):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
     # 权限校验：用户必须有权访问该仓库
     from src.api.deps import check_repo_access
