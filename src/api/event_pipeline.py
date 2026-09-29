@@ -17,6 +17,32 @@ _DIRECT_POOL = ThreadPoolExecutor(
 _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
+def _filter_pr_sub_matches(matches: list, issue_scene_id: str, issue_qa_skill: str = "") -> list:
+    """PR 订阅匹配结果三步过滤：
+    1. 排除 PR 关联 Issue 所在场景（同场景的 QA 由流水线自己派）
+    2. 排除跟 Issue 场景 qa_skill 相同的场景（同 skill 审同 PR 结果一样，无意义）
+    3. 剩余场景中 qa_skill 相同的只保留第一个（同 skill 重复审查浪费资源）
+
+    matches: [(scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids), ...]
+    issue_scene_id: PR 关联 Issue 所在场景（空=无关联 Issue）
+    issue_qa_skill: Issue 所在场景的 qa skill（空=无关联 Issue 或场景无 qa 节点）
+    """
+    # 1. 排除 Issue 所在场景
+    if issue_scene_id:
+        matches = [m for m in matches if m[0] != issue_scene_id]
+    # 2. 排除跟 Issue 场景 qa_skill 相同的场景
+    if issue_qa_skill:
+        matches = [m for m in matches if m[1] != issue_qa_skill]
+    # 3. 相同 qa_skill 只保留第一个
+    seen_skills = set()
+    deduped = []
+    for m in matches:
+        if m[1] not in seen_skills:
+            seen_skills.add(m[1])
+            deduped.append(m)
+    return deduped
+
+
 def _match_pr_subscription(repo_key: str, evt: dict, event_type: str, pr_branch: str) -> list:
     """PR 无关联 Issue 时，按 PR target_branch 匹配场景 work_branch，唤醒 QA agent。
 
@@ -543,7 +569,7 @@ _STAGE_EVENT_AGENT_MAP = {
     "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
     "pull_request_opened": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
     "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
-    "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
+    "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "sre", "sre": "sre", "pending_review": "", "done": ""},
     "note_hook_pr":        {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
 }
 
@@ -1009,6 +1035,52 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         append_skipped_event(repo_key, event_type, "unrecognized_event", issue_id=_pre_issue_id)
         return result
 
+    # 1.5 PR 订阅预匹配（在自循环检测之前，确保 bot 创建/更新的 PR 也能触发其他场景 QA）
+    _pr_branch_early = resolve_pr_target_branch(evt)
+    if _pr_branch_early and not evt.get("branch"):
+        evt["branch"] = _pr_branch_early
+    if event_type in PR_EVENT_TYPES:
+        # PR 订阅触发条件：
+        # - pull_request_opened：新建 PR，必定有首次 commit → 订阅
+        # - pull_request_updated：需有新 commit（oldrev 非空或有 commits 字段）→ 订阅，否则跳过
+        # - pull_request_merged：已合并，审查无意义 → 不订阅
+        _pr_sub_payload = evt.get("payload", {}) or {}
+        _pr_sub_action = str(_pr_sub_payload.get("_raw_action", "") or
+                             (_pr_sub_payload.get("object_attributes", {}) or {}).get("action", "")).lower()
+        if event_type == "pull_request_merged" or _pr_sub_action == "merge":
+            log.info(f"Pipeline: PR subscription skip: merged (no need to review)")
+            _pr_sub_matches_early = []
+        elif _pr_sub_action == "update" and event_type == "pull_request_updated":
+            _pr_sub_oa = _pr_sub_payload.get("object_attributes", {}) or {}
+            _pr_sub_has_commit = bool(_pr_sub_payload.get("commits")) or bool(_pr_sub_oa.get("oldrev"))
+            if not _pr_sub_has_commit:
+                log.info(f"Pipeline: PR subscription skip: no_commit_on_pr_update (action=update, no new commit)")
+                _pr_sub_matches_early = []
+            else:
+                _pr_sub_matches_early = _match_pr_subscription(repo_key, evt, event_type, _pr_branch_early)
+        else:
+            _pr_sub_matches_early = _match_pr_subscription(repo_key, evt, event_type, _pr_branch_early)
+        if _pr_sub_matches_early:
+            _issue_scene_id_early = ""
+            _issue_qa_skill_early = ""
+            if _pre_issue_id:
+                try:
+                    from src.api.session_store import get_issue_scene
+                    _issue_scene_id_early, _ = get_issue_scene(repo_key, _pre_issue_id)
+                except Exception:
+                    pass
+            # 从匹配列表中查找 Issue 所在场景的 qa_skill（排除前先取）
+            if _issue_scene_id_early:
+                for m in _pr_sub_matches_early:
+                    if m[0] == _issue_scene_id_early:
+                        _issue_qa_skill_early = m[1]
+                        break
+            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, _issue_qa_skill_early)
+            if _pr_sub_matches_early:
+                for _extra in _pr_sub_matches_early:
+                    _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
+                log.info(f"Pipeline: PR subscription pre-match -> scenes={[m[0] for m in _pr_sub_matches_early]} (before self-loop check)")
+
     # 2. 自循环检测：actor 是任一 bot 用户名 → 跳过（评论/评论PR/打标签等 bot 自身动作的回声）
     actor = resolve_actor(evt.get("payload", {}), evt)
     log.info(f"Pipeline: actor={actor}, event_type={event_type}")
@@ -1179,23 +1251,37 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _pr_branch = resolve_pr_target_branch(evt)
     if _pr_branch and not evt.get("branch"):
         evt["branch"] = _pr_branch
-    # PR 订阅：PR 无关联 Issue 时，按 target_branch 匹配场景 work_branch
+    # PR 订阅：无主路由时（PR 无关联 Issue，非 bot 操作未被自循环拦截），
+    # 第一个匹配作为主 agent。PR 订阅的并行分发已在自循环检测前完成（1.5 预匹配）。
     if not agent_type and event_type in PR_EVENT_TYPES:
         _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
         if _pr_sub_matches:
-            # 第一个匹配作为主 agent，其余并行分发
-            _first = _pr_sub_matches[0]
-            evt["_pr_sub_scene_id"] = _first[0]
-            evt["_pr_sub_skill"] = _first[1]
-            evt["_pr_sub_engine_ids"] = _first[2]
-            if _first[3]:
-                evt["_pr_sub_sre_skill"] = _first[3]
-                evt["_pr_sub_sre_engine_ids"] = _first[4]
-            agent_type = "qa"
-            log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
-            # 多场景命中：其余场景并行分发 QA
-            for _extra in _pr_sub_matches[1:]:
-                _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
+            # 排除 PR 关联 Issue 所在场景（避免同场景重复 QA）
+            _issue_scene_id = ""
+            _issue_qa_skill = ""
+            if _pre_issue_id:
+                try:
+                    from src.api.session_store import get_issue_scene
+                    _issue_scene_id, _ = get_issue_scene(repo_key, _pre_issue_id)
+                except Exception:
+                    pass
+            # 从匹配列表中查找 Issue 所在场景的 qa_skill（排除前先取）
+            if _issue_scene_id:
+                for m in _pr_sub_matches:
+                    if m[0] == _issue_scene_id:
+                        _issue_qa_skill = m[1]
+                        break
+            _pr_sub_matches = _filter_pr_sub_matches(_pr_sub_matches, _issue_scene_id, _issue_qa_skill)
+            if _pr_sub_matches:
+                _first = _pr_sub_matches[0]
+                evt["_pr_sub_scene_id"] = _first[0]
+                evt["_pr_sub_skill"] = _first[1]
+                evt["_pr_sub_engine_ids"] = _first[2]
+                if _first[3]:
+                    evt["_pr_sub_sre_skill"] = _first[3]
+                    evt["_pr_sub_sre_engine_ids"] = _first[4]
+                agent_type = "qa"
+                log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
     _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
     if not agent_type:
         # 主路由为空 → 订阅兜底
@@ -1241,6 +1327,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         if _rid2 and not get_issue_stage(repo_key, _rid2):
             set_issue_stage(repo_key, _rid2, "vod", "vod")
             log.info(f"Pipeline: issue_state init vod for {_rid2}")
+    # PR merged 跳过 QA 直接路由 SRE：补推 stage qa→sre（原由 QA A2A handoff 推进）
+    if event_type == "pull_request_merged" and agent_type == "sre":
+        _rid_sre = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+        if _rid_sre:
+            from src.api.session_store import get_issue_stage as _gis
+            _st_sre = _gis(repo_key, _rid_sre)
+            if _st_sre and _st_sre.get("stage") == "qa":
+                set_issue_stage(repo_key, _rid_sre, "sre", "sre")
+                log.info(f"Pipeline: PR merged skip QA, advance stage qa→sre for {_rid_sre}")
 
     # 3.2 任务中心全覆盖（task-center-issue-coverage-design.md §3-A）：
     # Issue 事件幂等建档；closed 动作自动完成对应任务（P5 webhook 兜底）。
