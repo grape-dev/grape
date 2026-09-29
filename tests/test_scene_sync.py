@@ -432,7 +432,7 @@ class TestSyncOfficialScenes:
         _run_async(_run())
 
     def test_full_sync_new_scene(self):
-        """完整同步流程：mock ZIP 下载 + mock DB，验证入库逻辑不报异常"""
+        """完整同步流程：mock ZIP 下载 + mock DB，验证 INSERT 路径（新场景入库）"""
         async def _run():
             import json as _json
             scene_data = {
@@ -466,10 +466,12 @@ class TestSyncOfficialScenes:
                     zf.extractall(tmp)
                 return os.path.join(tmp, "grape-skills-dev")
 
-            # mock DB：fetchone 返回 (0,)（COUNT=0），fetchall 返回空
+            # mock DB：fetchone 第一次返回 None（场景不存在→INSERT 路径），
+            # 第二次返回 (0,) 给 _init_featured_scenes_if_empty 的 COUNT 查询
             mock_cursor = MagicMock()
-            mock_cursor.fetchone = MagicMock(return_value=(0,))
+            mock_cursor.fetchone = MagicMock(side_effect=[None, (0,)])
             mock_cursor.fetchall = MagicMock(return_value=[])
+            mock_cursor.lastrowid = 42
             mock_db = MagicMock()
             mock_db.cursor = MagicMock(return_value=mock_cursor)
             mock_db.commit = MagicMock()
@@ -481,6 +483,91 @@ class TestSyncOfficialScenes:
                             with patch("src.storage.scene_sync._check_skills_exist", return_value=[]):
                                 with patch("src.storage.scene_sync.db_lock"):
                                     with patch("src.storage.scene_sync.db", mock_db):
-                                        result = await sync_official_scenes()
-                                        assert result is None or result is not None
+                                        with patch("src.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                            with patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+                                                result = await sync_official_scenes()
+
+            # 验证：INSERT 路径被触发（execute 调用中含 INSERT 关键字）
+            execute_calls = [str(call) for call in mock_cursor.execute.call_args_list]
+            assert any("INSERT" in c for c in execute_calls), \
+                f"INSERT not found in execute calls: {execute_calls}"
+            # 验证：UPDATE 路径未被触发（新场景不应 UPDATE）
+            assert not any("UPDATE scene_market SET" in c for c in execute_calls), \
+                f"UPDATE should not be called for new scene: {execute_calls}"
+        _run_async(_run())
+
+    def test_sync_existing_scene_preserves_is_active(self):
+        """同步已有场景时，UPDATE 保留 admin 设置的 is_active 值（不被覆盖为 1）"""
+        async def _run():
+            import json as _json
+            scene_data = {
+                "name": "test_scene",
+                "version": "1.0.0",
+                "display_name": "测试场景",
+                "description": "测试用",
+                "category": "general",
+                "recommended_template": "",
+                "onboarding": "repo-onboarding",
+                "tags": ["test"],
+                "author": "tester",
+                "nodes": [
+                    {"id": "vod", "tag": "vod", "skill": "vod", "mode": "emit", "next": "issue", "handoff": "a2a"},
+                    {"id": "issue", "tag": "issue", "skill": "issue-advance", "mode": "emit", "next": "done", "handoff": "complete"},
+                ],
+            }
+
+            zip_data = _make_zip_bytes(scenes={
+                "test_scene": {
+                    "scene.json": _json.dumps(scene_data),
+                    "README.md": "# Test Scene",
+                },
+            })
+
+            async def mock_download_zip(client, token):
+                tmp = tempfile.mkdtemp(prefix="test_sync_")
+                with zipfile.ZipFile(io.BytesIO(zip_data)) as zf:
+                    zf.extractall(tmp)
+                return os.path.join(tmp, "grape-skills-dev")
+
+            # mock DB：fetchone 第一次返回已有场景行（is_active=0 表示 admin 禁用了），
+            # old_hash 与 content_hash 不同→触发 UPDATE 路径
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone = MagicMock(side_effect=[(1, "0.9.0", "old_different_hash", 0), (0,)])
+            mock_cursor.fetchall = MagicMock(return_value=[])
+            mock_cursor.lastrowid = 1
+            mock_db = MagicMock()
+            mock_db.cursor = MagicMock(return_value=mock_cursor)
+            mock_db.commit = MagicMock()
+
+            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
+                with patch("src.storage.scene_sync._download_repo_zip", new=mock_download_zip):
+                    with patch("src.storage.scene_sync._refresh_cat_cache"):
+                        with patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
+                            with patch("src.storage.scene_sync._check_skills_exist", return_value=[]):
+                                with patch("src.storage.scene_sync.db_lock"):
+                                    with patch("src.storage.scene_sync.db", mock_db):
+                                        with patch("src.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                            with patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+                                                await sync_official_scenes()
+
+            # 找到 UPDATE 调用
+            update_call = None
+            for call in mock_cursor.execute.call_args_list:
+                sql = str(call)
+                if "UPDATE scene_market SET" in sql:
+                    update_call = call
+                    break
+            assert update_call is not None, "UPDATE scene_market SET not found in execute calls"
+
+            # 验证 1: UPDATE SQL 不含 is_featured（is_featured 不在 SET 子句中，不被覆盖）
+            update_sql = update_call.args[0] if update_call.args else update_call[0][0]
+            assert "is_featured" not in update_sql, \
+                f"is_featured should not be in UPDATE SET clause: {update_sql}"
+
+            # 验证 2: UPDATE 参数中 is_active 值 = 0（保留 admin 禁用状态，而非硬编码 1）
+            update_params = update_call.args[1] if len(update_call.args) > 1 else update_call[0][1]
+            # UPDATE SET 中 is_active=? 是倒数第二个参数（WHERE id=? 是最后一个）
+            is_active_value = update_params[-2]
+            assert is_active_value == 0, \
+                f"is_active should be 0 (preserved admin value), got {is_active_value}"
         _run_async(_run())

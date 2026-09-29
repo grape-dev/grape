@@ -416,14 +416,14 @@ async def sync_official_scenes():
                 with db_lock:
                     c = db.cursor()
                     c.execute(
-                        "SELECT id, version, content_hash, is_active, is_featured FROM scene_market "
+                        "SELECT id, version, content_hash, is_active FROM scene_market "
                         "WHERE name=? AND source='official' LIMIT 1",
                         (name,),
                     )
                     row = c.fetchone()
 
                     if row:
-                        scene_id, old_version, old_hash, preserved_active, preserved_featured = row
+                        scene_id, old_version, old_hash, preserved_active = row
                         if old_hash == content_hash:
                             stats["skipped"] += 1
                             continue
@@ -436,7 +436,7 @@ async def sync_official_scenes():
                             )
 
                         # 先 UPDATE 不带 icon（icon 等 OBS 上传后单独 UPDATE）
-                        # 保留 admin 设置的 is_active/is_featured，不从仓库覆盖
+                        # 保留 admin 设置的 is_active（SELECT 读回写），is_featured 不在 SET 中所以不被覆盖
                         c.execute(
                             "UPDATE scene_market SET "
                             "display_name=?, version=?, description=?, market_description=?, "
