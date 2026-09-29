@@ -2801,6 +2801,20 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
+    # ── direct 自报技能双信号收敛（方案 A，weekly-05）──
+    # worker 模式的 stream_ended 由远端 /api/runtime/tasks/{id}/complete 置位；
+    # direct 模式无 worker 回调，需在本机引擎流结束后补置 stream_ended，使
+    # self_reported(agent grape tasks complete) + stream_ended 双信号齐后 finalize_task 收敛。
+    if task_id:
+        try:
+            from src.runtime.service import skill_self_reports, set_task_signal, finalize_task
+            if skill_self_reports(skill_name):
+                log.info(f"Exec agent: seq={seq} direct self-report skill, set stream_ended + finalize")
+                set_task_signal(task_id, "stream_ended")
+                finalize_task(task_id, exit_code or 0)
+        except Exception as _e:
+            log.warning(f"Exec agent: direct self-report finalize failed for {task_id}: {_e}")
+
     # 判定 Agent 是否有明确答复产出
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
     if repo_gitcode_token and result_text:
@@ -2820,7 +2834,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             try:
                 from src.runtime.service import get_task
                 _t = get_task(task_id) or {}
-                if _t.get("status") == "completed":
+                # 自报技能：self_reported 已置（finalize_task 可能尚未收敛 task.status）→ 也视为完成，不标 failed
+                if _t.get("status") == "completed" or _t.get("self_reported") == 1:
                     log.info(f"Exec agent: task {task_id} self-reported completed, skip no-output fail")
                     return
             except Exception as _e:
