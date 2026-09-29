@@ -31,6 +31,16 @@ def _num_from_issue_id(issue_id: str) -> str:
     return m.group(1) if m else ""
 
 
+def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
+    """tk_ 会话 token 限定其绑定仓库：请求 repo_keys 含该 repo 才放行（防 agent 跨仓库读事件）。"""
+    if user.get("auth_type") == "session_token":
+        _tok_repo = user.get("repo_key") or ""
+        if _tok_repo and _tok_repo not in repo_keys:
+            raise HTTPException(
+                status_code=403,
+                detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
+
+
 def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
     from src.session_manager import db, db_lock
@@ -1125,6 +1135,7 @@ async def create_issue(owner: str, repo: str, body: dict = None,
 def get_issue_detail(owner: str, repo: str, number: int,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
+    _enforce_session_repo_scope(user, repo_keys)
     num = str(number)
     stage_map = _issue_stage_map(repo_keys)
     status_map = _task_status_map(repo_keys)
@@ -1142,6 +1153,7 @@ def get_issue_detail(owner: str, repo: str, number: int,
 def get_issue_events(owner: str, repo: str, number: str,
                      user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
+    _enforce_session_repo_scope(user, repo_keys)
     group_map = _group_events_by_issue(repo_keys)
     num = _num_from_issue_id(number) or number.replace("#", "")
     if num not in group_map:

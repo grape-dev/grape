@@ -149,6 +149,8 @@ GET /api/issues/{owner}/{repo}/{number}/events
 | API-02 | 兼容 `#5` 写法 | `.../issues/{o}/{r}?issue=#5` 或 query `issue=#5` | 与 `5` 返回一致（`_extract_num` 兼容） |
 | API-03 | 无该 issue 事件 | 随机块号 | 200 `segments: []`（不 404） |
 | API-04 | 无鉴权 | 不带 token | 401/403 |
+| API-06 | dual：tk_ 会话 token 可访问 | 签发 tk_（repo_key=同仓库）+ GET | 200（Agent 执行期可读事件） |
+| API-07 | tk_ 跨仓库拒绝 | tk_ 绑定其他 repo | 403（repo 作用域校验） |
 | API-05 | 跨 provider | `github:owner/repo` repo_key | 按 repo 过滤，返回该仓库事件 |
 
 ### 6.4 伴随修复用例（P1）

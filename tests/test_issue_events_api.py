@@ -109,3 +109,27 @@ def test_api_issue_events_cross_provider_filter():
     r = _client.get("/api/issues/org/evapi2/3/events", headers=_headers)
     assert r.status_code == 200
     assert len(r.json()["segments"]) == 2  # gitcode + github 双查
+
+
+# ── tk_ 会话 token：dual 支持 + repo 作用域 ──
+
+def _session_token(repo_key="gitcode:org/evapi"):
+    from src.api.auth_token import issue_session_token
+    return issue_session_token(session_key="t_api", repo_key=repo_key, agent_type="vod")
+
+
+def test_api_issue_events_dual_session_token_ok():
+    _seed(9030, "gitcode:org/evapi", "#5", "vod")
+    tok = _session_token()
+    r = _client.get("/api/issues/org/evapi/5/events",
+                    headers={"Authorization": "Bearer " + tok})
+    assert r.status_code == 200    # dual：tk_ 可访问同仓库
+
+
+def test_api_issue_events_session_token_cross_repo_forbidden():
+    _seed(9040, "gitcode:org/evapi", "#5", "vod")
+    # token 绑定其他仓库（github:other/repo）
+    tok = _session_token(repo_key="github:other/repo")
+    r = _client.get("/api/issues/org/evapi/5/events",
+                    headers={"Authorization": "Bearer " + tok})
+    assert r.status_code == 403    # 跨仓库拒绝
