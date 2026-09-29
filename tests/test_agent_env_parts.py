@@ -28,52 +28,58 @@ def test_split_owner_repo_no_slash():
     assert owner == "justname" and repo == ""
 
 
-# ── env_extra 注入：ACCOUNT/REPO_NAME/REPO_FULL_NAME ──
+# ── env_extra 注入：REPO_OWNER / REPO_NAME / ACCOUNT(actor) ──
 
-def _env_from_execute_inner():
-    """构造直取 _execute_agent_inner 的 env_extra 入口（复用 L2692 区域逻辑）。"""
-    # 直接验证 L255 类构建逻辑（_owner 拆分 + ACCOUNT 取 owner 段）
+def _env_from_execute_inner(actor="jason7602"):
+    """复用 L255 区域构建逻辑（REPO_OWNER 拆分 + ACCOUNT 取 actor）。"""
     from src.repo_key import split_owner_repo
-    repository = "grape-dev/grape"
-    account = "grape-dev/grape"            # 模拟被注入全名
-    own, rn = split_owner_repo(repository)
+    repository = "grape-dev/grape"   # owner 是组织，ACCOUNT 是个人
+    owner, rn = split_owner_repo(repository)
     env = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": (account or own).split("/")[0],
+        "REPO_OWNER": owner,
         "REPO_NAME": rn,
+        "ACCOUNT": actor,            # evt["actor"] 个人账号
     }
     return env
 
 
-def test_env_extra_account_repo_name():
-    env = _env_from_execute_inner()
+def test_env_extra_repo_owner_and_account_actor():
+    env = _env_from_execute_inner(actor="jason7602")
     assert env["REPO_FULL_NAME"] == "grape-dev/grape"
-    assert env["ACCOUNT"] == "grape-dev"       # 全名 → owner 段
+    assert env["REPO_OWNER"] == "grape-dev"   # 属主（组织）
+    assert env["ACCOUNT"] == "jason7602"      # 个人账号（actor）
     assert env["REPO_NAME"] == "grape"
+    # ACCOUNT ≠ REPO_OWNER（组织场景下解耦）
+    assert env["ACCOUNT"] != env["REPO_OWNER"]
 
 
-def test_env_extra_account_owner_only_when_account_correct():
+def test_env_extra_owner_from_gitcode_prefix():
     from src.repo_key import split_owner_repo
     repository = "gitcode:org/www"
-    own, rn = split_owner_repo(repository)
-    account = "org"                            # 已正确 owner
+    owner, rn = split_owner_repo(repository)
     env = {
         "REPO_FULL_NAME": "org/www",
-        "ACCOUNT": (account or own).split("/")[0],
+        "REPO_OWNER": owner,
         "REPO_NAME": rn,
+        "ACCOUNT": "someone",        # 个人触发人
     }
-    assert env["ACCOUNT"] == "org"
+    assert env["REPO_OWNER"] == "org"
     assert env["REPO_NAME"] == "www"
+    assert env["ACCOUNT"] == "someone"
 
 
 def test_direct_branch_env_parts():
-    # L2692 区域（direct 分支）：exec_account 全名 → ACCOUNT owner、REPO_NAME repo
+    # L2692 区域（direct 分支）：exec_account 兜底 REPO_OWNER/REPO_NAME，ACCOUNT 取 actor
     repository = "Jason7602/hello-x"
     exec_account = "Jason7602/hello-x"
     env = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": (exec_account or repository).split("/")[0],
+        "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
         "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
+        "ACCOUNT": "dev_act",        # evt actor
     }
-    assert env["ACCOUNT"] == "Jason7602"
+    assert env["REPO_OWNER"] == "Jason7602"
+    assert env["REPO_NAME"] == "hello-x"
+    assert env["ACCOUNT"] == "dev_act"
     assert env["REPO_NAME"] == "hello-x"

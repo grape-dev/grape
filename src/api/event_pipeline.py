@@ -256,8 +256,9 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     _owner, _repo_name = _sor(repository)
     env_extra = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": (evt.get("account") or _owner).split("/")[0],
+        "REPO_OWNER": _owner,
         "REPO_NAME": _repo_name,
+        "ACCOUNT": evt.get("actor") or evt.get("account") or "",
     }
 
     # repo_gitcode_token（按 provider 分流）
@@ -2017,8 +2018,9 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _owner2, _repo_name2 = _sor2(repository)
     env_extra = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": (evt.get("account") or _owner2).split("/")[0],
+        "REPO_OWNER": _owner2,
         "REPO_NAME": _repo_name2,
+        "ACCOUNT": evt.get("actor") or evt.get("account") or "",
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
@@ -2692,8 +2694,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     agent_logs = []
     env_extra = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": (exec_account or repository).split("/")[0],
+        "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
         "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
+        "ACCOUNT": evt.get("actor") or exec_account or "",
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     try:

@@ -1,8 +1,11 @@
-# 方案：修复 Agent 环境变量 ACCOUNT / REPO_NAME 注入错误
+# 方案：修复 Agent 环境变量 ACCOUNT / REPO_OWNER / REPO_NAME 注入语义
 
-> 状态：技术方案（2026-09-29，基于 grape-skills `temp/fix-agent-env-account-reponame.md` 核对后落档）｜分支 weekly-05-lyz
-> 现象：vod-cli 执行日志中 `ACCOUNT="grape-dev/grape"`（被注入为 owner/repo 全名）、`REPO_NAME` 为空 → agent 被迫手动 `export ACCOUNT="grape-dev" REPO_NAME="grape"` 并反复重试，浪费步骤。
-> 目标：确保注入给 agent 的 `ACCOUNT`（=owner）、`REPO_NAME`（=repo 名）、`REPO_FULL_NAME`（=全名）各自正确、来源唯一，技能可直接使用、无需推导。
+> 状态：技术方案（2026-09-29 第二轮：语义拆分）｜分支 weekly-05-lyz
+> 现象：vod-cli 执行日志中 `ACCOUNT="grape-dev/grape"`（被注入为 owner/repo 全名）、`REPO_NAME` 为空 → agent 被迫手动 `export ACCOUNT="grape-dev" REPO_NAME="grape"` 并反复重试。
+> 目标（评审修正）：区分三个语义——
+> - **`REPO_OWNER`** = 仓库属主（组织或个人的泛化概念），从 repository 拆分；
+> - **`ACCOUNT`** = 触发 agent 的**个人账号**（actor，取自 webhook 用户），与 owner 解耦；
+> - **`REPO_NAME` / `REPO_FULL_NAME`** = repo 名 / 全名。
 
 ---
 
@@ -29,9 +32,9 @@
 
 ## 二、优化方案
 
-### 2.1 注入层：统一拆分 owner / repo / full_name
+### 2.1 注入层：语义拆分 REPO_OWNER / REPO_NAME / ACCOUNT(actor)
 
-**复用现有 `src.repo_key.split_owner_repo(owner_repo) -> (owner, repo)`**（已存在，兼容 `owner/repo` / `gitcode:owner/repo`，不需新 helper）。
+**复用现有 `src.repo_key.split_owner_repo(owner_repo) -> (owner, repo)`**（兼容 `owner/repo` / `gitcode:owner/repo`）。
 
 三处 env_extra 统一改为：
 
@@ -39,9 +42,10 @@
 from src.repo_key import split_owner_repo  # 模块顶部引入
 owner, repo_name = split_owner_repo(repository)
 env_extra = {
-    "REPO_FULL_NAME": repository,   # 保持全名（无前缀语义）
-    "ACCOUNT": (evt.get("account") or owner).split("/")[0],  # 强制 owner 段
+    "REPO_FULL_NAME": repository,     # 全名 owner/repo（无前缀语义）
+    "REPO_OWNER": owner,              # 仓库属主（组织或个人）
     "REPO_NAME": repo_name,
+    "ACCOUNT": evt.get("actor") or evt.get("account") or "",  # 个人账号（webhook 触发人）
     "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
 }
 ```
@@ -52,19 +56,29 @@ L2685（direct 分支 exec_account）同样：
 owner, repo_name = split_owner_repo(repository or exec_account)
 env_extra = {
     "REPO_FULL_NAME": repository,
-    "ACCOUNT": (exec_account or owner).split("/")[0],
+    "REPO_OWNER": owner,
     "REPO_NAME": repo_name,
+    "ACCOUNT": evt.get("actor") or exec_account or "",
 }
 ```
 
 要点：
-- `ACCOUNT` 强制取 owner 段（若 account 实为全名，`split("/")[0]` 兜底）；
-- 新增 `REPO_NAME` = repo 名；
-- `REPO_FULL_NAME` 不变（全名）。
+- **`REPO_OWNER`** = 仓库属主（`split_owner_repo` 拆分，组织/个人通用，替代原 ACCOUNT=owner）；
+- **`ACCOUNT` = 个人账号** → 取 `evt["actor"]`（webhook 触发人用户名），与 owner 解耦；actor 缺失回落 `account`；
+- 新增 `REPO_NAME` = repo 名；`REPO_FULL_NAME` 保持全名。
 
-### 2.2 兜底：evt account 归一
+### 2.2 actor 来源（已回答）
 
-`if not account` 兜底改为取 owner 段：
+`actor` 由各 VCS backend `normalize_event` 提取：
+- `src/vcs/gitcode.py:103` `_extract_actor(payload)`：`payload.user_name → sender.username → user.username → issue.author.username`；
+- `github.py` / `gitlab.py` normalize 同样产出 `actor`；
+- `normalize_event` 返回含 `"actor": actor`（gitcode.py:86-87），进入 `evt["actor"]`（event_pipeline L990）。
+
+故 `evt["actor"]` 已可靠携带；**无需额外 API 查询**（比 owner 更贴近"个人账号"）。
+
+### 2.3 兜底：evt account 归一
+
+`if not account` 兜底保持取 owner 段（供 A2A 传导）：
 
 ```python
 if not account and evt.get("repository"):
@@ -72,17 +86,18 @@ if not account and evt.get("repository"):
     evt["account"] = _o
 ```
 
-避免后续任何路径拿到全名作 ACCOUNT。
+> 注：`evt["account"]` 现仅作 A2A/重派传导兜底，Agent env 的 `ACCOUNT` 已独立取 `actor`，二者解耦。
 
-### 2.3 worker 侧
+### 2.4 worker 侧
 
-确认 worker `agent.py`/引擎 get_env 不覆盖这三变量（worker 侧一般不加 ACCOUNT/REPO_NAME，由服务端 env_extra 注入）——核对后如有一致性需求则同用 `split_owner_repo`。
+确认 worker `agent.py`/引擎 get_env 不覆盖这些变量（worker 侧一般不加，由服务端 env_extra 注入）——如有覆盖则同用 `split_owner_repo`。
 
-### 2.4 文档同步
+### 2.5 文档同步
 
 `help/usage/agent-environment-variables.md`：
-- `ACCOUNT` 语义明确为「仓库属主（owner，如 `Jason7602`；从 repository 拆分，不含 `/repo`）」；
-- 新增 `REPO_NAME` 行（repo 名，服务端注入，技能直接用）。
+- `REPO_OWNER` = 仓库属主（组织/个人），从 repository 拆分；
+- `ACCOUNT` = 个人账号（webhook 触发人，`actor`），与 owner 解耦；
+- `REPO_NAME` / `REPO_FULL_NAME` = repo 名 / 全名。
 
 ---
 
@@ -90,18 +105,18 @@ if not account and evt.get("repository"):
 
 | 影响 | 说明 |
 |------|------|
-| 技能侧 | vod/issue/coding/qa/deploy runbook 已用 `$ACCOUNT`（owner）+ `$REPO_NAME`——修复后无需手动推导 |
-| 现有依赖 ACCOUNT 的代码 | 需 grep `ACCOUNT` 用作全名的地方（build 提示/im 通知等）核对语义 |
-| A2A payload | A2A `account` 字段是否走同源拆分？核对 webhook/`account` 归一为 owner |
+| 技能侧 | runbook 若用 `$ACCOUNT` 需核对语义（个人触发人 vs 原 owner 用法）；owner 用途改用 `$REPO_OWNER` |
+| 现有依赖 ACCOUNT 的代码 | grep `ACCOUNT` 语义变化（不能再当 owner 用）——需技能同步改用 REPO_OWNER |
+| A2A payload | `evt["account"]` 仍作 A2A 兜底传导（owner 段），Agent env 的 `ACCOUNT` 独立取 actor |
 
 ---
 
 ## 四、验证
 
-1. 触发 issue_opened → 注入 env：`ACCOUNT=grape-dev`、`REPO_NAME=grape`、`REPO_FULL_NAME=grape-dev/grape`。
-2. 回归 vod/issue 处理不再出现「ACCOUNT 为全名导致 export 修正」。
-3. 测试：`test_split_repo_parts`（复用 `split_owner_repo`；覆盖 `owner/repo` / `gitcode:owner/repo` / URL 输入）；`test_event_env_extra` 断言 ACCOUNT/REPO_NAME。
-4. 技能侧抽样：vod-cli Step 3 env 自检直接正确，无需修正。
+1. 触发 issue_opened → 注入 env：`REPO_OWNER=grape-dev`、`REPO_NAME=grape`、`REPO_FULL_NAME=grape-dev/grape`、`ACCOUNT=<触发人>`（个人账号）。
+2. 回归技能不再出现「ACCOUNT 为全名导致 export 修正」。
+3. 测试：`split_owner_repo` 拆分 + env_extra 断言 `REPO_OWNER`/`REPO_NAME`/`ACCOUNT(actor)`。
+4. 技能侧：vod-cli Step 3 env 自检正确。
 
 ---
 
@@ -110,9 +125,13 @@ if not account and evt.get("repository"):
 在 runbook Prerequisites/Step 0 前加 env 自检/修正（幂等，双重保险）：
 
 ```bash
-export ACCOUNT="${ACCOUNT%/*}"            # 若被注入成全名，强制取 owner 段
-export REPO_NAME="${REPO_NAME:-${REPO_FULL_NAME#*/}}"   # 为空时从全名推导
+# REPO_FULL_NAME 全名、REPO_NAME repo 名、REPO_OWNER 属主、ACCOUNT 个人触发人
+export REPO_OWNER="${REPO_OWNER:-${REPO_FULL_NAME%/*}}"   # 缺省从全名推导属主
+export REPO_NAME="${REPO_NAME:-${REPO_FULL_NAME#*/}}"     # 缺省从全名推导 repo 名
+export ACCOUNT="${ACCOUNT:-$REPO_OWNER}"                  # 缺省回落属主（但不再对 ACCOUNT 做 %/* 切分——它已是个人账号）
 ```
+
+> 注：ACCOUNT 是个人账号（actor），**不要**再 `%/*` 切分（会把它从"个人"截成 owner 段）；owner 用途用 `REPO_OWNER`。
 
 ---
 

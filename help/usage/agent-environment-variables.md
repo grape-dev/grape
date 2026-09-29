@@ -28,8 +28,9 @@ GitCode 事件（Issue/PR/评论）
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
 | `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义） | 全部（devops 事件） | `_execute_agent` |
-| `ACCOUNT` | **仓库属主（owner，如 `Jason7602`）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
+| `REPO_OWNER` | **仓库属主（owner，组织或个人的泛化概念）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
+| `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent` |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
