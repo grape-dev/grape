@@ -12,19 +12,28 @@ from src.session_manager import db, db_lock
 REPO = "gitcode:o/r"
 
 
+_TD_REPOS = (REPO, "gitcode:o/target-repo", "gitcode:o/session-repo", "gitcode:o/other-repo")
+
+
 @pytest.fixture(autouse=True)
 def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens")
         c.execute("DELETE FROM api_tokens")
-        c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (REPO,))
+        for _rk in _TD_REPOS:
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (_rk,))
+            c.execute("DELETE FROM managed_repos WHERE repo_key=?", (_rk,))
+            c.execute("DELETE FROM devops_pipeline_scene WHERE repo_key=?", (_rk,))
         db.commit()
     yield
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens")
-        c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (REPO,))
+        for _rk in _TD_REPOS:
+            c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (_rk,))
+            c.execute("DELETE FROM managed_repos WHERE repo_key=?", (_rk,))
+            c.execute("DELETE FROM devops_pipeline_scene WHERE repo_key=?", (_rk,))
         db.commit()
 
 
@@ -91,6 +100,91 @@ def test_a2a_reject_no_token_on_managed_repo():
 
 def test_a2a_unmanaged_defer_without_token():
     _authorize_a2a(_stub("anything"), REPO)  # 未托管仓库 → 放行交由下游
+
+
+# ===================== _authorize_a2a 关联仓库信任域 =====================
+# Issue #15 PR #369 新增逻辑：会话 token 绑定仓库与目标仓库若属于同一场景
+# 关联仓库集合（linked_repos），或两仓 bot token 相同（同一运维主体）→ 放行
+
+TARGET_REPO = "gitcode:o/target-repo"
+SESSION_REPO = "gitcode:o/session-repo"
+
+
+def _seed_managed_repo(repo_key: str, token: str):
+    """插入 managed_repos 行（带 bot_gitcode_token）。"""
+    from src.repo_key import split_owner_repo
+    owner, rname = split_owner_repo(repo_key)
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR REPLACE INTO managed_repos "
+            "(repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) "
+            "VALUES (?,?,?,?,?)",
+            (repo_key, owner, rname, f"{owner}/{rname}", token),
+        )
+        db.commit()
+
+
+def _seed_linked_repos_scene(repo_key: str, linked_repo_keys: list[str]):
+    """在 devops_pipeline_scene 表插入场景行，含 linked_repos 列。"""
+    import json as _json
+    _lr_json = _json.dumps(
+        [{"repo_key": rk, "branch": "main"} for rk in linked_repo_keys],
+        ensure_ascii=False,
+    )
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR REPLACE INTO devops_pipeline_scene "
+            "(scene_id, name, repo_key, nodes_json, is_active, linked_repos, advanced_options) "
+            "VALUES (?,?,?,?,1,?,?)",
+            ("test-td", "Trust Domain Scene", repo_key, "[]", _lr_json, "{}"),
+        )
+        db.commit()
+
+
+def test_a2a_trust_domain_same_bot_token():
+    """两仓 bot token 相同（同一运维主体）→ 放行。"""
+    _seed_managed_repo(SESSION_REPO, "SHARED_BOT")
+    _seed_managed_repo(TARGET_REPO, "SHARED_BOT")
+    tok = _seed_session(SESSION_REPO)
+    _authorize_a2a(_stub(tok), TARGET_REPO)  # 不应抛异常
+
+
+def test_a2a_trust_domain_linked_repos():
+    """目标仓库在会话仓库的 linked_repos 配置中 → 放行。"""
+    _seed_managed_repo(SESSION_REPO, "SESSION_BOT")
+    _seed_managed_repo(TARGET_REPO, "TARGET_BOT")  # 两仓 bot token 不同
+    _seed_linked_repos_scene(SESSION_REPO, [TARGET_REPO])
+    tok = _seed_session(SESSION_REPO)
+    _authorize_a2a(_stub(tok), TARGET_REPO)  # 不应抛异常
+
+
+def test_a2a_trust_domain_linked_repos_in_advanced_options():
+    """linked_repos 在 advanced_options JSON 中（独立列为空时回退）→ 放行。"""
+    import json as _json
+    _seed_managed_repo(SESSION_REPO, "SESSION_BOT")
+    _seed_managed_repo(TARGET_REPO, "TARGET_BOT")
+    _ao = _json.dumps({"linked_repos": [{"repo_key": TARGET_REPO, "branch": "main"}]})
+    with db_lock:
+        db.cursor().execute(
+            "INSERT OR REPLACE INTO devops_pipeline_scene "
+            "(scene_id, name, repo_key, nodes_json, is_active, linked_repos, advanced_options) "
+            "VALUES (?,?,?,?,1,?,?)",
+            ("test-td-ao", "TD AO Scene", SESSION_REPO, "[]", None, _ao),
+        )
+        db.commit()
+    tok = _seed_session(SESSION_REPO)
+    _authorize_a2a(_stub(tok), TARGET_REPO)  # 不应抛异常
+
+
+def test_a2a_trust_domain_reject_no_trust_relationship():
+    """无信任关系（bot token 不同、不在 linked_repos）→ 403 拒绝。"""
+    _seed_managed_repo(SESSION_REPO, "SESSION_BOT")
+    _seed_managed_repo(TARGET_REPO, "TARGET_BOT")  # 两仓 bot token 不同
+    _seed_linked_repos_scene(SESSION_REPO, ["gitcode:o/other-repo"])  # 不含目标仓库
+    tok = _seed_session(SESSION_REPO)
+    with pytest.raises(HTTPException) as ei:
+        _authorize_a2a(_stub(tok), TARGET_REPO)
+    assert ei.value.status_code == 403
 
 
 # ===================== get_user_or_none（A2A 软认证） =====================
