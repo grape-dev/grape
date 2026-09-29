@@ -1,41 +1,31 @@
-# Implementation Plan: Issue #242 — 跨仓库需求开发
+# Plan — Issue #254 缓存命中校验 content_hash 回源
 
-## Overview
+## 任务拆解
 
-扩展现有场景模型，将单仓库绑定升级为「主仓库 + 关联仓库」模式。在场景数据模型、API 路由、A2A handoff、repogit worktree、PR 提交机制和前端 UI 各层支持多仓库并行操作。
+### Step 1: 改造 mem_cache 结构（src/storage/__init__.py）
+- `_mem_cache` 从 `{skill_name: (content, size)}` 改为 `{skill_name: (content, size, content_hash)}`
+- `mem_cache_put(skill_name, content, content_hash="")` 新增可选参数
+- `mem_cache_get(skill_name)` 返回 `(content, content_hash)` 或 None
 
-## Architecture Decisions
+### Step 2: 改造 zip_cache 结构（src/storage/__init__.py）
+- `zip_cache_put(object_key, data, content_hash="")` index 记录 hash
+- `zip_cache_get(object_key)` 返回 `(data, content_hash)` 或 None
+- 保持向后兼容：content_hash 缺省为空串
 
-1. **linked_repos 存储方式**：JSON 字段 `linked_repos`（TEXT），存储 `[{repo_key, branch}]` 数组。与现有 `advanced_options` JSON 字段保持一致，避免 JOIN 开销。
-2. **多仓库 worktree 隔离**：每个 repo 独立 worktree（repogit 已按 repo_key 隔离，扩展即可）。
-3. **PR 提交触发方**：coding agent 自动遍历 linked_repos 中有改动的仓库分别提交。
-4. **分支策略**：各仓库独立分支名（用户在 linked_repos 中为每仓库指定）。
+### Step 3: skill_md_content 增加缓存校验（src/storage/__init__.py）
+- mem_cache 命中后查 DB content_hash（official scope），不一致则 invalidate + 回源
+- get_skill_zip_bytes 磁盘缓存命中后校验 hash
 
-## Task List
+### Step 4: skill_sync 传 hash（src/storage/skill_sync.py）
+- `zip_cache_put(object_key, zip_data, current_hash)` 传入 hash
 
-### Phase 1: 数据模型 + API 基础
-- [x] Task 1: DB schema 迁移 — devops_pipeline_scene 新增 linked_repos 列
-- [x] Task 2: pipeline_config.py 查询/创建/更新 linked_repos
-- [x] Task 3: scenes.py Request 模型 + CRUD 路由 + 高级选项 API
+### Step 5: 测试（tests/test_skill_sync_obs.py）
+- 缓存命中 + hash 一致 → 走缓存快路径
+- 缓存命中 + hash 变更 → 回源 OBS
+- mem_cache_put/get hash 存取
+- zip_cache_put/get hash 存取
 
-### Phase 2: A2A + Runtime 扩展
-- [x] Task 4: webhook.py / event_pipeline.py — A2A dispatch 注入 linked_repos
-- [x] Task 5: repogit.py — 多 repo_key bare mirror + worktree 支持
-- [x] Task 6: agent.py — coding agent 多仓库 worktree 初始化
-
-### Phase 3: 前端 + 测试
-- [x] Task 7: 前端场景详情页关联仓库配置 UI
-- [x] Task 8: 测试覆盖
-
-### Checkpoint: Complete
-- [x] 所有测试通过
-- [x] 自审查通过
-- [x] PR 创建
-
-## Risks and Mitigations
-
-| Risk | Impact | Mitigation |
-|------|--------|------------|
-| 多仓库并行操作资源开销 | Med | 限制关联仓库数量上限（5 个） |
-| 关联仓库 token 权限不足 | Med | A2A 前校验，不足时标注跳过 |
-| DB schema 变更兼容性 | Low | linked_repos 为新增可空字段，向后兼容 |
+## 设计决策
+- **向后兼容**：content_hash 参数默认空串，旧调用方不传仍可工作（hash="" 不校验）
+- **校验范围**：仅 official scope 校验（custom/repo 无 DB hash 同步机制，且 upload/convert 已主动 invalidate）
+- **性能**：hash 一致时仅多一次 DB 查询（单行主键查询，<1ms），不回源 OBS

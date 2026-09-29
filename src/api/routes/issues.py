@@ -27,7 +27,15 @@ router = APIRouter(prefix="/api/issues", tags=["issues"])
 # ===================== 辅助 =====================
 
 def _num_from_issue_id(issue_id: str) -> str:
-    m = re.search(r"(\d+)", str(issue_id or ""))
+    """从 issue_id 提取编号。
+
+    Issue #252: #pr_ 前缀的 PR 订阅伪 ID 不参与 issue 事件分组
+    （它们由 _query_pr_subscription_events 独立处理，不应混入同编号的 issue 分组）。
+    """
+    _raw = str(issue_id or "")
+    if _raw.startswith("#pr_"):
+        return ""
+    m = re.search(r"(\d+)", _raw)
     return m.group(1) if m else ""
 
 
@@ -227,8 +235,12 @@ def _task_status_map(repo_keys: list[str]) -> dict:
 
 
 def _group_events_by_issue(repo_keys: list[str]) -> dict:
-    """仓库内 issue_id → events 列表（seq 升序），带时间格式化 + 结构化产出（weekly-05）。"""
-    import json as _json
+    """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
+
+    Issue #252: 排除 entity_type='pull_request' 的事件，PR 事件不混入 issue 展示
+    （编号相同时 PR 事件与 issue 事件分离，避免关联混淆）。
+    向后兼容：旧事件无 entity_type（空串），视为 issue 事件正常分组。
+    """
     from src.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
@@ -240,13 +252,18 @@ def _group_events_by_issue(repo_keys: list[str]) -> dict:
             _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill"
                     + (", structured_output, agent_logs" if _has_so else ""))
             c.execute(
-                f"{_sel} FROM events WHERE repo_key IN ({placeholders}) AND issue_id!='' ORDER BY seq ASC",
+                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, entity_type "
+                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!='' ORDER BY seq ASC",
                 repo_keys)
             rows = c.fetchall()
         except Exception:
             rows = []
     for r in rows:
         iid = r[1]
+        _entity_type = r[9] if len(r) > 9 else ""
+        # Issue #252: PR 事件不混入 issue 分组
+        if _entity_type == "pull_request":
+            continue
         n = _num_from_issue_id(iid)
         if not n:
             continue

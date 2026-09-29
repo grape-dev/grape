@@ -218,7 +218,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
 
     归属校验：只允许更新当前凭据名下的 runtime（credential_id 匹配），
     防止已吊销设备的旧 runtime id 被其它 active 凭据的心跳刷回 online
-    （revoke 只置 offline，不删行；无校验则吊销的设备行会被残留 agent 复活）。
+    （revoke 物理删除 agent_runtimes 行；无校验则吊销的设备行会被残留 agent 复活）。
 
     响应携带 cancelled_tasks 列表——worker 收到后立即杀引擎进程，
     实现任务取消实时感知（延迟 15 秒，覆盖 step 很长时 report_messages 410 不触发的场景）。

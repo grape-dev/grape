@@ -124,11 +124,14 @@ def _task_insert_row(_cols, **kw):
 
 
 def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
-                        skill_path, engine_id, evt, issue_id="", skill_id=0):
-    """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。"""
+                        skill_path, engine_id, evt, issue_id="", skill_id=0,
+                        skip_event_config=False):
+    """direct 执行前创建 agent_tasks + 设 started_at，防 sweeper 误杀。
+
+    skip_event_config=True 时跳过 update_event_config（autopilot 场景：不写 events 表）。
+    """
     from src.runtime.service import _TASK_COLUMNS_LIST
     from src.api.session_store import get_or_create_agent_session
-    from src.api.event_store import update_event_config
     from src.runtime.instances import runtime_instance_name
     from datetime import datetime, timezone
 
@@ -136,7 +139,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     now = datetime.now(timezone.utc).isoformat()
 
     # 先设 started_at/runtime/skill，让 sweeper 的 no_start 检查跳过
-    update_event_config(seq, inst_name, skill_name, now)
+    # autopilot 不写 events 表，跳过这步
+    if not skip_event_config:
+        from src.api.event_store import update_event_config
+        update_event_config(seq, inst_name, skill_name, now)
 
     # 查 agent_session_id
     session = get_or_create_agent_session(repo_key, agent_type, backend or "")
@@ -184,7 +190,8 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
-            status="queued", exit_code=None, result_text="", errors="", stderr="",
+            status="queued", stream_ended=0, self_reported=0,
+            exit_code=None, result_text="", errors="", stderr="",
             usage_json="{}", started_at=now, completed_at=None, created_at=now,
             user_gitcode_token="")
         with db_lock:
@@ -275,7 +282,8 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",
-            status="failed", exit_code=1, result_text="", errors=_reason, stderr="",
+            status="failed", stream_ended=1, self_reported=0,
+            exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
             user_gitcode_token="")
         with db_lock:
@@ -435,17 +443,29 @@ def resolve_issue_id(payload: dict) -> str:
 def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") -> str:
     """从 PR 事件 payload 解析关联的 Issue 编号。
     优先级：payload 标题 #N → 分支名 issue-N → 同步调 PR 详情 API。
+
+    Issue #252: 当 issue 与 PR 编号相同时，通过 entity_type 区分——
+    从文本提取编号时检查 URL 路径：/pulls/N 是 PR 自引用（跳过），/issues/N 是关联 Issue（采用）。
     """
     import re, json, urllib.request
-    from src.api.event_store import _extract_issue_id_from_text
+    from src.api.event_store import _extract_issue_id_from_text, _extract_entity_type_from_text
 
-    # 1. 从 object_attributes / pull_request 的 title 提取 #N
+    # PR 自身编号（用于自引用检测）
     obj = payload.get("object_attributes", {}) or {}
     pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
+    _pr_self_num = str(obj.get("iid", obj.get("number", "")) or pr_obj.get("number", "")).lstrip("#")
+
+    # 1. 从 object_attributes / pull_request 的 title 提取 #N
     title = obj.get("title", "") or pr_obj.get("title", "")
     issue = _extract_issue_id_from_text(title)
     if issue:
-        return issue
+        _et = _extract_entity_type_from_text(title)
+        _issue_num = issue.lstrip("#")
+        # Issue #252: 跳过 PR 自引用（编号==PR自身编号 + URL路径为 /pulls/）
+        if _et == "pull_request" and _issue_num == _pr_self_num:
+            pass  # 自引用，继续找下一个
+        else:
+            return issue
 
     # 1.5 从 payload.issues 关联列表提取（GitCode pull_request_* 直接给出关联 Issue）
     issues = payload.get("issues")
@@ -483,9 +503,16 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") 
                 req = urllib.request.Request(url, headers=hdrs)
                 data = json.loads(urllib.request.urlopen(req, timeout=10).read())
                 # title / head.ref
-                issue = _extract_issue_id_from_text(str(data.get("title", "")))
+                _api_title = str(data.get("title", ""))
+                issue = _extract_issue_id_from_text(_api_title)
                 if issue:
-                    return issue
+                    _et = _extract_entity_type_from_text(_api_title)
+                    _issue_num = issue.lstrip("#")
+                    # Issue #252: 跳过 PR 自引用
+                    if _et == "pull_request" and _issue_num == _pr_self_num:
+                        pass
+                    else:
+                        return issue
                 head = data.get("head", {}) or {}
                 m = re.search(r'issue[-_](\d+)', str(head.get("ref", "")))
                 if m and m.group(1) != "0":
@@ -677,6 +704,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             summary=f"PR 订阅并行: scene={scene_id} → qa",
             payload=evt.get("payload", {}), status="running",
             scene_id=scene_id,
+            entity_type="pull_request",
         )
         log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
         # 分派执行：跟主场景 run_pipeline 一致的判断逻辑
@@ -906,12 +934,15 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
                 pass
         if not _sub_title:
             _sub_title = f"A2A (订阅): {agent_type}"
+        # Issue #252: 订阅事件继承原事件实体类型
+        _sub_entity_type = "pull_request" if event_type in PR_EVENT_TYPES else ("issue" if event_type in ISSUE_EVENT_TYPES else "")
         seq = append_event(
             repo_key=repo_key, event_type="a2a_event",
             title=_sub_title, issue_id=issue_id, source="a2a",
             agent_type=agent_type, actor=evt.get("actor", ""),
             summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
             payload=evt.get("payload", {}), status="running",
+            entity_type=_sub_entity_type,
         )
         log.info(f"Pipeline subscription: event created seq={seq} agent={agent_type}")
         # 执行分派
@@ -1479,6 +1510,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         summary = title or event_type
     log.info(f"Pipeline: summary={summary}")
 
+    # Issue #252: 实体类型区分（issue vs pull_request），编号相同时不混淆
+    _entity_type = "pull_request" if event_type in PR_EVENT_TYPES else ("issue" if event_type in ISSUE_EVENT_TYPES else "")
+
     # 5.1+6 去重检查 + 写入事件（合并到同一个 db_lock 临界区，消除竞态窗口）
     # 原因：GitHub 对同一 Issue 创建会发多个 webhook（opened/assigned/labeled 等），
     # 如果 action 不细分会导致同一 issue 产生重复任务。
@@ -1506,9 +1540,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     return result
                 # dedup 通过 → 直接 INSERT（不再调 append_event 函数，避免重复加锁开销）
                 _dc.execute(
-                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (repo_key, issue_id or "#0", event_type, source, agent_type, title, actor, summary,
-                     json.dumps(payload or {}), "running", "", _scene_id_for_event)
+                     json.dumps(payload or {}), "running", "", _scene_id_for_event, _entity_type)
                 )
                 db.commit()
                 _seq = _dc.lastrowid or 0
@@ -1534,6 +1568,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             payload=payload,
             status="running",
             scene_id=_scene_id_for_event,
+            entity_type=_entity_type,
         )
     seq = _seq
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
@@ -3378,6 +3413,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         payload={"repository": evt.get("repository", ""), "issue_number": _issue_num,
                  "context": "智能推荐完成，重派 VOD 执行完整工作流"},
         status="running",
+        entity_type="issue",
     )
     log.info(f"智能推荐重派: event created, seq={seq}")
 

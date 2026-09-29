@@ -1422,11 +1422,11 @@ class ApplySceneRequest(BaseModel):
 
 def _validate_scene_engine_ids(nodes: list, repo_key: str):
     """校验场景 nodes 的 engine_runtime_ids：
-    1. 引擎 ID 必须存在
+    1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
     3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
 
-    校验失败抛 HTTPException(400)。
+    校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
     from src.session_manager import db, db_lock
     from src.repo_key import from_repo_key
@@ -1452,9 +1452,9 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str):
                     "WHERE r.id=?", (_eid,))
                 row = c.fetchone()
             if not row:
-                raise HTTPException(status_code=400, detail={
-                    "code": 400,
-                    "message": f"节点 {tag} 的引擎 ID {_eid} 不存在"})
+                # Issue #250: 失效 runtime_id 优雅降级——跳过而非 400
+                log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
+                continue
             _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
             # scope=repo 时校验仓库归属
             if _scope == "repo" and _cred_id > 0:

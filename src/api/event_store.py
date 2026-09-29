@@ -35,16 +35,36 @@ def _extract_issue_id_from_text(text: str) -> str:
     return ""
 
 
+def _extract_entity_type_from_text(text: str) -> str:
+    """从文本中提取实体类型（issue vs pull_request）。
+
+    根据 URL 路径区分：/issues/N → "issue"，/pulls/N 或 /merge_requests/N → "pull_request"。
+    仅 #N 格式（无 URL 路径）返回 ""（未知，默认按 issue 处理）。
+    """
+    if not text:
+        return ""
+    import re
+    m = re.search(r'/issues/(\d+)', text)
+    if m:
+        return "issue"
+    m = re.search(r'/(?:pulls|merge_requests)/(\d+)', text)
+    if m:
+        return "pull_request"
+    return ""
+
+
 def append_event(repo_key: str, event_type: str, title: str = "",
                  issue_id: str = "", agent_type: str = "", source: str = "gitcode",
                  actor: str = "", summary: str = "",
                  payload: dict = None, status: str = "completed",
-                 result: str = "", scene_id: str = "") -> int:
+                 result: str = "", scene_id: str = "",
+                 entity_type: str = "") -> int:
     """写入事件到 events 表，返回 seq。result 为 Agent 答复结论（纯文本）。
 
     issue_id 保证非空：传入为空时按 payload → result → title/summary 顺序兜底解析，
     仍无法解析则用 #0 表示"无关联"。
     scene_id: PR 订阅等场景级事件持久化场景ID，空字符串表示无关联场景。
+    entity_type: 实体类型（"issue" / "pull_request"），区分编号相同的 issue 与 PR。
     """
     # 兜底解析 issue_id
     if not issue_id:
@@ -70,9 +90,9 @@ def append_event(repo_key: str, event_type: str, title: str = "",
         c = db.cursor()
         try:
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-                 json.dumps(payload or {}), status, result, scene_id)
+                 json.dumps(payload or {}), status, result, scene_id, entity_type)
             )
             db.commit()
             _seq = c.lastrowid
