@@ -416,14 +416,14 @@ async def sync_official_scenes():
                 with db_lock:
                     c = db.cursor()
                     c.execute(
-                        "SELECT id, version, content_hash FROM scene_market "
+                        "SELECT id, version, content_hash, is_active, is_featured FROM scene_market "
                         "WHERE name=? AND source='official' LIMIT 1",
                         (name,),
                     )
                     row = c.fetchone()
 
                     if row:
-                        scene_id, old_version, old_hash = row
+                        scene_id, old_version, old_hash, preserved_active, preserved_featured = row
                         if old_hash == content_hash:
                             stats["skipped"] += 1
                             continue
@@ -436,17 +436,18 @@ async def sync_official_scenes():
                             )
 
                         # 先 UPDATE 不带 icon（icon 等 OBS 上传后单独 UPDATE）
+                        # 保留 admin 设置的 is_active/is_featured，不从仓库覆盖
                         c.execute(
                             "UPDATE scene_market SET "
                             "display_name=?, version=?, description=?, market_description=?, "
                             "category_id=?, recommended_template=?, nodes_json=?, "
                             "onboarding=?, tags=?, author=?, content_hash=?, preset_custom_fields=?, "
-                            "is_active=1, updated_at=datetime('now') "
+                            "is_active=?, updated_at=datetime('now') "
                             "WHERE id=?",
                             (display_name, version, description, market_desc,
                              category_id, recommended_template, nodes_json,
                              onboarding, tags_str, author, content_hash,
-                             preset_custom_fields, scene_id),
+                             preset_custom_fields, preserved_active if preserved_active is not None else 1, scene_id),
                         )
                         db.commit()
                         market_id = scene_id
