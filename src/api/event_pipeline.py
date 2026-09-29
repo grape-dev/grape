@@ -252,7 +252,13 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
 
     # env_extra
     repository = evt.get("repository", "")
-    env_extra = {"REPO_FULL_NAME": repository, "ACCOUNT": evt.get("account") or repository}
+    from src.repo_key import split_owner_repo as _sor
+    _owner, _repo_name = _sor(repository)
+    env_extra = {
+        "REPO_FULL_NAME": repository,
+        "ACCOUNT": (evt.get("account") or _owner).split("/")[0],
+        "REPO_NAME": _repo_name,
+    }
 
     # repo_gitcode_token（按 provider 分流）
     repo_gitcode_token = ""
@@ -986,11 +992,12 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     repo_key = repo_key_override or f"{source}:{evt['repository']}"
     # 统一 repo_key：带平台前缀贯穿（gitcode:owner/repo），与 DB 内部一致
-    from src.repo_key import to_repo_key
+    from src.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
-    # account 兜底用仓库全名（无 default 概念）
+    # account 兜底用仓库 owner 段（无 default 概念；避免全名作为 ACCOUNT）
     if not account and evt.get("repository"):
-        evt["account"] = evt["repository"]
+        _o_acc, _ = split_owner_repo(evt["repository"])
+        evt["account"] = _o_acc
     event_type = evt.get("type", "unknown")
 
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
@@ -2006,9 +2013,12 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         return
 
     from src.prompt_builder import _resolve_server_url
+    from src.repo_key import split_owner_repo as _sor2
+    _owner2, _repo_name2 = _sor2(repository)
     env_extra = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": evt.get("account") or repository,
+        "ACCOUNT": (evt.get("account") or _owner2).split("/")[0],
+        "REPO_NAME": _repo_name2,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
@@ -2682,7 +2692,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     agent_logs = []
     env_extra = {
         "REPO_FULL_NAME": repository,
-        "ACCOUNT": exec_account,
+        "ACCOUNT": (exec_account or repository).split("/")[0],
+        "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     try:

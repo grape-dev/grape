@@ -27,8 +27,9 @@ GitCode 事件（Issue/PR/评论）
 | `GRAPE_SERVER_URL` | Grape 服务端地址（skill 调 API 用） | 全部 | `_execute_agent` / agent.py 本机修正 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
-| `REPO_FULL_NAME` | `owner/repo` 仓库全名 | 全部（devops 事件） | `_execute_agent` |
-| `ACCOUNT` | 仓库所属账号 | 全部 | `_execute_agent` |
+| `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义） | 全部（devops 事件） | `_execute_agent` |
+| `ACCOUNT` | **仓库属主（owner，如 `Jason7602`）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
+| `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent` |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
