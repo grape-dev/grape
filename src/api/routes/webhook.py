@@ -191,6 +191,10 @@ def _authorize_a2a(request: Request, repo_key: str):
     - bot token：仓库级（managed_repos / devops_agent_session），支持远端 worker；
     - 会话 token（GRAPE_SESSION_TOKEN，M2）：校验 repo_key 匹配——该仓库执行期 agent 凭据。
     仅当仓库已托管（有 bot token）才严格校验 bot；未托管仓库允许会话 token 或交由后续校验。
+
+    关联仓库信任域（Issue #15 修复）：会话 token 绑定的仓库与目标仓库若属于同一 Issue
+    场景的关联仓库集合（GRAPE_LINKED_REPOS），或两仓 bot token 相同（同一运维主体），
+    则放行——打通 QA→coding(关联仓库) 的审查-修复闭环。
     """
     _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not _auth:
@@ -199,13 +203,49 @@ def _authorize_a2a(request: Request, repo_key: str):
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
     from src.user.db import get_repo_bot_token_no_global
-    from src.api.auth_token import verify_session_token_for_repo
+    from src.api.auth_token import verify_session_token
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
-    _session_ok = bool(verify_session_token_for_repo(_auth, repo_key))
+    _session_info = verify_session_token(_auth)
+    _session_ok = bool(_session_info) and _session_info.get("repo_key") == repo_key
     if _bot_ok or _session_ok:
         log.info(f"A2A: token OK (bot={_bot_ok}, session={_session_ok}) repo={repo_key}")
         return
+    # 关联仓库信任域：会话 token 的仓库与目标仓库属于同一场景关联集合 → 放行
+    if _session_info and _session_info.get("repo_key"):
+        _session_repo = _session_info["repo_key"]
+        if _session_repo != repo_key:
+            # 检查 1: 两仓 bot token 相同（同一运维主体）
+            _session_bot_token = get_repo_bot_token_no_global(_session_repo) or ""
+            if _session_bot_token and _session_bot_token == _expected:
+                log.info(f"A2A: trust domain (same bot token) session_repo={_session_repo} → target_repo={repo_key}")
+                return
+            # 检查 2: 目标仓库是会话仓库的关联仓库（查场景 linked_repos）
+            try:
+                from src.session_manager import db, db_lock
+                import json as _json
+                with db_lock:
+                    c = db.cursor()
+                    # 查会话仓库的所有场景的 linked_repos
+                    c.execute(
+                        "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+                        "WHERE repo_key=? AND is_active=1", (_session_repo,))
+                    for row in c.fetchall():
+                        _lr = row[0] or ""
+                        _adv = row[1] or ""
+                        for _lr_str in (_lr, _json.loads(_adv).get("linked_repos", "[]") if _adv else "[]"):
+                            if not _lr_str:
+                                continue
+                            try:
+                                _lr_list = _json.loads(_lr_str) if isinstance(_lr_str, str) else _lr_str
+                            except Exception:
+                                continue
+                            for _lr_item in (_lr_list or []):
+                                if isinstance(_lr_item, dict) and _lr_item.get("repo_key") == repo_key:
+                                    log.info(f"A2A: trust domain (linked repo) session_repo={_session_repo} → target_repo={repo_key}")
+                                    return
+            except Exception as _le:
+                log.warning(f"A2A: linked repo trust check failed: {_le}")
     if not _expected:
         log.warning(f"A2A: repo not managed (no bot token) & no matching session token, defer to downstream: {repo_key}")
         return
