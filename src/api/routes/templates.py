@@ -159,7 +159,7 @@ async def create_from_template(body: CreateTemplateRequest,
 
     # 按 provider 分流：优先 GitHub token，降级 GitCode
     from src.api.routes.repos import _get_user_provider_and_token
-    provider, api_token = _get_user_provider_and_token(user["username"])
+    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 

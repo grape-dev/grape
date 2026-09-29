@@ -39,7 +39,7 @@ def _load_scenes() -> dict:
 
 
 @router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
-def list_scenes(user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
+def list_scenes(user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
     repo_key = ""
@@ -106,6 +106,9 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "description": s.get("description") or "",
                        "work_branch": s.get("work_branch") or "main",
                        "created_by": s.get("created_by") or "",
+                       "scene_type": s.get("scene_type") or "standard",
+                       "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
+                       "linked_repos": s.get("linked_repos") or [],
                        "pipeline": cfg})
     return {"scenes": result}
 
@@ -214,6 +217,16 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
             "repo_count": repo_count_map.get(s["id"], 0),
             "scope": s.get("scope", "official"),
         })
+    # 精选场景按 admin 管理台设置的顺序排列
+    if featured_only and result:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("scene")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                result.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"scenes": result, "total": total, "page": page, "page_size": page_size}
 
 
@@ -329,6 +342,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
         "recommended_template": scene["recommended_template"],
         "scope": scene.get("scope", "official"),
         "nodes_raw": nodes,
+        "preset_custom_fields": scene.get("preset_custom_fields", "[]"),
     }
 
 
@@ -469,6 +483,12 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
                 log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={db_id}, rowcount={c.rowcount}")
         except Exception as _e:
             log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
+
+    # 合并预置自定义参数（Issue #246）：仅追加缺失项，不覆盖用户已有配置
+    try:
+        _merge_preset_custom_fields(scene_id, repo_key, scene.get("preset_custom_fields", "[]"))
+    except Exception as _e:
+        log.warning(f"apply_market_scene: merge preset custom fields failed: {_e}")
 
     log.info(f"Market scene applied: market_id={market_id}, scene_id={scene_id}, repo={repo_key}")
     return {"message": f"场景 '{scene['display_name']}' 已创建", "scene_id": scene_id}
@@ -953,6 +973,7 @@ class CreateMarketSceneRequest(BaseModel):
     file_id: int = 0  # uploaded_files 表 id（图标临时文件）
     category_id: int = 1
     recommended_template: str = ""
+    linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
 
 @router.post("/market", operation_id="scenes_market_create", summary="Create market scene", description="Creates a user custom scene in scene_market. scope=repo: repo scene visible to all repo users.")
@@ -1046,6 +1067,7 @@ class UpdateMarketSceneRequest(BaseModel):
     file_id: int = 0  # 新上传的图标临时文件 id（0=未更换图标）
     category_id: int = 0
     recommended_template: str = ""
+    linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
 
 @router.put("/market/{market_id}", operation_id="scenes_market_update", summary="Update market scene", description="Updates a custom market scene (scope != official).")
@@ -1291,8 +1313,8 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (local): {e}")
 
 
-@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info.")
-def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_token)):
+@router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
+def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）"""
     from src.api.pipeline_config import get_pipeline_config
     from src.repo_key import to_repo_key
@@ -1306,7 +1328,9 @@ def get_scene_detail(scene_id: str, user: dict = Depends(require_no_session_toke
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
-    return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"], "onboarding": cfg.get("onboarding", "")}
+    return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"],
+            "onboarding": cfg.get("onboarding", ""),
+            "scene_type": cfg.get("scene_type", "standard")}
 
 
 @router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
@@ -1380,12 +1404,17 @@ class CreateSceneRequest(BaseModel):
     scope: str = "repo"  # repo
     nodes: list[SceneNodeInput] = []
     icon: str = ""
+    scene_type: str = "standard"  # deprecated, 保留向后兼容
+    pr_subscription_enabled: bool = False
+    linked_repos: list = []  # [{repo_key, branch}] 关联仓库（跨仓库协同开发）
 
 class UpdateSceneRequest(BaseModel):
     name: str | None = None
     description: str | None = None
     nodes: list[SceneNodeInput] = []
     icon: str | None = None
+    pr_subscription_enabled: bool | None = None
+    linked_repos: list | None = None  # None=不更新；[] = 清空关联仓库
 
 class ApplySceneRequest(BaseModel):
     scene_id: str
@@ -1393,11 +1422,11 @@ class ApplySceneRequest(BaseModel):
 
 def _validate_scene_engine_ids(nodes: list, repo_key: str):
     """校验场景 nodes 的 engine_runtime_ids：
-    1. 引擎 ID 必须存在
+    1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
     3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
 
-    校验失败抛 HTTPException(400)。
+    校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
     from src.session_manager import db, db_lock
     from src.repo_key import from_repo_key
@@ -1423,9 +1452,9 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str):
                     "WHERE r.id=?", (_eid,))
                 row = c.fetchone()
             if not row:
-                raise HTTPException(status_code=400, detail={
-                    "code": 400,
-                    "message": f"节点 {tag} 的引擎 ID {_eid} 不存在"})
+                # Issue #250: 失效 runtime_id 优雅降级——跳过而非 400
+                log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
+                continue
             _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
             # scope=repo 时校验仓库归属
             if _scope == "repo" and _cred_id > 0:
@@ -1475,13 +1504,22 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
     _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key)
 
+    # PR 订阅开启时校验：QA 节点必须启用且有 skill
+    if body.pr_subscription_enabled:
+        qa_node = next((n for n in body.nodes if n.tag == "qa"), None)
+        if not qa_node or not qa_node.enabled or not qa_node.skill:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
+
     scene_id = body.scene_id or str(uuid.uuid4())
 
     try:
         db_id = create_custom_scene(
             scene_id=scene_id, name=body.name, description=body.description,
             repo_key=repo_key, nodes=nodes_json, created_by=user.get("username") or "",
-            icon=body.icon or "")
+            icon=body.icon or "", scene_type="standard",
+            pr_subscription_enabled=1 if body.pr_subscription_enabled else 0,
+            linked_repos=body.linked_repos or [])
     except Exception as e:
         err_upper = str(e).upper()
         if "UNIQUE" in err_upper or "DUPLICATE" in err_upper:
@@ -1516,9 +1554,32 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
     nodes_json = [n.model_dump() for n in body.nodes]
     if repo_key:
         _validate_scene_engine_ids(nodes_json, repo_key)
+
+    # PR 订阅开启时校验：QA 节点必须启用且有 skill
+    _pr_sub_on = body.pr_subscription_enabled
+    if _pr_sub_on is None:
+        _pr_sub_on = bool(existing.get("pr_subscription_enabled", 0))
+    if _pr_sub_on:
+        # body.nodes 为空时从数据库已有场景查 QA 节点
+        _check_nodes = body.nodes if body.nodes else existing.get("nodes", [])
+        qa_node = next((n for n in _check_nodes if getattr(n, 'tag', n.get('tag') if isinstance(n, dict) else '') == "qa"), None)
+        if qa_node:
+            _qa_enabled = getattr(qa_node, 'enabled', True) if not isinstance(qa_node, dict) else qa_node.get("enabled", True)
+            _qa_skill = getattr(qa_node, 'skill', '') if not isinstance(qa_node, dict) else qa_node.get("skill", "")
+        else:
+            _qa_enabled = False
+            _qa_skill = ""
+        if not _qa_enabled or not _qa_skill:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "message": "开启 PR 订阅需要先配置 QA Agent 并启用技能"})
+
+    # body.nodes 为空时不覆盖已有 nodes（只更新 pr_subscription_enabled 等字段）
+    _update_nodes = nodes_json if body.nodes else existing.get("nodes", [])
     update_custom_scene(
-        scene_id=scene_id, repo_key=repo_key, nodes=nodes_json,
-        name=body.name, description=body.description, icon=body.icon)
+        scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
+        name=body.name, description=body.description, icon=body.icon,
+        pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None,
+        linked_repos=body.linked_repos)
 
     log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
     return {"message": "场景更新成功"}
@@ -1555,7 +1616,7 @@ def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), 
 def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                       user: dict = Depends(require_no_session_token)):
     """为仓库应用指定场景"""
-    from src.api.pipeline_config import get_pipeline_config
+    from src.api.pipeline_config import get_pipeline_config, _query_scene_by_id
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
     from src.user.db import get_bot_token_by_repo
@@ -1641,11 +1702,68 @@ def app_current_repo():
     return None
 
 
-# ===== 场景高级选项：工作分支 + 自定义 key:value =====
+# ===== 场景高级选项：工作分支 + 自定义 {name, value, is_secret} =====
+
+def _merge_preset_custom_fields(scene_id: str, repo_key: str, preset_json: str = "[]") -> None:
+    """将场景预置自定义参数声明合并到 devops_pipeline_scene.advanced_options（Issue #246）。
+
+    - preset 声明来自 scene_market.preset_custom_fields（scene.json custom_fields 数组）
+    - 仅在 custom_fields 中不存在同名项时追加（不覆盖用户已有配置）
+    - preset 项标注 preset=true，preyset 声明持久化为 advanced_options.preset_custom_fields
+    """
+    import json as _j
+    from src.session_manager import db, db_lock
+    from src.scene_custom_env import normalize_custom_field
+
+    try:
+        preset_decls = _j.loads(preset_json) if preset_json else []
+    except Exception:
+        preset_decls = []
+    if not preset_decls:
+        return
+
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT advanced_options FROM devops_pipeline_scene "
+            "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+            (scene_id, repo_key))
+        row = c.fetchone()
+    opts = _j.loads(row[0]) if (row and row[0]) else {}
+
+    existing = {(f.get("name") or "").strip() for f in (opts.get("custom_fields", []) or [])}
+    _normalized_presets = []
+    appended = 0
+    for _p in preset_decls:
+        _pf = normalize_custom_field(_p)
+        _pf["preset"] = True
+        _pf["value"] = _pf.get("default_value", "")
+        _normalized_presets.append(_pf)
+        if not _pf.get("name") or _pf["name"] in existing:
+            continue
+        opts.setdefault("custom_fields", []).append(_pf)
+        existing.add(_pf["name"])
+        appended += 1
+    # 声明持久化，供 preset 变更/重启用
+    opts["preset_custom_fields"] = preset_decls
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE devops_pipeline_scene SET advanced_options=?, updated_at=? "
+            "WHERE scene_id=? AND repo_key=? AND is_active=1",
+            (_j.dumps(opts, ensure_ascii=False), now, scene_id, repo_key))
+        db.commit()
+    if appended:
+        log.info(f"merge_preset_custom_fields: scene={scene_id} repo={repo_key} appended={appended}")
+
 
 class AdvancedOptionsRequest(BaseModel):
     work_branch: str = "main"
-    custom_fields: list = []   # [{key: str, value: str}]
+    custom_fields: list = []   # [{name: str, value: str, is_secret: bool?, scope?: list}]
+    linked_repos: list = []    # [{repo_key: str, branch: str}] — Issue #242
 
 
 @router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
@@ -1677,11 +1795,36 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             opts = _json.loads(row[0])
         except Exception:
             opts = {}
+        from src.scene_custom_env import normalize_custom_field
+        _fields = []
+        for f in (opts.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(f)
+            if not _nf.get("name"):
+                continue
+            # preset 项：scope/is_secret/preset 锁定展示；value 正常返回（前端按 is_secret 掩码）
+            _fields.append({
+                "name": _nf["name"],
+                "value": _nf.get("value", ""),
+                "is_secret": _nf.get("is_secret", False),
+                "scope": _nf.get("scope", ["all"]),
+                "preset": _nf.get("preset", False),
+                "description": _nf.get("description", ""),
+            })
         return {
             "work_branch": opts.get("work_branch", "main") or "main",
-            "custom_fields": opts.get("custom_fields", []) or [],
+            "custom_fields": _fields,
+            "linked_repos": opts.get("linked_repos", []) or [],
         }
-    return {"work_branch": "main", "custom_fields": []}
+    # linked_repos 也可能存在独立列中（create_scene 直接写入）
+    _linked_repos = []
+    try:
+        from src.api.pipeline_config import _query_scene_by_id
+        _scene = _query_scene_by_id(scene_id, repo_key=repo_key)
+        if _scene:
+            _linked_repos = _scene.get("linked_repos") or []
+    except Exception:
+        pass
+    return {"work_branch": "main", "custom_fields": [], "linked_repos": _linked_repos}
 
 
 @router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
@@ -1709,22 +1852,137 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
     if not existing:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
-    # 校验 custom_fields key 非空且不重复
-    seen_keys = set()
+    # 校验 custom_fields name 非空/大写/保留冲突且不重复
+    from src.scene_custom_env import custom_env_error, normalize_custom_field
+    seen_names = set()
     for f in (body.custom_fields or []):
-        _k = (f.get("key") or "").strip() if isinstance(f, dict) else ""
-        if not _k:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "配置项 key 不能为空"})
-        if _k in seen_keys:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 key '{_k}' 重复"})
-        seen_keys.add(_k)
+        _n = (f.get("name") or "").strip() if isinstance(f, dict) else ""
+        _err = custom_env_error(_n)
+        if _err:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": _err})
+        if _n in seen_names:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"配置项 name '{_n}' 重复"})
+        seen_names.add(_n)
+        # scope 校验：数组内每项必须为合法枚举；全部非法 → 400（部分非法在 normalize 时剔除）
+        _raw_scope = f.get("scope") if isinstance(f, dict) else None
+        if _raw_scope:
+            from src.scene_custom_env import _SCOPE_SET
+            _items = _raw_scope if isinstance(_raw_scope, (list, tuple, set)) else [_raw_scope]
+            _valid_items = {(str(x) or "").strip().lower() for x in _items if x not in (None, "")}
+            if _valid_items and not (_valid_items & _SCOPE_SET):
+                raise HTTPException(
+                    status_code=400,
+                    detail={"code": 400, "message": f"配置项 '{_n}' 的 scope 非法，可选值: all/vod/issue/coding/qa/sre"})
+
+    # 校验 linked_repos 格式：[{repo_key, branch}]，上限 5 个
+    _linked_repos = []
+    for lr in (getattr(body, 'linked_repos', None) or []):
+        if not isinstance(lr, dict):
+            continue
+        _rk = (lr.get("repo_key") or "").strip()
+        _br = (lr.get("branch") or "").strip()
+        if _rk:
+            _linked_repos.append({"repo_key": _rk, "branch": _br or "main"})
+    if len(_linked_repos) > 5:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "关联仓库数量不能超过 5 个"})
+
+    _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
+    _custom_fields = [f for f in _custom_fields if f.get("name")]
+    # 读库内现有 advanced_options（preset 声明 + 既有值），预置参数保护
+    from src.scene_custom_env import normalize_scope as _normalize_scope
+    _old_ao = {}
+    _old_cf_map = {}      # name -> 完整旧项
+    _preset_decl_map = {} # name -> preset 声明（preset_custom_fields 来源）
+    try:
+        with db_lock:
+            _c2 = db.cursor()
+            _c2.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            _row2 = _c2.fetchone()
+        if _row2 and _row2[0]:
+            _old_ao = _json.loads(_row2[0]) or {}
+        for _f in (_old_ao.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(_f)
+            if _nf.get("name"):
+                _old_cf_map[_nf["name"]] = _nf
+        # preset 声明：优先库内 preset_custom_fields，其次 custom_fields 里的 preset:true 项
+        for _pf in (_old_ao.get("preset_custom_fields", []) or []):
+            _pf = normalize_custom_field(_pf) if isinstance(_pf, dict) else {}
+            if _pf.get("name"):
+                _pf["preset"] = True
+                _preset_decl_map[_pf["name"]] = _pf
+        for _f in (_old_ao.get("custom_fields", []) or []):
+            _nf = normalize_custom_field(_f)
+            if _nf.get("preset") and _nf.get("name") and _nf["name"] not in _preset_decl_map:
+                _nf["preset"] = True
+                _preset_decl_map[_nf["name"]] = _nf
+    except Exception:
+        pass
+
+    # 前端掩码回显（value=********）→ keep_value 标记：value 视为未修改，保留旧值（不受 is_secret 限制）
+    if _custom_fields:
+        try:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT advanced_options FROM devops_pipeline_scene "
+                    "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                    (scene_id, repo_key))
+                _row = _c.fetchone()
+            _old = _json.loads(_row[0]) if (_row and _row[0]) else {}
+            _old_map = {f.get("name"): f.get("value", "") for f in (_old.get("custom_fields", []) or []) if f.get("name")}
+            _keep_map = {
+                (f.get("name") or "").strip()
+                for f in (body.custom_fields or []) if isinstance(f, dict) and f.get("keep_value")
+            }
+            for _f in _custom_fields:
+                # keep_value（掩码未改）或 secret 空值（清空无效）→ 保留旧值
+                if ((_f["name"] in _keep_map)
+                        or (_f.get("is_secret") and not _f.get("value"))) \
+                        and _f["name"] in _old_map:
+                    _f["value"] = _old_map[_f["name"]]
+        except Exception:
+            pass
+
+    # ── preset 保护：合并声明、锁定字段、禁止丢失 ──
+    # 1) 库内 preset 声明全部保留（前端未提交也不能删）
+    for _pname, _pdecl in _preset_decl_map.items():
+        if _pname not in {f.get("name") for f in _custom_fields}:
+            _existing = _old_cf_map.get(_pname)
+            _custom_fields.append({
+                "name": _pname,
+                "value": (_existing.get("value", "") if _existing else _pdecl.get("default_value", "")),
+                "is_secret": _pdecl.get("is_secret", False),
+                "scope": _pdecl.get("scope", ["all"]) or ["all"],
+                "preset": True,
+                "default_value": _pdecl.get("default_value", ""),
+                "description": _pdecl.get("description", ""),
+            })
+    # 2) preset 项字段锁定：name/scope/is_secret/preset 以声明为准，仅 value 取前端提交（或旧值）
+    for _f in _custom_fields:
+        _pdecl = _preset_decl_map.get(_f.get("name"))
+        if not _pdecl:
+            continue
+        _old_v = _old_cf_map.get(_f["name"], {}).get("value", "")
+        _f["preset"] = True
+        _f["name"] = _pdecl["name"]
+        _f["scope"] = _pdecl.get("scope", ["all"]) or ["all"]
+        if "is_secret" in _pdecl:
+            _f["is_secret"] = _pdecl.get("is_secret", False)
+        _f["description"] = _pdecl.get("description", "")
+        if not _f.get("value") or _f.get("value") in ("********", "#####"):
+            _f["value"] = _old_v or _pdecl.get("default_value", "")
+    # 3) 非 preset 项显式标注 preset=false
+    for _f in _custom_fields:
+        if _f.get("name") not in _preset_decl_map:
+            _f["preset"] = False
 
     opts = {
         "work_branch": body.work_branch.strip(),
-        "custom_fields": [
-            {"key": (f.get("key") or "").strip(), "value": (f.get("value") or "").strip()}
-            for f in (body.custom_fields or []) if isinstance(f, dict)
-        ],
+        "custom_fields": _custom_fields,
+        "linked_repos": _linked_repos,
     }
     opts_json = _json.dumps(opts, ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()
@@ -1738,11 +1996,18 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                 (opts_json, now, scene_id, repo_key))
             if c.rowcount == 0:
                 raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在或未激活"})
+            # Issue #242: 同步写入独立 linked_repos 列（便于查询时直接读取）
+            try:
+                c.execute(
+                    "UPDATE devops_pipeline_scene SET linked_repos=? WHERE scene_id=? AND repo_key=? AND is_active=1",
+                    (_json.dumps(_linked_repos, ensure_ascii=False), scene_id, repo_key))
+            except Exception:
+                pass  # 列不存在时忽略（兼容旧库）
             db.commit()
     except HTTPException:
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
 
-    log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch}")
+    log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch} linked_repos={len(_linked_repos)}")
     return {"message": "高级选项已保存"}

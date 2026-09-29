@@ -1,3 +1,95 @@
+// ═══════════════════════════════════════════════════════════════
+// 场景自定义环境变量（custom_fields）前端共享校验规则（Issue #236）
+// 供 dashboard.js / scene-market.js 复用：大写校验 + 保留冲突校验 + 密钥识别
+// ═══════════════════════════════════════════════════════════════
+const _CF_RESERVED_ENV_NAMES = [
+  'PATH','HOME','USER','USERNAME','SHELL','LANG','LANGUAGE','LC_ALL','LC_CTYPE',
+  'PWD','OLDPWD','HOSTNAME','HOST','TERM','TMPDIR','TMP','TEMP','EDITOR','VISUAL',
+  'SHLVL','PS1','OSTYPE','MACHTYPE','LOGNAME','MAIL','WINDIR','SYSTEMROOT','COMSPEC',
+  'NUMBER_OF_PROCESSORS','PROCESSOR_ARCHITECTURE','REPO_FULL_NAME','ACCOUNT',
+  'BOT_USERNAME','ISSUE_NUMBER','PR_NUMBER','GIT_ASKPASS','GRAPE_SERVER_URL',
+  'GRAPE_WORK_BRANCH','GRAPE_SCENE_ID','GRAPE_SESSION_TOKEN','GRAPE_CLI_MODE',
+  'BOT_GITCODE_TOKEN','USER_ID','CONVERSATION_ID'
+];
+const _CF_SECRET_SUFFIXES = ['_KEY','_SK','_SECRET','_TOKEN','_PASSWORD','_PWD','_CREDENTIALS'];
+
+function _cfIsReservedName(name) {
+  const n = (name || '').trim().toUpperCase();
+  return n.startsWith('GRAPE_') || _CF_RESERVED_ENV_NAMES.indexOf(n) >= 0;
+}
+function _cfIsUpperName(name) {
+  return /^[A-Z][A-Z0-9_]*$/.test((name || '').trim());
+}
+function _cfIsSecretName(name) {
+  const up = (name || '').trim().toUpperCase();
+  return _CF_SECRET_SUFFIXES.some(s => up.endsWith(s));
+}
+function _cfNameError(name) {
+  const n = (name || '').trim();
+  if (!n) return '自定义环境变量名不能为空';
+  if (!_cfIsUpperName(n)) return '自定义环境变量名需使用大写字母（如 MY_API_KEY），当前：' + n;
+  if (_cfIsReservedName(n)) return '变量名 "' + n + '" 与系统保留环境变量冲突，请更换名称';
+  return '';
+}
+function _cfComputeIsSecret(name, isSecret) {
+  if (isSecret === true) return true;
+  if (isSecret === false) return false;
+  return _cfIsSecretName(name);
+}
+const _CF_SCOPE_AGENTS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre'];
+// scope checkbox 互斥联动：勾选 all → 取消其它；勾选具体 agent → 取消 all
+// （不做 disabled 置灰，其它选项始终可选）
+function _cfScopeToggle(cb) {
+  const row = cb.closest('.adv-kv');
+  if (!row) return;
+  const boxes = row.querySelectorAll('.adv-kv-scope');
+  if (cb.value === 'all') {
+    if (cb.checked) boxes.forEach(b => { if (b.value !== 'all') b.checked = false; });
+  } else {
+    if (cb.checked) {
+      const allBox = row.querySelector('.adv-kv-scope[value="all"]');
+      if (allBox) allBox.checked = false;
+    }
+  }
+}
+// 渲染 scope 多选 checkbox 组，返回 HTML；scope 为数组（默认 ['all']）
+function _cfScopeHtml(scope) {
+  const sel = Array.isArray(scope) ? scope : [scope || 'all'];
+  const hasAll = sel.indexOf('all') >= 0;
+  return _CF_SCOPE_AGENTS.map(a => {
+    const checked = (a === 'all') ? hasAll : (sel.indexOf(a) >= 0 && !hasAll);
+    return '<label class="adv-kv-scope-lbl" style="font-size:11px;color:#86868b;display:inline-flex;align-items:center;gap:2px;white-space:nowrap">' +
+      '<input type="checkbox" class="adv-kv-scope" value="' + a + '"' + (checked ? ' checked' : '') + ' onchange="_cfScopeToggle(this)">' + a + '</label>';
+  }).join('');
+}
+// 从 .adv-kv 行容器收集 custom_fields：{name, value, is_secret, scope}
+// 密钥标记由 value 输入框类型承载：type=password（隐藏/👁）→ 密钥；type=text（明文/🙈）→ 非密钥
+function _cfCollectFields(prefix) {
+  const rows = document.querySelectorAll(prefix + ' .adv-kv');
+  const fields = [];
+  for (let i = 0; i < rows.length; i++) {
+    const row = rows[i];
+    const vEl = row.querySelector('.adv-kv-val');
+    if (!vEl) continue;
+    const nEl = row.querySelector('.adv-kv-key');
+    const staticEl = row.querySelector('.adv-kv-key-static');
+    const isPreset = !!row.querySelector('.adv-kv-preset');
+    const n = nEl ? (nEl.value || '').trim() : (staticEl ? (staticEl.textContent || '').trim() : '');
+    if (!n) continue;
+    if (!isPreset) {
+      const err = _cfNameError(n);
+      if (err) return { error: err + '（第 ' + (i + 1) + ' 行）' };
+    }
+    const isSec = vEl.type === 'password';
+    // scope：互斥后选中即入池；什么都不选 → ["all"]（全量）
+    const checked = Array.prototype.slice.call(row.querySelectorAll('.adv-kv-scope:checked'))
+      .map(cb => cb.value);
+    const scope = checked.length ? checked : ['all'];
+    fields.push({ name: n, value: (vEl.value || '').trim(), is_secret: isSec, scope: scope, preset: isPreset });
+  }
+  return { fields: fields };
+}
+
 const app = (() => {
   const $ = id => document.getElementById(id);
   const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
@@ -21,9 +113,24 @@ const app = (() => {
     } catch (e) {}
   }
 
+  // Issue #231: currentRepo 从 localStorage 迁移到 sessionStorage，实现页签级项目选择隔离。
+  // localStorage 跨页签共享会导致页签2切换项目后页签1对话列表串扰；sessionStorage 页签级隔离，
+  // 刷新保留、关闭清除，符合「每个页签独立维护当前选中项目」的期望。
+  // 一次性迁移逻辑见 _migrateCurrentRepo()，在 init() 最先执行，兼容已有用户会话无感知。
+  function _migrateCurrentRepo() {
+    try {
+      const inSession = sessionStorage.getItem('currentRepo');
+      const inLocal = localStorage.getItem('currentRepo');
+      if (!inSession && inLocal) {
+        sessionStorage.setItem('currentRepo', inLocal);
+        localStorage.removeItem('currentRepo');
+      }
+    } catch (e) {}
+  }
+
   function currentRepo() {
     try {
-      const r = JSON.parse(localStorage.getItem('currentRepo'));
+      const r = JSON.parse(sessionStorage.getItem('currentRepo'));
       if (r && r.fullName) {
         // GitCode 仓库 name 是显示名（可≠URL path，如 shelltest 显示 skillstest）——
         // 所有 API 路径/链接都用 owner/name 拼接，必须强制 URL 语义（fullName 拆分），
@@ -31,7 +138,7 @@ const app = (() => {
         const parts = String(r.fullName).split('/');
         if (parts.length === 2 && r.name !== parts[1]) {
           r.name = parts[1];
-          localStorage.setItem('currentRepo', JSON.stringify(r));
+          sessionStorage.setItem('currentRepo', JSON.stringify(r));
         }
       }
       return r;
@@ -153,8 +260,8 @@ function loadAgentTypes() {
     // current 存在但不在缓存列表中时保留用户选择不覆写（避免刷新后跳变为列表首位）
     if (!current) {
       const r = managedRepos[0];
-      if (r) localStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
-      else localStorage.removeItem('currentRepo');
+      if (r) sessionStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
+      else sessionStorage.removeItem('currentRepo');
     }
     nav('dash');
   }
@@ -194,7 +301,7 @@ function loadAgentTypes() {
     }
     const parts = val.split('/');
     const _rk = (window._managedRepoMap && window._managedRepoMap[val]) || '';
-    localStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
+    sessionStorage.setItem('currentRepo', JSON.stringify({fullName: val, owner: parts[0], name: parts[1], repoKey: _rk}));
     // 同步侧边栏下拉选中项
     const sel = $('repoSelect');
     if (sel) sel.value = val;
@@ -298,6 +405,93 @@ function loadAgentTypes() {
     }
     try { localStorage.setItem(key, collapsed ? '1' : '0'); } catch (e) {}
   }
+
+  // ── Sidebar 折叠/展开（Issue #207）──
+  // 桌面端：toggleSidebar() 切换 .sb.collapsed，宽度收为 0，主内容 .mn 自适应扩展。
+  // 窄屏（≤768px，CSS 已 display:none）：toggleSidebar() 以 overlay 抽屉模式临时展开 sidebar。
+  // 状态通过 localStorage('grapeSidebarCollapsed') 持久化，刷新后恢复。
+  // initSidebarState() 在启动时读取持久化状态并同步 class（仅桌面端；窄屏始终临时展开不持久化）。
+  const SB_COLLAPSE_KEY = 'grapeSidebarCollapsed';
+  const SB_NARROW_MAX = 768;  // 与 app.css @media(max-width:768px) 断点一致
+
+  function _isNarrowScreen() {
+    return window.innerWidth <= SB_NARROW_MAX;
+  }
+
+  function initSidebarState() {
+    const sb = $('sidebar');
+    if (!sb) return;
+    let collapsed = false;
+    try { collapsed = localStorage.getItem(SB_COLLAPSE_KEY) === '1'; } catch (e) {}
+    // 桌面端：恢复持久化折叠状态（窄屏下 sidebar 由 CSS display:none 控制，不持久化）
+    const shouldCollapse = !_isNarrowScreen() && collapsed;
+    if (shouldCollapse) {
+      // 临时禁用 transition 避免首屏闪缩动画（Issue #207 QA 反馈）
+      sb.classList.add('no-transition');
+    }
+    sb.classList.toggle('collapsed', shouldCollapse);
+    // 更新按钮图标方向（收起后图标可视觉提示）
+    _updateToggleIcon(shouldCollapse);
+    if (shouldCollapse) {
+      // 下一帧恢复 transition（双 rAF 确保浏览器已应用无过渡状态）
+      const restore = () => sb.classList.remove('no-transition');
+      if (window.requestAnimationFrame) {
+        window.requestAnimationFrame(() => window.requestAnimationFrame(restore));
+      } else {
+        setTimeout(restore, 0);
+      }
+    }
+  }
+
+  function _updateToggleIcon(collapsed) {
+    const btn = $('sbToggle');
+    if (!btn) return;
+    btn.classList.toggle('collapsed', collapsed);
+  }
+
+  // forceClose：窄屏 overlay 模式下点击遮罩关闭抽屉（不写回持久化）
+  function toggleSidebar(forceClose) {
+    const sb = $('sidebar');
+    if (!sb) return;
+    if (_isNarrowScreen()) {
+      // 窄屏 overlay 抽屉模式：临时展开/收起，不持久化
+      const open = sb.classList.contains('sb-drawer-open');
+      if (forceClose && !open) return;
+      sb.classList.toggle('sb-drawer-open', !open);
+      const ov = $('sbOverlay');
+      if (ov) ov.classList.toggle('show', !open);
+      return;
+    }
+    // 桌面端：切换 collapsed，写回 localStorage
+    const collapsed = !sb.classList.contains('collapsed');
+    sb.classList.toggle('collapsed', collapsed);
+    _updateToggleIcon(collapsed);
+    try { localStorage.setItem(SB_COLLAPSE_KEY, collapsed ? '1' : '0'); } catch (e) {}
+  }
+
+  // 窗口尺寸跨越断点时清理窄屏 overlay 状态，避免残留 class 影响桌面布局
+  let _sbWasNarrow = _isNarrowScreen();
+  window.addEventListener('resize', () => {
+    const nowNarrow = _isNarrowScreen();
+    if (_sbWasNarrow !== nowNarrow) {
+      _sbWasNarrow = nowNarrow;
+      const sb = $('sidebar');
+      if (sb) {
+        sb.classList.remove('sb-drawer-open');
+        if (!nowNarrow) {
+          // 从窄屏切到桌面：恢复持久化状态
+          let collapsed = false;
+          try { collapsed = localStorage.getItem(SB_COLLAPSE_KEY) === '1'; } catch (e) {}
+          sb.classList.toggle('collapsed', collapsed);
+          _updateToggleIcon(collapsed);
+        } else {
+          sb.classList.remove('collapsed');
+        }
+      }
+      const ov = $('sbOverlay');
+      if (ov) ov.classList.remove('show');
+    }
+  });
 
   function nav(view, param) {
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
@@ -729,9 +923,104 @@ function loadAgentTypes() {
         <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${z?'提交申请':'Submit'}</button>
       </div>`;
     document.body.appendChild(overlay);
-    overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
+    // Issue #205: 移除遮罩点击关闭逻辑，仅通过 × 按钮关闭；表单数据 sessionStorage 持久化
+    _baRestoreForm();
+    overlay.addEventListener('input', _baSaveForm);
+    overlay.addEventListener('change', _baSaveForm);
   }
   var _baIdentity = '';
+  var _BA_FORM_KEY = 'beta_apply_form';
+  function _baCollectFormData() {
+    var modal = document.getElementById('betaApplyModal');
+    if (!modal) return null;
+    var data = {};
+    ['betaPlatform','betaAccountName','betaEmail','betaPhone','betaReason'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el) data[id] = el.value;
+    });
+    data.identity = _baIdentity;
+    ['baEdu','baMajor','baSize','baRole','baOcc'].forEach(function(name){
+      var r = modal.querySelector('input[name="' + name + '"]:checked');
+      if (r) data['r_' + name] = r.value;
+    });
+    ['baEdu','baMajor','baRole','baOcc'].forEach(function(name){
+      var r = modal.querySelector('input[name="' + name + '"]:checked');
+      if (r && (r.value === '其他' || r.value === 'Other')) {
+        var t = r.parentElement.querySelector('.ba-other-text');
+        if (t) data['ro_' + name] = t.value;
+      }
+    });
+    ['baEntCase','baOpcCase','baOtherCase'].forEach(function(cls){
+      var vals = [];
+      modal.querySelectorAll('.' + cls + ':checked').forEach(function(cb){
+        var item = { v: cb.value };
+        if (cb.value === '其他' || cb.value === 'Other') {
+          var t = cb.parentElement.querySelector('.ba-other-text');
+          item.o = t ? t.value : '';
+        }
+        vals.push(item);
+      });
+      data['c_' + cls] = vals;
+    });
+    var desc = document.getElementById('baOtherDesc');
+    if (desc) data.baOtherDesc = desc.value;
+    return data;
+  }
+  function _baSaveForm() {
+    var data = _baCollectFormData();
+    if (data) { try { sessionStorage.setItem(_BA_FORM_KEY, JSON.stringify(data)); } catch(e) {} }
+  }
+  function _baRestoreForm() {
+    var modal = document.getElementById('betaApplyModal');
+    if (!modal) return;
+    var raw;
+    try { raw = sessionStorage.getItem(_BA_FORM_KEY); } catch(e) { return; }
+    if (!raw) return;
+    var data;
+    try { data = JSON.parse(raw); } catch(e) { return; }
+    ['betaPlatform','betaAccountName','betaEmail','betaPhone','betaReason'].forEach(function(id){
+      var el = document.getElementById(id);
+      if (el && data[id] !== undefined && data[id] !== '') el.value = data[id];
+    });
+    ['baEdu','baMajor','baSize','baRole','baOcc'].forEach(function(name){
+      var val = data['r_' + name];
+      if (val === undefined) return;
+      var radios = modal.querySelectorAll('input[name="' + name + '"]');
+      for (var i = 0; i < radios.length; i++) {
+        if (radios[i].value === val) {
+          radios[i].checked = true;
+          if (radios[i].value === '其他' || radios[i].value === 'Other') {
+            var t = radios[i].parentElement.querySelector('.ba-other-text');
+            if (t) { t.style.display = 'inline-block'; if (data['ro_' + name] !== undefined) t.value = data['ro_' + name]; }
+          }
+          break;
+        }
+      }
+    });
+    ['baEntCase','baOpcCase','baOtherCase'].forEach(function(cls){
+      var vals = data['c_' + cls];
+      if (!Array.isArray(vals)) return;
+      vals.forEach(function(item){
+        var cbs = modal.querySelectorAll('.' + cls);
+        for (var i = 0; i < cbs.length; i++) {
+          if (cbs[i].value === item.v) {
+            cbs[i].checked = true;
+            if (cbs[i].value === '其他' || cbs[i].value === 'Other') {
+              var t = cbs[i].parentElement.querySelector('.ba-other-text');
+              if (t) { t.style.display = 'inline-block'; if (item.o) t.value = item.o; }
+            }
+            break;
+          }
+        }
+      });
+    });
+    var desc = document.getElementById('baOtherDesc');
+    if (desc && data.baOtherDesc !== undefined) desc.value = data.baOtherDesc;
+    if (data.identity) { _baIdentity = data.identity; baSelectIdentity(data.identity); }
+  }
+  function _baClearForm() {
+    try { sessionStorage.removeItem(_BA_FORM_KEY); } catch(e) {}
+  }
   function baToggleOther(el) {
     if (el.type === 'radio') {
       var group = document.querySelectorAll('input[name="' + el.name + '"]');
@@ -765,6 +1054,7 @@ function loadAgentTypes() {
     var key = type.charAt(0).toUpperCase() + type.slice(1);
     var branch = document.getElementById('baBranch' + key);
     if (branch) { branch.style.maxHeight = '1000px'; branch.style.opacity = '1'; }
+    _baSaveForm();
   }
   function _baRadio(name) {
     var c = document.querySelector('input[name="' + name + '"]:checked');
@@ -822,12 +1112,14 @@ function loadAgentTypes() {
     }).then(function(d) {
       if (d.success) {
         showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        _baClearForm();
         document.getElementById('betaApplyModal').remove();
       } else if (d.error) {
         showToast(d.error);
         btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
       } else {
         showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        _baClearForm();
         document.getElementById('betaApplyModal').remove();
       }
     }).catch(function(e) {
@@ -889,6 +1181,7 @@ function loadAgentTypes() {
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('currentRepo');
+    sessionStorage.removeItem('currentRepo');
     localStorage.removeItem(REPO_CACHE_KEY);
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
@@ -976,14 +1269,19 @@ function loadAgentTypes() {
   }
 
   function init() {
+    // Issue #231: 最先执行 currentRepo 迁移（localStorage → sessionStorage），
+    // 必须在 cache 版本检查之前，避免 localStorage.clear() 抹掉待迁移值，保证已有用户无感知。
+    _migrateCurrentRepo();
     console.log("[init] start", JSON.stringify({
       hasToken: !!localStorage.getItem('token'),
       cacheVer: localStorage.getItem('app_cache_ver'),
-      currentRepo: localStorage.getItem('currentRepo'),
+      currentRepo: sessionStorage.getItem('currentRepo'),
       url: window.location.href
     }));
     // 同步可折叠分组的持久化状态（Issue #66）
     initGroupCollapse();
+    // 同步 sidebar 折叠/展开持久化状态（Issue #207）
+    initSidebarState();
     // Check for OAuth token in URL first
     const p = new URLSearchParams(window.location.search);
     // Check for OAuth error in URL (e.g. github.com timeout)
@@ -1008,12 +1306,13 @@ function loadAgentTypes() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '29');
+      localStorage.setItem('app_cache_ver', '36');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
+      sessionStorage.removeItem('currentRepo');
       if (p.get('first_login') === '1') {
-        localStorage.removeItem('currentRepo');
+        sessionStorage.removeItem('currentRepo');
         // Immediately show repo selection layout, skip Dashboard flash
         $('sidebar').style.display = 'none';
         $('tb').style.display = 'none';
@@ -1035,13 +1334,13 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '29') {
+    if (localStorage.getItem('app_cache_ver') !== '36') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '29');
+      localStorage.setItem('app_cache_ver', '36');
     }
 
     const token = localStorage.getItem('token');
@@ -1098,7 +1397,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

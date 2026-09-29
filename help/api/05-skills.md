@@ -1,7 +1,9 @@
 # Skills 技能接口（/api/skills）
 
 > 对外公开，认证：`get_current_user_or_api_key`。
-> scope（x-token-scope）：全部 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）。
+> scope（x-token-scope）：多数 = **user_only**（`grape_` API Key / JWT；`tk_` → 403）；
+> `skills_upload`、`skills_detail` 与**子技能三端点**（`sub`/`sub get`/`package-sub`）为 **dual**
+> （会话 token 可调，agent 运行时按需加载）；其余（含 `skills_list`）均为 **user_only**。
 
 ## GET /api/skills — 技能列表
 
@@ -49,6 +51,7 @@
 ## GET /api/skills/featured — 精选技能
 
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills featured`（operation_id=`skills_featured`）。
 
 | Query | `limit`（可选，默认 5）、`repo`（可选，scope 过滤） |
 | 出参 | 精选技能数组（is_featured=1 且 official，按 like_count 排序） |
@@ -76,7 +79,8 @@
 ---
 
 ## GET /api/skills/by-id/{skill_id} — 技能详情
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
+> CLI：`grape skills detail --id {skill_id}`（operation_id=`skills_detail`）。
 
 | Path | `{skill_id}` |
 | 出参 | `{id, skill_name, display_name, description, agent_type, skill_path, scope, owner_id, ...}` |
@@ -86,6 +90,7 @@
 
 ## GET /api/skills/by-id/{skill_id}/download — 下载技能 ZIP
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills download --id {skill_id}`（operation_id=`skills_download`）。
 
 | Path | `{skill_id}` |
 | 出参 | ZIP（application/zip） |
@@ -94,7 +99,8 @@
 ---
 
 ## POST /api/skills/upload — 上传技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**——用户（`grape_` API Key / JWT）可传个人或仓库技能；
+> 会话 token（`tk_`）仅支持 **scope=repo** 且 `repo` 必须与 token 绑定的仓库一致（越权 → 403）。
 > CLI：`grape skills upload`（命令路径即端点，见 README「CLI 命令映射」）。
 
 请求头：`multipart/form-data`，字段：
@@ -120,6 +126,7 @@
 
 ## DELETE /api/skills/by-id/{skill_id} — 删除技能
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills delete --id {skill_id}`（operation_id=`skills_delete`）。
 
 | Path | `{skill_id}` |
 | 返回 | 200/204；400 被引用；404 |
@@ -128,6 +135,7 @@
 
 ## GET /api/skills/template — 技能模板 ZIP
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills template`。
 
 | 出参 | ZIP（含 my-skill/ 示例） |
 | 返回 | 200 |
@@ -135,20 +143,24 @@
 ---
 
 ## GET /api/skills/{skill_id}/sub — 子技能列表
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
+> CLI：`grape skills sub --id {skill_id}`（operation_id=`skills_sub_list`）。
 
 ## GET /api/skills/{skill_id}/sub/{sub_name} — 读子技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（同左；agent 运行时按需加载子技能）
+> CLI：`grape skills sub get --id {skill_id} --name {sub_name}`（operation_id=`skills_sub_get`）。
 
 ## GET /api/skills/package-sub/{pkg_id}/{sub_name} — 包内子技能
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（同左）
+> CLI：`grape skills package-sub --package {pkg_id} --name {sub_name}`（operation_id=`skills_package_sub_get`）。
 
-> 子技能接口返回 SKILL.md/references 内容，供 agent 运行时按需加载。
+> 子技能接口返回 SKILL.md/references 内容，供 agent 运行时按需加载（三端点 session token 均可读）。
 
 ---
 
 ## POST /api/skills/{skill_id}/like — 点赞技能
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills like --id {skill_id}`（operation_id=`skills_like_toggle`）。
 
 | 出参 | `{"liked": true, "likes": n}` |
 | 返回 | 200 |
@@ -157,6 +169,7 @@
 
 ## POST /api/skills/convert — 转换技能（跨模式）
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape skills convert --json '{"skill_name":"x","repo":"owner/repo"}'`（operation_id=`skills_convert`）。
 
 请求头：`Content-Type: application/json`
 

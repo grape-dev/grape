@@ -118,11 +118,15 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
             if ensure_row:
                 # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
                 # SQLite 与 MySQL 均支持 INSERT..SELECT..WHERE NOT EXISTS。
+                # user_id 按 assignee 解析（unified_user_mapping 可映射则落真实 id，否则 0），
+                # 避免 stage/scene 先行建档把归属错存为 0（issues-mine-user-id-zero-fix-design.md）。
                 c.execute(
                     "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
-                    "SELECT 0, ?, ?, ?, 'active' WHERE NOT EXISTS "
+                    "SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m "
+                    "                 WHERE m.gitcode_user = ? AND m.user_id > 0 LIMIT 1), 0), "
+                    "?, ?, ?, 'active' WHERE NOT EXISTS "
                     "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (assignee, repo_key, _num, repo_key, _num))
+                    (assignee, assignee, repo_key, _num, repo_key, _num))
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             else:
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
@@ -188,17 +192,31 @@ def get_issue_assignee(repo_key: str, issue_id: str) -> str:
 
 
 def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
-    """读取 Issue 级开发场景。issue_state.scene_id 为空时返回 ("", 0)。
+    """读取 Issue 级开发场景。issue_state.scene_id 为空时回退到 issue 表。
 
-    不再回退到仓库级 dev_scene——新架构下每个 Issue 独立选场景（用户手选 / 智能推荐），
-    仓库级默认场景已退役。
     返回 (scene_id, scene_user_id)：
-    - issue_state.scene_id 非空 → 用该值 + scene_user_id
-    - 否则返回 ("", 0)，由调用方决定走智能推荐
+    - get_issue_stage 返回 scene_id → 用该值 + scene_user_id
+    - 否则从 issue 表回退读 scene_id/scene_user_id
+    - 都没有 → ("", 0)，由调用方决定走智能推荐
     """
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
+    # 回退：从 issue 表直接读 scene_id（Phase C3 权威源）
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, scene_user_id FROM issue "
+                "WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num)
+            )
+            r = c.fetchone()
+            if r and r[0]:
+                return r[0], r[1] or 0
+    except Exception:
+        pass
     return "", 0
 
 
@@ -453,6 +471,19 @@ def delete_agent_session(repo_key: str, agent_type: str) -> bool:
 
 def ensure_default_agent_sessions(repo_key: str):
     """基于 agent-skill-mapping.json 的 default 场景，为仓库创建默认 Agent 会话"""
+    # 先确保仓库有默认场景（幂等：已有场景则跳过）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM devops_pipeline_scene WHERE repo_key=? AND is_active=1", (repo_key,))
+            _scene_count = c.fetchone()[0]
+        if _scene_count == 0:
+            from src.api.pipeline_config import apply_market_scene_by_name
+            apply_market_scene_by_name(repo_key, "default")
+            log.info(f"ensure_default_agent_sessions: created default scene for {repo_key}")
+    except Exception as _e:
+        log.warning(f"ensure_default_agent_sessions: scene creation skipped: {_e}")
+
     import os
     _path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
     if not os.path.exists(_path):

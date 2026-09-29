@@ -226,11 +226,35 @@ _TASK_COLUMNS = (
     "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
-    "status, exit_code, result_text, errors, stderr, "
+    "status, stream_ended, self_reported, "
+    "exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
 
 _TASK_COLUMNS_LIST = [c.strip() for c in _TASK_COLUMNS.split(",")]
+
+# 双标记列：INSERT 时让 DB 默认（0）落地，select 时按表实际列过滤（兼容未迁移库）
+_TASK_SIGNAL_COLUMNS = ("stream_ended", "self_reported")
+
+_TABLE_COLS_CACHE: dict = {}
+
+
+def _table_columns(table: str) -> set:
+    """表实际存在的列（PRAGMA，进程内缓存）。
+
+    迁移动态列后代码兼容未迁移的旧库（如测试库）与已迁移库。
+    """
+    _cached = _TABLE_COLS_CACHE.get(table)
+    if _cached is not None:
+        return _cached
+    try:
+        with db_lock:
+            _rows = db.cursor().execute(f"PRAGMA table_info({table})").fetchall()
+        _col = {r[1] for r in _rows}
+    except Exception:
+        _col = set()
+    _TABLE_COLS_CACHE[table] = _col
+    return _col
 
 
 def _row_to_dict(row):
@@ -286,7 +310,12 @@ def _skill_files_from_zip(zip_bytes: bytes, skill_name: str) -> dict:
 
 
 def _collect_server_env(user_id, account):
-    """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。"""
+    """服务端 DB 系凭据注入（user credentials / 账户 AK-SK），远端 worker 无本地 DB 也生效。
+
+    huawei_cloud AK/SK 注入为 HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK 环境变量，
+    供 SRE agent (cloud-deploy skill) 通过 hcloud CLI 认证使用。
+    codearts AK/SK 注入为 CODEARTS_CLI_AK / CODEARTS_CLI_SK。
+    """
     env = {}
     if user_id and user_id > 0:
         try:
@@ -295,24 +324,20 @@ def _collect_server_env(user_id, account):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
                 if provider == "huawei_cloud":
-                    # cloud-deploy skill expects HUAWEICLOUD_SDK_AK / HUAWEICLOUD_SDK_SK
-                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
-                elif provider == "codearts":
-                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
-                else:
-                    for k, v in cfg.items():
-                        env[k.upper()] = str(v)
-        except Exception:
-            pass
-    if account:
-        try:
-            from src.config import get_account
-            acc = get_account(account)
-            for k in ("CODEARTS_CLI_AK", "CODEARTS_CLI_SK"):
-                if acc.get(k):
-                    env[k] = acc[k]
+                    # 注入为 SRE cloud-deploy skill 期望的环境变量名
+                    if cfg.get("ak"):
+                        env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"):
+                        env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
+                    continue
+                if provider == "codearts":
+                    if cfg.get("ak"):
+                        env["CODEARTS_CLI_AK"] = str(cfg["ak"])
+                    if cfg.get("sk"):
+                        env["CODEARTS_CLI_SK"] = str(cfg["sk"])
+                    continue
+                for k, v in cfg.items():
+                    env[k.upper()] = str(v)
         except Exception:
             pass
     return env
@@ -643,6 +668,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             env["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id, repo_key=repo_key,
                 agent_type=agent_type, user_id=_tk_uid)
+            # CLI 命令按 token 作用域过滤：本任务持 tk_ 会话 token → 只暴露 dual+session_only 命令
+            # （见 grape-cli-mode-filter-design.md；chat 与 devops 任务均适用）
+            env["GRAPE_CLI_MODE"] = "WORKER"
         except Exception as e:
             log.warning(f"enqueue: session token issue failed for {task_id}: {e}")
     _server_url = server_url or ""
@@ -654,20 +682,32 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             pass
     with db_lock:
         c = db.cursor()
+        _avail = _table_columns("agent_tasks")
+        _insert_cols = [x for x in _TASK_COLUMNS_LIST if x not in _TASK_SIGNAL_COLUMNS and x in _avail]
+        _insert_vals = {
+            "id": task_id,
+            "agent_session_id": agent_session_id,
+            "runtime_id": runtime_id,
+            "event_seq": event_seq,
+            "issue_id": issue_id or "", "repo_key": repo_key or "",
+            "agent_type": agent_type or "", "skill": skill or "", "skill_id": skill_id or 0,
+            "prompt": prompt, "cwd": cwd or "", "runtime_session_id": runtime_session_id or "",
+            "event_type": event_type or "", "account": account or "", "user_id": user_id or 0,
+            "repo_gitcode_token": repo_gitcode_token or "", "user_gitcode_token": user_gitcode_token or "",
+            "env_extra": json.dumps(env), "skill_files": json.dumps(skill_files), "server_url": _server_url,
+            "issue_session_id": issue_session_id or "",
+            "project_info_files": json.dumps(project_info_files), "project_info_meta": json.dumps(project_info_meta),
+            "knowledge_files": json.dumps(knowledge_files),
+            "project_info_file_urls": json.dumps(project_info_file_urls), "knowledge_file_urls": json.dumps(knowledge_file_urls),
+            "attempts": 0, "pool_agent_type": pool_agent_type or "", "affinity_runtime_id": affinity_runtime_id or 0,
+            "pool_tag": pool_tag or "", "pool_engine_ids": pool_engine_ids or "",
+            "status": "queued", "exit_code": None, "result_text": "", "errors": "", "stderr": "",
+            "usage_json": "{}", "started_at": None, "completed_at": None,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
         c.execute(
-            f"INSERT INTO agent_tasks ({_TASK_COLUMNS}) VALUES "
-            f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})",
-            (task_id, agent_session_id, runtime_id, event_seq, issue_id or "", repo_key or "",
-             agent_type or "", skill or "", skill_id or 0,
-             prompt, cwd or "", runtime_session_id or "",
-             event_type or "", account or "", user_id or 0, repo_gitcode_token or "",
-             user_gitcode_token or "",
-             json.dumps(env), json.dumps(skill_files), _server_url,
-             issue_session_id or "", json.dumps(project_info_files), json.dumps(project_info_meta),
-             json.dumps(knowledge_files),
-            json.dumps(project_info_file_urls), json.dumps(knowledge_file_urls),
-            0, pool_agent_type or "", affinity_runtime_id or 0, pool_tag or "", pool_engine_ids or "",
-             "queued", None, "", "", "", "{}", None, None, datetime.now(timezone.utc).isoformat())
+            f"INSERT INTO agent_tasks ({', '.join(_insert_cols)}) VALUES ({','.join(['?'] * len(_insert_cols))})",
+            [_insert_vals[x] for x in _insert_cols],
         )
         db.commit()
     from src.runtime.instances import runtime_instance_name
@@ -1074,9 +1114,10 @@ def claim(runtime_id) -> dict | None:
 def get_task(task_id) -> dict | None:
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT {_TASK_COLUMNS} FROM agent_tasks WHERE id=?", (task_id,))
+        _cols = [x for x in _TASK_COLUMNS_LIST if x in _table_columns("agent_tasks")]
+        c.execute(f"SELECT {', '.join(_cols)} FROM agent_tasks WHERE id=?", (task_id,))
         row = c.fetchone()
-    return _row_to_dict(row) if row else None
+    return dict(zip(_cols, row)) if row else None
 
 
 def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
@@ -1609,7 +1650,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                         _st = get_issue_stage(_rk, _iid)
                         _cur_stage = (_st or {}).get("stage", "") if _st else ""
                         if _cur_stage == _ag:  # 当前 stage 就是完成的 agent → 检查是否最后节点
-                            _scene_id = get_issue_scene(_rk, _iid) or "default"
+                            _scene_tuple = get_issue_scene(_rk, _iid)
+                            _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
                             _pipe_cfg = get_pipeline_config(_scene_id, repo_key=_rk)
                             _nodes = (_pipe_cfg or {}).get("nodes", [])
                             for _n in _nodes:
@@ -1735,6 +1777,79 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                           task_id=task_id, payload={"exit_code": exit_code}))
     except Exception:
         pass
+
+
+# ===== 双重标记完成（issue-219-task-complete-double-signal-design.md）=====
+
+def skill_self_reports(skill_name: str) -> bool:
+    """技能是否声明以 `grape tasks complete` 结构化收尾（#219 方案C 情形一）。
+
+    判定：解析该技能 SKILL.md 内容含 "grape tasks complete"。
+    无法解析（技能文件不在服务器/自定义技能）→ False（非自报，按旧路径直接完成，不阻塞）。
+    """
+    if not skill_name:
+        return False
+    try:
+        from src.config import resolve_official_skill_path
+        _p = resolve_official_skill_path(skill_name)
+        if not _p:
+            return False
+        with open(_p, "r", encoding="utf-8") as _f:
+            _content = _f.read()
+        return "grape tasks complete" in _content
+    except Exception:
+        return False
+
+
+def set_task_signal(task_id: str, signal: str, result_text: str = "") -> bool:
+    """条件置双标记之一（stream_ended=worker 隐式 / self_reported=agent 显式）。
+
+    - 仅当标记未置时置 1（重放安全）；置 `self_reported` 时同步写入 result_text（防值丢失）。
+    - 返回 True = 本次调用是第一个落该标记的；调用方据此读取另一标记，决定是否 finalize。
+    """
+    if signal not in ("stream_ended", "self_reported"):
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            if signal == "self_reported":
+                c.execute("UPDATE agent_tasks SET self_reported=1, result_text=? "
+                          "WHERE id=? AND self_reported=0", (result_text or "", task_id))
+            else:
+                c.execute("UPDATE agent_tasks SET stream_ended=1 WHERE id=? AND stream_ended=0", (task_id,))
+            _first = c.rowcount > 0
+            db.commit()
+        return _first
+    except Exception as e:
+        log.warning(f"set_task_signal({signal}) failed for {task_id}: {e}")
+        return False
+
+
+def task_double_signal_ready(task_id: str) -> bool:
+    """双标记齐（stream_ended=1 且 self_reported=1）→ 可以收敛终态。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            _r = c.execute("SELECT stream_ended, self_reported FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+        return bool(_r and _r[0] == 1 and _r[1] == 1)
+    except Exception:
+        return False
+
+
+def finalize_task(task_id: str, exit_code: int = 0, usage=None) -> bool:
+    """双标记齐时收敛终态：用已存储的 self_reported result_text 走完整 complete_task（副作用单次）。
+
+    任一标记未齐 → 不终态（事件保持 running），等后到者触发。
+    仅由「后到标记」的调用方调用；complete_task 内部幂等保证只会真正完成一次。
+    """
+    if not task_double_signal_ready(task_id):
+        return False
+    _task = get_task(task_id)
+    if not _task:
+        return False
+    complete_task(task_id, _task.get("result_text") or "", exit_code,
+                  usage=usage or {})
+    return True
 
 
 def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: str,
@@ -2135,6 +2250,10 @@ def _check_stale_queued_tasks():
     当任务 queued 超过 _STALE_QUEUED_THRESHOLD（默认 120 秒）且 pool_engine_ids 非空时，
     可能是因为所有候选引擎健康分过低导致无人认领。
     此时清空 pool_engine_ids，让任意在线引擎认领（包括低健康分的，至少能尝试执行）。
+
+    修复：在清空前增加物理可达性检查（_check_pool_engines_reachable），
+    避免因 uvicorn 重启期间心跳短暂中断导致健康分降低但实际在线的引擎被误判。
+    只有当引擎既不健康又物理不可达时才清空。
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_QUEUED_THRESHOLD)).isoformat()
     try:
@@ -2142,7 +2261,7 @@ def _check_stale_queued_tasks():
             c = db.cursor()
             # 查询超时的 queued 任务（带 pool_engine_ids 限定）
             c.execute(
-                "SELECT id, pool_engine_ids FROM agent_tasks "
+                "SELECT id, pool_engine_ids, pool_tag, repo_key, user_id FROM agent_tasks "
                 "WHERE status='queued' AND pool_engine_ids!='' AND pool_engine_ids IS NOT NULL "
                 "AND created_at <= ?",
                 (cutoff,))
@@ -2151,7 +2270,7 @@ def _check_stale_queued_tasks():
                 return
             import json as _json
             cleared = 0
-            for tid, peids in stale_tasks:
+            for tid, peids, task_tag, task_repo, task_uid in stale_tasks:
                 # 先检查 pool 中是否有健康引擎——有则不清空（健康引擎可能马上认领）
                 try:
                     _engine_ids = _json.loads(peids) if peids else []
@@ -2159,12 +2278,19 @@ def _check_stale_queued_tasks():
                     _engine_ids = []
                 if _engine_ids and _check_pool_has_healthy(_engine_ids):
                     continue  # 池中有健康引擎，不降级
-                # 池中全不健康 → 清空 pool_engine_ids 放行
+                # 健康分不达标 → 再检查物理可达性（在线 + 有 tag 能力 + scope 匹配 + 有并发槽）
+                # 如果引擎物理可达（只是健康分低），仍不清空——它仍能 claim 任务
+                if _engine_ids and _check_pool_engines_reachable(
+                    _engine_ids, task_tag or "", task_repo or "", task_user_id=task_uid or 0):
+                    log.info(f"_check_stale_queued_tasks: engine(s) {_engine_ids} unhealthy but reachable, "
+                             f"keeping pool_engine_ids for task {tid}")
+                    continue
+                # 既不健康又不可达 → 清空 pool_engine_ids 放行
                 c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (tid,))
                 cleared += 1
             if cleared:
                 db.commit()
                 log.info(f"_check_stale_queued_tasks: cleared pool_engine_ids for {cleared} tasks "
-                         f"(no healthy engine claimed within {_STALE_QUEUED_THRESHOLD}s)")
+                         f"(no healthy+reachable engine claimed within {_STALE_QUEUED_THRESHOLD}s)")
     except Exception as e:
         log.warning(f"_check_stale_queued_tasks failed: {e}")

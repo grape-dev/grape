@@ -172,7 +172,7 @@ function _workerCardHTML(wk) {
     ${_barHTML(I18N.t('observability.mem'), wk.memory_percent, null, 'wk-' + wid + '-mem')}
     ${_barHTML(I18N.t('observability.tmp'), wk.tmp_percent, null, 'wk-' + wid + '-tmp')}
     ${_barHTML(I18N.t('observability.disk'), wk.disk_percent, null, 'wk-' + wid + '-disk')}
-    ${_barHTML(I18N.t('observability.bandwidth'), wk.bandwidth_percent, null, 'wk-' + wid + '-bw')}
+    ${_barHTML(I18N.t('observability.bandwidth'), wk.bandwidth_percent, null, 'wk-' + wid + '-bw', (wk.bandwidth_mbps||0).toFixed(1) + ' Mbps')}
   </div>`;
 }
 
@@ -356,14 +356,15 @@ const _OBS_HEALTH_DOT = { online: '🟢', idle: '🟢', normal: '🟢', busy: '�
 const _OBS_HEALTH_COLOR = { online: 'var(--g)', idle: 'var(--g)', normal: 'var(--g)', busy: 'var(--y)', overload: 'var(--r)', recently_lost: 'var(--y)', offline: 'var(--t3)', about_to_gc: 'var(--r)' };
 
 // 资源进度条（首次渲染时带 id，供后续局部更新）
-function _barHTML(label, pct, color, idPrefix) {
+function _barHTML(label, pct, color, idPrefix, suffix) {
   const c = pct > 80 ? 'var(--r)' : pct > 60 ? 'var(--y)' : color || 'var(--g)';
+  const valText = suffix || (Math.round(pct) + '%');
   return `<div style="display:flex;align-items:center;gap:6px;font-size:10px">
     <span style="color:var(--t3);min-width:32px">${label}</span>
     <div style="flex:1;height:8px;background:var(--bg);border-radius:4px;overflow:hidden;min-width:60px">
       <div id="${idPrefix}-bar" style="height:100%;width:${Math.min(pct,100)}%;background:${c};border-radius:4px;transition:width .3s"></div>
     </div>
-    <span id="${idPrefix}-val" style="color:${c};font-weight:600;min-width:30px;text-align:right">${Math.round(pct)}%</span>
+    <span id="${idPrefix}-val" style="color:${c};font-weight:600;min-width:50px;text-align:right">${valText}</span>
   </div>`;
 }
 
@@ -470,7 +471,7 @@ function updateOverview(ops, rt) {
     _updateBar('wk-' + wid + '-mem', wk.memory_percent);
     _updateBar('wk-' + wid + '-tmp', wk.tmp_percent);
     _updateBar('wk-' + wid + '-disk', wk.disk_percent);
-    _updateBar('wk-' + wid + '-bw', wk.bandwidth_percent);
+    _updateBar('wk-' + wid + '-bw', wk.bandwidth_percent, (wk.bandwidth_mbps||0).toFixed(1) + ' Mbps');
   }
   // 同步 Worker 分页控件（总页数可能变化）
   const wkPager = document.getElementById('wk-pager');
@@ -546,13 +547,13 @@ function _setText(id, text) {
   if (el) el.textContent = text;
 }
 
-function _updateBar(idPrefix, pct) {
+function _updateBar(idPrefix, pct, suffix) {
   const bar = document.getElementById(idPrefix + '-bar');
   const val = document.getElementById(idPrefix + '-val');
   if (bar) bar.style.width = Math.min(pct, 100) + '%';
   const c = pct > 80 ? 'var(--r)' : pct > 60 ? 'var(--y)' : 'var(--g)';
   if (bar) bar.style.background = c;
-  if (val) { val.textContent = Math.round(pct) + '%'; val.style.color = c; }
+  if (val) { val.textContent = suffix || (Math.round(pct) + '%'); val.style.color = c; }
 }
 
 // A2A 健康检查（概览 tab 内异步加载）

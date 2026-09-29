@@ -93,6 +93,9 @@ function _switchSceneTab(tab) {
   _sceneMarketPage = 1;
   _sceneMarketQ = '';
   _sceneMarketActiveCat = 0;
+  // 切 tab 时清空旧场景数据，防止新 tab 列表加载回来前用旧数据渲染出"占位场景"
+  _sceneMarketScenes = [];
+  _sceneMarketTotal = 0;
   // Issue #63: 页面内 tab 切换——取消旧 tab 请求 + 更新标识
   if (window._tabAbortController) window._tabAbortController.abort();
   window._tabAbortController = new AbortController();
@@ -152,7 +155,7 @@ function _loadSceneMarket() {
     }).catch(() => {});
   }
   // 精选场景非阻塞加载（局部更新精选区，不再全量重建页面）
-  API.get('/scenes/market?sort=latest&limit=5&featured_only=1&scope=official').then(featData => {
+  API.get('/scenes/market?sort=latest&limit=4&featured_only=1&scope=official').then(featData => {
     _sceneMarketFeatured = featData.scenes || [];
     if (_sceneTab === 'official') _renderFeaturedSection();
   }).catch(() => { _sceneMarketFeatured = []; _renderFeaturedSection(); });
@@ -383,19 +386,9 @@ function _renderSceneMarketPage() {
 
   let html = '';
 
-  // 精选场景横向滚动
+  // 精选场景：≥4 张铺满一行，≤3 张横向滚动（可留白）
   if (featured.length > 0) {
-    html += `<div id="sceneMarketFeatured" class="apple-card">
-      <div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
-      <div class="scn-scroll-wrap">
-        <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
-          ${featured.map(s => _renderSceneCard(s)).join('')}
-        </div>
-        <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-        <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
-      </div>
-    </div>`;
-    setTimeout(() => _updateScrollBtns('featured-scenes'), 100);
+    html += `<div id="sceneMarketFeatured" class="apple-card">${_renderFeaturedInner(featured)}</div>`;
   }
 
   // 全部场景
@@ -448,6 +441,13 @@ function _renderSceneMarketPage() {
   el.innerHTML = html;
 }
 
+// 精选区内部 HTML：对齐精选技能 feat-row 布局
+function _renderFeaturedInner(featured) {
+  const cards = featured.map(s => _renderSceneCard(s)).join('');
+  const head = `<div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>`;
+  return head + `<div id="featured-scenes" class="feat-row">${cards}</div>`;
+}
+
 // Issue #196: 精选区局部刷新（不重建整个页面）
 function _renderFeaturedSection() {
   const featured = _sceneMarketFeatured;
@@ -462,27 +462,17 @@ function _renderFeaturedSection() {
     return;
   }
 
-  const innerHtml = `<div class="cd-h"><h2>🌟 ${I18N.t('skills.featured_scenes')||'精选场景'}</h2></div>
-    <div class="scn-scroll-wrap">
-      <div id="featured-scenes" class="scn-scroll-track" onscroll="_updateScrollBtns('featured-scenes')">
-        ${featured.map(s => _renderSceneCard(s)).join('')}
-      </div>
-      <button class="scn-scroll-btn scn-scroll-prev" id="featured-scenes-prev" onclick="document.getElementById('featured-scenes').scrollBy({left:-314,behavior:'smooth'})">◀</button>
-      <button class="scn-scroll-btn scn-scroll-next" id="featured-scenes-next" onclick="document.getElementById('featured-scenes').scrollBy({left:314,behavior:'smooth'})">▶</button>
-    </div>`;
+  const innerHtml = _renderFeaturedInner(featured);
 
   if (existing) {
-    // 已有精选区 → 仅更新内容
     existing.innerHTML = innerHtml;
   } else if (allScenesCard) {
-    // 无精选区 → 在「全部场景」卡片前插入
     const wrapper = document.createElement('div');
     wrapper.id = 'sceneMarketFeatured';
     wrapper.className = 'apple-card';
     wrapper.innerHTML = innerHtml;
     container.insertBefore(wrapper, allScenesCard);
   }
-  setTimeout(() => _updateScrollBtns('featured-scenes'), 100);
 }
 
 // 精选区滚动按钮动态显示/隐藏
@@ -498,7 +488,7 @@ function _updateScrollBtns(trackId) {
 }
 
 window.addEventListener('resize', function() {
-  ['featured-scenes', 'featured-skills'].forEach(function(id) {
+  ['featured-skills'].forEach(function(id) {
     if (document.getElementById(id)) _updateScrollBtns(id);
   });
 });
@@ -524,13 +514,13 @@ function _renderSceneCard(s) {
   let btns = '';
   if (scope === 'official') {
     btns = `<div class="scn-card-btns">
-      <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id})">${I18N.t('skills.apply_scene')||'应用'}</button>
+      <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id},'${s.name}','${(s.skills||[]).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
       ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
     </div>`;
   } else {
     // repo: 底部只放主操作，编辑/删除移到标题行 ⋯ 菜单
     btns = `<div class="scn-card-btns">
-      <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id})">${I18N.t('skills.apply_scene')||'应用'}</button>
+      <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id},'${s.name}','${(s.skills||[]).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
       ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
     </div>`;
   }
@@ -603,7 +593,7 @@ function _toggleSceneLike(sceneId, el) {
 }
 
 // ── 场景应用（带高级选项弹窗） ──
-function _applyScene(sceneId) {
+function _applyScene(sceneId, sceneName, sceneSkills) {
   const repo = _currentRepoFullName();
   if (!repo) {
     if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_repo_first')||'请先选择仓库');
@@ -612,16 +602,20 @@ function _applyScene(sceneId) {
   const parts = repo.split('/');
   const owner = encodeURIComponent(parts[0]);
   const repoName = encodeURIComponent(parts[1]);
+  // sceneSkills 可能是逗号分隔字符串，转回数组
+  var skillsArr = typeof sceneSkills === 'string' ? (sceneSkills ? sceneSkills.split(',') : []) : (Array.isArray(sceneSkills) ? sceneSkills : []);
+  // 判断是否为华为云 Skill 场景（name=skill-dev 或 skills 含 huawei-cloud）
+  var isHwCloudScene = (sceneName === 'huawei-skill') || (skillsArr.indexOf('huawei-cloud') >= 0);
   // 先检查是否已应用过，然后统一弹高级选项弹窗
   API.get('/scenes/market/' + sceneId + '/applied?owner=' + owner + '&repo=' + repoName).then(check => {
-    _showApplyOptionsModal(sceneId, owner, repoName, check.applied, check.scene_name);
+    _showApplyOptionsModal(sceneId, owner, repoName, check.applied, check.scene_name, isHwCloudScene);
   }).catch(() => {
-    _showApplyOptionsModal(sceneId, owner, repoName, false, '');
+    _showApplyOptionsModal(sceneId, owner, repoName, false, '', isHwCloudScene);
   });
 }
 
 // 高级选项弹窗：工作分支 + 自定义配置项
-function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName) {
+function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName, isHwCloudScene) {
   var modal = document.createElement('div');
   modal.id = 'applyOptionsModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
@@ -630,8 +624,8 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
     ? (I18N.t('skills.apply_confirm_title')||'确认覆盖应用')
     : (I18N.t('skills.apply_scene')||'应用场景');
   var warnHtml = isOverwrite
-    ? '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:16px;padding:12px 14px;background:rgba(255,59,48,.06);border-radius:12px">' +
-        '<span style="font-size:18px;flex-shrink:0">⚠️</span>' +
+    ? '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;padding:12px 14px;background:rgba(255,59,48,.06);border-radius:12px">' +
+        '<span style="font-size:16px;flex-shrink:0;line-height:1">⚠️</span>' +
         '<div style="font-size:12px;color:var(--t2);line-height:1.6">' +
           (I18N.t('skills.apply_confirm_desc')||'当前仓库已应用过此场景') + (sceneName ? '（' + sceneName + '）' : '') + '，' +
           (I18N.t('skills.apply_confirm_warning')||'再次应用将覆盖更新已有的场景配置。') +
@@ -646,7 +640,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
       '#applyOptionsModal .ap-btn-d{border:1px solid rgba(255,59,48,.3);color:#ff3b30}' +
       '#applyOptionsModal .ap-btn-d:hover{background:#ff3b30;border-color:#ff3b30;color:#fff}' +
     '</style>' +
-    '<div class="cd" style="width:480px;max-height:85vh;overflow-y:auto;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
+    '<div class="cd" style="width:600px;max-height:92vh;overflow-y:auto;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
       '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + title + '</h3>' +
       warnHtml +
       // 工作分支
@@ -691,18 +685,61 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   };
 
   // 添加自定义配置项
-  window._applyAddCustomField = function(key, value) {
+  window._applyAddCustomField = function(name, value, readOnlyKey, isSecret, scope, valueExist, preset, description) {
     var container = document.getElementById('applyAdvCustomFields');
     if (!container) return;
     var row = document.createElement('div');
     row.className = 'adv-kv';
-    row.style.cssText = 'display:flex;gap:8px;align-items:center';
-    row.innerHTML =
-      '<input class="adv-kv-key" placeholder="key" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (key || '') + '">' +
-      '<input class="adv-kv-val" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + (value || '') + '">' +
-      '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>';
+    row.style.cssText = 'display:flex;gap:8px;align-items:center;flex-wrap:wrap';
+    var isSec = _cfComputeIsSecret(name, isSecret);
+    var keyInputAttrs = readOnlyKey ? 'readonly style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#eee;color:#86868b;cursor:not-allowed"' : 'style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))"';
+    var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
+    var val = (value || '');
+    var valType = (readOnlyKey || isSec) ? 'password' : 'text';
+    var eyeIcon = (readOnlyKey || isSec) ? '👁' : '🙈';
+    var _desc = (description || '').trim();
+    var nameEl = preset
+      ? '<span style="flex:1;display:inline-flex;flex-direction:column;align-items:stretch;justify-content:center;padding:7px 12px">' +
+          '<span class="adv-kv-key-static" style="font-weight:600;color:#1d1d1f;font-size:13px;line-height:1.3">' + (name || '') + '</span>' +
+          (_desc ? '<span style="font-size:10px;color:#86868b;line-height:1.3;margin-top:2px">' + _desc + '</span>' : '') +
+        '</span>'
+      : '<input class="adv-kv-key" placeholder="name" ' + keyInputAttrs + ' value="' + (name || '') + '">';
+    row.innerHTML = nameEl +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + valType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + val + '">' +
+      '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + eyeIcon + '</button>' +
+      ((readOnlyKey || preset) ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
+      (preset ? '<input type="hidden" class="adv-kv-preset" value="1">'
+               : '<button class="ap-btn ap-btn-d" style="font-size:14px;padding:4px 10px" onclick="this.parentElement.remove()">×</button>');
     container.appendChild(row);
   };
+
+  // 华为云 Skill 场景：自动注入 AK/SK 配置项
+  if (isHwCloudScene) {
+    // 先添加提示
+    var hwHint = document.createElement('div');
+    hwHint.id = 'hwCloudCredsHint';
+    hwHint.style.cssText = 'padding:10px 14px;background:rgba(0,113,227,0.06);border-radius:10px;font-size:11px;color:#86868b;line-height:1.6;margin-bottom:8px';
+    hwHint.innerHTML = '☁ 华为云场景需要 AK/SK 凭证。如已配置将自动填入，也可在此直接填写。' +
+      ' <a href="javascript:void(0)" onclick="app.nav(\'settings\')" style="color:#0071e3;cursor:pointer">前往设置</a>';
+    var customFieldsContainer = document.getElementById('applyAdvCustomFields');
+    if (customFieldsContainer) {
+      customFieldsContainer.parentNode.insertBefore(hwHint, customFieldsContainer);
+    }
+    // 从用户设置中获取已配置的 AK/SK
+    API.get('/settings/credentials').then(function(credData) {
+      var hw = (credData && credData.huawei_cloud) || {};
+      var ak = hw.ak || '';
+      var sk = hw.sk || '';
+      // 添加 AK 行（name 只读）
+      window._applyAddCustomField('HUAWEICLOUD_SDK_AK', ak, true);
+      // 添加 SK 行（name 只读）
+      window._applyAddCustomField('HUAWEICLOUD_SDK_SK', sk, true);
+    }).catch(function() {
+      // 获取失败也添加空行，让用户手动填写
+      window._applyAddCustomField('HUAWEICLOUD_SDK_AK', '', true);
+      window._applyAddCustomField('HUAWEICLOUD_SDK_SK', '', true);
+    });
+  }
 
   // 创建新分支
   window._applyCreateNewBranch = function(o, n) {
@@ -770,7 +807,24 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
         }
       }
       var fields = d.custom_fields || [];
-      fields.forEach(function(f) { window._applyAddCustomField(f.key, f.value); });
+      // 华为云场景已自动注入 AK/SK 行，回填时跳过这些 name 避免重复
+      var hwKeys = isHwCloudScene ? ['HUAWEICLOUD_SDK_AK', 'HUAWEICLOUD_SDK_SK'] : [];
+      fields.forEach(function(f) {
+        var fname = f.name || f.key || '';
+        if (hwKeys.indexOf(fname) >= 0) {
+          // 已有 AK/SK 行 → 只更新 value，不新增行
+          var rows = document.querySelectorAll('#applyAdvCustomFields .adv-kv');
+          for (var i = 0; i < rows.length; i++) {
+            var k = (rows[i].querySelector('.adv-kv-key') || {}).value || '';
+            if (k === fname) {
+              var valInput = rows[i].querySelector('.adv-kv-val');
+              if (valInput) valInput.value = f.value || '';
+              return;
+            }
+          }
+        }
+        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.scope, f.value_exist, f.preset, f.description);
+      });
     }).catch(function() {});
   }
 
@@ -778,14 +832,10 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   document.getElementById('applyConfirmBtn').onclick = function() {
     var workBranch = (document.getElementById('applyAdvWorkBranch') || {}).value || '';
     if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
-    var fields = [];
-    document.querySelectorAll('#applyAdvCustomFields .adv-kv').forEach(function(row) {
-      var k = (row.querySelector('.adv-kv-key') || {}).value || '';
-      var v = (row.querySelector('.adv-kv-val') || {}).value || '';
-      if (k.trim()) fields.push({ key: k.trim(), value: v.trim() });
-    });
+    var _collected = _cfCollectFields('#applyAdvCustomFields');
+    if (_collected.error) { app.showToast && app.showToast(_collected.error); return; }
     modal.remove();
-    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, fields);
+    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, _collected.fields);
   };
 }
 
@@ -986,7 +1036,7 @@ function _selectRepoAndNav(fullName, owner, name) {
 
 function _currentRepoFullName() {
   try {
-    const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+    const c = app.currentRepo();
     return c ? (c.fullName || '') : '';
   } catch { return ''; }
 }
@@ -1043,7 +1093,7 @@ function _renderSceneDetailPage(s) {
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
         ${!isOfficial ? `<button class="bt bt-o bt-s" onclick="_editScene(${s.id})" style="opacity:0.7">${I18N.t('skills.edit_scene')||'编辑'}</button>
         <button class="bt bt-o bt-s" onclick="_deleteScene(${s.id})" style="opacity:0.7;color:var(--r)">${I18N.t('skills.delete_scene')||'删除'}</button>` : ''}
-        <button class="bt bt-o bt-s" onclick="_applyScene(${s.id})">${I18N.t('skills.apply_scene')||'应用'}</button>
+        <button class="bt bt-o bt-s" onclick="_applyScene(${s.id},'${s.name}','${(s.skills||[]).map(function(x){return x.name||x;}).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
         ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
       </div>
     </div>
@@ -1130,6 +1180,41 @@ function _renderSceneDetailPage(s) {
           <div class="det-suite-role" title="${(roleDesc || skLabel).replace(/"/g, '&quot;')}">${roleDesc || skLabel}</div>
         </div>
         <span class="det-suite-badge" style="background:${skDeleted ? 'var(--r)14' : bgColor+'14'};color:${skDeleted ? 'var(--r)' : bgColor}">${skLabel}</span>
+      </div>`;
+    });
+    html += `</div></div>`;
+  }
+
+  // 场景参数（预置自定义参数：应用场景时需要的参数 + 用途说明）
+  var presetFields = [];
+  try {
+    var _rawPc = s.preset_custom_fields;
+    if (typeof _rawPc === 'string') { presetFields = JSON.parse(_rawPc || '[]') || []; }
+    else if (Array.isArray(_rawPc)) { presetFields = _rawPc; }
+  } catch (e) { presetFields = []; }
+  if (presetFields.length > 0) {
+    var _scopeLabels = {vod:'VOD', issue:'Issue', coding:'Coding', qa:'QA', sre:'SRE', all:'全部'};
+    html += `<div class="cd-h" style="margin:24px 0 12px"><h2 style="font-size:16px;font-weight:600">${I18N.t('skills.scene_params')||'场景参数'}</h2>
+      <span style="font-size:11px;color:#86868b;font-weight:400;margin-left:8px">${I18N.t('skills.scene_params_hint')||'应用场景时需配置，Agent 将通过环境变量读取'}</span></div>`;
+    html += `<div class="det-card-wrap"><div style="display:flex;flex-direction:column;gap:10px">`;
+    presetFields.forEach(function(p) {
+      var _pn = p.name || p.key || '';
+      if (!_pn) return;
+      var _desc2 = p.description || '';
+      var _sc2 = (p.scope || ['all']);
+      var _scTxt = (Array.isArray(_sc2) ? _sc2 : [_sc2]).map(function(x){ return _scopeLabels[x] || x; }).join(' / ');
+      var _isSec2 = !!(p.is_secret);
+      var _dv = p.default_value || '';
+      html += `<div style="background:rgba(255,255,255,.6);border-radius:14px;padding:12px 16px;display:flex;align-items:center;gap:12px;box-shadow:0 1px 3px rgba(0,0,0,.04)">
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap">
+            <code style="background:rgba(0,113,227,.08);color:#0071e3;font-size:12px;font-weight:600;padding:2px 8px;border-radius:6px">${_pn}</code>
+            ${_isSec2 ? '<span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(255,69,58,.1);color:#ff453a">🔒 密钥</span>' : ''}
+            <span style="font-size:9px;font-weight:600;padding:2px 8px;border-radius:999px;background:rgba(0,0,0,.05);color:#86868b">${_scTxt}</span>
+            ${_dv ? `<span style="font-size:9px;color:#86868b">默认: ${_dv}</span>` : ''}
+          </div>
+          ${_desc2 ? `<div style="font-size:11px;color:#86868b;margin-top:4px;line-height:1.5">${_desc2}</div>` : ''}
+        </div>
       </div>`;
     });
     html += `</div></div>`;

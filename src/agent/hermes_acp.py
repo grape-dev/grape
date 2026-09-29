@@ -85,8 +85,8 @@ class HermesACPBackend:
         # 下次同一 cwd 执行时 session/resume 能找到历史会话数据（chat-ctx-fix §方向一）。
         import hashlib
         _cwd_hash = hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
-        import tempfile
-        _hermes_homes_root = os.path.join(tempfile.gettempdir(), "hermes-acp-homes")
+        # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
+        _hermes_homes_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-acp-homes")
         os.makedirs(_hermes_homes_root, exist_ok=True)
         iso_home = os.path.join(_hermes_homes_root, _cwd_hash)
         os.makedirs(iso_home, exist_ok=True)
@@ -245,30 +245,25 @@ class HermesACPBackend:
         # 用 select + 非阻塞 read 代替。
         import select as _select
         _fd = proc.stdout.fileno()
-        import fcntl as _fcntl
-        _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
-        _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | os.O_NONBLOCK)
+        # Windows 没有 fcntl
+        import sys as _sys
+        if _sys.platform != "win32":
+            import fcntl as _fcntl
+            _fl = _fcntl.fcntl(_fd, _fcntl.F_GETFL)
+            _fcntl.fcntl(_fd, _fcntl.F_SETFL, _fl | os.O_NONBLOCK)
 
         _read_buf = b""
 
         def _reader():
             nonlocal _read_buf
             try:
-                while True:
-                    readable, _, _ = _select.select([_fd], [], [], 0.5)
-                    if not readable:
-                        if proc.poll() is not None:
+                if _sys.platform == "win32":
+                    # Windows: 直接用 Popen.stdout.readline() 阻塞读
+                    # reader 在独立线程，阻塞不影响主线程
+                    while True:
+                        line = proc.stdout.readline()
+                        if not line:
                             break
-                        continue
-                    try:
-                        chunk = proc.stdout.read(4096)
-                    except (BlockingIOError, OSError):
-                        continue
-                    if not chunk:
-                        break
-                    _read_buf += chunk
-                    while b"\n" in _read_buf:
-                        line, _read_buf = _read_buf.split(b"\n", 1)
                         line_str = line.decode("utf-8", errors="replace").strip()
                         if not line_str:
                             continue
@@ -276,6 +271,30 @@ class HermesACPBackend:
                             client.handle_line(line_str)
                         except Exception as e:
                             log.warning(f"{label}hermes ACP handle_line error: {e}")
+                else:
+                    # Linux: select 轮询 + 非阻塞 read 批量读
+                    while True:
+                        readable, _, _ = _select.select([_fd], [], [], 0.5)
+                        if not readable:
+                            if proc.poll() is not None:
+                                break
+                            continue
+                        try:
+                            chunk = proc.stdout.read(4096)
+                        except (BlockingIOError, OSError):
+                            continue
+                        if not chunk:
+                            break
+                        _read_buf += chunk
+                        while b"\n" in _read_buf:
+                            line, _read_buf = _read_buf.split(b"\n", 1)
+                            line_str = line.decode("utf-8", errors="replace").strip()
+                            if not line_str:
+                                continue
+                            try:
+                                client.handle_line(line_str)
+                            except Exception as e:
+                                log.warning(f"{label}hermes ACP handle_line error: {e}")
             except Exception as e:
                 log.warning(f"{label}hermes ACP reader exception: {e}")
             finally:
@@ -284,6 +303,22 @@ class HermesACPBackend:
 
         reader_thread = threading.Thread(target=_reader, daemon=True)
         reader_thread.start()
+
+        # stderr reader 线程：持续排空 stderr 管道，防止管道缓冲区满导致死锁
+        # Windows 管道缓冲区约 4KB，hermes ACP 启动时输出大量 stderr 日志
+        # 不排空会导致 hermes 进程阻塞在 stderr 写入上，stdout 不再输出 → 管道死锁
+        _stderr_chunks = []
+        def _stderr_reader():
+            try:
+                while True:
+                    line = proc.stderr.readline()
+                    if not line:
+                        break
+                    _stderr_chunks.append(line.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+        stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
+        stderr_thread.start()
 
         try:
             # ── 1. initialize 握手 ──
@@ -458,7 +493,7 @@ class HermesACPBackend:
 
             stderr_output = ""
             try:
-                stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+                stderr_output = "".join(_stderr_chunks)[:500]
             except Exception:
                 pass
 
@@ -479,6 +514,10 @@ class HermesACPBackend:
             if _detect_structured_output(full_text):
                 _fixed = _robust_join_json(collected_text)
                 if _fixed and _detect_structured_output(_fixed):
+                    full_text = _fixed
+            elif _detect_findings_block(full_text):
+                _fixed = _robust_join_findings(collected_text)
+                if _fixed and _detect_findings_block(_fixed):
                     full_text = _fixed
 
             yield ("done", {
@@ -795,9 +834,24 @@ def _detect_structured_output(text: str) -> bool:
     return '"actions"' in compact and '"conclusion"' in compact and '"issue_summary"' in compact
 
 
+def _detect_findings_block(text: str) -> bool:
+    """检测 agent 输出中是否包含 autopilot findings JSON 块。
+
+    与 _detect_structured_output 同理：去空白后按字段特征匹配，
+    不依赖 HTML 注释标记完整性（<!-- --> 可能被 chunk 拆断）。
+    """
+    if not text:
+        return False
+    compact = re.sub(r'\s+', '', text)
+    return '"summary"' in compact and '"findings"' in compact
+
+
 # ── JSON 鲁棒拼接辅助函数（源头预防 flush 边界损坏）──
 
 _KNOWN_JSON_FIELDS = ("actions", "conclusion", "artifacts", "next_step", "issue_summary")
+
+_FINDINGS_JSON_FIELDS = ("summary", "findings", "id", "title", "severity",
+                         "category", "description", "suggested_assignee", "suggested_skill")
 
 
 def _robust_join_json(chunks: list) -> str:
@@ -819,6 +873,38 @@ def _robust_join_json(chunks: list) -> str:
             json_part = json_part[:idx]
     # 修复 1: 断裂字段名（\n 在字段名中间）
     for field in _KNOWN_JSON_FIELDS:
+        for i in range(1, len(field)):
+            broken = field[:i] + '\n' + field[i:]
+            if broken in json_part:
+                json_part = json_part.replace(broken, field)
+    # 修复 2: 字符串外 \n 去除，字符串内裸 \n 转义
+    json_part = _fix_json_newlines(json_part)
+    # 修复 3: 补闭合 } 如果缺失
+    json_part = _ensure_closed(json_part)
+    return full[:start] + json_part
+
+
+def _robust_join_findings(chunks: list) -> str:
+    """拼接 collected_text，修复 autopilot findings JSON 的 flush 边界损坏。
+
+    与 _robust_join_json 逻辑相同，适配 findings 格式：
+    - 起点匹配 {"summary"（而非 {"actions"）
+    - 字段名列表使用 _FINDINGS_JSON_FIELDS
+    - 尾部标记清理包含 --> 和 --\n>（注释标记可能被 chunk 拆断）
+    """
+    full = "\n".join(chunks)
+    m = re.search(r'\{\s*"summary"', full)
+    if not m:
+        return full
+    start = m.start()
+    json_part = full[start:]
+    # 去掉尾部非 JSON 标记：HTML 注释结束符（可能被 chunk 拆断）+ 其他杂标记
+    for marker in ('-->', '--\n>', '\n---', '\n\n['):
+        idx = json_part.rfind(marker)
+        if idx > 0:
+            json_part = json_part[:idx]
+    # 修复 1: 断裂字段名（\n 在字段名中间）
+    for field in _FINDINGS_JSON_FIELDS:
         for i in range(1, len(field)):
             broken = field[:i] + '\n' + field[i:]
             if broken in json_part:
@@ -923,10 +1009,10 @@ def _build_overlay_home(iso_home: str, src_home: str):
         if os.path.isfile(src_cfg):
             try:
                 import re
-                with open(src_cfg, "r") as f:
+                with open(src_cfg, "r", encoding="utf-8") as f:
                     cfg_text = f.read()
                 cfg_text = re.sub(r'(tool_progress:\s*)\w+', r'\g<1>new', cfg_text)
-                with open(dst_cfg, "w") as f:
+                with open(dst_cfg, "w", encoding="utf-8") as f:
                     f.write(cfg_text)
             except Exception:
                 shutil.copy2(src_cfg, dst_cfg)
@@ -937,7 +1023,7 @@ def _build_overlay_home(iso_home: str, src_home: str):
         env_body = ""
         if os.path.isfile(src_env):
             try:
-                with open(src_env, "r") as f:
+                with open(src_env, "r", encoding="utf-8") as f:
                     for line in f:
                         stripped = line.strip()
                         if stripped.startswith("HERMES_HOME=") or stripped.startswith("export HERMES_HOME="):
@@ -950,7 +1036,7 @@ def _build_overlay_home(iso_home: str, src_home: str):
             env_body += "\n"
         env_body += f"HERMES_HOME='{iso_home}'\n"
         try:
-            with open(dst_envf, "w") as f:
+            with open(dst_envf, "w", encoding="utf-8") as f:
                 f.write(env_body)
             os.chmod(dst_envf, 0o600)
         except Exception:

@@ -61,6 +61,7 @@ EXPECTED_PUBLIC = {
     "gitrepo_issues_create": ("post", "/api/git-repo/{owner}/{repo}/issues"),
     "gitrepo_issues_get": ("get", "/api/git-repo/{owner}/{repo}/issues/{number}"),
     "gitrepo_issues_update": ("patch", "/api/git-repo/{owner}/{repo}/issues/{number}"),
+    "gitrepo_issues_close": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/close"),
     "gitrepo_issues_comments_list": ("get", "/api/git-repo/{owner}/{repo}/issues/{number}/comments"),
     "gitrepo_issues_comments_create": ("post", "/api/git-repo/{owner}/{repo}/issues/{number}/comments"),
     "gitrepo_pulls_list": ("get", "/api/git-repo/{owner}/{repo}/pulls"),
@@ -356,7 +357,7 @@ def test_x_token_scope_consistency():
             f"标了 session_only 但未命中规则: {op_id} {method} {path}"
 
     # 3) 抽样：user_only（D 类管理 / 用户操作类）/ dual（开放读）实例
-    user_only_samples = {"/api/skills": "get", "/api/skills/upload": "post",
+    user_only_samples = {"/api/skills": "get",
                          "/api/auth/logout": "post", "/api/dashboard/ops/overview": "get",
                          "/api/issues/mine": "get", "/api/issues/{owner}/{repo}": "post",
                          # 用户操作类：状态写/会话预检禁止 tk_（避免 Agent 干扰 pipeline）
@@ -369,6 +370,10 @@ def test_x_token_scope_consistency():
             f"期望 user_only: {method} {path}"
 
     dual_samples = {"/api/issues/{owner}/{repo}": "get", "/api/a2a": "post",
+                    # skills upload（repo 技能上传会话可用）、详情与子技能（agent 运行时按需加载）为 dual
+                    "/api/skills/upload": "post",
+                    "/api/skills/by-id/{skill_id}": "get",
+                    "/api/skills/{skill_id}/sub": "get",
                     # Issue 状态只读轮询（CLI wait 用）保持 dual
                     "/api/issues/{issue_id}/status": "get"}
     for path, method in dual_samples.items():

@@ -104,6 +104,7 @@ Issue 对象字段：
 ```json
 {
   "ok": true,
+  "issue_id": 101,
   "task_id": 101,
   "issue_number": 5,
   "created": true,
@@ -113,7 +114,7 @@ Issue 对象字段：
 }
 ```
 
-返回：200 成功；400 仓库/标题/描述缺失；409 同标题 Issue 已存在；502 建 GitCode Issue 失败。
+> `issue_id`（= `task_id` 兼容别名）为**需求卡片 id（issue.id）**，非执行实例 id。返回：200 成功；400 仓库/标题/描述缺失；409 同标题 Issue 已存在；502 建 GitCode Issue 失败。
 
 ---
 

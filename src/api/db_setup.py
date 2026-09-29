@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS events (
     duration REAL DEFAULT NULL,
     agent_logs MEDIUMTEXT DEFAULT '[]',
     result MEDIUMTEXT DEFAULT '',
+    entity_type TEXT DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
@@ -539,6 +540,7 @@ CREATE TABLE IF NOT EXISTS devops_pipeline_scene (
     is_active   INTEGER DEFAULT 1,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
+    scene_type  TEXT DEFAULT 'standard',  -- standard | pr_subscription
     UNIQUE (scene_id, repo_key)
 )
 """
@@ -725,17 +727,17 @@ CREATE TABLE IF NOT EXISTS autopilot_tasks (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
     name            TEXT NOT NULL,                       -- 任务名称
     repo_key        TEXT NOT NULL DEFAULT '',            -- 仓库标识（gitcode:owner/repo）
-    scene_id        TEXT NOT NULL DEFAULT 'default',     -- 场景ID（定义 Agent 链）
-    description     TEXT NOT NULL DEFAULT '',             -- 任务描述（Issue body）
+    agent_type      TEXT NOT NULL DEFAULT 'issue',       -- 执行哪个agent（issue/qa/sre）
+    instruction     TEXT NOT NULL DEFAULT '',            -- 巡检指令（注入prompt）
+    skill_name      TEXT NOT NULL DEFAULT '',            -- 可选skill（空=不用skill）
     cron            TEXT NOT NULL DEFAULT '*/30 * * * *', -- cron 表达式（5 段制）
-    agent_chain     MEDIUMTEXT NOT NULL DEFAULT '[]',    -- [废弃] 保留兼容
-    issue_number    TEXT DEFAULT '',                     -- [废弃] 保留兼容
     max_retry       INTEGER NOT NULL DEFAULT 3,          -- 最大重试次数
     enabled         INTEGER NOT NULL DEFAULT 1,          -- 1=启用 0=禁用
-    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间（UTC）
-    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间（UTC）
+    last_run_at     TEXT DEFAULT '',                     -- 最近触发时间
+    next_run_at     TEXT DEFAULT '',                     -- 下次预计触发时间
     created_at      TEXT DEFAULT (datetime('now')),
-    updated_at      TEXT DEFAULT (datetime('now'))
+    updated_at      TEXT DEFAULT (datetime('now')),
+    created_by      INTEGER DEFAULT 0                    -- 创建者 user_id
 )
 """
 
@@ -745,13 +747,15 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     task_id         INTEGER NOT NULL,                    -- 外键 -> autopilot_tasks.id
     status          TEXT NOT NULL DEFAULT 'pending',     -- pending/running/success/failed/retrying
     retry_count     INTEGER NOT NULL DEFAULT 0,          -- 已重试次数
-    agent_chain_step INTEGER NOT NULL DEFAULT 0,         -- 当前执行的链步骤索引
     result          MEDIUMTEXT DEFAULT '',               -- 执行结果摘要
     error           MEDIUMTEXT DEFAULT '',               -- 错误信息
-    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 events.seq
-    started_at      TEXT DEFAULT '',                     -- 开始时间（UTC）
-    completed_at    TEXT DEFAULT '',                     -- 完成时间（UTC）
-    created_at      TEXT DEFAULT (datetime('now'))
+    a2a_seq         INTEGER DEFAULT NULL,                -- 关联 agent_tasks.event_seq（=exec_id）
+    started_at      TEXT DEFAULT '',                     -- 开始时间
+    completed_at    TEXT DEFAULT '',                     -- 完成时间
+    created_at      TEXT DEFAULT (datetime('now')),
+    -- v3.0 新增字段
+    agent_type      TEXT DEFAULT '',                     -- 执行快照
+    findings_json   MEDIUMTEXT DEFAULT ''                -- 问题列表JSON
 )
 """
 
@@ -1016,6 +1020,14 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task ON autopilot_executions(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status ON autopilot_executions(status)",
     ]
+    # autopilot_tasks.created_by 迁移
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "autopilot_tasks", "created_by", "INTEGER DEFAULT 0")
+            db.commit()
+    except Exception as e:
+        log.warning(f"autopilot_tasks created_by migration failed: {e}")
     for idx in indexes:
         try:
             with db_lock:
@@ -1221,10 +1233,11 @@ def _init_scene_category_data():
         categories = [
             ("通用", "general", "⚙", 1),
             ("移动开发", "mobile", "🍃", 2),
-            ("基础设施", "iac", "☁", 3),
-            ("技能开发", "skill-dev", "🔧", 4),
-            ("AI应用", "ai", "🤖", 5),
-            ("内容创作", "content", "📝", 6),
+            ("云原生", "cloud-native", "☁", 3),
+            ("IaC", "iac", "🏗️", 4),
+            ("技能开发", "skill-dev", "🔧", 5),
+            ("AI应用", "ai", "🤖", 6),
+            ("内容创作", "content", "📝", 7),
         ]
         with db_lock:
             c = db.cursor()
@@ -1241,13 +1254,14 @@ def _init_scene_category_data():
 
 
 def _init_skill_category_data():
-    """初始化 skill_category 表的 11 条分类数据（幂等）。
+    """初始化 skill_category 表的 15 条分类数据（幂等）。
 
     Issue #179: 技能分类表独立化，对齐 scene_category 模式。
+    Issue #222: 新增 code-hosting/browser-verify/meeting/other 4 个分类。
     """
     try:
         from src.user.db import get_meta_value, set_meta_value
-        if get_meta_value("skill_category_seeded") == "1":
+        if get_meta_value("skill_category_seeded_v2") == "1":
             return
         categories = [
             ("AI辅助编码与评审", "ai-coding-review", "🤖", 1),
@@ -1261,6 +1275,10 @@ def _init_skill_category_data():
             ("日志与诊断", "log-diagnostics", "🔍", 9),
             ("可观测性", "observability", "📊", 10),
             ("环境与脚手架", "scaffolding", "🏗️", 11),
+            ("代码托管", "code-hosting", "📁", 12),
+            ("浏览器验证", "browser-verify", "🌐", 13),
+            ("会议", "meeting", "📅", 14),
+            ("其他", "other", "📌", 15),
         ]
         with db_lock:
             c = db.cursor()
@@ -1270,8 +1288,8 @@ def _init_skill_category_data():
                     (name, slug, icon, order_num),
                 )
             db.commit()
-        set_meta_value("skill_category_seeded", "1")
-        log.info("Seeded skill_category with 11 categories")
+        set_meta_value("skill_category_seeded_v2", "1")
+        log.info("Seeded skill_category with 15 categories")
     except Exception as e:
         log.warning(f"Init skill_category data failed: {e}")
 
@@ -1333,12 +1351,12 @@ def _init_scene_market_data():
             init_scenes = [
                 ("harmony", "鸿蒙开发", 2, 0, "harmony-ecommerce", "鸿蒙应用开发场景，适合 HarmonyOS 应用开发", None),
                 ("default", "通用开发", 1, 1, "hello-flask", "通用的全链路开发场景，从需求收集到部署运维，适合大多数项目", "default"),
-                ("iac", "IaC开发", 3, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
-                ("skill-dev", "华为云Skill开发", 4, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
+                ("iac", "IaC开发", 4, 1, "tf-infra", "IaC 基础设施即代码开发场景，使用 Terraform 管理云资源", "iac"),
+                ("skill-dev", "华为云Skill开发", 5, 1, "hello-skill", "华为云 Skill 开发场景，创建和发布华为云技能", "skill-dev"),
                 ("cloud-native", "云原生开发", 3, 0, "micro-svc", "云原生开发场景，适合微服务和容器化项目", "cloud-native"),
-                ("agent-dev", "Agent开发", 5, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
-                ("api-skill-dev", "通用Skill开发", 4, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
-                ("blog-publish", "博客发布", 6, 0, "", "博客系统开发与发布场景", "blog-publish"),
+                ("agent-dev", "Agent开发", 6, 0, "ai-interview-swarm", "Agent 开发场景，适合构建 AI Agent 项目", "agent-dev"),
+                ("api-skill-dev", "通用Skill开发", 5, 0, "hello-skill", "通用 Skill 开发场景，创建和发布通用技能", "api-skill-dev"),
+                ("blog-publish", "博客发布", 7, 0, "", "博客系统开发与发布场景", "blog-publish"),
             ]
             imported = 0
             for name, display_name, cat_id, featured, template, mkt_desc, src_scene_id in init_scenes:
@@ -2258,6 +2276,8 @@ def _migrate_tables():
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN scene_id TEXT DEFAULT ''",
+        "ALTER TABLE events ADD COLUMN entity_type TEXT DEFAULT ''",
         "ALTER TABLE issue_state ADD COLUMN assignee TEXT DEFAULT ''",
         # ===== 发布配置(skill-publish v1.1)=====
         # ===== OBS 技能库(obs-skill-storage-design.md §4)=====
@@ -2278,6 +2298,7 @@ def _migrate_tables():
         "ALTER TABLE runtime_credentials ADD COLUMN tmp_percent DOUBLE DEFAULT 0",
         # ===== Issue #180: 带宽占用率指标 =====
         "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_percent DOUBLE DEFAULT 0",
+        "ALTER TABLE runtime_credentials ADD COLUMN bandwidth_mbps DOUBLE DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
@@ -2291,11 +2312,12 @@ def _migrate_tables():
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_expires_at DATETIME DEFAULT NULL",
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_owner VARCHAR(128) DEFAULT NULL",
         "ALTER TABLE global_im_bot_config ADD COLUMN lease_acquired_at DATETIME DEFAULT NULL",
-        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        # SQLite 不支持 ALTER ADD COLUMN non-constant default（CURRENT_TIMESTAMP 会静默失败）
+        "ALTER TABLE global_im_bot_config ADD COLUMN updated_at TEXT DEFAULT ''",
         # ===== knowledge-obs-design：agent_shared_knowledge OBS 对象存储字段 =====
         "ALTER TABLE agent_shared_knowledge ADD COLUMN obs_key VARCHAR(512) DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN content_hash VARCHAR(64) DEFAULT ''",
-        "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at DATETIME DEFAULT CURRENT_TIMESTAMP",
+        "ALTER TABLE agent_shared_knowledge ADD COLUMN updated_at TEXT DEFAULT ''",
         # ===== Issue #67：知识来源 + 归档标记 =====
         "ALTER TABLE agent_shared_knowledge ADD COLUMN source TEXT NOT NULL DEFAULT ''",
         "ALTER TABLE agent_shared_knowledge ADD COLUMN archived INTEGER NOT NULL DEFAULT 0",
@@ -2313,6 +2335,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN probe_latency INT DEFAULT 0",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_last VARCHAR(64) DEFAULT ''",
         "ALTER TABLE agent_runtimes ADD COLUMN probe_error TEXT DEFAULT ''",
+        # ===== probe 连续失败计数：连续2次fail才降级healthy，避免偶发超时误判 =====
+        "ALTER TABLE agent_runtimes ADD COLUMN probe_fail_count INT DEFAULT 0",
         # ===== 场景标签：引擎绑定的场景列表，约束可选角色标签 =====
         "ALTER TABLE agent_runtimes ADD COLUMN scene_tags TEXT DEFAULT '[\"default\"]'",
         # ===== 引擎别名：用户自定义别名，不受心跳覆盖 =====
@@ -2341,8 +2365,8 @@ def _migrate_tables():
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
-        ("general", "通用"), ("mobile", "移动开发"), ("iac", "基础设施"),
-        ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
+        ("general", "通用"), ("mobile", "移动开发"), ("cloud-native", "云原生"),
+        ("iac", "IaC"), ("skill-dev", "技能开发"), ("ai", "AI应用"), ("content", "内容创作"),
     ]
     for slug, name in _category_slugs:
         try:
@@ -2912,10 +2936,43 @@ def _migrate_tables():
             _ensure_column(c, "devops_pipeline_scene", "advanced_options", "TEXT DEFAULT '{}'")
             _ensure_column(c, "devops_pipeline_scene", "created_by", "TEXT DEFAULT ''")
             _ensure_column(c, "devops_pipeline_scene", "icon", "TEXT DEFAULT ''")
+            _ensure_column(c, "devops_pipeline_scene", "scene_type", "TEXT DEFAULT 'standard'")
             db.commit()
-            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon columns")
+            log.info("Added devops_pipeline_scene.advanced_options + created_by + icon + scene_type columns")
     except Exception as e:
-        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by column failed: {e}")
+        log.warning(f"Add devops_pipeline_scene.advanced_options/created_by/scene_type column failed: {e}")
+    # ===== PR 订阅附加能力：场景级开关（替代独立 scene_type='pr_subscription'）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "pr_subscription_enabled", "INTEGER NOT NULL DEFAULT 0")
+            db.commit()
+            # 数据迁移：已有 pr_subscription 场景 → standard + pr_subscription_enabled=1
+            c.execute("UPDATE devops_pipeline_scene SET pr_subscription_enabled=1, scene_type='standard' WHERE scene_type='pr_subscription'")
+            _migrated = c.rowcount
+            db.commit()
+            if _migrated:
+                log.info(f"Migrated {_migrated} pr_subscription scenes → standard + pr_subscription_enabled=1")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.pr_subscription_enabled column failed: {e}")
+    # ===== Issue #242: devops_pipeline_scene 关联仓库列（跨仓库协同开发）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "linked_repos", "TEXT DEFAULT '[]'")
+            db.commit()
+            log.info("Added devops_pipeline_scene.linked_repos column")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.linked_repos column failed: {e}")
+    # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "scene_id", "TEXT DEFAULT ''")
+            db.commit()
+            log.info("Added events.scene_id column")
+    except Exception as e:
+        log.warning(f"Add events.scene_id column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:
@@ -2967,6 +3024,7 @@ def _migrate_tables():
                 _ensure_column(c, "runtime_credentials", "spec", "TEXT DEFAULT ''")
                 _ensure_column(c, "runtime_credentials", "tmp_percent", "REAL DEFAULT 0")
                 _ensure_column(c, "runtime_credentials", "bandwidth_percent", "REAL DEFAULT 0")
+                _ensure_column(c, "runtime_credentials", "bandwidth_mbps", "REAL DEFAULT 0")
                 # 凭据名全局唯一:先清重(同名多行仅保留最小 id),再建唯一索引
                 c.execute("""
                     DELETE FROM runtime_credentials WHERE id NOT IN (
@@ -3110,6 +3168,16 @@ def _migrate_tables():
         log.info("Added pool_engine_ids column to agent_tasks")
     except Exception as e:
         log.warning(f"Add pool_engine_ids column failed: {e}")
+    # ===== 双重标记完成（issue-219-task-complete-double-signal-design.md）：stream_ended / self_reported =====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "agent_tasks", "stream_ended", "INTEGER DEFAULT 0")
+            _ensure_column(c, "agent_tasks", "self_reported", "INTEGER DEFAULT 0")
+            db.commit()
+        log.info("Added stream_ended/self_reported columns to agent_tasks")
+    except Exception as e:
+        log.warning(f"Add stream_ended/self_reported columns failed: {e}")
     # 官方场景种子导入（从 pipelines.json → DB，仅首次）
     try:
         _seed_official_scene_market_from_pipelines()
@@ -3451,15 +3519,24 @@ def _backfill_scene_display_names():
 
 
 
-    # ===== autopilot_tasks: 新增 scene_id / description 列 =====
+    # ===== autopilot v3.0: 表结构重构 =====
+    # 旧字段 scene_id/description/agent_chain/issue_number/agent_chain_step 已移除
+    # 新字段 agent_type/instruction/skill_name/findings_json
+    # 迁移策略: 清空两张表，新结构从头开始（_ensure_column 只加不删，旧字段物理保留但不再使用）
     try:
         with db_lock:
             c = db.cursor()
-            _ensure_column(c, "autopilot_tasks", "scene_id", "TEXT NOT NULL DEFAULT 'default'")
-            _ensure_column(c, "autopilot_tasks", "description", "TEXT NOT NULL DEFAULT ''")
-            # autopilot_executions: 新增 issue_number 列
-            _ensure_column(c, "autopilot_executions", "issue_number", "TEXT DEFAULT ''")
+            # autopilot_tasks 新字段
+            _ensure_column(c, "autopilot_tasks", "agent_type", "TEXT NOT NULL DEFAULT 'issue'")
+            _ensure_column(c, "autopilot_tasks", "instruction", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "skill_name", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "engine_runtime_ids", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "custom_fields", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "autopilot_tasks", "work_branch", "TEXT NOT NULL DEFAULT ''")
+            # autopilot_executions 新字段
+            _ensure_column(c, "autopilot_executions", "agent_type", "TEXT DEFAULT ''")
+            _ensure_column(c, "autopilot_executions", "findings_json", "MEDIUMTEXT DEFAULT ''")
             db.commit()
-            log.info("Autopilot schema migration: scene_id/description/issue_number ensured")
+            log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch ensured")
     except Exception as e:
-        log.warning(f"Autopilot schema migration failed: {e}")
+        log.warning(f"Autopilot v3.0 schema migration failed: {e}")

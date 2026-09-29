@@ -156,7 +156,7 @@ function loadCfgOptions() {
   if (skillSelect) {
     let repo = '';
     try {
-      const c = JSON.parse(localStorage.getItem('currentRepo') || 'null');
+      const c = app.currentRepo();
       repo = c ? (c.fullName || '') : '';
     } catch {}
     const scope = _skillScope || 'official';
@@ -269,10 +269,14 @@ function _renderAgentEvents(d) {
       </tr></thead>
       <tbody>
         ${events.map(function(ev) {
-          var _issNum = String(ev.issue_id || '').replace(/^#/, '');
+          var _rawIssId = String(ev.issue_id || '');
+          var _isPR = _rawIssId.startsWith('#pr_');
+          var _issNum = _isPR ? _rawIssId.replace(/^#pr_/, '').split('_')[0] : _rawIssId.replace(/^#/, '');
+          var _vcsPath = _isPR ? '/pull/' + _issNum : '/issues/' + _issNum;
+          var _issLabel = _isPR ? 'PR #' + _issNum : _rawIssId;
           var _issLink = (_issNum && ev.repo_key)
-            ? '<a href="' + _vcsUrl(ev.repo_key, '/issues/' + _issNum) + '" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">' + (ev.issue_id || '') + '</a>'
-            : (ev.issue_id || '—');
+            ? '<a href="' + _vcsUrl(ev.repo_key, _vcsPath) + '" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline" onclick="event.stopPropagation()">' + _issLabel + '</a>'
+            : (_issLabel || '—');
           var _isHl = highlightId && _normIss(ev.issue_id) === _normIss(highlightId);
           return '<tr class="pipe-row' + (_isHl ? ' highlight-flash' : '') + '" onclick="_agentRowClick(\'' + highlightId + '\', ' + ev.seq + ')" style="cursor:pointer">' +
             '<td style="padding:8px 10px;font-size:11px;font-weight:600;color:var(--t2)">#' + (ev.seq || '?') + '</td>' +

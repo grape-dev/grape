@@ -29,6 +29,7 @@
     "cancel": "Cancel",
     "generate": "Generate",
     "copy_one_cmd": "📋 Copy Install Command",
+    "copy_win_cmd": "📋 Copy Windows Command",
     "copy_token": "📋 Copy Token"
   },
   "label": {
@@ -102,6 +103,8 @@
     "install_hint": "📦 Install on the Worker machine (regular user) with one command:",
     "install_desc": "This command downloads the runtime package (grape-worker.tar.gz) from the controller, extracts it to the home directory, writes the credential and controller address, and starts registration in the background; no root needed. Re-run to upgrade.",
     "manual_start": "Or start RuntimeAgent manually:",
+    "win_install_hint": "🖥️ Windows setup (PowerShell):",
+    "win_install_desc": "Run this command in PowerShell on your Windows device. It downloads the runtime package, writes the credential, and starts registration in the background. Requires Python 3.10+.",
     "toast_generated": "Credential generated",
     "toast_gen_failed": "Generation failed: {{msg}}",
     "rename_prompt": "New credential name (globally unique):",

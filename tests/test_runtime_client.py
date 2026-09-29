@@ -170,6 +170,15 @@ class TestBusinessMethods:
         c = _client(_Ctx(_FakeResp(400, text="x")))
         assert _run(c.heartbeat([1])) is None
 
+    def test_heartbeat_payload_includes_bandwidth_percent(self):
+        c = _client(_Ctx(_FakeResp(200, {"status": "ok", "cancelled_tasks": []})))
+        metrics = {"cpu_percent": 5.0, "memory_percent": 50.0, "disk_percent": 30.0,
+                   "tmp_percent": 10.0, "bandwidth_percent": 25.5, "load_avg": "1.00,0.50,0.25", "spec": "4C8G"}
+        _run(c.heartbeat([7], metrics=metrics))
+        body = c._session.request.call_args.kwargs["json"]
+        assert body["runtime_ids"] == [7]
+        assert body["bandwidth_percent"] == 25.5
+
     def test_claim_returns_task(self):
         c = _client(_Ctx(_FakeResp(200, {"task": {"id": "t1"}})))
         result = _run(c.claim(7))

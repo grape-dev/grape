@@ -12,6 +12,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from unittest.mock import patch
 
 from src.api.routes import tasks as tasks_mod
+from src.api import issues_center as ic
 from src.session_manager import db, db_lock
 
 REPO = "gitcode:owner/repo"
@@ -49,10 +50,10 @@ def teardown_function():
 
 def test_ensure_idempotent_single_row():
     """同一 issue 重复建档只产生一条 active 行（幂等）"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=42), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
-        t1 = tasks_mod.ensure_issue_task(REPO, 1, title="T", assignee="alice", event_type="issue_opened")
-        t2 = tasks_mod.ensure_issue_task(REPO, 1, title="T", assignee="alice", event_type="issue_comment")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=42), \
+         patch.object(ic, "_get_issue_title", return_value="T"):
+        t1 = ic.ensure_issue_task(REPO, 1, title="T", assignee="alice", event_type="issue_opened")
+        t2 = ic.ensure_issue_task(REPO, 1, title="T", assignee="alice", event_type="issue_comment")
     assert t1 == t2
     assert _count(REPO, 1) == 1
     rows = _rows(REPO, 1)
@@ -61,28 +62,28 @@ def test_ensure_idempotent_single_row():
 
 def test_ensure_assignee_unmapped_hidden_user0():
     """assignee 未注册平台 → user_id=0 落库（任务中心 user_id=? 查询自然不可见）"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=None), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
-        tasks_mod.ensure_issue_task(REPO, 2, title="T", assignee="ghost", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=None), \
+         patch.object(ic, "_get_issue_title", return_value="T"):
+        ic.ensure_issue_task(REPO, 2, title="T", assignee="ghost", event_type="issue_opened")
     rows = _rows(REPO, 2)
     assert rows and rows[0][0] == 0 and rows[0][1] == "ghost"
 
 
 def test_ensure_owner_fallback_when_no_assignee():
     """无 assignee → 仓库 owner；owner 映射到 user_id"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", side_effect=lambda u: 7 if u == "owner" else None), \
-         patch.object(tasks_mod, "_get_issue_title", return_value=""):
-        tasks_mod.ensure_issue_task(REPO, 3, assignee="", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", side_effect=lambda u: 7 if u == "owner" else None), \
+         patch.object(ic, "_get_issue_title", return_value=""):
+        ic.ensure_issue_task(REPO, 3, assignee="", event_type="issue_opened")
     rows = _rows(REPO, 3)
     assert rows and rows[0][0] == 7 and rows[0][1] == "owner"
 
 
 def test_close_issue_tasks_completes_active():
     """close_issue_tasks：active/processing → completed(issue_closed)"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=1), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
-        tasks_mod.ensure_issue_task(REPO, 4, title="T", assignee="bob", event_type="issue_opened")
-        tasks_mod.ensure_issue_task(REPO, 5, title="T", assignee="bob", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=1), \
+         patch.object(ic, "_get_issue_title", return_value="T"):
+        ic.ensure_issue_task(REPO, 4, title="T", assignee="bob", event_type="issue_opened")
+        ic.ensure_issue_task(REPO, 5, title="T", assignee="bob", event_type="issue_opened")
     n = tasks_mod.close_issue_tasks(REPO, 4)
     assert n == 1
     with db_lock:
@@ -100,9 +101,9 @@ def test_close_issue_tasks_completes_active():
 
 def test_ensure_owner_fallback_unmapped_user0():
     """无 assignee 且 owner 未映射 → user_id=0 落库（target 仍为 owner login）"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=None), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="T"):
-        tasks_mod.ensure_issue_task(REPO, 6, title="T", assignee="", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=None), \
+         patch.object(ic, "_get_issue_title", return_value="T"):
+        ic.ensure_issue_task(REPO, 6, title="T", assignee="", event_type="issue_opened")
     rows = _rows(REPO, 6)
     assert rows and rows[0][0] == 0 and rows[0][1] == "owner"
 
@@ -113,9 +114,9 @@ def test_my_tasks_shows_unowned_rows():
     from src.api.main import app
     from src.api.deps import get_current_user, get_current_user_or_api_key
 
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=None), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="Unowned"):
-        tasks_mod.ensure_issue_task(REPO, 7, title="Unowned", assignee="ghost", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=None), \
+         patch.object(ic, "_get_issue_title", return_value="Unowned"):
+        ic.ensure_issue_task(REPO, 7, title="Unowned", assignee="ghost", event_type="issue_opened")
 
     app.dependency_overrides[get_current_user] = lambda: {"id": 999, "username": "viewer"}
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 999, "username": "viewer"}
@@ -131,9 +132,9 @@ def test_my_tasks_shows_unowned_rows():
 
 def test_ensure_links_conversation():
     """建档任务自动关联「Issue #N」对话（任务中心「去对话」配套）"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=88), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="Linked"):
-        tid = tasks_mod.ensure_issue_task(REPO, 8, title="Linked", assignee="carol", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=88), \
+         patch.object(ic, "_get_issue_title", return_value="Linked"):
+        tid = ic.ensure_issue_task(REPO, 8, title="Linked", assignee="carol", event_type="issue_opened")
     with db_lock:
         c = db.cursor()
         c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,))
@@ -187,9 +188,9 @@ def test_ensure_idempotent_updates_when_assignee_changed():
 
 def test_ensure_skips_conversation_when_user0():
     """user_id=0（assignee/owner 均未注册）→ 不建对话，conversation_id 留空"""
-    with patch.object(tasks_mod, "_get_user_id_by_gitcode", return_value=None), \
-         patch.object(tasks_mod, "_get_issue_title", return_value="NoUser"):
-        tid = tasks_mod.ensure_issue_task(REPO, 9, title="NoUser", assignee="ghost2", event_type="issue_opened")
+    with patch.object(ic, "_get_user_id_by_gitcode", return_value=None), \
+         patch.object(ic, "_get_issue_title", return_value="NoUser"):
+        tid = ic.ensure_issue_task(REPO, 9, title="NoUser", assignee="ghost2", event_type="issue_opened")
     with db_lock:
         c = db.cursor()
         c.execute("SELECT conversation_id FROM issue WHERE id=?", (tid,))

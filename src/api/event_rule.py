@@ -152,8 +152,11 @@ def evaluate_event_action(event_type: str, payload: dict, vcs_source: str = "") 
         return {"decision": "no_rule", "reason": "no_action", "actor_type": _get_actor(payload), "side_effect": ""}
 
     # Issue #49 补充：PR update 无新 commit（审查/通过审查/纯元数据/reopen 等）→ 过滤
+    # GitCode payload 无 commits 字段，用 oldrev 判断是否有新 commit
     if action == "update" and event_type in ("pull_request_opened", "pull_request_updated"):
-        if not payload.get("commits"):
+        _oa = payload.get("object_attributes", {}) or {}
+        _has_new_commit = bool(payload.get("commits")) or bool(_oa.get("oldrev"))
+        if not _has_new_commit:
             return {"decision": "skip", "reason": "no_commit_on_pr_update",
                     "actor_type": _get_actor(payload), "side_effect": ""}
 

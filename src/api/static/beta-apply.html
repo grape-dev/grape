@@ -89,19 +89,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
   <div class="field">
     <label>您的身份是？ <span class="req">*</span></label>
     <div class="id-grid">
-      <div class="id-card" onclick="selectIdentity('student', this)">
+      <div class="id-card" data-type="student" onclick="selectIdentity('student', this)">
         <span class="icon">🎓</span>
         <div class="info"><div class="title">学生</div><div class="desc">在校学生用户</div></div>
       </div>
-      <div class="id-card" onclick="selectIdentity('enterprise', this)">
+      <div class="id-card" data-type="enterprise" onclick="selectIdentity('enterprise', this)">
         <span class="icon">🏢</span>
         <div class="info"><div class="title">企业</div><div class="desc">企业团队用户</div></div>
       </div>
-      <div class="id-card" onclick="selectIdentity('opc', this)">
+      <div class="id-card" data-type="opc" onclick="selectIdentity('opc', this)">
         <span class="icon">💼</span>
         <div class="info"><div class="title">OPC</div><div class="desc">独立开发者/创作者</div></div>
       </div>
-      <div class="id-card" onclick="selectIdentity('other', this)">
+      <div class="id-card" data-type="other" onclick="selectIdentity('other', this)">
         <span class="icon">📋</span>
         <div class="info"><div class="title">其他</div><div class="desc">其他身份</div></div>
       </div>
@@ -237,8 +237,106 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 
 <script>
 var _identity = '';
+var _FORM_KEY = 'beta_apply_form';
 
-// 从URL参数自动填充平台和用户名
+// Issue #205: 页面加载时先从 sessionStorage 回填表单，再让 URL 参数覆盖平台/用户名
+(function() {
+  try {
+    var raw = sessionStorage.getItem(_FORM_KEY);
+    if (raw) {
+      var data = JSON.parse(raw);
+      ['fAccountType','fAccountName','fEmail','fPhone','fReason'].forEach(function(id){
+        if (data[id] !== undefined && data[id] !== '') { var el = document.getElementById(id); if (el) el.value = data[id]; }
+      });
+      if (data._identity) {
+        var card = document.querySelector('.id-card[data-type="' + data._identity + '"]');
+        if (card) selectIdentity(data._identity, card);
+      }
+      ['education','major','companySize','role','occupation'].forEach(function(name){
+        var val = data['r_' + name];
+        if (val === undefined) return;
+        var radios = document.querySelectorAll('input[name="' + name + '"]');
+        for (var i = 0; i < radios.length; i++) {
+          if (radios[i].value === val) {
+            radios[i].checked = true;
+            if (radios[i].value === '其他') {
+              var t = radios[i].parentElement.querySelector('.other-text');
+              if (t) { t.style.display = 'inline-block'; if (data['ro_' + name] !== undefined) t.value = data['ro_' + name]; }
+            }
+            break;
+          }
+        }
+      });
+      ['entUseCases','opcUseCases','otherUseCases'].forEach(function(dn){
+        var vals = data['c_' + dn];
+        if (!Array.isArray(vals)) return;
+        var container = document.querySelector('[data-name="' + dn + '"]');
+        if (!container) return;
+        vals.forEach(function(item){
+          var cbs = container.querySelectorAll('input[type=checkbox]');
+          for (var i = 0; i < cbs.length; i++) {
+            if (cbs[i].value === item.v) {
+              cbs[i].checked = true;
+              if (cbs[i].value === '其他') {
+                var t = cbs[i].parentElement.querySelector('.other-text');
+                if (t) { t.style.display = 'inline-block'; if (item.o) t.value = item.o; }
+              }
+              break;
+            }
+          }
+        });
+      });
+      var desc = document.getElementById('fOtherDesc');
+      if (desc && data.fOtherDesc !== undefined) desc.value = data.fOtherDesc;
+    }
+  } catch(e) {}
+})();
+
+// Issue #205: 表单数据持久化辅助函数
+function collectFormData() {
+  var data = {};
+  ['fAccountType','fAccountName','fEmail','fPhone','fReason'].forEach(function(id){
+    var el = document.getElementById(id);
+    if (el) data[id] = el.value;
+  });
+  data._identity = _identity;
+  ['education','major','companySize','role','occupation'].forEach(function(name){
+    var r = document.querySelector('input[name="' + name + '"]:checked');
+    if (r) data['r_' + name] = r.value;
+  });
+  ['education','major','role','occupation'].forEach(function(name){
+    var r = document.querySelector('input[name="' + name + '"]:checked');
+    if (r && r.value === '其他') {
+      var t = r.parentElement.querySelector('.other-text');
+      if (t) data['ro_' + name] = t.value;
+    }
+  });
+  ['entUseCases','opcUseCases','otherUseCases'].forEach(function(dn){
+    var container = document.querySelector('[data-name="' + dn + '"]');
+    if (!container) return;
+    var vals = [];
+    container.querySelectorAll('input[type=checkbox]:checked').forEach(function(cb){
+      var item = { v: cb.value };
+      if (cb.value === '其他') {
+        var t = cb.parentElement.querySelector('.other-text');
+        item.o = t ? t.value : '';
+      }
+      vals.push(item);
+    });
+    data['c_' + dn] = vals;
+  });
+  var desc = document.getElementById('fOtherDesc');
+  if (desc) data.fOtherDesc = desc.value;
+  return data;
+}
+function saveForm() {
+  try { sessionStorage.setItem(_FORM_KEY, JSON.stringify(collectFormData())); } catch(e) {}
+}
+function clearForm() {
+  try { sessionStorage.removeItem(_FORM_KEY); } catch(e) {}
+}
+
+// 从URL参数自动填充平台和用户名（覆盖 sessionStorage 回填值）
 (function() {
   var params = new URLSearchParams(window.location.search);
   var platform = params.get('platform');
@@ -252,6 +350,10 @@ var _identity = '';
     if (inp) inp.value = username;
   }
 })();
+
+// Issue #205: 表单输入/变更时自动持久化
+document.addEventListener('input', saveForm);
+document.addEventListener('change', saveForm);
 
 function toggleOtherInput(el) {
   if (el.type === 'radio') {
@@ -281,6 +383,7 @@ function selectIdentity(type, el) {
   document.querySelectorAll('.branch').forEach(function(b) { b.classList.remove('show'); });
   var branch = document.getElementById('branch' + type.charAt(0).toUpperCase() + type.slice(1));
   if (branch) branch.classList.add('show');
+  saveForm();
 }
 
 function getRadioValue(name) {
@@ -373,6 +476,7 @@ function submitForm() {
     body: JSON.stringify(payload)
   }).then(function(r) { return r.json(); }).then(function(d) {
     if (d.success) {
+      clearForm();
       document.getElementById('successOverlay').classList.add('show');
       var count = 3;
       var timer = setInterval(function() {

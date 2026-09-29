@@ -53,11 +53,11 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
-    scope 参数：official/repo/user 按维度过滤；不传 = 返回全部（兼容旧逻辑）。
+    scope 参数：official/repo/user 按维度过滤；all = 不限 scope（官方+个人+所有仓库）；不传 = 返回全部（兼容旧逻辑）。
     agent_type 参数：按 agent_type 过滤（vod/issue/coding/qa/sre/chat）。
     category_id 参数：按分类 ID 过滤（Issue #179）。
     q 参数：搜索词，按 skill_name / display_name / description 模糊匹配。
@@ -76,7 +76,9 @@ def list_skills(user: dict = Depends(get_current_user_or_api_key), repo: str = "
     # 构建查询条件
     conditions = ["is_active=1"]
     params = []
-    if scope == "official":
+    if scope == "all":
+        pass  # 不加 scope 条件，查全部（官方+个人+所有仓库）
+    elif scope == "official":
         conditions.append("scope='official'")
     elif scope == "repo":
         if not repo:
@@ -242,6 +244,16 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
         s["repo_count"] = stats.get("repo_count", 0)
         s["scenes"] = scenes_map.get(s["id"], [])
         s["category_name"] = cat_map.get(s.get("category_id", 0), "")
+    # 精选技能按 admin 管理台设置的顺序排列
+    if skills:
+        try:
+            from src.featured_order import get_featured_order
+            _order = get_featured_order("skill")
+            if _order:
+                _order_map = {sid: i for i, sid in enumerate(_order)}
+                skills.sort(key=lambda x: _order_map.get(x["id"], 9999))
+        except Exception:
+            pass
     return {"skills": skills}
 
 
@@ -610,7 +622,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                        scope: str = Form("user"), repo: str = Form(""), agent_type: str = Form(""),
                        category_id: int = Form(0)):
     """上传技能 ZIP。scope=user 存个人技能；scope=repo 存仓库技能（需指定 repo）。agent_type 必填（技能类型）。category_id 可选（分类ID，Issue #179）。"""
-    VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat"}
+    VALID_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
     if scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "scope 必须为 user 或 repo"})
     if scope == "repo" and not repo:
@@ -619,6 +631,15 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         raise HTTPException(status_code=400, detail={"code": 400, "message": "必须选择技能类型（agent_type）"})
     if agent_type not in VALID_AGENT_TYPES:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_AGENT_TYPES))}"})
+
+    # #219 会话 token（tk_，agent）上传：仅支持 scope=repo，且仓库必须与 token 绑定仓库一致（防越权写）。
+    if user.get("auth_type") == "session_token":
+        if scope != "repo":
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 仅支持上传仓库技能（scope=repo）"})
+        from src.repo_key import split_owner_repo
+        _tok_owner, _tok_repo = split_owner_repo(user.get("repo_key") or "")
+        if not _tok_owner or split_owner_repo(repo) != (_tok_owner, _tok_repo):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权上传到该仓库技能（仓库作用域不匹配）"})
 
     # 校验 category_id 存在性（0=未分类，>0 时必须在 skill_category 表中存在）
     if category_id > 0:
@@ -796,38 +817,75 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
 class ConvertSkillRequest(BaseModel):
     skill_name: str
     repo: str  # 目标仓库 repo_key（如 Jason7602/skill-evaluator）
+    source_scope: str = "user"  # 源技能 scope：user 或 repo（默认 user 兼容旧调用）
 
 
-@router.post("/convert", operation_id="skills_convert", summary="Convert skill (cross scope)", description="Copies a personal skill (scope=user) into a repo skill (scope=repo); the original record and directory are kept.")
+@router.post("/convert", operation_id="skills_convert", summary="Convert skill (cross scope)", description="Copies a skill between personal(user) and repo scope; the original record and directory are kept (copy, not move).")
 def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_session_token)):
-    """将个人技能（scope=user）复制为仓库技能（scope=repo）。
+    """将技能在个人(scope=user)与仓库(scope=repo)之间双向复制。
 
-    原个人技能记录与目录保留（复制而非移动）。复制后可在此仓库的 Agent 中配置使用。
+    原技能记录与目录保留（复制而非移动）。
+    source_scope='user' → 复制到仓库技能；source_scope='repo' → 复制到个人技能。
     """
     skill_name = (body.skill_name or "").strip()
     repo = (body.repo or "").strip()
+    source_scope = (body.source_scope or "user").strip()
     if not skill_name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "技能名不能为空"})
     if not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "目标仓库不能为空"})
+    if source_scope not in ("user", "repo"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的 source_scope: {source_scope}"})
 
     from src.repo_key import from_repo_key
     repo_key = _resolve_repo_key(repo)
+    user_id = str(user["id"])
 
-    # 1. 查原个人技能（须属于当前用户）
-    skill_rec = next((s for s in user_db.list_skills(user["id"]) if s["skill_name"] == skill_name), None)
-    if not skill_rec:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "个人技能未找到或不属于当前用户"})
-
-    # 2. 校验目标仓库下无同名仓库技能
     from src.session_manager import db, db_lock
-    with db_lock:
-        c = db.cursor()
-        exists = c.execute("SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1", (skill_name, repo_key)).fetchone()[0]
-    if exists:
-        raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
 
-    # ===== OBS 分支（N6）：copyObject（个人→仓库固定 key）→ DB 回写 =====
+    # 1. 查源技能记录
+    if source_scope == "user":
+        # 个人技能 → 仓库技能：从 user_db 查
+        skill_rec = next((s for s in user_db.list_skills(user["id"]) if s["skill_name"] == skill_name), None)
+        if not skill_rec:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "个人技能未找到或不属于当前用户"})
+    else:
+        # 仓库技能 → 个人技能：从 skill 表查
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT id, skill_name, agent_type, description, scope, owner_id, file_path, category_id "
+                "FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1",
+                (skill_name, repo_key),
+            ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库技能未找到或不属于该仓库"})
+        skill_rec = {
+            "id": row[0], "skill_name": row[1], "agent_type": row[2] or "",
+            "description": row[3] or "", "scope": row[4], "owner_id": row[5],
+            "file_path": row[6] or "", "category_id": row[7] or 0,
+        }
+
+    # 2. 确定目标方向 + 去重检查
+    if source_scope == "user":
+        dst_scope, dst_owner = "repo", repo_key
+        dst_skill_key_scope = "repo"
+        dedup_msg = f"目标仓库已存在同名技能「{skill_name}」"
+        with db_lock:
+            c = db.cursor()
+            exists = c.execute(
+                "SELECT COUNT(*) FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1",
+                (skill_name, repo_key),
+            ).fetchone()[0]
+    else:
+        dst_scope, dst_owner = "user", user_id
+        dst_skill_key_scope = "custom"
+        dedup_msg = f"个人技能已存在同名技能「{skill_name}」"
+        exists = any(s["skill_name"] == skill_name for s in user_db.list_skills(user["id"]))
+    if exists:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
+
+    # ===== OBS 分支：copyObject → DB 回写 =====
     from src.storage import get_storage
     storage = get_storage()
     if storage is not None:
@@ -835,22 +893,24 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         from src.user.db import get_skill_object_key, upsert_skill_obs
         src_key = get_skill_object_key(skill_rec["id"])
         if not src_key:
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "源个人技能未在 OBS（历史数据请先执行迁移），无法转换"})
-        dst_key = skill_key("repo", repo_key, skill_name)
+            src_label = "个人" if source_scope == "user" else "仓库"
+            raise HTTPException(status_code=404, detail={"code": 404, "message": f"源{src_label}技能未在 OBS（历史数据请先执行迁移），无法转换"})
+        dst_key = skill_key(dst_skill_key_scope, dst_owner, skill_name)
         if not storage.copy_object(src_key, dst_key):
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"OBS 复制技能失败: {src_key} -> {dst_key}"})
-        ok = upsert_skill_obs("repo", repo_key, skill_name, skill_rec.get("agent_type", ""),
-                              skill_rec.get("description", ""), dst_key, str(user["id"]),
+        ok = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
+                              skill_rec.get("description", ""), dst_key, user_id,
                               skill_rec.get("category_id", 0))
         if not ok:
             storage.delete_object(dst_key)
-            raise HTTPException(status_code=409, detail={"code": 409, "message": f"目标仓库已存在同名技能「{skill_name}」"})
+            raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
         # 源 zip 若在磁盘缓存，复制到目标 key（懒加载兜底亦可）
         src_zip = zip_cache_get(src_key)
         if src_zip:
             zip_cache_put(dst_key, src_zip)
         mem_cache_invalidate(skill_name)
-        return {"message": f"技能 {skill_name} 已复制到仓库 {repo}", "skill_name": skill_name, "scope": "repo", "repo": repo}
+        dst_label = f"仓库 {repo}" if dst_scope == "repo" else "个人技能"
+        return {"message": f"技能 {skill_name} 已复制到{dst_label}", "skill_name": skill_name, "scope": dst_scope, "repo": repo if dst_scope == "repo" else ""}
 
     # local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能转换失败。请检查服务端 OBS 配置后重试。"})
@@ -920,7 +980,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 
 
 @router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
-def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取技能包子技能的 SKILL.md 内容"""
     from src.session_manager import db, db_lock
 
@@ -970,7 +1030,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(require_no
 
 
 @router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
-def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(require_no_session_token)):
+def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
     from src.session_manager import db, db_lock
     import re as _re

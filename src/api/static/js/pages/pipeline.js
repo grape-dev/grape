@@ -139,7 +139,7 @@ function renderPipeline(data, focusIssueNum) {
     .pl-pbtn:hover{border-color:#0071e3;color:#0071e3}
     .pl-pbtn:disabled{opacity:.4;cursor:not-allowed}
     .pl-pbtn.act{border-color:#0071e3;color:#0071e3;font-weight:600}
-    .pl-table-card{background:#fff;border:1px solid #d2d2d7;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.06);flex:1;overflow:hidden;min-height:0}
+    .pl-table-card{background:#fff;border:1px solid #d2d2d7;border-radius:18px;box-shadow:0 2px 12px rgba(0,0,0,.06);display:flex;flex-direction:column;flex:1;overflow:hidden;min-height:0}
     .pl-table-wrap{flex:1;overflow-y:auto;min-height:0}
     .pl-table{width:100%;border-collapse:collapse;font-size:12px}
     .pl-table th{text-align:left;padding:10px 14px;font-weight:500;color:#86868b;border-bottom:1px solid #e8e8ed;font-size:10px;text-transform:uppercase;letter-spacing:.4px;position:sticky;top:0;background:#fff;z-index:1}
@@ -234,9 +234,8 @@ function renderPipeline(data, focusIssueNum) {
     </div>`;
   }
 
-  // 拼接：流程卡片 + 分页（右对齐） + 搜索框 + 表格卡片
+  // 拼接：流程卡片 + 搜索框 + 表格 + 分页
   html += `${flowHtml}`;
-  if (pagerHtml) html += pagerHtml;
 
   // Issue #89: 部分任务尚未生成流水线事件提示
   if (data.has_tasks_without_events) {
@@ -272,7 +271,14 @@ function renderPipeline(data, focusIssueNum) {
     const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
-    const _issueUrl = _issueNum ? _vcsUrl(data.repo_key || '', '/issues/' + _issueNum) : '';
+    // PR 订阅事件：issue_id 为 PR#N，链接指向 /pull/N 而非 /issues/N
+    var _prIssueMatch = String(p.issue_id || '').match(/^PR#(\d+)$/);
+    var _issueUrl = '';
+    if (_prIssueMatch) {
+      _issueUrl = _vcsUrl(data.repo_key || '', '/pull/' + _prIssueMatch[1]);
+    } else if (_issueNum) {
+      _issueUrl = _vcsUrl(data.repo_key || '', '/issues/' + _issueNum);
+    }
     const _parentIssueId = String(p.parent_issue_id || '').replace(/^#/, '');
     const _parentIssueUrl = _parentIssueId ? _vcsUrl(data.repo_key || '', '/issues/' + _parentIssueId) : '';
     const _parentIssueHtml = _parentIssueId ? `<a href="${_parentIssueUrl}" target="_blank" rel="noopener" style="color:var(--pu);text-decoration:underline;font-size:11px">#${_parentIssueId}</a>` : '<span class="ts t3">—</span>';
@@ -291,6 +297,7 @@ function renderPipeline(data, focusIssueNum) {
       <td>${owner}</td></tr>`;
   });
   html += `</table></div></div>`;
+  if (pagerHtml) html += pagerHtml;
   html += `</div>`;
 
   el.innerHTML = html;

@@ -1,37 +1,31 @@
-# Implementation Plan: Issue #162 — 系统监控分页增加「每页条数」选择器
+# Plan — Issue #254 缓存命中校验 content_hash 回源
 
-## Overview
-在系统监控页面概览 Worker/Runtime 分页栏和任务 Tab timeline 列表，新增「每页条数」选择器（10/20/50）。
+## 任务拆解
 
-## Architecture Decisions
-- **独立状态变量**：Worker/Runtime 各自持有 `_workerPageSize` / `_runtimePageSize`，互不影响
-- **复用 `_paginationWithPageSizeHTML` 通用函数**：统一翻页栏 UI，含 prev/next 按钮 + 页码 + rows_per_page 下拉框
-- **空列表不渲染分页栏**：`workers.length === 0` 或 `_filteredRuntimes.length === 0` 时 pager 渲染为空
-- **任务 Tab 新增完整分页**：`_timelinePage` / `_timelinePageSize` + `_filterTimelineIssues` 内分页
+### Step 1: 改造 mem_cache 结构（src/storage/__init__.py）
+- `_mem_cache` 从 `{skill_name: (content, size)}` 改为 `{skill_name: (content, size, content_hash)}`
+- `mem_cache_put(skill_name, content, content_hash="")` 新增可选参数
+- `mem_cache_get(skill_name)` 返回 `(content, content_hash)` 或 None
 
-## Task List
+### Step 2: 改造 zip_cache 结构（src/storage/__init__.py）
+- `zip_cache_put(object_key, data, content_hash="")` index 记录 hash
+- `zip_cache_get(object_key)` 返回 `(data, content_hash)` 或 None
+- 保持向后兼容：content_hash 缺省为空串
 
-### Phase 1: 状态与通用函数
-- [x] Task 1: 替换 `_OBS_PAGE_SIZE` 为 `_workerPageSize` / `_runtimePageSize` / `_timelinePage` / `_timelinePageSize`
-- [x] Task 2: 新增 `_paginationWithPageSizeHTML()` 函数
+### Step 3: skill_md_content 增加缓存校验（src/storage/__init__.py）
+- mem_cache 命中后查 DB content_hash（official scope），不一致则 invalidate + 回源
+- get_skill_zip_bytes 磁盘缓存命中后校验 hash
 
-### Phase 2: 概览 Worker/Runtime
-- [x] Task 3: 更新 `_rerenderWorkerGrid()` 使用 `_workerPageSize`
-- [x] Task 4: 更新 `_rerenderRuntimeTable()` 使用 `_runtimePageSize`
-- [x] Task 5: 更新 `renderOverview()` 使用新页面尺寸 + 新分页栏
-- [x] Task 6: 更新 `updateOverview()` 使用新页面尺寸 + 新分页栏
+### Step 4: skill_sync 传 hash（src/storage/skill_sync.py）
+- `zip_cache_put(object_key, zip_data, current_hash)` 传入 hash
 
-### Phase 3: 任务 Tab
-- [x] Task 7: `_filterTimelineIssues()` 增加分页切片 + 分页栏
-- [x] Task 8: 搜索 oninput 重置 `_timelinePage = 0`
-- [x] Task 9: `#N` 定位搜索自动跳到目标页
+### Step 5: 测试（tests/test_skill_sync_obs.py）
+- 缓存命中 + hash 一致 → 走缓存快路径
+- 缓存命中 + hash 变更 → 回源 OBS
+- mem_cache_put/get hash 存取
+- zip_cache_put/get hash 存取
 
-### Phase 4: 测试与回归
-- [x] Task 10: 更新 #117 测试断言（选择器可见行为变更）
-- [x] Task 11: 新增 `test_observability_page_size_162.js` 回归测试（15 条）
-- [x] Task 12: 全部 JS 测试通过
-
-### Checkpoint: Complete
-- [x] 3 个测试文件全部通过
-- [ ] 自审查完成
-- [ ] PR 创建完成
+## 设计决策
+- **向后兼容**：content_hash 参数默认空串，旧调用方不传仍可工作（hash="" 不校验）
+- **校验范围**：仅 official scope 校验（custom/repo 无 DB hash 同步机制，且 upload/convert 已主动 invalidate）
+- **性能**：hash 一致时仅多一次 DB 查询（单行主键查询，<1ms），不回源 OBS

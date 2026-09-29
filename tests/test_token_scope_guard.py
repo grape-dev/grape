@@ -47,7 +47,7 @@ class TestDClassEndpoints:
 
     @pytest.mark.parametrize("path", [
         "/api/skills",
-        "/api/skills/by-id/1",
+        "/api/skills",
         "/api/repos/member",
         "/api/repos/managed",
         "/api/auth/profile",
@@ -81,12 +81,11 @@ class TestDClassEndpoints:
 
 
 class TestNonDClassEndpoints:
-    """非 D 类（tasks/issues/scenes）不被误拦截；scenes 为 VOD 技能 session 调用维持 200。"""
+    """非 D 类（tasks/issues/scenes）不被误拦截。"""
 
     @pytest.mark.parametrize("path", [
         "/api/tasks/mine",     # A 类
         "/api/issues/o/r",     # B 类
-        "/api/scenes",         # 维持现状（VOD 技能用 session 调，不归 D 类）
         "/api/knowledge",      # B 类
     ])
     def test_session_allowed(self, path):
@@ -98,13 +97,25 @@ class TestNonDClassEndpoints:
         assert r.status_code != 403, f"{path} session 不应 403 实 {r.status_code}"
 
 
-class TestScenesKeptForAgent:
-    """scenes 不归 D 类：session_token 应放行（非 403）。"""
+class TestScenesScope:
+    """场景 scope：#219 调整——list=user_only（session 403）、detail=dual（session 可读）。
 
-    def test_scenes_session_allowed(self):
+    场景清单不再对 session 开放（agent 无需清单，当前场景经 env GRAPE_SCENE_ID 注入）；
+    详情对 session 开放（agent 按 scene_id 取当前场景流水线/节点）。
+    """
+
+    def test_scenes_list_session_forbidden(self):
         app.dependency_overrides[get_current_user_or_api_key] = lambda: _user("session_token")
         try:
             r = TestClient(app).get("/api/scenes", headers={"Authorization": "Bearer tk_x"})
         finally:
             app.dependency_overrides.clear()
-        assert r.status_code == 200
+        assert r.status_code == 403
+
+    def test_scenes_detail_session_allowed(self):
+        app.dependency_overrides[get_current_user_or_api_key] = lambda: _user("session_token")
+        try:
+            r = TestClient(app).get("/api/scenes/default", headers={"Authorization": "Bearer tk_x"})
+        finally:
+            app.dependency_overrides.clear()
+        assert r.status_code != 403

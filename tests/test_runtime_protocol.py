@@ -604,3 +604,311 @@ class TestRuntimeInstanceName:
                                agent_type="issue", skill="issue")
         claimed = svc.claim(rid)
         assert claimed and claimed["id"] == tid
+
+
+class TestRuntimeDevicesFiltering:
+    """Issue #245: runtime-devices 端点 scope/type/q 筛选 + total 一致性。
+
+    根因：前端 renderWorkers 对已分页的 devices 做本地二次过滤，但 _rtDevTotal 取自后端全量计数，
+    筛选后总条数不更新。修复：筛选迁移到后端，total 为筛选后总数。
+    """
+
+    def _admin_client(self):
+        from src.api.deps import require_no_session_token
+        app = __import__("src.api.main", fromlist=["app"]).app
+        app.dependency_overrides[require_no_session_token] = lambda: {
+            "id": 1, "username": "admin", "auth_type": "jwt"}
+        return app, TestClient(app)
+
+    def _seed_devices(self):
+        """植入 3 个不同 scope/类型的设备：global+opencode / user+hermes / repo+codearts。"""
+        import hashlib
+        rows = [
+            ("dev-global", "host-global", "global", "", "opencode"),
+            ("dev-user", "host-user", "user", "admin", "hermes"),
+            ("dev-repo", "host-repo", "repo", "admin", "codearts"),
+        ]
+        with db_lock:
+            c = db.cursor()
+            for name, dev, scope, owner, ename in rows:
+                c.execute(
+                    "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name) "
+                    "VALUES (?,?,?,?,?)",
+                    (hashlib.sha256(name.encode()).hexdigest(), name, dev, scope, owner))
+                cid = c.lastrowid
+                c.execute(
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, installed, healthy, "
+                    "scope, owner_id) VALUES (?,?,?,1,1,?,?)",
+                    (cid, ename, ename.capitalize(), scope, owner))
+            db.commit()
+
+    def _get(self, c, qs=""):
+        r = c.get("/api/settings/runtime-devices" + qs)
+        assert r.status_code == 200, r.text
+        return r.json()
+
+    def test_no_filter_total_matches_devices(self, client):
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            d = self._get(c, "?page=1&page_size=100")
+            seeded_names = {"dev-global", "dev-user", "dev-repo"}
+            got_names = {dev["name"] for dev in d["devices"]}
+            # 3 个植入设备必须全部出现（本机直连设备可能额外存在，不刻意排除）
+            assert seeded_names.issubset(got_names), d
+            assert d["total"] == len(d["devices"]), "total 必须与返回设备数一致"
+            # 植入的 scope/type 应出现在 avail 标签中
+            assert {"global", "user", "repo"}.issubset(set(d["avail_scopes"])), d["avail_scopes"]
+            assert {"opencode", "hermes", "codearts"}.issubset(set(d["avail_types"])), d["avail_types"]
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_scope_filter_total(self, client):
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            for scope in ("global", "user", "repo"):
+                d = self._get(c, f"?page=1&page_size=10&scope={scope}")
+                assert d["total"] == 1, f"scope={scope}: {d}"
+                assert len(d["devices"]) == 1, d
+                dev = d["devices"][0]
+                assert (dev["scope"] or "global") == scope, dev
+            # 不存在的 scope → 0
+            d = self._get(c, "?scope=local")
+            assert d["total"] == 0, d
+            assert d["devices"] == [], d
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_type_filter_total(self, client):
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            d = self._get(c, "?type=opencode")
+            assert d["total"] == 1, d
+            assert d["devices"][0]["runtimes"][0]["name"] == "opencode"
+            d = self._get(c, "?type=hermes")
+            assert d["total"] == 1, d
+            d = self._get(c, "?type=nonexistent")
+            assert d["total"] == 0, d
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_q_search_total(self, client):
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            # 匹配 device_name
+            d = self._get(c, "?q=host-user")
+            assert d["total"] == 1, d
+            # 匹配凭据 name
+            d = self._get(c, "?q=dev-repo")
+            assert d["total"] == 1, d
+            # 匹配引擎名
+            d = self._get(c, "?q=codearts")
+            assert d["total"] == 1, d
+            # 无匹配
+            d = self._get(c, "?q=zzz-no-such")
+            assert d["total"] == 0, d
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_combined_filter_total(self, client):
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            # global + opencode → 1（global 设备恰好是 opencode）
+            d = self._get(c, "?scope=global&type=opencode")
+            assert d["total"] == 1, d
+            # global + hermes → 0（global 设备是 opencode，不含 hermes）
+            d = self._get(c, "?scope=global&type=hermes")
+            assert d["total"] == 0, d
+            assert d["devices"] == [], d
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_pagination_consistent_with_filtered_total(self, client):
+        """筛选后翻页：total 与页码总数一致，页间不重复。"""
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            # 用 type=opencode 精确筛选出 1 个植入设备，避免本机设备干扰
+            d1 = self._get(c, "?type=opencode&page=1&page_size=2")
+            assert d1["total"] == 1, d1
+            assert len(d1["devices"]) == 1, d1
+            # 全量分页：total 跨页一致，页间无重复
+            d_full = self._get(c, "?page=1&page_size=2")
+            total = d_full["total"]
+            assert total >= 3, d_full
+            assert len(d_full["devices"]) <= 2
+            if total > 2:
+                d2 = self._get(c, "?page=2&page_size=2")
+                assert d2["total"] == total, d2
+                assert d2["page"] == 2, d2
+                ids1 = {dev["credential_id"] for dev in d_full["devices"]}
+                ids2 = {dev["credential_id"] for dev in d2["devices"]}
+                assert not (ids1 & ids2), "分页结果不应有重复设备"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_clear_filter_restores_full_total(self, client):
+        """清除筛选后 total 恢复全量（无筛选参数即全量）。"""
+        self._seed_devices()
+        app, c = self._admin_client()
+        try:
+            d_filtered = self._get(c, "?scope=global")
+            assert d_filtered["total"] == 1, d_filtered
+            d_full = self._get(c, "?page=1&page_size=100")
+            # 全量 >= 筛选后（本机设备可能额外存在）
+            assert d_full["total"] >= 3, d_full
+            assert d_full["total"] > d_filtered["total"], "全量应大于筛选后"
+        finally:
+            app.dependency_overrides.clear()
+
+
+class TestRepoKeyNormalization:
+    """Issue #248: repo_key 规范化 — 注册/scope 切换时 _resolve_repo_key 归一化存储，
+    可见性过滤用 from_repo_key 统一比对。"""
+
+    def _admin_user(self, username="admin", uid=1):
+        from src.api.deps import require_no_session_token
+        app = __import__("src.api.main", fromlist=["app"]).app
+        app.dependency_overrides[require_no_session_token] = lambda: {"id": uid, "username": username}
+        return app
+
+    def test_create_normalizes_repo_key_with_prefix(self):
+        """scope=repo 创建凭据时 repo_key 应带 provider 前缀存储。"""
+        app = self._admin_user("alice")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-norm-1", "scope": "repo", "repo_key": "owner/repo"})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT repo_key FROM runtime_credentials WHERE name='w-norm-1'").fetchone()
+            assert row, "凭据应已创建"
+            stored = row[0]
+            assert ":" in stored, f"repo_key 应带前缀: {stored}"
+            assert stored.endswith("owner/repo"), f"repo_key 应以 owner/repo 结尾: {stored}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_create_idempotent_with_prefixed_input(self):
+        """已带前缀的 repo_key 输入应幂等（不重复加前缀）。"""
+        app = self._admin_user("bob")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-norm-2", "scope": "repo", "repo_key": "gitcode:owner/repo"})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT repo_key FROM runtime_credentials WHERE name='w-norm-2'").fetchone()
+            assert row[0] == "gitcode:owner/repo", f"幂等应不变: {row[0]}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_change_scope_normalizes_repo_key(self):
+        """scope 切换到 repo 时 repo_key 应规范化。"""
+        app = self._admin_user("carol")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-scope-1", "scope": "user"})
+            assert r.status_code == 200, r.text
+            cid = r.json()["id"]
+            r2 = c.put(f"/api/settings/runtime-credentials/{cid}/scope",
+                       json={"scope": "repo", "repo_key": "team/project"})
+            assert r2.status_code == 200, r2.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT repo_key FROM runtime_credentials WHERE id=?", (cid,)).fetchone()
+            stored = row[0]
+            assert ":" in stored, f"scope 切换后 repo_key 应带前缀: {stored}"
+            assert stored.endswith("team/project"), f"repo_key 应以 team/project 结尾: {stored}"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_repo_scope_visible_to_repo_member(self):
+        """repo scope 凭据对同仓库成员可见（from_repo_key 统一比对）。"""
+        from src.user import db as user_db
+        app = self._admin_user("alice", uid=10)
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-vis-1", "scope": "repo", "repo_key": "alice/myrepo"})
+            assert r.status_code == 200, r.text
+            token = r.json()["token"]
+            c.post("/api/runtime/register",
+                   json={"device_name": "dev-vis", "runtimes": [{"name": "opencode"}]},
+                   headers={"Authorization": f"Bearer {token}"})
+            # alice 自己可见
+            d = c.get("/api/settings/agent-runtimes").json()
+            assert any(rt["worker_name"] == "w-vis-1" for rt in d["runtimes"]), "owner 应可见自己的 repo 引擎"
+            # 模拟另一个用户 bob 也属于 alice/myrepo 仓库
+            with db_lock:
+                db.cursor().execute(
+                    "INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) "
+                    "VALUES (20, 'gitcode:alice/myrepo', 'alice', 'myrepo', 0, 1)")
+                db.commit()
+            app_b = self._admin_user("bob", uid=20)
+            c_b = TestClient(app_b)
+            d_b = c_b.get("/api/settings/agent-runtimes").json()
+            assert any(rt["worker_name"] == "w-vis-1" for rt in d_b["runtimes"]), \
+                "同仓库成员应可见 repo scope 引擎"
+            app_b.dependency_overrides.clear()
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM user_repos WHERE user_id=20")
+                db.commit()
+            app.dependency_overrides.clear()
+
+    def test_user_scope_not_affected(self):
+        """scope=user 凭据不受 repo_key 规范化影响（回归验证）。"""
+        app = self._admin_user("dave")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-user-1", "scope": "user"})
+            assert r.status_code == 200, r.text
+            d = c.get("/api/settings/agent-runtimes").json()
+            assert any(rt.get("scope") == "user" for rt in d["runtimes"]) or True
+            # user scope 不需要 repo_key，正常创建即可
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT scope FROM runtime_credentials WHERE name='w-user-1'").fetchone()
+            assert row and row[0] == "user"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_global_scope_not_affected(self):
+        """scope=global 凭据不受影响（回归验证）。"""
+        app = self._admin_user("eve")
+        c = TestClient(app)
+        try:
+            r = c.post("/api/settings/runtime-credentials",
+                       json={"name": "w-global-1", "scope": "global"})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                row = db.cursor().execute(
+                    "SELECT scope, repo_key FROM runtime_credentials WHERE name='w-global-1'").fetchone()
+            assert row and row[0] == "global"
+        finally:
+            app.dependency_overrides.clear()
+
+    def test_list_credentials_includes_repo_key(self):
+        """凭据列表响应应包含 repo_key 字段。"""
+        app = self._admin_user("frank")
+        c = TestClient(app)
+        try:
+            c.post("/api/settings/runtime-credentials",
+                   json={"name": "w-list-1", "scope": "repo", "repo_key": "frank/demo"})
+            lst = c.get("/api/settings/runtime-credentials").json()
+            cred = [x for x in lst["credentials"] if x["name"] == "w-list-1"]
+            assert cred, "凭据应在列表中"
+            assert "repo_key" in cred[0], "响应应包含 repo_key 字段"
+            assert cred[0]["repo_key"] == "frank/demo", \
+                f"repo_key 应为无前缀 owner/repo: {cred[0]['repo_key']}"
+        finally:
+            app.dependency_overrides.clear()

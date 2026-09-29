@@ -94,9 +94,12 @@ def refresh_token(request: Request, response: Response):
         raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
     # 滚动续期——新 access_token + 新 refresh_token
     # 新 refresh_token 继承旧 max_exp（不重新生成——30 天绝对上限）
+    # login_provider 也从旧 refresh_token 继承——保证刷新后仍按登录平台选择 provider
     old_max_exp = int(payload.get("max_exp", 0))
-    new_access_token = create_access_token(uid, username, db_ver)
-    new_refresh_token = create_refresh_token(uid, username, db_ver, max_exp=old_max_exp)
+    old_login_provider = payload.get("login_provider", "")
+    new_access_token = create_access_token(uid, username, db_ver, login_provider=old_login_provider)
+    new_refresh_token = create_refresh_token(uid, username, db_ver, max_exp=old_max_exp,
+                                             login_provider=old_login_provider)
     _set_refresh_cookie(response, new_refresh_token)
     return {"token": new_access_token}
 
@@ -181,9 +184,8 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     if not gitcode_id:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取用户信息"})
 
+    # 按平台 ID 精确匹配，不跨平台 fallback username（同用户名不代表同一人）
     local_user = user_db.get_user_by_gitcode_id(gitcode_id)
-    if not local_user:
-        local_user = user_db.get_user_by_username(gitcode_login)
 
     # 白名单校验：所有用户（含已存在）都必须在白名单内，踢出白名单后立即无法登录
     from src.config import is_gitcode_user_allowed
@@ -194,7 +196,10 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     if not local_user:
         result = user_db.create_user(gitcode_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
         if not result:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+            # username 冲突（已有同用户名的 GitHub 账号）→ 加前缀创建独立 GitCode 账号
+            result = user_db.create_user(f"gc_{gitcode_login}", hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+            if not result:
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
         local_user = user_db.get_user(result["id"])
 
     user_db.link_gitcode_user(local_user["id"], gitcode_id, access_token, refresh_token)
@@ -217,8 +222,10 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     # JWT 双 token——OAuth 也签发 refresh_token
     from src.api.jwt_utils import create_access_token, create_refresh_token
     token_version = user_db.get_token_version(local_user["id"])
-    jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version)
-    jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version)
+    jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version,
+                                               login_provider="gitcode")
+    jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version,
+                                                 login_provider="gitcode")
     # 仅真正首次登录（无任何托管仓库）才 first_login=1（前端清 currentRepo 进仓库选择页）；
     # 已有托管仓库则保留上次选择的仓库（first_login=0），恢复上次的 repo
     has_repos = bool(user_db.get_managed_repos(local_user["id"]))
@@ -337,9 +344,8 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     if not github_id:
         return _oauth_error_redirect(request, "GitHub 登录失败：无法获取用户信息。")
 
+    # 按平台 ID 精确匹配，不跨平台 fallback username（同用户名不代表同一人）
     local_user = user_db.get_user_by_github_id(github_id)
-    if not local_user:
-        local_user = user_db.get_user_by_username(github_login)
 
     # 白名单校验
     from src.config import is_github_user_allowed
@@ -350,7 +356,10 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     if not local_user:
         result = user_db.create_user(github_login, hashlib.sha256(os.urandom(16)).hexdigest(), 0)
         if not result:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
+            # username 冲突（已有同用户名的 GitCode 账号）→ 加前缀创建独立 GitHub 账号
+            result = user_db.create_user(f"gh_{github_login}", hashlib.sha256(os.urandom(16)).hexdigest(), 0)
+            if not result:
+                raise HTTPException(status_code=500, detail={"code": 500, "message": "创建用户失败"})
         local_user = user_db.get_user(result["id"])
 
     user_db.link_github_user(local_user["id"], github_id, access_token, refresh_token)
@@ -372,15 +381,17 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     # 签发 JWT
     from src.api.jwt_utils import create_access_token, create_refresh_token
     token_version = user_db.get_token_version(local_user["id"])
-    jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version)
-    jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version)
+    jwt_access_token = create_access_token(local_user["id"], local_user["username"], token_version,
+                                               login_provider="github")
+    jwt_refresh_token = create_refresh_token(local_user["id"], local_user["username"], token_version,
+                                                 login_provider="github")
 
     # OAuth App 不需要 installation 检查（scope 在授权 URL 里已指定）
     _gh_perm_warning = ""
 
     try:
         from src.session_manager import update_unified_user_info
-        update_unified_user_info(github_login, open_id="", github_login=github_login)
+        update_unified_user_info(github_login)
     except Exception as e:
         log.warning(f"GitHub OAuth login: write user mapping failed: {e}")
 

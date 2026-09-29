@@ -63,7 +63,12 @@ def get_backend(name: str) -> AgentBackend:
 
 
 def discover_backends() -> list[dict]:
-    """动态发现本地已安装的 Agent 引擎"""
+    """动态发现本地已安装的 Agent 引擎（跨平台）。
+
+    Unix: shutil.which() 查 PATH。
+    Windows: shutil.which() 查 PATH（含 PATHEXT）+ os_adapter 额外查找常见安装目录。
+    """
+    from src.runtime.os_adapter import find_cli
     known = {
         "opencode": {"cli": "opencode", "pip": "opencode"},
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
@@ -73,11 +78,11 @@ def discover_backends() -> list[dict]:
     }
     results = []
     for name, info in known.items():
-        cli_path = shutil.which(info["cli"])
+        cli_path = find_cli(info["cli"])
         results.append({
             "name": name,
-            "installed": cli_path is not None,
-            "cli_path": cli_path or "",
+            "installed": bool(cli_path),
+            "cli_path": cli_path,
             "pip_package": info["pip"],
         })
     return results
@@ -272,24 +277,20 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
             log.warning(f"Failed to inject VCS_API_BASE: {e}")
 
     # 用户云凭据注入（devops 的 user_id=仓库归属用户，见 event_pipeline _issue_scene_uid）
+    # #219：huawei_cloud / codearts 的 AK-SK 不再经 env 注入（按需获取或自定义场景变量），跳过。
     if user_id > 0:
         try:
             from src.user.db import get_credentials
             for c in get_credentials(user_id):
                 provider = c.get("provider", "")
                 cfg = c.get("config", {})
-                if provider == "huawei_cloud":
-                    if cfg.get("ak"): env["HUAWEICLOUD_SDK_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["HUAWEICLOUD_SDK_SK"] = str(cfg["sk"])
-                elif provider == "codearts":
-                    if cfg.get("ak"): env["CODEARTS_CLI_AK"] = str(cfg["ak"])
-                    if cfg.get("sk"): env["CODEARTS_CLI_SK"] = str(cfg["sk"])
-                else:
-                    for k, v in cfg.items():
-                        env[k.upper()] = str(v)
-                    # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
-                    if provider == "openai" and cfg.get("api_key"):
-                        env["OPENAI_API_KEY"] = str(cfg["api_key"])
+                if provider in ("huawei_cloud", "codearts"):
+                    continue
+                for k, v in cfg.items():
+                    env[k.upper()] = str(v)
+                # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
+                if provider == "openai" and cfg.get("api_key"):
+                    env["OPENAI_API_KEY"] = str(cfg["api_key"])
         except Exception as e:
             log.warning(f"Failed to inject user credentials: {e}")
 
@@ -407,6 +408,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
     agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
     if not agent_cmd:
+        from src.runtime.os_adapter import find_cli
+        agent_cmd = find_cli(backend.binary)
+    if not agent_cmd:
         log.error(f"{label}{backend.name} CLI not found in PATH")
         yield ("done", {
             "exit_code": -1, "text": "", "oc_session_id": session_id,
@@ -460,7 +464,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _iso_home = ""
         if backend.name == "hermes":
             import tempfile, shutil as _sh
-            _iso_home = tempfile.mkdtemp(prefix="hermes-iso-")
+            # 使用当前用户家目录下的缓存目录，避免 /tmp 多用户权限冲突（issue #238）
+            _hermes_iso_root = os.path.join(os.path.expanduser("~"), ".cache", "hermes-iso")
+            os.makedirs(_hermes_iso_root, exist_ok=True)
+            _iso_home = tempfile.mkdtemp(prefix="hermes-iso-", dir=_hermes_iso_root)
             # 从默认 HERMES_HOME（~/.hermes 或 env HERMES_HOME）复制配置文件
             _src_home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
             for _cfg in ("config.yaml", ".env", "SOUL.md"):
@@ -497,7 +504,9 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _proc_env = dict(env)
             _proc_env["HERMES_HOME"] = _iso_home
             _old_pp = _proc_env.get("PYTHONPATH", "")
-            _proc_env["PYTHONPATH"] = _inject_dir + (":" + _old_pp if _old_pp else "")
+            from src.runtime.os_adapter import path_separator
+            _sep = path_separator()
+            _proc_env["PYTHONPATH"] = _inject_dir + (_sep + _old_pp if _old_pp else "")
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
         # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
@@ -555,6 +564,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
 
         _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
         _reader_thread.start()
+
+        # stderr reader 线程：持续排空 stderr 管道，防止 Windows 管道缓冲区满导致死锁
+        _stderr_chunks = []
+        def _stderr_reader():
+            try:
+                for raw_line in iter(proc.stderr.readline, b""):
+                    _stderr_chunks.append(raw_line.decode("utf-8", errors="replace"))
+            except Exception:
+                pass
+        _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
+        _stderr_thread.start()
 
         _raw_count = 0
         _parsed_count = 0
@@ -675,10 +695,17 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     # codearts 方案E2: 超时也要杀 serve
                     if _serve_proc and _serve_proc.poll() is None:
                         try:
-                            os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                            if hasattr(os, "getpgid"):
+                                os.killpg(os.getpgid(_serve_proc.pid), signal.SIGTERM)
+                            else:
+                                _serve_proc.terminate()
                             _serve_proc.wait(timeout=3)
                         except Exception:
-                            try: os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                            try:
+                                if hasattr(os, "getpgid"):
+                                    os.killpg(os.getpgid(_serve_proc.pid), signal.SIGKILL)
+                                else:
+                                    _serve_proc.kill()
                             except Exception: _serve_proc.kill()
                     return
                 time.sleep(0.1)
@@ -724,7 +751,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         full_text = "\n".join(collected_text)
         stderr_output = ""
         try:
-            stderr_output = proc.stderr.read().decode("utf-8", errors="replace")[:500]
+            stderr_output = "".join(_stderr_chunks)[:500]
         except Exception as e:
             log.warning(f"{label}{backend.name} stderr read err: {e}")
 

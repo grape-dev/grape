@@ -411,6 +411,7 @@ async def sync_official_scenes():
                 tags_str = ",".join(scene_data.get("tags", []))
                 author = scene_data.get("author", "")
                 nodes_json = json.dumps(nodes, ensure_ascii=False)
+                preset_custom_fields = json.dumps(scene_data.get("custom_fields", []), ensure_ascii=False)
 
                 with db_lock:
                     c = db.cursor()
@@ -439,13 +440,13 @@ async def sync_official_scenes():
                             "UPDATE scene_market SET "
                             "display_name=?, version=?, description=?, market_description=?, "
                             "category_id=?, recommended_template=?, nodes_json=?, "
-                            "onboarding=?, tags=?, author=?, content_hash=?, "
+                            "onboarding=?, tags=?, author=?, content_hash=?, preset_custom_fields=?, "
                             "is_active=1, updated_at=datetime('now') "
                             "WHERE id=?",
                             (display_name, version, description, market_desc,
                              category_id, recommended_template, nodes_json,
                              onboarding, tags_str, author, content_hash,
-                             scene_id),
+                             preset_custom_fields, scene_id),
                         )
                         db.commit()
                         market_id = scene_id
@@ -457,11 +458,12 @@ async def sync_official_scenes():
                             "(name, display_name, version, description, market_description, icon, obs_icon_key, "
                             "category_id, is_featured, like_count, source, source_user_id, "
                             "recommended_template, nodes_json, onboarding, tags, author, "
-                            "content_hash, is_active, created_at, updated_at) "
-                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
+                            "content_hash, preset_custom_fields, is_active, created_at, updated_at) "
+                            "VALUES (?,?,?,?,?,?,?,?,0,0,'official',0,?,?,?,?,?,?,?,1,datetime('now'),datetime('now'))",
                             (name, display_name, version, description, market_desc,
                              "", "", category_id, recommended_template, nodes_json,
-                             onboarding, tags_str, author, content_hash),
+                             onboarding, tags_str, author, content_hash,
+                             preset_custom_fields),
                         )
                         db.commit()
                         market_id = c.lastrowid

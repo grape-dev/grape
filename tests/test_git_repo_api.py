@@ -201,7 +201,7 @@ def test_pulls_mapping(gitcode_calls, _client):
     base = f"/api/git-repo/{OWNER}/{REPO}"
 
     r = client.post(f"{base}/pulls",
-                    json={"title": "feat", "head": "feat/x", "base": "main", "close_related_issue": True})
+                    json={"title": "feat", "head": "feat/x", "base": "main", "auto_close_issues": True})
     assert r.status_code == 200
     last = gitcode_calls[-1]
     assert last["method"] == "POST" and last["body"]["head"] == "feat/x" and last["body"]["close_related_issue"] is True
@@ -259,7 +259,7 @@ def test_no_token_502(monkeypatch, _client):
 
 def _repo_token_call(user):
     import src.api.git_repo_api as m
-    return m._repo_token(OWNER, REPO, user)
+    return m._repo_token(OWNER, REPO, user, "gitcode")
 
 
 def test_repo_token_chat_session_uses_user_token(monkeypatch):
@@ -294,10 +294,10 @@ def test_repo_token_api_key_not_applicable():
     import pytest as _p
     from fastapi import HTTPException
     with _p.raises(HTTPException) as ei:
-        m._repo_token(OWNER, REPO, {"auth_type": "api_key", "id": 9, "username": "someone"})
+        m._repo_token(OWNER, REPO, {"auth_type": "api_key", "id": 9, "username": "someone"}, "gitcode")
     assert ei.value.status_code == 403
     with _p.raises(HTTPException) as ei2:
-        m._repo_token(OWNER, REPO, {"auth_type": "jwt", "id": 9, "username": "someone"})
+        m._repo_token(OWNER, REPO, {"auth_type": "jwt", "id": 9, "username": "someone"}, "gitcode")
     assert ei2.value.status_code == 403
 
 
@@ -308,7 +308,7 @@ def test_repo_token_all_missing_502(monkeypatch):
     import pytest as _p
     from fastapi import HTTPException
     with _p.raises(HTTPException) as ei:
-        m._repo_token(OWNER, REPO, {"auth_type": "session_token", "agent_type": "vod", "user_id": 0})
+        m._repo_token(OWNER, REPO, {"auth_type": "session_token", "agent_type": "vod", "user_id": 0}, "gitcode")
     assert ei.value.status_code == 502
 
 
@@ -346,3 +346,54 @@ def test_tree_recursive_gitcode_rejected(_client):
     r = client.get(f"{base}/tree?ref=main&depth=recursive")
     assert r.status_code == 400
     assert "暂不支持递归" in r.json()["detail"]["message"]
+
+
+# ===================== Issue Close（gitrepo_issues_close）=====================
+
+def test_close_issue_gitcode_ok(_client):
+    """POST /issues/{number}/close：gitcode provider → VcsApiClient.close_issue 关闭，返回 issue。"""
+    client = _client
+    with patch("src.vcs.api_client.VcsApiClient") as MC:
+        inst = MC.return_value
+        inst.close_issue.return_value = {"number": 5, "state": "closed", "title": "t"}
+        r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/5/close")
+    assert r.status_code == 200
+    assert r.json()["state"] == "closed"
+    MC.assert_called_once()
+    args = MC.call_args[0]
+    assert args[0] == "gitcode" and args[2:] == (OWNER, REPO)
+    inst.close_issue.assert_called_once_with(5)
+
+
+def test_close_issue_github_provider(_client):
+    """repo_key=github: → provider=github → VcsApiClient(github, ...)"""
+    client = _client
+    _override_user(f"github:{OWNER}/{REPO}")
+    with patch("src.vcs.api_client.VcsApiClient") as MC:
+        inst = MC.return_value
+        inst.close_issue.return_value = {"state": "closed", "number": 7}
+        r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/7/close")
+    assert r.status_code == 200
+    assert MC.call_args[0][0] == "github"
+
+
+def test_close_issue_error_502(_client):
+    """关闭失败（VcsApiClient 返回 error）→ 502。"""
+    client = _client
+    with patch("src.vcs.api_client.VcsApiClient") as MC:
+        inst = MC.return_value
+        inst.close_issue.return_value = {"error": "HTTP 400", "detail": "bad"}
+        r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/5/close")
+    assert r.status_code == 502
+    assert "关闭 Issue 失败" in r.json()["detail"]["message"]
+
+
+def test_close_issue_requires_session_token(_client):
+    """非会话 token（用户 API Key/JWT）→ 403（_repo_token 只服务 session token）。"""
+    from src.api.deps import get_current_user_or_api_key
+    app.dependency_overrides[get_current_user_or_api_key] = lambda: {
+        "id": UID, "username": "git_tester", "auth_type": "api_key",
+        "agent_type": "vod", "repo_key": f"gitcode:{OWNER}/{REPO}"}
+    client = TestClient(app)
+    r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/5/close")
+    assert r.status_code == 403

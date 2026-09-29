@@ -442,6 +442,26 @@
 .fn-label{font-size:11.5px;font-weight:600;color:var(--t3);letter-spacing:.1em;margin-bottom:12px}
 .fn-body{font-size:14.5px;line-height:1.9;color:var(--t)}
 .fn-body pre{background:var(--bg);padding:14px;border-radius:var(--rd);font-size:11px;font-family:monospace;line-height:1.6;overflow-x:auto;white-space:pre-wrap}
+.fn-body h1,.fn-body h2,.fn-body h3,.fn-body h4,.fn-body h5,.fn-body h6{margin:18px 0 8px;font-weight:600;line-height:1.3}
+.fn-body h1{font-size:20px}.fn-body h2{font-size:18px}.fn-body h3{font-size:16px}.fn-body h4{font-size:14px}
+.fn-body p{margin:8px 0}
+.fn-body ul,.fn-body ol{margin:8px 0;padding-left:24px}
+.fn-body li{margin:4px 0}
+.fn-body code{background:var(--bg);padding:2px 6px;border-radius:4px;font-size:12px;font-family:monospace}
+.fn-body pre code{background:none;padding:0}
+.fn-body a{color:var(--a);text-decoration:none}
+.fn-body a:hover{text-decoration:underline}
+.fn-body blockquote{border-left:3px solid var(--b);padding-left:14px;margin:10px 0;color:var(--t2)}
+.fn-body table{border-collapse:collapse;width:100%;margin:10px 0;font-size:12px}
+.fn-body th,.fn-body td{border:1px solid var(--b);padding:6px 10px;text-align:left}
+.fn-body th{background:var(--bg);font-weight:600}
+.fn-body hr{border:none;border-top:1px solid var(--b);margin:16px 0}
+.fn-body img{max-width:100%;border-radius:var(--rd)}
+/* Issue #232: front matter 表格样式 */
+.fn-body table.fm-table{margin:0 0 16px;font-size:13px;border-radius:var(--r2);overflow:hidden}
+.fn-body table.fm-table th{width:140px;white-space:nowrap;background:var(--bg);color:var(--t2);font-weight:600;font-size:12px;letter-spacing:.02em}
+.fn-body table.fm-table td{color:var(--t);white-space:pre-wrap;word-break:break-word}
+.fn-body table.fm-table + *{margin-top:16px}
 .info-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin-top:36px}
 @media(max-width:760px){.info-grid{grid-template-columns:1fr}}
 .info-cell{background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:16px 18px}
@@ -941,6 +961,11 @@
   text-decoration: none;
 }
 [data-theme="apple"] .msg a:hover { text-decoration: underline; }
+/* Issue #233: 蓝色背景用户消息气泡内链接高对比度样式（WCAG AA ≥4.5:1） */
+[data-theme="apple"] .chat-body .msg.l a,
+[data-theme="apple"] .chat-body .msg.l a:link,
+[data-theme="apple"] .chat-body .msg.l a:visited { color: #fff; text-decoration: underline; }
+[data-theme="apple"] .chat-body .msg.l a:hover { text-decoration: underline; background-color: rgba(255,255,255,.18); border-radius: 2px; }
 
 /* ── 17. Modal / Overlay ── */
 [data-theme="apple"] .create-repo-modal {
@@ -1422,4 +1447,65 @@
 }
 [data-theme="apple"][data-theme-mode="dark"] .help-drawer-close:hover {
   background: rgba(255,255,255,0.18);
+}
+
+/* ── 14. Issue #207: Sidebar 折叠按钮 — Liquid Glass Style ── */
+[data-theme="apple"] .sb-toggle {
+  border-radius: 980px;
+  background: rgba(0,0,0,0.04);
+  backdrop-filter: blur(10px) saturate(180%);
+  -webkit-backdrop-filter: blur(10px) saturate(180%);
+  border: 0.5px solid rgba(0,0,0,0.06);
+  color: var(--t2);
+  transition: all var(--apple-transition);
+}
+[data-theme="apple"] .sb-toggle:hover {
+  background: rgba(0,113,227,0.1);
+  color: var(--a);
+  transform: scale(1.08);
+  box-shadow: 0 2px 12px rgba(0,113,227,0.2);
+}
+[data-theme="apple"] .sb-toggle:active {
+  transform: scale(0.92);
+}
+[data-theme="apple"] .sb-toggle.collapsed {
+  color: var(--a);
+  background: rgba(0,113,227,0.1);
+}
+/* Apple 主题：sidebar 折叠过渡曲线与主题一致 */
+[data-theme="apple"] .sb {
+  transition: width var(--apple-transition);
+}
+/* 窄屏 overlay 抽屉 — Liquid Glass 阴影与圆角 */
+@media(max-width:768px){
+  [data-theme="apple"] .sb-ov {
+    background: rgba(0,0,0,0.25);
+    backdrop-filter: blur(8px) saturate(150%);
+    -webkit-backdrop-filter: blur(8px) saturate(150%);
+  }
+  [data-theme="apple"] .sb {
+    border-right: 0.5px solid rgba(0,0,0,0.08);
+    border-radius: 0 24px 24px 0;
+    box-shadow: 12px 0 48px rgba(0,0,0,0.12);
+    transition: transform var(--apple-transition);
+  }
+}
+/* Dark mode: 折叠按钮 */
+[data-theme="apple"][data-theme-mode="dark"] .sb-toggle {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--t3);
+}
+[data-theme="apple"][data-theme-mode="dark"] .sb-toggle:hover {
+  background: rgba(0,113,227,0.25);
+  color: #5ac8fa;
+}
+[data-theme="apple"][data-theme-mode="dark"] .sb-toggle.collapsed {
+  color: #5ac8fa;
+  background: rgba(0,113,227,0.2);
+}
+[data-theme="apple"][data-theme-mode="auto"] .sb-toggle {
+  background: rgba(255,255,255,0.08);
+  border-color: rgba(255,255,255,0.1);
+  color: var(--t3);
 }

@@ -169,14 +169,35 @@ try:
 except Exception as e:
     log.warning(f"Rebuild unified_user_mapping check failed: {e}")
 db.execute(UNIFIED_USER_MAPPING_TABLE_SQL)
+# 兼容列迁移：unified_user_mapping 增加 gitcode_id（Issue #211，非 OAuth 注册用户的关联字段）
+try:
+    _um_cols_gid = [r[1] for r in db.execute("PRAGMA table_info(unified_user_mapping)").fetchall()]
+    if "gitcode_id" not in _um_cols_gid:
+        db.execute("ALTER TABLE unified_user_mapping ADD COLUMN gitcode_id TEXT DEFAULT ''")
+        db.commit()
+        log.info("Added unified_user_mapping.gitcode_id column")
+except Exception as e:
+    log.warning(f"Add unified_user_mapping.gitcode_id failed: {e}")
 # 回填 unified_user_mapping：user_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
 # 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次启动执行
 try:
-    db.execute(
-        "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
-        "SELECT id, username, nickname FROM user_accounts WHERE id>0"
-    )
-    db.commit()
+    # 先检查 user_accounts 表是否存在（首次启动时可能还未创建）
+    _has_ua = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_accounts'").fetchone()
+    if _has_ua:
+        db.execute(
+            "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
+            "SELECT id, username, nickname FROM user_accounts WHERE id>0"
+        )
+        # Issue #211: 补充 gitcode_id 关联，确保非 OAuth 注册用户也能建立映射
+        # user_accounts.gitcode_id 非空时，更新映射表对应字段（已有行不覆盖，仅补充空值）
+        db.execute(
+            "UPDATE unified_user_mapping SET gitcode_id = "
+            "(SELECT gitcode_id FROM user_accounts WHERE user_accounts.id = unified_user_mapping.user_id) "
+            "WHERE gitcode_id='' AND user_id IN (SELECT id FROM user_accounts WHERE gitcode_id!='')"
+        )
+        db.commit()
+    else:
+        log.info("user_accounts table not yet created, skipping backfill")
 except Exception as e:
     log.warning(f"Backfill unified_user_mapping failed: {e}")
 # 兼容列迁移：unified_user_mapping 增加 app_id（feishu-app-scoped-openid-fix.md，open_id 为 app 级）

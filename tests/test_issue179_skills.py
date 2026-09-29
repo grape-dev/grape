@@ -1,7 +1,7 @@
 """Issue #179: Skill 远程同步 + 技能分类表独立化 — 单元测试
 
 覆盖：
-- skill_category 表建表 + seed 11 分类
+- skill_category 表建表 + seed 15 分类
 - category_id 回填（sub_scene → slug 映射）
 - list_skill_categories / get_skill_category 查询
 - _sync_skills_to_db 写入 category_id + 变更检测
@@ -68,7 +68,7 @@ class TestSkillCategoryTable:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM skill_category")
-            assert c.fetchone()[0] == 11
+            assert c.fetchone()[0] == 15
 
     def test_seed_data(self):
         with db_lock:
@@ -92,7 +92,7 @@ class TestSkillCategoryTable:
             c = db.cursor()
             c.execute("SELECT COUNT(DISTINCT slug), COUNT(*) FROM skill_category")
             distinct, total = c.fetchone()
-            assert distinct == total == 11
+            assert distinct == total == 15
 
 
 class TestCategoryBackfill:
@@ -134,7 +134,7 @@ class TestCategoryQueries:
     def test_list_skill_categories(self):
         from src.user.db import list_skill_categories
         cats = list_skill_categories()
-        assert len(cats) == 11
+        assert len(cats) == 15
         assert all("id" in c and "name" in c and "slug" in c for c in cats)
         # 按 order_num 排序
         order_nums = [c["order_num"] for c in cats]
@@ -240,7 +240,7 @@ class TestApiEndpoints:
         assert r.status_code == 200
         data = r.json()
         assert "categories" in data
-        assert len(data["categories"]) == 11
+        assert len(data["categories"]) == 15
 
     def test_agent_stats_returns_agents(self):
         headers = self._headers()

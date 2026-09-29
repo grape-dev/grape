@@ -133,5 +133,10 @@
   "recommend_rules_hint": "key 从当前仓库已应用场景中选择，value 描述什么情况下推荐使用该场景",
   "recommend_saved": "智能推荐规则已保存",
   "recommend_fallback_required": "兜底场景不能为空",
-  "recommend_rule_dup": "同一场景不能有多条规则"
+  "recommend_rule_dup": "同一场景不能有多条规则",
+  "choose_scene_type": "选择场景类型",
+  "standard_scene": "标准场景",
+  "standard_scene_desc": "VOD + Issue + Coding + QA + SRE 全流程，适用于 Issue 驱动开发",
+  "pr_subscription_scene": "PR 订阅场景",
+  "pr_subscription_desc": "QA + SRE，当 PR 无关联 Issue 时自动触发审查。每仓库最多一个"
 }

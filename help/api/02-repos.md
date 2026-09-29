@@ -143,11 +143,13 @@
 ---
 
 ## GET /api/repos/{owner}/{repo}/project-info — 项目知识
-> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> scope（x-token-scope）：**dual**（`grape_` API Key / JWT / `tk_` 会话 token 均可）
+> 会话 token 调用需**仓库作用域匹配**（token 绑定的 repo_key 与 `owner/repo` 不一致 → 403）；
+> JWT / API Key 维持用户通道现状。
 
 | Path | `{owner}` `{repo}` |
 | 出参 | `{files: {project-graph.md: "...", project-capabilities.md: "..."}, meta: {commit, branches, updated, degraded}}` |
-| 返回 | 200 |
+| 返回 | 200；403 会话 token 仓库作用域不匹配 |
 
 ---
 

@@ -6,6 +6,7 @@ from src.user import db as user_db
 from src.api.deps import require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.repo_key import from_repo_key
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -77,7 +78,7 @@ _PLACEHOLDER_VALUES = {
 def _is_placeholder(value: str) -> bool:
     v = (value or "").strip()
     if not v:
-        return True  # 空 = 无值（不写）
+        return False  # 空字符串不是占位符（清除语义由调用方处理）
     if v in _PLACEHOLDER_VALUES:
         return True
     if v.startswith(("AK-demo-", "SK-demo-", "ghp_devopsbot_")):
@@ -85,36 +86,57 @@ def _is_placeholder(value: str) -> bool:
     return "xxxx" in v.lower()
 
 
-@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected.")
+@router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected. Sending an empty string explicitly clears the field; omitting a field leaves it unchanged.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
     acc = user_db.get_user_account(user["username"]) or {}
-    if body.huawei_cloud_ak and not _is_placeholder(body.huawei_cloud_ak):
-        acc["huawei_cloud_ak"] = body.huawei_cloud_ak.strip()
-    if body.huawei_cloud_sk and not _is_placeholder(body.huawei_cloud_sk):
-        acc["huawei_cloud_sk"] = body.huawei_cloud_sk.strip()
-    if body.codearts_ak and not _is_placeholder(body.codearts_ak):
-        acc["CODEARTS_CLI_AK"] = body.codearts_ak.strip()
-    if body.codearts_sk and not _is_placeholder(body.codearts_sk):
-        acc["CODEARTS_CLI_SK"] = body.codearts_sk.strip()
-    if body.github_token and not _is_placeholder(body.github_token):
-        _gh_tok = body.github_token.strip()
-        acc["github_api_token"] = _gh_tok
-        # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
-        try:
-            import requests as _req
-            _resp = _req.get("https://api.github.com/user",
-                             headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
-                             timeout=10)
-            if _resp.status_code == 200:
-                _gh_user = _resp.json()
-                acc["github_login"] = _gh_user.get("login", "")
-                # 关联到用户表
-                user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
-                log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
-            else:
-                log.warning(f"GitHub token validation failed: {_resp.status_code}")
-        except Exception as _e:
-            log.warning(f"GitHub token validation error: {_e}")
+    # 区分「未传字段」（不修改）与「传空字符串」（清除）：
+    # model_dump(exclude_unset=True) 仅含请求体中显式传递的字段，未传字段取默认值时不包含在内。
+    explicit = body.model_dump(exclude_unset=True)
+
+    def _apply_credential(field: str, acc_key: str):
+        """统一凭据写入逻辑（Issue #237）：
+        - 字段未传 → 不修改（保持已有值）
+        - 字段传空字符串 → 清除（置空）
+        - 字段传非空非占位符值 → 写入
+        - 字段传占位符/demo 值 → 拒绝写入（保持已有值）
+        """
+        if field not in explicit:
+            return
+        v = (explicit[field] or "").strip()
+        if v and not _is_placeholder(v):
+            acc[acc_key] = v
+        elif not v:
+            acc[acc_key] = ""
+
+    _apply_credential("huawei_cloud_ak", "huawei_cloud_ak")
+    _apply_credential("huawei_cloud_sk", "huawei_cloud_sk")
+    _apply_credential("codearts_ak", "CODEARTS_CLI_AK")
+    _apply_credential("codearts_sk", "CODEARTS_CLI_SK")
+
+    # GitHub Token（写入时需验证 token 并获取用户信息；清除时无需验证）
+    if "github_token" in explicit:
+        _gh_tok = (explicit["github_token"] or "").strip()
+        if _gh_tok and not _is_placeholder(_gh_tok):
+            acc["github_api_token"] = _gh_tok
+            # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+            try:
+                import requests as _req
+                _resp = _req.get("https://api.github.com/user",
+                                 headers={"Authorization": f"Bearer {_gh_tok}", "Accept": "application/vnd.github+json"},
+                                 timeout=10)
+                if _resp.status_code == 200:
+                    _gh_user = _resp.json()
+                    acc["github_login"] = _gh_user.get("login", "")
+                    # 关联到用户表
+                    user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
+                    log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+                else:
+                    log.warning(f"GitHub token validation failed: {_resp.status_code}")
+            except Exception as _e:
+                log.warning(f"GitHub token validation error: {_e}")
+        elif not _gh_tok:
+            acc["github_api_token"] = ""
+            acc["github_login"] = ""
     user_db.save_user_account(user["username"], acc)
     return {"message": "凭据已更新"}
 
@@ -401,6 +423,7 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
         else:
             rt["owner"] = cred["owner_name"]
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
+            rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
         # 引擎健康分（Issue #134 展示增强）
         try:
@@ -497,19 +520,20 @@ def _build_cred_map(db, db_lock) -> dict:
     cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip FROM runtime_credentials")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key = r
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
-                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or ""}
+                             "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
+                             "repo_key": crepo_key or ""}
     return cred_map
 
 
 def _make_visible_credential_fn(uname: str, user_repos: set):
     """返回 _visible_credential 闭包，两个端点共用。
     uname: 当前登录用户名
-    user_repos: 用户可访问的仓库 full_name 集合
+    user_repos: 用户可访问的仓库 full_name 集合（无前缀 owner/repo）
     """
     def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
         if not cid:                      # credential_id=0（历史本机引擎）
@@ -519,7 +543,11 @@ def _make_visible_credential_fn(uname: str, user_repos: set):
         if cscope == "user":
             return cowner_name == uname
         if cscope == "repo":
-            return cowner_name == uname or cowner_id in user_repos
+            if cowner_name == uname:
+                return True
+            # repo_key 存储为 gitcode:owner/repo（带前缀），user_repos 无前缀
+            # 统一用 from_repo_key 剥前缀后比对（Issue #248）
+            return from_repo_key(cowner_id) in user_repos
         return False
     return _visible_credential
 
@@ -570,6 +598,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
                             "owner": cred.get("owner_name", ""),
+                            "repo_key": from_repo_key(cred.get("repo_key", "")),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
                             "runtimes": runtimes})
 
@@ -639,11 +668,14 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
-@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size.")
-def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20):
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245).")
+def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20,
+                        scope: str = "", type: str = "", q: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
+    筛选（Issue #245）：scope/type/q 参数在分页切片前过滤，total 始终为筛选后总数，
+    保证底部页码总条数与实际展示数据一致（修复前端二次过滤导致 total 不更新）。
     可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
     """
     from src.user import db as user_db
@@ -676,12 +708,59 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
                                      valid_users, _local_runtimes, now)
 
-    # 分页切片
+    # Issue #245: 筛选从迁移到后端——前端二次过滤会让 _rtDevTotal 与展示数据不一致
+    # avail_scopes / avail_types 取自全部可见设备（不依赖当前筛选/页），供前端生成筛选标签，
+    # 避免后端过滤后当前页只剩单一 scope/type 导致筛选标签消失无法切换
+    _avail_scopes = list(set(
+        ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global"))
+        for d in devices
+    ))
+    _avail_types = list(set(
+        _t for d in devices for _t in _device_engine_types(d)
+    ))
+
+    # type 筛选：设备任一引擎名 includes(type)（小写，与前端 _availTypes 逻辑一致）
+    if type:
+        _tlow = type.lower()
+        devices = [d for d in devices if any(
+            _tlow in (r.get("name") or "").lower() for r in d.get("runtimes", [])
+        )]
+
+    # q 搜索：匹配 name/device_name/owner/worker_ip/runtimes[].name（与前端原 haystack 一致）
+    if q:
+        _qlow = q.lower()
+        devices = [d for d in devices if _qlow in " ".join([
+            d.get("name") or "", d.get("device_name") or "", d.get("owner") or "",
+            d.get("worker_ip") or "",
+            " ".join((r.get("name") or "") for r in d.get("runtimes", []))
+        ]).lower()]
+
+    # scope 筛选（credential_id=0 → local，否则取 d.scope；与 renderWorkers 原前端逻辑一致）
+    if scope:
+        devices = [d for d in devices if (
+            ("local" if d.get("credential_id") == 0 else (d.get("scope") or "global")) == scope
+        )]
+
+    # 分页切片（total 为筛选后总数）
     total = len(devices)
     _page = max(page, 1)
     _offset = (_page - 1) * page_size
     paged_devices = devices[_offset:_offset + page_size]
-    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size}
+    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
+            "avail_scopes": _avail_scopes, "avail_types": _avail_types}
+
+
+def _device_engine_types(d: dict) -> list:
+    """从设备的引擎列表派生引擎类型标签（与前端 _availTypes 的 includes 判定一致）。"""
+    _KNOWN = [("hermes", "hermes"), ("opencode", "opencode"),
+              ("codearts", "codearts"), ("codex", "codex")]
+    found = []
+    for rt in d.get("runtimes", []):
+        n = (rt.get("name") or "").lower()
+        for _kw, _label in _KNOWN:
+            if _kw in n and _label not in found:
+                found.append(_label)
+    return found
 
 
 # 兼容别名：旧路径 /backend-agents（≥2 发布周期，见 agent-runtime-design.md §6.2）
@@ -766,9 +845,11 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     owner = user.get("username") or ""
     repo_key = ""
     if scope in ("repo", "user"):
-        repo_key = (body.repo_key or "").strip()
-        if scope == "repo" and not repo_key:
+        raw_key = (body.repo_key or "").strip()
+        if scope == "repo" and not raw_key:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
+        if raw_key:
+            repo_key = _resolve_repo_key(raw_key)
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
@@ -835,9 +916,10 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
     scope = _normalize_scope(body.scope)
     if scope == "global":
         raise HTTPException(status_code=400, detail={"code": 400, "message": "不允许设为全局，仅可切换仓库/个人"})
-    repo_key = (body.repo_key or "").strip()
-    if scope == "repo" and not repo_key:
+    raw_key = (body.repo_key or "").strip()
+    if scope == "repo" and not raw_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 scope 需填写 repo_key"})
+    repo_key = _resolve_repo_key(raw_key) if raw_key else ""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
@@ -862,12 +944,58 @@ def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at FROM runtime_credentials ORDER BY id DESC")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
-             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8])}
+             "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8]),
+             "repo_key": from_repo_key(r[9] or "")}
             for r in c.fetchall()
         ]}
+
+
+def _cleanup_scene_engine_runtime_ids(rid_list: list):
+    """清理场景配置中引用了即将被删除的 runtime_id 的 engine_runtime_ids（Issue #250）。
+
+    扫描 devops_pipeline_scene 所有活跃场景的 nodes_json，
+    从每个 node 的 engine_runtime_ids 中移除在 rid_list 中的 ID，回写 DB。
+    """
+    if not rid_list:
+        return
+    import json as _json
+    from datetime import datetime, timezone
+    from src.session_manager import db, db_lock
+    rid_set = set(rid_list)
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
+        except Exception as _e:
+            log.warning(f"_cleanup_scene_engine_runtime_ids: query scenes failed: {_e}")
+            return
+        now = datetime.now(timezone.utc).isoformat()
+        for row_id, nodes_str in rows:
+            try:
+                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
+            except Exception:
+                continue
+            changed = False
+            for node in nodes:
+                eids = node.get("engine_runtime_ids") or []
+                if not eids:
+                    continue
+                new_eids = [eid for eid in eids if eid not in rid_set]
+                if len(new_eids) != len(eids):
+                    node["engine_runtime_ids"] = new_eids
+                    changed = True
+            if changed:
+                try:
+                    c.execute(
+                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
+                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
+                except Exception as _e:
+                    log.warning(f"_cleanup_scene_engine_runtime_ids: update scene {row_id} failed: {_e}")
+        db.commit()
 
 
 @router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")
@@ -879,6 +1007,7 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
     级联清理：
     - agent_runtimes：该凭据注册的引擎行一并删除
     - devops_agent_session.runtime_id：置 0（dashboard 红字「无 engine」，如实反映）
+    - devops_pipeline_scene.nodes_json：清理 engine_runtime_ids 中对被删 runtime 的悬空引用（Issue #250）
     历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
     （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
     """
@@ -896,6 +1025,8 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
                 c.execute(f"UPDATE devops_agent_session SET runtime_id=0 WHERE runtime_id IN ({ph})", rid_list)
             except Exception as _e:
                 log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
+        # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
+        _cleanup_scene_engine_runtime_ids(rid_list)
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
         db.commit()
