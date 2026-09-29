@@ -617,7 +617,10 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
                                          result=_result_text[:5000],
                                          error=f"agent_tasks status={_at_status}")
                 return "failed"
-            # queued/dispatched/running → 继续等
+            elif _at_status == "running":
+                # worker 已认领并开始执行，同步 autopilot_executions 为 running
+                _update_execution_result(exec_id, "running")
+            # queued/dispatched → 继续等
         except Exception as e:
             log.warning(f"Autopilot poll exec {exec_id}: query failed: {e}")
 

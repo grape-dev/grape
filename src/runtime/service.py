@@ -1045,7 +1045,7 @@ def claim(runtime_id) -> dict | None:
                     db.commit()
                     return None
             c.execute(
-                "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
+                "UPDATE agent_tasks SET status='running', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
             claimed = c.rowcount > 0
             if claimed:
@@ -1078,7 +1078,7 @@ def claim(runtime_id) -> dict | None:
             return None
         task = get_task(task_id)
         if task:
-            task["status"] = "dispatched"
+            task["status"] = "running"
             # 回填事件 runtime 为真实引擎实例名（pool 模式入队显示 pool:<type>，
             # claim 后展示实际执行引擎，见 #44：vod 池 hermes 执行但事件显示 opencode）
             if task.get("event_seq"):
@@ -1306,9 +1306,11 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             except Exception as _he:
                 log.warning(f"claim_by_tag: health check failed: {_he}, skip check")
 
-            # 标记 dispatched
+            # 标记 running（原 dispatched：worker 认领即开始执行，UI 长时间显示 dispatched
+            # 是因为 worker 侧 task_start 回调丢失/批量消息延迟，靠 auto-fix 兜底才转 running。
+            # 认领即 running 语义更准确，防 UI 卡 dispatched 窗口）
             c.execute(
-                "UPDATE agent_tasks SET status='dispatched', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
+                "UPDATE agent_tasks SET status='running', runtime_id=?, started_at=? WHERE id=? AND status='queued'",
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id)
             )
             claimed = c.rowcount > 0
@@ -1323,7 +1325,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
         return None
     task = get_task(task_id)
     if task:
-        task["status"] = "dispatched"
+        task["status"] = "running"
         # 回填事件 runtime
         if task.get("event_seq"):
             try:

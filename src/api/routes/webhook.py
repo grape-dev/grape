@@ -185,12 +185,15 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
-def _authorize_a2a(request: Request, repo_key: str):
+def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
 
     - bot token：仓库级（managed_repos / devops_agent_session），支持远端 worker；
     - 会话 token（GRAPE_SESSION_TOKEN，M2）：校验 repo_key 匹配——该仓库执行期 agent 凭据。
     仅当仓库已托管（有 bot token）才严格校验 bot；未托管仓库允许会话 token 或交由后续校验。
+
+    返回 session token info（含 session_key），供调用方反查调用方身份；
+    bot token 通道返回 None（无身份信息）。
     """
     _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not _auth:
@@ -202,13 +205,14 @@ def _authorize_a2a(request: Request, repo_key: str):
     from src.api.auth_token import verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
-    _session_ok = bool(verify_session_token_for_repo(_auth, repo_key))
+    _session_info = verify_session_token_for_repo(_auth, repo_key)
+    _session_ok = bool(_session_info)
     if _bot_ok or _session_ok:
         log.info(f"A2A: token OK (bot={_bot_ok}, session={_session_ok}) repo={repo_key}")
-        return
+        return _session_info if _session_ok else None
     if not _expected:
         log.warning(f"A2A: repo not managed (no bot token) & no matching session token, defer to downstream: {repo_key}")
-        return
+        return None
     log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
     raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
 
@@ -306,12 +310,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             repo_key = to_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
 
-    # PR 订阅模式拦截：PR 订阅触发的 QA 任务不允许 A2A（只做审查，不流转流水线）
-    # PR 订阅的 issue_number 格式为 pr_{pr_num}_{scene_id}（非纯数字）
-    if issue_number and not str(issue_number).lstrip("#").isdigit():
-        log.info(f"A2A: rejected — PR subscription mode (issue={issue_number}), A2A disabled")
-        return {"ok": False, "skipped": "pr_subscription_a2a_disabled"}
-
     # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
     if issue_number and repo_key:
         try:
@@ -328,6 +326,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     seq = 0
 
     # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
+    _a2a_session_info = None
     if user and user.get("auth_type") in ("jwt", "api_key"):
         from src.user.db import get_managed_repos
         managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
@@ -335,7 +334,25 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
     else:
         # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
-        _authorize_a2a(request, repo_key)
+        _a2a_session_info = _authorize_a2a(request, repo_key)
+
+    # PR 订阅模式拦截：PR 订阅触发的 QA 不允许 A2A（只做审查，不流转流水线）
+    # 通过 session token 反查调用方 agent_tasks.issue_id：
+    #   PR订阅QA 的 issue_id 以 "#pr_" 开头（伪 ID），流水线 QA 的 issue_id 是真实 Issue 号
+    #   session token 通道（agent CLI 调用）可反查；bot token 通道（服务端 resume/redispatch）无身份，放行
+    if _a2a_session_info and _a2a_session_info.get("session_key"):
+        try:
+            from src.session_manager import db as _prsub_db, db_lock as _prsub_lock
+            _caller_task_id = _a2a_session_info["session_key"]
+            with _prsub_lock:
+                _prsub_c = _prsub_db.cursor()
+                _prsub_c.execute("SELECT issue_id FROM agent_tasks WHERE id=?", (_caller_task_id,))
+                _prsub_row = _prsub_c.fetchone()
+            if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
+                log.info(f"A2A: rejected — PR subscription QA (task={_caller_task_id}, issue={_prsub_row[0]}), A2A disabled")
+                return {"ok": False, "skipped": "pr_subscription_a2a_disabled"}
+        except Exception as _prsub_e:
+            log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled

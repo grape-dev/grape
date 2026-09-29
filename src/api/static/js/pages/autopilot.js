@@ -1,4 +1,4 @@
-// Issue #150: Autopilot 定时任务管理页面
+// Issue #150: Autopilot 自动化管理页面
 // 参照 multica AutopilotsPage 风格设计
 var $ = function(id) { return document.getElementById(id); };
 
@@ -36,7 +36,7 @@ function _apListHTML() {
   return '<div class="cd">' +
     '<div class="cd-h" style="display:flex;justify-content:space-between;align-items:center">' +
       '<div style="display:flex;align-items:center;gap:12px">' +
-        '<h2><span style="margin-right:6px">⏰</span>定时任务</h2>' +
+        '<h2><span style="margin-right:6px">⏰</span>自动化</h2>' +
       '</div>' +
       '<button class="bt bt-p" onclick="_apShowCreate()">+ 新建任务</button>' +
     '</div>' +
@@ -81,7 +81,7 @@ function _apEmptyHTML() {
   }).join('');
   return '<div style="padding:40px 0;text-align:center">' +
     '<div style="font-size:32px;margin-bottom:8px">⏰</div>' +
-    '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">暂无定时任务</p>' +
+    '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">暂无自动化</p>' +
     '<p style="font-size:12px;color:var(--t3);margin-bottom:24px">选择一个模板快速创建，或从空白开始</p>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;max-width:720px;margin:0 auto">' + cards + '</div>' +
     '<button class="bt bt-o" style="margin-top:16px" onclick="_apShowCreate()">+ 从空白创建</button>' +
@@ -346,7 +346,7 @@ function _apShowDialog(tpl, existing) {
   var engineIds = existing ? (existing.engine_runtime_ids || []) : [];
   var customFields = existing ? (existing.custom_fields || []) : [];
   var workBranch = existing ? (existing.work_branch || '') : '';
-  var title = existing ? '编辑定时任务' : '新建定时任务';
+  var title = existing ? '编辑自动化' : '新建自动化';
   var btnText = existing ? '保存' : '创建';
 
   // Shared input style
@@ -380,7 +380,7 @@ function _apShowDialog(tpl, existing) {
           '<div style="padding:16px 20px 8px">' +
             '<label style="' + _lbl2 + '">任务名称 <span style="color:var(--r)">*</span></label>' +
             '<input id="apFormName" type="text" value="' + _esc(name) + '" placeholder="输入任务名称" style="' + _inp + ';font-size:14px;font-weight:500">' +
-            '<div style="' + _hint + '">定时任务的名称，用于列表展示</div>' +
+            '<div style="' + _hint + '">自动化的名称，用于列表展示</div>' +
           '</div>' +
           '<div style="padding:8px 20px">' +
             '<label style="' + _lbl2 + '">执行引擎</label>' +
@@ -1453,7 +1453,7 @@ function _apDetailHTML(t) {
   return '<div>' +
     // 标题行：返回按钮 + 右侧操作
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">' +
-      '<button class="bt bt-o bt-s" onclick="app.nav(\'autopilot\')" style="margin-right:auto">← 定时任务</button>' +
+      '<button class="bt bt-o bt-s" onclick="app.nav(\'autopilot\')" style="margin-right:auto">← 自动化</button>' +
       '<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
         '<span style="font-size:12px;color:var(--t2)">' + (t.enabled ? '启用' : '暂停') + '</span>' +
         '<span data-ap-toggle="' + t.id + '" onclick="event.stopPropagation();_apToggleEnabled(' + t.id + ', ' + (!t.enabled) + ')" style="position:relative;width:36px;height:20px;border-radius:10px;background:' + (t.enabled ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
@@ -1673,6 +1673,7 @@ function _apLoadExecutions(taskId) {
           '<span style="flex:1;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + result + '</span>' +
           (hasFindings ? '<span style="font-size:10px;background:rgba(49,104,224,0.12);color:#3168e0;padding:2px 8px;border-radius:8px;flex-shrink:0">有问题</span>' : '') +
           '<span style="font-size:10px;color:var(--t3);flex-shrink:0">重试 ' + (e.retry_count||0) + '</span>' +
+          (e.agent_task_id ? '<span onclick="event.stopPropagation();openTaskLog(\'' + _esc(e.agent_task_id) + '\',\'自动化 #' + eid + '\')" style="font-size:10px;color:rgba(0,113,227,.8);border:1px solid rgba(0,113,227,.3);border-radius:999px;padding:2px 10px;flex-shrink:0;cursor:pointer;white-space:nowrap">日志</span>' : '') +
           '<span class="ap-exec-arrow" style="font-size:10px;color:var(--t3);transition:transform .3s;flex-shrink:0">▼</span>' +
         '</div>' +
         '<div class="ap-exec-detail" id="apExecDetail_' + eid + '">' +
