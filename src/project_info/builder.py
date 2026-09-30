@@ -8,7 +8,7 @@
   * 分析副本:      {WORKSPACE_DIR}/{owner}/{repo}/project-info/codegraph-repo/  （生成器专用，非 bare）
   * 产物:          {WORKSPACE_DIR}/{owner}/{repo}/project-info/
 """
-import json, os, shutil, subprocess, hashlib
+import json, os, shutil, subprocess, hashlib, time
 from src.config import log, WORKSPACE_DIR
 from src.localfs import write_text as _atomic_write
 from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
@@ -17,6 +17,12 @@ _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
 _CAP_FILE = "project-capabilities.md"
 _META_FILE = ".metadata.json"
+
+# 各节内容上限（env 可调，便于按库/部署调节 token 预算）
+_SECTION_CAP = int(os.environ.get("PROJECT_INFO_SECTION_CAP", "3000"))
+_KEY_FILES_CAP = int(os.environ.get("PROJECT_INFO_KEY_FILES_CAP", "8000"))
+_KEY_FILES_MAX_DEPTH = int(os.environ.get("PROJECT_INFO_FILES_MAX_DEPTH", "5"))
+_GRAPH_VERSION = 2
 _GRAPH_TEMPLATE = """# Project Graph: {owner}/{repo}
 
 > Last updated: {updated} | Branches: {branches_list} | Commit: {sha}
@@ -29,6 +35,18 @@ _GRAPH_TEMPLATE = """# Project Graph: {owner}/{repo}
 
 ## Core Call Chains
 {chains}
+
+## Background Work & Scheduling
+{background_jobs}
+
+## Error Handling & Observability
+{error_handling}
+
+## Auth & Security
+{auth_security}
+
+## Deployment & CI-CD
+{deployment}
 
 ## Branch Structure
 {branches_desc}
@@ -100,6 +118,15 @@ def _write_meta(repo_key: str, meta: dict):
         _write_to_obs(repo_key, _META_FILE, json.dumps(meta, ensure_ascii=False))
     except Exception as e:
         log.warning(f"project-info meta write failed {repo_key}: {e}")
+
+
+def _write_local_meta(repo_key: str, meta: dict):
+    """仅写本地 meta（锁丢失/中断时用，不写 OBS+DB 防止无锁状态污染共享）。"""
+    try:
+        p = os.path.join(_pi_dir(repo_key), _META_FILE)
+        _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
+    except Exception:
+        pass
 
 
 def _write_file(repo_key: str, name: str, content: str):
@@ -234,14 +261,41 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
         return None
 
 
+def _cap(text: str, limit: int) -> str:
+    """截断 helper：空串→N/A，超限→带标记（提示用 grape knowledge 拉全量）。"""
+    text = (text or "").strip()
+    if not text:
+        return "N/A"
+    if len(text) > limit:
+        return text[:limit] + "\n...(已截断，完整内容用 `grape knowledge detail` 获取)"
+    return text
+
+
 def _codegraph_explore(work: str, query: str, max_files: int = 10) -> str:
     code, out, err = _run(["codegraph", "explore", "--max-files", str(max_files), query], cwd=work, timeout=120)
     return out or err or ""
 
 
 def _codegraph_files(work: str) -> str:
-    code, out, err = _run(["codegraph", "files", "--format", "tree"], cwd=work, timeout=120)
+    code, out, err = _run(
+        ["codegraph", "files", "--format", "tree", "--max-depth", str(_KEY_FILES_MAX_DEPTH)],
+        cwd=work, timeout=120)
     return out or err or ""
+
+
+def _codegraph_files_section(work: str, directory: str, max_depth: int = 3) -> str:
+    """目录过滤子树：探测 skills/ agents/ workflows/ 等目录用（命中才填，无命中返回空）。"""
+    if not os.path.isdir(work):
+        return ""
+    code, out, err = _run(
+        ["codegraph", "files", "--format", "tree", "--filter", directory, "--max-depth", str(max_depth)],
+        cwd=work, timeout=120)
+    return (out or "").strip() if code == 0 and (out or "").strip() else ""
+
+
+def _codegraph_engine_version() -> str:
+    code, out, err = _run(["codegraph", "--version"], timeout=30)
+    return (out or err or "").strip()
 
 
 def _codegraph_callees(work: str, symbol: str, limit: int = 10) -> str:
@@ -249,30 +303,79 @@ def _codegraph_callees(work: str, symbol: str, limit: int = 10) -> str:
     return out or err or ""
 
 
-def _build_graph_md(repo_key: str, meta: dict, arch: str, modules: str, chains: str, key_files: str) -> str:
+def _fetch_branches(repo_key: str, owner: str, rname: str) -> tuple[list, str]:
+    """GitCode/GitHub 拉真实分支列表 + 默认分支（best-effort，失败回落空）。"""
+    try:
+        from src.repo import Repo
+        _repo = Repo(repo_key)
+        tok = _repo.bot_token
+        if not tok:
+            return [], ""
+        import urllib.request, json as _json
+        _api = _repo.api_base
+        _headers = {"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"}
+        req = urllib.request.Request(f"{_api}/repos/{owner}/{rname}/branches?per_page=100", headers=_headers)
+        data = _json.load(urllib.request.urlopen(req, timeout=20))
+        if isinstance(data, dict):
+            data = data.get("branches") or []
+        branches = []
+        for b in data or []:
+            if isinstance(b, dict) and b.get("name"):
+                branches.append(b["name"])
+            elif isinstance(b, str) and b:
+                branches.append(b)
+        default_branch = ""
+        try:
+            req2 = urllib.request.Request(f"{_api}/repos/{owner}/{rname}", headers=_headers)
+            info = _json.load(urllib.request.urlopen(req2, timeout=20))
+            if isinstance(info, dict):
+                default_branch = info.get("default_branch") or ""
+        except Exception:
+            pass
+        return branches, default_branch
+    except Exception:
+        return [], ""
+
+
+def _build_graph_md(repo_key: str, meta: dict, arch: str, modules: str, chains: str, key_files: str,
+                    extra: dict | None = None) -> str:
     owner, rname = split_owner_repo(repo_key)
+    extra = extra or {}
+    _brs = meta.get("branches_analyzed", []) or []
+    branches_desc = "\n".join(f"- {b}" for b in _brs[:30]) if _brs else "N/A"
+    if len(_brs) > 30:
+        branches_desc += f"\n- ...（共 {len(_brs)} 个分支，仅列前 30）"
     return _GRAPH_TEMPLATE.format(
         owner=owner, repo=rname,
         updated=meta.get("last_updated", ""),
-        branches_list=", ".join(meta.get("branches_analyzed", [])),
+        branches_list=", ".join(_brs),
         sha=meta.get("last_commit_sha", ""),
-        architecture=arch[:600] or "N/A",
-        modules=modules[:600] or "N/A",
-        chains=chains[:600] or "N/A",
-        branches_desc=meta.get("branches_analyzed", []) or "N/A",
-        key_files=key_files[:600] or "N/A",
+        architecture=_cap(arch, _SECTION_CAP),
+        modules=_cap(modules, _SECTION_CAP),
+        chains=_cap(chains, _SECTION_CAP),
+        background_jobs=_cap(extra.get("background_jobs"), _SECTION_CAP),
+        error_handling=_cap(extra.get("error_handling"), _SECTION_CAP),
+        auth_security=_cap(extra.get("auth_security"), _SECTION_CAP),
+        deployment=_cap(extra.get("deployment"), _SECTION_CAP),
+        branches_desc=branches_desc,
+        key_files=_cap(key_files, _KEY_FILES_CAP),
     )
 
 
-def _build_capabilities_md(repo_key: str, meta: dict, tech: str, features: str, api: str) -> str:
+def _build_capabilities_md(repo_key: str, meta: dict, tech: str, features: str, api: str,
+                           extra: dict | None = None) -> str:
     owner, rname = split_owner_repo(repo_key)
+    extra = extra or {}
     return _CAP_TEMPLATE.format(
         owner=owner, repo=rname,
         updated=meta.get("last_updated", ""),
-        tech_stack=tech[:600] or "N/A",
-        features=features[:600] or "N/A",
-        api=api[:600] or "N/A",
-        integrations="N/A", skills_agents="N/A", data_model="N/A", config="N/A",
+        tech_stack=_cap(tech, _SECTION_CAP),
+        features=_cap(features, _SECTION_CAP),
+        api=_cap(api, _SECTION_CAP),
+        integrations=_cap(extra.get("integrations"), _SECTION_CAP),
+        skills_agents=_cap(extra.get("skills_agents"), _SECTION_CAP),
+        data_model=_cap(extra.get("data_model"), _SECTION_CAP),
+        config=_cap(extra.get("config"), _SECTION_CAP),
     )
 
 
@@ -288,6 +391,10 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     meta = _read_meta(repo_key)
     now = __import__("datetime").datetime.now().astimezone().isoformat()
     meta["last_updated"] = now
+    _build_start = time.perf_counter()
+    meta["graph_version"] = _GRAPH_VERSION
+    if not meta.get("engine_version"):
+        meta["engine_version"] = _codegraph_engine_version()
 
     # 获取 main HEAD sha（用于刷新判定）
     try:
@@ -323,7 +430,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         _write_meta(repo_key, meta)
         return {"ok": False, "degraded": True, "reason": "analysis worktree failed"}
 
-    # codegraph 探索（Issue #103：每两步续期锁，防止大仓库 build 超时）
+    # codegraph 探索（Issue #103：每几步续期锁，防止大仓库 build 超时）
     arch = _codegraph_explore(work, "main entry point application startup", 10)
     modules = _codegraph_explore(work, "module import dependency", 15)
     if renew_fn and not renew_fn():
@@ -331,11 +438,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         # 只写本地 meta，不调 _write_meta（避免 _write_to_obs 在无锁状态下写 OBS+DB）
         meta["degraded"] = True
         meta["note"] = "build aborted: distributed lock lost"
-        try:
-            p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
-        except Exception:
-            pass
+        _write_local_meta(repo_key, meta)
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     chains = _codegraph_explore(work, "API routes endpoints handlers", 10)
     files = _codegraph_files(work)
@@ -343,22 +446,65 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
         meta["degraded"] = True
         meta["note"] = "build aborted: distributed lock lost"
-        try:
-            p = os.path.join(_pi_dir(repo_key), _META_FILE)
-            _atomic_write(p, json.dumps(meta, ensure_ascii=False, indent=2))
-        except Exception:
-            pass
+        _write_local_meta(repo_key, meta)
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
+    bg = _codegraph_explore(work, "background jobs scheduled tasks cron workers queue", 8)
+    errh = _codegraph_explore(work, "error handling logging observability middleware", 8)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        _write_local_meta(repo_key, meta)
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
+    auth = _codegraph_explore(work, "authentication authorization security guard middleware", 8)
+    deploy = _codegraph_explore(work, "deployment build ci cd dockerfile container k8s", 6)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        _write_local_meta(repo_key, meta)
         return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     tech = _codegraph_explore(work, "tech stack dependencies", 8)
     features = _codegraph_explore(work, "features capabilities", 8)
+    if renew_fn and not renew_fn():
+        log.warning(f"project-info: lock lost during build for {repo_key}, aborting")
+        meta["degraded"] = True
+        meta["note"] = "build aborted: distributed lock lost"
+        _write_local_meta(repo_key, meta)
+        return {"ok": False, "degraded": True, "reason": "lock lost during build"}
     api = _codegraph_explore(work, "API endpoints", 8)
+    integ = _codegraph_explore(work, "external integrations third-party sdk api webhook oauth sso", 8)
+    dmodel = _codegraph_explore(work, "data model entities database tables orm schema migration models", 8)
+    cfg = _codegraph_explore(work, "configuration settings env vars feature flags config", 8)
+
+    # Skills & Agents：目录探测（命中才填，无命中 N/A）
+    sk_bits = []
+    for _d in ("skills/", "agents/", "workflows/"):
+        _sub = _codegraph_files_section(work, _d)
+        if _sub:
+            sk_bits.append(f"### {_d}\n{_sub}")
+    skagents = "\n\n".join(sk_bits)
+
+    branches, default_branch = _fetch_branches(repo_key, owner, rname)
+    meta["branches_analyzed"] = branches or ["main", "master"]
+    if default_branch:
+        meta["default_branch"] = default_branch
 
     meta["degraded"] = False
     meta["note"] = ""
-    meta["branches_analyzed"] = ["main", "master"]
+    meta["build_ms"] = int((time.perf_counter() - _build_start) * 1000)
+    meta["sections_char_counts"] = {
+        "graph_arch": len(arch), "graph_modules": len(modules), "graph_chains": len(chains),
+        "graph_bg": len(bg), "graph_err": len(errh), "graph_auth": len(auth), "graph_deploy": len(deploy),
+        "graph_files": len(files),
+        "caps_tech": len(tech), "caps_features": len(features), "caps_api": len(api),
+        "caps_integ": len(integ), "caps_dmodel": len(dmodel), "caps_cfg": len(cfg),
+    }
     _write_meta(repo_key, meta)
-    _write_file(repo_key, _GRAPH_FILE, _build_graph_md(repo_key, meta, arch, modules, chains, files))
-    _write_file(repo_key, _CAP_FILE, _build_capabilities_md(repo_key, meta, tech, features, api))
+    graph_extra = {"background_jobs": bg, "error_handling": errh, "auth_security": auth, "deployment": deploy}
+    caps_extra = {"integrations": integ, "skills_agents": skagents, "data_model": dmodel, "config": cfg}
+    _write_file(repo_key, _GRAPH_FILE, _build_graph_md(repo_key, meta, arch, modules, chains, files, graph_extra))
+    _write_file(repo_key, _CAP_FILE, _build_capabilities_md(repo_key, meta, tech, features, api, caps_extra))
     log.info(f"project-info regenerated for {repo_key} (codegraph)")
     return {"ok": True, "degraded": False, "reason": "codegraph"}
 

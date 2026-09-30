@@ -280,3 +280,87 @@ class TestBuildProjectInfoTokenPassing:
         r = build_project_info("gitcode:org/test", token="")
         assert r["degraded"] is False
 
+
+class TestCapHelper:
+    def test_empty_returns_na(self):
+        from src.project_info.builder import _cap
+        assert _cap("", 100) == "N/A"
+        assert _cap(None, 100) == "N/A"
+        assert _cap("   ", 100) == "N/A"
+
+    def test_within_limit_returns_original(self):
+        from src.project_info.builder import _cap
+        assert _cap("abc", 10) == "abc"
+
+    def test_over_limit_truncates_with_marker(self):
+        from src.project_info.builder import _cap
+        out = _cap("a" * 50, 10)
+        assert out.startswith("a" * 10)
+        assert "已截断" in out
+        assert "grape knowledge" in out
+
+
+class TestContentEnrich:
+    """Phase 1 内容量提升：capabilities 四节实数据 + graph 新增四节 + 真实分支。"""
+
+    def _mock_all(self, monkeypatch, work="/fake/work"):
+        monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
+        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="": work)
+        monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore[{q}]")
+        monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
+
+    def test_capabilities_four_sections_filled(self, _tmp_workspace, monkeypatch):
+        """capabilities 四节不再硬编码 N/A（mock 返回实数据）。"""
+        self._mock_all(monkeypatch)
+        monkeypatch.setattr("src.project_info.builder._codegraph_files_section",
+                            lambda work, directory, max_depth=3: f"tree[{directory}]")
+        monkeypatch.setattr("src.project_info.builder._fetch_branches",
+                            lambda repo_key, owner, rname: (["main", "release/1.0"], "main"))
+        from src.project_info.builder import build_project_info
+        from src.repo_key import workspace_repo_dir
+        r = build_project_info("gitcode:org/test")
+        assert r["degraded"] is False
+        caps = open(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "project-capabilities.md"), encoding="utf-8").read()
+        for section, marker in (("External Integrations", "integrations"),
+                                ("Data Model", "data model"),
+                                ("Configuration", "configuration"),
+                                ("Skills & Agents", "tree[skills/]")):
+            assert section in caps
+            assert marker in caps, f"{section} 应为实数据而非 N/A"
+        assert "N/A" not in caps
+
+    def test_graph_new_sections_and_real_branches(self, _tmp_workspace, monkeypatch):
+        """graph 新增四节 + branches_analyzed 为真实分支。"""
+        self._mock_all(monkeypatch)
+        monkeypatch.setattr("src.project_info.builder._codegraph_files_section", lambda work, directory, max_depth=3: "")
+        monkeypatch.setattr("src.project_info.builder._fetch_branches",
+                            lambda repo_key, owner, rname: (["main", "dev", "release/1.0"], "main"))
+        from src.project_info.builder import build_project_info
+        from src.repo_key import workspace_repo_dir
+        r = build_project_info("gitcode:org/test")
+        assert r["degraded"] is False
+        pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
+        graph = open(os.path.join(pi, "project-graph.md"), encoding="utf-8").read()
+        for sec in ("Background Work & Scheduling", "Error Handling & Observability",
+                    "Auth & Security", "Deployment & CI-CD"):
+            assert sec in graph
+        meta = json.load(open(os.path.join(pi, ".metadata.json"), encoding="utf-8"))
+        assert meta["branches_analyzed"] == ["main", "dev", "release/1.0"]
+        assert meta.get("default_branch") == "main"
+        assert meta.get("graph_version") == 2
+        assert "build_ms" in meta
+        assert "sections_char_counts" in meta
+
+    def test_branches_fallback_when_api_empty(self, _tmp_workspace, monkeypatch):
+        """分支 API 失败 → 回落 main/master（build 不降级）。"""
+        self._mock_all(monkeypatch)
+        monkeypatch.setattr("src.project_info.builder._codegraph_files_section", lambda work, directory, max_depth=3: "")
+        monkeypatch.setattr("src.project_info.builder._fetch_branches",
+                            lambda repo_key, owner, rname: ([], ""))
+        from src.project_info.builder import build_project_info
+        from src.repo_key import workspace_repo_dir
+        r = build_project_info("gitcode:org/test")
+        assert r["degraded"] is False
+        meta = json.load(open(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", ".metadata.json"), encoding="utf-8"))
+        assert meta["branches_analyzed"] == ["main", "master"]
+
