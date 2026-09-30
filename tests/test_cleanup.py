@@ -148,16 +148,17 @@ class TestStuckAgentTasks:
                 db.cursor().execute(f"DELETE FROM {t}")
             db.commit()
 
-    def _mk_task(self, tid, status, runtime_id=0, created_at=None, started_at=None, event_seq=None, repo_key="gitcode:org/sweep"):
+    def _mk_task(self, tid, status, runtime_id=0, created_at=None, started_at=None, event_seq=None,
+                 repo_key="gitcode:org/sweep", stream_ended=0, self_reported=0):
         with db_lock:
             c = db.cursor()
             c.execute(
                 "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, event_seq, status, prompt, "
-                "created_at, started_at, repo_key, issue_id, agent_type) "
-                "VALUES (?, 'sess', ?, ?, ?, 'p', ?, ?, ?, '#1', 'vod')",
+                "created_at, started_at, repo_key, issue_id, agent_type, stream_ended, self_reported) "
+                "VALUES (?, 'sess', ?, ?, ?, 'p', ?, ?, ?, '#1', 'vod', ?, ?)",
                 (tid, runtime_id, event_seq, status,
                  created_at or datetime.now(timezone.utc).isoformat(),
-                 started_at, repo_key))
+                 started_at, repo_key, stream_ended, self_reported))
             db.commit()
 
     def _mk_runtime(self, rid, status):
@@ -253,6 +254,33 @@ class TestStuckAgentTasks:
         self._mk_task("t-nostart", "running", runtime_id=999, started_at=None, created_at=_OLD)
         cleanup.sweep_stuck_agent_tasks_once(queued_stale_minutes=10, dead_runtime_minutes=10)
         assert self._status("t-nostart") == "running"
+
+    def test_dual_signal_stuck_recycled_even_fresh(self):
+        # 双信号齐（stream_ended+self_reported）但任务仍非终态 → 收敛失败残留，无年龄要求直接回收
+        # 实例：#214（issue #10）QA 任务 t_1a1a9c440f9a：事件 2219 已 completed、output 齐全，任务恒 running
+        self._mk_task("t-dual", "running", runtime_id=0, started_at=None,
+                      created_at=datetime.now(timezone.utc).isoformat(),
+                      stream_ended=1, self_reported=1)
+        cleanup.sweep_stuck_agent_tasks_once(queued_stale_minutes=10, dead_runtime_minutes=10)
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT status, result_text FROM agent_tasks WHERE id='t-dual'").fetchone()
+        assert row and row[0] == "failed"
+        assert "双信号" in row[1]
+
+    def test_dual_signal_queued_stuck_recycled(self):
+        self._mk_task("t-dual-q", "queued", runtime_id=0, started_at=None,
+                      created_at=datetime.now(timezone.utc).isoformat(),
+                      stream_ended=1, self_reported=1)
+        cleanup.sweep_stuck_agent_tasks_once(queued_stale_minutes=10, dead_runtime_minutes=10)
+        assert self._status("t-dual-q") == "failed"
+
+    def test_running_single_signal_kept(self):
+        # 仅一个信号（self_reported=1 但 stream_ended=0，或反之）→ 仍在等另一信号，不回收
+        self._mk_task("t-one", "running", runtime_id=0, started_at=None,
+                      created_at=_OLD, stream_ended=1, self_reported=0)
+        cleanup.sweep_stuck_agent_tasks_once(queued_stale_minutes=10, dead_runtime_minutes=10)
+        assert self._status("t-one") == "running"
 
     def test_sweep_once_integrates_agent_tasks_recycle(self):
         seq = _mk_event(7002, "gitcode:org/sweep")

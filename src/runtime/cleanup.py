@@ -25,6 +25,7 @@ _LONG_RUNNING_MINUTES = int(os.environ.get("SWEEPER_LONG_RUNNING_MINUTES", "360"
 _QUEUED_STALE_TXT = "中断：queued 超时无 worker 认领（sweeper 兜底回收）"
 _DEAD_RUNTIME_TXT = "中断：running/dispatched 悬空，所属 runtime 已离线或不存在（sweeper 兜底回收）"
 _LONG_RUNNING_TXT = "中断：running/dispatched 超长未收敛（sweeper 兜底回收，worker 任务超时阈值 1h）"
+_DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
@@ -392,11 +393,15 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
 
     回收规则（保守，防误伤活跃任务）：
     - `queued` 且 created_at 超 queued_stale_minutes（默认 180min）→ 判死。正常集群入队→认领仅数秒。
+    - 任意非终态且 stream_ended=1 ∧ self_reported=1 → 判死。双信号齐意味着收敛必须发生且应瞬时完成，
+      仍停留非终态即收敛失败（finalize 路径中断）。实例：hello-calculator-14 #10 QA 任务
+      t_1a1a9c440f9a（事件 2219 已 completed、structured_output 齐全，任务却恒 running 亮雷达）。
     - `running`/`dispatched` 且 started_at 超 long_running_minutes（默认 360min，worker 侧任务超时 1h，
       6h 仍运行必为孤儿，与 runtime 是否在线无关）→ 判死。
     - `running`/`dispatched` 且 runtime_id!=0 且 runtime 已离线/不存在，且 started_at 超
       dead_runtime_minutes（默认 30min）→ 判死。
-    started_at 为空的 running（本机 direct 自执行）与 runtime_id=0 均按上述年龄规则保守判定，不盲杀。
+    started_at 为空的 running（本机 direct 自执行）与 runtime_id=0 均按上述年龄规则保守判定，不盲杀；
+    但双信号规则无年龄要求（信号齐即完成态）。
     关联事件若仍 running 一并置 failed（与 sweep_stuck_events_once 语义一致）。
     """
     from datetime import datetime, timezone, timedelta
@@ -421,10 +426,13 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, event_seq, runtime_id, created_at, started_at, status "
+            c.execute("SELECT id, event_seq, runtime_id, created_at, started_at, status, "
+                      "stream_ended, self_reported "
                       "FROM agent_tasks WHERE status IN ('queued','dispatched','running')")
-            for tid, event_seq, rid, created_at, started_at, status in c.fetchall():
-                if status == "queued":
+            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported in c.fetchall():
+                if stream_ended == 1 and self_reported == 1:
+                    dead.append((tid, event_seq, _DUAL_SIGNAL_TXT))
+                elif status == "queued":
                     age = _dt_age_minutes(created_at, now)
                     if age is not None and age >= q_stale:
                         dead.append((tid, event_seq, _QUEUED_STALE_TXT))
