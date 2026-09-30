@@ -749,10 +749,16 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
                          and get_execution_mode() != EXEC_MODE_DIRECT)
         if _is_broadcast:
             # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
+            # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+            if _pool_ids is None:
+                log.warning(f"Pipeline PR sub: scene={scene_id} qa engines all offline, skip (Issue #259)")
+                from src.api.event_store import update_event_status
+                update_event_status(seq, "failed")
+                return
             _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                    0, qa_skill, _engine_id, _pseudo_id,
-                                   pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+                                   pool_engine_ids=_pool_ids or "")
         else:
             _kind = runtime_execution_kind(_engine_id)
             if _kind == EXEC_MODE_DIRECT:
@@ -764,10 +770,16 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
                     repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
                 ))
             else:
+                # Issue #259：同上，None = 全灭不入队
                 _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+                if _pool_ids is None:
+                    log.warning(f"Pipeline PR sub: scene={scene_id} qa engines all offline, skip else-branch (Issue #259)")
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                    return
                 _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                        0, qa_skill, _engine_id, _pseudo_id,
-                                       pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+                                       pool_engine_ids=_pool_ids or "")
     except Exception as e:
         log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
 
@@ -844,10 +856,16 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
 
         if _is_broadcast:
             # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
+            # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+            if _pool_ids is None:
+                log.warning(f"Pipeline PR sub: scene={scene_id} qa engines all offline, skip (Issue #259)")
+                from src.api.event_store import update_event_status
+                update_event_status(seq, "failed")
+                return
             _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                    0, qa_skill, _engine_id, _pseudo_id,
-                                   pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+                                   pool_engine_ids=_pool_ids or "")
         else:
             _kind = runtime_execution_kind(_engine_id)
             if _kind == EXEC_MODE_DIRECT:
@@ -859,10 +877,16 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
                     repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
                 ))
             else:
+                # Issue #259：同上，None = 全灭不入队
                 _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+                if _pool_ids is None:
+                    log.warning(f"Pipeline PR sub: scene={scene_id} qa engines all offline, skip else-branch (Issue #259)")
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                    return
                 _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                        0, qa_skill, _engine_id, _pseudo_id,
-                                       pool_engine_ids=",".join(str(x) for x in _pool_ids) if _pool_ids else "")
+                                       pool_engine_ids=_pool_ids or "")
 
         # 重派成功：把事件状态改回 running（重派前可能是 failed）
         from src.api.event_store import update_event_status
@@ -1702,7 +1726,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 非 direct 模式均走广播（queue_remote + auto）；仅 direct 模式走本机 direct（自动选引擎）。
     # 场景 engine_runtime_ids 限定广播范围（写入 pool_engine_ids 字段）。
     # Issue #112 修复：所有模式都获取 pool_engine_ids，确保场景引擎绑定生效
+    # Issue #259：写入前已按健康过滤（get_scene_pool_engine_ids 内部）。
     _pool_engine_ids = get_scene_pool_engine_ids(_issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid)
+    if _pool_engine_ids is None:
+        # 方案A：场景绑定的引擎全部离线/失联 → 不入队，事件置 failed 并明确提示
+        log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
+        _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                            skill_path, skill_id, evt, issue_id, runtime_id or 0)
+        _fail_event(seq, f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态")
+        return result
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
         _be = backend or "opencode"
         # 智能推荐模式：强制限定 opencode 引擎认领（推荐任务轻量，opencode 最快）
@@ -3503,6 +3535,12 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         if is_plugin_mode():
             from src.runtime.engine_select import get_scene_pool_engine_ids
             _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
+        # Issue #259：None = 场景引擎全灭（方案A，不入队）
+        if _pool_eids is None:
+            log.warning(f"智能推荐重派: scene={_scene_id} vod engines all offline, skip (Issue #259)")
+            from src.api.event_store import update_event_status
+            update_event_status(seq, "failed")
+            return False
         _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
                                skill_id, skill_path, engine_id, issue_id,
                                pool_engine_ids=_pool_eids, user_id=_scene_uid,

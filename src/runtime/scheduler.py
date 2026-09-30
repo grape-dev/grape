@@ -353,14 +353,28 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     _pool_tag = agent_type if engine_id == 0 else ""
 
     # 任务级引擎限定：task 有 engine_runtime_ids 时用它限定广播范围
+    # Issue #259：写入前按健康过滤（复用 engine_select 的 _engines_by_ids + _health_ok）
     _pool_engine_ids = ""
     if engine_id == 0:
         _task_engine_ids = task.get("engine_runtime_ids") or ""
         if _task_engine_ids:
             try:
-                _pool_engine_ids = _task_engine_ids if isinstance(_task_engine_ids, str) else json.dumps(_task_engine_ids)
-                log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
-            except Exception:
+                _raw_ids = json.loads(_task_engine_ids) if isinstance(_task_engine_ids, str) else _task_engine_ids
+                if isinstance(_raw_ids, list) and _raw_ids:
+                    from src.runtime.engine_select import _engines_by_ids, _health_ok, load_engine_selection, _norm_repo
+                    _members = _engines_by_ids([int(x) for x in _raw_ids if str(x).strip().isdigit()],
+                                               _norm_repo(repo_key), load_engine_selection())
+                    _healthy_ids = [m["runtime_id"] for m in _members if _health_ok(m)]
+                    if _healthy_ids:
+                        _pool_engine_ids = json.dumps(_healthy_ids)
+                        log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
+                    else:
+                        # 方案A：任务级引擎全灭 → 明确报错，不广播
+                        log.warning(f"Autopilot exec {exec_id}: task engines {_raw_ids} all offline (Issue #259)")
+                        _update_execution_result(exec_id, "failed", error="任务绑定的引擎全部离线")
+                        return
+            except Exception as _pe:
+                log.warning(f"Autopilot exec {exec_id}: parse engine ids failed: {_pe}")
                 _pool_engine_ids = ""
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")

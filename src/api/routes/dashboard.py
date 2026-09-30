@@ -81,7 +81,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_no_session_tok
         repo_key = _repo_keys[0]
         _repo_filter = f" AND repo_key IN ({','.join('?' * len(_repo_keys))})"
         _repo_params = _repo_keys
-    # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=1800s=30min，22min 能在超时前预警）
+    # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=3600s=1h，22min 能在超时前预警）
     stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=22)).isoformat()
 
     with db_lock:
