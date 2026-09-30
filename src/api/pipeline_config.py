@@ -325,9 +325,12 @@ def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 
     return None
 
 
-def get_first_node(scene_id: str = "default") -> Optional[dict]:
-    """Return the first node of a scene's pipeline (entry point)."""
-    cfg = get_pipeline_config(scene_id)
+def get_first_node(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
+    """Return the first node of a scene's pipeline (entry point).
+
+    传 repo_key 时优先查仓库级场景（含自定义场景），不传则回退到场景市场/pipelines.json。
+    """
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg or not cfg.get("nodes"):
         return None
     return cfg["nodes"][0]
