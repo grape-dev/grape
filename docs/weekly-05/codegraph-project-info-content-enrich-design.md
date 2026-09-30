@@ -109,9 +109,10 @@ def _codegraph_files(work: str, max_depth: int = 5) -> str:
 
 ### 2.5 分支真实化（对症 #6）
 
-- 用 GitCode/GitHub branches API 拉取真实分支列表写入 `meta["branches_analyzed"]`（复用 L293-308 已有 `urllib` + Repo token 模式），失败回落 `["main", "master"]`；
-- `_ensure_analysis_worktree` 的 checkout 保持 `origin/HEAD → origin/main → origin/master`（已适用默认分支）；
-- 若 API 返回默认分支名，顺带写入 meta（如 `default_branch`），供 prompt 标注。
+- 用 GitCode/GitHub branches API 拉取真实分支列表写入 `meta["branches_analyzed"]`（复用已有 `urllib` + Repo token 模式），失败回落 `["main", "master"]`；API 返回的 `default_branch` 写入 meta。
+- `_fetch_branches` **提前**（worktree 准备前）调用，`default_branch` 作为 `_ensure_analysis_worktree` 的首选候选分支（`origin/{default_branch}` → `origin/HEAD` → `origin/main` → `origin/master`），保证分析副本 checkout/fetch 的是仓库真实默认分支（如 `develop`/`trunk`），而非写死 main/master。
+- 每次刷新：选中分支 fetch 后对比 HEAD tip，**变化才 `reset --hard` 更新工作区**并 `codegraph sync` 增量刷索引（失败仅告警）。修复实测原实现"只 fetch 不更新文件、分析副本停留在首次 checkout commit"的问题（Issue #200）。
+- > 注：`branches?per_page=100` 未做分页拉取，超 100 分支的仓库清单会截断（记录在落档，后续补 Link header/页码）。
 
 ### 2.6 消费侧：不改（design 确认）
 

@@ -216,8 +216,14 @@ def _run(cmd: list, cwd: str = None, timeout: int = 300) -> tuple[int, str, str]
         return -1, "", str(e)
 
 
-def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
-    """确保分析副本为非 bare 工作目录（从 bare mirror checkout 最新 main/master）。"""
+def _ensure_analysis_worktree(repo_key: str, token: str = "", default_branch: str = "") -> str | None:
+    """确保分析副本为非 bare 工作目录（从 bare mirror checkout 默认分支）。
+
+    - 候选分支：API default_branch 优先，其次 origin/HEAD → origin/main → origin/master；
+    - 每次刷新：fetch 选中分支并 reset 工作区到最新（实测原实现只 fetch 不更新文件，
+      分析副本停留在首次 checkout 的 commit，Issue #200 未彻底修复）；
+    - 文件 tip 变化时对已有 .codegraph 索引做增量 sync（失败仅告警，不阻断）。
+    """
     base = _repo_base_dir(repo_key)
     # Issue #200: 每次都刷新 bare mirror refs（ensure_repo_base 内部幂等：已存在只 fetch）
     try:
@@ -228,33 +234,66 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "") -> str | None:
     if not base or not os.path.isdir(base):
         return None
     work = _analysis_dir(repo_key)
+    from src.runtime.repogit import _run_git
+    # 候选默认分支（去重保序）
+    _cand = []
+    if default_branch:
+        _cand.append(f"origin/{default_branch}")
+    for _b in ("origin/HEAD", "origin/main", "origin/master"):
+        if _b not in _cand:
+            _cand.append(_b)
     try:
         _git_marker = os.path.join(work, ".git")
         if not (os.path.isfile(_git_marker) or os.path.isdir(_git_marker)):
             os.makedirs(work, exist_ok=True)
-            # 从 bare mirror 检出（checkout 到分析副本，不 clone 远程，避免重复拉取）
-            code, out, err = _run(["git", "--git-dir", base, "worktree", "add", "--force", work, "origin/HEAD"], timeout=900)
-            if code != 0:
-                # origin/HEAD 可能不存在，尝试 origin/main / origin/master
-                for br in ("origin/main", "origin/master"):
-                    code, out, err = _run(["git", "--git-dir", base, "worktree", "add", "--force", work, br], timeout=900)
-                    if code == 0:
-                        break
-            if code != 0:
+            # 提供了默认分支但 mirror 可能无该 ref → 先单独拉取再 worktree add
+            if default_branch:
+                _r = _run_git(["--git-dir", base, "fetch", "origin", default_branch], token=token, timeout=300)
+            add_code = 1
+            for br in _cand:
+                add_code, out, err = _run(["git", "--git-dir", base, "worktree", "add", "--force", work, br], timeout=900)
+                if add_code == 0:
+                    break
+            if add_code != 0:
                 log.warning(f"project-info analysis worktree add failed {repo_key}: {err[:200]}")
                 return None
-        # 刷新 main/master 到最新（私有仓库需 token 认证；Issue #200）
-        from src.runtime.repogit import _run_git
-        for br in ("origin/main", "origin/master"):
-            _r = _run_git(["-C", work, "fetch", "origin", br], token=token, timeout=300)
+
+        def _rev(ref: str) -> str:
+            c, out, err = _run(["git", "-C", work, "rev-parse", "--verify", "--quiet", ref], timeout=60)
+            return (out or "").strip() if c == 0 else ""
+
+        # 选中有实际 ref 的默认分支（origin/HEAD 解析到具体分支）
+        target = ""
+        for br in _cand:
+            if _rev(f"refs/remotes/{br}"):
+                if br == "origin/HEAD":
+                    c, out, _e = _run(["git", "-C", work, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"], timeout=60)
+                    _sym = (out or "").strip()
+                    target = _sym[len("refs/remotes/"):] if _sym.startswith("refs/remotes/") else br
+                else:
+                    target = br
+                break
+        if target:
+            name = target[len("origin/"):] if target.startswith("origin/") else target
+            _r = _run_git(["-C", work, "fetch", "origin", name], token=token, timeout=300)
             if _r and _r.returncode != 0:
-                log.warning(f"project-info worktree fetch {br} failed {repo_key}: {(_r.stderr or '')[:200]}")
-        # codegraph 索引初始化（幂等：已存在则跳过；索引持久化于分析副本 .codegraph/）
+                log.warning(f"project-info worktree fetch {name} failed {repo_key}: {(_r.stderr or '')[:200]}")
+            prev = _rev("HEAD")
+            cur = _rev(f"refs/remotes/{target}")
+            if cur and cur != prev:
+                code, out, err = _run(["git", "-C", work, "reset", "--hard", target], timeout=120)
+                if code == 0:
+                    log.info(f"project-info worktree updated for {repo_key} {prev[:12]}..{cur[:12]}")
+        # codegraph 索引：缺失 init；文件 tip 变化后增量 sync（失败仅告警）
         if not os.path.isdir(os.path.join(work, ".codegraph")):
             code, out, err = _run(["codegraph", "init"], cwd=work, timeout=600)
             if code != 0:
                 log.warning(f"project-info codegraph init failed {repo_key}: {err[:200]}")
                 return None
+        else:
+            code, out, err = _run(["codegraph", "sync"], cwd=work, timeout=120)
+            if code != 0:
+                log.warning(f"project-info codegraph sync failed {repo_key}: {err[:200]}")
         return work
     except Exception as e:
         log.warning(f"project-info analysis worktree failed {repo_key}: {e}")
@@ -303,12 +342,12 @@ def _codegraph_callees(work: str, symbol: str, limit: int = 10) -> str:
     return out or err or ""
 
 
-def _fetch_branches(repo_key: str, owner: str, rname: str) -> tuple[list, str]:
+def _fetch_branches(repo_key: str, owner: str, rname: str, token: str = "") -> tuple[list, str]:
     """GitCode/GitHub 拉真实分支列表 + 默认分支（best-effort，失败回落空）。"""
     try:
         from src.repo import Repo
         _repo = Repo(repo_key)
-        tok = _repo.bot_token
+        tok = token or _repo.bot_token
         if not tok:
             return [], ""
         import urllib.request, json as _json
@@ -423,7 +462,10 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
         _write_file(repo_key, _CAP_FILE, _build_capabilities_md(repo_key, meta, "N/A", "N/A", "N/A"))
         return {"ok": True, "degraded": True, "reason": "codegraph unavailable"}
 
-    work = _ensure_analysis_worktree(repo_key, token)
+    # 真实分支提前拉取：default_branch 驱动分析副本 checkout/fetch（候选分支优先用它）
+    branches, default_branch = _fetch_branches(repo_key, owner, rname, token)
+
+    work = _ensure_analysis_worktree(repo_key, token, default_branch=default_branch)
     if not work:
         meta["degraded"] = True
         meta["note"] = "analysis worktree prepare failed"
@@ -485,7 +527,6 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
             sk_bits.append(f"### {_d}\n{_sub}")
     skagents = "\n\n".join(sk_bits)
 
-    branches, default_branch = _fetch_branches(repo_key, owner, rname)
     meta["branches_analyzed"] = branches or ["main", "master"]
     if default_branch:
         meta["default_branch"] = default_branch

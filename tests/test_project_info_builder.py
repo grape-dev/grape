@@ -32,7 +32,7 @@ class TestBuildProjectInfo:
     def test_codegraph_available_generates(self, _tmp_workspace, monkeypatch):
         """codegraph 可用 → 生成完整基线，degraded=false。"""
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
-        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="": "/fake/work")
+        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="", default_branch="": "/fake/work")
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
         from src.project_info.builder import build_project_info
@@ -50,7 +50,7 @@ class TestBuildProjectInfo:
     def test_analysis_worktree_failed(self, _tmp_workspace, monkeypatch):
         """分析副本准备失败 → 降级，degraded=true。"""
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
-        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="": None)
+        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="", default_branch="": None)
         from src.project_info.builder import build_project_info
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is True
@@ -91,7 +91,7 @@ class TestBuildProjectInfo:
 
         monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
         monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
-                            lambda repo_key, token="": os.path.join(workspace_repo_dir(repo_key), "codebase"))
+                            lambda repo_key, token="", default_branch="": os.path.join(workspace_repo_dir(repo_key), "codebase"))
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
         from src.project_info.builder import build_project_info
@@ -255,7 +255,7 @@ class TestBuildProjectInfoTokenPassing:
         """传入非空 token 时，不调 get_gitcode_token/get_github_token 兜底。"""
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
         monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
-                            lambda repo_key, token="": "/fake/work")
+                            lambda repo_key, token="", default_branch="": "/fake/work")
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: "explore")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "files")
 
@@ -270,7 +270,7 @@ class TestBuildProjectInfoTokenPassing:
         """传入空 token 时，通过 Repo.bot_token 兜底获取。"""
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
         monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
-                            lambda repo_key, token="": "/fake/work")
+                            lambda repo_key, token="", default_branch="": "/fake/work")
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: "explore")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "files")
         # mock get_gitcode_token 验证兜底被调用
@@ -305,7 +305,7 @@ class TestContentEnrich:
 
     def _mock_all(self, monkeypatch, work="/fake/work"):
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
-        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="": work)
+        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree", lambda repo_key, token="", default_branch="": work)
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore[{q}]")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
 
@@ -315,7 +315,7 @@ class TestContentEnrich:
         monkeypatch.setattr("src.project_info.builder._codegraph_files_section",
                             lambda work, directory, max_depth=3: f"tree[{directory}]")
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
-                            lambda repo_key, owner, rname: (["main", "release/1.0"], "main"))
+                            lambda repo_key, owner, rname, token="": (["main", "release/1.0"], "main"))
         from src.project_info.builder import build_project_info
         from src.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
@@ -334,7 +334,7 @@ class TestContentEnrich:
         self._mock_all(monkeypatch)
         monkeypatch.setattr("src.project_info.builder._codegraph_files_section", lambda work, directory, max_depth=3: "")
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
-                            lambda repo_key, owner, rname: (["main", "dev", "release/1.0"], "main"))
+                            lambda repo_key, owner, rname, token="": (["main", "dev", "release/1.0"], "main"))
         from src.project_info.builder import build_project_info
         from src.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
@@ -356,11 +356,112 @@ class TestContentEnrich:
         self._mock_all(monkeypatch)
         monkeypatch.setattr("src.project_info.builder._codegraph_files_section", lambda work, directory, max_depth=3: "")
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
-                            lambda repo_key, owner, rname: ([], ""))
+                            lambda repo_key, owner, rname, token="": ([], ""))
         from src.project_info.builder import build_project_info
         from src.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
         meta = json.load(open(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", ".metadata.json"), encoding="utf-8"))
         assert meta["branches_analyzed"] == ["main", "master"]
+
+
+class TestDefaultBranchDrivesWorktree:
+    """Phase 1 修复：API default_branch 驱动分析副本 checkout/fetch，并写入 meta。"""
+
+    def test_default_branch_passed_to_worktree(self, _tmp_workspace, monkeypatch):
+        """_fetch_branches 返回的 default_branch 传入 _ensure_analysis_worktree 且写入 meta。"""
+        passed = {}
+        monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
+        monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
+                            lambda repo_key, token="", default_branch="": (passed.update(default_branch=default_branch), "/fake/work")[1])
+        monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
+        monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
+        monkeypatch.setattr("src.project_info.builder._codegraph_files_section", lambda work, directory, max_depth=3: "")
+        monkeypatch.setattr("src.project_info.builder._fetch_branches",
+                            lambda repo_key, owner, rname, token="": (["main", "develop"], "develop"))
+        from src.project_info.builder import build_project_info
+        from src.repo_key import workspace_repo_dir
+        r = build_project_info("gitcode:org/test", token="t")
+        assert r["degraded"] is False
+        assert passed.get("default_branch") == "develop"
+        meta = json.load(open(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", ".metadata.json"), encoding="utf-8"))
+        assert meta["branches_analyzed"] == ["main", "develop"]
+        assert meta.get("default_branch") == "develop"
+
+    def test_worktree_reset_on_tip_change(self, _tmp_workspace, monkeypatch):
+        """默认分支 tip 变化 → reset 工作区并增量 sync（修复"只 fetch 不更新文件"）。"""
+        from src.repo_key import workspace_repo_dir
+        work = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "codegraph-repo")
+        os.makedirs(work, exist_ok=True)
+        open(os.path.join(work, ".git"), "w").write("gitdir: x")
+        os.makedirs(os.path.join(work, ".codegraph"), exist_ok=True)
+        cmds = []
+        git_cmds = []
+
+        def _fake_ensure_repo_base(repo_key, token=""):
+            base = os.path.join(workspace_repo_dir(repo_key), "codebase")
+            os.makedirs(base, exist_ok=True)
+            return base
+
+        def _fake_run(cmd, cwd=None, timeout=300):
+            cmds.append(cmd)
+            joined = " ".join(cmd)
+            if "rev-parse" in joined:
+                # 目标分支 refs/remotes/origin/main 有 tip；本工作区 HEAD 落后
+                if "refs/remotes/" in joined:
+                    return 0, "newsha\n", ""
+                return 0, "oldsha\n", ""
+            return 0, "", ""
+
+        def _fake_run_git(args, token="", timeout=900):
+            git_cmds.append(args)
+            import subprocess
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.runtime.repogit._run_git", _fake_run_git)
+        monkeypatch.setattr("src.project_info.builder._run", _fake_run)
+        from src.project_info.builder import _ensure_analysis_worktree
+        result = _ensure_analysis_worktree("gitcode:org/test", token="t", default_branch="main")
+        assert result == work
+        fetch = " ".join(" ".join(c) for c in git_cmds)
+        joined = " ".join(" ".join(c) for c in cmds)
+        assert "fetch" in fetch and "origin" in fetch and "main" in fetch
+        assert "reset --hard" in joined
+        assert "codegraph sync" in joined
+
+    def test_worktree_no_reset_when_unchanged(self, _tmp_workspace, monkeypatch):
+        """tip 未变化 → 不 reset（避免无谓 churn）。"""
+        from src.repo_key import workspace_repo_dir
+        work = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "codegraph-repo")
+        os.makedirs(work, exist_ok=True)
+        open(os.path.join(work, ".git"), "w").write("gitdir: x")
+        os.makedirs(os.path.join(work, ".codegraph"), exist_ok=True)
+        cmds = []
+
+        def _fake_ensure_repo_base(repo_key, token=""):
+            base = os.path.join(workspace_repo_dir(repo_key), "codebase")
+            os.makedirs(base, exist_ok=True)
+            return base
+
+        def _fake_run(cmd, cwd=None, timeout=300):
+            cmds.append(cmd)
+            joined = " ".join(cmd)
+            if "rev-parse" in joined:
+                return 0, "same\n", ""
+            return 0, "", ""
+
+        def _fake_run_git(args, token="", timeout=900):
+            import subprocess
+            return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
+
+        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.runtime.repogit._run_git", _fake_run_git)
+        monkeypatch.setattr("src.project_info.builder._run", _fake_run)
+        from src.project_info.builder import _ensure_analysis_worktree
+        result = _ensure_analysis_worktree("gitcode:org/test", token="t", default_branch="main")
+        assert result == work
+        joined = " ".join(" ".join(c) for c in cmds)
+        assert "reset --hard" not in joined
+        assert "codegraph sync" in joined
 
