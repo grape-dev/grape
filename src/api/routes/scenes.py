@@ -760,6 +760,19 @@ class CreateBranchRequest(BaseModel):
     refs: str = "main"
 
 
+def _normalize_owner_repo(owner: str, repo: str) -> tuple[str, str]:
+    """清洗路径参数中的 provider 前缀污染（如 owner="github:foo"）。
+
+    to_repo_key 对已带冒号的串幂等返回，会掩盖污染并让 DB 查询
+    "碰巧"命中；必须在拼外部 API URL 前把前缀剥掉。
+    """
+    if ":" in owner:
+        prefix, _, rest = owner.partition(":")
+        if prefix in ("github", "gitcode", "gitlab"):
+            owner = rest
+    return owner, repo
+
+
 def _detect_repo_provider(owner: str, repo: str) -> str:
     """根据 managed_repos.repo_key 前缀判断仓库属于 gitcode 还是 github。
 
@@ -795,6 +808,7 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_se
     """列出仓库所有分支（供高级选项工作分支选择）"""
     from src.user.repo_manager import _req, _github_req
 
+    owner, repo = _normalize_owner_repo(owner, repo)
     provider = _detect_repo_provider(owner, repo)
 
     if provider == "github":
@@ -872,6 +886,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     """在仓库中创建新分支"""
     from src.user.repo_manager import _req, _github_req
 
+    owner, repo = _normalize_owner_repo(owner, repo)
     provider = _detect_repo_provider(owner, repo)
 
     if provider == "github":
