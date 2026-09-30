@@ -353,14 +353,28 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     _pool_tag = agent_type if engine_id == 0 else ""
 
     # 任务级引擎限定：task 有 engine_runtime_ids 时用它限定广播范围
+    # Issue #259：写入前按健康过滤（复用 engine_select 的 _engines_by_ids + _health_ok）
     _pool_engine_ids = ""
     if engine_id == 0:
         _task_engine_ids = task.get("engine_runtime_ids") or ""
         if _task_engine_ids:
             try:
-                _pool_engine_ids = _task_engine_ids if isinstance(_task_engine_ids, str) else json.dumps(_task_engine_ids)
-                log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
-            except Exception:
+                _raw_ids = json.loads(_task_engine_ids) if isinstance(_task_engine_ids, str) else _task_engine_ids
+                if isinstance(_raw_ids, list) and _raw_ids:
+                    from src.runtime.engine_select import _engines_by_ids, _health_ok, load_engine_selection, _norm_repo
+                    _members = _engines_by_ids([int(x) for x in _raw_ids if str(x).strip().isdigit()],
+                                               _norm_repo(repo_key), load_engine_selection())
+                    _healthy_ids = [m["runtime_id"] for m in _members if _health_ok(m)]
+                    if _healthy_ids:
+                        _pool_engine_ids = json.dumps(_healthy_ids)
+                        log.info(f"Autopilot exec {exec_id}: task 级限定 engines={_pool_engine_ids}")
+                    else:
+                        # 方案A：任务级引擎全灭 → 明确报错，不广播
+                        log.warning(f"Autopilot exec {exec_id}: task engines {_raw_ids} all offline (Issue #259)")
+                        _update_execution_result(exec_id, "failed", error="任务绑定的引擎全部离线")
+                        return
+            except Exception as _pe:
+                log.warning(f"Autopilot exec {exec_id}: parse engine ids failed: {_pe}")
                 _pool_engine_ids = ""
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
@@ -617,7 +631,10 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
                                          result=_result_text[:5000],
                                          error=f"agent_tasks status={_at_status}")
                 return "failed"
-            # queued/dispatched/running → 继续等
+            elif _at_status == "running":
+                # worker 已认领并开始执行，同步 autopilot_executions 为 running
+                _update_execution_result(exec_id, "running")
+            # queued/dispatched → 继续等
         except Exception as e:
             log.warning(f"Autopilot poll exec {exec_id}: query failed: {e}")
 
@@ -633,6 +650,15 @@ async def _execute_task(task: dict):
         log.info(f"Autopilot: task {task_id} already running, skip")
         return
     _RUNNING_TASKS.add(task_id)
+    # 触发即写 last_run_at/next_run_at（防执行窗口内主控重启导致 cron 重新判定到期：
+    # _is_cron_due 用 last_run_at 推算，若只在任务结束后写，执行期间的 20 分钟窗口内
+    # 服务重启会丢失 _RUNNING_TASKS 内存互斥 → 同一 cron 被再次触发 → 自触发循环。
+    # 2026-09-28 实际发生：8 次重启 + 17 个僵尸 execution + 生产被误停一轮）
+    try:
+        _early_next = _compute_next_run(task["cron"])
+        _update_task_run_info(task_id, _early_next)
+    except Exception as _e:
+        log.warning(f"Autopilot: task {task_id} early next_run write failed: {_e}")
     try:
         max_retry = task["max_retry"]
         agent_type = _FIXED_AGENT_TYPE
