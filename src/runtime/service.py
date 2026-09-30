@@ -31,8 +31,10 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
     仍然算 reachable（不清空 pool），claim_by_tag 中的健康分检查会阻止它们认领。
     防饿死由 _check_stale_queued_tasks 超时降级处理。
 
-    Issue #259：不再嵌套 with db_lock——调用方（claim_by_tag / _check_stale_queued_tasks）
-    已持有 db_lock；测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
+    Lock contract（Issue #259 Optional）：调用方必须已持有 db_lock。
+    本函数不再嵌套 with db_lock——生产 db_lock=RLock（可重入，嵌套无碍），
+    但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
+    所有调用点（claim / claim_by_tag / _check_stale_queued_tasks）均在 with db_lock 块内调用。
     """
     from src.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
@@ -179,6 +181,17 @@ _RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 # 双跑窗口=0。前提：该值 >= worker 端 RUNTIME_TASK_TIMEOUT（部署注意）。
 _TASK_RECOVER_STALE_SECONDS = int(os.environ.get("TASK_RECOVER_STALE_SECONDS", "3600"))
 
+# Issue #259 Optional：启动期配置耦合告警——防双跑前提是 TASK_RECOVER_STALE_SECONDS >= worker RUNTIME_TASK_TIMEOUT。
+# 二者默认均 3600s（安全），但部署侧单边调大 RUNTIME_TASK_TIMEOUT 而不调 TASK_RECOVER_STALE_SECONDS
+# 会导致服务端在 worker 仍本地执行时重派 → 双跑。启动期告警一次，运行期不再重复。
+_WORKER_TASK_TIMEOUT_DEFAULT = int(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+if _TASK_RECOVER_STALE_SECONDS < _WORKER_TASK_TIMEOUT_DEFAULT:
+    log.warning(
+        f"Config coupling risk: TASK_RECOVER_STALE_SECONDS={_TASK_RECOVER_STALE_SECONDS}s < "
+        f"RUNTIME_TASK_TIMEOUT={_WORKER_TASK_TIMEOUT_DEFAULT}s — running tasks may be re-dispatched "
+        f"before worker local timeout, causing double execution (Issue #259)"
+    )
+
 
 def _remote_runtime_ready(runtime_id: int) -> bool:
     """远端引擎是否可用：引擎 status=online、last_seen 新鲜、凭据未吊销。
@@ -264,9 +277,10 @@ def _table_columns(table: str) -> set:
 
     迁移动态列后代码兼容未迁移的旧库（如测试库）与已迁移库。
 
-    Issue #259：不再嵌套 with db_lock——调用方（get_task 等）已持有 db_lock；
-    测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。PRAGMA 只读 + 进程内
-    缓存，无锁竞争风险。
+    Lock contract（Issue #259 Optional）：调用方必须已持有 db_lock。
+    本函数不再嵌套 with db_lock——生产 db_lock=RLock（可重入，嵌套无碍），
+    但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
+    PRAGMA 只读 + 进程内缓存，无锁竞争风险。
     """
     _cached = _TABLE_COLS_CACHE.get(table)
     if _cached is not None:
