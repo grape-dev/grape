@@ -21,7 +21,7 @@ _RESOLVE_LOCAL_TTL = 30.0
 
 # 远端引擎心跳超时阈值（秒）：last_seen_at 超过此值视为死引擎（AI DevSpace 被删后残留 runtime）。
 # 与 service.py _RUNTIME_STALE_SECONDS 保持一致。
-_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "300"))
+_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 
 # 默认优先级档位（小=高优先）
 _PRIO_REPO = 10
@@ -378,11 +378,17 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
 
 
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
-                              issue_creator: str = "") -> str:
+                              issue_creator: str = "") -> str | None:
     """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
 
-    只从场景 node 的 engine_runtime_ids 读取。
-    node 不存在或 engine_runtime_ids 为空 → 空字符串（全量广播）。
+    只从场景 node 的 engine_runtime_ids 读取，并按健康过滤（Issue #259）：
+    离线（status!=online）或心跳超时（last_seen_at 距今 > _RUNTIME_STALE_SECONDS，默认 100s）
+    的引擎不写入 pool。
+
+    返回值（三方语义，调用方必须用 is None 显式区分 None 与 ""）：
+    - JSON 字符串：场景配了引擎且有健康的 → 限定名单（仅健康引擎）
+    - ""：场景没配引擎 / node 不存在 / 场景查询失败 → 全量广播（原行为不变）
+    - None：场景配了引擎但全部不健康 → 全灭，调用方不入队并明确报错（Issue #259 方案A）
     """
     import json
     if not user_id:
@@ -392,7 +398,13 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
             from src.api.pipeline_config import get_scene_engine_ids
             ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
             if ids:
-                return json.dumps(ids)
+                # Issue #259：写入 pool 前按健康过滤（与 legacy pick_engine 的 _health_ok 同一把尺子）
+                members = _engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection())
+                healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
+                if healthy_ids:
+                    return json.dumps(healthy_ids)
+                # 配了引擎但全灭 → None（方案A：调用方报错，不放开广播）
+                return None
         except Exception as e:
             log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
     return ""

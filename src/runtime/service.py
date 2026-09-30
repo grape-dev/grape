@@ -23,73 +23,90 @@ _DEFAULT_MODE = EXEC_MODE_AUTO
 def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "", task_user_id: int = 0) -> bool:
     """检查 pool_engine_ids 中的引擎是否有任何一个能真正认领该 tag 的任务。
 
-    检查维度：在线 + healthy + probe_status + 有 tag 能力 + scope 匹配 + 并发槽。
+    检查维度：在线 + healthy + probe_status + 心跳新鲜（Issue #259）+ 有 tag 能力 + scope 匹配 + 并发槽。
     返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
     返回 False = 池里全不可达，应清空 pool_engine_ids 放行。
 
     Issue #134 扩展：健康分维度不在此函数判定——健康分低但物理可达的引擎
     仍然算 reachable（不清空 pool），claim_by_tag 中的健康分检查会阻止它们认领。
     防饿死由 _check_stale_queued_tasks 超时降级处理。
+
+    Lock contract（Issue #259 Optional）：调用方必须已持有 db_lock。
+    本函数不再嵌套 with db_lock——生产 db_lock=RLock（可重入，嵌套无碍），
+    但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
+    所有调用点（claim / claim_by_tag / _check_stale_queued_tasks）均在 with db_lock 块内调用。
     """
     from src.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for eid in engine_ids:
         try:
-            with db_lock:
-                c = db.cursor()
-                # 引擎在线 + healthy + probe 正常？
-                c.execute("SELECT status, healthy, probe_status FROM agent_runtimes WHERE id=?", (eid,))
-                r = c.fetchone()
-                if not r or (r[0] or "") != "online":
+            c = db.cursor()
+            # 引擎在线 + healthy + probe 正常？
+            c.execute("SELECT status, healthy, probe_status, last_seen_at FROM agent_runtimes WHERE id=?", (eid,))
+            r = c.fetchone()
+            if not r or (r[0] or "") != "online":
+                continue
+            # Issue #259：心跳新鲜度检查——status=online 但 last_seen_at 过期 = 刚断线的窗口期，
+            # 引擎实际不可达（与 _health_ok / reap 同一把尺子），不算 reachable。
+            _ls = r[3] or ""
+            if _ls:
+                from src.runtime.health import parse_dt as _parse_dt
+                _ts = _parse_dt(_ls)
+                if _ts is not None and time.time() - _ts > _RUNTIME_STALE_SECONDS:
                     continue
-                _healthy = r[1] if r[1] is not None else 0
-                _probe = r[2] or ""
-                if _healthy != 1:
-                    continue
-                if _probe not in ("ok", "pending", ""):
-                    continue
-                # 有 tag 能力？
-                c.execute(
-                    "SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
-                    "AND (tag=? OR tag='all') LIMIT 1", (eid, tag))
-                if not c.fetchone():
-                    continue
-                # scope 匹配？
-                c.execute(
-                    "SELECT rc.scope, rc.owner_id, rc.owner_name FROM agent_runtimes r "
-                    "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (eid,))
-                sr = c.fetchone()
-                if sr:
-                    _scope = sr[0] or "global"
-                    _owner = sr[1] or ""
-                    _owner_name = sr[2] or ""
-                    if _scope == "repo" and _owner:
-                        _owner_norm = (from_repo_key(_owner) or "").strip()
-                        if _repo_norm and _owner_norm != _repo_norm:
-                            continue  # repo scope 但仓库不匹配
-                    elif _scope == "user" and task_user_id > 0 and _owner_name:
-                        # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
-                        try:
-                            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (_owner_name,))
-                            _ur = c.fetchone()
-                            _engine_uid = _ur[0] if _ur else 0
-                            if _engine_uid != task_user_id:
-                                continue  # user scope 但用户不匹配
-                        except Exception:
-                            pass
-                # 并发槽可用？
-                c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (eid,))
-                _br = c.fetchone()
-                if _br:
-                    _busy = _br[0] or 0
-                    _max = _br[1] or 1
-                    if _busy >= _max:
-                        continue  # 已满载
-                # 全部通过：有能干的引擎（物理可达）
-                return True
+            else:
+                # 从未心跳过（last_seen_at NULL/空）但 status=online 的幽灵行 → 不可达
+                continue
+            _healthy = r[1] if r[1] is not None else 0
+            _probe = r[2] or ""
+            if _healthy != 1:
+                continue
+            if _probe not in ("ok", "pending", ""):
+                continue
+            # 有 tag 能力？
+            c.execute(
+                "SELECT 1 FROM engine_capabilities WHERE runtime_id=? AND enabled=1 "
+                "AND (tag=? OR tag='all') LIMIT 1", (eid, tag))
+            if not c.fetchone():
+                continue
+            # scope 匹配？
+            c.execute(
+                "SELECT rc.scope, rc.owner_id, rc.owner_name FROM agent_runtimes r "
+                "LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id WHERE r.id=?", (eid,))
+            sr = c.fetchone()
+            if sr:
+                _scope = sr[0] or "global"
+                _owner = sr[1] or ""
+                _owner_name = sr[2] or ""
+                if _scope == "repo" and _owner:
+                    _owner_norm = (from_repo_key(_owner) or "").strip()
+                    if _repo_norm and _owner_norm != _repo_norm:
+                        continue  # repo scope 但仓库不匹配
+                elif _scope == "user" and task_user_id > 0 and _owner_name:
+                    # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
+                    try:
+                        c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (_owner_name,))
+                        _ur = c.fetchone()
+                        _engine_uid = _ur[0] if _ur else 0
+                        if _engine_uid != task_user_id:
+                            continue  # user scope 但用户不匹配
+                    except Exception:
+                        pass
+            # 并发槽可用？
+            c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (eid,))
+            _br = c.fetchone()
+            if _br:
+                _busy = _br[0] or 0
+                _max = _br[1] or 1
+                if _busy >= _max:
+                    continue  # 已满载
+            # 全部通过：有能干的引擎（物理可达）
+            return True
         except Exception:
             continue
     return False
+
+
 
 
 def _check_pool_has_healthy(engine_ids: list) -> bool:
@@ -157,7 +174,23 @@ def runtime_credential_id(runtime_id: int):
         return None
 
 
-_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "300"))
+_RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
+
+# Issue #259：running 任务回收阈值——对齐 worker 本地 RUNTIME_TASK_TIMEOUT（默认 3600s）。
+# 假死 worker（断连但本地任务还在跑）的 running 任务须等本地超时自杀后才服务端重派，
+# 双跑窗口=0。前提：该值 >= worker 端 RUNTIME_TASK_TIMEOUT（部署注意）。
+_TASK_RECOVER_STALE_SECONDS = int(os.environ.get("TASK_RECOVER_STALE_SECONDS", "3600"))
+
+# Issue #259 Optional：启动期配置耦合告警——防双跑前提是 TASK_RECOVER_STALE_SECONDS >= worker RUNTIME_TASK_TIMEOUT。
+# 二者默认均 3600s（安全），但部署侧单边调大 RUNTIME_TASK_TIMEOUT 而不调 TASK_RECOVER_STALE_SECONDS
+# 会导致服务端在 worker 仍本地执行时重派 → 双跑。启动期告警一次，运行期不再重复。
+_WORKER_TASK_TIMEOUT_DEFAULT = int(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+if _TASK_RECOVER_STALE_SECONDS < _WORKER_TASK_TIMEOUT_DEFAULT:
+    log.warning(
+        f"Config coupling risk: TASK_RECOVER_STALE_SECONDS={_TASK_RECOVER_STALE_SECONDS}s < "
+        f"RUNTIME_TASK_TIMEOUT={_WORKER_TASK_TIMEOUT_DEFAULT}s — running tasks may be re-dispatched "
+        f"before worker local timeout, causing double execution (Issue #259)"
+    )
 
 
 def _remote_runtime_ready(runtime_id: int) -> bool:
@@ -243,13 +276,17 @@ def _table_columns(table: str) -> set:
     """表实际存在的列（PRAGMA，进程内缓存）。
 
     迁移动态列后代码兼容未迁移的旧库（如测试库）与已迁移库。
+
+    Lock contract（Issue #259 Optional）：调用方必须已持有 db_lock。
+    本函数不再嵌套 with db_lock——生产 db_lock=RLock（可重入，嵌套无碍），
+    但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
+    PRAGMA 只读 + 进程内缓存，无锁竞争风险。
     """
     _cached = _TABLE_COLS_CACHE.get(table)
     if _cached is not None:
         return _cached
     try:
-        with db_lock:
-            _rows = db.cursor().execute(f"PRAGMA table_info({table})").fetchall()
+        _rows = db.cursor().execute(f"PRAGMA table_info({table})").fetchall()
         _col = {r[1] for r in _rows}
     except Exception:
         _col = set()
@@ -2219,15 +2256,21 @@ def reap_stale_runtimes() -> dict:
     from src.runtime.health import parse_dt
     now = time.time()
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_RUNTIME_STALE_SECONDS)).isoformat()
+    # Issue #259：回收分级——running 任务的对齐 worker 本地超时（RUNTIME_TASK_TIMEOUT 默认 3600s），
+    # 防假死 worker（断连但任务还在本地跑）的服务端重派与本地执行重叠造成双跑。
+    # dispatched 任务从未开始执行，无双跑风险，跟心跳阈值走（100s）。
+    _recover_cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_TASK_RECOVER_STALE_SECONDS)).isoformat()
     reaped = []
     with db_lock:
         c = db.cursor()
         try:
             # 查找远端引擎（credential_id>0）status=online 但心跳过期的行
+            # Issue #259：去掉 last_seen_at IS NOT NULL——NULL（从未心跳）但 status=online 的
+            # 幽灵行也算过期，一起标 offline（原查询会永久漏掉它们）
             c.execute(
-                "SELECT id, name, credential_id FROM agent_runtimes "
-                "WHERE status='online' AND credential_id > 0 AND last_seen_at IS NOT NULL "
-                "AND last_seen_at < ?",
+                "SELECT id, name, credential_id, last_seen_at FROM agent_runtimes "
+                "WHERE status='online' AND credential_id > 0 "
+                "AND (last_seen_at IS NULL OR last_seen_at='' OR last_seen_at < ?)",
                 (cutoff_iso,)
             )
             stale = c.fetchall()
@@ -2238,13 +2281,23 @@ def reap_stale_runtimes() -> dict:
                     "UPDATE agent_runtimes SET status='offline' WHERE id=?",
                     (rid,)
                 )
-                # 回收该 runtime 上的 dispatched 任务 → queued
+                # 回收该 runtime 上的 dispatched 任务 → queued（从未开始，零双跑风险，100s）
+                # runtime_id 置 0（NOT NULL 列不能置 NULL；0 = 无主池任务，可被任意引擎 claim）
                 c.execute(
-                    "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=NULL "
-                    "WHERE runtime_id=? AND status IN ('dispatched','running')",
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0, attempts=attempts+1 "
+                    "WHERE runtime_id=? AND status='dispatched'",
                     (rid,)
                 )
                 recovered = c.rowcount
+                # 回收 running 任务 → queued（可能还在假死 worker 本地执行，3600s 对齐 worker
+                # 本地 RUNTIME_TASK_TIMEOUT 默认值——worker 本地到点自杀后才重派，双跑窗口=0）
+                # 前提：TASK_RECOVER_STALE_SECONDS 必须 >= worker 的 RUNTIME_TASK_TIMEOUT（部署注意）。
+                c.execute(
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0, attempts=attempts+1 "
+                    "WHERE runtime_id=? AND status='running' AND (started_at IS NULL OR started_at='' OR started_at < ?)",
+                    (rid, _recover_cutoff_iso)
+                )
+                recovered += c.rowcount
                 if recovered > 0:
                     c.execute(
                         "UPDATE agent_runtimes SET busy_slots=0 WHERE id=?",
