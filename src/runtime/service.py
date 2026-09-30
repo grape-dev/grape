@@ -1977,7 +1977,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     log.info(f"VOD recommend: scene_id={_rec_scene} set for {issue_id}")
 
     from src.api.pipeline_config import get_first_node, get_pipeline_config
-    _vod_node = get_first_node(_rec_scene)
+    _vod_node = get_first_node(_rec_scene, repo_key=repo_key)
     if not _vod_node:
         _pcfg = get_pipeline_config(_rec_scene, repo_key=repo_key)
         _nodes = (_pcfg or {}).get("nodes", [])

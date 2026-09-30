@@ -1534,7 +1534,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 skill_name = _pipe_skill
                 backend = backend or ""
                 log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill} (scene={_issue_scene})")
-        if not skill_name:
+        if not skill_name and not _is_scene_recommend:
+            # 推荐模式不需要 skill（用 build_scene_recommender_prompt 内置 prompt），
+            # 跳过 fallback 的 no_agent_session 检查，直接走引擎选择 → 广播入队
             # Legacy fallback: agent-skill-mapping.json（用 Issue 级场景）
             try:
                 _defaults_path = os.path.join(os.path.dirname(__file__), "..", "..", "configs", "agent-skill-mapping.json")
@@ -2988,8 +2990,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                                 log.info(f"智能推荐完成: scene_id={_rec_scene} set for {issue_id}")
                                 # 重派 VOD（用匹配场景的 vod 技能）
                                 from src.api.pipeline_config import get_first_node, get_pipeline_config
-                                _vod_node = get_first_node(_rec_scene)
-                                # get_first_node 需要 repo_key，直接查 pipeline_config
+                                _vod_node = get_first_node(_rec_scene, repo_key=repo_key)
                                 if not _vod_node:
                                     _pcfg = get_pipeline_config(_rec_scene, repo_key=repo_key)
                                     _nodes = (_pcfg or {}).get("nodes", [])
