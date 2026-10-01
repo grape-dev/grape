@@ -27,6 +27,7 @@ EXPECTED_PUBLIC = {
     "tasks_complete": ("post", "/api/tasks/complete"),
     "tasks_current": ("get", "/api/tasks/current"),
     "tasks_notify": ("post", "/api/tasks/notify"),
+    "tasks_awaiting-input": ("post", "/api/tasks/awaiting-input"),
     # POST /api/tasks/create 已废弃移除（C2）→ 创建走 POST /api/issues/{owner}/{repo}
     "a2a_handoff": ("post", "/api/a2a"),
     # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
@@ -384,6 +385,7 @@ def test_x_token_scope_consistency():
     session_samples = {"/api/git-repo/{owner}/{repo}/branches": "get",
                        "/api/tasks/current": "get",
                        "/api/tasks/notify": "post",
+                       "/api/tasks/awaiting-input": "post",
                        "/api/repos/{owner}/{repo}/git-credential": "get",
                        "/api/repos/{owner}/{repo}/workspace": "get"}
     for path, method in session_samples.items():

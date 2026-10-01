@@ -35,7 +35,7 @@
 
 | 文档 | 接口 | scope |
 |------|------|:---:|
-| [01 Tasks](01-tasks.md) | `notify`（tk_）/ `current`（tk_ 自省） | session_only |
+| [01 Tasks](01-tasks.md) | `notify`（tk_）/ `current`（tk_ 自省）/ `awaiting-input`（tk_ 声明待澄清） | session_only |
 | | `complete`（Event 执行） | dual |
 | [02 Repos](02-repos.md) | `managed/member/sync/check-name/create/host/repair/bot-token/deploy-url/remove/project-info` | user_only |
 | | `{owner}/{repo}/git-credential`、`{owner}/{repo}/workspace` | session_only |

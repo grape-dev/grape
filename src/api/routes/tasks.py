@@ -25,6 +25,7 @@ from src.api.issues_center import (  # noqa: F401
     TaskConfirmBody,
     TaskCreateBody,
     TaskNotifyBody,
+    TaskAwaitingInputBody,
     TaskStatusBody,
     _ATTACH_ALL_EXTS,
     _ATTACH_ARCHIVE_EXTS,
@@ -67,6 +68,7 @@ from src.api.issues_center import (  # noqa: F401
     _query_tasks,
     _require_session_repo_token,
     _resolve_user_chat_bot,
+    _run_awaiting_notify,
     _run_notify,
     cancel_issue_task,
     close_issue_tasks,
@@ -261,6 +263,101 @@ async def notify_task(body: TaskNotifyBody, request: Request,
 
     return {"ok": True, "issue_id": task_id, "task_id": task_id, "conversation_id": conv_id,
             "message": "任务已创建并通知责任人"}
+
+
+@router.post("/awaiting-input", operation_id="tasks_awaiting-input", summary="Declare task awaiting-input (Agent runtime)", description="vod/issue agent explicitly declares the task is waiting for user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match, agent_type must be vod/issue.")
+async def awaiting_input_task(body: TaskAwaitingInputBody, request: Request,
+                             user: dict = Depends(get_current_user_or_api_key)):
+    """vod/issue agent 显式声明「待澄清」：active/processing → awaiting-input，写澄清问题 + 静态飞书通知。
+
+    - 与 `tasks complete` 同一套显式声明哲学（issue-explicit-awaiting-input-api-design.md）：
+      仅会话通道（tk_），task_id 由 session_key 自动定位，不依赖输出关键词判定（已退役）。
+    - 非终态：不置 task 终态、不推进 pipeline stage；开发者回复走既有 clarify（awaiting-input→processing）。
+    - **不做**：不触发 ChatAgent / 不执行 opencode / 不注入用户个人 token（§十）。
+    """
+    questions = (body.questions or "").strip()
+    if not questions:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "questions 必填（本次需澄清的问题）"})
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期声明待澄清）"})
+    task_id = user.get("session_key") or ""
+    session_repo = user.get("repo_key") or ""
+    session_agent = user.get("agent_type") or ""
+    if not task_id:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 task_id（会话 token 自动定位）"})
+
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, repo_key, issue_id, agent_type, status, user_id FROM agent_tasks WHERE id=?", (task_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    repo_key, issue_id, agent_type = row[1], row[2] or "", row[3] or ""
+    task_status, task_user_id = row[4] or "", row[5] or 0
+    if session_repo != repo_key:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+    if session_agent in ("vod", "issue") and session_agent == agent_type:
+        pass  # 会话 token 与任务 agent 一致且在范围内
+    elif agent_type not in ("vod", "issue"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={agent_type} 不在本接口范围（仅 vod/issue 可声明待澄清）"})
+    else:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 agent_type 与任务不一致或不在范围（仅 vod/issue）"})
+
+    # 终态幂等边界（同 tasks complete）
+    if task_status in ("completed", "failed", "cancelled"):
+        return {"ok": True, "task_id": task_id, "status": task_status, "changed": False}
+
+    _num_txt = str(issue_id or "").lstrip("#").strip()
+    issue_number = int(_num_txt) if _num_txt.isdigit() else 0
+    if not issue_number or not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "任务未关联到有效 Issue"})
+
+    # 需求卡片 + 原子迁移（active/processing → awaiting-input）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, assignee, user_id, title FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                  (repo_key, issue_number))
+        irow = c.fetchone()
+        if not irow:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求卡片不存在"})
+        issue_card_id, assignee, issue_user_id, title = irow[0], irow[1] or "", irow[2] or 0, irow[3] or ""
+        c.execute(
+            "UPDATE issue SET status='awaiting_input' "
+            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
+            (repo_key, issue_number))
+        changed = c.rowcount > 0
+        db.commit()
+    user_id = task_user_id or issue_user_id or 0
+
+    # 任务会话：复用「Issue #N」对话并回填 conversation_id，澄清问题由后台 _run_awaiting_notify 写入
+    conv_id = ""
+    if user_id > 0 and changed:
+        try:
+            conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, "",
+                                                write_context_on_reuse=False)
+            if conv_id:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, issue_card_id))
+                    db.commit()
+        except Exception as e:
+            log.warning(f"Task awaiting: conversation ensure failed: {e}")
+
+    log.info(f"Task awaiting: {repo_key}/#{issue_number} -> awaiting_input task={task_id} changed={changed} "
+             f"(agent={agent_type}, questions={questions[:60]})")
+    # 飞书卡片通知（静态，用户本人 chat bot；无 open_id/本人 bot → 跳过）；仅首次迁移时触达
+    if changed:
+        open_id = _get_feishu_open_id(assignee)
+        from src.api import main as api_main
+        bm = api_main.bot_manager
+        ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
+        api = bm.api if bm else None
+        cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
+        asyncio.create_task(_run_awaiting_notify(ctx, api, user_id, conv_id, open_id,
+                                                 questions, repo_key, issue_number, cfg))
+
+    return {"ok": True, "task_id": task_id, "issue_id": issue_card_id, "status": "awaiting_input",
+            "changed": changed}
 
 
 class TaskCreateBody(BaseModel):

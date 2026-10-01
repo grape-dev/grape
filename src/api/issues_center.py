@@ -41,6 +41,11 @@ class TaskNotifyBody(BaseModel):
     task_description: str = ""
 
 
+class TaskAwaitingInputBody(BaseModel):
+    questions: str = ""
+    reason: str = ""
+
+
 class TaskCloseBody(BaseModel):
     repo_key: str = ""
     issue_number: int = 0
@@ -492,6 +497,38 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                 log.warning(f"Task notify feishu failed: {e}")
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
+
+
+async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                               questions: str, repo_key: str, issue_number: int, cfg: dict):
+    """待澄清通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_notify 同规约）。
+
+    进入 awaiting_input 的语义就是「等用户输入」，必须主动触达用户；fd：本人 chat bot（open_id 为 app 级）。
+    """
+    try:
+        from src.repo_key import from_repo_key
+        if conv_id:
+            try:
+                _tpl = (f"❓ 需要你补充信息 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"{questions}")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Task awaiting: questions written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Task awaiting: template write failed: {e}")
+
+        if open_id and api and ctx:
+            notify_text = (f"❓ 需要你补充信息\n\n"
+                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
+                           f"{questions}\n\n"
+                           f"请在任务中心补充后，我继续处理。")
+            try:
+                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清")
+            except Exception as e:
+                log.warning(f"Task awaiting feishu failed: {e}")
+    except Exception as e:
+        log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
+
 
 def _resolve_user_chat_bot(bm, user_id: int):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
