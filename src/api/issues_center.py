@@ -654,6 +654,39 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
 
+async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                                     review_points: str, references: str,
+                                     repo_key: str, issue_number: int, cfg: dict):
+    """待审核通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_awaiting_notify 同规约）。
+
+    进入 pending_review 的语义就是「交付审核点请用户拍板」，必须主动触达用户；本机本人 chat bot（open_id 为 app 级）。
+    """
+    try:
+        from src.repo_key import from_repo_key
+        _refs_suffix = (f"\n\n参考: {references}" if (references or "").strip() else "")
+        if conv_id:
+            try:
+                _tpl = (f"🔎 需要你审核确认 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"{review_points}{_refs_suffix}")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Issue pending-review: review points written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Issue pending-review: template write failed: {e}")
+
+        if open_id and api and ctx:
+            notify_text = (f"🔎 需要你审核确认\n\n"
+                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
+                           f"{review_points}{_refs_suffix}\n\n"
+                           f"请审核后回复，我继续处理。")
+            try:
+                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核")
+            except Exception as e:
+                log.warning(f"Issue pending-review feishu failed: {e}")
+    except Exception as e:
+        log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
+
+
 def _resolve_user_chat_bot(bm, user_id: int):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
 

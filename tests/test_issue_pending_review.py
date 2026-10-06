@@ -6,12 +6,15 @@ review-pass（判定通过→processing/done）、review-reject（判定未通�
 """
 import os
 import sys
+import asyncio
+from unittest.mock import patch
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
 from src.api.main import app
+from src.api.routes import issues as issues_mod
 from src.session_manager import db, db_lock
 from src.user import db as user_db
 
@@ -19,6 +22,14 @@ client = TestClient(app)
 
 _uid = None
 _BOT_TOKEN = "bot_review_test_token"
+
+
+def _swallow(coro, *a, **k):
+    try:
+        coro.close()
+    except Exception:
+        pass
+    return None
 
 
 def _session_headers(repo_key="gitcode:org/test", agent_type="qa"):
@@ -86,9 +97,10 @@ def _status(issue_number=21):
 class TestPendingReview:
     def test_qa_sets_pending_review(self):
         cid = _seed()
-        r = client.post(f"/api/issues/{cid}/pending-review",
-                        headers=_session_headers(agent_type="qa"),
-                        json={"review_points": "请确认是否合入该 PR（#11 变更）", "references": "PR#11"})
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"),
+                            json={"review_points": "请确认是否合入该 PR（#11 变更）", "references": "PR#11"})
         assert r.status_code == 200
         data = r.json()
         assert data["ok"] is True and data["issue_id"] == cid
@@ -100,10 +112,30 @@ class TestPendingReview:
     def test_any_devops_agent_allowed(self):
         for agent in ("vod", "issue", "coding", "sre"):
             cid = _seed(issue_number=21 if agent != "sre" else 22)
-            r = client.post(f"/api/issues/{cid}/pending-review",
-                            headers=_session_headers(agent_type=agent),
-                            json={"review_points": "审核点"})
+            with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+                r = client.post(f"/api/issues/{cid}/pending-review",
+                                headers=_session_headers(agent_type=agent),
+                                json={"review_points": "审核点"})
             assert r.status_code == 200 and r.json()["changed"] is True
+
+    def test_review_points_written_to_conversation(self):
+        from src.api.issues_center import _run_pending_review_notify
+        from src.session_manager import get_messages
+        cid = _seed(issue_number=23)
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"),
+                            json={"review_points": "请确认是否合并", "references": "PR#23"})
+        assert r.status_code == 200 and r.json()["changed"] is True
+        with db_lock:
+            conv = db.cursor().execute(
+                "SELECT conversation_id FROM issue WHERE id=?", (cid,)).fetchone()
+        assert conv and conv[0]
+        asyncio.run(_run_pending_review_notify(None, None, _uid["id"], conv[0], "",
+                                               "请确认是否合并", "PR#23",
+                                               "gitcode:org/test", 23, {}))
+        msgs = get_messages(conv[0], limit=30)
+        assert any("请确认是否合并" in (m.get("content") or "") for m in msgs)
 
     def test_non_devops_agent_403(self):
         cid = _seed()

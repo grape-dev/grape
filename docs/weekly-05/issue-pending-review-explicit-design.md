@@ -58,7 +58,7 @@ pending_review  : "我交付这个决策点，请你审核/拍板"（agent 产�
 | 出参 | `{"ok":true, "issue_id":…, "status":"pending_review", "changed":true}` |
 
 - **不改 stage**（阶段保持当前 vod/issue/coding/qa/sre）；状态由 issue 卡片承载。
-- 审核点写入任务会话（agent 消息，`GET clarifications` 分享据点）；可选 `events.agent_logs` 记录。
+- 审核点写入任务会话（agent 消息，`GET clarifications` 分享据点）+ **飞书静态卡片触达用户**（同 awaiting，`_run_pending_review_notify`；缺 open_id/本人 bot 跳过，不触发 ChatAgent/LLM）。
 - 与任务终态正交（同 awaiting，C 单信号）：不终态化、不钉 running。
 
 ### 3.3 退出端点（Agent 判定）
@@ -141,6 +141,7 @@ webhook `issue_comment`（非 bot，bot 已由 run_pipeline self-loop 跳过）�
 | 项 | 结果 |
 |---|---|
 | 任意 devops agent 可在任意阶段显式设 pending_review（含审核点） | ✅ 3.2 |
+| **飞书静态卡片触达“待审核”用户**（同 awaiting，本人 bot） | ✅ 3.2 / UT-009 |
 | 退出由 Agent 判定（pass/reject，显式幂等 + 证据） | ✅ 3.3 |
 | 平台评论自动恢复统一覆盖 awaiting_input 与 pending_review | ✅ 3.5 |
 | status 与 stage 解耦，pending_review 不被阶段事件冲掉 | ✅ 3.4 |

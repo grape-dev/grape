@@ -364,8 +364,9 @@ Issue 对象字段：
 | 返回 | 200；400 review_points 缺失；403 非会话 / 仓库作用域不匹配 / 非 devops agent；404 |
 
 > 鉴权：`agent_type∈{vod,issue,coding,qa,sre}` 且 `issue.repo_key == token.repo_key`。效果：
-> `active/processing/awaiting_input → pending_review` 原子迁移（`changed` 可观测）、审核点写入任务会话、不改 stage、
-> 不终态化（与任务生命周期正交）。用户评论（非 bot）会自动恢复为 processing。
+> `active/processing/awaiting_input → pending_review` 原子迁移（`changed` 可观测）、审核点写入任务会话、
+> 向本人飞书 bot 发静态卡片「需要你审核确认」（缺配置则跳过）、不改 stage、不终态化（与任务生命周期正交）。
+> 用户评论（非 bot）会自动恢复为 processing。
 
 ### POST /api/issues/{issue_id}/review-pass — Agent 判定审核通过
 
