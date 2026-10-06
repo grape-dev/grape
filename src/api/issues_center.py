@@ -46,6 +46,11 @@ class TaskAwaitingInputBody(BaseModel):
     reason: str = ""
 
 
+class TaskPendingReviewBody(BaseModel):
+    review_points: str = ""
+    references: str = ""
+
+
 class TaskCloseBody(BaseModel):
     repo_key: str = ""
     issue_number: int = 0
@@ -378,29 +383,110 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         return c.rowcount
 
 
-def _resume_issue_from_awaiting(repo_key: str, issue_number: int) -> bool:
-    """澄清回复恢复（幂等）：`awaiting_input → processing`。
+def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
+    """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
 
-    供两条路径复用（issue-explicit-awaiting-input-api-design.md §3.6）：
-    - webhook `issue_comment` 自动恢复（收到非 bot 用户评论且 issue 正待澄清）；
-    - `POST /api/issues/{issue_id}/clarify` 端点。
-    仅当 issue 正处于 `awaiting_input` 时翻回，返回是否真正翻转（幂等、可观测）。
+    供两条路径复用（issue-explicit-awaiting-input-api-design.md §3.6 / issue-pending-review-explicit-design.md §3.5）：
+    - webhook `issue_comment` 自动恢复（非 bot 用户评论）；
+    - `issues clarify` / Agent 显式续接。
+    仅当 issue 正处于 `awaiting_input` 或 `pending_review` 时翻回，返回是否真正翻转（幂等、可观测）。
     """
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
                 "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
-                "WHERE repo_key=? AND issue_number=? AND status='awaiting_input'",
+                "WHERE repo_key=? AND issue_number=? AND status IN ('awaiting_input','pending_review')",
                 (repo_key, issue_number))
             db.commit()
             _changed = c.rowcount > 0
         if _changed:
-            log.info(f"Issue awaiting resume: {repo_key}/#{issue_number} awaiting_input → processing")
+            log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing")
         return _changed
     except Exception as _e:
-        log.warning(f"resume issue from awaiting failed {repo_key}/#{issue_number}: {_e}")
+        log.warning(f"resume issue from waiting failed {repo_key}/#{issue_number}: {_e}")
         return False
+
+
+def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
+    """Agent 显式设置阶段审核点（幂等）：`active/processing/awaiting_input → pending_review`，不改 stage。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input')",
+                (repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue pending_review set: {repo_key}/#{issue_number}")
+        return _changed
+    except Exception as _e:
+        log.warning(f"set issue pending_review failed {repo_key}/#{issue_number}: {_e}")
+        return False
+
+
+def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
+                 evidence: str = "") -> str:
+    """Agent 判定用户通过审核（幂等）：仅 `pending_review` 可退出。
+    target=processing → 继续流水线；target=done → status=completed + stage=done（合入/收尾）。"""
+    try:
+        if target == "done":
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
+                    "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                    (repo_key, issue_number))
+                db.commit()
+                _changed = c.rowcount > 0
+            if _changed:
+                try:
+                    from src.api.session_store import set_issue_stage
+                    set_issue_stage(repo_key, f"#{issue_number}", "done", "agent")
+                except Exception as _se:
+                    log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
+                log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+                return "passed_done"
+        else:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                    "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                    (repo_key, issue_number))
+                db.commit()
+                _changed = c.rowcount > 0
+            if _changed:
+                log.info(f"Issue review-pass(processing): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+                return "passed_processing"
+        return "noop"
+    except Exception as _e:
+        log.warning(f"review_pass failed {repo_key}/#{issue_number}: {_e}")
+        return "noop"
+
+
+def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
+                   reason: str = "") -> str:
+    """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。"""
+    try:
+        _t = target if target in ("processing", "awaiting_input") else "processing"
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE issue SET status=?, completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                (_t, repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue review-reject({_t}): {repo_key}/#{issue_number} reason={reason[:60]}")
+            return f"rejected_{_t}"
+        return "noop"
+    except Exception as _e:
+        log.warning(f"review_reject failed {repo_key}/#{issue_number}: {_e}")
+        return "noop"
 
 
 def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
@@ -602,10 +688,10 @@ class TaskStatusBody(BaseModel):
     status: str = ""
 
 _TASK_STATUS_FLOWS = {
-    "active": ("processing", "awaiting_input", "cancelled"),
+    "active": ("processing", "awaiting_input", "pending_review", "cancelled"),
     "processing": ("awaiting_input", "pending_review", "completed", "cancelled", "active"),
-    "awaiting_input": ("processing", "cancelled"),
-    "pending_review": ("completed", "cancelled"),
+    "awaiting_input": ("processing", "pending_review", "cancelled"),
+    "pending_review": ("processing", "completed", "cancelled"),
     "completed": (),
     "cancelled": ("active",),
 }

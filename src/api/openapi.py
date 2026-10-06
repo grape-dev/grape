@@ -71,8 +71,8 @@ _SESSION_ONLY_OPERATIONS = frozenset({
     "repos_git_credential", "repos_workspace",
     # Agent 执行期动作（tasks.py / issues.py，体内 _require_session_repo_token / auth_type 强制 session）
     "tasks_current", "tasks_notify",
-    # awaiting-input 归属 issues（澄清三件套），session_only 显式登记
-    "issues_awaiting-input",
+    # awaiting-input / pending-review 归属 issues（等用户双态），session_only 显式登记
+    "issues_awaiting-input", "issues_pending-review", "issues_review-pass", "issues_review-reject",
 })
 
 # session_only 的路径前缀规则（覆盖表补充；新增 git-repo 端点只要进此命名空间即自动标注）

@@ -21,7 +21,8 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
-from src.api.issues_center import TaskAwaitingInputBody
+from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
+                                   _review_pass, _review_reject, _set_issue_pending_review)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -909,6 +910,105 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     return {"ok": True, "issue_id": issue_card_id, "status": "awaiting_input", "changed": changed}
 
 
+# ===== 待审核（pending_review）—— Agent 显式阶段审核点，语义见 issue-pending-review-explicit-design.md =====
+
+_DEV_OPS_AGENTS = ("vod", "issue", "coding", "qa", "sre")
+
+
+def _session_devops_issue(issue_id: int, user: dict) -> dict:
+    """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈devops；issue.repo_key==token.repo_key；返回 issue 行。"""
+    from src.session_manager import db as _db, db_lock as _dl
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期）"})
+    _agent = user.get("agent_type") or ""
+    if _agent not in _DEV_OPS_AGENTS:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={_agent} 不在本接口范围（devops agent）"})
+    _repo = user.get("repo_key") or ""
+    if not _repo:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
+    with _dl:
+        c = _db.cursor()
+        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?", (issue_id,))
+        _r = c.fetchone()
+    if not _r:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    if _r[1] != _repo:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+    return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
+            "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or ""}
+
+
+@router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
+             summary="Agent declares issue pending_review (阶段审核点)",
+             description="任意 devops agent 显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。Session-only (tk_)，repo 匹配，agent_type 为 devops agent。与 awaiting-input 对称（等用户双态）。")
+async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
+                               user: dict = Depends(get_current_user_or_api_key)):
+    """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""
+    from src.api.issues_center import _ensure_task_conversation
+    from src.session_manager import db as _db, db_lock as _dl, add_message as _add
+
+    review_points = (body.review_points or "").strip()
+    if not review_points:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "review_points 必填（本次需审核的内容）"})
+    it = _session_devops_issue(issue_id, user)
+    if it["status"] in ("completed", "cancelled"):
+        return {"ok": True, "issue_id": it["id"], "status": it["status"], "changed": False}
+    _changed = _set_issue_pending_review(it["repo_key"], it["issue_number"])
+    conv_id = ""
+    if it["user_id"] > 0 and _changed:
+        try:
+            conv_id = _ensure_task_conversation(it["user_id"], it["repo_key"], it["issue_number"], it["title"], "",
+                                                write_context_on_reuse=False)
+            if conv_id:
+                from src.repo_key import from_repo_key
+                _refs = (body.references or "").strip()
+                _msg = (f"🔎 需要你审核确认 · Issue #{it['issue_number']}\n\n"
+                        f"仓库: {from_repo_key(it['repo_key'])}\n\n"
+                        f"{review_points}" + (f"\n\n参考: {_refs}" if _refs else ""))
+                _add(conv_id, "agent", _msg)
+                with _dl:
+                    c = _db.cursor()
+                    c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, it["id"]))
+                    _db.commit()
+        except Exception as e:
+            log.warning(f"Issue pending-review: conversation write failed: {e}")
+    return {"ok": True, "issue_id": it["id"], "status": "pending_review", "changed": _changed}
+
+
+class _ReviewPassBody(BaseModel):
+    target: str = "processing"   # processing | done
+    evidence: str = ""
+
+
+class _ReviewRejectBody(BaseModel):
+    target: str = "processing"   # processing | awaiting_input
+    reason: str = ""
+
+
+@router.post("/{issue_id}/review-pass", operation_id="issues_review-pass",
+             summary="Agent decides review passed",
+             description="Agent 判定用户已通过审核：pending_review → processing（继续）；target=done → completed+stage=done（合入/收尾）。Session-only (tk_)，repo 匹配，devops agent。")
+async def issue_review_pass(issue_id: int, body: _ReviewPassBody,
+                            user: dict = Depends(get_current_user_or_api_key)):
+    it = _session_devops_issue(issue_id, user)
+    _out = _review_pass(it["repo_key"], it["issue_number"],
+                        target=body.target or "processing", evidence=body.evidence or "")
+    return {"ok": True, "issue_id": it["id"], "status": "completed" if _out == "passed_done" else ("processing" if _out == "passed_processing" else "pending_review"),
+            "result": _out}
+
+
+@router.post("/{issue_id}/review-reject", operation_id="issues_review-reject",
+             summary="Agent decides review rejected",
+             description="Agent 判定用户未通过审核：pending_review → processing（打回）或 awaiting_input（转澄清）。Session-only (tk_)，repo 匹配，devops agent。")
+async def issue_review_reject(issue_id: int, body: _ReviewRejectBody,
+                              user: dict = Depends(get_current_user_or_api_key)):
+    it = _session_devops_issue(issue_id, user)
+    _out = _review_reject(it["repo_key"], it["issue_number"],
+                          target=body.target or "processing", reason=body.reason or "")
+    _st = "awaiting_input" if _out == "rejected_awaiting_input" else ("processing" if _out == "rejected_processing" else "pending_review")
+    return {"ok": True, "issue_id": it["id"], "status": _st, "result": _out}
+
+
 class _IssueClarifyBody(BaseModel):
     message: str = ""
 
@@ -984,8 +1084,8 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         except Exception as e:
             log.warning(f"Issue clarify: write conversation message failed: {e}")
     try:
-        from src.api.issues_center import _resume_issue_from_awaiting
-        if _resume_issue_from_awaiting(repo_key, issue_number):
+        from src.api.issues_center import _resume_issue_waiting
+        if _resume_issue_waiting(repo_key, issue_number):
             log.info(f"Issue clarify: awaiting_input → processing for {repo_key}/#{issue_number}")
     except Exception as e:
         log.warning(f"Issue clarify: restore processing failed: {e}")

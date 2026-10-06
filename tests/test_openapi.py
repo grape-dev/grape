@@ -28,6 +28,9 @@ EXPECTED_PUBLIC = {
     "tasks_current": ("get", "/api/tasks/current"),
     "tasks_notify": ("post", "/api/tasks/notify"),
     "issues_awaiting-input": ("post", "/api/issues/{issue_id}/awaiting-input"),
+    "issues_pending-review": ("post", "/api/issues/{issue_id}/pending-review"),
+    "issues_review-pass": ("post", "/api/issues/{issue_id}/review-pass"),
+    "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),
     # POST /api/tasks/create 已废弃移除（C2）→ 创建走 POST /api/issues/{owner}/{repo}
     "a2a_handoff": ("post", "/api/a2a"),
     # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
