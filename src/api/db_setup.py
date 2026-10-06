@@ -1060,6 +1060,20 @@ def _create_indexes():
     except Exception as e:
         log.warning(f"issue dedupe cleanup failed: {e}")
 
+    # 确保 idx_tasks_repo_issue 为 UNIQUE（SQLite/MySQL 双栈）：历史可能存在同名**普通**索引，
+    # `CREATE UNIQUE INDEX IF NOT EXISTS` 遇同名不会升级 → 先 DROP 非唯一同名索引，由下方循环重建为唯一。
+    try:
+        with db_lock:
+            c = db.cursor()
+            for _r in c.execute("PRAGMA index_list('issue')").fetchall():
+                if _r[1] == "idx_tasks_repo_issue" and not _r[2]:
+                    c.execute("DROP INDEX idx_tasks_repo_issue")
+                    db.commit()
+                    log.info("Dropped non-unique idx_tasks_repo_issue for unique re-create")
+                    break
+    except Exception as e:
+        log.warning(f"ensure unique idx_tasks_repo_issue prep failed: {e}")
+
     for idx in indexes:
         try:
             with db_lock:
