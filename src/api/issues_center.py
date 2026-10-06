@@ -86,16 +86,24 @@ def _get_feishu_open_id(gitcode_user: str) -> str:
 
 def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
                                title: str, task_description: str) -> int | None:
-    """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。"""
+    """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。
+
+    2026-10-06：按 (repo_key, issue_number) 去重复用（任何状态），避免 awaiting/completed 卡导致 notify 另建新卡；
+    复用卡时同步 assignee/user_id。
+    """
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id FROM issue WHERE repo_key=? AND issue_number=? AND assignee=? AND status='active' LIMIT 1",
-            (repo_key, issue_number, assignee)
+            "SELECT id, assignee, user_id FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+            (repo_key, issue_number)
         )
         row = c.fetchone()
         if row:
-            return row[0]
+            card_id, _existing_asg, _existing_uid = row[0], row[1] or "", row[2] or 0
+            if _existing_asg != assignee or (_existing_uid or 0) != (user_id or 0):
+                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (assignee, user_id, card_id))
+                db.commit()
+            return card_id
         c.execute(
             "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
             "VALUES (?,?,?,?,?,?,'active',?,?,?)",
@@ -190,16 +198,21 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         user_id = 0
     with db_lock:
         c = db.cursor()
-        # 幂等：同一 issue 任何 assignee 的 active/processing 任务都复用
-        # （#15 修复：防止 webhook 回声导致不同 assignee 创建多个任务）
+        # 幂等去重：同一平台 issue 唯一一张卡，任何状态都复用（2026-10-06 修复：
+        # 此前仅复用 active/processing，awaiting_input/completed/cancelled 时后续事件会新增一行 → 重复卡片）
         c.execute(
-            "SELECT id, conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') LIMIT 1",
+            "SELECT id, conversation_id, status FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
             (repo_key, issue_number)
         )
         row = c.fetchone()
         if row:
             task_id = row[0]
             linked = row[1]
+            _cur_st = row[2] or ""
+            if _cur_st not in ("active", "processing"):
+                # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
+                c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
+                          (task_id,))
             if title:
                 c.execute("UPDATE issue SET title=? WHERE id=?", (title, task_id))
             if subtask_mode >= 0:
