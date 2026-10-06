@@ -111,8 +111,13 @@
 
 | 项 | 值 |
 |----|-----|
-| 出参 | `{"ok": true, "task_id": "t_xxx", "status": "completed"}`；终态幂等返回 `already: true` |
+| 出参 | `{"ok": true, "task_id": "t_xxx", "status": "completed", "enriched": "attached"}`；终态幂等返回 `already: true`；流未结束时 `status` 为当前执行态且带 `pending_finalize: true`（自报已记录，等待引擎流结束收敛） |
 | 返回 | 200；401 未认证；400 缺 task_id；403 作用域不匹配/非本人托管仓库；404 任务不存在 |
+
+> 单信号语义（`stream-end-finalize-single-signal-design.md`）：`tasks complete` = 记录**权威结构化结论**（产物），
+> **终态由引擎流结束定案**（`finalize_by_stream_end`）。若流结束已先定案（completed/failed）且本次自报在会话
+> token 宽限窗（`SESSION_TOKEN_REVOKE_GRACE=180s`）内到达 → 幂等补挂结构化产出（`enriched`）/ 受控提升
+> （`promoted`，仅限 no-output 占位失败）；不再区分普通/自报技能，不再等双信号。
 
 > 会话 token：任务 id 由 `session_key` 自动定位（M2 以 task_id 签发），agent 收尾直接
 > `grape tasks complete --json '{"result_text":"...","next_step":"a2a_issue"}'`，无需 `--task-id`。

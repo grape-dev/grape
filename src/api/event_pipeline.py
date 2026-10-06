@@ -2888,24 +2888,36 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
-    # ── direct 自报技能双信号收敛（方案 A，weekly-05）──
-    # worker 模式的 stream_ended 由远端 /api/runtime/tasks/{id}/complete 置位；
-    # direct 模式无 worker 回调，需在本机引擎流结束后补置 stream_ended，使
-    # self_reported(agent grape tasks complete) + stream_ended 双信号齐后 finalize_task 收敛。
+    # ── 单信号收尾（C，stream-end-finalize-single-signal-design.md）──
+    # 引擎流结束即终态触发点；stream_ended 仅作仪器记录，不再按技能类型区分/门控。
     if task_id:
         try:
-            from src.runtime.service import skill_self_reports, set_task_signal, finalize_task
-            if skill_self_reports(skill_name):
-                log.info(f"Exec agent: seq={seq} direct self-report skill, set stream_ended + finalize")
-                set_task_signal(task_id, "stream_ended")
-                finalize_task(task_id, exit_code or 0)
+            from src.runtime.service import set_task_signal
+            set_task_signal(task_id, "stream_ended")
         except Exception as _e:
-            log.warning(f"Exec agent: direct self-report finalize failed for {task_id}: {_e}")
+            log.warning(f"Exec agent: set stream_ended failed for {task_id}: {_e}")
 
     # 判定 Agent 是否有明确答复产出
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
     if repo_gitcode_token and result_text:
         result_text = result_text.replace(repo_gitcode_token, "[REDACTED]")
+    # 若 Agent 已显式 self_report（结构化结论），以其为权威（产物而非闸门）
+    if task_id:
+        try:
+            from src.runtime.service import get_task
+            _t = get_task(task_id) or {}
+            if _t.get("self_reported") == 1 and _t.get("result_text"):
+                import json as _json
+                _stored = _t.get("result_text") or ""
+                _sd = None
+                try:
+                    _sd = _json.loads(_stored)
+                except Exception:
+                    _sd = None
+                if _sd and isinstance(_sd, dict) and (_sd.get("actions") or _sd.get("conclusion")):
+                    result_text = _stored
+        except Exception as _e:
+            log.warning(f"Exec agent: self-reported result merge failed for {task_id}: {_e}")
     completed_at = datetime.utcnow().isoformat()
     duration = None
     try:
@@ -2914,30 +2926,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         duration = round((e - s).total_seconds(), 1)
     except Exception:
         pass
-
-    if not has_output:
-        # agent 已通过 grape tasks complete 自报完成 → 跳过启发失败（防误判，issue-45-task-complete-endpoint-design.md）
-        if task_id:
-            try:
-                from src.runtime.service import get_task
-                _t = get_task(task_id) or {}
-                # 自报技能：self_reported 已置（finalize_task 可能尚未收敛 task.status）→ 也视为完成，不标 failed
-                if _t.get("status") == "completed" or _t.get("self_reported") == 1:
-                    log.info(f"Exec agent: task {task_id} self-reported completed, skip no-output fail")
-                    return
-            except Exception as _e:
-                log.warning(f"Exec agent: check self-complete failed for {task_id}: {_e}")
-        # 无产出 → 标记 failed（保留 event，不删）
-        log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
-        if task_id:
-            from src.runtime.service import update_task_status
-            update_task_status(task_id, "failed", exit_code=exit_code, result_text=result_text)
-        else:
-            _update_direct_task(seq, "failed", exit_code=exit_code, result_text=result_text)
-        update_event_status(seq, "failed")
-        update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
-                              agent_logs=agent_logs, completed_at=completed_at, result=result_text)
-        return
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     # exit_code < 0 表示进程被信号终止（如 -15=SIGTERM, -9=SIGKILL），
