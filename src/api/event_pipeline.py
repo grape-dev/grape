@@ -1076,6 +1076,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     from src.api.event_store import append_skipped_event
                     append_skipped_event(repo_key, event_type, "user_resume")
                     return result
+
+            # 澄清回复自动恢复（§3.6）：非 bot 用户评论且 issue 正处 awaiting_input → awaiting→processing。
+            # bot 自评在上方 2.0 自循环检测已跳过，此处 actor 必为用户；note_hook_pr 不适用（PR 讨论非 issue 澄清）。
+            if event_type == "issue_comment" and _issue_num and _issue_num.isdigit() and int(_issue_num) > 0:
+                try:
+                    from src.api.issues_center import _resume_issue_from_awaiting
+                    if _resume_issue_from_awaiting(repo_key, int(_issue_num)):
+                        log.info(f"Pipeline: issue #{_issue_num} awaiting_input → processing (issue_comment reply)")
+                except Exception as _re:
+                    log.warning(f"Pipeline: awaiting resume on issue_comment failed: {_re}")
         except Exception as e:
             log.warning(f"Pipeline: auto-comment marker / command check failed: {e}")
 

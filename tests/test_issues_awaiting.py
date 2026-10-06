@@ -189,3 +189,29 @@ class TestIssuesAwaitingInput:
         card_id = _seed_issue(status="completed")
         _before = _status("gitcode:org/test", 9)[0]
         assert _before == "completed"
+
+
+class TestResumeFromAwaiting:
+    """澄清回复自动恢复 helper（§3.6）：awaiting_input → processing 幂等。"""
+
+    def test_resume_when_awaiting(self):
+        _seed_issue(status="awaiting_input")
+        from src.api.issues_center import _resume_issue_from_awaiting
+        assert _resume_issue_from_awaiting("gitcode:org/test", 9) is True
+        assert _status("gitcode:org/test", 9)[0] == "processing"
+
+    def test_resume_not_when_processing(self):
+        _seed_issue(status="processing")
+        from src.api.issues_center import _resume_issue_from_awaiting
+        assert _resume_issue_from_awaiting("gitcode:org/test", 9) is False
+        assert _status("gitcode:org/test", 9)[0] == "processing"
+
+    def test_resume_idempotent_second_call(self):
+        _seed_issue(status="awaiting_input")
+        from src.api.issues_center import _resume_issue_from_awaiting
+        assert _resume_issue_from_awaiting("gitcode:org/test", 9) is True
+        assert _resume_issue_from_awaiting("gitcode:org/test", 9) is False  # 已 processing → no-op
+
+    def test_resume_absent_issue_false(self):
+        from src.api.issues_center import _resume_issue_from_awaiting
+        assert _resume_issue_from_awaiting("gitcode:org/test", 42) is False

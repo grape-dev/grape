@@ -365,6 +365,31 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         return c.rowcount
 
 
+def _resume_issue_from_awaiting(repo_key: str, issue_number: int) -> bool:
+    """澄清回复恢复（幂等）：`awaiting_input → processing`。
+
+    供两条路径复用（issue-explicit-awaiting-input-api-design.md §3.6）：
+    - webhook `issue_comment` 自动恢复（收到非 bot 用户评论且 issue 正待澄清）；
+    - `POST /api/issues/{issue_id}/clarify` 端点。
+    仅当 issue 正处于 `awaiting_input` 时翻回，返回是否真正翻转（幂等、可观测）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='awaiting_input'",
+                (repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue awaiting resume: {repo_key}/#{issue_number} awaiting_input → processing")
+        return _changed
+    except Exception as _e:
+        log.warning(f"resume issue from awaiting failed {repo_key}/#{issue_number}: {_e}")
+        return False
+
+
 def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
     """从 issue_state 读取 is_subtask_mode（任务创建时同步）。
     子任务（有 parent_issue_id）也算多任务模式。"""

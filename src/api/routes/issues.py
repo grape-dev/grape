@@ -984,15 +984,9 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         except Exception as e:
             log.warning(f"Issue clarify: write conversation message failed: {e}")
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "UPDATE issue SET status='processing' "
-                "WHERE repo_key=? AND issue_number=? AND status='awaiting_input'",
-                (repo_key, issue_number))
-            db.commit()
-            if c.rowcount > 0:
-                log.info(f"Issue clarify: awaiting_input → processing for {repo_key}/#{issue_number}")
+        from src.api.issues_center import _resume_issue_from_awaiting
+        if _resume_issue_from_awaiting(repo_key, issue_number):
+            log.info(f"Issue clarify: awaiting_input → processing for {repo_key}/#{issue_number}")
     except Exception as e:
         log.warning(f"Issue clarify: restore processing failed: {e}")
     return {"ok": True, "message": "澄清已发送到 Issue 并同步到任务会话"}
