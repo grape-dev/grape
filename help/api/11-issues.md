@@ -330,6 +330,69 @@ Issue 对象字段：
 
 > 同步发 GitCode Issue 评论（`💬 开发者澄清` 前缀）+ 写入任务会话；awaiting_input 自动恢复 processing。
 
+### POST /api/issues/{issue_id}/awaiting-input — Agent 声明需求待澄清（澄清三件套·发起）
+
+> 原 `/api/tasks/awaiting-input` 迁移而来（`issue-explicit-awaiting-input-api-design.md`）：awaiting-input 只修改
+> **issue 状态**、与任务生命周期正交（单信号），故归属 issues，与 `clarifications`（历史）、`clarify`（用户回复）同组。
+> CLI：`grape issues awaiting-input --issue_id {issue_id} --json '{"questions":"..."}' --json-out`（operation_id=`issues_awaiting-input`）。
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT/`BOT_GITCODE_TOKEN` → 403） |
+| Path | `{issue_id}` int（需求卡片 id） |
+| Body | `{"questions": "...", "reason": "..."}` |
+| 出参 | `{"ok": true, "issue_id": 210, "status": "awaiting_input", "changed": true}` |
+| 返回 | 200；400 questions 缺失；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 需求不存在 |
+
+> 鉴权：会话 token 的 `(repo_key, agent_type)` 作用域——须与需求的 repo_key 一致且 `agent_type∈{vod,issue}`
+> （与 `tasks notify` 同源信任模型）。效果：`active/processing → awaiting_input` 原子迁移（`changed` 可观测）、
+> 写入澄清问题到会话（`clarifications` 可直接看到）、向本人飞书 bot 发静态卡片（无配置则跳过）；
+> 与 `clarify` 回复闭环（awaiting_input → processing）。不终态化、不钉住任务（C 单信号）。
+
+### POST /api/issues/{issue_id}/pending-review — Agent 提交阶段审核点（等用户双态·待审核）
+
+> 与 `awaiting-input` 对称：`awaiting_input`=「我要你的输入/澄清」，`pending_review`=「我交付这个决策点，请你审核/拍板」。
+> **任意 devops agent**（vod/issue/coding/qa/sre）可在**任意阶段**显式将 issue 置为待审核，不改 stage。
+> CLI：`grape issues pending-review --issue_id {issue_id} --json '{"review_points":"...","references":"..."}' --json-out`（operation_id=`issues_pending-review`）。
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT → 403） |
+| Path | `{issue_id}` int |
+| Body | `{"review_points": "...", "references": "...(可选，如 PR#/设计文档)"}` |
+| 出参 | `{"ok": true, "issue_id": 217, "status": "pending_review", "changed": true}` |
+| 返回 | 200；400 review_points 缺失；403 非会话 / 仓库作用域不匹配 / 非 devops agent；404 |
+
+> 鉴权：`agent_type∈{vod,issue,coding,qa,sre}` 且 `issue.repo_key == token.repo_key`。效果：
+> `active/processing/awaiting_input → pending_review` 原子迁移（`changed` 可观测）、审核点写入任务会话、不改 stage、
+> 不终态化（与任务生命周期正交）。用户评论（非 bot）会自动恢复为 processing。
+
+### POST /api/issues/{issue_id}/review-pass — Agent 判定审核通过
+
+> CLI：`grape issues review-pass --issue_id {issue_id} --json '{"target":"processing|done","evidence":"..."}' --json-out`（operation_id=`issues_review-pass`）。
+
+| 项 | 值 |
+|----|-----|
+| scope | **session_only**（`tk_`；devops agent） |
+| Body | `{"target":"processing"\|"done", "evidence":"用户确认引用"}` |
+| 出参 | `{"ok": true, "issue_id": 217, "status": "completed"\|"processing", "result": "passed_done"\|"passed_processing"\|"noop"}` |
+| 返回 | 200；403 鉴权；404 |
+
+> 仅 `pending_review` 可退出；`target=processing` → 继续流水线；`target=done` → `completed` + `stage=done`（合入/收尾）。幂等。
+
+### POST /api/issues/{issue_id}/review-reject — Agent 判定审核未通过
+
+> CLI：`grape issues review-reject --issue_id {issue_id} --json '{"target":"processing|awaiting_input","reason":"..."}' --json-out`（operation_id=`issues_review-reject`）。
+
+| 项 | 值 |
+|----|-----|
+| scope | **session_only**（`tk_`；devops agent） |
+| Body | `{"target":"processing"\|"awaiting_input", "reason":"打回原因"}` |
+| 出参 | `{"ok": true, "issue_id": 217, "status": "processing"\|"awaiting_input", "result": "rejected_processing"\|"rejected_awaiting_input"\|"noop"}` |
+| 返回 | 200；403 鉴权；404 |
+
+> 仅 `pending_review` 可退出；默认 `processing`（打回继续改）；`awaiting_input`（转澄清）。幂等。
+
 ### POST /api/issues/{issue_id}/attachments — 上传附件
 
 > CLI：grape issues upload attachment --issue_id {issue_id} --file {path} --json-out（operation_id=issues_upload_attachment）。

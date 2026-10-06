@@ -567,16 +567,6 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") 
     return ""
 
 
-# Issue #85: agent 输出澄清意图检测
-_AWAITING_INPUT_MARKERS = ["澄清", "需要确认", "请问", "请提供", "需要补充", "请回复", "请说明", "需要以下信息"]
-
-def _detect_awaiting_input(result_text: str) -> bool:
-    """检测 agent 输出是否包含澄清意图（仅 vod/issue agent 调用）。"""
-    if not result_text:
-        return False
-    return any(marker in result_text for marker in _AWAITING_INPUT_MARKERS)
-
-
 # L2 阶段分派映射表（Issue #49 §5.3）：stage × 事件类型 → Agent
 # - 对应列 stage 命中 → 目标 Agent；"—" 表示该阶段下该事件不分发（返回空）
 # - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
@@ -1184,6 +1174,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     from src.api.event_store import append_skipped_event
                     append_skipped_event(repo_key, event_type, "user_resume")
                     return result
+
+            # 澄清/审核回复自动恢复（§3.6/§3.5）：非 bot 用户评论且 issue 处 awaiting_input 或 pending_review →
+            # 恢复 processing。bot 自评在上方 2.0 自循环检测已跳过；note_hook_pr 不适用（PR 讨论非 issue 澄清）。
+            if event_type == "issue_comment" and _issue_num and _issue_num.isdigit() and int(_issue_num) > 0:
+                try:
+                    from src.api.issues_center import _resume_issue_waiting
+                    if _resume_issue_waiting(repo_key, int(_issue_num)):
+                        log.info(f"Pipeline: issue #{_issue_num} awaiting/pending_review → processing (issue_comment reply)")
+                except Exception as _re:
+                    log.warning(f"Pipeline: issue_comment resume failed: {_re}")
         except Exception as e:
             log.warning(f"Pipeline: auto-comment marker / command check failed: {e}")
 
@@ -3032,24 +3032,36 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 
-    # ── direct 自报技能双信号收敛（方案 A，weekly-05）──
-    # worker 模式的 stream_ended 由远端 /api/runtime/tasks/{id}/complete 置位；
-    # direct 模式无 worker 回调，需在本机引擎流结束后补置 stream_ended，使
-    # self_reported(agent grape tasks complete) + stream_ended 双信号齐后 finalize_task 收敛。
+    # ── 单信号收尾（C，stream-end-finalize-single-signal-design.md）──
+    # 引擎流结束即终态触发点；stream_ended 仅作仪器记录，不再按技能类型区分/门控。
     if task_id:
         try:
-            from src.runtime.service import skill_self_reports, set_task_signal, finalize_task
-            if skill_self_reports(skill_name):
-                log.info(f"Exec agent: seq={seq} direct self-report skill, set stream_ended + finalize")
-                set_task_signal(task_id, "stream_ended")
-                finalize_task(task_id, exit_code or 0)
+            from src.runtime.service import set_task_signal
+            set_task_signal(task_id, "stream_ended")
         except Exception as _e:
-            log.warning(f"Exec agent: direct self-report finalize failed for {task_id}: {_e}")
+            log.warning(f"Exec agent: set stream_ended failed for {task_id}: {_e}")
 
     # 判定 Agent 是否有明确答复产出
     has_output, result_text = evaluate_agent_output(agent_type, tool_uses, final_text)
     if repo_gitcode_token and result_text:
         result_text = result_text.replace(repo_gitcode_token, "[REDACTED]")
+    # 若 Agent 已显式 self_report（结构化结论），以其为权威（产物而非闸门）
+    if task_id:
+        try:
+            from src.runtime.service import get_task
+            _t = get_task(task_id) or {}
+            if _t.get("self_reported") == 1 and _t.get("result_text"):
+                import json as _json
+                _stored = _t.get("result_text") or ""
+                _sd = None
+                try:
+                    _sd = _json.loads(_stored)
+                except Exception:
+                    _sd = None
+                if _sd and isinstance(_sd, dict) and (_sd.get("actions") or _sd.get("conclusion")):
+                    result_text = _stored
+        except Exception as _e:
+            log.warning(f"Exec agent: self-reported result merge failed for {task_id}: {_e}")
     completed_at = datetime.utcnow().isoformat()
     duration = None
     try:
@@ -3058,30 +3070,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         duration = round((e - s).total_seconds(), 1)
     except Exception:
         pass
-
-    if not has_output:
-        # agent 已通过 grape tasks complete 自报完成 → 跳过启发失败（防误判，issue-45-task-complete-endpoint-design.md）
-        if task_id:
-            try:
-                from src.runtime.service import get_task
-                _t = get_task(task_id) or {}
-                # 自报技能：self_reported 已置（finalize_task 可能尚未收敛 task.status）→ 也视为完成，不标 failed
-                if _t.get("status") == "completed" or _t.get("self_reported") == 1:
-                    log.info(f"Exec agent: task {task_id} self-reported completed, skip no-output fail")
-                    return
-            except Exception as _e:
-                log.warning(f"Exec agent: check self-complete failed for {task_id}: {_e}")
-        # 无产出 → 标记 failed（保留 event，不删）
-        log.info(f"Exec agent: [Agent:{agent_type}|repo:{repo_name}] no output, mark failed")
-        if task_id:
-            from src.runtime.service import update_task_status
-            update_task_status(task_id, "failed", exit_code=exit_code, result_text=result_text)
-        else:
-            _update_direct_task(seq, "failed", exit_code=exit_code, result_text=result_text)
-        update_event_status(seq, "failed")
-        update_event_complete(seq, "failed", exit_code=exit_code, duration=duration,
-                              agent_logs=agent_logs, completed_at=completed_at, result=result_text)
-        return
 
     # 有产出 → 更新该 event（写入配置 + 结果 + 结论 + 执行日志）
     # exit_code < 0 表示进程被信号终止（如 -15=SIGTERM, -9=SIGKILL），
@@ -3110,23 +3098,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _submit_direct_linked_prs(env_extra, repo_key, issue_id, repo_gitcode_token)
         except Exception as _le:
             log.warning(f"Exec agent: direct linked PR submit failed: {_le}")
-
-    # Issue #85: agent 完成后检测澄清意图 → 设 task.status=awaiting_input
-    if new_status == "completed" and result_text and issue_id and agent_type in ("vod", "issue"):
-        try:
-            _issue_num = _issue_num_from(issue_id)
-            if _issue_num and _detect_awaiting_input(result_text):
-                with db_lock:
-                    _c = db.cursor()
-                    _c.execute(
-                        "UPDATE issue SET status='awaiting_input' "
-                        "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing')",
-                        (repo_key, int(_issue_num)))
-                    db.commit()
-                    if _c.rowcount > 0:
-                        log.info(f"Issue #85: agent clarification detected → task awaiting_input for {repo_key}/#{_issue_num}")
-        except Exception as _e:
-            log.warning(f"Issue #85: awaiting_input detection failed: {_e}")
 
     # 多任务模式：父任务 Issue Agent 完成后 → stage=done（不 A2A coding，子任务由 webhook 自动触发）
     if new_status == "completed" and agent_type == "issue" and issue_id:

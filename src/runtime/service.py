@@ -1848,26 +1848,6 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
 
 # ===== 双重标记完成（issue-219-task-complete-double-signal-design.md）=====
 
-def skill_self_reports(skill_name: str) -> bool:
-    """技能是否声明以 `grape tasks complete` 结构化收尾（#219 方案C 情形一）。
-
-    判定：解析该技能 SKILL.md 内容含 "grape tasks complete"。
-    无法解析（技能文件不在服务器/自定义技能）→ False（非自报，按旧路径直接完成，不阻塞）。
-    """
-    if not skill_name:
-        return False
-    try:
-        from src.config import resolve_official_skill_path
-        _p = resolve_official_skill_path(skill_name)
-        if not _p:
-            return False
-        with open(_p, "r", encoding="utf-8") as _f:
-            _content = _f.read()
-        return "grape tasks complete" in _content
-    except Exception:
-        return False
-
-
 def set_task_signal(task_id: str, signal: str, result_text: str = "") -> bool:
     """条件置双标记之一（stream_ended=worker 隐式 / self_reported=agent 显式）。
 
@@ -1892,31 +1872,100 @@ def set_task_signal(task_id: str, signal: str, result_text: str = "") -> bool:
         return False
 
 
-def task_double_signal_ready(task_id: str) -> bool:
-    """双标记齐（stream_ended=1 且 self_reported=1）→ 可以收敛终态。"""
-    try:
-        with db_lock:
-            c = db.cursor()
-            _r = c.execute("SELECT stream_ended, self_reported FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
-        return bool(_r and _r[0] == 1 and _r[1] == 1)
-    except Exception:
-        return False
+def finalize_by_stream_end(task_id: str, fallback_text: str = "", exit_code: int = 0,
+                           usage: dict | None = None) -> bool:
+    """单信号收尾（stream-end-finalize-single-signal-design.md）：引擎流结束即任务终态。
 
-
-def finalize_task(task_id: str, exit_code: int = 0, usage=None) -> bool:
-    """双标记齐时收敛终态：用已存储的 self_reported result_text 走完整 complete_task（副作用单次）。
-
-    任一标记未齐 → 不终态（事件保持 running），等后到者触发。
-    仅由「后到标记」的调用方调用；complete_task 内部幂等保证只会真正完成一次。
+    不再区分「自报/普通」技能、不再等双信号；结构化 self_report 只是产物而非闸门：
+    - Agent 已显式 self_report 且存了结构化 JSON → 以其为权威结论；
+    - 否则回落调用方传入的流/引擎文本。
+    complete_task 负责全部落库副作用（事件、结果、回帖、stage、token 延迟失效）。
+    已终态 → 幂等返回 False（补挂走 enrich_task_on_late_report）。
     """
-    if not task_double_signal_ready(task_id):
+    task = get_task(task_id)
+    if not task:
         return False
-    _task = get_task(task_id)
-    if not _task:
+    if task.get("status") in ("completed", "failed", "cancelled"):
         return False
-    complete_task(task_id, _task.get("result_text") or "", exit_code,
-                  usage=usage or {})
+    result_text = fallback_text or ""
+    if task.get("self_reported") == 1 and task.get("result_text"):
+        _stored = task.get("result_text") or ""
+        try:
+            import json as _j
+            _d = _j.loads(_stored)
+            if isinstance(_d, dict) and (_d.get("actions") or _d.get("conclusion")):
+                result_text = _stored
+        except Exception:
+            pass
+    complete_task(task_id, result_text, exit_code, usage=usage or {})
     return True
+
+
+def enrich_task_on_late_report(task_id: str, result_text: str = "") -> str:
+    """单信号下「流结束后才到达的显式 self_report」幂等补挂（宽限窗内，token 仍有效）。
+
+    返回：attached（completed 补挂结构化）/ promoted（failed 占位提升 completed）/ already / noop。
+    守卫：仅本任务、仅结构化结论、仅未落库的缺位；failed 提升仅限「no-output 占位失败」
+    （exit_code in (0, NULL)），真实 crash（exit_code!=0）不提升。
+    只改结果存储（task/event 的 structured_output/result），不重放任何副作用（评论/回帖）。
+    """
+    task = get_task(task_id)
+    if not task:
+        return "noop"
+    status = task.get("status") or ""
+    if status not in ("completed", "failed") or task.get("self_reported") != 1:
+        return "noop"
+    _raw = result_text or (task.get("result_text") or "")
+    structured = None
+    try:
+        import json as _j
+        _d = _j.loads(_raw)
+        if isinstance(_d, dict) and (_d.get("actions") or _d.get("conclusion")):
+            structured = _raw
+    except Exception:
+        structured = None
+    if structured is None:
+        return "noop"
+
+    _event_seq = task.get("event_seq")
+    if status == "completed":
+        if _event_seq:
+            # 已落 event 结构化 → 幂等 already
+            try:
+                with db_lock:
+                    _r = db.cursor().execute(
+                        "SELECT structured_output FROM events WHERE seq=?", (_event_seq,)).fetchone()
+                if _r and (_r[0] or "").strip() not in ("", "null"):
+                    return "already"
+            except Exception:
+                pass
+            _set_task_late_result(task_id, task, structured, status="completed")
+            return "attached"
+        # 无关联 event：set_task_signal 已把结构化写入 agent_tasks.result_text，无需再附
+        return "already"
+    # failed：仅占位失败可提升
+    if task.get("exit_code") not in (0, None):
+        return "already"
+    _set_task_late_result(task_id, task, structured, status="completed")
+    return "promoted"
+
+
+def _set_task_late_result(task_id: str, task: dict, result_text: str, status: str):
+    """补挂/提升：更新 agent_tasks 与关联 event 的结果存储（无副作用重放）。"""
+    _now_iso = datetime.now(timezone.utc).isoformat()
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE agent_tasks SET status=?, result_text=?, exit_code=CASE WHEN ?='completed' THEN 0 ELSE exit_code END, "
+            "completed_at=? WHERE id=? AND status IN ('completed','failed')",
+            (status, result_text, status, _now_iso, task_id))
+        _event_seq = task.get("event_seq")
+        if _event_seq:
+            c.execute(
+                "UPDATE events SET status=?, structured_output=?, result=?, completed_at=? WHERE seq=?",
+                (status, result_text, result_text, _now_iso, _event_seq))
+        db.commit()
+    log.info(f"task {task_id} late self-report: {status} + structured attached (enrich)")
 
 
 def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: str,
