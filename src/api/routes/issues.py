@@ -13,6 +13,7 @@ Design: docs/weekly-02/issues-api-design.md
 """
 import os
 import re
+import asyncio
 
 from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
 from pydantic import BaseModel
@@ -20,6 +21,7 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.api.issues_center import TaskAwaitingInputBody
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -825,6 +827,86 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
     _issue_host = "github.com" if repo_key.startswith("github:") else "gitcode.com"
     return {"messages": messages, "conversation_id": conv_id,
             "issue_url": f"https://{_issue_host}/{repo_key}/issues/{issue_number}"}
+
+
+@router.post("/{issue_id}/awaiting-input", operation_id="issues_awaiting-input",
+             summary="Agent declares issue awaiting-input (待澄清)",
+             description="vod/issue agent explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue, agent_type must be vod/issue. Colocated with issues clarify (user reply) / issues clarifications (history).")
+async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
+                               user: dict = Depends(get_current_user_or_api_key)):
+    """vod/issue agent 显式声明「待澄清」（澄清三件套之 Agent 发起）。
+
+    - 从 `/api/tasks/awaiting-input` 迁移而来（issue-explicit-awaiting-input-api-design.md）：awaiting-input
+      **只改 issue 状态、与任务生命周期正交（C 单信号）**，故归属 /api/issues/{issue_id}。
+    - 仅会话通道（tk_）：URL {issue_id} 定位需求 + 会话 `(repo_key, agent_type)` 作用域校验（与 notify 同源信任模型）。
+    - 不终态化、不钉住 task；任务随引擎流结束由 finalize_by_stream_end 照常收尾。
+    - **不做**：不触发 ChatAgent / 不执行 opencode / 不注入用户个人 token（§十）。
+    """
+    from src.api.issues_center import (_ensure_task_conversation, _get_feishu_open_id,
+                                       _resolve_user_chat_bot, _run_awaiting_notify)
+    from src.session_manager import db as _db, db_lock as _dl, get_chat_config
+
+    questions = (body.questions or "").strip()
+    if not questions:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "questions 必填（本次需澄清的问题）"})
+    if user.get("auth_type") != "session_token":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期声明待澄清）"})
+    session_repo = user.get("repo_key") or ""
+    session_agent = user.get("agent_type") or ""
+    if not session_repo:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
+    if session_agent not in ("vod", "issue"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={session_agent} 不在本接口范围（仅 vod/issue 可声明待澄清）"})
+
+    with _dl:
+        c = _db.cursor()
+        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?",
+                  (issue_id,))
+        irow = c.fetchone()
+    if not irow:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    issue_card_id, repo_key, issue_number = irow[0], irow[1] or "", irow[2] or 0
+    assignee, issue_user_id, title, cur_status = irow[3] or "", irow[4] or 0, irow[5] or "", irow[6] or ""
+    if repo_key != session_repo:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+    if cur_status in ("completed", "cancelled"):
+        return {"ok": True, "issue_id": issue_card_id, "status": cur_status, "changed": False}
+
+    with _dl:
+        c = _db.cursor()
+        c.execute(
+            "UPDATE issue SET status='awaiting_input' WHERE id=? AND status IN ('active','processing')",
+            (issue_card_id,))
+        changed = c.rowcount > 0
+        _db.commit()
+    user_id = issue_user_id
+
+    conv_id = ""
+    if user_id > 0 and changed:
+        try:
+            conv_id = _ensure_task_conversation(user_id, repo_key, issue_number, title, "",
+                                                write_context_on_reuse=False)
+            if conv_id:
+                with _dl:
+                    c = _db.cursor()
+                    c.execute("UPDATE issue SET conversation_id=? WHERE id=?", (conv_id, issue_card_id))
+                    _db.commit()
+        except Exception as e:
+            log.warning(f"Issue awaiting-input: conversation ensure failed: {e}")
+
+    log.info(f"Issue awaiting-input: {repo_key}/#{issue_number} -> awaiting_input issue={issue_card_id} "
+             f"changed={changed} (agent={session_agent}, questions={questions[:60]})")
+    if changed:
+        open_id = _get_feishu_open_id(assignee)
+        from src.api import main as api_main
+        bm = api_main.bot_manager
+        ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
+        api = bm.api if bm else None
+        cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
+        asyncio.create_task(_run_awaiting_notify(ctx, api, user_id, conv_id, open_id,
+                                                 questions, repo_key, issue_number, cfg))
+
+    return {"ok": True, "issue_id": issue_card_id, "status": "awaiting_input", "changed": changed}
 
 
 class _IssueClarifyBody(BaseModel):

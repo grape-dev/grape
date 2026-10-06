@@ -43,39 +43,10 @@
 
 ---
 
-## POST /api/tasks/awaiting-input — 显式声明待澄清（Agent 执行期）
+## POST /api/tasks/awaiting-input — ⚠️ 已迁移
 
-> scope（x-token-scope）：**session_only**（仅 `tk_`；API Key / JWT / `BOT_GITCODE_TOKEN` → 403）。
-> CLI：`grape tasks awaiting-input`（operation_id=`tasks_awaiting-input`，命令名 ≠ 路径，见 README「CLI 命令映射」；
-> operation_id 进契约即**自动生成** CLI 命令，`grape refresh` 刷新后可用）。
-
-> 调用方：**vod / issue 系列技能**在「缺少用户输入无法继续」时显式声明任务进入待澄清（`issue-explicit-awaiting-input-api-design.md`）。
-> 语义：**唯一**进入 `awaiting_input` 状态（待澄清）的 Agent 契约路径——不再依赖输出关键词自动判定（已退役）。
-> 认证：`Authorization: Bearer <tk_ 会话 token>`，task_id 由 `session_key` 自动定位；仓库作用域必须匹配
-> 执行的 agent_tasks，且会话/任务 `agent_type` 必须为 `vod` 或 `issue`（coding/qa/sre → 403）。
-
-请求体（TaskAwaitingInputBody）：
-
-| 字段 | 类型 | 必填 | 说明 |
-|------|------|:---:|------|
-| `questions` | string | ✅ | 向开发者提出的澄清问题 / 需要补充的信息 |
-| `reason` | string | 否 | 进入待澄清的原因（写日志/归档） |
-
-出参：
-
-```json
-{"ok": true, "task_id": "t_xxx", "issue_id": 210, "status": "awaiting_input", "changed": true}
-```
-
-> `status` 为既有状态枚举 `awaiting_input`（数据值，非接口命名）；`changed=false`：任务已终态
-> （completed/failed/cancelled）或已处于待澄清（幂等），未发生迁移。
-
-效果：
-- `active/processing → awaiting_input` 原子迁移，写入任务会话（问题文本），并向责任人本人飞书 bot 发静态卡片（缺 `feishu_open_id` / 未配本人 bot → 跳过）。
-- **非终态**：不置 task 终态、不推进 pipeline stage；开发者回复走 `POST /api/issues/{issue_id}/clarify`（awaiting_input → processing）。
-- **不做**：不触发 ChatAgent / 不执行 opencode / 不注入用户个人 token。
-
-返回：200；400 questions 缺失 / 未关联有效 Issue；401 未认证；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 任务或需求卡片不存在。
+> **已迁移至 `POST /api/issues/{issue_id}/awaiting-input`**（`grape issues awaiting-input`，见 `11-issues.md`）：
+> awaiting-input 只修改 issue 状态、与任务生命周期正交（单信号），归属澄清三件套。旧路径现返回 **410 Gone**。
 
 ---
 

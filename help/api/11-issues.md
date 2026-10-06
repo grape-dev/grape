@@ -330,6 +330,25 @@ Issue 对象字段：
 
 > 同步发 GitCode Issue 评论（`💬 开发者澄清` 前缀）+ 写入任务会话；awaiting_input 自动恢复 processing。
 
+### POST /api/issues/{issue_id}/awaiting-input — Agent 声明需求待澄清（澄清三件套·发起）
+
+> 原 `/api/tasks/awaiting-input` 迁移而来（`issue-explicit-awaiting-input-api-design.md`）：awaiting-input 只修改
+> **issue 状态**、与任务生命周期正交（单信号），故归属 issues，与 `clarifications`（历史）、`clarify`（用户回复）同组。
+> CLI：`grape issues awaiting-input --issue_id {issue_id} --json '{"questions":"..."}' --json-out`（operation_id=`issues_awaiting-input`）。
+
+| 项 | 值 |
+|----|-----|
+| scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT/`BOT_GITCODE_TOKEN` → 403） |
+| Path | `{issue_id}` int（需求卡片 id） |
+| Body | `{"questions": "...", "reason": "..."}` |
+| 出参 | `{"ok": true, "issue_id": 210, "status": "awaiting_input", "changed": true}` |
+| 返回 | 200；400 questions 缺失；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 需求不存在 |
+
+> 鉴权：会话 token 的 `(repo_key, agent_type)` 作用域——须与需求的 repo_key 一致且 `agent_type∈{vod,issue}`
+> （与 `tasks notify` 同源信任模型）。效果：`active/processing → awaiting_input` 原子迁移（`changed` 可观测）、
+> 写入澄清问题到会话（`clarifications` 可直接看到）、向本人飞书 bot 发静态卡片（无配置则跳过）；
+> 与 `clarify` 回复闭环（awaiting_input → processing）。不终态化、不钉住任务（C 单信号）。
+
 ### POST /api/issues/{issue_id}/attachments — 上传附件
 
 > CLI：grape issues upload attachment --issue_id {issue_id} --file {path} --json-out（operation_id=issues_upload_attachment）。
