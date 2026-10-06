@@ -360,9 +360,9 @@ window._openBoardDetail = function(taskId) {
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}','_blank')">${t.is_pr ? '查看 PR' : I18N.t('tasks.detail.view_issue')}</button>
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('tasks.detail.go_conversation')}</button>
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}','_blank')">${t.is_pr ? '查看 PR' : I18N.t('issues.detail.view_issue')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('issues.detail.go_conversation')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
     </div>
     <div id="_boardDetailContent">${_detailHtml(t)}</div>
@@ -973,7 +973,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, (_taskSel.is_pr ? '/pull/' : '/issues/') + _taskSel.issue_number)}','_blank')">${_taskSel.is_pr ? '查看 PR' : I18N.t('tasks.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('tasks.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('tasks.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, (_taskSel.is_pr ? '/pull/' : '/issues/') + _taskSel.issue_number)}','_blank')">${_taskSel.is_pr ? '查看 PR' : I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
@@ -1058,18 +1058,18 @@ function _detailHtml(t) {
   return `
     <!-- 任务详情卡片（统一） -->
     <div style="${_cardStyle}position:relative">
-      <div style="${_cardTitle}">${I18N.t('tasks.detail_title')||'需求详情'}</div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.task_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
+      <div style="${_cardTitle}">${I18N.t('issues.detail_title')||'需求详情'}</div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.status')}</span><b style="${_valueStyle};color:${isDone?'#34c759':isCancelled?'#86868b':isProc?'#3b82f6':'#86868b'}">${tagText}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.issue_id')}</span><b style="${_valueStyle}">#${t.id}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.assignee')||'创建人'}</span><b style="${_valueStyle}">${t.assignee || '—'}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${t.is_pr ? 'PR' : 'Issue'}</span><b style="${_valueStyle}"><a href="${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}" target="_blank" rel="noopener" style="color:var(--a,#0071e3);text-decoration:none;font-weight:500">#${t.issue_number} ↗</a></b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.repo')}</span><b style="${_valueStyle}">${t.repo_key.replace(/^(github|gitcode):/, '')}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">Stage</span><b style="${_valueStyle}">${_stageLabel}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.pipeline_scene')||'流水线场景'}</span><b style="${_valueStyle}">${sceneName}${sceneBadge}</b></div>
       <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.task_mode')}</span><b style="${_valueStyle}">${subtaskBadge}${parentIssue}</b></div>
-      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.created_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
-      ${t.completed_at ? `<div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('tasks.detail.completed_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
-      ${t.task_description ? `<div style="${_rowStyle};border-bottom:none;flex-direction:column;align-items:flex-start"><span style="${_labelStyle};margin-bottom:4px">${I18N.t('tasks.detail.no_description')}</span><div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;white-space:pre-wrap;width:100%">${t.task_description}</div></div>` : ''}
+      <div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.created_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.created_at).substring(0,16)}</b></div>
+      ${t.completed_at ? `<div style="${_rowStyle}"><span style="${_labelStyle}">${I18N.t('issues.detail.completed_at')}</span><b style="${_valueStyle}">${fmtLocalTime(t.completed_at).substring(0,16)}</b></div>` : ''}
+      ${t.task_description ? `<div style="${_rowStyle};border-bottom:none;flex-direction:column;align-items:flex-start"><span style="${_labelStyle};margin-bottom:4px">${I18N.t('issues.detail.no_description')}</span><div style="font-size:13px;color:var(--t2,#3a3a3c);line-height:1.5;white-space:pre-wrap;width:100%">${t.task_description}</div></div>` : ''}
     </div>
     <div style="${_cardStyle}">
       <div style="${_cardTitle}">附件</div>

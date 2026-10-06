@@ -1,0 +1,15 @@
+{
+  "detail_title": "Requirement Detail",
+  "detail": {
+    "issue_id": "Issue ID",
+    "status": "Status",
+    "assignee": "Assignee",
+    "repo": "Repository",
+    "created_at": "Created",
+    "completed_at": "Completed",
+    "no_description": "Description",
+    "view_issue": "View Issue",
+    "go_conversation": "Open Conversation",
+    "copy_task": "Copy Requirement"
+  }
+}

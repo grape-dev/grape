@@ -421,6 +421,44 @@ class TestFeishuAsyncHttp:
         with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
             assert asyncio.run(api.send_card_to_user(_ctx(), "ou1", "card")) == "mid"
 
+    def test_send_card_to_user_with_actions(self):
+        """feishu-notification-card-quick-actions-design.md：actions 参数追加 action 元素。"""
+        api, sess = _api_with_session()
+        sess.post.return_value = _HttpCtx(_FakeResp({"data": {"message_id": "mid"}}))
+        actions = [{"tag": "button", "text": {"tag": "plain_text", "content": "go"},
+                    "value": {"cmd": "/task-open"}}]
+        with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
+            assert asyncio.run(api.send_card_to_user(_ctx(), "ou1", "card", actions=actions)) == "mid"
+        req = sess.post.call_args
+        payload = req[1]["json"]
+        card = json.loads(payload["content"])
+        assert card["elements"][-1]["tag"] == "action"
+        assert card["elements"][-1]["actions"] == actions
+
+    def test_send_card_to_user_no_actions(self):
+        api, sess = _api_with_session()
+        sess.post.return_value = _HttpCtx(_FakeResp({"data": {"message_id": "mid"}}))
+        with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
+            asyncio.run(api.send_card_to_user(_ctx(), "ou1", "card"))
+        req = sess.post.call_args
+        payload = req[1]["json"]
+        card = json.loads(payload["content"])
+        assert all(el.get("tag") != "action" for el in card["elements"])
+
+    def test_parse_card_action_passes_card_value(self):
+        evt = {
+            "event": {
+                "operator": {"open_id": "ou_x"},
+                "context": {"open_chat_id": "oc_x", "open_message_id": "om_x"},
+                "action": {"value": {"cmd": "/task-open", "repo_key": "gitcode:a/b",
+                                     "issue_number": "#7", "conv_id": "c1"}},
+            },
+        }
+        parsed = fa._parse_card_action(evt)
+        assert parsed["text"] == "/task-open"
+        assert parsed["_card_value"]["repo_key"] == "gitcode:a/b"
+        assert parsed["_card_value"]["conv_id"] == "c1"
+
     def test_update_message_true_on_200(self):
         api, sess = _api_with_session()
         sess.patch.return_value = _HttpCtx(_FakeResp({}, status=200))
