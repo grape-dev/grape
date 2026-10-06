@@ -534,7 +534,7 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") 
 # - 特例：PR updated + stage=coding + QA 有历史 → qa（复审）
 _STAGE_EVENT_AGENT_MAP = {
     "issue_opened":        {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
-    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "issue", "done": ""},
+    "issue_comment":       {"vod": "vod", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "issue", "done": ""},
     # close 已由 L1 副作用短路，此处安全兜底：close 一律不分发（issue_updated 其余 action 归 issue）
     "issue_updated":       {"vod": "issue", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
     "issue_labeled":       {"vod": "vod", "issue": "issue", "coding": "issue", "qa": "issue", "sre": "issue", "pending_review": "", "done": ""},
@@ -595,6 +595,13 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
     # 表驱动查找；显式列缺失视为不分发
     _row = _STAGE_EVENT_AGENT_MAP.get(event_type)
     _agent = (_row or {}).get(stage, "") if _row else ""
+
+    # pending_review → 审核点 owner（issue-comment-stage-owner-routing-design.md §3.1）：
+    # 评论应回给「设审核点/当前 stage owner」的 agent（如 QA 设待审核则由 QA 收口 review-pass/reject）
+    if stage == "pending_review" and _agent:
+        _owner = (st.get("owner_agent") or "")
+        if _owner in ("vod", "issue", "coding", "qa", "sre"):
+            _agent = _owner
 
     # 特例已由 _STAGE_EVENT_AGENT_MAP 表驱动处理：
     # pull_request_updated + coding → qa（weekly-02 修复 Issue #46：QA↔coding 回流闭环）
@@ -1527,7 +1534,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 豁免：a2a_event（已有自己的去重）
     _scene_id_for_event = evt.get("_pr_sub_scene_id", "") or _issue_scene
     _seq = 0
-    if issue_id and agent_type and event_type != "a2a_event":
+    # issue_comment 豁免 webhook 去重（issue-comment-stage-owner-routing-design.md §3.3）：
+    # 评论是人操作、频率低，被「同 (issue,agent) 有 running 事件」的 dedup 挡掉会导致评论丢失；
+    # 改为始终新建事件 + 入队（agent_tasks），由 issue_agent_session 的串行执行自然排队，
+    # 待当前事件终态后再跑，不丢弃。bot 自评回声/系统回帖已在上游过滤，不会因豁免循环触发。
+    if issue_id and agent_type and event_type not in ("a2a_event", "issue_comment"):
         try:
             with db_lock:
                 _dc = db.cursor()

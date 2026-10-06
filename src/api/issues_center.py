@@ -587,6 +587,33 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     return "\n".join(lines)
 
 
+def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> list:
+    """通知卡快捷按钮：进入任务会话（cmd 直达）+ 查看 Issue（VCS 公开页只读）。
+
+    设计：docs/weekly-05/feishu-notification-card-quick-actions-design.md。
+    """
+    try:
+        from src.repo_key import split_owner_repo
+        owner, repo = split_owner_repo(repo_key)
+    except Exception:
+        owner, repo = "", ""
+    _iss = f"#{issue_number}" if issue_number else ""
+    actions = [{
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "💬 进入任务会话"},
+        "value": {"cmd": "/task-open", "repo_key": repo_key,
+                  "issue_number": _iss, "conv_id": conv_id or ""},
+    }]
+    if owner and repo and _iss:
+        base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "查看 Issue ↗"},
+            "url": f"{base}/{owner}/{repo}/issues/{_iss.lstrip('#')}",
+        })
+    return actions
+
+
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                       task_description: str, repo_key: str, issue_number: int, cfg: dict):
     """任务分配通知：仅静态模板消息 + 飞书通知，不执行任何后台 LLM/ChatAgent。
@@ -616,7 +643,8 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                            f"{task_description}\n\n"
                            f"请在任务中心查看并处理。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知")
+                await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知",
+                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
             except Exception as e:
                 log.warning(f"Task notify feishu failed: {e}")
     except Exception as e:
@@ -647,7 +675,8 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
                            f"{questions}\n\n"
                            f"请在任务中心补充后，我继续处理。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清")
+                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清",
+                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
             except Exception as e:
                 log.warning(f"Task awaiting feishu failed: {e}")
     except Exception as e:
@@ -680,7 +709,8 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
                            f"{review_points}{_refs_suffix}\n\n"
                            f"请审核后回复，我继续处理。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核")
+                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核",
+                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
             except Exception as e:
                 log.warning(f"Issue pending-review feishu failed: {e}")
     except Exception as e:
