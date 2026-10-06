@@ -52,7 +52,7 @@
 | [10 Git 仓库](10-git-repos.md) | **全部** | session_only |
 | [11 Issues](11-issues.md) | 仓库列表 + 详情/事件/pipeline + `GET status`（读） | dual |
 | | `mine`（个人维度）、`create`（创建人=调用者） | user_only |
-| | `awaiting-input`（tk_，Agent 声明待澄清） | session_only |
+| | `awaiting-input` / `pending-review` / `review-pass` / `review-reject`（tk_，Agent 等用户双态） | session_only |
 | | 操作/写类（start/`PUT status`/confirm-done/cancel/resume/pipeline/clarify/attachments 写） | user_only |
 | [12 A2A](12-a2a.md) | `POST /api/a2a` | dual |
 | [13 Settings](13-settings.md) | 全部（凭据/API Key/通知/OAuth/引擎/rta 凭据/mode/规则） | user_only |
