@@ -73,15 +73,15 @@ def teardown_module():
         db.commit()
 
 
-def _seed(status="processing", issue_number=21, assignee="review_eric"):
+def _seed(status="processing", issue_number=21, assignee="review_eric", stage="vod"):
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=?", (issue_number,))
         c.execute("DELETE FROM chat_conversations WHERE repo_key='gitcode:org/test' AND title=?", (f"Issue #{issue_number}",))
         c.execute(
-            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status) "
-            "VALUES (?,?,?,?,?,?,?)",
-            (_uid["id"], assignee, "gitcode:org/test", issue_number, "待审核需求", "d", status))
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, stage) "
+            "VALUES (?,?,?,?,?,?,?,?)",
+            (_uid["id"], assignee, "gitcode:org/test", issue_number, "待审核需求", "d", status, stage))
         card_id = c.lastrowid
         db.commit()
         return card_id
@@ -216,3 +216,54 @@ class TestPendingReview:
         assert r.status_code == 200
         assert r.json()["changed"] is True
         assert _status(issue_number=24)[0] == "pending_review"
+
+
+class TestReviewPassLastNodeNormalize:
+    """review-pass-last-node-force-done-design.md：末节点触达时 target=processing → 归一 done。"""
+
+    def test_last_node_processing_normalized_to_done(self):
+        # 默认场景末节点 sre（next=done）+ status=pending_review
+        cid = _seed(status="pending_review", issue_number=31, stage="sre")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="sre"),
+                        json={"target": "processing", "evidence": "用户确认 ok"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["result"] == "passed_done"
+        assert data["status"] == "completed"
+        st = _status(issue_number=31)
+        assert st[0] == "completed"
+        assert st[1] == "done"
+
+    def test_middle_node_processing_not_normalized(self):
+        # 中继节点 qa（next=sre，非末节点）→ 保持 processing
+        cid = _seed(status="pending_review", issue_number=32, stage="qa")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "processing"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["result"] == "passed_processing"
+        assert data["status"] == "processing"
+        st = _status(issue_number=32)
+        assert st[0] == "processing"
+        assert st[1] == "qa"  # stage 不变
+
+    def test_explicit_done_unaffected(self):
+        cid = _seed(status="pending_review", issue_number=33, stage="sre")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="sre"),
+                        json={"target": "done"})
+        assert r.status_code == 200
+        assert r.json()["result"] == "passed_done"
+
+    def test_is_last_stage_node_helper(self):
+        from src.api.issues_center import _is_last_stage_node
+        _seed(status="processing", issue_number=41, stage="sre")
+        assert _is_last_stage_node("gitcode:org/test", 41) is True
+        _seed(status="processing", issue_number=42, stage="qa")
+        assert _is_last_stage_node("gitcode:org/test", 42) is False
+        _seed(status="processing", issue_number=43, stage="done")
+        assert _is_last_stage_node("gitcode:org/test", 43) is False  # 终态 → 保守 False
+        _seed(status="processing", issue_number=44, stage="")
+        assert _is_last_stage_node("gitcode:org/test", 44) is False  # 未知 → 保守 False

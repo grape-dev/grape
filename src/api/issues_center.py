@@ -448,40 +448,78 @@ def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
         return False
 
 
+def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
+    """当前 issue.stage 是否为流水线末节点（next=='done'）。
+
+    与 complete_task 末节点判定（service.py:1685-1687）同源复用 `next=='done'` 判据；
+    stage 不可推定 / 未知 / 已终态 → 保守返回 False（review-pass 归一兜底用）。
+    """
+    try:
+        from src.api.session_store import get_issue_stage, get_issue_scene
+        from src.api.pipeline_config import get_pipeline_config
+        _issue_id = f"#{issue_number}"
+        _st = get_issue_stage(repo_key, _issue_id) or {}
+        _cur = (_st.get("stage") or "").strip()
+        if not _cur or _cur in ("done", "pending_review"):
+            return False
+        _scene = get_issue_scene(repo_key, _issue_id)
+        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
+        for _n in (_cfg.get("nodes") or []):
+            if _n.get("id") == _cur:
+                return _n.get("next") == "done"
+        return False
+    except Exception:
+        return False
+
+
+def _complete_pending_review(repo_key: str, issue_number: int, evidence: str) -> bool:
+    """review-pass done 分支：status=completed + stage=done（合入/收尾）。返回是否变更。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+            (repo_key, issue_number))
+        db.commit()
+        _changed = c.rowcount > 0
+    if _changed:
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, f"#{issue_number}", "done", "agent")
+        except Exception as _se:
+            log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
+        log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+    return _changed
+
+
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
     """Agent 判定用户通过审核（幂等）：仅 `pending_review` 可退出。
-    target=processing → 继续流水线；target=done → status=completed + stage=done（合入/收尾）。"""
+    target=processing → 继续流水线；target=done → status=completed + stage=done（合入/收尾）。
+
+    归一兜底（review-pass-last-node-force-done-design.md）：target=processing 但当前 stage 已是
+    流水线末节点（next=='done'）→ 无下游可续，归一为 done（否则卡片卡死 processing）。
+    仅 review-pass；review-reject 的 processing（打回继续改）不归一。
+    """
     try:
         if target == "done":
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
-                    "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
-                    (repo_key, issue_number))
-                db.commit()
-                _changed = c.rowcount > 0
-            if _changed:
-                try:
-                    from src.api.session_store import set_issue_stage
-                    set_issue_stage(repo_key, f"#{issue_number}", "done", "agent")
-                except Exception as _se:
-                    log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
-                log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
-                return "passed_done"
-        else:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
-                    "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
-                    (repo_key, issue_number))
-                db.commit()
-                _changed = c.rowcount > 0
-            if _changed:
-                log.info(f"Issue review-pass(processing): {repo_key}/#{issue_number} evidence={evidence[:60]}")
-                return "passed_processing"
+            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+        if _is_last_stage_node(repo_key, issue_number):
+            log.info(f"Issue review-pass normalized last-node target=processing→done: "
+                     f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
+            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                (repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue review-pass(processing): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+            return "passed_processing"
         return "noop"
     except Exception as _e:
         log.warning(f"review_pass failed {repo_key}/#{issue_number}: {_e}")
