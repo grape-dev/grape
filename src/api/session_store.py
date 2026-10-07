@@ -152,7 +152,7 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
     from src.config import log
     log.info(f"IssueState: repo={repo_key} issue={issue_id} stage={stage} owner={owner_agent} assignee={assignee}")
 
-    # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled）
+    # Issue #85: stage 推进时同步 task.status（不覆盖 awaiting_input/completed/cancelled/pending_review）
     _STAGE_TO_TASK_STATUS = {
         "vod": "processing", "issue": "processing", "coding": "processing",
         "qa": "processing", "sre": "processing",
@@ -166,7 +166,8 @@ def set_issue_stage(repo_key: str, issue_id: str, stage: str, owner_agent: str,
                 _c = db.cursor()
                 _c.execute(
                     "UPDATE issue SET status=? "
-                    "WHERE repo_key=? AND issue_number=? AND status NOT IN ('completed','cancelled','awaiting_input')",
+                    "WHERE repo_key=? AND issue_number=? "
+                    "AND status NOT IN ('completed','cancelled','awaiting_input','pending_review')",
                     (_task_status, repo_key, _issue_num))
                 db.commit()
         except Exception as _e:

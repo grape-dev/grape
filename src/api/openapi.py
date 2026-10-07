@@ -69,8 +69,10 @@ _SESSION_ONLY_OPERATIONS = frozenset({
     "gitrepo_pulls_comments_list", "gitrepo_pulls_comments_create", "gitrepo_pulls_files",
     # CLI 本地 git 凭据/工作区（repos.py，体内 _repo_platform_token 强制 session）
     "repos_git_credential", "repos_workspace",
-    # Agent 执行期动作（tasks.py，体内 _require_session_repo_token 强制 session）
+    # Agent 执行期动作（tasks.py / issues.py，体内 _require_session_repo_token / auth_type 强制 session）
     "tasks_current", "tasks_notify",
+    # awaiting-input / pending-review 归属 issues（等用户双态），session_only 显式登记
+    "issues_awaiting-input", "issues_pending-review", "issues_review-pass", "issues_review-reject",
 })
 
 # session_only 的路径前缀规则（覆盖表补充；新增 git-repo 端点只要进此命名空间即自动标注）
