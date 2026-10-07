@@ -71,6 +71,9 @@
 - **等用户双态自动恢复**（`_resume_issue_waiting`）：awaiting_input/pending_review → processing 后再按新矩阵路由给 stage owner；
 - `_STAGE_EVENT_AGENT_MAP` 其余事件（issue_opened/updated、PR、note_hook_pr）不动。
 
+> 附带决策：**删除旧“A2A 回退检测”→ 取消下游任务机制**（`webhook.py` A2A 归属转移处）。stage-owner 机制保证即便收到回退指令，
+> 由最新归属的 agent（owner）负责处理；旧的取消逻辑会把“QA 打回 coding”这类合法回流误判为回退并杀掉发起方任务（事件被置 cancelled）。
+
 ### 3.5 与 pending-review / awaiting-input 协同
 
 - QA 设 pending_review（stage=qa）→ 用户评论恢复 processing → 新矩阵路由给 **qa** → QA 读用户意见后 `review-pass/review-reject` 收口（无需 issue 中转）。
