@@ -73,7 +73,7 @@ def teardown_module():
         db.commit()
 
 
-def _seed(status="processing", issue_number=21):
+def _seed(status="processing", issue_number=21, assignee="review_eric"):
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=?", (issue_number,))
@@ -81,7 +81,7 @@ def _seed(status="processing", issue_number=21):
         c.execute(
             "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status) "
             "VALUES (?,?,?,?,?,?,?)",
-            (_uid["id"], "review_eric", "gitcode:org/test", issue_number, "待审核需求", "d", status))
+            (_uid["id"], assignee, "gitcode:org/test", issue_number, "待审核需求", "d", status))
         card_id = c.lastrowid
         db.commit()
         return card_id
@@ -199,3 +199,20 @@ class TestPendingReview:
                         headers=_session_headers(agent_type="qa"), json={"target": "processing"})
         assert r.json()["result"] == "noop"
         assert _status()[0] == "processing"
+
+    def test_feishu_open_id_by_user_id(self):
+        # user_id 定位优先（assignee='' 时仍可触达）；_get_feishu_open_id('') 为空证明兜底必要
+        from src.api.issues_center import _get_feishu_open_id, _get_feishu_open_id_by_user_id
+        assert _get_feishu_open_id_by_user_id(_uid["id"]) == "ou_review"
+        assert _get_feishu_open_id("") == ""
+
+    def test_pending_review_with_empty_assignee_ok(self):
+        # assignee 为空仍能设待审核（通知 open_id 走 user_id 定位）；不崩溃、状态正确
+        cid = _seed(issue_number=24, assignee="")
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"),
+                            json={"review_points": "请确认", "references": ""})
+        assert r.status_code == 200
+        assert r.json()["changed"] is True
+        assert _status(issue_number=24)[0] == "pending_review"

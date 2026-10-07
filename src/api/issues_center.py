@@ -89,6 +89,27 @@ def _get_feishu_open_id(gitcode_user: str) -> str:
             return ""
 
 
+def _get_feishu_open_id_by_user_id(user_id: int) -> str:
+    """按平台 user_id 查飞书 open_id（等用户状态通知的 open_id 定位）。
+
+    A2A/流水线产生的需求卡 `assignee` 常为空（归属人由 user_id 承载），飞书 open_id 应随 user_id 查询，
+    而非 GitCode 用户名（assignee），否则 assignee 为空时通知静默丢失（feishu-openid-by-user-id-design.md）。
+    返回 open_id（空串=未配置/缺失）。
+    """
+    if not user_id:
+        return ""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND feishu_open_id!='' LIMIT 1",
+                (user_id,))
+            row = c.fetchone()
+            return row[0] if row else ""
+        except Exception:
+            return ""
+
+
 def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
                                title: str, task_description: str) -> int | None:
     """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。

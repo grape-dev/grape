@@ -898,7 +898,8 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     log.info(f"Issue awaiting-input: {repo_key}/#{issue_number} -> awaiting_input issue={issue_card_id} "
              f"changed={changed} (agent={session_agent}, questions={questions[:60]})")
     if changed:
-        open_id = _get_feishu_open_id(assignee)
+        from src.api.issues_center import _get_feishu_open_id_by_user_id
+        open_id = _get_feishu_open_id_by_user_id(user_id) or _get_feishu_open_id(assignee)
         from src.api import main as api_main
         bm = api_main.bot_manager
         ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
@@ -975,10 +976,10 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
     # 飞书静态卡片触达（同 awaiting）：等用户双态的“待审核”必须主动通知用户
     if _changed:
         try:
-            from src.api.issues_center import (_get_feishu_open_id, _resolve_user_chat_bot,
-                                               _run_pending_review_notify)
+            from src.api.issues_center import (_get_feishu_open_id, _get_feishu_open_id_by_user_id,
+                                               _resolve_user_chat_bot, _run_pending_review_notify)
             from src.session_manager import get_chat_config
-            _open_id = _get_feishu_open_id(it["assignee"])
+            _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"])
             from src.api import main as api_main
             bm = api_main.bot_manager
             _ctx = _resolve_user_chat_bot(bm, it["user_id"]) if bm else None
