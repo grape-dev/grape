@@ -45,7 +45,10 @@ def _hash_password(password: str) -> str:
 
 
 def create_user(username: str, password: str, created_by: int = 0) -> dict | None:
-    """创建普通用户，返回用户信息或 None"""
+    """创建普通用户，返回用户信息或 None。
+
+    新用户自动创建个人组织（is_personal=1），实现组织特性向后兼容。
+    """
     pw_hash = _hash_password(password)
     try:
         with db_lock:
@@ -55,6 +58,16 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
             db.commit()
             uid = c.lastrowid
             log.info(f"User created: {username} (id={uid}, by={created_by})")
+
+            # 自动创建个人组织
+            from src.user.org_db import create_org
+            slug = f"personal-{uid}"
+            create_org(
+                name=f"{username}的个人空间", slug=slug,
+                owner_id=uid, is_personal=1
+            )
+            log.info(f"Personal org created for user {uid}")
+
             return {"id": uid, "username": username}
     except Exception as e:
         log.warning(f"Create user failed: {e}")
@@ -1092,29 +1105,38 @@ def get_skill_md(user_id: int, skill_name: str) -> str | None:
 def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id: int = 0,
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
                      bot_username: str = "", dev_scene: str = "",
-                     github_webhook_token: str = "", bot_github_token: str = "") -> bool:
-    """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。"""
+                     github_webhook_token: str = "", bot_github_token: str = "",
+                     org_id: int = 0) -> bool:
+    """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。
+
+    org_id > 0 时绑定到指定组织；org_id=0 时为全局（兼容旧逻辑）。
+    """
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
     full_name = from_repo_key(repo_key)
     try:
         with db_lock:
             c = db.cursor()
-            # 先尝试含 bot_github_token 的完整插入
+            # 先尝试含 org_id + bot_github_token 的完整插入
             try:
                 c.execute(
-                    "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                    (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token))
+                    "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id))
             except Exception:
                 # 列不存在时降级（兼容未迁移的库）
                 try:
                     c.execute(
-                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token))
+                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, org_id))
                 except Exception:
-                    c.execute(
-                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
-                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
+                    try:
+                        c.execute(
+                            "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, org_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                            (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, org_id))
+                    except Exception:
+                        c.execute(
+                            "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
+                            (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
             db.commit()
             return True
     except Exception as e:
@@ -1281,20 +1303,34 @@ def get_global_bot_credential() -> tuple[str, str]:
     return "", ""
 
 
-def get_managed_repos(user_id: int) -> list[dict]:
-    """返回该用户可见（JOIN user_repos）的托管仓库；对外 full_name 无前缀、repo_key 带前缀。"""
+def get_managed_repos(user_id: int, org_id: int = 0) -> list[dict]:
+    """返回该用户可见（JOIN user_repos）的托管仓库；对外 full_name 无前缀、repo_key 带前缀。
+
+    org_id > 0 时按组织过滤（managed_repos.org_id=?），实现组织级仓库隔离。
+    org_id=0 时返回全部（兼容旧调用，但实际由调用方 require_org_member 保证 org_id 已解析）。
+    """
     from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(
-                "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
-                "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
-                "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
-                "FROM managed_repos m "
-                "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
-                "WHERE u.repo_key IS NOT NULL "
-                "ORDER BY m.full_name", (user_id,))
+            if org_id:
+                c.execute(
+                    "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
+                    "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "FROM managed_repos m "
+                    "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
+                    "WHERE u.repo_key IS NOT NULL AND m.org_id=? "
+                    "ORDER BY m.full_name", (user_id, org_id))
+            else:
+                c.execute(
+                    "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
+                    "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "FROM managed_repos m "
+                    "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
+                    "WHERE u.repo_key IS NOT NULL "
+                    "ORDER BY m.full_name", (user_id,))
         except Exception as e:
             log.warning(f"get_managed_repos join failed: {e}")
             c.execute(
@@ -1917,8 +1953,12 @@ def save_user_repos(user_id: int, repos: list[dict]):
         db.commit()
 
 
-def get_user_repos(user_id: int) -> list[dict]:
-    """读取用户仓库缓存（对外返回 full_name 无前缀）"""
+def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
+    """读取用户仓库缓存（对外返回 full_name 无前缀）。
+
+    org_id 参数保留兼容，但实际过滤在 _filter_repos 中完成
+    （需要同时返回未托管的仓库供用户托管到当前组织）。
+    """
     from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
@@ -1926,7 +1966,6 @@ def get_user_repos(user_id: int) -> list[dict]:
         return [
             {"repo_key": r[0], "full_name": from_repo_key(r[0]), "owner": r[1], "name": r[2],
              "description": r[3], "role": r[4], "is_admin": bool(r[5]), "is_join": bool(r[6]),
-
              "created_at": r[7] or ""}
             for r in c.fetchall()
         ]
@@ -2076,9 +2115,9 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, org_id FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, org_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return _rows_to_runtimes(c.fetchall())
 
 
@@ -2096,7 +2135,8 @@ def _rows_to_runtimes(rows) -> list[dict]:
          "host_name": r[17] or "",
          "max_concurrent": r[18] or 20,
          "scene_tags": json.loads(r[19]) if r[19] else ["default"],
-         "alias": r[20] or ""}
+         "alias": r[20] or "",
+         "org_id": r[21] or 0}
         for r in rows
     ]
 

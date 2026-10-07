@@ -1333,18 +1333,117 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
 | **P5** | 事件入库填充 org_id + Worker 注册绑定 org_id + Session Token 扩展 | 1 天 |
 | **P6** | 测试 + 回归验证 + 迁移脚本验证 | 2 天 |
 
-### 7.2 验证清单
+### 7.2 验证用例
 
-- [ ] 现有用户登录后自动有个人组织
-- [ ] 未传 `X-Org-ID` 时所有 API 行为不变
-- [ ] 创建组织 → 邀请成员 → 成员切换组织 → 看到组织资源
-- [ ] 组织 A 的仓库对组织 B 不可见
-- [ ] Worker 凭据只能注册到所属组织的引擎池
-- [ ] 事件入库时 `org_id` 正确填充
-- [ ] `scope='official'` 的 Skill/Scene 对所有组织可见
-- [ ] 个人组织不可删除
-- [ ] MySQL 环境迁移脚本执行成功
-- [ ] 现有测试用例全部通过
+#### 7.2.1 数据迁移验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| M-01 | organization 表创建 | `SELECT count(*) FROM organization` | 返回 > 0（每个用户一个个人组织） | ✅ |
+| M-02 | org_member 表创建 | `SELECT count(*) FROM org_member` | 返回 > 0（每个用户 owner 记录） | ✅ |
+| M-03 | org_id 列存在 | 对 12 张核心表执行 `PRAGMA table_info(表名)` | 每张表都包含 `org_id` 列 | ✅ |
+| M-04 | 个人组织自动创建 | `SELECT count(*) FROM organization WHERE is_personal=1` == `SELECT count(*) FROM user_accounts` | 两者相等 | ✅ |
+| M-05 | managed_repos 迁移 | `SELECT count(*) FROM managed_repos WHERE org_id > 0` | > 0（现有仓库已归属个人组织） | ✅ |
+| M-06 | runtime_credentials 迁移 | `SELECT count(*) FROM runtime_credentials WHERE org_id > 0 AND scope='user'` | scope=user 的凭据已迁移 | ✅ |
+| M-07 | skill 迁移 | `SELECT count(*) FROM skill WHERE org_id > 0 AND scope IN ('user','repo')` | user/repo scope 的技能已迁移 | ✅ |
+| M-08 | events 回填 | `SELECT count(*) FROM events WHERE org_id > 0` | > 0（跟随 repo_key 回填） | ✅ |
+| M-09 | 迁移幂等性 | 二次执行 `_migrate_create_personal_orgs()` + `_migrate_data_to_personal_orgs()` | 不报错，不产生重复数据 | ✅ |
+| M-10 | 新用户自动创建个人组织 | 调用 `create_user('testuser', 'pass')` 后查 `organization WHERE owner_id=<新uid> AND is_personal=1` | 存在一条记录 | ✅ |
+
+#### 7.2.2 组织管理 API 验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| A-01 | 列出用户组织 | `GET /api/orgs`（已登录） | 返回数组，含个人组织（is_personal=true, role=owner） | ✅ |
+| A-02 | 创建组织 | `POST /api/orgs {"name":"测试团队","slug":"test-team"}` | 返回 200 + 组织详情，role=owner | ✅ |
+| A-03 | 创建组织 slug 唯一 | 重复创建 slug=test-team | 返回 409 | ✅ |
+| A-04 | 获取组织详情 | `GET /api/orgs/{org_id}` | 返回组织信息 + 当前用户角色 | ✅ |
+| A-05 | 更新组织 | `PUT /api/orgs/{org_id} {"name":"新名称"}`（owner/admin） | 返回 `{"ok": true}` | ✅ |
+| A-06 | 更新组织权限 | member 角色调用 `PUT /api/orgs/{org_id}` | 返回 403 | ✅ |
+| A-07 | 删除组织 | `DELETE /api/orgs/{org_id}`（owner，非个人组织） | 返回 `{"ok": true}` | ✅ |
+| A-08 | 个人组织不可删 | `DELETE /api/orgs/{personal_org_id}` | 返回 400 | ✅ |
+| A-09 | 列出成员 | `GET /api/orgs/{org_id}/members` | 返回成员数组（含 username/nickname/role） | ✅ |
+| A-10 | 添加成员 | `POST /api/orgs/{org_id}/members {"user_id":N,"role":"member"}` | 返回 `{"ok": true}` | ✅ |
+| A-11 | 添加不存在用户 | `POST /api/orgs/{org_id}/members {"user_id":99999}` | 返回 404 | ✅ |
+| A-12 | 重复添加成员 | 对已加入的成员再次 `POST /api/orgs/{org_id}/members` | 返回 409 | ✅ |
+| A-13 | 修改成员角色 | `PATCH /api/orgs/{org_id}/members/{user_id} {"role":"admin"}`（owner） | 返回 `{"ok": true}` | ✅ |
+| A-14 | 非 owner 修改角色 | admin 调用 `PATCH` 修改角色 | 返回 403 | ✅ |
+| A-15 | 移除成员 | `DELETE /api/orgs/{org_id}/members/{user_id}`（admin） | 返回 `{"ok": true}` | ✅ |
+| A-16 | 移除 owner | `DELETE /api/orgs/{org_id}/members/{owner_user_id}` | 返回 400（owner 不可移除） | ✅ |
+| A-17 | 离开组织 | `POST /api/orgs/{org_id}/leave`（member） | 返回 `{"ok": true}` | ✅ |
+| A-18 | owner 离开组织 | `POST /api/orgs/{org_id}/leave`（owner） | 返回 400 | ✅ |
+| A-19 | 非成员访问组织 | 非组织成员调用 `GET /api/orgs/{org_id}` | 返回 403 | ✅ |
+| A-20 | 未登录访问 | 无 token 调用 `GET /api/orgs` | 返回 401 | ✅ |
+
+#### 7.2.3 组织上下文解析验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| C-01 | X-Org-ID header | 请求带 `X-Org-ID: <org_id>`（成员） | resolve_org_context 返回该 org_id | ✅ |
+| C-02 | X-Org-Slug header | 请求带 `X-Org-Slug: personal-1` | resolve_org_context 返回对应 org_id | ✅ |
+| C-03 | ?org_id query | 请求带 `?org_id=<org_id>` | resolve_org_context 返回该 org_id | ✅ |
+| C-04 | ?org_slug query | 请求带 `?org_slug=personal-1` | resolve_org_context 返回对应 org_id | ✅ |
+| C-05 | 未指定组织 | 不传任何 org 标识 | 回退到用户个人组织 ID（兼容现有行为） | ✅ |
+| C-06 | 非成员指定组织 | 用户传 `X-Org-ID` 指定非成员组织 | 返回 403 | ✅ |
+| C-07 | 前端 X-Org-ID 注入 | 前端 localStorage 设置 current_org_id 后请求 | 每个请求 header 自动携带 X-Org-ID | ✅ |
+
+#### 7.2.4 数据隔离验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| I-01 | 仓库列表隔离 | 用户 A 在组织 A 仓库列表中看不到组织 B 的仓库 | managed_repos 查询加 org_id 过滤 | ⬜ |
+| I-02 | 事件隔离 | 组织 A 的事件查询不返回组织 B 的事件 | events 查询加 org_id 过滤 | ⬜ |
+| I-03 | Worker 凭据隔离 | 组织 A 的凭据列表不含组织 B 的凭据 | runtime_credentials 查询加 org_id 过滤 | ⬜ |
+| I-04 | 引擎隔离 | 组织 A 的引擎列表不含组织 B 的引擎 | agent_runtimes 查询加 org_id 过滤 | ⬜ |
+| I-05 | Skill 隔离 | 组织 A 的技能列表不含组织 B 的 user/repo scope 技能 | skill 查询加 org_id 过滤 | ⬜ |
+| I-06 | 官方资源不受隔离 | scope='official' 的 Skill 在任何组织中可见 | org_id=0 不加组织过滤 | ⬜ |
+| I-07 | 事件入库填充 | Webhook 触发新事件后，events.org_id 正确填充 | 查 managed_repos.org_id 并写入 | ✅ |
+| I-08 | 创建仓库绑定 org | 托管新仓库时 managed_repos.org_id 填充当前组织 | 写入时带 org_id | ⬜ |
+| I-09 | 跨组织伪造 X-Org-ID | 用户伪造其他组织的 X-Org-ID | 403（resolve_org_context 校验成员关系） | ✅ |
+
+#### 7.2.5 前端 UI 验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| U-01 | 侧边栏入口 | 登录后查看侧边栏 | 设置组中有「组织管理」入口 | ✅ |
+| U-02 | 组织列表页 | 点击「组织管理」 | 显示用户加入的组织列表（含个人组织徽章） | ✅ |
+| U-03 | 创建组织弹窗 | 点击「+ 创建组织」 | 弹出创建表单（名称/slug/描述） | ✅ |
+| U-04 | 组织详情页 | 点击组织卡片 | 显示组织信息 + 成员列表 + 切换按钮 | ✅ |
+| U-05 | 添加成员弹窗 | owner/admin 点击「+ 添加成员」 | 弹出添加表单（用户 ID + 角色选择） | ✅ |
+| U-06 | 移除成员确认 | owner 点击「移除」 | 弹出确认弹窗 | ✅ |
+| U-07 | 切换组织 | 点击「切换到此组织」 | localStorage 写入 current_org_id，页面刷新 | ✅ |
+| U-08 | API 拦截器 | 切换组织后所有请求 | 请求 header 自动携带 X-Org-ID | ✅ |
+| U-09 | 无仓库可访问 | 未选择仓库时点击组织管理 | 正常显示（在 no-repo allowlist 中） | ✅ |
+| U-10 | 未登录路由 | 未登录时访问组织管理 | 重定向到登录页 | ✅ |
+
+#### 7.2.6 向后兼容验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| B-01 | 现有用户零感知 | 现有用户登录，不传 X-Org-ID | 所有 API 行为与改造前一致（回退到个人组织） | ✅ |
+| B-02 | 现有 Worker 注册 | Worker 用 rta_ token 注册 | 正常注册（credential.org_id 已迁移） | ⬜ |
+| B-03 | 现有 Webhook 事件 | GitCode push Issue 事件 | 事件正常入库，org_id 从 managed_repos 填充 | ✅ |
+| B-04 | scope=official 资源 | 查询 Skill 列表 | 官方技能对所有组织可见 | ⬜ |
+| B-05 | scope=global 凭据 | 查询凭据列表 | global 凭据对所有组织可见（org_id=0） | ⬜ |
+| B-06 | 现有测试用例 | 运行全部已有测试 | 全部通过（无回归） | ✅ |
+
+#### 7.2.7 安全验证
+
+| 编号 | 用例 | 验证步骤 | 预期结果 | 状态 |
+|------|------|----------|----------|------|
+| S-01 | 伪造 X-Org-ID | 用户传非成员组织的 X-Org-ID | 403 拒绝 | ✅ |
+| S-02 | 个人组织防删 | 尝试删除 is_personal=1 的组织 | 400 拒绝 | ✅ |
+| S-03 | owner 防移除 | 尝试移除 owner 成员 | 400 拒绝 | ✅ |
+| S-04 | tk_ token 限制 | 会话 token 调用组织管理 API | 403（require_no_session_token） | ✅ |
+| S-05 | 成员校验 | 所有组织 API 均校验 org_member 成员关系 | 非成员 403 | ✅ |
+
+#### 7.2.8 验证状态说明
+
+| 标记 | 含义 |
+|------|------|
+| ✅ | 已实现并验证通过 |
+| ⬜ | 已设计但尚未实现（P3 现有 API 改造阶段） |
+| ❌ | 验证失败（需修复） |
 
 ---
 

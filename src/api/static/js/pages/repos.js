@@ -58,6 +58,7 @@ function switchSidebarTab(tab) {
   } else {
     if (_projectsContent) {
       renderSelectionShell('projects', _projectsContent);
+      _loadOrgSection();
     } else {
       renderRepos();
     }
@@ -144,6 +145,13 @@ function renderRepoSelection(repos) {
 
   var templatesHtml = _renderProjectTemplates();
 
+  // 组织区块：显示归属组织列表 + 切换入口
+  var orgSectionHtml = '<div class="project-section" id="orgSection" style="margin-top:12px">'
+    + '<div class="project-section-header"><div class="project-section-header-left"><h2>' + I18N.t("organizations.my_orgs") + '</h2></div>'
+    + '<div class="project-section-header-right"><button class="project-refresh-btn" onclick="app.nav(\'organizations\')" style="font-size:12px;color:var(--a);background:none;border:none;cursor:pointer">' + I18N.t("organizations.manage_orgs") + '</button></div>'
+    + '</div><div id="orgSectionList" style="display:flex;gap:10px;flex-wrap:wrap;padding:4px 0">'
+    + '<div style="color:var(--t3);font-size:13px;padding:12px 0">' + I18N.t("organizations.loading") + '</div></div></div>';
+
   var inner = '<div class="project-page">' +
     '<div class="project-hero">' +
       '<div class="project-hero-welcome">' +
@@ -158,6 +166,7 @@ function renderRepoSelection(repos) {
         '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
       '</div>' +
     '</div>' +
+    orgSectionHtml +
     '<div class="project-section">' +
       '<div class="project-section-header">' +
         '<div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.my_projects') + '</h2></div>' +
@@ -173,6 +182,39 @@ function renderRepoSelection(repos) {
 
   _projectsContent = inner;
   renderSelectionShell('projects', inner);
+  _loadOrgSection();
+}
+
+function _loadOrgSection() {
+  var container = document.getElementById('orgSectionList');
+  if (!container) return;
+  API.get('/orgs').then(function(orgs) {
+    if (!orgs || orgs.length === 0) {
+      container.innerHTML = '<div style="color:var(--t3);font-size:13px;padding:12px 0">' + I18N.t("organizations.no_orgs") + '</div>';
+      return;
+    }
+    var currentId = localStorage.getItem('current_org_id') || '';
+    var html = '';
+    orgs.forEach(function(o) {
+      var isActive = String(o.id) === String(currentId);
+      var bg = isActive ? 'var(--a)' : 'var(--c)';
+      var fg = isActive ? '#fff' : 'var(--t1)';
+      var borderColor = isActive ? 'var(--a)' : 'var(--b)';
+      var badge = o.is_personal ? '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + ';margin-left:4px">' + I18N.t("organizations.badge_personal") + '</span>' : '';
+      var roleTag = '<span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (o.role || 'member') + '</span>';
+      html += '<div onclick="app.switchOrg(' + o.id + ')" style="cursor:pointer;padding:10px 14px;border-radius:10px;border:1px solid ' + borderColor + ';background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:6px;min-width:160px;transition:all .15s" onmouseover="this.style.transform=\'scale(1.02)\'" onmouseout="this.style.transform=\'\'">'
+        + '<span style="font-size:16px">🏢</span>'
+        + '<div style="flex:1;min-width:0">'
+        + '<div style="font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
+        + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + I18N.t("organizations.members") + ' · ' + roleTag + '</div>'
+        + '</div>'
+        + (isActive ? '<span style="font-size:10px;opacity:.8">' + I18N.t("organizations.switch_org.current") + '</span>' : '')
+        + '</div>';
+    });
+    container.innerHTML = html;
+  }).catch(function() {
+    container.innerHTML = '<div style="color:var(--t3);font-size:13px;padding:12px 0">' + I18N.t("organizations.load_failed", {msg: ""}) + '</div>';
+  });
 }
 
 function onProjectSearch(val) {

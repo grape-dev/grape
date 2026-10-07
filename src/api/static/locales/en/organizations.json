@@ -1,0 +1,68 @@
+{
+  "title": "Organizations",
+  "create_org": "+ Create Organization",
+  "loading": "Loading...",
+  "no_orgs": "No organizations",
+  "load_failed": "Load failed: {msg}",
+  "badge_personal": "Personal",
+  "members": "members",
+  "create": {
+    "title": "Create Organization",
+    "name_label": "Organization Name",
+    "name_placeholder": "e.g. Engineering Team",
+    "slug_label": "URL Slug (optional)",
+    "slug_placeholder": "e.g. eng-team",
+    "desc_label": "Description (optional)",
+    "desc_placeholder": "Organization description",
+    "confirm": "Create",
+    "creating": "Creating...",
+    "name_required": "Please enter organization name",
+    "success": "Organization created",
+    "failed": "Create failed: {msg}"
+  },
+  "detail": {
+    "back": "← Back to organizations",
+    "members_title": "Members",
+    "add_member": "+ Add Member",
+    "switch_to": "Switch to this organization",
+    "delete_org": "Delete Organization",
+    "no_description": "No description",
+    "role_label": "Role",
+    "member_limit": "Member limit",
+    "worker_limit": "Worker limit"
+  },
+  "add_member": {
+    "title": "Add Member",
+    "username_label": "Username",
+    "username_placeholder": "Search by username (e.g. songspace)",
+    "role_label": "Role",
+    "role_member": "member",
+    "role_admin": "admin",
+    "confirm": "Add",
+    "adding": "Adding...",
+    "username_required": "Please enter username",
+    "success": "Member added",
+    "failed": "Add failed: {msg}"
+  },
+  "remove_member": {
+    "title": "Remove Member",
+    "confirm_msg": "Remove {name}?",
+    "confirm": "Remove",
+    "success": "Member removed",
+    "failed": "Remove failed: {msg}"
+  },
+  "delete_org": {
+    "title": "Delete Organization",
+    "confirm_msg": "Delete organization \"{name}\"?\nThis cannot be undone. Repository associations will be removed.",
+    "confirm": "Delete",
+    "success": "Organization deleted",
+    "failed": "Delete failed: {msg}"
+  },
+  "switch_org": {
+    "success": "Organization switched",
+    "current": "✓ Current",
+    "no_repos": "No hosted repositories in this organization. Please host a repository first."
+  },
+  "my_orgs": "My Organizations",
+  "manage_orgs": "Manage →"
+}

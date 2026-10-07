@@ -187,7 +187,114 @@ function loadAgentTypes() {
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
       if (welcomeEl) welcomeEl.textContent = displayName;
+      // 加载组织下拉列表
+      _loadOrgSelect();
     }).catch(() => {});
+  }
+
+  function _loadOrgSelect() {
+    var sel = document.getElementById('orgSelect');
+    if (!sel) return;
+    API.get('/orgs').then(function(orgs) {
+      if (!orgs || orgs.length === 0) {
+        sel.innerHTML = I18N.t("organizations.no_orgs");
+        return;
+      }
+      var html = '';
+      var currentId = localStorage.getItem('current_org_id') || '';
+      var found = false;
+      orgs.forEach(function(o) {
+        var selAttr = '';
+        if (String(o.id) === String(currentId)) { selAttr = ' selected'; found = true; }
+        var label = o.name + (o.is_personal ? '（个人）' : '') + ' · ' + o.role;
+        html += '<option value="' + o.id + '"' + selAttr + '>' + label + '</option>';
+      });
+      // 未匹配到当前组织 → 默认选个人组织
+      if (!found) {
+        var personal = orgs.find(function(o) { return o.is_personal; });
+        if (personal) {
+          localStorage.setItem('current_org_id', personal.id);
+          html = html.replace('value="' + personal.id + '"', 'value="' + personal.id + '" selected');
+        }
+      }
+      sel.innerHTML = html;
+    }).catch(function(e) {
+      // 延迟重试一次（可能是 token refresh 导致的瞬时失败）
+      setTimeout(function() {
+        API.get('/orgs').then(function(orgs) {
+          if (!orgs || orgs.length === 0) {
+            sel.innerHTML = '<option value="">无组织</option>';
+            return;
+          }
+          var html2 = '';
+          var currentId2 = localStorage.getItem('current_org_id') || '';
+          var found2 = false;
+          orgs.forEach(function(o) {
+            var selAttr2 = '';
+            if (String(o.id) === String(currentId2)) { selAttr2 = ' selected'; found2 = true; }
+            html2 += '<option value="' + o.id + '"' + selAttr2 + '>' + o.name + (o.is_personal ? '（个人）' : '') + ' · ' + o.role + '</option>';
+          });
+          if (!found2) {
+            var personal2 = orgs.find(function(o) { return o.is_personal; });
+            if (personal2) {
+              localStorage.setItem('current_org_id', personal2.id);
+              html2 = html2.replace('value="' + personal2.id + '"', 'value="' + personal2.id + '" selected');
+            }
+          }
+          sel.innerHTML = html2;
+        }).catch(function() {
+          sel.innerHTML = I18N.t("organizations.loading");
+        });
+      }, 500);
+    });
+  }
+
+  function switchOrg(orgId) {
+    if (!orgId) return;
+    var sel = document.getElementById('orgSelect');
+    if (sel) { sel.disabled = true; }
+    localStorage.setItem('current_org_id', orgId);
+    // 清除仓库缓存，防止切换组织后仍显示旧组织的仓库
+    localStorage.removeItem(REPO_CACHE_KEY);
+    // 更新组织下拉框选中项
+    if (sel) {
+      for (var i = 0; i < sel.options.length; i++) {
+        sel.options[i].selected = (String(sel.options[i].value) === String(orgId));
+      }
+      sel.disabled = false;
+    }
+    // 保持当前页面不变，只静默刷新仓库缓存 + 侧边栏下拉
+    API.get('/repos/member').then(function(d) {
+      var repos = (d && d.repos) || [];
+      try { localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos: repos, ts: Date.now()})); } catch(e) {}
+      // 查找该组织已托管的仓库
+      var managed = repos.filter(function(r) { return r.is_hosted || r.is_joined; });
+      if (managed.length > 0) {
+        // 切换到第一个已托管仓库
+        var first = managed[0];
+        sessionStorage.setItem('currentRepo', JSON.stringify({fullName: first.full_name, owner: first.owner, name: first.name, repoKey: first.repo_key || ''}));
+        // 更新侧边栏仓库下拉
+        initSidebarRepos();
+        // 刷新当前页面数据（如果是 dashboard 会重新加载）
+        if (window._currentView === 'dash') {
+          nav('dash');
+        }
+      } else {
+        // 没有已托管仓库 — 清除当前仓库选择，刷新页面显示空态
+        sessionStorage.removeItem('currentRepo');
+        initSidebarRepos();
+        showToast(I18N.t("organizations.switch_org.no_repos"));
+        // 如果当前在 dash 页面，刷新显示空态
+        if (window._currentView === 'dash' || !window._currentView) {
+          nav('dash');
+        }
+      }
+      // 刷新首页"我的组织"区块高亮（如果在 #repos 页面）
+      if (typeof _loadOrgSection === 'function') {
+        _loadOrgSection();
+      }
+    }).catch(function() {});
+    showToast(I18N.t("organizations.switch_org.success"));
   }
 
   const REPO_CACHE_KEY = 'repo_member_cache';
@@ -508,7 +615,7 @@ function loadAgentTypes() {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail' && view !== 'organizations' && view !== 'dash' && view !== 'pipe' && view !== 'vod' && view !== 'issue' && view !== 'coding' && view !== 'qa' && view !== 'sre' && view !== 'chat' && view !== 'im-channel' && view !== 'skills' && view !== 'event' && view !== 'skill') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -609,6 +716,15 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       // 进入场景中心时无条件清除编辑标志（上一次操作异常退出时泄漏）
       window._dashboardEditing = false;
+      // 无仓库时显示空态引导
+      if (!repo) {
+        pc.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:40px">' +
+          '<div style="font-size:48px">📦</div>' +
+          '<div style="font-size:16px;font-weight:600;color:var(--t1)">' + I18N.t("organizations.switch_org.no_repos") + '</div>' +
+          '<button onclick="app.goToRepos()" style="padding:10px 24px;border:none;border-radius:10px;background:var(--a);color:#fff;cursor:pointer;font-size:13px;font-weight:600">' + I18N.t("app.repo.back_to_select") + '</button>' +
+          '</div>';
+        return;
+      }
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
@@ -662,6 +778,13 @@ function loadAgentTypes() {
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
+    } else if (view === 'organizations') {
+      title.textContent = '组织管理';
+      if (typeof renderOrganizations === 'function') {
+        renderOrganizations();
+      } else {
+        pc.innerHTML = '<div class="error">组织管理页面加载失败，请刷新重试</div>';
+      }
     } else if (view === 'my-feedback') {
       title.textContent = '我的反馈';
       if (typeof renderMyFeedback === 'function') {
@@ -1406,7 +1529,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

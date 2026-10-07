@@ -1,0 +1,68 @@
+{
+  "title": "组织管理",
+  "create_org": "+ 创建组织",
+  "loading": "加载中...",
+  "no_orgs": "暂无组织",
+  "load_failed": "加载失败: {msg}",
+  "badge_personal": "个人",
+  "members": "成员",
+  "create": {
+    "title": "创建组织",
+    "name_label": "组织名称",
+    "name_placeholder": "如：研发团队",
+    "slug_label": "URL 标识（可选）",
+    "slug_placeholder": "如：rd-team",
+    "desc_label": "描述（可选）",
+    "desc_placeholder": "组织描述",
+    "confirm": "创建",
+    "creating": "创建中...",
+    "name_required": "请输入组织名称",
+    "success": "组织创建成功",
+    "failed": "创建失败: {msg}"
+  },
+  "detail": {
+    "back": "← 返回组织列表",
+    "members_title": "成员",
+    "add_member": "+ 添加成员",
+    "switch_to": "切换到此组织",
+    "delete_org": "删除组织",
+    "no_description": "暂无描述",
+    "role_label": "角色",
+    "member_limit": "成员上限",
+    "worker_limit": "Worker 上限"
+  },
+  "add_member": {
+    "title": "添加成员",
+    "username_label": "用户名",
+    "username_placeholder": "输入用户名搜索（如 songspace）",
+    "role_label": "角色",
+    "role_member": "member（成员）",
+    "role_admin": "admin（管理员）",
+    "confirm": "添加",
+    "adding": "添加中...",
+    "username_required": "请输入用户名",
+    "success": "成员添加成功",
+    "failed": "添加失败: {msg}"
+  },
+  "remove_member": {
+    "title": "移除成员",
+    "confirm_msg": "确定要移除 {name} 吗？",
+    "confirm": "移除",
+    "success": "成员已移除",
+    "failed": "移除失败: {msg}"
+  },
+  "delete_org": {
+    "title": "删除组织",
+    "confirm_msg": "确定要删除组织「{name}」吗？\n该操作不可撤销，组织下的仓库关联将解除。",
+    "confirm": "删除",
+    "success": "组织已删除",
+    "failed": "删除失败: {msg}"
+  },
+  "switch_org": {
+    "success": "已切换组织",
+    "current": "✓ 当前",
+    "no_repos": "当前组织没有已托管仓库，请先托管一个仓库"
+  },
+  "my_orgs": "我的组织",
+  "manage_orgs": "管理组织 →"
+}

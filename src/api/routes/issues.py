@@ -18,7 +18,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
 from pydantic import BaseModel
 
-from src.api.deps import get_current_user_or_api_key, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
@@ -1215,14 +1215,19 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                     created_by_me: str = Query("", description="仅我创建的任务"),
                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
-                    user: dict = Depends(require_no_session_token)):
+                    user: dict = Depends(require_org_member)):
     """我的需求列表（需求中心·个人维度）。
 
     返回当前用户的需求（Issue 卡片行，user_id 过滤）+ 富化
     （scene/stage/is_running/agent_statuses）。
+    组织隔离：非个人组织只返回 org_id 匹配的 issue。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
     from src.repo_key import to_repo_key
+    from src.user.org_db import is_org_personal
+    _org_id = user.get("org_id", 0)
+    _is_personal = is_org_personal(_org_id) if _org_id else True
+    _filter_org_id = 0 if _is_personal else _org_id
     clauses = []
     params = []
     if repo_key:
@@ -1239,6 +1244,10 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     if status:
         clauses.append("status=?")
         params.append(status)
+    # 组织隔离
+    if _filter_org_id:
+        clauses.append("org_id=?")
+        params.append(_filter_org_id)
     _build_assignee_filter(assignees, clauses, params)
     where = " AND ".join(clauses)
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
@@ -1255,7 +1264,7 @@ def list_repo_issues(owner: str, repo: str,
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                      mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                      assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
-                     user: dict = Depends(get_current_user_or_api_key)):
+                     user: dict = Depends(require_org_member)):
     """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
 
     - 按 owner/repo 定位仓库，返回全部卡片富化（scene/stage/is_running/agent_statuses）+ events_count/latest_event
@@ -1263,6 +1272,10 @@ def list_repo_issues(owner: str, repo: str,
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
+    from src.user.org_db import is_org_personal
+    _org_id = user.get("org_id", 0)
+    _is_personal = is_org_personal(_org_id) if _org_id else True
+    _filter_org_id = 0 if _is_personal else _org_id
     repo_keys = _repo_keys_of(owner, repo)
     placeholders = ",".join("?" * len(repo_keys))
     clauses = [f"repo_key IN ({placeholders})"]
@@ -1270,6 +1283,10 @@ def list_repo_issues(owner: str, repo: str,
     if status:
         clauses.append("status=?")
         params.append(status)
+    # 组织隔离
+    if _filter_org_id:
+        clauses.append("org_id=?")
+        params.append(_filter_org_id)
     _build_assignee_filter(assignees, clauses, params)
     where = " AND ".join(clauses)
     _order_dir = "DESC" if sort_order == "desc" else "ASC"

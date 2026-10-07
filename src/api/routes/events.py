@@ -3,7 +3,7 @@ import asyncio
 import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
-from src.api.deps import get_current_user_or_api_key, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
 

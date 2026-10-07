@@ -147,6 +147,26 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
     return user
 
 
+def require_org_member(request: Request, user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """组织成员校验依赖。返回 {**user, "org_id": int, "org_role": str}。
+
+    解析 X-Org-ID/X-Org-Slug/ query 参数获取组织上下文；
+    未指定时回退到用户的个人组织（兼容现有 API 行为）。
+    """
+    from src.api.org_context import resolve_org_context
+    from src.user.org_db import get_member_role
+    org_id = resolve_org_context(request, user.get("id") or 0)
+    role = get_member_role(user.get("id") or 0, org_id)
+    return {**user, "org_id": org_id, "org_role": role}
+
+
+def require_org_admin(user: dict = Depends(require_org_member)) -> dict:
+    """组织管理员校验（owner/admin）。"""
+    if user.get("org_role") not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "需要组织管理员权限"})
+    return user
+
+
 def get_user_token(username: str) -> str:
     """获取用户的个人 GitCode API Token（Chat Agent 使用）"""
     acc = user_db.get_user_account(username) or {}

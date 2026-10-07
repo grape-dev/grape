@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import require_no_session_token
+from src.api.deps import require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.repo_key import from_repo_key
@@ -352,7 +352,7 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 # ====== Agent Runtimes ======
 
 @router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params.")
-def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 0,
+def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 0,
                        scope: str = ""):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
@@ -388,9 +388,21 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
     _visible_credential = _make_visible_credential_fn(uname, user_repos)
 
     cached = user_db.get_agent_runtimes(scope=None)
+    _org_id = user.get("org_id", 0)
+    # 判断当前组织是否是个人组织（个人组织显示 global 引擎，非个人组织严格隔离）
+    _is_personal_org = False
+    if _org_id:
+        from src.user.org_db import is_org_personal
+        _is_personal_org = is_org_personal(_org_id)
+    _filter_org_id = 0 if _is_personal_org else _org_id
     now = __import__("time").time()
     visible_runtimes = []
     for rt in cached:
+        # 组织隔离：非个人组织只显示 org_id 匹配的引擎（不含 global）
+        # 个人组织显示全部（兼容现有行为）
+        rt_org_id = rt.get("org_id") or 0
+        if _filter_org_id and rt_org_id != _filter_org_id:
+            continue
         rt["health"] = _runtime_health(rt, now)
         cid = rt.get("credential_id") or 0
         cred = cred_map.get(cid) or {"name": "", "device_name": "", "scope": "global",
@@ -520,13 +532,13 @@ def _build_cred_map(db, db_lock) -> dict:
     cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key FROM runtime_credentials")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id = r
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
                              "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or ""}
+                             "repo_key": crepo_key or "", "org_id": corg_id or 0}
     return cred_map
 
 
@@ -577,7 +589,9 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         c = db.cursor()
         c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
         for (cid,) in c.fetchall():
-            cred = cred_map.get(cid) or {}
+            cred = cred_map.get(cid)
+            if not cred:
+                continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
             if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
             c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
@@ -669,7 +683,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
 @router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245).")
-def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20,
+def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 20,
                         scope: str = "", type: str = "", q: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
@@ -703,6 +717,16 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
 
     # 本机引擎列表（一次性查询，传入 _build_runtime_devices 复用，消除 N+1 二次全量查询）
     _local_runtimes = user_db.get_agent_runtimes(scope=None)
+
+    # 组织隔离：非个人组织只显示 org_id 匹配的引擎/凭据
+    from src.user.org_db import is_org_personal
+    _org_id = user.get("org_id", 0)
+    _is_personal_org = is_org_personal(_org_id) if _org_id else True
+    _filter_org_id = 0 if _is_personal_org else _org_id
+    if _filter_org_id:
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == _filter_org_id]
+        # 过滤 cred_map 只保留 org_id 匹配的凭据
+        cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == _filter_org_id}
 
     # 构建设备列表（共享 helper）
     devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
@@ -834,10 +858,14 @@ def _normalize_scope(scope: str) -> str:
 
 
 @router.post("/runtime-credentials", operation_id="settings_runtime_credential_create", summary="Create runtime credential", description="Creates an rta_ credential; plaintext shown once, DB stores sha256. owner = current user (not selectable); scope defaults to personal.")
-def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
-    """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。"""
+def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_org_member)):
+    """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。
+
+    组织隔离：凭据创建时绑定当前组织 org_id。
+    """
     import hashlib, secrets
     from src.session_manager import db, db_lock
+    from src.user.org_db import is_org_personal
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
@@ -850,12 +878,16 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
         if raw_key:
             repo_key = _resolve_repo_key(raw_key)
+    # 解析当前组织 org_id
+    _org_id = user.get("org_id", 0)
+    _is_personal = is_org_personal(_org_id) if _org_id else True
+    _cred_org_id = 0 if _is_personal else _org_id
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key) VALUES (?,?,?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key))
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
+                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
             cred_id = c.lastrowid
             db.commit()
         except Exception as e:
@@ -939,12 +971,24 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
 
 
 @router.get("/runtime-credentials", operation_id="settings_runtime_credentials", summary="List runtime credentials", description="Lists runtime credentials without token_hash/plaintext.")
-def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
-    """凭据列表（不含 token_hash / 明文）"""
+def list_runtime_credentials(user: dict = Depends(require_org_member)):
+    """凭据列表（不含 token_hash / 明文），按组织过滤。
+
+    非个人组织只显示 org_id 匹配的凭据（不含 global）；
+    个人组织显示全部（兼容现有行为）。
+    """
     from src.session_manager import db, db_lock
+    from src.user.org_db import is_org_personal
+    org_id = user.get("org_id", 0)
+    _is_personal = is_org_personal(org_id) if org_id else True
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
+        if org_id and not _is_personal:
+            # 非个人组织：严格隔离，只显示 org_id 匹配的凭据
+            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials WHERE org_id=? ORDER BY id DESC", (org_id,))
+        else:
+            # 个人组织或未指定：显示全部（兼容现有行为）
+            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
              "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8]),

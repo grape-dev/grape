@@ -89,10 +89,13 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     with db_lock:
         c = db.cursor()
         try:
+            # 解析 org_id（从 managed_repos.org_id 获取）
+            from src.user.org_db import get_org_id_by_repo_key
+            _org_id = get_org_id_by_repo_key(repo_key)
             c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-                 json.dumps(payload or {}), status, result, scene_id, entity_type)
+                 json.dumps(payload or {}), status, result, scene_id, entity_type, _org_id)
             )
             db.commit()
             _seq = c.lastrowid

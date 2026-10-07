@@ -894,6 +894,202 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
 ]
 
+# ===== Organization（组织）特性 =====
+_ORGANIZATION_DDL = """
+CREATE TABLE IF NOT EXISTS organization (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            VARCHAR(128) NOT NULL,
+    slug            VARCHAR(64) NOT NULL UNIQUE,
+    description     TEXT DEFAULT '',
+    avatar_url      VARCHAR(512) DEFAULT '',
+    owner_id        INTEGER NOT NULL,
+    is_personal     INTEGER DEFAULT 0,
+    settings        TEXT DEFAULT '{}',
+    max_members     INTEGER DEFAULT 50,
+    max_workers     INTEGER DEFAULT 10,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)"""
+
+_ORG_MEMBER_DDL = """
+CREATE TABLE IF NOT EXISTS org_member (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          INTEGER NOT NULL,
+    user_id         INTEGER NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'member',
+    invited_by      INTEGER DEFAULT 0,
+    joined_at       TEXT DEFAULT (datetime('now')),
+    UNIQUE (org_id, user_id)
+)"""
+
+_ORG_INVITATION_DDL = """
+CREATE TABLE IF NOT EXISTS org_invitation (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          INTEGER NOT NULL,
+    inviter_id      INTEGER NOT NULL,
+    invitee_email   TEXT DEFAULT '',
+    invitee_user_id INTEGER DEFAULT 0,
+    role            TEXT NOT NULL DEFAULT 'member',
+    status          TEXT DEFAULT 'pending',
+    expires_at      TEXT,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)"""
+
+_NEW_TABLES.extend([
+    ("organization", _ORGANIZATION_DDL),
+    ("org_member", _ORG_MEMBER_DDL),
+    ("org_invitation", _ORG_INVITATION_DDL),
+])
+
+# 需要 org_id 列的核心表
+_ORG_ID_TABLES = [
+    "managed_repos",
+    "runtime_credentials",
+    "agent_runtimes",
+    "skill",
+    "devops_pipeline_scene",
+    "scene_market",
+    "agent_shared_knowledge",
+    "events",
+    "agent_tasks",
+    "devops_agent_session",
+    "chat_conversations",
+    "issue",
+    "session_api_tokens",
+]
+
+
+def _migrate_add_org_id_columns():
+    """为核心表幂等添加 org_id 列（0=全局/未归属，兼容现有数据）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            for table in _ORG_ID_TABLES:
+                _ensure_column(c, table, "org_id", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("org_id columns ensured on all core tables")
+    except Exception as e:
+        log.warning(f"org_id column migration failed: {e}")
+
+
+def _migrate_create_personal_orgs():
+    """为每个现有用户创建个人组织（幂等）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            users = c.execute("SELECT id, username FROM user_accounts").fetchall()
+            for uid, username in users:
+                existing = c.execute(
+                    "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                ).fetchone()
+                if existing:
+                    continue
+                slug = f"personal-{uid}"
+                c.execute(
+                    "INSERT INTO organization (name, slug, owner_id, is_personal) VALUES (?, ?, ?, 1)",
+                    (f"{username}的个人空间", slug, uid)
+                )
+                org_id = c.lastrowid
+                c.execute(
+                    "INSERT OR IGNORE INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
+                    (org_id, uid)
+                )
+            db.commit()
+            log.info("Personal organizations ensured for all users")
+    except Exception as e:
+        log.warning(f"Personal org creation migration failed: {e}")
+
+
+def _migrate_data_to_personal_orgs():
+    """将现有数据迁入对应用户的个人组织（幂等，只处理 org_id=0 的行）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+
+            # 1. managed_repos：按 user_repos.is_admin 找管理员迁入
+            repos = c.execute(
+                "SELECT repo_key FROM managed_repos WHERE org_id=0 OR org_id IS NULL"
+            ).fetchall()
+            for (repo_key,) in repos:
+                admin = c.execute(
+                    "SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 LIMIT 1",
+                    (repo_key,)
+                ).fetchone()
+                if admin:
+                    uid = admin[0]
+                    org = c.execute(
+                        "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                    ).fetchone()
+                    if org:
+                        c.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?", (org[0], repo_key))
+
+            # 2. runtime_credentials：scope=user 的按 owner_name 迁入
+            creds = c.execute(
+                "SELECT id, owner_name, scope FROM runtime_credentials WHERE org_id=0 OR org_id IS NULL"
+            ).fetchall()
+            for cid, owner_name, scope in creds:
+                if not owner_name or scope == "global":
+                    continue
+                user = c.execute(
+                    "SELECT id FROM user_accounts WHERE username=?", (owner_name,)
+                ).fetchone()
+                if user:
+                    uid = user[0]
+                    org = c.execute(
+                        "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                    ).fetchone()
+                    if org:
+                        c.execute("UPDATE runtime_credentials SET org_id=? WHERE id=?", (org[0], cid))
+                        c.execute("UPDATE agent_runtimes SET org_id=? WHERE credential_id=?", (org[0], cid))
+
+            # 3. skill：scope=user 的按 owner_id 迁入
+            skills = c.execute(
+                "SELECT id, owner_id, scope FROM skill WHERE scope='user' AND (org_id=0 OR org_id IS NULL)"
+            ).fetchall()
+            for sid, owner_id, _ in skills:
+                try:
+                    uid = int(owner_id)
+                except (ValueError, TypeError):
+                    continue
+                org = c.execute(
+                    "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                ).fetchone()
+                if org:
+                    c.execute("UPDATE skill SET org_id=? WHERE id=?", (org[0], sid))
+
+            # 4. skill：scope=repo 的跟随 repo_key 迁移
+            repo_skills = c.execute(
+                "SELECT id, owner_id FROM skill WHERE scope='repo' AND (org_id=0 OR org_id IS NULL)"
+            ).fetchall()
+            for sid, owner_id in repo_skills:
+                repo_org = c.execute(
+                    "SELECT org_id FROM managed_repos WHERE repo_key=?", (owner_id,)
+                ).fetchone()
+                if repo_org and repo_org[0]:
+                    c.execute("UPDATE skill SET org_id=? WHERE id=?", (repo_org[0], sid))
+
+            # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge /
+            #    events / agent_tasks / devops_agent_session / issue
+            for table in ["devops_pipeline_scene", "agent_shared_knowledge", "events",
+                           "agent_tasks", "devops_agent_session", "issue"]:
+                try:
+                    c.execute(f"""
+                        UPDATE {table} SET org_id = (
+                            SELECT m.org_id FROM managed_repos m
+                            WHERE m.repo_key = {table}.repo_key AND m.org_id > 0
+                        )
+                        WHERE (org_id = 0 OR org_id IS NULL)
+                          AND repo_key IN (SELECT repo_key FROM managed_repos WHERE org_id > 0)
+                    """)
+                except Exception as _e:
+                    log.warning(f"org_id backfill for {table} failed: {_e}")
+
+            db.commit()
+            log.info("Data migrated to personal organizations")
+    except Exception as e:
+        log.warning(f"Data migration to personal orgs failed: {e}")
+
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
 
@@ -3595,3 +3791,8 @@ def _backfill_scene_display_names():
             log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch ensured")
     except Exception as e:
         log.warning(f"Autopilot v3.0 schema migration failed: {e}")
+
+    # ===== Organization 特性迁移 =====
+    _migrate_add_org_id_columns()
+    _migrate_create_personal_orgs()
+    _migrate_data_to_personal_orgs()
