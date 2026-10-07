@@ -72,10 +72,49 @@ def _backup_db(path: str, tag: str = "") -> str:
         if not os.path.exists(dest):
             shutil.copy2(path, dest)
             log.info(f"DB backed up: {path} -> {dest}")
+        # 保留最近 N 份，删除更早（防 data/backups 无限膨胀打满磁盘）
+        prune_db_backups(path)
         return dest
     except Exception as e:
         log.warning(f"DB backup failed: {e}")
         return ""
+
+
+def prune_db_backups(path: str, keep: int | None = None) -> int:
+    """保留最近 keep 份迁移前 DB 备份，删除更早的（防 data/backups 无限膨胀打满磁盘）。
+
+    默认保留 DB_BACKUP_KEEP（5）；MySQL 后端为远端无文件，跳过。返回删除数量（幂等）。
+    """
+    if _is_mysql_backend():
+        return 0
+    keep = int(os.environ.get("DB_BACKUP_KEEP", "5")) if keep is None else int(keep)
+    try:
+        backup_dir = os.path.join(os.path.dirname(path), "backups")
+        if not os.path.isdir(backup_dir):
+            return 0
+        base = os.path.basename(path)
+        rows = []
+        for f in os.listdir(backup_dir):
+            if f.startswith(base + ".") and f.endswith(".bak"):
+                fp = os.path.join(backup_dir, f)
+                try:
+                    rows.append((os.path.getmtime(fp), fp))
+                except Exception:
+                    continue
+        rows.sort(key=lambda r: r[0], reverse=True)
+        removed = 0
+        for _, fp in rows[keep:]:
+            try:
+                os.remove(fp)
+                removed += 1
+            except Exception:
+                pass
+        if removed:
+            log.info(f"Pruned {removed} old DB backups (keep {keep}) in {backup_dir}")
+        return removed
+    except Exception as e:
+        log.warning(f"prune_db_backups failed: {e}")
+        return 0
 
 
 if _is_mysql_backend():
