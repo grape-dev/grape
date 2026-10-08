@@ -53,6 +53,7 @@
     // 先用 login 接口返回的权威值设置 banner，再异步 refresh（防 /status 回调前闪烁）
     setPwdBanner(!!pwdInitial);
     loadStatus();
+    forceRefreshBanner();
     if (pwdInitial) openPwdModal();
   }
 
@@ -66,6 +67,11 @@
     api('/status').then(function (d) {
       setPwdBanner(!!d.pwd_initial);
     }).catch(function () { setPwdBanner(false); });
+  }
+
+  function forceRefreshBanner() {
+    // 兜底：改密/重登后延迟复查，防任何时序竞争残留显示
+    setTimeout(function () { loadStatus(); }, 600);
   }
 
   // ====== 改密 ======
