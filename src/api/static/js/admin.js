@@ -50,14 +50,22 @@
   function showApp(pwdInitial) {
     $2('loginView').classList.add('hid');
     $2('mainView').classList.remove('hid');
+    // 先用 login 接口返回的权威值设置 banner，再异步 refresh（防 /status 回调前闪烁）
+    setPwdBanner(!!pwdInitial);
     loadStatus();
     if (pwdInitial) openPwdModal();
   }
 
+  function setPwdBanner(show) {
+    var b = $2('pwdBanner');
+    if (!b) return;
+    if (show) b.classList.remove('hid'); else b.classList.add('hid');
+  }
+
   function loadStatus() {
     api('/status').then(function (d) {
-      if (d.pwd_initial) { $2('pwdBanner').classList.remove('hid'); } else { $2('pwdBanner').classList.add('hid'); }
-    }).catch(function () {});
+      setPwdBanner(!!d.pwd_initial);
+    }).catch(function () { setPwdBanner(false); });
   }
 
   // ====== 改密 ======
@@ -79,6 +87,7 @@
     api('/change-password', { method: 'POST', body: { old_password: oldP, new_password: newP } }).then(function () {
       toast('密码已修改，请重新登录', true);
       setToken(null);
+      setPwdBanner(false);
       $2('pwdModal').classList.add('hid');
       $2('mainView').classList.add('hid');
       $2('loginView').classList.remove('hid');
