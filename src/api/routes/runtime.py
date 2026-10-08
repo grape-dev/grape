@@ -106,11 +106,13 @@ class CompleteBody(BaseModel):
     exit_code: int = 0
     session_id: str = ""
     work_dir: str = ""
+    engine: str = ""
 
 
 class FailBody(BaseModel):
     error: str = ""
     failure_reason: str = ""
+    exit_code: int = -1
 
 
 # ===== 认证中间件 =====
@@ -639,7 +641,7 @@ def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int =
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    _usage = {"session_id": body.session_id, "work_dir": body.work_dir}
+    _usage = {"session_id": body.session_id, "work_dir": body.work_dir, "engine": body.engine}
     service.set_task_signal(task_id, "stream_ended")
     service.finalize_by_stream_end(task_id, body.result_text or "", body.exit_code, usage=_usage)
     return {"status": "completed"}
@@ -650,7 +652,9 @@ def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    service.fail_task(task_id, body.error or body.failure_reason or "unknown error", exit_code=1)
+    # 透传 worker 上报的真实 exit_code（旧硬编码 1 → 死 session 检测的"连续3次负数"
+    # 永不触发，坏指针清不掉）；旧 worker 不传则默认 -1，与 fail_task 签名一致。
+    service.fail_task(task_id, body.error or body.failure_reason or "unknown error", exit_code=body.exit_code)
     return {"status": "failed"}
 
 

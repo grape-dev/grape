@@ -569,7 +569,7 @@ def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -
         c = db.cursor()
         try:
             c.execute(
-                "SELECT id, runtime_session_id, status, last_active_at FROM issue_agent_session "
+                "SELECT id, runtime_session_id, status, last_active_at, session_engine FROM issue_agent_session "
                 "WHERE repo_key=? AND agent_type=? AND issue_id=?",
                 (repo_key, agent_type, issue_id)
             )
@@ -578,7 +578,8 @@ def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -
             row = None
         if row:
             return {"id": row[0], "runtime_session_id": row[1] or "",
-                    "status": row[2] or "idle", "last_active_at": row[3] or "", "new": False}
+                    "status": row[2] or "idle", "last_active_at": row[3] or "",
+                    "session_engine": row[4] or "", "new": False}
 
         # 每 Issue 独立 session：新 Issue 不继承 repo 级 session 指针，_seed 恒为空
         _seed = ""
@@ -586,21 +587,22 @@ def get_or_create_issue_session(repo_key: str, agent_type: str, issue_id: str) -
         now = datetime.now().isoformat()
         try:
             c.execute(
-                "INSERT INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, status, last_active_at) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (sid, repo_key, agent_type, issue_id, _seed, "idle", now)
+                "INSERT INTO issue_agent_session (id, repo_key, agent_type, issue_id, runtime_session_id, session_engine, status, last_active_at) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (sid, repo_key, agent_type, issue_id, _seed, "", "idle", now)
             )
             db.commit()
         except Exception as e:
             log.warning(f"Failed to create issue session: {e}")
             return {"id": sid, "runtime_session_id": _seed, "status": "idle",
-                    "last_active_at": now, "new": True}
+                    "last_active_at": now, "session_engine": "", "new": True}
         return {"id": sid, "runtime_session_id": _seed, "status": "idle",
-                "last_active_at": now, "new": True}
+                "last_active_at": now, "session_engine": "", "new": True}
 
 
-def update_issue_session(session_id: str, runtime_session_id: str = None, status: str = None):
-    """更新 Issue 级执行会话：续接指针 / 状态。指针为空则不覆盖（避免丢上下文）。"""
+def update_issue_session(session_id: str, runtime_session_id: str = None, status: str = None,
+                         session_engine: str = None):
+    """更新 Issue 级执行会话：续接指针 / 状态 / 引擎名。指针为空则不覆盖（避免丢上下文）。"""
     if not session_id:
         return
     sets = []
@@ -608,6 +610,9 @@ def update_issue_session(session_id: str, runtime_session_id: str = None, status
     if runtime_session_id is not None:
         sets.append("runtime_session_id=?")
         params.append(runtime_session_id)
+    if session_engine is not None:
+        sets.append("session_engine=?")
+        params.append(session_engine)
     if status is not None:
         sets.append("status=?")
         params.append(status)
@@ -629,14 +634,36 @@ def get_issue_session(repo_key: str, agent_type: str, issue_id: str) -> dict | N
     """按 (repo, agent, issue) 查 Issue 级执行会话；无记录返回 None。"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, runtime_session_id, status, last_active_at FROM issue_agent_session "
+        c.execute("SELECT id, runtime_session_id, status, last_active_at, session_engine FROM issue_agent_session "
                   "WHERE repo_key=? AND agent_type=? AND issue_id=?",
                   (repo_key, agent_type, issue_id))
         row = c.fetchone()
         if not row:
             return None
         return {"id": row[0], "runtime_session_id": row[1] or "",
-                "status": row[2] or "idle", "last_active_at": row[3] or ""}
+                "status": row[2] or "idle", "last_active_at": row[3] or "",
+                "session_engine": row[4] or ""}
+
+
+def guard_issue_session_pointer(isess: dict, current_engine: str) -> str:
+    """session 引擎守卫：校验续接指针的产出引擎与本次执行引擎是否同家。
+
+    - 指针为空 / 引擎名缺失（旧行、反查失败）→ 放行原值（fail-safe，不 block 任务）；
+    - 指针引擎与本次引擎不一致 → 返回 ""（弃用指针，引擎开新会话），指针本身不动，
+      由死 session 检测（连续 3 次负数退出码）或下一次同家引擎回写覆盖。
+    防引擎池混跑时跨引擎续接（hermes resume opencode 的会话号 → 假成功 → prompt 静默挂死到超时）。
+    """
+    sid = (isess or {}).get("runtime_session_id") or ""
+    if not sid:
+        return ""
+    ptr_engine = (isess or {}).get("session_engine") or ""
+    if not ptr_engine or not current_engine:
+        return sid  # 引擎未知 → 不过滤
+    if ptr_engine != current_engine:
+        log.info(f"session engine guard: pointer engine '{ptr_engine}' != current '{current_engine}', "
+                 f"drop cross-engine session pointer (sid={sid[:12]}...)")
+        return ""
+    return sid
 
 
 def list_issue_sessions(repo_key: str, agent_type: str = "") -> list[dict]:

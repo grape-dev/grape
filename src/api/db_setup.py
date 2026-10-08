@@ -396,7 +396,8 @@ CREATE TABLE IF NOT EXISTS issue_agent_session (
     repo_key          TEXT NOT NULL,
     agent_type        TEXT NOT NULL,
     issue_id          TEXT NOT NULL,             -- 如 "#5"(对应 event.json 的 issue_num)
-    runtime_session_id TEXT DEFAULT '',          -- opencode --session 续接指针(Issue 级)
+    runtime_session_id TEXT DEFAULT '',          -- 引擎 --session 续接指针(Issue 级,opencode/hermes)
+    session_engine     TEXT DEFAULT '',          -- 指针产出的引擎名(opencode/hermes/codearts/codex),跨引擎守卫用
     status            TEXT DEFAULT 'idle',       -- idle / running / failed
     last_active_at    TEXT DEFAULT (datetime('now')),
     created_at        TEXT DEFAULT (datetime('now')),
@@ -2945,6 +2946,17 @@ def _migrate_tables():
             log.info("Added issue_session_id / project_info_* / knowledge_files / skill_id columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
+    # ===== session 引擎守卫:issue_agent_session 加 session_engine 列(老库升级) =====
+    # 指针(runtime_session_id)记引擎名,消费端校验"指针引擎==本次引擎"不一致则弃用(开新会话),
+    # 防止引擎池混跑时 hermes 拿到 opencode 的会话号静默挂死(跨引擎续接无防护的历史遗留)
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue_agent_session", "session_engine", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added issue_agent_session.session_engine column")
+    except Exception as e:
+        log.warning(f"Add issue_agent_session.session_engine column failed: {e}")
     # ===== user_accounts 发布仓库列(老库升级;CREATE TABLE 只影响新库,存量库须幂等补列)=====
     try:
         with db_lock:
