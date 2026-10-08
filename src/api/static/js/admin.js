@@ -50,28 +50,8 @@
   function showApp(pwdInitial) {
     $2('loginView').classList.add('hid');
     $2('mainView').classList.remove('hid');
-    // 先用 login 接口返回的权威值设置 banner，再异步 refresh（防 /status 回调前闪烁）
-    setPwdBanner(!!pwdInitial);
-    loadStatus();
-    forceRefreshBanner();
+    // 首次登录引导（默认密码）弹窗——仅在 pwd_initial 时弹出
     if (pwdInitial) openPwdModal();
-  }
-
-  function setPwdBanner(show) {
-    var b = $2('pwdBanner');
-    if (!b) return;
-    if (show) b.classList.remove('hid'); else b.classList.add('hid');
-  }
-
-  function loadStatus() {
-    api('/status').then(function (d) {
-      setPwdBanner(!!d.pwd_initial);
-    }).catch(function () { setPwdBanner(false); });
-  }
-
-  function forceRefreshBanner() {
-    // 兜底：改密/重登后延迟复查，防任何时序竞争残留显示
-    setTimeout(function () { loadStatus(); }, 600);
   }
 
   // ====== 改密 ======
@@ -83,7 +63,6 @@
   }
   function closePwdModal() {
     $2('pwdModal').classList.add('hid');
-    if (pwdModalMode === 'first') { $2('pwdBanner').classList.remove('hid'); }
   }
   function changePwd() {
     var oldP = $2('oldPass').value, newP = $2('newPass').value, confirmP = $2('confirmPass').value;
@@ -93,7 +72,6 @@
     api('/change-password', { method: 'POST', body: { old_password: oldP, new_password: newP } }).then(function () {
       toast('密码已修改，请重新登录', true);
       setToken(null);
-      setPwdBanner(false);
       $2('pwdModal').classList.add('hid');
       $2('mainView').classList.add('hid');
       $2('loginView').classList.remove('hid');
@@ -128,7 +106,6 @@
       $2('f_github_oauth_redirect_uri').value = c.github_oauth_redirect_uri || '';
       $2('f_github_oauth_redirect_uri').placeholder = '留空自动推断';
       $2('f_bot_usernames').value = (c.bot_usernames || []).join(', ');
-      if (d.pwd_initial) { $2('pwdBanner').classList.remove('hid'); } else { $2('pwdBanner').classList.add('hid'); }
     }).catch(function (e) { toast('加载配置失败: ' + e.message, false); });
   }
 
