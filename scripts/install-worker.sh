@@ -111,11 +111,52 @@ if ! gzip -t "$TMP_PKG" 2>/dev/null; then
   fail "下载的运行包损坏（gzip 校验失败），请重试"
 fi
 
-# ===== 3. 解压到安装目录（幂等）=====
+# ===== 3. 解压到安装目录（幂等，升级前备份旧代码供回滚）=====
 mkdir -p "$INSTALL_DIR"
+# 升级回滚保护（2026-10-08）：覆盖代码前备份当前 src/ + VERSION。
+# 第 6 步"杀旧起新"若新 agent 起不来，restore_upgrade_backup 可恢复旧版本重启，
+# 避免 worker 永久失联（build-0005 / k8gtld1 两台实锤：杀旧成功、起新失败、
+# 无人拉回）。备份只留最近一份（.upgrade-backup），旧备份先清，磁盘占用可控。
+_upgrade_backup_dir="$INSTALL_DIR/.upgrade-backup"
+if [ -d "$INSTALL_DIR/src" ]; then
+  rm -rf "$_upgrade_backup_dir"
+  mkdir -p "$_upgrade_backup_dir"
+  cp -a "$INSTALL_DIR/src" "$_upgrade_backup_dir/src" 2>/dev/null || true
+  [ -f "$INSTALL_DIR/VERSION" ] && cp -a "$INSTALL_DIR/VERSION" "$_upgrade_backup_dir/VERSION" 2>/dev/null || true
+  log "已备份当前代码到 $_upgrade_backup_dir（升级失败时自动回滚）"
+fi
 log "解压运行包到 $INSTALL_DIR"
 tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "解压运行包失败"
 rm -f "$TMP_PKG"
+
+# restore_upgrade_backup <起服务方式>：恢复备份的旧代码并按传入方式重启 agent。
+# systemd: restore_upgrade_backup systemd；nohup: restore_upgrade_backup nohup
+restore_upgrade_backup() {
+  _mode="${1:-nohup}"
+  log "!!! 新 agent 启动失败，回滚到升级前代码并重启旧 agent !!!"
+  if [ ! -d "$_upgrade_backup_dir/src" ]; then
+    log "回滚失败: 无备份（$_upgrade_backup_dir 不存在，可能是全新安装）—— worker 将保持失联，需人工介入"
+    return 1
+  fi
+  rm -rf "$INSTALL_DIR/src"
+  cp -a "$_upgrade_backup_dir/src" "$INSTALL_DIR/src"
+  [ -f "$_upgrade_backup_dir/VERSION" ] && cp -a "$_upgrade_backup_dir/VERSION" "$INSTALL_DIR/VERSION"
+  log "已恢复旧代码（$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo '未知版本')）"
+  if [ "$_mode" = "systemd" ]; then
+    systemctl daemon-reload >/dev/null 2>&1 || true
+    systemctl restart runtime-agent >/dev/null 2>&1 || true
+  else
+    setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
+    disown 2>/dev/null || true
+  fi
+  sleep 5
+  if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m src\.runtime\.agent" >/dev/null 2>&1; then
+    log "回滚成功：旧 agent 已恢复运行"
+    return 0
+  fi
+  log "回滚后 agent 仍未运行—— worker 失联，需人工介入（日志: $INSTALL_DIR/data/worker.log / journalctl -u runtime-agent）"
+  return 1
+}
 
 # 校验包内 SHA256SUMS：包内路径带 grape-worker/ 前缀，解压 --strip-components=1 后
 # 实际文件在安装目录根，校验时去掉前缀（存在则校验；缺失仅告警）
@@ -342,7 +383,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable runtime-agent >/dev/null 2>&1 || true
-  systemctl restart runtime-agent || fail "服务启动失败，请查看 journalctl -u runtime-agent"
+  systemctl restart runtime-agent || { restore_upgrade_backup systemd || true; fail "新 agent 启动失败（已尝试回滚旧版本，请查 journalctl -u runtime-agent）"; }
   log "已通过 systemd 启动（runtime-agent）"
 else
   # ---- 普通用户 或 容器环境（无 systemd）：nohup/setsid 后台启动 ----
@@ -405,11 +446,29 @@ EOF
   # 脱离终端启动（setsid + nohup，退出 ssh 不中断）
   setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
   disown 2>/dev/null || true
+  # 启动验证 + 失败回滚（2026-10-08）：原逻辑只打一行"启动失败"就继续走完脚本退出，
+  # 旧 agent 已被杀、新 agent 没起来 → worker 永久失联无人拉回（k8gtld1 实锤）。
+  # 现在验证两件事：进程活着 + 30s 内注册成功（日志出现 registered）。
+  # 注册成功才算升级完成；任一失败 → 恢复备份旧代码重启（旧版至少能连上 master）。
   sleep 3
-  if pgrep -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1; then
-    log "已后台启动（pid $(pgrep -f "${_pat}.*-m src\.runtime\.agent" | head -1)），日志: $INSTALL_DIR/data/worker.log"
+  if ! pgrep -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1; then
+    restore_upgrade_backup nohup || true
+    fail "新 agent 启动失败（已尝试回滚旧版本），日志: $INSTALL_DIR/data/worker.log"
+  fi
+  _reg_ok=""
+  for _i in $(seq 1 10); do
+    if tail -n 40 "$INSTALL_DIR/data/worker.log" 2>/dev/null | grep -q "RuntimeAgent registered"; then
+      _reg_ok=1
+      break
+    fi
+    sleep 3
+  done
+  if [ -n "$_reg_ok" ]; then
+    log "已后台启动并注册成功（pid $(pgrep -f "${_pat}.*-m src\.runtime\.agent" | head -1)），日志: $INSTALL_DIR/data/worker.log"
+  elif restore_upgrade_backup nohup; then
+    log "新 agent 进程存活但 30s 未注册成功——已回滚旧版本（新版本可能无法连接 master，如 502 窗口期升级）"
   else
-    log "启动失败，请查看日志: $INSTALL_DIR/data/worker.log"
+    log "新 agent 注册超时且回滚失败，worker 状态异常，请人工检查: $INSTALL_DIR/data/worker.log"
   fi
 fi
 
