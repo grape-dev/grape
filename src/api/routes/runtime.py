@@ -707,16 +707,22 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
             except Exception:
                 pass  # 查询失败保守跳过检查（保持旧行为：回收）
             # attempts 封顶：循环回炉保护
+            # 2026-10-08 follow-up：SQLite 后端不支持 CONCAT → no such function 导致
+            # 整个事务回滚、端点 500、封顶安全网失效。改用 service.py 同款纯 SQL CASE
+            # 写法（attempts=attempts+1，CASE 判定 status，说明写 result_text 非 errors）。
             _att = (attempts or 0) + 1
+            c.execute(
+                "UPDATE agent_tasks SET attempts=attempts+1, "
+                "status=CASE WHEN attempts+1 >= ? THEN 'failed' ELSE 'queued' END, "
+                "started_at=CASE WHEN attempts+1 >= ? THEN started_at ELSE NULL END, "
+                "result_text=CASE WHEN attempts+1 >= ? "
+                "THEN 'recover-orphans attempts cap reached (possible self-restart loop)' "
+                "ELSE result_text END "
+                "WHERE id=?",
+                (RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, tid))
             if _att >= RECOVER_MAX_ATTEMPTS:
-                c.execute(
-                    "UPDATE agent_tasks SET status='failed', attempts=?, errors=CONCAT(COALESCE(errors,''), ?) WHERE id=?",
-                    (_att, "recover-orphans attempts cap reached (possible self-restart loop)", tid))
                 force_failed.append(tid)
             else:
-                c.execute(
-                    "UPDATE agent_tasks SET status='queued', started_at=NULL, attempts=? WHERE id=?",
-                    (_att, tid))
                 recovered.append(tid)
         db.commit()
     if recovered or skipped_active or force_failed:
