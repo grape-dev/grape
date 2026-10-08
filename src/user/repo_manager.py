@@ -36,19 +36,36 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
 
 
 def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str) -> bool:
-    """调 /collaborators/{username}/permission 接口精确判断管理员权限"""
+    """调 /collaborators/{username}/permission 接口精确判断管理/维护权限。
+
+    GitCode 实测坑：该接口返回的复数 ``permissions.admin`` 恒为 false
+    （维护者 access_level=40 时同样是 false），不能用于判定是否能托管。
+    真实权限看同接口的：
+      - ``access_level``：30=开发者(Developer) / 40=维护者(Maintainer) / >=50=管理员
+      - 单数 ``permission`` 字符串："write"(开发者) / "admin"(维护者及以上)
+    因此按 access_level>=40 判定（维护者及以上可托管），单数 permission 与
+    复数 permissions.admin 作兜底兼容。
+    """
     if not username:
         return False
     # 项目所有者直接有完全权限
     if username == owner:
         return True
-    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{username}/permission"
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}/permission"
     try:
         data = _req("GET", url, api_token)
-        perm = data.get("permissions", {})
-        return bool(perm.get("admin")) if isinstance(perm, dict) else False
     except RuntimeError:
         return False
+    try:
+        access_level = int(data.get("access_level", 0) or 0)
+    except (TypeError, ValueError):
+        access_level = 0
+    if access_level >= 40:  # Maintainer(40) / Admin(>=50)
+        return True
+    if str(data.get("permission", "") or "").lower() == "admin":
+        return True
+    perm = data.get("permissions") or {}
+    return bool(perm.get("admin")) if isinstance(perm, dict) else False
 
 
 # GitCode 成员权限枚举（官方 API：PUT /collaborators/{username} body 用单数字段 permission）
