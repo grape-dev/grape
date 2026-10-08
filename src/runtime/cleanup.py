@@ -609,6 +609,7 @@ def _sweep_tmp_residuals() -> int:
         "/tmp/pip-metadata-*",
         "/tmp/pytest-of-root",
         "/tmp/tirith-install-*",
+        "/tmp/scene_sync_zip_*",   # scene sync 临时包泄漏（2026-10 曾 2486 个/5.7G 打满 /tmp）
     ]
     for pattern in _dir_prefixes:
         for path in _glob.glob(pattern):

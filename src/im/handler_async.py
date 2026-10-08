@@ -279,12 +279,14 @@ def get_user_id_by_app_id(app_id: str) -> int | None:
 async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                                 text: str, chat_id: str, sender_id: str, db,
                                 account: str = "", msg_id: str = "",
-                                sender_open_id: str = "") -> str:
+                                sender_open_id: str = "", card_value: dict | None = None) -> str:
     """异步命令处理（卡片化导航 feishu-repo-navigation-commands-design.md）。
 
     新命令 /repo /chat /task /new /where /cancel /help 用 reply_card 回复并返回空串（调用方跳过文本回复）；
     /clean 沿用同步逻辑后以卡片确认。旧 /bind /unbind /status /refresh /autodev /notify 及
     /对话 /加入 已按设计删除（/repo 取代 /bind、/chat 取代 /对话、/where 承担 /status 定位）。
+
+    card_value：卡片按钮 value 附加字段（_parse_card_action 透传，feishu-notification-card-quick-actions-design.md）。
     """
     text = text.strip()
     parts = text.split()
@@ -436,6 +438,51 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
     if cmd in ("/help", "/start"):
         await api.send_quick_cmd_card(ctx, sender_open_id)
         log.info(f"Command: /help -> send_quick_cmd_card to open_id={sender_open_id[:20]}")
+        return ""
+
+    # /task-open — 通知卡快捷按钮：直达任务会话（feishu-notification-card-quick-actions-design.md）
+    if cmd == "/task-open":
+        value = card_value or {}
+        _rk = value.get("repo_key") or ""
+        _iss = str(value.get("issue_number") or "").lstrip("#")
+        if not _rk or not _iss:
+            # 纯文本输入 /task-open（无卡片上下文）→ 回退 /task 列表流
+            await api.reply_card(ctx, msg_id, "**⚠️ 请使用通知卡片上的按钮，或 `/task` 选择任务。**")
+            return ""
+        if not uid:
+            await _send_card_reply(ctx, api, msg_id, {
+                "header": {"title": {"tag": "plain_text", "content": "❌ 未关联用户"}, "template": "red"},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**❌ 未找到关联平台用户**\n请在 Chat Agent 页配置飞书。"}}],
+            })
+            return ""
+        from src.session_manager import join_feishu_chat, create_conversation, db_lock
+        cid = value.get("conv_id") or ""
+        _title = f"Issue #{_iss}"
+        if not cid:
+            # 按 (uid, repo_key, issue_number) 查/建 task conversation（与 _handle_selection action==task 同源）
+            with db_lock:
+                r2 = db.cursor().execute(
+                    "SELECT id FROM chat_conversations WHERE user_id=? AND repo_key=? "
+                    "AND conv_type='task' AND issue_number=? LIMIT 1",
+                    (uid, _rk, int(_iss) if _iss.isdigit() else 0)).fetchone()
+                if r2:
+                    cid = r2[0]
+            if not cid:
+                if not _iss.isdigit():
+                    await api.reply_card(ctx, msg_id, f"**❌ 无效任务号 {_iss}**")
+                    return ""
+                cid = create_conversation(uid, _rk, title=_title, conv_type="task", issue_number=int(_iss))
+        if cid and join_feishu_chat(chat_id, cid, uid):
+            _clear_pending_selection(chat_id)
+            await _send_card_reply(ctx, api, msg_id, {
+                "header": {"title": {"tag": "plain_text", "content": "✅ 已进入任务会话"}, "template": "green"},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"**✅ 已进入任务会话**\nIssue #{_iss} · {value.get('title') or _title}"}}],
+            })
+        else:
+            await _send_card_reply(ctx, api, msg_id, {
+                "header": {"title": {"tag": "plain_text", "content": "❌ 进入失败"}, "template": "red"},
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**❌ 进入任务会话失败**\n该会话可能不属于当前账号。"}}],
+            })
         return ""
 
     # /bind N — 数字按钮直接绑定仓库
@@ -867,13 +914,13 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
 
         if detect_clean_intent(text):
-            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""))
+            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None)
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
 
         if text.startswith("/"):
-            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""))
+            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None)
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return

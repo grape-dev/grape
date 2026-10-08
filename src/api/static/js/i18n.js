@@ -8,7 +8,7 @@
  * - SUPPORTED = ['zh', 'en'], DEFAULT_LANG = 'zh'
  * - URL pathname prefix detection (/en → en, else → zh)
  * - localStorage + cookie dual-write for language persistence
- * - Async fetch of 15 module JSON language packs
+ * - Async fetch of 16 module JSON language packs
  * - Inline minimal packs for synchronous first paint (common + app.login + app.repo)
  * - {{name}} variable interpolation
  * - Fallback to default language (zh) when key missing in current language
@@ -28,11 +28,11 @@ var I18N = (function () {
   var DEFAULT_LANG = 'zh';
   var STORAGE_KEY = 'grapeLang';
 
-  // 15 module names — each corresponds to a JSON file in locales/<lang>/
+  // 16 module names — each corresponds to a JSON file in locales/<lang>/
   var MODULES = [
     'common', 'app', 'settings', 'knowledge', 'skills',
     'chat', 'events', 'agents', 'pipeline', 'runtimes',
-    'tasks', 'repos', 'dashboard', 'observability', 'templates'
+    'tasks', 'issues', 'repos', 'dashboard', 'observability', 'templates'
   ];
 
   var _currentLang = DEFAULT_LANG;

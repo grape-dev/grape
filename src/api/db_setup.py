@@ -1525,6 +1525,14 @@ def _init_skill_featured():
 
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
+    # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
+    # 每次启动清理过量 pre-m0 备份，保留 DB_BACKUP_KEEP(默认5) 份
+    try:
+        from src.session_manager import prune_db_backups, _db_path
+        prune_db_backups(_db_path)
+    except Exception as _pb:
+        log.warning(f"DB backup prune skipped: {_pb}")
+
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
     # SQLite 不支持 GET_LOCK，跳过（单实例不需要）
     from src.mysql_compat import get_db_backend

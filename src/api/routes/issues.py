@@ -898,7 +898,8 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     log.info(f"Issue awaiting-input: {repo_key}/#{issue_number} -> awaiting_input issue={issue_card_id} "
              f"changed={changed} (agent={session_agent}, questions={questions[:60]})")
     if changed:
-        open_id = _get_feishu_open_id(assignee)
+        from src.api.issues_center import _get_feishu_open_id_by_user_id
+        open_id = _get_feishu_open_id_by_user_id(user_id) or _get_feishu_open_id(assignee)
         from src.api import main as api_main
         bm = api_main.bot_manager
         ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
@@ -972,6 +973,23 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                     _db.commit()
         except Exception as e:
             log.warning(f"Issue pending-review: conversation write failed: {e}")
+    # 飞书静态卡片触达（同 awaiting）：等用户双态的“待审核”必须主动通知用户
+    if _changed:
+        try:
+            from src.api.issues_center import (_get_feishu_open_id, _get_feishu_open_id_by_user_id,
+                                               _resolve_user_chat_bot, _run_pending_review_notify)
+            from src.session_manager import get_chat_config
+            _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"])
+            from src.api import main as api_main
+            bm = api_main.bot_manager
+            _ctx = _resolve_user_chat_bot(bm, it["user_id"]) if bm else None
+            _api = bm.api if bm else None
+            _cfg = get_chat_config(it["user_id"]) if it["user_id"] else {"backend": "opencode"}
+            asyncio.create_task(_run_pending_review_notify(
+                _ctx, _api, it["user_id"], conv_id, _open_id, review_points,
+                body.references or "", it["repo_key"], it["issue_number"], _cfg))
+        except Exception as e:
+            log.warning(f"Issue pending-review: notify schedule failed: {e}")
     return {"ok": True, "issue_id": it["id"], "status": "pending_review", "changed": _changed}
 
 

@@ -426,7 +426,7 @@ class FeishuAsync:
 
     async def send_card_to_chat(self, ctx: BotContext, chat_id: str, text: str,
                                     title: str = "DevOps Bot", template: str = "blue",
-                                    fallback_open_id: str = "") -> str:
+                                    fallback_open_id: str = "", actions: list | None = None) -> str:
             # 主动发卡片消息到聊天（非 reply，主窗口可见）
             # fallback_open_id: P2P 私聊场景 chat_id 方式可能被飞书拒绝(code=230001)，
             # 此时用 open_id 重发。
@@ -439,6 +439,8 @@ class FeishuAsync:
                 "tag": "action",
                 "actions": [{"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]
             })
+            if actions:
+                elements.append({"tag": "action", "actions": actions})
             card = {
                 "elements": elements,
                 "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
@@ -535,15 +537,18 @@ class FeishuAsync:
         return False
 
     async def send_card_to_user(self, ctx: BotContext, open_id: str, text: str,
-                                title: str = "DevOps Bot") -> str:
+                                title: str = "DevOps Bot", actions: list | None = None) -> str:
         """主动发送卡片给用户"""
         token = await self._ensure_token(ctx)
         if not token:
             return ""
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
+        elements = to_lark_elements(text, 2000)
+        if actions:
+            elements.append({"tag": "action", "actions": actions})
         card = {
-            "elements": to_lark_elements(text, 2000),
+            "elements": elements,
             "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"},
         }
         payload = {
@@ -910,6 +915,7 @@ def _parse_card_action(event_data: dict) -> dict | None:
         "message_id": header.get("event_id") or msg_id,  # event_id 唯一，用于去重
         "_reply_id": msg_id,  # 真实消息 ID，用于回复
         "message_type": "text",
+        "_card_value": value if isinstance(value, dict) else {},  # 按钮附加字段（cmd 之外的 目标上下文）
     }
 
 
