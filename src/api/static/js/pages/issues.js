@@ -924,7 +924,7 @@ function _render() {
   const detailHtml = _taskSel ? _detailHtml(_taskSel) : `<div class="tsk-empty" style="border:none"><div>🗒</div><h3>${I18N.t('tasks.empty.select_task_title')}</h3><p>${I18N.t('tasks.empty.select_task_desc')}</p></div>`;
 
   el.innerHTML = `
-  <div class="tsk-page" style="max-width:none;height:calc(100vh - 60px);display:flex;flex-direction:column">
+  <div class="tsk-page" style="max-width:none;height:calc(100vh - 52px);display:flex;flex-direction:column">
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>

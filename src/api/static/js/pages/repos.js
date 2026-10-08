@@ -22,10 +22,15 @@ function renderSelectionShell(tab, innerHtml) {
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
         <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
-      <div class="lobby-user" onclick="app.logout()" title="${I18N.t('repos.logout_title')}">
-        <span class="lobby-avatar">${avatar}</span>
-        <span class="lobby-user-name">${user}</span>
-        <span class="lobby-out">↩</span>
+      <div style="display:flex;align-items:center;gap:12px">
+        <div id="lobbyUserDropdown" style="position:relative">
+          <button onclick="app._toggleLobbyUserMenu()" style="display:flex;align-items:center;gap:8px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">
+            <span class="lobby-avatar">${avatar}</span>
+            <span class="lobby-user-name">${user}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div id="lobbyUserMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:9999;padding:4px"></div>
+        </div>
       </div>
     </header>
     <main class="lobby-main">
@@ -145,13 +150,6 @@ function renderRepoSelection(repos) {
 
   var templatesHtml = _renderProjectTemplates();
 
-  // 组织区块：显示归属组织列表 + 切换入口
-  var orgSectionHtml = '<div class="project-section" id="orgSection" style="margin-top:12px">'
-    + '<div class="project-section-header"><div class="project-section-header-left"><h2>' + I18N.t("organizations.my_orgs") + '</h2></div>'
-    + '<div class="project-section-header-right"><button class="project-refresh-btn" onclick="app.nav(\'organizations\')" style="font-size:12px;color:var(--a);background:none;border:none;cursor:pointer">' + I18N.t("organizations.manage_orgs") + '</button></div>'
-    + '</div><div id="orgSectionList" style="display:flex;gap:10px;flex-wrap:wrap;padding:4px 0">'
-    + '<div style="color:var(--t3);font-size:13px;padding:12px 0">' + I18N.t("organizations.loading") + '</div></div></div>';
-
   var inner = '<div class="project-page">' +
     '<div class="project-hero">' +
       '<div class="project-hero-welcome">' +
@@ -166,7 +164,6 @@ function renderRepoSelection(repos) {
         '<div class="project-stat"><b>' + hostedCount + '</b><span>' + I18N.t('repos.lobby.stat_hosted') + '</span></div>' +
       '</div>' +
     '</div>' +
-    orgSectionHtml +
     '<div class="project-section">' +
       '<div class="project-section-header">' +
         '<div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.my_projects') + '</h2></div>' +
@@ -182,7 +179,6 @@ function renderRepoSelection(repos) {
 
   _projectsContent = inner;
   renderSelectionShell('projects', inner);
-  _loadOrgSection();
 }
 
 function _loadOrgSection() {

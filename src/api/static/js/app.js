@@ -189,6 +189,8 @@ function loadAgentTypes() {
       if (welcomeEl) welcomeEl.textContent = displayName;
       // 加载组织下拉列表
       _loadOrgSelect();
+      // 加载右上角组织名
+      _updateTbOrgName();
     }).catch(() => {});
   }
 
@@ -249,6 +251,136 @@ function loadAgentTypes() {
     });
   }
 
+  // ===== 工作台右上角组织下拉菜单 =====
+  function _toggleOrgDropdown() {
+    var menu = document.getElementById('tbOrgMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadTbOrgs();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeOrgDropdownOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeOrgDropdownOnOutside);
+    }
+  }
+  function _closeOrgDropdownOnOutside(e) {
+    var btn = document.getElementById('tbOrgBtn');
+    var menu = document.getElementById('tbOrgMenu');
+    if (btn && !btn.contains(e.target) && menu && !menu.contains(e.target)) {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeOrgDropdownOnOutside);
+    }
+  }
+  function _loadTbOrgs() {
+    var menu = document.getElementById('tbOrgMenu');
+    if (!menu) return;
+    menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.loading") || "加载中...") + '</div>';
+    API.get('/orgs').then(function(orgs) {
+      if (!orgs || orgs.length === 0) {
+        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>';
+        return;
+      }
+      var currentId = localStorage.getItem('current_org_id') || '';
+      var html = '';
+      orgs.forEach(function(o) {
+        var isActive = String(o.id) === String(currentId);
+        var bg = isActive ? 'var(--a)' : 'transparent';
+        var fg = isActive ? '#fff' : 'var(--t1)';
+        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "个人") + '</span>' : '';
+        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+          + '<span style="font-size:14px">🏢</span>'
+          + '<div style="flex:1;min-width:0">'
+          + '<div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
+          + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + (I18N.t("organizations.members") || "成员") + ' · ' + (o.role || 'member') + '</div>'
+          + '</div>'
+          + (isActive ? '<span style="font-size:12px">✓</span>' : '')
+          + '</div>';
+      });
+      html += '<div style="border-top:1px solid var(--b);margin-top:4px;padding-top:4px">'
+        + '<div onclick="app.nav(\'organizations\');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px">'
+        + '<span>⚙</span><span>' + (I18N.t("organizations.manage_orgs") || "管理组织") + '</span></div></div>';
+      menu.innerHTML = html;
+    }).catch(function() {
+      menu.innerHTML = '<div style="padding:8px 12px;color:var(--r);font-size:12px">' + (I18N.t("organizations.load_failed", {msg: ""}) || "加载失败") + '</div>';
+    });
+  }
+  function _updateTbOrgName() {
+    // 无需更新按钮文字 — 固定显示"我的组织"
+  }
+
+  // ===== lobby（#repos 全屏页）用户下拉菜单（含组织切换 + 退出） =====
+  function _toggleLobbyUserMenu() {
+    var menu = document.getElementById('lobbyUserMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadLobbyUserMenu();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeLobbyUserMenuOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeLobbyUserMenuOnOutside);
+    }
+  }
+  function _closeLobbyUserMenuOnOutside(e) {
+    var dropdown = document.getElementById('lobbyUserDropdown');
+    var menu = document.getElementById('lobbyUserMenu');
+    if (dropdown && !dropdown.contains(e.target)) {
+      if (menu) menu.style.display = 'none';
+      document.removeEventListener('click', _closeLobbyUserMenuOnOutside);
+    }
+  }
+  function _loadLobbyUserMenu() {
+    var menu = document.getElementById('lobbyUserMenu');
+    if (!menu) return;
+    var currentId = localStorage.getItem('current_org_id') || '';
+    var html = '';
+    // 组织区域标题
+    html += '<div style="padding:6px 12px;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.5px;font-weight:600">' + (I18N.t("organizations.my_orgs") || "我的组织") + '</div>';
+    html += '<div id="lobbyUserOrgList" style="padding:0 4px"><div style="padding:6px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.loading") || "加载中...") + '</div></div>';
+    // 管理组织入口
+    html += '<div onclick="app.nav(\'organizations\');document.getElementById(\'lobbyUserMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>⚙</span><span>' + (I18N.t("organizations.manage_orgs") || "管理组织") + '</span></div>';
+    // 分割线
+    html += '<div style="border-top:1px solid var(--b);margin:4px 0"></div>';
+    // 退出
+    html += '<div onclick="app.logout()" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--r);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>↩</span><span>' + (I18N.t("app.logout") || "退出登录") + '</span></div>';
+    menu.innerHTML = html;
+    // 异步加载组织列表
+    API.get('/orgs').then(function(orgs) {
+      var listEl = document.getElementById('lobbyUserOrgList');
+      if (!listEl) return;
+      if (!orgs || orgs.length === 0) {
+        listEl.innerHTML = '<div style="padding:6px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>';
+        return;
+      }
+      var listHtml = '';
+      orgs.forEach(function(o) {
+        var isActive = String(o.id) === String(currentId);
+        var bg = isActive ? 'var(--a)' : 'transparent';
+        var fg = isActive ? '#fff' : 'var(--t1)';
+        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "个人") + '</span>' : '';
+        listHtml += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'lobbyUserMenu\').style.display=\'none\'" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+          + '<span style="font-size:13px">🏢</span>'
+          + '<div style="flex:1;min-width:0">'
+          + '<div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
+          + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + (I18N.t("organizations.members") || "成员") + ' · ' + (o.role || 'member') + '</div>'
+          + '</div>'
+          + (isActive ? '<span style="font-size:11px">✓</span>' : '')
+          + '</div>';
+      });
+      listEl.innerHTML = listHtml;
+    }).catch(function() {
+      var listEl = document.getElementById('lobbyUserOrgList');
+      if (listEl) listEl.innerHTML = '<div style="padding:6px 12px;color:var(--r);font-size:12px">' + (I18N.t("organizations.load_failed", {msg: ""}) || "加载失败") + '</div>';
+    });
+  }
+
   function switchOrg(orgId) {
     if (!orgId) return;
     var sel = document.getElementById('orgSelect');
@@ -289,6 +421,8 @@ function loadAgentTypes() {
           nav('dash');
         }
       }
+      // 刷新右上角组织名
+      _updateTbOrgName();
       // 刷新首页"我的组织"区块高亮（如果在 #repos 页面）
       if (typeof _loadOrgSection === 'function') {
         _loadOrgSection();
@@ -455,6 +589,8 @@ function loadAgentTypes() {
       mv.style.zIndex = '100';
       $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
+      // 加载 lobby 组织下拉名
+      _updateTbOrgName();
     }).catch(e => {
       if (window._currentView !== 'repos') return;  // stale guard
       if (ov) ov.remove();
@@ -1529,7 +1665,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyUserMenu};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

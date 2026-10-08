@@ -52,14 +52,14 @@
 <div class="logo-s" style="cursor:pointer" onclick="app.goToRepos()" data-i18n-title="app.repo.back_to_select" title="返回仓库选择"><img class="sq" src="/static/img/grape-logo.jpg?v=1" alt="A"><h1>Grape</h1></div>
 <div class="tagline">Multi-Agent DevOps</div>
 </div>
-<div style="padding:0 12px;margin-top:8px">
+<div style="padding:0 12px;margin-top:8px;display:none">
 <div style="font-size:10px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px" data-i18n="app.sidebar.organizations">组织</div>
 <div class="sb-sel">
   <select id="orgSelect" onchange="app.switchOrg(this.value)" data-i18n-title="organizations.title" title="切换组织">
     <option value="">加载中...</option>
   </select>
 </div>
-<div style="font-size:10px;color:var(--t3);margin-top:4px"><a onclick="app.nav('organizations')" style="cursor:pointer;color:var(--a)" data-i18n="organizations.manage_orgs">管理组织 →</a></div>
+<div style="font-size:10px;color:var(--t3);margin-top:4px;display:none"><a onclick="app.nav('organizations')" style="cursor:pointer;color:var(--a)" data-i18n="organizations.manage_orgs">管理组织 →</a></div>
 </div>
 <div style="padding:0 12px;margin-top:8px">
 <div style="font-size:10px;color:var(--t3);margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px" data-i18n="app.nav.repos">仓库</div>
@@ -96,7 +96,7 @@
 <div class="grp" data-i18n="app.sidebar.settings">设置</div>
 <a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span><span data-i18n="app.nav.settings">通用设置</span></a>
 <a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span><span data-i18n="app.nav.gitcode_repo">仓库设置</span></a>
-<a id="nav-organizations" onclick="app.nav('organizations')"><span class="ic">🏢</span><span data-i18n="app.nav.organizations">组织管理</span></a>
+<a id="nav-organizations" onclick="app.nav('organizations')" style="display:none"><span class="ic">🏢</span><span data-i18n="app.nav.organizations">组织管理</span></a>
 </div>
 <div class="sb-ft">
 <div class="av" id="userAvatar">U</div>
@@ -116,6 +116,8 @@
 <a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回主页</a>
 <a id="tbFeedback" onclick="openFeedbackDialog()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="问题反馈" data-i18n-title="app.feedback.title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> <span data-i18n="app.feedback.link_text">反馈</span></a>
 <a href="/static/help.html" target="_blank" style="color:var(--t3);font-size:13px;text-decoration:none" data-i18n="app.help.link_text">📖 帮助</a>
+<a id="tbOrgBtn" onclick="app._toggleOrgDropdown()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px" data-i18n="organizations.my_orgs" title="切换组织">🏢 <span data-i18n="organizations.my_orgs">我的组织</span></a>
+<div id="tbOrgMenu" style="display:none;position:fixed;top:52px;right:0;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
 </div>
 <div class="ct" id="pageContent">
 <div class="loading" data-i18n="app.loading">加载中...</div>
@@ -136,9 +138,9 @@
 <script src="/static/js/pages/events.js?v=51"></script>
 <script src="/static/js/pages/chat.js?v=40"></script>
 <script src="/static/js/pages/im_channel.js?v=20"></script>
-<script src="/static/js/pages/repos.js?v=43"></script>
+<script src="/static/js/pages/repos.js?v=46"></script>
 <script src="/static/js/pages/templates.js?v=36"></script>
-<script src="/static/js/pages/issues.js?v=107"></script>
+<script src="/static/js/pages/issues.js?v=108"></script>
 <script src="/static/js/pages/settings.js?v=23"></script>
 <script src="/static/js/pages/scene-market.js?v=40"></script>
 <script src="/static/js/pages/skills.js?v=44"></script>
@@ -150,7 +152,7 @@
 <script src="/static/js/pages/my_feedback.js?v=5"></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=3"></script>
 <script src="/static/js/pages/autopilot.js?v=59"></script>
-<script src="/static/js/app.js?v=114"></script>
+<script src="/static/js/app.js?v=119"></script>
 <script src="/static/js/auto-recovery.js?v=2"></script>
 
 <!-- Help Drawer -->
