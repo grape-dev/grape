@@ -99,6 +99,7 @@ scripts/install-worker.sh.bak.*
 start-cluster.sh
 configs/admin.env
 admin/
+!src/admin/
 logs/
 examples/
 skills/
