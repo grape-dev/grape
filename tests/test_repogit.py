@@ -18,6 +18,8 @@ def git_src(tmp_path):
     src = tmp_path / "src"
     src.mkdir()
     _git(["init", "-b", "main"], str(src))
+    _git(["config", "user.email", "test@example.com"], str(src))
+    _git(["config", "user.name", "Test User"], str(src))
     (src / "a.txt").write_text("v1", encoding="utf-8")
     _git(["add", "-A"], str(src))
     _git(["commit", "-m", "init"], str(src))
@@ -138,3 +140,37 @@ class TestTokenNoPersist:
                     assert "BOT_GITCODE_TOKEN" in content
         # 无 credentials 文件
         assert not os.path.exists(os.path.join(wt, ".git-credentials"))
+
+
+
+
+class TestEnsureFeatureBranch:
+    """分支护栏 helper（Issue #15）：先 checkout 已存在分支，失败再 -b 新建。"""
+
+    def test_already_on_target_branch(self, git_src):
+        """已在目标分支 → 直接返回 True，不执行 checkout。"""
+        ok = repogit.ensure_feature_branch(str(git_src), "main", "main")
+        assert ok is True
+        br = _git(["rev-parse", "--abbrev-ref", "HEAD"], str(git_src))
+        assert br.stdout.strip() == "main"
+
+    def test_switch_to_existing_branch(self, git_src):
+        """目标分支已存在但当前不在其上 → checkout 切换成功（分支已存在场景）。"""
+        _git(["checkout", "-b", "feat/issue-99"], str(git_src))
+        _git(["checkout", "main"], str(git_src))
+        ok = repogit.ensure_feature_branch(str(git_src), "feat/issue-99", "main")
+        assert ok is True
+        br = _git(["rev-parse", "--abbrev-ref", "HEAD"], str(git_src))
+        assert br.stdout.strip() == "feat/issue-99"
+
+    def test_create_new_branch_when_not_exists(self, git_src):
+        """目标分支不存在 → 先 checkout 失败，再 -b 新建（本地分支追踪 HEAD）。"""
+        ok = repogit.ensure_feature_branch(str(git_src), "feat/issue-77", "main")
+        assert ok is True
+        br = _git(["rev-parse", "--abbrev-ref", "HEAD"], str(git_src))
+        assert br.stdout.strip() == "feat/issue-77"
+
+    def test_invalid_dir_returns_false(self):
+        """无效目录 → 不崩溃，返回 False。"""
+        ok = repogit.ensure_feature_branch("/nonexistent/path", "feat/issue-1", "main")
+        assert ok is False

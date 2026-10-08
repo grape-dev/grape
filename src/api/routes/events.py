@@ -17,7 +17,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result FROM events WHERE seq=?",
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output FROM events WHERE seq=?",
                 (seq,)
             )
             row = c.fetchone()
@@ -67,6 +67,24 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
+    _structured_raw = row[20] if len(row) > 20 else None
+    _structured = None
+    try:
+        if _structured_raw:
+            _parsed = json.loads(_structured_raw)
+            if isinstance(_parsed, dict):
+                _structured = _parsed
+    except Exception:
+        _structured = None
+    if _structured is not None:
+        result["archive"] = {
+            "seq": row[0], "agent": row[5] or "",
+            "event_type": row[3] or "", "status": row[10] or "",
+            "runtime": row[12] or "", "skill": row[13] or "",
+            "output": _structured,
+            "logs": agent_logs or [],
+        }
     # 前后同 agent_type 同仓库事件 seq（供前端箭头导航，Issue #224: 增加 repo_key 过滤避免跨仓库导航）
     try:
         agent_type = row[5] or ""
@@ -82,26 +100,27 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     except Exception:
         result["prev_seq"] = 0
         result["next_seq"] = 0
-    # M4：附 event.json archive 对应 pipeline 段（结构化产出展示，见 §11.4）
-    try:
-        import re as _re
-        num = ""
-        if row[2]:
-            m = _re.search(r"(\d+)", str(row[2]))
-            if m:
-                num = m.group(1)
-        if num:
-            from src.api.event_archive import load_event_json
-            arch = load_event_json(row[1] or "", num)
-            if arch:
-                for seg in arch.get("pipeline", []):
-                    if seg.get("seq") == row[0]:
-                        result["archive"] = seg
-                        break
-                if "archive" not in result:
-                    result["archive"] = arch
-    except Exception:
-        pass
+    # M4：archive 结构化产出——优先 events.structured_output（weekly-05）；无则回退 event.json 段
+    if "archive" not in result:
+        try:
+            import re as _re
+            num = ""
+            if row[2]:
+                m = _re.search(r"(\d+)", str(row[2]))
+                if m:
+                    num = m.group(1)
+            if num:
+                from src.api.event_archive import load_event_json
+                arch = load_event_json(row[1] or "", num)
+                if arch:
+                    for seg in arch.get("pipeline", []):
+                        if seg.get("seq") == row[0]:
+                            result["archive"] = seg
+                            break
+                    if "archive" not in result:
+                        result["archive"] = arch
+        except Exception:
+            pass
     # 引擎实例名（events.runtime 是引擎类型名；具体实例多级回退解析，见 agent-cluster-design.md）
     # 1) agent_tasks.runtime_id（queue/池模式实际执行引擎）
     # 2) devops_agent_session.runtime_id（direct 模式绑定实例）
@@ -469,8 +488,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 log.info(f"[redispatch] seq={seq} local_only: direct execution started on rid={_orig_rid}")
             except Exception as e:
                 log.warning(f"[redispatch] seq={seq} local_only: direct execution failed: {e}")
-        # 事件状态回写 running
-        update_event_status(seq, "running")
+        # 事件状态回写 running（redispatch 语义：重置终态，允许重跑成功后 complete 覆盖）
+        from src.api.event_store import reset_event_terminal
+        reset_event_terminal(seq)
         try:
             from src.user.db import set_meta_value
             import time as _time
@@ -911,8 +931,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 log.warning(f"[redispatch] seq={seq} re-run_pipeline failed: {e}")
                 raise HTTPException(status_code=500, detail={"code": 500, "message": f"重派异常: {str(e)[:100]}"})
 
-    # 4) 事件状态回写 running
-    update_event_status(seq, "running")
+    # 4) 事件状态回写 running（redispatch 语义：重置终态，允许重跑成功后 complete 覆盖）
+    from src.api.event_store import reset_event_terminal
+    reset_event_terminal(seq)
 
     # 5) 记录幂等时间戳
     try:
@@ -1721,9 +1742,15 @@ def list_events(owner: str, repo: str,
                       page: int = Query(1, ge=1),
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
-                      user: dict = Depends(require_no_session_token)):
+                      user: dict = Depends(get_current_user_or_api_key)):
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
+
+    # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
+    if user.get("auth_type") == "session_token":
+        _tok_repo = user.get("repo_key") or ""
+        if _tok_repo and _tok_repo not in (repo_key, f"github:{owner}/{repo}", f"gitcode:{owner}/{repo}"):
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
     # 权限校验：用户必须有权访问该仓库
     from src.api.deps import check_repo_access

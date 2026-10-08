@@ -27,15 +27,16 @@ GitCode 事件（Issue/PR/评论）
 | `GRAPE_SERVER_URL` | Grape 服务端地址（skill 调 API 用） | 全部 | `_execute_agent` / agent.py 本机修正 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
-| `REPO_FULL_NAME` | `owner/repo` 仓库全名 | 全部（devops 事件） | `_execute_agent` |
-| `ACCOUNT` | 仓库所属账号 | 全部 | `_execute_agent` |
+| `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义） | 全部（devops 事件） | `_execute_agent` |
+| `REPO_OWNER` | **仓库属主（owner，组织或个人的泛化概念）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
+| `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
+| `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent` |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
 | `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra |
-| `GRAPE_CF_1..N` | 场景高级选项 custom_fields 按序号注入的值 | 配置了 custom_fields 的场景 | `_inject_scene_env` |
-| `GRAPE_CF_MAP` | `{"GRAPE_CF_1":"key名",...}` 键名映射 | 同上 | 同上 |
+| 场景自定义变量（`custom_fields`） | 场景高级选项配置的自定义环境变量，**以变量名直接注入**（如 `MY_API_KEY`、`HUAWEI_AK`），技能 `os.environ.get('VAR_NAME')` 直接读取；支持 `is_secret`（页面掩码）与 `scope`（按 agent 过滤，默认 all） | 配置了 custom_fields 的场景（按 scope 匹配的 agent） | `_inject_scene_env` → env_extra |
 | `BOT_GITCODE_TOKEN` | 仓库 bot token（仓库身份，事件任务） | **非 chat**（devops 事件） | `_assemble_env`（互斥） |
 | `BOT_GITHUB_TOKEN` | GitHub 仓库 bot token | 非 chat（GitHub 仓库） | `_assemble_env`（互斥） |
 | `USER_GITCODE_TOKEN` | 当前用户 GitCode token（用户身份） | **Chat 专用** | `_assemble_env`（互斥） |
@@ -46,7 +47,7 @@ GitCode 事件（Issue/PR/评论）
 | `GIT_ASKPASS` | git 凭据辅助脚本（BOT_GITCODE_TOKEN） | Coding/QA/SRE（git workflow） | `repogit.askpass_path` |
 
 > 注：`HUAWEICLOUD_SDK_AK/SK`、`CODEARTS_CLI_AK/SK`、`GITHUB_PUBLISH_REPO`、`GITCODE_PUBLISH_REPO`、
-> `CLAWHUB_OWNER_HANDLE` **已不再经环境变量注入**（#219 按需获取）——技能需要时通过自定义场景变量（`GRAPE_CF_*`）
+> `CLAWHUB_OWNER_HANDLE` **已不再经环境变量注入**（#219 按需获取）——技能需要时通过自定义场景变量（场景高级选项 custom_fields，变量名直接注入）
 > 或按需 API 获取。
 
 > **`AGENT_NAME` 与 `DEVOPS_EVENT_TYPE` 的区别**：两者是正交的两个维度——
@@ -80,7 +81,7 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
 
 > Chat 用当前登录用户身份；事件任务用仓库 bot 身份。
 > 华为云/CodeArts AK-SK 与发布目标（gitcode/github publish repo、ClawHub handle）**不再 env 注入**（#219），
-> 技能需要时走自定义场景变量（`GRAPE_CF_*`）或按需 API。
+> 技能需要时走**自定义场景变量**（场景高级选项 custom_fields，变量名直接注入）或按需 API。
 
 ## 五、Skill 开发建议
 
@@ -95,39 +96,30 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
    **会话 token（`tk_`）可用的命令**（dual + session_only，含 git-repo / issues 读 / a2a / tasks 等）；
    user_only（skills 管理 / settings / repos 平台管理 等）已被过滤——agent 不要尝试调用它们（服务端仍会 403）。
 4. **华为云/CodeArts 凭据**：不再经 env 注入——需要云能力的 SRE/skill 通过**自定义场景变量**（场景高级选项
-   `custom_fields`，映射为 `GRAPE_CF_*`）读取，或在技能 SKILL.md 中声明按需获取方式。
+   `custom_fields`，变量名直接注入）读取，或在技能 SKILL.md 中声明按需获取方式。
 5. **场景读取**：`printenv GRAPE_SCENE_ID` 确认当前 Issue 绑定的场景（空串=尚未判定）；
-   自定义字段读 `GRAPE_CF_MAP` 按 key 名取 `GRAPE_CF_N` 值。
+   自定义字段以**变量名直接注入**——`printenv <NAME>` / `os.environ.get('<NAME>')` 直接读值。
 6. **git 操作**：用 `GRAPE_WORK_BRANCH` 作工作基线；`GIT_ASKPASS` 已注入 `$BOT_GITCODE_TOKEN`。
 7. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
    平台已有脱敏（[REDACTED]）。token 仅在进程内有效、删除即失效（GRAPE_SESSION_TOKEN 生命周期=任务）。
 
-### 五.1 技能如何使用自定义场景变量（GRAPE_CF_*）
+### 五.1 技能如何使用自定义场景变量
 
-场景高级选项 `custom_fields`（`[{key, value}, ...]`）注入为 `GRAPE_CF_1..N`（值）+ `GRAPE_CF_MAP`
-（键名→变量序号映射）。技能**不硬编码序号**，按 key 名动态取值：
+场景高级选项 `custom_fields`（`[{name, value, is_secret?, scope?}, ...]`）**以变量名直接注入**——`name` 即环境变量名，技能直接读取，无序号/映射。
 
 ```bash
-# 1) 发现：当前场景配了哪些自定义字段
-printenv GRAPE_CF_MAP        # {"GRAPE_CF_1":"HUAWEI_AK","GRAPE_CF_2":"HUAWEI_SK","GRAPE_CF_3":"DEPLOY_ENV"}
-
-# 2) 按 key 名映射为业务变量（随场景自动绑定，序号无关）
-eval "$(printenv GRAPE_CF_MAP | python3 -c '
-import json, os, sys
-m = json.load(sys.stdin)
-for var, key in m.items():
-    print(f"export {key}={os.environ.get(var, \"\")!r}")')"
-
-# 3) 使用
-echo "AK=$HUAWEI_AK SK=${HUAWEI_SK:+<set>} ENV=$DEPLOY_ENV"
+# 直接读取（printenv / os.environ.get）
+printenv HUAWEI_AK
+# 或
+python3 -c 'import os; print(os.environ.get("HUAWEI_AK",""))'
 ```
 
 对齐场景（例：把原 `HUAWEICLOUD_SDK_AK/SK` 改为场景自定义字段）：
 ```json
 {"custom_fields": [
-  {"key": "HUAWEI_AK", "value": "LTAxxx"},
-  {"key": "HUAWEI_SK", "value": "xxxyyy"},
-  {"key": "DEPLOY_ENV", "value": "prod"}
+  {"name": "HUAWEI_AK", "value": "LTAxxx"},
+  {"name": "HUAWEI_SK", "value": "xxxyyy", "is_secret": true},
+  {"name": "DEPLOY_ENV", "value": "prod", "scope": ["all"]}
 ]}
 ```
 

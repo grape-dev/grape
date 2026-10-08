@@ -48,6 +48,57 @@ def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
     return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), agent_type)
 
 
+def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
+                          logger=None) -> bool:
+    """分支护栏：确保 worktree 在 target_branch 上，禁止直推基线分支（Issue #15）。
+
+    先检查当前分支；若不在 target_branch 上，先尝试 `git checkout target_branch`
+    （分支已存在场景），失败再 `git checkout -b target_branch origin/{base_branch}`
+    （新建分支）。记 warning 但不阻断后续流程（避免误杀）。
+
+    Args:
+        wt_dir: worktree 目录路径
+        target_branch: 目标分支名（如 feat/issue-{N}）
+        base_branch: 基线分支名（如 main），用于新建分支时追踪
+        logger: 可选 logger（默认用 src.config.log）
+
+    Returns:
+        True 表示已在目标分支上（或成功切换），False 表示切换失败。
+    """
+    _log = logger or log
+    try:
+        _r_br = subprocess.run(
+            ["git", "-C", wt_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=10)
+        _current = (_r_br.stdout or "").strip()
+        if _current and _current == target_branch:
+            return True
+        if _current:
+            _log.warning(f"branch guard: on '{_current}', switching to {target_branch}")
+        # 先尝试 checkout 已存在的分支
+        _r_co = subprocess.run(
+            ["git", "-C", wt_dir, "checkout", target_branch],
+            capture_output=True, text=True, timeout=30)
+        if _r_co.returncode == 0:
+            return True
+        # 分支不存在 → 新建（优先追踪 origin/{base_branch}，不存在则从 HEAD）
+        _r_co2 = subprocess.run(
+            ["git", "-C", wt_dir, "checkout", "-b", target_branch, f"origin/{base_branch}"],
+            capture_output=True, text=True, timeout=30)
+        if _r_co2.returncode != 0:
+            # origin/{base_branch} 不存在（如纯本地仓库）→ 从当前 HEAD 新建
+            _r_co3 = subprocess.run(
+                ["git", "-C", wt_dir, "checkout", "-b", target_branch],
+                capture_output=True, text=True, timeout=30)
+            if _r_co3.returncode != 0:
+                _log.warning(f"branch guard checkout failed {target_branch}: {(_r_co3.stderr or '')[:200]}")
+                return False
+        return True
+    except Exception as _e:
+        _log.warning(f"branch guard check failed {target_branch}: {_e}")
+        return False
+
+
 def clone_url_for(repo_key: str) -> str:
     from src.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)

@@ -41,6 +41,16 @@ class TaskNotifyBody(BaseModel):
     task_description: str = ""
 
 
+class TaskAwaitingInputBody(BaseModel):
+    questions: str = ""
+    reason: str = ""
+
+
+class TaskPendingReviewBody(BaseModel):
+    review_points: str = ""
+    references: str = ""
+
+
 class TaskCloseBody(BaseModel):
     repo_key: str = ""
     issue_number: int = 0
@@ -79,18 +89,47 @@ def _get_feishu_open_id(gitcode_user: str) -> str:
             return ""
 
 
+def _get_feishu_open_id_by_user_id(user_id: int) -> str:
+    """按平台 user_id 查飞书 open_id（等用户状态通知的 open_id 定位）。
+
+    A2A/流水线产生的需求卡 `assignee` 常为空（归属人由 user_id 承载），飞书 open_id 应随 user_id 查询，
+    而非 GitCode 用户名（assignee），否则 assignee 为空时通知静默丢失（feishu-openid-by-user-id-design.md）。
+    返回 open_id（空串=未配置/缺失）。
+    """
+    if not user_id:
+        return ""
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND feishu_open_id!='' LIMIT 1",
+                (user_id,))
+            row = c.fetchone()
+            return row[0] if row else ""
+        except Exception:
+            return ""
+
+
 def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue_number: int,
                                title: str, task_description: str) -> int | None:
-    """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。"""
+    """为「指定 assignee + Issue」建/复用任务中心卡片（active）；区别于移除的 create，仅服务 notify 分配语义。
+
+    2026-10-06：按 (repo_key, issue_number) 去重复用（任何状态），避免 awaiting/completed 卡导致 notify 另建新卡；
+    复用卡时同步 assignee/user_id。
+    """
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id FROM issue WHERE repo_key=? AND issue_number=? AND assignee=? AND status='active' LIMIT 1",
-            (repo_key, issue_number, assignee)
+            "SELECT id, assignee, user_id FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+            (repo_key, issue_number)
         )
         row = c.fetchone()
         if row:
-            return row[0]
+            card_id, _existing_asg, _existing_uid = row[0], row[1] or "", row[2] or 0
+            if _existing_asg != assignee or (_existing_uid or 0) != (user_id or 0):
+                c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (assignee, user_id, card_id))
+                db.commit()
+            return card_id
         c.execute(
             "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
             "VALUES (?,?,?,?,?,?,'active',?,?,?)",
@@ -185,16 +224,21 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         user_id = 0
     with db_lock:
         c = db.cursor()
-        # 幂等：同一 issue 任何 assignee 的 active/processing 任务都复用
-        # （#15 修复：防止 webhook 回声导致不同 assignee 创建多个任务）
+        # 幂等去重：同一平台 issue 唯一一张卡，任何状态都复用（2026-10-06 修复：
+        # 此前仅复用 active/processing，awaiting_input/completed/cancelled 时后续事件会新增一行 → 重复卡片）
         c.execute(
-            "SELECT id, conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') LIMIT 1",
+            "SELECT id, conversation_id, status FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
             (repo_key, issue_number)
         )
         row = c.fetchone()
         if row:
             task_id = row[0]
             linked = row[1]
+            _cur_st = row[2] or ""
+            if _cur_st not in ("active", "processing"):
+                # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
+                c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
+                          (task_id,))
             if title:
                 c.execute("UPDATE issue SET title=? WHERE id=?", (title, task_id))
             if subtask_mode >= 0:
@@ -360,6 +404,150 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         return c.rowcount
 
 
+def _resume_issue_waiting(repo_key: str, issue_number: int) -> bool:
+    """「等用户」双态恢复（幂等）：`awaiting_input / pending_review → processing`。
+
+    供两条路径复用（issue-explicit-awaiting-input-api-design.md §3.6 / issue-pending-review-explicit-design.md §3.5）：
+    - webhook `issue_comment` 自动恢复（非 bot 用户评论）；
+    - `issues clarify` / Agent 显式续接。
+    仅当 issue 正处于 `awaiting_input` 或 `pending_review` 时翻回，返回是否真正翻转（幂等、可观测）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('awaiting_input','pending_review')",
+                (repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue waiting resume: {repo_key}/#{issue_number} awaiting/pending_review → processing")
+        return _changed
+    except Exception as _e:
+        log.warning(f"resume issue from waiting failed {repo_key}/#{issue_number}: {_e}")
+        return False
+
+
+def _set_issue_pending_review(repo_key: str, issue_number: int) -> bool:
+    """Agent 显式设置阶段审核点（幂等）：`active/processing/awaiting_input → pending_review`，不改 stage。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='pending_review', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input')",
+                (repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue pending_review set: {repo_key}/#{issue_number}")
+        return _changed
+    except Exception as _e:
+        log.warning(f"set issue pending_review failed {repo_key}/#{issue_number}: {_e}")
+        return False
+
+
+def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
+    """当前 issue.stage 是否为流水线末节点（next=='done'）。
+
+    与 complete_task 末节点判定（service.py:1685-1687）同源复用 `next=='done'` 判据；
+    stage 不可推定 / 未知 / 已终态 → 保守返回 False（review-pass 归一兜底用）。
+    """
+    try:
+        from src.api.session_store import get_issue_stage, get_issue_scene
+        from src.api.pipeline_config import get_pipeline_config
+        _issue_id = f"#{issue_number}"
+        _st = get_issue_stage(repo_key, _issue_id) or {}
+        _cur = (_st.get("stage") or "").strip()
+        if not _cur or _cur in ("done", "pending_review"):
+            return False
+        _scene = get_issue_scene(repo_key, _issue_id)
+        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
+        for _n in (_cfg.get("nodes") or []):
+            if _n.get("id") == _cur:
+                return _n.get("next") == "done"
+        return False
+    except Exception:
+        return False
+
+
+def _complete_pending_review(repo_key: str, issue_number: int, evidence: str) -> bool:
+    """review-pass done 分支：status=completed + stage=done（合入/收尾）。返回是否变更。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+            (repo_key, issue_number))
+        db.commit()
+        _changed = c.rowcount > 0
+    if _changed:
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, f"#{issue_number}", "done", "agent")
+        except Exception as _se:
+            log.warning(f"review_pass stage=done failed {repo_key}/#{issue_number}: {_se}")
+        log.info(f"Issue review-pass(done): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+    return _changed
+
+
+def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
+                 evidence: str = "") -> str:
+    """Agent 判定用户通过审核（幂等）：仅 `pending_review` 可退出。
+    target=processing → 继续流水线；target=done → status=completed + stage=done（合入/收尾）。
+
+    归一兜底（review-pass-last-node-force-done-design.md）：target=processing 但当前 stage 已是
+    流水线末节点（next=='done'）→ 无下游可续，归一为 done（否则卡片卡死 processing）。
+    仅 review-pass；review-reject 的 processing（打回继续改）不归一。
+    """
+    try:
+        if target == "done":
+            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+        if _is_last_stage_node(repo_key, issue_number):
+            log.info(f"Issue review-pass normalized last-node target=processing→done: "
+                     f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
+            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='processing', completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                (repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue review-pass(processing): {repo_key}/#{issue_number} evidence={evidence[:60]}")
+            return "passed_processing"
+        return "noop"
+    except Exception as _e:
+        log.warning(f"review_pass failed {repo_key}/#{issue_number}: {_e}")
+        return "noop"
+
+
+def _review_reject(repo_key: str, issue_number: int, target: str = "processing",
+                   reason: str = "") -> str:
+    """Agent 判定用户未通过审核（幂等）：`pending_review → processing|awaiting_input` 打回/转澄清。"""
+    try:
+        _t = target if target in ("processing", "awaiting_input") else "processing"
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE issue SET status=?, completed_reason=NULL, completed_at=NULL "
+                "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
+                (_t, repo_key, issue_number))
+            db.commit()
+            _changed = c.rowcount > 0
+        if _changed:
+            log.info(f"Issue review-reject({_t}): {repo_key}/#{issue_number} reason={reason[:60]}")
+            return f"rejected_{_t}"
+        return "noop"
+    except Exception as _e:
+        log.warning(f"review_reject failed {repo_key}/#{issue_number}: {_e}")
+        return "noop"
+
+
 def _get_issue_subtask_mode(repo_key: str, issue_number: int) -> int:
     """从 issue_state 读取 is_subtask_mode（任务创建时同步）。
     子任务（有 parent_issue_id）也算多任务模式。"""
@@ -458,6 +646,33 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     return "\n".join(lines)
 
 
+def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> list:
+    """通知卡快捷按钮：进入任务会话（cmd 直达）+ 查看 Issue（VCS 公开页只读）。
+
+    设计：docs/weekly-05/feishu-notification-card-quick-actions-design.md。
+    """
+    try:
+        from src.repo_key import split_owner_repo
+        owner, repo = split_owner_repo(repo_key)
+    except Exception:
+        owner, repo = "", ""
+    _iss = f"#{issue_number}" if issue_number else ""
+    actions = [{
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "💬 进入任务会话"},
+        "value": {"cmd": "/task-open", "repo_key": repo_key,
+                  "issue_number": _iss, "conv_id": conv_id or ""},
+    }]
+    if owner and repo and _iss:
+        base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
+        actions.append({
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": "查看 Issue ↗"},
+            "url": f"{base}/{owner}/{repo}/issues/{_iss.lstrip('#')}",
+        })
+    return actions
+
+
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                       task_description: str, repo_key: str, issue_number: int, cfg: dict):
     """任务分配通知：仅静态模板消息 + 飞书通知，不执行任何后台 LLM/ChatAgent。
@@ -487,11 +702,79 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                            f"{task_description}\n\n"
                            f"请在任务中心查看并处理。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知")
+                await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知",
+                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
             except Exception as e:
                 log.warning(f"Task notify feishu failed: {e}")
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
+
+
+async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                               questions: str, repo_key: str, issue_number: int, cfg: dict):
+    """待澄清通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_notify 同规约）。
+
+    进入 awaiting_input 的语义就是「等用户输入」，必须主动触达用户；fd：本人 chat bot（open_id 为 app 级）。
+    """
+    try:
+        from src.repo_key import from_repo_key
+        if conv_id:
+            try:
+                _tpl = (f"❓ 需要你补充信息 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"{questions}")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Task awaiting: questions written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Task awaiting: template write failed: {e}")
+
+        if open_id and api and ctx:
+            notify_text = (f"❓ 需要你补充信息\n\n"
+                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
+                           f"{questions}\n\n"
+                           f"请在任务中心补充后，我继续处理。")
+            try:
+                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清",
+                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+            except Exception as e:
+                log.warning(f"Task awaiting feishu failed: {e}")
+    except Exception as e:
+        log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
+
+
+async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
+                                     review_points: str, references: str,
+                                     repo_key: str, issue_number: int, cfg: dict):
+    """待审核通知：仅静态模板消息 + 飞书卡片，不触发 ChatAgent / 不跑 LLM（与 _run_awaiting_notify 同规约）。
+
+    进入 pending_review 的语义就是「交付审核点请用户拍板」，必须主动触达用户；本机本人 chat bot（open_id 为 app 级）。
+    """
+    try:
+        from src.repo_key import from_repo_key
+        _refs_suffix = (f"\n\n参考: {references}" if (references or "").strip() else "")
+        if conv_id:
+            try:
+                _tpl = (f"🔎 需要你审核确认 · Issue #{issue_number}\n\n"
+                        f"仓库: {from_repo_key(repo_key)}\n\n"
+                        f"{review_points}{_refs_suffix}")
+                add_message(conv_id, "agent", _tpl)
+                log.info(f"Issue pending-review: review points written to conv={conv_id} (no chat-agent)")
+            except Exception as e:
+                log.warning(f"Issue pending-review: template write failed: {e}")
+
+        if open_id and api and ctx:
+            notify_text = (f"🔎 需要你审核确认\n\n"
+                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
+                           f"{review_points}{_refs_suffix}\n\n"
+                           f"请审核后回复，我继续处理。")
+            try:
+                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核",
+                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+            except Exception as e:
+                log.warning(f"Issue pending-review feishu failed: {e}")
+    except Exception as e:
+        log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
+
 
 def _resolve_user_chat_bot(bm, user_id: int):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
@@ -527,10 +810,10 @@ class TaskStatusBody(BaseModel):
     status: str = ""
 
 _TASK_STATUS_FLOWS = {
-    "active": ("processing", "awaiting_input", "cancelled"),
+    "active": ("processing", "awaiting_input", "pending_review", "cancelled"),
     "processing": ("awaiting_input", "pending_review", "completed", "cancelled", "active"),
-    "awaiting_input": ("processing", "cancelled"),
-    "pending_review": ("completed", "cancelled"),
+    "awaiting_input": ("processing", "pending_review", "cancelled"),
+    "pending_review": ("processing", "completed", "cancelled"),
     "completed": (),
     "cancelled": ("active",),
 }

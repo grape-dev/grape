@@ -1,4 +1,13 @@
 // ═══════════════════════════════════════════════════════════════
+// repo_key 前缀统一剥离（对应后端 src/repo_key.py 的 from_repo_key）
+// 外部/前端约定一律无前缀；dashboard 响应可能带 gitcode:/github: 前缀，需剥离
+// ═══════════════════════════════════════════════════════════════
+function stripRepoPrefix(s) {
+  return String(s || '').replace(/^(gitcode|github|gitlab):/, '');
+}
+window.stripRepoPrefix = stripRepoPrefix;
+
+// ═══════════════════════════════════════════════════════════════
 // 场景自定义环境变量（custom_fields）前端共享校验规则（Issue #236）
 // 供 dashboard.js / scene-market.js 复用：大写校验 + 保留冲突校验 + 密钥识别
 // ═══════════════════════════════════════════════════════════════

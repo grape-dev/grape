@@ -63,6 +63,8 @@ def setup_db(tmp_path, monkeypatch):
         credential_id INTEGER DEFAULT 0,
         name TEXT,
         status TEXT DEFAULT 'online',
+        healthy INTEGER DEFAULT 1,
+        probe_status TEXT DEFAULT '',
         busy_slots INTEGER DEFAULT 0,
         max_concurrent INTEGER DEFAULT 4,
         agent_tags TEXT DEFAULT '[]',
@@ -100,10 +102,24 @@ def setup_db(tmp_path, monkeypatch):
     monkeypatch.setattr(service, 'db', test_db)
     monkeypatch.setattr(service, 'db_lock', __import__('threading').Lock())
 
+    # Issue #259：claim_by_tag 的健康分检查（health_scorer）经 session_manager.db
+    # 引用真实库，须一并替换到测试库；否则引擎 76 查不到 → 失联 → score=0 → claim 拒绝。
+    import src.session_manager as _sm
+    import src.runtime.health_scorer as _hs
+    monkeypatch.setattr(_sm, 'db', test_db)
+    monkeypatch.setattr(_sm, 'db_lock', __import__('threading').Lock())
+    _hs._cache.clear()
+
     # 插入引擎
-    test_db.execute("INSERT INTO agent_runtimes (id, name, status, agent_tags, credential_id) VALUES (76, 'codearts', 'online', '[\"vod\"]', 63)")
+    import datetime as _dt
+    _now = _dt.datetime.now(_dt.timezone.utc).isoformat()
+    test_db.execute("INSERT INTO agent_runtimes (id, name, status, agent_tags, credential_id, last_seen_at) VALUES (76, 'codearts', 'online', '[\"vod\"]', 63, ?)", (_now,))
     test_db.execute("INSERT INTO runtime_credentials (id, scope, owner_name) VALUES (63, 'global', '')")
     test_db.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, enabled) VALUES (76, 'vod', 4, 1)")
+    # 引擎 999：t_skip_me 的 pool 指向它——必须在线健康可达，
+    # 否则"pool 全不可达清空"兜底会让 76 直接认领 t_skip_me（违背 skip 测试意图）
+    test_db.execute("INSERT INTO agent_runtimes (id, name, status, agent_tags, credential_id, last_seen_at) VALUES (999, 'other-eng', 'online', '[\"vod\"]', 63, ?)", (_now,))
+    test_db.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, enabled) VALUES (999, 'vod', 4, 1)")
 
     # 插入两个 vod 任务，第一个 pool_engine_ids 不含 76（应被跳过），第二个含 76（应被认领）
     test_db.execute("""
@@ -130,7 +146,8 @@ def test_claim_by_tag_global_scope_skip_loop_passes_params(setup_db):
     # 修复后：应成功认领 t_4e73a9363f87
     assert result is not None, "claim_by_tag returned None — SQL params bug not fixed!"
     assert result['id'] == 't_4e73a9363f87', f"expected t_4e73a9363f87, got {result.get('id')}"
-    assert result['status'] == 'dispatched'
+    # f06732b1：claim 认领即 running（防 UI 卡 dispatched 窗口），不再是 dispatched
+    assert result['status'] == 'running'
 
 
 def test_claim_by_tag_all_tag_still_works(setup_db):
@@ -154,7 +171,8 @@ def test_claim_by_tag_repo_scope_prefix_mismatch(setup_db):
     """repo scope: owner_id 无前缀 vs agent_tasks.repo_key 带前缀，IN (?, ?) 必须两种都匹配"""
     from src.runtime import service as svc
     # 注册一个 repo scope 的 worker（owner_id 无前缀）
-    svc.db.execute("INSERT INTO agent_runtimes (id, name, status, credential_id) VALUES (173, 'opencode', 'online', 167)")
+    svc.db.execute("INSERT INTO agent_runtimes (id, name, status, credential_id, last_seen_at) VALUES (173, 'opencode', 'online', 167, ?)", (
+        __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),))
     svc.db.execute("INSERT INTO runtime_credentials (id, scope, owner_id, owner_name) VALUES (167, 'repo', 'Sinkear/AgentLens', 'Sinkear')")
     svc.db.execute("INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, enabled) VALUES (173, 'all', 4, 1)")
     # 插入一个 repo_key 带前缀的 queued 任务

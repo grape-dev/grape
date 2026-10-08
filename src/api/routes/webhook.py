@@ -185,12 +185,20 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     return {"status": "ok", "seq": 0, "event_type": event_header, "message": "pipeline scheduled"}
 
 
-def _authorize_a2a(request: Request, repo_key: str):
+def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
     """A2A 端点仓库级鉴权：bot token 或会话级临时 token（repo 作用域）二选一通过。
 
     - bot token：仓库级（managed_repos / devops_agent_session），支持远端 worker；
     - 会话 token（GRAPE_SESSION_TOKEN，M2）：校验 repo_key 匹配——该仓库执行期 agent 凭据。
     仅当仓库已托管（有 bot token）才严格校验 bot；未托管仓库允许会话 token 或交由后续校验。
+
+    返回 session token info（含 session_key），供调用方反查调用方身份；
+    bot token 通道返回 None（无身份信息）。
+
+    关联仓库信任域（Issue #15 修复）：会话 token 绑定的仓库与目标仓库若属于同一 Issue
+    场景的关联仓库集合（GRAPE_LINKED_REPOS），或两仓 bot token 相同（同一运维主体），
+    则放行——打通 QA→coding(关联仓库) 的审查-修复闭环。信任域放行走 bot 通道语义
+    （返回 None，调用方无法反查身份，A2A 拦截对其放行）。
     """
     _auth = (request.headers.get("Authorization", "") or "").replace("Bearer ", "").strip()
     if not _auth:
@@ -199,16 +207,54 @@ def _authorize_a2a(request: Request, repo_key: str):
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
     from src.user.db import get_repo_bot_token_no_global
-    from src.api.auth_token import verify_session_token_for_repo
+    from src.api.auth_token import verify_session_token, verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
-    _session_ok = bool(verify_session_token_for_repo(_auth, repo_key))
+    # 严格匹配：会话 token 绑定仓库 == 目标仓库 → 返回 info（可反查调用方身份）
+    _session_info = verify_session_token_for_repo(_auth, repo_key)
+    _session_ok = bool(_session_info)
     if _bot_ok or _session_ok:
         log.info(f"A2A: token OK (bot={_bot_ok}, session={_session_ok}) repo={repo_key}")
-        return
+        return _session_info if _session_ok else None
+    # 关联仓库信任域：会话 token 的仓库与目标仓库属于同一场景关联集合 → 放行
+    _raw_session_info = verify_session_token(_auth)
+    if _raw_session_info and _raw_session_info.get("repo_key"):
+        _session_repo = _raw_session_info["repo_key"]
+        if _session_repo != repo_key:
+            # 检查 1: 两仓 bot token 相同（同一运维主体）
+            _session_bot_token = get_repo_bot_token_no_global(_session_repo) or ""
+            if _session_bot_token and _session_bot_token == _expected:
+                log.info(f"A2A: trust domain (same bot token) session_repo={_session_repo} → target_repo={repo_key}")
+                return None
+            # 检查 2: 目标仓库是会话仓库的关联仓库（查场景 linked_repos）
+            try:
+                from src.session_manager import db, db_lock
+                import json as _json
+                with db_lock:
+                    c = db.cursor()
+                    # 查会话仓库的所有场景的 linked_repos
+                    c.execute(
+                        "SELECT linked_repos, advanced_options FROM devops_pipeline_scene "
+                        "WHERE repo_key=? AND is_active=1", (_session_repo,))
+                    for row in c.fetchall():
+                        _lr = row[0] or ""
+                        _adv = row[1] or ""
+                        for _lr_str in (_lr, _json.loads(_adv).get("linked_repos", "[]") if _adv else "[]"):
+                            if not _lr_str:
+                                continue
+                            try:
+                                _lr_list = _json.loads(_lr_str) if isinstance(_lr_str, str) else _lr_str
+                            except Exception:
+                                continue
+                            for _lr_item in (_lr_list or []):
+                                if isinstance(_lr_item, dict) and _lr_item.get("repo_key") == repo_key:
+                                    log.info(f"A2A: trust domain (linked repo) session_repo={_session_repo} → target_repo={repo_key}")
+                                    return None
+            except Exception as _le:
+                log.warning(f"A2A: linked repo trust check failed: {_le}")
     if not _expected:
         log.warning(f"A2A: repo not managed (no bot token) & no matching session token, defer to downstream: {repo_key}")
-        return
+        return None
     log.warning(f"A2A: unauthorized (token mismatch) for repo={repo_key}")
     raise HTTPException(status_code=403, detail={"code": 403, "message": "invalid token"})
 
@@ -306,12 +352,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             repo_key = to_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
 
-    # PR 订阅模式拦截：PR 订阅触发的 QA 任务不允许 A2A（只做审查，不流转流水线）
-    # PR 订阅的 issue_number 格式为 pr_{pr_num}_{scene_id}（非纯数字）
-    if issue_number and not str(issue_number).lstrip("#").isdigit():
-        log.info(f"A2A: rejected — PR subscription mode (issue={issue_number}), A2A disabled")
-        return {"ok": False, "skipped": "pr_subscription_a2a_disabled"}
-
     # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
     if issue_number and repo_key:
         try:
@@ -328,6 +368,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     seq = 0
 
     # 鉴权：用户级身份（JWT/API Key，校验托管仓库）或内部 bot/会话 token（_authorize_a2a）
+    _a2a_session_info = None
     if user and user.get("auth_type") in ("jwt", "api_key"):
         from src.user.db import get_managed_repos
         managed = {r.get("repo_key") for r in get_managed_repos(user.get("id") or 0)}
@@ -335,7 +376,25 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权对该仓库发起 A2A"})
     else:
         # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
-        _authorize_a2a(request, repo_key)
+        _a2a_session_info = _authorize_a2a(request, repo_key)
+
+    # PR 订阅模式拦截：PR 订阅触发的 QA 不允许 A2A（只做审查，不流转流水线）
+    # 通过 session token 反查调用方 agent_tasks.issue_id：
+    #   PR订阅QA 的 issue_id 以 "#pr_" 开头（伪 ID），流水线 QA 的 issue_id 是真实 Issue 号
+    #   session token 通道（agent CLI 调用）可反查；bot token 通道（服务端 resume/redispatch）无身份，放行
+    if _a2a_session_info and _a2a_session_info.get("session_key"):
+        try:
+            from src.session_manager import db as _prsub_db, db_lock as _prsub_lock
+            _caller_task_id = _a2a_session_info["session_key"]
+            with _prsub_lock:
+                _prsub_c = _prsub_db.cursor()
+                _prsub_c.execute("SELECT issue_id FROM agent_tasks WHERE id=?", (_caller_task_id,))
+                _prsub_row = _prsub_c.fetchone()
+            if _prsub_row and _prsub_row[0] and _prsub_row[0].startswith("#pr_"):
+                log.info(f"A2A: rejected — PR subscription QA (task={_caller_task_id}, issue={_prsub_row[0]}), A2A disabled")
+                return {"ok": False, "skipped": "pr_subscription_a2a_disabled"}
+        except Exception as _prsub_e:
+            log.warning(f"A2A: PR subscription check failed: {_prsub_e}")
 
     # Agent 启用检查（仓库级 enable，见 agent-enable-toggle-design.md）
     from src.api.session_store import is_agent_enabled
@@ -464,9 +523,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         }
 
         # Issue 生命周期阶段推进（D9/D10，见 vod-skill-upgrade-plan.md §3.0.2）
-        # A2A 交办 → issue_state 归属转移到目标 agent（qa 回 coding 允许回退）
-        # 回退检测：A2A 目标 agent 比当前 stage 更早时，取消已派发的下游任务。
-        # 不做跳步修正——agent 有权 A2A 到任意目标 agent，pipeline 顺序由 skill 逻辑保证。
+        # A2A 交办 → issue_state 归属转移到目标 agent（允许回退，如 qa 回 coding）
+        # 不做跳步修正、不做回退取消：stage-owner 机制保证最新归属的 agent 负责处理
+        #（issue-comment-stage-owner-routing-design.md）；旧的 A2A 发起方早已完成其交办。
         if issue_number:
             try:
                 from src.api.session_store import get_issue_stage
@@ -487,73 +546,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 except Exception:
                     pass
                 _stage_order = list(_pipeline_next.keys())
-                _cur_idx = _stage_order.index(_current_stage) if _current_stage in _stage_order else -1
-                _target_idx = _stage_order.index(agent_name) if agent_name in _stage_order else -1
-
-                # 回退检测 + 取消下游任务
-                if _target_idx < _cur_idx and _cur_idx > 0:
-                    _cancel_agents = [a for a in _stage_order[_cur_idx:] if a != "done"]
-                    log.info(f"A2A: rollback detected — issue=#{issue_number} "
-                             f"from={_current_stage} to={agent_name}, cancelling={_cancel_agents}")
-                    try:
-                        from src.session_manager import db, db_lock
-                        from src.runtime.service import cancel_task
-                        from src.api.event_pipeline import cancel_direct_task
-                        from src.api.event_store import update_event_status
-
-                        with db_lock:
-                            c = db.cursor()
-                            placeholders = ",".join("?" * len(_cancel_agents))
-                            c.execute(
-                                f"SELECT id, event_seq, agent_type FROM agent_tasks "
-                                f"WHERE repo_key=? AND issue_id=? AND agent_type IN ({placeholders}) "
-                                f"AND status IN ('queued','dispatched','running')",
-                                (repo_key, f"#{issue_number}", *_cancel_agents))
-                            tasks = c.fetchall()
-
-                        _cancelled = 0
-                        _errors = []
-                        _sre_completed_alert = False
-
-                        for tid, tseq, ttype in tasks:
-                            try:
-                                cancel_task(tid)
-                                _cancelled += 1
-                            except Exception as _ce:
-                                _errors.append(f"cancel_task({ttype}:{tid}): {_ce}")
-                            try:
-                                if tseq:
-                                    cancel_direct_task(tseq)
-                            except Exception as _de:
-                                _errors.append(f"cancel_direct_task({ttype}:{tseq}): {_de}")
-                            try:
-                                if tseq:
-                                    update_event_status(tseq, "cancelled")
-                            except Exception:
-                                pass
-
-                        # SRE 已完成检测：查 events 表（权威状态）
-                        if "sre" in _cancel_agents:
-                            with db_lock:
-                                c2 = db.cursor()
-                                c2.execute(
-                                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
-                                    "AND agent_type='sre' AND status='completed' "
-                                    "ORDER BY seq DESC LIMIT 1",
-                                    (repo_key, f"#{issue_number}"))
-                                _sre_row = c2.fetchone()
-                            if _sre_row:
-                                _sre_completed_alert = True
-
-                        if _sre_completed_alert:
-                            log.warning(f"A2A: SRE already completed for issue=#{issue_number} — "
-                                        f"manual review needed, published artifact may need rollback")
-                        if _errors:
-                            log.warning(f"A2A: cancel errors: {_errors}")
-                        log.info(f"A2A: rollback cancel — {_cancelled} tasks cancelled, "
-                                 f"sre_alert={_sre_completed_alert}")
-                    except Exception as _re:
-                        log.warning(f"A2A: rollback cancel failed: {_re} — A2A continues, cancel may not have taken effect")
             except Exception as _pe:
                 log.warning(f"A2A: pipeline order check failed: {_pe}")
 
@@ -749,6 +741,15 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             from src.api.event_pipeline import _enqueue_pipeline_task
             _be = backend or "opencode"
             _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
+            if _pool_eids is None:
+                # Issue #259 方案A：场景绑定的引擎全部离线 → 不入队，事件置 failed 并明确提示
+                log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} engines all offline, skip (Issue #259)")
+                try:
+                    from src.api.event_store import update_event_status
+                    update_event_status(seq, "failed")
+                except Exception:
+                    pass
+                return {"status": "ok", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线"}
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path or "", engine_id,

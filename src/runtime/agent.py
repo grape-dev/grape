@@ -1241,6 +1241,10 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             log.warning(f"linked PR: skip invalid worktree: rk={_rk} dir={_wt_dir}")
             continue
 
+        # 0. 分支护栏：检查当前分支是否是 feat/issue-{N}，禁止直推基线分支
+        from src.runtime.repogit import ensure_feature_branch
+        ensure_feature_branch(_wt_dir, _wt_branch, _base_branch, logger=log)
+
         try:
             # 1. git identity（防 commit 被拒）
             _sp.run(["git", "-C", _wt_dir, "config", "user.name", _bot_name],

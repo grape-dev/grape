@@ -15,6 +15,17 @@ _SWEEP_INTERVAL = int(os.environ.get("SWEEPER_INTERVAL_SECONDS", "900"))  # 15mi
 _ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "3"))  # 非 done issue workdir 3 天不活跃清理
 # Chat / feishu / vod 目录 TTL（默认 3 天未活跃清理，比 issue 的 7 天更短——这些是临时会话目录）
 _SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
+# 悬空 agent_tasks 回收 TTL（sweep_stuck_agent_tasks_once，单位分钟）：
+# queued 超时无人认领 / running·dispatched 所属 runtime 已离线或不存在且 started_at 超时 /
+# running·dispatched 超长未收敛（worker 侧任务超时 RUNTIME_TASK_TIMEOUT=1h，6h 仍运行必为孤儿）
+_QUEUED_STALE_MINUTES = int(os.environ.get("SWEEPER_QUEUED_STALE_MINUTES", "180"))
+_DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
+_LONG_RUNNING_MINUTES = int(os.environ.get("SWEEPER_LONG_RUNNING_MINUTES", "360"))
+
+_QUEUED_STALE_TXT = "中断：queued 超时无 worker 认领（sweeper 兜底回收）"
+_DEAD_RUNTIME_TXT = "中断：running/dispatched 悬空，所属 runtime 已离线或不存在（sweeper 兜底回收）"
+_LONG_RUNNING_TXT = "中断：running/dispatched 超长未收敛（sweeper 兜底回收，worker 任务超时阈值 1h）"
+_DUAL_SIGNAL_TXT = "中断：双信号已齐（stream_ended+self_reported）但终态未收敛（sweeper 兜底回收）"
 
 _GIT_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
@@ -343,6 +354,126 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
     return fixed
 
 
+def _dt_age_minutes(s: str | None, now: float | None = None) -> float | None:
+    """解析 created_at/started_at（ISO 或本地 'YYYY-MM-DD HH:MM:SS'）距今分钟数；解析失败返回 None。"""
+    if not s:
+        return None
+    from datetime import datetime
+    txt = str(s).strip()
+    dt = None
+    try:
+        dt = datetime.fromisoformat(txt)
+    except ValueError:
+        pass
+    if dt is None:
+        for _fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M:%S.%f"):
+            try:
+                dt = datetime.strptime(txt, _fmt)
+                break
+            except ValueError:
+                continue
+    if dt is None:
+        return None
+    from datetime import timezone
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    _now = now if now is not None else time.time()
+    return max(0.0, (_now - dt.timestamp()) / 60.0)
+
+
+def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
+                                 dead_runtime_minutes: int | None = None,
+                                 long_running_minutes: int | None = None) -> int:
+    """兜底回收悬空 agent_tasks（需求中心「运行中/雷达扫描」亮灯的直接依据）。
+
+    现状：sweeper 只回收 events（sweep_stuck_events_once），完全不碰 agent_tasks。
+    广播任务无 worker 认领（runtime_id=0）、或 runtime 被删/离线后，queued/dispatched/running
+    永远悬空 → `_batch_running_agent_tasks` 恒命中 → issue 卡片 is_running=true 雷达动画永久亮。
+    实例：#210 孤儿广播任务 t_84b3622a7c2d（2026-09-29 07:18 入队，广播回落本机修复 17:36 才部署）。
+
+    回收规则（保守，防误伤活跃任务）：
+    - `queued` 且 created_at 超 queued_stale_minutes（默认 180min）→ 判死。正常集群入队→认领仅数秒。
+    - 任意非终态且 stream_ended=1 ∧ self_reported=1 → 判死。双信号齐意味着收敛必须发生且应瞬时完成，
+      仍停留非终态即收敛失败（finalize 路径中断）。实例：hello-calculator-14 #10 QA 任务
+      t_1a1a9c440f9a（事件 2219 已 completed、structured_output 齐全，任务却恒 running 亮雷达）。
+    - `running`/`dispatched` 且 started_at 超 long_running_minutes（默认 360min，worker 侧任务超时 1h，
+      6h 仍运行必为孤儿，与 runtime 是否在线无关）→ 判死。
+    - `running`/`dispatched` 且 runtime_id!=0 且 runtime 已离线/不存在，且 started_at 超
+      dead_runtime_minutes（默认 30min）→ 判死。
+    started_at 为空的 running（本机 direct 自执行）与 runtime_id=0 均按上述年龄规则保守判定，不盲杀；
+    但双信号规则无年龄要求（信号齐即完成态）。
+    关联事件若仍 running 一并置 failed（与 sweep_stuck_events_once 语义一致）。
+    """
+    from datetime import datetime, timezone, timedelta
+    now = time.time()
+    q_stale = _QUEUED_STALE_MINUTES if queued_stale_minutes is None else int(queued_stale_minutes)
+    d_stale = _DEAD_RUNTIME_MINUTES if dead_runtime_minutes is None else int(dead_runtime_minutes)
+    l_stale = _LONG_RUNNING_MINUTES if long_running_minutes is None else int(long_running_minutes)
+    if l_stale <= d_stale:
+        l_stale = d_stale  # 长超时阈值不得小于 runtime 死亡阈值（避免重叠误读）
+
+    online: set = set()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM agent_runtimes WHERE status='online'")
+            online = {r[0] for r in c.fetchall()}
+    except Exception as e:
+        log.warning(f"sweeper agent_tasks runtime scan failed: {e}")
+        return 0
+
+    dead: list = []  # (task_id, event_seq, result_text)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, event_seq, runtime_id, created_at, started_at, status, "
+                      "stream_ended, self_reported "
+                      "FROM agent_tasks WHERE status IN ('queued','dispatched','running')")
+            for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported in c.fetchall():
+                if stream_ended == 1 and self_reported == 1:
+                    dead.append((tid, event_seq, _DUAL_SIGNAL_TXT))
+                elif status == "queued":
+                    age = _dt_age_minutes(created_at, now)
+                    if age is not None and age >= q_stale:
+                        dead.append((tid, event_seq, _QUEUED_STALE_TXT))
+                elif status in ("dispatched", "running"):
+                    age = _dt_age_minutes(started_at, now)
+                    if age is not None and age >= l_stale:
+                        dead.append((tid, event_seq, _LONG_RUNNING_TXT))
+                    elif (rid and rid != 0 and rid not in online
+                          and age is not None and age >= d_stale):
+                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT))
+    except Exception as e:
+        log.warning(f"sweeper agent_tasks scan failed: {e}")
+        return 0
+
+    if not dead:
+        return 0
+    fixed = 0
+    now_iso = datetime.now(timezone.utc).isoformat()
+    try:
+        with db_lock:
+            c = db.cursor()
+            for tid, event_seq, txt in dead:
+                try:
+                    if event_seq:
+                        c.execute("UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
+                                  "WHERE seq=? AND status='running'", (now_iso, txt, event_seq))
+                    c.execute("UPDATE agent_tasks SET status='failed', exit_code=1, completed_at=?, "
+                              "errors=?, result_text=? WHERE id=? "
+                              "AND status IN ('queued','dispatched','running')",
+                              (now_iso, txt, txt, tid))
+                    fixed += c.rowcount
+                except Exception as e:
+                    log.warning(f"sweeper agent_tasks recycle {tid} failed: {e}")
+            db.commit()
+    except Exception as e:
+        log.warning(f"sweeper agent_tasks recycle commit failed: {e}")
+    if fixed:
+        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): {[t for t, _, _ in dead]}")
+    return fixed
+
+
 def sweep_once() -> int:
     cleaned = 0
     try:
@@ -363,6 +494,12 @@ def sweep_once() -> int:
                 cleaned += sweep_stuck_events_once()
             except Exception as e:
                 log.warning(f"sweeper stuck-event sweep failed: {e}")
+            # 兜底回收悬空 agent_tasks（queued 无 worker 认领 / runtime 已死的 running·dispatched），
+            # 否则需求中心 is_running=true 雷达动画永久亮（sweep_stuck_agent_tasks_once 见 #210 佐证）
+            try:
+                cleaned += sweep_stuck_agent_tasks_once()
+            except Exception as e:
+                log.warning(f"sweeper stuck-task sweep failed: {e}")
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
         if _has_db_tables:
@@ -472,6 +609,7 @@ def _sweep_tmp_residuals() -> int:
         "/tmp/pip-metadata-*",
         "/tmp/pytest-of-root",
         "/tmp/tirith-install-*",
+        "/tmp/scene_sync_zip_*",   # scene sync 临时包泄漏（2026-10 曾 2486 个/5.7G 打满 /tmp）
     ]
     for pattern in _dir_prefixes:
         for path in _glob.glob(pattern):

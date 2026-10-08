@@ -1028,6 +1028,52 @@ def _create_indexes():
             db.commit()
     except Exception as e:
         log.warning(f"autopilot_tasks created_by migration failed: {e}")
+    # ===== issue 表 (repo_key, issue_number) 去重（保证下方唯一索引可建，2026-10-06）=====
+    # 背景：ensure_issue_task 此前仅复用 active/processing 卡，awaiting_input/completed/cancelled 时
+    # 后续事件会新建一行 → 同一平台 issue 多卡（需求中心并排出现多张卡）。此处兜底删除多余行，
+    # 保留执行中最有意义的一张（processing > awaiting_input/active > pending_review > completed > cancelled，
+    # 同级取 updated_at 最新、id 最小），随后创建唯一索引从根上防重。
+    try:
+        with db_lock:
+            c = db.cursor()
+            _dup_groups = c.execute(
+                "SELECT repo_key, issue_number FROM issue WHERE issue_number>0 "
+                "GROUP BY repo_key, issue_number HAVING COUNT(*)>1").fetchall()
+            _del = 0
+            for _rk, _num in _dup_groups:
+                _rows = c.execute(
+                    "SELECT id, status, updated_at FROM issue WHERE repo_key=? AND issue_number=? ORDER BY id",
+                    (_rk, _num)).fetchall()
+                if len(_rows) < 2:
+                    continue
+                def _pri(_st):
+                    return {"processing": 5, "awaiting_input": 4, "active": 4, "pending_review": 3,
+                            "completed": 2, "cancelled": 1}.get(_st or "", 0)
+                _keep = max(_rows, key=lambda r: (_pri(r[1]), r[2] or "", r[0]))
+                for _r in _rows:
+                    if _r[0] != _keep[0]:
+                        c.execute("DELETE FROM issue WHERE id=?", (_r[0],))
+                        _del += 1
+            if _del:
+                db.commit()
+                log.info(f"issue dedupe: removed {_del} duplicate row(s) before unique index")
+    except Exception as e:
+        log.warning(f"issue dedupe cleanup failed: {e}")
+
+    # 确保 idx_tasks_repo_issue 为 UNIQUE（SQLite/MySQL 双栈）：历史可能存在同名**普通**索引，
+    # `CREATE UNIQUE INDEX IF NOT EXISTS` 遇同名不会升级 → 先 DROP 非唯一同名索引，由下方循环重建为唯一。
+    try:
+        with db_lock:
+            c = db.cursor()
+            for _r in c.execute("PRAGMA index_list('issue')").fetchall():
+                if _r[1] == "idx_tasks_repo_issue" and not _r[2]:
+                    c.execute("DROP INDEX idx_tasks_repo_issue")
+                    db.commit()
+                    log.info("Dropped non-unique idx_tasks_repo_issue for unique re-create")
+                    break
+    except Exception as e:
+        log.warning(f"ensure unique idx_tasks_repo_issue prep failed: {e}")
+
     for idx in indexes:
         try:
             with db_lock:
@@ -1479,6 +1525,14 @@ def _init_skill_featured():
 
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
+    # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
+    # 每次启动清理过量 pre-m0 备份，保留 DB_BACKUP_KEEP(默认5) 份
+    try:
+        from src.session_manager import prune_db_backups, _db_path
+        prune_db_backups(_db_path)
+    except Exception as _pb:
+        log.warning(f"DB backup prune skipped: {_pb}")
+
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
     # SQLite 不支持 GET_LOCK，跳过（单实例不需要）
     from src.mysql_compat import get_db_backend
@@ -2973,6 +3027,15 @@ def _migrate_tables():
             log.info("Added events.scene_id column")
     except Exception as e:
         log.warning(f"Add events.scene_id column failed: {e}")
+    # ===== events 表补 structured_output 列（weekly-05：结构化产出落库替代 event.json seg.output）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "events", "structured_output", "MEDIUMTEXT DEFAULT NULL")
+            db.commit()
+            log.info("Added events.structured_output column")
+    except Exception as e:
+        log.warning(f"Add events.structured_output column failed: {e}")
     # ===== agent-cluster-design.md §4.1/§4.2:引擎池数据面(池表 + 槽位列 + 任务池标记)=====
     # 老库升级:agent_runtimes 补 busy_slots/max_concurrent;agent_tasks 补 attempts/pool_agent_type/affinity_runtime_id
     try:

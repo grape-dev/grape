@@ -931,7 +931,7 @@ function renderTimelineList(container, issues, repoKey) {
     const _workers = (_obsData.ops && _obsData.ops.workers && _obsData.ops.workers.list) || [];
     _workers.forEach(w => { if (w.device_name) _timelineDevIpMap[w.device_name] = w.last_ip || ''; });
   } catch(e) {}
-  _timelineGlobalRepoPath = (repoKey || '').replace(/^gitcode:/, '');
+  _timelineGlobalRepoPath = stripRepoPrefix(repoKey || '');
   let html = section(I18N.t('observability.task_list'), I18N.t('observability.task_list_subtitle', {count: issues.length}));
   html += '<div style="margin-bottom:10px;display:flex;align-items:center;gap:8px">';
   html += '<input type="text" id="timelineSearchInput" placeholder="' + I18N.t('observability.search_tasks_placeholder') + '" value="' + _timelineSearch.replace(/"/g, '&quot;') + '" oninput="_timelineSearch=this.value;_timelinePage=0;_filterTimelineIssues()" style="flex:1;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">';
@@ -988,7 +988,7 @@ function _filterTimelineIssues() {
   }
   function _issueUrl(issueId, issueRepoKey) {
     const num = (issueId || '').replace(/^#/, '');
-    const repoPath = (issueRepoKey || '').replace(/^gitcode:/, '') || _timelineGlobalRepoPath;
+    const repoPath = stripRepoPrefix(issueRepoKey || '') || _timelineGlobalRepoPath;
     return repoPath && num ? 'https://gitcode.com/' + repoPath + '/issues/' + num : '';
   }
 

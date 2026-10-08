@@ -51,7 +51,7 @@ function renderDashboard(data) {
     if (cr) { owner = cr.owner; name = cr.name; }
   } catch(e) {}
   if (!owner || !name) {
-    const parts = repo.replace(/^gitcode:/, '').split('/');
+    const parts = stripRepoPrefix(repo).split('/');
     owner = parts[0] || '';
     name = parts[1] || '';
   }
@@ -501,7 +501,7 @@ function renderSceneDetailLocal(sceneId) {
     if (cr) { owner = cr.owner; name = cr.name; }
   } catch(e) {}
   if (!owner || !name) {
-    const parts = (data.repo || '').replace(/^gitcode:/, '').split('/');
+    const parts = stripRepoPrefix(data.repo || '').split('/');
     owner = parts[0] || '';
     name = parts[1] || '';
   }
@@ -882,7 +882,7 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       brSel.appendChild(def);
       if (!rk) return;
       // 解析 owner/repo
-      var parts = rk.replace(/^gitcode:/, '').split('/');
+      var parts = stripRepoPrefix(rk).split('/');
       if (parts.length < 2) { brDefOpt.textContent = '分支（默认 main）'; return; }
       var owner = parts[0], repo = parts[1];
       // 优先用缓存
@@ -1506,7 +1506,7 @@ window.enterCreateMode = function() {
   const data = window._dashboardData || {};
   let owner = '', name = '';
   try { const cr = app.currentRepo(); if (cr) { owner = cr.owner; name = cr.name; } } catch(e) {}
-  if (!owner || !name) { const parts = (data.repo || '').replace(/^gitcode:/, '').split('/'); owner = parts[0]||''; name = parts[1]||''; }
+  if (!owner || !name) { const parts = stripRepoPrefix(data.repo || '').split('/'); owner = parts[0]||''; name = parts[1]||''; }
   _enterCreateStandardMode(data, owner, name);
 };
 

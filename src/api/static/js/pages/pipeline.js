@@ -389,7 +389,7 @@ function pipeRowDblClick(idx) {
   // 全都没有 → 跳到 issue 对应的最新事件
   const agentIds = ['vod','issue','coding','qa','sre'];
   const issNum = String(p.issue_id || '').replace(/^#/, '');
-  const repo = (_pipeData.repo || '').replace(/^gitcode:/, '');
+  const repo = stripRepoPrefix(_pipeData.repo || '');
   if (issNum && repo) {
     API.get('/events/' + encodeURIComponent(repo) + '?page=1&page_size=50').then(function(d) {
       const ev = (d.events || []).find(function(e) {

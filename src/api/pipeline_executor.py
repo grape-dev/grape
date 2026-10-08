@@ -11,6 +11,7 @@ Each node dispatches via the event bus:
 """
 import asyncio
 import logging
+import time
 from typing import Any
 
 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
@@ -220,9 +221,19 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
         if runtime_id:
             with db_lock:
                 c = db.cursor()
-                c.execute("SELECT 1 FROM agent_runtimes WHERE id=? AND status='online'", (runtime_id,))
-                if not c.fetchone():
-                    log.info(f"Pipeline emit: runtime_id={runtime_id} not online, dropping to pool task (agent={agent_type})")
+                # Issue #259：status=online 且心跳新鲜（< _RUNTIME_STALE_SECONDS，默认 100s）才算在线。
+                # 原 status-only 检查会被「刚断线、reap 还没翻牌」的窗口期欺骗。
+                c.execute("SELECT last_seen_at FROM agent_runtimes WHERE id=? AND status='online'", (runtime_id,))
+                _row = c.fetchone()
+                _alive = False
+                if _row and _row[0]:
+                    from src.runtime.health import parse_dt as _parse_dt
+                    from src.runtime.engine_select import _RUNTIME_STALE_SECONDS
+                    _ts = _parse_dt(_row[0])
+                    if _ts is not None and time.time() - _ts <= _RUNTIME_STALE_SECONDS:
+                        _alive = True
+                if not _alive:
+                    log.info(f"Pipeline emit: runtime_id={runtime_id} offline or stale heartbeat, dropping to pool task (agent={agent_type})")
                     runtime_id = 0
 
         # Plugin 模式：始终走 pick_engine（返回 0=广播），忽略上游传入的 runtime_id。
@@ -254,10 +265,14 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
             if _picked is None:
                 return {"error": "no engine available"}
             runtime_id = _picked
-            # 场景 engine 限定广播范围
+            # 场景 engine 限定广播范围（Issue #259：写入前已按健康过滤）
             from src.runtime.engine_select import get_scene_pool_engine_ids
             _pool_eids = get_scene_pool_engine_ids(_scene_id, agent_type, repo_key=repo_key, user_id=_scene_uid,
                                                    issue_creator=evt.get("actor", ""))
+            if _pool_eids is None:
+                # 方案A：场景绑定的引擎全部离线/失联 → 不入队，明确报错
+                log.warning(f"Pipeline emit: scene={_scene_id} agent={agent_type} engines all offline (Issue #259)")
+                return {"error": f"场景绑定的引擎全部离线（scene={_scene_id}, agent={agent_type}）"}
         elif not runtime_id:
             _picked = pick_engine(repo_key, agent_type, fallback_runtime_id=0)
             if _picked is None:
