@@ -36,39 +36,36 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
 
 
 def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str) -> bool:
-    """调 /collaborators/{username}/permission 接口精确判断管理员权限。
+    """调 /collaborators/{username}/permission 接口精确判断管理/维护权限。
 
-    GitCode 权限模型（实测 2026-10-08，repos/{owner}/{repo}/collaborators/{user}/permission）：
-      Owner        → permissions.admin=true
-      Maintainer   → permissions.admin=false 但 access_level=40 / role_name="Maintainer" / permission="admin"
-                     （维护者可管理 webhook 与成员，足以完成仓库托管流程）
-      Developer    → access_level=30 / permission="push"
-    因此不能只看 permissions.admin 布尔——否则所有维护者被误判为无权限（403）。
+    GitCode 实测坑：该接口返回的复数 ``permissions.admin`` 恒为 false
+    （维护者 access_level=40 时同样是 false），不能用于判定是否能托管。
+    真实权限看同接口的：
+      - ``access_level``：30=开发者(Developer) / 40=维护者(Maintainer) / >=50=管理员
+      - 单数 ``permission`` 字符串："write"(开发者) / "admin"(维护者及以上)
+    因此按 access_level>=40 判定（维护者及以上可托管），单数 permission 与
+    复数 permissions.admin 作兜底兼容。
     """
     if not username:
         return False
     # 项目所有者直接有完全权限
     if username == owner:
         return True
-    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{username}/permission"
+    url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}/permission"
     try:
         data = _req("GET", url, api_token)
-        # 1) Owner：permissions.admin 布尔
-        perm = data.get("permissions", {})
-        if isinstance(perm, dict) and perm.get("admin"):
-            return True
-        # 2) Maintainer：access_level >= 40（GitCode 维护者权限级）
-        try:
-            if int(data.get("access_level") or 0) >= 40:
-                return True
-        except (TypeError, ValueError):
-            pass
-        # 3) Maintainer：role_name 或 permission 字符串（冗余兜底，任一字段漂移不断路）
-        if data.get("role_name") == "Maintainer" or data.get("permission") == "admin":
-            return True
-        return False
     except RuntimeError:
         return False
+    try:
+        access_level = int(data.get("access_level", 0) or 0)
+    except (TypeError, ValueError):
+        access_level = 0
+    if access_level >= 40:  # Maintainer(40) / Admin(>=50)
+        return True
+    if str(data.get("permission", "") or "").lower() == "admin":
+        return True
+    perm = data.get("permissions") or {}
+    return bool(perm.get("admin")) if isinstance(perm, dict) else False
 
 
 # GitCode 成员权限枚举（官方 API：PUT /collaborators/{username} body 用单数字段 permission）
