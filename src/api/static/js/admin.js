@@ -108,15 +108,19 @@
       var os = c.oauth_status || {};
       applyToField('f_gitcode_api_token', c.gitcode_api_token_present, c.gitcode_api_token_tail);
       applyToField('f_github_bot_token', c.github_bot_token_present, c.github_bot_token_tail);
-      $2('f_gitcode_oauth_client_id').value = c.gitcode_oauth_client_id_present ? '● 已配置' : '';
-      $2('f_github_oauth_client_id').value = c.github_oauth_client_id_present ? '● 已配置' : '';
-      // 密文不定长，用 client_id 存在性一并对齐提示；仅在用户重新输入时才提交
-      $2('f_gitcode_oauth_client_secret').value = os.gitcode ? '' : '';
-      $2('f_gitcode_oauth_client_secret').placeholder = os.gitcode ? '● 已配置（重新输入以更新）' : '';
+      // client_id / redirect_uri 非敏感，回显明文；secret 占位提示
+      $2('f_gitcode_oauth_client_id').value = c.gitcode_oauth_client_id || '';
+      $2('f_gitcode_oauth_client_id').placeholder = c.gitcode_oauth_client_id_present ? '● 已配置' : 'GitCode OAuth App Client ID';
+      $2('f_github_oauth_client_id').value = c.github_oauth_client_id || '';
+      $2('f_github_oauth_client_id').placeholder = c.github_oauth_client_id_present ? '● 已配置' : 'GitHub OAuth App Client ID';
+      $2('f_gitcode_oauth_client_secret').value = '';
+      $2('f_gitcode_oauth_client_secret').placeholder = os.gitcode ? '● 已配置（重新输入以更新）' : 'GitCode OAuth App Client Secret';
       $2('f_github_oauth_client_secret').value = '';
-      $2('f_github_oauth_client_secret').placeholder = os.github ? '● 已配置（重新输入以更新）' : '';
+      $2('f_github_oauth_client_secret').placeholder = os.github ? '● 已配置（重新输入以更新）' : 'GitHub OAuth App Client Secret';
       $2('f_gitcode_oauth_redirect_uri').value = c.gitcode_oauth_redirect_uri || '';
+      $2('f_gitcode_oauth_redirect_uri').placeholder = '留空自动推断';
       $2('f_github_oauth_redirect_uri').value = c.github_oauth_redirect_uri || '';
+      $2('f_github_oauth_redirect_uri').placeholder = '留空自动推断';
       $2('f_bot_usernames').value = (c.bot_usernames || []).join(', ');
       if (d.pwd_initial) { $2('pwdBanner').classList.remove('hid'); } else { $2('pwdBanner').classList.add('hid'); }
     }).catch(function (e) { toast('加载配置失败: ' + e.message, false); });

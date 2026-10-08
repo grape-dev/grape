@@ -73,6 +73,10 @@ def read_public_config() -> dict:
             tail = val[-4:] if len(val) >= 4 else val
             out["{}_present".format(field)] = val != ""
             out["{}_tail".format(field)] = tail
+            # 非敏感字段回显明文：client_id / redirect_uri（URL）便于前端回填
+            if field in ("gitcode_oauth_client_id", "github_oauth_client_id",
+                         "gitcode_oauth_redirect_uri", "github_oauth_redirect_uri"):
+                out[field] = val
     # oauth_status 汇总（前端直接展示三态）
     out["oauth_status"] = {
         "gitcode": bool(get_meta_value("oauth_gitcode_client_id")),
