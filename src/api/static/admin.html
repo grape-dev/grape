@@ -1,0 +1,176 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>Grape Admin — 配置中心</title>
+<style>
+:root{--t:#1d1d1f;--t2:#86868b;--c:#fff;--bg:#f5f6f8;--a:#3168e0;--ah:#2556c2;--g:#1ca44c;--r:#dc2828;--rd:10px;--sh:0 1px 4px rgba(0,0,0,.06)}
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg);color:var(--t);min-height:100vh}
+::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#d2d6de;border-radius:3px}
+
+/* ===== 登录 ===== */
+#loginView{position:fixed;inset:0;z-index:200;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);display:flex;align-items:center;justify-content:center}
+#loginView.hid{display:none}
+.lbox{width:400px;text-align:center}
+.lbox .logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:20px;font-weight:800;margin-bottom:18px}
+.lbox h1{color:#fff;font-size:26px;font-weight:700;letter-spacing:-1px;margin-bottom:6px}
+.lbox .sub{color:#8d97a8;font-size:14px;margin-bottom:28px}
+.ipt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:#fff;font-size:14px;outline:none;margin-bottom:12px}
+.ipt::placeholder{color:#8d97a8}
+.ipt:focus{border-color:#6ea2ff}
+.lbtn{width:100%;padding:13px;border-radius:10px;border:none;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:all .2s}
+.lbtn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,.3)}
+.err{color:#ff6b6b;font-size:13px;margin-top:10px;min-height:18px}
+
+/* ===== 登录后主框架 ===== */
+#mainView{display:flex;min-height:100vh}
+#mainView.hid{display:none}
+.sb{width:220px;background:#0c1222;color:#fff;display:flex;flex-direction:column;flex-shrink:0;position:sticky;top:0;height:100vh}
+.sb-h{padding:18px;border-bottom:1px solid rgba(255,255,255,.06)}
+.sb-h .logo-s{display:flex;align-items:center;gap:9px}
+.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#3168e0,#7b3cf2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:800}
+.sb-h h1{font-size:15px;font-weight:700}
+.sb-h .tagline{font-size:10px;color:#8d97a8;text-transform:uppercase;letter-spacing:.8px}
+.sb-nav{flex:1;padding:10px;overflow-y:auto}
+.sb-nav a{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:8px;color:#c2cad6;text-decoration:none;font-size:13px;cursor:pointer;margin-bottom:2px}
+.sb-nav a:hover{background:#161e30;color:#fff}
+.sb-nav a.act{background:#3168e0;color:#fff;font-weight:500}
+.sb-nav .grp{font-size:10px;text-transform:uppercase;letter-spacing:1.1px;color:#7d8fb5;padding:14px 10px 5px;font-weight:600}
+.sb-nav a .ic{width:18px;text-align:center}
+.sb-ft{padding:14px;border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:#c2cad6}
+.sb-ft .out{color:#ff6b6b;cursor:pointer;margin-top:6px;display:block}
+
+.mn{flex:1;min-width:0;display:flex;flex-direction:column}
+.tb{background:var(--c);border-bottom:1px solid #e3e6ee;padding:0 24px;height:52px;display:flex;align-items:center;gap:10px}
+.tb .bc{font-size:13px;color:var(--t2)}
+.tb .bc b{color:var(--t);font-weight:600}
+.ct{padding:22px 24px;overflow-y:auto;flex:1;max-width:980px}
+
+/* 卡片 */
+.card{background:var(--c);border:1px solid #e3e6ee;border-radius:12px;padding:20px 22px;margin-bottom:14px}
+.card-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.card-h h2{font-size:15px;font-weight:600}
+.card-h h2 .tag{font-size:11px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:6px}
+.f-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+.f-row label{width:200px;font-size:13px;color:var(--t2);flex-shrink:0}
+.f-row input{flex:1;padding:9px 12px;border-radius:8px;border:1px solid #d8dce4;font-size:13px;outline:none}
+.f-row input:focus{border-color:var(--a)}
+.f-row .s-btn{padding:8px 14px;border-radius:8px;border:1px solid #d8dce4;background:#f7f8fa;font-size:12px;cursor:pointer;color:var(--t);flex-shrink:0}
+.f-row .s-btn:hover{background:#eceef2}
+.f-row .st{font-size:12px;color:var(--g);min-width:90px}
+.f-row .st.off{color:var(--r)}
+.hint{font-size:12px;color:var(--t2);margin:-6px 0 12px 210px}
+.save-bar{display:flex;align-items:center;gap:12px;margin-top:8px}
+.btn{padding:11px 22px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer}
+.btn-p{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff}
+.btn-p:disabled{opacity:.5;cursor:default}
+.btn-o{background:#f2f3f5;color:var(--t);border:1px solid #d8dce4}
+.banner{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:10px;background:#fff8e6;border:1px solid #f0e0b0;color:#8a6d1c;font-size:13px;margin-bottom:14px}
+.banner.warn{background:#fdeaea;border-color:#f3c2c2;color:#9a2b2b}
+.banner button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#8a6d1c;color:#fff;cursor:pointer;font-size:12px}
+.banner.warn button{background:#9a2b2b}
+
+/* Modal */
+.modal{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.35);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center}
+.modal.hid{display:none}
+.mbox{width:420px;max-width:92vw;background:#fff;border-radius:16px;padding:26px}
+.mbox h3{font-size:17px;font-weight:700;margin-bottom:6px}
+.mbox .msub{font-size:13px;color:var(--t2);margin-bottom:18px;line-height:1.6}
+.mbox .m-actions{display:flex;gap:10px;justify-content:center;margin-top:18px}
+.mbox .m-actions button{flex:1;padding:11px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer}
+.toast-wrap{position:fixed;top:18px;right:18px;z-index:400;display:flex;flex-direction:column;gap:8px}
+.toast{padding:12px 18px;border-radius:10px;color:#fff;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.18);animation:fadeIn .25s}
+.toast.ok{background:#1ca44c}.toast.err{background:#dc2828}
+@keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
+</style>
+</head>
+<body>
+
+<!-- 登录 -->
+<div id="loginView">
+  <div class="lbox">
+    <div class="logo">🍇</div>
+    <h1>Grape Admin</h1>
+    <p class="sub">系统管理 · 配置中心</p>
+    <input class="ipt" id="loginUser" placeholder="管理员账号" autocomplete="username">
+    <input class="ipt" id="loginPass" type="password" placeholder="登录密码" autocomplete="current-password">
+    <button class="lbtn" id="loginBtn">登 录</button>
+    <div class="err" id="loginErr"></div>
+  </div>
+</div>
+
+<!-- 改密弹窗 -->
+<div class="modal hid" id="pwdModal">
+  <div class="mbox">
+    <h3>设置管理员密码</h3>
+    <div class="msub">您正在使用默认密码。为保障安全建议立即修改，修改后旧会话将失效。</div>
+    <input class="ipt" id="oldPass" type="password" placeholder="原密码" style="background:#f2f3f5;color:#1d1d1f">
+    <input class="ipt" id="newPass" type="password" placeholder="新密码（至少 8 位）" style="background:#f2f3f5;color:#1d1d1f">
+    <div class="m-actions">
+      <button style="background:#f2f3f5;color:#1d1d1f" onclick="closePwdModal()">跳过</button>
+      <button style="background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff" onclick="changePwd()">确认修改</button>
+    </div>
+  </div>
+</div>
+
+<!-- 主框架 -->
+<div id="mainView">
+  <div class="sb">
+    <div class="sb-h">
+      <div class="logo-s"><span class="sq">🍇</span><h1>Grape Admin</h1></div>
+      <div class="tagline">Config Center</div>
+    </div>
+    <div class="sb-nav">
+      <div class="grp">配置中心</div>
+      <a class="act" onclick="showCfg()"><span class="ic">⚙</span>平台凭据</a>
+      <div class="grp">账号</div>
+      <a onclick="openPwdModal('self')"><span class="ic">🔑</span>修改密码</a>
+      <a onclick="logout()"><span class="ic">↪</span>退出登录</a>
+    </div>
+    <div class="sb-ft">
+      <div id="adminUser">admin</div>
+      <a class="out" onclick="logout()">退出登录</a>
+    </div>
+  </div>
+  <div class="mn">
+    <div class="tb"><div class="bc"><b>平台凭据配置</b></div></div>
+    <div class="ct">
+      <div id="pwdBanner" class="banner hid">您仍在使用默认密码，建议尽快修改。
+        <button onclick="openPwdModal('self')">立即修改</button>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2>GitCode 配置<span class="tag">github.com 平台操作凭据</span></h2></div>
+        <div class="f-row"><label>gitcode_api_token</label><input id="f_gitcode_api_token" type="password" placeholder="GitCode bot token"><button class="s-btn" onclick="verifyToken('gitcode','f_gitcode_api_token')">校验</button><span class="st" id="s_gitcode_api_token"></span></div>
+        <div class="f-row"><label>oauth_client_id</label><input id="f_gitcode_oauth_client_id" placeholder="GitCode OAuth App Client ID"></div>
+        <div class="f-row"><label>oauth_client_secret</label><input id="f_gitcode_oauth_client_secret" type="password" placeholder="GitCode OAuth App Client Secret"></div>
+        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_gitcode_oauth_redirect_uri" placeholder="留空自动推断"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2>GitHub 配置<span class="tag">GitHub 平台操作凭据</span></h2></div>
+        <div class="f-row"><label>github_bot_token</label><input id="f_github_bot_token" type="password" placeholder="GitHub bot token"><button class="s-btn" onclick="verifyToken('github','f_github_bot_token')">校验</button><span class="st" id="s_github_bot_token"></span></div>
+        <div class="f-row"><label>oauth_client_id</label><input id="f_github_oauth_client_id" placeholder="GitHub OAuth App Client ID"></div>
+        <div class="f-row"><label>oauth_client_secret</label><input id="f_github_oauth_client_secret" type="password" placeholder="GitHub OAuth App Client Secret"></div>
+        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_github_oauth_redirect_uri" placeholder="留空自动推断"></div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2>Bot 账户<span class="tag">self-comment 检测</span></h2></div>
+        <div class="f-row"><label>bot_usernames</label><input id="f_bot_usernames" placeholder="逗号分隔，如 grape_bot, dev-bot"></div>
+        <div class="hint">手动填写或点击上方「校验」后用返回的用户名自动回填</div>
+      </div>
+
+      <div class="save-bar">
+        <button class="btn btn-p" id="saveBtn" onclick="saveConfig()">保存配置</button>
+        <span class="st">保存后写入 configs/global-bot-token.json 并同步生效</span>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script src="/static/js/admin.js"></script>
+</body>
+</html>

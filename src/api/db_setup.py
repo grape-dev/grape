@@ -759,7 +759,20 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
 )
 """
 
+_ADMIN_ACCOUNTS_TABLE_DDL = """
+CREATE TABLE IF NOT EXISTS admin_accounts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL DEFAULT '',
+    is_super      INTEGER NOT NULL DEFAULT 1,
+    token_version INTEGER NOT NULL DEFAULT 0,
+    created_at    TEXT DEFAULT (datetime('now')),
+    last_login_at TEXT DEFAULT NULL
+)
+"""
+
 _NEW_TABLES = [
+    ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
@@ -1523,6 +1536,37 @@ def _init_skill_featured():
         log.warning(f"Init skill featured failed: {e}")
 
 
+def _seed_admin_accounts():
+    """首次部署种子 admin 账号（admin/admin123）+ meta 标记。
+
+    - 仅当 admin_accounts 为空时插入默认账号 admin；密码优先级：
+      环境变量 GRAPE_ADMIN_PASSWORD > 默认 'admin123'
+    - meta 标记：
+      admin_initialized  = 1（账号已种子，防重复）
+      admin_pwd_initial  = 1（仍为默认密码，前端引导改密；改密后置 0）
+    - admin 账号与 user_accounts 完全独立，不影响用户登录
+    """
+    import hashlib
+    from src.user.db import get_meta_value, set_meta_value
+    _default_pwd = os.environ.get("GRAPE_ADMIN_PASSWORD") or "admin123"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM admin_accounts")
+            if c.fetchone()[0] == 0:
+                _pw_hash = hashlib.sha256(_default_pwd.encode()).hexdigest()
+                c.execute("INSERT INTO admin_accounts (username, password_hash, is_super, token_version) VALUES (?,?,1,0)",
+                          ("admin", _pw_hash))
+                db.commit()
+                _src = "GRAPE_ADMIN_PASSWORD env" if os.environ.get("GRAPE_ADMIN_PASSWORD") else "default admin123"
+                log.info(f"Seeded default admin account: admin (password from {_src})")
+        set_meta_value("admin_initialized", "1")
+        if not get_meta_value("admin_pwd_initial"):
+            set_meta_value("admin_pwd_initial", "1" if _default_pwd == "admin123" else "0")
+    except Exception as e:
+        log.warning(f"Seed admin account failed: {e}")
+
+
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
     # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
@@ -1548,6 +1592,7 @@ def init_database():
                 # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
                 _tasks_to_issue_rename_pre_create()
                 _create_tables()
+                _seed_admin_accounts()
                 _migrate_tables()
                 _create_indexes()
                 _seed_from_json()
@@ -1581,6 +1626,7 @@ def init_database():
         # SQLite——单实例不需要锁
         _tasks_to_issue_rename_pre_create()
         _create_tables()
+        _seed_admin_accounts()
         _migrate_tables()
         _create_indexes()
         _seed_from_json()
