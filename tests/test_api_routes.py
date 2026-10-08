@@ -248,6 +248,19 @@ class TestRepos:
         with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": True}}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
 
+        # 2b) 真实 GitCode 格式：维护者 access_level=40（注意 permissions.admin 恒为 false，
+        #     真实权限看 access_level / 单数 permission）→ 通过
+        with patch("src.user.repo_manager._req", return_value={
+                "access_level": 40, "role_name": "Maintainer",
+                "permissions": {"admin": False}, "permission": "admin"}):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
+
+        # 2c) 真实 GitCode 格式：开发者 access_level=30 → 拒绝
+        with patch("src.user.repo_manager._req", return_value={
+                "access_level": 30, "role_name": "Developer",
+                "permissions": {"admin": False}, "permission": "write"}):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
+
         # 3) 非所有者：permission.admin=False → 拒绝
         with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": False}}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False

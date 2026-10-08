@@ -544,3 +544,80 @@ def test_feishu_task_prompt_injects_task_description():
     assert "### Task Description" in prompt
     assert "处理登录超时" in prompt
     _clean()
+
+
+class TestTaskOpenQuickAction:
+    """feishu-notification-card-quick-actions-design.md：通知卡「进入任务会话」按钮直通。"""
+
+    def test_task_open_with_card_value_joins(self):
+        _seed()
+        cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #3", conv_type="task", issue_number=3)
+        ctx = _ctx()
+        api = _make_api_mock()
+        from src.im.handler_async import process_command_async
+        asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
+                                          account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav",
+                                          card_value={"repo_key": "gitcode:navuser/repo-a",
+                                                      "issue_number": "#3", "conv_id": cid}))
+        assert "已进入任务会话" in _card_text(api)
+        with db_lock:
+            row = db.cursor().execute("SELECT im_channel_id FROM chat_conversations WHERE id=?", (cid,)).fetchone()
+        assert row and row[0] == "nav_chat"
+        _clean()
+
+    def test_task_open_without_card_value_falls_back(self):
+        _seed()
+        ctx = _ctx()
+        api = _make_api_mock()
+        from src.im.handler_async import process_command_async
+        asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
+                                          account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav"))
+        assert "使用通知卡片" in _card_text(api)
+        _clean()
+
+    def test_task_open_no_conv_id_lookup_or_create(self):
+        _seed()
+        ctx = _ctx()
+        api = _make_api_mock()
+        from src.im.handler_async import process_command_async
+        asyncio.run(process_command_async(ctx, api, "/task-open", "nav_chat", "sender_1", db,
+                                          account=ctx.app_id, msg_id="msg_1", sender_open_id="ou_nav",
+                                          card_value={"repo_key": "gitcode:navuser/repo-a",
+                                                      "issue_number": "#9", "conv_id": ""}))
+        assert "已进入任务会话" in _card_text(api)
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT id FROM chat_conversations WHERE user_id=1 AND repo_key='gitcode:navuser/repo-a' "
+                "AND conv_type='task' AND issue_number=9 LIMIT 1").fetchone()
+        assert row is not None
+        _clean()
+
+
+class TestBuildNotifyActions:
+    """通知卡按钮组装（issues_center._build_notify_actions）。"""
+
+    def test_gitcode_actions(self):
+        from src.api.issues_center import _build_notify_actions
+        acts = _build_notify_actions("gitcode:navuser/repo-a", 7, "conv1")
+        assert len(acts) == 2
+        assert acts[0]["text"]["content"] == "💬 进入任务会话"
+        assert acts[0]["value"]["cmd"] == "/task-open"
+        assert acts[0]["value"]["repo_key"] == "gitcode:navuser/repo-a"
+        assert acts[0]["value"]["conv_id"] == "conv1"
+        assert acts[1]["url"] == "https://gitcode.com/navuser/repo-a/issues/7"
+
+    def test_github_actions(self):
+        from src.api.issues_center import _build_notify_actions
+        acts = _build_notify_actions("github:navuser/repo-a", 7, "")
+        assert acts[1]["url"] == "https://github.com/navuser/repo-a/issues/7"
+        assert acts[0]["value"]["conv_id"] == ""
+
+    def test_empty_issue_no_url(self):
+        from src.api.issues_center import _build_notify_actions
+        acts = _build_notify_actions("gitcode:navuser/repo-a", 0, "")
+        assert len(acts) == 1  # 无编号 → 只有主按钮
+
+    def test_malformed_repo_no_url(self):
+        from src.api.issues_center import _build_notify_actions
+        acts = _build_notify_actions("", 7, "")
+        assert len(acts) == 1

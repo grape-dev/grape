@@ -113,6 +113,10 @@ function _loadRuntimeDevices() {
     if (__runtimeData) {
       __runtimeData.devices = d.devices || [];
       renderRuntimes(__runtimeData);
+    } else {
+      // __runtimeData 还没加载 — 直接用 devices 渲染空壳
+      __runtimeData = {runtimes: [], devices: d.devices || [], total: 0};
+      renderRuntimes(__runtimeData);
     }
   }).catch(function(e) {
     if (e.name === 'AbortError' && e.silent) return;
@@ -240,15 +244,14 @@ function renderRuntimes(data) {
   if (data.total !== undefined) _rtTotal = data.total;
   // 场景标签缓存未加载时先异步拉取，拿到后再渲染（避免卡片显示原始 name 而非 display_name）
   if (!__sceneTagsCache) {
-    _loadSceneTagsCache(function() { renderRuntimes(data); });
+    _loadSceneTagsCache(function() { if (__runtimeData) renderRuntimes(__runtimeData); });
     return;
   }
   // 设置当前用户名供权限判断
   try { window._grapeUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) { window._grapeUsername = ''; }
   const devices = (data.devices && data.devices.length)
     ? data.devices
-    : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
-      scope: 'global', owner: rt.owner || '', worker_ip: rt.worker_ip || '', credential_id: 0, runtimes: [rt] }));
+    : [];
   __runtimeDevices = devices;
   // Issue #185 审查修复：_rtDevTotal 只由 runtime-devices 端点提供权威值，
   // 不再从 agent-runtimes 返回的 devices 启发式更新（避免过滤不一致导致分页页数错误）
@@ -858,9 +861,15 @@ function refreshRuntimes() {
   _stopDevspaceAutoRefresh();
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
+  // 清空旧缓存，防止刷新期间渲染旧数据
+  __runtimeData = null;
   API.post('/settings/agent-runtimes/refresh').then(() => {
+    // 串行加载：先加载引擎列表，完成后再加载设备列表
     _loadRuntimesData();
-    if (_runtimeTab === 'workers') _loadRuntimeDevices();
+    if (_runtimeTab === 'workers') {
+      // 延迟加载设备列表，等 _loadRuntimesData 先完成设置 __runtimeData
+      setTimeout(function() { _loadRuntimeDevices(); }, 300);
+    }
     app.showToast(I18N.t('runtimes.toast.refresh_success'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }

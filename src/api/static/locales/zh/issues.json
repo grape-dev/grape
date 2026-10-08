@@ -1,0 +1,15 @@
+{
+  "detail_title": "需求详情",
+  "detail": {
+    "issue_id": "需求编号",
+    "status": "状态",
+    "assignee": "负责人",
+    "repo": "仓库",
+    "created_at": "创建时间",
+    "completed_at": "完成时间",
+    "no_description": "描述",
+    "view_issue": "查看 Issue",
+    "go_conversation": "去对话",
+    "copy_task": "复制需求"
+  }
+}

@@ -800,7 +800,7 @@ def user_db_get_backend_agents_alias():
 
 
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")
-def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
+def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）
 
     P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
@@ -835,7 +835,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
 
 # 兼容别名：旧路径 /backend-agents/refresh
 @router.post("/backend-agents/refresh", operation_id="settings_backend_agents_refresh", summary="Refresh backend agents (legacy alias)", description="Legacy alias for refreshing agent runtimes.")
-async def refresh_backend_agents(user: dict = Depends(require_no_session_token)):
+async def refresh_backend_agents(user: dict = Depends(require_org_member)):
     return await refresh_agent_runtimes(user)
 
 
