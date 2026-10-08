@@ -2106,7 +2106,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     # 3) 会话：配置会话（repo+agent）+ 执行会话（Issue 级，串行粒度，见 multi-issue-isolation-design.md §3.3）
     #    每 Issue 独立 session（见 vod-agent-hang-rootcause-fix.md 方案 A）：有关联 Issue 只用 Issue 会话；
     #    repo 级会话仅用于无关联 Issue（push/#0）。
-    from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
+    from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session, guard_issue_session_pointer
     from src.api.event_store import update_event_config
     update_event_config(seq, inst_name, skill_name, datetime.now(timezone.utc).isoformat())
     session = get_or_create_agent_session(repo_key, agent_type, backend or "")
@@ -2124,7 +2124,14 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     if _issue_num_from(issue_id):
         _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
         issue_session_id = _isess.get("id") or ""
-        oc_session_id = _isess.get("runtime_session_id") or ""
+        # session 引擎守卫：runtime_id>0（确定性路由）时校验指针引擎与目标引擎同家，
+        # 跨引擎指针弃用（hermes resume opencode 会话号会静默挂死）；广播/查不到 → 放行，
+        # 由 worker 侧执行时兜底校验。
+        _cur_engine = ""
+        if runtime_id:
+            from src.runtime.instances import engine_type_of_runtime
+            _cur_engine = engine_type_of_runtime(runtime_id)
+        oc_session_id = guard_issue_session_pointer(_isess, _cur_engine)
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回退读取。
 
     repo_gitcode_token = ""
@@ -2764,10 +2771,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _has_issue = bool(_issue_num_from(issue_id))
     try:
         if _has_issue:
-            from src.api.session_store import get_or_create_issue_session
+            from src.api.session_store import get_or_create_issue_session, guard_issue_session_pointer
             _isess = get_or_create_issue_session(repo_key, agent_type, issue_id)
             issue_session_id = _isess.get("id") or ""
-            oc_session_id = _isess.get("runtime_session_id") or ""
+            # session 引擎守卫：backend 即本次引擎名，跨引擎指针弃用（防 hermes resume
+            # opencode 会话号静默挂死）；引擎未知 → 放行。
+            oc_session_id = guard_issue_session_pointer(_isess, backend or "")
         # 无关联 Issue 任务不执行（push 忽略），不再回退读 repo 级 runtime_session_id。
     except Exception:
         pass
@@ -3035,11 +3044,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
     # 更新 oc_session_id（持久化对话上下文）——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
+    # 同步记录 session_engine（本次执行引擎），供消费端跨引擎守卫比对。
     if new_oc_session_id and new_oc_session_id != oc_session_id:
         try:
             if issue_session_id:
                 from src.api.session_store import update_issue_session
-                update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id)
+                update_issue_session(issue_session_id, runtime_session_id=new_oc_session_id,
+                                     session_engine=backend or "")
         except Exception as e:
             log.warning(f"Exec agent: failed to update oc_session_id: {e}")
 

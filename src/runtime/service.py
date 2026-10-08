@@ -1116,6 +1116,29 @@ def claim(runtime_id) -> dict | None:
         task = get_task(task_id)
         if task:
             task["status"] = "running"
+            # session 引擎守卫（worker 兜底层）：任务带的续接指针若由异构引擎产出（如
+            # 入队时广播模式未知引擎，或存量脏指针），claim 已确定实际引擎 → 比对
+            # issue_agent_session.session_engine，跨引擎则置空指针（引擎开新会话），
+            # 防 hermes resume opencode 会话号静默挂死。引擎名未知 → 放行（fail-safe）。
+            try:
+                _isid = task.get("issue_session_id") or ""
+                _sid = task.get("runtime_session_id") or ""
+                if _isid and _sid:
+                    _eng_name = ""
+                    with db_lock:
+                        c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+                        _er = c.fetchone()
+                        _eng_name = (_er[0] or "") if _er else ""
+                    with db_lock:
+                        c.execute("SELECT session_engine FROM issue_agent_session WHERE id=?", (_isid,))
+                        _sr = c.fetchone()
+                    _ptr_engine = (_sr[0] or "") if _sr else ""
+                    if _eng_name and _ptr_engine and _ptr_engine != _eng_name:
+                        task["runtime_session_id"] = ""
+                        log.info(f"claim: drop cross-engine session pointer "
+                                 f"(ptr={_ptr_engine} engine={_eng_name} task={task_id})")
+            except Exception as e:
+                log.warning(f"claim session engine guard failed: {e}")
             # 回填事件 runtime 为真实引擎实例名（pool 模式入队显示 pool:<type>，
             # claim 后展示实际执行引擎，见 #44：vod 池 hermes 执行但事件显示 opencode）
             if task.get("event_seq"):
@@ -1363,6 +1386,28 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
     task = get_task(task_id)
     if task:
         task["status"] = "running"
+        # session 引擎守卫（worker 兜底层，与 claim() 同款）：广播任务 claim 时才确定
+        # 实际引擎 → 比对 issue_agent_session.session_engine，跨引擎置空指针（引擎开新
+        # 会话），防 hermes resume opencode 会话号静默挂死。引擎未知 → 放行（fail-safe）。
+        try:
+            _isid = task.get("issue_session_id") or ""
+            _sid = task.get("runtime_session_id") or ""
+            if _isid and _sid:
+                _eng_name = ""
+                with db_lock:
+                    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+                    _er = c.fetchone()
+                    _eng_name = (_er[0] or "") if _er else ""
+                with db_lock:
+                    c.execute("SELECT session_engine FROM issue_agent_session WHERE id=?", (_isid,))
+                    _sr = c.fetchone()
+                _ptr_engine = (_sr[0] or "") if _sr else ""
+                if _eng_name and _ptr_engine and _ptr_engine != _eng_name:
+                    task["runtime_session_id"] = ""
+                    log.info(f"claim_by_tag: drop cross-engine session pointer "
+                             f"(ptr={_ptr_engine} engine={_eng_name} task={task_id})")
+        except Exception as e:
+            log.warning(f"claim_by_tag session engine guard failed: {e}")
         # 回填事件 runtime
         if task.get("event_seq"):
             try:
@@ -1735,12 +1780,17 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                        usage_json=json.dumps(usage or {}))
     # 新会话续接指针回写——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
+    # 引擎守卫（B2）：usage.engine 为本次执行引擎（worker done 事件带上），回写时
+    # 连同 session_engine 一起覆盖为本次引擎（最新产出者权威），消费端守卫比对用。
+    # 陈旧异构指针不跳过而是直接覆盖——跳过会让坏指针永久滞留表里。
     _new_sid = (usage or {}).get("session_id") or ""
+    _done_engine = (usage or {}).get("engine") or ""
     if _new_sid:
         try:
             from src.api.session_store import update_issue_session
             if task and task.get("issue_session_id"):
-                update_issue_session(task["issue_session_id"], runtime_session_id=_new_sid)
+                update_issue_session(task["issue_session_id"], runtime_session_id=_new_sid,
+                                     session_engine=_done_engine)
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
@@ -2074,7 +2124,7 @@ def fail_task(task_id, error, exit_code=-1):
                        errors=json.dumps([str(error)] if error else []))
     # 死 session 检测（smart-session-recovery-design.md §2.3）：
     # 同一 issue_agent_session 下连续 ≥3 次 exit_code < 0（-15/-1/timeout）→ 清空 runtime_session_id
-    # 注意：worker 端 client.fail 不传 exit_code，服务端 fail_task 恒收到 exit_code=-1；
+    # exit_code 由 worker fail 上报透传（超时/-1、引擎崩溃码）；不传时默认 -1；
     # exit=1（快速失败如 key/config 问题）不计入 session 故障，避免误清
     _isid = (task or {}).get("issue_session_id") or ""
     if _isid and exit_code < 0:
@@ -2087,7 +2137,8 @@ def fail_task(task_id, error, exit_code=-1):
                 rows = c.fetchall()
                 if len(rows) >= 3 and all((r[0] or 0) < 0 for r in rows):
                     from src.api.session_store import update_issue_session
-                    update_issue_session(_isid, runtime_session_id="")
+                    # 指针与引擎标记一起清，防残留 engine 标记让后续异构引擎回写被误拦
+                    update_issue_session(_isid, runtime_session_id="", session_engine="")
                     log.info(f"fail_task: dead session detected (consecutive failures), cleared runtime_session_id for {_isid}")
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
