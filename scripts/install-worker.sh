@@ -393,15 +393,21 @@ set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m src.runtime.agent
 EOF
   chmod +x "$START_SCRIPT"
-  # 停掉旧实例（按 start 脚本匹配，避免误杀）
-  pkill -f "python -m src.runtime.agent" >/dev/null 2>&1 || true
+  # 停掉旧实例——限定到本安装目录自己的实例（按 venv python 路径匹配）
+  # ⚠️ 不能用裸 "python -m src.runtime.agent" 匹配：会误杀同机其他安装目录/其他用户
+  #    的 worker（2026-10-08 实测：root 升级 /opt/grape 时误杀 liufei ~/grape-worker 的
+  #    实例，恰好只因为 root 侧 cmdline 带 -u 才躲过反向误杀）。
+  #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.runtime.agent
+  #    （$VENV 展开为绝对路径，跨目录/跨用户天然隔离；pgrep -f 按子串匹配含路径）
+  _pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
+  pkill -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1 || true
   sleep 1
   # 脱离终端启动（setsid + nohup，退出 ssh 不中断）
   setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
   disown 2>/dev/null || true
   sleep 3
-  if pgrep -f "python -m src.runtime.agent" >/dev/null 2>&1; then
-    log "已后台启动（pid $(pgrep -f 'python -m src.runtime.agent' | head -1)），日志: $INSTALL_DIR/data/worker.log"
+  if pgrep -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1; then
+    log "已后台启动（pid $(pgrep -f "${_pat}.*-m src\.runtime\.agent" | head -1)），日志: $INSTALL_DIR/data/worker.log"
   else
     log "启动失败，请查看日志: $INSTALL_DIR/data/worker.log"
   fi
