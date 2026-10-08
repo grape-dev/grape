@@ -36,7 +36,15 @@ def _req(method: str, url: str, token: str = "", body: dict | None = None) -> di
 
 
 def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: str) -> bool:
-    """调 /collaborators/{username}/permission 接口精确判断管理员权限"""
+    """调 /collaborators/{username}/permission 接口精确判断管理员权限。
+
+    GitCode 权限模型（实测 2026-10-08，repos/{owner}/{repo}/collaborators/{user}/permission）：
+      Owner        → permissions.admin=true
+      Maintainer   → permissions.admin=false 但 access_level=40 / role_name="Maintainer" / permission="admin"
+                     （维护者可管理 webhook 与成员，足以完成仓库托管流程）
+      Developer    → access_level=30 / permission="push"
+    因此不能只看 permissions.admin 布尔——否则所有维护者被误判为无权限（403）。
+    """
     if not username:
         return False
     # 项目所有者直接有完全权限
@@ -45,8 +53,20 @@ def _check_collaborator_admin(api_token: str, owner: str, repo: str, username: s
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{username}/permission"
     try:
         data = _req("GET", url, api_token)
+        # 1) Owner：permissions.admin 布尔
         perm = data.get("permissions", {})
-        return bool(perm.get("admin")) if isinstance(perm, dict) else False
+        if isinstance(perm, dict) and perm.get("admin"):
+            return True
+        # 2) Maintainer：access_level >= 40（GitCode 维护者权限级）
+        try:
+            if int(data.get("access_level") or 0) >= 40:
+                return True
+        except (TypeError, ValueError):
+            pass
+        # 3) Maintainer：role_name 或 permission 字符串（冗余兜底，任一字段漂移不断路）
+        if data.get("role_name") == "Maintainer" or data.get("permission") == "admin":
+            return True
+        return False
     except RuntimeError:
         return False
 
