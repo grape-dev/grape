@@ -98,6 +98,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     <input class="ipt" id="loginPass" type="password" placeholder="登录密码" autocomplete="current-password">
     <button class="lbtn" id="loginBtn">登 录</button>
     <div class="err" id="loginErr"></div>
+    <div style="margin-top:18px;font-size:13px;color:#8d97a8">
+      <a href="/" style="color:#8d97a8;text-decoration:none">← 返回用户界面</a>
+    </div>
   </div>
 </div>
 
@@ -108,6 +111,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     <div class="msub">您正在使用默认密码。为保障安全建议立即修改，修改后旧会话将失效。</div>
     <input class="ipt" id="oldPass" type="password" placeholder="原密码" style="background:#f2f3f5;color:#1d1d1f">
     <input class="ipt" id="newPass" type="password" placeholder="新密码（至少 8 位）" style="background:#f2f3f5;color:#1d1d1f">
+    <input class="ipt" id="confirmPass" type="password" placeholder="确认新密码" style="background:#f2f3f5;color:#1d1d1f">
     <div class="m-actions">
       <button style="background:#f2f3f5;color:#1d1d1f" onclick="closePwdModal()">跳过</button>
       <button style="background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff" onclick="changePwd()">确认修改</button>

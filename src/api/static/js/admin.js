@@ -65,16 +65,17 @@
   function openPwdModal(mode) {
     pwdModalMode = mode || 'first';
     $2('pwdModal').classList.remove('hid');
-    $2('oldPass').value = ''; $2('newPass').value = '';
+    $2('oldPass').value = ''; $2('newPass').value = ''; $2('confirmPass').value = '';
   }
   function closePwdModal() {
     $2('pwdModal').classList.add('hid');
     if (pwdModalMode === 'first') { $2('pwdBanner').classList.remove('hid'); }
   }
   function changePwd() {
-    var oldP = $2('oldPass').value, newP = $2('newPass').value;
+    var oldP = $2('oldPass').value, newP = $2('newPass').value, confirmP = $2('confirmPass').value;
     if (!oldP || !newP) { toast('请填写原密码与新密码', false); return; }
     if (newP.length < 8) { toast('新密码至少 8 位', false); return; }
+    if (newP !== confirmP) { toast('两次输入的新密码不一致', false); return; }
     api('/change-password', { method: 'POST', body: { old_password: oldP, new_password: newP } }).then(function () {
       toast('密码已修改，请重新登录', true);
       setToken(null);
@@ -162,5 +163,14 @@
 
   window.AdminApp = { login: login, changePwd: changePwd, closePwdModal: closePwdModal, openPwdModal: openPwdModal,
                       logout: logout, showCfg: showCfg, saveConfig: saveConfig, verifyToken: verifyToken };
+  // 暴露到全局——admin.html 内联 onclick 引用裸函数名
+  window.login = login;
+  window.changePwd = changePwd;
+  window.closePwdModal = closePwdModal;
+  window.openPwdModal = openPwdModal;
+  window.logout = logout;
+  window.showCfg = showCfg;
+  window.saveConfig = saveConfig;
+  window.verifyToken = verifyToken;
   document.addEventListener('DOMContentLoaded', init);
 })();
