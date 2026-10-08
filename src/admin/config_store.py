@@ -51,19 +51,33 @@ def load_config() -> dict:
 
 
 def read_public_config() -> dict:
-    """返回脱敏配置（前端展示）：token/secret 只显示是否存在 + 尾 4 位。"""
+    """返回脱敏配置（前端展示）：token/secret 只显示是否存在 + 尾 4 位。
+
+    OAuth 字段优先读 meta 表（运行时权威，可能是旧版只配 meta 未落盘文件），
+    文件里的 bot token / bot_usernames 为兜底。
+    """
+    from src.user.db import get_meta_value
     data = load_config()
+    # meta 表 OAuth 值覆盖文件（运行时 OAuth 走 meta）
+    _merged = dict(data)
+    for src_key, meta_key in _META_SYNC_MAP.items():
+        _mv = get_meta_value(meta_key)
+        if _mv:
+            _merged[src_key] = _mv
     out = {}
     for field in ALL_FIELDS:
-        val = data.get(field, "")
+        val = _merged.get(field, "")
         if isinstance(val, list):
             out[field] = val
         elif isinstance(val, str) and val:
-            masked = "●已配置" if val else "○未配置"
             tail = val[-4:] if len(val) >= 4 else val
             out["{}_present".format(field)] = val != ""
             out["{}_tail".format(field)] = tail
-    # OAuth 客户端 id 习惯不是秘密，仍给存在性与尾4
+    # oauth_status 汇总（前端直接展示三态）
+    out["oauth_status"] = {
+        "gitcode": bool(get_meta_value("oauth_gitcode_client_id")),
+        "github": bool(get_meta_value("oauth_github_client_id")),
+    }
     return out
 
 

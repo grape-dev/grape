@@ -105,12 +105,16 @@
   function showCfg() {
     api('/config').then(function (d) {
       var c = d.config || {};
+      var os = c.oauth_status || {};
       applyToField('f_gitcode_api_token', c.gitcode_api_token_present, c.gitcode_api_token_tail);
       applyToField('f_github_bot_token', c.github_bot_token_present, c.github_bot_token_tail);
       $2('f_gitcode_oauth_client_id').value = c.gitcode_oauth_client_id_present ? '● 已配置' : '';
       $2('f_github_oauth_client_id').value = c.github_oauth_client_id_present ? '● 已配置' : '';
-      $2('f_gitcode_oauth_client_secret').value = '';
+      // 密文不定长，用 client_id 存在性一并对齐提示；仅在用户重新输入时才提交
+      $2('f_gitcode_oauth_client_secret').value = os.gitcode ? '' : '';
+      $2('f_gitcode_oauth_client_secret').placeholder = os.gitcode ? '● 已配置（重新输入以更新）' : '';
       $2('f_github_oauth_client_secret').value = '';
+      $2('f_github_oauth_client_secret').placeholder = os.github ? '● 已配置（重新输入以更新）' : '';
       $2('f_gitcode_oauth_redirect_uri').value = c.gitcode_oauth_redirect_uri || '';
       $2('f_github_oauth_redirect_uri').value = c.github_oauth_redirect_uri || '';
       $2('f_bot_usernames').value = (c.bot_usernames || []).join(', ');
