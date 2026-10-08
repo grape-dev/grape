@@ -5,7 +5,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
 import hashlib, json, os, threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
@@ -666,13 +666,60 @@ def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_cre
 
 @router.post("/runtimes/{runtime_id}/recover-orphans")
 def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_require_credential)):
-    """启动时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。"""
+    """启动/重注册时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。
+
+    2026-10-08 自噬循环修复（生产 exec#310 实锤）：
+    部署类任务流程中包含"重启 master"——master 重启导致 worker 心跳断 3 次
+    触发 _reregister → recover_orphans 一刀切把**正在执行**的任务置回 queued
+    → worker 重新 claim 从头再跑 → 又重启 master → 循环。任务的本地进程
+    从头到尾没死过，不是孤儿。
+
+    修复（与 service.py claim 兜底回收的活跃度检查同一思路）：
+    1. 活跃度检查：task_messages 最近 RECOVER_ACTIVITY_WINDOW（1200s，兼容
+       hermes 长命令静默窗口 + 分次等待策略）内有新消息 → agent 还在跑，
+       跳过回炉（真孤儿不会有新消息）。
+    2. attempts 封顶：回炉时 attempts+1，attempts>=3 的任务直接置 failed
+       （此前 recover_orphans 不维护 attempts，无限回炉无封顶）。
+    """
+    RECOVER_ACTIVITY_WINDOW = int(os.environ.get("RECOVER_ACTIVITY_WINDOW", "1200"))
+    RECOVER_MAX_ATTEMPTS = int(os.environ.get("RECOVER_MAX_ATTEMPTS", "3"))
+    _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
+    recovered, skipped_active, force_failed = [], [], []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE runtime_id=? AND status IN ('dispatched','running')",
-                  (runtime_id,))
+        c.execute(
+            "SELECT id, attempts FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            (runtime_id,))
+        rows = c.fetchall()
+        for tid, attempts in rows:
+            # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
+            try:
+                c.execute(
+                    "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
+                    (tid, _active_cutoff))
+                if c.fetchone():
+                    skipped_active.append(tid)
+                    continue
+            except Exception:
+                pass  # 查询失败保守跳过检查（保持旧行为：回收）
+            # attempts 封顶：循环回炉保护
+            _att = (attempts or 0) + 1
+            if _att >= RECOVER_MAX_ATTEMPTS:
+                c.execute(
+                    "UPDATE agent_tasks SET status='failed', attempts=?, errors=CONCAT(COALESCE(errors,''), ?) WHERE id=?",
+                    (_att, "recover-orphans attempts cap reached (possible self-restart loop)", tid))
+                force_failed.append(tid)
+            else:
+                c.execute(
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL, attempts=? WHERE id=?",
+                    (_att, tid))
+                recovered.append(tid)
         db.commit()
-    return {"message": "orphans recovered"}
+    if recovered or skipped_active or force_failed:
+        log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "
+                 f"skipped_active={skipped_active} force_failed={force_failed}")
+    return {"message": "orphans recovered", "recovered": recovered,
+            "skipped_active": skipped_active, "force_failed": force_failed}
 
 
 # ===== 用户态端点（M2，保留）=====
