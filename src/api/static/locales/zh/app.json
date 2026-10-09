@@ -56,6 +56,7 @@
     "select": "选择仓库...",
     "load_failed": "无法加载仓库列表，请确认 GitCode Token 是否有效",
     "back_to_select": "返回仓库选择",
+    "back_to_website": "返回官网",
     "add_new": "新增仓库托管"
   },
   "toast": {
