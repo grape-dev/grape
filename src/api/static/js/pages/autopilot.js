@@ -1646,8 +1646,8 @@ function _apLoadExecutions(taskId) {
       el.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">暂无执行记录</div>';
       return;
     }
-    var statusIcons = {success:'✅', failed:'❌', running:'🔄', pending:'⏳', retrying:'🔁', skipped:'⏭', dispatched:'📤'};
-    var statusColors = {success:'#28a745', failed:'#dc3545', running:'#3168e0', pending:'var(--t3)', retrying:'#e8a000', skipped:'var(--t3)', dispatched:'#3168e0'};
+    var statusIcons = {success:'✅', failed:'❌', running:'🔄', pending:'⏳', retrying:'🔁', skipped:'⏭', dispatched:'📤', cancelled:'🛑'};
+    var statusColors = {success:'#28a745', failed:'#dc3545', running:'#3168e0', pending:'var(--t3)', retrying:'#e8a000', skipped:'var(--t3)', dispatched:'#3168e0', cancelled:'#86868b'};
 
     var html = '<style>' +
       '.ap-exec-row{border-bottom:1px solid var(--b);cursor:pointer;transition:background .15s}' +
