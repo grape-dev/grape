@@ -7,6 +7,7 @@ from src.config import log
 TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"
 TOKEN_TYPE_WEBHOOK = "webhook"
+TOKEN_TYPE_ADMIN = "admin"
 
 # 用户活跃状态追踪——内存缓冲，定时批量 flush
 _pending_active: set = set()
@@ -132,6 +133,33 @@ def get_user_or_none(request: Request) -> dict | None:
         return get_current_user_or_api_key(request)
     except HTTPException:
         return None
+
+
+def require_admin(authorization: str = Header(None)) -> dict:
+    """管理后台鉴权：JWT access token 且 role=admin，token_version 与 admin_accounts 一致。
+
+    - 普通用户 JWT（role 为空或非 admin）→ 403
+    - 校验失败 → 401
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
+    token = authorization.replace("Bearer ", "").strip()
+    from src.api.jwt_utils import verify_access_token
+    payload = verify_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session expired"})
+    if payload.get("role") != TOKEN_TYPE_ADMIN:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "Admin only"})
+    uid = int(payload.get("sub", 0))
+    username = payload.get("username", "")
+    token_ver = int(payload.get("ver", 0))
+    if not uid:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
+    from src.admin.db import get_admin_token_version
+    db_ver = get_admin_token_version(uid)
+    if token_ver != db_ver:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
+    return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_ADMIN}
 
 
 def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) -> dict:

@@ -473,14 +473,16 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         return False
 
 
-def _complete_pending_review(repo_key: str, issue_number: int, evidence: str) -> bool:
-    """review-pass done 分支：status=completed + stage=done（合入/收尾）。返回是否变更。"""
+def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
+                         statuses: tuple = ("pending_review",)) -> bool:
+    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。"""
     with db_lock:
         c = db.cursor()
+        _ph = ",".join("?" * len(statuses))
         c.execute(
-            "UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
-            (repo_key, issue_number))
+            f"UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
+            f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
+            (repo_key, issue_number, *statuses))
         db.commit()
         _changed = c.rowcount > 0
     if _changed:
@@ -495,20 +497,33 @@ def _complete_pending_review(repo_key: str, issue_number: int, evidence: str) ->
 
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
-    """Agent 判定用户通过审核（幂等）：仅 `pending_review` 可退出。
-    target=processing → 继续流水线；target=done → status=completed + stage=done（合入/收尾）。
+    """Agent 判定用户通过审核（幂等）。
 
-    归一兜底（review-pass-last-node-force-done-design.md）：target=processing 但当前 stage 已是
-    流水线末节点（next=='done'）→ 无下游可续，归一为 done（否则卡片卡死 processing）。
-    仅 review-pass；review-reject 的 processing（打回继续改）不归一。
+    - target=done：pending_review → completed+done（合入/收尾）；
+      **末节点放宽（#2266）**：若当前 stage 为流水线末节点（next=='done'），status 处于
+      active/processing/awaiting_input 也放行 done（CLI 流水线可从未进入 pending_review，
+      如 PR 已合入但需求卡 active → 原路径 noop）。防中间节点误终态：非末节点仍仅 pending_review 可退出。
+    - target=processing：仅 pending_review → processing（继续流水线）；末节点触达则归一 done
+      （review-pass-last-node-force-done-design.md，无下游可续）。
+    - 非命中 → noop。
     """
     try:
         if target == "done":
-            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+            if _is_last_stage_node(repo_key, issue_number):
+                # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
+                if _complete_issue_done(repo_key, issue_number, evidence,
+                                        ("pending_review", "active", "processing", "awaiting_input")):
+                    return "passed_done"
+                return "noop"
+            # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
+            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
+                                                          ("pending_review",)) else "noop"
         if _is_last_stage_node(repo_key, issue_number):
+            # 末节点 + processing → 归一 done（无下游可续）
             log.info(f"Issue review-pass normalized last-node target=processing→done: "
                      f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
-            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
+                                                          ("pending_review", "active", "processing", "awaiting_input")) else "noop"
         with db_lock:
             c = db.cursor()
             c.execute(

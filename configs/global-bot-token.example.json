@@ -3,6 +3,10 @@
   "gitcode_oauth_client_id": "",
   "gitcode_oauth_client_secret": "",
   "gitcode_oauth_redirect_uri": "",
+  "github_bot_token": "",
+  "github_oauth_client_id": "",
+  "github_oauth_client_secret": "",
+  "github_oauth_redirect_uri": "",
   "bot_usernames": [],
-  "description": "全局 DevOps Bot 配置模板：gitcode_api_token（bot 账户 token，fallback 用）、gitcode_oauth_*（GitCode OAuth 登录凭据，首次运行加载到 meta 表）、bot_usernames（self-comment 检测用 bot 用户名）。复制为 global-bot-token.json 并填入真实值。"
+  "description": "全局 DevOps Bot 配置模板：gitcode_api_token / github_bot_token（各平台 bot 账户 token，fallback 用）、gitcode_oauth_* / github_oauth_*（各平台 OAuth 登录凭据 client_id/client_secret/redirect_uri，首次运行加载到 meta 表；redirect_uri 留空则自动推断）、bot_usernames（self-comment 检测用 bot 用户名，可由 token 调 /api/v5/user 自动获取）。复制为 global-bot-token.json 并填入真实值。"
 }

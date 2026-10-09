@@ -230,14 +230,16 @@ class RuntimeClient:
     async def report_usage(self, task_id: str, usage: dict):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/usage", usage, retries=1)
 
-    async def complete(self, task_id: str, result_text: str, exit_code: int, session_id: str = "", work_dir: str = ""):
+    async def complete(self, task_id: str, result_text: str, exit_code: int, session_id: str = "",
+                       work_dir: str = "", engine: str = ""):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/complete",
                             {"result_text": result_text, "exit_code": exit_code,
-                             "session_id": session_id, "work_dir": work_dir}, retries=4)
+                             "session_id": session_id, "work_dir": work_dir,
+                             "engine": engine}, retries=4)
 
-    async def fail(self, task_id: str, error: str):
+    async def fail(self, task_id: str, error: str, exit_code: int = -1):
         await self._request("POST", f"/api/runtime/tasks/{task_id}/fail",
-                            {"error": error}, retries=4)
+                            {"error": error, "exit_code": exit_code}, retries=4)
 
     async def requeue(self, task_id: str):
         """回滚 dispatched/running 任务为 queued（客户端 claim 冲突跳过时调用）。

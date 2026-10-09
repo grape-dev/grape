@@ -642,6 +642,9 @@ async def api_ping():
 
 app.include_router(auth.router)
 app.include_router(repos.router)
+# Admin 管理后台（/api/admin/*）
+from src.admin.routes import router as admin_router
+app.include_router(admin_router)
 # Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo，与 grape 托管 repos.py 区分）
 from src.api.git_repo_api import router as git_repo_router
 app.include_router(git_repo_router)
@@ -945,6 +948,22 @@ def _check_and_sync_templates() -> bool:
     return json_ok and examples_ok
 # SPA catch-all：非 API/static 的路径（如 /login）回退到 index.html
 # 必须放在所有 API 路由之后，否则会拦截 /health /healthz 等端点
+
+@app.get("/admin", include_in_schema=False)
+@app.get("/admin/{path:path}", include_in_schema=False)
+async def serve_admin(path: str = ""):
+    """Admin 独立页面：返回 src/api/static/admin.html（frontend 单页）。"""
+    from fastapi.responses import FileResponse
+    if path.startswith("api/") or path.startswith("static/"):
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404)
+    _admin_html = os.path.join(STATIC_DIR, "admin.html")
+    if os.path.isfile(_admin_html):
+        resp = FileResponse(_admin_html)
+        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+        return resp
+    raise HTTPException(status_code=404, detail="admin.html not found")
+
 @app.get("/{path:path}")
 async def spa_catch_all(path: str):
     if path.startswith("api/") or path.startswith("static/"):

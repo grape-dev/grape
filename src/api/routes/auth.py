@@ -21,6 +21,16 @@ _COOKIE_PATH = "/api/auth"
 _COOKIE_MAX_AGE = 7 * 24 * 3600  # 7 天
 
 
+def _app_base() -> str:
+    """平台部署在子路径时的 URL 前缀（如生产 www.grapedev.cn/app → APP_BASE_PATH=/app）。
+
+    默认空字符串，保持「平台部署在根路径」的行为完全不变。
+    用于 OAuth 回调后的 302 跳转目标：若平台挂在 /app/ 下，必须跳到
+    {prefix}/app/... 而不是根路径 /，否则会落到同域的其它站点（如官网首页）。
+    """
+    return (os.environ.get("APP_BASE_PATH", "") or "").rstrip("/")
+
+
 def _set_refresh_cookie(response: Response, refresh_token: str):
     """设置 refresh_token HttpOnly cookie——JS 不可读，防 XSS。"""
     response.set_cookie(
@@ -233,7 +243,7 @@ def gitcode_oauth_callback(request: Request, code: str = "", state: str = "", er
     lang = request.cookies.get("grapeLang", "zh")
     prefix = f"/{lang}" if lang != "zh" else ""
     # refresh_token 通过 cookie 传递（HttpOnly）——URL 只带 access_token
-    resp = RedirectResponse(url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}", status_code=302)
+    resp = RedirectResponse(url=f"{_app_base()}{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}", status_code=302)
     _set_refresh_cookie(resp, jwt_refresh_token)
     return resp
 
@@ -251,7 +261,7 @@ def _oauth_error_redirect(request: Request, message: str):
     if port and port not in (80, 443):
         base += f":{port}"
     _encoded = urllib.parse.quote(message)
-    return RedirectResponse(url=f"{base}/login?oauth_error={_encoded}", status_code=302)
+    return RedirectResponse(url=f"{base}{_app_base()}/login?oauth_error={_encoded}", status_code=302)
 
 
 @router.get("/login/github")
@@ -399,7 +409,7 @@ def github_oauth_callback(request: Request, code: str = "", state: str = "", err
     lang = request.cookies.get("grapeLang", "zh")
     prefix = f"/{lang}" if lang != "zh" else ""
     _warn_param = f"&gh_perm_warning={urllib.parse.quote(_gh_perm_warning)}" if _gh_perm_warning else ""
-    resp = RedirectResponse(url=f"{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}{_warn_param}", status_code=302)
+    resp = RedirectResponse(url=f"{_app_base()}{prefix}/?token={jwt_access_token}&first_login={'1' if not has_repos else '0'}{_warn_param}", status_code=302)
     _set_refresh_cookie(resp, jwt_refresh_token)
     return resp
 
