@@ -208,7 +208,7 @@ function loadAgentTypes() {
       orgs.forEach(function(o) {
         var selAttr = '';
         if (String(o.id) === String(currentId)) { selAttr = ' selected'; found = true; }
-        var label = o.name + (o.is_personal ? '（个人）' : '') + ' · ' + o.role;
+        var label = o.name + (o.is_personal ? '（默认）' : '') + ' · ' + o.role;
         html += '<option value="' + o.id + '"' + selAttr + '>' + label + '</option>';
       });
       // 未匹配到当前组织 → 默认选个人组织
@@ -234,7 +234,7 @@ function loadAgentTypes() {
           orgs.forEach(function(o) {
             var selAttr2 = '';
             if (String(o.id) === String(currentId2)) { selAttr2 = ' selected'; found2 = true; }
-            html2 += '<option value="' + o.id + '"' + selAttr2 + '>' + o.name + (o.is_personal ? '（个人）' : '') + ' · ' + o.role + '</option>';
+            html2 += '<option value="' + o.id + '"' + selAttr2 + '>' + o.name + (o.is_personal ? '（默认）' : '') + ' · ' + o.role + '</option>';
           });
           if (!found2) {
             var personal2 = orgs.find(function(o) { return o.is_personal; });
@@ -289,7 +289,7 @@ function loadAgentTypes() {
         var isActive = String(o.id) === String(currentId);
         var bg = isActive ? 'var(--a)' : 'transparent';
         var fg = isActive ? '#fff' : 'var(--t1)';
-        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "个人") + '</span>' : '';
+        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
         html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
           + '<span style="font-size:14px">🏢</span>'
           + '<div style="flex:1;min-width:0">'
@@ -364,7 +364,7 @@ function loadAgentTypes() {
         var isActive = String(o.id) === String(currentId);
         var bg = isActive ? 'var(--a)' : 'transparent';
         var fg = isActive ? '#fff' : 'var(--t1)';
-        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "个人") + '</span>' : '';
+        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
         listHtml += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'lobbyUserMenu\').style.display=\'none\'" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
           + '<span style="font-size:13px">🏢</span>'
           + '<div style="flex:1;min-width:0">'

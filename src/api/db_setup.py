@@ -1002,7 +1002,7 @@ def _migrate_create_personal_orgs():
                 slug = f"personal-{uid}"
                 c.execute(
                     "INSERT INTO organization (name, slug, owner_id, is_personal) VALUES (?, ?, ?, 1)",
-                    (f"{username}的个人空间", slug, uid)
+                    ("默认工作空间", slug, uid)
                 )
                 org_id = c.lastrowid
                 c.execute(

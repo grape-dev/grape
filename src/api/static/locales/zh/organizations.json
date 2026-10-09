@@ -4,7 +4,7 @@
   "loading": "加载中...",
   "no_orgs": "暂无组织",
   "load_failed": "加载失败: {msg}",
-  "badge_personal": "个人",
+  "badge_personal": "默认",
   "members": "成员",
   "create": {
     "title": "创建组织",

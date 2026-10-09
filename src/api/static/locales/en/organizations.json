@@ -4,7 +4,7 @@
   "loading": "Loading...",
   "no_orgs": "No organizations",
   "load_failed": "Load failed: {msg}",
-  "badge_personal": "Personal",
+  "badge_personal": "Default",
   "members": "members",
   "create": {
     "title": "Create Organization",
