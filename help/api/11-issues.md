@@ -380,7 +380,7 @@ Issue 对象字段：
 | 返回 | 200；403 鉴权；404 |
 
 > 仅 `pending_review` 可退出；`target=processing` → 继续流水线；`target=done` → `completed` + `stage=done`（合入/收尾）。幂等。
-> 归一兜底：`target=processing` 但当前 `stage` 已是流水线末节点（`next=done`）时，无下游可续 → 自动按 `done` 处理（`completed` + `stage=done`）。`review-reject` 的 `processing`（打回继续改）不归一。
+> 归一兜底：`target=processing` 但当前 `stage` 已是流水线末节点（`next=done`）时，无下游可续 → 自动按 `done` 处理（`completed` + `stage=done`）。`target=done` 在**末节点**且 `status` 为 `active/processing/awaiting_input`（CLI 流水线可能从未进入待审核）时同样放行 `completed`+`stage=done`；非末节点仍仅 `pending_review` 可退出。`review-reject` 的 `processing`（打回继续改）不归一。
 
 ### POST /api/issues/{issue_id}/review-reject — Agent 判定审核未通过
 

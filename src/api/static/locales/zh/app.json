@@ -42,13 +42,14 @@
     "gitcode_login": "使用 GitCode 登录",
     "github_login": "使用 GitHub 登录",
     "beta_apply": "申请内测",
+    "admin": "管理后台",
     "pwd_login": "← 用户名密码登录",
     "username": "用户名",
     "password": "密码",
     "login_btn": "登录",
     "back_gitcode": "← 返回 GitCode 登录",
     "failed": "登录失败",
-    "oauth_not_configured": "OAuth 未配置",
+    "oauth_not_configured": "OAuth未配置，请在管理界面配置",
     "empty_input": "请输入用户名和密码"
   },
   "repo": {

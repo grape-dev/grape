@@ -257,6 +257,32 @@ class TestReviewPassLastNodeNormalize:
         assert r.status_code == 200
         assert r.json()["result"] == "passed_done"
 
+    def test_last_node_active_target_done_force_completed(self):
+        """#2266 复诊：末节点 + status=active（CLI 从未进入 pending_review）+ target=done → 放行 done。"""
+        cid = _seed(status="active", issue_number=34, stage="sre")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="sre"),
+                        json={"target": "done", "evidence": "用户确认合入 PR #N"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["result"] == "passed_done"
+        assert data["status"] == "completed"
+        st = _status(issue_number=34)
+        assert st[0] == "completed"
+        assert st[1] == "done"
+
+    def test_middle_node_active_target_done_noop(self):
+        """守卫：中继节点（qa，next=sre）status=active + target=done → noop（防中间节点误终态）。"""
+        cid = _seed(status="active", issue_number=35, stage="qa")
+        r = client.post(f"/api/issues/{cid}/review-pass",
+                        headers=_session_headers(agent_type="qa"),
+                        json={"target": "done"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["result"] == "noop"
+        st = _status(issue_number=35)
+        assert st[0] == "active"
+
     def test_is_last_stage_node_helper(self):
         from src.api.issues_center import _is_last_stage_node
         _seed(status="processing", issue_number=41, stage="sre")
