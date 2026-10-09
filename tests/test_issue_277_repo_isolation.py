@@ -125,7 +125,7 @@ class TestGetAgentRuntimesRepoFilter:
     def test_repo_param_filters_repo_scoped_engines(self, monkeypatch):
         """repo 参数非空时，repo scope 引擎仅返回当前仓库的引擎。"""
         import time as _time
-        from src.api.routes.settings import _build_cred_map, _runtime_health
+        from src.api.routes.settings import _build_cred_map
         from src.user import db as user_db
 
         # 创建两个仓库的凭据和引擎
