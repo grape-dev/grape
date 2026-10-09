@@ -56,6 +56,7 @@
     "select": "Select repository...",
     "load_failed": "Failed to load repositories, please check your GitCode Token",
     "back_to_select": "Back to repository selection",
+    "back_to_website": "Back to website",
     "add_new": "Add new repository"
   },
   "toast": {
