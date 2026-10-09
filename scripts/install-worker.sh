@@ -442,7 +442,15 @@ set -a; . "$ENV_FILE"; set +a
 exec "$VENV/bin/python" -m src.runtime.agent
 EOF
   chmod +x "$START_SCRIPT"
-  # 停掉旧实例——限定到本安装目录自己的实例（按 venv python 路径匹配）
+  # 停掉旧 daemon（start-worker.sh 的 bash 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
+  # ⚠️ 匹配 start-worker.sh 进程：按脚本路径 + --no-daemon 模式（daemon 循环体特征）
+  #    仅杀本安装目录的 start-worker.sh，避免误杀同机其他安装目录的 daemon
+  _daemon_pat="$(printf '%s' "$START_SCRIPT" | sed 's/[.[\*^$]/\\&/g')"
+  pkill -f "${_daemon_pat}.*--no-daemon" >/dev/null 2>&1 || true
+  # 也杀 daemon 主进程（while true 循环体本身，--no-daemon 参数的父进程）
+  pkill -f "$_daemon_pat" >/dev/null 2>&1 || true
+  sleep 1
+  # 停掉旧 worker——限定到本安装目录自己的实例（按 venv python 路径匹配）
   # ⚠️ 不能用裸 "python -m src.runtime.agent" 匹配：会误杀同机其他安装目录/其他用户
   #    的 worker（2026-10-08 实测：root 升级 /opt/grape 时误杀 liufei ~/grape-worker 的
   #    实例，恰好只因为 root 侧 cmdline 带 -u 才躲过反向误杀）。
