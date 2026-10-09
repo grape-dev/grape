@@ -22,7 +22,15 @@ function renderSelectionShell(tab, innerHtml) {
         <a class="${tabCls('templates')}" onclick="switchSidebarTab('templates')">${I18N.t('repos.tab.templates')}</a>
         <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
-      <div style="display:flex;align-items:center;gap:12px">
+      <div style="display:flex;align-items:center;gap:10px">
+        <div id="lobbyOrgDropdown" style="position:relative">
+          <button onclick="app._toggleLobbyOrgDropdown()" id="lobbyOrgBtn" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">
+            <span style="font-size:14px">🏢</span>
+            <span class="lobby-org-name" id="lobbyOrgName">${I18N.t('organizations.my_orgs') || '我的组织'}</span>
+            <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+          </button>
+          <div id="lobbyOrgMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:9999;padding:4px"></div>
+        </div>
         <div id="lobbyUserDropdown" style="position:relative">
           <button onclick="app._toggleLobbyUserMenu()" style="display:flex;align-items:center;gap:8px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">
             <span class="lobby-avatar">${avatar}</span>
