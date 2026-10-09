@@ -692,10 +692,10 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, attempts FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            "SELECT id, attempts, runtime_id FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
-        for tid, attempts in rows:
+        for tid, attempts, rid in rows:
             # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
             try:
                 c.execute(
@@ -714,10 +714,31 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                     (_att, "recover-orphans attempts cap reached (possible self-restart loop)", tid))
                 force_failed.append(tid)
             else:
+                # 引擎归零 + pool 回填（对齐 master 侧回收，service.py 回收段）：
+                # 保留 runtime_id 的回炉任务在引擎被删重建（id 变化）后定向死引擎，
+                # claim（runtime_id=?）失配、claim_by_tag 只认 runtime_id=0 → 永久 queued。
+                _pool_fill = ""
+                try:
+                    c.execute("SELECT agent_type FROM agent_tasks WHERE id=?", (tid,))
+                    _pr = c.fetchone()
+                    if _pr and _pr[0]:
+                        _pool_fill = _pr[0]
+                except Exception:
+                    pass
                 c.execute(
-                    "UPDATE agent_tasks SET status='queued', started_at=NULL, attempts=? WHERE id=?",
-                    (_att, tid))
+                    "UPDATE agent_tasks SET status='queued', started_at=NULL, attempts=?, "
+                    "runtime_id=0, "
+                    "pool_agent_type=CASE WHEN pool_agent_type='' THEN ? ELSE pool_agent_type END "
+                    "WHERE id=?",
+                    (_att, _pool_fill, tid))
                 recovered.append(tid)
+            # 槽位释放（与 service.py 回收/update_task_status/requeue_task 同款防负数写法）：
+            # 旧代码两分支都不减 busy_slots → 每次回炉净漏 1 槽、force-fail 永久泄漏；
+            # claim_by_tag 满载即拒领（busy>=max → None），漏 4 槽后引擎哑死。
+            if rid and rid > 0:
+                c.execute(
+                    "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                    (rid,))
         db.commit()
     if recovered or skipped_active or force_failed:
         log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "
