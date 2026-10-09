@@ -1027,12 +1027,14 @@ def claim(runtime_id) -> dict | None:
                         "UPDATE agent_tasks SET attempts=attempts+1, "
                         "status=CASE WHEN attempts+1 >= 50 THEN 'failed' ELSE 'queued' END, "
                         "runtime_id=CASE WHEN attempts+1 >= 50 THEN runtime_id ELSE 0 END, "
+                        "pool_tag=CASE WHEN attempts+1 < 50 AND pool_tag='' "
+                        "THEN ? ELSE pool_tag END, "
                         "pool_agent_type=CASE WHEN attempts+1 < 50 AND pool_agent_type='' "
                         "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
                         "result_text=CASE WHEN attempts+1 >= 50 THEN '回收超限(dispatched 超时 50 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
-                        (_pool_fill, _tid))
+                        (_pool_fill, _pool_fill, _tid))
                     if c.rowcount and _rid:
                         c.execute(
                             "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",

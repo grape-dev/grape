@@ -178,5 +178,6 @@ class TestRecoverOrphans:
         _t = service.get_task(tid)
         assert _t["runtime_id"] == 0, f"回炉应归零 runtime_id: {_t['runtime_id']}"
         assert _t["pool_agent_type"] == "issue", f"pool_agent_type 应回填 issue: {_t['pool_agent_type']}"
+        assert _t["pool_tag"] == "issue", f"pool_tag 应回填 issue（claim_by_tag 查此字段）: {_t['pool_tag']}"
         again = service.claim_by_tag("issue", rid)
         assert again and again["id"] == tid, "recover 后广播可再次认领"

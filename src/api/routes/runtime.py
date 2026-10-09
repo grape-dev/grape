@@ -730,11 +730,15 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                 "THEN 'recover-orphans attempts cap reached (possible self-restart loop)' "
                 "ELSE result_text END, "
                 "runtime_id=CASE WHEN attempts+1 >= ? THEN runtime_id ELSE 0 END, "
+                "pool_tag=CASE WHEN attempts+1 < ? AND pool_tag='' "
+                "THEN ? ELSE pool_tag END, "
                 "pool_agent_type=CASE WHEN attempts+1 < ? AND pool_agent_type='' "
                 "THEN ? ELSE pool_agent_type END "
                 "WHERE id=?",
                 (RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS,
-                 RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
+                 RECOVER_MAX_ATTEMPTS,
+                 RECOVER_MAX_ATTEMPTS, _pool_fill,
+                 RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
             if _att >= RECOVER_MAX_ATTEMPTS:
                 force_failed.append(tid)
             else:
