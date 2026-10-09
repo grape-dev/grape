@@ -260,7 +260,21 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    return _row_to_task(row)
+    task = _row_to_task(row)
+    # 引擎绑定真实性同步 §5.1b：详情同样带 engine_detached 提示（与列表口径一致）
+    try:
+        from src.runtime.engine_select import get_detached_engine_hints
+        _eids = [int(x) for x in (task.get("engine_runtime_ids") or [])]
+        if _eids:
+            _hints = get_detached_engine_hints(runtime_ids=_eids)
+            if _hints:
+                task["engine_detached"] = {
+                    "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
+                    "detached_at": _hints[0]["detached_at"],
+                }
+    except Exception as _he:
+        log.warning(f"get_task: engine_detached hints failed: {_he}")
+    return task
 
 
 @router.post("/tasks")
