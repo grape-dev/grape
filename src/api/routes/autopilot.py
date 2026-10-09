@@ -231,10 +231,13 @@ def list_tasks(
             for _eid in (t.get("engine_runtime_ids") or []):
                 _all_eids.add(int(_eid))
         if _all_eids:
-            _hint_map = {}  # runtime_id -> hint
-            for h in get_detached_engine_hints(runtime_ids=list(_all_eids)):
-                _hint_map[h["runtime_id"]] = h
+            # 卡点④：按任务仓库分组取提示（引擎审计全局、任务提示只看本仓库场景）
+            _hints_by_repo = {}
+            _repos = {t.get("repo_key") or "" for t in tasks}
+            for _rk in _repos:
+                _hints_by_repo[_rk] = {h["runtime_id"]: h for h in get_detached_engine_hints(runtime_ids=list(_all_eids), repo_key=_rk)}
             for t in tasks:
+                _hint_map = _hints_by_repo.get(t.get("repo_key") or "", {})
                 _hints = [ _hint_map[int(_eid)] for _eid in (t.get("engine_runtime_ids") or [])
                            if int(_eid) in _hint_map ]
                 if _hints:
@@ -266,7 +269,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         from src.runtime.engine_select import get_detached_engine_hints
         _eids = [int(x) for x in (task.get("engine_runtime_ids") or [])]
         if _eids:
-            _hints = get_detached_engine_hints(runtime_ids=_eids)
+            _hints = get_detached_engine_hints(runtime_ids=_eids, repo_key=task.get("repo_key") or "")
             if _hints:
                 task["engine_detached"] = {
                     "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
@@ -341,15 +344,6 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
         c.execute(f"UPDATE autopilot_tasks SET {', '.join(fields)} WHERE id=?", params)
         db.commit()
     log.info(f"Autopilot: task {task_id} updated by user={user.get('username', '')}")
-    # 引擎绑定真实性同步 §5.1b：用户重绑引擎 → 标记解绑审计已处理，提示消失
-    if "engine_runtime_ids=?" in ", ".join(fields):
-        try:
-            from src.runtime.engine_select import mark_detach_rebound
-            _marked = mark_detach_rebound(task_id)
-            if _marked:
-                log.info(f"Autopilot: task {task_id} rebound engines, marked {_marked} detach hints")
-        except Exception as _re:
-            log.warning(f"Autopilot: mark_detach_rebound failed: {_re}")
     return {"message": "task updated"}
 
 

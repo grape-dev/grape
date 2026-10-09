@@ -682,11 +682,14 @@ def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
     return out
 
 
-def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None) -> list:
+def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
+                              repo_key: str = "") -> list:
     """查询场景/引擎的被解绑提示信息（引擎绑定真实性同步 §4.3/§5.1b 前端数据源）。
 
     - scene_row_id 非空：查该场景的未重绑（rebound_at 空）解绑记录 → detached_engines
-    - runtime_ids 非空：查这些引擎的未重绑解绑记录 → autopilot 任务 engine_detached 提示
+    - runtime_ids 非空：查这些引擎的未重绑解绑记录 → autopilot 任务 engine_detached 提示。
+      卡点④修复：必须传 repo_key（任务所属仓库）——引擎审计是全局的，任务提示只关心
+      「本仓库场景」的解绑记录，否则其他仓库同引擎的审计会误报到无关任务上。
     返回 [{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, detached_at, affected_autopilot_tasks}]
     """
     from src.session_manager import db, db_lock
@@ -702,12 +705,21 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
                     (scene_row_id,))
             elif runtime_ids:
                 _ph = ",".join("?" * len(runtime_ids))
-                c.execute(
-                    "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
-                    "detached_at, affected_autopilot_tasks "
-                    f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
-                    "AND (rebound_at='' OR rebound_at IS NULL)",
-                    tuple(runtime_ids))
+                if repo_key:
+                    # 卡点④：按仓库过滤（autopilot 任务提示语义 = 本仓库场景受影响）
+                    c.execute(
+                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                        "detached_at, affected_autopilot_tasks "
+                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) AND repo_key=? "
+                        "AND (rebound_at='' OR rebound_at IS NULL)",
+                        (*runtime_ids, repo_key))
+                else:
+                    c.execute(
+                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                        "detached_at, affected_autopilot_tasks "
+                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
+                        "AND (rebound_at='' OR rebound_at IS NULL)",
+                        tuple(runtime_ids))
             else:
                 return out
             import json as _json
@@ -724,35 +736,6 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
         except Exception as e:
             log.warning(f"get_detached_engine_hints: query failed: {e}")
     return out
-
-
-def mark_detach_rebound(task_id: int) -> int:
-    """巡检任务重绑引擎后，标记其关联解绑审计条目为已重绑（提示消失，§5.1b 解除时机）。"""
-    from src.session_manager import db, db_lock
-    from datetime import datetime, timezone
-    import json as _json
-    now = datetime.now(timezone.utc).isoformat()
-    marked = 0
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT engine_runtime_ids FROM autopilot_tasks WHERE id=?", (task_id,))
-            row = c.fetchone()
-            if not row:
-                return 0
-            eids = _json.loads(row[0]) if row[0] else []
-            if not eids:
-                return 0
-            _ph = ",".join("?" * len(eids))
-            c.execute(
-                "UPDATE scene_engine_detach_log SET rebound_at=? "
-                f"WHERE runtime_id IN ({_ph}) AND (rebound_at='' OR rebound_at IS NULL)",
-                (now, *eids))
-            marked = c.rowcount
-            db.commit()
-        except Exception as e:
-            log.warning(f"mark_detach_rebound: task={task_id} failed: {e}")
-    return marked
 
 
 def _detach_dead_engine_bindings() -> dict:

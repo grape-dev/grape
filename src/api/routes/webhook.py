@@ -747,7 +747,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 # 引擎绑定真实性同步：改走统一 helper，人话原因落 events.result/agent_tasks.errors
                 try:
                     from src.api.event_pipeline import _fail_scene_all_offline
-                    _fail_scene_all_offline(seq, _a2a_scene, agent_name, "A2A")
+                    _fail_scene_all_offline(seq, _a2a_scene, agent_name, "A2A", repo_key=repo_key or "")
                 except Exception:
                     from src.api.event_store import update_event_status
                     update_event_status(seq, "failed")

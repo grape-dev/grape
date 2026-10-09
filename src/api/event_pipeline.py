@@ -18,7 +18,8 @@ _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
 
-def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: str = ""):
+def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: str = "",
+                            repo_key: str = ""):
     """Issue #259 Optional：场景引擎全灭时统一置事件 failed 并告警（5 处调用点共用）。
 
     调用方在 return 前调用本 helper——helper 负责 log + fail，调用方负责 return / return False。
@@ -27,6 +28,8 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
     原裸 update_event_status(seq, "failed") 无原因落库，排障需倒查日志。
     现改走 _fail_event 同款通路：人话原因写 events.result + agent_tasks.errors，
     前端 observability/issues 点开即见。文案含引擎名（engine_name 反查）。
+    repo_key 必传（调用方都有）：仓库级场景查询依赖它，缺失时 get_pipeline_config
+    会回退官方模板导致引擎名查不到（卡点①修复）。
     """
     _ctx = context or "Pipeline"
     log.warning(f"{_ctx}: scene={scene_id} {agent_type} engines all offline, skip (Issue #259)")
@@ -34,7 +37,7 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
     _engine_names = []
     try:
         from src.api.pipeline_config import get_scene_engine_ids
-        _eids = get_scene_engine_ids(scene_id, agent_type) or []
+        _eids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key) or []
         if _eids:
             from src.runtime.engine_select import engine_name as _en
             _seen = set()
@@ -791,7 +794,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
             if _pool_ids is None:
-                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub")
+                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
                 return
             _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                    0, qa_skill, _engine_id, _pseudo_id,
@@ -809,7 +812,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             else:
                 _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
                 if _pool_ids is None:
-                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch")
+                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch", repo_key=repo_key)
                     return
                 _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                        0, qa_skill, _engine_id, _pseudo_id,
@@ -893,7 +896,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
             # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
             if _pool_ids is None:
-                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub")
+                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
                 return
             _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                    0, qa_skill, _engine_id, _pseudo_id,
@@ -911,7 +914,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
             else:
                 _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
                 if _pool_ids is None:
-                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch")
+                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch", repo_key=repo_key)
                     return
                 _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                        0, qa_skill, _engine_id, _pseudo_id,
@@ -3623,7 +3626,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
             _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
         # Issue #259：None = 场景引擎全灭（方案A，不入队）
         if _pool_eids is None:
-            _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派")
+            _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派", repo_key=repo_key)
             return False
         _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
                                skill_id, skill_path, engine_id, issue_id,
