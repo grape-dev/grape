@@ -1820,33 +1820,80 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         return result
     # engine_id=0：plugin direct/auto 兜底 → 自动选一个本机在线引擎执行
     if not engine_id:
-        log.info(f"Pipeline: engine_id=0, auto-selecting local engine for seq={seq}")
-        # 尝试取一个本机在线引擎（优先 opencode，其次 codearts，最后 hermes）
-        from src.user.db import get_meta_value as _gmv
-        try:
-            from src.session_manager import db as _db, db_lock as _dbl
-            log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
-            with _dbl:
-                _c = _db.cursor()
-                _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
-                _row = _c.fetchone()
-            log.info(f"Pipeline: engine query done, row={_row}, seq={seq}")
-            if _row:
-                engine_id = _row[0]
-                _be = _row[1] or _be
-                log.info(f"Pipeline: auto-selected local engine id={engine_id} name={_be}, seq={seq}")
-            else:
-                log.info(f"Pipeline: engine_id=0 no online engine, seq={seq}, skip")
+        # Issue #253 改动4：有显式绑定时 direct 自动选机只允许在绑定集合内挑（宁失败不跑飞）。
+        # 原行为：全站 online/healthy 查询（opencode>codearts>其他），hermes 等池外引擎可被选中。
+        _pool_ids_253 = []
+        if _pool_engine_ids:
+            try:
+                import json as _json253
+                _pool_ids_253 = [int(x) for x in _json253.loads(_pool_engine_ids) if x]
+            except Exception:
+                _pool_ids_253 = []
+        if _pool_ids_253:
+            # 绑定集合内选在线健康引擎；全灭 → failed + 人话原因，不碰全站
+            _bind_names_253 = []
+            try:
+                from src.runtime.engine_select import engine_name as _en253
+                _bind_names_253 = [_en253(int(x)) or str(x) for x in _pool_ids_253]
+            except Exception:
+                _bind_names_253 = [str(x) for x in _pool_ids_253]
+            _picked_253 = 0
+            try:
+                from src.session_manager import db as _db, db_lock as _dbl
+                with _dbl:
+                    _c = _db.cursor()
+                    _ph253 = ",".join("?" * len(_pool_ids_253))
+                    _c.execute(
+                        f"SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 "
+                        f"AND id IN ({_ph253}) "
+                        f"ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1",
+                        tuple(_pool_ids_253))
+                    _row = _c.fetchone()
+                if _row:
+                    _picked_253 = _row[0]
+                    engine_id = _row[0]
+                    _be = _row[1] or _be
+                    log.info(f"Pipeline: direct auto-select within scene binding {list(set(_bind_names_253))} "
+                             f"-> id={engine_id} name={_be}, seq={seq} (Issue #253)")
+            except Exception as _e:
+                log.warning(f"Pipeline: binding-constrained engine query failed: {_e}, seq={seq}")
+            if not _picked_253:
+                log.info(f"Pipeline: scene binding {list(set(_bind_names_253))} all offline for direct "
+                         f"auto-select, seq={seq}, skip (Issue #253)")
+                _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                _fail_event(seq, f"场景绑定的引擎（{', '.join(sorted(set(_bind_names_253)))}）"
+                                 f"全部不可用，direct 模式无法选机（Issue #253）")
+                return result
+        else:
+            # 无绑定（空 pool）→ 原全站自动选机行为不变
+            log.info(f"Pipeline: engine_id=0, auto-selecting local engine for seq={seq}")
+            # 尝试取一个本机在线引擎（优先 opencode，其次 codearts，最后 hermes）
+            from src.user.db import get_meta_value as _gmv
+            try:
+                from src.session_manager import db as _db, db_lock as _dbl
+                log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
+                with _dbl:
+                    _c = _db.cursor()
+                    _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
+                    _row = _c.fetchone()
+                log.info(f"Pipeline: engine query done, row={_row}, seq={seq}")
+                if _row:
+                    engine_id = _row[0]
+                    _be = _row[1] or _be
+                    log.info(f"Pipeline: auto-selected local engine id={engine_id} name={_be}, seq={seq}")
+                else:
+                    log.info(f"Pipeline: engine_id=0 no online engine, seq={seq}, skip")
+                    _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                                        skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                    _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+                    return result
+            except Exception as _e:
+                log.warning(f"Pipeline: auto-select engine failed: {_e}")
                 _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
                                     skill_path, skill_id, evt, issue_id, runtime_id or 0)
                 _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                 return result
-        except Exception as _e:
-            log.warning(f"Pipeline: auto-select engine failed: {_e}")
-            _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                skill_path, skill_id, evt, issue_id, runtime_id or 0)
-            _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
-            return result
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
