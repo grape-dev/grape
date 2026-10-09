@@ -505,15 +505,12 @@ class TestTaskLifecycle:
     def _clean(self):
         _clean_tasks()
 
-    def test_notify_bot_takeover_closes_tasks(self):
-        """assignee=grape_bot 时，同 issue 的 active/processing 任务置 completed（bot_takeover）"""
+    def test_notify_bot_takeover_does_not_complete(self):
+        """assignee=grape_bot 时只做接管，不把需求置 completed（reassign-takeover-no-complete-design.md）"""
         self._clean()
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'active')",
-                      (_uid["id"], "younger_eric", "gitcode:org/test", 50))
-            db.commit()
-            c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) VALUES (?,?,?,?, 'processing')",
                       (_uid["id"], "younger_eric", "gitcode:org/test", 50))
             db.commit()
         r = client.post("/api/tasks/notify", headers=_bot_headers(), json={
@@ -524,11 +521,10 @@ class TestTaskLifecycle:
         with db_lock:
             c = db.cursor()
             rows = c.execute(
-                "SELECT status, completed_reason FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=50").fetchall()
-        assert rows, "应有任务"
-        for status, reason in rows:
-            assert status == "completed", f"bot 接管后应为 completed，实际 {status}"
-            assert reason == "bot_takeover", f"completed_reason 应为 bot_takeover，实际 {reason}"
+                "SELECT status FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=50").fetchall()
+        assert rows
+        for (status,) in rows:
+            assert status != "completed", f"bot 接管不应完成需求，实际 {status}"
 
     def test_notify_bot_takeover_no_tasks(self):
         """同 issue 无 active/processing 任务时 bot 接管返回 ok 且不抛错"""
@@ -601,8 +597,8 @@ class TestTaskLifecycle:
             row = c.execute("SELECT status, completed_reason FROM issue WHERE repo_key='gitcode:org/test' AND issue_number=55").fetchone()
         assert row and row[0] == "pending_review"
 
-    def test_reassign_closes_processing_old_assignee(self):
-        """换人时原 assignee 的 processing 任务置 completed（reassigned）"""
+    def test_reassign_does_not_complete_old_assignee(self):
+        """换人不再把需求置 completed（reassign-takeover-no-complete-design.md）"""
         self._clean()
         # bob 用独立 user_id（unified_user_mapping.user_id 为主键，直接复用 _uid["id"] 会覆盖 younger_eric 映射）
         bob = user_db.create_user("bob_processing_user", "test123")
@@ -635,9 +631,9 @@ class TestTaskLifecycle:
             with db_lock:
                 c = db.cursor()
                 row = c.execute("SELECT status, completed_reason FROM issue WHERE id=?", (old_tid,)).fetchone()
-            # 原 assignee（younger_eric）的 processing 任务应被换人关闭
-            assert row and row[0] == "completed", f"原 assignee processing 任务应 completed，实际 {row}"
-            assert row and row[1] == "reassigned"
+            # 换人只转移责任，不完成需求
+            assert row and row[0] != "completed", f"换人不应完成需求，实际 {row}"
+            assert row and row[1] is None
         finally:
             if bob:
                 user_db.delete_user(bob["id"])
