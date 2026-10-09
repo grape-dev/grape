@@ -958,44 +958,12 @@ def _cleanup_scene_engine_runtime_ids(rid_list: list):
 
     扫描 devops_pipeline_scene 所有活跃场景的 nodes_json，
     从每个 node 的 engine_runtime_ids 中移除在 rid_list 中的 ID，回写 DB。
+
+    引擎绑定真实性同步：实现已抽至 engine_select.cleanup_scene_engine_bindings（与
+    离线超阈值解绑共用），本函数保留为薄包装（调用点不变，行为等价）。
     """
-    if not rid_list:
-        return
-    import json as _json
-    from datetime import datetime, timezone
-    from src.session_manager import db, db_lock
-    rid_set = set(rid_list)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-            rows = c.fetchall()
-        except Exception as _e:
-            log.warning(f"_cleanup_scene_engine_runtime_ids: query scenes failed: {_e}")
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        for row_id, nodes_str in rows:
-            try:
-                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
-            except Exception:
-                continue
-            changed = False
-            for node in nodes:
-                eids = node.get("engine_runtime_ids") or []
-                if not eids:
-                    continue
-                new_eids = [eid for eid in eids if eid not in rid_set]
-                if len(new_eids) != len(eids):
-                    node["engine_runtime_ids"] = new_eids
-                    changed = True
-            if changed:
-                try:
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
-                except Exception as _e:
-                    log.warning(f"_cleanup_scene_engine_runtime_ids: update scene {row_id} failed: {_e}")
-        db.commit()
+    from src.runtime.engine_select import cleanup_scene_engine_bindings
+    cleanup_scene_engine_bindings(rid_list)
 
 
 @router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")

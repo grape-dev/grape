@@ -21,13 +21,36 @@ _DIRECT_FUTURES_LOCK = threading.Lock()
 def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: str = ""):
     """Issue #259 Optional：场景引擎全灭时统一置事件 failed 并告警（5 处调用点共用）。
 
-    调用方在 return 前调用本 helper——helper 负责 log + update_event_status，
-    调用方负责 return / return False（不同函数返回值不同）。
+    调用方在 return 前调用本 helper——helper 负责 log + fail，调用方负责 return / return False。
+
+    引擎绑定真实性同步（docs/weekly-06/engine-binding-truth-sync-design.md §4.4）：
+    原裸 update_event_status(seq, "failed") 无原因落库，排障需倒查日志。
+    现改走 _fail_event 同款通路：人话原因写 events.result + agent_tasks.errors，
+    前端 observability/issues 点开即见。文案含引擎名（engine_name 反查）。
     """
     _ctx = context or "Pipeline"
     log.warning(f"{_ctx}: scene={scene_id} {agent_type} engines all offline, skip (Issue #259)")
-    from src.api.event_store import update_event_status
-    update_event_status(seq, "failed")
+    # 反查场景绑定的引擎名列表，拼人话
+    _engine_names = []
+    try:
+        from src.api.pipeline_config import get_scene_engine_ids
+        _eids = get_scene_engine_ids(scene_id, agent_type) or []
+        if _eids:
+            from src.runtime.engine_select import engine_name as _en
+            _seen = set()
+            for _eid in _eids:
+                _nm = _en(int(_eid))
+                if _nm and _nm not in _seen:
+                    _seen.add(_nm)
+                    _engine_names.append(_nm)
+    except Exception as _e:
+        log.warning(f"_fail_scene_all_offline: engine name lookup failed: {_e}")
+    if _engine_names:
+        _reason = (f"绑定的 {len(_engine_names)} 台引擎（{', '.join(_engine_names)}）全部离线，"
+                   f"任务无法派发（scene={scene_id}, agent={agent_type}）")
+    else:
+        _reason = f"场景绑定的引擎全部离线，任务无法派发（scene={scene_id}, agent={agent_type}）"
+    _fail_event(seq, _reason)
 
 def _filter_pr_sub_matches(matches: list, issue_scene_id: str, issue_qa_skill: str = "") -> list:
     """PR 订阅匹配结果三步过滤：

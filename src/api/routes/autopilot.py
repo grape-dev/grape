@@ -222,6 +222,28 @@ def list_tasks(
     from src.user.db import get_managed_repos
     user_repos = {r["repo_key"] for r in get_managed_repos(user.get("id", 0))}
     tasks = [_row_to_task(r) for r in rows if r[2] in user_repos or not r[2]]
+    # 引擎绑定真实性同步 §5.1b：绑定引擎已被系统 detach 的任务带提示（两表协同，不删绑定）
+    try:
+        from src.runtime.engine_select import get_detached_engine_hints
+        import json as _json_hint
+        _all_eids = set()
+        for t in tasks:
+            for _eid in (t.get("engine_runtime_ids") or []):
+                _all_eids.add(int(_eid))
+        if _all_eids:
+            _hint_map = {}  # runtime_id -> hint
+            for h in get_detached_engine_hints(runtime_ids=list(_all_eids)):
+                _hint_map[h["runtime_id"]] = h
+            for t in tasks:
+                _hints = [ _hint_map[int(_eid)] for _eid in (t.get("engine_runtime_ids") or [])
+                           if int(_eid) in _hint_map ]
+                if _hints:
+                    t["engine_detached"] = {
+                        "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
+                        "detached_at": _hints[0]["detached_at"],
+                    }
+    except Exception as _he:
+        log.warning(f"list_tasks: engine_detached hints failed: {_he}")
     return {"tasks": tasks}
 
 
@@ -305,6 +327,15 @@ def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_cur
         c.execute(f"UPDATE autopilot_tasks SET {', '.join(fields)} WHERE id=?", params)
         db.commit()
     log.info(f"Autopilot: task {task_id} updated by user={user.get('username', '')}")
+    # 引擎绑定真实性同步 §5.1b：用户重绑引擎 → 标记解绑审计已处理，提示消失
+    if "engine_runtime_ids=?" in ", ".join(fields):
+        try:
+            from src.runtime.engine_select import mark_detach_rebound
+            _marked = mark_detach_rebound(task_id)
+            if _marked:
+                log.info(f"Autopilot: task {task_id} rebound engines, marked {_marked} detach hints")
+        except Exception as _re:
+            log.warning(f"Autopilot: mark_detach_rebound failed: {_re}")
     return {"message": "task updated"}
 
 

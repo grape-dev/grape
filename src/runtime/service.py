@@ -2421,6 +2421,14 @@ def reap_stale_runtimes() -> dict:
     except Exception as _sqe:
         log.warning(f"reap_stale_runtimes: _check_stale_queued_tasks failed: {_sqe}")
 
+    # 引擎绑定真实性同步：离线超阈值（默认 8h）的引擎，真实清理场景绑定 + 审计留痕。
+    # 设计文档 docs/weekly-06/engine-binding-truth-sync-design.md §4.2。
+    try:
+        from src.runtime.engine_select import _detach_dead_engine_bindings
+        _detach_dead_engine_bindings()
+    except Exception as _de:
+        log.warning(f"reap_stale_runtimes: _detach_dead_engine_bindings failed: {_de}")
+
     return {"reaped": reaped}
 
 

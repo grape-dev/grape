@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
+    detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
@@ -683,6 +684,23 @@ CREATE TABLE IF NOT EXISTS scene_skill_ref (
 )
 """
 
+# 引擎绑定真实性同步：场景引擎解绑审计表（引擎离线超 8h 系统自动移除场景绑定的留痕）
+_SCENE_ENGINE_DETACH_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_row_id INTEGER NOT NULL,        -- devops_pipeline_scene.id
+    repo_key    TEXT DEFAULT '',
+    scene_id    TEXT DEFAULT '',          -- 场景 scene_id（非 market id）
+    node_tag    TEXT DEFAULT '',          -- 被移除绑定的节点标签（coding/qa/sre…）
+    runtime_id  INTEGER NOT NULL,         -- 被移除的引擎 id
+    runtime_name TEXT DEFAULT '',         -- 引擎名（快照，防 runtime 行后续变更）
+    detached_at TEXT DEFAULT (datetime('now')),
+    reason      TEXT DEFAULT '',          -- 触发原因（offline_timeout 等）
+    affected_autopilot_tasks TEXT DEFAULT '[]',  -- 仍绑定该引擎的巡检任务 [{id,name}]（两表协同提示用）
+    rebound_at  TEXT DEFAULT ''           -- 用户重绑时间（非空=不再提示）
+)
+"""
+
 _SKILL_LIKES_DDL = """
 CREATE TABLE IF NOT EXISTS skill_likes (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -817,6 +835,8 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_market", _SCENE_MARKET_DDL),
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
+    # 引擎绑定真实性同步：场景引擎解绑审计表
+    ("scene_engine_detach_log", _SCENE_ENGINE_DETACH_LOG_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
     ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
@@ -1765,6 +1785,9 @@ def _migrate_knowledge_dedup_and_ref():
 
         # 3.0 scene_market 加 preset_custom_fields 列（Issue #246：场景预置自定义参数声明）
         _ensure_column(c, "scene_market", "preset_custom_fields", "TEXT DEFAULT '[]'")
+
+        # 3.0b agent_runtimes 加 detached_from_scenes_at 列（引擎绑定真实性同步：离线超阈值解绑标记）
+        _ensure_column(c, "agent_runtimes", "detached_from_scenes_at", "TEXT DEFAULT ''")
 
         # 3.1 MySQL: 修复 UNIQUE 索引——老索引缺 issue_num，删旧建新
         if _is_mysql:

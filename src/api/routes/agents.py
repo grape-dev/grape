@@ -276,6 +276,28 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     except Exception:
         pass
 
+    # 引擎绑定真实性同步 §4.3：该仓库场景有引擎被系统解绑且未重绑 → 前端编辑页提示条
+    detached_engines = []
+    try:
+        from src.session_manager import db as _sdb, db_lock as _slock
+        with _slock:
+            _sc = _sdb.cursor()
+            _sc.execute("SELECT dev_scene FROM managed_repos WHERE repo_key IN ({})".format(_rk_placeholders),
+                        tuple(_repo_keys))
+            _r = _sc.fetchone()
+            _dev_scene = _r[0] if _r else ""
+        if _dev_scene:
+            with _slock:
+                _sc = _sdb.cursor()
+                _sc.execute("SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND repo_key IN ({}) LIMIT 1".format(_rk_placeholders),
+                            (_dev_scene, *_repo_keys))
+                _sr = _sc.fetchone()
+            if _sr:
+                from src.runtime.engine_select import get_detached_engine_hints
+                detached_engines = get_detached_engine_hints(scene_row_id=_sr[0])
+    except Exception as _de:
+        log.warning(f"get_agent_detail: detached_engines lookup failed: {_de}")
+
     return {
         "agent_type": name,
         "display_name": meta["display_name"],
@@ -286,6 +308,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "backend": session_data.get("instance_name") or session_data.get("backend", ""),
         "backends": [p.get("instance_name") or p.get("name") for p in pool],  # 引擎集合（多选回显）
         "pool": pool,  # 完整集合信息（含 priority/status 等）
+        "detached_engines": detached_engines,  # 被系统解绑的引擎提示（引擎绑定真实性同步 §4.3）
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
