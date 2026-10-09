@@ -26,7 +26,8 @@
     "scene_skill_market": "场景·技能",
     "scene_market": "场景市场",
     "skill_market": "技能市场",
-    "organizations": "组织管理"
+    "organizations": "组织管理",
+    "autopilot": "自动化"
   },
   "sidebar": {
     "workspace": "工作区",

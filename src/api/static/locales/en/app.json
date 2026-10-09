@@ -26,7 +26,8 @@
     "scene_skill_market": "Scenes & Skills",
     "scene_market": "Scene Market",
     "skill_market": "Skill Market",
-    "organizations": "Organizations"
+    "organizations": "Organizations",
+    "autopilot": "Automation"
   },
   "sidebar": {
     "workspace": "Workspace",

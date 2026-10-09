@@ -33,7 +33,7 @@ var I18N = (function () {
     'common', 'app', 'settings', 'knowledge', 'skills',
     'chat', 'events', 'agents', 'pipeline', 'runtimes',
     'tasks', 'issues', 'repos', 'dashboard', 'observability', 'templates',
-    'organizations'
+    'organizations', 'autopilot'
   ];
 
   var _currentLang = DEFAULT_LANG;
