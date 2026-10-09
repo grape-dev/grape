@@ -768,6 +768,14 @@ def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     service.cancel_task(task_id)
+    # autopilot 联动：杀死只写 agent_tasks，autopilot_executions 无人回写会永远停在
+    # running —— event_type=autopilot_event 时同步 exec 终态（cancelled）
+    if (task.get("event_type") or "") == "autopilot_event" and task.get("event_seq"):
+        try:
+            from src.runtime.scheduler import _update_execution_result
+            _update_execution_result(int(task["event_seq"]), "cancelled", error="用户手动终止")
+        except Exception as e:
+            log.warning(f"Cancel: autopilot exec sync failed (task={task_id}, event_seq={task.get('event_seq')}): {e}")
     return {"message": f"任务 {task_id} 已取消", "status": "cancelled"}
 
 

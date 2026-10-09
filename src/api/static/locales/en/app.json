@@ -25,7 +25,8 @@
     "scene_center": "Project Scenes",
     "scene_skill_market": "Scenes & Skills",
     "scene_market": "Scene Market",
-    "skill_market": "Skill Market"
+    "skill_market": "Skill Market",
+    "autopilot": "Automation"
   },
   "sidebar": {
     "workspace": "Workspace",
