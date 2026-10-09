@@ -183,7 +183,9 @@
     "last_run": "Last run: {{time}}",
     "advanced_title": "Advanced Options",
     "history_title": "Run History",
-    "load_failed": "Failed to load: {{msg}}"
+    "load_failed": "Failed to load: {{msg}}",
+    "engine_detached_hint": "Bound engine(s) ",
+    "engine_detached_rebind": " went offline (8h+) and were removed from the scene by the system. Task binding is kept; adjust or rebind manually."
   },
   "advanced": {
     "save": "Save",

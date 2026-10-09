@@ -677,6 +677,34 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             if old:
                 _sid = old.get("issue_session_id") or ""
                 _env = {}
+                # ===== Issue #253 改动1：重派贴证 — 绑定从 issue 场景重读（不抄旧任务快照）=====
+                # 终态重建的新任务此前不带 pool_engine_ids：绑定引擎查询瞬时落空 → _rid=0
+                # → 新任务退化为无限制广播，池外全局 worker（'all' 标签）可抢走任务（#253 事故形态）。
+                _pool_253 = ""                      # 重读绑定（JSON 串；"" = 无绑定）
+                _pool_253_authoritative = False     # True = 场景存在且重读成功（以场景为准）
+                try:
+                    from src.api.session_store import get_issue_scene
+                    from src.runtime.engine_select import get_scene_pool_engine_ids
+                    _scene_253, _scene_uid_253 = get_issue_scene(old.get("repo_key") or "", old.get("issue_id") or "")
+                    if _scene_253:
+                        _rp_253 = get_scene_pool_engine_ids(
+                            _scene_253, old.get("agent_type") or "",
+                            repo_key=old.get("repo_key") or "", user_id=_scene_uid_253)
+                        if _rp_253 is None:
+                            # 绑定全灭 → 宁失败不跑飞：事件保持 failed + 人话原因（#259 通路）。
+                            # 早退在函数末尾 reset_event_terminal 之前 → 事件不会被掰回 running 悬挂。
+                            from src.api.event_pipeline import _fail_scene_all_offline
+                            _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
+                                                    context="Redispatch", repo_key=old.get("repo_key") or "")
+                            raise HTTPException(status_code=409, detail={
+                                "code": 409,
+                                "message": "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"})
+                        _pool_253 = _rp_253 or ""
+                        _pool_253_authoritative = True
+                except HTTPException:
+                    raise
+                except Exception as _e253:
+                    log.warning(f"[redispatch] seq={seq} scene pool re-read failed: {_e253}")
                 # 重派时重新解析路由：旧 task 快照的 runtime_id 可能为 0（120s 超时回收产物）。
                 # fallback 链：task.runtime_id → session.runtime_id → 拒派。
                 _rid = old.get("runtime_id") or 0
@@ -700,16 +728,25 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 # Plugin mode: prefer an engine that has the matching tag + scope isolation
                 # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）
                 # pool_engine_ids 为空 → 加 scope 过滤（与 claim_by_tag 对齐）
+                # Issue #253 改动1：重读绑定 authoritative 时以场景为准（快照里的 pool 残值可能已被
+                # 撕证/中间代任务写空，以旧快照过滤会回到"凭运气"）；无绑定时才看快照值（兼容空场景）。
                 if is_plugin_mode() and old.get("pool_tag"):
                     try:
                         _old_pool_eids = []
                         import json as _json_pe2
-                        try:
-                            _raw = old.get("pool_engine_ids") or ""
-                            if _raw:
-                                _old_pool_eids = [int(x) for x in _json_pe2.loads(_raw) if x]
-                        except Exception:
-                            pass
+                        if _pool_253_authoritative:
+                            # 场景重读为准：非空 → 只在绑定集合内选；空 → 无绑定，不动 _rid（广播）
+                            if _pool_253:
+                                _old_pool_eids = [int(x) for x in _json_pe2.loads(_pool_253) if x]
+                            else:
+                                _old_pool_eids = []
+                        else:
+                            try:
+                                _raw = old.get("pool_engine_ids") or ""
+                                if _raw:
+                                    _old_pool_eids = [int(x) for x in _json_pe2.loads(_raw) if x]
+                            except Exception:
+                                pass
                         _old_repo = old.get("repo_key") or ""
                         _old_uid = old.get("user_id") or 0
                         if _old_pool_eids:
@@ -783,9 +820,13 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     issue_session_id=_sid,
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
+                    pool_engine_ids=_pool_253,
                 )
                 # If local direct engine, trigger direct execution (no worker will claim)
-                if _is_local_direct and _new_task_id:
+                # Issue #253 改动1 守卫：_rid=0 时禁止触发直跑。runtime_credential_id(0) 返回 None，
+                # None or 0 → _cid=0 → _is_local_direct 误判 True → 空 engine_id=0 直跑。
+                # 现贴证广播下 _rid=0 是合法结局（等绑定引擎认领），必须只入队不直跑。
+                if _is_local_direct and _new_task_id and _rid > 0:
                     try:
                         from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.runtime.engine_select import engine_name as _en

@@ -175,6 +175,8 @@
     "engine_label": "引擎:",
     "engine_unlimited": "不限定（广播）",
     "engine_count": "{{count}} 个引擎",
+    "engine_detached_hint": "绑定的引擎 ",
+    "engine_detached_rebind": " 已离线（超 8 小时）被系统从场景移除，任务绑定仍保留，请自行调整或重新绑定。",
     "max_retry_label": "最大重试:",
     "created_at_label": "创建时间:",
     "instruction_label": "任务指令:",

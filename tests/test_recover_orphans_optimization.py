@@ -172,5 +172,12 @@ class TestRecoverOrphans:
         assert r.status_code == 200, r.text
         assert tid in r.json()["recovered"]
         assert service.get_task(tid)["status"] == "queued"
-        again = service.claim(rid)
-        assert again and again["id"] == tid, "recover 后可再次 claim"
+        # 2026-10-09 #253 归零语义调整：回炉任务 runtime_id 归零 + pool_agent_type 回填
+        # （对齐 master 侧回收；引擎删重建后防死定向）→ 定向 claim(rid) 不再命中，
+        # 改为广播认领：注册引擎默认 'all' 标签，claim_by_tag 可再领。
+        _t = service.get_task(tid)
+        assert _t["runtime_id"] == 0, f"回炉应归零 runtime_id: {_t['runtime_id']}"
+        assert _t["pool_agent_type"] == "issue", f"pool_agent_type 应回填 issue: {_t['pool_agent_type']}"
+        assert _t["pool_tag"] == "issue", f"pool_tag 应回填 issue（claim_by_tag 查此字段）: {_t['pool_tag']}"
+        again = service.claim_by_tag("issue", rid)
+        assert again and again["id"] == tid, "recover 后广播可再次认领"
