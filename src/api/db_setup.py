@@ -650,6 +650,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
     author      VARCHAR(64) DEFAULT '',
     content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
     obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
+    preset_custom_fields TEXT DEFAULT '[]',  -- 场景预置自定义参数声明（scene.json custom_fields 数组，Issue #246）
     is_active   INTEGER DEFAULT 1,
     scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
     repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
@@ -1761,6 +1762,9 @@ def _migrate_knowledge_dedup_and_ref():
 
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
+
+        # 3.0 scene_market 加 preset_custom_fields 列（Issue #246：场景预置自定义参数声明）
+        _ensure_column(c, "scene_market", "preset_custom_fields", "TEXT DEFAULT '[]'")
 
         # 3.1 MySQL: 修复 UNIQUE 索引——老索引缺 issue_num，删旧建新
         if _is_mysql:
