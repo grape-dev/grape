@@ -439,6 +439,21 @@ function _renderAgentSkills() {
     return;
   }
   container.innerHTML = `<div class="rgrid">${skills.map(s => _renderSkillCard(s)).join('')}</div>`;
+  // Issue #276: 技能卡片标题被省略号截断时，添加 title 属性以 tooltip 展示完整标题
+  _attachSkillTitleTooltips();
+}
+
+// Issue #276: 检测技能卡片标题是否被截断，被截断时添加 title 属性展示完整标题
+function _attachSkillTitleTooltips() {
+  var titles = document.querySelectorAll('#all-skills .rn');
+  titles.forEach(function(el) {
+    // scrollWidth > clientWidth 说明文本被 ellipsis 截断
+    if (el.scrollWidth > el.clientWidth) {
+      el.setAttribute('title', el.textContent);
+    } else {
+      el.removeAttribute('title');
+    }
+  });
 }
 
 // ── 渲染精选技能卡片（渐变广告卡风格，对齐 new.html 原型）──
