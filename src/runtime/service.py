@@ -109,6 +109,101 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
 
 
 
+def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str = ""):
+    """Issue #253 改动2：绑定引擎全部物理不可达 → 任务诚实失败（宁失败，不跑飞）。
+
+    claim / claim_by_tag 认领时发现 pool_engine_ids 内引擎全部不可达（离线/心跳过期/
+    无 tag/scope 不符/满槽）时调用。替代原"清空 pool_engine_ids 放行全站"的降级。
+
+    Lock contract：调用方必须已持有 db_lock（与 _check_pool_engines_reachable 相同）。
+    c 为调用方传入的已持有锁事务的 cursor；本函数内部 commit 并同步事件终态。
+    """
+    from datetime import datetime, timezone
+    _names = []
+    try:
+        for _eid in engine_ids:
+            c.execute("SELECT name FROM agent_runtimes WHERE id=?", (int(_eid),))
+            _r = c.fetchone()
+            if _r and _r[0]:
+                _names.append(_r[0])
+    except Exception:
+        pass
+    _now = datetime.now(timezone.utc).isoformat()
+    _reason = (f"绑定的 {len(engine_ids)} 台引擎（{', '.join(_names) or ', '.join(str(x) for x in engine_ids)}）"
+               f"全部不可达（离线/失联/无对应标签/满载），任务停止派发"
+               f"{'，标签=' + pool_tag if pool_tag else ''}（Issue #253）")
+    try:
+        c.execute(
+            "UPDATE agent_tasks SET status='failed', result_text='', errors=?, "
+            "completed_at=?, stream_ended=1 WHERE id=? AND status='queued'",
+            (_reason, _now, task_id))
+        if c.rowcount:
+            db.commit()
+            log.warning(f"task {task_id} failed: pool engines {engine_ids} all unreachable (Issue #253)")
+            # 同步事件终态（模式同回收逻辑 937-945：防事件永远 running）
+            c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+            _es = c.fetchone()
+            if _es and _es[0]:
+                try:
+                    from src.api.event_store import update_event_status
+                    update_event_status(_es[0], "failed")
+                except Exception:
+                    pass
+    except Exception as _e:
+        log.warning(f"_fail_task_pool_unreachable failed for task {task_id}: {_e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def _fail_task_pool_unhealthy(c, task_id: str, engine_ids: list, waited_seconds: int):
+    """Issue #253 改动3（方案 A）：绑定引擎物理可达但健康分不足 → 限时等待超时后诚实失败。
+
+    _check_stale_queued_tasks 在 120s 窗口耗尽时调用。替代原"无限等待"死区
+    （引擎活着但低分：健康分门禁拦它认领 + 可达即不撕证 = 永久 queued）。
+
+    Lock contract：同 _fail_task_pool_unreachable，调用方已持有 db_lock。
+    """
+    from datetime import datetime, timezone
+    _names = []
+    try:
+        for _eid in engine_ids:
+            c.execute("SELECT name FROM agent_runtimes WHERE id=?", (int(_eid),))
+            _r = c.fetchone()
+            if _r and _r[0]:
+                _names.append(_r[0])
+    except Exception:
+        pass
+    _now = datetime.now(timezone.utc).isoformat()
+    _name_str = ', '.join(_names) or ', '.join(str(x) for x in engine_ids)
+    _reason = (f"绑定的 {len(engine_ids)} 台引擎（{_name_str}）在线但健康分不足，"
+               f"等待 {waited_seconds}s 未恢复，任务停止派发（Issue #253）")
+    try:
+        c.execute(
+            "UPDATE agent_tasks SET status='failed', result_text='', errors=?, "
+            "completed_at=?, stream_ended=1 WHERE id=? AND status='queued'",
+            (_reason, _now, task_id))
+        if c.rowcount:
+            db.commit()
+            log.warning(f"task {task_id} failed: pool engines {engine_ids} unhealthy "
+                        f"after {waited_seconds}s wait (Issue #253)")
+            c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
+            _es = c.fetchone()
+            if _es and _es[0]:
+                try:
+                    from src.api.event_store import update_event_status
+                    update_event_status(_es[0], "failed")
+                except Exception:
+                    pass
+    except Exception as _e:
+        log.warning(f"_fail_task_pool_unhealthy failed for task {task_id}: {_e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def _check_pool_has_healthy(engine_ids: list) -> bool:
     """检查 pool_engine_ids 中是否有健康分达标的引擎（Issue #134 扩展）。
 
@@ -270,6 +365,7 @@ _TASK_COLUMNS_LIST = [c.strip() for c in _TASK_COLUMNS.split(",")]
 _TASK_SIGNAL_COLUMNS = ("stream_ended", "self_reported")
 
 _TABLE_COLS_CACHE: dict = {}
+_TABLE_COLS_CACHE_DB_ID = id(db)   # db 对象身份标记（测试 monkeypatch 换库 → 缓存自动失效）
 
 
 def _table_columns(table: str) -> set:
@@ -281,7 +377,15 @@ def _table_columns(table: str) -> set:
     本函数不再嵌套 with db_lock——生产 db_lock=RLock（可重入，嵌套无碍），
     但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
     PRAGMA 只读 + 进程内缓存，无锁竞争风险。
+
+    2026-10-09 缓存失效修复：测试连跑时 monkeypatch 换 db（真实库 39 列 →
+    内存库 38 列），列缓存仍命中旧库清单 → no such column（顺序依赖假红）。
+    以 db 对象身份（id()）为缓存键，db 变更即整体失效。
     """
+    global _TABLE_COLS_CACHE_DB_ID
+    if id(db) != _TABLE_COLS_CACHE_DB_ID:
+        _TABLE_COLS_CACHE.clear()
+        _TABLE_COLS_CACHE_DB_ID = id(db)
     _cached = _TABLE_COLS_CACHE.get(table)
     if _cached is not None:
         return _cached
@@ -923,12 +1027,14 @@ def claim(runtime_id) -> dict | None:
                         "UPDATE agent_tasks SET attempts=attempts+1, "
                         "status=CASE WHEN attempts+1 >= 50 THEN 'failed' ELSE 'queued' END, "
                         "runtime_id=CASE WHEN attempts+1 >= 50 THEN runtime_id ELSE 0 END, "
+                        "pool_tag=CASE WHEN attempts+1 < 50 AND pool_tag='' "
+                        "THEN ? ELSE pool_tag END, "
                         "pool_agent_type=CASE WHEN attempts+1 < 50 AND pool_agent_type='' "
                         "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
                         "result_text=CASE WHEN attempts+1 >= 50 THEN '回收超限(dispatched 超时 50 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
-                        (_pool_fill, _tid))
+                        (_pool_fill, _pool_fill, _tid))
                     if c.rowcount and _rid:
                         c.execute(
                             "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
@@ -1029,10 +1135,11 @@ def claim(runtime_id) -> dict | None:
                                 pass
                             _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
                             if not _has_capable:
-                                log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
-                                c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
-                                db.commit()
-                                break  # 清空后当前 task 可认领
+                                # Issue #253 改动2：绑定引擎全部物理不可达 → 宁失败不跑飞（同 claim_by_tag）。
+                                # 原行为：清空 pool_engine_ids 放行任意引擎（池外全局 worker 抢任务）。
+                                # 新行为：任务置 failed + 人话原因，保留 pool_engine_ids，同步事件终态。
+                                _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
+                                return None
                             _skip = True
                     except Exception:
                         pass
@@ -1299,10 +1406,11 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                                 pass
                             _has_capable = _check_pool_engines_reachable(_allowed, _task_tag, _task_repo, task_user_id=_task_uid)
                             if not _has_capable:
-                                log.info(f"pool_engine_ids {_allowed} all unreachable (offline/no-tag/scope-mismatch), clearing for task {task_id}")
-                                c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (task_id,))
-                                db.commit()
-                                break  # 清空后当前 task 可认领
+                                # Issue #253 改动2：绑定引擎全部物理不可达 → 宁失败不跑飞。
+                                # 原行为：清空 pool_engine_ids 放行任意引擎（池外全局 worker 抢任务）。
+                                # 新行为：任务置 failed + 人话原因，保留 pool_engine_ids，同步事件终态。
+                                _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
+                                return None
                             _skip = True
                     except Exception:
                         pass
@@ -2421,6 +2529,14 @@ def reap_stale_runtimes() -> dict:
     except Exception as _sqe:
         log.warning(f"reap_stale_runtimes: _check_stale_queued_tasks failed: {_sqe}")
 
+    # 引擎绑定真实性同步：离线超阈值（默认 8h）的引擎，真实清理场景绑定 + 审计留痕。
+    # 设计文档 docs/weekly-06/engine-binding-truth-sync-design.md §4.2。
+    try:
+        from src.runtime.engine_select import _detach_dead_engine_bindings
+        _detach_dead_engine_bindings()
+    except Exception as _de:
+        log.warning(f"reap_stale_runtimes: _detach_dead_engine_bindings failed: {_de}")
+
     return {"reaped": reaped}
 
 
@@ -2428,15 +2544,16 @@ _STALE_QUEUED_THRESHOLD = int(os.environ.get("HEALTH_STALE_QUEUED_THRESHOLD", "1
 
 
 def _check_stale_queued_tasks():
-    """定期检查 queued 超时的任务，降级清空 pool_engine_ids 放行。
+    """Issue #253 改动3：queued 任务超时 → 限时等待收敛（宁失败，不跑飞）。
 
     当任务 queued 超过 _STALE_QUEUED_THRESHOLD（默认 120 秒）且 pool_engine_ids 非空时，
-    可能是因为所有候选引擎健康分过低导致无人认领。
-    此时清空 pool_engine_ids，让任意在线引擎认领（包括低健康分的，至少能尝试执行）。
+    按 issue #253 硬约束语义收敛（方案 A：低健康分限时等待，超时失败）：
+    - 池中有健康引擎 → 等待（引擎可能马上认领）
+    - 引擎不健康但物理可达 → 有界等待：超时后任务 failed（替代原无限等待死区，
+      #253 事故第一次派发挂 28 分钟的形态）
+    - 引擎既不健康又不可达 → 任务 failed（替代原"清空 pool_engine_ids 放行全站"）
 
-    修复：在清空前增加物理可达性检查（_check_pool_engines_reachable），
-    避免因 uvicorn 重启期间心跳短暂中断导致健康分降低但实际在线的引擎被误判。
-    只有当引擎既不健康又物理不可达时才清空。
+    空绑定任务不进本函数（查询条件 pool_engine_ids!=''），广播语义不受影响。
     """
     cutoff = (datetime.now(timezone.utc) - timedelta(seconds=_STALE_QUEUED_THRESHOLD)).isoformat()
     try:
@@ -2452,28 +2569,23 @@ def _check_stale_queued_tasks():
             if not stale_tasks:
                 return
             import json as _json
-            cleared = 0
             for tid, peids, task_tag, task_repo, task_uid in stale_tasks:
-                # 先检查 pool 中是否有健康引擎——有则不清空（健康引擎可能马上认领）
+                # 先检查 pool 中是否有健康引擎——有则等待（正常路径，引擎马上会领）
                 try:
                     _engine_ids = _json.loads(peids) if peids else []
                 except Exception:
                     _engine_ids = []
                 if _engine_ids and _check_pool_has_healthy(_engine_ids):
-                    continue  # 池中有健康引擎，不降级
+                    continue  # 池中有健康引擎，继续等待
                 # 健康分不达标 → 再检查物理可达性（在线 + 有 tag 能力 + scope 匹配 + 有并发槽）
-                # 如果引擎物理可达（只是健康分低），仍不清空——它仍能 claim 任务
+                # Issue #253 方案 A：物理可达但低分 → 限时等待已到点（120s），诚实失败；
+                # 物理不可达 → 直接失败（不撕证放行全站）
                 if _engine_ids and _check_pool_engines_reachable(
                     _engine_ids, task_tag or "", task_repo or "", task_user_id=task_uid or 0):
                     log.info(f"_check_stale_queued_tasks: engine(s) {_engine_ids} unhealthy but reachable, "
-                             f"keeping pool_engine_ids for task {tid}")
-                    continue
-                # 既不健康又不可达 → 清空 pool_engine_ids 放行
-                c.execute("UPDATE agent_tasks SET pool_engine_ids='' WHERE id=?", (tid,))
-                cleared += 1
-            if cleared:
-                db.commit()
-                log.info(f"_check_stale_queued_tasks: cleared pool_engine_ids for {cleared} tasks "
-                         f"(no healthy+reachable engine claimed within {_STALE_QUEUED_THRESHOLD}s)")
+                             f"wait window elapsed -> fail task {tid} (Issue #253)")
+                    _fail_task_pool_unhealthy(c, tid, _engine_ids, _STALE_QUEUED_THRESHOLD)
+                else:
+                    _fail_task_pool_unreachable(c, tid, _engine_ids, task_tag or "")
     except Exception as e:
         log.warning(f"_check_stale_queued_tasks failed: {e}")

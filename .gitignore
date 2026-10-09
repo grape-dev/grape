@@ -120,3 +120,6 @@ src/api/static/openapi.json
 cli/
 src/api/static/uploads/
 *.log
+
+# git askpass credential script (outputs token env vars, must not be committed)
+.git-askpass.sh

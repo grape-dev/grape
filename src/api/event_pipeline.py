@@ -18,16 +18,42 @@ _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
 
-def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: str = ""):
+def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: str = "",
+                            repo_key: str = ""):
     """Issue #259 Optional：场景引擎全灭时统一置事件 failed 并告警（5 处调用点共用）。
 
-    调用方在 return 前调用本 helper——helper 负责 log + update_event_status，
-    调用方负责 return / return False（不同函数返回值不同）。
+    调用方在 return 前调用本 helper——helper 负责 log + fail，调用方负责 return / return False。
+
+    引擎绑定真实性同步（docs/weekly-06/engine-binding-truth-sync-design.md §4.4）：
+    原裸 update_event_status(seq, "failed") 无原因落库，排障需倒查日志。
+    现改走 _fail_event 同款通路：人话原因写 events.result + agent_tasks.errors，
+    前端 observability/issues 点开即见。文案含引擎名（engine_name 反查）。
+    repo_key 必传（调用方都有）：仓库级场景查询依赖它，缺失时 get_pipeline_config
+    会回退官方模板导致引擎名查不到（卡点①修复）。
     """
     _ctx = context or "Pipeline"
     log.warning(f"{_ctx}: scene={scene_id} {agent_type} engines all offline, skip (Issue #259)")
-    from src.api.event_store import update_event_status
-    update_event_status(seq, "failed")
+    # 反查场景绑定的引擎名列表，拼人话
+    _engine_names = []
+    try:
+        from src.api.pipeline_config import get_scene_engine_ids
+        _eids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key) or []
+        if _eids:
+            from src.runtime.engine_select import engine_name as _en
+            _seen = set()
+            for _eid in _eids:
+                _nm = _en(int(_eid))
+                if _nm and _nm not in _seen:
+                    _seen.add(_nm)
+                    _engine_names.append(_nm)
+    except Exception as _e:
+        log.warning(f"_fail_scene_all_offline: engine name lookup failed: {_e}")
+    if _engine_names:
+        _reason = (f"绑定的 {len(_engine_names)} 台引擎（{', '.join(_engine_names)}）全部离线，"
+                   f"任务无法派发（scene={scene_id}, agent={agent_type}）")
+    else:
+        _reason = f"场景绑定的引擎全部离线，任务无法派发（scene={scene_id}, agent={agent_type}）"
+    _fail_event(seq, _reason)
 
 def _filter_pr_sub_matches(matches: list, issue_scene_id: str, issue_qa_skill: str = "") -> list:
     """PR 订阅匹配结果三步过滤：
@@ -768,7 +794,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
             if _pool_ids is None:
-                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub")
+                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
                 return
             _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                    0, qa_skill, _engine_id, _pseudo_id,
@@ -786,7 +812,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             else:
                 _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
                 if _pool_ids is None:
-                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch")
+                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch", repo_key=repo_key)
                     return
                 _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                        0, qa_skill, _engine_id, _pseudo_id,
@@ -870,7 +896,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
             # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
             _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
             if _pool_ids is None:
-                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub")
+                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
                 return
             _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                    0, qa_skill, _engine_id, _pseudo_id,
@@ -888,7 +914,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
             else:
                 _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
                 if _pool_ids is None:
-                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch")
+                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch", repo_key=repo_key)
                     return
                 _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
                                        0, qa_skill, _engine_id, _pseudo_id,
@@ -1794,33 +1820,80 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         return result
     # engine_id=0：plugin direct/auto 兜底 → 自动选一个本机在线引擎执行
     if not engine_id:
-        log.info(f"Pipeline: engine_id=0, auto-selecting local engine for seq={seq}")
-        # 尝试取一个本机在线引擎（优先 opencode，其次 codearts，最后 hermes）
-        from src.user.db import get_meta_value as _gmv
-        try:
-            from src.session_manager import db as _db, db_lock as _dbl
-            log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
-            with _dbl:
-                _c = _db.cursor()
-                _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
-                _row = _c.fetchone()
-            log.info(f"Pipeline: engine query done, row={_row}, seq={seq}")
-            if _row:
-                engine_id = _row[0]
-                _be = _row[1] or _be
-                log.info(f"Pipeline: auto-selected local engine id={engine_id} name={_be}, seq={seq}")
-            else:
-                log.info(f"Pipeline: engine_id=0 no online engine, seq={seq}, skip")
+        # Issue #253 改动4：有显式绑定时 direct 自动选机只允许在绑定集合内挑（宁失败不跑飞）。
+        # 原行为：全站 online/healthy 查询（opencode>codearts>其他），hermes 等池外引擎可被选中。
+        _pool_ids_253 = []
+        if _pool_engine_ids:
+            try:
+                import json as _json253
+                _pool_ids_253 = [int(x) for x in _json253.loads(_pool_engine_ids) if x]
+            except Exception:
+                _pool_ids_253 = []
+        if _pool_ids_253:
+            # 绑定集合内选在线健康引擎；全灭 → failed + 人话原因，不碰全站
+            _bind_names_253 = []
+            try:
+                from src.runtime.engine_select import engine_name as _en253
+                _bind_names_253 = [_en253(int(x)) or str(x) for x in _pool_ids_253]
+            except Exception:
+                _bind_names_253 = [str(x) for x in _pool_ids_253]
+            _picked_253 = 0
+            try:
+                from src.session_manager import db as _db, db_lock as _dbl
+                with _dbl:
+                    _c = _db.cursor()
+                    _ph253 = ",".join("?" * len(_pool_ids_253))
+                    _c.execute(
+                        f"SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 "
+                        f"AND id IN ({_ph253}) "
+                        f"ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1",
+                        tuple(_pool_ids_253))
+                    _row = _c.fetchone()
+                if _row:
+                    _picked_253 = _row[0]
+                    engine_id = _row[0]
+                    _be = _row[1] or _be
+                    log.info(f"Pipeline: direct auto-select within scene binding {list(set(_bind_names_253))} "
+                             f"-> id={engine_id} name={_be}, seq={seq} (Issue #253)")
+            except Exception as _e:
+                log.warning(f"Pipeline: binding-constrained engine query failed: {_e}, seq={seq}")
+            if not _picked_253:
+                log.info(f"Pipeline: scene binding {list(set(_bind_names_253))} all offline for direct "
+                         f"auto-select, seq={seq}, skip (Issue #253)")
+                _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                                    skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                _fail_event(seq, f"场景绑定的引擎（{', '.join(sorted(set(_bind_names_253)))}）"
+                                 f"全部不可用，direct 模式无法选机（Issue #253）")
+                return result
+        else:
+            # 无绑定（空 pool）→ 原全站自动选机行为不变
+            log.info(f"Pipeline: engine_id=0, auto-selecting local engine for seq={seq}")
+            # 尝试取一个本机在线引擎（优先 opencode，其次 codearts，最后 hermes）
+            from src.user.db import get_meta_value as _gmv
+            try:
+                from src.session_manager import db as _db, db_lock as _dbl
+                log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
+                with _dbl:
+                    _c = _db.cursor()
+                    _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
+                    _row = _c.fetchone()
+                log.info(f"Pipeline: engine query done, row={_row}, seq={seq}")
+                if _row:
+                    engine_id = _row[0]
+                    _be = _row[1] or _be
+                    log.info(f"Pipeline: auto-selected local engine id={engine_id} name={_be}, seq={seq}")
+                else:
+                    log.info(f"Pipeline: engine_id=0 no online engine, seq={seq}, skip")
+                    _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
+                                        skill_path, skill_id, evt, issue_id, runtime_id or 0)
+                    _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
+                    return result
+            except Exception as _e:
+                log.warning(f"Pipeline: auto-select engine failed: {_e}")
                 _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
                                     skill_path, skill_id, evt, issue_id, runtime_id or 0)
                 _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                 return result
-        except Exception as _e:
-            log.warning(f"Pipeline: auto-select engine failed: {_e}")
-            _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
-                                skill_path, skill_id, evt, issue_id, runtime_id or 0)
-            _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
-            return result
     kind = runtime_execution_kind(engine_id)
     if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
         _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
@@ -3600,7 +3673,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
             _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
         # Issue #259：None = 场景引擎全灭（方案A，不入队）
         if _pool_eids is None:
-            _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派")
+            _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派", repo_key=repo_key)
             return False
         _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
                                skill_id, skill_path, engine_id, issue_id,

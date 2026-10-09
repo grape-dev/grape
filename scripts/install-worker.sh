@@ -146,6 +146,14 @@ restore_upgrade_backup() {
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart runtime-agent >/dev/null 2>&1 || true
   else
+    # 2026-10-08 follow-up：先杀残留的新进程再起旧版。注册超时路径（启动验证 30s
+    # 未 registered）调用本函数时，新 agent 进程可能仍存活——若不限域 pkill，
+    # 旧版起成功后新旧两进程并存，残留新进程可能反向注册击穿回滚。
+    # 限域模式与第 6 步停旧实例一致：按本安装目录 venv 绝对路径匹配，不误杀同机
+    # 其他安装/其他用户的 worker。
+    _rollback_pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
+    pkill -f "${_rollback_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1 || true
+    sleep 1
     setsid nohup "$START_SCRIPT" >> "$INSTALL_DIR/data/worker.log" 2>&1 < /dev/null &
     disown 2>/dev/null || true
   fi

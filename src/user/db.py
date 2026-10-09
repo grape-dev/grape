@@ -2403,7 +2403,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
             "SELECT id, name, display_name, version, description, market_description, "
             "icon, obs_icon_key, category_id, is_featured, like_count, source, source_user_id, "
             "recommended_template, nodes_json, onboarding, is_active, created_at, updated_at, "
-            "scope, repo_key "
+            "scope, repo_key, preset_custom_fields "
             "FROM scene_market WHERE id=?",
             (market_id,),
         )
@@ -2421,6 +2421,7 @@ def get_scene_market_by_id(market_id: int) -> dict | None:
         "onboarding": row[15] or "repo-onboarding", "is_active": row[16],
         "created_at": str(row[17] or ""), "updated_at": str(row[18] or ""),
         "scope": row[19] or "official", "repo_key": row[20] or "",
+        "preset_custom_fields": row[21] or "[]",
     }
 
 
