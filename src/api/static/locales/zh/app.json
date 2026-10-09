@@ -25,7 +25,8 @@
     "scene_center": "项目场景",
     "scene_skill_market": "场景·技能",
     "scene_market": "场景市场",
-    "skill_market": "技能市场"
+    "skill_market": "技能市场",
+    "autopilot": "自动化"
   },
   "sidebar": {
     "workspace": "工作区",
