@@ -82,9 +82,12 @@ window._rtDevGoPage = function(p) {
 };
 
 // Issue #185: Engines 分页加载
+// Issue #277: 传入当前仓库 repo 参数，隔离 repo scope 引擎
 function _loadRuntimesData() {
   var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? (app.currentRepo().fullName || '') : '';
+  if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
@@ -99,11 +102,14 @@ function _loadRuntimesData() {
 
 // Issue #185: Workers 设备分页加载（独立端点）
 // Issue #245: 筛选条件传给后端，total 由后端返回筛选后总数（移除前端二次过滤）
+// Issue #277: 传入当前仓库 repo 参数，隔离 repo scope 设备
 function _loadRuntimeDevices() {
   var qs = '?page=' + _rtDevPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
   if (_rtFilterType) qs += '&type=' + encodeURIComponent(_rtFilterType);
   if (_runtimeSearch) qs += '&q=' + encodeURIComponent(_runtimeSearch);
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? (app.currentRepo().fullName || '') : '';
+  if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/runtime-devices' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtDevTotal = d.total || 0;
