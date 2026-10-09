@@ -365,6 +365,7 @@ _TASK_COLUMNS_LIST = [c.strip() for c in _TASK_COLUMNS.split(",")]
 _TASK_SIGNAL_COLUMNS = ("stream_ended", "self_reported")
 
 _TABLE_COLS_CACHE: dict = {}
+_TABLE_COLS_CACHE_DB_ID = id(db)   # db 对象身份标记（测试 monkeypatch 换库 → 缓存自动失效）
 
 
 def _table_columns(table: str) -> set:
@@ -376,7 +377,15 @@ def _table_columns(table: str) -> set:
     本函数不再嵌套 with db_lock——生产 db_lock=RLock（可重入，嵌套无碍），
     但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
     PRAGMA 只读 + 进程内缓存，无锁竞争风险。
+
+    2026-10-09 缓存失效修复：测试连跑时 monkeypatch 换 db（真实库 39 列 →
+    内存库 38 列），列缓存仍命中旧库清单 → no such column（顺序依赖假红）。
+    以 db 对象身份（id()）为缓存键，db 变更即整体失效。
     """
+    global _TABLE_COLS_CACHE_DB_ID
+    if id(db) != _TABLE_COLS_CACHE_DB_ID:
+        _TABLE_COLS_CACHE.clear()
+        _TABLE_COLS_CACHE_DB_ID = id(db)
     _cached = _TABLE_COLS_CACHE.get(table)
     if _cached is not None:
         return _cached
