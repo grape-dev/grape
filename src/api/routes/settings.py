@@ -351,9 +351,9 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 
 # ====== Agent Runtimes ======
 
-@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params.")
+@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo.")
 def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 0,
-                       scope: str = ""):
+                       scope: str = "", repo: str = ""):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -364,6 +364,9 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
     - page_size>0 → 返回 {runtimes: [...page slice...], total: N, page: P, page_size: S}
     可见性过滤在应用层完成（依赖 credential scope + 用户仓库列表），无法纯 SQL 分页，
     因此先全量过滤再切片——total 为过滤后总数。
+
+    Issue #277 数据隔离：repo 参数非空时，repo scope 引擎仅返回该仓库的引擎，
+    避免跨仓库看到其他仓库的 worker 设备和引擎。
     """
     from src.user import db as user_db
     from src.runtime.instances import instance_name
@@ -384,8 +387,9 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
             pass
 
     # 凭据映射 + 可见性过滤（共享 helper，Issue #185 审查修复）
+    # Issue #277 数据隔离：repo 参数非空时，repo scope 仅返回当前仓库的引擎
     cred_map = _build_cred_map(db, db_lock)
-    _visible_credential = _make_visible_credential_fn(uname, user_repos)
+    _visible_credential = _make_visible_credential_fn(uname, user_repos, repo_filter=repo)
 
     cached = user_db.get_agent_runtimes(scope=None)
     now = __import__("time").time()
@@ -530,10 +534,11 @@ def _build_cred_map(db, db_lock) -> dict:
     return cred_map
 
 
-def _make_visible_credential_fn(uname: str, user_repos: set):
+def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = ""):
     """返回 _visible_credential 闭包，两个端点共用。
     uname: 当前登录用户名
     user_repos: 用户可访问的仓库 full_name 集合（无前缀 owner/repo）
+    repo_filter: 当前仓库 full_name（无前缀），非空时 repo scope 仅允许该仓库（Issue #277 数据隔离）
     """
     def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
         if not cid:                      # credential_id=0（历史本机引擎）
@@ -543,6 +548,9 @@ def _make_visible_credential_fn(uname: str, user_repos: set):
         if cscope == "user":
             return cowner_name == uname
         if cscope == "repo":
+            # repo_filter 非空（Issue #277 数据隔离）：仅允许当前仓库的设备/引擎
+            if repo_filter:
+                return from_repo_key(cowner_id) == repo_filter
             if cowner_name == uname:
                 return True
             # repo_key 存储为 gitcode:owner/repo（带前缀），user_repos 无前缀
@@ -668,15 +676,18 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
-@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245).")
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245). Issue #277: repo param filters repo-scoped devices to only the current repo.")
 def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20,
-                        scope: str = "", type: str = "", q: str = ""):
+                        scope: str = "", type: str = "", q: str = "", repo: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
     筛选（Issue #245）：scope/type/q 参数在分页切片前过滤，total 始终为筛选后总数，
     保证底部页码总条数与实际展示数据一致（修复前端二次过滤导致 total 不更新）。
     可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
+
+    Issue #277 数据隔离：repo 参数非空时，repo scope 设备仅返回当前仓库的设备，
+    避免跨仓库看到其他仓库的 worker 设备和引擎。
     """
     from src.user import db as user_db
     from src.session_manager import db as _db, db_lock as _dl
@@ -688,8 +699,9 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     now = _time.time()
 
     # 凭据映射 + 可见性过滤（共享 helper，Issue #185 审查修复）
+    # Issue #277 数据隔离：repo 参数非空时，repo scope 仅返回当前仓库的设备
     cred_map = _build_cred_map(_db, _dl)
-    _visible_credential = _make_visible_credential_fn(uname, user_repos)
+    _visible_credential = _make_visible_credential_fn(uname, user_repos, repo_filter=repo)
 
     # 有效用户集合（用于过滤已删除用户的本机引擎）
     valid_users = set()
