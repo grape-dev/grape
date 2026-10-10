@@ -1,0 +1,56 @@
+{
+  "name": "default",
+  "version": "1.0.0",
+  "display_name": "通用开发",
+  "description": "通用的全链路开发场景，从需求收集到部署运维，适合大多数项目",
+  "category": "general",
+  "recommended_template": "hello-flask",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "general",
+    "full-cycle"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "vod-cli",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "issue-cli",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "coding-cli",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "qa-cli",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "deploy-cli",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}

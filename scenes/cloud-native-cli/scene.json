@@ -1,0 +1,81 @@
+{
+  "name": "cloud-native-cli",
+  "version": "1.0.0",
+  "display_name": "云原生开发CLI版",
+  "description": "云原生应用开发场景（CLI 版）：面向微服务架构和容器化部署的项目，全程使用 grape CLI 命令行操作",
+  "category": "iac",
+  "recommended_template": "micro-svc",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "cloud-native",
+    "microservice",
+    "container",
+    "cli"
+  ],
+  "author": "grape-team",
+"custom_fields": [
+    {
+      "name": "DEFAULT_SERVICE_NAME",
+      "is_secret": false,
+      "scope": ["coding"],
+      "default_value": "core-svc",
+      "description": "默认微服务名，coding-cli 生成/改造服务时使用"
+    },
+    {
+      "name": "DEPLOY_TARGET_URL",
+      "is_secret": false,
+      "scope": ["sre"],
+      "default_value": "",
+      "description": "部署目标地址（如服务对外访问 URL），deploy-cli 部署后验证用"
+    },
+    {
+      "name": "DEPLOY_CLUSTER_REGION",
+      "is_secret": false,
+      "scope": ["sre"],
+      "default_value": "cn-north-4",
+      "description": "部署目标云区域（如 cn-north-4），deploy-cli 部署时使用"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "vod-cli",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "issue-cli",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "coding-cli",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "qa-cli",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "deploy-cli",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}

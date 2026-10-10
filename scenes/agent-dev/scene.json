@@ -1,0 +1,57 @@
+{
+  "name": "agent-dev",
+  "version": "1.0.0",
+  "display_name": "Agent开发",
+  "description": "AI Agent 应用开发场景，适合构建智能体应用和多 Agent 协作系统",
+  "category": "ai",
+  "recommended_template": "ai-interview-swarm",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "ai",
+    "agent",
+    "llm"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "vod",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "issue-advance",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "implementation",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "pr",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "cloud-deploy",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}
