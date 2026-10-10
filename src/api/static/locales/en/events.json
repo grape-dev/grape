@@ -96,5 +96,6 @@
   "knowledge_delete_confirm_project": "This knowledge is shared by all Agents. Confirm deletion?",
   "knowledge_modal_close": "Close",
   "scope_agent_solo": "Agent Only",
-  "nav_forbidden": "No permission to access event #{{seq}}, it may belong to another repo"
+  "nav_forbidden": "No permission to access event #{{seq}}, it may belong to another repo",
+  "engine_undispatched": "Undispatched / No execution engine"
 }

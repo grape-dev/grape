@@ -161,16 +161,29 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     engine_ip = ar[3] or ""
             if not engine_instance and row[12]:
                 # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
-                c2.execute(
-                    "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
-                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
-                    "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
-                    (row[12],))
-                ar2 = c2.fetchone()
-                if ar2:
-                    engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
-                    engine_device = ar2[3] or ""
-                    engine_ip = ar2[4] or ""
+                # 未派发（runtime_id=0 且任务 failed）跳过兜底，避免错误归因无关引擎（Issue #285）
+                _undispatched = False
+                if not runtime_id:
+                    try:
+                        c2.execute(
+                            "SELECT status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                            (seq,))
+                        _ts = c2.fetchone()
+                        if _ts and (_ts[0] or "") == "failed":
+                            _undispatched = True
+                    except Exception:
+                        pass
+                if not _undispatched:
+                    c2.execute(
+                        "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                        "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
+                        (row[12],))
+                    ar2 = c2.fetchone()
+                    if ar2:
+                        engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
+                        engine_device = ar2[3] or ""
+                        engine_ip = ar2[4] or ""
     except Exception:
         pass
     result["engine_instance"] = engine_instance
