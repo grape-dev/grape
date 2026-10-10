@@ -10,12 +10,15 @@ ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
 # 测试库隔离：所有本地测试使用独立测试库，绝不触碰生产库 data/sessions.db
-os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
-# 测试强制 SQLite 后端：即使 configs/db-backend.json 配了 mysql，测试也绝不连 RDS
-# （可用环境变量 DEVOPS_DB_BACKEND 显式覆盖，用于 MySQL 后端专项测试）
-os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
+os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_sessions.db")
+# 测试强制 SQLite 后端：即使 configs/db-backend.json 或 .env 配了 mysql，测试也绝不连 RDS
+# 使用 os.environ[...] = ... 强制覆盖（不使用 setdefault，防止 .env 已设置 mysql 时失效）
+os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
+# 清除可能被 .env 设置的 MySQL 连接参数，防止 mysql_compat 误连生产库
+for _k in ("DEVOPS_DB_HOST", "DEVOPS_DB_PORT", "DEVOPS_DB_USER", "DEVOPS_DB_PASSWORD", "DEVOPS_DB_NAME"):
+    os.environ.pop(_k, None)
 # 测试隔离工作区（config.WORKSPACE_DIR 解析优先级 env > 家目录 > 代码目录）
-os.environ.setdefault("DEVOPS_WORKSPACE_DIR", os.path.join(ROOT, "data", "test_workspaces"))
+os.environ["DEVOPS_WORKSPACE_DIR"] = os.path.join(ROOT, "data", "test_workspaces")
 
 
 @pytest.fixture(scope="session", autouse=True)

@@ -26,6 +26,7 @@
     "scene_skill_market": "Scenes & Skills",
     "scene_market": "Scene Market",
     "skill_market": "Skill Market",
+    "organizations": "Organizations",
     "autopilot": "Automation"
   },
   "sidebar": {
@@ -36,7 +37,8 @@
     "account": "User Center",
     "device_center": "Device Center",
     "settings": "Settings",
-    "toggle": "Collapse/Expand Sidebar"
+    "toggle": "Collapse/Expand Sidebar",
+    "organizations": "Organization"
   },
   "login": {
     "gitcode_login": "Sign in with GitCode",

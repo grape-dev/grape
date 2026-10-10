@@ -97,6 +97,24 @@ function _apEmptyHTML() {
 // ===== 加载任务 =====
 function _apLoadTasks() {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  if (!repo) {
+    // 无仓库时显示空态引导，不发送 API 请求（避免 "No permission" 错误）
+    var container = $('apTableContainer');
+    if (container) {
+      container.innerHTML = '<div style="padding:40px 0;text-align:center">' +
+        '<div style="font-size:32px;margin-bottom:8px">⏰</div>' +
+        '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">' + _apt('list.empty_title') + '</p>' +
+        '<p style="font-size:12px;color:var(--t3);margin-bottom:24px">' + _apt('list.empty_desc') + '</p>' +
+        '<button class="bt bt-p" onclick="app.goToRepos()">' + I18N.t('app.repo.back_to_select') + '</button>' +
+      '</div>';
+    }
+    _apAllTasks = [];
+    document.getElementById('apCountAll').textContent = '0';
+    document.getElementById('apCountEnabled').textContent = '0';
+    document.getElementById('apCountDisabled').textContent = '0';
+    document.getElementById('apResultCount').textContent = '';
+    return;
+  }
   var _apRepoKey = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().repoKey || '') : '';
   if (!_apRepoKey && repo) _apRepoKey = 'gitcode:' + repo;
   var url = '/autopilot/tasks?repo_key=' + _apRepoKey;

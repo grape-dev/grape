@@ -26,11 +26,11 @@ REPO = "gitcode:org/pi-repo"
 def _clean():
     from src.session_manager import db, db_lock
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.commit()
     yield
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.commit()
 
 

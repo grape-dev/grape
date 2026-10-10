@@ -17,13 +17,13 @@ from src.api.routes.settings import _make_visible_credential_fn
 def _clean_tables():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM agent_runtimes")
+        c.execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%') OR id IN (900001, 900002, 999)")
         c.execute("DELETE FROM runtime_credentials WHERE id > 0")
         db.commit()
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM agent_runtimes")
+        c.execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%') OR id IN (900001, 900002, 999)")
         c.execute("DELETE FROM runtime_credentials WHERE id > 0")
         db.commit()
 

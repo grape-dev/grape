@@ -2,7 +2,7 @@
 import json, os, re, asyncio, base64
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
-from src.api.deps import require_no_session_token
+from src.api.deps import require_no_session_token, require_org_member
 from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
 
@@ -150,7 +150,7 @@ class CreateTemplateRequest(BaseModel):
 
 @router.post("/create", operation_id="project_template_create", summary="Create project from template", description="One-shot create: create repo -> write template code -> auto-host -> apply dev scene.")
 async def create_from_template(body: CreateTemplateRequest,
-                               user: dict = Depends(require_no_session_token)):
+                               user: dict = Depends(require_org_member)):
     """一键创建：建仓库 → 写模板代码 → 自动托管 → 应用开发场景"""
     ctx = _find_template(body.template_id)
     if not ctx:
