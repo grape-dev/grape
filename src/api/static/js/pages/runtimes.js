@@ -86,17 +86,16 @@ window._rtDevGoPage = function(p) {
 function _loadRuntimesData() {
   var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
-  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? (app.currentRepo().fullName || '') : '';
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
-    // 空数据快速路径：直接渲染空态，不等待 sceneTagsCache
+    // 空数据快速路径：直接渲染空态，不经过 renderRuntimes（避免等待 sceneTagsCache）
     var _rts = (d && d.runtimes) || [];
     var _devs = (d && d.devices) || [];
-    if (_rts.length === 0 && _devs.length === 0 && !d.devices) {
+    if (_rts.length === 0 && _devs.length === 0) {
       _renderRuntimesSkeleton(d);
-      // 仍然预加载 sceneTagsCache 供后续使用
       if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
       return;
     }
@@ -117,7 +116,7 @@ function _loadRuntimeDevices() {
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
   if (_rtFilterType) qs += '&type=' + encodeURIComponent(_rtFilterType);
   if (_runtimeSearch) qs += '&q=' + encodeURIComponent(_runtimeSearch);
-  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? (app.currentRepo().fullName || '') : '';
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/runtime-devices' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
@@ -497,7 +496,7 @@ function openScopeSwitcher(cid, currentScope) {
   var scopes = ['repo', 'user'];
   var existing = document.getElementById('scopeSwitcherOverlay');
   if (existing) { existing.remove(); return; }
-  var curRepo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  var curRepo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   var overlay = document.createElement('div');
   overlay.id = 'scopeSwitcherOverlay';
   overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
@@ -665,7 +664,7 @@ function _renderAddDeviceCredForm() {
   var area = document.getElementById('addDeviceCredArea');
   if (!area) return;
   var cur = _currentUser();
-  var curRepo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  var curRepo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   area.innerHTML = '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
     '<div style="font-size:13px;font-weight:600;margin-bottom:14px;color:var(--t1)">' + I18N.t('runtimes.credential.gen_title') + '</div>' +
     // 凭据名称
