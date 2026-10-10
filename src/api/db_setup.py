@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
+    detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
@@ -407,7 +408,8 @@ CREATE TABLE IF NOT EXISTS issue_agent_session (
     repo_key          TEXT NOT NULL,
     agent_type        TEXT NOT NULL,
     issue_id          TEXT NOT NULL,             -- 如 "#5"(对应 event.json 的 issue_num)
-    runtime_session_id TEXT DEFAULT '',          -- opencode --session 续接指针(Issue 级)
+    runtime_session_id TEXT DEFAULT '',          -- 引擎 --session 续接指针(Issue 级,opencode/hermes)
+    session_engine     TEXT DEFAULT '',          -- 指针产出的引擎名(opencode/hermes/codearts/codex),跨引擎守卫用
     status            TEXT DEFAULT 'idle',       -- idle / running / failed
     last_active_at    TEXT DEFAULT (datetime('now')),
     created_at        TEXT DEFAULT (datetime('now')),
@@ -660,6 +662,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
     author      VARCHAR(64) DEFAULT '',
     content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
     obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
+    preset_custom_fields TEXT DEFAULT '[]',  -- 场景预置自定义参数声明（scene.json custom_fields 数组，Issue #246）
     is_active   INTEGER DEFAULT 1,
     scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
     repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
@@ -689,6 +692,23 @@ CREATE TABLE IF NOT EXISTS scene_skill_ref (
     skill_name  TEXT NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     UNIQUE (scene_id, skill_name)
+)
+"""
+
+# 引擎绑定真实性同步：场景引擎解绑审计表（引擎离线超 8h 系统自动移除场景绑定的留痕）
+_SCENE_ENGINE_DETACH_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_row_id INTEGER NOT NULL,        -- devops_pipeline_scene.id
+    repo_key    TEXT DEFAULT '',
+    scene_id    TEXT DEFAULT '',          -- 场景 scene_id（非 market id）
+    node_tag    TEXT DEFAULT '',          -- 被移除绑定的节点标签（coding/qa/sre…）
+    runtime_id  INTEGER NOT NULL,         -- 被移除的引擎 id
+    runtime_name TEXT DEFAULT '',         -- 引擎名（快照，防 runtime 行后续变更）
+    detached_at TEXT DEFAULT (datetime('now')),
+    reason      TEXT DEFAULT '',          -- 触发原因（offline_timeout 等）
+    affected_autopilot_tasks TEXT DEFAULT '[]',  -- 仍绑定该引擎的巡检任务 [{id,name}]（两表协同提示用）
+    rebound_at  TEXT DEFAULT ''           -- 用户重绑时间（非空=不再提示）
 )
 """
 
@@ -827,6 +847,8 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_market", _SCENE_MARKET_DDL),
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
+    # 引擎绑定真实性同步：场景引擎解绑审计表
+    ("scene_engine_detach_log", _SCENE_ENGINE_DETACH_LOG_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
     ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
@@ -918,6 +940,202 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     ("autopilot_tasks", _AUTOPILOT_TASKS_DDL),
     ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
 ]
+
+# ===== Organization（组织）特性 =====
+_ORGANIZATION_DDL = """
+CREATE TABLE IF NOT EXISTS organization (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            VARCHAR(128) NOT NULL,
+    slug            VARCHAR(64) NOT NULL UNIQUE,
+    description     TEXT DEFAULT '',
+    avatar_url      VARCHAR(512) DEFAULT '',
+    owner_id        INTEGER NOT NULL,
+    is_personal     INTEGER DEFAULT 0,
+    settings        TEXT DEFAULT '{}',
+    max_members     INTEGER DEFAULT 50,
+    max_workers     INTEGER DEFAULT 10,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)"""
+
+_ORG_MEMBER_DDL = """
+CREATE TABLE IF NOT EXISTS org_member (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          INTEGER NOT NULL,
+    user_id         INTEGER NOT NULL,
+    role            TEXT NOT NULL DEFAULT 'member',
+    invited_by      INTEGER DEFAULT 0,
+    joined_at       TEXT DEFAULT (datetime('now')),
+    UNIQUE (org_id, user_id)
+)"""
+
+_ORG_INVITATION_DDL = """
+CREATE TABLE IF NOT EXISTS org_invitation (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    org_id          INTEGER NOT NULL,
+    inviter_id      INTEGER NOT NULL,
+    invitee_email   TEXT DEFAULT '',
+    invitee_user_id INTEGER DEFAULT 0,
+    role            TEXT NOT NULL DEFAULT 'member',
+    status          TEXT DEFAULT 'pending',
+    expires_at      TEXT,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)"""
+
+_NEW_TABLES.extend([
+    ("organization", _ORGANIZATION_DDL),
+    ("org_member", _ORG_MEMBER_DDL),
+    ("org_invitation", _ORG_INVITATION_DDL),
+])
+
+# 需要 org_id 列的核心表
+_ORG_ID_TABLES = [
+    "managed_repos",
+    "runtime_credentials",
+    "agent_runtimes",
+    "skill",
+    "devops_pipeline_scene",
+    "scene_market",
+    "agent_shared_knowledge",
+    "events",
+    "agent_tasks",
+    "devops_agent_session",
+    "chat_conversations",
+    "issue",
+    "session_api_tokens",
+]
+
+
+def _migrate_add_org_id_columns():
+    """为核心表幂等添加 org_id 列（0=全局/未归属，兼容现有数据）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            for table in _ORG_ID_TABLES:
+                _ensure_column(c, table, "org_id", "INTEGER DEFAULT 0")
+            db.commit()
+            log.info("org_id columns ensured on all core tables")
+    except Exception as e:
+        log.warning(f"org_id column migration failed: {e}")
+
+
+def _migrate_create_personal_orgs():
+    """为每个现有用户创建个人组织（幂等）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            users = c.execute("SELECT id, username FROM user_accounts").fetchall()
+            for uid, username in users:
+                existing = c.execute(
+                    "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                ).fetchone()
+                if existing:
+                    continue
+                slug = f"personal-{uid}"
+                c.execute(
+                    "INSERT INTO organization (name, slug, owner_id, is_personal) VALUES (?, ?, ?, 1)",
+                    ("默认工作空间", slug, uid)
+                )
+                org_id = c.lastrowid
+                c.execute(
+                    "INSERT OR IGNORE INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
+                    (org_id, uid)
+                )
+            db.commit()
+            log.info("Personal organizations ensured for all users")
+    except Exception as e:
+        log.warning(f"Personal org creation migration failed: {e}")
+
+
+def _migrate_data_to_personal_orgs():
+    """将现有数据迁入对应用户的个人组织（幂等，只处理 org_id=0 的行）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+
+            # 1. managed_repos：按 user_repos.is_admin 找管理员迁入
+            repos = c.execute(
+                "SELECT repo_key FROM managed_repos WHERE org_id=0 OR org_id IS NULL"
+            ).fetchall()
+            for (repo_key,) in repos:
+                admin = c.execute(
+                    "SELECT user_id FROM user_repos WHERE repo_key=? AND is_admin=1 LIMIT 1",
+                    (repo_key,)
+                ).fetchone()
+                if admin:
+                    uid = admin[0]
+                    org = c.execute(
+                        "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                    ).fetchone()
+                    if org:
+                        c.execute("UPDATE managed_repos SET org_id=? WHERE repo_key=?", (org[0], repo_key))
+
+            # 2. runtime_credentials：scope=user 的按 owner_name 迁入
+            creds = c.execute(
+                "SELECT id, owner_name, scope FROM runtime_credentials WHERE org_id=0 OR org_id IS NULL"
+            ).fetchall()
+            for cid, owner_name, scope in creds:
+                if not owner_name or scope == "global":
+                    continue
+                user = c.execute(
+                    "SELECT id FROM user_accounts WHERE username=?", (owner_name,)
+                ).fetchone()
+                if user:
+                    uid = user[0]
+                    org = c.execute(
+                        "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                    ).fetchone()
+                    if org:
+                        c.execute("UPDATE runtime_credentials SET org_id=? WHERE id=?", (org[0], cid))
+                        c.execute("UPDATE agent_runtimes SET org_id=? WHERE credential_id=?", (org[0], cid))
+
+            # 3. skill：scope=user 的按 owner_id 迁入
+            skills = c.execute(
+                "SELECT id, owner_id, scope FROM skill WHERE scope='user' AND (org_id=0 OR org_id IS NULL)"
+            ).fetchall()
+            for sid, owner_id, _ in skills:
+                try:
+                    uid = int(owner_id)
+                except (ValueError, TypeError):
+                    continue
+                org = c.execute(
+                    "SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,)
+                ).fetchone()
+                if org:
+                    c.execute("UPDATE skill SET org_id=? WHERE id=?", (org[0], sid))
+
+            # 4. skill：scope=repo 的跟随 repo_key 迁移
+            repo_skills = c.execute(
+                "SELECT id, owner_id FROM skill WHERE scope='repo' AND (org_id=0 OR org_id IS NULL)"
+            ).fetchall()
+            for sid, owner_id in repo_skills:
+                repo_org = c.execute(
+                    "SELECT org_id FROM managed_repos WHERE repo_key=?", (owner_id,)
+                ).fetchone()
+                if repo_org and repo_org[0]:
+                    c.execute("UPDATE skill SET org_id=? WHERE id=?", (repo_org[0], sid))
+
+            # 5. 跟随 repo_key 的表：devops_pipeline_scene / agent_shared_knowledge /
+            #    events / agent_tasks / devops_agent_session / issue
+            for table in ["devops_pipeline_scene", "agent_shared_knowledge", "events",
+                           "agent_tasks", "devops_agent_session", "issue"]:
+                try:
+                    c.execute(f"""
+                        UPDATE {table} SET org_id = (
+                            SELECT m.org_id FROM managed_repos m
+                            WHERE m.repo_key = {table}.repo_key AND m.org_id > 0
+                        )
+                        WHERE (org_id = 0 OR org_id IS NULL)
+                          AND repo_key IN (SELECT repo_key FROM managed_repos WHERE org_id > 0)
+                    """)
+                except Exception as _e:
+                    log.warning(f"org_id backfill for {table} failed: {_e}")
+
+            db.commit()
+            log.info("Data migrated to personal organizations")
+    except Exception as e:
+        log.warning(f"Data migration to personal orgs failed: {e}")
 
 
 _CONFIG_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "configs")
@@ -1773,6 +1991,12 @@ def _migrate_knowledge_dedup_and_ref():
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
 
+        # 3.0 scene_market 加 preset_custom_fields 列（Issue #246：场景预置自定义参数声明）
+        _ensure_column(c, "scene_market", "preset_custom_fields", "TEXT DEFAULT '[]'")
+
+        # 3.0b agent_runtimes 加 detached_from_scenes_at 列（引擎绑定真实性同步：离线超阈值解绑标记）
+        _ensure_column(c, "agent_runtimes", "detached_from_scenes_at", "TEXT DEFAULT ''")
+
         # 3.1 MySQL: 修复 UNIQUE 索引——老索引缺 issue_num，删旧建新
         if _is_mysql:
             try:
@@ -2455,6 +2679,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
         # ===== 标签用户标记：用户手动设过标签后置1，心跳注册不再自动补 'all' =====
         "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
+        # ===== Issue-P2: 健康分重置时间戳（管理员赦免点，计算窗口起点=max(此值, 7天前)）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN health_reset_at VARCHAR(64) DEFAULT ''",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",
@@ -3003,6 +3229,17 @@ def _migrate_tables():
             log.info("Added issue_session_id / project_info_* / knowledge_files / skill_id columns to agent_tasks")
     except Exception as e:
         log.warning(f"Add agent_tasks issue isolation columns failed: {e}")
+    # ===== session 引擎守卫:issue_agent_session 加 session_engine 列(老库升级) =====
+    # 指针(runtime_session_id)记引擎名,消费端校验"指针引擎==本次引擎"不一致则弃用(开新会话),
+    # 防止引擎池混跑时 hermes 拿到 opencode 的会话号静默挂死(跨引擎续接无防护的历史遗留)
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue_agent_session", "session_engine", "TEXT DEFAULT ''")
+            db.commit()
+        log.info("Added issue_agent_session.session_engine column")
+    except Exception as e:
+        log.warning(f"Add issue_agent_session.session_engine column failed: {e}")
     # ===== user_accounts 发布仓库列(老库升级;CREATE TABLE 只影响新库,存量库须幂等补列)=====
     try:
         with db_lock:
@@ -3661,3 +3898,8 @@ def _backfill_scene_display_names():
             log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch ensured")
     except Exception as e:
         log.warning(f"Autopilot v3.0 schema migration failed: {e}")
+
+    # ===== Organization 特性迁移 =====
+    _migrate_add_org_id_columns()
+    _migrate_create_personal_orgs()
+    _migrate_data_to_personal_orgs()

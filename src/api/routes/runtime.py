@@ -5,7 +5,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 见 agent-runtime-event-full-design.md §6 / tech-impl.md §3。
 """
 import hashlib, json, os, threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
@@ -106,11 +106,13 @@ class CompleteBody(BaseModel):
     exit_code: int = 0
     session_id: str = ""
     work_dir: str = ""
+    engine: str = ""
 
 
 class FailBody(BaseModel):
     error: str = ""
     failure_reason: str = ""
+    exit_code: int = -1
 
 
 # ===== 认证中间件 =====
@@ -138,11 +140,12 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         # 凭据作用域决定 runtime 归属：user scope 的个人 worker 注册为 user scope + owner_id；
         # repo scope 用凭据行 owner_id（仓库全名），否则 set_chat_config / Engines 视图的
         # scope 判定失效（个人/仓库级引擎永远选不中，见 engine-selection §7.1）
-        c.execute("SELECT scope, owner_name, owner_id, repo_key FROM runtime_credentials WHERE id=?", (credential_id,))
+        c.execute("SELECT scope, owner_name, owner_id, repo_key, org_id FROM runtime_credentials WHERE id=?", (credential_id,))
         cred_row = c.fetchone()
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
         cred_repo_key = (cred_row[3] or "") if cred_row else ""
+        cred_org_id = (cred_row[4] or 0) if cred_row else 0
         if cred_scope == "user" and cred_row and cred_row[1]:
             # owner_id 与 user_accounts.id 对齐（按用户名），找不到保持空
             try:
@@ -173,10 +176,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id))
                 rid = c.lastrowid
             # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
             # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。
@@ -639,7 +642,7 @@ def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int =
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    _usage = {"session_id": body.session_id, "work_dir": body.work_dir}
+    _usage = {"session_id": body.session_id, "work_dir": body.work_dir, "engine": body.engine}
     service.set_task_signal(task_id, "stream_ended")
     service.finalize_by_stream_end(task_id, body.result_text or "", body.exit_code, usage=_usage)
     return {"status": "completed"}
@@ -650,7 +653,9 @@ def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    service.fail_task(task_id, body.error or body.failure_reason or "unknown error", exit_code=1)
+    # 透传 worker 上报的真实 exit_code（旧硬编码 1 → 死 session 检测的"连续3次负数"
+    # 永不触发，坏指针清不掉）；旧 worker 不传则默认 -1，与 fail_task 签名一致。
+    service.fail_task(task_id, body.error or body.failure_reason or "unknown error", exit_code=body.exit_code)
     return {"status": "failed"}
 
 
@@ -666,13 +671,92 @@ def runtime_task_requeue(task_id: str, credential_id: int = Depends(_require_cre
 
 @router.post("/runtimes/{runtime_id}/recover-orphans")
 def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_require_credential)):
-    """启动时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。"""
+    """启动/重注册时清理该 runtime 遗留的 dispatched/running 任务（置回 queued）。
+
+    2026-10-08 自噬循环修复（生产 exec#310 实锤）：
+    部署类任务流程中包含"重启 master"——master 重启导致 worker 心跳断 3 次
+    触发 _reregister → recover_orphans 一刀切把**正在执行**的任务置回 queued
+    → worker 重新 claim 从头再跑 → 又重启 master → 循环。任务的本地进程
+    从头到尾没死过，不是孤儿。
+
+    修复（与 service.py claim 兜底回收的活跃度检查同一思路）：
+    1. 活跃度检查：task_messages 最近 RECOVER_ACTIVITY_WINDOW（1200s，兼容
+       hermes 长命令静默窗口 + 分次等待策略）内有新消息 → agent 还在跑，
+       跳过回炉（真孤儿不会有新消息）。
+    2. attempts 封顶：回炉时 attempts+1，attempts>=3 的任务直接置 failed
+       （此前 recover_orphans 不维护 attempts，无限回炉无封顶）。
+    """
+    RECOVER_ACTIVITY_WINDOW = int(os.environ.get("RECOVER_ACTIVITY_WINDOW", "1200"))
+    RECOVER_MAX_ATTEMPTS = int(os.environ.get("RECOVER_MAX_ATTEMPTS", "3"))
+    _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
+    recovered, skipped_active, force_failed = [], [], []
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE runtime_id=? AND status IN ('dispatched','running')",
-                  (runtime_id,))
+        c.execute(
+            "SELECT id, attempts, runtime_id FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            (runtime_id,))
+        rows = c.fetchall()
+        for tid, attempts, rid in rows:
+            # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
+            try:
+                c.execute(
+                    "SELECT 1 FROM task_messages WHERE task_id=? AND created_at > ? LIMIT 1",
+                    (tid, _active_cutoff))
+                if c.fetchone():
+                    skipped_active.append(tid)
+                    continue
+            except Exception:
+                pass  # 查询失败保守跳过检查（保持旧行为：回收）
+            # attempts 封顶：循环回炉保护
+            # 2026-10-08 follow-up：SQLite 后端不支持 CONCAT → no such function 导致
+            # 整个事务回滚、端点 500、封顶安全网失效。改用 service.py 同款纯 SQL CASE
+            # 写法（attempts=attempts+1，CASE 判定 status，说明写 result_text 非 errors）。
+            # 2026-10-09 #253 合并融合：回炉（queued）分支并入 runtime_id 归零 +
+            # pool_agent_type 回填（对齐 master 侧回收；引擎删重建后防死定向）。
+            _att = (attempts or 0) + 1
+            # 归零回填参数：先读 agent_type（回炉转广播后同 tag 引擎可再领）
+            _pool_fill = ""
+            try:
+                c.execute("SELECT agent_type FROM agent_tasks WHERE id=?", (tid,))
+                _pr = c.fetchone()
+                if _pr and _pr[0]:
+                    _pool_fill = _pr[0]
+            except Exception:
+                pass
+            c.execute(
+                "UPDATE agent_tasks SET attempts=attempts+1, "
+                "status=CASE WHEN attempts+1 >= ? THEN 'failed' ELSE 'queued' END, "
+                "started_at=CASE WHEN attempts+1 >= ? THEN started_at ELSE NULL END, "
+                "result_text=CASE WHEN attempts+1 >= ? "
+                "THEN 'recover-orphans attempts cap reached (possible self-restart loop)' "
+                "ELSE result_text END, "
+                "runtime_id=CASE WHEN attempts+1 >= ? THEN runtime_id ELSE 0 END, "
+                "pool_tag=CASE WHEN attempts+1 < ? AND pool_tag='' "
+                "THEN ? ELSE pool_tag END, "
+                "pool_agent_type=CASE WHEN attempts+1 < ? AND pool_agent_type='' "
+                "THEN ? ELSE pool_agent_type END "
+                "WHERE id=?",
+                (RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS,
+                 RECOVER_MAX_ATTEMPTS,
+                 RECOVER_MAX_ATTEMPTS, _pool_fill,
+                 RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
+            if _att >= RECOVER_MAX_ATTEMPTS:
+                force_failed.append(tid)
+            else:
+                recovered.append(tid)
+            # 槽位释放（与 service.py 回收/update_task_status/requeue_task 同款防负数写法）：
+            # 旧代码两分支都不减 busy_slots → 每次回炉净漏 1 槽、force-fail 永久泄漏；
+            # claim_by_tag 满载即拒领（busy>=max → None），漏 4 槽后引擎哑死。
+            if rid and rid > 0:
+                c.execute(
+                    "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                    (rid,))
         db.commit()
-    return {"message": "orphans recovered"}
+    if recovered or skipped_active or force_failed:
+        log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "
+                 f"skipped_active={skipped_active} force_failed={force_failed}")
+    return {"message": "orphans recovered", "recovered": recovered,
+            "skipped_active": skipped_active, "force_failed": force_failed}
 
 
 # ===== 用户态端点（M2，保留）=====
@@ -717,6 +801,14 @@ def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     service.cancel_task(task_id)
+    # autopilot 联动：杀死只写 agent_tasks，autopilot_executions 无人回写会永远停在
+    # running —— event_type=autopilot_event 时同步 exec 终态（cancelled）
+    if (task.get("event_type") or "") == "autopilot_event" and task.get("event_seq"):
+        try:
+            from src.runtime.scheduler import _update_execution_result
+            _update_execution_result(int(task["event_seq"]), "cancelled", error="用户手动终止")
+        except Exception as e:
+            log.warning(f"Cancel: autopilot exec sync failed (task={task_id}, event_seq={task.get('event_seq')}): {e}")
     return {"message": f"任务 {task_id} 已取消", "status": "cancelled"}
 
 

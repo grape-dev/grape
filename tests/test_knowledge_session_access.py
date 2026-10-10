@@ -26,13 +26,13 @@ REPO = "gitcode:org/k-repo"
 @pytest.fixture(autouse=True)
 def _clean():
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE repo_key=?", (REPO,))
         db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE repo_key='gitcode:org/other-k'")
         db.commit()
     yield
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE repo_key=?", (REPO,))
         db.cursor().execute("DELETE FROM agent_shared_knowledge WHERE repo_key='gitcode:org/other-k'")
         db.commit()

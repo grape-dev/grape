@@ -13,8 +13,8 @@ from src.prompt_builder import build_issue_chat_prompt
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM chat_conversations")
-        c.execute("DELETE FROM chat_messages")
+        c.execute("DELETE FROM chat_conversations WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR id LIKE 'test_%' OR title LIKE 'test_%'")
+        c.execute("DELETE FROM chat_messages WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%')")
         db.commit()
 
 
@@ -80,10 +80,43 @@ def test_build_issue_chat_prompt_no_conv_defaults():
     assert "Issue: #0" in prompt
 
 
-def test_build_issue_chat_prompt_no_task_description():
-    """决策 R2：不再注入「## Task Description」，改由 Issue 上下文承担。"""
-    conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7", "repo_key": "gitcode:owner/repo"}
-    prompt = build_issue_chat_prompt("确认一下", "gitcode:owner/repo", [], conv)
+def _clean_tasks():
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM issue WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
+        db.commit()
+
+
+def _insert_task(repo_key, issue_number, description, conv_id="", user_id=1):
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (?,?,?,?,?,?,?, 'active')",
+            (user_id, "alice", repo_key, issue_number, f"Issue #{issue_number}", description, conv_id))
+        db.commit()
+
+
+def test_build_task_chat_prompt_injects_task_description():
+    """任务会话 prompt 显式含 ## 任务描述（来自 tasks 表）"""
+    _clean()
+    _clean_tasks()
+    _insert_task("gitcode:owner/repo", 7, "处理登录超时")
+    conv = {"conv_type": "task", "issue_number": 7, "title": "Issue #7",
+            "repo_key": "gitcode:owner/repo", "id": ""}
+    prompt = build_task_chat_prompt("确认一下", "gitcode:owner/repo", [], conv)
+    assert "### Task Description" in prompt
+    assert "处理登录超时" in prompt
+    _clean_tasks()
+    _clean()
+
+
+def test_build_task_chat_prompt_no_description_ok():
+    """tasks 表无对应记录时 prompt 正常（跳过 ## 任务描述）"""
+    _clean()
+    _clean_tasks()
+    conv = {"conv_type": "task", "issue_number": 99, "title": "Issue #99",
+            "repo_key": "gitcode:owner/repo", "id": ""}
+    prompt = build_task_chat_prompt("hi", "gitcode:owner/repo", [], conv)
     assert "### Task Description" not in prompt
 
 

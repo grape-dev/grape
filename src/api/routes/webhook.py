@@ -744,11 +744,13 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             if _pool_eids is None:
                 # Issue #259 方案A：场景绑定的引擎全部离线 → 不入队，事件置 failed 并明确提示
                 log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} engines all offline, skip (Issue #259)")
+                # 引擎绑定真实性同步：改走统一 helper，人话原因落 events.result/agent_tasks.errors
                 try:
+                    from src.api.event_pipeline import _fail_scene_all_offline
+                    _fail_scene_all_offline(seq, _a2a_scene, agent_name, "A2A", repo_key=repo_key or "")
+                except Exception:
                     from src.api.event_store import update_event_status
                     update_event_status(seq, "failed")
-                except Exception:
-                    pass
                 return {"status": "ok", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线"}
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
