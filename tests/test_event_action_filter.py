@@ -21,7 +21,7 @@ def _clean_event_rules():
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM event_action_filter")
+        c.execute("DELETE FROM event_action_filter WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
         cur = c
         def _ins(evt, act, allow, actor="any", req="", block="", se=""):
             cur.execute(
@@ -44,7 +44,7 @@ def _clean_event_rules():
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM event_action_filter")
+        c.execute("DELETE FROM event_action_filter WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
         db.commit()
     event_rule.load_event_action_rule(force=True)
 

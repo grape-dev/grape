@@ -298,6 +298,9 @@ const API = (() => {
     const token = await ensureTokenValid();
     const h = {'Content-Type': 'application/json'};
     if (token) h['Authorization'] = 'Bearer ' + token;
+    // 组织上下文：从 localStorage 读取当前组织 ID
+    const orgId = localStorage.getItem('current_org_id');
+    if (orgId) h['X-Org-ID'] = orgId;
     return h;
   }
 
@@ -377,8 +380,10 @@ const API = (() => {
         const xhr = new XMLHttpRequest();
         xhr.open('POST', BASE + path);
         if (token) xhr.setRequestHeader('Authorization', 'Bearer ' + token);
+        const _orgId = localStorage.getItem('current_org_id');
+        if (_orgId) xhr.setRequestHeader('X-Org-ID', _orgId);
         xhr.upload.onprogress = (e) => {
-          if (onUploadProgress && e.lengthcomputable) {
+          if (onUploadProgress && e.lengthComputable) {
             onUploadProgress(Math.round((e.loaded / e.total) * 100));
           }
         };

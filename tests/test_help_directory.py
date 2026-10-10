@@ -36,6 +36,10 @@ EXPECTED_USAGE_FILES = [
     "faq.md",
 ]
 
+EXPECTED_REFERENCE_FILES = [
+    "event-mapping.md",
+]
+
 EXPECTED_API_FILES = [
     "00-auth.md",
     "01-tasks.md",

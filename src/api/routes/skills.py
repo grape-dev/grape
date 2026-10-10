@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
-from src.api.deps import get_current_user_or_api_key, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 
 router = APIRouter(prefix="/api/skills", tags=["skills"])
 
@@ -53,7 +53,7 @@ def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
 
 
 @router.get("", operation_id="skills_list", summary="List skills", description="Lists skills: official visible to all, user visible to owner, repo visible to members. Supports scope/agent_type/sub_scene filtering, sort and paging.")
-def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", scope: str = "",
+def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope: str = "",
                 agent_type: str = "", category_id: int = 0,
                 q: str = "", sort: str = "", page: int = 1, page_size: int = 0):
     """返回技能列表：official 所有用户可见；user 本人可见；repo 指定仓库可见。
@@ -74,6 +74,7 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
     repo_key = _resolve_repo_key(repo) if repo else ""
 
     # 构建查询条件
+    _org_id = user.get("org_id", 0)
     conditions = ["is_active=1"]
     params = []
     if scope == "all":
@@ -98,6 +99,12 @@ def list_skills(user: dict = Depends(require_no_session_token), repo: str = "", 
         # 官方 + 个人（兼容旧逻辑）
         conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
         params.append(str(user["id"]))
+
+    # 组织隔离：official 技能（org_id=0）对所有组织可见；
+    # user/repo scope 技能只在当前组织内可见（org_id 匹配）
+    if _org_id:
+        conditions.append("(org_id=0 OR org_id=?)")
+        params.append(_org_id)
 
     # 搜索过滤
     q = (q or "").strip()

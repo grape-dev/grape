@@ -182,7 +182,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
-                      sender: str = "") -> int | None:
+                      sender: str = "",
+                      org_id: int = 0) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id
@@ -222,6 +223,20 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
+    # org_id 未显式传入时，从 managed_repos 表推断仓库关联的组织
+    if not org_id:
+        try:
+            from src.session_manager import db as _org_db, db_lock as _org_db_lock
+            with _org_db_lock:
+                _oc = _org_db.cursor()
+                _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                _or = _oc.fetchone()
+                if _or and _or[0]:
+                    org_id = _or[0]
+                else:
+                    log.info(f"ensure_issue_task: managed_repos has no org_id for repo_key={repo_key}, org_id stays 0")
+        except Exception as _e:
+            log.warning(f"ensure_issue_task: failed to infer org_id from managed_repos for {repo_key}: {_e}")
     with db_lock:
         c = db.cursor()
         # 幂等去重：同一平台 issue 唯一一张卡，任何状态都复用（2026-10-06 修复：
@@ -235,6 +250,9 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = row[0]
             linked = row[1]
             _cur_st = row[2] or ""
+            # 复用路径：如果已有行 org_id=0 但推断出 org_id>0，则回补（session_store 先建行的 org_id 为 0）
+            if org_id:
+                c.execute("UPDATE issue SET org_id=? WHERE id=? AND (org_id=0 OR org_id IS NULL)", (org_id, task_id))
             if _cur_st not in ("active", "processing"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
@@ -275,10 +293,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number))
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id)
             )
             db.commit()
             task_id = c.lastrowid
@@ -1212,8 +1230,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             _log.warning(f"Auto multi-task detection failed: {_e}")
 
     # 4) 按既有流程幂等建档（同 issue 任务 id 复用）
+    _org_id = user.get("org_id", 0)
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
-                                subtask_mode=_auto_subtask_mode)
+                                subtask_mode=_auto_subtask_mode, org_id=_org_id)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记

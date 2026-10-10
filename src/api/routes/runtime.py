@@ -140,11 +140,12 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         # 凭据作用域决定 runtime 归属：user scope 的个人 worker 注册为 user scope + owner_id；
         # repo scope 用凭据行 owner_id（仓库全名），否则 set_chat_config / Engines 视图的
         # scope 判定失效（个人/仓库级引擎永远选不中，见 engine-selection §7.1）
-        c.execute("SELECT scope, owner_name, owner_id, repo_key FROM runtime_credentials WHERE id=?", (credential_id,))
+        c.execute("SELECT scope, owner_name, owner_id, repo_key, org_id FROM runtime_credentials WHERE id=?", (credential_id,))
         cred_row = c.fetchone()
         cred_scope = (cred_row[0] if cred_row and cred_row[0] else "global").strip().lower()
         owner_id = (cred_row[2] or "") if cred_row else ""
         cred_repo_key = (cred_row[3] or "") if cred_row else ""
+        cred_org_id = (cred_row[4] or 0) if cred_row else 0
         if cred_scope == "user" and cred_row and cred_row[1]:
             # owner_id 与 user_accounts.id 对齐（按用户名），找不到保持空
             try:
@@ -175,10 +176,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id))
                 rid = c.lastrowid
             # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
             # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。

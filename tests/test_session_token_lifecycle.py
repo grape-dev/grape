@@ -40,7 +40,7 @@ def _task_env(task_id):
 def _cleanup():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM session_api_tokens")
+        c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         c.execute("DELETE FROM agent_tasks WHERE id LIKE 't_%'")
         c.execute("DELETE FROM devops_agent_session WHERE id LIKE 'm2sess-%'")
         c.execute("DELETE FROM agent_runtimes WHERE name='m2rt'")

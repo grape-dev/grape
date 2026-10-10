@@ -33,8 +33,8 @@ _client = TestClient(app)
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM session_api_tokens")
-        c.execute("DELETE FROM api_tokens")
+        c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
+        c.execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         c.execute("DELETE FROM agent_tasks WHERE id=?", (TASK,))
         c.execute("DELETE FROM user_repos WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (REPO,))
@@ -42,8 +42,8 @@ def _clean():
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM session_api_tokens")
-        c.execute("DELETE FROM api_tokens")
+        c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
+        c.execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         c.execute("DELETE FROM agent_tasks WHERE id=?", (TASK,))
         c.execute("DELETE FROM user_repos WHERE repo_key=?", (REPO,))
         db.commit()

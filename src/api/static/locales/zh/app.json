@@ -26,6 +26,7 @@
     "scene_skill_market": "场景·技能",
     "scene_market": "场景市场",
     "skill_market": "技能市场",
+    "organizations": "组织管理",
     "autopilot": "自动化"
   },
   "sidebar": {
@@ -36,7 +37,8 @@
     "account": "用户中心",
     "device_center": "设备中心",
     "settings": "设置",
-    "toggle": "收起/展开侧边栏"
+    "toggle": "收起/展开侧边栏",
+    "organizations": "组织"
   },
   "login": {
     "gitcode_login": "使用 GitCode 登录",
