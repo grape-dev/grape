@@ -27,8 +27,8 @@ def _clean_token_tables():
     """每用例前清空 token 表：Windows 下旧库残留跨运行，防键值冲突。"""
     from src.session_manager import db, db_lock
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
-        db.cursor().execute("DELETE FROM api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
+        db.cursor().execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         db.commit()
     yield
 

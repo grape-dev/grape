@@ -890,19 +890,19 @@ function loadAgentTypes() {
       repoTitle.textContent = '';
     }
 
+    // 无仓库时的统一空态引导
+    function _noRepoPlaceholder() {
+      return '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:40px">' +
+        '<div style="font-size:48px">📦</div>' +
+        '<div style="font-size:16px;font-weight:600;color:var(--t1)">' + (I18N.t("organizations.switch_org.no_repos") || "该组织下暂无托管仓库") + '</div>' +
+        '<button onclick="app.goToRepos()" style="padding:10px 24px;border:none;border-radius:10px;background:var(--a);color:#fff;cursor:pointer;font-size:13px;font-weight:600">' + (I18N.t("app.repo.back_to_select") || "返回选择仓库") + '</button>' +
+        '</div>';
+    }
+
     if (view === 'dash') {
       title.textContent = I18N.t('app.current_project');
-      // 进入场景中心时无条件清除编辑标志（上一次操作异常退出时泄漏）
       window._dashboardEditing = false;
-      // 无仓库时显示空态引导
-      if (!repo) {
-        pc.innerHTML = '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:40px">' +
-          '<div style="font-size:48px">📦</div>' +
-          '<div style="font-size:16px;font-weight:600;color:var(--t1)">' + I18N.t("organizations.switch_org.no_repos") + '</div>' +
-          '<button onclick="app.goToRepos()" style="padding:10px 24px;border:none;border-radius:10px;background:var(--a);color:#fff;cursor:pointer;font-size:13px;font-weight:600">' + I18N.t("app.repo.back_to_select") + '</button>' +
-          '</div>';
-        return;
-      }
+      if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
@@ -925,9 +925,11 @@ function loadAgentTypes() {
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
+      if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
+      if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {

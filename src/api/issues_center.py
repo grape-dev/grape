@@ -233,8 +233,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 _or = _oc.fetchone()
                 if _or and _or[0]:
                     org_id = _or[0]
-        except Exception:
-            pass
+                else:
+                    log.info(f"ensure_issue_task: managed_repos has no org_id for repo_key={repo_key}, org_id stays 0")
+        except Exception as _e:
+            log.warning(f"ensure_issue_task: failed to infer org_id from managed_repos for {repo_key}: {_e}")
     with db_lock:
         c = db.cursor()
         # 幂等去重：同一平台 issue 唯一一张卡，任何状态都复用（2026-10-06 修复：
@@ -248,6 +250,9 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = row[0]
             linked = row[1]
             _cur_st = row[2] or ""
+            # 复用路径：如果已有行 org_id=0 但推断出 org_id>0，则回补（session_store 先建行的 org_id 为 0）
+            if org_id:
+                c.execute("UPDATE issue SET org_id=? WHERE id=? AND (org_id=0 OR org_id IS NULL)", (org_id, task_id))
             if _cur_st not in ("active", "processing"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",

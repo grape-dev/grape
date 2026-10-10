@@ -57,8 +57,8 @@ def _clean():
     _issue_seq = None
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM event_thread")
-        c.execute("DELETE FROM agent_shared_knowledge")
+        c.execute("DELETE FROM event_thread WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
+        c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
         c.execute("DELETE FROM events WHERE repo_key=?", (_REPO_KEY,))
         c.execute("DELETE FROM issue_state WHERE repo_key=?", (_REPO_KEY,))
         c.execute("DELETE FROM agent_tasks WHERE repo_key=?", (_REPO_KEY,))

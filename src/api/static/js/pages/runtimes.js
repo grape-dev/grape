@@ -91,12 +91,21 @@ function _loadRuntimesData() {
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
+    // 空数据快速路径：直接渲染空态，不等待 sceneTagsCache
+    var _rts = (d && d.runtimes) || [];
+    var _devs = (d && d.devices) || [];
+    if (_rts.length === 0 && _devs.length === 0 && !d.devices) {
+      _renderRuntimesSkeleton(d);
+      // 仍然预加载 sceneTagsCache 供后续使用
+      if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
+      return;
+    }
     renderRuntimes(d);
   }).catch(function(e) {
     if (e.name === 'AbortError' && e.silent) return;
     if (window._currentView !== 'runtimes') return;
     var el = document.getElementById('pageContent');
-    if (el) el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
+    if (el) el.innerHTML = '<div class="error">' + (I18N.t('common.load_failed') || '加载失败') + ': ' + (e.message || '') + '</div>';
   });
 }
 
@@ -242,6 +251,33 @@ function _legendHtml() {
   </div>`;
 }
 
+function _renderRuntimesSkeleton(data) {
+  var el = document.getElementById('pageContent');
+  if (!el) return;
+  var runtimes = (data && data.runtimes) || [];
+  var devices = (data && data.devices) || [];
+  var isEmpty = runtimes.length === 0 && devices.length === 0;
+  var tabBtn = function(t) {
+    var active = _runtimeTab === t;
+    return '<button class="bt ' + (active ? 'bt-p' : 'bt-o') + '" onclick="_runtimeTab=\'' + t + '\';_onRuntimeTabSwitch(\'' + t + '\')">' + (I18N.t('runtimes.tab.' + t) || t) + '</button>';
+  };
+  var toolbar = '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">' +
+    tabBtn('engines') + tabBtn('workers') +
+    '<div class="sp"></div>' +
+    '<button class="bt bt-o" onclick="refreshRuntimes()">' + (I18N.t('runtimes.refresh') || '⟳') + '</button>' +
+    '</div>';
+  if (isEmpty) {
+    el.innerHTML = toolbar +
+      '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
+      '<div style="font-size:48px">🔧</div>' +
+      '<div style="font-size:15px;font-weight:600;color:var(--t1)">暂无引擎</div>' +
+      '<div style="font-size:13px;color:var(--t3)">当前组织下暂无接入的引擎或设备</div>' +
+      '</div>';
+  } else {
+    el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
+  }
+}
+
 function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -250,6 +286,8 @@ function renderRuntimes(data) {
   if (data.total !== undefined) _rtTotal = data.total;
   // 场景标签缓存未加载时先异步拉取，拿到后再渲染（避免卡片显示原始 name 而非 display_name）
   if (!__sceneTagsCache) {
+    // 先渲染基础框架（带空态提示），避免页面一直显示"加载中"
+    _renderRuntimesSkeleton(data);
     _loadSceneTagsCache(function() { if (__runtimeData) renderRuntimes(__runtimeData); });
     return;
   }

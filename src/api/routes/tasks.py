@@ -150,6 +150,9 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
         if row:
             task_id = row[0]
             linked = row[1]
+            # 复用路径：如果已有行 org_id=0 但推断出 org_id>0，则回补
+            if org_id:
+                c.execute("UPDATE issue SET org_id=? WHERE id=? AND (org_id=0 OR org_id IS NULL)", (org_id, task_id))
             if title:
                 c.execute("UPDATE issue SET title=? WHERE id=?", (title, task_id))
             if subtask_mode >= 0:

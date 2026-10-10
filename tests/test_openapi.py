@@ -405,8 +405,8 @@ def _user():
 def test_three_channels_can_call_public_api():
     from src.session_manager import db, db_lock
     with db_lock:  # 清空 token 表，避免残留
-        db.cursor().execute("DELETE FROM session_api_tokens")
-        db.cursor().execute("DELETE FROM api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
+        db.cursor().execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         db.commit()
     uid = _user()
 

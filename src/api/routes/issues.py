@@ -1339,7 +1339,7 @@ def list_repo_issues(owner: str, repo: str,
 
 @router.post("/{owner}/{repo}", operation_id="issues_create", summary="Create issue (unified entry)", description="Creates an Issue (unified external entry): creates the GitCode issue, records it and triggers the pipeline. Body: repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode.")
 async def create_issue(owner: str, repo: str, body: dict = None,
-                       user: dict = Depends(require_no_session_token)):
+                       user: dict = Depends(require_org_member)):
     """创建 Issue（对外唯一创建入口）：建 GitCode Issue + 建档 + 触发 pipeline。
 
     body: {repo_key?, title, description?, assignee?, scene_id?, is_subtask_mode?}
