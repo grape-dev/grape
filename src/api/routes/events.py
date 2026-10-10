@@ -17,9 +17,8 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         c = db.cursor()
         try:
             c.execute(
-                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output FROM events WHERE seq=?",
-                (seq,)
-            )
+                "SELECT seq, repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, created_at, runtime, skill, exit_code, duration, agent_logs, started_at, completed_at, result, structured_output, scene_id FROM events WHERE seq=?",
+                (seq,))
             row = c.fetchone()
         except Exception:
             row = None
@@ -123,12 +122,15 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
             pass
     # 引擎实例名（events.runtime 是引擎类型名；具体实例多级回退解析，见 agent-cluster-design.md）
     # 1) agent_tasks.runtime_id（queue/池模式实际执行引擎）
-    # 2) devops_agent_session.runtime_id（direct 模式绑定实例）
-    # 3) events.runtime 类型名 → 本机/在线实例
+    # 2) 场景节点 engine_runtime_ids（Issue #285 后续：场景绑定才是派发依据，优先于 session 旧绑定）
+    # 3) devops_agent_session.runtime_id（direct 模式绑定实例）
+    # 4) events.runtime 类型名 → 本机/在线实例
+    # 未派发（runtime_id=0 且无场景/session 绑定）时不做兜底归因，前端显示"未派发"
     engine_instance = ""
     engine_device = ""
     engine_ip = ""
     runtime_id = 0
+    _scene_bound = False
     try:
         from src.runtime.instances import instance_name
         runtime_id = 0
@@ -142,13 +144,25 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
             if tr:
                 runtime_id = tr[0]
             else:
-                # direct 模式：查该 repo+agent 会话绑定的实例
-                c2.execute(
-                    "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1",
-                    (row[1] or "", row[5] or ""))
-                sr = c2.fetchone()
-                if sr:
-                    runtime_id = sr[0]
+                # 场景绑定优先（A）：scene_id 非空时取场景节点 engine_runtime_ids 首个
+                _scene_id = row[21] if len(row) > 21 else ""
+                if _scene_id:
+                    try:
+                        from src.api.pipeline_config import get_scene_engine_ids
+                        _sids = get_scene_engine_ids(_scene_id, row[5] or "", repo_key=row[1] or "")
+                        if _sids:
+                            runtime_id = int(_sids[0])
+                            _scene_bound = True
+                    except Exception:
+                        pass
+                if not runtime_id:
+                    # direct 模式：查该 repo+agent 会话绑定的实例
+                    c2.execute(
+                        "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1",
+                        (row[1] or "", row[5] or ""))
+                    sr = c2.fetchone()
+                    if sr:
+                        runtime_id = sr[0]
             if runtime_id:
                 c2.execute(
                     "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
@@ -161,16 +175,15 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     engine_ip = ar[3] or ""
             if not engine_instance and row[12]:
                 # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
-                # 未派发（runtime_id=0 且任务 failed）跳过兜底，避免错误归因无关引擎（Issue #285）
+                # Issue #285 + C 方案：runtime_id=0 说明无任何真实绑定（未派发/未认领），
+                # 只要存在 task 记录就不做类型名兜底，避免错误归因无关引擎；前端显示"未派发"
                 _undispatched = False
-                if not runtime_id:
+                if not runtime_id and not _scene_bound:
                     try:
                         c2.execute(
-                            "SELECT status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                            "SELECT COUNT(*) FROM agent_tasks WHERE event_seq=?",
                             (seq,))
-                        _ts = c2.fetchone()
-                        if _ts and (_ts[0] or "") == "failed":
-                            _undispatched = True
+                        _undispatched = (c2.fetchone()[0] or 0) > 0
                     except Exception:
                         pass
                 if not _undispatched:
