@@ -115,6 +115,11 @@ def get_organization(org_id: int, user: dict = Depends(require_no_session_token)
 @router.put("/{org_id}", operation_id="orgs_update", summary="更新组织信息")
 def update_organization(org_id: int, body: UpdateOrgBody,
                         user: dict = Depends(require_org_admin)):
+    # 个人组织（默认工作空间）不支持编辑成员上限/Worker 上限，忽略这两个字段
+    from src.user.org_db import is_org_personal as _is_p
+    if _is_p(org_id):
+        body.max_members = 0
+        body.max_workers = 0
     update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url,
                max_members=body.max_members, max_workers=body.max_workers)
     return {"ok": True}
