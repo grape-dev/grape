@@ -3195,9 +3195,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             if not _self_ok:
                 for _tu in (tool_uses or []):
                     _cmd = _tu.get("cmd", "") if isinstance(_tu, dict) else str(_tu)
-                    _cmd = _extract_tool_command(_tu) if not isinstance(_cmd, str) or "POST" not in _cmd.upper() else _cmd
+                    _cmd = _extract_tool_command(_tu) if (not isinstance(_cmd, str) or "POST" not in _cmd.upper()) else _cmd
                     _up = _cmd.upper()
-                    if "POST" in _up and any(k in _up for k in ("/COMMENTS", "/PULLS", "/API/A2A", "MERGE_REQUESTS")):
+                    # A2A 有两种形态：直接 curl POST /api/a2a，或 grape CLI 的 `grape a2a handoff`
+                    # （CLI 内部才发 POST，命令字符串里没有 POST 关键字，须单独匹配）
+                    if (("POST" in _up and any(k in _up for k in ("/COMMENTS", "/PULLS", "MERGE_REQUESTS")))
+                            or ("A2A HANDOFF" in _up) or ("POST" in _up and "/API/A2A" in _up)):
                         _write_action = True
                         break
             if not (_self_ok or _write_action):
