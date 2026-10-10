@@ -31,6 +31,23 @@ from typing import Generator
 from src.config import log
 
 
+def _global_timeout_for(max_exec_seconds: float) -> float:
+    """hermes ACP 内循环全局墙钟上限（#282 对齐修复）。
+
+    取 RUNTIME_TASK_TIMEOUT 环境变量（与 src/runtime/agent.py 任务级看门狗
+    `_env_float("RUNTIME_TASK_TIMEOUT", 3600)` 同一配置源、同默认值），
+    解析失败回退 3600；下限保护 max_exec_seconds——全局上限始终 ≥ 静默超时窗口，
+    防止配置异常把全局上限压到静默超时之下。
+    旧逻辑 `max_exec_seconds * 2`（=1200s 写死倍率）会在长任务 20 分钟处
+    硬切仍在正常输出的任务，已废弃。
+    """
+    try:
+        _v = float(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+    except Exception:
+        _v = 3600.0
+    return max(_v, float(max_exec_seconds))
+
+
 class HermesACPBackend:
     """Hermes ACP 后端 — 不走 build_args/parse_output，直接 stream_execute yield 事件。"""
     name = "hermes"
@@ -405,7 +422,7 @@ class HermesACPBackend:
             _global_start = time.time()
             _SILENT_TIMEOUT = 300   # 工具调用后 5分钟无事件 → 超时终止
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后 60s 无后续 → 超时终止
-            _GLOBAL_TIMEOUT = max_exec_seconds * 2
+            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
             _last_event_type = ""   # 记录最后一次事件类型
 
             while True:
@@ -446,9 +463,11 @@ class HermesACPBackend:
                     prompt_result["stopReason"] = "timeout"
                     break
 
-                # 全局超时
+                # 全局超时（#282：对齐外层 RUNTIME_TASK_TIMEOUT，默认 3600s）
                 if time.time() - _global_start > _GLOBAL_TIMEOUT:
-                    log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT}s) exceeded")
+                    _gt_src = os.environ.get("RUNTIME_TASK_TIMEOUT")
+                    _gt_src_txt = f"env RUNTIME_TASK_TIMEOUT={_gt_src}" if _gt_src else "default 3600s"
+                    log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT:.0f}s, {_gt_src_txt}) exceeded")
                     prompt_result["stopReason"] = "timeout"
                     break
 
