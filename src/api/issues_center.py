@@ -1116,9 +1116,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _is_github = repo_key.startswith("github:")
     # _preauth_token: autopilot 等内部调用（auth_type=api_key/internal）预注入 bot token
     # JWT 登录用户的 token 是 session JWT 不是 GitCode API token，不能走此路径
+    # grape_ 前缀的是用户级 API Key（CLI 用户），同样不是 GitCode token，不能走此路径
     _preauth_token = ""
     if user.get("auth_type") in ("api_key", "internal") and user.get("token"):
-        _preauth_token = user["token"]
+        _token_val = user["token"]
+        if not _token_val.startswith("grape_"):
+            _preauth_token = _token_val
     if _preauth_token:
         api_token = _preauth_token
     elif _is_github:

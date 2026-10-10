@@ -115,7 +115,9 @@ function _apLoadTasks() {
     document.getElementById('apResultCount').textContent = '';
     return;
   }
-  var url = '/autopilot/tasks?repo_key=gitcode:' + repo;
+  var _apRepoKey = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().repoKey || '') : '';
+  if (!_apRepoKey && repo) _apRepoKey = 'gitcode:' + repo;
+  var url = '/autopilot/tasks?repo_key=' + _apRepoKey;
   API.get(url).then(function(d) {
     if (window._currentView !== 'autopilot') return;
     _apAllTasks = d.tasks || [];
@@ -493,7 +495,7 @@ function _apShowDialog(tpl, existing) {
   // 加载工作分支列表（编辑时用 task.repo_key，新建时用当前仓库）
   var _taskRepoKey = existing ? (existing.repo_key || '') : '';
   if (!_taskRepoKey && typeof app !== 'undefined' && app.currentRepo()) {
-    _taskRepoKey = 'gitcode:' + (app.currentRepo().fullName || '');
+    _taskRepoKey = (app.currentRepo().repoKey || '') || ('gitcode:' + (app.currentRepo().fullName || ''));
   }
   if (_taskRepoKey) {
     var _rk = _taskRepoKey.replace(/^(gitcode|github):/, '');
@@ -1385,7 +1387,7 @@ function _apSubmitForm() {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   var body = {
     name: name,
-    repo_key: 'gitcode:' + repo,
+    repo_key: (app.currentRepo() && app.currentRepo().repoKey) ? app.currentRepo().repoKey : ('gitcode:' + repo),
     instruction: instruction,
     skill_name: skillName,
     cron: _apFormCron,
