@@ -442,24 +442,22 @@ function loadAgentTypes() {
         sessionStorage.setItem('currentRepo', JSON.stringify({fullName: first.full_name, owner: first.owner, name: first.name, repoKey: first.repo_key || ''}));
         // 更新侧边栏仓库下拉
         initSidebarRepos();
-        // 刷新当前页面数据（如果是 dashboard 会重新加载）
-        if (window._currentView === 'dash') {
-          nav('dash');
-        } else if (window._currentView === 'repos') {
-          // 在 repos lobby 页面切换到有仓库的组织时，直接进入第一个仓库
+        // 刷新当前页面数据（切换组织后所有视图都重新加载）
+        if (window._currentView === 'repos') {
           selectRepo(first.full_name, first.owner, first.name, first.repo_key || '');
+        } else if (window._currentView) {
+          nav(window._currentView, _currentParam);
         }
       } else {
         // 没有已托管仓库 — 清除当前仓库选择，刷新页面显示空态
         sessionStorage.removeItem('currentRepo');
         initSidebarRepos();
         showToast(I18N.t("organizations.switch_org.no_repos"));
-        // 如果当前在 dash 页面，刷新显示空态
-        if (window._currentView === 'dash' || !window._currentView) {
-          nav('dash');
-        } else if (window._currentView === 'repos') {
-          // 在 repos lobby 页面切换到无仓库的组织时，重新渲染 lobby
+        // 切换组织后所有视图都重新加载（显示空态或刷新数据）
+        if (window._currentView === 'repos') {
           goToRepos();
+        } else if (window._currentView) {
+          nav(window._currentView, _currentParam);
         }
       }
       // 刷新右上角组织名

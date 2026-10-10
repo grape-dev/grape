@@ -73,14 +73,15 @@ def list_user_orgs(user_id: int) -> list[dict]:
 
 
 def update_org(org_id: int, name: str = "", description: str = "",
-               avatar_url: str = "", settings: str = "") -> bool:
-    """更新组织信息（仅非空字段）。"""
+               avatar_url: str = "", settings: str = "",
+               max_members: int = 0, max_workers: int = 0) -> bool:
+    """更新组织信息（仅非空/非零字段）。"""
     sets = []
     params = []
     if name:
         sets.append("name=?")
         params.append(name)
-    if description:
+    if description is not None and description != "":
         sets.append("description=?")
         params.append(description)
     if avatar_url:
@@ -89,6 +90,12 @@ def update_org(org_id: int, name: str = "", description: str = "",
     if settings:
         sets.append("settings=?")
         params.append(settings)
+    if max_members and max_members > 0:
+        sets.append("max_members=?")
+        params.append(max_members)
+    if max_workers and max_workers > 0:
+        sets.append("max_workers=?")
+        params.append(max_workers)
     if not sets:
         return True
     sets.append("updated_at=datetime('now')")

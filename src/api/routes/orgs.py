@@ -27,6 +27,8 @@ class UpdateOrgBody(BaseModel):
     name: str = ""
     description: str = ""
     avatar_url: str = ""
+    max_members: int = 0
+    max_workers: int = 0
 
 
 class AddMemberBody(BaseModel):
@@ -113,7 +115,8 @@ def get_organization(org_id: int, user: dict = Depends(require_no_session_token)
 @router.put("/{org_id}", operation_id="orgs_update", summary="更新组织信息")
 def update_organization(org_id: int, body: UpdateOrgBody,
                         user: dict = Depends(require_org_admin)):
-    update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url)
+    update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url,
+               max_members=body.max_members, max_workers=body.max_workers)
     return {"ok": True}
 
 

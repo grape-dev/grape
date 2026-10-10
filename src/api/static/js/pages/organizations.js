@@ -126,8 +126,11 @@ function _showOrgDetail(orgId) {
     });
     html += '</div>';
 
-    // 切换到该组织 + 删除组织
-    html += '<div style="border:1px solid var(--b);border-radius:12px;padding:16px;display:flex;gap:10px;justify-content:center;align-items:center">';
+    // 切换到该组织 + 编辑 + 删除组织
+    html += '<div style="border:1px solid var(--b);border-radius:12px;padding:16px;display:flex;gap:10px;justify-content:center;align-items:center;flex-wrap:wrap">';
+    if (org.role === 'owner' || org.role === 'admin') {
+      html += '<button onclick="_showEditOrgDialog(' + orgId + ',\'' + (org.name || '').replace(/'/g, "\\'") + '\',\'' + (org.description || '').replace(/'/g, "\\'") + '\',' + (org.max_members || 50) + ',' + (org.max_workers || 10) + ')" style="padding:10px 20px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);cursor:pointer;font-size:12px">' + (I18N.t("organizations.detail.edit_org") || '编辑组织') + '</button>';
+    }
     if (!org.is_personal && (org.role === 'owner')) {
       html += '<button onclick="_deleteOrg(' + orgId + ',\'' + (org.name || '').replace(/'/g, "\\'") + '\')" style="padding:10px 20px;border:1px solid var(--r);border-radius:8px;background:transparent;color:var(--r);cursor:pointer;font-size:12px">' + I18N.t("organizations.detail.delete_org") + '</button>';
     }
@@ -282,3 +285,52 @@ function _deleteOrg(orgId, orgName) {
 window.renderOrganizations = renderOrganizations;
 window._switchOrg = _switchOrg;
 window._deleteOrg = _deleteOrg;
+window._showEditOrgDialog = _showEditOrgDialog;
+
+function _showEditOrgDialog(orgId, name, description, maxMembers, maxWorkers) {
+  var existing = document.getElementById('_editOrgOverlay');
+  if (existing) { existing.remove(); return; }
+  var overlay = document.createElement('div');
+  overlay.id = '_editOrgOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
+  var dlg = document.createElement('div');
+  dlg.style.cssText = 'position:relative;background:var(--c,#fff);border-radius:12px;padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.15);font-family:-apple-system,BlinkMacSystemFont,sans-serif';
+  dlg.innerHTML =
+    '<div style="font-size:16px;font-weight:600;margin-bottom:16px;color:var(--t1)">' + (I18N.t("organizations.detail.edit_org") || '编辑组织') + '</div>' +
+    '<div style="margin-bottom:12px"><label style="display:block;font-size:12px;color:var(--t3);margin-bottom:4px">' + (I18N.t("organizations.create.name_label") || '名称') + '</label>' +
+    '<input id="_editOrgName" type="text" value="' + (name || '').replace(/"/g, '&quot;') + '" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);font-size:13px;box-sizing:border-box;outline:none"></div>' +
+    '<div style="margin-bottom:12px"><label style="display:block;font-size:12px;color:var(--t3);margin-bottom:4px">' + (I18N.t("organizations.create.desc_label") || '描述') + '</label>' +
+    '<textarea id="_editOrgDesc" rows="2" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);font-size:13px;box-sizing:border-box;outline:none;resize:none">' + (description || '') + '</textarea></div>' +
+    '<div style="display:flex;gap:12px;margin-bottom:16px">' +
+    '<div style="flex:1"><label style="display:block;font-size:12px;color:var(--t3);margin-bottom:4px">' + (I18N.t("organizations.detail.member_limit") || '成员上限') + '</label>' +
+    '<input id="_editOrgMaxMembers" type="number" min="1" max="500" value="' + (maxMembers || 50) + '" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);font-size:13px;box-sizing:border-box;outline:none"></div>' +
+    '<div style="flex:1"><label style="display:block;font-size:12px;color:var(--t3);margin-bottom:4px">' + (I18N.t("organizations.detail.worker_limit") || 'Worker 上限') + '</label>' +
+    '<input id="_editOrgMaxWorkers" type="number" min="0" max="100" value="' + (maxWorkers || 10) + '" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);font-size:13px;box-sizing:border-box;outline:none"></div>' +
+    '</div>' +
+    '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+    '<button id="_editOrgCancel" style="padding:8px 16px;border:1px solid var(--b);border-radius:8px;background:var(--c);color:var(--t1);cursor:pointer;font-size:13px">' + (I18N.t("common.cancel") || '取消') + '</button>' +
+    '<button id="_editOrgSave" style="padding:8px 20px;border:none;border-radius:8px;background:var(--a);color:#fff;cursor:pointer;font-size:13px;font-weight:500">' + (I18N.t("common.save") || '保存') + '</button>' +
+    '</div>';
+  overlay.appendChild(dlg);
+  document.body.appendChild(overlay);
+  requestAnimationFrame(function() { overlay.style.opacity = '1'; });
+  function _close() { overlay.remove(); }
+  document.getElementById('_editOrgCancel').onclick = _close;
+  overlay.onclick = function(e) { if (e.target === overlay) _close(); };
+  document.getElementById('_editOrgSave').onclick = function() {
+    var newName = document.getElementById('_editOrgName').value.trim();
+    var newDesc = document.getElementById('_editOrgDesc').value.trim();
+    var newMaxMembers = parseInt(document.getElementById('_editOrgMaxMembers').value) || 0;
+    var newMaxWorkers = parseInt(document.getElementById('_editOrgMaxWorkers').value) || 0;
+    if (!newName) { app.showToast(I18N.t("organizations.create.name_required") || '名称不能为空'); return; }
+    var btn = this; btn.disabled = true; btn.textContent = '...';
+    API.put('/orgs/' + orgId, { name: newName, description: newDesc, max_members: newMaxMembers, max_workers: newMaxWorkers }).then(function() {
+      app.showToast(I18N.t("organizations.detail.edit_success") || '组织信息已更新');
+      _close();
+      _showOrgDetail(orgId);
+    }).catch(function(e) {
+      app.showToast((I18N.t("organizations.detail.edit_failed") || '更新失败') + ': ' + (e.message || e));
+      btn.disabled = false; btn.textContent = (I18N.t("common.save") || '保存');
+    });
+  };
+}
