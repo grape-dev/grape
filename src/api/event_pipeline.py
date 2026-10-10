@@ -1539,7 +1539,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         skill_id = 0
         skill_path = ""
         log.info("Pipeline (plugin): 智能推荐模式, skip skill resolution")
-    elif is_plugin_mode() and _issue_scene and _issue_scene != "default" and not _is_pr_sub:
+    elif is_plugin_mode() and _issue_scene and not _is_pr_sub:
+        # 2026-10-10：去掉 != "default" —— default 场景的 skill 改动同样生效（前端已无
+        # Agent 配置页，场景 nodes 成为唯一可编辑入口），与 webhook.py a2a 路径口径一致
         _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
         if _pipe_skill:
             skill_name = _pipe_skill
