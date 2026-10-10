@@ -494,7 +494,7 @@ if ! command -v opencode >/dev/null 2>&1; then
   _engine_hint="  npm install -g opencode-ai（opencode 引擎）"
 fi
 if ! command -v hermes >/dev/null 2>&1; then
-  _engine_hint="${_engine_hint:+$_engine_hint\n}  pip install hermes（hermes 引擎）"
+  _engine_hint="${_engine_hint:+$_engine_hint\n}  pip install 'hermes[acp]'（hermes 引擎，含 ACP 协议包——普通 pip install hermes 不带，会导致引擎在线但调不通）"
 fi
 if [ -n "$_engine_hint" ]; then
   log "未检测到执行引擎。请自行安装后重启 worker："

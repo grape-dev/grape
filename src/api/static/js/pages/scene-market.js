@@ -27,6 +27,7 @@ const _AGENT_META = {
   qa:     {icon:'🧪', label:'QA',     color:'#9A85A8', tag:'tg-q'},
   sre:    {icon:'⚙️', label:'SRE',    color:'#B89B6A', tag:'tg-s'},
   chat:   {icon:'💬', label:'Chat',   color:'#34c759', tag:'tg-ch'},
+  auto:   {icon:'⏰', label:'Auto',   color:'#8E9BAA', tag:'tg-a'},
 };
 const _AGENT_ORDER = ['vod','issue','coding','qa','sre'];
 

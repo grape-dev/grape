@@ -447,7 +447,7 @@ foreach ($eng in $engines) {
     if (-not $found) {
         switch ($eng) {
             "opencode" { $engineHints += "  npm install -g opencode-ai（opencode 引擎）" }
-            "hermes" { $engineHints += "  pip install hermes（hermes 引擎）" }
+            "hermes" { $engineHints += "  pip install 'hermes[acp]'（hermes 引擎，含 ACP 协议包——普通 pip install hermes 不带，会导致引擎在线但调不通）" }
             "codearts" { $engineHints += "  安装 CodeArts CLI（codearts 引擎）" }
             "codex" { $engineHints += "  npm install -g @openai/codex（codex 引擎）" }
         }
