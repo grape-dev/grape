@@ -102,9 +102,18 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict
         hosted = in_managed and bool(managed.get(repo_key))
         repo_org_id = managed_org.get(repo_key, 0)
 
-        # 组织隔离：已托管到其他组织的仓库不显示
-        if org_id and in_managed and repo_org_id and repo_org_id != org_id:
-            continue
+        # 组织隔离：
+        # - org_id > 0（非个人组织）：已托管到其他组织的仓库不显示
+        # - org_id = 0（个人组织）：已托管到其他非个人组织的仓库不显示
+        #   （个人组织只显示全局托管 + 自身托管的仓库，不显示其他非个人组织的仓库）
+        if in_managed and repo_org_id:
+            if org_id and repo_org_id != org_id:
+                continue
+            if not org_id:
+                # 个人组织：检查 repo_org_id 对应的组织是否是个人组织
+                from src.user.org_db import is_org_personal as _is_p
+                if not _is_p(repo_org_id):
+                    continue
 
         role = "Admin" if is_admin else "Member"
         result.append({
