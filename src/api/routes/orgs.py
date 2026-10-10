@@ -167,6 +167,10 @@ def list_members(org_id: int, user: dict = Depends(require_no_session_token)):
 
 @router.post("/{org_id}/members", operation_id="orgs_members_add", summary="添加成员")
 def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_org_admin)):
+    # 个人组织（默认工作空间）暂不支持添加成员——成员即用户本人，多人协作请创建团队组织
+    from src.user.org_db import is_org_personal as _is_p
+    if _is_p(org_id):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "默认工作空间（个人组织）不支持添加成员，如需多人协作请创建团队组织"})
     # 支持通过 username 或 user_id 添加
     target_uid = body.user_id
     if not target_uid and body.username:

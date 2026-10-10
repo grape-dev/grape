@@ -108,7 +108,7 @@ function _showOrgDetail(orgId) {
     html += '<div style="border:1px solid var(--b);border-radius:12px;padding:16px">' +
       '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
       '<h3 style="margin:0;font-size:14px">' + I18N.t("organizations.detail.members_title") + ' (' + members.length + ')</h3>';
-    if (org.role === 'owner' || org.role === 'admin') {
+    if ((org.role === 'owner' || org.role === 'admin') && !org.is_personal) {
       html += '<button onclick="_showAddMemberDialog(' + orgId + ')" style="padding:6px 12px;border:none;border-radius:6px;background:var(--a);color:#fff;cursor:pointer;font-size:12px">' + I18N.t("organizations.detail.add_member") + '</button>';
     }
     html += '</div>';
