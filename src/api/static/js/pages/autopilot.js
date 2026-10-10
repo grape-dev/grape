@@ -727,11 +727,9 @@ function _apUpdateSkillLabel() {
   }
 }
 function _apOpenSkillPicker() {
-  if (_apAllAutoSkills.length === 0) {
-    _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
-  } else {
-    _apOpenSkillPickerInner();
-  }
+  // 每次打开都按当前仓库重新拉取：_apAllAutoSkills 是全局缓存，
+  // 切换仓库后旧缓存不会失效（曾导致所有仓库都看到第一次打开时的技能列表）
+  _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
 }
 function _apOpenSkillPickerInner() {
   var _SCOPE_COLORS = {official:'#6366f1',user:'#34c759',repo:'#f59e0b'};
