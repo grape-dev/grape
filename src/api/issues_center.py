@@ -141,31 +141,60 @@ def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue
         return c.lastrowid
 
 
+def _build_task_conversation_title(issue_number: int, title: str = "") -> str:
+    """生成任务会话标题：`Issue #N · {title}`（title 空回退 `Issue #N`）。
+
+    与需求中心看板卡片标题风格一致；超长截断保护（title 部分上限 80 字符）。
+    """
+    _MAX_TITLE_LEN = 80
+    clean_title = (title or "").strip()
+    if clean_title:
+        if len(clean_title) > _MAX_TITLE_LEN:
+            clean_title = clean_title[:_MAX_TITLE_LEN]
+        return f"Issue #{issue_number} · {clean_title}"
+    return f"Issue #{issue_number}"
+
+
 def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
                               title: str = "", description: str = "",
                               write_context_on_reuse: bool = False) -> str:
-    """为任务查找/复用「Issue #N」对话（任务中心「去对话」入口）。
+    """为任务查找/复用「Issue #N · {title}」对话（任务中心「去对话」入口）。
 
-    - 复用：同用户已有该 Issue 对话 → 补 conv_type/issue_number 标记；
+    - 复用：同用户已有该 Issue 对话（按 conv_type='task' + issue_number 列匹配，
+      旧格式 `Issue #N` 字符串作回退）→ 补 conv_type/issue_number 标记；
       write_context_on_reuse=True 时再次写入上下文消息（notify 语义：每次分配都刷上下文）
+    - 存量升级：复用命中旧标题 `Issue #N` 的会话时刷新为新格式（不覆盖用户自定义标题）
     - 新建：create_conversation(conv_type="task") 并写入任务上下文消息。
     - 失败返回空串（不抛异常，旁路不影响任务建档）。
     """
     from src.session_manager import get_user_conversations, create_conversation, update_conversation, add_message
     conv_id = ""
+    new_title = _build_task_conversation_title(issue_number, title)
+    old_title = f"Issue #{issue_number}"
     try:
         convs = get_user_conversations(user_id, repo_key=repo_key, limit=50)
+        matched = None
         for conv in convs:
-            if conv.get("title") == f"Issue #{issue_number}":
-                conv_id = conv["id"]
+            _ct = conv.get("conv_type") or ""
+            _in = conv.get("issue_number") or 0
+            if _ct == "task" and _in == issue_number:
+                matched = conv
                 break
-        if conv_id:
+        if matched is None:
+            for conv in convs:
+                if conv.get("title") == old_title:
+                    matched = conv
+                    break
+        if matched is not None:
+            conv_id = matched["id"]
             update_conversation(conv_id, conv_type="task", issue_number=issue_number)
+            if (matched.get("title") or "") == old_title:
+                update_conversation(conv_id, title=new_title)
             if write_context_on_reuse:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
                 add_message(conv_id, "agent", ctx_msg)
         else:
-            conv_id = create_conversation(user_id, repo_key, title=f"Issue #{issue_number}",
+            conv_id = create_conversation(user_id, repo_key, title=new_title,
                                           conv_type="task", issue_number=issue_number)
             try:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
