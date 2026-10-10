@@ -120,3 +120,5 @@ src/api/static/openapi.json
 cli/
 src/api/static/uploads/
 *.log
+# git 凭据助手脚本（本地生成，含敏感环境变量引用，不进仓库）
+.git-askpass.sh
