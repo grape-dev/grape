@@ -1638,7 +1638,8 @@ class BotManager:
                             continue
                         if app_id in self._bots:
                             continue  # 已经在连
-                        if IM_LEASE_STICKY and _im_owner(ring, app_id) != self._instance_id:
+                        # 空环（心跳表缺失/心跳失败）→ 退化为旧"先到先得"，避免 IM 整体不连
+                        if IM_LEASE_STICKY and ring and _im_owner(ring, app_id) != self._instance_id:
                             continue  # 非归属实例不抢（均匀 + 粘性）
                         if self._acquire_cooldown.get(app_id, 0.0) > _time.monotonic():
                             continue  # 上一轮连接失败冷却期
