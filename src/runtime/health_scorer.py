@@ -70,6 +70,39 @@ def _window_start() -> str:
     return (_utcnow() - timedelta(days=_WINDOW_DAYS)).isoformat()
 
 
+def _effective_window_start(runtime_id: int) -> str:
+    """Issue-P2: 实际统计窗口起点 = max(健康分重置时间戳, 7天前)。
+
+    管理员通过 health-reset 接口写入 agent_runtimes.health_reset_at 赦免点：
+    - 重置时间戳晚于 7 天前 → 从重置点开始统计（重置前的 failed 被赦免）
+    - 重置时间戳早于 7 天前（重置已滚出窗口）→ 回到普通 7 天窗口，赦免自动失效
+    - 从未重置 → 普通 7 天窗口
+    交集语义：两个区间取更晚的起点，无需任何清理逻辑。
+    """
+    window = _window_start()
+    reset_at = ""
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute("SELECT health_reset_at FROM agent_runtimes WHERE id=?",
+                      (runtime_id,))
+            row = c.fetchone()
+            reset_at = (row[0] or "") if row else ""
+    except Exception as e:
+        log.warning(f"health_scorer: fetch health_reset_at failed for runtime={runtime_id}: {e}")
+        return window
+    if not reset_at:
+        return window
+    try:
+        ts = datetime.fromisoformat(reset_at)
+        if ts.tzinfo is None:
+            ts = ts.replace(tzinfo=timezone.utc)
+        reset_iso = ts.isoformat()
+        return reset_iso if reset_iso > window else window
+    except Exception:
+        return window
+
+
 # ===== 核心计算 =====
 
 def _compute_health_score(total: int, failed: int, consecutive_failures: int) -> int:
@@ -93,8 +126,9 @@ def _fetch_task_stats(runtime_id: int) -> dict:
     """从 agent_tasks 表查询近 N 天的任务执行统计。
 
     返回 {total, failed, completed, consecutive_failures, last_status}
+    Issue-P2: 窗口起点走 _effective_window_start（含健康分重置赦免，交集语义）。
     """
-    window = _window_start()
+    window = _effective_window_start(runtime_id)
     result = {"total": 0, "failed": 0, "completed": 0,
               "consecutive_failures": 0, "last_status": ""}
     try:
@@ -237,9 +271,12 @@ def _persist_score(data: dict):
 # ===== 公共接口 =====
 
 def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
-    """获取单个引擎的健康度数据（带内存缓存）。
+    """获取单个引擎的健康度数据。
 
-    force_refresh=True 时跳过缓存重新计算。
+    Issue-P2: 读路径改为读 runtime_health_scores 表（表即缓存）——
+    双主天然一致，写路径（任务终态触发 / 5min 定时扫描）负责现算落表。
+    force_refresh=True 仍强制现算（管理端详情查询用）。
+    表中无记录（全新引擎 / 服务刚迁移）→ 现算一条落表。
     返回 dict：{runtime_id, health_score, total_tasks, failed_tasks,
                completed_tasks, consecutive_failures, failure_rate,
                last_status, heartbeat_alive, window_days, updated_at}
@@ -248,13 +285,61 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
     """
     if not runtime_id:
         return _empty_score(0)
-    # 检查缓存
     if not force_refresh:
-        with _cache_lock:
-            cached = _cache.get(runtime_id)
-            if cached and cached["expires"] > time.time():
-                return cached["data"]
+        try:
+            with _lock():
+                c = _db().cursor()
+                c.execute(
+                    "SELECT health_score, total_tasks, failed_tasks, completed_tasks, "
+                    "consecutive_failures, failure_rate, last_status, window_days, updated_at "
+                    "FROM runtime_health_scores WHERE runtime_id=?",
+                    (runtime_id,))
+                row = c.fetchone()
+            if row:
+                return {
+                    "runtime_id": runtime_id,
+                    "health_score": row[0],
+                    "total_tasks": row[1],
+                    "failed_tasks": row[2],
+                    "completed_tasks": row[3],
+                    "consecutive_failures": row[4],
+                    "failure_rate": row[5],
+                    "last_status": row[6] or "",
+                    "heartbeat_alive": None,   # 读档不含实时心跳；失联判定由定时扫描落表
+                    "window_days": row[7],
+                    "updated_at": row[8] or "",
+                }
+        except Exception as e:
+            log.warning(f"health_scorer: read_score failed for runtime={runtime_id}: {e}")
     return _compute_and_persist(runtime_id)
+
+
+def set_health_reset(runtime_id: int, reason: str = "") -> dict:
+    """Issue-P2: 管理员健康分重置（赦免点写入 + 立即重算）。
+
+    不改 agent_tasks 历史记录（审计完整），只写 agent_runtimes.health_reset_at
+    时间戳；统计窗口起点变为 max(重置点, 7天前)，重置之前的 failed 不再计入
+    失败率与连续失败。重置点滚出 7 天窗口后自动失效，无需清理。
+
+    返回 {old_score, new_score, reset_at, ...} 新旧对比。
+    """
+    old = _compute_and_persist(runtime_id)  # 重算前先落一份当前值（无视缓存）
+    reset_iso = _utcnow().isoformat()
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute("UPDATE agent_runtimes SET health_reset_at=? WHERE id=?",
+                      (reset_iso, runtime_id))
+            _db().commit()
+    except Exception as e:
+        log.warning(f"health_scorer: set_health_reset failed for runtime={runtime_id}: {e}")
+        raise
+    log.info(f"health_scorer: health reset for runtime={runtime_id} at {reset_iso} "
+             f"(old_score={old.get('health_score')}), reason={reason or 'unspecified'}")
+    with _cache_lock:
+        _cache.pop(runtime_id, None)
+    new = _compute_and_persist(runtime_id)
+    return {"old": old, "new": new, "reset_at": reset_iso, "reason": reason}
 
 
 def get_health_scores(runtime_ids: list[int], force_refresh: bool = False) -> dict[int, dict]:
