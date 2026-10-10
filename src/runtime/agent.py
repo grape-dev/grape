@@ -566,8 +566,16 @@ def _env_int(name, default):
 
 
 def _discover_local_runtimes() -> list[dict]:
-    """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。"""
+    """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
+
+    hermes 额外做 ACP 依赖自举（hermes-acp-auto-bootstrap-design.md）：
+    --version 探测不出 ACP 依赖缺失（可选 extra），必须 `hermes acp --check`
+    才能暴露；缺失时自动补装 agent-client-protocol==0.9.0，补装失败则
+    healthy=False（引擎照常注册，但服务端 engine_select 只挑 healthy，
+    不会再把任务派到一台调不通的机器上）。
+    """
     from src.runtime.registry import discover_runtimes
+    from src.runtime.acp_bootstrap import _ensure_hermes_acp
     out = []
     for r in discover_runtimes():
         version = ""
@@ -582,6 +590,9 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
+        # hermes：ACP 依赖可用才算真健康（缺失时已尝试自动补装）
+        if healthy and (r["name"] or "").lower() == "hermes":
+            healthy = _ensure_hermes_acp(cli)
         out.append({"name": r["name"], "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
     return out
 

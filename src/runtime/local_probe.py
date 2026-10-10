@@ -13,7 +13,11 @@ LOCAL_PROBE_MAX_TOTAL = 25       # 全量探测总上限（秒）
 
 
 def _probe_one(eng: dict) -> dict:
-    """探测单个引擎：跑 [cli, --version]（可用 probe_args 覆盖），healthy=returncode==0。"""
+    """探测单个引擎：跑 [cli, --version]（可用 probe_args 覆盖），healthy=returncode==0。
+
+    hermes 用 probe_args 覆盖为 [acp, --check]：--version 探测不出 ACP 依赖
+    缺失（可选 extra 不被触碰），见 hermes-acp-auto-bootstrap-design.md。
+    """
     cli = eng.get("cli_path") or ""
     if not cli or not eng.get("installed"):
         return {**eng, "version": "", "healthy": False}
@@ -35,11 +39,19 @@ def probe_local_engines(engines: list | None = None) -> list[dict]:
     """探测本机已安装引擎，返回 [{name, version, healthy, cli_path, installed, ...}]。
 
     engines 缺省 = `discover_backends()`（含 cli_path/installed）。
+    hermes 自动带 probe_args=["acp", "--check"]（ACP 依赖缺失 → healthy=False，
+    与 worker 注册口径一致，见 hermes-acp-auto-bootstrap-design.md）。
     线程池并发 + 单引擎 5s 超时 + 总时长 ≤ LOCAL_PROBE_MAX_TOTAL（超时未完成引擎置 healthy=False）。
     """
     if engines is None:
         from src.agent.executor import discover_backends
         engines = discover_backends()
+    engines = [
+        {**e, "probe_args": ["acp", "--check"]}
+        if (e.get("name") or "").lower() == "hermes" and e.get("installed") and not e.get("probe_args")
+        else e
+        for e in engines
+    ]
     if not engines:
         return []
     results: list[dict] = []

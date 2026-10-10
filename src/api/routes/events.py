@@ -161,16 +161,29 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     engine_ip = ar[3] or ""
             if not engine_instance and row[12]:
                 # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
-                c2.execute(
-                    "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
-                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
-                    "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
-                    (row[12],))
-                ar2 = c2.fetchone()
-                if ar2:
-                    engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
-                    engine_device = ar2[3] or ""
-                    engine_ip = ar2[4] or ""
+                # 未派发（runtime_id=0 且任务 failed）跳过兜底，避免错误归因无关引擎（Issue #285）
+                _undispatched = False
+                if not runtime_id:
+                    try:
+                        c2.execute(
+                            "SELECT status FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                            (seq,))
+                        _ts = c2.fetchone()
+                        if _ts and (_ts[0] or "") == "failed":
+                            _undispatched = True
+                    except Exception:
+                        pass
+                if not _undispatched:
+                    c2.execute(
+                        "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                        "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
+                        (row[12],))
+                    ar2 = c2.fetchone()
+                    if ar2:
+                        engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
+                        engine_device = ar2[3] or ""
+                        engine_ip = ar2[4] or ""
     except Exception:
         pass
     result["engine_instance"] = engine_instance
@@ -441,6 +454,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         except Exception:
             _cwd = old.get("cwd") or ""
         _is_local_direct = (_cid == 0)
+        # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
+        from src.api.event_pipeline import build_task_env as _bte
+        _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
+                            agent_type=old.get("agent_type") or "",
+                            issue_id=old.get("issue_id") or "",
+                            runtime_id=_orig_rid,
+                            account=old.get("account") or "",
+                            issue_number=old.get("issue_id") or "")
         _new_task_id = enqueue_task(
             agent_session_id=old.get("agent_session_id") or "",
             runtime_id=_orig_rid,
@@ -457,7 +478,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             account=old.get("account") or "",
             user_id=old.get("user_id") or 0,
             repo_gitcode_token=old.get("repo_gitcode_token") or "",
-            env_extra={},
+            env_extra=_rebuild_env,
             server_url=old.get("server_url") or "",
             issue_session_id=_sid,
             pool_tag=old.get("agent_type") or "" if _is_plugin_mode() else "",
@@ -799,6 +820,14 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     _cwd = old.get("cwd") or ""
 
                 # Always enqueue (stores full prompt + env), then trigger direct if local
+                # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
+                from src.api.event_pipeline import build_task_env as _bte
+                _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
+                                    agent_type=old.get("agent_type") or "",
+                                    issue_id=old.get("issue_id") or "",
+                                    runtime_id=_rid,
+                                    account=old.get("account") or "",
+                                    issue_number=old.get("issue_id") or "")
                 _new_task_id = enqueue_task(
                     agent_session_id=old.get("agent_session_id") or "",
                     runtime_id=_rid,
@@ -815,7 +844,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     account=old.get("account") or "",
                     user_id=old.get("user_id") or 0,
                     repo_gitcode_token=old.get("repo_gitcode_token") or "",
-                    env_extra={},
+                    env_extra=_rebuild_env,
                     server_url=old.get("server_url") or "",
                     issue_session_id=_sid,
                     pool_tag=old.get("agent_type") or "" if is_plugin_mode() else "",
@@ -1249,6 +1278,13 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                 if not is_plugin_mode():
                     final_text = "（对话执行失败：无可用引擎/会话）"
             else:
+                # 重派丢 env 修复（2026-10-10 事故）：对话入队同样补全 env_extra
+                # （此前未传 → 无 GRAPE_SERVER_URL/REPO_* 等基础变量）
+                from src.api.event_pipeline import build_task_env as _bte
+                _conv_env = _bte(repo_key=repo_key, agent_type=agent_type,
+                                 issue_id=issue_id or "", runtime_id=runtime_id or 0,
+                                 account=repository or "",
+                                 issue_number=issue_id or "")
                 tid = enqueue_task(
                     agent_session_id=agent_sid, runtime_id=runtime_id, prompt=prompt, cwd=ws,
                     runtime_session_id=oc_session_id,
@@ -1259,6 +1295,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
                     skill_path=event_dialogue_path,
                     account=repository, repo_gitcode_token=bot_token,
                     issue_id=issue_id or "#0",
+                    env_extra=_conv_env,
                     pool_agent_type=agent_type if not runtime_id else "",  # plugin 广播模式下需要 pool_tag
                 )
                 # Fix C：超时/失败要有回显与清理，不再 30 分钟静默
