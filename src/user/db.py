@@ -1303,17 +1303,32 @@ def get_global_bot_credential() -> tuple[str, str]:
     return "", ""
 
 
-def get_managed_repos(user_id: int, org_id: int = 0) -> list[dict]:
+def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
     """返回该用户可见（JOIN user_repos）的托管仓库；对外 full_name 无前缀、repo_key 带前缀。
 
     org_id > 0 时按组织过滤（managed_repos.org_id=?），实现组织级仓库隔离。
     org_id=0 时返回全部（兼容旧调用，但实际由调用方 require_org_member 保证 org_id 已解析）。
+
+    personal_org=True（当前组织是个人组织）时放宽 org 过滤：
+    自己组织托管的 + 用户 user_repos.is_join=1 的（不论托管在哪个组织）都显示。
+    口径与 /repos/member 的 _filter_repos 对个人组织的处理保持一致——侧边栏下拉框
+    与全屏大堂不再互相矛盾（见 docs/weekly-06/repo-dropdown-grape-invisible-diagnosis.md 方案A）。
+    团队组织（is_personal=0）仍严格按 m.org_id=? 隔离，不影响团队间隔离语义。
     """
     from src.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         try:
-            if org_id:
+            if org_id and personal_org:
+                c.execute(
+                    "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
+                    "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
+                    "COALESCE(u.is_join,0), COALESCE(u.is_admin,0) "
+                    "FROM managed_repos m "
+                    "LEFT JOIN user_repos u ON u.repo_key=m.repo_key AND u.user_id=? "
+                    "WHERE u.repo_key IS NOT NULL AND (m.org_id=? OR COALESCE(u.is_join,0)=1) "
+                    "ORDER BY m.full_name", (user_id, org_id))
+            elif org_id:
                 c.execute(
                     "SELECT m.repo_key, m.repo_owner, m.repo_name, m.full_name, m.webhook_id, "
                     "m.bot_gitcode_token, m.gitcode_webhook_token, m.bot_username, m.created_at, "
