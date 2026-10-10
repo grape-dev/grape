@@ -1,8 +1,8 @@
-"""帮助文档静态页生成器（v2）：将 help/usage + help/api 的 markdown 渲染为 src/api/static/help.html。
+"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference 的 markdown 渲染为 src/api/static/help.html。
 
 v2 设计（见 docs/weekly-02/help-page-prototype.md）：
-- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / API 文档 两个独立区块
-- 目录按区块隔离：使用页=仅使用指南；API 页=仅 API；同一级小节同缩进（不互为父子）
+- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / Git事件统一模型 / API 文档 三个独立区块
+- 目录按区块隔离：使用页=仅使用指南；Git事件统一模型=参考文档；API 页=仅 API；同一级小节同缩进（不互为父子）
 - 点击目录子项左目录常驻，仅右侧内容区替换渲染对应 markdown
 - 右侧单文档渲染，H2/H3 轻量标题，仅提示/代码块带框；当前章节/小节高亮 + scrollspy
 - 主题切换(🌓 localStorage) + 移动端抽屉目录 + 侧栏搜索
@@ -37,6 +37,12 @@ USAGE_ORDER = [
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
+]
+
+# 独立参考文档（首页独立入口，不归入使用文档或 API 文档）
+REFERENCE_DIR = HELP_DIR / "reference"
+REFERENCE_ORDER = [
+    "event-mapping.md",
 ]
 _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
@@ -113,7 +119,7 @@ th{background:var(--c);font-weight:600}
 """
 
 _MIGRATION_COMMENT = """<!--
-  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api 渲染。
+  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api + help/reference 渲染。
   如需更新任何内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 自动重新生成）。
 -->"""
 
@@ -135,8 +141,8 @@ _JS_APP = r"""
     return out;
   }
   function sideList(sec, cur) {
-    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : 'API 参考') + '</div>';
-    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : 'API 文档') + '..."></div>';
+    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : 'API 参考') + '</div>';
+    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : 'API 文档') + '..."></div>';
     var h1id = (cur && (cur.html.match(/<h1\b[^>]*id="([^"]+)"/) || [])[1]) || '';
     var d, i;
     for (i = 0; i < docs(sec).length; i++) {
@@ -149,6 +155,7 @@ _JS_APP = r"""
   function topbar(sec) {
     return '<div class="topnav"><a class="brand" href="#/">Grape 帮助中心</a>'
       + '<a class="link' + (sec === 'usage' ? ' active' : '') + '" href="#/usage">使用文档</a>'
+      + '<a class="link' + (sec === 'reference' ? ' active' : '') + '" href="#/reference">Git事件统一模型</a>'
       + '<a class="link' + (sec === 'api' ? ' active' : '') + '" href="#/api">API 文档</a>'
       + '<span class="spacer"></span>'
       + '<button class="btn theme-toggle" type="button" title="切换主题">\u2600\ufe0f/\ud83c\udf19</button>'
@@ -160,6 +167,7 @@ _JS_APP = r"""
       + '<p>帮助文档与 API 参考，按需进入。</p>'
       + '<div class="cards">'
       + '<a class="card" href="#/usage"><div class="big">\ud83d\udcd6 使用文档</div><div>快速上手 · Agent 详解 · 流水线 · 技能 · FAQ</div><div class="go">进入使用文档 \u2192</div></a>'
+      + '<a class="card" href="#/reference"><div class="big">\ud83d\udd04 Git事件统一模型</div><div>GitCode/GitHub Webhook → Grape 内部事件类型映射参考</div><div class="go">进入 Git事件统一模型 \u2192</div></a>'
       + '<a class="card" href="#/api"><div class="big">\u26ed API 文档</div><div>认证与通用约定 · 任务/仓库/技能 等接口参考</div><div class="go">进入 API 文档 \u2192</div></a>'
       + '</div></div>';
   }
@@ -221,7 +229,7 @@ _JS_APP = r"""
     var raw = (location.hash || '').replace(/^#/, '');
     var parts = raw.split('/').filter(Boolean);
     var sec = parts[0];
-    if (sec !== 'usage' && sec !== 'api') { renderHome(); return; }
+    if (sec !== 'usage' && sec !== 'api' && sec !== 'reference') { renderHome(); return; }
     renderSection(sec, docOf(sec, parts[1]));
   }
   app.addEventListener('click', function (e) {
@@ -354,8 +362,25 @@ def _section_data(usage: bool) -> list[dict]:
     return items
 
 
+def _reference_data() -> list[dict]:
+    """独立参考文档（首页独立入口）"""
+    items = []
+    for fname in REFERENCE_ORDER:
+        path = REFERENCE_DIR / fname
+        if not path.is_file():
+            continue
+        body, tokens = _render_file(path)
+        prefix = re.sub(r"[^0-9a-zA-Z]", "-", path.stem).strip("-") + "-"
+        body = _prefix_heading_ids(body, tokens, prefix)
+        body = _adorn_blockquotes(body)
+        body = _rewrite_md_hrefs(body, "reference")
+        title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
+        items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
+    return items
+
+
 def build_data() -> dict:
-    return {"usage": _section_data(True), "api": _section_data(False)}
+    return {"usage": _section_data(True), "api": _section_data(False), "reference": _reference_data()}
 
 
 def build_help_html(data: dict | None = None) -> str:
@@ -382,7 +407,7 @@ def generate() -> int:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = build_data()
     OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
-    return len(data["usage"]) + len(data["api"])
+    return len(data["usage"]) + len(data["api"]) + len(data.get("reference", []))
 
 
 def write_openapi_contract(schema: dict, help_path: Path | None = None, static_path: Path | None = None) -> int:

@@ -21,7 +21,7 @@ def _clean_scene_table():
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("DELETE FROM devops_pipeline_scene")
+            c.execute("DELETE FROM devops_pipeline_scene WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
         except Exception:
             pass
         try:

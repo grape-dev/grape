@@ -187,7 +187,287 @@ function loadAgentTypes() {
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
       if (welcomeEl) welcomeEl.textContent = displayName;
+      // 加载组织下拉列表
+      _loadOrgSelect();
+      // 加载右上角组织名
+      _updateTbOrgName();
     }).catch(() => {});
+  }
+
+  function _loadOrgSelect() {
+    var sel = document.getElementById('orgSelect');
+    if (!sel) return;
+    API.get('/orgs').then(function(orgs) {
+      if (!orgs || orgs.length === 0) {
+        sel.innerHTML = I18N.t("organizations.no_orgs");
+        return;
+      }
+      var html = '';
+      var currentId = localStorage.getItem('current_org_id') || '';
+      var found = false;
+      orgs.forEach(function(o) {
+        var selAttr = '';
+        if (String(o.id) === String(currentId)) { selAttr = ' selected'; found = true; }
+        var label = o.name + (o.is_personal ? '（默认）' : '') + ' · ' + o.role;
+        html += '<option value="' + o.id + '"' + selAttr + '>' + label + '</option>';
+      });
+      // 未匹配到当前组织 → 默认选个人组织
+      if (!found) {
+        var personal = orgs.find(function(o) { return o.is_personal; });
+        if (personal) {
+          localStorage.setItem('current_org_id', personal.id);
+          html = html.replace('value="' + personal.id + '"', 'value="' + personal.id + '" selected');
+        }
+      }
+      sel.innerHTML = html;
+    }).catch(function(e) {
+      // 延迟重试一次（可能是 token refresh 导致的瞬时失败）
+      setTimeout(function() {
+        API.get('/orgs').then(function(orgs) {
+          if (!orgs || orgs.length === 0) {
+            sel.innerHTML = '<option value="">无组织</option>';
+            return;
+          }
+          var html2 = '';
+          var currentId2 = localStorage.getItem('current_org_id') || '';
+          var found2 = false;
+          orgs.forEach(function(o) {
+            var selAttr2 = '';
+            if (String(o.id) === String(currentId2)) { selAttr2 = ' selected'; found2 = true; }
+            html2 += '<option value="' + o.id + '"' + selAttr2 + '>' + o.name + (o.is_personal ? '（默认）' : '') + ' · ' + o.role + '</option>';
+          });
+          if (!found2) {
+            var personal2 = orgs.find(function(o) { return o.is_personal; });
+            if (personal2) {
+              localStorage.setItem('current_org_id', personal2.id);
+              html2 = html2.replace('value="' + personal2.id + '"', 'value="' + personal2.id + '" selected');
+            }
+          }
+          sel.innerHTML = html2;
+        }).catch(function() {
+          sel.innerHTML = I18N.t("organizations.loading");
+        });
+      }, 500);
+    });
+  }
+
+  // ===== 工作台右上角组织下拉菜单 =====
+  function _toggleOrgDropdown() {
+    var menu = document.getElementById('tbOrgMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadTbOrgs();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeOrgDropdownOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeOrgDropdownOnOutside);
+    }
+  }
+  function _closeOrgDropdownOnOutside(e) {
+    var btn = document.getElementById('tbOrgBtn');
+    var menu = document.getElementById('tbOrgMenu');
+    if (btn && !btn.contains(e.target) && menu && !menu.contains(e.target)) {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeOrgDropdownOnOutside);
+    }
+  }
+  function _loadTbOrgs() {
+    var menu = document.getElementById('tbOrgMenu');
+    if (!menu) return;
+    menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.loading") || "加载中...") + '</div>';
+    API.get('/orgs').then(function(orgs) {
+      if (!orgs || orgs.length === 0) {
+        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>';
+        return;
+      }
+      var currentId = localStorage.getItem('current_org_id') || '';
+      var html = '';
+      orgs.forEach(function(o) {
+        var isActive = String(o.id) === String(currentId);
+        var bg = isActive ? 'var(--a)' : 'transparent';
+        var fg = isActive ? '#fff' : 'var(--t1)';
+        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
+        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+          + '<span style="font-size:14px">🏢</span>'
+          + '<div style="flex:1;min-width:0">'
+          + '<div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
+          + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + (I18N.t("organizations.members") || "成员") + ' · ' + (o.role || 'member') + '</div>'
+          + '</div>'
+          + (isActive ? '<span style="font-size:12px">✓</span>' : '')
+          + '</div>';
+      });
+      html += '<div style="border-top:1px solid var(--b);margin-top:4px;padding-top:4px">'
+        + '<div onclick="app.nav(\'organizations\');document.getElementById(\'tbOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px">'
+        + '<span>⚙</span><span>' + (I18N.t("organizations.manage_orgs") || "管理组织") + '</span></div></div>';
+      menu.innerHTML = html;
+    }).catch(function() {
+      menu.innerHTML = '<div style="padding:8px 12px;color:var(--r);font-size:12px">' + (I18N.t("organizations.load_failed", {msg: ""}) || "加载失败") + '</div>';
+    });
+  }
+  function _updateTbOrgName() {
+    // 无需更新按钮文字 — 固定显示"我的组织"
+  }
+
+  // ===== lobby（#repos 全屏页）组织独立下拉菜单 =====
+  function _toggleLobbyOrgDropdown() {
+    var menu = document.getElementById('lobbyOrgMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadLobbyOrgs();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeLobbyOrgDropdownOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeLobbyOrgDropdownOnOutside);
+    }
+  }
+  function _closeLobbyOrgDropdownOnOutside(e) {
+    var dropdown = document.getElementById('lobbyOrgDropdown');
+    var menu = document.getElementById('lobbyOrgMenu');
+    if (dropdown && !dropdown.contains(e.target)) {
+      if (menu) menu.style.display = 'none';
+      document.removeEventListener('click', _closeLobbyOrgDropdownOnOutside);
+    }
+  }
+  function _loadLobbyOrgs() {
+    var menu = document.getElementById('lobbyOrgMenu');
+    if (!menu) return;
+    var currentId = localStorage.getItem('current_org_id') || '';
+    menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.loading") || "加载中...") + '</div>';
+    API.get('/orgs').then(function(orgs) {
+      if (!orgs || orgs.length === 0) {
+        menu.innerHTML = '<div style="padding:8px 12px;color:var(--t3);font-size:12px">' + (I18N.t("organizations.no_orgs") || "暂无组织") + '</div>';
+        return;
+      }
+      var html = '';
+      orgs.forEach(function(o) {
+        var isActive = String(o.id) === String(currentId);
+        var bg = isActive ? 'var(--a)' : 'transparent';
+        var fg = isActive ? '#fff' : 'var(--t1)';
+        var badge = o.is_personal ? ' <span style="font-size:9px;padding:1px 4px;border-radius:3px;background:' + (isActive ? 'rgba(255,255,255,.2)' : 'var(--bg)') + ';color:' + (isActive ? '#fff' : 'var(--t3)') + '">' + (I18N.t("organizations.badge_personal") || "默认") + '</span>' : '';
+        html += '<div onclick="app.switchOrg(' + o.id + ');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\';app._updateLobbyOrgName()" style="cursor:pointer;padding:7px 12px;border-radius:8px;background:' + bg + ';color:' + fg + ';display:flex;align-items:center;gap:8px;margin:2px 0" onmouseover="if(!this.dataset.active){this.style.background=\'var(--bg)\'}" onmouseout="if(!this.dataset.active){this.style.background=\'transparent\'}" data-active="' + (isActive ? '1' : '') + '">'
+          + '<span style="font-size:13px">🏢</span>'
+          + '<div style="flex:1;min-width:0">'
+          + '<div style="font-size:12px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + (o.name || '') + badge + '</div>'
+          + '<div style="font-size:10px;opacity:.7">' + (o.member_count || 1) + ' ' + (I18N.t("organizations.members") || "成员") + ' · ' + (o.role || 'member') + '</div>'
+          + '</div>'
+          + (isActive ? '<span style="font-size:11px">✓</span>' : '')
+          + '</div>';
+      });
+      html += '<div style="border-top:1px solid var(--b);margin-top:4px;padding-top:4px">'
+        + '<div onclick="app.nav(\'organizations\');document.getElementById(\'lobbyOrgMenu\').style.display=\'none\'" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:12px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+        + '<span>⚙</span><span>' + (I18N.t("organizations.manage_orgs") || "管理组织") + '</span></div></div>';
+      menu.innerHTML = html;
+    }).catch(function() {
+      menu.innerHTML = '<div style="padding:8px 12px;color:var(--r);font-size:12px">' + (I18N.t("organizations.load_failed", {msg: ""}) || "加载失败") + '</div>';
+    });
+  }
+  function _updateLobbyOrgName() {
+    // 延迟读取，等 switchOrg 写完 localStorage
+    setTimeout(function() {
+      var nameEl = document.getElementById('lobbyOrgName');
+      if (!nameEl) return;
+      var currentId = localStorage.getItem('current_org_id') || '';
+      API.get('/orgs').then(function(orgs) {
+        if (!orgs || orgs.length === 0) return;
+        var current = orgs.find(function(o) { return String(o.id) === String(currentId); });
+        if (current) {
+          nameEl.textContent = current.name;
+        }
+      }).catch(function() {});
+    }, 200);
+  }
+
+  // ===== lobby（#repos 全屏页）用户下拉菜单（退出登录） =====
+  function _toggleLobbyUserMenu() {
+    var menu = document.getElementById('lobbyUserMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadLobbyUserMenu();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeLobbyUserMenuOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeLobbyUserMenuOnOutside);
+    }
+  }
+  function _closeLobbyUserMenuOnOutside(e) {
+    var dropdown = document.getElementById('lobbyUserDropdown');
+    var menu = document.getElementById('lobbyUserMenu');
+    if (dropdown && !dropdown.contains(e.target)) {
+      if (menu) menu.style.display = 'none';
+      document.removeEventListener('click', _closeLobbyUserMenuOnOutside);
+    }
+  }
+  function _loadLobbyUserMenu() {
+    var menu = document.getElementById('lobbyUserMenu');
+    if (!menu) return;
+    var html = '';
+    // 退出
+    html += '<div onclick="app.logout()" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--r);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>↩</span><span>' + (I18N.t("app.logout") || "退出登录") + '</span></div>';
+    menu.innerHTML = html;
+  }
+
+  function switchOrg(orgId) {
+    if (!orgId) return;
+    var sel = document.getElementById('orgSelect');
+    if (sel) { sel.disabled = true; }
+    localStorage.setItem('current_org_id', orgId);
+    // 清除仓库缓存，防止切换组织后仍显示旧组织的仓库
+    localStorage.removeItem(REPO_CACHE_KEY);
+    // 更新组织下拉框选中项
+    if (sel) {
+      for (var i = 0; i < sel.options.length; i++) {
+        sel.options[i].selected = (String(sel.options[i].value) === String(orgId));
+      }
+      sel.disabled = false;
+    }
+    // 保持当前页面不变，只静默刷新仓库缓存 + 侧边栏下拉
+    API.get('/repos/member').then(function(d) {
+      var repos = (d && d.repos) || [];
+      try { localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos: repos, ts: Date.now()})); } catch(e) {}
+      // 查找该组织已托管的仓库
+      var managed = repos.filter(function(r) { return r.is_hosted || r.is_joined; });
+      if (managed.length > 0) {
+        // 切换到第一个已托管仓库
+        var first = managed[0];
+        sessionStorage.setItem('currentRepo', JSON.stringify({fullName: first.full_name, owner: first.owner, name: first.name, repoKey: first.repo_key || ''}));
+        // 更新侧边栏仓库下拉
+        initSidebarRepos();
+        // 刷新当前页面数据（切换组织后所有视图都重新加载）
+        if (window._currentView === 'repos') {
+          selectRepo(first.full_name, first.owner, first.name, first.repo_key || '');
+        } else if (window._currentView) {
+          nav(window._currentView, _currentParam);
+        }
+      } else {
+        // 没有已托管仓库 — 清除当前仓库选择，刷新页面显示空态
+        sessionStorage.removeItem('currentRepo');
+        initSidebarRepos();
+        showToast(I18N.t("organizations.switch_org.no_repos"));
+        // 切换组织后所有视图都重新加载（显示空态或刷新数据）
+        if (window._currentView === 'repos') {
+          goToRepos();
+        } else if (window._currentView) {
+          nav(window._currentView, _currentParam);
+        }
+      }
+      // 刷新右上角组织名
+      _updateTbOrgName();
+      // 刷新首页"我的组织"区块高亮（如果在 #repos 页面）
+      if (typeof _loadOrgSection === 'function') {
+        _loadOrgSection();
+      }
+    }).catch(function() {});
+    showToast(I18N.t("organizations.switch_org.success"));
   }
 
   const REPO_CACHE_KEY = 'repo_member_cache';
@@ -297,9 +577,17 @@ function loadAgentTypes() {
       repos.forEach(r => { window._managedRepoMap[r.full_name] = r.repo_key || ''; });
       const sel = $('repoSelect');
       const current = currentRepo();
-      sel.innerHTML = repos.map(r =>
-        `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-      ).join('') + '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
+      if (repos.length === 0) {
+        // 无托管仓库时：仅保留"新增托管"选项，并添加 click 事件兜底
+        // （select 只有 1 个选项时 change 事件不触发，需用 click 兜底）
+        sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
+        sel.onclick = function() { switchRepo('__add__'); };
+      } else {
+        sel.innerHTML = repos.map(r =>
+          `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
+        ).join('') + '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
+        sel.onclick = null;
+      }
     }).catch(() => {});
   }
 
@@ -362,6 +650,9 @@ function loadAgentTypes() {
       mv.style.zIndex = '100';
       $('pageTitle').textContent = I18N.t('app.current_project');
       renderRepoSelection(d.repos || []);
+      // 加载 lobby 组织下拉名
+      _updateTbOrgName();
+      _updateLobbyOrgName();
     }).catch(e => {
       if (window._currentView !== 'repos') return;  // stale guard
       if (ov) ov.remove();
@@ -522,7 +813,7 @@ function loadAgentTypes() {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail') { loadRepos(); return; }
+    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail' && view !== 'organizations' && view !== 'dash' && view !== 'pipe' && view !== 'vod' && view !== 'issue' && view !== 'coding' && view !== 'qa' && view !== 'sre' && view !== 'chat' && view !== 'im-channel' && view !== 'skills' && view !== 'event' && view !== 'skill') { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -619,10 +910,19 @@ function loadAgentTypes() {
       repoTitle.textContent = '';
     }
 
+    // 无仓库时的统一空态引导
+    function _noRepoPlaceholder() {
+      return '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:16px;padding:40px">' +
+        '<div style="font-size:48px">📦</div>' +
+        '<div style="font-size:16px;font-weight:600;color:var(--t1)">' + (I18N.t("organizations.switch_org.no_repos") || "该组织下暂无托管仓库") + '</div>' +
+        '<button onclick="app.goToRepos()" style="padding:10px 24px;border:none;border-radius:10px;background:var(--a);color:#fff;cursor:pointer;font-size:13px;font-weight:600">' + (I18N.t("app.repo.back_to_select") || "返回选择仓库") + '</button>' +
+        '</div>';
+    }
+
     if (view === 'dash') {
       title.textContent = I18N.t('app.current_project');
-      // 进入场景中心时无条件清除编辑标志（上一次操作异常退出时泄漏）
       window._dashboardEditing = false;
+      if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       const loadDash = () => Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
         API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
@@ -645,9 +945,11 @@ function loadAgentTypes() {
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
+      if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
+      if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
       API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
     } else if (view === 'event') {
@@ -676,6 +978,16 @@ function loadAgentTypes() {
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'credentials');
+    } else if (view === 'organizations') {
+      title.textContent = I18N.t('app.nav.organizations') || '组织管理';
+      repoTitle.textContent = '';
+      // 组织管理页面隐藏左侧菜单，全屏展示
+      var _orgSb = $('sidebar'); if (_orgSb) _orgSb.style.display = 'none';
+      if (typeof renderOrganizations === 'function') {
+        renderOrganizations();
+      } else {
+        pc.innerHTML = '<div class="error">' + (I18N.t('common.load_failed') || '加载失败') + '</div>';
+      }
     } else if (view === 'my-feedback') {
       title.textContent = '我的反馈';
       if (typeof renderMyFeedback === 'function') {
@@ -1427,7 +1739,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm};
+  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

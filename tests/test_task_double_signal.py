@@ -32,14 +32,14 @@ _client = TestClient(app)
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM session_api_tokens")
+        c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         c.execute("DELETE FROM agent_tasks WHERE id=?", (TASK,))
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (REPO,))
         db.commit()
     yield
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM session_api_tokens")
+        c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         c.execute("DELETE FROM agent_tasks WHERE id=?", (TASK,))
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (REPO,))
         db.commit()
