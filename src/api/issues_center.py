@@ -173,25 +173,22 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
     old_title = f"Issue #{issue_number}"
     try:
         convs = get_user_conversations(user_id, repo_key=repo_key, limit=50)
+        matched = None
         for conv in convs:
             _ct = conv.get("conv_type") or ""
             _in = conv.get("issue_number") or 0
             if _ct == "task" and _in == issue_number:
-                conv_id = conv["id"]
+                matched = conv
                 break
-        if not conv_id:
+        if matched is None:
             for conv in convs:
                 if conv.get("title") == old_title:
-                    conv_id = conv["id"]
+                    matched = conv
                     break
-        if conv_id:
+        if matched is not None:
+            conv_id = matched["id"]
             update_conversation(conv_id, conv_type="task", issue_number=issue_number)
-            _cur_title = ""
-            for conv in convs:
-                if conv["id"] == conv_id:
-                    _cur_title = conv.get("title") or ""
-                    break
-            if _cur_title == old_title:
+            if (matched.get("title") or "") == old_title:
                 update_conversation(conv_id, title=new_title)
             if write_context_on_reuse:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
