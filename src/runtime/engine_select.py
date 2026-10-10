@@ -578,3 +578,248 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
             "org_id": r[13] or 0,
         })
     return out
+
+
+# ====== 引擎绑定真实性同步（docs/weekly-06/engine-binding-truth-sync-design.md）======
+
+# 引擎离线判定为真死、触发场景绑定清理的阈值（秒）。默认 8h：
+# 心跳周期 15s，8h 无恢复 = 连续 ~1920 个心跳周期全丢，机器不会自己回来。
+# 置 0 禁用自动解绑（只提示不清理）。
+_ENGINE_DETACH_AFTER_SECONDS = int(os.environ.get("ENGINE_DETACH_AFTER_SECONDS", "28800"))
+
+
+def cleanup_scene_engine_bindings(rid_list: list) -> int:
+    """从所有活跃场景的 nodes_json 中移除对 rid_list 引擎的绑定（Issue #250 原逻辑抽出共享）。
+
+    返回被修改的场景数。供两处调用：
+    - settings.py 删除 runtime 时（原 _cleanup_scene_engine_runtime_ids，行为等价）
+    - _detach_dead_engine_bindings 离线超阈值解绑（引擎绑定真实性同步）
+    """
+    if not rid_list:
+        return 0
+    import json as _json
+    from datetime import datetime, timezone
+    from src.session_manager import db, db_lock
+    rid_set = set(rid_list)
+    changed_rows = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
+        except Exception as _e:
+            log.warning(f"cleanup_scene_engine_bindings: query scenes failed: {_e}")
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        for row_id, nodes_str in rows:
+            try:
+                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
+            except Exception:
+                continue
+            changed = False
+            for node in nodes:
+                eids = node.get("engine_runtime_ids") or []
+                if not eids:
+                    continue
+                new_eids = [eid for eid in eids if eid not in rid_set]
+                if len(new_eids) != len(eids):
+                    node["engine_runtime_ids"] = new_eids
+                    changed = True
+            if changed:
+                try:
+                    c.execute(
+                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
+                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
+                    changed_rows.append(row_id)
+                except Exception as _e:
+                    log.warning(f"cleanup_scene_engine_bindings: update scene {row_id} failed: {_e}")
+        db.commit()
+    return len(changed_rows)
+
+
+def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
+    """查所有活跃场景中绑定了 runtime_id 的 (row_id, repo_key, scene_id, node_tag, before_ids)。
+
+    供 detach 审计用：先记录被移除前的绑定事实，再执行清理。
+    """
+    import json as _json
+    hits = []
+    try:
+        c.execute("SELECT id, repo_key, scene_id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+        rows = c.fetchall()
+    except Exception as _e:
+        log.warning(f"_find_scene_bindings_for_runtime: query failed: {_e}")
+        return hits
+    for row_id, repo_key, scene_id, nodes_str in rows:
+        try:
+            nodes = _json.loads(nodes_str or "[]") if nodes_str else []
+        except Exception:
+            continue
+        for node in nodes:
+            eids = node.get("engine_runtime_ids") or []
+            if runtime_id in eids:
+                hits.append((row_id, repo_key or "", scene_id or "",
+                             node.get("tag") or node.get("id") or "", eids))
+    return hits
+
+
+def _find_autopilot_tasks_for_runtime(c, runtime_id: int) -> list:
+    """查仍绑定 runtime_id 的 autopilot 巡检任务 [{id, name}]（两表协同提示用，不删绑定）。"""
+    import json as _json
+    out = []
+    try:
+        c.execute("SELECT id, name, engine_runtime_ids FROM autopilot_tasks WHERE enabled=1")
+        rows = c.fetchall()
+    except Exception as _e:
+        log.warning(f"_find_autopilot_tasks_for_runtime: query failed: {_e}")
+        return out
+    for tid, tname, eids_str in rows:
+        try:
+            eids = _json.loads(eids_str) if eids_str else []
+        except Exception:
+            continue
+        if isinstance(eids, list) and runtime_id in eids:
+            out.append({"id": tid, "name": tname or f"task-{tid}"})
+    return out
+
+
+def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = None,
+                              repo_key: str = "") -> list:
+    """查询场景/引擎的被解绑提示信息（引擎绑定真实性同步 §4.3/§5.1b 前端数据源）。
+
+    - scene_row_id 非空：查该场景的未重绑（rebound_at 空）解绑记录 → detached_engines
+    - runtime_ids 非空：查这些引擎的未重绑解绑记录 → autopilot 任务 engine_detached 提示。
+      卡点④修复：必须传 repo_key（任务所属仓库）——引擎审计是全局的，任务提示只关心
+      「本仓库场景」的解绑记录，否则其他仓库同引擎的审计会误报到无关任务上。
+    返回 [{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, detached_at, affected_autopilot_tasks}]
+    """
+    from src.session_manager import db, db_lock
+    out = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            if scene_row_id:
+                c.execute(
+                    "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                    "detached_at, affected_autopilot_tasks "
+                    "FROM scene_engine_detach_log WHERE scene_row_id=? AND (rebound_at='' OR rebound_at IS NULL)",
+                    (scene_row_id,))
+            elif runtime_ids:
+                _ph = ",".join("?" * len(runtime_ids))
+                if repo_key:
+                    # 卡点④：按仓库过滤（autopilot 任务提示语义 = 本仓库场景受影响）
+                    c.execute(
+                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                        "detached_at, affected_autopilot_tasks "
+                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) AND repo_key=? "
+                        "AND (rebound_at='' OR rebound_at IS NULL)",
+                        (*runtime_ids, repo_key))
+                else:
+                    c.execute(
+                        "SELECT scene_row_id, scene_id, node_tag, runtime_id, runtime_name, "
+                        "detached_at, affected_autopilot_tasks "
+                        f"FROM scene_engine_detach_log WHERE runtime_id IN ({_ph}) "
+                        "AND (rebound_at='' OR rebound_at IS NULL)",
+                        tuple(runtime_ids))
+            else:
+                return out
+            import json as _json
+            for r in c.fetchall():
+                try:
+                    _aff = _json.loads(r[6]) if r[6] else []
+                except Exception:
+                    _aff = []
+                out.append({
+                    "scene_row_id": r[0], "scene_id": r[1] or "", "node_tag": r[2] or "",
+                    "runtime_id": r[3], "runtime_name": r[4] or "",
+                    "detached_at": r[5] or "", "affected_autopilot_tasks": _aff or [],
+                })
+        except Exception as e:
+            log.warning(f"get_detached_engine_hints: query failed: {e}")
+    return out
+
+
+def _detach_dead_engine_bindings() -> dict:
+    """引擎绑定真实性同步核心：离线超阈值的引擎，真实清理场景绑定 + 审计留痕。
+
+    幂等：agent_runtimes.detached_from_scenes_at 非空 = 已处理过，跳过。
+    双主安全：db_lock + detached 标记在全部场景处理完后才写，失败下轮 reap 重试。
+    不删的：agent_runtimes 行本身（保留 status=offline 防历史任务悬空）、
+    autopilot_tasks.engine_runtime_ids（任务级意图声明，只提示不删，见设计 §5.1b）。
+    """
+    import json as _json
+    from datetime import datetime, timezone
+    from src.runtime.health import parse_dt
+    from src.session_manager import db, db_lock
+
+    if _ENGINE_DETACH_AFTER_SECONDS <= 0:
+        return {"detached": 0, "disabled": True}
+
+    now = _time.time()
+    cutoff_ts = now - _ENGINE_DETACH_AFTER_SECONDS
+    stats = {"detached": 0, "scenes_cleaned": 0, "audit_rows": 0}
+
+    with db_lock:
+        c = db.cursor()
+        # 1. 找离线超阈值且未处理过的引擎
+        try:
+            c.execute(
+                "SELECT id, name, last_seen_at FROM agent_runtimes "
+                "WHERE (detached_from_scenes_at='' OR detached_from_scenes_at IS NULL)")
+            candidates = c.fetchall()
+        except Exception as e:
+            log.warning(f"_detach_dead_engine_bindings: query runtimes failed: {e}")
+            return stats
+
+        dead = []
+        for rid, rname, last_seen in candidates:
+            ts = parse_dt(last_seen)
+            # 从未心跳（last_seen NULL）的注册残留也视为死引擎
+            if ts is None or ts <= cutoff_ts:
+                dead.append((rid, rname))
+            # ts > cutoff：8h 内有心跳（或从未有过心跳但 detached 标记为空的新行）——不动
+        if not dead:
+            return stats
+
+        now_iso = datetime.now(timezone.utc).isoformat()
+        for rid, rname in dead:
+            # 2. 记录被移除前的绑定事实（审计 + detached_engines 提示的数据源）
+            bindings = _find_scene_bindings_for_runtime(c, rid)
+            affected_tasks = _find_autopilot_tasks_for_runtime(c, rid)
+
+            # 3. 真实清理场景绑定
+            try:
+                cleaned = cleanup_scene_engine_bindings([rid])
+                stats["scenes_cleaned"] += cleaned
+            except Exception as e:
+                log.warning(f"_detach_dead_engine_bindings: cleanup runtime={rid} failed: {e}")
+                continue  # 清理失败不写标记，下轮重试
+
+            # 4. 审计留痕（每 scene+node 一行）
+            for row_id, repo_key, scene_id, node_tag, before_ids in bindings:
+                try:
+                    c.execute(
+                        "INSERT INTO scene_engine_detach_log "
+                        "(scene_row_id, repo_key, scene_id, node_tag, runtime_id, runtime_name, "
+                        "detached_at, reason, affected_autopilot_tasks) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (row_id, repo_key, scene_id, node_tag, rid, rname or "",
+                         now_iso, "offline_timeout",
+                         _json.dumps(affected_tasks, ensure_ascii=False)))
+                    stats["audit_rows"] += 1
+                except Exception as e:
+                    log.warning(f"_detach_dead_engine_bindings: audit insert scene={row_id} failed: {e}")
+
+            # 5. 全部处理完后写幂等标记
+            try:
+                c.execute(
+                    "UPDATE agent_runtimes SET detached_from_scenes_at=? WHERE id=?",
+                    (now_iso, rid))
+                stats["detached"] += 1
+            except Exception as e:
+                log.warning(f"_detach_dead_engine_bindings: mark runtime={rid} failed: {e}")
+        db.commit()
+
+    if stats["detached"]:
+        log.info(f"_detach_dead_engine_bindings: {stats} (threshold={_ENGINE_DETACH_AFTER_SECONDS}s)")
+    return stats
+

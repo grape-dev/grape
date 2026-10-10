@@ -693,10 +693,10 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, attempts FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            "SELECT id, attempts, runtime_id FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
-        for tid, attempts in rows:
+        for tid, attempts, rid in rows:
             # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
             try:
                 c.execute(
@@ -708,17 +708,49 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
             except Exception:
                 pass  # 查询失败保守跳过检查（保持旧行为：回收）
             # attempts 封顶：循环回炉保护
+            # 2026-10-08 follow-up：SQLite 后端不支持 CONCAT → no such function 导致
+            # 整个事务回滚、端点 500、封顶安全网失效。改用 service.py 同款纯 SQL CASE
+            # 写法（attempts=attempts+1，CASE 判定 status，说明写 result_text 非 errors）。
+            # 2026-10-09 #253 合并融合：回炉（queued）分支并入 runtime_id 归零 +
+            # pool_agent_type 回填（对齐 master 侧回收；引擎删重建后防死定向）。
             _att = (attempts or 0) + 1
+            # 归零回填参数：先读 agent_type（回炉转广播后同 tag 引擎可再领）
+            _pool_fill = ""
+            try:
+                c.execute("SELECT agent_type FROM agent_tasks WHERE id=?", (tid,))
+                _pr = c.fetchone()
+                if _pr and _pr[0]:
+                    _pool_fill = _pr[0]
+            except Exception:
+                pass
+            c.execute(
+                "UPDATE agent_tasks SET attempts=attempts+1, "
+                "status=CASE WHEN attempts+1 >= ? THEN 'failed' ELSE 'queued' END, "
+                "started_at=CASE WHEN attempts+1 >= ? THEN started_at ELSE NULL END, "
+                "result_text=CASE WHEN attempts+1 >= ? "
+                "THEN 'recover-orphans attempts cap reached (possible self-restart loop)' "
+                "ELSE result_text END, "
+                "runtime_id=CASE WHEN attempts+1 >= ? THEN runtime_id ELSE 0 END, "
+                "pool_tag=CASE WHEN attempts+1 < ? AND pool_tag='' "
+                "THEN ? ELSE pool_tag END, "
+                "pool_agent_type=CASE WHEN attempts+1 < ? AND pool_agent_type='' "
+                "THEN ? ELSE pool_agent_type END "
+                "WHERE id=?",
+                (RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS,
+                 RECOVER_MAX_ATTEMPTS,
+                 RECOVER_MAX_ATTEMPTS, _pool_fill,
+                 RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
             if _att >= RECOVER_MAX_ATTEMPTS:
-                c.execute(
-                    "UPDATE agent_tasks SET status='failed', attempts=?, errors=CONCAT(COALESCE(errors,''), ?) WHERE id=?",
-                    (_att, "recover-orphans attempts cap reached (possible self-restart loop)", tid))
                 force_failed.append(tid)
             else:
-                c.execute(
-                    "UPDATE agent_tasks SET status='queued', started_at=NULL, attempts=? WHERE id=?",
-                    (_att, tid))
                 recovered.append(tid)
+            # 槽位释放（与 service.py 回收/update_task_status/requeue_task 同款防负数写法）：
+            # 旧代码两分支都不减 busy_slots → 每次回炉净漏 1 槽、force-fail 永久泄漏；
+            # claim_by_tag 满载即拒领（busy>=max → None），漏 4 槽后引擎哑死。
+            if rid and rid > 0:
+                c.execute(
+                    "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
+                    (rid,))
         db.commit()
     if recovered or skipped_active or force_failed:
         log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "

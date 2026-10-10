@@ -1010,18 +1010,38 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
   };
 }
 
-// Issue #249: 过滤 engine_runtime_ids，仅保留可用（online/recently_lost）引擎
-// agentEngines 为空或该 agentType 无列表时退回原始 engineIds（不劣于现状）
-function _filterAvailableEngineIds(engineIds, agentEngines, agentType) {
+// Issue #249 → 引擎绑定真实性同步：原过滤逻辑（离线引擎隐藏、滤空画"广播"）是表面工程，
+// 后端 fail fast 拒绝派发但界面显示绿色广播。改为三态如实呈现：
+//   有在线绑定 → "N 台引擎"（蓝）；部分离线 → "N 台引擎 · M 离线"（红）；全灭 → "绑定失效"（红）；未配 → "广播"（绿）
+// 返回 {total, offline} 计数供两处渲染（dashboard 流程卡片 / scene-market 详情）共用。
+function _engineBadgeState(engineIds, agentEngines, agentType) {
+  const ids = engineIds || [];
+  if (!ids.length) return { total: 0, offline: 0 };
   if (!agentEngines || !agentEngines[agentType] || !agentEngines[agentType].length) {
-    return engineIds || [];
+    return { total: ids.length, offline: 0 };  // 无引擎数据时不劣于现状（不误报离线）
   }
   const availMap = {};
   agentEngines[agentType].forEach(e => {
     if (e.status === 'online' || e.status === 'recently_lost') availMap[e.id] = true;
   });
-  return (engineIds || []).filter(id => availMap[id]);
+  const offline = ids.filter(id => !availMap[id]).length;
+  return { total: ids.length, offline };
 }
+
+// 三态徽章 HTML（共享 helper，scene-market.js 同款引用）
+window._engineBadgeHtml = function(engineIds, agentEngines, agentType) {
+  const st = _engineBadgeState(engineIds, agentEngines, agentType);
+  if (!st.total) {
+    return `<span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')||'广播'}</span>`;
+  }
+  if (st.offline > 0) {
+    const label = st.offline < st.total
+      ? (I18N.t('dashboard.engine_offline_partial', {total: st.total, offline: st.offline}) || `${st.total} 台引擎 · ${st.offline} 离线`)
+      : (I18N.t('dashboard.engine_offline_all') || '绑定失效 · 全部离线');
+    return `<span style="display:inline-flex;align-items:center;gap:4px;background:#ff3b3014;color:#ff3b30;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${label}</span>`;
+  }
+  return `<span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: st.total})}</span>`;
+};
 
 // 渲染执行流程卡片（查看模式只显示 enabled 的 agent）
 function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, colors, descs, editMode, editNodes) {
@@ -1036,7 +1056,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const skLabel = meta.label || tag;
     const agent = agents.find(a => a.agent_type === tag) || {};
     const skillName = node.skill_display_name || node.skill || agent.skill_display_name || agent.skill || '';
-    const engineIds = _filterAvailableEngineIds(node.engine_runtime_ids || agent.engine_runtime_ids || [], agentEngines, tag);
+    const badgeHtml = window._engineBadgeHtml(node.engine_runtime_ids || agent.engine_runtime_ids || [], agentEngines, tag);
     const modeIcon = {emit:'→',waterfall:'◇',serial:'↻',parallel:'⇄'}[node.mode] || '→';
     const en = editNodes.find(n => n.id === tag);
     const enabled = editMode ? (en ? en.enabled : true) : (node.enabled !== false);
@@ -1060,10 +1080,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
       </div>
       <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center">
         <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_engine')||'引擎'}</div>
-        ${engineIds.length > 0
-          ? `<span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: engineIds.length})}</span>`
-          : `<span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')||'广播'}</span>`
-        }
+        ${badgeHtml}
       </div>
     </div>`;
     if (i < displayNodes.length - 1) {
@@ -1236,7 +1253,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     const skLabel = meta.label || tag;
     const ag = agents.find(a => a.agent_type === tag) || {};
     const skillDisplay = node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '';
-    const engineIds = _filterAvailableEngineIds(node.engine_runtime_ids || [], agentEngines, tag);
+    const badgeHtml = window._engineBadgeHtml(node.engine_runtime_ids || [], agentEngines, tag);
     const enabled = node.enabled !== false;
 
     let toggleBtn = '';
@@ -1270,11 +1287,8 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     // Engine 区域 — 药丸标签在上，按钮在下
     let engineHtml;
     if (enabled) {
-      const badge = engineIds.length > 0
-        ? `<span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: engineIds.length})}</span>`
-        : `<span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')||'广播'}</span>`;
       engineHtml = `<div style="display:flex;flex-direction:column;align-items:center;gap:6px;width:100%">
-        ${badge}
+        ${badgeHtml}
         <button onclick="openEngineModal('${tag}')" style="font-size:10px;padding:4px 12px;border:1px solid #e8e8ed;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#e8e8ed';this.style.color='#6e6e73'">${I18N.t('dashboard.select_engine')||'选择引擎'}</button>
       </div>`;
     } else {
@@ -1447,6 +1461,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   overlay.innerHTML = `<div id="engModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">
     <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')||'选择引擎'} — ${title}</h3>
     <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})||'已注册引擎: '+allEngines.length}</div>
+    <div id="engDetachHint" style="display:none"></div>
     <div id="engFilterTags" style="flex-shrink:0">${_renderFilterTags()}</div>
     <div style="margin-bottom:12px;flex-shrink:0"><input id="engSearchInput" placeholder="搜索引擎名称/标签..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>
     <div id="engListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">${_renderEngineList('')}</div>
@@ -1456,6 +1471,28 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
     </div>
   </div>`;
   document.body.appendChild(overlay);
+
+  // 引擎绑定真实性同步 §4.3：异步拉取该 agent 详情的 detached_engines，有被系统移除的引擎时显示提示条
+  try {
+    if (owner && name) {
+      API.get('/agents/' + agentType + '/' + owner + '/' + name).then(function(d) {
+        var hints = d.detached_engines || [];
+        if (!hints.length) return;
+        var box = document.getElementById('engDetachHint');
+        if (!box) return;
+        var mine = hints.filter(function(h) { return !h.node_tag || h.node_tag === agentType; });
+        if (!mine.length) return;
+        var names = mine.map(function(h) { return (h.runtime_name || 'engine') + '#' + h.runtime_id; });
+        var uniq = names.filter(function(v, i) { return names.indexOf(v) === i; });
+        box.style.display = 'block';
+        box.innerHTML = '<div style="background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:12px;padding:10px 14px;margin-bottom:12px;font-size:11px;color:#d32f2f;line-height:1.6">'
+          + (I18N.t('dashboard.engine_detached_hint') || '以下引擎因离线超过 8 小时被系统移除：')
+          + '<b>' + uniq.join('、') + '</b>'
+          + (I18N.t('dashboard.engine_detached_rebind') || '，如需使用请在下方列表重新勾选绑定。')
+          + '</div>';
+      }).catch(function() {});
+    }
+  } catch (e) { /* 提示条失败不影响选引擎 */ }
 
   // 加载场景标签缓存（供 _engSceneDisplayName 解析显示名；runtimes.js 已定义 __sceneTagsCache）
   if (typeof __sceneTagsCache !== 'undefined' && !__sceneTagsCache && typeof _loadSceneTagsCache === 'function') {
@@ -1821,7 +1858,7 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
     const skill = node ? (node.skill || '') : (ag.skill || '');
     const skillDisplay = node ? (node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '') : (ag.skill_display_name || ag.skill || '');
-    const engineIds = _filterAvailableEngineIds(node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []), agentEngines, at);
+    const badgeHtml = window._engineBadgeHtml(node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []), agentEngines, at);
     const accentColor = meta.color || colors[at] || '#86868b';
     // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
     const desc = descs[at] || meta.description || '';
@@ -1864,21 +1901,12 @@ function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngine
     // Engine 区域 — 居中药丸标签 + 编辑按钮
     let engineHtml;
     if ((editMode || engineMode) && enabled) {
-      if (engineIds.length > 0) {
-        engineHtml = `<div class="ap-nd-eng" style="gap:6px">
-          <span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: engineIds.length})}</span>
-          <button onclick="openEngineModal('${at}')" style="font-size:10px;padding:3px 10px;border:1px solid #d2d2d7;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#d2d2d7';this.style.color='#6e6e73'">${I18N.t('dashboard.change_engine')}</button>
-        </div>`;
-      } else {
-        engineHtml = `<div class="ap-nd-eng" style="gap:6px">
-          <span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')}</span>
-          <button onclick="openEngineModal('${at}')" style="font-size:10px;padding:3px 10px;border:1px solid #d2d2d7;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#d2d2d7';this.style.color='#6e6e73'">${I18N.t('dashboard.select_engine')}</button>
-        </div>`;
-      }
-    } else if (enabled && engineIds.length > 0) {
-      engineHtml = `<div class="ap-nd-eng"><span style="display:inline-flex;align-items:center;gap:4px;background:#0071e314;color:#0071e3;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.engine_count', {count: engineIds.length})}</span></div>`;
+      engineHtml = `<div class="ap-nd-eng" style="gap:6px">
+        ${badgeHtml}
+        <button onclick="openEngineModal('${at}')" style="font-size:10px;padding:3px 10px;border:1px solid #d2d2d7;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#d2d2d7';this.style.color='#6e6e73'">${I18N.t('dashboard.change_engine')}</button>
+      </div>`;
     } else if (enabled) {
-      engineHtml = `<div class="ap-nd-eng"><span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')}</span></div>`;
+      engineHtml = `<div class="ap-nd-eng">${badgeHtml}</div>`;
     } else {
       engineHtml = `<div class="ap-nd-eng"><span style="font-size:11px;color:#86868b">none</span></div>`;
     }

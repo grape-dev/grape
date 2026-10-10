@@ -348,24 +348,22 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
 
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
-    """换人：将同 issue 其他 assignee 的 active/processing 任务置为 completed（reassigned）"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE issue SET status='completed', completed_reason='reassigned', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') AND assignee<>?",
-            (repo_key, issue_number, keep_assignee)
-        )
-        db.commit()
-        return c.rowcount
+    """换人：不再把需求标完成（reassigned 语义错位，见 reassign-takeover-no-complete-design.md）。
+
+    单行模型（issue.(repo_key, issue_number) UNIQUE）下 assignee<>keep 基本不命中；
+    责任转移由 _ensure_assignee_task_card 更新 assignee 承担。保持 no-op 幂等，不触碰需求状态。
+    """
+    return 0
 
 
 def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
-    """bot 接管：将同 issue active 任务置 processing（Issue #51：不再直接 completed）。
+    """bot 接管：不把需求标完成（bot_takeover 语义错位，见 reassign-takeover-no-complete-design.md）。
 
-    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管。
-    Issue #51 修订：不再直接关闭，改为走 pending_review 流程。
-    如果有 agent 正在 running，不修改 stage（等 agent 完成后再判定）。
+    接管语义 = bot 自己继续处理，绝不完结需求：
+    - stage='done'（本已终态）→ 早退不改状态（已完成的保持 completed，不翻回不重标）；
+    - stage='pending_review' → 保持 pending_review；
+    - 无 running agent 且活跃 → pending_review 等待开发者确认；
+    - 有 agent 在 running → 不修改，等 agent 完成后再判定。
     """
     from src.api.session_store import get_issue_stage, set_issue_stage
     _issue_id = f"#{issue_number}"
@@ -381,11 +379,8 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         _has_running = c.fetchone() is not None
 
         if _stage == "done":
-            # stage=done → 直接 completed
-            c.execute(
-                "UPDATE issue SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
-                (repo_key, issue_number))
+            # 本已终态：bot 接管不改变完成状态（防止重复完成 / 翻活已完成需求）
+            return 0
         elif _stage == "pending_review":
             # Issue #85: stage=pending_review → 保持，不自动 completed
             c.execute(

@@ -1454,6 +1454,15 @@ function _apDetailHTML(t) {
   if (t.engine_runtime_ids && t.engine_runtime_ids.length) {
     engineNames = _apt('detail.engine_count', {count: t.engine_runtime_ids.length});
   }
+  // 引擎绑定真实性同步 §5.1b：绑定引擎被系统从场景移除 → 同款提示条（两表协同，不删任务绑定）
+  var detachHint = '';
+  if (t.engine_detached && t.engine_detached.engines && t.engine_detached.engines.length) {
+    detachHint = '<div style="background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:12px;padding:10px 14px;margin-top:12px;font-size:11px;color:#d32f2f;line-height:1.6">'
+      + (_apt('detail.engine_detached_hint') || '绑定的引擎 ')
+      + '<b>' + _esc(t.engine_detached.engines.join('、')) + '</b>'
+      + (_apt('detail.engine_detached_rebind') || ' 已离线（超 8 小时）被系统从场景移除，任务绑定仍保留，请自行调整或重新绑定。')
+      + '</div>';
+  }
   return '<div>' +
     // 标题行：返回按钮 + 右侧操作
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">' +
@@ -1478,6 +1487,7 @@ function _apDetailHTML(t) {
         '<div><span style="color:var(--t2)">' + _apt('detail.max_retry_label') + '</span> ' + (typeof t.max_retry === 'number' ? t.max_retry : 3) + '</div>' +
         '<div><span style="color:var(--t2)">' + _apt('detail.created_at_label') + '</span> ' + _apFormatTime(t.created_at) + '</div>' +
       '</div>' +
+      detachHint +
       '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">' + _apt('detail.instruction_label') + '</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(t.instruction||'') + '</pre></div>' +
     '</div>' +
     // 时间表
