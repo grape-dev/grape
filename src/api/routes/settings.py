@@ -463,8 +463,14 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         visible_runtimes.append(rt)
 
     # 设备级视图（共享 helper，Issue #185 审查修复：消除重复代码）
-    devices = _build_runtime_devices(db, db_lock, cred_map, _visible_credential,
-                                     valid_users, cached, now)
+    # org_id 过滤 cred_map 和 cached（与 runtime-devices 端点一致，防止闪现其他组织设备）
+    _devices_cred_map = cred_map
+    _devices_cached = cached
+    if _filter_org_id:
+        _devices_cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == _filter_org_id}
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) == _filter_org_id]
+    devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
+                                     valid_users, _devices_cached, now)
 
     # scope 筛选（服务端过滤）
     if scope:

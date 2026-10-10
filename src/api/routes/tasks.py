@@ -85,7 +85,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
-                      sender: str = "") -> int | None:
+                      sender: str = "",
+                      org_id: int = 0) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id
@@ -125,6 +126,18 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
+    # org_id 未显式传入时，从 managed_repos 表推断仓库关联的组织
+    if not org_id:
+        try:
+            from src.session_manager import db as _org_db, db_lock as _org_db_lock
+            with _org_db_lock:
+                _oc = _org_db.cursor()
+                _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                _or = _oc.fetchone()
+                if _or and _or[0]:
+                    org_id = _or[0]
+        except Exception:
+            pass
     with db_lock:
         c = db.cursor()
         # 幂等：同一 issue 任何 assignee 的 active/processing 任务都复用
@@ -166,10 +179,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number))
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id)
             )
             db.commit()
             task_id = c.lastrowid

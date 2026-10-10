@@ -870,11 +870,21 @@ function refreshRuntimes() {
   // 清空旧缓存，防止刷新期间渲染旧数据
   __runtimeData = null;
   API.post('/settings/agent-runtimes/refresh').then(() => {
-    // 串行加载：先加载引擎列表，完成后再加载设备列表
-    _loadRuntimesData();
     if (_runtimeTab === 'workers') {
-      // 延迟加载设备列表，等 _loadRuntimesData 先完成设置 __runtimeData
-      setTimeout(function() { _loadRuntimeDevices(); }, 300);
+      // Workers 标签页：直接加载 runtime-devices（权威数据源），避免 agent-runtimes 的 devices 闪现
+      _loadRuntimeDevices();
+      // 后台静默加载 agent-runtimes 以填充 engines 数据（不触发渲染）
+      API.get('/settings/agent-runtimes?page=1&page_size=' + _rtPageSize).then(function(d) {
+        if (window._currentView !== 'runtimes') return;
+        if (!__runtimeData) {
+          __runtimeData = {runtimes: d.runtimes || [], devices: [], total: d.total || 0};
+        } else {
+          __runtimeData.runtimes = d.runtimes || [];
+          __runtimeData.total = d.total || 0;
+        }
+      }).catch(function() {});
+    } else {
+      _loadRuntimesData();
     }
     app.showToast(I18N.t('runtimes.toast.refresh_success'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));

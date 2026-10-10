@@ -445,6 +445,9 @@ function loadAgentTypes() {
         // 刷新当前页面数据（如果是 dashboard 会重新加载）
         if (window._currentView === 'dash') {
           nav('dash');
+        } else if (window._currentView === 'repos') {
+          // 在 repos lobby 页面切换到有仓库的组织时，直接进入第一个仓库
+          selectRepo(first.full_name, first.owner, first.name, first.repo_key || '');
         }
       } else {
         // 没有已托管仓库 — 清除当前仓库选择，刷新页面显示空态
@@ -454,6 +457,9 @@ function loadAgentTypes() {
         // 如果当前在 dash 页面，刷新显示空态
         if (window._currentView === 'dash' || !window._currentView) {
           nav('dash');
+        } else if (window._currentView === 'repos') {
+          // 在 repos lobby 页面切换到无仓库的组织时，重新渲染 lobby
+          goToRepos();
         }
       }
       // 刷新右上角组织名
