@@ -961,11 +961,11 @@
   text-decoration: none;
 }
 [data-theme="apple"] .msg a:hover { text-decoration: underline; }
-/* Issue #233: 蓝色背景用户消息气泡内链接高对比度样式（WCAG AA ≥4.5:1） */
-[data-theme="apple"] .chat-body .msg.l a,
-[data-theme="apple"] .chat-body .msg.l a:link,
-[data-theme="apple"] .chat-body .msg.l a:visited { color: #fff; text-decoration: underline; }
-[data-theme="apple"] .chat-body .msg.l a:hover { text-decoration: underline; background-color: rgba(255,255,255,.18); border-radius: 2px; }
+/* Issue #233: 蓝色背景用户消息气泡内链接高对比度样式（WCAG AA ≥4.5:1）；Issue #286: 蓝色气泡改为 .msg.r（右侧） */
+[data-theme="apple"] .chat-body .msg.r a,
+[data-theme="apple"] .chat-body .msg.r a:link,
+[data-theme="apple"] .chat-body .msg.r a:visited { color: #fff; text-decoration: underline; }
+[data-theme="apple"] .chat-body .msg.r a:hover { text-decoration: underline; background-color: rgba(255,255,255,.18); border-radius: 2px; }
 
 /* ── 17. Modal / Overlay ── */
 [data-theme="apple"] .create-repo-modal {

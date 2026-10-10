@@ -460,7 +460,7 @@ function switchConversation(convId) {
       rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
         return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
       });
-      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
+      return `<div class="msg ${m.role === 'user' ? 'r' : 'l'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
     }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
     body.scrollTop = body.scrollHeight;
 
@@ -474,7 +474,7 @@ function switchConversation(convId) {
         if (st.status === 'running') {
           // 任务仍在执行 → 追加 3 点动画占位 + SSE 重连
           const elId = 't' + Date.now();
-          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+          body.innerHTML += '<div class="msg l" id="' + elId + '">'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
             + '</div>';
           body.scrollTop = body.scrollHeight;
@@ -688,9 +688,9 @@ function doSend(input, body) {
   if (vid) {
     imgHtml += '<div style="margin-top:4px"><div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-size:12px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>' + (_pendingVideo ? (_pendingVideo.name || 'video') : 'video') + '</div></div>';
   }
-  body.innerHTML += '<div class="msg l">' + displayMsg + imgHtml + '</div>';
+  body.innerHTML += '<div class="msg r">' + displayMsg + imgHtml + '</div>';
   const tid = 't' + Date.now();
-  body.innerHTML += '<div class="msg r" id="' + tid + '">'
+  body.innerHTML += '<div class="msg l" id="' + tid + '">'
     + '<span class="chat-dots"><span></span><span></span><span></span></span>'
     + '</div>';
   body.scrollTop = body.scrollHeight;
@@ -820,7 +820,7 @@ function resumeChatTask() {
         if (!el) {
           const elId = 't' + Date.now();
           task.el_id = elId;
-          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+          body.innerHTML += '<div class="msg l" id="' + elId + '">'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
             + '</div>';
           body.scrollTop = body.scrollHeight;
@@ -863,9 +863,9 @@ function renderChatMessages(messages) {
     const textOnly = content.replace(/\[chat_img:[^\]]+\]/g, '').trim();
     if (m.role === 'user') {
       const escaped = textOnly.replace(/</g, '&lt;');
-      body.innerHTML += '<div class="msg l">' + escaped + (imgHtml !== content ? imgHtml : '') + '</div>';
+      body.innerHTML += '<div class="msg r">' + escaped + (imgHtml !== content ? imgHtml : '') + '</div>';
     } else {
-      body.innerHTML += '<div class="msg r">' + renderMarkdown(content) + '</div>';
+      body.innerHTML += '<div class="msg l">' + renderMarkdown(content) + '</div>';
     }
   });
   body.scrollTop = body.scrollHeight;
