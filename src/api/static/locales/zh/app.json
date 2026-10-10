@@ -25,7 +25,8 @@
     "scene_center": "项目场景",
     "scene_skill_market": "场景·技能",
     "scene_market": "场景市场",
-    "skill_market": "技能市场"
+    "skill_market": "技能市场",
+    "autopilot": "自动化"
   },
   "sidebar": {
     "workspace": "工作区",
@@ -55,6 +56,7 @@
     "select": "选择仓库...",
     "load_failed": "无法加载仓库列表，请确认 GitCode Token 是否有效",
     "back_to_select": "返回仓库选择",
+    "back_to_website": "返回官网",
     "add_new": "新增仓库托管"
   },
   "toast": {

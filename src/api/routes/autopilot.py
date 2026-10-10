@@ -206,9 +206,11 @@ def list_tasks(
            "FROM autopilot_tasks")
     conditions = []
     params = []
+    # 跨平台前缀兼容（与 check_repo_access 对齐）：gitcode:↔github: 互换匹配
     if repo_key:
-        conditions.append("repo_key=?")
-        params.append(repo_key)
+        base = repo_key.split(":", 1)[1] if ":" in repo_key else repo_key
+        conditions.append("(repo_key=? OR repo_key=? OR repo_key=?)")
+        params.extend([repo_key, f"gitcode:{base}", f"github:{base}"])
     if enabled is not None:
         conditions.append("enabled=?")
         params.append(enabled)
@@ -219,9 +221,42 @@ def list_tasks(
         c = db.cursor()
         rows = c.execute(sql, params).fetchall()
     # 过滤：只返回当前用户有权访问的仓库的任务
+    # 跨平台前缀兼容（与 check_repo_access 对齐）：gitcode:↔github: 互换匹配
     from src.user.db import get_managed_repos
     user_repos = {r["repo_key"] for r in get_managed_repos(user.get("id", 0))}
-    tasks = [_row_to_task(r) for r in rows if r[2] in user_repos or not r[2]]
+    # 构建跨平台候选集：user_repos 中每个 repo_key 的 gitcode:/github: 变体都算匹配
+    _repo_base = set()
+    for rk in user_repos:
+        base = rk.split(":", 1)[1] if ":" in rk else rk
+        _repo_base.add(base)
+    tasks = [_row_to_task(r) for r in rows if not r[2] or
+             r[2] in user_repos or
+             (r[2].split(":", 1)[1] if ":" in r[2] else r[2]) in _repo_base]
+    # 引擎绑定真实性同步 §5.1b：绑定引擎已被系统 detach 的任务带提示（两表协同，不删绑定）
+    try:
+        from src.runtime.engine_select import get_detached_engine_hints
+        import json as _json_hint
+        _all_eids = set()
+        for t in tasks:
+            for _eid in (t.get("engine_runtime_ids") or []):
+                _all_eids.add(int(_eid))
+        if _all_eids:
+            # 卡点④：按任务仓库分组取提示（引擎审计全局、任务提示只看本仓库场景）
+            _hints_by_repo = {}
+            _repos = {t.get("repo_key") or "" for t in tasks}
+            for _rk in _repos:
+                _hints_by_repo[_rk] = {h["runtime_id"]: h for h in get_detached_engine_hints(runtime_ids=list(_all_eids), repo_key=_rk)}
+            for t in tasks:
+                _hint_map = _hints_by_repo.get(t.get("repo_key") or "", {})
+                _hints = [ _hint_map[int(_eid)] for _eid in (t.get("engine_runtime_ids") or [])
+                           if int(_eid) in _hint_map ]
+                if _hints:
+                    t["engine_detached"] = {
+                        "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
+                        "detached_at": _hints[0]["detached_at"],
+                    }
+    except Exception as _he:
+        log.warning(f"list_tasks: engine_detached hints failed: {_he}")
     return {"tasks": tasks}
 
 
@@ -238,13 +273,42 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
         ).fetchone()
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
-    return _row_to_task(row)
+    task = _row_to_task(row)
+    # 引擎绑定真实性同步 §5.1b：详情同样带 engine_detached 提示（与列表口径一致）
+    try:
+        from src.runtime.engine_select import get_detached_engine_hints
+        _eids = [int(x) for x in (task.get("engine_runtime_ids") or [])]
+        if _eids:
+            _hints = get_detached_engine_hints(runtime_ids=_eids, repo_key=task.get("repo_key") or "")
+            if _hints:
+                task["engine_detached"] = {
+                    "engines": [f"{h['runtime_name']}#{h['runtime_id']}" for h in _hints],
+                    "detached_at": _hints[0]["detached_at"],
+                }
+    except Exception as _he:
+        log.warning(f"get_task: engine_detached hints failed: {_he}")
+    return task
 
 
 @router.post("/tasks")
 def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     """创建自动化任务。"""
+    # 规范化 repo_key：前端可能硬编码 gitcode: 前缀，需按用户实际关联仓修正
+    from src.repo_key import to_repo_key, parse_repo_key
     if body.repo_key:
+        # 检查用户 managed_repos 中是否有匹配的仓库（跨平台前缀兼容）
+        from src.user.db import get_managed_repos
+        user_repos = {r["repo_key"] for r in get_managed_repos(user.get("id", 0))}
+        body_base = body.repo_key.split(":", 1)[1] if ":" in body.repo_key else body.repo_key
+        _matched_repo_key = ""
+        for rk in user_repos:
+            rk_base = rk.split(":", 1)[1] if ":" in rk else rk
+            if rk_base == body_base:
+                _matched_repo_key = rk
+                break
+        if _matched_repo_key:
+            # 用用户实际关联的 repo_key（正确的前缀），而非前端硬编码的
+            body.repo_key = _matched_repo_key
         check_repo_access(user, body.repo_key)
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()

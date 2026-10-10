@@ -10,6 +10,7 @@
   "status_success": "✅ 成功",
   "status_failed": "❌ 失败",
   "status_running_prefix": "⏳ ",
+  "fail_reason": "失败原因",
   "btn_redispatch": "🔄 重新派发",
   "btn_local_retry": "🖥 本机重试",
   "local_retry_title": "本机重试",

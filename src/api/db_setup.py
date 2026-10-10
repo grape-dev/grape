@@ -174,6 +174,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     repo_key TEXT DEFAULT NULL,          -- 关联项目 repo_key（注册时从凭据复制）
     worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
+    detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
@@ -650,6 +651,7 @@ CREATE TABLE IF NOT EXISTS scene_market (
     author      VARCHAR(64) DEFAULT '',
     content_hash VARCHAR(64) DEFAULT '',  -- 内容 hash（定时同步增量检测用）
     obs_icon_key VARCHAR(256) DEFAULT '',  -- OBS 桶 icon 对象 key（查询时动态生成签名 URL）
+    preset_custom_fields TEXT DEFAULT '[]',  -- 场景预置自定义参数声明（scene.json custom_fields 数组，Issue #246）
     is_active   INTEGER DEFAULT 1,
     scope       VARCHAR(32) DEFAULT 'official',  -- 可见范围：official/repo
     repo_key    VARCHAR(191) DEFAULT '',  -- 仓库标识（official 为空，repo 为当前仓库）
@@ -679,6 +681,23 @@ CREATE TABLE IF NOT EXISTS scene_skill_ref (
     skill_name  TEXT NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     UNIQUE (scene_id, skill_name)
+)
+"""
+
+# 引擎绑定真实性同步：场景引擎解绑审计表（引擎离线超 8h 系统自动移除场景绑定的留痕）
+_SCENE_ENGINE_DETACH_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS scene_engine_detach_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    scene_row_id INTEGER NOT NULL,        -- devops_pipeline_scene.id
+    repo_key    TEXT DEFAULT '',
+    scene_id    TEXT DEFAULT '',          -- 场景 scene_id（非 market id）
+    node_tag    TEXT DEFAULT '',          -- 被移除绑定的节点标签（coding/qa/sre…）
+    runtime_id  INTEGER NOT NULL,         -- 被移除的引擎 id
+    runtime_name TEXT DEFAULT '',         -- 引擎名（快照，防 runtime 行后续变更）
+    detached_at TEXT DEFAULT (datetime('now')),
+    reason      TEXT DEFAULT '',          -- 触发原因（offline_timeout 等）
+    affected_autopilot_tasks TEXT DEFAULT '[]',  -- 仍绑定该引擎的巡检任务 [{id,name}]（两表协同提示用）
+    rebound_at  TEXT DEFAULT ''           -- 用户重绑时间（非空=不再提示）
 )
 """
 
@@ -816,6 +835,8 @@ CREATE TABLE IF NOT EXISTS bot_seen_messages (
     ("scene_market", _SCENE_MARKET_DDL),
     ("scene_likes", _SCENE_LIKES_DDL),
     ("scene_skill_ref", _SCENE_SKILL_REF_DDL),
+    # 引擎绑定真实性同步：场景引擎解绑审计表
+    ("scene_engine_detach_log", _SCENE_ENGINE_DETACH_LOG_DDL),
     ("skill_likes", _SKILL_LIKES_DDL),
     ("skill_category", _SKILL_CATEGORY_DDL),
     ("uploaded_files", _UPLOADED_FILES_DDL),
@@ -1762,6 +1783,12 @@ def _migrate_knowledge_dedup_and_ref():
         # 3. scene_knowledge_ref 加 issue_num 列（幂等）
         _ensure_column(c, "scene_knowledge_ref", "issue_num", "INTEGER NOT NULL DEFAULT 0")
 
+        # 3.0 scene_market 加 preset_custom_fields 列（Issue #246：场景预置自定义参数声明）
+        _ensure_column(c, "scene_market", "preset_custom_fields", "TEXT DEFAULT '[]'")
+
+        # 3.0b agent_runtimes 加 detached_from_scenes_at 列（引擎绑定真实性同步：离线超阈值解绑标记）
+        _ensure_column(c, "agent_runtimes", "detached_from_scenes_at", "TEXT DEFAULT ''")
+
         # 3.1 MySQL: 修复 UNIQUE 索引——老索引缺 issue_num，删旧建新
         if _is_mysql:
             try:
@@ -2444,6 +2471,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN alias TEXT DEFAULT ''",
         # ===== 标签用户标记：用户手动设过标签后置1，心跳注册不再自动补 'all' =====
         "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
+        # ===== Issue-P2: 健康分重置时间戳（管理员赦免点，计算窗口起点=max(此值, 7天前)）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN health_reset_at VARCHAR(64) DEFAULT ''",
         # ===== Issue-11: skill 表加 is_featured + like_count =====
         "ALTER TABLE skill ADD COLUMN is_featured INTEGER DEFAULT 0",
         "ALTER TABLE skill ADD COLUMN like_count INTEGER DEFAULT 0",

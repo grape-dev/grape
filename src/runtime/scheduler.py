@@ -471,13 +471,18 @@ def _update_execution_result(exec_id: int, status: str, result: str = "",
     if findings_json:
         fields.append("findings_json=?")
         vals.append(findings_json)
-    if status in ("success", "failed"):
+    if status in ("success", "failed", "cancelled"):
         fields.append("completed_at=?")
         vals.append(datetime.now(timezone.utc).isoformat())
     vals.append(exec_id)
     try:
         with db_lock:
             c = db.cursor()
+            # 终态幂等：已 success/failed/cancelled 的执行不再覆盖——
+            # 用户杀死(cancelled)后，轮询/迟到的完成回写不得把状态洗掉
+            _cur = c.execute("SELECT status FROM autopilot_executions WHERE id=?", (exec_id,)).fetchone()
+            if _cur and _cur[0] in ("success", "failed", "cancelled"):
+                return
             c.execute(
                 f"UPDATE autopilot_executions SET {', '.join(fields)} WHERE id=?",
                 vals
@@ -626,10 +631,16 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
                                          result=_result_summary,
                                          findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
                 return "success"
-            elif _at_status in ("failed", "cancelled"):
+            elif _at_status == "cancelled":
+                # 用户杀死：原样同步 cancelled（不翻译成 failed）
+                _update_execution_result(exec_id, "cancelled",
+                                         result=_result_text[:5000],
+                                         error="用户手动终止")
+                return "cancelled"
+            elif _at_status == "failed":
                 _update_execution_result(exec_id, "failed",
                                          result=_result_text[:5000],
-                                         error=f"agent_tasks status={_at_status}")
+                                         error="agent_tasks status=failed")
                 return "failed"
             elif _at_status == "running":
                 # worker 已认领并开始执行，同步 autopilot_executions 为 running
@@ -684,6 +695,10 @@ async def _execute_task(task: dict):
 
             if exec_status == "success":
                 log.info(f"Autopilot: task {task_id} exec {exec_id} success (attempt {attempt})")
+                break
+            if exec_status == "cancelled":
+                # 用户杀死：立即停止，不再重试
+                log.info(f"Autopilot: task {task_id} exec {exec_id} cancelled by user, stop")
                 break
             if attempt < max_retry:
                 error_msg = row[1] if row else "unknown"
