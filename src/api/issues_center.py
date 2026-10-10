@@ -683,6 +683,36 @@ def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> lis
     return actions
 
 
+_IM_NOTIFY_COUNTERS: dict[str, int] = {}
+
+
+def _im_notify_counter(key: str) -> None:
+    """通知计数器（cluster-im-lease-stability-design.md §3.3）。"""
+    _IM_NOTIFY_COUNTERS[key] = _IM_NOTIFY_COUNTERS.get(key, 0) + 1
+
+
+def get_im_notify_counters() -> dict:
+    return dict(_IM_NOTIFY_COUNTERS)
+
+
+def _im_notify_begin(ntype: str, repo_key, issue_number, user_id, open_id, ctx):
+    _im_notify_counter("attempted")
+    _ctx_name = getattr(ctx, "name", "") if ctx else ""
+    log.info(f"[im-notify] type={ntype} repo={repo_key} issue=#{issue_number} "
+             f"user={user_id} open_id={open_id or ''} ctx={_ctx_name or 'none'}")
+
+
+def _im_notify_skip(ntype: str, issue_number, user_id, ctx, open_id):
+    if not ctx:
+        _reason = "no_ctx"
+    elif not open_id:
+        _reason = "no_openid"
+    else:
+        _reason = "no_api"
+    _im_notify_counter(f"skipped_{_reason}")
+    log.warning(f"[im-notify] type={ntype} issue=#{issue_number} user={user_id} reason={_reason}")
+
+
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                       task_description: str, repo_key: str, issue_number: int, cfg: dict):
     """任务分配通知：仅静态模板消息 + 飞书通知，不执行任何后台 LLM/ChatAgent。
@@ -705,6 +735,7 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                 log.warning(f"Task notify: static template write failed: {e}")
 
         # 飞书仅作通知（D3）
+        _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
             from src.repo_key import from_repo_key
             notify_text = (f"📋 你有新的任务\n\n"
@@ -714,8 +745,12 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
             try:
                 await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知",
                                             actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Task notify feishu failed: {e}")
+        else:
+            _im_notify_skip("task", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
 
@@ -738,6 +773,7 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
             except Exception as e:
                 log.warning(f"Task awaiting: template write failed: {e}")
 
+        _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
             notify_text = (f"❓ 需要你补充信息\n\n"
                            f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
@@ -746,8 +782,12 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
             try:
                 await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清",
                                             actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Task awaiting feishu failed: {e}")
+        else:
+            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
@@ -772,6 +812,7 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
             except Exception as e:
                 log.warning(f"Issue pending-review: template write failed: {e}")
 
+        _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
             notify_text = (f"🔎 需要你审核确认\n\n"
                            f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
@@ -780,8 +821,12 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
             try:
                 await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核",
                                             actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Issue pending-review feishu failed: {e}")
+        else:
+            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
@@ -790,8 +835,11 @@ def _resolve_user_chat_bot(bm, user_id: int):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
 
     用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
+    可观测（cluster-im-lease-stability-design.md §3.1）：区分 no_bm / no_session_row /
+    bot_not_in_memory（sticky-lease 场景）→ 让"未收到通知"有日志可查。
     """
     if not bm:
+        log.info(f"[im-notify] resolve user={user_id} reason=no_bm")
         return None
     try:
         bots = bm.get_all_bots()
@@ -800,11 +848,18 @@ def _resolve_user_chat_bot(bm, user_id: int):
             row = c.execute(
                 "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
                 (user_id,)).fetchone()
-        if row and row[0] in bots:
-            return bots[row[0]]
-    except Exception:
-        pass
-    return None
+        if not row or not row[0]:
+            log.warning(f"[im-notify] resolve user={user_id} reason=no_session_row")
+            return None
+        bot = bots.get(row[0])
+        if bot:
+            log.info(f"[im-notify] resolve user={user_id} bot={row[0]} ok")
+        else:
+            log.warning(f"[im-notify] resolve user={user_id} bot={row[0]} reason=bot_not_in_memory hint=sticky-lease")
+        return bot
+    except Exception as e:
+        log.warning(f"[im-notify] resolve user={user_id} reason=bot_error err={e}")
+        return None
 
 
 class TaskCreateBody(BaseModel):

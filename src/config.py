@@ -160,9 +160,23 @@ OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
 
 # ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
 BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
-BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "90"))
-BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "20"))
+BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "180"))
+BOT_LEASE_RENEW_INTERVAL = int(os.environ.get("BOT_LEASE_RENEW_INTERVAL", "30"))
 BOT_LEASE_SWEEP_INTERVAL = int(os.environ.get("BOT_LEASE_SWEEP_INTERVAL", "10"))
+# BOT_LEASE_GRACE：续约连续失败后进入宽限期，宽限期到才断开（抗瞬时 DB 抖动）
+BOT_LEASE_GRACE = int(os.environ.get("BOT_LEASE_GRACE", "90"))
+# BOT_LEASE_RENEW_FAIL_THRESHOLD：连续续约失败多少次（每次 = 一个 renew 周期）才进入宽限期
+BOT_LEASE_RENEW_FAIL_THRESHOLD = int(os.environ.get("BOT_LEASE_RENEW_FAIL_THRESHOLD", "3"))
+# IM_LEASE_STICKY：一致性哈希归属（均匀 + 粘性）。=0 退回"先到先得"旧模式（灰度回退）
+IM_LEASE_STICKY = os.environ.get("IM_LEASE_STICKY", "true").lower() in ("1", "true", "yes")
+# IM_INSTANCE_TIMEOUT：实例心跳超时（秒）——超过视为失联，其 bot 可被接管
+IM_INSTANCE_TIMEOUT = int(os.environ.get("IM_INSTANCE_TIMEOUT", "45"))
+# IM_STEAL_AFTER：lease 已过期但对存活实例的接管保护窗（秒）——超过才允许从存活实例强制接管（防假死）
+IM_STEAL_AFTER = int(os.environ.get("IM_STEAL_AFTER", "60"))
+# IM_ACQUIRE_COOLDOWN：抢到 lease 但连接失败后，多长时间内不重抢同一 bot（秒）
+IM_ACQUIRE_COOLDOWN = int(os.environ.get("IM_ACQUIRE_COOLDOWN", "30"))
+# IM_INSTANCE_HEARTBEAT：实例心跳/环 owner 过滤的虚拟节点数（一致性哈希均匀度）
+IM_HASH_VNODES = int(os.environ.get("IM_HASH_VNODES", "50"))
 # 本地缓存根（磁盘 LRU zip 缓存；默认 data/cache/storage）
 OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 
