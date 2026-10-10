@@ -705,7 +705,11 @@ function _apAddCustomField(name, value, isSecret, scope) {
   container.appendChild(row);
 }
 function _apLoadAutoSkills() {
-  return API.get('/skills?agent_type=auto&scope=all&page_size=0').then(function(d) {
+  // 按当前仓库过滤：官方 + 个人 + 本仓库技能（不传 scope=all，避免混入其他仓库的技能）
+  var _repo = '';
+  try { if (typeof app !== 'undefined' && app.currentRepo()) _repo = app.currentRepo().fullName || ''; } catch (e) {}
+  var url = '/skills?agent_type=auto&page_size=0' + (_repo ? '&repo=' + encodeURIComponent(_repo) : '');
+  return API.get(url).then(function(d) {
     _apAllAutoSkills = (d.skills || []).map(function(s) {
       return { skill_name: s.name || s.skill_name, display_name: s.display_name || s.name || s.skill_name, description: s.description || '', scope: s.scope || '' };
     });
