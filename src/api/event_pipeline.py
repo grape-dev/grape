@@ -2812,7 +2812,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     from src.runtime.executor import stream_devops_agent
     from src.prompt_builder import build_devops_agent_prompt
     from src.api.event_store import (
-        update_event_config, update_event_status, update_event_complete, evaluate_agent_output,
+        update_event_config, update_event_status, update_event_complete, evaluate_agent_output, _extract_tool_command,
         append_skipped_event,
     )
     from src.runtime.instances import runtime_instance_name
@@ -3174,6 +3174,40 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         new_status = "completed"
         if exit_code < 0:
             log.info(f"Exec agent: seq={seq} exit_code={exit_code} but has_output=True, mark completed (signal death after work done)")
+        # ── 假完成硬门槛（issue-P5，关卡B）──
+        # 引擎 exit 0 不再是成功的充分条件：devops 类任务（issue/coding/qa/sre）还须有
+        # 可信产出证据之一，否则降级 failed（防模型流挂死/空 end_turn 静默收场标绿）：
+        #   证据1 self_reported==1 且有 result_text —— grape tasks complete 服务端盖章自报；
+        #   证据2 执行日志（tool_uses，实际执行过的命令）中有真实写操作：
+        #         POST .../comments（评论）/ POST .../pulls（PR）/ POST /api/a2a（A2A交棒）。
+        # 注意只看执行证据，不看 agent 文字自述（思考里"打算交棒"不算做过）。
+        # vod 等非 devops agent（智能推荐路径）不加门槛，避免误伤。
+        if exit_code == 0 and agent_type in ("issue", "coding", "qa", "sre") and not has_output:
+            _self_ok = False
+            if task_id:
+                try:
+                    from src.runtime.service import get_task as _gt
+                    _trow = _gt(task_id) or {}
+                    _self_ok = (_trow.get("self_reported") == 1 and bool(_trow.get("result_text")))
+                except Exception:
+                    _self_ok = False
+            _write_action = False
+            if not _self_ok:
+                for _tu in (tool_uses or []):
+                    _cmd = _tu.get("cmd", "") if isinstance(_tu, dict) else str(_tu)
+                    _cmd = _extract_tool_command(_tu) if (not isinstance(_cmd, str) or "POST" not in _cmd.upper()) else _cmd
+                    _up = _cmd.upper()
+                    # A2A 有两种形态：直接 curl POST /api/a2a，或 grape CLI 的 `grape a2a handoff`
+                    # （CLI 内部才发 POST，命令字符串里没有 POST 关键字，须单独匹配）
+                    if (("POST" in _up and any(k in _up for k in ("/COMMENTS", "/PULLS", "MERGE_REQUESTS")))
+                            or ("A2A HANDOFF" in _up) or ("POST" in _up and "/API/A2A" in _up)):
+                        _write_action = True
+                        break
+            if not (_self_ok or _write_action):
+                new_status = "failed"
+                log.warning(f"Exec agent: seq={seq} exit_code=0 but no verified output "
+                            f"(self_reported={_self_ok}, write_action={_write_action}), "
+                            f"demoting to failed (fake completion guard)")
     else:
         new_status = "failed"
     if task_id:

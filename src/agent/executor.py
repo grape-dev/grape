@@ -537,12 +537,19 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         step_count = 0
         _last_output = time.time()
         _reader_total = 0
+        _text_count = 0      # 本次执行 text 事件数（假完成判定用，issue-P5）
+        _tool_count = 0      # 本次执行 tool_use 事件数（假完成判定用，issue-P5）
+        # 静默超时窗口：首个无输出窗口。与 hermes ACP _SILENT_TIMEOUT=300s 对齐，
+        # 可用 AGENT_SILENT_WINDOW 环境变量覆盖（模型流挂死 5 分钟即感知，不再干等 20min）。
+        _silent_window = float(os.environ.get("AGENT_SILENT_WINDOW", str(min(300, max_exec_seconds))))
         # 进程存活但无输出的累计延长上限（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
-        # 默认 = max_exec_seconds（首个静默窗口 + 1 次续期 ≈ 20min），可用 AGENT_SILENT_LIMIT 调整；
-        # 兼容旧变量 AGENT_SILENT_EXTEND_CAP。
+        # 可用 AGENT_SILENT_EXTEND_CAP 调整（旧变量 AGENT_SILENT_LIMIT 亦兼容，语义=续期额度上限）。
         _silent_extend_total = 0.0
-        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_LIMIT",
-                                                   os.environ.get("AGENT_SILENT_EXTEND_CAP", str(max_exec_seconds))))
+        _silent_extend_cap = float(os.environ.get("AGENT_SILENT_EXTEND_CAP",
+                                                   os.environ.get("AGENT_SILENT_LIMIT", str(max_exec_seconds))))
+        # 超时总账（issue-P1）：单次执行最坏 ≈ _silent_window + _silent_extend_cap + grace 10s；
+        # RUNTIME_TASK_TIMEOUT=3600s 需 ≥ 2×(单次最坏) 才能容纳一次无效完成自动重跑。
+        # 300 + 600 + 10 = 910s → 2 次 ≈ 1820s < 3600s，安全。
 
         import threading
         _line_queue = []
@@ -609,10 +616,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         yield ("step_start", f"Step {step_count} started (session: {new_session_id})")
                     elif et == "text":
                         collected_text.append(parsed["text"])
+                        _text_count += 1
                         yield ("text", _redact(parsed["text"], _tokens))
                     elif et == "reasoning":
                         yield ("reasoning", _redact(parsed["text"], _tokens))
                     elif et == "tool_use":
+                        _tool_count += 1
                         # M1 结构化：yield dict（tool/input），供 evaluate 与档案记录使用
                         yield ("tool_use", {
                             "tool": parsed.get("tool", ""),
@@ -639,7 +648,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 break
             else:
                 elapsed_silent = time.time() - _last_output
-                if elapsed_silent > max_exec_seconds:
+                if elapsed_silent > _silent_window:
                     # 若 opencode 进程仍存活（长 bash 命令/长思考中，如 pip install），
                     # 不立即判超时——重置静默计时继续等待，避免长命令被误杀（见 #501 修复）。
                     # 但累计延长受硬上限约束（AGENT_SILENT_EXTEND_CAP，默认 3×max_exec_seconds），
@@ -651,7 +660,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         _last_output = time.time()
                         time.sleep(0.1)
                         continue
-                    log.warning(f"{label}{backend.name} no output for {max_exec_seconds}s"
+                    log.warning(f"{label}{backend.name} no output for {_silent_window:.0f}s"
                                 f"(extend_total={_silent_extend_total:.0f}s), terminating")
                     # 先 SIGTERM 给 agent 收尾窗口（_terminate_proc 内部 grace_seconds=10 等待优雅退出）
                     _terminate_proc(proc, f"{label}{backend.name}")
@@ -688,8 +697,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
                         "text": _redact("\n".join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
-                        "errors": error_events + ([f"no output for {max_exec_seconds}s, killed"] if _grace_tail.strip() == "" else []),
+                        "errors": error_events + ([f"no output for {_silent_window:.0f}s, killed"] if _grace_tail.strip() == "" else []),
                         "stderr": "",
+                        "backend": backend.name, "parsed_count": _parsed_count,
+                        "text_count": _text_count, "tool_count": _tool_count,
                     })
                     _untrack_proc(proc)
                     # codearts 方案E2: 超时也要杀 serve
@@ -785,6 +796,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             "oc_session_id": new_session_id,
             "errors": error_events, "stderr": _redact(stderr_output, _tokens),
             "backend": backend.name, "reader_total": _reader_total, "parsed_count": _parsed_count,
+            "text_count": _text_count, "tool_count": _tool_count,
         })
 
     # 执行一次；若因会话失效失败，降级重跑一次（不带 session）。
@@ -832,6 +844,49 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 yield (evt_type, data)
         if done2 is not None:
             done = done2
+
+    # ── 假完成识别（issue-P5：引擎 exit 0 但零产出）──
+    # 场景：模型流挂死后引擎静默收场（codearts #9635）或空 end_turn（opencode #9662）。
+    # 分级处理：
+    #  a) 0 text + 0 tool → 零副作用 → 自动重跑一次（复用 session 失效重跑通道形状）；
+    #  b) 0 text + tool>0 → 副作用状态未知（可能已发评论/PR/A2A），盲目重跑会重复执行
+    #     → 不重跑，注入错误信息放行，由 event_pipeline 终态门槛（关卡B）裁为 failed。
+    _invalid_done = (
+        done.get("exit_code", 0) == 0
+        and (done.get("text") or "").strip() == ""
+        and (
+            (done.get("text_count") or 0) == 0
+            or (done.get("errors") or [])
+        )
+    )
+    if _invalid_done and not session_missing:
+        _tc = done.get("text_count") or 0
+        _kc = done.get("tool_count") or 0
+        if _tc == 0 and _kc == 0:
+            log.warning(f"{label}{backend.name} invalid completion: exit=0 with 0 text/0 tool "
+                        f"(model stream anomaly), retrying once without session")
+            run_gen3 = _run_once("")
+            done3 = None
+            for evt_type, data in run_gen3:
+                if evt_type == "done":
+                    done3 = data
+                else:
+                    yield (evt_type, data)
+            if done3 is not None:
+                # 重跑仍无效完成 → 注入错误放行（关卡B 裁 failed）
+                if (done3.get("exit_code", 0) == 0
+                        and (done3.get("text") or "").strip() == ""
+                        and (done3.get("text_count") or 0) == 0):
+                    done3.setdefault("errors", []).append(
+                        "invalid completion: engine exited 0 with empty output (model stream anomaly)")
+                    log.warning(f"{label}{backend.name} retry still invalid completion, marking error")
+                done = done3
+        else:
+            done.setdefault("errors", []).append(
+                f"engine exited 0 after {_kc} tool calls with no conclusion "
+                f"(suspected model stream anomaly, manual re-dispatch advised)")
+            log.warning(f"{label}{backend.name} invalid completion: exit=0 with 0 text/{_kc} tools, "
+                        f"no auto-retry (side effects unknown)")
     yield ("done", done)
 
 

@@ -272,7 +272,21 @@ function loadAgentTypes() {
       if (r) sessionStorage.setItem('currentRepo', JSON.stringify({fullName: r.full_name, owner: r.owner, name: r.name, repoKey: r.repo_key || ''}));
       else sessionStorage.removeItem('currentRepo');
     }
-    nav('dash');
+    // Issue #278: 刷新后保持当前 URL 路由——若 hash 已指向有效子页面则导航到该页，
+    // 仅当无有效 hash 时才回退默认 Dashboard，避免刷新被无条件重定向到 dash。
+    var _h = window.location.hash;
+    var _restored = false;
+    if (_h && _h.length > 1) {
+      var _hp = _h.substring(1).split('/');
+      var _hv = _hp[0];
+      // 包含 VIEWS 数组 + nav() 视图开关中的额外视图（不在 VIEWS 但有对应渲染分支）
+      var _validHashViews = VIEWS.concat(['skill-sub', 'scene-detail-local', 'autopilot', 'autopilot-detail']);
+      if (_validHashViews.indexOf(_hv) !== -1) {
+        nav(_hv, _hp[1] ? decodeURIComponent(_hp[1]) : undefined);
+        _restored = true;
+      }
+    }
+    if (!_restored) nav('dash');
   }
 
   function initSidebarRepos() {
@@ -1356,24 +1370,31 @@ function loadAgentTypes() {
     if (token) {
       showApp();
       API.scheduleProactiveRefresh();  // Issue #86: 页面恢复时启动定时器
-      // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
-      const hash = window.location.hash;
-      if (hash && hash.length > 1) {
-        const parts = hash.substring(1).split('/');
-        const view = parts[0];
-        const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-        // Views that don't require a repo
-        const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail'];
-        if (noRepoViews.includes(view) || currentRepo()) {
-          nav(view, param);
-        } else {
-          nav('dash');
-        }
-      } else if (currentRepo()) {
-        nav('dash');
+      // Issue #278: showApp() → loadRepos() 的 cachedRepos 同步路径可能已通过
+      // renderReposFromData 恢复了当前 hash 路由（_currentView 已设）。
+      // 此时跳过重复的 hash 导航，避免二次渲染闪烁；仅在尚未导航时才处理。
+      if (window._currentView && window._currentView !== '') {
+        // 已经在 loadRepos 同步路径中恢复了路由，无需再次导航
       } else {
-        // No repo selected and no hash — go to repo selection
-        goToRepos();
+        // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
+        const hash = window.location.hash;
+        if (hash && hash.length > 1) {
+          const parts = hash.substring(1).split('/');
+          const view = parts[0];
+          const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
+          // Views that don't require a repo
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail'];
+          if (noRepoViews.includes(view) || currentRepo()) {
+            nav(view, param);
+          } else {
+            nav('dash');
+          }
+        } else if (currentRepo()) {
+          nav('dash');
+        } else {
+          // No repo selected and no hash — go to repo selection
+          goToRepos();
+        }
       }
     } else { showLogin(); }
   }
