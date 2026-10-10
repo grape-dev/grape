@@ -387,48 +387,6 @@ def batch_recover_stale_tasks_api(user: dict = Depends(require_no_session_token)
     return result
 
 
-class HealthResetBody(BaseModel):
-    """Issue-P2: 健康分重置请求体。"""
-    reason: str = ""          # 必填留痕：为什么重置（事故修复完毕等）
-    dry_run: bool = False     # 只看新旧分数对比，不写时间戳
-
-
-@router.post("/admin/health-reset/{runtime_id}",
-             operation_id="runtime_health_reset",
-             summary="Reset engine health score (admin)",
-             description="Issue-P2: 管理员健康分重置。写 agent_runtimes.health_reset_at 赦免点，"
-                         "统计窗口起点变为 max(重置点, 7天前)：重置之前的 failed 不再计入失败率/连续失败，"
-                         "agent_tasks 历史记录不动（审计完整），7 天后赦免自动失效。"
-                         "reason 必填留痕。dry_run=true 只返回新旧对比不落时间戳。")
-def health_reset_api(runtime_id: int, body: HealthResetBody,
-                     user: dict = Depends(require_no_session_token)):
-    """Issue-P2: 健康分重置接口（管理台用）。"""
-    from src.session_manager import db, db_lock
-    from src.runtime.health_scorer import set_health_reset, get_health_score
-    if not (body.reason or "").strip():
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "reason 必填（留痕：为什么重置）"})
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT id FROM agent_runtimes WHERE id=?", (runtime_id,))
-        if not c.fetchone():
-            raise HTTPException(status_code=404, detail={"code": 404, "message": "runtime 不存在"})
-    if body.dry_run:
-        current = get_health_score(runtime_id, force_refresh=True)
-        return {"ok": True, "dry_run": True, "runtime_id": runtime_id,
-                "current": current, "note": "dry_run：未写重置时间戳"}
-    result = set_health_reset(runtime_id, reason=body.reason.strip())
-    return {"ok": True, "runtime_id": runtime_id,
-            "old_score": result["old"].get("health_score"),
-            "new_score": result["new"].get("health_score"),
-            "old_stats": {"total": result["old"].get("total_tasks"),
-                          "failed": result["old"].get("failed_tasks"),
-                          "consecutive_failures": result["old"].get("consecutive_failures")},
-            "new_stats": {"total": result["new"].get("total_tasks"),
-                          "failed": result["new"].get("failed_tasks"),
-                          "consecutive_failures": result["new"].get("consecutive_failures")},
-            "reset_at": result["reset_at"], "reason": result["reason"]}
-
-
 class RuntimeClaimBody(BaseModel):
     """v3.0：worker 能力动态声明（零落库）——claim 每次携带"""
     supports_obs_url: bool = False   # 本 worker 支持 OBS 直连（启动探测结果）

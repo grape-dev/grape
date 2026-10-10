@@ -314,34 +314,6 @@ def get_health_score(runtime_id: int, force_refresh: bool = False) -> dict:
     return _compute_and_persist(runtime_id)
 
 
-def set_health_reset(runtime_id: int, reason: str = "") -> dict:
-    """Issue-P2: 管理员健康分重置（赦免点写入 + 立即重算）。
-
-    不改 agent_tasks 历史记录（审计完整），只写 agent_runtimes.health_reset_at
-    时间戳；统计窗口起点变为 max(重置点, 7天前)，重置之前的 failed 不再计入
-    失败率与连续失败。重置点滚出 7 天窗口后自动失效，无需清理。
-
-    返回 {old_score, new_score, reset_at, ...} 新旧对比。
-    """
-    old = _compute_and_persist(runtime_id)  # 重算前先落一份当前值（无视缓存）
-    reset_iso = _utcnow().isoformat()
-    try:
-        with _lock():
-            c = _db().cursor()
-            c.execute("UPDATE agent_runtimes SET health_reset_at=? WHERE id=?",
-                      (reset_iso, runtime_id))
-            _db().commit()
-    except Exception as e:
-        log.warning(f"health_scorer: set_health_reset failed for runtime={runtime_id}: {e}")
-        raise
-    log.info(f"health_scorer: health reset for runtime={runtime_id} at {reset_iso} "
-             f"(old_score={old.get('health_score')}), reason={reason or 'unspecified'}")
-    with _cache_lock:
-        _cache.pop(runtime_id, None)
-    new = _compute_and_persist(runtime_id)
-    return {"old": old, "new": new, "reset_at": reset_iso, "reason": reason}
-
-
 def get_health_scores(runtime_ids: list[int], force_refresh: bool = False) -> dict[int, dict]:
     """批量获取多个引擎的健康度。返回 {runtime_id: health_data}。"""
     result = {}
