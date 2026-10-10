@@ -8,7 +8,7 @@
 | 入口 | Prompt 函数 | 用户信息 | 项目基线 |
 |---|---|---|---|
 | **Chat（Web/飞书通用）** | `_build_feishu_chat_prompt`（前置 `user_info`）→ `build_general_chat_prompt` | ✅ GitCode + feishu_name | ✅ |
-| **Task（Web/飞书）** | `build_task_chat_prompt`（前置 `user_info`） | ✅ 同 Chat | ✅ |
+| **Task（Web/飞书）** | `build_issue_chat_prompt`（前置 `user_info`） | ✅ 同 Chat | ✅ |
 | **Pipeline** | `build_devops_agent_prompt` | ❌ | ✅ |
 | **Event 对话** | `build_event_chat_prompt` | ❌ | ❌ |
 
@@ -60,7 +60,7 @@ Skill 文件：{{SKILL_DIR}}/chat/SKILL.md
 **必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令去完成任务（不得跳过读取或凭空猜测）。
 ```
 
-### 2.2 Task Chat (`build_task_chat_prompt`)
+### 2.2 Task Chat (`build_issue_chat_prompt`)
 
 ```
 ## Role Definition
@@ -167,9 +167,9 @@ Always reply in Chinese. Never include internal reasoning or process steps.
 
 | 入口 | 调用链 |
 |---|---|
-| 飞书 WS 消息 | `process_chat_async` → `_build_feishu_chat_prompt` (+ `user_info`) → `build_general_chat_prompt` / `build_task_chat_prompt` |
+| 飞书 WS 消息 | `process_chat_async` → `_build_feishu_chat_prompt` (+ `user_info`) → `build_general_chat_prompt` / `build_issue_chat_prompt` |
 | Web Chat | `chat.py` → `build_general_chat_prompt()` |
-| Task Center | `tasks.py` → `build_task_chat_prompt()` |
+| Task Center | `tasks.py` → `build_issue_chat_prompt()` |
 | Pipeline | `event_pipeline.py` → `build_devops_agent_prompt()` |
 | Event 对话 | `events.py` → `build_event_chat_prompt()` |
 

@@ -120,10 +120,10 @@ class TestHistoryInjection:
                                          has_valid_session=has_valid_session)
 
     def _task(self, has_valid_session):
-        from src.prompt_builder import build_task_chat_prompt
+        from src.prompt_builder import build_issue_chat_prompt
         conv = {"conv_type": "task", "issue_number": 7, "title": "t", "repo_key": "org/repo"}
-        return build_task_chat_prompt("hi", "org/repo", self.HISTORY, conv,
-                                      has_valid_session=has_valid_session)
+        return build_issue_chat_prompt("hi", "org/repo", self.HISTORY, conv,
+                                       has_valid_session=has_valid_session)
 
     def test_general_no_session_injects_history(self, pb):
         p = self._general(False)
@@ -361,7 +361,7 @@ class TestNoCurlTemplates:
 
     def test_task_chat_prompt_no_curl(self, pb):
         conv = {"conv_type": "task", "issue_number": 7, "title": "t", "repo_key": "org/repo"}
-        prompt = pb.build_task_chat_prompt("hi", "org/repo", [], conv)
+        prompt = pb.build_issue_chat_prompt("hi", "org/repo", [], conv)
         assert "curl" not in prompt
 
     def test_devops_prompt_keeps_token_env_name(self, pb, base_evt):

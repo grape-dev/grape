@@ -168,7 +168,7 @@ class TestSend:
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
              patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent), \
-             patch("src.prompt_builder.build_task_chat_prompt", return_value="task-prompt") as m_build:
+             patch("src.prompt_builder.build_issue_chat_prompt", return_value="task-prompt") as m_build:
             _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         m_build.assert_called()
 
