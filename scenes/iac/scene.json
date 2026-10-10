@@ -1,0 +1,57 @@
+{
+  "name": "iac",
+  "version": "1.0.0",
+  "display_name": "IaC开发",
+  "description": "基础设施即代码开发场景，使用 Terraform 管理云资源，适合 DevOps 基础设施团队",
+  "category": "iac",
+  "recommended_template": "tf-infra",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "iac",
+    "terraform",
+    "infrastructure"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "iac-vod",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "iac-issue",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "iac-coding",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "iac-qa",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "iac-sre",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}

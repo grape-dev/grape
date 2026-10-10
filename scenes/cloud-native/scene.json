@@ -1,0 +1,57 @@
+{
+  "name": "cloud-native",
+  "version": "1.0.0",
+  "display_name": "云原生开发",
+  "description": "面向云原生应用的开发场景，适合微服务架构和容器化部署的项目",
+  "category": "iac",
+  "recommended_template": "micro-svc",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "cloud-native",
+    "microservice",
+    "container"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "vod-cli",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "issue-cli",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "coding-cli",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "qa-cli",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "deploy-cli",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}

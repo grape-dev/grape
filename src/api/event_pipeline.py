@@ -1396,7 +1396,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             log.info(f"Pipeline: issue_state init vod for {_rid2}")
     # PR merged 跳过 QA 直接路由 SRE：补推 stage qa→sre（原由 QA A2A handoff 推进）
     if event_type == "pull_request_merged" and agent_type == "sre":
-        _rid_sre = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+        # 与 1606 行路由处一致的 PR 感知解析链：merge payload 的 object_attributes.iid
+        # 是 PR 号，resolve_issue_id 会跳过（其 docstring 自警告此陷阱）→ 必须先用
+        # resolve_pr_issue_id（title #N / 分支 issue-N / issues 列表 / PR 详情 API 兜底）。
+        try:
+            from src.user.db import get_agent_bot_token
+            _sre_api_token = get_agent_bot_token(repo_key) or ""
+            _rid_sre = resolve_pr_issue_id(evt.get("payload", {}) or {}, _sre_api_token, repo_key=repo_key) \
+                or resolve_issue_id(evt.get("payload", {}) or {}) \
+                or evt.get("issue_id", "")
+        except Exception:
+            _rid_sre = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
         if _rid_sre:
             from src.api.session_store import get_issue_stage as _gis
             _st_sre = _gis(repo_key, _rid_sre)

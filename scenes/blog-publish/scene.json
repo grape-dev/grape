@@ -1,0 +1,49 @@
+{
+  "name": "blog-publish",
+  "version": "1.0.0",
+  "display_name": "博客开发",
+  "description": "博客内容创作和发布场景，从选题到 AI 生成到自动发布，适合内容驱动型项目",
+  "category": "content",
+  "recommended_template": "",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "blog",
+    "content",
+    "ai-generation"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "blog-vod",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "blog-issue",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "ai-blog-generation",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "blog-publish",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}
