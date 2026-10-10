@@ -1,10 +1,9 @@
-# TODO — Issue #254
+# Todo: Issue #284
 
-- [ ] Step 1: mem_cache 结构加 content_hash 字段
-- [ ] Step 2: zip_cache 结构加 content_hash 字段
-- [ ] Step 3: skill_md_content 缓存命中校验回源
-- [ ] Step 4: skill_sync zip_cache_put 传 hash
-- [ ] Step 5: 编写测试用例
-- [ ] Step 6: 运行测试验证
-- [ ] Step 7: 五轴自审查
-- [ ] Step 8: 建 PR + 评论 + A2A
+- [x] 修改 `_ensure_task_conversation` 标题生成逻辑
+- [x] 修改复用匹配逻辑（conv_type + issue_number）
+- [x] 添加存量旧标题升级逻辑
+- [x] 新增测试文件
+- [x] 运行测试验证
+- [x] 自审查
+- [x] 建 PR

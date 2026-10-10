@@ -1,0 +1,2 @@
+#!/bin/sh
+echo "${BOT_GITCODE_TOKEN:-${BOT_TOKEN:-$BOT_GITHUB_TOKEN}}"
