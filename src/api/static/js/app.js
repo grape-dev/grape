@@ -565,9 +565,17 @@ function loadAgentTypes() {
       repos.forEach(r => { window._managedRepoMap[r.full_name] = r.repo_key || ''; });
       const sel = $('repoSelect');
       const current = currentRepo();
-      sel.innerHTML = repos.map(r =>
-        `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-      ).join('') + '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
+      if (repos.length === 0) {
+        // 无托管仓库时：仅保留"新增托管"选项，并添加 click 事件兜底
+        // （select 只有 1 个选项时 change 事件不触发，需用 click 兜底）
+        sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
+        sel.onclick = function() { switchRepo('__add__'); };
+      } else {
+        sel.innerHTML = repos.map(r =>
+          `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
+        ).join('') + '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
+        sel.onclick = null;
+      }
     }).catch(() => {});
   }
 
