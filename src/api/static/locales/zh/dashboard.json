@@ -142,5 +142,9 @@
   "standard_scene": "标准场景",
   "standard_scene_desc": "VOD + Issue + Coding + QA + SRE 全流程，适用于 Issue 驱动开发",
   "pr_subscription_scene": "PR 订阅场景",
-  "pr_subscription_desc": "QA + SRE，当 PR 无关联 Issue 时自动触发审查。每仓库最多一个"
+  "pr_subscription_desc": "QA + SRE，当 PR 无关联 Issue 时自动触发审查。每仓库最多一个",
+  "skill_no_match": "无匹配技能",
+  "skill_search_placeholder": "搜索技能名称/描述",
+  "skill_clear": "清除选择",
+  "skill_load_failed": "技能列表加载失败"
 }
