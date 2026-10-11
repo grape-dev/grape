@@ -7,7 +7,7 @@
 
 ---
 
-## 一、统一事件类型（Canonical Event Types）
+## 统一事件类型（Canonical Event Types）
 
 所有平台的 Webhook 事件在进入流水线前，先归一化为以下统一类型：
 
@@ -48,7 +48,7 @@
 
 ---
 
-## 二、GitCode Webhook → 统一类型映射
+## GitCode Webhook → 统一类型映射
 
 GitCode Webhook 通过 `X-GitCode-Event` 请求头标识事件类型，payload 结构类似 GitLab。
 
@@ -77,7 +77,7 @@ GitCode Webhook 通过 `X-GitCode-Event` 请求头标识事件类型，payload �
 
 ---
 
-## 三、GitHub Webhook → 统一类型映射
+## GitHub Webhook → 统一类型映射
 
 GitHub Webhook 通过 `X-GitHub-Event` 请求头标识事件类型，payload 含 `action` 字段。
 
@@ -107,7 +107,7 @@ GitHub Webhook 通过 `X-GitHub-Event` 请求头标识事件类型，payload 含
 
 ---
 
-## 四、Grape 内部事件
+## Grape 内部事件
 
 除 VCS Webhook 事件外，Grape 流水线内部也会产生以下事件类型：
 
@@ -128,7 +128,7 @@ GitHub Webhook 通过 `X-GitHub-Event` 请求头标识事件类型，payload 含
 
 ---
 
-## 五、事件路由（event_type → Agent）
+## 事件路由（event_type → Agent）
 
 Grape 根据统一事件类型路由到对应 Agent 处理：
 
@@ -173,7 +173,7 @@ Grape 根据统一事件类型路由到对应 Agent 处理：
 
 ---
 
-## 六、事件跳过原因（skipped reasons）
+## 事件跳过原因（skipped reasons）
 
 事件被跳过时会在 `event_skipped` 表记录原因：
 
@@ -201,7 +201,7 @@ Grape 根据统一事件类型路由到对应 Agent 处理：
 
 ---
 
-## 七、Webhook 端点
+## Webhook 端点
 
 | 平台 | 端点 | 事件头 | Token 验证 |
 |------|------|--------|------------|

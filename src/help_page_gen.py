@@ -98,8 +98,6 @@ th{background:var(--c);font-weight:600}
 .dn:hover{background:var(--c)}
 .dn.active{background:rgba(59,130,246,.12);color:var(--a);font-weight:600}
 .dn-wrap{display:flex;align-items:baseline;gap:6px}
-.dno{display:inline-block;min-width:20px;color:var(--t3);font-size:12px;font-weight:700;flex:0 0 auto}
-.dn.active .dno{color:var(--a)}
 .dov{display:inline-block;min-width:20px;flex:0 0 auto;color:var(--a);font-size:11px;font-weight:700;border:1px solid var(--a);border-radius:4px;padding:1px 4px;line-height:1.3}
 .dn-t{flex:1 1 auto}
 .caret{display:inline-block;width:16px;flex:0 0 auto;color:var(--t3);font-size:10px;text-align:center;transition:transform .15s;cursor:pointer;user-select:none}
@@ -107,7 +105,6 @@ th{background:var(--c);font-weight:600}
 .subnav{display:none;margin:2px 0 6px}
 .subnav.open{display:block}
 .subnav .ds{display:flex;align-items:baseline;gap:6px}
-.subnav .sno{display:inline-block;min-width:20px;color:var(--t3);font-size:11px;flex:0 0 auto;text-align:right}
 .ds{display:block;padding:4px 10px;border-radius:6px;color:var(--t2);text-decoration:none;font-size:12px;cursor:pointer}
 .ds:hover{color:var(--a)}
 .ds.active{background:var(--c);color:var(--a);font-weight:600}
@@ -170,8 +167,7 @@ _JS_APP = r"""
     var t = d.toc || [], out = '<div class="subnav' + (d.id === cur.id ? ' open' : '') + '" data-for="' + esc(d.id) + '">', i, r;
     for (i = 0; i < t.length; i++) {
       r = t[i];
-      out += '<a class="ds" data-id="' + r.id + '" style="padding-left:' + (8 + 12 * (r.level - 1)) + 'px">'
-        + (r.no ? '<span class="sno">' + esc(r.no) + '</span>' : '') + esc(r.name) + '</a>';
+      out += '<a class="ds" data-id="' + r.id + '" style="padding-left:' + (8 + 12 * (r.level - 1)) + 'px">' + esc(r.name) + '</a>';
     }
     return out + '</div>';
   }
@@ -184,8 +180,8 @@ _JS_APP = r"""
       d = docs(sec)[i];
       has = (d.toc && d.toc.length) > 0;
       out += '<a class="dn' + (d.id === cur.id ? ' active' : '') + '" href="#/' + sec + '/' + d.id + '" data-id="' + d.id + '"' + (d.id === cur.id && h1id ? ' data-h1="' + h1id + '"' : '') + '><span class="dn-wrap">'
-        + (d.is_overview ? '<span class="dov">总览</span>' : (d.no ? '<span class="dno">' + esc(d.no) + '</span>' : ''))
-        + (has ? '<span class="caret' + (d.id === cur.id ? ' open' : '') + '">\u25b8</span>' : '')
++ (d.is_overview ? '<span class="dov">总览</span>' : '')
+          + (has ? '<span class="caret' + (d.id === cur.id ? ' open' : '') + '">\u25b8</span>' : '')
         + '<span class="dn-t">' + esc(d.title) + '</span></span></a>';
       if (has) { out += subNav(d, cur); }
     }
@@ -414,39 +410,14 @@ def _collect_toc(tokens: list, prefix: str) -> list[dict]:
     return rows
 
 
-def assign_doc_numbers(items: list[dict], section: str) -> None:
-    """为左侧目录的文档条目分配顺序编号（写入 item["no"]）。
+def mark_overview(items: list[dict], section: str) -> None:
+    """标记总览文档（api 的 README），不分配任何编号（help-center-remove-auto-numbering-design.md 方案 B）。
 
-    - usage/reference：按文档顺序 1..N
-    - api：README（总览）编号为空并标记 is_overview，其余按顺序 1..N（与 README 目录一致）
-    """
-    counter = 0
-    for item in items:
-        if section == "api" and item["id"] == "README":
-            item["no"] = ""
-            item["is_overview"] = True
-        else:
-            counter += 1
-            item["no"] = str(counter)
-            item["is_overview"] = False
-
-
-def assign_toc_numbers(items: list[dict]) -> None:
-    """为每条目录小节按标题层级计算层级编号（写入 row["no"]）。
-
-    格式：{文档编号}.{层级序号}，如 1.1 / 1.1.1；同层兄弟递增，深层缩进时重置更深层计数。
-    文档为总览（no 为空）时小节不编号。
+    系统不再为文档/小节生成序号：文档正文 H1 的手写编号为唯一正体，侧栏仅显示标题。
     """
     for item in items:
-        doc_no = item.get("no", "")
-        counters: dict[int, int] = {}
-        for row in item.get("toc", []):
-            level = int(row.get("level", 2))
-            counters[level] = counters.get(level, 0) + 1
-            for d in range(level + 1, 10):
-                counters.pop(d, None)
-            sub = ".".join(str(counters.get(v, 0)) for v in range(2, level + 1))
-            row["no"] = f"{doc_no}.{sub}" if doc_no and sub else ""
+        item["no"] = ""
+        item["is_overview"] = (section == "api" and item["id"] == "README")
 
 
 def _adorn_blockquotes(body: str) -> str:
@@ -508,8 +479,7 @@ def _section_data(usage: bool) -> list[dict]:
         body = _rewrite_md_hrefs(body, section)
         title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
         items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
-    assign_doc_numbers(items, section)
-    assign_toc_numbers(items)
+    mark_overview(items, section)
     return items
 
 
@@ -527,8 +497,7 @@ def _reference_data() -> list[dict]:
         body = _rewrite_md_hrefs(body, "reference")
         title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
         items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
-    assign_doc_numbers(items, "reference")
-    assign_toc_numbers(items)
+    mark_overview(items, "reference")
     return items
 
 

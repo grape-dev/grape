@@ -2,8 +2,7 @@
   "no_reply": "⚠️ No reply received. The connection may have been interrupted. Please try again.",
   "header": {
     "title": "Chat Agent · Personal Assistant",
-    "config_btn": "⚙ Settings",
-    "title_prefix": "Chat Agent · "
+    "config_btn": "⚙ Settings"
   },
   "loading": "Loading...",
   "scope_short": {

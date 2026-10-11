@@ -470,8 +470,14 @@ function switchConversation(convId) {
     if (hdr) {
       const titleBase = conv.title || 'Personal Assistant';
       const stripped = _stripIssuePrefix(titleBase);
-      const safeTitle = String(stripped.title || titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
+      let safeTitle = String(stripped.title || titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      // 任务会话：前缀显示带链接的 Issue #N（gitcode/github），去品牌前缀
+      let prefix = '';
+      if (conv.conv_type === 'task' && conv.issue_number) {
+        const url = _vcsUrl(conv.repo_key || '', '/issues/' + conv.issue_number);
+        prefix = `<a href="${url}" target="_blank" rel="noopener">Issue #${conv.issue_number}</a> · `;
+      }
+      hdr.innerHTML = prefix + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
     }
 
     // 渲染消息列表
