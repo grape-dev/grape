@@ -93,6 +93,10 @@
     "not_connected": "Not Connected",
     "coming_soon": "Coming Soon",
     "active_status": "Active",
+    "unbind": "Unbind",
+    "unbind_confirm": "Unbind this IM channel?\n\nThe saved App ID / App Secret and the channel's conversations will be removed, the channel returns to \"Not Connected\", and you can bind again afterwards.",
+    "unbind_success": "Unbound",
+    "unbind_failed": "Unbind failed: {{msg}}",
     "help_title": "Info",
     "help_desc": "Configure the IM platform App ID and App Secret for Chat Agent to receive and reply messages via Feishu/WeCom/DingTalk. You can also use scan-to-configure for quick Feishu setup."
   }
