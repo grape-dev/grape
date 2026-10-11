@@ -527,6 +527,28 @@ def _understand_video(video_data: str) -> str:
         return f"用户上传了视频，但分析出错: {e}"
 
 
+def _chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
+    """direct 模式 chat 会话凭据注入（chat-direct-session-token-injection-design.md）。
+
+    目标：任务会话（绑定真实仓库）的 chat 对齐 queue 语义（enqueue_task 已注入），
+    签发 tk_ 会话 token 注入 GRAPE_SESSION_TOKEN，使 Chat Agent 能调用仓库作用域内部端点
+    （如 git-repo issue comment 回写澄清结论）；并按 tk_ 作用域过滤 CLI 命令（GRAPE_CLI_MODE=WORKER）。
+
+    仅真实仓库注入；一般对话（repo_key 为空或 chat:{id} 伪仓库）不注入，行为不变。
+    """
+    env = {"USER_ID": str(user_id), "CONVERSATION_ID": conv_id}
+    if repo_key and not repo_key.startswith("chat:"):
+        try:
+            from src.api.auth_token import issue_session_token
+            env["GRAPE_SESSION_TOKEN"] = issue_session_token(
+                session_key=f"conv:{conv_id}",
+                repo_key=repo_key, agent_type="chat", user_id=user_id)
+            env["GRAPE_CLI_MODE"] = "WORKER"
+        except Exception as e:
+            log.warning(f"Chat direct: session token issue failed for conv={conv_id}: {e}")
+    return env
+
+
 @router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
 async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
@@ -644,6 +666,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
                 account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                 agent_label=f"[Agent:chat|user:{user['username']}]",
                 repo_key=repo_key,
+                env_extra=_chat_session_env_extra(user["id"], conv_id, repo_key),
             ):
                 # 日志输出
                 if evt_type == "step_start":
@@ -887,6 +910,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                     repo_key=repo_key,
+                    env_extra=_chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
@@ -1518,6 +1542,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     agent_name="Chat Agent",
                     agent_label=f"[Agent:chat|user:{user['username']}]",
                     repo_key=repo_key,
+                    env_extra=_chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (
