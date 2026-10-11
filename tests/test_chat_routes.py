@@ -168,7 +168,7 @@ class TestSend:
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
              patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent), \
-             patch("src.prompt_builder.build_task_chat_prompt", return_value="task-prompt") as m_build:
+             patch("src.prompt_builder.build_issue_chat_prompt", return_value="task-prompt") as m_build:
             _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         m_build.assert_called()
 
@@ -361,6 +361,80 @@ class TestConfig:
         with db_lock:
             row = db.cursor().execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
         assert row and row[0] == ""
+
+    def test_put_config_unbind_cleans_im(self, _client):
+        """Issue #294：解绑（app_id 置空）→ 清凭证 + 释放注册表 + 删渠道会话 + 映射对账 + 移除 bot。"""
+        app_id = "cli_unbind_%s" % uuid.uuid4().hex[:6]
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?)",
+                      ("sess-cfg-%d" % UID, UID, "", app_id, "sec", "feishu"))
+            c.execute("INSERT OR REPLACE INTO global_im_bot_config (bot_app_id, bot_type) VALUES (?, 'chat_bot')", (app_id,))
+            c.execute("INSERT OR REPLACE INTO chat_conversations (id, user_id, im_channel_id, title) VALUES (?,?,?,?)",
+                      ("ubc-%s" % app_id, UID, app_id, "t"))
+            c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, app_id) VALUES (?,?,?,?,?)",
+                      (UID, USERNAME, "ou_unbind", "绑定人", app_id))
+            db.commit()
+        bm = MagicMock()
+        bm.api = MagicMock()
+        bm.remove_bot = AsyncMock()
+        try:
+            with patch("src.api.main.bot_manager", bm):
+                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "", "app_secret": ""}}})
+            assert r.status_code == 200, r.text
+            bm.remove_bot.assert_awaited_once_with(app_id)
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
+                reg = c.execute("SELECT COUNT(*) FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()[0]
+                conv = c.execute("SELECT COUNT(*) FROM chat_conversations WHERE im_channel_id=?", (app_id,)).fetchone()[0]
+                um = c.execute("SELECT feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=?", (USERNAME,)).fetchone()
+            assert tuple(row) == ("", "", "")
+            assert reg == 0, "解绑后 chat_bot 注册行应被删除"
+            assert conv == 0, "解绑后该渠道会话应被清理"
+            assert um and tuple(um) == ("", "", ""), "解绑后 unified_user_mapping 应清空 open_id/name/app_id"
+            # 接口不再返回该凭证
+            r2 = _client.get("/api/chat/config")
+            assert r2.json()["im"]["feishu"]["app_id"] == ""
+            assert r2.json()["im"]["feishu"]["connected"] is False
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (app_id,))
+                c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (USERNAME,))
+                c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (UID,))
+                db.commit()
+
+    def test_put_config_unbind_then_rebind(self, _client):
+        """Issue #294：绑定 → 解绑 → 再绑定（同一凭证）循环无残留。"""
+        app_id = "cli_cycle_%s" % uuid.uuid4().hex[:6]
+        bm = MagicMock()
+        bm.api = MagicMock()
+        bm.remove_bot = AsyncMock()
+        bm.add_bot = AsyncMock()
+        try:
+            with patch("src.api.main.bot_manager", bm):
+                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}})
+                assert r.status_code == 200, r.text
+                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": "", "app_secret": ""}}})
+                assert r.status_code == 200, r.text
+                bm.remove_bot.assert_awaited_with(app_id)
+                r = _client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec"}}})
+            assert r.status_code == 200, r.text
+            with db_lock:
+                c = db.cursor()
+                row = c.execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
+                reg = c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=?", (app_id,)).fetchone()
+            assert row and row[0] == app_id, "重绑后凭证应写回"
+            assert reg and reg[0] == "chat_bot", "重绑后注册表应重建"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
+                c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (app_id,))
+                c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (UID,))
+                db.commit()
 
 
 # ====== 内部辅助函数 ======

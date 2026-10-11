@@ -146,6 +146,10 @@ function renderImChannelBody(d) {
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M19 21H5a2 2 0 01-2-2V5a2 2 0 012-2h11l5 5v11a2 2 0 01-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
               ${I18N.t('common.save')}
             </button>
+            ${isConfigured ? `<button class="bt bt-r" onclick="unbindImChannelConfig()" style="padding:10px 20px;font-size:12px;border-radius:10px;display:flex;align-items:center;gap:6px;font-weight:600">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 15l6-6"/><path d="M11 6l1-1a4.24 4.24 0 016 6l-1 1"/><path d="M13 18l-1 1a4.24 4.24 0 01-6-6l1-1"/></svg>
+              ${_imt('unbind')}
+            </button>` : ''}
           </div>
         </div>
 
@@ -180,4 +184,18 @@ function saveImChannelConfig() {
     app.showToast(I18N.t('chat.config.saved'));
     loadImChannelConfig();
   }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
+}
+
+/** 解绑当前渠道（Issue #294）：置空 app_id 走既有 PUT 语义，后端同步清理注册表/会话/映射。 */
+function unbindImChannelConfig() {
+  if (!confirm(_imt('unbind_confirm'))) return;
+  const provider = _imCurrentProvider;
+  const im = {};
+  im[provider] = {app_id: '', app_secret: ''};
+  const _repo = app.currentRepo();
+  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+  API.put('/chat/config' + _qs, {im}).then(() => {
+    app.showToast(_imt('unbind_success'));
+    loadImChannelConfig();
+  }).catch(e => app.showToast(_imt('unbind_failed', {msg: e.message})));
 }

@@ -224,6 +224,17 @@ CREATE TABLE IF NOT EXISTS global_im_bot_config (
 )
 """
 
+_IM_INSTANCE_DDL = """
+CREATE TABLE IF NOT EXISTS grape_im_instance (
+    instance_id      VARCHAR(64) PRIMARY KEY,
+    hostname         VARCHAR(64) NOT NULL,
+    ip               VARCHAR(64) DEFAULT '',
+    joined_at        DATETIME DEFAULT (datetime('now')),
+    last_heartbeat   DATETIME DEFAULT (datetime('now')),
+    im_enabled       INTEGER DEFAULT 1
+)
+"""
+
 _VOD_CONVERSATIONS_DDL = """
 CREATE TABLE IF NOT EXISTS vod_conversations (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -814,6 +825,7 @@ _NEW_TABLES = [
     ("agent_type", _AGENT_TYPE_DDL),
     ("skill", _SKILL_DDL),
     ("global_im_bot_config", _GLOBAL_IM_BOT_CONFIG_DDL),
+    ("grape_im_instance", _IM_INSTANCE_DDL),
     ("feishu_onboard_task", _FEISHU_ONBOARD_TASK_DDL),
     ("vod_conversations", _VOD_CONVERSATIONS_DDL),
     ("issue", _ISSUE_DDL),

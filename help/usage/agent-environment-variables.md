@@ -4,7 +4,7 @@
 > 会在 Agent 的**执行环境**中注入一组环境变量（`env`），供 Skill 脚本 / Agent 读取。
 > 本页汇总这些变量的**来源、语义、适用 Agent 类型**，方便开发者编写 Skill 时正确使用。
 
-## 一、注入链路概览
+## 注入链路概览
 
 ```
 GitCode 事件（Issue/PR/评论）
@@ -20,7 +20,7 @@ GitCode 事件（Issue/PR/评论）
 - **引擎 get_env**：引擎侧基础环境（`opencode.py` / `codearts.py` / `hermes.py` / `codex.py`）
 - **_assemble_env**：GitCode/GitHub token 互斥注入（`agent/executor.py`）
 
-## 二、核心注入变量总表
+## 核心注入变量总表
 
 | 环境变量 | 语义 | 适用 Agent | 注入来源 |
 |----------|------|-----------|----------|
@@ -55,7 +55,7 @@ GitCode 事件（Issue/PR/评论）
 > `DEVOPS_EVENT_TYPE` = **时机**（在响应什么触发事件，如 `issue_comment`/`push`，技能据此分派分支）。
 > 例：同一 `QA Agent`（名字恒为 `QA Agent`）可以在 `pr_opened`、`issue_comment` 等不同事件类型下被触发。
 
-## 三、GitCode Token 互斥注入（关键）
+## GitCode Token 互斥注入（关键）
 
 `_assemble_env`（`agent/executor.py`）按执行类型**互斥注入** token：
 
@@ -68,7 +68,7 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
 - GitHub 仓库额外注入 `BOT_GITHUB_TOKEN` / `USER_GITHUB_TOKEN`。
 - 自定义 provider 凭据（openai 等，按 `get_credentials`）与 GITCODE token 无关，chat 与 devops **都按 user_id 注入**。
 
-## 四、按 Agent 类型的可用性
+## 按 Agent 类型的可用性
 
 | Agent | 仓库身份 token | 用户身份 token | 场景字段 |
 |-------|----------------|----------------|----------|
@@ -83,7 +83,7 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
 > 华为云/CodeArts AK-SK 与发布目标（gitcode/github publish repo、ClawHub handle）**不再 env 注入**（#219），
 > 技能需要时走**自定义场景变量**（场景高级选项 custom_fields，变量名直接注入）或按需 API。
 
-## 五、Skill 开发建议
+## Skill 开发建议
 
 1. **读 GitCode 仓库信息**：
    ```bash
@@ -125,7 +125,7 @@ python3 -c 'import os; print(os.environ.get("HUAWEI_AK",""))'
 
 注意：值只进 env、不进 prompt；技能 PRINTENV 时**不要回显敏感值到日志/评论**。
 
-## 六、关键代码位置
+## 关键代码位置
 
 | 环节 | 位置 |
 |------|------|

@@ -2,8 +2,7 @@
   "no_reply": "⚠️ 未收到回复，连接可能中断，请重试。",
   "header": {
     "title": "Chat Agent · 个人助手",
-    "config_btn": "⚙ 配置",
-    "title_prefix": "Chat Agent · "
+    "config_btn": "⚙ 配置"
   },
   "loading": "加载中...",
   "scope_short": {
@@ -93,6 +92,10 @@
     "not_connected": "未接入",
     "coming_soon": "暂未开放",
     "active_status": "运行中",
+    "unbind": "解绑",
+    "unbind_confirm": "确认解绑该 IM 渠道？\n\n解绑后将清除已保存的 App ID / App Secret 以及该渠道的会话数据，渠道状态回到「未接入」，之后可重新绑定。",
+    "unbind_success": "已解绑",
+    "unbind_failed": "解绑失败: {{msg}}",
     "help_title": "说明",
     "help_desc": "配置 IM 平台的 App ID 和 App Secret，用于 Chat Agent 通过飞书/企业微信/钉钉接收消息和回复。也可使用扫码配置快速接入飞书。"
   }

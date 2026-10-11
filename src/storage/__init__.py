@@ -163,8 +163,35 @@ def get_storage() -> StorageBackend | None:
 def reset_storage() -> None:
     """重置单例（测试用）。"""
     global _storage
-    with _storage_lock:
-        _storage = None
+    _storage = None
+
+
+# ===== 技能域存储（OBS 未启用时单机本地兜底，docs/weekly-06/skill-local-storage-fallback-design.md）=====
+
+def get_skill_storage() -> StorageBackend | None:
+    """技能域统一存储：OBS 可用 → OBS；SKILL_STORAGE 允许 → LocalStorage；obs-only 且无 OBS → None。
+
+    只影响技能域（upload/download/detail/convert/delete/执行取包），其它域继续用 get_storage()。
+    不缓存（每次现算）：OBS 的 singletion 由 get_storage() 持有，LocalStorage 无状态、构建廉价；
+    避免测试/运行时切换 OBS 与本地后技能域仍用旧后端。
+    """
+    return _build_skill_storage(get_storage())
+
+
+def _build_skill_storage(_base: StorageBackend | None) -> StorageBackend | None:
+    from src.config import SKILL_STORAGE, SKILL_STORAGE_DIR
+    _mode = (SKILL_STORAGE or "auto").lower()
+    if _base is not None:  # OBS 已配置则优先
+        return _base
+    if _mode in ("auto", "local"):
+        from src.storage.local import LocalStorage
+        log.info(f"StorageBackend: local skill storage (dir={SKILL_STORAGE_DIR}, mode={_mode})")
+        return LocalStorage(SKILL_STORAGE_DIR)
+    return None  # obs-only 且 OBS 未配置 → 维持 503
+
+
+def reset_skill_storage() -> None:
+    """（兼容保留）技能存储不缓存，无需重置。"""
 
 
 # ===== 对象键生成（唯一入口） =====
@@ -428,11 +455,11 @@ def invalidate_skill_caches(object_key: str) -> None:
 # ===== 技能 zip 工具函数（业务侧复用） =====
 
 def get_skill_zip_bytes(object_key: str) -> bytes | None:
-    """获取技能 zip 字节：磁盘缓存优先 → OBS 回源。storage=None 返回 None。"""
+    """获取技能 zip 字节：磁盘缓存优先 → 技能存储回源（OBS 或单机本地）。storage=None 返回 None。"""
     cached = zip_cache_get(object_key)
     if cached is not None:
         return cached
-    storage = get_storage()
+    storage = get_skill_storage()
     if storage is None:
         return None
     data = storage.read_bytes(object_key)
@@ -489,8 +516,8 @@ def skill_md_content(object_key: str, skill_name: str) -> str | None:
         # hash 不一致 → 失效磁盘缓存，回源 OBS
         zip_cache_invalidate(object_key)
 
-    # 回源 OBS
-    storage = get_storage()
+    # 回源技能存储（OBS 或单机本地）
+    storage = get_skill_storage()
     if storage is None:
         return None
     data = storage.read_bytes(object_key)

@@ -1,7 +1,7 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
 import io as _io
 import os, tempfile, zipfile, json, shutil, stat as _stat
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.user.validator import validate_skill as validate_custom_skill, parse_skill_frontmatter
@@ -491,20 +491,25 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能不存在"})
     skill_id, skill_path, scope, owner_id, name = row
 
-    from src.storage import get_storage
-    storage = get_storage()
+    from src.storage import get_skill_storage
+    storage = get_skill_storage()
     if storage is not None:
         from src.user.db import get_skill_object_key
         object_key = get_skill_object_key(skill_id)
         if object_key:
             url = storage.temporary_url(object_key)
-            return {"url": url, "expires_in": getattr(storage, "default_expires", 300)}
-    # 官方技能未转集群模式：无 OBS 对象，不提供下载
+            if url:  # OBS：签名 URL
+                return {"url": url, "expires_in": getattr(storage, "default_expires", 300)}
+            # 本地模式：直接回 zip 字节流
+            data = storage.read_bytes(object_key)
+            if data is not None:
+                return Response(content=data, media_type="application/zip",
+                                headers={"Content-Disposition": f'attachment; filename="{name}.zip"'})
+    # 官方技能未转集群模式：无对象存储对象，不提供下载
     if scope == "official":
         raise HTTPException(status_code=400, detail={"code": 400, "message": "官方技能为部署内置，未转集群模式不提供下载"})
 
-    # local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机
-    raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能下载失败。请检查服务端 OBS 配置后重试。"})
+    raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且技能对象缺失，下载失败。请检查服务端存储配置后重试。"})
 
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
@@ -556,9 +561,9 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
 
     skill_dir = row[4] or row[0]
     current_id = row[7]
-    # ===== OBS 分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址 =====
-    from src.storage import get_storage
-    storage = get_storage()
+    # ===== 存储分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址/local 直接读 =====
+    from src.storage import get_skill_storage
+    storage = get_skill_storage()
     object_key = ""
     if storage is not None:
         from src.user.db import get_skill_object_key
@@ -709,10 +714,10 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
         import shutil
         from src.session_manager import db, db_lock
-        # ===== OBS 分支（N4）：规范化重打包 → 传 OBS 固定 key（原子覆盖）→ DB upsert → 缓存 =====
+        # ===== OBS/本地存储分支（N4）：规范化重打包 → 存固定 key（原子覆盖）→ DB upsert → 缓存 =====
         from src.config import log
-        from src.storage import get_storage
-        storage = get_storage()
+        from src.storage import get_skill_storage
+        storage = get_skill_storage()
         if storage is not None:
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
@@ -733,14 +738,14 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                     raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
                 zip_cache_put(object_key, zip_bytes)  # put 覆盖同名 key 即天然失效旧缓存
                 mem_cache_invalidate(skill_name)      # 覆盖后显式失效内存提取缓存
-                log.info(f"skill uploaded to OBS (fixed key): {object_key}")
+                log.info(f"skill uploaded (storage={storage.backend_name()}, key={object_key})")
             except HTTPException:
                 raise
             except Exception as e:
-                raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能上传 OBS 失败: {e}"})
+                raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能上传存储失败: {e}"})
             return {"message": f"技能 {skill_name} 上传成功"}
-        # ===== local 分支已移除：均衡负载环境下 local 存储会导致文件只存在单机 =====
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能上传失败。请检查服务端 OBS 配置后重试。"})
+        # 存储后端不可用（obs-only 且 OBS 未配置）
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且本地存储被禁用，技能上传失败。请检查服务端存储配置后重试。"})
     except HTTPException:
         raise
     except Exception as e:
@@ -788,9 +793,9 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         if owner_id not in user_repo_keys:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权删除该技能"})
 
-    # OBS 对象清理
-    from src.storage import get_storage
-    storage = get_storage()
+    # 存储对象清理（OBS 或单机本地）
+    from src.storage import get_skill_storage
+    storage = get_skill_storage()
     object_key = ""
     if storage is not None:
         from src.user.db import get_skill_object_key
@@ -805,10 +810,9 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         c.execute("DELETE FROM skill WHERE id=?", (skill_id,))
         db.commit()
 
-    # local 磁盘清理已移除：均衡负载环境下 local 目录清理只作用于单机
     if storage is None:
         from src.config import log
-        log.warning("OBS 不可用，仅清理 DB 记录，磁盘文件需手动清理 (skill_id=%s, scope=%s, name=%s)", skill_id, skill_scope, skill_name)
+        log.warning("存储后端不可用，仅清理 DB 记录，对象文件需手动清理 (skill_id=%s, scope=%s, name=%s)", skill_id, skill_scope, skill_name)
 
     if object_key:
         from src.storage import invalidate_skill_caches
@@ -892,9 +896,9 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     if exists:
         raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
 
-    # ===== OBS 分支：copyObject → DB 回写 =====
-    from src.storage import get_storage
-    storage = get_storage()
+    # ===== 存储分支：copy → DB 回写（OBS copyObject / 本地 copy）=====
+    from src.storage import get_skill_storage
+    storage = get_skill_storage()
     if storage is not None:
         from src.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate
         from src.user.db import get_skill_object_key, upsert_skill_obs

@@ -560,7 +560,7 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
                               has_valid_session: bool = False) -> str:
     """按当前加入会话的 conv_type 分支构建 Feishu chat prompt（feishu-web-chat-unified-design.md §11）。
 
-    task 会话 → build_task_chat_prompt（会话消息 get_messages 作历史，与 web chat 一致）；
+    task 会话 → build_issue_chat_prompt（会话消息 get_messages 作历史，与 web chat 一致）；
     否则 general → build_chat_prompt（事件 history）。
     has_valid_session：飞书侧按 repo 级 oc_sid 是否有效；无效时注入完整对话历史
     （chat-prompt-history-injection-design.md §3）。
@@ -573,14 +573,14 @@ def _build_feishu_chat_prompt(text: str, repo_key: str, history, skills, exec_ac
         except Exception as e:
             log.warning(f"Feishu: get conversation failed: {e}")
     if conv_obj and conv_obj.get("conv_type") == "task":
-        from src.prompt_builder import build_task_chat_prompt
+        from src.prompt_builder import build_issue_chat_prompt
         from src.repo_key import from_repo_key
         try:
             from src.session_manager import get_messages
             conv_history = get_messages(conv_id, limit=20)
         except Exception:
             conv_history = []
-        body = build_task_chat_prompt(text, repo_key, conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
+        body = build_issue_chat_prompt(text, repo_key, conv_history, conv_obj, account=exec_account, runtime_id=chat_runtime_id, user_info=user_info, has_valid_session=has_valid_session)
     else:
         # general chat：用 chat_messages 表的历史（格式 {role, content}），与 task 会话一致；
         # 不用 event_history（格式 {type, stdout}，与 _append_chat_history 的 role/content 不匹配）
