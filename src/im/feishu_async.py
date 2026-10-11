@@ -542,19 +542,30 @@ class FeishuAsync:
         return False
 
     async def send_card_to_user(self, ctx: BotContext, open_id: str, text: str,
-                                title: str = "DevOps Bot", actions: list | None = None) -> str:
-        """主动发送卡片给用户"""
+                                title: str = "DevOps Bot", actions: list | None = None,
+                                template: str = "blue", fields: list | None = None,
+                                note: str | None = None) -> str:
+        """主动发送卡片给用户
+
+        template: 头部模板色（blue/wathet/turquoise/green/yellow/orange/red/grey...）。
+        fields:   结构化键值对字段元素（{"is_short":...,"text":{...}} 列表），正文后追加 div。
+        note:     卡片底部灰色注释（如发送时间戳）。
+        """
         token = await self._ensure_token(ctx)
         if not token:
             return ""
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
         elements = to_lark_elements(text, 2000)
+        if fields:
+            elements.append({"tag": "div", "fields": fields})
         if actions:
             elements.append({"tag": "action", "actions": actions})
+        if note:
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
         card = {
             "elements": elements,
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"},
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
         }
         payload = {
             "receive_id": open_id,

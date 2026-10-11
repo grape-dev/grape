@@ -624,3 +624,24 @@ class TestBuildNotifyActions:
         from src.api.issues_center import _build_notify_actions
         acts = _build_notify_actions("", 7, "")
         assert len(acts) == 1
+
+    def test_build_fields(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("gitcode:navuser/repo-a", 7)
+        assert len(flds) == 2
+        assert flds[0]["is_short"] is True
+        assert "**📦 仓库**" in flds[0]["text"]["content"]
+        assert "navuser/repo-a" in flds[0]["text"]["content"]
+        assert flds[1]["text"]["content"].endswith("#7")
+        assert flds[0]["text"]["tag"] == "lark_md" and flds[1]["text"]["tag"] == "lark_md"
+
+    def test_build_fields_no_issue(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("github:navuser/repo-a", 0)
+        assert flds[1]["text"]["content"].endswith("—")
+
+    def test_notify_note_has_timestamp(self):
+        from src.api.issues_center import _notify_note
+        note = _notify_note()
+        assert note.startswith("发送时间：")
+        assert len(note) == len("发送时间：" + "2026-10-11 14:30")
