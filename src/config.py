@@ -158,6 +158,14 @@ OBS_SECRET_KEY = os.environ.get("OBS_SECRET_KEY", "")
 OBS_PREFIX = os.environ.get("OBS_PREFIX", "grape/prod")
 OBS_URL_EXPIRES = int(os.environ.get("OBS_URL_EXPIRES", "300"))
 
+# ── 技能本地存储兜底（OBS 未启用时单机可用，docs/weekly-06/skill-local-storage-fallback-design.md）──
+# SKILL_STORAGE = auto|obs|local；auto=OBS 有则 OBS 否则本地；obs=仅 OBS；local=强制本地（单机）
+SKILL_STORAGE = os.environ.get("SKILL_STORAGE", "auto").strip().lower()
+# 技能对象本地权威落盘根（默认 <部署根>/data/skills/；多机集群请指向 OBS 或共享盘，勿用 local）
+SKILL_STORAGE_DIR = os.path.abspath(os.environ.get("SKILL_STORAGE_DIR", os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "data", "skills",)))
+
 # ── 飞书 Bot Lease（集群部署，保证同一 bot 同一时刻只有一个实例连 WebSocket）──
 BOT_LEASE_DISABLED = os.environ.get("BOT_LEASE_DISABLED", "false").lower() in ("1", "true", "yes")
 BOT_LEASE_TTL = int(os.environ.get("BOT_LEASE_TTL", "180"))
