@@ -24,6 +24,20 @@ function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStore
 // _NO_REPLY: 内联 I18N.t('chat.no_reply')，不缓存（模块顶层缓存会在语言切换后失效）
 
 /**
+ * Issue #293: 剥离标题行首 "Issue #N · " 前缀，返回清理后标题与编号。
+ * @param {string} title - 原始标题（可能含 "Issue #N · {title}" 前缀）
+ * @returns {{title: string, issueNumber: number}}
+ */
+function _stripIssuePrefix(title) {
+  if (!title) return {title: '', issueNumber: 0};
+  var m = title.match(/^Issue\s*#(\d+)\s*·\s*/);
+  if (m) {
+    return {title: title.substring(m[0].length), issueNumber: parseInt(m[1], 10) || 0};
+  }
+  return {title: title, issueNumber: 0};
+}
+
+/**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
  * @param {string} text - 原始文本
  * @param {string} repoKey - 仓库 key（如 "songspace/hello-blog"），用于构建 URL
@@ -326,10 +340,16 @@ function loadConversations(autoSelect) {
     let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">' + I18N.t('chat.conversation.new') + '</button></div>';
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
-      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : I18N.t('chat.conversation.default_title');
+      const stripped = _stripIssuePrefix(c.title || '');
+      const issueNum = (c.issue_number && c.issue_number > 0) ? c.issue_number : stripped.issueNumber;
+      const cleanTitle = stripped.title || (c.title ? '' : I18N.t('chat.conversation.default_title'));
+      const safeTitle = String(cleanTitle).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const metaHtml = issueNum > 0
+        ? '#' + issueNum + ' · ' + fmtLocalTime(c.created_at).substring(0,16)
+        : fmtLocalTime(c.created_at).substring(0,16);
       html += `<div class="conv-item" data-id="${c.id}"${active}>
-        <div class="conv-title">${titleHtml}</div>
-        <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
+        <div class="conv-title">${safeTitle}</div>
+        <div class="conv-meta">${metaHtml}</div>
         <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}', event)">✕</span>
       </div>`;
     });
@@ -449,7 +469,8 @@ function switchConversation(convId) {
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) {
       const titleBase = conv.title || 'Personal Assistant';
-      const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const stripped = _stripIssuePrefix(titleBase);
+      const safeTitle = String(stripped.title || titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
       hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
     }
 
