@@ -2,6 +2,7 @@
 
 > 状态：已实施（2026-10-11，分支 `feat/feishu-notify-format`，提交 `719a940a6`；迭代二同分支）｜目标分支：weekly-06
 > 迭代二（评审修订）：「任务通知」类型更名为「信息知会」；字段区新增「需求标题」，Issue 编号改为 VCS 公开页链接。见 §2.1、§2.2。
+> 迭代三（评审修订）：Issue 链接与「查看 Issue ↗」抽取统一 `_vcs_issue_url`，支持 gitcode / github / **gitlab**。见 §2.2。
 > 动机：三条静态飞书通知卡（信息知会 / 需求待澄清 / 需求待审核）均为「纯文本段落 + 统一蓝色模板」，
 > 类型不可一眼区分、信息堆叠为长段落、无时间戳、引导文案与快捷按钮语义重复。
 > 本次将通知卡从「纯文本段落」升级为「按类型差异化 + 结构化字段 + 底部时间戳」的卡片布局。
@@ -74,8 +75,12 @@ _IM_NOTIFY_TITLES    = {"task": "📋 信息知会", "awaiting": "❓ 需求待�
 ```
 
 - 仓库 / Issue 两个短字段一行对齐；需求标题为全宽字段（长文本不截断换行）。
-- Issue 链接 URL 规则与 `_build_notify_actions` 一致：`repo_key.startswith("github:")` → GitHub，否则 GitCode。
-- 需求标题为空 / 无编号（`issue_number=0`）时回退「—」，不弹链接。
+- Issue 链接统一走 `_vcs_issue_url`（issues_center.py，`_build_notify_actions` / `_build_notify_fields` 共用）按 repo_key provider 前缀分流：
+  - `gitcode:` → `https://gitcode.com/{owner}/{repo}/issues/{n}`
+  - `github:` → `https://github.com/{owner}/{repo}/issues/{n}`
+  - `gitlab:` → `https://gitlab.com/{owner}/{repo}/-/issues/{n}`
+  - 未知前缀 → 默认 GitCode；无编号 / 坏仓库 → 不弹链接。
+- 需求标题为空 / 无编号（`issue_number=0`）时回退「—」。
 - 飞书端按 `field` 渲染为对齐键值对，移动端不再依赖肉眼对齐。
 
 ### 2.3 底部时间戳（`note` 灰字注释）
@@ -113,7 +118,7 @@ _IM_NOTIFY_TITLES    = {"task": "📋 信息知会", "awaiting": "❓ 需求待�
 | 模块 | 改动 |
 |------|------|
 | `src/im/feishu_async.py` `send_card_to_user`:544 | 新增 `template="blue"` / `fields=None` / `note=None` 参数；fields 追加 div、note 追加底部注释、header 用传入 template。默认值 → 与改造前完全一致 |
-| `src/api/issues_center.py` | 新增 `_IM_NOTIFY_TEMPLATES` / `_IM_NOTIFY_TITLES`（:733-742，task 标题为「📋 信息知会」）、`_build_notify_fields`（:745，仓库/链接 Issue/需求标题）、`_notify_note`（:763）；三条 `_run_*_notify` 传 `title/template/fields/note` 并精简正文 |
+| `src/api/issues_center.py` | 新增 `_vcs_issue_url`（gitcode/github/gitlab 分流）；`_IM_NOTIFY_TEMPLATES` / `_IM_NOTIFY_TITLES`（:733-742，task 标题为「📋 信息知会」）；`_build_notify_fields`（:745，仓库/链接 Issue/需求标题）；`_notify_note`（:763）；三条 `_run_*_notify` 传 `title/template/fields/note` 并精简正文；`_build_notify_actions` 复用 `_vcs_issue_url` |
 
 **未改动**：会话静态模板文案、`tasks.py:275` / `issues.py:908/988` 触发点、`_build_notify_actions` 按钮机制、`send_card_to_chat`、`to_lark_elements`。
 
@@ -138,6 +143,8 @@ _IM_NOTIFY_TITLES    = {"task": "📋 信息知会", "awaiting": "❓ 需求待�
 | `test_send_card_to_user_with_actions` / `_no_actions` | actions 参数行为与改造前一致 | tests/test_feishu_async.py |
 | `test_build_fields` | fields 3 项：仓库、`[#7](gitcode 链接)`、需求标题（全宽） | tests/test_feishu_navigation_commands.py |
 | `test_build_fields_github_issue_link` | GitHub 前缀仓库 Issue 链接指向 github.com | tests/test_feishu_navigation_commands.py |
+| `test_build_fields_gitlab_issue_link` | GitLab 前缀仓库 Issue 链接指向 `gitlab.com/{owner}/{repo}/-/issues/{n}` | tests/test_feishu_navigation_commands.py |
+| `test_gitlab_actions` | 「查看 Issue ↗」按钮 URL 指向 GitLab | tests/test_feishu_navigation_commands.py |
 | `test_build_fields_no_issue` | 无编号：Issue 字段回退「—」且无链接 | tests/test_feishu_navigation_commands.py |
 | `test_notify_note_has_timestamp` | 时间戳格式 | tests/test_feishu_navigation_commands.py |
 | 全量回归 | 基线 359 fail/2312 pass → 本次 358 fail/2317 pass，**branch-only 失败=0**（存量失败均为环境性：test_tasks 鉴权种子、测试文件 mojibake） | pytest tests/ |

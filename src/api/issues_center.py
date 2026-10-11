@@ -703,16 +703,30 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     return "\n".join(lines)
 
 
+def _vcs_issue_url(repo_key: str, issue_number: int) -> str:
+    """repo_key → VCS Issue 公开页 URL（gitcode/github/gitlab 分流）。
+
+    无编号 / 坏仓库（缺 owner 或 repo）→ ''。未知 provider 前缀 → 默认 GitCode。
+    """
+    from src.repo_key import split_owner_repo
+    if not issue_number:
+        return ""
+    owner, repo = split_owner_repo(repo_key)
+    if not owner or not repo:
+        return ""
+    _p = str(repo_key).split(":", 1)[0]
+    if _p == "github":
+        return f"https://github.com/{owner}/{repo}/issues/{issue_number}"
+    if _p == "gitlab":
+        return f"https://gitlab.com/{owner}/{repo}/-/issues/{issue_number}"
+    return f"https://gitcode.com/{owner}/{repo}/issues/{issue_number}"
+
+
 def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> list:
     """通知卡快捷按钮：进入任务会话（cmd 直达）+ 查看 Issue（VCS 公开页只读）。
 
     设计：docs/weekly-05/feishu-notification-card-quick-actions-design.md。
     """
-    try:
-        from src.repo_key import split_owner_repo
-        owner, repo = split_owner_repo(repo_key)
-    except Exception:
-        owner, repo = "", ""
     _iss = f"#{issue_number}" if issue_number else ""
     actions = [{
         "tag": "button",
@@ -720,12 +734,12 @@ def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> lis
         "value": {"cmd": "/task-open", "repo_key": repo_key,
                   "issue_number": _iss, "conv_id": conv_id or ""},
     }]
-    if owner and repo and _iss:
-        base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
+    _url = _vcs_issue_url(repo_key, issue_number)
+    if _url:
         actions.append({
             "tag": "button",
             "text": {"tag": "plain_text", "content": "查看 Issue ↗"},
-            "url": f"{base}/{owner}/{repo}/issues/{_iss.lstrip('#')}",
+            "url": _url,
         })
     return actions
 
@@ -744,14 +758,13 @@ _IM_NOTIFY_TITLES = {
 
 def _build_notify_fields(repo_key: str, issue_number: int) -> list:
     """通知卡结构化键值对字段：仓库 / Issue（带 VCS 链接）/ 需求标题（替代纯文本行，移动端对齐更好）。"""
-    from src.repo_key import from_repo_key, split_owner_repo
+    from src.repo_key import from_repo_key
     _iss = f"#{issue_number}" if issue_number else ""
     _iss_link = ""
     if _iss:
-        owner, repo = split_owner_repo(repo_key)
-        if owner and repo:
-            base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
-            _iss_link = f"[{_iss}]({base}/{owner}/{repo}/issues/{issue_number})"
+        _url = _vcs_issue_url(repo_key, issue_number)
+        if _url:
+            _iss_link = f"[{_iss}]({_url})"
     _title = _get_issue_title(repo_key, issue_number) or "—"
     return [
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**📦 仓库**\n{from_repo_key(repo_key) or '—'}"}},

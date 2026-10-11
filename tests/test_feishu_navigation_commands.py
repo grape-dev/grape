@@ -615,6 +615,12 @@ class TestBuildNotifyActions:
         assert acts[1]["url"] == "https://github.com/navuser/repo-a/issues/7"
         assert acts[0]["value"]["conv_id"] == ""
 
+    def test_gitlab_actions(self):
+        from src.api.issues_center import _build_notify_actions
+        acts = _build_notify_actions("gitlab:navuser/repo-a", 7, "")
+        assert len(acts) == 2
+        assert acts[1]["url"] == "https://gitlab.com/navuser/repo-a/-/issues/7"
+
     def test_empty_issue_no_url(self):
         from src.api.issues_center import _build_notify_actions
         acts = _build_notify_actions("gitcode:navuser/repo-a", 0, "")
@@ -642,6 +648,11 @@ class TestBuildNotifyActions:
         from src.api.issues_center import _build_notify_fields
         flds = _build_notify_fields("github:navuser/repo-a", 7)
         assert "[#7](https://github.com/navuser/repo-a/issues/7)" in flds[1]["text"]["content"]
+
+    def test_build_fields_gitlab_issue_link(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("gitlab:navuser/repo-a", 7)
+        assert "[#7](https://gitlab.com/navuser/repo-a/-/issues/7)" in flds[1]["text"]["content"]
 
     def test_build_fields_no_issue(self):
         from src.api.issues_center import _build_notify_fields
