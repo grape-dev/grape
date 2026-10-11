@@ -59,7 +59,11 @@
     "save_failed": "Save failed: {{msg}}",
     "title": "Agent Configuration",
     "bot_app_id": "Bot App ID",
-    "bot_secret": "Bot Secret"
+    "bot_secret": "Bot Secret",
+    "unbind": "Unbind",
+    "unbind_confirm": "Unbind this IM channel?\n\nThe Bot App ID / Secret saved for this repository and the channel's group conversations will be removed, and you can bind again afterwards.",
+    "unbind_success": "Unbound",
+    "unbind_failed": "Unbind failed: {{msg}}"
   },
   "subscription": {
     "title": "Event Subscription",
