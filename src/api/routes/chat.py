@@ -1238,6 +1238,39 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     }
 
 
+def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> None:
+    """Chat IM 解绑清理（Issue #294）：注册表释放 + 渠道会话清理 + unified_user_mapping 对账。
+
+    - 该 app_id 无其他用户引用 → 删除 global_im_bot_config 的 chat_bot 注册行，并清空
+      unified_user_mapping 中所有该 app 的 open_id/feishu_name/app_id（open_id 为 app 级，
+      app 释放后失效，重绑需重新 p2p 确认）；
+    - 仍被其他用户引用 → 只清空当前用户自己的映射行；
+    - 该渠道（im_channel_id=old_app_id）的 chat_conversations 一律删除（对齐换绑清理逻辑）。
+    """
+    if not old_app_id:
+        return
+    from datetime import datetime as _dt
+    from src.session_manager import db as _db, db_lock as _db_lock
+    try:
+        with _db_lock:
+            c = _db.cursor()
+            c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE im_app_id=? AND user_id!=? AND im_app_id!=''", (old_app_id, user_id))
+            other_refs = c.fetchone()[0]
+            _now = _dt.now().isoformat()
+            if other_refs == 0:
+                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=? AND bot_type='chat_bot'", (old_app_id,))
+                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
+                          (_now, old_app_id))
+            elif gitcode_user:
+                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE gitcode_user=?",
+                          (_now, gitcode_user))
+            c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
+            _db.commit()
+        log.info(f"Chat IM: unbound old app_id={old_app_id[:30]} user={user_id} (other_refs={other_refs})")
+    except Exception as e:
+        log.warning(f"Chat IM: unbind cleanup failed: {e}")
+
+
 @router.put("/config", operation_id="chat_config_update", summary="Update chat config", description="Updates chat config.")
 async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
     im = body.get("im", {})
@@ -1287,6 +1320,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         old_app_id = old_cfg.get("im_app_id", "")
         kwargs["im_app_id"] = ""
         kwargs["im_app_secret"] = ""
+        kwargs["im_provider"] = ""
     if feishu.get("app_secret") and feishu["app_secret"] != "********":
         kwargs["im_app_secret"] = feishu["app_secret"]
     if body.get("backend"):
@@ -1347,6 +1381,10 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         kwargs["skill_id"] = skill_id
         kwargs["skill_scope"] = skill_scope
     _set_chat_config(user["id"], **kwargs)
+
+    # Issue #294：解绑（显式携带 im 且 app_id 置空）→ 清理全局注册表/渠道会话 + unified_user_mapping 对账
+    if "im" in body and not feishu.get("app_id") and old_app_id:
+        _purge_chat_im_binding(user["id"], user.get("username", ""), old_app_id)
 
     # 手动配置换 app：对账 unified_user_mapping（feishu-app-scoped-openid-fix.md §2.3）
     # 新旧 im_app_id 不同 → 刷新 app_id 并清空 open_id/feishu_name，要求用户重新 p2p 确认
