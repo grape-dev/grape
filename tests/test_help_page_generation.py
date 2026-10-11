@@ -160,3 +160,72 @@ class TestGenerate:
         gen.generate()
         second = HELP_HTML.read_bytes()
         assert first == second, "generation not deterministic"
+
+
+class TestDirectoryNumbering:
+    """Issue #291: 左侧目录层级编号（1/1.1/1.1.1）+ 总览标识。"""
+
+    def test_api_docs_numbered_1_to_n(self, data):
+        api = data["api"]
+        assert len(api) == len(API_FILES)
+        readme = next(d for d in api if d["id"] == "README")
+        assert readme["no"] == "" and readme.get("is_overview") is True, "README should be overview"
+        numbered = [d for d in api if d.get("no")]
+        assert len(numbered) == len(API_FILES) - 1
+        assert [d["no"] for d in numbered] == [str(i) for i in range(1, len(numbered) + 1)], \
+            "api docs must be numbered 1..N in order"
+
+    def test_usage_docs_numbered_1_to_n(self, data):
+        usage = data["usage"]
+        assert len(usage) == len(gen.USAGE_ORDER)
+        assert [d["no"] for d in usage] == [str(i) for i in range(1, len(usage) + 1)]
+
+    def test_toc_hierarchical_numbers(self, data):
+        """00-auth 小节应为 1.1 / 1.1.1 等层级编号（文档 1 + 层级序号）。"""
+        auth = next(d for d in data["api"] if d["id"] == "00-auth")
+        assert auth["no"] == "1"
+        numbers = [r["no"] for r in auth["toc"]]
+        assert numbers, "00-auth should have toc entries"
+        assert numbers[0] == "1.1", f"first sub heading should be 1.1, got {numbers[0]}"
+        assert any(re.match(r"^1\.\d+\.\d+$", n) for n in numbers), \
+            f"expected nested number like 1.1.1, got {numbers[:6]}"
+
+    def test_flat_siblings_incremented(self, data):
+        """quickstart 同级 2.1/2.2/2.3/2.4 递增且不嵌套。"""
+        qs = next(d for d in data["usage"] if d["id"] == "quickstart")
+        numbers = [r["no"] for r in qs["toc"]]
+        assert numbers[0] == "2.1"
+        assert all(n.startswith("2.") and len(n.split(".")) == 2 for n in numbers), numbers
+
+    def test_reference_numbered(self, data):
+        ref = data.get("reference") or []
+        assert all(d["no"] == str(i) for i, d in enumerate(ref, start=1))
+
+
+class TestApiEndpointStandardization:
+    """Issue #291: 右侧接口标准化字段（方法徽章/路径/参数/响应/错误码标签）。"""
+
+    def test_js_has_endpoint_card_markers(self, page_text):
+        for marker in ("ep-card", "ep-method", "ep-path", "ep-title", "ep-label", "decorateApi"):
+            assert marker in page_text, f"missing marker {marker!r} in help JS"
+
+    def test_js_has_method_regex(self, page_text):
+        assert re.search(r"GET\|POST\|PUT\|DELETE\|PATCH\|HEAD\|OPTIONS", page_text)
+
+    def test_js_has_directory_collapse_markers(self, page_text):
+        for marker in ("subnav", "caret", "dno", "dn-t", "data-for"):
+            assert marker in page_text, f"missing marker {marker!r}"
+
+    def test_js_overview_badge(self, page_text):
+        assert "总览" in page_text
+
+    def test_endpoint_headings_parseable(self, data):
+        """至少一个 API 端点的 H2 能被方法+路径正则解析（内容 <=> 展示契约一致）。"""
+        pattern = re.compile(r"^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\S+)")
+        found = False
+        for d in data["api"]:
+            for m in re.finditer(r"<h2[^>]*>(.*?)</h2>", d["html"], re.DOTALL):
+                text = re.sub(r"<[^>]+>", "", m.group(1)).strip()
+                if pattern.match(text):
+                    found = True
+        assert found, "no endpoint heading matches METHOD /path pattern"

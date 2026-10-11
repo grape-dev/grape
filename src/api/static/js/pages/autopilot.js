@@ -723,7 +723,11 @@ function _apAddCustomField(name, value, isSecret, scope) {
   container.appendChild(row);
 }
 function _apLoadAutoSkills() {
-  return API.get('/skills?agent_type=auto&scope=all&page_size=0').then(function(d) {
+  // 按当前仓库过滤：官方 + 个人 + 本仓库技能（不传 scope=all，避免混入其他仓库的技能）
+  var _repo = '';
+  try { if (typeof app !== 'undefined' && app.currentRepo()) _repo = app.currentRepo().fullName || ''; } catch (e) {}
+  var url = '/skills?agent_type=auto&page_size=0' + (_repo ? '&repo=' + encodeURIComponent(_repo) : '');
+  return API.get(url).then(function(d) {
     _apAllAutoSkills = (d.skills || []).map(function(s) {
       return { skill_name: s.name || s.skill_name, display_name: s.display_name || s.name || s.skill_name, description: s.description || '', scope: s.scope || '' };
     });
@@ -741,11 +745,9 @@ function _apUpdateSkillLabel() {
   }
 }
 function _apOpenSkillPicker() {
-  if (_apAllAutoSkills.length === 0) {
-    _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
-  } else {
-    _apOpenSkillPickerInner();
-  }
+  // 每次打开都按当前仓库重新拉取：_apAllAutoSkills 是全局缓存，
+  // 切换仓库后旧缓存不会失效（曾导致所有仓库都看到第一次打开时的技能列表）
+  _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
 }
 function _apOpenSkillPickerInner() {
   var _SCOPE_COLORS = {official:'#6366f1',user:'#34c759',repo:'#f59e0b'};

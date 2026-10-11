@@ -453,7 +453,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 from src.api.event_pipeline import is_plugin_mode, resolve_skill_from_pipeline
                 _a2a_issue_scene, _a2a_issue_uid = get_issue_scene(repo_key, f"#{issue_number}")
                 _a2a_issue_scene = _a2a_issue_scene or "default"
-                if is_plugin_mode() and _a2a_issue_scene and _a2a_issue_scene != "default":
+                if is_plugin_mode() and _a2a_issue_scene:
+                    # 2026-10-10：去掉 != "default" —— 与 event_pipeline 主路径口径一致，
+                    # default 场景 skill 改动在 a2a 路径同样生效
                     _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_name, scene_id=_a2a_issue_scene, user_id=_a2a_issue_uid)
                     if _pipe_skill:
                         skill_name = _pipe_skill

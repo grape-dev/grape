@@ -1,0 +1,57 @@
+{
+  "name": "grape-skill-dev",
+  "version": "1.0.0",
+  "display_name": "Grape Skill 开发流程",
+  "description": "该场景可根据实际业务需求，全新生成或改造现有 Skill，产出满足 Grape 规范的技能",
+  "category": "skill-dev",
+  "recommended_template": "hello-skill",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "skill",
+    "grape-cli",
+    "framework"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "grape-vod-cli",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "grape-skill-issue",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "grape-skill-generator",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "grape-skill-validator",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "grape-skill-uploader",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}

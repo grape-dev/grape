@@ -1396,7 +1396,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             log.info(f"Pipeline: issue_state init vod for {_rid2}")
     # PR merged 跳过 QA 直接路由 SRE：补推 stage qa→sre（原由 QA A2A handoff 推进）
     if event_type == "pull_request_merged" and agent_type == "sre":
-        _rid_sre = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+        # 与 1606 行路由处一致的 PR 感知解析链：merge payload 的 object_attributes.iid
+        # 是 PR 号，resolve_issue_id 会跳过（其 docstring 自警告此陷阱）→ 必须先用
+        # resolve_pr_issue_id（title #N / 分支 issue-N / issues 列表 / PR 详情 API 兜底）。
+        try:
+            from src.user.db import get_agent_bot_token
+            _sre_api_token = get_agent_bot_token(repo_key) or ""
+            _rid_sre = resolve_pr_issue_id(evt.get("payload", {}) or {}, _sre_api_token, repo_key=repo_key) \
+                or resolve_issue_id(evt.get("payload", {}) or {}) \
+                or evt.get("issue_id", "")
+        except Exception:
+            _rid_sre = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
         if _rid_sre:
             from src.api.session_store import get_issue_stage as _gis
             _st_sre = _gis(repo_key, _rid_sre)
@@ -1539,7 +1549,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         skill_id = 0
         skill_path = ""
         log.info("Pipeline (plugin): 智能推荐模式, skip skill resolution")
-    elif is_plugin_mode() and _issue_scene and _issue_scene != "default" and not _is_pr_sub:
+    elif is_plugin_mode() and _issue_scene and not _is_pr_sub:
+        # 2026-10-10：去掉 != "default" —— default 场景的 skill 改动同样生效（前端已无
+        # Agent 配置页，场景 nodes 成为唯一可编辑入口），与 webhook.py a2a 路径口径一致
         _pipe_skill = resolve_skill_from_pipeline(repo_key, agent_type, scene_id=_issue_scene, user_id=_issue_scene_uid)
         if _pipe_skill:
             skill_name = _pipe_skill
@@ -2467,6 +2479,71 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
         return []
     except Exception:
         return []
+
+
+def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: int = 0,
+                   account: str = "", issue_number: str = "", pr_number: str = "") -> dict:
+    """构建任务完整 env_extra（正常入队/重派/对话入队共用，防重派丢变量）。
+
+    2026-10-10 事故：events.py 重派路径 enqueue_task(env_extra={}) 丢了
+    GRAPE_SERVER_URL（远程 worker 上 CLI 落 localhost:8000，A2A 交办全连不上），
+    同时丢 GRAPE_WORK_BRANCH / GRAPE_SCENE_ID / custom_fields / GRAPE_LINKED_REPOS
+    （worktree 建错分支、场景自定义变量失效）。本函数对齐 _enqueue_pipeline_task
+    （原 L2243-2293）的 env 组装，重派处调用方按 old.runtime_id 重建。
+
+    与正常入队的差异（调用方已持有或无意义的不重复注入）：
+    - ISSUE_NUMBER/PR_NUMBER：参数传入则注入
+    - BOT_USERNAME（coding）：与正常入队同逻辑
+    - evt._env_extra 事件级扩展：重派无 evt，无法还原（快照已在 prompt 里），不注入
+    """
+    import json as _json
+    env = {}
+    # ── 仓库/服务地址基础四项 ──
+    from src.repo_key import split_owner_repo as _sor
+    _owner, _repo_name = _sor(repo_key)
+    env["REPO_FULL_NAME"] = _repo_name and f"{_owner}/{_repo_name}" or repo_key
+    env["REPO_OWNER"] = _owner
+    env["REPO_NAME"] = _repo_name
+    env["ACCOUNT"] = account
+    from src.prompt_builder import _resolve_server_url
+    env["GRAPE_SERVER_URL"] = _resolve_server_url(runtime_id)
+    # ── 场景环境（work_branch / scene_id / custom_fields / linked_repos）──
+    try:
+        from src.runtime.repogit import _read_scene_work_branch
+        _wb = _read_scene_work_branch(repo_key, issue_id)
+        if _wb:
+            env["GRAPE_WORK_BRANCH"] = _wb
+    except Exception:
+        pass
+    _inject_scene_env(env, repo_key, issue_id, agent_type)
+    try:
+        _linked = _read_scene_linked_repos(repo_key, issue_id)
+        if _linked:
+            env["GRAPE_LINKED_REPOS"] = _json.dumps(_linked, ensure_ascii=False)
+    except Exception:
+        pass
+    # ── coding 注入 BOT_USERNAME（审查人）──
+    if agent_type == "coding":
+        try:
+            from src.session_manager import db, db_lock
+            from src.repo_key import to_repo_key
+            _rk = to_repo_key(repo_key)
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+                row = c.fetchone()
+                _bot_name = row[0] if row else ""
+            if not _bot_name:
+                _bot_name = _owner
+            env["BOT_USERNAME"] = _bot_name
+        except Exception:
+            pass
+    # ── issue/pr 编号 ──
+    if issue_number:
+        env["ISSUE_NUMBER"] = str(issue_number).lstrip("#")
+    if pr_number:
+        env["PR_NUMBER"] = str(pr_number)
+    return env
 
 
 def get_prompt_context(repo_key: str) -> str:
