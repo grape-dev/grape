@@ -628,17 +628,27 @@ class TestBuildNotifyActions:
     def test_build_fields(self):
         from src.api.issues_center import _build_notify_fields
         flds = _build_notify_fields("gitcode:navuser/repo-a", 7)
-        assert len(flds) == 2
+        assert len(flds) == 3
         assert flds[0]["is_short"] is True
         assert "**📦 仓库**" in flds[0]["text"]["content"]
         assert "navuser/repo-a" in flds[0]["text"]["content"]
-        assert flds[1]["text"]["content"].endswith("#7")
-        assert flds[0]["text"]["tag"] == "lark_md" and flds[1]["text"]["tag"] == "lark_md"
+        assert flds[1]["text"]["content"].startswith("**🎯 Issue**")
+        assert "[#7](https://gitcode.com/navuser/repo-a/issues/7)" in flds[1]["text"]["content"]
+        assert flds[2]["is_short"] is False
+        assert "**📌 需求标题**" in flds[2]["text"]["content"]
+        assert flds[0]["text"]["tag"] == "lark_md"
+
+    def test_build_fields_github_issue_link(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("github:navuser/repo-a", 7)
+        assert "[#7](https://github.com/navuser/repo-a/issues/7)" in flds[1]["text"]["content"]
 
     def test_build_fields_no_issue(self):
         from src.api.issues_center import _build_notify_fields
         flds = _build_notify_fields("github:navuser/repo-a", 0)
+        assert len(flds) == 3
         assert flds[1]["text"]["content"].endswith("—")
+        assert "[" not in flds[1]["text"]["content"]
 
     def test_notify_note_has_timestamp(self):
         from src.api.issues_center import _notify_note

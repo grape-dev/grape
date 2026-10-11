@@ -736,19 +736,27 @@ _IM_NOTIFY_TEMPLATES = {
     "pending_review": "red",
 }
 _IM_NOTIFY_TITLES = {
-    "task": "📋 任务通知",
+    "task": "📋 信息知会",
     "awaiting": "❓ 需求待澄清",
     "pending_review": "🔎 需求待审核",
 }
 
 
 def _build_notify_fields(repo_key: str, issue_number: int) -> list:
-    """通知卡结构化键值对字段：仓库 / Issue（替代纯文本行，移动端对齐更好）。"""
-    from src.repo_key import from_repo_key
-    _iss = f"#{issue_number}" if issue_number else "—"
+    """通知卡结构化键值对字段：仓库 / Issue（带 VCS 链接）/ 需求标题（替代纯文本行，移动端对齐更好）。"""
+    from src.repo_key import from_repo_key, split_owner_repo
+    _iss = f"#{issue_number}" if issue_number else ""
+    _iss_link = ""
+    if _iss:
+        owner, repo = split_owner_repo(repo_key)
+        if owner and repo:
+            base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
+            _iss_link = f"[{_iss}]({base}/{owner}/{repo}/issues/{issue_number})"
+    _title = _get_issue_title(repo_key, issue_number) or "—"
     return [
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**📦 仓库**\n{from_repo_key(repo_key) or '—'}"}},
-        {"is_short": True, "text": {"tag": "lark_md", "content": f"**🎯 Issue**\n{_iss}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**🎯 Issue**\n{_iss_link or '—'}"}},
+        {"is_short": False, "text": {"tag": "lark_md", "content": f"**📌 需求标题**\n{_title}"}},
     ]
 
 
