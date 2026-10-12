@@ -49,6 +49,47 @@ function navEvent(seq) {
   });
 }
 
+// ===== 事件详情 running 状态自动轮询（2026-10-12）=====
+// 背景：A2A 补发/新事件跳转后，事件最初是 running 且引擎未认领（无 engine_instance、
+// 日志空），详情页一次渲染就静止 → 用户必须手动刷新。此轮询仅对非终态事件生效，
+// 5s 间隔，复用 navEvent 的局部刷新（不重置 pageContent，避免闪抖）。
+var _eventPollTimer = null;
+var _eventPollSeq = 0;
+var _eventPollBusy = false;
+
+function _startEventPoll(data) {
+  var _st = (data && data.status) || '';
+  // 终态（completed/failed/cancelled）→ 停止轮询
+  if (_st === 'completed' || _st === 'failed' || _st === 'cancelled') {
+    _stopEventPoll();
+    return;
+  }
+  var seq = data && data.seq;
+  if (!seq) { _stopEventPoll(); return; }
+  // 同一事件已轮询中 → 不重启（避免每次局部刷新都清重建 timer）
+  if (_eventPollTimer && _eventPollSeq === seq) return;
+  _stopEventPoll();
+  _eventPollSeq = seq;
+  _eventPollTimer = setInterval(function() {
+    if (_eventPollBusy) return;
+    if (window._currentView !== 'event') { _stopEventPoll(); return; }
+    _eventPollBusy = true;
+    API.get('/events/detail/' + _eventPollSeq).then(function(d) {
+      _eventPollBusy = false;
+      // 用户已切到别的事件 → 停止（新事件的 renderEventDetail 会自己重启轮询）
+      if (window._currentView !== 'event' || _eventPollSeq !== d.seq) return;
+      renderEventDetail(d);  // 终态时 renderEventDetail 内部会 _stopEventPoll
+    }).catch(function() {
+      _eventPollBusy = false;
+    });
+  }, 5000);
+}
+
+function _stopEventPoll() {
+  if (_eventPollTimer) { clearInterval(_eventPollTimer); _eventPollTimer = null; }
+  _eventPollSeq = 0;
+}
+
 function renderEventDetail(data) {
   // 切换事件时清理接收上下文全屏状态
   if (_promptFs) {
@@ -59,6 +100,9 @@ function renderEventDetail(data) {
   }
   const el = document.getElementById('pageContent');
   if (!el) return;
+  // 2026-10-12：running 事件自动轮询刷新（A2A 补发/新事件跳转后无需手动刷新即可
+  // 看到引擎认领与日志）。终态或离开 event 页即停止；renderEventDetail 复入时重启。
+  _startEventPoll(data);
   const agent = data.agent_type || 'vod';
   const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
   const result = data.result || data.summary || '';
