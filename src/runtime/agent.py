@@ -566,8 +566,16 @@ def _env_int(name, default):
 
 
 def _discover_local_runtimes() -> list[dict]:
-    """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。"""
+    """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
+
+    hermes 额外做 ACP 依赖自举（hermes-acp-auto-bootstrap-design.md）：
+    --version 探测不出 ACP 依赖缺失（可选 extra），必须 `hermes acp --check`
+    才能暴露；缺失时自动补装 agent-client-protocol==0.9.0，补装失败则
+    healthy=False（引擎照常注册，但服务端 engine_select 只挑 healthy，
+    不会再把任务派到一台调不通的机器上）。
+    """
     from src.runtime.registry import discover_runtimes
+    from src.runtime.acp_bootstrap import _ensure_hermes_acp
     out = []
     for r in discover_runtimes():
         version = ""
@@ -582,6 +590,9 @@ def _discover_local_runtimes() -> list[dict]:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
             except Exception:
                 pass
+        # hermes：ACP 依赖可用才算真健康（缺失时已尝试自动补装）
+        if healthy and (r["name"] or "").lower() == "hermes":
+            healthy = _ensure_hermes_acp(cli)
         out.append({"name": r["name"], "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
     return out
 
@@ -1885,9 +1896,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 if _test_execute is None:
                     try:
                         if isinstance(_result, dict) and _result.get("_error"):
-                            await client.fail(_tid, _result["_error"])
+                            await client.fail(_tid, _result["_error"], exit_code=-1)
                         elif _result is None:
-                            await client.fail(_tid, f"task timed out after {task_timeout}s")
+                            # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发
+                            await client.fail(_tid, f"task timed out after {task_timeout}s", exit_code=-1)
                         elif isinstance(_result, dict) and "exit_code" in _result:
                             _exit = _result.get("exit_code", 0)
                             _text = _result.get("text", "")
@@ -1897,12 +1909,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             # exit_code!=0 + 无文本 → 失败（崩溃/超时/启动失败）
                             # exit_code!=0 + 有文本 → 交服务端 complete_task 判断（有结构化输出覆盖逻辑）
                             if _exit == 0 and not _text and _errs:
-                                await client.fail(_tid, f"engine errors: {'; '.join(_errs[:3])}")
+                                await client.fail(_tid, f"engine errors: {'; '.join(_errs[:3])}", exit_code=_exit)
                             elif _exit != 0 and not _text:
-                                await client.fail(_tid, f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}")
+                                await client.fail(_tid, f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}", exit_code=_exit)
                             else:
                                 await client.complete(_tid, _text, _exit,
-                                                      session_id=_result.get("oc_session_id", ""), work_dir=t.get("cwd") or ".")
+                                                      session_id=_result.get("oc_session_id", ""),
+                                                      work_dir=t.get("cwd") or ".", engine=e)
                         else:
                             await client.fail(_tid, "no done event")
                     except Exception as _ce:

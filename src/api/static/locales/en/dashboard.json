@@ -138,5 +138,13 @@
   "standard_scene": "Standard Scene",
   "standard_scene_desc": "VOD + Issue + Coding + QA + SRE full pipeline for issue-driven development",
   "pr_subscription_scene": "PR Subscription Scene",
-  "pr_subscription_desc": "QA + SRE, auto-triggered when a PR has no associated Issue. One per repo"
+  "pr_subscription_desc": "QA + SRE, auto-triggered when a PR has no associated Issue. One per repo",
+  "engine_offline_partial": "{{total}} engines · {{offline}} offline",
+  "engine_offline_all": "Binding broken · all offline",
+  "engine_detached_hint": "The following engines were removed by the system after 8h+ offline:",
+  "engine_detached_rebind": " Re-check them below to rebind.",
+  "skill_no_match": "No matching skills",
+  "skill_search_placeholder": "Search skill name/description",
+  "skill_clear": "Clear selection",
+  "skill_load_failed": "Failed to load skills"
 }

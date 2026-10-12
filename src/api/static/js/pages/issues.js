@@ -360,7 +360,7 @@ window._openBoardDetail = function(taskId) {
       <h1 style="margin:0;font-size:16px;font-weight:600;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${t.title || ''}</h1>
     </div>
     <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-end;padding-bottom:10px;border-bottom:1px solid var(--b);margin-bottom:12px">
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, (t.is_pr ? '/pull/' : '/issues/') + t.issue_number)}','_blank')">${t.is_pr ? '查看 PR' : I18N.t('issues.detail.view_issue')}</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(t.repo_key, '/issues/' + t.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('issues.detail.go_conversation')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
@@ -924,7 +924,7 @@ function _render() {
   const detailHtml = _taskSel ? _detailHtml(_taskSel) : `<div class="tsk-empty" style="border:none"><div>🗒</div><h3>${I18N.t('tasks.empty.select_task_title')}</h3><p>${I18N.t('tasks.empty.select_task_desc')}</p></div>`;
 
   el.innerHTML = `
-  <div class="tsk-page" style="max-width:none;height:calc(100vh - 60px);display:flex;flex-direction:column">
+  <div class="tsk-page" style="max-width:none;height:calc(100vh - 52px);display:flex;flex-direction:column">
     <div class="tsk-top">
       <h1>${I18N.t('tasks.page_title')}</h1>
       <div id="deployLinkBar" style="margin-top:4px"></div>
@@ -973,7 +973,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, (_taskSel.is_pr ? '/pull/' : '/issues/') + _taskSel.issue_number)}','_blank')">${_taskSel.is_pr ? '查看 PR' : I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 

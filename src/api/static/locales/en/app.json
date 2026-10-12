@@ -25,7 +25,9 @@
     "scene_center": "Project Scenes",
     "scene_skill_market": "Scenes & Skills",
     "scene_market": "Scene Market",
-    "skill_market": "Skill Market"
+    "skill_market": "Skill Market",
+    "organizations": "Organizations",
+    "autopilot": "Automation"
   },
   "sidebar": {
     "workspace": "Workspace",
@@ -35,25 +37,28 @@
     "account": "User Center",
     "device_center": "Device Center",
     "settings": "Settings",
-    "toggle": "Collapse/Expand Sidebar"
+    "toggle": "Collapse/Expand Sidebar",
+    "organizations": "Organization"
   },
   "login": {
     "gitcode_login": "Sign in with GitCode",
     "github_login": "Sign in with GitHub",
     "beta_apply": "Apply for Beta",
+    "admin": "Admin Console",
     "pwd_login": "← Sign in with username",
     "username": "Username",
     "password": "Password",
     "login_btn": "Sign In",
     "back_gitcode": "← Back to GitCode login",
     "failed": "Login failed",
-    "oauth_not_configured": "OAuth not configured",
+    "oauth_not_configured": "OAuth not configured, please configure it in the admin console",
     "empty_input": "Please enter username and password"
   },
   "repo": {
     "select": "Select repository...",
     "load_failed": "Failed to load repositories, please check your GitCode Token",
     "back_to_select": "Back to repository selection",
+    "back_to_website": "Back to website",
     "add_new": "Add new repository"
   },
   "toast": {

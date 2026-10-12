@@ -28,11 +28,11 @@ AGENT = "coding"
 @pytest.fixture(autouse=True)
 def _clean():
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.commit()
     yield
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.commit()
 
 

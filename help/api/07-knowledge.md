@@ -7,7 +7,7 @@
 > 概念：知识 = 仓库/场景/Agent 注入的说明文档。**文件型**（`source=system/agent`，按 repo+file 落 OBS/工作区）
 > 与**条目型**（`source=manual`，用户 Web 直接录入，以 `knowledge_id` 定位）两类并存。
 
-## 读取（list / stats / detail）
+## 概述
 
 ### GET /api/knowledge — 知识清单（统一列表 + 分页）
 

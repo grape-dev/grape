@@ -1,6 +1,6 @@
 # 7. 运行时与引擎
 
-## 6.1 引擎类型
+## 引擎类型
 
 | 引擎 | 说明 | 适用场景 |
 |------|------|----------|
@@ -8,7 +8,7 @@
 | hermes | Hermes Agent，支持 ACP 协议 | VOD/Chat/SRE Agent |
 | codearts | 华为云 CodeArts CLI | 特定 CI/CD 场景 |
 
-## 6.2 Worker 管理
+## Worker 管理
 
 - 在 **Agent 运行时** 页面查看所有 Worker 设备和引擎状态
 - 每个 Worker 可以运行多个引擎实例（如同时运行 opencode + hermes + codearts）

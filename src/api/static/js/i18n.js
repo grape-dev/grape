@@ -32,7 +32,8 @@ var I18N = (function () {
   var MODULES = [
     'common', 'app', 'settings', 'knowledge', 'skills',
     'chat', 'events', 'agents', 'pipeline', 'runtimes',
-    'tasks', 'issues', 'repos', 'dashboard', 'observability', 'templates'
+    'tasks', 'issues', 'repos', 'dashboard', 'observability', 'templates',
+    'organizations', 'autopilot'
   ];
 
   var _currentLang = DEFAULT_LANG;

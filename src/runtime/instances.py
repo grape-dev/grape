@@ -115,6 +115,25 @@ def scope_of_runtime(rid: int) -> str | None:
         return r2[0] if r2 else "global"
 
 
+def engine_type_of_runtime(rid: int) -> str:
+    """按 runtime_id 反查引擎类型名（agent_runtimes.name，如 opencode/hermes）。
+
+    session 引擎守卫用：消费 issue_agent_session.runtime_session_id 前校验
+    "指针引擎 == 本次执行引擎"，不一致则弃用指针（开新会话），防止引擎池混跑时
+    hermes 拿到 opencode 的会话号 resume 假成功后静默挂死。查不到返回空串（守卫放行）。
+    """
+    if not rid:
+        return ""
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute("SELECT name FROM agent_runtimes WHERE id=?", (rid,))
+            row = c.fetchone()
+            return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def _lock():
     from src.session_manager import db_lock
     return db_lock

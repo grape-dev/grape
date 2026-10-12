@@ -85,6 +85,10 @@
   "change_engine": "更改",
   "engine_count": "{{count}} 个引擎",
   "broadcast": "广播",
+  "engine_offline_partial": "{{total}} 个引擎 · {{offline}} 离线",
+  "engine_offline_all": "绑定失效 · 全部离线",
+  "engine_detached_hint": "以下引擎因离线超过 8 小时被系统移除：",
+  "engine_detached_rebind": "，如需使用请在下方列表重新勾选绑定。",
   "not_needed_in_scene": "此场景下不需要",
   "disable_agent": "点击禁用此 Agent",
   "enable_agent": "点击启用此 Agent",
@@ -138,5 +142,9 @@
   "standard_scene": "标准场景",
   "standard_scene_desc": "VOD + Issue + Coding + QA + SRE 全流程，适用于 Issue 驱动开发",
   "pr_subscription_scene": "PR 订阅场景",
-  "pr_subscription_desc": "QA + SRE，当 PR 无关联 Issue 时自动触发审查。每仓库最多一个"
+  "pr_subscription_desc": "QA + SRE，当 PR 无关联 Issue 时自动触发审查。每仓库最多一个",
+  "skill_no_match": "无匹配技能",
+  "skill_search_placeholder": "搜索技能名称/描述",
+  "skill_clear": "清除选择",
+  "skill_load_failed": "技能列表加载失败"
 }

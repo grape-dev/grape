@@ -93,10 +93,56 @@ try {
     Fail "下载运行包失败: $PkgUrl（请确认主控地址/网络可达）"
 }
 
-# ===== 3. 解压到安装目录（幂等）=====
+# ===== 3. 解压到安装目录（幂等，升级前备份旧代码供回滚）=====
 if (-not (Test-Path $Dir)) {
     New-Item -ItemType Directory -Path $Dir -Force | Out-Null
 }
+
+# 升级回滚保护：覆盖代码前备份当前 src/ + VERSION（与 Linux install-worker.sh 对齐）。
+# 备份只留最近一份（.upgrade-backup），旧备份先清，磁盘占用可控。
+$upgradeBackupDir = Join-Path $Dir ".upgrade-backup"
+$srcDir = Join-Path $Dir "src"
+$versionFilePath = Join-Path $Dir "VERSION"
+if (Test-Path $srcDir) {
+    if (Test-Path $upgradeBackupDir) { Remove-Item $upgradeBackupDir -Recurse -Force -ErrorAction SilentlyContinue }
+    New-Item -ItemType Directory -Path $upgradeBackupDir -Force | Out-Null
+    Copy-Item -Path $srcDir -Destination (Join-Path $upgradeBackupDir "src") -Recurse -Force -ErrorAction SilentlyContinue
+    if (Test-Path $versionFilePath) {
+        Copy-Item -Path $versionFilePath -Destination (Join-Path $upgradeBackupDir "VERSION") -Force -ErrorAction SilentlyContinue
+    }
+    Log "已备份当前代码到 $upgradeBackupDir（升级失败时自动回滚）"
+}
+
+# restore_upgrade_backup: 恢复备份的旧代码并重启 agent（回滚函数，与 Linux 对齐）
+function restore_upgrade_backup {
+    Log "!!! 新 agent 启动失败，回滚到升级前代码并重启旧 agent !!!"
+    $backupSrc = Join-Path $upgradeBackupDir "src"
+    if (-not (Test-Path $backupSrc)) {
+        Log "回滚失败: 无备份（$upgradeBackupDir 不存在，可能是全新安装）—— worker 将保持失联，需人工介入"
+        return $false
+    }
+    if (Test-Path $srcDir) { Remove-Item $srcDir -Recurse -Force -ErrorAction SilentlyContinue }
+    Copy-Item -Path $backupSrc -Destination $srcDir -Recurse -Force
+    $backupVer = Join-Path $upgradeBackupDir "VERSION"
+    if (Test-Path $backupVer) {
+        Copy-Item -Path $backupVer -Destination $versionFilePath -Force -ErrorAction SilentlyContinue
+    }
+    $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "未知版本" }
+    Log "已恢复旧代码（$restoredVer）"
+    # 重启旧 agent
+    Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
+    Start-Sleep -Seconds 5
+    $restoredProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
+        $_.CommandLine -like "*src.runtime.agent*"
+    } | Select-Object -First 1
+    if ($restoredProc) {
+        Log "回滚成功：旧 agent 已恢复运行"
+        return $true
+    }
+    Log "回滚后 agent 仍未运行—— worker 失联，需人工介入（日志: $workerLog）"
+    return $false
+}
+
 Log "解压运行包到 $Dir"
 try {
     # Windows 没有 tar 命令时用 .NET System.IO.Compression
@@ -308,19 +354,26 @@ Log "接入配置已写入 $EnvFile（token + 主控地址）"
 # ===== 6. 生成启动脚本并启动 =====
 $startScript = Join-Path $Dir "start-worker.ps1"
 
-# 从服务端下载 start-worker.ps1（避免 here-string 转义问题）
-if (-not (Test-Path $startScript)) {
-    Log "下载 start-worker.ps1..."
-    try {
-        $startUrl = "$Server/api/runtime/start-worker.ps1"
-        irm $startUrl -OutFile $startScript
-        Log "start-worker.ps1 已下载"
-    } catch {
-        Log "警告: 下载 start-worker.ps1 失败: $_（不影响安装，worker 可手动启动）"
-    }
+# 每次升级都重新下载 start-worker.ps1（与 Linux 侧 cat > $START_SCRIPT 行为对齐，
+# 确保升级时 daemon 逻辑也同步更新，避免旧版 start-worker.ps1 与新代码不匹配）
+Log "下载 start-worker.ps1..."
+try {
+    $startUrl = "$Server/api/runtime/start-worker.ps1"
+    irm $startUrl -OutFile $startScript
+    Log "start-worker.ps1 已下载"
+} catch {
+    Log "警告: 下载 start-worker.ps1 失败: $_（不影响安装，worker 可手动启动）"
 }
 
-# 停掉旧实例（按 grape 目录路径匹配 python 进程）
+# 停掉旧 daemon（start-worker.ps1 的 powershell 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
+# 按本安装目录的 start-worker.ps1 完整路径匹配，避免误杀同机其他 grape 安装的 daemon
+Get-CimInstance Win32_Process -Filter "Name='powershell.exe'" -ErrorAction SilentlyContinue | Where-Object {
+    $_.CommandLine -like "*$startScript*"
+} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+
+Start-Sleep -Seconds 1
+
+# 停掉旧 worker（按 grape 目录路径匹配 python 进程）
 Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
     $_.ExecutablePath -like "*grape*" -and $_.CommandLine -like "*src.runtime.agent*"
 } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
@@ -333,16 +386,47 @@ $workerLog = Join-Path $workerLogDir "devops-bot.log"
 
 Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
 
+# 启动验证 + 失败回滚（与 Linux install-worker.sh 对齐）：
+# 1. 进程存活检查（3s 后）
+# 2. 注册成功检查（最多等 30s，日志出现 "registered"）
+# 3. 任一失败 → restore_upgrade_backup 恢复旧代码重启
 Start-Sleep -Seconds 3
 
 $workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue | Where-Object {
     $_.CommandLine -like "*src.runtime.agent*"
 } | Select-Object -First 1
 
-if ($workerProc) {
-    Log "已后台启动（pid $($workerProc.ProcessId)），日志: $workerLog"
+if (-not $workerProc) {
+    Log "新 agent 启动失败（进程不存在），尝试回滚旧版本..."
+    restore_upgrade_backup
+    Fail "新 agent 启动失败（已尝试回滚旧版本），日志: $workerLog"
+}
+
+Log "新 agent 进程已启动（pid $($workerProc.ProcessId)），等待注册..."
+
+# 等待注册成功（最多 30s）
+$regOk = $false
+for ($i = 1; $i -le 10; $i++) {
+    if (Test-Path $workerLog) {
+        $logContent = Get-Content $workerLog -Tail 40 -ErrorAction SilentlyContinue
+        if ($logContent -match "RuntimeAgent registered") {
+            $regOk = $true
+            break
+        }
+    }
+    Start-Sleep -Seconds 3
+}
+
+if ($regOk) {
+    Log "已后台启动并注册成功（pid $($workerProc.ProcessId)），日志: $workerLog"
 } else {
-    Log "启动失败，请查看日志: $workerLog"
+    Log "新 agent 进程存活但 30s 未注册成功，尝试回滚旧版本..."
+    $rollbackOk = restore_upgrade_backup
+    if ($rollbackOk) {
+        Log "已回滚旧版本（新版本可能无法连接 master）"
+    } else {
+        Log "回滚失败，worker 状态异常，请人工检查: $workerLog"
+    }
 }
 
 # ===== 6.5 hermes 沙箱降级标注 =====
@@ -363,7 +447,7 @@ foreach ($eng in $engines) {
     if (-not $found) {
         switch ($eng) {
             "opencode" { $engineHints += "  npm install -g opencode-ai（opencode 引擎）" }
-            "hermes" { $engineHints += "  pip install hermes（hermes 引擎）" }
+            "hermes" { $engineHints += "  pip install 'hermes[acp]'（hermes 引擎，含 ACP 协议包——普通 pip install hermes 不带，会导致引擎在线但调不通）" }
             "codearts" { $engineHints += "  安装 CodeArts CLI（codearts 引擎）" }
             "codex" { $engineHints += "  npm install -g @openai/codex（codex 引擎）" }
         }

@@ -2,6 +2,12 @@
 // 参照 multica AutopilotsPage 风格设计
 var $ = function(id) { return document.getElementById(id); };
 
+// i18n 辅助（语言包: locales/<lang>/autopilot.json）
+function _apt(key, vars) { return I18N.t('autopilot.' + key, vars); }
+// cron 星期名（cron.day_sun...）
+var _AP_DAY_KEYS = ['day_sun','day_mon','day_tue','day_wed','day_thu','day_fri','day_sat'];
+function _apDayName(d) { return _apt('cron.' + _AP_DAY_KEYS[d] ); }
+
 // ===== 状态 =====
 var _apScope = 'all';           // all / enabled / disabled
 var _apSortField = 'name';      // name / lastRun / nextRun / created
@@ -12,14 +18,14 @@ var _apEditingId = null;        // 编辑模式时的任务ID
 var _apCronMode = 'at';      // daily / weekly / custom
 var _apDetailId = null;         // 详情页任务ID
 
-// ===== 模板 =====
+// ===== 模板（title/desc 走 i18n；instruction 是发给 agent 的指令内容，保持原文不翻译）=====
 var _AP_TEMPLATES = [
-  {id:'issue_patrol', icon:'📋', title:'Issue看板巡检', desc:'每日检查stale issue，提醒更新或关闭', cron:'0 9 * * *', instruction:'1. 列出所有打开的 Issue\n2. 找出超过 7 天无更新的 stale issue\n3. 检查是否有阻塞的 Issue 及其阻塞原因\n4. 汇总巡检报告，包含：stale 数量、阻塞数量、建议关闭列表'},
-  {id:'pr_review', icon:'🔀', title:'PR审查提醒', desc:'标记需要 Review 的过期 PR', cron:'0 10 * * 1-5', instruction:'1. 列出所有打开的 PR\n2. 找出超过 24 小时未审查的 PR\n3. 为每个标记作者和摘要\n4. 提醒团队审查'},
-  {id:'bug_triage', icon:'🐛', title:'Bug 分拣', desc:'评估并优先排序新 Bug 报告', cron:'0 9 * * 1-5', instruction:'1. 列出所有未优先排序的 backlog Issue\n2. 评估每个的严重程度\n3. 设置优先级标签\n4. 添加评估说明'},
-  {id:'weekly_report', icon:'📊', title:'周进度报告', desc:'编写团队周报', cron:'0 17 * * 1', instruction:'1. 收集过去 7 天完成的 Issue\n2. 收集进行中的 Issue\n3. 识别阻塞的 Issue\n4. 编写结构化周报'},
-  {id:'dep_audit', icon:'🛡', title:'依赖审计', desc:'依赖安全漏洞审计', cron:'0 8 * * 1', instruction:'1. 运行依赖审计工具\n2. 识别有安全漏洞的包\n3. 列出过期的依赖\n4. 输出修复建议'},
-  {id:'doc_check', icon:'🔍', title:'文档检查', desc:'检查文档覆盖完整性', cron:'0 14 * * 1', instruction:'1. 列出过去 7 天的代码变更\n2. 检查相关文档是否更新\n3. 识别缺失文档的新功能\n4. 输出文档补全清单'}
+  {id:'issue_patrol', icon:'📋', title_key:'tpl_issue_patrol_t', desc_key:'tpl_issue_patrol_d', cron:'0 9 * * *', instruction:'1. 列出所有打开的 Issue\n2. 找出超过 7 天无更新的 stale issue\n3. 检查是否有阻塞的 Issue 及其阻塞原因\n4. 汇总巡检报告，包含：stale 数量、阻塞数量、建议关闭列表'},
+  {id:'pr_review', icon:'🔀', title_key:'tpl_pr_review_t', desc_key:'tpl_pr_review_d', cron:'0 10 * * 1-5', instruction:'1. 列出所有打开的 PR\n2. 找出超过 24 小时未审查的 PR\n3. 为每个标记作者和摘要\n4. 提醒团队审查'},
+  {id:'bug_triage', icon:'🐛', title_key:'tpl_bug_triage_t', desc_key:'tpl_bug_triage_d', cron:'0 9 * * 1-5', instruction:'1. 列出所有未优先排序的 backlog Issue\n2. 评估每个的严重程度\n3. 设置优先级标签\n4. 添加评估说明'},
+  {id:'weekly_report', icon:'📊', title_key:'tpl_weekly_report_t', desc_key:'tpl_weekly_report_d', cron:'0 17 * * 1', instruction:'1. 收集过去 7 天完成的 Issue\n2. 收集进行中的 Issue\n3. 识别阻塞的 Issue\n4. 编写结构化周报'},
+  {id:'dep_audit', icon:'🛡', title_key:'tpl_dep_audit_t', desc_key:'tpl_dep_audit_d', cron:'0 8 * * 1', instruction:'1. 运行依赖审计工具\n2. 识别有安全漏洞的包\n3. 列出过期的依赖\n4. 输出修复建议'},
+  {id:'doc_check', icon:'🔍', title_key:'tpl_doc_check_t', desc_key:'tpl_doc_check_d', cron:'0 14 * * 1', instruction:'1. 列出过去 7 天的代码变更\n2. 检查相关文档是否更新\n3. 识别缺失文档的新功能\n4. 输出文档补全清单'}
 ];
 
 // ===== 入口 =====
@@ -36,36 +42,36 @@ function _apListHTML() {
   return '<div class="cd">' +
     '<div class="cd-h" style="display:flex;justify-content:space-between;align-items:center">' +
       '<div style="display:flex;align-items:center;gap:12px">' +
-        '<h2><span style="margin-right:6px">⏰</span>自动化</h2>' +
+        '<h2><span style="margin-right:6px">⏰</span>' + _apt('title') + '</h2>' +
       '</div>' +
-      '<button class="bt bt-p" onclick="_apShowCreate()">+ 新建任务</button>' +
+      '<button class="bt bt-p" onclick="_apShowCreate()">' + _apt('list.create') + '</button>' +
     '</div>' +
     // Toolbar
     '<div style="display:flex;align-items:center;gap:8px;margin-top:12px;flex-wrap:wrap">' +
       '<div style="display:flex;gap:0">' +
-        '<button class="bt bt-s ' + (_apScope==='all'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'all\')">全部 <span id="apCountAll" class="c"></span></button>' +
-        '<button class="bt bt-s ' + (_apScope==='enabled'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'enabled\')">启用 <span id="apCountEnabled" class="c"></span></button>' +
-        '<button class="bt bt-s ' + (_apScope==='disabled'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'disabled\')">暂停 <span id="apCountDisabled" class="c"></span></button>' +
+        '<button class="bt bt-s ' + (_apScope==='all'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'all\')">' + _apt('list.scope_all') + ' <span id="apCountAll" class="c"></span></button>' +
+        '<button class="bt bt-s ' + (_apScope==='enabled'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'enabled\')">' + _apt('list.scope_enabled') + ' <span id="apCountEnabled" class="c"></span></button>' +
+        '<button class="bt bt-s ' + (_apScope==='disabled'?'bt-tg':'bt-o') + '" onclick="_apSetScope(\'disabled\')">' + _apt('list.scope_disabled') + ' <span id="apCountDisabled" class="c"></span></button>' +
       '</div>' +
-      '<input type="text" placeholder="搜索任务名称..." value="' + _apSearch + '" oninput="_apSearch=this.value;_apRenderTable()" style="flex:1;min-width:120px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
+      '<input type="text" placeholder="' + _apt('list.search_placeholder') + '" value="' + _apSearch + '" oninput="_apSearch=this.value;_apRenderTable()" style="flex:1;min-width:120px;padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t);outline:none">' +
       '<select onchange="_apSortField=this.value;_apRenderTable()" style="padding:6px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c);color:var(--t)">' +
-        '<option value="name"' + (_apSortField==='name'?' selected':'')+ '>按名称</option>' +
-        '<option value="lastRun"' + (_apSortField==='lastRun'?' selected':'')+ '>按上次运行</option>' +
-        '<option value="nextRun"' + (_apSortField==='nextRun'?' selected':'')+ '>按下次运行</option>' +
-        '<option value="created"' + (_apSortField==='created'?' selected':'')+ '>按创建时间</option>' +
+        '<option value="name"' + (_apSortField==='name'?' selected':'')+ '>' + _apt('list.sort_by_name') + '</option>' +
+        '<option value="lastRun"' + (_apSortField==='lastRun'?' selected':'')+ '>' + _apt('list.sort_by_last_run') + '</option>' +
+        '<option value="nextRun"' + (_apSortField==='nextRun'?' selected':'')+ '>' + _apt('list.sort_by_next_run') + '</option>' +
+        '<option value="created"' + (_apSortField==='created'?' selected':'')+ '>' + _apt('list.sort_by_created') + '</option>' +
       '</select>' +
       '<button class="bt bt-s bt-o" onclick="_apToggleSortDir()">' + (_apSortDir==='asc'?'↑':'↓') + '</button>' +
       '<span class="ts t3" id="apResultCount"></span>' +
     '</div>' +
     // Table container
-    '<div id="apTableContainer" style="margin-top:12px"><div class="loading">加载中...</div></div>' +
+    '<div id="apTableContainer" style="margin-top:12px"><div class="loading">' + I18N.t('common.loading') + '</div></div>' +
     // Batch toolbar
     '<div id="apBatchBar" style="display:none;margin-top:8px;padding:8px 12px;background:var(--bg);border-radius:8px;display:flex;align-items:center;gap:8px">' +
       '<span class="ts" id="apBatchCount"></span>' +
-      '<button class="bt bt-s bt-o" onclick="_apBatchToggle(1)">启用全部</button>' +
-      '<button class="bt bt-s bt-o" onclick="_apBatchToggle(0)">暂停全部</button>' +
-      '<button class="bt bt-s bt-r" onclick="_apBatchDelete()">删除全部</button>' +
-      '<button class="bt bt-s bt-o" onclick="_apClearSelection()">清除</button>' +
+      '<button class="bt bt-s bt-o" onclick="_apBatchToggle(1)">' + _apt('list.batch_enable_all') + '</button>' +
+      '<button class="bt bt-s bt-o" onclick="_apBatchToggle(0)">' + _apt('list.batch_pause_all') + '</button>' +
+      '<button class="bt bt-s bt-r" onclick="_apBatchDelete()">' + _apt('list.batch_delete_all') + '</button>' +
+      '<button class="bt bt-s bt-o" onclick="_apClearSelection()">' + _apt('list.batch_clear') + '</button>' +
     '</div>' +
   '</div>';
 }
@@ -75,23 +81,43 @@ function _apEmptyHTML() {
   var cards = _AP_TEMPLATES.map(function(t) {
     return '<button onclick="_apShowCreate(\'' + t.id + '\')" style="display:flex;align-items:flex-start;gap:10px;padding:12px;border:1px solid var(--b);border-radius:10px;background:var(--c);cursor:pointer;text-align:left;transition:all .15s" onmouseover="this.style.borderColor=\'var(--a)\'" onmouseout="this.style.borderColor=\'var(--b)\'">' +
       '<span style="font-size:20px;flex-shrink:0">' + t.icon + '</span>' +
-      '<div style="min-width:0"><div style="font-size:13px;font-weight:600;color:var(--t)">' + t.title + '</div>' +
-      '<div style="font-size:11px;color:var(--t2);margin-top:2px">' + t.desc + '</div></div>' +
+      '<div style="min-width:0"><div style="font-size:13px;font-weight:600;color:var(--t)">' + _apt(t.title_key) + '</div>' +
+      '<div style="font-size:11px;color:var(--t2);margin-top:2px">' + _apt(t.desc_key) + '</div></div>' +
     '</button>';
   }).join('');
   return '<div style="padding:40px 0;text-align:center">' +
     '<div style="font-size:32px;margin-bottom:8px">⏰</div>' +
-    '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">暂无自动化</p>' +
-    '<p style="font-size:12px;color:var(--t3);margin-bottom:24px">选择一个模板快速创建，或从空白开始</p>' +
+    '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">' + _apt('list.empty_title') + '</p>' +
+    '<p style="font-size:12px;color:var(--t3);margin-bottom:24px">' + _apt('list.empty_desc') + '</p>' +
     '<div style="display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:10px;max-width:720px;margin:0 auto">' + cards + '</div>' +
-    '<button class="bt bt-o" style="margin-top:16px" onclick="_apShowCreate()">+ 从空白创建</button>' +
+    '<button class="bt bt-o" style="margin-top:16px" onclick="_apShowCreate()">' + _apt('list.empty_create') + '</button>' +
   '</div>';
 }
 
 // ===== 加载任务 =====
 function _apLoadTasks() {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
-  var url = '/autopilot/tasks?repo_key=gitcode:' + repo;
+  if (!repo) {
+    // 无仓库时显示空态引导，不发送 API 请求（避免 "No permission" 错误）
+    var container = $('apTableContainer');
+    if (container) {
+      container.innerHTML = '<div style="padding:40px 0;text-align:center">' +
+        '<div style="font-size:32px;margin-bottom:8px">⏰</div>' +
+        '<p style="font-size:14px;color:var(--t2);margin-bottom:4px">' + _apt('list.empty_title') + '</p>' +
+        '<p style="font-size:12px;color:var(--t3);margin-bottom:24px">' + _apt('list.empty_desc') + '</p>' +
+        '<button class="bt bt-p" onclick="app.goToRepos()">' + I18N.t('app.repo.back_to_select') + '</button>' +
+      '</div>';
+    }
+    _apAllTasks = [];
+    document.getElementById('apCountAll').textContent = '0';
+    document.getElementById('apCountEnabled').textContent = '0';
+    document.getElementById('apCountDisabled').textContent = '0';
+    document.getElementById('apResultCount').textContent = '';
+    return;
+  }
+  var _apRepoKey = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().repoKey || '') : '';
+  if (!_apRepoKey && repo) _apRepoKey = 'gitcode:' + repo;
+  var url = '/autopilot/tasks?repo_key=' + _apRepoKey;
   API.get(url).then(function(d) {
     if (window._currentView !== 'autopilot') return;
     _apAllTasks = d.tasks || [];
@@ -99,7 +125,7 @@ function _apLoadTasks() {
   }).catch(function(e) {
     if (e.name === 'AbortError' && e.silent) return;
     if (window._currentView !== 'autopilot') return;
-    $('apTableContainer').innerHTML = '<div class="error">加载失败: ' + _esc(e.message) + '</div>';
+    $('apTableContainer').innerHTML = '<div class="error">' + _apt('list.load_failed', {msg: _esc(e.message)}) + '</div>';
   });
 }
 
@@ -145,7 +171,7 @@ function _apRenderTable() {
     return;
   }
   if (tasks.length === 0) {
-    container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">无匹配任务</div>';
+    container.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">' + _apt('list.no_match') + '</div>';
     _apUpdateBatchBar();
     return;
   }
@@ -155,11 +181,11 @@ function _apRenderTable() {
     // Header
     '<div style="display:contents">' +
       '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600"></div>' +
-      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'name\';_apToggleSortDir()">名称 ' + (_apSortField==='name'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
-      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600">时间表</div>' +
-      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'lastRun\';_apToggleSortDir()">上次 ' + (_apSortField==='lastRun'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
-      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'nextRun\';_apToggleSortDir()">下次 ' + (_apSortField==='nextRun'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
-      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600">状态</div>' +
+      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'name\';_apToggleSortDir()">' + _apt('list.col_name') + ' ' + (_apSortField==='name'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
+      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600">' + _apt('list.col_schedule') + '</div>' +
+      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'lastRun\';_apToggleSortDir()">' + _apt('list.col_last_run') + ' ' + (_apSortField==='lastRun'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
+      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600;cursor:pointer" onclick="_apSortField=\'nextRun\';_apToggleSortDir()">' + _apt('list.col_next_run') + ' ' + (_apSortField==='nextRun'?(_apSortDir==='asc'?'↑':'↓'):'') + '</div>' +
+      '<div class="ap-th" style="padding:0 8px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b);color:var(--t2);font-size:11px;font-weight:600">' + _apt('list.col_status') + '</div>' +
       '<div class="ap-th" style="padding:0 4px;height:36px;display:flex;align-items:center;border-bottom:2px solid var(--b)"></div>' +
     '</div>';
   // Rows
@@ -236,10 +262,10 @@ function _apToggleRowMenu(id, e) {
   menu.id = 'apRowMenu';
   menu.style.cssText = 'position:fixed;z-index:10001;top:' + (rect.bottom + 2) + 'px;left:' + (rect.right - 140) + 'px;width:140px;background:var(--c,#fff);border:1px solid var(--b);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:4px';
   menu.innerHTML =
-    '<div onclick="event.stopPropagation();_apTrigger(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">▶ 立即触发</div>' +
-    '<div onclick="event.stopPropagation();_apToggleTask(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + (_apTaskEnabled(id) ? '⏸ 暂停' : '▶ 启用') + '</div>' +
-    '<div onclick="event.stopPropagation();_apEdit(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">✎ 编辑</div>' +
-    '<div onclick="event.stopPropagation();_apDelete(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:#dc3545;white-space:nowrap" onmouseover="this.style.background=\'rgba(220,53,69,0.08)\'" onmouseout="this.style.background=\'transparent\'">🗑 删除</div>';
+    '<div onclick="event.stopPropagation();_apTrigger(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_trigger') + '</div>' +
+    '<div onclick="event.stopPropagation();_apToggleTask(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + (_apTaskEnabled(id) ? _apt('list.menu_pause') : _apt('list.menu_enable')) + '</div>' +
+    '<div onclick="event.stopPropagation();_apEdit(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_edit') + '</div>' +
+    '<div onclick="event.stopPropagation();_apDelete(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:#dc3545;white-space:nowrap" onmouseover="this.style.background=\'rgba(220,53,69,0.08)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_delete') + '</div>';
   document.body.appendChild(menu);
   _apOpenMenuId = id;
 
@@ -285,11 +311,11 @@ function _apToggleTask(id) {
   API.put('/autopilot/tasks/' + id, {enabled: enabled}).then(function() {
     _apLoadTasks();
   }).catch(function(e) {
-    if (app && app.showToast) app.showToast('操作失败: ' + (e.message||e));
+    if (app && app.showToast) app.showToast(_apt('op_failed', {msg: (e.message||e)}));
   });
 }
 function _apBatchDelete() {
-  if (!confirm('确定删除选中的 ' + _apSelected.size + ' 个任务吗？')) return;
+  if (!confirm(_apt('list.confirm_delete_selected', {count: _apSelected.size}))) return;
   var ids = Array.from(_apSelected);
   ids.forEach(function(id) {
     API.del('/autopilot/tasks/' + id).catch(function(){});
@@ -301,23 +327,23 @@ function _apBatchDelete() {
 // ===== 单个操作 =====
 function _apTrigger(id) {
   API.post('/autopilot/tasks/' + id + '/trigger').then(function(d) {
-    if (app && app.showToast) app.showToast(d.message || '已触发');
+    if (app && app.showToast) app.showToast(d.message || _apt('trigger.done'));
     _apLoadTasks();
     // 如果在详情页，延迟刷新执行历史（触发后需要时间执行）
     if (window._currentView === 'autopilot-detail' && String(_apDetailId) === String(id)) {
       setTimeout(function() { _apLoadExecutions(id); }, 2000);
     }
   }).catch(function(e) {
-    if (app && app.showToast) app.showToast('触发失败: ' + (e.message||e));
+    if (app && app.showToast) app.showToast(_apt('trigger.failed', {msg: (e.message||e)}));
   });
 }
 function _apDelete(id) {
-  if (!confirm('确定删除此任务吗？')) return;
+  if (!confirm(_apt('list.confirm_delete_one'))) return;
   API.del('/autopilot/tasks/' + id).then(function() {
-    if (app && app.showToast) app.showToast('已删除');
+    if (app && app.showToast) app.showToast(_apt('deleted'));
     _apLoadTasks();
   }).catch(function(e) {
-    if (app && app.showToast) app.showToast('删除失败: ' + (e.message||e));
+    if (app && app.showToast) app.showToast(_apt('delete_failed', {msg: (e.message||e)}));
   });
 }
 
@@ -333,12 +359,12 @@ function _apEdit(id) {
   API.get('/autopilot/tasks/' + id).then(function(t) {
     _apShowDialog(null, t);
   }).catch(function(e) {
-    if (app && app.showToast) app.showToast('加载失败: ' + (e.message||e));
+    if (app && app.showToast) app.showToast(_apt('list.load_failed', {msg: (e.message||e)}));
   });
 }
 
 function _apShowDialog(tpl, existing) {
-  var name = existing ? existing.name : (tpl ? tpl.title : '');
+  var name = existing ? existing.name : (tpl ? _apt(tpl.title_key) : '');
   var skillName = existing ? (existing.skill_name || '') : '';
   var instruction = existing ? (existing.instruction || '') : (tpl ? tpl.instruction : '');
   var cron = existing ? existing.cron : (tpl ? tpl.cron : '0 9 * * *');
@@ -346,8 +372,8 @@ function _apShowDialog(tpl, existing) {
   var engineIds = existing ? (existing.engine_runtime_ids || []) : [];
   var customFields = existing ? (existing.custom_fields || []) : [];
   var workBranch = existing ? (existing.work_branch || '') : '';
-  var title = existing ? '编辑自动化' : '新建自动化';
-  var btnText = existing ? '保存' : '创建';
+  var title = existing ? _apt('form.edit_title') : _apt('form.create_title');
+  var btnText = existing ? _apt('form.btn_save') : _apt('form.btn_create');
 
   // Shared input style
   var _inp = 'width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t);outline:none;min-width:0';
@@ -367,7 +393,7 @@ function _apShowDialog(tpl, existing) {
           '<span style="font-size:13px;font-weight:600">' + title + '</span>' +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:2px">' +
-          '<button type="button" onclick="_apToggleExpand()" id="apExpandBtn" style="padding:4px 8px;border:none;background:transparent;cursor:pointer;color:var(--t3);border-radius:4px" title="放大">' +
+          '<button type="button" onclick="_apToggleExpand()" id="apExpandBtn" style="padding:4px 8px;border:none;background:transparent;cursor:pointer;color:var(--t3);border-radius:4px" title="' + _apt('form.expand') + '">' +
             '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>' +
           '</button>' +
           '<span onclick="document.getElementById(\'apDialog\').remove()" style="cursor:pointer;font-size:18px;color:var(--t3);padding:4px 8px;border-radius:4px;line-height:1">×</span>' +
@@ -378,77 +404,77 @@ function _apShowDialog(tpl, existing) {
         // Left column: name + engine + skill + instruction
         '<div style="flex:1;min-width:0;display:flex;flex-direction:column;border-right:1px solid var(--b);overflow-y:auto">' +
           '<div style="padding:16px 20px 8px">' +
-            '<label style="' + _lbl2 + '">任务名称 <span style="color:var(--r)">*</span></label>' +
-            '<input id="apFormName" type="text" value="' + _esc(name) + '" placeholder="输入任务名称" style="' + _inp + ';font-size:14px;font-weight:500">' +
-            '<div style="' + _hint + '">自动化的名称，用于列表展示</div>' +
+            '<label style="' + _lbl2 + '">' + _apt('form.name_label') + ' <span style="color:var(--r)">*</span></label>' +
+            '<input id="apFormName" type="text" value="' + _esc(name) + '" placeholder="' + _apt('form.name_placeholder') + '" style="' + _inp + ';font-size:14px;font-weight:500">' +
+            '<div style="' + _hint + '">' + _apt('form.name_hint') + '</div>' +
           '</div>' +
           '<div style="padding:8px 20px">' +
-            '<label style="' + _lbl2 + '">执行引擎</label>' +
+            '<label style="' + _lbl2 + '">' + _apt('form.engine_label') + '</label>' +
             '<div onclick="_apOpenEnginePicker()" style="' + _inp + ';cursor:pointer;display:flex;align-items:center;justify-content:center;min-height:38px">' +
-              '<span id="apEnginePill" style="font-size:13px;font-weight:500;color:#34c759">广播</span>' +
+              '<span id="apEnginePill" style="font-size:13px;font-weight:500;color:#34c759">' + _apt('form.engine_broadcast') + '</span>' +
             '</div>' +
-            '<div style="' + _hint + '">选择引擎限定执行范围，不选=所有在线引擎均可认领</div>' +
+            '<div style="' + _hint + '">' + _apt('form.engine_hint') + '</div>' +
           '</div>' +
           '<div style="padding:8px 20px">' +
-            '<label style="' + _lbl2 + '">Skill（可选）</label>' +
+            '<label style="' + _lbl2 + '">' + _apt('form.skill_label') + '</label>' +
             '<div onclick="_apOpenSkillPicker()" style="' + _inp + ';cursor:pointer;display:flex;align-items:center;justify-content:center;min-height:38px">' +
-              '<span id="apSkillPill" style="font-size:13px;font-weight:500;color:#86868b">' + (skillName ? _esc(skillName) : '留空=纯指令模式') + '</span>' +
+              '<span id="apSkillPill" style="font-size:13px;font-weight:500;color:#86868b">' + (skillName ? _esc(skillName) : _apt('form.skill_empty')) + '</span>' +
             '</div>' +
-            '<div style="' + _hint + '">选择技能加载 SKILL.md，留空则按指令直接执行</div>' +
+            '<div style="' + _hint + '">' + _apt('form.skill_hint') + '</div>' +
           '</div>' +
           '<div style="padding:8px 20px 16px;flex:1;display:flex;flex-direction:column;min-height:0">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">' +
-              '<label style="' + _lbl2 + ';margin-bottom:0">巡检指令 <span style="color:var(--r)">*</span></label>' +
-              '<button type="button" class="bt bt-s bt-o" onclick="_apPolishInstruction(this)" id="apPolishBtn" style="font-size:11px;padding:4px 10px">✨ 润色</button>' +
+              '<label style="' + _lbl2 + ';margin-bottom:0">' + _apt('form.instruction_label') + ' <span style="color:var(--r)">*</span></label>' +
+              '<button type="button" class="bt bt-s bt-o" onclick="_apPolishInstruction(this)" id="apPolishBtn" style="font-size:11px;padding:4px 10px">' + _apt('form.polish_btn') + '</button>' +
             '</div>' +
-            '<textarea id="apFormInstruction" rows="6" placeholder="描述巡检的具体步骤和要求" style="' + _inp + ';resize:none;flex:1;min-height:120px;font-family:inherit">' + _esc(instruction) + '</textarea>' +
-            '<div style="' + _hint + '">写个大概，点润色可让 AI 优化指令内容</div>' +
+            '<textarea id="apFormInstruction" rows="6" placeholder="' + _apt('form.instruction_placeholder') + '" style="' + _inp + ';resize:none;flex:1;min-height:120px;font-family:inherit">' + _esc(instruction) + '</textarea>' +
+            '<div style="' + _hint + '">' + _apt('form.instruction_hint') + '</div>' +
           '</div>' +
         '</div>' +
         // Right column: schedule + retry + advanced options
         '<aside style="flex:1.2;min-width:340px;overflow-y:auto;padding:16px 20px;background:var(--bg,rgba(0,0,0,0.02))">' +
           '<div style="margin-bottom:16px">' +
-            '<div style="' + _sectionLbl + '">时间表 <span style="color:var(--r)">*</span></div>' +
+            '<div style="' + _sectionLbl + '">' + _apt('form.schedule_title') + ' <span style="color:var(--r)">*</span></div>' +
             '<div id="apScheduleEditor" style="border:1px solid var(--b);border-radius:8px;padding:12px;background:var(--c,#fff)"></div>' +
             '<div id="apCronPreview" style="font-size:12px;color:var(--t2);margin-top:6px;padding:8px 10px;background:var(--c,#fff);border-radius:6px"></div>' +
           '</div>' +
           '<div>' +
-            '<div style="' + _sectionLbl + '">执行设置</div>' +
+            '<div style="' + _sectionLbl + '">' + _apt('form.settings_title') + '</div>' +
             '<div style="display:flex;align-items:center;gap:8px;margin-bottom:12px">' +
-              '<label style="font-size:13px;color:var(--t3);white-space:nowrap">最大重试</label>' +
+              '<label style="font-size:13px;color:var(--t3);white-space:nowrap">' + _apt('form.max_retry_label') + '</label>' +
               '<input id="apFormRetry" type="number" min="0" max="10" value="' + maxRetry + '" style="width:50px;padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:13px;background:var(--c,#fff);color:var(--t);outline:none;text-align:center">' +
-              '<span style="font-size:11px;color:var(--t3)">0-10，默认3</span>' +
+              '<span style="font-size:11px;color:var(--t3)">' + _apt('form.max_retry_hint') + '</span>' +
             '</div>' +
           '</div>' +
           '<div style="margin-top:12px">' +
             '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
-              '<span style="font-size:13px;font-weight:600;color:var(--t2)">高级选项</span>' +
+              '<span style="font-size:13px;font-weight:600;color:var(--t2)">' + _apt('form.advanced_title') + '</span>' +
             '</div>' +
             '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-              '<label style="font-size:12px;font-weight:600;color:var(--t2)">工作分支</label>' +
+              '<label style="font-size:12px;font-weight:600;color:var(--t2)">' + _apt('form.work_branch_label') + '</label>' +
               '<span onclick="_apToggleWorkBranch()" id="apWbToggle" style="position:relative;width:32px;height:18px;border-radius:9px;background:var(--b);transition:background .2s;cursor:pointer;flex-shrink:0">' +
                 '<span id="apWbKnob" style="position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:left .2s"></span>' +
               '</span>' +
-              '<span id="apWbLabel" style="font-size:11px;color:var(--t3)">未启用</span>' +
+              '<span id="apWbLabel" style="font-size:11px;color:var(--t3)">' + _apt('advanced.disabled') + '</span>' +
             '</div>' +
             '<div id="apWorkBranchSection" style="margin-bottom:12px;padding:10px;border:1px solid var(--b);border-radius:8px;background:var(--c,#fff);opacity:.5;pointer-events:none">' +
               '<select id="apFormWorkBranch" style="' + _inp + ';cursor:pointer;min-height:34px"></select>' +
-              '<div style="' + _hint + '">启用后注入 GRAPE_WORK_BRANCH 环境变量</div>' +
+              '<div style="' + _hint + '">' + _apt('form.work_branch_hint') + '</div>' +
             '</div>' +
             '<div>' +
-              '<label style="' + _lbl2 + '">自定义配置</label>' +
+              '<label style="' + _lbl2 + '">' + _apt('form.custom_fields_label') + '</label>' +
               '<div id="apCustomFields" style="display:flex;flex-direction:column;gap:8px"></div>' +
-              '<button type="button" class="bt bt-o bt-s" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="_apAddCustomField()">+ 添加配置项</button>' +
-              '<div style="' + _hint + '">配置项以环境变量形式注入 agent，密钥不暴露在 prompt 中</div>' +
+              '<button type="button" class="bt bt-o bt-s" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="_apAddCustomField()">' + _apt('form.custom_fields_add') + '</button>' +
+              '<div style="' + _hint + '">' + _apt('form.custom_fields_hint') + '</div>' +
             '</div>' +
           '</div>' +
         '</aside>' +
       '</div>' +
       // Footer
       '<div style="display:flex;align-items:center;justify-content:space-between;padding:10px 20px;border-top:1px solid var(--b);flex-shrink:0;background:var(--c,#fff)">' +
-        '<span style="font-size:10px;color:var(--t3)">带 * 为必填项</span>' +
+        '<span style="font-size:10px;color:var(--t3)">' + _apt('form.required_hint') + '</span>' +
         '<div style="display:flex;gap:8px">' +
-          '<button class="bt bt-o" onclick="document.getElementById(\'apDialog\').remove()">取消</button>' +
+          '<button class="bt bt-o" onclick="document.getElementById(\'apDialog\').remove()">' + I18N.t('common.cancel') + '</button>' +
           '<button class="bt bt-p" onclick="_apSubmitForm()">' + btnText + '</button>' +
         '</div>' +
       '</div>' +
@@ -469,7 +495,7 @@ function _apShowDialog(tpl, existing) {
   // 加载工作分支列表（编辑时用 task.repo_key，新建时用当前仓库）
   var _taskRepoKey = existing ? (existing.repo_key || '') : '';
   if (!_taskRepoKey && typeof app !== 'undefined' && app.currentRepo()) {
-    _taskRepoKey = 'gitcode:' + (app.currentRepo().fullName || '');
+    _taskRepoKey = (app.currentRepo().repoKey || '') || ('gitcode:' + (app.currentRepo().fullName || ''));
   }
   if (_taskRepoKey) {
     var _rk = _taskRepoKey.replace(/^(gitcode|github):/, '');
@@ -513,10 +539,10 @@ function _apUpdateEngineLabel() {
   var pill = $('apEnginePill');
   if (!pill) return;
   if (_apSelectedEngines.size === 0) {
-    pill.textContent = '广播';
+    pill.textContent = _apt('form.engine_broadcast');
     pill.style.color = '#34c759';
   } else {
-    pill.textContent = '已选择 ' + _apSelectedEngines.size + ' 个引擎';
+    pill.textContent = _apt('engine_picker.selected_count', {count: _apSelectedEngines.size});
     pill.style.color = '#0071e3';
   }
 }
@@ -539,7 +565,7 @@ function _apOpenEnginePickerInner() {
   var _ENG_TAG_COLORS = {all:'#6366f1',vod:'#ec4899',issue:'#ef4444',coding:'#3b82f6',qa:'#a855f7',sre:'#f59e0b'};
   var _tagBadge = function(tags) { return (tags||[]).map(function(t) { var tn = typeof t === 'string' ? t : (t.tag || ''); return '<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:' + (_ENG_TAG_COLORS[tn]||'#999') + ';margin-left:4px;font-weight:500">' + (tn==='all'?'All':tn.charAt(0).toUpperCase()+tn.slice(1)) + '</span>'; }).join(''); };
   var _SCOPE_COLORS = {global:'#6366f1',user:'#34c759',repo:'#f59e0b',local:'#86868b'};
-  var _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
+  var _SCOPE_LABELS = {global:_apt('engine_picker.scope_global'), user:_apt('engine_picker.scope_user'), repo:_apt('engine_picker.scope_repo'), local:_apt('engine_picker.scope_local')};
   var _scopeBadge = function(s) { return s ? '<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:' + (_SCOPE_COLORS[s]||'#999') + ';margin-left:4px;font-weight:500">' + (_SCOPE_LABELS[s]||s) + '</span>' : ''; };
   var _SCOPE_ORDER = ['user','repo','global','local'];
   var sorted = _apAllEngines.slice().sort(function(a,b) {
@@ -573,7 +599,7 @@ function _apOpenEnginePickerInner() {
       html += '<span onclick="window._apEngToggleScope(\'' + s + '\')" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid ' + (act?'#0071e3':'#e8e8ed') + ';color:' + (act?'#fff':'#1d1d1f') + ';background:' + (act?'#0071e3':'#f5f5f7') + ';font-weight:500;transition:all .15s">' + (_SCOPE_LABELS[s]||s) + '</span>';
     });
     html += '<span style="flex:1"></span>';
-    html += '<span onclick="window._apEngClearAll()" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e8e8ed;color:#86868b;background:#f5f5f7;font-weight:500;transition:all .15s" onmouseover="this.style.color=\'#d32f2f\'" onmouseout="this.style.color=\'#86868b\'">全不选</span>';
+    html += '<span onclick="window._apEngClearAll()" style="cursor:pointer;font-size:11px;padding:3px 10px;border-radius:999px;border:1px solid #e8e8ed;color:#86868b;background:#f5f5f7;font-weight:500;transition:all .15s" onmouseover="this.style.color=\'#d32f2f\'" onmouseout="this.style.color=\'#86868b\'">' + _apt('engine_picker.clear_all') + '</span>';
     html += '</div>';
     return html;
   }
@@ -588,7 +614,7 @@ function _apOpenEnginePickerInner() {
     });
     var groups = {};
     filtered.forEach(function(e) { var s = e.scope || 'global'; if (!groups[s]) groups[s] = []; groups[s].push(e); });
-    if (filtered.length === 0) return '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">暂无可用引擎，将使用广播模式</div>';
+    if (filtered.length === 0) return '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">' + _apt('engine_picker.no_engines') + '</div>';
     var html = '';
     _SCOPE_ORDER.forEach(function(s) {
       if (!groups[s]) return;
@@ -604,7 +630,7 @@ function _apOpenEnginePickerInner() {
           '<input type="checkbox" data-eid="' + e.id + '" ' + (checked ? 'checked' : '') + ' onchange="window._apEngToggle(' + e.id + ')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
           '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + (e.alias || e.name) + (e.alias ? '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + e.name + ')</span>' : '') + _tagBadge(tags) + _scopeBadge(e.scope) + '</div>' +
           '<div style="font-size:10px;color:#86868b;margin-top:3px">' + (inst || e.name) + (host ? ' · ' + host : '') + '</div></div>' +
-          '<span style="font-size:11px;font-weight:500;color:#34c759;flex-shrink:0">在线</span></label>';
+          '<span style="font-size:11px;font-weight:500;color:#34c759;flex-shrink:0">' + _apt('engine_picker.online') + '</span></label>';
       }).join('');
     });
     return html;
@@ -630,14 +656,14 @@ function _apOpenEnginePickerInner() {
   var overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = '<div id="apEngModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">' +
-    '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">选择执行引擎</h3>' +
-    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">可用引擎: ' + sorted.length + '</div>' +
+    '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">' + _apt('engine_picker.title') + '</h3>' +
+    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">' + _apt('engine_picker.available_count', {count: sorted.length}) + '</div>' +
     '<div id="apEngFilterTags" style="flex-shrink:0">' + _renderFilterTags() + '</div>' +
-    '<div style="margin-bottom:12px;flex-shrink:0"><input id="apEngSearchInput" placeholder="搜索引擎名称/设备/标签..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>' +
+    '<div style="margin-bottom:12px;flex-shrink:0"><input id="apEngSearchInput" placeholder="' + _apt('engine_picker.search_placeholder') + '" style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>' +
     '<div id="apEngListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">' + _renderEngineList('') + '</div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">' +
-      '<button class="bt bt-o" onclick="this.closest(\'[style*=fixed]\').remove()">取消</button>' +
-      '<button class="bt bt-p" id="apEngConfirmBtn">确认</button>' +
+      '<button class="bt bt-o" onclick="this.closest(\'[style*=fixed]\').remove()">' + I18N.t('common.cancel') + '</button>' +
+      '<button class="bt bt-p" id="apEngConfirmBtn">' + I18N.t('common.confirm') + '</button>' +
     '</div></div>';
   document.body.appendChild(overlay);
   overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
@@ -670,13 +696,13 @@ function _apToggleWorkBranch() {
     section.style.pointerEvents = 'auto';
     if (toggle) toggle.style.background = '#28a745';
     if (knob) knob.style.left = '16px';
-    if (label) { label.textContent = '已启用'; label.style.color = '#28a745'; }
+    if (label) { label.textContent = _apt('advanced.enabled'); label.style.color = '#28a745'; }
   } else {
     section.style.opacity = '.5';
     section.style.pointerEvents = 'none';
     if (toggle) toggle.style.background = 'var(--b)';
     if (knob) knob.style.left = '2px';
-    if (label) { label.textContent = '未启用'; label.style.color = 'var(--t3)'; }
+    if (label) { label.textContent = _apt('advanced.disabled'); label.style.color = 'var(--t3)'; }
   }
 }
 function _apAddCustomField(name, value, isSecret, scope) {
@@ -697,7 +723,11 @@ function _apAddCustomField(name, value, isSecret, scope) {
   container.appendChild(row);
 }
 function _apLoadAutoSkills() {
-  return API.get('/skills?agent_type=auto&scope=all&page_size=0').then(function(d) {
+  // 按当前仓库过滤：官方 + 个人 + 本仓库技能（不传 scope=all，避免混入其他仓库的技能）
+  var _repo = '';
+  try { if (typeof app !== 'undefined' && app.currentRepo()) _repo = app.currentRepo().fullName || ''; } catch (e) {}
+  var url = '/skills?agent_type=auto&page_size=0' + (_repo ? '&repo=' + encodeURIComponent(_repo) : '');
+  return API.get(url).then(function(d) {
     _apAllAutoSkills = (d.skills || []).map(function(s) {
       return { skill_name: s.name || s.skill_name, display_name: s.display_name || s.name || s.skill_name, description: s.description || '', scope: s.scope || '' };
     });
@@ -710,20 +740,18 @@ function _apUpdateSkillLabel() {
     pill.textContent = _apSelectedSkill;
     pill.style.color = '#0071e3';
   } else {
-    pill.textContent = '留空=纯指令模式';
+    pill.textContent = _apt('form.skill_empty');
     pill.style.color = '#86868b';
   }
 }
 function _apOpenSkillPicker() {
-  if (_apAllAutoSkills.length === 0) {
-    _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
-  } else {
-    _apOpenSkillPickerInner();
-  }
+  // 每次打开都按当前仓库重新拉取：_apAllAutoSkills 是全局缓存，
+  // 切换仓库后旧缓存不会失效（曾导致所有仓库都看到第一次打开时的技能列表）
+  _apLoadAutoSkills().then(function() { _apOpenSkillPickerInner(); });
 }
 function _apOpenSkillPickerInner() {
   var _SCOPE_COLORS = {official:'#6366f1',user:'#34c759',repo:'#f59e0b'};
-  var _SCOPE_LABELS = {official:'官方', user:'个人', repo:'仓库'};
+  var _SCOPE_LABELS = {official:_apt('skill_picker.scope_official'), user:_apt('skill_picker.scope_user'), repo:_apt('skill_picker.scope_repo')};
   var _scopeBadge = function(s) { return s && _SCOPE_LABELS[s] ? '<span style="font-size:9px;padding:2px 7px;border-radius:999px;color:#fff;background:' + (_SCOPE_COLORS[s]||'#999') + ';margin-left:6px;font-weight:500">' + _SCOPE_LABELS[s] + '</span>' : ''; };
 
   function _renderSkillList(filter) {
@@ -733,19 +761,19 @@ function _apOpenSkillPickerInner() {
       var hay = [s.skill_name, s.display_name, s.description].join(' ').toLowerCase();
       return hay.indexOf(q) >= 0;
     });
-    if (filtered.length === 0) return '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">暂无 auto 类型技能，可在技能市场上传</div>';
+    if (filtered.length === 0) return '<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">' + _apt('skill_picker.no_skills') + '</div>';
     var html = '';
     // "不选择"选项
     html += '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (!_apSelectedSkill ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
       '<input type="radio" name="apSkillRadio" ' + (!_apSelectedSkill ? 'checked' : '') + ' onchange="window._apSkillPick(\'\')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
-      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f">不选择技能</div>' +
-      '<div style="font-size:11px;color:#86868b;margin-top:2px">纯指令模式，直接按巡检指令执行</div></div></label>';
+      '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f">' + _apt('skill_picker.no_selection') + '</div>' +
+      '<div style="font-size:11px;color:#86868b;margin-top:2px">' + _apt('skill_picker.no_selection_desc') + '</div></div></label>';
     filtered.forEach(function(s) {
       var checked = _apSelectedSkill === s.skill_name;
       html += '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:' + (checked ? 'rgba(0,113,227,.06)' : '#f5f5f7') + ';transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
         '<input type="radio" name="apSkillRadio" ' + (checked ? 'checked' : '') + ' onchange="window._apSkillPick(\'' + s.skill_name.replace(/'/g, "\\'") + '\')" style="width:18px;height:18px;cursor:pointer;accent-color:#0071e3">' +
         '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f;display:flex;align-items:center;flex-wrap:wrap">' + _esc(s.display_name) + _scopeBadge(s.scope) + '<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:4px">(' + _esc(s.skill_name) + ')</span></div>' +
-        '<div style="font-size:11px;color:#86868b;margin-top:3px">' + _esc(s.description || '暂无描述') + '</div></div></label>';
+        '<div style="font-size:11px;color:#86868b;margin-top:3px">' + _esc(s.description || _apt('skill_picker.no_description')) + '</div></div></label>';
     });
     return html;
   }
@@ -753,12 +781,12 @@ function _apOpenSkillPickerInner() {
   var overlay = document.createElement('div');
   overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = '<div style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:560px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">' +
-    '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">选择技能</h3>' +
-    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">可用技能: ' + _apAllAutoSkills.length + '</div>' +
-    '<div style="margin-bottom:12px;flex-shrink:0"><input id="apSkillSearchInput" placeholder="搜索技能名称/描述..." style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>' +
+    '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">' + _apt('skill_picker.title') + '</h3>' +
+    '<div style="font-size:12px;color:#86868b;margin-bottom:12px">' + _apt('skill_picker.available_count', {count: _apAllAutoSkills.length}) + '</div>' +
+    '<div style="margin-bottom:12px;flex-shrink:0"><input id="apSkillSearchInput" placeholder="' + _apt('skill_picker.search_placeholder') + '" style="width:100%;padding:8px 12px;border:none;border-radius:12px;font-size:13px;background:#f5f5f7;color:#1d1d1f;outline:none"></div>' +
     '<div id="apSkillListContainer" style="display:flex;flex-direction:column;gap:4px;flex:1;overflow-y:auto;min-height:0">' + _renderSkillList('') + '</div>' +
     '<div style="display:flex;justify-content:flex-end;gap:8px;margin-top:16px;flex-shrink:0">' +
-      '<button class="bt bt-p" id="apSkillConfirmBtn">确认</button>' +
+      '<button class="bt bt-p" id="apSkillConfirmBtn">' + I18N.t('common.confirm') + '</button>' +
     '</div></div>';
   document.body.appendChild(overlay);
   overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
@@ -789,14 +817,14 @@ function _apToggleExpand() {
     dlg.style.width = 'calc(100vw - 32px)';
     dlg.style.height = 'calc(100vh - 32px)';
     if (btn) {
-      btn.title = '缩小';
+      btn.title = _apt('form.shrink');
       btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="4 14 10 14 10 20"/><polyline points="20 10 14 10 14 4"/><line x1="14" y1="10" x2="21" y2="3"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
     }
   } else {
     dlg.style.width = '900px';
     dlg.style.height = 'min(680px,calc(100vh - 64px))';
     if (btn) {
-      btn.title = '放大';
+      btn.title = _apt('form.expand');
       btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="15 3 21 3 21 9"/><polyline points="9 21 3 21 3 15"/><line x1="21" y1="3" x2="14" y2="10"/><line x1="3" y1="21" x2="10" y2="14"/></svg>';
     }
   }
@@ -970,10 +998,10 @@ function _apDescribeSchedule() {
   if (_apTimeKind === 'at') {
     desc += _apTimeAt;
   } else if (_apEveryUnit === 'minutes') {
-    desc += '每' + _apEveryInterval + '分钟';
+    desc += _apt('cron.every_minutes', {n: _apEveryInterval});
   } else {
-    desc += '每' + _apEveryInterval + '小时';
-    if (_apEveryMinute > 0) desc += ' ' + _p2(_apEveryMinute) + '分';
+    desc += _apt('cron.every_hours', {n: _apEveryInterval});
+    if (_apEveryMinute > 0) desc += ' ' + _apt('cron.every_minute_at', {n: _apEveryInterval, m: _p2(_apEveryMinute)});
   }
   if (_apTimeKind === 'every' && _apWindowFrom && _apWindowTo) {
     desc += '（' + _apWindowFrom + '-' + _apWindowTo + '）';
@@ -981,12 +1009,11 @@ function _apDescribeSchedule() {
   desc += ' · ';
   // Days
   if (_apDayKind === 'every') {
-    desc += '每天';
+    desc += _apt('cron.daily');
   } else if (_apDayKind === 'weekly') {
-    var names = ['日','一','二','三','四','五','六'];
-    desc += '每周' + _apWeeklyDays.slice().sort(function(a,b){return a-b;}).map(function(d){return names[d];}).join('、');
+    desc += _apt('cron.weekly', {days: _apWeeklyDays.slice().sort(function(a,b){return a-b;}).map(function(d){return _apDayName(d);}).join('、')});
   } else {
-    desc += '每月' + _apMonthlyDay + '日';
+    desc += _apt('cron.monthly', {n: _apMonthlyDay});
   }
   return desc;
 }
@@ -1037,24 +1064,23 @@ function _apDescribeCron(cron) {
   var m = parts[0], h = parts[1], dom = parts[2], mon = parts[3], dow = parts[4];
   var mi = parseInt(m) || 0, hi = parseInt(h) || 0;
   var time = _p2(hi) + ':' + _p2(mi);
-  var dayNames = ['日','一','二','三','四','五','六'];
   if (m.indexOf('*/') === 0 && h.indexOf(',') >= 0) {
     var hs = h.split(',');
-    return '每天 ' + _p2(parseInt(hs[0])) + ':00-' + (parseInt(hs[hs.length-1])+1) + ':00 每' + m.slice(2) + '分钟';
+    return _apt('cron.daily_window_minutes', {from: _p2(parseInt(hs[0])), to: (parseInt(hs[hs.length-1])+1), n: m.slice(2)});
   }
-  if (m.indexOf('*/') === 0) return '每' + m.slice(2) + '分钟执行';
-  if (h.indexOf('*/') === 0 && mi === 0) return '每' + h.slice(2) + '小时执行';
+  if (m.indexOf('*/') === 0) return _apt('cron.every_n_minutes_exec', {n: m.slice(2)});
+  if (h.indexOf('*/') === 0 && mi === 0) return _apt('cron.every_n_hours_exec', {n: h.slice(2)});
   if (mi === 0 && h.indexOf(',') >= 0) {
     var hs2 = h.split(',');
-    return '每天 ' + _p2(parseInt(hs2[0])) + ':00-' + (parseInt(hs2[hs2.length-1])+1) + ':00 每小时';
+    return _apt('cron.daily_window_hours', {from: _p2(parseInt(hs2[0])), to: (parseInt(hs2[hs2.length-1])+1)});
   }
-  if (dom === '*' && mon === '*' && dow === '*') return '每天 ' + time;
+  if (dom === '*' && mon === '*' && dow === '*') return _apt('cron.daily_at', {time: time});
   if (dom === '*' && mon === '*' && dow !== '*') {
-    if (dow === '1-5') return '工作日 ' + time;
-    var days = dow.split(',').map(function(d) { return dayNames[parseInt(d)] || d; });
-    return '每周' + days.join('、') + ' ' + time;
+    if (dow === '1-5') return _apt('cron.workdays_at', {time: time});
+    var days = dow.split(',').map(function(d) { return _apDayName(parseInt(d)) || d; });
+    return _apt('cron.weekly_at', {days: days.join('、'), time: time});
   }
-  if (dom !== '*' && mon === '*' && dow === '*') return '每月' + parseInt(dom) + '日 ' + time;
+  if (dom !== '*' && mon === '*' && dow === '*') return _apt('cron.monthly_at', {n: parseInt(dom), time: time});
   return cron;
 }
 
@@ -1074,10 +1100,10 @@ function _apRenderScheduleEditor() {
 
   if (_apAdvanced) {
     container.innerHTML =
-      '<div style="' + _cap + '">高级模式</div>' +
-      '<input type="text" id="apCronRaw" value="' + _esc(_apFormCron) + '" oninput="_apOnRawInput(this.value)" placeholder="分 时 日 月 周" style="width:100%;' + _input + ';font-family:monospace">' +
-      '<div style="font-size:10px;color:var(--t3);margin-top:4px">输入 5 段制 cron 表达式（分 时 日 月 周）</div>' +
-      '<button class="bt bt-s bt-o" style="margin-top:6px" onclick="_apExitAdvanced()">返回结构化模式</button>';
+      '<div style="' + _cap + '">' + _apt('schedule.advanced_mode') + '</div>' +
+      '<input type="text" id="apCronRaw" value="' + _esc(_apFormCron) + '" oninput="_apOnRawInput(this.value)" placeholder="' + _apt('schedule.advanced_placeholder') + '" style="width:100%;' + _input + ';font-family:monospace">' +
+      '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + _apt('schedule.advanced_hint') + '</div>' +
+      '<button class="bt bt-s bt-o" style="margin-top:6px" onclick="_apExitAdvanced()">' + _apt('schedule.back_to_structured') + '</button>';
     _apUpdatePreview();
     return;
   }
@@ -1094,8 +1120,8 @@ function _apRenderScheduleEditor() {
 
   // ===== Time fieldset =====
   var timeHTML = '<fieldset style="border:none;padding:0;margin:0 0 16px 0">' +
-    '<legend style="' + _cap + '">时间</legend>' +
-    '<div style="margin-bottom:8px">' + segToggle([['at','固定时间'],['every','间隔执行']], _apTimeKind, '_apSetTimeKind') + '</div>';
+    '<legend style="' + _cap + '">' + _apt('schedule.time_legend') + '</legend>' +
+    '<div style="margin-bottom:8px">' + segToggle([['at', _apt('schedule.time_at')],['every', _apt('schedule.time_every')]], _apTimeKind, '_apSetTimeKind') + '</div>';
 
   if (_apTimeKind === 'at') {
     timeHTML += '<input type="time" value="' + _apTimeAt + '" oninput="_apOnTimeAt(this.value)" style="' + _timeInput + '">';
@@ -1108,11 +1134,11 @@ function _apRenderScheduleEditor() {
 
     // Frequency box (InputGroup style)
     var freqHTML = '<div style="display:flex;align-items:center;border:1px solid var(--b);border-radius:6px;overflow:hidden;min-width:0;flex:1">' +
-      '<span style="padding:6px 8px;font-size:11px;color:var(--t3);white-space:nowrap">每</span>' +
+      '<span style="padding:6px 8px;font-size:11px;color:var(--t3);white-space:nowrap">' + _apt('schedule.every_prefix') + '</span>' +
       '<input type="number" min="1" max="' + maxInt + '" value="' + _apEveryInterval + '" oninput="_apOnEveryInterval(this.value)" style="' + _numInput + ';border:none;border-radius:0;flex:1">' +
       '<select oninput="_apOnEveryUnit(this.value)" style="border:none;border-left:1px solid var(--b);padding:6px 8px;font-size:11px;background:var(--c);color:var(--t);outline:none;cursor:pointer">' +
-        '<option value="minutes"' + (_apEveryUnit==='minutes'?' selected':'') + '>分钟</option>' +
-        '<option value="hours"' + (_apEveryUnit==='hours'?' selected':'') + '>小时</option>' +
+        '<option value="minutes"' + (_apEveryUnit==='minutes'?' selected':'') + '>' + _apt('schedule.unit_minutes') + '</option>' +
+        '<option value="hours"' + (_apEveryUnit==='hours'?' selected':'') + '>' + _apt('schedule.unit_hours') + '</option>' +
       '</select>' +
     '</div>';
 
@@ -1146,9 +1172,9 @@ function _apRenderScheduleEditor() {
     // Firing minute for hours unit (below the row)
     if (!hourOnly) {
       timeHTML += '<div style="display:flex;align-items:center;gap:6px;margin-top:4px">' +
-        '<span style="font-size:10px;color:var(--t3)">第</span>' +
+        '<span style="font-size:10px;color:var(--t3)">' + _apt('schedule.monthly_prefix') + '</span>' +
         '<input type="number" min="0" max="59" value="' + _apEveryMinute + '" oninput="_apOnEveryMinute(this.value)" style="' + _numInput + ';width:36px">' +
-        '<span style="font-size:10px;color:var(--t3)">分钟执行</span>' +
+        '<span style="font-size:10px;color:var(--t3)">' + _apt('schedule.monthly_suffix') + '</span>' +
       '</div>';
     }
   }
@@ -1156,15 +1182,15 @@ function _apRenderScheduleEditor() {
 
   // ===== Day fieldset =====
   var dayHTML = '<fieldset style="border:none;padding:0;margin:0 0 12px 0">' +
-    '<legend style="' + _cap + '">日期</legend>';
+    '<legend style="' + _cap + '">' + _apt('schedule.date_legend') + '</legend>';
 
   // Day kind select + optional monthly number on same row (7:4 grid)
   var daySelectSpan = _apDayKind !== 'monthly' ? ';grid-column:span 2' : '';
   dayHTML += '<div style="display:grid;grid-template-columns:7fr 4fr;gap:6px;align-items:center">' +
     '<select oninput="_apOnDayKind(this.value)" style="' + _select + ';' + daySelectSpan + '">' +
-      '<option value="every"' + (_apDayKind==='every'?' selected':'') + '>每天</option>' +
-      '<option value="weekly"' + (_apDayKind==='weekly'?' selected':'') + '>每周</option>' +
-      '<option value="monthly"' + (_apDayKind==='monthly'?' selected':'') + '>每月</option>' +
+      '<option value="every"' + (_apDayKind==='every'?' selected':'') + '>' + _apt('schedule.day_every') + '</option>' +
+      '<option value="weekly"' + (_apDayKind==='weekly'?' selected':'') + '>' + _apt('schedule.day_weekly') + '</option>' +
+      '<option value="monthly"' + (_apDayKind==='monthly'?' selected':'') + '>' + _apt('schedule.day_monthly') + '</option>' +
     '</select>';
   if (_apDayKind === 'monthly') {
     dayHTML += '<input type="number" min="1" max="31" value="' + _apMonthlyDay + '" oninput="_apSetMonthlyDay(parseInt(this.value)||1)" style="' + _numInput + ';width:100%;padding:6px 8px">';
@@ -1172,23 +1198,22 @@ function _apRenderScheduleEditor() {
   dayHTML += '</div>';
 
   if (_apDayKind === 'weekly') {
-    var dn = ['日','一','二','三','四','五','六'];
     dayHTML += '<div style="display:flex;gap:2px;margin-top:6px">' +
-      dn.map(function(name, i) {
+      _AP_DAY_KEYS.map(function(k, i) {
         var sel = _apWeeklyDays.indexOf(i) >= 0;
         return '<button type="button" onclick="_apToggleDay(' + i + ')" style="flex:1;min-width:0;height:26px;border:none;border-radius:4px;font-size:11px;font-weight:500;cursor:pointer;transition:all .15s;' +
-          (sel ? 'background:var(--t);color:var(--c)' : 'background:var(--bg);color:var(--t3)') + '">' + name + '</button>';
+          (sel ? 'background:var(--t);color:var(--c)' : 'background:var(--bg);color:var(--t3)') + '">' + _apt('cron.' + k) + '</button>';
       }).join('') + '</div>';
   } else if (_apDayKind === 'monthly') {
     if (_apMonthlyDay >= 29) {
-      dayHTML += '<div style="font-size:10px;color:var(--t3);margin-top:4px">提示：2月等短月可能不触发</div>';
+      dayHTML += '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + _apt('schedule.feb_hint') + '</div>';
     }
   }
   dayHTML += '</fieldset>';
 
   // Advanced entry
   var advHTML = '<div style="font-size:10px;margin-top:2px">' +
-    '<span style="cursor:pointer;color:var(--a)" onclick="_apEnterAdvanced()">高级模式：直接输入 cron 表达式 →</span>' +
+    '<span style="cursor:pointer;color:var(--a)" onclick="_apEnterAdvanced()">' + _apt('schedule.advanced_link') + '</span>' +
   '</div>';
 
   container.innerHTML = timeHTML + dayHTML + advHTML;
@@ -1287,10 +1312,10 @@ function _apEnterAdvanced() {
   var _cap = 'font-size:12px;font-weight:600;color:var(--t2);margin-bottom:6px;display:block';
   var _input = 'padding:6px 8px;border:1px solid var(--b);border-radius:6px;font-size:13px;background:var(--c);color:var(--t);outline:none;min-width:0';
   container.innerHTML =
-    '<div style="' + _cap + '">高级模式</div>' +
-    '<input type="text" id="apCronRaw" value="' + _esc(_apFormCron) + '" oninput="_apOnRawInput(this.value)" placeholder="分 时 日 月 周" style="width:100%;' + _input + ';font-family:monospace">' +
-    '<div style="font-size:11px;color:var(--t3);margin-top:4px">输入 5 段制 cron 表达式（分 时 日 月 周）</div>' +
-    '<button class="bt bt-s bt-o" style="margin-top:6px" onclick="_apExitAdvanced()">返回结构化模式</button>';
+    '<div style="' + _cap + '">' + _apt('schedule.advanced_mode') + '</div>' +
+    '<input type="text" id="apCronRaw" value="' + _esc(_apFormCron) + '" oninput="_apOnRawInput(this.value)" placeholder="' + _apt('schedule.advanced_placeholder') + '" style="width:100%;' + _input + ';font-family:monospace">' +
+    '<div style="font-size:11px;color:var(--t3);margin-top:4px">' + _apt('schedule.advanced_hint') + '</div>' +
+    '<button class="bt bt-s bt-o" style="margin-top:6px" onclick="_apExitAdvanced()">' + _apt('schedule.back_to_structured') + '</button>';
   _apUpdatePreview();
 }
 
@@ -1316,15 +1341,15 @@ function _apUpdatePreview() {
   if (desc) {
     html += '<div style="font-size:12px;color:var(--t2);margin-top:2px">🕒 ' + desc + '</div>';
   } else {
-    html += '<div style="font-size:12px;color:var(--t3);margin-top:2px">高级表达式</div>';
+    html += '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + _apt('schedule.advanced_expr') + '</div>';
   }
   if (next3.length > 0) {
-    html += '<div style="font-size:10px;color:var(--t3);margin-top:4px">下次运行:</div>';
+    html += '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + _apt('schedule.next_run') + '</div>';
     next3.forEach(function(t) {
       html += '<div style="font-size:10px;color:var(--t3)">' + t + '</div>';
     });
   } else {
-    html += '<div style="font-size:10px;color:var(--t3);margin-top:4px">（未计算出下次运行时间，表达式可能无效或触发时间较远）</div>';
+    html += '<div style="font-size:10px;color:var(--t3);margin-top:4px">' + _apt('schedule.next_run_invalid') + '</div>';
   }
   el.innerHTML = html;
 }
@@ -1333,17 +1358,17 @@ function _apUpdatePreview() {
 function _apPolishInstruction(btn) {
   var name = $('apFormName').value.trim();
   var instruction = $('apFormInstruction').value.trim();
-  if (!instruction) { if (app&&app.showToast) app.showToast('请先填写巡检指令'); return; }
-  if (btn) { btn.disabled = true; btn.textContent = '润色中...'; }
+  if (!instruction) { if (app&&app.showToast) app.showToast(_apt('form.polish_empty_instruction')); return; }
+  if (btn) { btn.disabled = true; btn.textContent = _apt('form.polishing'); }
   API.post('/autopilot/polish', {name: name, instruction: instruction}, 20000).then(function(d) {
     if (d.instruction) {
       $('apFormInstruction').value = d.instruction;
-      if (app&&app.showToast) app.showToast('润色完成');
+      if (app&&app.showToast) app.showToast(_apt('form.polish_done'));
     }
-    if (btn) { btn.disabled = false; btn.textContent = '✨ 润色'; }
+    if (btn) { btn.disabled = false; btn.textContent = _apt('form.polish_btn'); }
   }).catch(function(e) {
-    if (app&&app.showToast) app.showToast('润色失败: ' + (e.message||e));
-    if (btn) { btn.disabled = false; btn.textContent = '✨ 润色'; }
+    if (app&&app.showToast) app.showToast(_apt('form.polish_failed', {msg: (e.message||e)}));
+    if (btn) { btn.disabled = false; btn.textContent = _apt('form.polish_btn'); }
   });
 }
 
@@ -1354,8 +1379,8 @@ function _apSubmitForm() {
   var instruction = $('apFormInstruction').value.trim();
   var retry = parseInt($('apFormRetry').value, 10);
   if (isNaN(retry) || retry < 0 || retry > 10) retry = 3;
-  if (!name) { if (app&&app.showToast) app.showToast('请填写任务名称'); return; }
-  if (!instruction) { if (app&&app.showToast) app.showToast('请填写任务指令'); return; }
+  if (!name) { if (app&&app.showToast) app.showToast(_apt('form.name_required')); return; }
+  if (!instruction) { if (app&&app.showToast) app.showToast(_apt('form.instruction_required')); return; }
   // 收集自定义配置项
   var _cf = _cfCollectFields('#apCustomFields');
   if (_cf.error) { if (app&&app.showToast) app.showToast(_cf.error); return; }
@@ -1364,7 +1389,7 @@ function _apSubmitForm() {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   var body = {
     name: name,
-    repo_key: 'gitcode:' + repo,
+    repo_key: (app.currentRepo() && app.currentRepo().repoKey) ? app.currentRepo().repoKey : ('gitcode:' + repo),
     instruction: instruction,
     skill_name: skillName,
     cron: _apFormCron,
@@ -1376,10 +1401,10 @@ function _apSubmitForm() {
   // 新建时默认启用，编辑时不改 enabled 状态
   if (!_apEditingId) body.enabled = true;
   var btn = $('apDialog').querySelector('.bt-p');
-  if (btn) { btn.disabled = true; btn.textContent = '提交中...'; }
+  if (btn) { btn.disabled = true; btn.textContent = _apt('form.submitting'); }
   if (_apEditingId) {
     API.put('/autopilot/tasks/' + _apEditingId, body).then(function() {
-      if (app&&app.showToast) app.showToast('已保存');
+      if (app&&app.showToast) app.showToast(_apt('form.saved'));
       $('apDialog').remove();
       _apLoadTasks();
       // 如果在详情页，重新拉取任务数据并更新任务信息卡片
@@ -1388,21 +1413,21 @@ function _apSubmitForm() {
           var card = document.getElementById('apTaskInfoCard');
           if (card) {
             // 重建任务信息卡片内容
-            var engineNames = '不限定（广播）';
+            var engineNames = _apt('detail.engine_unlimited');
             if (task.engine_runtime_ids && task.engine_runtime_ids.length) {
-              engineNames = task.engine_runtime_ids.length + ' 个引擎';
+              engineNames = _apt('detail.engine_count', {count: task.engine_runtime_ids.length});
             }
             card.innerHTML =
-              '<div class="cd-h"><h2>任务信息</h2></div>' +
+              '<div class="cd-h"><h2>' + _apt('detail.info_title') + '</h2></div>' +
               '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
-                '<div><span style="color:var(--t2)">名称:</span> <b>' + _esc(task.name) + '</b></div>' +
-                '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(task.repo_key) + '</div>' +
+                '<div><span style="color:var(--t2)">' + _apt('detail.name_label') + '</span> <b>' + _esc(task.name) + '</b></div>' +
+                '<div><span style="color:var(--t2)">' + _apt('detail.repo_label') + '</span> ' + _esc(task.repo_key) + '</div>' +
                 '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(task.skill_name||'—') + '</div>' +
-                '<div><span style="color:var(--t2)">引擎:</span> ' + engineNames + '</div>' +
-                '<div><span style="color:var(--t2)">最大重试:</span> ' + (typeof task.max_retry === 'number' ? task.max_retry : 3) + '</div>' +
-                '<div><span style="color:var(--t2)">创建时间:</span> ' + _apFormatTime(task.created_at) + '</div>' +
+                '<div><span style="color:var(--t2)">' + _apt('detail.engine_label') + '</span> ' + engineNames + '</div>' +
+                '<div><span style="color:var(--t2)">' + _apt('detail.max_retry_label') + '</span> ' + (typeof task.max_retry === 'number' ? task.max_retry : 3) + '</div>' +
+                '<div><span style="color:var(--t2)">' + _apt('detail.created_at_label') + '</span> ' + _apFormatTime(task.created_at) + '</div>' +
               '</div>' +
-              '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">任务指令:</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(task.instruction||'') + '</pre></div>';
+              '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">' + _apt('detail.instruction_label') + '</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(task.instruction||'') + '</pre></div>';
           }
           // 刷新高级选项卡片（重新加载分支列表和回填配置）
           var advCard = document.getElementById('apAdvancedCard');
@@ -1415,17 +1440,17 @@ function _apSubmitForm() {
         });
       }
     }).catch(function(e) {
-      if (app&&app.showToast) app.showToast('保存失败: ' + (e.message||e));
-      if (btn) { btn.disabled = false; btn.textContent = '保存'; }
+      if (app&&app.showToast) app.showToast(_apt('form.save_failed', {msg: (e.message||e)}));
+      if (btn) { btn.disabled = false; btn.textContent = _apt('form.btn_save'); }
     });
   } else {
     API.post('/autopilot/tasks', body).then(function() {
-      if (app&&app.showToast) app.showToast('已创建');
+      if (app&&app.showToast) app.showToast(_apt('form.created'));
       $('apDialog').remove();
       _apLoadTasks();
     }).catch(function(e) {
-      if (app&&app.showToast) app.showToast('创建失败: ' + (e.message||e));
-      if (btn) { btn.disabled = false; btn.textContent = '创建'; }
+      if (app&&app.showToast) app.showToast(_apt('form.create_failed', {msg: (e.message||e)}));
+      if (btn) { btn.disabled = false; btn.textContent = _apt('form.btn_create'); }
     });
   }
 }
@@ -1435,65 +1460,75 @@ function renderAutopilotDetail(id) {
   _apDetailId = id;
   var pc = $('pageContent');
   if (!pc) return;
-  pc.innerHTML = '<div class="loading">加载中...</div>';
+  pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
   API.get('/autopilot/tasks/' + id).then(function(t) {
     if (window._currentView !== 'autopilot-detail') return;
     pc.innerHTML = _apDetailHTML(t);
     _apLoadExecutions(id);
   }).catch(function(e) {
-    pc.innerHTML = '<div class="error">加载失败: ' + _esc(e.message||e) + '</div>';
+    pc.innerHTML = '<div class="error">' + _apt('detail.load_failed', {msg: _esc(e.message||e)}) + '</div>';
   });
 }
 
 function _apDetailHTML(t) {
   // 引擎名称显示
-  var engineNames = '不限定（广播）';
+  var engineNames = _apt('detail.engine_unlimited');
   if (t.engine_runtime_ids && t.engine_runtime_ids.length) {
-    engineNames = t.engine_runtime_ids.length + ' 个引擎';
+    engineNames = _apt('detail.engine_count', {count: t.engine_runtime_ids.length});
+  }
+  // 引擎绑定真实性同步 §5.1b：绑定引擎被系统从场景移除 → 同款提示条（两表协同，不删任务绑定）
+  var detachHint = '';
+  if (t.engine_detached && t.engine_detached.engines && t.engine_detached.engines.length) {
+    detachHint = '<div style="background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:12px;padding:10px 14px;margin-top:12px;font-size:11px;color:#d32f2f;line-height:1.6">'
+      + (_apt('detail.engine_detached_hint') || '绑定的引擎 ')
+      + '<b>' + _esc(t.engine_detached.engines.join('、')) + '</b>'
+      + (_apt('detail.engine_detached_rebind') || ' 已离线（超 8 小时）被系统从场景移除，任务绑定仍保留，请自行调整或重新绑定。')
+      + '</div>';
   }
   return '<div>' +
     // 标题行：返回按钮 + 右侧操作
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px">' +
-      '<button class="bt bt-o bt-s" onclick="app.nav(\'autopilot\')" style="margin-right:auto">← 自动化</button>' +
+      '<button class="bt bt-o bt-s" onclick="app.nav(\'autopilot\')" style="margin-right:auto">' + _apt('detail.back') + '</button>' +
       '<label style="display:inline-flex;align-items:center;gap:8px;cursor:pointer;user-select:none">' +
-        '<span style="font-size:12px;color:var(--t2)">' + (t.enabled ? '启用' : '暂停') + '</span>' +
+        '<span style="font-size:12px;color:var(--t2)">' + (t.enabled ? _apt('detail.status_enabled') : _apt('detail.status_paused')) + '</span>' +
         '<span data-ap-toggle="' + t.id + '" onclick="event.stopPropagation();_apToggleEnabled(' + t.id + ', ' + (!t.enabled) + ')" style="position:relative;width:36px;height:20px;border-radius:10px;background:' + (t.enabled ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
           '<span style="position:absolute;top:2px;left:' + (t.enabled ? '18px' : '2px') + ';width:16px;height:16px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:left .2s"></span>' +
         '</span>' +
       '</label>' +
-      '<button class="bt bt-o" onclick="_apEdit(' + t.id + ')">编辑</button>' +
-      '<button class="bt bt-p" onclick="_apTrigger(' + t.id + ')">立即触发</button>' +
+      '<button class="bt bt-o" onclick="_apEdit(' + t.id + ')">' + _apt('detail.edit') + '</button>' +
+      '<button class="bt bt-p" onclick="_apTrigger(' + t.id + ')">' + _apt('detail.trigger') + '</button>' +
     '</div>' +
     // 任务信息
     '<div class="cd" id="apTaskInfoCard" style="margin-bottom:16px">' +
-      '<div class="cd-h"><h2>任务信息</h2></div>' +
+      '<div class="cd-h"><h2>' + _apt('detail.info_title') + '</h2></div>' +
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
-        '<div><span style="color:var(--t2)">名称:</span> <b>' + _esc(t.name) + '</b></div>' +
-        '<div><span style="color:var(--t2)">仓库:</span> ' + _esc(t.repo_key) + '</div>' +
+        '<div><span style="color:var(--t2)">' + _apt('detail.name_label') + '</span> <b>' + _esc(t.name) + '</b></div>' +
+        '<div><span style="color:var(--t2)">' + _apt('detail.repo_label') + '</span> ' + _esc(t.repo_key) + '</div>' +
         '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(t.skill_name||'—') + '</div>' +
-        '<div><span style="color:var(--t2)">引擎:</span> ' + engineNames + '</div>' +
-        '<div><span style="color:var(--t2)">最大重试:</span> ' + (typeof t.max_retry === 'number' ? t.max_retry : 3) + '</div>' +
-        '<div><span style="color:var(--t2)">创建时间:</span> ' + _apFormatTime(t.created_at) + '</div>' +
+        '<div><span style="color:var(--t2)">' + _apt('detail.engine_label') + '</span> ' + engineNames + '</div>' +
+        '<div><span style="color:var(--t2)">' + _apt('detail.max_retry_label') + '</span> ' + (typeof t.max_retry === 'number' ? t.max_retry : 3) + '</div>' +
+        '<div><span style="color:var(--t2)">' + _apt('detail.created_at_label') + '</span> ' + _apFormatTime(t.created_at) + '</div>' +
       '</div>' +
-      '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">巡检指令:</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(t.instruction||'') + '</pre></div>' +
+      detachHint +
+      '<div style="margin-top:12px"><span style="color:var(--t2);font-size:12px">' + _apt('detail.instruction_label') + '</span><pre style="white-space:pre-wrap;font-size:13px;margin-top:4px;padding:10px;background:var(--bg);border-radius:6px;font-family:inherit">' + _esc(t.instruction||'') + '</pre></div>' +
     '</div>' +
     // 时间表
     '<div class="cd" style="margin-bottom:16px">' +
-      '<div class="cd-h"><h2>时间表</h2></div>' +
+      '<div class="cd-h"><h2>' + _apt('detail.schedule_title') + '</h2></div>' +
       '<div style="display:flex;align-items:center;gap:12px;font-size:13px">' +
         '<span style="font-size:16px">🕒</span>' +
         '<code style="font-family:monospace">' + _esc(t.cron) + '</code>' +
         '<span style="color:var(--t2)">→ ' + _apDescribeCron(t.cron) + '</span>' +
       '</div>' +
-      (t.next_run_at ? '<div style="margin-top:8px;font-size:12px;color:var(--t2)">下次运行: ' + _apFormatTime(t.next_run_at) + '</div>' : '') +
-      (t.last_run_at ? '<div style="margin-top:4px;font-size:12px;color:var(--t2)">上次运行: ' + _apFormatTime(t.last_run_at) + '</div>' : '') +
+      (t.next_run_at ? '<div style="margin-top:8px;font-size:12px;color:var(--t2)">' + _apt('detail.next_run', {time: _apFormatTime(t.next_run_at)}) + '</div>' : '') +
+      (t.last_run_at ? '<div style="margin-top:4px;font-size:12px;color:var(--t2)">' + _apt('detail.last_run', {time: _apFormatTime(t.last_run_at)}) + '</div>' : '') +
     '</div>' +
     // 高级选项
     _apAdvancedOptionsHTML(t) +
     // 执行历史
     '<div class="cd">' +
-      '<div class="cd-h"><h2>执行历史</h2></div>' +
-      '<div id="apExecList"><div class="loading">加载中...</div></div>' +
+      '<div class="cd-h"><h2>' + _apt('detail.history_title') + '</h2></div>' +
+      '<div id="apExecList"><div class="loading">' + I18N.t('common.loading') + '</div></div>' +
     '</div>' +
   '</div>';
 }
@@ -1504,17 +1539,17 @@ function _apAdvancedOptionsHTML(t) {
   var _wbOn = !!wb;
   var html = '<div class="cd" id="apAdvancedCard" style="margin-bottom:16px">' +
     '<div class="cd-h" style="display:flex;justify-content:space-between;align-items:center">' +
-      '<h2>高级选项</h2>' +
-      '<button class="bt bt-p bt-s" onclick="_apSaveAdvanced()">保存</button>' +
+      '<h2>' + _apt('detail.advanced_title') + '</h2>' +
+      '<button class="bt bt-p bt-s" onclick="_apSaveAdvanced()">' + _apt('advanced.save') + '</button>' +
     '</div>';
   // 工作分支（开关 + 下拉框）
   html += '<div style="margin-bottom:12px">' +
     '<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">' +
-      '<label style="font-size:12px;font-weight:600;color:var(--t2)">工作分支</label>' +
+      '<label style="font-size:12px;font-weight:600;color:var(--t2)">' + _apt('advanced.work_branch_label') + '</label>' +
       '<span onclick="_apToggleDetailWb()" id="apDetailWbToggle" style="position:relative;width:32px;height:18px;border-radius:9px;background:' + (_wbOn ? '#28a745' : 'var(--b)') + ';transition:background .2s;cursor:pointer;flex-shrink:0">' +
         '<span id="apDetailWbKnob" style="position:absolute;top:2px;left:' + (_wbOn ? '16px' : '2px') + ';width:14px;height:14px;border-radius:50%;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.2);transition:left .2s"></span>' +
       '</span>' +
-      '<span id="apDetailWbLabel" style="font-size:11px;color:' + (_wbOn ? '#28a745' : 'var(--t3)') + '">' + (_wbOn ? '已启用' : '未启用') + '</span>' +
+      '<span id="apDetailWbLabel" style="font-size:11px;color:' + (_wbOn ? '#28a745' : 'var(--t3)') + '">' + (_wbOn ? _apt('advanced.enabled') : _apt('advanced.disabled')) + '</span>' +
     '</div>' +
     '<div id="apDetailWbSection" style="' + (_wbOn ? '' : 'opacity:.5;pointer-events:none') + '">' +
       '<select id="apDetailWorkBranch" style="width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t);outline:none;cursor:pointer;min-height:34px"></select>' +
@@ -1522,9 +1557,9 @@ function _apAdvancedOptionsHTML(t) {
   '</div>';
   // 自定义配置
   html += '<div>' +
-    '<label style="display:block;font-size:12px;font-weight:600;color:var(--t2);margin-bottom:4px">自定义配置</label>' +
+    '<label style="display:block;font-size:12px;font-weight:600;color:var(--t2);margin-bottom:4px">' + _apt('advanced.custom_fields_label') + '</label>' +
     '<div id="apDetailCustomFields" style="display:flex;flex-direction:column;gap:8px"></div>' +
-    '<button type="button" class="bt bt-o bt-s" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="_apAddDetailCustomField()">+ 添加配置项</button>' +
+    '<button type="button" class="bt bt-o bt-s" style="margin-top:8px;font-size:11px;padding:4px 10px" onclick="_apAddDetailCustomField()">' + _apt('advanced.custom_fields_add') + '</button>' +
   '</div>';
   html += '</div>';
   // 延迟加载分支列表和回填配置
@@ -1572,14 +1607,14 @@ function _apToggleDetailWb() {
     section.style.pointerEvents = 'none';
     if (toggle) toggle.style.background = 'var(--b)';
     if (knob) knob.style.left = '2px';
-    if (label) { label.textContent = '未启用'; label.style.color = 'var(--t3)'; }
+    if (label) { label.textContent = _apt('advanced.disabled'); label.style.color = 'var(--t3)'; }
   } else {
     // 开启
     section.style.opacity = '1';
     section.style.pointerEvents = 'auto';
     if (toggle) toggle.style.background = '#28a745';
     if (knob) knob.style.left = '16px';
-    if (label) { label.textContent = '已启用'; label.style.color = '#28a745'; }
+    if (label) { label.textContent = _apt('advanced.enabled'); label.style.color = '#28a745'; }
   }
 }
 
@@ -1610,15 +1645,15 @@ function _apSaveAdvanced() {
   var _cf = _cfCollectFields('#apDetailCustomFields');
   if (_cf.error) { if (app&&app.showToast) app.showToast(_cf.error); return; }
   API.put('/autopilot/tasks/' + _apDetailId, { work_branch: _wb, custom_fields: _cf.fields }).then(function() {
-    if (app&&app.showToast) app.showToast('高级选项已保存');
+    if (app&&app.showToast) app.showToast(_apt('advanced.saved'));
   }).catch(function(e) {
-    if (app&&app.showToast) app.showToast('保存失败: ' + (e.message||e));
+    if (app&&app.showToast) app.showToast(_apt('advanced.save_failed', {msg: (e.message||e)}));
   });
 }
 
 function _apToggleEnabled(id, enabled) {
   API.put('/autopilot/tasks/' + id, {enabled: !!enabled}).then(function() {
-    if (app&&app.showToast) app.showToast(enabled ? '已启用' : '已暂停');
+    if (app&&app.showToast) app.showToast(enabled ? _apt('toggle.enabled') : _apt('toggle.paused'));
     var t = _apAllTasks.find(function(x) { return x.id === id; });
     if (t) t.enabled = enabled;
     // 只更新开关样式，不重建页面
@@ -1628,11 +1663,11 @@ function _apToggleEnabled(id, enabled) {
       var dot = switchEl.querySelector('span');
       if (dot) dot.style.left = enabled ? '18px' : '2px';
       var label = switchEl.parentElement.querySelector('span:first-child');
-      if (label) label.textContent = enabled ? '启用' : '暂停';
+      if (label) label.textContent = enabled ? _apt('toggle.enable') : _apt('toggle.pause');
       switchEl.setAttribute('onclick', 'event.stopPropagation();_apToggleEnabled(' + id + ', ' + !enabled + ')');
     }
   }).catch(function(e) {
-    if (app&&app.showToast) app.showToast('操作失败: ' + (e.message||e));
+    if (app&&app.showToast) app.showToast(_apt('toggle.failed', {msg: (e.message||e)}));
   });
 }
 
@@ -1643,11 +1678,11 @@ function _apLoadExecutions(taskId) {
     if (!el) return;
     var execs = d.executions || [];
     if (execs.length === 0) {
-      el.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">暂无执行记录</div>';
+      el.innerHTML = '<div style="padding:24px;text-align:center;color:var(--t3)">' + _apt('exec.no_records') + '</div>';
       return;
     }
-    var statusIcons = {success:'✅', failed:'❌', running:'🔄', pending:'⏳', retrying:'🔁', skipped:'⏭', dispatched:'📤'};
-    var statusColors = {success:'#28a745', failed:'#dc3545', running:'#3168e0', pending:'var(--t3)', retrying:'#e8a000', skipped:'var(--t3)', dispatched:'#3168e0'};
+    var statusIcons = {success:'✅', failed:'❌', running:'🔄', pending:'⏳', retrying:'🔁', skipped:'⏭', dispatched:'📤', cancelled:'🚫'};
+    var statusColors = {success:'#28a745', failed:'#dc3545', running:'#3168e0', pending:'var(--t3)', retrying:'#e8a000', skipped:'var(--t3)', dispatched:'#3168e0', cancelled:'#e8a000'};
 
     var html = '<style>' +
       '.ap-exec-row{border-bottom:1px solid var(--b);cursor:pointer;transition:background .15s}' +
@@ -1672,15 +1707,15 @@ function _apLoadExecutions(taskId) {
           '<span style="font-size:12px;font-weight:600;color:' + color + ';min-width:70px">' + _esc(e.status) + '</span>' +
           '<span style="font-size:11px;color:var(--t3);white-space:nowrap">' + time + '</span>' +
           '<span style="flex:1;font-size:12px;color:var(--t2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + result + '</span>' +
-          (hasFindings ? '<span style="font-size:10px;background:rgba(49,104,224,0.12);color:#3168e0;padding:2px 8px;border-radius:8px;flex-shrink:0">有问题</span>' : '') +
-          '<span style="font-size:10px;color:var(--t3);flex-shrink:0">重试 ' + (e.retry_count||0) + '</span>' +
-          (e.agent_task_id ? '<span onclick="event.stopPropagation();openTaskLog(\'' + _esc(e.agent_task_id) + '\',\'自动化 #' + eid + '\')" style="font-size:10px;color:rgba(0,113,227,.8);border:1px solid rgba(0,113,227,.3);border-radius:999px;padding:2px 10px;flex-shrink:0;cursor:pointer;white-space:nowrap">日志</span>' : '') +
+          (hasFindings ? '<span style="font-size:10px;background:rgba(49,104,224,0.12);color:#3168e0;padding:2px 8px;border-radius:8px;flex-shrink:0">' + _apt('exec.has_issues') + '</span>' : '') +
+          '<span style="font-size:10px;color:var(--t3);flex-shrink:0">' + _apt('exec.retry_count', {count: (e.retry_count||0)}) + '</span>' +
+          (e.agent_task_id ? '<span onclick="event.stopPropagation();openTaskLog(\'' + _esc(e.agent_task_id) + '\',\'' + _apt('exec.log_title', {id: eid}) + '\')" style="font-size:10px;color:rgba(0,113,227,.8);border:1px solid rgba(0,113,227,.3);border-radius:999px;padding:2px 10px;flex-shrink:0;cursor:pointer;white-space:nowrap">' + _apt('exec.log_btn') + '</span>' : '') +
           '<span class="ap-exec-arrow" style="font-size:10px;color:var(--t3);transition:transform .3s;flex-shrink:0">▼</span>' +
         '</div>' +
         '<div class="ap-exec-detail" id="apExecDetail_' + eid + '">' +
           '<div style="padding:4px 12px 14px 36px">' +
-            '<div style="font-size:11px;color:var(--t3);margin-bottom:6px">执行结果:</div>' +
-            '<pre style="white-space:pre-wrap;font-size:12px;color:var(--t);background:var(--bg);border-radius:8px;padding:10px 12px;max-height:300px;overflow-y:auto;margin-bottom:12px;font-family:inherit">' + _esc(e.result || e.error || '(无)') + '</pre>' +
+            '<div style="font-size:11px;color:var(--t3);margin-bottom:6px">' + _apt('exec.result_label') + '</div>' +
+            '<pre style="white-space:pre-wrap;font-size:12px;color:var(--t);background:var(--bg);border-radius:8px;padding:10px 12px;max-height:300px;overflow-y:auto;margin-bottom:12px;font-family:inherit">' + _esc(e.result || e.error || _apt('exec.no_result')) + '</pre>' +
             '<div id="apExecFindings_' + eid + '"></div>' +
           '</div>' +
         '</div>' +
@@ -1689,7 +1724,7 @@ function _apLoadExecutions(taskId) {
     el.innerHTML = html;
   }).catch(function(e) {
     var el = $('apExecList');
-    if (el) el.innerHTML = '<div class="error">加载失败: ' + _esc(e.message||e) + '</div>';
+    if (el) el.innerHTML = '<div class="error">' + _apt('exec.load_failed', {msg: _esc(e.message||e)}) + '</div>';
   });
 }
 
@@ -1727,7 +1762,7 @@ function _apStartLogPoll(execId, agentTaskId) {
   var since = 0;
   var preEl = document.querySelector('#apExecDetail_' + execId + ' pre');
   if (preEl) {
-    preEl.textContent = '正在执行中...\n';
+    preEl.textContent = _apt('exec.running_hint');
     preEl.style.color = '#3168e0';
   }
   _apLogPollTimers[execId] = setInterval(function() {
@@ -1771,18 +1806,18 @@ function _apLoadFindingsInline(execId, container) {
   API.get('/autopilot/executions/' + execId + '/findings').then(function(d) {
     var findings = d.findings || [];
     if (findings.length === 0) {
-      container.innerHTML = '<div style="font-size:11px;color:var(--t3)">未发现问题</div>';
+      container.innerHTML = '<div style="font-size:11px;color:var(--t3)">' + _apt('findings.none_found') + '</div>';
       return;
     }
     var sevIcons = {high:'🔴', medium:'🟡', low:'🔵'};
     var sevColors = {high:'#dc3545', medium:'#e8a000', low:'#3168e0'};
-    var html = '<div style="font-size:11px;color:var(--t3);margin-bottom:6px">发现问题 (' + findings.length + '):</div>';
+    var html = '<div style="font-size:11px;color:var(--t3);margin-bottom:6px">' + _apt('findings.found_title', {count: findings.length}) + '</div>';
     findings.forEach(function(f) {
       var icon = sevIcons[f.severity] || '•';
       var color = sevColors[f.severity] || 'var(--t3)';
       var dispatchBtn = f.dispatched_issue_number
-        ? '<span style="font-size:10px;color:var(--t3)">已派发 #' + _esc(f.dispatched_issue_number) + '</span>'
-        : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ',\'' + _esc(f.id) + '\',this)" style="font-size:10px;padding:2px 8px">派发</button>';
+        ? '<span style="font-size:10px;color:var(--t3)">' + _apt('findings.dispatched', {n: _esc(f.dispatched_issue_number)}) + '</span>'
+        : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ',\'' + _esc(f.id) + '\',this)" style="font-size:10px;padding:2px 8px">' + _apt('findings.dispatch_btn') + '</button>';
       html += '<div style="display:flex;align-items:flex-start;gap:8px;padding:8px 0;border-bottom:1px solid var(--b)">' +
         '<span style="font-size:12px;flex-shrink:0">' + icon + '</span>' +
         '<div style="flex:1;min-width:0">' +
@@ -1795,7 +1830,7 @@ function _apLoadFindingsInline(execId, container) {
     });
     container.innerHTML = html;
   }).catch(function() {
-    container.innerHTML = '<div style="font-size:11px;color:var(--t3)">加载问题失败</div>';
+    container.innerHTML = '<div style="font-size:11px;color:var(--t3)">' + _apt('findings.load_failed') + '</div>';
   });
 }
 
@@ -1804,15 +1839,15 @@ function _apShowFindings(execId) {
   API.get('/autopilot/executions/' + execId + '/findings').then(function(d) {
     var findings = d.findings || [];
     if (findings.length === 0) {
-      if (app && app.showToast) app.showToast('暂无问题记录');
+      if (app && app.showToast) app.showToast(_apt('findings.no_records'));
       return;
     }
     var sevIcons = {high:'🔴', medium:'🟡', low:'🔵'};
     var rows = findings.map(function(f) {
       var icon = sevIcons[f.severity] || '•';
       var dispatchBtn = f.dispatched
-        ? '<span style="font-size:11px;color:var(--t3)">已派发</span>'
-        : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ', ' + f.id + ', this)" style="font-size:11px">派发</button>';
+        ? '<span style="font-size:11px;color:var(--t3)">' + _apt('findings.dispatched_badge') + '</span>'
+        : '<button class="bt bt-s bt-p" onclick="_apDispatchFinding(' + execId + ', ' + f.id + ', this)" style="font-size:11px">' + _apt('findings.dispatch_btn') + '</button>';
       return '<div style="display:flex;align-items:center;gap:8px;padding:10px 0;border-bottom:1px solid var(--b)">' +
         '<span style="font-size:14px;flex-shrink:0">' + icon + '</span>' +
         '<span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + _esc(f.title) + '</span>' +
@@ -1826,7 +1861,7 @@ function _apShowFindings(execId) {
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:12px;width:560px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,0.15)">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--b);flex-shrink:0">' +
-          '<span style="font-size:14px;font-weight:600">问题列表 (执行 #' + execId + ')</span>' +
+          '<span style="font-size:14px;font-weight:600">' + _apt('findings.list_title', {id: execId}) + '</span>' +
           '<span onclick="document.getElementById(\'apFindingsDialog\').remove()" style="cursor:pointer;font-size:18px;color:var(--t3);padding:4px 8px;border-radius:4px;line-height:1">×</span>' +
         '</div>' +
         '<div style="flex:1;overflow-y:auto;padding:0 20px">' + rows + '</div>' +
@@ -1834,7 +1869,7 @@ function _apShowFindings(execId) {
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   }).catch(function(e) {
-    if (app && app.showToast) app.showToast('加载问题失败: ' + (e.message||e));
+    if (app && app.showToast) app.showToast(_apt('findings.load_detail_failed', {msg: (e.message||e)}));
   });
 }
 
@@ -1844,10 +1879,10 @@ function _apDispatchFinding(execId, findingId, btn) {
   API.get('/autopilot/executions/' + execId + '/findings').then(function(d) {
     var finding = null;
     (d.findings || []).forEach(function(f) { if (f.id == findingId) finding = f; });
-    if (!finding) { if (app&&app.showToast) app.showToast('未找到问题详情'); return; }
+    if (!finding) { if (app&&app.showToast) app.showToast(_apt('dispatch.not_found')); return; }
     _apShowDispatchDialog(execId, finding, btn);
   }).catch(function(e) {
-    if (app&&app.showToast) app.showToast('加载问题详情失败: ' + (e.message||e));
+    if (app&&app.showToast) app.showToast(_apt('findings.load_detail_failed', {msg: (e.message||e)}));
   });
 }
 
@@ -1856,7 +1891,7 @@ function _apShowDispatchDialog(execId, finding, btn) {
   var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
   API.get('/scenes?repo=' + encodeURIComponent(repo)).then(function(d) {
     var scenes = d.scenes || [];
-    var sceneOpts = '<option value="">智能推荐（自动选场景）</option>' +
+    var sceneOpts = '<option value="">' + _apt('dispatch.scene_smart') + '</option>' +
       scenes.map(function(s) {
         return '<option value="' + _esc(s.scene_id) + '">' + _esc(s.name || s.scene_id) + '</option>';
       }).join('');
@@ -1869,32 +1904,32 @@ function _apShowDispatchDialog(execId, finding, btn) {
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:12px;width:520px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,0.15)">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--b);flex-shrink:0">' +
-          '<span style="font-size:14px;font-weight:600">派发为 Issue</span>' +
+          '<span style="font-size:14px;font-weight:600">' + _apt('dispatch.title') + '</span>' +
           '<span onclick="document.getElementById(\'apDispatchDialog\').remove()" style="cursor:pointer;font-size:18px;color:var(--t3);padding:4px 8px;border-radius:4px;line-height:1">×</span>' +
         '</div>' +
         '<div style="flex:1;overflow-y:auto;padding:16px 20px">' +
           '<div style="margin-bottom:12px">' +
-            '<label style="' + _lbl + '">标题</label>' +
+            '<label style="' + _lbl + '">' + _apt('dispatch.field_title') + '</label>' +
             '<input id="apDispatchTitle" type="text" value="' + _esc(finding.title) + '" style="' + _inp + '">' +
           '</div>' +
           '<div style="margin-bottom:12px">' +
-            '<label style="' + _lbl + '">描述</label>' +
+            '<label style="' + _lbl + '">' + _apt('dispatch.field_desc') + '</label>' +
             '<textarea id="apDispatchDesc" rows="5" style="' + _inp + ';resize:vertical;font-family:inherit">' + _esc(finding.description || '') + '</textarea>' +
           '</div>' +
           '<div>' +
-            '<label style="' + _lbl + '">场景</label>' +
+            '<label style="' + _lbl + '">' + _apt('dispatch.field_scene') + '</label>' +
             '<select id="apDispatchScene" style="' + _inp + '">' + sceneOpts + '</select>' +
           '</div>' +
         '</div>' +
         '<div style="display:flex;justify-content:flex-end;gap:8px;padding:10px 20px;border-top:1px solid var(--b);flex-shrink:0;background:var(--c,#fff)">' +
-          '<button class="bt bt-o" onclick="document.getElementById(\'apDispatchDialog\').remove()">取消</button>' +
-          '<button class="bt bt-p" id="apDispatchConfirmBtn" onclick="_apConfirmDispatch(' + execId + ',\'' + _esc(finding.id) + '\')">创建 Issue</button>' +
+          '<button class="bt bt-o" onclick="document.getElementById(\'apDispatchDialog\').remove()">' + I18N.t('common.cancel') + '</button>' +
+          '<button class="bt bt-p" id="apDispatchConfirmBtn" onclick="_apConfirmDispatch(' + execId + ',\'' + _esc(finding.id) + '\')">' + _apt('dispatch.confirm') + '</button>' +
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   }).catch(function(e) {
-    if (app&&app.showToast) app.showToast('加载场景列表失败: ' + (e.message||e));
+    if (app&&app.showToast) app.showToast(_apt('dispatch.scenes_load_failed', {msg: (e.message||e)}));
   });
 }
 
@@ -1902,24 +1937,24 @@ function _apConfirmDispatch(execId, findingId) {
   var title = $('apDispatchTitle').value.trim();
   var desc = $('apDispatchDesc').value.trim();
   var sceneId = $('apDispatchScene').value;
-  if (!title) { if (app&&app.showToast) app.showToast('标题不能为空'); return; }
-  if (!desc) { if (app&&app.showToast) app.showToast('描述不能为空'); return; }
+  if (!title) { if (app&&app.showToast) app.showToast(_apt('dispatch.title_required')); return; }
+  if (!desc) { if (app&&app.showToast) app.showToast(_apt('dispatch.desc_required')); return; }
   var btn = $('apDispatchConfirmBtn');
-  if (btn) { btn.disabled = true; btn.textContent = '创建中...'; }
+  if (btn) { btn.disabled = true; btn.textContent = _apt('dispatch.creating'); }
   API.post('/autopilot/executions/' + execId + '/dispatch', {
     finding_id: findingId,
     title: title,
     description: desc,
     scene_id: sceneId
   }).then(function(d) {
-    if (app&&app.showToast) app.showToast('已创建 Issue #' + (d.issue_number || ''));
+    if (app&&app.showToast) app.showToast(_apt('dispatch.created', {n: (d.issue_number || '')}));
     $('apDispatchDialog').remove();
     // 刷新 findings 列表
     var container = $('apExecFindings_' + execId);
     if (container) { container.dataset.loaded = ''; _apLoadFindingsInline(execId, container); }
   }).catch(function(e) {
-    if (app&&app.showToast) app.showToast('派发失败: ' + (e.message||e));
-    if (btn) { btn.disabled = false; btn.textContent = '创建 Issue'; }
+    if (app&&app.showToast) app.showToast(_apt('dispatch.failed', {msg: (e.message||e)}));
+    if (btn) { btn.disabled = false; btn.textContent = _apt('dispatch.confirm'); }
   });
 }
 

@@ -4,8 +4,8 @@
  * 运行：node tests/js/test_issue_233_link_contrast.js
  *
  * 验证点：
- *   1. app.css 包含 .chat-body .msg.l a 高对比度规则（color:#fff）
- *   2. apple-theme.css 包含对应 [data-theme="apple"] .chat-body .msg.l a 规则
+ *   1. app.css 包含 .chat-body .msg.r a 高对比度规则（color:#fff）
+ *   2. apple-theme.css 包含对应 [data-theme="apple"] .chat-body .msg.r a 规则
  *   3. 白色 #ffffff on 蓝色背景 #3168e0 对比度 ≥ 4.5:1（WCAG AA）
  *   4. 白色 #ffffff on Apple 蓝 #0071e3 对比度 ≥ 4.5:1
  *   5. chat.js linkifyIssueNumbers 不再包含内联 color:var(--a) 样式
@@ -74,26 +74,26 @@ function testAppCss() {
   const css = readFile('src/api/static/css/app.css');
 
   assert.ok(
-    css.includes('.chat-body .msg.l a'),
-    'app.css 缺少 .chat-body .msg.l a 规则'
+    css.includes('.chat-body .msg.r a'),
+    'app.css 缺少 .chat-body .msg.r a 规则'
   );
-  console.log('  ✓ app.css 包含 .chat-body .msg.l a 规则');
+  console.log('  ✓ app.css 包含 .chat-body .msg.r a 规则');
 
   assert.ok(
-    css.includes('.chat-body .msg.l a:hover'),
-    'app.css 缺少 .chat-body .msg.l a:hover 规则'
+    css.includes('.chat-body .msg.r a:hover'),
+    'app.css 缺少 .chat-body .msg.r a:hover 规则'
   );
   console.log('  ✓ app.css 包含 hover 状态规则');
 
   assert.ok(
-    css.includes('.chat-body .msg.l a:visited'),
-    'app.css 缺少 .chat-body .msg.l a:visited 规则'
+    css.includes('.chat-body .msg.r a:visited'),
+    'app.css 缺少 .chat-body .msg.r a:visited 规则'
   );
   console.log('  ✓ app.css 包含 visited 状态规则');
 
   // 确认白色颜色值
-  const ruleMatch = css.match(/\.chat-body\s+\.msg\.l\s+a[^{]*\{([^}]*)\}/);
-  assert.ok(ruleMatch, '无法提取 .chat-body .msg.l a 规则体');
+  const ruleMatch = css.match(/\.chat-body\s+\.msg\.r\s+a[^{]*\{([^}]*)\}/);
+  assert.ok(ruleMatch, '无法提取 .chat-body .msg.r a 规则体');
   assert.ok(
     ruleMatch[1].includes('#fff') || ruleMatch[1].includes('#ffffff'),
     '链接颜色未设置为白色'
@@ -101,8 +101,8 @@ function testAppCss() {
   console.log('  ✓ app.css 链接颜色为白色');
 
   // hover 不应使用 opacity（会导致混合色对比度下降）
-  const hoverMatch = css.match(/\.chat-body\s+\.msg\.l\s+a:hover\{([^}]*)\}/);
-  assert.ok(hoverMatch, '无法提取 .chat-body .msg.l a:hover 规则体');
+  const hoverMatch = css.match(/\.chat-body\s+\.msg\.r\s+a:hover\{([^}]*)\}/);
+  assert.ok(hoverMatch, '无法提取 .chat-body .msg.r a:hover 规则体');
   assert.ok(
     !hoverMatch[1].includes('opacity'),
     'hover 不应使用 opacity（会导致混合色对比度低于 WCAG AA）'
@@ -110,7 +110,7 @@ function testAppCss() {
   console.log('  ✓ app.css hover 不使用 opacity');
 
   // visited 应使用 #fff/#ffffff（确保对比度 ≥4.5:1）
-  const visitedMatch = css.match(/\.chat-body\s+\.msg\.l\s+a:visited\{([^}]*)\}/);
+  const visitedMatch = css.match(/\.chat-body\s+\.msg\.r\s+a:visited\{([^}]*)\}/);
   if (visitedMatch) {
     assert.ok(
       visitedMatch[1].includes('#fff') || visitedMatch[1].includes('#ffffff'),
@@ -131,25 +131,25 @@ function testAppleThemeCss() {
   const css = readFile('src/api/static/css/apple-theme.css');
 
   assert.ok(
-    css.includes('[data-theme="apple"] .chat-body .msg.l a'),
-    'apple-theme.css 缺少 [data-theme="apple"] .chat-body .msg.l a 规则'
+    css.includes('[data-theme="apple"] .chat-body .msg.r a'),
+    'apple-theme.css 缺少 [data-theme="apple"] .chat-body .msg.r a 规则'
   );
   console.log('  ✓ apple-theme.css 包含对应规则');
 
   assert.ok(
-    css.includes('[data-theme="apple"] .chat-body .msg.l a:hover'),
+    css.includes('[data-theme="apple"] .chat-body .msg.r a:hover'),
     'apple-theme.css 缺少 hover 规则'
   );
   console.log('  ✓ apple-theme.css 包含 hover 状态规则');
 
   assert.ok(
-    css.includes('[data-theme="apple"] .chat-body .msg.l a:visited'),
+    css.includes('[data-theme="apple"] .chat-body .msg.r a:visited'),
     'apple-theme.css 缺少 visited 规则'
   );
   console.log('  ✓ apple-theme.css 包含 visited 状态规则');
 
   // hover 不应使用 opacity
-  const appleHover = css.match(/\[data-theme="apple"\]\s+\.chat-body\s+\.msg\.l\s+a:hover\s*\{([^}]*)\}/);
+  const appleHover = css.match(/\[data-theme="apple"\]\s+\.chat-body\s+\.msg\.r\s+a:hover\s*\{([^}]*)\}/);
   assert.ok(appleHover, '无法提取 apple-theme hover 规则体');
   assert.ok(
     !appleHover[1].includes('opacity'),
@@ -159,7 +159,7 @@ function testAppleThemeCss() {
 
   // visited 应使用 #fff/#ffffff
   assert.ok(
-    css.match(/\[data-theme="apple"\]\s+\.chat-body\s+\.msg\.l\s+a:visited[^{]*\{[^}]*#fff/),
+    css.match(/\[data-theme="apple"\]\s+\.chat-body\s+\.msg\.r\s+a:visited[^{]*\{[^}]*#fff/),
     'apple-theme visited 颜色应为白色'
   );
   console.log('  ✓ apple-theme.css visited 颜色为白色');
@@ -189,7 +189,7 @@ function testLinkifyNoInlineColor() {
 
 function testNonBlueAreaUnaffected() {
   const css = readFile('src/api/static/css/app.css');
-  // .msg a 通用规则（蓝色链接）应保留，用于 .msg.r（浅色背景）
+  // .msg a 通用规则（蓝色链接）应保留，用于 .msg.l（浅色背景）
   assert.ok(
     css.includes('.msg a{color:var(--a)}'),
     'app.css .msg a 通用蓝色链接规则被移除，影响非蓝色区域'

@@ -25,7 +25,9 @@
     "scene_center": "项目场景",
     "scene_skill_market": "场景·技能",
     "scene_market": "场景市场",
-    "skill_market": "技能市场"
+    "skill_market": "技能市场",
+    "organizations": "组织管理",
+    "autopilot": "自动化"
   },
   "sidebar": {
     "workspace": "工作区",
@@ -35,25 +37,28 @@
     "account": "用户中心",
     "device_center": "设备中心",
     "settings": "设置",
-    "toggle": "收起/展开侧边栏"
+    "toggle": "收起/展开侧边栏",
+    "organizations": "组织"
   },
   "login": {
     "gitcode_login": "使用 GitCode 登录",
     "github_login": "使用 GitHub 登录",
     "beta_apply": "申请内测",
+    "admin": "管理后台",
     "pwd_login": "← 用户名密码登录",
     "username": "用户名",
     "password": "密码",
     "login_btn": "登录",
     "back_gitcode": "← 返回 GitCode 登录",
     "failed": "登录失败",
-    "oauth_not_configured": "OAuth 未配置",
+    "oauth_not_configured": "OAuth未配置，请在管理界面配置",
     "empty_input": "请输入用户名和密码"
   },
   "repo": {
     "select": "选择仓库...",
     "load_failed": "无法加载仓库列表，请确认 GitCode Token 是否有效",
     "back_to_select": "返回仓库选择",
+    "back_to_website": "返回官网",
     "add_new": "新增仓库托管"
   },
   "toast": {

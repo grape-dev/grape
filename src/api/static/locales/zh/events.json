@@ -10,6 +10,7 @@
   "status_success": "✅ 成功",
   "status_failed": "❌ 失败",
   "status_running_prefix": "⏳ ",
+  "fail_reason": "失败原因",
   "btn_redispatch": "🔄 重新派发",
   "btn_local_retry": "🖥 本机重试",
   "local_retry_title": "本机重试",
@@ -96,5 +97,6 @@
   "knowledge_delete_confirm_project": "此知识为所有 Agent 共享，删除后其他 Agent 也会受影响。确认删除？",
   "knowledge_modal_close": "关闭",
   "scope_agent_solo": "Agent 独享",
-  "nav_forbidden": "无权限访问事件 #{{seq}}，可能属于其他仓库"
+  "nav_forbidden": "无权限访问事件 #{{seq}}，可能属于其他仓库",
+  "engine_undispatched": "未派发/无执行引擎"
 }

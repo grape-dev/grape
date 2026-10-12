@@ -24,8 +24,8 @@ from src.session_manager import (
 def _clean():
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM chat_conversations")
-        c.execute("DELETE FROM chat_messages")
+        c.execute("DELETE FROM chat_conversations WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR id LIKE 'test_%' OR title LIKE 'test_%'")
+        c.execute("DELETE FROM chat_messages WHERE conversation_id IN (SELECT id FROM chat_conversations WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%')")
         db.commit()
 
 

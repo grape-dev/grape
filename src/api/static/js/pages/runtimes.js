@@ -82,28 +82,42 @@ window._rtDevGoPage = function(p) {
 };
 
 // Issue #185: Engines 分页加载
+// Issue #277: 传入当前仓库 repo 参数，隔离 repo scope 引擎
 function _loadRuntimesData() {
   var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
+  if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtTotal = d.total || 0;
+    // 空数据快速路径：直接渲染空态，不经过 renderRuntimes（避免等待 sceneTagsCache）
+    var _rts = (d && d.runtimes) || [];
+    var _devs = (d && d.devices) || [];
+    if (_rts.length === 0 && _devs.length === 0) {
+      _renderRuntimesSkeleton(d);
+      if (!__sceneTagsCache) _loadSceneTagsCache(function() {});
+      return;
+    }
     renderRuntimes(d);
   }).catch(function(e) {
     if (e.name === 'AbortError' && e.silent) return;
     if (window._currentView !== 'runtimes') return;
     var el = document.getElementById('pageContent');
-    if (el) el.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
+    if (el) el.innerHTML = '<div class="error">' + (I18N.t('common.load_failed') || '加载失败') + ': ' + (e.message || '') + '</div>';
   });
 }
 
 // Issue #185: Workers 设备分页加载（独立端点）
 // Issue #245: 筛选条件传给后端，total 由后端返回筛选后总数（移除前端二次过滤）
+// Issue #277: 传入当前仓库 repo 参数，隔离 repo scope 设备
 function _loadRuntimeDevices() {
   var qs = '?page=' + _rtDevPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
   if (_rtFilterType) qs += '&type=' + encodeURIComponent(_rtFilterType);
   if (_runtimeSearch) qs += '&q=' + encodeURIComponent(_runtimeSearch);
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
+  if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/runtime-devices' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtDevTotal = d.total || 0;
@@ -112,6 +126,10 @@ function _loadRuntimeDevices() {
     // 合并到 __runtimeData 供 renderWorkers 使用
     if (__runtimeData) {
       __runtimeData.devices = d.devices || [];
+      renderRuntimes(__runtimeData);
+    } else {
+      // __runtimeData 还没加载 — 直接用 devices 渲染空壳
+      __runtimeData = {runtimes: [], devices: d.devices || [], total: 0};
       renderRuntimes(__runtimeData);
     }
   }).catch(function(e) {
@@ -232,6 +250,33 @@ function _legendHtml() {
   </div>`;
 }
 
+function _renderRuntimesSkeleton(data) {
+  var el = document.getElementById('pageContent');
+  if (!el) return;
+  var runtimes = (data && data.runtimes) || [];
+  var devices = (data && data.devices) || [];
+  var isEmpty = runtimes.length === 0 && devices.length === 0;
+  var tabBtn = function(t) {
+    var active = _runtimeTab === t;
+    return '<button class="bt ' + (active ? 'bt-p' : 'bt-o') + '" onclick="_runtimeTab=\'' + t + '\';_onRuntimeTabSwitch(\'' + t + '\')">' + (I18N.t('runtimes.tab.' + t) || t) + '</button>';
+  };
+  var toolbar = '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">' +
+    tabBtn('engines') + tabBtn('workers') +
+    '<div class="sp"></div>' +
+    '<button class="bt bt-o" onclick="refreshRuntimes()">' + (I18N.t('runtimes.refresh') || '⟳') + '</button>' +
+    '</div>';
+  if (isEmpty) {
+    el.innerHTML = toolbar +
+      '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
+      '<div style="font-size:48px">🔧</div>' +
+      '<div style="font-size:15px;font-weight:600;color:var(--t1)">暂无引擎</div>' +
+      '<div style="font-size:13px;color:var(--t3)">当前组织下暂无接入的引擎或设备</div>' +
+      '</div>';
+  } else {
+    el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
+  }
+}
+
 function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -240,15 +285,16 @@ function renderRuntimes(data) {
   if (data.total !== undefined) _rtTotal = data.total;
   // 场景标签缓存未加载时先异步拉取，拿到后再渲染（避免卡片显示原始 name 而非 display_name）
   if (!__sceneTagsCache) {
-    _loadSceneTagsCache(function() { renderRuntimes(data); });
+    // 先渲染基础框架（带空态提示），避免页面一直显示"加载中"
+    _renderRuntimesSkeleton(data);
+    _loadSceneTagsCache(function() { if (__runtimeData) renderRuntimes(__runtimeData); });
     return;
   }
   // 设置当前用户名供权限判断
   try { window._grapeUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) { window._grapeUsername = ''; }
   const devices = (data.devices && data.devices.length)
     ? data.devices
-    : (data.runtimes || []).map(rt => ({ name: rt.worker_name || rt.name, device_name: I18N.t('runtimes.label.local'), health: rt.health || 'offline',
-      scope: 'global', owner: rt.owner || '', worker_ip: rt.worker_ip || '', credential_id: 0, runtimes: [rt] }));
+    : [];
   __runtimeDevices = devices;
   // Issue #185 审查修复：_rtDevTotal 只由 runtime-devices 端点提供权威值，
   // 不再从 agent-runtimes 返回的 devices 启发式更新（避免过滤不一致导致分页页数错误）
@@ -450,7 +496,7 @@ function openScopeSwitcher(cid, currentScope) {
   var scopes = ['repo', 'user'];
   var existing = document.getElementById('scopeSwitcherOverlay');
   if (existing) { existing.remove(); return; }
-  var curRepo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  var curRepo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   var overlay = document.createElement('div');
   overlay.id = 'scopeSwitcherOverlay';
   overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
@@ -618,7 +664,7 @@ function _renderAddDeviceCredForm() {
   var area = document.getElementById('addDeviceCredArea');
   if (!area) return;
   var cur = _currentUser();
-  var curRepo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  var curRepo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   area.innerHTML = '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
     '<div style="font-size:13px;font-weight:600;margin-bottom:14px;color:var(--t1)">' + I18N.t('runtimes.credential.gen_title') + '</div>' +
     // 凭据名称
@@ -858,9 +904,25 @@ function refreshRuntimes() {
   _stopDevspaceAutoRefresh();
   const el = document.getElementById('pageContent');
   if (el) el.innerHTML = `<div class="loading">${I18N.t('runtimes.toast.refreshing')}</div>`;
+  // 清空旧缓存，防止刷新期间渲染旧数据
+  __runtimeData = null;
   API.post('/settings/agent-runtimes/refresh').then(() => {
-    _loadRuntimesData();
-    if (_runtimeTab === 'workers') _loadRuntimeDevices();
+    if (_runtimeTab === 'workers') {
+      // Workers 标签页：直接加载 runtime-devices（权威数据源），避免 agent-runtimes 的 devices 闪现
+      _loadRuntimeDevices();
+      // 后台静默加载 agent-runtimes 以填充 engines 数据（不触发渲染）
+      API.get('/settings/agent-runtimes?page=1&page_size=' + _rtPageSize).then(function(d) {
+        if (window._currentView !== 'runtimes') return;
+        if (!__runtimeData) {
+          __runtimeData = {runtimes: d.runtimes || [], devices: [], total: d.total || 0};
+        } else {
+          __runtimeData.runtimes = d.runtimes || [];
+          __runtimeData.total = d.total || 0;
+        }
+      }).catch(function() {});
+    } else {
+      _loadRuntimesData();
+    }
     app.showToast(I18N.t('runtimes.toast.refresh_success'));
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }

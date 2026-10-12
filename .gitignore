@@ -99,6 +99,7 @@ scripts/install-worker.sh.bak.*
 start-cluster.sh
 configs/admin.env
 admin/
+!src/admin/
 logs/
 examples/
 skills/
@@ -119,3 +120,7 @@ src/api/static/openapi.json
 cli/
 src/api/static/uploads/
 *.log
+
+# git askpass credential script (outputs token env vars, must not be committed)
+.git-askpass.sh
+venv/

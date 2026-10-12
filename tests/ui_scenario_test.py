@@ -34,7 +34,7 @@ class TestFirstLoginNoRepos:
         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
         c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
-                       "db.execute('DELETE FROM managed_repos');db.commit();print('OK')\"", timeout=5)
+                       "db.execute('DELETE FROM managed_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'');db.commit();print('OK')\"", timeout=5)
         pw = hashlib.sha256(b"testpass123").hexdigest()
         c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/opt/grape/data/sessions.db\\\");'
                        f'db.execute(\\\"UPDATE user_accounts SET password_hash=?,password=? WHERE username=?\\\",'
@@ -175,7 +175,7 @@ class TestFirstLoginNoRepos:
         c.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         c.connect('203.0.113.2', 22, 'root', 'YOUR_SSH_PASSWORD', timeout=10)
         c.exec_command("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
-                       "db.execute('DELETE FROM managed_repos');db.commit();print('OK')\"", timeout=5)
+                       "db.execute('DELETE FROM managed_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'');db.commit();print('OK')\"", timeout=5)
         pw = hashlib.sha256(b"testpass123").hexdigest()
         c.exec_command(f'python3 -c "import sqlite3,hashlib;db=sqlite3.connect(\\\"/opt/grape/data/sessions.db\\\");'
                        f'db.execute(\\\"UPDATE user_accounts SET password_hash=?,password=? WHERE username=?\\\",'
@@ -227,7 +227,7 @@ def _backup_and_restore_managed_repos():
                   "assert n>0, 'managed_repos empty before destructive test, aborting';"
                   "db.commit();print('BACKED UP', n)\"")
     restore_sql = ("python3 -c \"import sqlite3;db=sqlite3.connect('/opt/grape/data/sessions.db');"
-                   "db.execute('DELETE FROM managed_repos');"
+                   "db.execute('DELETE FROM managed_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'');"
                    "db.execute('INSERT INTO managed_repos SELECT * FROM managed_repos_backup');"
                    "db.commit();print('RESTORED', db.execute('SELECT COUNT(*) FROM managed_repos').fetchone()[0])\"")
     c = paramiko.SSHClient()

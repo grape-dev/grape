@@ -1,11 +1,12 @@
 """仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
 import os
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token, require_no_session_token
+from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_github_token, require_no_session_token, require_org_member
+from src.api.org_context import resolve_org_context
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
 router = APIRouter(prefix="/api/repos", tags=["repos"])
@@ -67,17 +68,31 @@ def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") ->
     return repos
 
 
-def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
+def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict]:
     """过滤仓库列表：返回用户身份可见的全部仓库（管理员 + 非管理员成员）。
 
-    状态语义（前端卡片三态校验）：
-    - in_managed（仓库在 managed_repos = 已被任何人托管）→ is_hosted 按是否配置 webhook；
-    - can_host（用户是仓库管理员/所有者，或 permission.admin）→ 未托管时可「加入并托管」；
-    - 非管理员成员 + 未托管 → 照样返回（展示「未托管」），点「加入并托管」由前端提示
-      「无权限托管，请联系管理员」，不再静默 403。
+    org_id > 0 时组织隔离：
+    - 已托管到当前组织的仓库 → 显示，is_hosted=true
+    - 已托管到其他组织的仓库 → 隐藏（隔离）
+    - 未托管的仓库 → 显示，用户可托管到当前组织
     """
     from src.repo_key import to_repo_key
-    managed = {r["repo_key"]: r["webhook_id"] for r in user_db.get_all_managed_repos()}
+    # 获取所有托管仓库及其 org_id
+    from src.session_manager import db as _db, db_lock as _dbl
+    managed = {}
+    managed_org = {}
+    with _dbl:
+        _c = _db.cursor()
+        try:
+            _c.execute("SELECT repo_key, webhook_id, org_id FROM managed_repos")
+            for _r in _c.fetchall():
+                managed[_r[0]] = _r[1]
+                managed_org[_r[0]] = _r[2] or 0
+        except Exception:
+            # 降级：不带 org_id
+            for r in user_db.get_all_managed_repos():
+                managed[r["repo_key"]] = r["webhook_id"]
+                managed_org[r["repo_key"]] = 0
     result = []
     for r in repos:
         full_name = r.get("full_name", "")
@@ -85,6 +100,20 @@ def _filter_repos(user_id: int, repos: list[dict]) -> list[dict]:
         is_admin = r.get("is_admin", False)
         in_managed = repo_key in managed
         hosted = in_managed and bool(managed.get(repo_key))
+        repo_org_id = managed_org.get(repo_key, 0)
+
+        # 组织隔离：
+        # - org_id > 0（非个人组织）：已托管到其他组织的仓库不显示
+        # - org_id = 0（个人组织）：已托管到其他非个人组织的仓库不显示
+        #   （个人组织只显示全局托管 + 自身托管的仓库，不显示其他非个人组织的仓库）
+        if in_managed and repo_org_id:
+            if org_id and repo_org_id != org_id:
+                continue
+            if not org_id:
+                # 个人组织：检查 repo_org_id 对应的组织是否是个人组织
+                from src.user.org_db import is_org_personal as _is_p
+                if not _is_p(repo_org_id):
+                    continue
 
         role = "Admin" if is_admin else "Member"
         result.append({
@@ -232,7 +261,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
 
 
 @router.get("/member", operation_id="repos_member", summary="List repos I can operate", description="Lists repositories the current user can operate. Reads the user_repos cache, auto-refreshing from GitCode when empty or stale; prunes managed repos removed upstream.")
-def list_member_repos(user: dict = Depends(require_no_session_token)):
+def list_member_repos(user: dict = Depends(require_org_member)):
     """获取用户可操作仓库列表：优先从 user_repos 缓存读取；缓存为空或超过 TTL 时自动从 GitCode 拉取刷新
 
     加载前先检查托管仓库在 GitCode 上是否还存在（GitCode 删仓库不发 webhook，
@@ -258,7 +287,14 @@ def list_member_repos(user: dict = Depends(require_no_session_token)):
         except Exception as e:
             log.warning(f"member: background stale probe start failed: {e}")
 
-    # 优先读取 DB 缓存（未过期）
+    # 优先读取 DB 缓存（未过期）——按组织过滤
+    org_id = user.get("org_id", 0)
+    # 判断当前组织是否是个人组织（个人组织显示全量用户仓库，非个人组织才隔离）
+    _is_personal_org = False
+    if org_id:
+        from src.user.org_db import is_org_personal
+        _is_personal_org = is_org_personal(org_id)
+    _filter_org_id = 0 if _is_personal_org else org_id
     cached = user_db.get_user_repos(user["id"])
     synced_at = user_db.get_user_repos_synced_at(user["id"])
 
@@ -274,23 +310,28 @@ def list_member_repos(user: dict = Depends(require_no_session_token)):
             return True
 
     if cached and not _is_expired():
-        return {"repos": _filter_repos(user["id"], cached), "_cached": True}
+        return {"repos": _filter_repos(user["id"], cached, org_id=_filter_org_id), "_cached": True}
 
     # 缓存为空或已过期 → 从 VCS 拉取并刷新缓存
+    # 组织隔离模式下也同步全量 user_repos（_filter_repos 负责过滤）
     try:
         repos = _fetch_and_cache(user["id"], api_token, provider)
     except Exception as e:
         # 拉取失败但有旧缓存兜底（避免 GitCode 抖动导致页面空白）
         if cached:
-            return {"repos": _filter_repos(user["id"], cached), "_cached": True, "_stale": True}
+            return {"repos": _filter_repos(user["id"], cached, org_id=_filter_org_id), "_cached": True, "_stale": True}
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"加载仓库列表失败: {e}"})
 
-    return {"repos": _filter_repos(user["id"], repos), "_cached": False}
+    return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id), "_cached": False}
 
 
 @router.post("/sync", operation_id="repos_sync", summary="Sync repo list from VCS", description="Manually syncs the repository list from VCS, refreshes the user_repos cache and probes/cleans stale managed records.")
-def sync_repos(user: dict = Depends(require_no_session_token)):
-    """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录"""
+def sync_repos(user: dict = Depends(require_org_member)):
+    """手动从 VCS 同步仓库列表，刷新 user_repos 缓存，并探活清理失效托管记录。
+
+    组织隔离：同步 GitCode 全量到 user_repos 缓存，但返回时按当前组织过滤
+    （只返回该组织已托管的仓库 + 个人组织返回全量）。
+    """
     provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
@@ -303,7 +344,14 @@ def sync_repos(user: dict = Depends(require_no_session_token)):
     except Exception as e:
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"同步失败: {e}"})
 
-    return {"repos": _filter_repos(user["id"], repos), "message": "同步成功"}
+    org_id = user.get("org_id", 0)
+    # 个人组织不隔离（显示全量用户仓库），非个人组织才隔离
+    from src.user.org_db import is_org_personal
+    _filter_org_id = 0 if is_org_personal(org_id) else org_id
+    if _filter_org_id:
+        # 非个人组织：已托管到其他组织的仓库不显示，未托管的显示
+        return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id), "message": "同步成功"}
+    return {"repos": _filter_repos(user["id"], repos, org_id=0), "message": "同步成功"}
 
 
 @router.get("/check-name", operation_id="repos_check_name", summary="Check repo name availability", description="Checks whether a repository with the same name already exists under the current user.")
@@ -502,8 +550,15 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
 
 
 @router.post("/host", operation_id="repos_host", summary="Host repository", description="Registers an existing repository for hosting: creates the webhook and sets up the repo bot.")
-def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
+def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), request: Request = None):
     from src.repo_key import to_repo_key
+    # 解析当前组织上下文：优先从 user dict（require_org_member 注入），其次从 request header
+    _org_id = user.get("org_id", 0) if isinstance(user, dict) else 0
+    if not _org_id and request:
+        try:
+            _org_id = resolve_org_context(request, user["id"])
+        except Exception:
+            _org_id = 0
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
@@ -545,7 +600,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
             if existing_id:
                 user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                          github_webhook_token=api_token,
-                                         bot_github_token=gh_bot_token, bot_username=gh_bot_username)
+                                         bot_github_token=gh_bot_token, bot_username=gh_bot_username, org_id=_org_id)
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
                 ensure_default_agent_sessions(repo_key)
                 _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
@@ -556,7 +611,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
             cleanup_stale_repo_data(repo_key)
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
                                      github_webhook_token=api_token,
-                                     bot_github_token=gh_bot_token, bot_username=gh_bot_username)
+                                     bot_github_token=gh_bot_token, bot_username=gh_bot_username, org_id=_org_id)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             ensure_default_agent_sessions(repo_key)
             _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
@@ -657,7 +712,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
         # 4) webhook：统一用 bot token 查/建（方案 C）
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
-            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username)
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username, org_id=_org_id)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
@@ -668,7 +723,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
         # 清理同名旧仓库残留的 DB 数据（同上）
         from src.api.onboarding import cleanup_stale_repo_data
         cleanup_stale_repo_data(repo_key)
-        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username)
+        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username, org_id=_org_id)
         user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
@@ -760,8 +815,18 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 
 
 @router.get("/managed", operation_id="repos_managed", summary="List managed repositories", description="Lists repositories hosted by the platform for the current user.")
-def list_managed_repos(user: dict = Depends(require_no_session_token)):
-    repos = user_db.get_managed_repos(user["id"])
+def list_managed_repos(user: dict = Depends(require_org_member)):
+    org_id = user.get("org_id", 0)
+    # 个人组织放宽 org 过滤（方案A）：与 /repos/member 大堂口径一致，
+    # 侧边栏下拉框显示 user_repos.is_join=1 的仓库（不论托管在哪个组织）
+    _personal_org = False
+    if org_id:
+        try:
+            from src.user.org_db import is_org_personal
+            _personal_org = bool(is_org_personal(org_id))
+        except Exception:
+            _personal_org = False
+    repos = user_db.get_managed_repos(user["id"], org_id=org_id, personal_org=_personal_org)
     return {"repos": [{
         "repo_key": r["repo_key"],
         "full_name": r["full_name"],

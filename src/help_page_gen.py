@@ -1,8 +1,8 @@
-"""帮助文档静态页生成器（v2）：将 help/usage + help/api 的 markdown 渲染为 src/api/static/help.html。
+"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference 的 markdown 渲染为 src/api/static/help.html。
 
 v2 设计（见 docs/weekly-02/help-page-prototype.md）：
-- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / API 文档 两个独立区块
-- 目录按区块隔离：使用页=仅使用指南；API 页=仅 API；同一级小节同缩进（不互为父子）
+- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / Git事件统一模型 / API 文档 三个独立区块
+- 目录按区块隔离：使用页=仅使用指南；Git事件统一模型=参考文档；API 页=仅 API；同一级小节同缩进（不互为父子）
 - 点击目录子项左目录常驻，仅右侧内容区替换渲染对应 markdown
 - 右侧单文档渲染，H2/H3 轻量标题，仅提示/代码块带框；当前章节/小节高亮 + scrollspy
 - 主题切换(🌓 localStorage) + 移动端抽屉目录 + 侧栏搜索
@@ -37,6 +37,12 @@ USAGE_ORDER = [
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
+]
+
+# 独立参考文档（首页独立入口，不归入使用文档或 API 文档）
+REFERENCE_DIR = HELP_DIR / "reference"
+REFERENCE_ORDER = [
+    "event-mapping.md",
 ]
 _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
@@ -91,6 +97,14 @@ th{background:var(--c);font-weight:600}
 .dn{display:block;padding:6px 10px;border-radius:6px;color:var(--t1);text-decoration:none;font-size:13px}
 .dn:hover{background:var(--c)}
 .dn.active{background:rgba(59,130,246,.12);color:var(--a);font-weight:600}
+.dn-wrap{display:flex;align-items:baseline;gap:6px}
+.dov{display:inline-block;min-width:20px;flex:0 0 auto;color:var(--a);font-size:11px;font-weight:700;border:1px solid var(--a);border-radius:4px;padding:1px 4px;line-height:1.3}
+.dn-t{flex:1 1 auto}
+.caret{display:inline-block;width:16px;flex:0 0 auto;color:var(--t3);font-size:10px;text-align:center;transition:transform .15s;cursor:pointer;user-select:none}
+.caret.open{transform:rotate(90deg)}
+.subnav{display:none;margin:2px 0 6px}
+.subnav.open{display:block}
+.subnav .ds{display:flex;align-items:baseline;gap:6px}
 .ds{display:block;padding:4px 10px;border-radius:6px;color:var(--t2);text-decoration:none;font-size:12px;cursor:pointer}
 .ds:hover{color:var(--a)}
 .ds.active{background:var(--c);color:var(--a);font-weight:600}
@@ -102,6 +116,23 @@ th{background:var(--c);font-weight:600}
 .contract .dl{background:var(--a);color:#fff;text-decoration:none;border-radius:6px;padding:8px 16px;font-size:13px;font-weight:600;white-space:nowrap}
 .contract .dl:hover{opacity:.9}
 .back-top{position:fixed;bottom:26px;right:26px;background:var(--a);color:#fff;width:40px;height:40px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;border:none;font-size:18px;box-shadow:0 4px 12px rgba(0,0,0,.15)}
+/* ── API 端点卡片（标准化字段：接口说明/请求方法=路径/请求参数/响应示例/错误码说明） ── */
+.ep-card{border:1px solid var(--b);border-radius:10px;margin:26px 0;padding:16px 20px;background:linear-gradient(180deg,rgba(59,130,246,.05),transparent)}
+.ep-card .ep-h{border-left:4px solid var(--a);padding-left:12px}
+.ep-card .ep-h h2{border:0;margin:0;padding:0;display:flex;align-items:center;flex-wrap:wrap;gap:10px;font-size:15px}
+.ep-method{display:inline-block;background:var(--a);color:#fff;border-radius:6px;font-size:12px;font-weight:700;padding:3px 10px;letter-spacing:.5px;flex:0 0 auto}
+.ep-method.get{background:#22c55e}.ep-method.post{background:#3b82f6}
+.ep-method.put{background:#f97316}.ep-method.patch{background:#ec4899}
+.ep-method.delete{background:#ef4444}.ep-method.head{background:#8b5cf6}
+.ep-method.options{background:#64748b}
+.ep-path{font-family:"SF Mono",Monaco,monospace;font-size:13px;font-weight:600;background:none;padding:0;color:var(--t1)}
+.ep-title{color:var(--t2);font-size:13px}
+.ep-card h2{font-size:15px}
+.ep-card blockquote{margin:8px 0}
+.ep-label{display:block;font-size:12px;font-weight:700;color:var(--a);margin:18px 0 -2px;letter-spacing:.3px}
+.ep-card table{margin-top:12px}
+.ep-error{background:rgba(239,68,68,.06);border-left:3px solid var(--r);border-radius:6px;padding:10px 14px;color:var(--t2);font-size:13px}
+.ep-error::before{content:"错误码说明";display:block;font-weight:700;color:var(--r);margin-bottom:4px}
 @media(max-width:900px){
   .burger{display:inline-block}
   .cards{grid-template-columns:1fr}
@@ -109,11 +140,15 @@ th{background:var(--c);font-weight:600}
   .side{position:fixed;left:0;top:52px;bottom:0;width:280px;z-index:30;background:var(--bg);display:none;border-right:1px solid var(--b)}
   .side.open{display:block}
   .content{padding:20px 18px 90px}
+  .ep-card{padding:12px 14px}
+  .ep-card .ep-h h2{gap:6px;font-size:14px}
+  .ep-method{font-size:11px;padding:2px 8px}
+  .ep-path{font-size:12px}
 }
 """
 
 _MIGRATION_COMMENT = """<!--
-  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api 渲染。
+  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api + help/reference 渲染。
   如需更新任何内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 自动重新生成）。
 -->"""
 
@@ -128,27 +163,34 @@ _JS_APP = r"""
   function initMode() { var m = 'light'; try { m = localStorage.getItem('help_theme') || 'light'; } catch (e) {} setMode(m); }
   function docs(s) { return DATA[s] || []; }
   function docOf(s, id) { var d = docs(s); for (var i = 0; i < d.length; i++) { if (d[i].id === id) return d[i]; } return d[0] || null; }
-  function subLinks(cur) {
-    if (!cur) return '';
-    var out = '', t = cur.toc || [], i, r;
-    for (i = 0; i < t.length; i++) { r = t[i]; out += '<a class="ds" data-id="' + r.id + '" style="padding-left:' + (8 + 12 * (r.level - 1)) + 'px">' + esc(r.name) + '</a>'; }
-    return out;
+  function subNav(d, cur) {
+    var t = d.toc || [], out = '<div class="subnav' + (d.id === cur.id ? ' open' : '') + '" data-for="' + esc(d.id) + '">', i, r;
+    for (i = 0; i < t.length; i++) {
+      r = t[i];
+      out += '<a class="ds" data-id="' + r.id + '" style="padding-left:' + (8 + 12 * (r.level - 1)) + 'px">' + esc(r.name) + '</a>';
+    }
+    return out + '</div>';
   }
   function sideList(sec, cur) {
-    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : 'API 参考') + '</div>';
-    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : 'API 文档') + '..."></div>';
+    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : 'API 参考') + '</div>';
+    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : 'API 文档') + '..."></div>';
     var h1id = (cur && (cur.html.match(/<h1\b[^>]*id="([^"]+)"/) || [])[1]) || '';
-    var d, i;
+    var d, i, has;
     for (i = 0; i < docs(sec).length; i++) {
       d = docs(sec)[i];
-      out += '<a class="dn' + (d.id === cur.id ? ' active' : '') + '" href="#/' + sec + '/' + d.id + '" data-id="' + d.id + '"' + (d.id === cur.id && h1id ? ' data-h1="' + h1id + '"' : '') + '>' + esc(d.title) + '</a>';
-      if (d.id === cur.id) { out += subLinks(cur); }
+      has = (d.toc && d.toc.length) > 0;
+      out += '<a class="dn' + (d.id === cur.id ? ' active' : '') + '" href="#/' + sec + '/' + d.id + '" data-id="' + d.id + '"' + (d.id === cur.id && h1id ? ' data-h1="' + h1id + '"' : '') + '><span class="dn-wrap">'
++ (d.is_overview ? '<span class="dov">总览</span>' : '')
+          + (has ? '<span class="caret' + (d.id === cur.id ? ' open' : '') + '">\u25b8</span>' : '')
+        + '<span class="dn-t">' + esc(d.title) + '</span></span></a>';
+      if (has) { out += subNav(d, cur); }
     }
     return out;
   }
   function topbar(sec) {
     return '<div class="topnav"><a class="brand" href="#/">Grape 帮助中心</a>'
       + '<a class="link' + (sec === 'usage' ? ' active' : '') + '" href="#/usage">使用文档</a>'
+      + '<a class="link' + (sec === 'reference' ? ' active' : '') + '" href="#/reference">Git事件统一模型</a>'
       + '<a class="link' + (sec === 'api' ? ' active' : '') + '" href="#/api">API 文档</a>'
       + '<span class="spacer"></span>'
       + '<button class="btn theme-toggle" type="button" title="切换主题">\u2600\ufe0f/\ud83c\udf19</button>'
@@ -160,6 +202,7 @@ _JS_APP = r"""
       + '<p>帮助文档与 API 参考，按需进入。</p>'
       + '<div class="cards">'
       + '<a class="card" href="#/usage"><div class="big">\ud83d\udcd6 使用文档</div><div>快速上手 · Agent 详解 · 流水线 · 技能 · FAQ</div><div class="go">进入使用文档 \u2192</div></a>'
+      + '<a class="card" href="#/reference"><div class="big">\ud83d\udd04 Git事件统一模型</div><div>GitCode/GitHub Webhook → Grape 内部事件类型映射参考</div><div class="go">进入 Git事件统一模型 \u2192</div></a>'
       + '<a class="card" href="#/api"><div class="big">\u26ed API 文档</div><div>认证与通用约定 · 任务/仓库/技能 等接口参考</div><div class="go">进入 API 文档 \u2192</div></a>'
       + '</div></div>';
   }
@@ -190,7 +233,10 @@ _JS_APP = r"""
       var q = (box.value || '').toLowerCase();
       var items = Array.prototype.slice.call(document.querySelectorAll('.side .dn'));
       for (var i = 0; i < items.length; i++) {
-        items[i].style.display = (!q || items[i].textContent.toLowerCase().indexOf(q) >= 0) ? '' : 'none';
+        var m = (!q || items[i].textContent.toLowerCase().indexOf(q) >= 0);
+        items[i].style.display = m ? '' : 'none';
+        var nav = document.querySelector('.subnav[data-for="' + items[i].getAttribute('data-id') + '"]');
+        if (nav) { nav.style.display = q ? (m ? 'block' : 'none') : ''; }
       }
     });
     box.addEventListener('keydown', function (e) {
@@ -206,11 +252,59 @@ _JS_APP = r"""
   function contractBar() {
     return '<div class="contract"><div class="ct-info"><b>OpenAPI 契约</b><small>OpenAPI 3.1 \u00b7 对外安全接口 \u00b7 Bearer / PRIVATE-TOKEN / access_token 三通道认证</small></div><a class="dl" href="' + OPENAPI_URL + '" download>⬇ 下载 openapi.json</a></div>';
   }
+  function labelBefore(el, text) {
+    var chip = document.createElement('span');
+    chip.setAttribute('class', 'ep-label');
+    chip.textContent = text;
+    el.parentNode.insertBefore(chip, el);
+  }
+  function decorateApi(root) {
+    var nodes = Array.prototype.slice.call(root.childNodes);
+    var ep = null, descLabeled = false, paramLabeled = false, i, el, m;
+    for (i = 0; i < nodes.length; i++) {
+      el = nodes[i];
+      if (el.nodeType !== 1) { continue; }
+      if (el.tagName === 'H2') {
+        m = /^(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\s+(\S+)/i.exec(el.textContent || '');
+        if (m) {
+          ep = document.createElement('section');
+          ep.setAttribute('class', 'ep-card');
+          el.parentNode.insertBefore(ep, el);
+          var rest = (el.textContent || '').slice(m[0].length).replace(/^\s*[—\-–]\s*/, '');
+          el.setAttribute('class', 'ep-h');
+          el.innerHTML = '<span class="ep-method ' + m[1].toLowerCase() + '">' + m[1].toUpperCase() + '</span>'
+            + '<code class="ep-path">' + esc(m[2]) + '</code>'
+            + (rest ? '<span class="ep-title">' + esc(rest) + '</span>' : '');
+          ep.appendChild(el);
+          descLabeled = false;
+          paramLabeled = false;
+        } else { ep = null; }
+        continue;
+      }
+      if (!ep) { continue; }
+      if (el.tagName === 'BLOCKQUOTE' && !descLabeled) {
+        labelBefore(el, '接口说明');
+        descLabeled = true;
+      } else if (el.tagName === 'TABLE') {
+        labelBefore(el, paramLabeled ? '出参 / 字段说明' : '请求参数 · 类型/必填/说明');
+        paramLabeled = true;
+      } else if (el.tagName === 'P' && /(返回[:：]|错误码|出错|错误)/.test(el.textContent || '')) {
+        el.setAttribute('class', 'ep-error');
+      }
+      ep.appendChild(el);
+    }
+    Array.prototype.slice.call(root.querySelectorAll('.ep-card')).forEach(function (card) {
+      var pres = card.querySelectorAll('pre');
+      if (pres.length) { labelBefore(pres[pres.length - 1], '响应示例'); }
+    });
+  }
   function renderSection(sec, cur) {
     var body = cur ? cur.html : '';
     if (sec === 'api') { body = contractBar() + body; }
     app.innerHTML = topbar(sec) + '<div class="body"><aside class="side" id="side">' + sideList(sec, cur) + '</aside><main class="content" id="content"></main></div>';
-    document.getElementById('content').innerHTML = body;
+    var contentEl = document.getElementById('content');
+    contentEl.innerHTML = body;
+    if (sec === 'api') { decorateApi(contentEl); }
     window.scrollTo(0, 0);
     var sideEl = document.getElementById('side');
     if (sideEl) { sideEl.classList.remove('open'); }
@@ -219,19 +313,43 @@ _JS_APP = r"""
   }
   function route() {
     var raw = (location.hash || '').replace(/^#/, '');
+    var frag = '';
+    var hashIdx = raw.lastIndexOf('#');
+    if (hashIdx >= 0) { frag = raw.slice(hashIdx + 1); raw = raw.slice(0, hashIdx); }
     var parts = raw.split('/').filter(Boolean);
     var sec = parts[0];
-    if (sec !== 'usage' && sec !== 'api') { renderHome(); return; }
-    renderSection(sec, docOf(sec, parts[1]));
+    if (sec !== 'usage' && sec !== 'api' && sec !== 'reference') { renderHome(); return; }
+    var cur = docOf(sec, parts[1]);
+    renderSection(sec, cur);
+    if (frag) {
+      var target = document.getElementById(frag);
+      if (target) { setTimeout(function () { target.scrollIntoView({ behavior: 'smooth', block: 'start' }); }, 60); }
+    }
   }
   app.addEventListener('click', function (e) {
+    var caret = e.target.closest ? e.target.closest('.caret') : null;
+    if (caret) {
+      e.preventDefault();
+      var dn = caret.closest('a.dn');
+      var nav = dn && document.querySelector('.subnav[data-for="' + dn.getAttribute('data-id') + '"]');
+      if (nav) { nav.classList.toggle('open'); }
+      caret.classList.toggle('open');
+      return;
+    }
     var sub = e.target.closest ? e.target.closest('a.ds') : null;
     if (sub) {
       e.preventDefault();
       var el = document.getElementById(sub.getAttribute('data-id'));
-      if (el) { el.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
-      var links = Array.prototype.slice.call(document.querySelectorAll('.side .ds'));
-      for (var i = 0; i < links.length; i++) { links[i].classList.toggle('active', links[i] === sub); }
+      if (el) {
+        el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        var links = Array.prototype.slice.call(document.querySelectorAll('.side .ds'));
+        for (var i = 0; i < links.length; i++) { links[i].classList.toggle('active', links[i] === sub); }
+      } else {
+        var nav = sub.closest('.subnav');
+        var docId = nav ? nav.getAttribute('data-for') : '';
+        var sec2 = (location.hash || '').replace(/^#/, '').split('/').filter(Boolean)[0] || 'api';
+        location.hash = '#/' + sec2 + '/' + docId + '#' + sub.getAttribute('data-id');
+      }
       return;
     }
     if (e.target.closest('.theme-toggle')) {
@@ -290,6 +408,16 @@ def _collect_toc(tokens: list, prefix: str) -> list[dict]:
 
     walk(tokens)
     return rows
+
+
+def mark_overview(items: list[dict], section: str) -> None:
+    """标记总览文档（api 的 README），不分配任何编号（help-center-remove-auto-numbering-design.md 方案 B）。
+
+    系统不再为文档/小节生成序号：文档正文 H1 的手写编号为唯一正体，侧栏仅显示标题。
+    """
+    for item in items:
+        item["no"] = ""
+        item["is_overview"] = (section == "api" and item["id"] == "README")
 
 
 def _adorn_blockquotes(body: str) -> str:
@@ -351,11 +479,30 @@ def _section_data(usage: bool) -> list[dict]:
         body = _rewrite_md_hrefs(body, section)
         title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
         items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
+    mark_overview(items, section)
+    return items
+
+
+def _reference_data() -> list[dict]:
+    """独立参考文档（首页独立入口）"""
+    items = []
+    for fname in REFERENCE_ORDER:
+        path = REFERENCE_DIR / fname
+        if not path.is_file():
+            continue
+        body, tokens = _render_file(path)
+        prefix = re.sub(r"[^0-9a-zA-Z]", "-", path.stem).strip("-") + "-"
+        body = _prefix_heading_ids(body, tokens, prefix)
+        body = _adorn_blockquotes(body)
+        body = _rewrite_md_hrefs(body, "reference")
+        title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
+        items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
+    mark_overview(items, "reference")
     return items
 
 
 def build_data() -> dict:
-    return {"usage": _section_data(True), "api": _section_data(False)}
+    return {"usage": _section_data(True), "api": _section_data(False), "reference": _reference_data()}
 
 
 def build_help_html(data: dict | None = None) -> str:
@@ -382,7 +529,7 @@ def generate() -> int:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = build_data()
     OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
-    return len(data["usage"]) + len(data["api"])
+    return len(data["usage"]) + len(data["api"]) + len(data.get("reference", []))
 
 
 def write_openapi_contract(schema: dict, help_path: Path | None = None, static_path: Path | None = None) -> int:

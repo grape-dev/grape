@@ -3,7 +3,7 @@ import json
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.user import db as user_db
-from src.api.deps import require_no_session_token
+from src.api.deps import require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.repo_key import from_repo_key
@@ -351,9 +351,9 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 
 # ====== Agent Runtimes ======
 
-@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params.")
-def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 0,
-                       scope: str = ""):
+@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo.")
+def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 0,
+                       scope: str = "", repo: str = ""):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -364,6 +364,9 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
     - page_size>0 → 返回 {runtimes: [...page slice...], total: N, page: P, page_size: S}
     可见性过滤在应用层完成（依赖 credential scope + 用户仓库列表），无法纯 SQL 分页，
     因此先全量过滤再切片——total 为过滤后总数。
+
+    Issue #277 数据隔离：repo 参数非空时，repo scope 引擎仅返回该仓库的引擎，
+    避免跨仓库看到其他仓库的 worker 设备和引擎。
     """
     from src.user import db as user_db
     from src.runtime.instances import instance_name
@@ -384,13 +387,35 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
             pass
 
     # 凭据映射 + 可见性过滤（共享 helper，Issue #185 审查修复）
+    # Issue #277 数据隔离：repo 参数非空时，repo scope 仅返回当前仓库的引擎
     cred_map = _build_cred_map(db, db_lock)
-    _visible_credential = _make_visible_credential_fn(uname, user_repos)
+    _visible_credential = _make_visible_credential_fn(uname, user_repos, repo_filter=repo)
 
     cached = user_db.get_agent_runtimes(scope=None)
+    _org_id = user.get("org_id", 0)
+    # 判断当前组织是否是个人组织（个人组织显示 global 引擎，非个人组织严格隔离）
+    _is_personal_org = False
+    if _org_id:
+        from src.user.org_db import is_org_personal
+        _is_personal_org = is_org_personal(_org_id)
+    _filter_org_id = 0 if _is_personal_org else _org_id
     now = __import__("time").time()
     visible_runtimes = []
     for rt in cached:
+        # 组织隔离：
+        # 非个人组织：只显示 org_id 匹配的引擎（不含 global org_id=0）
+        # 个人组织：只显示 org_id=0（全局/本机）和 org_id=自身个人组织的引擎，
+        #           不显示其他非个人组织的引擎
+        rt_org_id = rt.get("org_id") or 0
+        if _filter_org_id:
+            if rt_org_id != _filter_org_id:
+                continue
+        elif _is_personal_org and rt_org_id and rt_org_id != _org_id:
+            # 个人组织：跳过其他非个人组织（org_id>0 且不是自己）的引擎
+            # 但需要检查该 org 是否是个人组织——如果是个人组织则不跳过
+            from src.user.org_db import is_org_personal
+            if not is_org_personal(rt_org_id):
+                continue
         rt["health"] = _runtime_health(rt, now)
         cid = rt.get("credential_id") or 0
         cred = cred_map.get(cid) or {"name": "", "device_name": "", "scope": "global",
@@ -447,8 +472,18 @@ def get_agent_runtimes(user: dict = Depends(require_no_session_token), page: int
         visible_runtimes.append(rt)
 
     # 设备级视图（共享 helper，Issue #185 审查修复：消除重复代码）
-    devices = _build_runtime_devices(db, db_lock, cred_map, _visible_credential,
-                                     valid_users, cached, now)
+    # org_id 过滤 cred_map 和 cached（与 runtime-devices 端点一致，防止闪现其他组织设备）
+    _devices_cred_map = cred_map
+    _devices_cached = cached
+    if _filter_org_id:
+        _devices_cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == _filter_org_id}
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) == _filter_org_id]
+    elif _is_personal_org:
+        # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎
+        _devices_cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == 0 or (v.get("org_id") or 0) == _org_id}
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) == 0 or (rt.get("org_id") or 0) == _org_id]
+    devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
+                                     valid_users, _devices_cached, now)
 
     # scope 筛选（服务端过滤）
     if scope:
@@ -520,20 +555,21 @@ def _build_cred_map(db, db_lock) -> dict:
     cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key FROM runtime_credentials")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id = r
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
                              "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or ""}
+                             "repo_key": crepo_key or "", "org_id": corg_id or 0}
     return cred_map
 
 
-def _make_visible_credential_fn(uname: str, user_repos: set):
+def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = ""):
     """返回 _visible_credential 闭包，两个端点共用。
     uname: 当前登录用户名
     user_repos: 用户可访问的仓库 full_name 集合（无前缀 owner/repo）
+    repo_filter: 当前仓库 full_name（无前缀），非空时 repo scope 仅允许该仓库（Issue #277 数据隔离）
     """
     def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
         if not cid:                      # credential_id=0（历史本机引擎）
@@ -543,6 +579,9 @@ def _make_visible_credential_fn(uname: str, user_repos: set):
         if cscope == "user":
             return cowner_name == uname
         if cscope == "repo":
+            # repo_filter 非空（Issue #277 数据隔离）：仅允许当前仓库的设备/引擎
+            if repo_filter:
+                return from_repo_key(cowner_id) == repo_filter
             if cowner_name == uname:
                 return True
             # repo_key 存储为 gitcode:owner/repo（带前缀），user_repos 无前缀
@@ -577,7 +616,9 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         c = db.cursor()
         c.execute("SELECT id FROM runtime_credentials WHERE status='active' ORDER BY id DESC")
         for (cid,) in c.fetchall():
-            cred = cred_map.get(cid) or {}
+            cred = cred_map.get(cid)
+            if not cred:
+                continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
             if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
             c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
@@ -668,15 +709,18 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
 
 # ====== Runtime Devices（设备级分页端点，Issue #185）======
 
-@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245).")
-def get_runtime_devices(user: dict = Depends(require_no_session_token), page: int = 1, page_size: int = 20,
-                        scope: str = "", type: str = "", q: str = ""):
+@router.get("/runtime-devices", operation_id="settings_runtime_devices", summary="List runtime devices (paginated)", description="Lists devices grouped by credential_id with hosted engines. Supports pagination via page/page_size and filtering via scope/type/q. total reflects the filtered count so the footer pager stays consistent with the displayed list (Issue #245). Issue #277: repo param filters repo-scoped devices to only the current repo.")
+def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 20,
+                        scope: str = "", type: str = "", q: str = "", repo: str = ""):
     """设备级视图：按 credential_id 分组，返回每个设备及其承载的引擎列表。
 
     分页（Issue #185）：page/page_size 参数对设备列表切片，total 为过滤后设备总数。
     筛选（Issue #245）：scope/type/q 参数在分页切片前过滤，total 始终为筛选后总数，
     保证底部页码总条数与实际展示数据一致（修复前端二次过滤导致 total 不更新）。
     可见性过滤与 agent-runtimes 端点一致（global + personal + repo-level）。
+
+    Issue #277 数据隔离：repo 参数非空时，repo scope 设备仅返回当前仓库的设备，
+    避免跨仓库看到其他仓库的 worker 设备和引擎。
     """
     from src.user import db as user_db
     from src.session_manager import db as _db, db_lock as _dl
@@ -688,8 +732,9 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
     now = _time.time()
 
     # 凭据映射 + 可见性过滤（共享 helper，Issue #185 审查修复）
+    # Issue #277 数据隔离：repo 参数非空时，repo scope 仅返回当前仓库的设备
     cred_map = _build_cred_map(_db, _dl)
-    _visible_credential = _make_visible_credential_fn(uname, user_repos)
+    _visible_credential = _make_visible_credential_fn(uname, user_repos, repo_filter=repo)
 
     # 有效用户集合（用于过滤已删除用户的本机引擎）
     valid_users = set()
@@ -703,6 +748,20 @@ def get_runtime_devices(user: dict = Depends(require_no_session_token), page: in
 
     # 本机引擎列表（一次性查询，传入 _build_runtime_devices 复用，消除 N+1 二次全量查询）
     _local_runtimes = user_db.get_agent_runtimes(scope=None)
+
+    # 组织隔离：非个人组织只显示 org_id 匹配的引擎/凭据
+    from src.user.org_db import is_org_personal
+    _org_id = user.get("org_id", 0)
+    _is_personal_org = is_org_personal(_org_id) if _org_id else True
+    _filter_org_id = 0 if _is_personal_org else _org_id
+    if _filter_org_id:
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == _filter_org_id]
+        # 过滤 cred_map 只保留 org_id 匹配的凭据
+        cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == _filter_org_id}
+    elif _is_personal_org:
+        # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == 0 or (rt.get("org_id") or 0) == _org_id]
+        cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == 0 or (v.get("org_id") or 0) == _org_id}
 
     # 构建设备列表（共享 helper）
     devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
@@ -776,7 +835,7 @@ def user_db_get_backend_agents_alias():
 
 
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")
-def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
+def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）
 
     P0 修复：save_agent_runtimes 可能因 MySQL Lock wait timeout (1205) 抛异常，
@@ -811,7 +870,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_no_session_token)):
 
 # 兼容别名：旧路径 /backend-agents/refresh
 @router.post("/backend-agents/refresh", operation_id="settings_backend_agents_refresh", summary="Refresh backend agents (legacy alias)", description="Legacy alias for refreshing agent runtimes.")
-async def refresh_backend_agents(user: dict = Depends(require_no_session_token)):
+async def refresh_backend_agents(user: dict = Depends(require_org_member)):
     return await refresh_agent_runtimes(user)
 
 
@@ -834,10 +893,14 @@ def _normalize_scope(scope: str) -> str:
 
 
 @router.post("/runtime-credentials", operation_id="settings_runtime_credential_create", summary="Create runtime credential", description="Creates an rta_ credential; plaintext shown once, DB stores sha256. owner = current user (not selectable); scope defaults to personal.")
-def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
-    """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。"""
+def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(require_org_member)):
+    """生成 rta_ token：仅展示一次明文，DB 存 sha256。owner=当前登录用户（不可选），scope 默认个人。
+
+    组织隔离：凭据创建时绑定当前组织 org_id。
+    """
     import hashlib, secrets
     from src.session_manager import db, db_lock
+    from src.user.org_db import is_org_personal
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
@@ -850,12 +913,16 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库范围凭据必须指定 repo_key"})
         if raw_key:
             repo_key = _resolve_repo_key(raw_key)
+    # 解析当前组织 org_id
+    _org_id = user.get("org_id", 0)
+    _is_personal = is_org_personal(_org_id) if _org_id else True
+    _cred_org_id = 0 if _is_personal else _org_id
     token = "rta_" + secrets.token_urlsafe(32)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key) VALUES (?,?,?,?,?,?)",
-                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key))
+            c.execute("INSERT INTO runtime_credentials (token_hash, name, scope, owner_id, owner_name, repo_key, org_id) VALUES (?,?,?,?,?,?,?)",
+                      (hashlib.sha256(token.encode()).hexdigest(), name, scope, repo_key if scope == "repo" else "", owner, repo_key, _cred_org_id))
             cred_id = c.lastrowid
             db.commit()
         except Exception as e:
@@ -939,12 +1006,24 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
 
 
 @router.get("/runtime-credentials", operation_id="settings_runtime_credentials", summary="List runtime credentials", description="Lists runtime credentials without token_hash/plaintext.")
-def list_runtime_credentials(user: dict = Depends(require_no_session_token)):
-    """凭据列表（不含 token_hash / 明文）"""
+def list_runtime_credentials(user: dict = Depends(require_org_member)):
+    """凭据列表（不含 token_hash / 明文），按组织过滤。
+
+    非个人组织只显示 org_id 匹配的凭据（不含 global）；
+    个人组织显示全部（兼容现有行为）。
+    """
     from src.session_manager import db, db_lock
+    from src.user.org_db import is_org_personal
+    org_id = user.get("org_id", 0)
+    _is_personal = is_org_personal(org_id) if org_id else True
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
+        if org_id and not _is_personal:
+            # 非个人组织：严格隔离，只显示 org_id 匹配的凭据
+            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials WHERE org_id=? ORDER BY id DESC", (org_id,))
+        else:
+            # 个人组织或未指定：显示全部（兼容现有行为）
+            c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, created_at, repo_key FROM runtime_credentials ORDER BY id DESC")
         return {"credentials": [
             {"id": r[0], "name": r[1], "device_name": r[2] or "", "scope": r[3],
              "owner_id": r[4], "owner": r[5] or "", "status": r[6], "last_seen_at": normalize_event_time(r[7]), "created_at": normalize_event_time(r[8]),
@@ -958,44 +1037,12 @@ def _cleanup_scene_engine_runtime_ids(rid_list: list):
 
     扫描 devops_pipeline_scene 所有活跃场景的 nodes_json，
     从每个 node 的 engine_runtime_ids 中移除在 rid_list 中的 ID，回写 DB。
+
+    引擎绑定真实性同步：实现已抽至 engine_select.cleanup_scene_engine_bindings（与
+    离线超阈值解绑共用），本函数保留为薄包装（调用点不变，行为等价）。
     """
-    if not rid_list:
-        return
-    import json as _json
-    from datetime import datetime, timezone
-    from src.session_manager import db, db_lock
-    rid_set = set(rid_list)
-    with db_lock:
-        c = db.cursor()
-        try:
-            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
-            rows = c.fetchall()
-        except Exception as _e:
-            log.warning(f"_cleanup_scene_engine_runtime_ids: query scenes failed: {_e}")
-            return
-        now = datetime.now(timezone.utc).isoformat()
-        for row_id, nodes_str in rows:
-            try:
-                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
-            except Exception:
-                continue
-            changed = False
-            for node in nodes:
-                eids = node.get("engine_runtime_ids") or []
-                if not eids:
-                    continue
-                new_eids = [eid for eid in eids if eid not in rid_set]
-                if len(new_eids) != len(eids):
-                    node["engine_runtime_ids"] = new_eids
-                    changed = True
-            if changed:
-                try:
-                    c.execute(
-                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
-                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
-                except Exception as _e:
-                    log.warning(f"_cleanup_scene_engine_runtime_ids: update scene {row_id} failed: {_e}")
-        db.commit()
+    from src.runtime.engine_select import cleanup_scene_engine_bindings
+    cleanup_scene_engine_bindings(rid_list)
 
 
 @router.post("/runtime-credentials/{cid}/revoke", operation_id="settings_runtime_credential_revoke", summary="Revoke runtime credential", description="Revokes and deletes a worker credential: removes the credential row and cascades its agent_runtimes; runtime_session bindings are reset.")

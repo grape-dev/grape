@@ -34,10 +34,29 @@ class BotLeaseStore:
         self.sweep_interval = sweep_interval
         self._disabled = False
 
-    def try_acquire(self, app_id: str) -> str | None:
+    def try_acquire(self, app_id: str, steal_after: int = 60,
+                    instance_timeout: float = 45.0) -> str | None:
         token = secrets.token_hex(16)
         expires_at = _future(self.ttl)
         try:
+            # 接管保护（cluster-im-lease-stability-design.md §2.3）：
+            # lease 虽过期，但旧 owner 心跳存活且刚过期（≤ steal_after）→ 不抢（防活体误抢）；
+            # 超过 steal_after 才允许从存活实例强制接管（防 owner 假死卡住）。
+            try:
+                info = self.lease_owner_info(app_id)
+                owner = info.get("owner") or ""
+                if owner and owner != self.instance_id and self.is_owner_alive(owner, instance_timeout):
+                    exp = (info.get("expires_at") or "").strip()
+                    if exp:
+                        from datetime import datetime, timezone
+                        try:
+                            exp_dt = datetime.strptime(exp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+                            if (datetime.now(timezone.utc) - exp_dt).total_seconds() <= steal_after:
+                                return None
+                        except ValueError:
+                            pass
+            except Exception as e:
+                log.warning(f"[lease] owner-alive precheck error {app_id}: {e}")
             from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
@@ -198,3 +217,81 @@ class BotLeaseStore:
         except Exception as e:
             log.warning(f"[lease] get_status error: {e}")
             return {}
+
+    # ── 实例注册表 / 心跳（cluster-im-lease-stability-design.md §2.1）──
+
+    def heartbeat(self, hostname: str = "", ip: str = "") -> None:
+        """上报本实例心跳（UPSERT grape_im_instance），供环 owner 计算与接管判定。"""
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) "
+                    "VALUES (?,?,?,1) "
+                    "ON CONFLICT(instance_id) DO UPDATE SET "
+                    "last_heartbeat=datetime('now'), hostname=COALESCE(excluded.hostname, hostname), "
+                    "ip=COALESCE(excluded.ip, ip), im_enabled=1",
+                    (self.instance_id, hostname, ip),
+                )
+                db.commit()
+        except Exception as e:
+            log.warning(f"[lease] heartbeat error: {e}")
+
+    def list_active_instances(self, timeout: float = 45.0, now_dt=None) -> list[str]:
+        """返回心跳存活（last_heartbeat 距今 < timeout）且 im_enabled=1 的实例 id 列表。"""
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                # 各后端时间函数统一用 python 侧计算阈值（sqlite datetime / mysql datetime 均兼容）
+                from datetime import datetime, timezone, timedelta
+                cutoff = (now_dt or datetime.now(timezone.utc).replace(tzinfo=None)) - timedelta(seconds=timeout)
+                _fmt = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+                c.execute(
+                    "SELECT instance_id FROM grape_im_instance "
+                    "WHERE im_enabled=1 AND last_heartbeat >= ?",
+                    (_fmt,),
+                )
+                return [r[0] for r in c.fetchall()]
+        except Exception as e:
+            log.warning(f"[lease] list_active_instances error: {e}")
+            return []
+
+    def lease_owner_info(self, app_id: str) -> dict:
+        """返回某 bot 当前 lease_owner（串 'owner|token'，便于查存活与防误抢）。"""
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT COALESCE(lease_owner,''), COALESCE(lease_token,''), lease_expires_at "
+                    "FROM global_im_bot_config WHERE bot_app_id=?",
+                    (app_id,),
+                )
+                r = c.fetchone()
+                return {"owner": (r[0] or "") if r else "", "token": (r[1] or "") if r else "",
+                        "expires_at": str(r[2]) if r and r[2] else ""}
+        except Exception as e:
+            log.warning(f"[lease] owner_info error: {e}")
+            return {"owner": "", "token": "", "expires_at": ""}
+
+    def is_owner_alive(self, owner: str, timeout: float = 45.0) -> bool:
+        """lease 当前 owner 是否在存活实例表中。"""
+        if not owner:
+            return False
+        try:
+            from src.session_manager import db, db_lock
+            from datetime import datetime, timezone, timedelta
+            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=timeout)
+            _fmt = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT 1 FROM grape_im_instance WHERE instance_id=? AND im_enabled=1 AND last_heartbeat >= ? LIMIT 1",
+                    (owner, _fmt),
+                )
+                return c.fetchone() is not None
+        except Exception as e:
+            log.warning(f"[lease] is_owner_alive error: {e}")
+            return False

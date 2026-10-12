@@ -141,31 +141,60 @@ def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue
         return c.lastrowid
 
 
+def _build_task_conversation_title(issue_number: int, title: str = "") -> str:
+    """生成任务会话标题：`Issue #N · {title}`（title 空回退 `Issue #N`）。
+
+    与需求中心看板卡片标题风格一致；超长截断保护（title 部分上限 80 字符）。
+    """
+    _MAX_TITLE_LEN = 80
+    clean_title = (title or "").strip()
+    if clean_title:
+        if len(clean_title) > _MAX_TITLE_LEN:
+            clean_title = clean_title[:_MAX_TITLE_LEN]
+        return f"Issue #{issue_number} · {clean_title}"
+    return f"Issue #{issue_number}"
+
+
 def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
                               title: str = "", description: str = "",
                               write_context_on_reuse: bool = False) -> str:
-    """为任务查找/复用「Issue #N」对话（任务中心「去对话」入口）。
+    """为任务查找/复用「Issue #N · {title}」对话（任务中心「去对话」入口）。
 
-    - 复用：同用户已有该 Issue 对话 → 补 conv_type/issue_number 标记；
+    - 复用：同用户已有该 Issue 对话（按 conv_type='task' + issue_number 列匹配，
+      旧格式 `Issue #N` 字符串作回退）→ 补 conv_type/issue_number 标记；
       write_context_on_reuse=True 时再次写入上下文消息（notify 语义：每次分配都刷上下文）
+    - 存量升级：复用命中旧标题 `Issue #N` 的会话时刷新为新格式（不覆盖用户自定义标题）
     - 新建：create_conversation(conv_type="task") 并写入任务上下文消息。
     - 失败返回空串（不抛异常，旁路不影响任务建档）。
     """
     from src.session_manager import get_user_conversations, create_conversation, update_conversation, add_message
     conv_id = ""
+    new_title = _build_task_conversation_title(issue_number, title)
+    old_title = f"Issue #{issue_number}"
     try:
         convs = get_user_conversations(user_id, repo_key=repo_key, limit=50)
+        matched = None
         for conv in convs:
-            if conv.get("title") == f"Issue #{issue_number}":
-                conv_id = conv["id"]
+            _ct = conv.get("conv_type") or ""
+            _in = conv.get("issue_number") or 0
+            if _ct == "task" and _in == issue_number:
+                matched = conv
                 break
-        if conv_id:
+        if matched is None:
+            for conv in convs:
+                if conv.get("title") == old_title:
+                    matched = conv
+                    break
+        if matched is not None:
+            conv_id = matched["id"]
             update_conversation(conv_id, conv_type="task", issue_number=issue_number)
+            if (matched.get("title") or "") == old_title:
+                update_conversation(conv_id, title=new_title)
             if write_context_on_reuse:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
                 add_message(conv_id, "agent", ctx_msg)
         else:
-            conv_id = create_conversation(user_id, repo_key, title=f"Issue #{issue_number}",
+            conv_id = create_conversation(user_id, repo_key, title=new_title,
                                           conv_type="task", issue_number=issue_number)
             try:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
@@ -182,7 +211,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
-                      sender: str = "") -> int | None:
+                      sender: str = "",
+                      org_id: int = 0) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id
@@ -222,6 +252,20 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
+    # org_id 未显式传入时，从 managed_repos 表推断仓库关联的组织
+    if not org_id:
+        try:
+            from src.session_manager import db as _org_db, db_lock as _org_db_lock
+            with _org_db_lock:
+                _oc = _org_db.cursor()
+                _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                _or = _oc.fetchone()
+                if _or and _or[0]:
+                    org_id = _or[0]
+                else:
+                    log.info(f"ensure_issue_task: managed_repos has no org_id for repo_key={repo_key}, org_id stays 0")
+        except Exception as _e:
+            log.warning(f"ensure_issue_task: failed to infer org_id from managed_repos for {repo_key}: {_e}")
     with db_lock:
         c = db.cursor()
         # 幂等去重：同一平台 issue 唯一一张卡，任何状态都复用（2026-10-06 修复：
@@ -235,6 +279,9 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = row[0]
             linked = row[1]
             _cur_st = row[2] or ""
+            # 复用路径：如果已有行 org_id=0 但推断出 org_id>0，则回补（session_store 先建行的 org_id 为 0）
+            if org_id:
+                c.execute("UPDATE issue SET org_id=? WHERE id=? AND (org_id=0 OR org_id IS NULL)", (org_id, task_id))
             if _cur_st not in ("active", "processing"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
@@ -275,10 +322,10 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number))
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id)
             )
             db.commit()
             task_id = c.lastrowid
@@ -348,24 +395,22 @@ def close_issue_tasks(repo_key: str, issue_number: int) -> int:
 
 
 def _close_other_assignee_tasks(repo_key: str, issue_number: int, keep_assignee: str) -> int:
-    """换人：将同 issue 其他 assignee 的 active/processing 任务置为 completed（reassigned）"""
-    with db_lock:
-        c = db.cursor()
-        c.execute(
-            "UPDATE issue SET status='completed', completed_reason='reassigned', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing') AND assignee<>?",
-            (repo_key, issue_number, keep_assignee)
-        )
-        db.commit()
-        return c.rowcount
+    """换人：不再把需求标完成（reassigned 语义错位，见 reassign-takeover-no-complete-design.md）。
+
+    单行模型（issue.(repo_key, issue_number) UNIQUE）下 assignee<>keep 基本不命中；
+    责任转移由 _ensure_assignee_task_card 更新 assignee 承担。保持 no-op 幂等，不触碰需求状态。
+    """
+    return 0
 
 
 def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
-    """bot 接管：将同 issue active 任务置 processing（Issue #51：不再直接 completed）。
+    """bot 接管：不把需求标完成（bot_takeover 语义错位，见 reassign-takeover-no-complete-design.md）。
 
-    见 task-lifecycle-design.md §2.3：issue agent 将 assignee 刷为 grape_bot 表示自己接管。
-    Issue #51 修订：不再直接关闭，改为走 pending_review 流程。
-    如果有 agent 正在 running，不修改 stage（等 agent 完成后再判定）。
+    接管语义 = bot 自己继续处理，绝不完结需求：
+    - stage='done'（本已终态）→ 早退不改状态（已完成的保持 completed，不翻回不重标）；
+    - stage='pending_review' → 保持 pending_review；
+    - 无 running agent 且活跃 → pending_review 等待开发者确认；
+    - 有 agent 在 running → 不修改，等 agent 完成后再判定。
     """
     from src.api.session_store import get_issue_stage, set_issue_stage
     _issue_id = f"#{issue_number}"
@@ -381,11 +426,8 @@ def _close_issue_tasks_bot_takeover(repo_key: str, issue_number: int) -> int:
         _has_running = c.fetchone() is not None
 
         if _stage == "done":
-            # stage=done → 直接 completed
-            c.execute(
-                "UPDATE issue SET status='completed', completed_reason='bot_takeover', completed_at=datetime('now') "
-                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input','pending_review')",
-                (repo_key, issue_number))
+            # 本已终态：bot 接管不改变完成状态（防止重复完成 / 翻活已完成需求）
+            return 0
         elif _stage == "pending_review":
             # Issue #85: stage=pending_review → 保持，不自动 completed
             c.execute(
@@ -473,14 +515,16 @@ def _is_last_stage_node(repo_key: str, issue_number: int) -> bool:
         return False
 
 
-def _complete_pending_review(repo_key: str, issue_number: int, evidence: str) -> bool:
-    """review-pass done 分支：status=completed + stage=done（合入/收尾）。返回是否变更。"""
+def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
+                         statuses: tuple = ("pending_review",)) -> bool:
+    """把给定 status 集合内的问题置 completed + stage=done（合入/收尾）。返回是否变更。"""
     with db_lock:
         c = db.cursor()
+        _ph = ",".join("?" * len(statuses))
         c.execute(
-            "UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
-            "WHERE repo_key=? AND issue_number=? AND status='pending_review'",
-            (repo_key, issue_number))
+            f"UPDATE issue SET status='completed', completed_reason='review_passed', completed_at=datetime('now') "
+            f"WHERE repo_key=? AND issue_number=? AND status IN ({_ph})",
+            (repo_key, issue_number, *statuses))
         db.commit()
         _changed = c.rowcount > 0
     if _changed:
@@ -495,20 +539,33 @@ def _complete_pending_review(repo_key: str, issue_number: int, evidence: str) ->
 
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
-    """Agent 判定用户通过审核（幂等）：仅 `pending_review` 可退出。
-    target=processing → 继续流水线；target=done → status=completed + stage=done（合入/收尾）。
+    """Agent 判定用户通过审核（幂等）。
 
-    归一兜底（review-pass-last-node-force-done-design.md）：target=processing 但当前 stage 已是
-    流水线末节点（next=='done'）→ 无下游可续，归一为 done（否则卡片卡死 processing）。
-    仅 review-pass；review-reject 的 processing（打回继续改）不归一。
+    - target=done：pending_review → completed+done（合入/收尾）；
+      **末节点放宽（#2266）**：若当前 stage 为流水线末节点（next=='done'），status 处于
+      active/processing/awaiting_input 也放行 done（CLI 流水线可从未进入 pending_review，
+      如 PR 已合入但需求卡 active → 原路径 noop）。防中间节点误终态：非末节点仍仅 pending_review 可退出。
+    - target=processing：仅 pending_review → processing（继续流水线）；末节点触达则归一 done
+      （review-pass-last-node-force-done-design.md，无下游可续）。
+    - 非命中 → noop。
     """
     try:
         if target == "done":
-            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+            if _is_last_stage_node(repo_key, issue_number):
+                # 末节点：兼容 pending_review + 放宽 active/processing/awaiting_input（方向 A）
+                if _complete_issue_done(repo_key, issue_number, evidence,
+                                        ("pending_review", "active", "processing", "awaiting_input")):
+                    return "passed_done"
+                return "noop"
+            # 非末节点：保持原契约（仅 pending_review），防中间节点误终态
+            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
+                                                          ("pending_review",)) else "noop"
         if _is_last_stage_node(repo_key, issue_number):
+            # 末节点 + processing → 归一 done（无下游可续）
             log.info(f"Issue review-pass normalized last-node target=processing→done: "
                      f"{repo_key}/#{issue_number} evidence={evidence[:60]}")
-            return "passed_done" if _complete_pending_review(repo_key, issue_number, evidence) else "noop"
+            return "passed_done" if _complete_issue_done(repo_key, issue_number, evidence,
+                                                          ("pending_review", "active", "processing", "awaiting_input")) else "noop"
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -646,16 +703,30 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     return "\n".join(lines)
 
 
+def _vcs_issue_url(repo_key: str, issue_number: int) -> str:
+    """repo_key → VCS Issue 公开页 URL（gitcode/github/gitlab 分流）。
+
+    无编号 / 坏仓库（缺 owner 或 repo）→ ''。未知 provider 前缀 → 默认 GitCode。
+    """
+    from src.repo_key import split_owner_repo
+    if not issue_number:
+        return ""
+    owner, repo = split_owner_repo(repo_key)
+    if not owner or not repo:
+        return ""
+    _p = str(repo_key).split(":", 1)[0]
+    if _p == "github":
+        return f"https://github.com/{owner}/{repo}/issues/{issue_number}"
+    if _p == "gitlab":
+        return f"https://gitlab.com/{owner}/{repo}/-/issues/{issue_number}"
+    return f"https://gitcode.com/{owner}/{repo}/issues/{issue_number}"
+
+
 def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> list:
     """通知卡快捷按钮：进入任务会话（cmd 直达）+ 查看 Issue（VCS 公开页只读）。
 
     设计：docs/weekly-05/feishu-notification-card-quick-actions-design.md。
     """
-    try:
-        from src.repo_key import split_owner_repo
-        owner, repo = split_owner_repo(repo_key)
-    except Exception:
-        owner, repo = "", ""
     _iss = f"#{issue_number}" if issue_number else ""
     actions = [{
         "tag": "button",
@@ -663,14 +734,78 @@ def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> lis
         "value": {"cmd": "/task-open", "repo_key": repo_key,
                   "issue_number": _iss, "conv_id": conv_id or ""},
     }]
-    if owner and repo and _iss:
-        base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
+    _url = _vcs_issue_url(repo_key, issue_number)
+    if _url:
         actions.append({
             "tag": "button",
             "text": {"tag": "plain_text", "content": "查看 Issue ↗"},
-            "url": f"{base}/{owner}/{repo}/issues/{_iss.lstrip('#')}",
+            "url": _url,
         })
     return actions
+
+
+_IM_NOTIFY_TEMPLATES = {
+    "task": "blue",
+    "awaiting": "orange",
+    "pending_review": "red",
+}
+_IM_NOTIFY_TITLES = {
+    "task": "📋 信息知会",
+    "awaiting": "❓ 需求待澄清",
+    "pending_review": "🔎 需求待审核",
+}
+
+
+def _build_notify_fields(repo_key: str, issue_number: int) -> list:
+    """通知卡结构化键值对字段：仓库 / Issue（带 VCS 链接）/ 需求标题（替代纯文本行，移动端对齐更好）。"""
+    from src.repo_key import from_repo_key
+    _iss = f"#{issue_number}" if issue_number else ""
+    _iss_link = ""
+    if _iss:
+        _url = _vcs_issue_url(repo_key, issue_number)
+        if _url:
+            _iss_link = f"[{_iss}]({_url})"
+    _title = _get_issue_title(repo_key, issue_number) or "—"
+    return [
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**📦 仓库**\n{from_repo_key(repo_key) or '—'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**🎯 Issue**\n{_iss_link or '—'}"}},
+        {"is_short": False, "text": {"tag": "lark_md", "content": f"**📌 需求标题**\n{_title}"}},
+    ]
+
+
+def _notify_note() -> str:
+    """通知卡底部时间戳（灰字注释）。"""
+    return f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+
+_IM_NOTIFY_COUNTERS: dict[str, int] = {}
+
+
+def _im_notify_counter(key: str) -> None:
+    """通知计数器（cluster-im-lease-stability-design.md §3.3）。"""
+    _IM_NOTIFY_COUNTERS[key] = _IM_NOTIFY_COUNTERS.get(key, 0) + 1
+
+
+def get_im_notify_counters() -> dict:
+    return dict(_IM_NOTIFY_COUNTERS)
+
+
+def _im_notify_begin(ntype: str, repo_key, issue_number, user_id, open_id, ctx):
+    _im_notify_counter("attempted")
+    _ctx_name = getattr(ctx, "name", "") if ctx else ""
+    log.info(f"[im-notify] type={ntype} repo={repo_key} issue=#{issue_number} "
+             f"user={user_id} open_id={open_id or ''} ctx={_ctx_name or 'none'}")
+
+
+def _im_notify_skip(ntype: str, issue_number, user_id, ctx, open_id):
+    if not ctx:
+        _reason = "no_ctx"
+    elif not open_id:
+        _reason = "no_openid"
+    else:
+        _reason = "no_api"
+    _im_notify_counter(f"skipped_{_reason}")
+    log.warning(f"[im-notify] type={ntype} issue=#{issue_number} user={user_id} reason={_reason}")
 
 
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
@@ -695,17 +830,23 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                 log.warning(f"Task notify: static template write failed: {e}")
 
         # 飞书仅作通知（D3）
+        _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
-            from src.repo_key import from_repo_key
-            notify_text = (f"📋 你有新的任务\n\n"
-                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
-                           f"{task_description}\n\n"
-                           f"请在任务中心查看并处理。")
+            notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
+                           if (task_description or "").strip() else "你有一条新任务待处理。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知",
-                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["task"],
+                    template=_IM_NOTIFY_TEMPLATES["task"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Task notify feishu failed: {e}")
+        else:
+            _im_notify_skip("task", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
 
@@ -728,16 +869,23 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
             except Exception as e:
                 log.warning(f"Task awaiting: template write failed: {e}")
 
+        _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
-            notify_text = (f"❓ 需要你补充信息\n\n"
-                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
-                           f"{questions}\n\n"
-                           f"请在任务中心补充后，我继续处理。")
+            notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
+                           if (questions or "").strip() else "Agent 需要你补充信息。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清",
-                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["awaiting"],
+                    template=_IM_NOTIFY_TEMPLATES["awaiting"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Task awaiting feishu failed: {e}")
+        else:
+            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
@@ -762,16 +910,23 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
             except Exception as e:
                 log.warning(f"Issue pending-review: template write failed: {e}")
 
+        _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
-            notify_text = (f"🔎 需要你审核确认\n\n"
-                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
-                           f"{review_points}{_refs_suffix}\n\n"
-                           f"请审核后回复，我继续处理。")
+            notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
+                           if (review_points or "").strip() else "请审核确认交付结果。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核",
-                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pending_review"],
+                    template=_IM_NOTIFY_TEMPLATES["pending_review"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Issue pending-review feishu failed: {e}")
+        else:
+            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
@@ -780,8 +935,11 @@ def _resolve_user_chat_bot(bm, user_id: int):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
 
     用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
+    可观测（cluster-im-lease-stability-design.md §3.1）：区分 no_bm / no_session_row /
+    bot_not_in_memory（sticky-lease 场景）→ 让"未收到通知"有日志可查。
     """
     if not bm:
+        log.info(f"[im-notify] resolve user={user_id} reason=no_bm")
         return None
     try:
         bots = bm.get_all_bots()
@@ -790,11 +948,18 @@ def _resolve_user_chat_bot(bm, user_id: int):
             row = c.execute(
                 "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
                 (user_id,)).fetchone()
-        if row and row[0] in bots:
-            return bots[row[0]]
-    except Exception:
-        pass
-    return None
+        if not row or not row[0]:
+            log.warning(f"[im-notify] resolve user={user_id} reason=no_session_row")
+            return None
+        bot = bots.get(row[0])
+        if bot:
+            log.info(f"[im-notify] resolve user={user_id} bot={row[0]} ok")
+        else:
+            log.warning(f"[im-notify] resolve user={user_id} bot={row[0]} reason=bot_not_in_memory hint=sticky-lease")
+        return bot
+    except Exception as e:
+        log.warning(f"[im-notify] resolve user={user_id} reason=bot_error err={e}")
+        return None
 
 
 class TaskCreateBody(BaseModel):
@@ -1088,9 +1253,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     _is_github = repo_key.startswith("github:")
     # _preauth_token: autopilot 等内部调用（auth_type=api_key/internal）预注入 bot token
     # JWT 登录用户的 token 是 session JWT 不是 GitCode API token，不能走此路径
+    # grape_ 前缀的是用户级 API Key（CLI 用户），同样不是 GitCode token，不能走此路径
     _preauth_token = ""
     if user.get("auth_type") in ("api_key", "internal") and user.get("token"):
-        _preauth_token = user["token"]
+        _token_val = user["token"]
+        if not _token_val.startswith("grape_"):
+            _preauth_token = _token_val
     if _preauth_token:
         api_token = _preauth_token
     elif _is_github:
@@ -1199,8 +1367,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             _log.warning(f"Auto multi-task detection failed: {_e}")
 
     # 4) 按既有流程幂等建档（同 issue 任务 id 复用）
+    _org_id = user.get("org_id", 0)
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
-                                subtask_mode=_auto_subtask_mode)
+                                subtask_mode=_auto_subtask_mode, org_id=_org_id)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记

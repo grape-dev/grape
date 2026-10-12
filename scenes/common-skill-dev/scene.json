@@ -1,0 +1,57 @@
+{
+  "name": "common-skill-dev",
+  "version": "1.0.0",
+  "display_name": "通用 Skill 开发（自定义）",
+  "description": "通用技能开发场景（用户自定义技能使用场景），基于 grape 基础技能框架开发和发布技能包",
+  "category": "skill-dev",
+  "recommended_template": "hello-skill",
+  "onboarding": "repo-onboarding",
+  "tags": [
+    "skill",
+    "common",
+    "framework"
+  ],
+  "author": "grape-team",
+  "nodes": [
+    {
+      "id": "vod",
+      "tag": "vod",
+      "skill": "vod",
+      "mode": "emit",
+      "next": "issue",
+      "handoff": "a2a"
+    },
+    {
+      "id": "issue",
+      "tag": "issue",
+      "skill": "skill-issue",
+      "mode": "emit",
+      "next": "coding",
+      "handoff": "a2a"
+    },
+    {
+      "id": "coding",
+      "tag": "coding",
+      "skill": "common-skill-creator",
+      "mode": "emit",
+      "next": "qa",
+      "handoff": "a2a"
+    },
+    {
+      "id": "qa",
+      "tag": "qa",
+      "skill": "common-skill-tester",
+      "mode": "emit",
+      "next": "sre",
+      "handoff": "a2a"
+    },
+    {
+      "id": "sre",
+      "tag": "sre",
+      "skill": "skill-publish",
+      "mode": "emit",
+      "next": "done",
+      "handoff": "complete"
+    }
+  ]
+}

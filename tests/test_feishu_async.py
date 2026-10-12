@@ -445,6 +445,24 @@ class TestFeishuAsyncHttp:
         card = json.loads(payload["content"])
         assert all(el.get("tag") != "action" for el in card["elements"])
 
+    def test_send_card_to_user_template_fields_note(self):
+        """通知卡格式优化：header 模板色 + 结构化字段 + 底部时间戳。"""
+        api, sess = _api_with_session()
+        sess.post.return_value = _HttpCtx(_FakeResp({"data": {"message_id": "mid"}}))
+        fields = [{"is_short": True, "text": {"tag": "lark_md", "content": "**📦 仓库**\nowner/repo"}}]
+        with patch.object(api, "get_tenant_token", new=AsyncMock(return_value="tok")):
+            asyncio.run(api.send_card_to_user(
+                _ctx(), "ou1", "body", title="❓ 需求待澄清", template="orange",
+                fields=fields, note="发送时间：2026-10-11 14:30"))
+        req = sess.post.call_args
+        payload = req[1]["json"]
+        card = json.loads(payload["content"])
+        assert card["header"]["template"] == "orange"
+        assert card["header"]["title"]["content"] == "❓ 需求待澄清"
+        assert any(el.get("tag") == "div" and el.get("fields") == fields for el in card["elements"])
+        assert card["elements"][-1]["tag"] == "note"
+        assert card["elements"][-1]["elements"][0]["content"] == "发送时间：2026-10-11 14:30"
+
     def test_parse_card_action_passes_card_value(self):
         evt = {
             "event": {

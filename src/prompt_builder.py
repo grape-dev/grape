@@ -336,36 +336,11 @@ Use Python to save discovered mappings in the bot's sessions.db:
     return "\n".join(lines)
 
 
-def build_chat_role_definition(repo_key="") -> str:
-    _vcs = _vcs_name(repo_key)
-    _token_env = _vcs_token_env(repo_key)
-    return f"""You are a DevOps operations assistant. Your domain:
-- Code review, build diagnosis, deployment guard, incident triage
-- Issue/PR analysis, changelog generation, repository management
-- Repository (GitCode/GitHub) API operations
+def _build_base_chat_role(repo_key="") -> str:
+    """Chat 级公共角色基底（领域声明 + SECURITY），general/issue 在此之上叠加差异段。
 
-You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
-
-Reply rules:
-1. DevOps topic: analyze and reply
-2. NOT DevOps topic: politely explain you only handle DevOps
-3. Never write code, modify files, or execute git commands
-4. Always reply in Chinese. Never include internal reasoning or process steps.
-5. MEDIA EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" or "## 用户上传的视频分析" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.
-
-SECURITY (MUST FOLLOW):
-1. Use ONLY the {_vcs} token provided in this prompt ({_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.
-2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
-3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.
-4. NEVER write any token into files, logs, or comments."""
-
-
-def build_task_role_definition(repo_key="") -> str:
-    """Task 会话专属 Role（task-vs-general-chat-flow-analysis.md §2.1）。
-
-    与 general 的 build_chat_role_definition 不同：task 会话是**已被分配 Issue** 的对话，
-    职责是澄清该 Issue 需求并回帖，不是"收到任务再创建新 Issue"。因此去掉
-    general 的「创建 Issue 转交流水线」流程，突出澄清+回帖边界（对齐 chat-prompt-overview §2.2）。
+    抽自原 build_chat_role_definition / build_task_role_definition 的共同部分，
+    避免措辞漂移（A4）。
     """
     _vcs = _vcs_name(repo_key)
     _token_env = _vcs_token_env(repo_key)
@@ -376,17 +351,41 @@ def build_task_role_definition(repo_key="") -> str:
 
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
 
-## Current Role (task conversation)
-You are in a requirement-clarification conversation for an **already-assigned Issue**. Your duties:
-1. Communicate with the user in multiple rounds around the Issue requirement, clarifying key parameters and the implementation approach;
-2. Post the clarification conclusions back to the corresponding Issue ({_vcs} comment);
-3. Do NOT implement / deploy / write code / run git commands - implementation is executed by the pipeline (coding/sre) after you post the comment.
-
 SECURITY (MUST FOLLOW):
-1. Use ONLY the {_vcs} token provided in this prompt ({_token_env}).
-2. NEVER access the bot's internal data/, configs/, sessions.db, user_accounts.
-3. {_vcs} API 403: STOP and politely tell the user the action needs the required permission.
-4. NEVER write any token into files, logs, or comments.
+1. Use ONLY the {_vcs} token provided in this prompt ({_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.
+2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
+3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.
+4. NEVER write any token into files, logs, or comments."""
+
+
+def build_chat_role_definition(repo_key="") -> str:
+    _base = _build_base_chat_role(repo_key)
+    return f"""{_base}
+
+Reply rules:
+1. DevOps topic: analyze and reply
+2. NOT DevOps topic: politely explain you only handle DevOps
+3. Never write code, modify files, or execute git commands
+4. Always reply in the same language the user used (if the user writes in Chinese, reply in Chinese; if English, reply in English). Never include internal reasoning or process steps.
+5. MEDIA EXCEPTION (overrides rule 2): When prompt contains "## 用户上传的图片分析" or "## 用户上传的视频分析" section, the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video — UI/UX, design, layout, content, code shown in screenshot, architecture, video content, etc. These are NOT "non-DevOps topics". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided."""
+
+
+def build_issue_role_definition(repo_key="") -> str:
+    """Issue 会话专属 Role（原 build_task_role_definition 重命名+语义扩展）。
+
+    v2 决策 R1/R2：从「任务澄清」放宽为「围绕该 Issue 的讨论」——
+    可咨询状态、评审方案、解读背景、澄清需求后回帖；但保留红线
+    （不实现/不部署/不写代码/不修改仓库状态）。
+    """
+    _base = _build_base_chat_role(repo_key)
+    _vcs = _vcs_name(repo_key)
+    return f"""{_base}
+
+## Current Role (issue conversation)
+You are in a conversation about a **specific Issue**. Your duties:
+1. Discuss the Issue with the user: clarify requirements when needed, answer questions about the Issue's status/background, and review proposed approaches;
+2. If requirement clarification completes, post the clarified conclusion back to the corresponding Issue ({_vcs} comment) using the user's identity;
+3. Do NOT implement / deploy / write code / run git commands / change Issue or PR state - implementation is executed by the pipeline (coding/sre) after you post the comment.
 
 Image analysis rule:
 When the prompt contains the "## 用户上传的图片分析" section, the system has completed image visual understanding. You should answer the user's question based on that analysis; this is part of your normal duties. Do not refuse on the grounds of "cannot analyze images". Any question about the image content (including UI/UX, design, layout, content, etc.) is an image-context question and must be answered; do not refuse on the grounds of "non-DevOps topic"."""
@@ -847,73 +846,44 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
     return "\n".join(parts)
 
 
-def _get_task_description(conv: dict | None) -> str:
-    """按 conversation_id 或 (repo_key, issue_number) 反查 tasks 表任务描述。
+def build_issue_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
+                            account: str = "", runtime_id: int = 0, user_info: str = "",
+                            has_valid_session: bool = False) -> str:
+    """Issue 会话独立 prompt：围绕该 Issue 展开讨论（咨询/评审/澄清/解读）。
 
-    见 task-conversation-prompt-align-design.md §3.1。conv.id 非空优先按 conversation_id 精确反查；
-    否则回退 (repo_key, issue_number)。查不到返回空串（调用方跳过任务描述段）。
-    """
-    conv = conv or {}
-    issue_number = conv.get("issue_number") or 0
-    repo_key = conv.get("repo_key") or ""
-    conv_id = conv.get("id") or ""
-    if not issue_number:
-        return ""
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            if conv_id:
-                c.execute(
-                    "SELECT task_description FROM issue WHERE conversation_id=? AND task_description!='' ORDER BY id DESC LIMIT 1",
-                    (conv_id,))
-            else:
-                c.execute(
-                    "SELECT task_description FROM issue WHERE repo_key=? AND issue_number=? AND task_description!='' ORDER BY id DESC LIMIT 1",
-                    (repo_key, issue_number))
-            row = c.fetchone()
-            return row[0] if row else ""
-    except Exception:
-        return ""
-
-
-def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: dict = None,
-                           account: str = "", runtime_id: int = 0, user_info: str = "",
-                           has_valid_session: bool = False) -> str:
-    """任务对话独立 prompt：注入 Issue 上下文 + `场景: task`，Agent 直接走任务处理流程。
-
-    见 template-onboarding-task-full-chain-design.md §5.7.1。用于任务中心「去对话」会话
-    （chat_conversations.conv_type='task'），替代通用 build_chat_prompt。
+    原 build_task_chat_prompt（决策 R1 重命名）；语义从「任务澄清」放宽为
+    「围绕该 Issue 的讨论」（决策 R2：注入 Issue 上下文，取代 task 描述）。
+    用于 chat_conversations.conv_type='task' 会话（需求中心「去对话」/ 飞书 /task）。
     """
     conv = conv or {}
     issue_number = conv.get("issue_number") or 0
     parts = []
 
-    # Role Definition（task 专属，见 task-vs-general-chat-flow-analysis.md §2.1；
-    # 与 general 不同：去掉"创建 Issue 转交流水线"，突出澄清+回帖）
-    parts.append("## Role Definition\n" + build_task_role_definition(repo_key))
+    # Role Definition（issue 专属，见 build_issue_role_definition）
+    parts.append("## Role Definition\n" + build_issue_role_definition(repo_key))
 
     # 用户基本信息（飞书侧前置）
     if user_info:
         parts.append(user_info)
 
-    parts.extend([f"## Scene: task", f"## Task Context", f"Repository: {repo_key}", f"Issue: #{issue_number}"])
+    parts.extend([f"## Scene: issue", f"## Issue Context", f"Repository: {repo_key}", f"Issue: #{issue_number}"])
     if conv.get("title"):
         parts.append(f"Title: {conv['title']}")
-    # 注入当前执行的 runtime 引擎信息
+    # 注入当前执行的 runtime 引擎信息；403 是正常安全限制（D3 借鉴）
     if runtime_id:
         try:
             from src.runtime.engine_select import engine_name
             _be = engine_name(runtime_id) or ""
             if _be:
                 parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
+            parts.append(
+                "Bound engine info is provided in the prompt; do not check /openapi.json. "
+                "A 403 from an API is a normal security restriction - report it to the user, do not retry with other tokens."
+            )
         except Exception:
             pass
-    # 任务描述（tasks 表，职责边界已并入 Role「当前职责」）
-    task_desc = _get_task_description(conv)
-    if task_desc:
-        parts.append(f"\n### Task Description\n{task_desc}")
 
+    # Issue 上下文：事件/评论摘要（取代旧 task_description 段，R2）
     try:
         from src.api.event_store import get_issue_summary
         issue_summary = get_issue_summary(repo_key, exclude_issue=str(issue_number))
@@ -931,9 +901,11 @@ def build_task_chat_prompt(user_text: str, repo_key: str, history: list, conv: d
     parts.append(
         f"## Current Skill: chat\n"
         f"Skill file: {_sp}\n"
-        f"**MANDATORY**: Read this SKILL.md with the read tool and strictly follow its instructions to complete the task (do not skip reading or guess)."
+        f"**MANDATORY**: Read this SKILL.md with the read tool and strictly follow its instructions (do not skip reading or guess).\n"
+        f"If the SKILL.md instructs reading reference files under references/ (e.g. task-handling.md), read them as needed before you proceed.\n"
+        f"Reply in the same language the user used, concise, aligned with your current Issue discussion."
     )
-    return "\n".join(parts)
+    return "\n".join(parts) + _CHAT_PROMPT_SUFFIX
 
 
 # ====== Event 对话（event-conversation-design.md）======

@@ -18,7 +18,7 @@ let _allSkills = [];         // 当前页技能缓存
 let _featuredSkills = [];    // 精选技能（独立加载，不受搜索影响）
 let _agentStats = {};        // {agent_type: count} 来自 agent-stats 接口
 let _skillCategories = [];   // 技能分类列表 [{id, name, slug, icon, order_num}] 来自 /api/skills/categories 接口
-let _agentList = ['vod','issue','coding','qa','sre','chat'];  // 固定顺序（auto 仅 autopilot 内部使用，不在技能页面展示）
+let _agentList = ['vod','issue','coding','qa','sre','chat','auto'];  // 固定顺序
 let _activeAgentIdx = -1;    // -1=无选中(显示全部), 0+=第N个agent
 let _activeTagFilter = 'all';  // 当前标签筛选（中文 label 用于显示）
 let _activeTagFilterId = '';  // 当前标签筛选 ID（用于 API 查询和客户端过滤）
@@ -439,6 +439,21 @@ function _renderAgentSkills() {
     return;
   }
   container.innerHTML = `<div class="rgrid">${skills.map(s => _renderSkillCard(s)).join('')}</div>`;
+  // Issue #276: 技能卡片标题被省略号截断时，添加 title 属性以 tooltip 展示完整标题
+  _attachSkillTitleTooltips();
+}
+
+// Issue #276: 检测技能卡片标题是否被截断，被截断时添加 title 属性展示完整标题
+function _attachSkillTitleTooltips() {
+  var titles = document.querySelectorAll('#all-skills .rn');
+  titles.forEach(function(el) {
+    // scrollWidth > clientWidth 说明文本被 ellipsis 截断
+    if (el.scrollWidth > el.clientWidth) {
+      el.setAttribute('title', el.textContent);
+    } else {
+      el.removeAttribute('title');
+    }
+  });
 }
 
 // ── 渲染精选技能卡片（渐变广告卡风格，对齐 new.html 原型）──
@@ -741,6 +756,7 @@ function showSkillUpload() {
     {v:'vod', label:'VOD Agent'}, {v:'issue', label:'Issue Agent'},
     {v:'coding', label:'Coding Agent'}, {v:'qa', label:'QA Agent'},
     {v:'sre', label:'SRE Agent'}, {v:'chat', label:'Chat Agent'},
+    {v:'auto', label:'Auto Agent'},
   ];
   const modal = document.createElement('div');
   modal.id = 'skillUploadModal';

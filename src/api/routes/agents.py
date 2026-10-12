@@ -50,6 +50,56 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
             scene_id=scene_id, repo_key=repo_key, nodes=nodes)
 
 
+async def _remove_vod_bot(app_id: str) -> None:
+    """从 BotManager 移除 VOD bot（仅在该 app_id 已释放、无其他仓库引用时调用）。"""
+    if not app_id:
+        return
+    try:
+        from src.api.main import bot_manager
+        if bot_manager and bot_manager.api:
+            await bot_manager.remove_bot(app_id)
+            log.info(f"VOD IM: removed bot {app_id[:30]} from BotManager (unbind)")
+    except Exception as e:
+        log.warning(f"VOD BotManager update failed: {e}")
+
+
+def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
+    """VOD IM 解绑清理（Issue #294）：会话 IM 三字段置空 + 释放注册表 + 清理本仓库群会话。
+
+    返回 (old_app_id, session_id, released)；无既有会话行时返回 ("", "", False)。
+    - app_id 仍被其他仓库引用 → 只清空本仓库行，不删注册表（released=False）；
+    - 无其他引用 → 删除 global_im_bot_config 行（released=True），并清空 unified_user_mapping
+      中该 app 的 open_id/feishu_name/app_id（open_id 为 app 级，app 释放后失效，重绑需重新 p2p 确认）。
+    """
+    from datetime import datetime, timezone
+    from src.session_manager import db, db_lock
+    old_app_id = ""
+    session_id = ""
+    released = False
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, im_app_id FROM devops_agent_session WHERE repo_key=? AND agent_type='vod'", (repo_key,))
+        row = c.fetchone()
+        if not row:
+            return "", "", False
+        session_id = row[0]
+        old_app_id = row[1] or ""
+        c.execute("UPDATE devops_agent_session SET im_app_id='', im_app_secret='', im_provider='', last_active_at=datetime('now') WHERE id=?",
+                  (session_id,))
+        if old_app_id:
+            c.execute("SELECT COUNT(*) FROM devops_agent_session WHERE im_app_id=? AND repo_key!=?", (old_app_id, repo_key))
+            released = c.fetchone()[0] == 0
+            if released:
+                c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (old_app_id,))
+                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
+                          (datetime.now(timezone.utc).isoformat(), old_app_id))
+            c.execute("DELETE FROM vod_conversations WHERE agent_session_id=?", (session_id,))
+        db.commit()
+    if old_app_id:
+        log.info(f"VOD IM: unbound app_id={old_app_id[:30]} repo={repo_key} (released={released})")
+    return old_app_id, session_id, released
+
+
 def _get_agent_type_meta(agent_type: str) -> dict | None:
     """从 agent_type 表读取 Agent 元数据"""
     from src.session_manager import db, db_lock
@@ -276,6 +326,28 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     except Exception:
         pass
 
+    # 引擎绑定真实性同步 §4.3：该仓库场景有引擎被系统解绑且未重绑 → 前端编辑页提示条
+    detached_engines = []
+    try:
+        from src.session_manager import db as _sdb, db_lock as _slock
+        with _slock:
+            _sc = _sdb.cursor()
+            _sc.execute("SELECT dev_scene FROM managed_repos WHERE repo_key IN ({})".format(_rk_placeholders),
+                        tuple(_repo_keys))
+            _r = _sc.fetchone()
+            _dev_scene = _r[0] if _r else ""
+        if _dev_scene:
+            with _slock:
+                _sc = _sdb.cursor()
+                _sc.execute("SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND repo_key IN ({}) LIMIT 1".format(_rk_placeholders),
+                            (_dev_scene, *_repo_keys))
+                _sr = _sc.fetchone()
+            if _sr:
+                from src.runtime.engine_select import get_detached_engine_hints
+                detached_engines = get_detached_engine_hints(scene_row_id=_sr[0])
+    except Exception as _de:
+        log.warning(f"get_agent_detail: detached_engines lookup failed: {_de}")
+
     return {
         "agent_type": name,
         "display_name": meta["display_name"],
@@ -286,6 +358,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "backend": session_data.get("instance_name") or session_data.get("backend", ""),
         "backends": [p.get("instance_name") or p.get("name") for p in pool],  # 引擎集合（多选回显）
         "pool": pool,  # 完整集合信息（含 priority/status 等）
+        "detached_engines": detached_engines,  # 被系统解绑的引擎提示（引擎绑定真实性同步 §4.3）
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
@@ -320,6 +393,7 @@ class AgentConfig(BaseModel):
     subscribe_events: list | None = None
     im_app_id: str = ""
     im_app_secret: str = ""
+    im_unbind: bool = False  # Issue #294：显式解绑标记（防普通保存误清既有 IM 绑定）
 
 
 @router.post("/{name}/{owner}/{repo}/clean", operation_id="agents_clean", summary="Clean agent session", description="Cleans an agent session by clearing runtime_session_id; a new session is created on the next event.")
@@ -367,7 +441,13 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
 
     # VOD IM 配置：保存到 global_im_bot_config + 类型独占校验 + 清理旧 app_id
     old_app_id = ""
-    if name == "vod" and body.im_app_id:
+    _vod_unbind_session_id = ""
+    _vod_unbind_released = False
+    _vod_im_unbind = bool(name == "vod" and body.im_unbind)
+    if _vod_im_unbind:
+        # Issue #294：显式解绑（im_unbind=true）——清 IM 三字段 + 释放注册表 + 清理群会话
+        old_app_id, _vod_unbind_session_id, _vod_unbind_released = _unbind_vod_im(repo_key)
+    elif name == "vod" and body.im_app_id:
         app_secret = body.im_app_secret
         if app_secret == "********":
             try:
@@ -409,6 +489,19 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                 )
                 db.commit()
 
+    # Issue #294：解绑-only 请求（未带引擎/技能/订阅信息）→ 仅清 IM 三字段，保留其余 Agent 配置
+    if _vod_im_unbind and body.backends is None and not body.skill and not body.skill_id and body.subscribe_events is None:
+        session_id = _vod_unbind_session_id
+        if not session_id:
+            from src.api.session_store import upsert_agent_session
+            session_id = upsert_agent_session(
+                repo_key=repo_key, agent_type=name, repo_gitcode_token=repo_token,
+                im_app_id="", im_app_secret="", im_provider="",
+            )
+        # app_id 已释放（无其他仓库引用）才移除 BotManager 实例，避免影响共用该 app 的仓库
+        await _remove_vod_bot(old_app_id if _vod_unbind_released else "")
+        return {"message": "Agent 配置已更新", "session_id": session_id}
+
     # ---- 引擎配置：写入场景 node 的 engine_runtime_ids ----
     # backends 显式提供 → 解析为 runtime_id 列表，更新当前场景 node；
     # 无场景则为空（全广播/兜底）。
@@ -441,6 +534,32 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             _update_scene_engine_ids(repo_key, name, rids, user.get("id", 0))
         except Exception as e:
             log.warning(f"Agent engine config: update scene node failed: {e}")
+        # 引擎绑定真实性同步 §4.3：场景侧重绑 → 该 (场景, 节点) 的解绑审计标记 rebound，
+        # 编辑页提示条消失。按 node_tag 精确清（不动其他节点/其他场景的审计）。
+        try:
+            from datetime import datetime, timezone
+            with db_lock:
+                c3 = db.cursor()
+                c3.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
+                _r = c3.fetchone()
+                _dev_scene = _r[0] if _r else ""
+            if _dev_scene:
+                with db_lock:
+                    c3.execute(
+                        "SELECT id FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=? LIMIT 1",
+                        (_dev_scene, repo_key))
+                    _sr = c3.fetchone()
+                if _sr:
+                    _now = datetime.now(timezone.utc).isoformat()
+                    with db_lock:
+                        c3.execute(
+                            "UPDATE scene_engine_detach_log SET rebound_at=? "
+                            "WHERE scene_row_id=? AND node_tag=? AND (rebound_at='' OR rebound_at IS NULL)",
+                            (_now, _sr[0], name))
+                    if c3.rowcount:
+                        log.info(f"Agent engine rebind: marked {c3.rowcount} detach hints rebound (scene={_dev_scene}, node={name})")
+        except Exception as _re:
+            log.warning(f"Agent engine rebind: mark rebound failed: {_re}")
         log.info(f"Agent engine configured: {repo_key}:{name} -> {rids}")
 
     with db_lock:

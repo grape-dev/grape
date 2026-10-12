@@ -24,6 +24,20 @@ function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStore
 // _NO_REPLY: 内联 I18N.t('chat.no_reply')，不缓存（模块顶层缓存会在语言切换后失效）
 
 /**
+ * Issue #293: 剥离标题行首 "Issue #N · " 前缀，返回清理后标题与编号。
+ * @param {string} title - 原始标题（可能含 "Issue #N · {title}" 前缀）
+ * @returns {{title: string, issueNumber: number}}
+ */
+function _stripIssuePrefix(title) {
+  if (!title) return {title: '', issueNumber: 0};
+  var m = title.match(/^Issue\s*#(\d+)\s*·\s*/);
+  if (m) {
+    return {title: title.substring(m[0].length), issueNumber: parseInt(m[1], 10) || 0};
+  }
+  return {title: title, issueNumber: 0};
+}
+
+/**
  * 将 "Issue #N" 文本渲染为 GitCode Issue 超链接。
  * @param {string} text - 原始文本
  * @param {string} repoKey - 仓库 key（如 "songspace/hello-blog"），用于构建 URL
@@ -326,10 +340,16 @@ function loadConversations(autoSelect) {
     let html = '<div style="padding:10px 12px;border-bottom:1px solid var(--b)"><button class="bt bt-p bt-s" onclick="newConversation()" style="width:100%">' + I18N.t('chat.conversation.new') + '</button></div>';
     convs.forEach(c => {
       const active = c.id === _currentConvId ? ' style="background:var(--b)"' : '';
-      const titleHtml = c.title ? linkifyIssueNumbers(c.title, c.repo_key) : I18N.t('chat.conversation.default_title');
+      const stripped = _stripIssuePrefix(c.title || '');
+      const issueNum = (c.issue_number && c.issue_number > 0) ? c.issue_number : stripped.issueNumber;
+      const cleanTitle = stripped.title || (c.title ? '' : I18N.t('chat.conversation.default_title'));
+      const safeTitle = String(cleanTitle).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      const metaHtml = issueNum > 0
+        ? '#' + issueNum + ' · ' + fmtLocalTime(c.created_at).substring(0,16)
+        : fmtLocalTime(c.created_at).substring(0,16);
       html += `<div class="conv-item" data-id="${c.id}"${active}>
-        <div class="conv-title">${titleHtml}</div>
-        <div class="conv-meta">${fmtLocalTime(c.created_at).substring(0,16)}</div>
+        <div class="conv-title">${safeTitle}</div>
+        <div class="conv-meta">${metaHtml}</div>
         <span class="conv-del" onclick="event.stopPropagation();deleteConversation('${c.id}', event)">✕</span>
       </div>`;
     });
@@ -449,8 +469,15 @@ function switchConversation(convId) {
     const hdr = document.querySelector('.chat-hdr h2');
     if (hdr) {
       const titleBase = conv.title || 'Personal Assistant';
-      const safeTitle = String(titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-      hdr.innerHTML = I18N.t('chat.header.title_prefix') + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
+      const stripped = _stripIssuePrefix(titleBase);
+      let safeTitle = String(stripped.title || titleBase).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+      // 任务会话：前缀显示带链接的 Issue #N（gitcode/github），去品牌前缀
+      let prefix = '';
+      if (conv.conv_type === 'task' && conv.issue_number) {
+        const url = _vcsUrl(conv.repo_key || '', '/issues/' + conv.issue_number);
+        prefix = `<a href="${url}" target="_blank" rel="noopener">Issue #${conv.issue_number}</a> · `;
+      }
+      hdr.innerHTML = prefix + linkifyIssueNumbers(safeTitle, conv.repo_key || '');
     }
 
     // 渲染消息列表
@@ -460,7 +487,7 @@ function switchConversation(convId) {
       rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
         return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
       });
-      return `<div class="msg ${m.role === 'user' ? 'l' : 'r'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
+      return `<div class="msg ${m.role === 'user' ? 'r' : 'l'}">${linkifyIssueNumbers(rendered, conv.repo_key || '')}</div>`;
     }).join('') || '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_new') + '</div>';
     body.scrollTop = body.scrollHeight;
 
@@ -474,7 +501,7 @@ function switchConversation(convId) {
         if (st.status === 'running') {
           // 任务仍在执行 → 追加 3 点动画占位 + SSE 重连
           const elId = 't' + Date.now();
-          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+          body.innerHTML += '<div class="msg l" id="' + elId + '">'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
             + '</div>';
           body.scrollTop = body.scrollHeight;
@@ -688,9 +715,9 @@ function doSend(input, body) {
   if (vid) {
     imgHtml += '<div style="margin-top:4px"><div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-size:12px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>' + (_pendingVideo ? (_pendingVideo.name || 'video') : 'video') + '</div></div>';
   }
-  body.innerHTML += '<div class="msg l">' + displayMsg + imgHtml + '</div>';
+  body.innerHTML += '<div class="msg r">' + displayMsg + imgHtml + '</div>';
   const tid = 't' + Date.now();
-  body.innerHTML += '<div class="msg r" id="' + tid + '">'
+  body.innerHTML += '<div class="msg l" id="' + tid + '">'
     + '<span class="chat-dots"><span></span><span></span><span></span></span>'
     + '</div>';
   body.scrollTop = body.scrollHeight;
@@ -820,7 +847,7 @@ function resumeChatTask() {
         if (!el) {
           const elId = 't' + Date.now();
           task.el_id = elId;
-          body.innerHTML += '<div class="msg r" id="' + elId + '">'
+          body.innerHTML += '<div class="msg l" id="' + elId + '">'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
             + '</div>';
           body.scrollTop = body.scrollHeight;
@@ -863,9 +890,9 @@ function renderChatMessages(messages) {
     const textOnly = content.replace(/\[chat_img:[^\]]+\]/g, '').trim();
     if (m.role === 'user') {
       const escaped = textOnly.replace(/</g, '&lt;');
-      body.innerHTML += '<div class="msg l">' + escaped + (imgHtml !== content ? imgHtml : '') + '</div>';
+      body.innerHTML += '<div class="msg r">' + escaped + (imgHtml !== content ? imgHtml : '') + '</div>';
     } else {
-      body.innerHTML += '<div class="msg r">' + renderMarkdown(content) + '</div>';
+      body.innerHTML += '<div class="msg l">' + renderMarkdown(content) + '</div>';
     }
   });
   body.scrollTop = body.scrollHeight;

@@ -33,7 +33,10 @@ def _clean():
         c = db.cursor()
         for t in ("repo_im_group_binding", "chat_conversations", "chat_messages", "tasks", "user_repos", "managed_repos"):
             try:
-                c.execute(f"DELETE FROM {t}")
+                try:
+                    c.execute(f"DELETE FROM {t} WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
+                except Exception:
+                    pass
             except Exception:
                 pass
         c.execute("DELETE FROM chat_agent_session WHERE id LIKE 'nav-%'")
@@ -467,7 +470,7 @@ def test_unbound_no_repos_guides_repo():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='nav_chat'")
-        c.execute("DELETE FROM user_repos")
+        c.execute("DELETE FROM user_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
         db.commit()
     api = _run_msg("查询下情况")
     text = _reply_text(api)
@@ -499,22 +502,22 @@ def _build_prompt(conv_id, text="hi", repo="gitcode:navuser/repo-a", skills=None
 
 
 def test_feishu_task_conversation_uses_task_prompt():
-    """P01：飞书任务会话 → build_task_chat_prompt（场景:task + 任务边界 + Issue#）"""
+    """P01：飞书任务会话 → build_issue_chat_prompt（场景:issue + Issue 边界 + Issue#）"""
     _seed()
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #5", conv_type="task", issue_number=5)
     prompt = _build_prompt(cid)
-    assert "## Scene: task" in prompt
-    assert "## Current Role (task conversation)" in prompt
+    assert "## Scene: issue" in prompt
+    assert "## Current Role (issue conversation)" in prompt
     assert "Issue: #5" in prompt
     _clean()
 
 
 def test_feishu_general_conversation_uses_chat_prompt():
-    """P02：飞书 general 会话 → build_chat_prompt，无 task 特征"""
+    """P02：飞书 general 会话 → build_chat_prompt，无 issue 特征"""
     _seed()
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="普通")
     prompt = _build_prompt(cid)
-    assert "## Scene: task" not in prompt
+    assert "## Scene: issue" not in prompt
     assert "DevOps topic: analyze and reply" in prompt
     _clean()
 
@@ -532,17 +535,17 @@ def test_feishu_task_prompt_history_from_conversation_messages():
     _clean()
 
 
-def test_feishu_task_prompt_injects_task_description():
-    """P04：任务 prompt 显式含 ## 任务描述（经 conversation_id 反查 tasks）"""
+def test_feishu_task_prompt_no_task_description():
+    """P04：任务会话不再注入 ## 任务描述（决策 R2，改由 Issue 上下文承担）"""
     _seed()
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #7", conv_type="task", issue_number=7)
     with db_lock:
         c = db.cursor()
-        c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','处理登录超时',?,'active')", (cid,))
+        c.execute("INSERT OR REPLACE INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, conversation_id, status) VALUES (1,'navuser','gitcode:navuser/repo-a',7,'刷新readme','处理登录超时',?,'active')", (cid,))
         db.commit()
     prompt = _build_prompt(cid)
-    assert "### Task Description" in prompt
-    assert "处理登录超时" in prompt
+    assert "### Task Description" not in prompt
+    assert "处理登录超时" not in prompt
     _clean()
 
 
@@ -612,6 +615,12 @@ class TestBuildNotifyActions:
         assert acts[1]["url"] == "https://github.com/navuser/repo-a/issues/7"
         assert acts[0]["value"]["conv_id"] == ""
 
+    def test_gitlab_actions(self):
+        from src.api.issues_center import _build_notify_actions
+        acts = _build_notify_actions("gitlab:navuser/repo-a", 7, "")
+        assert len(acts) == 2
+        assert acts[1]["url"] == "https://gitlab.com/navuser/repo-a/-/issues/7"
+
     def test_empty_issue_no_url(self):
         from src.api.issues_center import _build_notify_actions
         acts = _build_notify_actions("gitcode:navuser/repo-a", 0, "")
@@ -621,3 +630,39 @@ class TestBuildNotifyActions:
         from src.api.issues_center import _build_notify_actions
         acts = _build_notify_actions("", 7, "")
         assert len(acts) == 1
+
+    def test_build_fields(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("gitcode:navuser/repo-a", 7)
+        assert len(flds) == 3
+        assert flds[0]["is_short"] is True
+        assert "**📦 仓库**" in flds[0]["text"]["content"]
+        assert "navuser/repo-a" in flds[0]["text"]["content"]
+        assert flds[1]["text"]["content"].startswith("**🎯 Issue**")
+        assert "[#7](https://gitcode.com/navuser/repo-a/issues/7)" in flds[1]["text"]["content"]
+        assert flds[2]["is_short"] is False
+        assert "**📌 需求标题**" in flds[2]["text"]["content"]
+        assert flds[0]["text"]["tag"] == "lark_md"
+
+    def test_build_fields_github_issue_link(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("github:navuser/repo-a", 7)
+        assert "[#7](https://github.com/navuser/repo-a/issues/7)" in flds[1]["text"]["content"]
+
+    def test_build_fields_gitlab_issue_link(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("gitlab:navuser/repo-a", 7)
+        assert "[#7](https://gitlab.com/navuser/repo-a/-/issues/7)" in flds[1]["text"]["content"]
+
+    def test_build_fields_no_issue(self):
+        from src.api.issues_center import _build_notify_fields
+        flds = _build_notify_fields("github:navuser/repo-a", 0)
+        assert len(flds) == 3
+        assert flds[1]["text"]["content"].endswith("—")
+        assert "[" not in flds[1]["text"]["content"]
+
+    def test_notify_note_has_timestamp(self):
+        from src.api.issues_center import _notify_note
+        note = _notify_note()
+        assert note.startswith("发送时间：")
+        assert len(note) == len("发送时间：" + "2026-10-11 14:30")

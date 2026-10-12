@@ -7,6 +7,7 @@ from src.config import log
 TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"
 TOKEN_TYPE_WEBHOOK = "webhook"
+TOKEN_TYPE_ADMIN = "admin"
 
 # 用户活跃状态追踪——内存缓冲，定时批量 flush
 _pending_active: set = set()
@@ -134,6 +135,33 @@ def get_user_or_none(request: Request) -> dict | None:
         return None
 
 
+def require_admin(authorization: str = Header(None)) -> dict:
+    """管理后台鉴权：JWT access token 且 role=admin，token_version 与 admin_accounts 一致。
+
+    - 普通用户 JWT（role 为空或非 admin）→ 403
+    - 校验失败 → 401
+    """
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
+    token = authorization.replace("Bearer ", "").strip()
+    from src.api.jwt_utils import verify_access_token
+    payload = verify_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session expired"})
+    if payload.get("role") != TOKEN_TYPE_ADMIN:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "Admin only"})
+    uid = int(payload.get("sub", 0))
+    username = payload.get("username", "")
+    token_ver = int(payload.get("ver", 0))
+    if not uid:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
+    from src.admin.db import get_admin_token_version
+    db_ver = get_admin_token_version(uid)
+    if token_ver != db_ver:
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
+    return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_ADMIN}
+
+
 def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """账户/平台管理端点鉴权：session_token（tk_）→ 403；API Key / JWT 维持现状放行。
 
@@ -144,6 +172,26 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
     if user.get("auth_type") == "session_token":
         raise HTTPException(status_code=403, detail={"code": 403,
                                                      "message": "Session token not allowed on this endpoint (account/platform management)"})
+    return user
+
+
+def require_org_member(request: Request, user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """组织成员校验依赖。返回 {**user, "org_id": int, "org_role": str}。
+
+    解析 X-Org-ID/X-Org-Slug/ query 参数获取组织上下文；
+    未指定时回退到用户的个人组织（兼容现有 API 行为）。
+    """
+    from src.api.org_context import resolve_org_context
+    from src.user.org_db import get_member_role
+    org_id = resolve_org_context(request, user.get("id") or 0)
+    role = get_member_role(user.get("id") or 0, org_id)
+    return {**user, "org_id": org_id, "org_role": role}
+
+
+def require_org_admin(user: dict = Depends(require_org_member)) -> dict:
+    """组织管理员校验（owner/admin）。"""
+    if user.get("org_role") not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "需要组织管理员权限"})
     return user
 
 

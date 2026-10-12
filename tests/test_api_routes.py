@@ -176,7 +176,7 @@ class TestRepos:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM managed_repos")
+            c.execute("DELETE FROM managed_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
             db.commit()
 
         # 清理后应为空
@@ -247,6 +247,19 @@ class TestRepos:
         # 2) 非所有者：permission.admin=True → 通过
         with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": True}}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
+
+        # 2b) 真实 GitCode 格式：维护者 access_level=40（注意 permissions.admin 恒为 false，
+        #     真实权限看 access_level / 单数 permission）→ 通过
+        with patch("src.user.repo_manager._req", return_value={
+                "access_level": 40, "role_name": "Maintainer",
+                "permissions": {"admin": False}, "permission": "admin"}):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
+
+        # 2c) 真实 GitCode 格式：开发者 access_level=30 → 拒绝
+        with patch("src.user.repo_manager._req", return_value={
+                "access_level": 30, "role_name": "Developer",
+                "permissions": {"admin": False}, "permission": "write"}):
+            assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
 
         # 3) 非所有者：permission.admin=False → 拒绝
         with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": False}}):
