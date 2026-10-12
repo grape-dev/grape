@@ -187,16 +187,37 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     except Exception:
                         pass
                 if not _undispatched:
-                    c2.execute(
-                        "SELECT ar.id, ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
-                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
-                        "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
-                        (row[12],))
-                    ar2 = c2.fetchone()
+                    # 2026-10-12 修复（!415 回归）：events.runtime 存的是「实例名」（如
+                    # opencode-worker-ecs-hd-ai-wo-0006，任务完成时实际执行引擎写回），
+                    # 不是类型名。旧兜底 WHERE ar.name=?（类型名）与实例名永远不匹配 →
+                    # task 行被清理后的历史事件全部显示"未派发/无执行引擎"。
+                    # 修法：实例名精确解析（resolve_instance_id，只认事件自己跑过的那台，
+                    # 不瞎猜——与 #285 防"错误归因"的意图一致）；解析不到再回退类型名匹配。
+                    _rt_val = (row[12] or "").strip()
+                    _resolved_rid = None
+                    try:
+                        from src.runtime.instances import resolve_instance_id
+                        _resolved_rid = resolve_instance_id(_rt_val)
+                    except Exception:
+                        _resolved_rid = None
+                    if _resolved_rid:
+                        c2.execute(
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
+                            (_resolved_rid,))
+                        ar2 = c2.fetchone()
+                    else:
+                        # 回退：旧格式类型名（本机 credential_id=0 优先、其次在线实例）
+                        c2.execute(
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                            "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
+                            (row[12],))
+                        ar2 = c2.fetchone()
                     if ar2:
-                        engine_instance = instance_name(ar2[1] or "engine", ar2[3] or "", ar2[2] or 0)
-                        engine_device = ar2[3] or ""
-                        engine_ip = ar2[4] or ""
+                        engine_instance = instance_name(ar2[0] or "engine", ar2[2] or "", ar2[1] or 0)
+                        engine_device = ar2[2] or ""
+                        engine_ip = ar2[3] or ""
     except Exception:
         pass
     result["engine_instance"] = engine_instance
