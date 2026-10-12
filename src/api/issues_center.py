@@ -1410,21 +1410,31 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             set_issue_stage(repo_key, f"#{issue_num}", "vod", "vod", assignee=assignee or "")
             # 同步触发 pipeline（不依赖 webhook，task_center 创建的事件直接入队）
             # run_pipeline 内部会调 append_event 存事件 + 路由 + 入队
+            # 方案 D（duplicate-issue-opened-event-fix-design.md）：按平台发原生 payload，
+            # 使补发事件与对应平台真实 webhook 形态一致（可读性/排查 + 去重指纹一致），
+            # 不再对 GitCode 也发 GitHub 格式合成 payload 造成「GitHub 事件」误判。
             import json as _pipe_json
-            _pipe_payload = _pipe_json.dumps({
-                "action": "opened",
-                "issue": {"number": int(issue_num), "title": body.title.strip(),
-                          "user": {"login": assignee or user["username"]}},
-                "repository": {"full_name": f"{owner}/{rname}"},
-                "sender": {"login": assignee or user["username"]},
-            }).encode()
-            _pipe_headers = {"Content-Type": "application/json"}
+            _assign = assignee or user["username"]
             if _is_github:
-                _pipe_headers["X-GitHub-Event"] = "issues"
+                _pipe_payload = {
+                    "action": "opened",
+                    "issue": {"number": int(issue_num), "title": body.title.strip(),
+                              "user": {"login": _assign}},
+                    "repository": {"full_name": f"{owner}/{rname}"},
+                    "sender": {"login": _assign},
+                }
+                _pipe_headers = {"Content-Type": "application/json", "X-GitHub-Event": "issues"}
             else:
-                _pipe_headers["X-Gitcode-Event"] = "issue_opened"
+                _pipe_payload = {
+                    "object_kind": "issue",
+                    "object_attributes": {"iid": int(issue_num), "title": body.title.strip(),
+                                          "action": "open"},
+                    "project": {"path_with_namespace": f"{owner}/{rname}"},
+                    "user": {"username": _assign},
+                }
+                _pipe_headers = {"Content-Type": "application/json", "X-Gitcode-Event": "issue_opened"}
             from src.api.event_pipeline import run_pipeline
-            _pipe_result = run_pipeline(_pipe_payload, _pipe_headers,
+            _pipe_result = run_pipeline(_pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
                                         account=repo_key, repo_key_override=repo_key)
             _log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
         except Exception as _e:

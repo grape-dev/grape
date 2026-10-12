@@ -865,6 +865,18 @@ CREATE TABLE IF NOT EXISTS session_api_tokens (
     token_sha256 TEXT NOT NULL,
     expires_at INTEGER NOT NULL DEFAULT 0
 )"""),
+    # ===== 事件活跃守卫（duplicate-issue-opened-event-fix-design.md 方案 A/C）=====
+    # 同一 (repo, issue, agent) 同一时刻只允许一条活跃事件；跨进程原子（PK 唯一约束，
+    # SQLite INSERT OR IGNORE / MySQL 由 mysql_compat 转 INSERT IGNORE）。终态释放或 TTL 兜底清理。
+    ("event_active_guard", """
+CREATE TABLE IF NOT EXISTS event_active_guard (
+    repo_key    TEXT NOT NULL,
+    issue_id    TEXT NOT NULL,
+    agent_type  TEXT NOT NULL,
+    seq         INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL DEFAULT (datetime('now')),
+    PRIMARY KEY (repo_key, issue_id, agent_type)
+)"""),
     ("api_tokens", """
 CREATE TABLE IF NOT EXISTS api_tokens (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

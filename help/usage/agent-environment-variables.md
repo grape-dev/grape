@@ -32,6 +32,7 @@ GitCode 事件（Issue/PR/评论）
 | `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
+| `GRAPE_ISSUE_ID` | **需求卡片 id（issue 表主键，整数**；awaiting-input / pending-review / review-pass 的 `--issue_id` 用此值，**非 ISSUE_NUMBER**） | 事件任务（有 Issue） | `_execute_agent`（按 `(repo_key, issue_number)` 查卡片） |
 | `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent` |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |

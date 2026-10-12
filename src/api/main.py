@@ -373,6 +373,9 @@ async def lifespan(app: FastAPI):
                         _purge_i = 0
                         from src.api.auth_token import purge_expired_session_tokens
                         await asyncio.to_thread(purge_expired_session_tokens)
+                        # 事件活跃守卫 TTL 兜底清理（进程崩溃未终态释放时自愈）
+                        from src.api.event_store import purge_stale_event_guards
+                        await asyncio.to_thread(purge_stale_event_guards)
                 except Exception as e:
                     log.warning(f"Session token purge failed: {e}")
 
