@@ -364,6 +364,7 @@ function renderAgent(name, data) {
     <div class="f1"><h2 style="font-size:16px;font-weight:600;margin-bottom:2px">${_agentTypeDisplay(name, meta)}</h2><div class="ts t2">${_agentTypeDesc(name, meta)}</div></div>
   </div>
 </div>
+${name === 'vod' ? _agentVodImSection(data) : ''}
 <div class="stats mt16 mb16">
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${et}</div><div class="l">${I18N.t('agents.event.total')}</div></div>
   <div class="st"><div class="v" style="color:${meta.color || 'var(--t2)'}">${ef}</div><div class="l">${I18N.t('agents.event.completed')}</div></div>
@@ -412,6 +413,40 @@ function _agentSubsSection(name, data) {
     <div class="srow"><label>${I18N.t('agents.subscription.merge_branch')}</label><input id="subPrBranches" value="${prBranches}" placeholder="${I18N.t('agents.subscription.merge_branch_placeholder')}" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--bg);outline:none"></div>
     <div class="ts t3" style="margin-top:6px">${I18N.t('agents.subscription.branch_hint', {name: displayName})}</div>
   </div>`;
+}
+
+function _agentVodImSection(data) {
+  // Issue #294：VOD IM 已绑定时提供解绑入口。
+  // 注：Agent 配置面板（含原 VOD IM 配置区）已在场景中心重构中移除，故改为在 VOD Agent 页
+  // 顶部渲染「已绑定渠道」卡片 + 解绑按钮（未绑定时不渲染，不影响原有页面）。
+  const im = (data && data.im) || {};
+  if (!im.im_app_id) return '';
+  const convs = im.conversations || [];
+  return `<div class="cd" style="padding:16px 20px;margin-bottom:14px">
+    <div class="flex fc jbtw" style="margin-bottom:10px">
+      <h3 style="font-size:13px;font-weight:600">${I18N.t('agents.config.im_title')}</h3>
+      <span class="ts t3">${im.connected ? I18N.t('agents.config.im_configured') : ''}</span>
+    </div>
+    <div class="srow" style="margin-bottom:0">
+      <label>${I18N.t('agents.config.bot_app_id')}</label>
+      <span class="ts t2" style="flex:1;word-break:break-all">${im.im_app_id}</span>
+      <button class="bt bt-r" onclick="unbindVodIm()" style="padding:7px 16px;flex-shrink:0">${I18N.t('agents.config.unbind')}</button>
+    </div>
+    ${convs.length ? `<div class="ts t3" style="margin-top:6px">${I18N.t('agents.config.bound_chats', {n: convs.length})}</div>` : ''}
+  </div>`;
+}
+
+function unbindVodIm() {
+  const repo = app.currentRepo();
+  if (!repo) { app.showToast(I18N.t('agents.toast.select_repo_first')); return; }
+  if (!confirm(I18N.t('agents.config.unbind_confirm'))) return;
+  // 只带解绑标记：后端仅清 IM 三字段，保留引擎/技能/事件订阅配置
+  API.put('/agents/vod/' + repo.owner + '/' + repo.name, {im_unbind: true}).then(() => {
+    app.showToast(I18N.t('agents.config.unbind_success'));
+    API.get('/agents/vod/' + repo.owner + '/' + repo.name).then(d => {
+      if (window._currentView === 'vod') renderAgent('vod', d);
+    }).catch(() => {});
+  }).catch(e => app.showToast(I18N.t('agents.config.unbind_failed', {msg: e.message})));
 }
 
 function saveAgentConfig(name) {

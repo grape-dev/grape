@@ -3,7 +3,7 @@
 > 对外公开（openapi-full-coverage-design.md A/D 批收录），认证：`require_no_session_token`。
 > scope（x-token-scope）：**全部 = user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 
-## Auth 认证
+## 认证
 
 ### GET /api/auth/profile — 用户信息
 

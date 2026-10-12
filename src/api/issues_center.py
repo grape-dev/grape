@@ -141,31 +141,60 @@ def _ensure_assignee_task_card(user_id: int, assignee: str, repo_key: str, issue
         return c.lastrowid
 
 
+def _build_task_conversation_title(issue_number: int, title: str = "") -> str:
+    """生成任务会话标题：`Issue #N · {title}`（title 空回退 `Issue #N`）。
+
+    与需求中心看板卡片标题风格一致；超长截断保护（title 部分上限 80 字符）。
+    """
+    _MAX_TITLE_LEN = 80
+    clean_title = (title or "").strip()
+    if clean_title:
+        if len(clean_title) > _MAX_TITLE_LEN:
+            clean_title = clean_title[:_MAX_TITLE_LEN]
+        return f"Issue #{issue_number} · {clean_title}"
+    return f"Issue #{issue_number}"
+
+
 def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
                               title: str = "", description: str = "",
                               write_context_on_reuse: bool = False) -> str:
-    """为任务查找/复用「Issue #N」对话（任务中心「去对话」入口）。
+    """为任务查找/复用「Issue #N · {title}」对话（任务中心「去对话」入口）。
 
-    - 复用：同用户已有该 Issue 对话 → 补 conv_type/issue_number 标记；
+    - 复用：同用户已有该 Issue 对话（按 conv_type='task' + issue_number 列匹配，
+      旧格式 `Issue #N` 字符串作回退）→ 补 conv_type/issue_number 标记；
       write_context_on_reuse=True 时再次写入上下文消息（notify 语义：每次分配都刷上下文）
+    - 存量升级：复用命中旧标题 `Issue #N` 的会话时刷新为新格式（不覆盖用户自定义标题）
     - 新建：create_conversation(conv_type="task") 并写入任务上下文消息。
     - 失败返回空串（不抛异常，旁路不影响任务建档）。
     """
     from src.session_manager import get_user_conversations, create_conversation, update_conversation, add_message
     conv_id = ""
+    new_title = _build_task_conversation_title(issue_number, title)
+    old_title = f"Issue #{issue_number}"
     try:
         convs = get_user_conversations(user_id, repo_key=repo_key, limit=50)
+        matched = None
         for conv in convs:
-            if conv.get("title") == f"Issue #{issue_number}":
-                conv_id = conv["id"]
+            _ct = conv.get("conv_type") or ""
+            _in = conv.get("issue_number") or 0
+            if _ct == "task" and _in == issue_number:
+                matched = conv
                 break
-        if conv_id:
+        if matched is None:
+            for conv in convs:
+                if conv.get("title") == old_title:
+                    matched = conv
+                    break
+        if matched is not None:
+            conv_id = matched["id"]
             update_conversation(conv_id, conv_type="task", issue_number=issue_number)
+            if (matched.get("title") or "") == old_title:
+                update_conversation(conv_id, title=new_title)
             if write_context_on_reuse:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
                 add_message(conv_id, "agent", ctx_msg)
         else:
-            conv_id = create_conversation(user_id, repo_key, title=f"Issue #{issue_number}",
+            conv_id = create_conversation(user_id, repo_key, title=new_title,
                                           conv_type="task", issue_number=issue_number)
             try:
                 ctx_msg = _build_task_context_message(title, description, repo_key, issue_number)
@@ -674,16 +703,30 @@ def _build_task_context_message(title: str, task_description: str, repo_key: str
     return "\n".join(lines)
 
 
+def _vcs_issue_url(repo_key: str, issue_number: int) -> str:
+    """repo_key → VCS Issue 公开页 URL（gitcode/github/gitlab 分流）。
+
+    无编号 / 坏仓库（缺 owner 或 repo）→ ''。未知 provider 前缀 → 默认 GitCode。
+    """
+    from src.repo_key import split_owner_repo
+    if not issue_number:
+        return ""
+    owner, repo = split_owner_repo(repo_key)
+    if not owner or not repo:
+        return ""
+    _p = str(repo_key).split(":", 1)[0]
+    if _p == "github":
+        return f"https://github.com/{owner}/{repo}/issues/{issue_number}"
+    if _p == "gitlab":
+        return f"https://gitlab.com/{owner}/{repo}/-/issues/{issue_number}"
+    return f"https://gitcode.com/{owner}/{repo}/issues/{issue_number}"
+
+
 def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> list:
     """通知卡快捷按钮：进入任务会话（cmd 直达）+ 查看 Issue（VCS 公开页只读）。
 
     设计：docs/weekly-05/feishu-notification-card-quick-actions-design.md。
     """
-    try:
-        from src.repo_key import split_owner_repo
-        owner, repo = split_owner_repo(repo_key)
-    except Exception:
-        owner, repo = "", ""
     _iss = f"#{issue_number}" if issue_number else ""
     actions = [{
         "tag": "button",
@@ -691,14 +734,78 @@ def _build_notify_actions(repo_key: str, issue_number: int, conv_id: str) -> lis
         "value": {"cmd": "/task-open", "repo_key": repo_key,
                   "issue_number": _iss, "conv_id": conv_id or ""},
     }]
-    if owner and repo and _iss:
-        base = "https://github.com" if str(repo_key).startswith("github:") else "https://gitcode.com"
+    _url = _vcs_issue_url(repo_key, issue_number)
+    if _url:
         actions.append({
             "tag": "button",
             "text": {"tag": "plain_text", "content": "查看 Issue ↗"},
-            "url": f"{base}/{owner}/{repo}/issues/{_iss.lstrip('#')}",
+            "url": _url,
         })
     return actions
+
+
+_IM_NOTIFY_TEMPLATES = {
+    "task": "blue",
+    "awaiting": "orange",
+    "pending_review": "red",
+}
+_IM_NOTIFY_TITLES = {
+    "task": "📋 信息知会",
+    "awaiting": "❓ 需求待澄清",
+    "pending_review": "🔎 需求待审核",
+}
+
+
+def _build_notify_fields(repo_key: str, issue_number: int) -> list:
+    """通知卡结构化键值对字段：仓库 / Issue（带 VCS 链接）/ 需求标题（替代纯文本行，移动端对齐更好）。"""
+    from src.repo_key import from_repo_key
+    _iss = f"#{issue_number}" if issue_number else ""
+    _iss_link = ""
+    if _iss:
+        _url = _vcs_issue_url(repo_key, issue_number)
+        if _url:
+            _iss_link = f"[{_iss}]({_url})"
+    _title = _get_issue_title(repo_key, issue_number) or "—"
+    return [
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**📦 仓库**\n{from_repo_key(repo_key) or '—'}"}},
+        {"is_short": True, "text": {"tag": "lark_md", "content": f"**🎯 Issue**\n{_iss_link or '—'}"}},
+        {"is_short": False, "text": {"tag": "lark_md", "content": f"**📌 需求标题**\n{_title}"}},
+    ]
+
+
+def _notify_note() -> str:
+    """通知卡底部时间戳（灰字注释）。"""
+    return f"发送时间：{datetime.now().strftime('%Y-%m-%d %H:%M')}"
+
+
+_IM_NOTIFY_COUNTERS: dict[str, int] = {}
+
+
+def _im_notify_counter(key: str) -> None:
+    """通知计数器（cluster-im-lease-stability-design.md §3.3）。"""
+    _IM_NOTIFY_COUNTERS[key] = _IM_NOTIFY_COUNTERS.get(key, 0) + 1
+
+
+def get_im_notify_counters() -> dict:
+    return dict(_IM_NOTIFY_COUNTERS)
+
+
+def _im_notify_begin(ntype: str, repo_key, issue_number, user_id, open_id, ctx):
+    _im_notify_counter("attempted")
+    _ctx_name = getattr(ctx, "name", "") if ctx else ""
+    log.info(f"[im-notify] type={ntype} repo={repo_key} issue=#{issue_number} "
+             f"user={user_id} open_id={open_id or ''} ctx={_ctx_name or 'none'}")
+
+
+def _im_notify_skip(ntype: str, issue_number, user_id, ctx, open_id):
+    if not ctx:
+        _reason = "no_ctx"
+    elif not open_id:
+        _reason = "no_openid"
+    else:
+        _reason = "no_api"
+    _im_notify_counter(f"skipped_{_reason}")
+    log.warning(f"[im-notify] type={ntype} issue=#{issue_number} user={user_id} reason={_reason}")
 
 
 async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
@@ -723,17 +830,23 @@ async def _run_notify(ctx, api, user_id: int, conv_id: str, open_id: str,
                 log.warning(f"Task notify: static template write failed: {e}")
 
         # 飞书仅作通知（D3）
+        _im_notify_begin("task", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
-            from src.repo_key import from_repo_key
-            notify_text = (f"📋 你有新的任务\n\n"
-                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
-                           f"{task_description}\n\n"
-                           f"请在任务中心查看并处理。")
+            notify_text = (f"你有一条新任务待处理。\n\n{task_description}"
+                           if (task_description or "").strip() else "你有一条新任务待处理。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="任务通知",
-                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["task"],
+                    template=_IM_NOTIFY_TEMPLATES["task"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Task notify feishu failed: {e}")
+        else:
+            _im_notify_skip("task", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Task notify _run_notify error: {e}")
 
@@ -756,16 +869,23 @@ async def _run_awaiting_notify(ctx, api, user_id: int, conv_id: str, open_id: st
             except Exception as e:
                 log.warning(f"Task awaiting: template write failed: {e}")
 
+        _im_notify_begin("awaiting", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
-            notify_text = (f"❓ 需要你补充信息\n\n"
-                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
-                           f"{questions}\n\n"
-                           f"请在任务中心补充后，我继续处理。")
+            notify_text = (f"Agent 需要你补充以下信息：\n\n{questions}"
+                           if (questions or "").strip() else "Agent 需要你补充信息。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待澄清",
-                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["awaiting"],
+                    template=_IM_NOTIFY_TEMPLATES["awaiting"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Task awaiting feishu failed: {e}")
+        else:
+            _im_notify_skip("awaiting", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Task awaiting _run_awaiting_notify error: {e}")
 
@@ -790,16 +910,23 @@ async def _run_pending_review_notify(ctx, api, user_id: int, conv_id: str, open_
             except Exception as e:
                 log.warning(f"Issue pending-review: template write failed: {e}")
 
+        _im_notify_begin("pending_review", repo_key, issue_number, user_id, open_id, ctx)
         if open_id and api and ctx:
-            notify_text = (f"🔎 需要你审核确认\n\n"
-                           f"仓库: {from_repo_key(repo_key)}\nIssue: #{issue_number}\n\n"
-                           f"{review_points}{_refs_suffix}\n\n"
-                           f"请审核后回复，我继续处理。")
+            notify_text = (f"请审核确认以下交付审核点：\n\n{review_points}{_refs_suffix}"
+                           if (review_points or "").strip() else "请审核确认交付结果。")
             try:
-                await api.send_card_to_user(ctx, open_id, notify_text, title="需求待审核",
-                                            actions=_build_notify_actions(repo_key, issue_number, conv_id))
+                await api.send_card_to_user(
+                    ctx, open_id, notify_text, title=_IM_NOTIFY_TITLES["pending_review"],
+                    template=_IM_NOTIFY_TEMPLATES["pending_review"],
+                    actions=_build_notify_actions(repo_key, issue_number, conv_id),
+                    fields=_build_notify_fields(repo_key, issue_number),
+                    note=_notify_note())
+                _im_notify_counter("sent_ok")
             except Exception as e:
+                _im_notify_counter("sent_failed")
                 log.warning(f"Issue pending-review feishu failed: {e}")
+        else:
+            _im_notify_skip("pending_review", issue_number, user_id, ctx, open_id)
     except Exception as e:
         log.warning(f"Issue pending-review _run_pending_review_notify error: {e}")
 
@@ -808,8 +935,11 @@ def _resolve_user_chat_bot(bm, user_id: int):
     """按用户 chat_agent_session.im_app_id 取其本人 chat bot（open_id 为 app 级，须用本人 bot 发送）。
 
     用户未配置本人 chat bot → 返回 None（**不通知**，不回落其它 bot，避免用他人 app 发送静默失败）。
+    可观测（cluster-im-lease-stability-design.md §3.1）：区分 no_bm / no_session_row /
+    bot_not_in_memory（sticky-lease 场景）→ 让"未收到通知"有日志可查。
     """
     if not bm:
+        log.info(f"[im-notify] resolve user={user_id} reason=no_bm")
         return None
     try:
         bots = bm.get_all_bots()
@@ -818,11 +948,18 @@ def _resolve_user_chat_bot(bm, user_id: int):
             row = c.execute(
                 "SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND im_app_id!='' LIMIT 1",
                 (user_id,)).fetchone()
-        if row and row[0] in bots:
-            return bots[row[0]]
-    except Exception:
-        pass
-    return None
+        if not row or not row[0]:
+            log.warning(f"[im-notify] resolve user={user_id} reason=no_session_row")
+            return None
+        bot = bots.get(row[0])
+        if bot:
+            log.info(f"[im-notify] resolve user={user_id} bot={row[0]} ok")
+        else:
+            log.warning(f"[im-notify] resolve user={user_id} bot={row[0]} reason=bot_not_in_memory hint=sticky-lease")
+        return bot
+    except Exception as e:
+        log.warning(f"[im-notify] resolve user={user_id} reason=bot_error err={e}")
+        return None
 
 
 class TaskCreateBody(BaseModel):

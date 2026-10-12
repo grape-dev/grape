@@ -59,7 +59,11 @@
     "save_failed": "保存失败: {{msg}}",
     "title": "Agent 配置",
     "bot_app_id": "Bot App ID",
-    "bot_secret": "Bot Secret"
+    "bot_secret": "Bot Secret",
+    "unbind": "解绑",
+    "unbind_confirm": "确认解绑该 IM 渠道？\n\n解绑后将清除该仓库保存的 Bot App ID / Secret 以及该渠道的群会话数据，之后可重新绑定。",
+    "unbind_success": "已解绑",
+    "unbind_failed": "解绑失败: {{msg}}"
   },
   "subscription": {
     "title": "事件订阅",

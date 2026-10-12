@@ -6,7 +6,7 @@
 > 与 `/api/settings/agent-runtimes` 的差异：本接口聚合「每个引擎实例」的运行视角（任务/会话/健康/标签），
 > settings 侧重「凭据管理 + 引擎列表」。
 
-## 机器健康度（admin）
+## 机器健康度
 
 ### GET /api/runtime/admin/machine-health — 机器健康度概览
 

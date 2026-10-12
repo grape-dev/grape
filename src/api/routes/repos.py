@@ -817,7 +817,16 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 @router.get("/managed", operation_id="repos_managed", summary="List managed repositories", description="Lists repositories hosted by the platform for the current user.")
 def list_managed_repos(user: dict = Depends(require_org_member)):
     org_id = user.get("org_id", 0)
-    repos = user_db.get_managed_repos(user["id"], org_id=org_id)
+    # 个人组织放宽 org 过滤（方案A）：与 /repos/member 大堂口径一致，
+    # 侧边栏下拉框显示 user_repos.is_join=1 的仓库（不论托管在哪个组织）
+    _personal_org = False
+    if org_id:
+        try:
+            from src.user.org_db import is_org_personal
+            _personal_org = bool(is_org_personal(org_id))
+        except Exception:
+            _personal_org = False
+    repos = user_db.get_managed_repos(user["id"], org_id=org_id, personal_org=_personal_org)
     return {"repos": [{
         "repo_key": r["repo_key"],
         "full_name": r["full_name"],

@@ -746,6 +746,52 @@ async def scheduler_loop():
                     asyncio.ensure_future(_execute_task(task))
         except Exception as e:
             log.warning(f"Autopilot scheduler loop error: {e}")
+
+        # 僵尸执行回收：主控重启后 _poll_dispatched_completion 协程被杀，
+        # autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
+        # 每轮扫描顺带检查并同步终态（幂等自愈）。
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT id FROM autopilot_executions "
+                    "WHERE status IN ('running', 'dispatched') "
+                    "ORDER BY id DESC LIMIT 20"
+                )
+                stuck = c.fetchall()
+            for row in stuck:
+                _exec_id = row[0]
+                with db_lock:
+                    c2 = db.cursor()
+                    c2.execute(
+                        "SELECT status, result_text, exit_code FROM agent_tasks "
+                        "WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                        (_exec_id,)
+                    )
+                    at_row = c2.fetchone()
+                if not at_row:
+                    continue
+                _at_status = at_row[0] or ""
+                _result_text = at_row[1] or ""
+                if _at_status in ("completed", "success"):
+                    findings_result = parse_findings(_result_text)
+                    _summary = findings_result["summary"] or (_result_text[-500:] if _result_text else "")
+                    _update_execution_result(_exec_id, "success",
+                        result=_summary,
+                        findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
+                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> success (agent_task completed)")
+                elif _at_status == "cancelled":
+                    _update_execution_result(_exec_id, "cancelled",
+                        result=_result_text[:5000], error="用户手动终止")
+                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> cancelled")
+                elif _at_status == "failed":
+                    _update_execution_result(_exec_id, "failed",
+                        result=_result_text[:5000], error="agent_tasks status=failed")
+                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed")
+                # running/queued/dispatched -> 跳过，等下一轮
+        except Exception as _ze:
+            log.warning(f"Autopilot zombie recovery error: {_ze}")
+
         await asyncio.sleep(_SCHEDULER_INTERVAL)
 
 

@@ -85,6 +85,7 @@ class BotMetrics:
     last_user_message_at: float = 0.0  # 仅用户消息更新（空闲超时检测用，PING 不更新）
     connected_at: float = 0.0
     last_error: str = ""
+    disconnect_reasons: dict = field(default_factory=dict)  # {lease|ws_transport|shutdown: count}
 
     def to_dict(self) -> dict:
         return {
@@ -95,6 +96,7 @@ class BotMetrics:
             "last_message_at": self.last_message_at,
             "connected_at": self.connected_at,
             "last_error": self.last_error,
+            "disconnect_reasons": dict(self.disconnect_reasons),
         }
 
 
@@ -117,6 +119,9 @@ class BotContext:
 
     reconnect_delay: float = 2.0
     max_reconnect_delay: float = 15.0
+    # 本次停止/移出原因（重连账本，cluster-im-lease-stability-design.md §2.5）：
+    #   lease=宽限期/优雅让渡断开；shutdown=stop()；否则 ws_transport
+    stop_reason: str = ""
     # websockets 协议级 ping 禁用（None）：飞书 WS 不回协议级 pong，会导致 ping_timeout 断连。
     # 保活依赖飞书应用层 PING/PONG（run_bot 里收到 PING 帧回 PONG）。
     ws_ping_interval: float = 0.0  # 0 → websockets.connect(ping_interval=None) 禁用协议级 ping
@@ -537,19 +542,30 @@ class FeishuAsync:
         return False
 
     async def send_card_to_user(self, ctx: BotContext, open_id: str, text: str,
-                                title: str = "DevOps Bot", actions: list | None = None) -> str:
-        """主动发送卡片给用户"""
+                                title: str = "DevOps Bot", actions: list | None = None,
+                                template: str = "blue", fields: list | None = None,
+                                note: str | None = None) -> str:
+        """主动发送卡片给用户
+
+        template: 头部模板色（blue/wathet/turquoise/green/yellow/orange/red/grey...）。
+        fields:   结构化键值对字段元素（{"is_short":...,"text":{...}} 列表），正文后追加 div。
+        note:     卡片底部灰色注释（如发送时间戳）。
+        """
         token = await self._ensure_token(ctx)
         if not token:
             return ""
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
         elements = to_lark_elements(text, 2000)
+        if fields:
+            elements.append({"tag": "div", "fields": fields})
         if actions:
             elements.append({"tag": "action", "actions": actions})
+        if note:
+            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
         card = {
             "elements": elements,
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": "blue"},
+            "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
         }
         payload = {
             "receive_id": open_id,
@@ -562,6 +578,7 @@ class FeishuAsync:
                 data = await resp.json()
                 msg_id = data.get("data", {}).get("message_id", "")
                 ctx.metrics.messages_sent += 1
+                log.info(f"[{ctx.name}] send_card_to_user ok: msg_id={msg_id} text={text[:50]}")
                 return msg_id
         except Exception as e:
             ctx.metrics.messages_failed += 1
@@ -1036,6 +1053,42 @@ async def _disable_bot(app_id: str):
         log.warning(f"BotManager: disable bot {app_id} failed: {e}")
 
 
+# ── 一致性哈希环 / lease 过期解析（cluster-im-lease-stability-design.md §2.2/§2.3）──
+
+
+def _im_ring(instances: list, vnodes: int = 50) -> list:
+    """一致性哈希环：[(hash, instance)] 升序。实例均匀打点，增删只影响邻近。"""
+    import hashlib
+    ring = []
+    for inst in instances:
+        for _vn in range(vnodes):
+            h = int(hashlib.md5(f"{inst}:{_vn}".encode()).hexdigest()[:8], 16)
+            ring.append((h, inst))
+    ring.sort()
+    return ring
+
+
+def _im_owner(ring: list, app_id: str) -> str:
+    """app_id 顺时针落到的实例（归属）。ring 空 → ''。"""
+    import hashlib
+    if not ring:
+        return ""
+    h = int(hashlib.md5(app_id.encode()).hexdigest()[:8], 16)
+    for hv, inst in ring:
+        if hv >= h:
+            return inst
+    return ring[0][1]
+
+
+def _lease_expiry_ts(exp: str) -> float:
+    """'YYYY-MM-DD HH:MM:SS'(UTC) → epoch 秒；解析失败返回 0。"""
+    try:
+        from datetime import datetime, timezone
+        return datetime.strptime(exp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc).timestamp()
+    except Exception:
+        return 0.0
+
+
 async def run_bot(ctx: BotContext, api: FeishuAsync,
                   on_message: Callable[[BotContext, dict], Awaitable[None]]):
     """单Bot的WS连接主协程 — 完整生命周期：鉴权→获取端点→连接→接收→重连
@@ -1071,6 +1124,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                         await _disable_bot(ctx.app_id)
                     except Exception:
                         pass
+                    ctx.stop_reason = "ws_transport"
                     ctx._running = False
                     break
                 log.warning(f"[{ctx.name}] no ws endpoint, retry in {delay:.0f}s")
@@ -1114,6 +1168,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                             db_token = row[0] if row else None
                         if db_token != ctx._lease_token:
                             log.warning(f"[{ctx.name}] lease lost during reconnect, disconnecting")
+                            ctx.stop_reason = "lease"
                             ctx._running = False
                             break
                     except Exception as e:
@@ -1258,6 +1313,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
         except asyncio.CancelledError:
             ctx._running = False
             ctx.state = BotState.STOPPED
+            ctx.stop_reason = ctx.stop_reason or "shutdown"
             log.info(f"[{ctx.name}] cancelled, stopping")
             break
         except websockets.ConnectionClosed as e:
@@ -1278,6 +1334,10 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
             delay = min(delay * 2, ctx.max_reconnect_delay)
 
     ctx.state = BotState.STOPPED
+    # 重连账本：记录本次断开归因（lease / ws_transport / shutdown）
+    _reason = ctx.stop_reason or "ws_transport"
+    ctx.metrics.disconnect_reasons[_reason] = ctx.metrics.disconnect_reasons.get(_reason, 0) + 1
+    ctx.stop_reason = ""
     cleanup_task.cancel()
     log.info(f"[{ctx.name}] stopped")
 
@@ -1315,6 +1375,11 @@ class BotManager:
         self._held_leases: dict[str, str] = {}  # {app_id: lease_token} 本实例持有的 lease
         self._eligible_bots: dict[str, dict] = {}  # 登记的 bot 配置（IDLE，未连接）
         self._grace_deadlines: dict[str, float] = {}  # {app_id: timestamp} 宽限期到期时间（问题 C）
+        # cluster-im-lease-stability-design.md：抗抖/粘性/账本
+        self._instance_id = (lease_store.instance_id if lease_store else "") or ""
+        self._renew_fails: dict[str, int] = {}  # {app_id: 连续续约失败次数}
+        self._handoff_apps: set[str] = set()     # 环迁移后本实例不再续约、随 lease 过期让渡的 bot
+        self._acquire_cooldown: dict[str, float] = {}  # {app_id: time.monotonic 冷却截至}
 
     @property
     def api(self) -> FeishuAsync:
@@ -1339,6 +1404,7 @@ class BotManager:
         """优雅停止所有Bot + 释放所有 lease"""
         for ctx in self._bots.values():
             ctx._running = False
+            ctx.stop_reason = "shutdown"
             if ctx._task and not ctx._task.done():
                 ctx._task.cancel()
 
@@ -1406,8 +1472,12 @@ class BotManager:
 
         return ctx
 
-    async def remove_bot(self, app_id: str):
-        """运行时动态移除Bot。lease 模式下同时释放 lease（待优化 3）。"""
+    async def remove_bot(self, app_id: str, reason: str = ""):
+        """运行时动态移除Bot。lease 模式下同时释放 lease（待优化 3）。
+
+        reason：重连账本归因（lease=宽限期/优雅让渡；shutdown=停止；其余 ws_transport）。
+        """
+        self._handoff_apps.discard(app_id)
         ctx = self._bots.pop(app_id, None)
         # lease 模式下释放 lease
         if self._lease_store:
@@ -1418,6 +1488,7 @@ class BotManager:
         if not ctx:
             return
         ctx._running = False
+        ctx.stop_reason = reason or "shutdown"
         if ctx._task and not ctx._task.done():
             ctx._task.cancel()
             try:
@@ -1529,19 +1600,23 @@ class BotManager:
         log.info(f"BotManager: loaded {added} bot(s) from DB, total={len(self._bots)}")
 
     async def lease_sweep_loop(self):
-        """lease 扫描循环——每 SWEEP_INTERVAL 秒：
-        1. 游标分页查询可抢的 bot → try_acquire → 抢到则 add_bot
-        2. 批量续约持有的 lease
-        3. 检查 is_active=0 的 bot → remove_bot + release lease
+        """lease 扫描循环——每 SWEEP_INTERVAL 秒（cluster-im-lease-stability-design.md §2）：
 
-        问题 O：try-except 包住每轮 sweep，异常不杀死循环。
-        问题 J：变量名 _lease_sweep_task 和 _sweep_task 区分。
+        0. 实例心跳上报 + 一致性哈希环（均匀 + 粘性归属）
+        1. 游标分页查可抢 bot → 仅归属实例 try_acquire（含 owner 存活保护）→ 连接
+        2. 批量续约（失败连续达阈值才进宽限期；宽限期到才断开）
+        3. 环迁移 → 优雅让渡（不再续约，随 lease 过期释放）
         """
         if not self._lease_store:
             return
         lease_store = self._lease_store  # 本地引用避免 Pyright None 检查
         import time as _time
-        from src.config import BOT_LEASE_SWEEP_INTERVAL, BOT_LEASE_RENEW_INTERVAL
+        import socket as _socket
+        from src.config import (
+            BOT_LEASE_SWEEP_INTERVAL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_GRACE,
+            BOT_LEASE_RENEW_FAIL_THRESHOLD, IM_LEASE_STICKY, IM_INSTANCE_TIMEOUT,
+            IM_STEAL_AFTER, IM_ACQUIRE_COOLDOWN, IM_HASH_VNODES,
+        )
 
         sweep_count = 0
         while True:
@@ -1554,7 +1629,15 @@ class BotManager:
                     return
 
                 sweep_count += 1
-                # 1. 游标分页查询可抢的 bot → try_acquire
+                # 0. 实例心跳 + 环（owner 归属真值）
+                try:
+                    lease_store.heartbeat(_socket.gethostname())
+                except Exception as e:
+                    log.warning(f"[lease] heartbeat failed: {e}")
+                actives = lease_store.list_active_instances(IM_INSTANCE_TIMEOUT) if IM_LEASE_STICKY else []
+                ring = _im_ring(actives, IM_HASH_VNODES) if actives else []
+
+                # 1. 游标分页查询可抢的 bot → 归属过滤 → try_acquire
                 cursor = ""
                 while True:
                     candidates = lease_store.list_expired_or_unheld(cursor=cursor, limit=500)
@@ -1562,18 +1645,22 @@ class BotManager:
                         break
                     for bot_info in candidates:
                         app_id = bot_info["bot_app_id"]
-                        # 只抢已登记的 bot
                         if app_id not in self._eligible_bots:
                             continue
                         if app_id in self._bots:
                             continue  # 已经在连
-                        token = lease_store.try_acquire(app_id)
+                        # 空环（心跳表缺失/心跳失败）→ 退化为旧"先到先得"，避免 IM 整体不连
+                        if IM_LEASE_STICKY and ring and _im_owner(ring, app_id) != self._instance_id:
+                            continue  # 非归属实例不抢（均匀 + 粘性）
+                        if self._acquire_cooldown.get(app_id, 0.0) > _time.monotonic():
+                            continue  # 上一轮连接失败冷却期
+                        token = lease_store.try_acquire(app_id,
+                                                        steal_after=IM_STEAL_AFTER,
+                                                        instance_timeout=IM_INSTANCE_TIMEOUT)
                         if token:
                             self._held_leases[app_id] = token
                             eligible = self._eligible_bots[app_id]
                             try:
-                                # 抢到 lease 后直接创建 BotContext + run_bot 连接
-                                # 不走 add_bot（add_bot 在 lease 模式下只登记不连接）
                                 ctx = BotContext(
                                     app_id=app_id,
                                     app_secret=eligible["app_secret"],
@@ -1589,61 +1676,104 @@ class BotManager:
                                     )
                                     log.info(f"[lease] bot {ctx.name} connected after acquiring lease")
                             except Exception as e:
-                                # 遗漏修复 1：连接失败要释放 lease
+                                # 连接失败：释放 lease + 冷却，避免循环抢占
                                 log.warning(f"[lease] bot {app_id} connect failed: {e}, releasing lease")
                                 lease_store.release(app_id, token)
                                 self._held_leases.pop(app_id, None)
                                 self._bots.pop(app_id, None)
+                                self._acquire_cooldown[app_id] = _time.monotonic() + IM_ACQUIRE_COOLDOWN
+                                self._renew_fails.pop(app_id, None)
+                                self._grace_deadlines.pop(app_id, None)
                     cursor = candidates[-1]["bot_app_id"]
                     if len(candidates) < 500:
                         break
 
-                # 2. 批量续约（每 RENEW_INTERVAL 秒续约一次，不是每次 sweep 都续约）
-                if self._held_leases and sweep_count % (BOT_LEASE_RENEW_INTERVAL // BOT_LEASE_SWEEP_INTERVAL) == 0:
-                    renew_results = lease_store.batch_renew(self._held_leases)
+                # 1.5 环迁移 → 优雅让渡：不属于本实例的 bot 标记为不再续约（仍在线，随 lease 过期释放）
+                if IM_LEASE_STICKY and ring:
+                    for app_id in list(self._held_leases.keys()):
+                        if _im_owner(ring, app_id) != self._instance_id:
+                            self._handoff_apps.add(app_id)
+                        else:
+                            self._handoff_apps.discard(app_id)
+
+                # 2. 批量续约（每 RENEW_INTERVAL 秒续约一次；跳过让渡中的 bot）
+                _renew_div = max(1, BOT_LEASE_RENEW_INTERVAL // BOT_LEASE_SWEEP_INTERVAL)
+                if self._held_leases and sweep_count % _renew_div == 0:
+                    to_renew = {a: t for a, t in self._held_leases.items() if a not in self._handoff_apps}
+                    renew_results = lease_store.batch_renew(to_renew) if to_renew else {}
                     now = _time.time()
                     for app_id, success in renew_results.items():
-                        if not success:
-                            # 续约失败可能是瞬时 DB 锁竞争——立即单条重试一次再决定是否开宽限期。
-                            # 避免单次 batch_renew CAS 失败（如其他 sweep 同时写 DB）就断连，
-                            # 导致用户登出等正常操作期间的 DB 短暂阻塞引发飞书 WS 断连。
-                            token = self._held_leases.get(app_id, "")
-                            if token:
-                                retry_ok = lease_store.renew(app_id, token)
-                                if retry_ok:
-                                    log.info(f"[lease] bot {app_id} renew retry succeeded (was transient)")
-                                    continue
-                            # 重试也失败 → 宽限期 30 秒后断开
-                            if app_id not in self._grace_deadlines:
-                                self._grace_deadlines[app_id] = now + 30
-                                log.info(f"[lease] bot {app_id} renew failed (retry also failed), grace period 30s started")
-                        else:
-                            # 续约成功 → 清除宽限期
+                        if success:
+                            self._renew_fails.pop(app_id, None)
                             self._grace_deadlines.pop(app_id, None)
+                            continue
+                        # 失败：单条重试一次（瞬时 DB 竞争）
+                        token = self._held_leases.get(app_id, "")
+                        retry_ok = False
+                        if token:
+                            try:
+                                retry_ok = bool(lease_store.renew(app_id, token))
+                            except Exception:
+                                retry_ok = False
+                        if retry_ok:
+                            log.info(f"[lease] bot {app_id} renew retry succeeded (was transient)")
+                            self._renew_fails.pop(app_id, None)
+                            self._grace_deadlines.pop(app_id, None)
+                            continue
+                        # 连续失败达到阈值才进宽限期（抗瞬时抖动）
+                        _fails = self._renew_fails.get(app_id, 0) + 1
+                        self._renew_fails[app_id] = _fails
+                        if _fails >= BOT_LEASE_RENEW_FAIL_THRESHOLD and app_id not in self._grace_deadlines:
+                            self._grace_deadlines[app_id] = now + BOT_LEASE_GRACE
+                            log.info(f"[lease] bot {app_id} renew failed x{_fails}, "
+                                     f"grace period {BOT_LEASE_GRACE}s started")
+                        else:
+                            log.info(f"[lease] bot {app_id} renew failed x{_fails}/{BOT_LEASE_RENEW_FAIL_THRESHOLD}")
 
-                # 2b. 每次 sweep 都检查宽限期到期 → 断开（不等续约间隔）
+                # 2a. handoff：lease 已过期且 owner 已不是本实例 → 本地释放（优雅让渡，不强制断开前有横差）
+                if self._handoff_apps:
+                    now_ts = _time.time()
+                    for app_id in list(self._handoff_apps):
+                        try:
+                            info = lease_store.lease_owner_info(app_id)
+                            exp = (info.get("expires_at") or "").strip()
+                            if info.get("owner") != self._instance_id and exp and _lease_expiry_ts(exp) <= now_ts:
+                                self._handoff_apps.discard(app_id)
+                                token = self._held_leases.pop(app_id, "")
+                                if token:
+                                    lease_store.release(app_id, token)
+                                self._grace_deadlines.pop(app_id, None)
+                                self._renew_fails.pop(app_id, None)
+                                if app_id in self._bots:
+                                    await self.remove_bot(app_id, reason="handoff")
+                        except Exception as e:
+                            log.warning(f"[lease] handoff check {app_id} error: {e}")
+
+                # 2b. 每次 sweep 检查宽限期到期 → 断开（reason=lease）
                 if self._grace_deadlines:
                     now = _time.time()
                     expired_grace = [aid for aid, dl in self._grace_deadlines.items() if now >= dl]
                     for app_id in expired_grace:
                         log.info(f"[lease] bot {app_id} grace period expired, disconnecting")
+                        self._handoff_apps.discard(app_id)
                         token = self._held_leases.pop(app_id, "")
                         if token:
                             lease_store.release(app_id, token)
                         self._grace_deadlines.pop(app_id, None)
                         if app_id in self._bots:
-                            await self.remove_bot(app_id)
+                            await self.remove_bot(app_id, reason="lease")
 
                 # 3. 检查 is_active=0 的 bot → 断开 + 释放 lease（问题 K）
                 if self._held_leases:
                     inactive = lease_store.check_inactive_bots(self._held_leases)
                     for app_id in inactive:
                         log.info(f"[lease] bot {app_id} is_active=0, disconnecting")
+                        self._handoff_apps.discard(app_id)
                         token = self._held_leases.pop(app_id, "")
                         if token:
                             lease_store.release(app_id, token)
                         if app_id in self._bots:
-                            await self.remove_bot(app_id)
+                            await self.remove_bot(app_id, reason="lease")
 
                 # 4. 定期重新加载 bot 配置（问题 B：每 5 分钟重新加载）
                 if sweep_count % (300 // BOT_LEASE_SWEEP_INTERVAL) == 0:  # 约 5 分钟
@@ -1674,6 +1804,13 @@ class BotManager:
         lease_status = {}
         if self._lease_store and self._bots:
             lease_status = self._lease_store.get_lease_status(list(self._bots.keys()))
+        # 重连账本（cluster-im-lease-stability-design.md §2.5）：各 bot 断开归因聚合
+        flap = {"lease": 0, "ws_transport": 0, "shutdown": 0}
+        total_recon = 0
+        for b in self._bots.values():
+            total_recon += b.metrics.reconnect_count
+            for reason, cnt in (b.metrics.disconnect_reasons or {}).items():
+                flap[reason] = flap.get(reason, 0) + cnt
         return {
             "total_bots": total,
             "connected": connected,
@@ -1681,6 +1818,8 @@ class BotManager:
             "total_messages_received": total_received,
             "total_messages_sent": total_sent,
             "total_messages_failed": total_failed,
+            "total_reconnects": total_recon,
+            "flap_by_cause": flap,
             "bots": {app_id: ctx.to_dict() for app_id, ctx in self._bots.items()},
             "lease": lease_status,
         }
