@@ -33,13 +33,13 @@ _FIXED_AGENT_TYPE = "issue"
 # ====== findings 解析 ======
 
 _FINDINGS_PATTERN = re.compile(
-    r'<!--\s*autopilot-findings\s*\n(.*?)\n-->',
+    r'<!--\s*autopilot-findings\s*(.*?)\s*-->',
     re.DOTALL
 )
 
 # 宽松匹配：不要求结尾完整 -->，-- 即可（chunk 可能拆断 --> 为 --\n>）
 _FINDINGS_PATTERN_LOOSE = re.compile(
-    r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)(?:\n-->|\n--\s*$)',
+    r'<!--\s*autopilot-findings\s*(.*?)(?:\s*-->|\s*--\s*$)',
     re.DOTALL
 )
 
@@ -73,9 +73,19 @@ def _heal_findings_marker(text: str) -> str:
         return text
     header_end = fidx + len('findings')
     header = text[idx:header_end]
-    if '\n' not in header:
-        return text
-    return text[:idx] + header.replace('\n', '') + text[header_end:]
+    if '\n' in header:
+        # 标记头被插换行（如 <!-- autop\nilot-findings），拼回去
+        text = text[:idx] + header.replace('\n', '') + text[header_end:]
+        header_end = idx + len('<!-- autopilot-findings')
+
+    # 修复流式 chunk 边界拆断结尾 --> 的情况（如 --\n> / --\n\n>）：
+    # 仅当整个文本找不到完整 --> 时才归一，避免误伤正文里恰好出现的 --\n>
+    if '-->' not in text:
+        _TAIL_BROKEN = re.compile(r'--[ \t]*\n+[ \t]*>')
+        m = _TAIL_BROKEN.search(text, header_end)
+        if m:
+            text = text[:m.start()] + '-->' + text[m.end():]
+    return text
 
 
 def parse_findings(agent_output: str) -> dict:
@@ -87,16 +97,16 @@ def parse_findings(agent_output: str) -> dict:
     # 修复 ACP 流式输出在标记头中插入的换行符（如 autop\nilot → autopilot）
     _text = _heal_findings_marker(agent_output or "")
 
-    # 宽松匹配：允许 autopilot 和 -findings 之间有换行/空格
+    # 宽松匹配：允许 autopilot 和 -findings 之间有换行/空格，标记头后换行或同行均接受
     # 先尝试严格匹配（结尾 -->），再降级宽松匹配（结尾 --，chunk 可能拆断 --> 为 --\n>）
     match = re.search(
-        r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)\n-->',
+        r'<!--\s*autopilot[\s\-]*findings\s*(.*?)\s*-->',
         _text,
         re.DOTALL
     )
     if not match:
         match = re.search(
-            r'<!--\s*autopilot[\s\-]*findings\s*\n(.*?)(?:\n-->|\n--\s*$)',
+            r'<!--\s*autopilot[\s\-]*findings\s*(.*?)(?:\s*-->|\s*--\s*$)',
             _text,
             re.DOTALL
         )
