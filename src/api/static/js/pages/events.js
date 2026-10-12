@@ -871,16 +871,20 @@ function _showA2aRedoGlass(seq, sceneInfo) {
   const _names = { vod: 'VOD Agent', issue: 'Issue Agent', coding: 'Coding Agent', qa: 'QA Agent', sre: 'SRE Agent' };
   const _icons = { vod: '🔍', issue: '📝', coding: '🤖', qa: '✅', sre: '🔧' };
   const _inScene = sceneInfo.agents_in_scene || [];
+  const _upstream = sceneInfo.upstream_agents || [];
   const _next = sceneInfo.next_agent || '';
   const _hasSceneInfo = _inScene.length > 0;
   window._a2aRedoSel = _next && _agents.includes(_next) ? _next : '';
+  window._a2aRedoDoneAgents = _upstream;  // 供 _doA2aRedo 二次确认用
   const _btn = (a) => {
     const _ok = !_hasSceneInfo || _inScene.includes(a);
     const _sel = window._a2aRedoSel === a;
+    const _done = _upstream.includes(a);  // 该 Issue 此前已 completed 过的 agent
     return `<div data-a2a-agent="${a}" data-ok="${_ok ? 1 : 0}" onclick="_pickA2aRedo('${a}')" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;cursor:${_ok ? 'pointer' : 'not-allowed'};border:1px solid ${_sel ? 'rgba(0,113,227,.45)' : 'rgba(0,0,0,.06)'};background:${_sel ? 'rgba(0,113,227,.08)' : _ok ? 'rgba(255,255,255,.55)' : 'rgba(0,0,0,.03)'};opacity:${_ok ? 1 : .4};transition:all .15s">
       <span style="font-size:15px">${_icons[a]}</span>
       <span style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${_names[a]}</span>
       ${!_ok ? '<span style="font-size:10px;color:var(--t3,#86868b);margin-left:auto">不在场景</span>' : ''}
+      ${_ok && _done ? '<span style="font-size:10px;color:#c77700;margin-left:auto">⚠ 已执行过，补发将重跑</span>' : ''}
       ${_sel ? '<span style="font-size:11px;color:var(--a,#0071e3);margin-left:auto">已选</span>' : ''}
     </div>`;
   };
@@ -941,11 +945,17 @@ function _closeA2aRedoGlass() {
   const ex = document.querySelector('.a2r-overlay');
   if (ex) ex.remove();
   window._a2aRedoSel = '';
+  window._a2aRedoDoneAgents = [];
 }
 
 function _doA2aRedo(seq) {
   const agent = window._a2aRedoSel || '';
   if (!agent) { app.showToast('请先选择目标 Agent'); return; }
+  // 防手误二次确认（2026-10-12）：目标 Agent 已在此前流程 completed 过 → 重跑确认
+  const _doneAgents = window._a2aRedoDoneAgents || [];
+  if (_doneAgents.includes(agent)) {
+    if (!window.confirm('该 Agent 已在此前流程中执行完成。\n补发将重新执行整个阶段（消耗资源与时间），且不会影响已有结果。\n确定继续吗？')) return;
+  }
   _closeA2aRedoGlass();
   API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
     if (d && d.skipped) {

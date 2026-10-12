@@ -1077,6 +1077,7 @@ def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
     repo_key = evt.get("repo_key", "") or ""
     agents_in_scene: list = []
     next_agent = ""
+    upstream_agents: list = []  # 该 Issue 已有 completed 事件的 agent（防手误提示用）
     if issue_id and not issue_id.startswith("pr_"):
         try:
             from src.api.routes.webhook import _scene_node_check
@@ -1092,7 +1093,19 @@ def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
                     break
         except Exception as e:
             log.warning(f"[a2a-redo] scene check failed: {e}")
-    return {"scene_id": evt.get("scene_id") or "default", "agents_in_scene": agents_in_scene, "next_agent": next_agent}
+        # 上游提示（2026-10-12）：该 Issue 已 completed 过的 agent 集合——
+        # 补发给它们 = 重跑已完成的阶段（防手误，仅提示不拦截；合法回退仍放行）
+        try:
+            from src.session_manager import db, db_lock
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT DISTINCT agent_type FROM events WHERE repo_key=? AND issue_id=? AND status='completed' AND agent_type IN ('vod','issue','coding','qa','sre')",
+                    (repo_key, f"#{issue_id}"))
+                upstream_agents = [r[0] for r in _c.fetchall()]
+        except Exception as e:
+            log.warning(f"[a2a-redo] upstream check failed: {e}")
+    return {"scene_id": evt.get("scene_id") or "default", "agents_in_scene": agents_in_scene, "next_agent": next_agent, "upstream_agents": upstream_agents}
 
 
 @router.post("/{seq}/a2a-redo", operation_id="events_a2a_redo", summary="A2A redo (manual handoff)", description="Manually re-sends a downstream A2A handoff for a completed event whose agent did not actually hand off. Does NOT touch the original event/task (unlike redispatch); simply creates a new a2a_event via the standard A2A path.")
