@@ -221,3 +221,46 @@ class TestResumeFromAwaiting:
     def test_resume_absent_issue_false(self):
         from src.api.issues_center import _resume_issue_waiting
         assert _resume_issue_waiting("gitcode:org/test", 42) is False
+
+
+class TestAwaitingPrefixNormalizeAndId:
+    """issue-awaiting-input-id-fix-design.md：repo 作用域归一 + 404 hint + GRAPE_ISSUE_ID。"""
+
+    def test_repo_scope_normalized_without_prefix(self):
+        # token repo_key 无 gitcode: 前缀 vs 卡片带前缀 → to_repo_key 归一后应 200（修复前 403）
+        card_id = _seed_issue()  # repo_key=gitcode:org/test
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post(f"/api/issues/{card_id}/awaiting-input",
+                            headers=_session_headers(repo_key="org/test"),
+                            json={"questions": "前缀归一后应通过", "reason": "x"})
+        assert r.status_code == 200, r.text
+        assert r.json()["changed"] is True
+
+    def test_repo_scope_mismatch_still_403(self):
+        # 归一后仍不同的仓库 → 403（越权守卫不受影响）
+        card_id = _seed_issue()
+        r = client.post(f"/api/issues/{card_id}/awaiting-input",
+                        headers=_session_headers(repo_key="gitcode:org/other"), json={"questions": "q"})
+        assert r.status_code == 403
+
+    def test_not_found_has_hint(self):
+        r = client.post("/api/issues/999999/awaiting-input",
+                        headers=_session_headers(), json={"questions": "q"})
+        assert r.status_code == 404
+        hint = r.json().get("detail", {}).get("hint", "")
+        assert "GRAPE_ISSUE_ID" in hint or "issues detail" in hint, hint
+
+
+class TestResolveIssueCardId:
+    """GRAPE_ISSUE_ID 解析（event_pipeline.resolve_issue_card_id）。"""
+
+    def test_returns_card_id(self):
+        card_id = _seed_issue(issue_number=77, repo_key="gitcode:org/test")
+        from src.api.event_pipeline import resolve_issue_card_id
+        assert resolve_issue_card_id("gitcode:org/test", "77") == str(card_id)
+        assert resolve_issue_card_id("gitcode:org/test", 77) == str(card_id)
+
+    def test_missing_returns_empty(self):
+        from src.api.event_pipeline import resolve_issue_card_id
+        assert resolve_issue_card_id("gitcode:org/test", 9999) == ""
+        assert resolve_issue_card_id("gitcode:org/test", "") == ""

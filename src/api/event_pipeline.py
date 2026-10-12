@@ -468,6 +468,22 @@ def _is_pr_payload(payload: dict) -> bool:
     return False
 
 
+def resolve_issue_card_id(repo_key: str, issue_number) -> str:
+    """需求卡片 id（issue 表主键）：awaiting-input 等 --issue_id 用（≠ Issue number）。查无返回空串。"""
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        _n = str(issue_number or "").lstrip("#")
+        if not _n.isdigit():
+            return ""
+        with _dl:
+            _r = _db.cursor().execute(
+                "SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                (repo_key, int(_n))).fetchone()
+        return str(_r[0]) if _r else ""
+    except Exception:
+        return ""
+
+
 def resolve_issue_id(payload: dict) -> str:
     """从事件 payload 提取 Issue 编号。
 
@@ -2298,6 +2314,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
     if _issue_num:
         env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
+        # 需求卡片 id（issue 表主键）：awaiting-input 等 --issue_id 用（≠ ISSUE_NUMBER）
+        env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
     _pr_num = evt.get("payload", {}).get("pr_number", "")
     if _pr_num:
         env_extra["PR_NUMBER"] = str(_pr_num)
@@ -3044,6 +3062,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
     if _issue_num:
         env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
+        env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
     _pr_num = evt.get("payload", {}).get("pr_number", "")
     if _pr_num:
         env_extra["PR_NUMBER"] = str(_pr_num)
