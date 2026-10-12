@@ -1,31 +1,87 @@
-# grape-template
+<h1 align="center">grape-template</h1>
 
-Grape 官方项目模板独立仓库。内容由 grape 主仓库在构建/部署阶段通过 `scripts/sync_templates.sh`
-拉取到部署根 `examples/` 与 `configs/project-templates.json`。
+<p align="center">English | <a href="README.zh.md">中文</a></p>
 
-## 目录约定
+<p align="center">
+  <strong>Official project templates for the Grape platform</strong>
+  <br>
+  The stock templates ship here, versioned independently from the main grape repository.
+</p>
 
-| 目录/文件 | 说明 |
+<p align="center">
+  <a href="#what-is-grape-template">What is grape-template</a> ·
+  <a href="#repo-layout">Repo Layout</a> ·
+  <a href="#registry-structure">Registry Structure</a> ·
+  <a href="#local-templates">Local Templates</a> ·
+  <a href="#adding-a-template">Adding a Template</a> ·
+  <a href="#usage">Usage</a>
+</p>
+
+---
+
+## What is grape-template
+
+`grape-template` is the standalone repo for Grape's official project templates. At the **build / deploy
+stage of the main grape repo**, `scripts/sync_templates.sh` pulls these contents into the deployment root:
+
+- template directories → `examples/`
+- the template registry → `configs/project-templates.json`
+
+Keeping the templates in their own repo lets them ship and version independently from the platform.
+
+**In one sentence: add a template here + register its id in `project-templates.json` → it appears in the Grape "New Project" flow.**
+
+## Repo Layout
+
+| Path | Description |
 |---|---|
-| `hello-*` | 官方项目模板，目录名即模板 `id`，与 `project-templates.json` 中 `source: "local"` 的模板一一对应 |
-| `project-templates.json` | 官方模板注册表（含 local 与 git 模板全量条目），随本仓库独立发版 |
+| `hello-*` | Official local templates. The directory name is the template `id` and maps one-to-one with `source: "local"` entries in `project-templates.json` |
+| `project-templates.json` | The template registry — every entry (local and git) organized by category; versioned with this repo |
 
-> 新增模板时，必须同时满足：新建同名模板目录 **且** 在 `project-templates.json` 中登记对应 `id`
->（`source: "local"`）。两者不一致会导致 grape 侧 `test_local_template_dir_exists` 门禁失败。
+## Registry Structure
 
-## 模板列表
+`project-templates.json` organizes all templates into categories (`categories`). The `cloud-native` and
+`iac` categories are synced daily and their counts drift with the sync result:
 
-- `hello-flask` — 极简 Flask Web 应用（default 场景）
-- `hello-fastapi` — 极简 FastAPI 服务（default 场景）
-- `hello-todo` — 命令行待办清单（default 场景）
-- `hello-calculator` — 计算器 + 单元测试（default 场景）
-- `hello-html` — 静态网页前端三件套（default 场景）
-- `hello-blog` — Flask 多页博客骨架（default 场景）
-- `hello-skill` — 最小 Skill 项目模板（skill-dev 场景）
+| category `id` | Category | scene | Entries | Notes |
+|---|---|---|---|---|
+| `hello-world` | 👋 Hello World starters | hello-world | 15 | 7 local + 8 popular GitCode git templates (random mode) |
+| `general` | ⚙ General project templates | default | 3 | General-purpose git templates |
+| `mobile` | 🍃 Mobile development templates | harmony | 2 | HarmonyOS / mobile git templates |
+| `cloud-native` | ☁️ Cloud-native development | cloud-native | 110 | Curated cloud-native repos, auto-synced daily |
+| `iac` | 🏗️ IaC development | iac | 22 | Curated IaC repos, auto-synced daily |
+| `skill-dev` | 🔧 Skill development templates | skill-dev | 1 | Local `hello-skill` |
+| `ai` | 🤖 AI application templates | agent-dev | 20 | AI application git templates |
+| `content` | 📝 Content creation templates | blog-publish | 3 | Blogging / content git templates |
 
-## 使用
+## Local Templates
+
+- `hello-flask` — Mood Tracker: Flask web app with 5 API endpoints and unit tests (hello-world scene)
+- `hello-fastapi` — minimal FastAPI service (hello-world scene)
+- `hello-todo` — command-line todo list (hello-world scene)
+- `hello-calculator` — calculator with unit tests (hello-world scene)
+- `hello-html` — static web page (HTML + CSS + JS, hello-world scene)
+- `hello-blog` — Flask multi-page blog skeleton (hello-world scene)
+- `snake-game` — classic Snake game, converted to a local template (hello-world scene)
+- `hello-skill` — minimal Skill project template (skill-dev scene)
+
+## Adding a Template
+
+To add a **local** template, both steps are required at the same time:
+
+1. Create a new template directory whose name is the template `id`
+2. Register that same `id` in `project-templates.json` with `"source": "local"`
+
+> Note: every `source: "local"` entry must have a matching directory, otherwise the grape-side gate
+> `test_local_template_dir_exists` fails. Template directories that stay `source: "git"` are fine as
+> long as the registry entry remains `git`.
+
+A mismatch between the directory and the registry fails the grape-side gate
+`test_local_template_dir_exists`. Git-backed templates only need a `source: "git"` registry entry.
+
+## Usage
 
 ```bash
-# 在 grape 主仓库部署时同步模板
+# Synced by the grape main repo at deploy time
 bash scripts/sync_templates.sh
 ```

@@ -45,6 +45,9 @@ def _tar_filter(ti):
         return None
     if ".venv" in ti.name:
         return None
+    # help/api/openapi.json 是生成物（服务启动时落盘，gitignore）——打包跳过
+    if ti.name.endswith("help/api/openapi.json"):
+        return None
     return ti
 
 def make_subtar_gz(src_dir_or_files, out_path, base_dir=""):
@@ -73,8 +76,17 @@ def pack_backend(ts):
     scripts_dir = os.path.join(ROOT, "scripts")
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
-    # 仓库根文件 (start-worker.sh, Dockerfile, docker-compose.yml, README 等)
-    for rf in ["start-worker.sh", "Dockerfile", "docker-compose.yml",
+    # help/ 帮助文档源目录（usage + api + reference markdown）
+    # ⚠️ 必须打入：服务重启时 src/help_page_gen.py 依据 help/ 渲染 src/api/static/help.html；
+    #    缺失则升级后文档无法再生成（一直用渲染旧内容的 help.html，升级总缺新文档的根因，
+    #    2026-10-12 修复）。openapi.json 生成物已被 _tar_filter 过滤。
+    help_dir = os.path.join(ROOT, "help")
+    if os.path.isdir(help_dir):
+        items.append((help_dir, "help"))
+    # 仓库根文件 (Dockerfile, docker-compose.yml, README 等)
+    # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
+    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
+    for rf in ["Dockerfile", "docker-compose.yml",
                "README.md", "README.zh.md", "requirements.txt",
                "requirements-worker.txt", ".gitignore"]:
         p = os.path.join(ROOT, rf)

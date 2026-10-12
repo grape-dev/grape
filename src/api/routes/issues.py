@@ -865,10 +865,12 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                   (issue_id,))
         irow = c.fetchone()
     if not irow:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在",
+                                                       "hint": "awaiting-input 需传需求卡片 id（GRAPE_ISSUE_ID，issue 表主键），非 Issue number；可先 grape issues detail --number $ISSUE_NUMBER --json-out 取 id"})
     issue_card_id, repo_key, issue_number = irow[0], irow[1] or "", irow[2] or 0
     assignee, issue_user_id, title, cur_status = irow[3] or "", irow[4] or 0, irow[5] or "", irow[6] or ""
-    if repo_key != session_repo:
+    from src.repo_key import to_repo_key
+    if to_repo_key(repo_key) != to_repo_key(session_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     if cur_status in ("completed", "cancelled"):
         return {"ok": True, "issue_id": issue_card_id, "status": cur_status, "changed": False}
@@ -933,7 +935,8 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
         _r = c.fetchone()
     if not _r:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-    if _r[1] != _repo:
+    from src.repo_key import to_repo_key
+    if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
             "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or ""}

@@ -120,6 +120,76 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     return _seq
 
 
+def claim_event_guard(repo_key: str, issue_id: str, agent_type: str) -> bool:
+    """原子抢占事件活跃守卫（duplicate-issue-opened-event-fix-design.md 方案 A）。
+
+    (repo, issue, agent) 唯一约束：INSERT OR IGNORE 成功（rowcount=1）= 抢占成功；
+    失败 = 已有活跃事件（含近窗），跨进程互斥由数据库唯一索引保证。
+    """
+    try:
+        _now = _utc_now_str()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT OR IGNORE INTO event_active_guard (repo_key, issue_id, agent_type, seq, created_at) "
+                "VALUES (?,?,?,0,?)",
+                (repo_key, issue_id, agent_type, _now))
+            db.commit()
+            return c.rowcount == 1
+    except Exception as e:
+        log.warning(f"claim_event_guard failed ({repo_key}, {issue_id}, {agent_type}): {e}")
+        return False
+
+
+def update_event_guard_seq(repo_key: str, issue_id: str, agent_type: str, seq: int) -> None:
+    """把守卫行的 seq 记录为对应当前事件（抢占成功后回填）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE event_active_guard SET seq=? WHERE repo_key=? AND issue_id=? AND agent_type=? AND seq=0",
+                (seq, repo_key, issue_id, agent_type))
+            db.commit()
+    except Exception as e:
+        log.warning(f"update_event_guard_seq failed seq={seq}: {e}")
+
+
+def release_event_guard(repo_key: str, issue_id: str, agent_type: str, seq: int) -> None:
+    """释放守卫（事件进入终态）。仅当守卫被当前 seq 持有才删除，避免误删新事件守卫。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? AND agent_type=? AND seq=?",
+                (repo_key, issue_id, agent_type, seq))
+            db.commit()
+    except Exception as e:
+        log.warning(f"release_event_guard failed seq={seq}: {e}")
+
+
+def purge_stale_event_guards(max_age_seconds: int = 21600) -> int:
+    """TTL 兜底清理守卫行（进程崩溃来不及终态释放时的自愈；默认 6h）。
+
+    守卫作用域仅为"活跃/近窗"，超时删除后允许同 (issue,agent) 重新建事件。
+    """
+    try:
+        _cutoff = _utc_now_str(-max_age_seconds)
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM event_active_guard WHERE created_at < ?", (_cutoff,))
+            db.commit()
+            return c.rowcount
+    except Exception as e:
+        log.warning(f"purge_stale_event_guards failed: {e}")
+        return 0
+
+
+def _utc_now_str(offset_seconds: int = 0) -> str:
+    """UTC 'YYYY-MM-DD HH:MM:SS'（与 datetime('now') 同形；避免引入 DB 方言差异）。"""
+    from datetime import datetime, timezone, timedelta
+    return (datetime.now(timezone.utc) + timedelta(seconds=offset_seconds)).strftime("%Y-%m-%d %H:%M:%S")
+
+
 def append_skipped_event(repo_key: str, event_type: str, reason: str, detail: str = "",
                          issue_id: str = ""):
     """写入被跳过/无产出的事件审计记录到 event_skipped 表
@@ -430,6 +500,22 @@ def update_event_status(seq: int, status: str):
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event {seq}: {e}")
+    if status in _TERMINAL:
+        # 释放活跃守卫（独立 db_lock；避免在临界区内嵌套获取非可重入锁）
+        _release_guard_by_seq(seq)
+
+
+def _release_guard_by_seq(seq: int) -> None:
+    """事件终态 → 按事件的 (repo,issue,agent) 释放对应守卫（仅当前 seq）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key, issue_id, agent_type FROM events WHERE seq=? LIMIT 1", (seq,))
+            row = c.fetchone()
+        if row:
+            release_event_guard(row[0], row[1] or "#0", row[2] or "", seq)
+    except Exception as e:
+        log.warning(f"_release_guard_by_seq failed seq={seq}: {e}")
 
 
 def reset_event_terminal(seq: int):
@@ -449,6 +535,17 @@ def reset_event_terminal(seq: int):
             db.commit()
         except Exception as e:
             log.warning(f"reset_event_terminal failed seq={seq}: {e}")
+    # redispatch：重新抢占守卫（终态时已释放；此处幂等重抢，防重跑期间并发事件滑入）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key, issue_id, agent_type FROM events WHERE seq=? LIMIT 1", (seq,))
+            row = c.fetchone()
+        if row:
+            claim_event_guard(row[0], row[1] or "#0", row[2] or "")
+            update_event_guard_seq(row[0], row[1] or "#0", row[2] or "", seq)
+    except Exception as e:
+        log.warning(f"reset_event_terminal re-claim guard failed seq={seq}: {e}")
 
 
 def update_event_issue_id(seq: int, issue_id: str):
@@ -513,6 +610,9 @@ def update_event_complete(seq: int, status: str, exit_code: int = None,
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event complete {seq}: {e}")
+    # 事件进入终态 → 释放活跃守卫（允许同 (issue,agent) 开启新事件）
+    if status in ("completed", "failed", "cancelled"):
+        _release_guard_by_seq(seq)
     # WAL checkpoint 在 db_lock 释放后执行
     try:
         db.execute("PRAGMA wal_checkpoint(PASSIVE)")
