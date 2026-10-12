@@ -85,6 +85,11 @@ function renderEventDetail(data) {
     data.status === 'failed' ||
     (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
     (data.task && data.task.task_status === 'dispatched');
+  // A2A 重新派发按钮显示条件（a2a-redo-button-design.md §2）：
+  // completed + 真实 Issue（PR 订阅伪 #pr_ 不允许 A2A）
+  const _a2aRedoVisible =
+    data.status === 'completed' &&
+    data.issue_id && !String(data.issue_id).startsWith('#pr_');
 
   // M4：结构化产出（唯一结论）：优先 event.json archive.output，其次 events.result 自身的结构化 JSON。
   // "Agent 处理记录" 作为方框外部左上角标题，与下方结构化结论分离（不再重复展示 result 原文）。
@@ -156,7 +161,7 @@ function renderEventDetail(data) {
               <div><span style="color:var(--t3)">Engine:</span> ${(() => { if (!data.engine_instance) return '<span class="ts t3">' + I18N.t('events.engine_undispatched') + '</span>'; const h = data.engine_health; let health = ''; if (h && h.score !== null && h.score !== undefined) { const sc = h.score === 0 ? 'var(--r)' : h.score < 50 ? 'var(--y)' : 'var(--g)'; const hb = h.heartbeat_alive === false ? ' · 失联' : ''; health = ` · <span style="color:${sc};font-weight:600">健康分 ${h.score}</span>${h.consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败 ${h.consecutive_failures}</span>` : ''}${hb}`; } return `<b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}${health}`; })()}</div>
               <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
               <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}</div>
+              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}</div>
               ${data.status === 'failed' && result ? `<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason')||'失败原因'}：</b>${String(result).substring(0, 500)}</div>` : ''}
               ${data.task && data.task.task_id
                 ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_realtime_log')}</a></div>`
@@ -847,6 +852,114 @@ function _doRedispatch(seq) {
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast(I18N.t('events.redispatch_toast_failed', {msg: msg}));
+  });
+}
+
+// ===== A2A 重新派发（a2a-redo-button-design.md weekly-06）=====
+// completed 事件未实际交办下游 → 用户手动补发（方案B：弹窗自选目标 Agent）
+function a2aRedoEvent(seq) {
+  API.get('/events/' + seq + '/a2a-redo/scene').then(s => {
+    _showA2aRedoGlass(seq, s || {});
+  }).catch(() => {
+    _showA2aRedoGlass(seq, {});
+  });
+}
+
+function _showA2aRedoGlass(seq, sceneInfo) {
+  _closeA2aRedoGlass();
+  const _agents = ['vod', 'issue', 'coding', 'qa', 'sre'];
+  const _names = { vod: 'VOD Agent', issue: 'Issue Agent', coding: 'Coding Agent', qa: 'QA Agent', sre: 'SRE Agent' };
+  const _icons = { vod: '🔍', issue: '📝', coding: '🤖', qa: '✅', sre: '🔧' };
+  const _inScene = sceneInfo.agents_in_scene || [];
+  const _next = sceneInfo.next_agent || '';
+  const _hasSceneInfo = _inScene.length > 0;
+  window._a2aRedoSel = _next && _agents.includes(_next) ? _next : '';
+  const _btn = (a) => {
+    const _ok = !_hasSceneInfo || _inScene.includes(a);
+    const _sel = window._a2aRedoSel === a;
+    return `<div data-a2a-agent="${a}" data-ok="${_ok ? 1 : 0}" onclick="_pickA2aRedo('${a}')" style="display:flex;align-items:center;gap:8px;padding:8px 10px;border-radius:12px;cursor:${_ok ? 'pointer' : 'not-allowed'};border:1px solid ${_sel ? 'rgba(0,113,227,.45)' : 'rgba(0,0,0,.06)'};background:${_sel ? 'rgba(0,113,227,.08)' : _ok ? 'rgba(255,255,255,.55)' : 'rgba(0,0,0,.03)'};opacity:${_ok ? 1 : .4};transition:all .15s">
+      <span style="font-size:15px">${_icons[a]}</span>
+      <span style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${_names[a]}</span>
+      ${!_ok ? '<span style="font-size:10px;color:var(--t3,#86868b);margin-left:auto">不在场景</span>' : ''}
+      ${_sel ? '<span style="font-size:11px;color:var(--a,#0071e3);margin-left:auto">已选</span>' : ''}
+    </div>`;
+  };
+  const overlay = document.createElement('div');
+  overlay.className = 'a2r-overlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  const modal = document.createElement('div');
+  modal.className = 'a2r-glass';
+  modal.style.cssText = 'width:340px;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);overflow:hidden;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
+  modal.innerHTML = `
+    <div style="padding:18px 20px 14px">
+      <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+        <div style="width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,#0a84ff,#0071e3);display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;box-shadow:0 4px 12px rgba(10,132,255,0.3)">🤝</div>
+        <div>
+          <div style="font-size:14px;font-weight:700;color:var(--t,#1d1d1f);letter-spacing:-0.2px">A2A 重新派发</div>
+          <div style="font-size:11px;color:var(--t3,#86868b)">Seq #${seq}</div>
+        </div>
+      </div>
+      <div style="font-size:12px;color:var(--t2,#6e6e73);line-height:1.6;margin-bottom:12px">
+        该任务已完成但未交办下游 Agent。选择目标 Agent 补发一次 A2A 交办（不影响原任务结果）：
+      </div>
+      <div style="display:flex;flex-direction:column;gap:6px;margin-bottom:14px">
+        ${_agents.map(_btn).join('')}
+      </div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="bt bt-o bt-s" style="padding:8px 16px;font-size:12px" onclick="_closeA2aRedoGlass()">取消</button>
+        <button class="bt bt-s" id="_a2aRedoConfirmBtn" style="padding:8px 16px;font-size:12px;background:linear-gradient(135deg,#0a84ff,#0071e3);color:#fff;border:none;box-shadow:0 4px 12px rgba(10,132,255,0.35);${window._a2aRedoSel ? '' : 'opacity:.5'}" onclick="_doA2aRedo(${seq})">补发</button>
+      </div>
+    </div>`;
+  overlay.appendChild(modal);
+  overlay.addEventListener('mousedown', function(e) {
+    if (e.target === overlay) _closeA2aRedoGlass();
+  });
+  const _escHandler = function(e) {
+    if (e.key === 'Escape') {
+      _closeA2aRedoGlass();
+      document.removeEventListener('keydown', _escHandler);
+    }
+  };
+  document.addEventListener('keydown', _escHandler);
+  document.body.appendChild(overlay);
+}
+
+function _pickA2aRedo(a) {
+  const el = document.querySelector(`[data-a2a-agent="${a}"]`);
+  if (!el || el.dataset.ok === '0') return;
+  window._a2aRedoSel = a;
+  document.querySelectorAll('[data-a2a-agent]').forEach(n => {
+    const _sel = n.dataset.a2aAgent === a;
+    n.style.borderColor = _sel ? 'rgba(0,113,227,.45)' : 'rgba(0,0,0,.06)';
+    n.style.background = _sel ? 'rgba(0,113,227,.08)' : (n.dataset.ok === '1' ? 'rgba(255,255,255,.55)' : 'rgba(0,0,0,.03)');
+  });
+  const btn = document.getElementById('_a2aRedoConfirmBtn');
+  if (btn) btn.style.opacity = '';
+}
+
+function _closeA2aRedoGlass() {
+  const ex = document.querySelector('.a2r-overlay');
+  if (ex) ex.remove();
+  window._a2aRedoSel = '';
+}
+
+function _doA2aRedo(seq) {
+  const agent = window._a2aRedoSel || '';
+  if (!agent) { app.showToast('请先选择目标 Agent'); return; }
+  _closeA2aRedoGlass();
+  API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
+    if (d && d.skipped) {
+      const _reasons = { not_in_scene: '目标 Agent 不在当前场景内', duplicate_a2a: '该 Agent 已有进行中的任务', sre_subscribed: 'SRE 已订阅，无需补发', task_cancelled: '任务已取消' };
+      app.showToast('A2A 补发未执行：' + (_reasons[d.skipped] || d.skipped));
+    } else if (d && d.seq) {
+      app.showToast('A2A 补发成功，新事件 #' + d.seq);
+      app.nav('event', d.seq);
+    } else {
+      app.showToast('A2A 补发失败：' + ((d && d.error) || (d && d.message) || '未知原因'));
+    }
+  }).catch(e => {
+    const msg = (e.detail && e.detail.message) || e.message || e;
+    app.showToast('A2A 补发失败：' + msg);
   });
 }
 

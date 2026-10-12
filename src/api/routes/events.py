@@ -1042,6 +1042,113 @@ class KnowledgeBody(BaseModel):
     status: str = "accepted"       # accepted / rejected
 
 
+class A2ARedoBody(BaseModel):
+    agent: str = ""
+
+
+@router.get("/{seq}/a2a-redo/scene", operation_id="events_a2a_redo_scene", summary="A2A redo scene info", description="Returns scene pipeline nodes for a completed event, used by the A2A redo modal: which agents are in-scene (selectable) and the default preselected next agent.")
+def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
+    """A2A 补发弹窗的场景信息（a2a-redo-button-design.md §2）。"""
+    evt = _load_event(seq)
+    from src.api.deps import check_repo_access
+    check_repo_access(user, evt.get("repo_key", "") or "")
+    issue_id = (evt.get("issue_id") or "").lstrip("#")
+    repo_key = evt.get("repo_key", "") or ""
+    agents_in_scene: list = []
+    next_agent = ""
+    if issue_id and not issue_id.startswith("pr_"):
+        try:
+            from src.api.routes.webhook import _scene_node_check
+            _ck = _scene_node_check(repo_key, issue_id, evt.get("agent_type") or "")
+            agents_in_scene = [n.get("id") for n in (_ck.get("nodes") or []) if n.get("id")]
+            # 默认预选：当前 agent 的下一个节点（仅 UI 预选）
+            _cur = evt.get("agent_type") or ""
+            for _n in (_ck.get("nodes") or []):
+                if _n.get("id") == _cur and _n.get("next"):
+                    _nx = _n.get("next")
+                    if _nx in ("vod", "issue", "coding", "qa", "sre"):
+                        next_agent = _nx
+                    break
+        except Exception as e:
+            log.warning(f"[a2a-redo] scene check failed: {e}")
+    return {"scene_id": evt.get("scene_id") or "default", "agents_in_scene": agents_in_scene, "next_agent": next_agent}
+
+
+@router.post("/{seq}/a2a-redo", operation_id="events_a2a_redo", summary="A2A redo (manual handoff)", description="Manually re-sends a downstream A2A handoff for a completed event whose agent did not actually hand off. Does NOT touch the original event/task (unlike redispatch); simply creates a new a2a_event via the standard A2A path.")
+async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(require_no_session_token)):
+    """A2A 重新派发（a2a-redo-button-design.md weekly-06）。
+
+    场景：Agent 实际未 A2A 交办但事件已 completed，用户无补救手段。
+    语义：仅新增一条 a2a_event（复用 POST /api/a2a 的完整链路含场景/去重校验），
+    不回写原事件、不重置 task —— 与 redispatch 完全独立。
+
+    幂等：同 seq+agent 30s 内重复补发拒绝；同 issue+agent 已有未终态 A2A 事件
+    由 /api/a2a 的 duplicate_a2a 检查拦截（透传给前端）。
+    """
+    import time as _time
+    agent_name = (body.agent or "").strip()
+    if agent_name not in ("vod", "issue", "coding", "qa", "sre"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的目标 Agent"})
+
+    # 1) 事件存在 + completed + 真实 Issue（PR 订阅伪 Issue 不允许 A2A）
+    evt = _load_event(seq)
+    if evt.get("status") != "completed":
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "仅已完成事件可补发 A2A（运行中防双跑，失败请用重新派发）"})
+    issue_id = (evt.get("issue_id") or "").lstrip("#")
+    if not issue_id or issue_id.startswith("pr_"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "事件无关联 Issue，无法 A2A 补发"})
+
+    # 2) 归属校验：仅仓库归属人（managed_repos）可补发
+    from src.api.deps import check_repo_access
+    check_repo_access(user, evt.get("repo_key", "") or "")
+
+    # 3) 幂等：30s 内同 seq+agent 已补发过则拒绝（同 redispatch:{seq} 模式）
+    from src.user.db import get_meta_value, set_meta_value
+    _mk = f"a2a-redo:{seq}:{agent_name}"
+    _last = get_meta_value(_mk) or ""
+    if _last and (_time.time() - float(_last or 0)) < 30:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "已补发过该 Agent，请 30s 后再试"})
+    try:
+        if _last and _time.time() - float(_last) < 30:
+            raise HTTPException(status_code=409, detail={"code": 409, "message": "已补发过该 Agent，请 30s 后再试"})
+    except ValueError:
+        pass
+
+    # 4) 组装 payload，以当前登录用户身份走标准 /api/a2a 链路
+    #    （jwt 分支内部会再校验 managed_repos 归属，与第 2 步双保险）
+    repo_key = evt.get("repo_key", "") or ""
+    repository = repo_key.split(":", 1)[1] if ":" in repo_key else repo_key
+    actor = evt.get("actor") or ""
+    if not actor:
+        actor = repository.split("/", 1)[0]
+    _redo_user = dict(user or {})
+    _redo_user["auth_type"] = "jwt"
+    from src.api.routes.webhook import a2a_endpoint, A2AHandoffBody
+    _a2a_body = A2AHandoffBody(agent=agent_name, payload={
+        "repository": repository,
+        "account": actor,
+        "issue_number": issue_id,
+        "pr_number": "",
+        "context": f"用户手动补发 A2A：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
+    })
+    _res = await a2a_endpoint(None, _a2a_body, _redo_user)  # type: ignore[arg-type]  # jwt 分支不读 request
+    # JSONResponse（拦截类 skipped）原样透传
+    if not isinstance(_res, dict):
+        import json as _rjson
+        _raw = getattr(_res, "body", b"") or b""
+        if isinstance(_raw, memoryview):
+            _raw = _raw.tobytes()
+        try:
+            _res = _rjson.loads(bytes(_raw).decode("utf-8"))
+        except Exception:
+            _res = {"status": "error", "message": "A2A 返回解析失败"}
+
+    # 5) 记录幂等时间戳（仅真实入队/拦截都记，防连点）
+    set_meta_value(_mk, str(_time.time()))
+    log.info(f"[a2a-redo] seq={seq} → agent={agent_name} by={user.get('username', '')}: {_res}")
+    return _res
+
+
 class FlowResetBody(BaseModel):
     to_stage: str = "vod"
 
