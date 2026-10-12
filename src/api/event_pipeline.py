@@ -622,6 +622,7 @@ _STAGE_EVENT_AGENT_MAP = {
     "pull_request_updated": {"vod": "issue", "issue": "issue", "coding": "qa", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
     "pull_request_merged": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "sre", "sre": "sre", "pending_review": "", "done": ""},
     "note_hook_pr":        {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
+    "pull_request_review": {"vod": "issue", "issue": "issue", "coding": "coding", "qa": "qa", "sre": "sre", "pending_review": "", "done": ""},
 }
 
 
