@@ -100,9 +100,13 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
         conditions.append("(scope='official' OR (scope='user' AND owner_id=?))")
         params.append(str(user["id"]))
 
-    # 组织隔离：official 技能（org_id=0）对所有组织可见；
-    # user/repo scope 技能只在当前组织内可见（org_id 匹配）
-    if _org_id:
+    # 组织隔离（2026-10-12 修正）：official 技能（org_id=0）对所有组织可见；
+    # user/repo scope 的技能没有"组织级"概念——org_id 只是迁移时的数据归属标记，
+    # 可见性依据是 owner：repo 技能跟着仓库走（owner_id=repo_key 精确限定，
+    # 用户能访问该仓库即能看其技能，见 skills-org-visibility 修复），user 技能
+    # owner_id=user.id 已是本人限定。故组织过滤仅作用于 official 之外的兜底场景，
+    # 不再对 repo/user 分支追加 org_id 条件（否则跨组织的仓库技能会被错误滤掉）。
+    if _org_id and scope not in ("repo", "user"):
         conditions.append("(org_id=0 OR org_id=?)")
         params.append(_org_id)
 
