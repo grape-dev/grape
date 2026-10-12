@@ -73,8 +73,10 @@ def pack_backend(ts):
     scripts_dir = os.path.join(ROOT, "scripts")
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
-    # 仓库根文件 (start-worker.sh, Dockerfile, docker-compose.yml, README 等)
-    for rf in ["start-worker.sh", "Dockerfile", "docker-compose.yml",
+    # 仓库根文件 (Dockerfile, docker-compose.yml, README 等)
+    # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
+    #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
+    for rf in ["Dockerfile", "docker-compose.yml",
                "README.md", "README.zh.md", "requirements.txt",
                "requirements-worker.txt", ".gitignore"]:
         p = os.path.join(ROOT, rf)
