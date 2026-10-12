@@ -1716,25 +1716,46 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 改为始终新建事件 + 入队（agent_tasks），由 issue_agent_session 的串行执行自然排队，
     # 待当前事件终态后再跑，不丢弃。bot 自评回声/系统回帖已在上游过滤，不会因豁免循环触发。
     if issue_id and agent_type and event_type not in ("a2a_event", "issue_comment"):
+        # 方案 A/C（duplicate-issue-opened-event-fix-design.md）：
+        # - A：event_active_guard 唯一约束原子抢占（跨进程互斥，替代依赖进程内 db_lock 的
+        #   "同 (repo,issue,agent) 无 running 事件" SELECT）；
+        # - C：近 60s 同类事件（含已终态）也视为重复，处理 webhook 重发/终态后二次投递。
+        # 解决 GitCode/GitHub 双 webhook 或 create_task 同步补发 + 真实 webhook 并发双投。
+        from src.api.event_store import append_skipped_event, _utc_now_str
         try:
             with db_lock:
                 _dc = db.cursor()
+                # ① 原子抢占守卫（跨进程唯一约束；SQLite OR IGNORE / MySQL INSERT IGNORE）
                 _dc.execute(
-                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
-                    "AND status IN ('running','dispatched') "
-                    "AND event_type != 'a2a_event' "
-                    "ORDER BY seq DESC LIMIT 1",
-                    (repo_key, issue_id, agent_type))
-                _existing_evt = _dc.fetchone()
-                if _existing_evt:
-                    log.info(f"Pipeline: dedup skip — issue={issue_id} agent={agent_type} "
-                             f"already has running event seq={_existing_evt[0]}")
-                    from src.api.event_store import append_skipped_event
-                    append_skipped_event(repo_key, event_type, f"dedup:active_{agent_type}_for_{issue_id}",
+                    "INSERT OR IGNORE INTO event_active_guard "
+                    "(repo_key, issue_id, agent_type, seq, created_at) VALUES (?,?,?,0,?)",
+                    (repo_key, issue_id or "#0", agent_type, _utc_now_str()))
+                if _dc.rowcount == 0:
+                    log.info(f"Pipeline: dedup skip — (issue,agent)=({issue_id},{agent_type}) "
+                             f"guard already held (active/recent)")
+                    append_skipped_event(repo_key, event_type,
+                                         f"dedup:active_{agent_type}_for_{issue_id}",
                                          issue_id=issue_id)
                     result["skipped"] = "duplicate_active_task"
                     return result
-                # dedup 通过 → 直接 INSERT（不再调 append_event 函数，避免重复加锁开销）
+                # ② 近窗去重：同 (repo,issue,agent) 且同 event_type 60s 内已存在（含已终态）→ 跳过
+                _dc.execute(
+                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                    "AND event_type=? AND created_at >= ? ORDER BY seq DESC LIMIT 1",
+                    (repo_key, issue_id or "#0", agent_type, event_type, _utc_now_str(-60)))
+                if _dc.fetchone():
+                    log.info(f"Pipeline: dedup skip — recent {event_type} event within 60s "
+                             f"for (issue,agent)=({issue_id},{agent_type})")
+                    append_skipped_event(repo_key, event_type,
+                                         f"dedup:recent_{event_type}_60s_for_{agent_type}",
+                                         issue_id=issue_id)
+                    _dc.execute(
+                        "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? AND agent_type=?",
+                        (repo_key, issue_id or "#0", agent_type))
+                    db.commit()
+                    result["skipped"] = "duplicate_recent_window"
+                    return result
+                # ⑧ 去重通过 → 直接 INSERT（不再调 append_event 函数，避免重复加锁开销）
                 _dc.execute(
                     "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (repo_key, issue_id or "#0", event_type, source, agent_type, title, actor, summary,
@@ -1742,6 +1763,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 )
                 db.commit()
                 _seq = _dc.lastrowid or 0
+                # 守卫行回填当前事件 seq（终态释放时按 seq 精确删除）
+                _dc.execute(
+                    "UPDATE event_active_guard SET seq=? WHERE repo_key=? AND issue_id=? AND agent_type=? AND seq=0",
+                    (_seq, repo_key, issue_id or "#0", agent_type))
+                db.commit()
                 # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
                 _dc.execute("SELECT seq FROM events WHERE seq=?", (_seq,))
                 if not _dc.fetchone():
@@ -1749,6 +1775,15 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     log.warning(f"Pipeline: INSERT returned lastrowid={_seq} but row not found (WAL conflict?), repo={repo_key}, type={event_type}")
         except Exception as _de:
             log.warning(f"Pipeline: dedup+insert failed: {_de}")
+            try:
+                with db_lock:
+                    _dc2 = db.cursor()
+                    _dc2.execute(
+                        "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? AND agent_type=? AND seq IN (0,?)",
+                        (repo_key, issue_id or "#0", agent_type, _seq or 0))
+                    db.commit()
+            except Exception:
+                pass
     else:
         # a2a_event 或无 issue_id/agent_type：直接写入（无需 dedup）
         from src.api.event_store import append_event
