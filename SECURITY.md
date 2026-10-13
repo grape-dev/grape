@@ -6,7 +6,7 @@ Grape is under active development. Security fixes are applied to the current rel
 
 | Version | Supported |
 |---------|-----------|
-| latest (main-opensource / releases) | ✅ |
+| latest (main / releases) | ✅ |
 
 ## Reporting a Vulnerability
 
