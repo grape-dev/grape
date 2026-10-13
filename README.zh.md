@@ -140,7 +140,7 @@ python -m src.api.run --dev    # 开发：单端口 3000，热重载
 |------|------|
 | `configs/global-bot-token.json` | 全局 Bot token + GitCode OAuth 凭据（gitignored） |
 | `configs/agent-description.json` | Agent 类型种子（订阅事件、默认后端） |
-| `configs/skill-description.json` | 官方技能种子（由独立技能仓库 [grape-skills](https://gitcode.com/grape-dev/grape-skills) 经 `scripts/sync_skills.sh` 同步） |
+| `configs/skill-description.json` | 官方技能种子（由独立技能仓库 [grape-skills](https://github.com/grape-dev/grape-skills) 经 `scripts/sync_skills.sh` 同步） |
 | `configs/agent-skill-mapping.json` | 开发场景 → Agent × Skill 映射 |
 | `configs/project-templates.json` | 项目模板库 |
 | `configs/login-whitelist.json` | GitCode 登录白名单 |
@@ -181,7 +181,7 @@ python -m pytest tests/ -v
 ### 不写代码也能贡献
 
 - **文档**：改进 README、补充设计文档、修正错别字
-- **Skills**：向独立技能仓库 [grape-skills](https://gitcode.com/grape-dev/grape-skills) 贡献新的 Agent 技能（`skills/<agent_type>/<skill>/`，Markdown 即可，无需改后端代码）
+- **Skills**：向独立技能仓库 [grape-skills](https://github.com/grape-dev/grape-skills) 贡献新的 Agent 技能（`skills/<agent_type>/<skill>/`，Markdown 即可，无需改后端代码）
 - **项目模板**：为 `configs/project-templates.json` 补充可一键创建的模板
 - **Bug 报告**：提供清晰的复现步骤、运行环境、相关日志
 - **测试用例**：补充覆盖边界场景的用例

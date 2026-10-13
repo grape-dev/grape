@@ -134,9 +134,9 @@ Production deployment examples (nginx reverse proxy / systemd / Docker) in `docs
 |------|-------------|
 | `configs/global-bot-token.json` | Global Bot token + GitCode OAuth credentials (gitignored) |
 | `configs/agent-description.json` | Agent type seeds (event subscriptions, default backend) |
-| `configs/skill-description.json` | Official skill seeds (synced from the standalone [grape-skills](https://gitcode.com/grape-dev/grape-skills) repo via `scripts/sync_skills.sh`) |
+| `configs/skill-description.json` | Official skill seeds (synced from the standalone [grape-skills](https://github.com/grape-dev/grape-skills) repo via `scripts/sync_skills.sh`) |
 | `configs/agent-skill-mapping.json` | Dev scenario → Agent × Skill mapping |
-| `configs/project-templates.json` | Project template library (synced from the standalone [grape-template](https://gitcode.com/grape-dev/grape-template) repo via `scripts/sync_templates.sh`) |
+| `configs/project-templates.json` | Project template library (synced from the standalone [grape-template](https://github.com/grape-dev/grape-template) repo via `scripts/sync_templates.sh`) |
 | `configs/login-whitelist.json` | GitCode login whitelist |
 
 ## Development & Testing
@@ -173,8 +173,8 @@ Test coverage: event normalization, prompt building, Agent executor (NDJSON pars
 ### Non-code Contributions Welcome
 
 - **Documentation** — Improve README, supplement design docs, fix typos
-- **Skills** — Contribute new Agent skills to the standalone [grape-skills](https://gitcode.com/grape-dev/grape-skills) repo (`skills/<agent_type>/<skill>/`, Markdown only, no backend changes)
-- **Templates** — Add new project templates to the standalone [grape-template](https://gitcode.com/grape-dev/grape-template) repo (template directory + `project-templates.json` entry)
+- **Skills** — Contribute new Agent skills to the standalone [grape-skills](https://github.com/grape-dev/grape-skills) repo (`skills/<agent_type>/<skill>/`, Markdown only, no backend changes)
+- **Templates** — Add new project templates to the standalone [grape-template](https://github.com/grape-dev/grape-template) repo (template directory + `project-templates.json` entry)
 - **Bug Reports** — Provide clear repro steps, environment info, and logs
 - **Test Cases** — Add coverage for edge cases
 - **Community** — Answer questions, write tutorials
