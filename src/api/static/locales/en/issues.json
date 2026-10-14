@@ -39,6 +39,12 @@
     "skipped_no_vod": "Target scene does not contain a vod node",
     "result_unknown": "Unknown handoff result",
     "a2a_context": "Cross-pipeline continuation: please do a quick review then proceed to issue to confirm Spec",
-    "continuation_from": "⇄ Continued from"
+    "continuation_from": "⇄ Continued from",
+    "confirm_title": "Confirm Handoff",
+    "confirm_message": "You are about to hand off issue #{issue} to the \"{scene}\" pipeline.\nThe target pipeline will take over; the current pipeline stops flowing (history is preserved).\nContinue?",
+    "no_permission": "Cannot load target pipelines (no permission or issue missing)",
+    "no_target": "No available target pipelines (vod node required, current pipeline excluded)",
+    "err_invalid_target": "Target pipeline unavailable",
+    "duplicate_current": "Target pipeline cannot be the current pipeline"
   }
 }

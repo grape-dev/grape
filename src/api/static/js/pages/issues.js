@@ -989,7 +989,7 @@ function _render() {
     </div>
     <div class="tsk-layout" style="flex:1;min-height:0">
       <div class="tsk-list" style="overflow-y:auto;height:100%;display:flex;flex-direction:column">${listHtml}<div style="flex:1"></div>${pagerHtml}</div>
-      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}</div>` : ''}</div>
+      <div class="tsk-detail" style="overflow-y:auto;height:100%;position:relative;top:0">${detailHtml}${_taskSel ? `<div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:flex-start;margin-top:12px"><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="window.open('${_vcsUrl(_taskSel.repo_key, '/issues/' + _taskSel.issue_number)}','_blank')">${I18N.t('issues.detail.view_issue')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${_taskSel.id}])">${I18N.t('issues.detail.go_conversation')}</button><button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${_taskSel.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>${_renderTaskActionsInline(_taskSel)}${_renderCrossPipelineButton(_taskSel)}</div>` : ''}</div>
     </div>`}
   </div>`;
 
@@ -1711,7 +1711,7 @@ function copyTaskSubmit() {
     });
 }
 
-// ===== 跨流水线移交（Issue #329）=====
+// ===== 跨流水线移交（Issue #329；Issue #337 列表模式入口 + 后端代理 + 二次确认）=====
 function _renderCrossPipelineButton(t) {
   // Show handoff button for all statuses (including completed/cancelled/failed)
   var _label = I18N.t('issues.cross_pipeline.handoff_btn')||'移交到其他流水线';
@@ -1723,8 +1723,6 @@ let _crossPipelineModal = null;
 window.openCrossPipelineModal = function(taskId) {
   var t = window._tasksById[taskId] || window._currentDetailTask;
   if (!t) return;
-  var repo = app.currentRepo();
-  var defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
   if (_crossPipelineModal) _crossPipelineModal.remove();
   var esc = function(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
 
@@ -1757,29 +1755,35 @@ window.openCrossPipelineModal = function(taskId) {
   document.body.appendChild(ov);
   _crossPipelineModal = ov;
 
-  // Async load scenes with vod node
-  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
+  // Issue #337: 目标列表走后端代理接口（权限过滤 + 排除当前流水线 + 仅含 vod 节点，服务端统一裁决）
+  var _sel = document.getElementById('cpTargetScene');
+  var _btn = document.getElementById('cpSubmitBtn');
+  if (_btn) { _btn.disabled = true; _btn.style.opacity = '.5'; _btn.style.cursor = 'not-allowed'; }
+  API.get('/issues/' + t.id + '/handoff/targets').then(function(d) {
     var sel = document.getElementById('cpTargetScene');
     if (!sel) return;
-    sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.scene_placeholder')||'请选择目标场景') + '</option>';
-    var scenes = d.scenes || [];
-    var hasValid = false;
-    scenes.forEach(function(s) {
-      var nodes = (s.pipeline && s.pipeline.nodes) || [];
-      var hasVod = nodes.some(function(n) { return (n.id || n.tag) === 'vod'; });
-      if (hasVod) {
-        hasValid = true;
-        var opt = document.createElement('option');
-        opt.value = s.id;
-        opt.textContent = (s.display_name || s.name || s.id);
-        opt._sceneData = s;
-        sel.appendChild(opt);
-      }
-    });
-    if (!hasValid) {
-      sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.no_vod_scenes')||'无可用场景（需含 vod 节点）') + '</option>';
+    var targets = d.targets || [];
+    if (!targets.length) {
+      sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.no_target')||'无可用目标流水线（需含 vod 节点且非当前流水线）') + '</option>';
+      return;
     }
-  }).catch(function(){});
+    sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.scene_placeholder')||'请选择目标场景') + '</option>';
+    targets.forEach(function(s) {
+      var opt = document.createElement('option');
+      opt.value = s.id;
+      opt.textContent = (s.display_name || s.name || s.id);
+      opt._sceneData = s;
+      sel.appendChild(opt);
+    });
+    var btn = document.getElementById('cpSubmitBtn');
+    if (btn) { btn.disabled = false; btn.style.opacity = ''; btn.style.cursor = ''; }
+  }).catch(function(e) {
+    var sel = document.getElementById('cpTargetScene');
+    if (sel) sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.no_permission')||'无法获取目标流水线列表') + '</option>';
+    var errEl = document.getElementById('cpError');
+    var msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+    if (errEl) { errEl.style.display = 'block'; errEl.textContent = (I18N.t('issues.cross_pipeline.err_failed')||'移交失败: ') + msg; }
+  });
 };
 
 window._onCrossPipelineSceneChange = function() {
@@ -1803,35 +1807,26 @@ window.crossPipelineSubmit = function(taskId) {
   var showErr = function(msg) { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
   var targetSceneId = (sceneSel || {}).value || '';
   if (!targetSceneId) { showErr(I18N.t('issues.cross_pipeline.err_no_scene')||'请选择目标场景'); return; }
-  var engineConfig = null;
+  var _sceneName = (sceneSel.options[sceneSel.selectedIndex] || {}).textContent || targetSceneId;
 
+  // Issue #337: 二次确认防误触（展示目标流水线名称 + 需求号）
+  var _confirmMsg = (I18N.t('issues.cross_pipeline.confirm_message')||'即将把需求 #{issue} 移交到「{scene}」流水线。\n移交后由目标流水线接续处理，原流水线停止流转（历史记录保留）。\n确定继续吗？')
+    .replace('{issue}', t.issue_number).replace('{scene}', _sceneName);
+  _grapeConfirm({
+    title: I18N.t('issues.cross_pipeline.confirm_title')||'确认移交',
+    message: _confirmMsg,
+    confirmText: I18N.t('issues.cross_pipeline.btn_submit')||'确认移交',
+    onConfirm: function() { _doCrossPipelineSubmit(t, targetSceneId, _sceneName); },
+  });
+};
+
+function _doCrossPipelineSubmit(t, targetSceneId, sceneName) {
   var btn = document.getElementById('cpSubmitBtn');
   if (btn) { btn.disabled = true; btn.textContent = I18N.t('issues.cross_pipeline.btn_submitting')||'移交中...'; }
 
-  var repo = app.currentRepo();
-  var repoKey = (t.repo_key || '').replace(/^(github|gitcode):/, '');
-  var carriedContext = {
-    source_issue_number: t.issue_number,
-    source_scene_id: t.scene_id || '',
-    source_scene_name: t.scene_name || '',
-    spec_ref: '',
-    rating: 'ready',
-    work_branch: (sceneSel.options[sceneSel.selectedIndex]._sceneData && sceneSel.options[sceneSel.selectedIndex]._sceneData.work_branch) || 'main',
-  };
-
-  API.post('/a2a', {
-    agent: 'vod',
-    payload: {
-      repository: repoKey,
-      account: repoKey.split('/')[0] || repoKey,
-      issue_number: parseInt(t.issue_number) || t.issue_number,
-      context: I18N.t('issues.cross_pipeline.a2a_context')||'跨流水线接续：请快速复核后流转至 issue 确认 Spec',
-      target_scene_id: targetSceneId,
-      target_node: 'vod',
-      carried_context: carriedContext,
-      target_assignee: '',
-      engine_config: engineConfig,
-    }
+  // Issue #337: 提交走后端代理端点（统一鉴权/审计/幂等，复用既有 A2A cross-pipeline 链路）
+  API.post('/issues/' + t.id + '/handoff', {
+    target_scene_id: targetSceneId
   }).then(function(d) {
     var ov = document.getElementById('crossPipelineOverlay');
     if (ov) ov.remove();
@@ -1841,21 +1836,22 @@ window.crossPipelineSubmit = function(taskId) {
       else if (d.skipped === 'target_scene_missing_node') _skipMsg = I18N.t('issues.cross_pipeline.skipped_no_vod')||'目标场景不含 vod 节点';
       app.showToast(_skipMsg);
     } else if (d.seq > 0) {
-      var _sceneName = sceneSel.options[sceneSel.selectedIndex].textContent || targetSceneId;
-      app.showToast((I18N.t('issues.cross_pipeline.success_toast')||'已移交至 {scene} 流水线').replace('{scene}', _sceneName));
+      app.showToast((I18N.t('issues.cross_pipeline.success_toast')||'已移交至 {scene} 流水线').replace('{scene}', sceneName));
     } else {
       app.showToast(I18N.t('issues.cross_pipeline.result_unknown')||'移交结果未知');
     }
-    // Refresh pipeline section
+    // Refresh pipeline section + 列表状态（scene_id/stage 已回写）
     if (t.id) {
       API.get('/issues/' + t.id + '/pipeline').then(function(data) {
         _renderPipelineSection(data);
       }).catch(function(){});
+      loadTasks();
     }
   }).catch(function(e) {
     if (btn) { btn.disabled = false; btn.textContent = I18N.t('issues.cross_pipeline.btn_submit')||'确认移交'; }
     var msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
-    showErr((I18N.t('issues.cross_pipeline.err_failed')||'移交失败: ') + msg);
+    app.showToast((I18N.t('issues.cross_pipeline.err_failed')||'移交失败: ') + msg);
+    loadTasks();  // 错误后刷新保证页面可用
   });
 };
 

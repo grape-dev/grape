@@ -44,16 +44,17 @@ describe('Issue #329: Cross-pipeline handoff frontend', () => {
     expect(body).not.toContain('confirm(');
   });
 
-  test('issues.js cross-pipeline submit calls API.post /a2a with target_scene_id', () => {
+  test('issues.js cross-pipeline submit reaches the A2A chain (Issue #337: via backend proxy)', () => {
     const src = fs.readFileSync(ISSUES_JS, 'utf8');
     const idx = src.indexOf('window.crossPipelineSubmit');
     expect(idx).toBeGreaterThan(-1);
     const body = src.substring(idx, idx + 3000);
-    expect(body).toContain("API.post('/a2a'");
+    // Issue #337: submit now goes through the backend proxy endpoint, which reuses the
+    // /api/a2A cross-pipeline chain server-side (targets/confirm handled there).
+    expect(body).toContain("API.post('/issues/' + t.id + '/handoff'");
     expect(body).toContain('target_scene_id');
-    expect(body).toContain('target_node');
-    expect(body).toContain('carried_context');
-    expect(body).toContain('engine_config');
+    // Double-confirm guard (Issue #337 anti-misclick)
+    expect(body).toContain('_grapeConfirm');
   });
 
   test('issues.js _renderPipelineSection includes source_issue_number annotation', () => {
@@ -109,14 +110,19 @@ describe('Issue #329: Cross-pipeline handoff frontend', () => {
 
   test('index.html bumped issues.js and pipeline.js versions', () => {
     const html = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
-    expect(html).toContain('issues.js?v=109');
+    // Version moves forward over time (v109 at #329, bumped since); assert >= v109.
+    const m = html.match(/issues\.js\?v=(\d+)/);
+    expect(m).not.toBeNull();
+    expect(parseInt(m[1], 10)).toBeGreaterThanOrEqual(109);
     expect(html).toContain('pipeline.js?v=44');
   });
 
   test('issues.js handoff button uses Apple design (0.5px border, rounded-lg)', () => {
     const src = fs.readFileSync(ISSUES_JS, 'utf8');
-    const idx = src.indexOf('_renderCrossPipelineButton');
+    // Locate the function definition (call sites appear earlier in the file)
+    const idx = src.indexOf('function _renderCrossPipelineButton');
     const body = src.substring(idx, idx + 500);
+    expect(idx).toBeGreaterThan(-1);
     expect(body).toContain('tsk-btn');
     // Check for rounded border style
     expect(body).toMatch(/border-radius/i);

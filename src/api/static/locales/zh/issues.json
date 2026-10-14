@@ -39,6 +39,12 @@
     "skipped_no_vod": "目标场景不含 vod 节点",
     "result_unknown": "移交结果未知",
     "a2a_context": "跨流水线接续：请快速复核后流转至 issue 确认 Spec",
-    "continuation_from": "⇄ 接续自"
+    "continuation_from": "⇄ 接续自",
+    "confirm_title": "确认移交",
+    "confirm_message": "即将把需求 #{issue} 移交到「{scene}」流水线。\n移交后由目标流水线接续处理，原流水线停止流转（历史记录保留）。\n确定继续吗？",
+    "no_permission": "无法获取目标流水线列表（无权限或需求不存在）",
+    "no_target": "无可用目标流水线（需含 vod 节点且非当前流水线）",
+    "err_invalid_target": "目标流水线不可用",
+    "duplicate_current": "目标流水线不能是当前流水线"
   }
 }
