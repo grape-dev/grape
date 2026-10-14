@@ -1764,6 +1764,42 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
     return out
 
 
+def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str = "") -> dict:
+    """Issue #337: 计算某需求「可移交目标流水线」列表（列表模式详情移交入口数据源）。
+
+    - 数据源：`get_scenes(repo_key)`（与 /scenes/with-pipeline 同源；仓库作用域即权限过滤，
+      调用方仍需先 `check_repo_access`）。
+    - 过滤：① 排除当前流水线（current_scene_id；空 → 由调用方解析，通常为 "default"）；
+      ② 仅保留含 vod 节点的场景（与 _cross_pipeline_handoff 目标节点约定一致）。
+    - 返回 {targets: [{id, name, display_name, description, work_branch, scene_type}],
+            current_scene_id}。空列表照常返回（前端展示「无可用目标」，非静默失败）。
+    """
+    from src.api.pipeline_config import get_scenes
+    _cur = (current_scene_id or "").strip() or "default"
+    targets = []
+    try:
+        for s in get_scenes(repo_key=repo_key):
+            _sid = s.get("id") or ""
+            if not _sid or _sid == _cur:
+                continue
+            _nodes = s.get("nodes") or []
+            _has_vod = any((n.get("id") or n.get("tag")) == "vod" for n in _nodes)
+            if not _has_vod:
+                continue
+            targets.append({
+                "id": _sid,
+                "name": s.get("name") or _sid,
+                "display_name": s.get("display_name") or s.get("name") or _sid,
+                "description": s.get("description") or "",
+                "work_branch": s.get("work_branch") or "main",
+                "scene_type": s.get("scene_type") or "standard",
+            })
+    except Exception as _e:
+        log.warning(f"get_handoff_targets failed repo={repo_key} issue=#{issue_number}: {_e}")
+        targets = []
+    return {"targets": targets, "current_scene_id": _cur}
+
+
 def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False) -> list[dict]:
     """查询 tasks 并富化（scene / stage / is_running / is_pr）为对外 dict（my_tasks / repo_all_tasks 共享）。
 

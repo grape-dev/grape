@@ -806,6 +806,125 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     }
 
 
+# ===== Issue #337: 列表模式详情「移交到其他流水线」（后端代理，复用 #329 handoff 链路）=====
+
+class IssueHandoffBody(BaseModel):
+    target_scene_id: str = ""
+
+
+def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
+    """按 issue.id 取 (repo_key, issue_number, current_scene_id)；不存在 → 404。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, scene_id FROM issue WHERE id=?", (issue_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    _scene_id = (row[2] or "").strip() or "default"
+    return row[0], row[1] or 0, _scene_id
+
+
+@router.get("/{issue_id}/handoff/targets", operation_id="issues_handoff_targets",
+            summary="List handoff target pipelines for an issue",
+            description="Lists available cross-pipeline handoff targets for the issue-center detail view: repo-scoped scenes (permission-filtered), excluding the issue's current pipeline, vod node required. Empty list is returned as-is (frontend shows explicit empty hint).")
+async def targets_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """Issue #337: 需求详情「移交到其他流水线」目标流水线列表。"""
+    from src.api.deps import check_repo_access
+    from src.api.issues_center import get_handoff_targets
+    repo_key, issue_number, current_scene_id = _load_issue_repo_scene(issue_id)
+    check_repo_access(user, repo_key)
+    out = get_handoff_targets(repo_key, issue_number, current_scene_id)
+    return {"issue_id": issue_id, "issue_number": issue_number, "repo_key": repo_key,
+            "current_scene_id": out["current_scene_id"], "targets": out["targets"]}
+
+
+@router.post("/{issue_id}/handoff", operation_id="issues_handoff",
+             summary="Hand off issue to another pipeline",
+             description="Hands the issue off to a target pipeline (Issue #337 list-view entry). Backend proxy: validates repo access + target membership (excludes current pipeline, vod required), 30s idempotency guard, then reuses the standard A2A cross-pipeline handoff path (a2a_endpoint -> _cross_pipeline_handoff). Result (including 'skipped' interceptions like duplicate_handoff) is passed through to the frontend.")
+async def handoff_issue(issue_id: int, body: IssueHandoffBody,
+                        user: dict = Depends(require_no_session_token)):
+    """Issue #337: 移交提交——服务内直调 a2a_endpoint（与 a2a-redo 同模式），复用 #329 链路。"""
+    import time as _time
+    import json as _rjson
+    from src.api.deps import check_repo_access
+    from src.api.issues_center import get_handoff_targets
+
+    # 1) 定位需求 + 归属校验
+    repo_key, issue_number, current_scene_id = _load_issue_repo_scene(issue_id)
+    check_repo_access(user, repo_key)
+
+    # 2) 目标校验：非空 / 非当前场景 / 在可移交列表内（含 vod 过滤，防绕过权限点名任意场景）
+    target_scene_id = (body.target_scene_id or "").strip()
+    if not target_scene_id:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "请选择目标流水线"})
+    if target_scene_id == current_scene_id:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "目标流水线不能是当前流水线"})
+    _targets = get_handoff_targets(repo_key, issue_number, current_scene_id)
+    _target_ids = {t["id"] for t in _targets["targets"]}
+    if target_scene_id not in _target_ids:
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": "目标流水线不存在或不可移交（需含 vod 节点且不归属当前仓库）"})
+
+    # 3) 幂等防连点：30s 内同一需求重复提交拒绝（复用 a2a-redo 的 meta 键模式）
+    from src.user.db import get_meta_value, set_meta_value
+    _mk = f"issue-handoff:{issue_id}"
+    _last = get_meta_value(_mk) or ""
+    try:
+        _recent = _last and (_time.time() - float(_last)) < 30
+    except ValueError:
+        _recent = False
+    if _recent:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "该需求刚发起过移交，请 30s 后再试"})
+
+    # 4) 组装 payload：carried_context 读取历史接续信息并补来源场景
+    from src.api.session_store import get_carried_context
+    from src.api.pipeline_config import get_pipeline_config
+    _carried = get_carried_context(repo_key, issue_number) or {}
+    _carried.setdefault("source_issue_number", issue_number)
+    _carried.setdefault("source_scene_id", current_scene_id)
+    _src_cfg = get_pipeline_config(current_scene_id, repo_key=repo_key) or {}
+    _carried.setdefault("source_scene_name", _src_cfg.get("display_name") or _src_cfg.get("name") or current_scene_id)
+
+    _repository = repo_key.split(":", 1)[1] if ":" in repo_key else repo_key
+    _account = (user.get("username") or "") or _repository.split("/", 1)[0]
+    _context = (f"用户在需求中心发起跨流水线移交（Issue #{issue_number}）："
+                f"目标场景 {target_scene_id}，请快速复核后流转至 issue 确认 Spec。")
+
+    # 5) 服务内直调标准 /api/a2a 链路（jwt 分支内部再校验 managed_repos，双保险）
+    from src.api.routes.webhook import a2a_endpoint, A2AHandoffBody
+    _handoff_user = dict(user or {})
+    _handoff_user["auth_type"] = "jwt"
+    _a2a_body = A2AHandoffBody(agent="vod", payload={
+        "repository": _repository,
+        "account": _account,
+        "issue_number": issue_number,
+        "pr_number": "",
+        "context": _context,
+        "target_scene_id": target_scene_id,
+        "target_node": "vod",
+        "carried_context": _carried,
+        "target_assignee": "",
+        "engine_config": None,
+    })
+    _res = await a2a_endpoint(None, _a2a_body, _handoff_user)  # type: ignore[arg-type]  # jwt 分支不读 request
+    # JSONResponse（拦截类 skipped）原样透传
+    if not isinstance(_res, dict):
+        _raw = getattr(_res, "body", b"") or b""
+        if isinstance(_raw, memoryview):
+            _raw = _raw.tobytes()
+        try:
+            _res = _rjson.loads(bytes(_raw).decode("utf-8"))
+        except Exception:
+            _res = {"status": "error", "message": "A2A 返回解析失败"}
+
+    # 6) 记录幂等时间戳（真实入队/拦截都记，防连点）
+    set_meta_value(_mk, str(_time.time()))
+    log.info(f"[issue-handoff] issue_id={issue_id} #{issue_number} → scene={target_scene_id} "
+             f"by={user.get('username', '')}: {_res}")
+    return _res
+
+
 @router.get("/{issue_id}/clarifications", operation_id="issues_clarifications", summary="Issue clarification history", description="Fetches the agent's clarification messages for the Issue.")
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
