@@ -1008,10 +1008,14 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（与 dashboard 个人组织视图语义一致）
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == 0 or (rt.get("org_id") or 0) == _org_id]
+        # Issue #338 补充：repo scope 凭据也不受 org_id 隔离——仓库级设备对仓库成员可见
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == 0
+                           or (rt.get("org_id") or 0) == _org_id
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
                     if (v.get("org_id") or 0) in (0, _org_id)
-                    or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
+                    or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)
+                    or (v.get("scope") == "repo")}
 
     # 构建设备列表（共享 helper）
     devices = _build_runtime_devices(_db, _dl, cred_map, _visible_credential,
@@ -1052,10 +1056,13 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
 
     # 分页切片（total 为筛选后总数）
     total = len(devices)
-    _page = max(page, 1)
-    _offset = (_page - 1) * page_size
-    paged_devices = devices[_offset:_offset + page_size]
-    return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
+    if page_size and page_size > 0:
+        _page = max(page, 1)
+        _offset = (_page - 1) * page_size
+        paged_devices = devices[_offset:_offset + page_size]
+        return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
+                "avail_scopes": _avail_scopes, "avail_types": _avail_types}
+    return {"devices": devices, "total": total,
             "avail_scopes": _avail_scopes, "avail_types": _avail_types}
 
 
