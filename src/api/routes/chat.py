@@ -1455,6 +1455,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     - 页面切换/会话切换不中断后端执行
     """
     from src.api.chat_task_manager import ChatTaskManager
+    from src.api.deps import get_user_token_with_refresh
 
     conv_id = body.conversation_id
     # Issue #52: 用带预刷新的 token 获取
