@@ -1,5 +1,10 @@
-"""Community API routes for grape-website community page."""
-from fastapi import APIRouter, Depends, Query
+"""Community API routes for grape-website community page.
+
+Posts CRUD + comments + likes + file upload. Auth via get_current_user (JWT).
+Tables created in db_setup.py init_database().
+"""
+import os, uuid
+from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from src.api.deps import get_current_user
 from src.config import log
@@ -7,7 +12,18 @@ from src.session_manager import db, db_lock
 
 router = APIRouter(prefix='/api/community', tags=['community'])
 
-_CAT_LABELS = {'tech': 'Tech', 'bug': 'Bug', 'experience': 'Experience', 'suggestion': 'Suggestion'}
+_UPLOAD_DIR = os.path.join(os.path.dirname(__file__), '..', 'data', 'community_uploads')
+_ALLOWED_IMAGE = {'.png', '.jpg', '.jpeg', '.gif', '.webp'}
+_ALLOWED_MD = {'.md', '.markdown'}
+_MAX_IMG_SIZE = 5 * 1024 * 1024  # 5MB
+_MAX_MD_SIZE = 2 * 1024 * 1024    # 2MB
+
+_CAT_LABELS = {
+    'tech': 'Tech',
+    'bug': 'Bug',
+    'experience': 'Experience',
+    'suggestion': 'Suggestion',
+}
 
 
 class CreatePostBody(BaseModel):
@@ -22,7 +38,9 @@ class CreateCommentBody(BaseModel):
 
 @router.get('/posts')
 def list_posts(page: int = Query(0, ge=0), size: int = Query(15, ge=1, le=100),
-               category: str = Query(''), search: str = Query('')):
+               category: str = Query(''), search: str = Query(''),
+               sort: str = Query('recent')):
+    """List posts with pagination, category filter, search, and sort."""
     try:
         with db_lock:
             c = db.cursor()
@@ -35,15 +53,19 @@ def list_posts(page: int = Query(0, ge=0), size: int = Query(15, ge=1, le=100),
                 conditions.append("(title LIKE ? OR content LIKE ?)")
                 params.extend(["%" + search + "%", "%" + search + "%"])
             where = " WHERE " + " AND ".join(conditions)
+
             c.execute("SELECT COUNT(*) FROM community_posts" + where, tuple(params))
             total = c.fetchone()[0]
+
+            order = "likes DESC, comments_count DESC" if sort == 'popular' else "created_at DESC"
             c.execute(
                 "SELECT id, user_id, username, title, content, category, "
                 "views, likes, comments_count, created_at "
                 "FROM community_posts" + where +
-                " ORDER BY created_at DESC LIMIT ? OFFSET ?",
+                " ORDER BY " + order + " LIMIT ? OFFSET ?",
                 tuple(params + [size, page * size]))
             rows = c.fetchall()
+
         posts = []
         for r in rows:
             posts.append({
@@ -59,8 +81,37 @@ def list_posts(page: int = Query(0, ge=0), size: int = Query(15, ge=1, le=100),
         return {"posts": [], "total": 0, "error": str(e)}
 
 
+@router.get('/stats')
+def get_stats():
+    """Get community statistics: total posts, total likes, total comments, hot posts."""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM community_posts WHERE is_deleted=0")
+            total_posts = c.fetchone()[0]
+            c.execute("SELECT COALESCE(SUM(likes),0) FROM community_posts WHERE is_deleted=0")
+            total_likes = c.fetchone()[0]
+            c.execute("SELECT COALESCE(SUM(comments_count),0) FROM community_posts WHERE is_deleted=0")
+            total_comments = c.fetchone()[0]
+            c.execute(
+                "SELECT id, title, likes, comments_count FROM community_posts "
+                "WHERE is_deleted=0 ORDER BY likes DESC, comments_count DESC LIMIT 5")
+            hot = [{"id": r[0], "title": r[1], "likes": r[2], "comments_count": r[3]}
+                   for r in c.fetchall()]
+        return {
+            "total_posts": total_posts,
+            "total_likes": total_likes,
+            "total_comments": total_comments,
+            "hot_posts": hot
+        }
+    except Exception as e:
+        log.warning(f"community stats failed: {e}")
+        return {"total_posts": 0, "total_likes": 0, "total_comments": 0, "hot_posts": []}
+
+
 @router.post('/posts')
 def create_post(body: CreatePostBody, user: dict = Depends(get_current_user)):
+    """Create a new post. Requires login."""
     if not body.title.strip():
         return {"error": "Title required"}
     if body.category not in _CAT_LABELS:
@@ -84,6 +135,7 @@ def create_post(body: CreatePostBody, user: dict = Depends(get_current_user)):
 
 @router.get('/posts/{pid}')
 def get_post(pid: int):
+    """Get a single post with comments. Increments view count."""
     try:
         with db_lock:
             c = db.cursor()
@@ -122,6 +174,7 @@ def get_post(pid: int):
 
 @router.post('/posts/{pid}/like')
 def toggle_like(pid: int, user: dict = Depends(get_current_user)):
+    """Toggle like on a post. Requires login."""
     uid = user.get('id', 0)
     try:
         with db_lock:
@@ -148,6 +201,7 @@ def toggle_like(pid: int, user: dict = Depends(get_current_user)):
 
 @router.post('/posts/{pid}/comments')
 def add_comment(pid: int, body: CreateCommentBody, user: dict = Depends(get_current_user)):
+    """Add a comment to a post. Requires login."""
     if not body.content.strip():
         return {"error": "Comment content required"}
     try:
@@ -168,3 +222,39 @@ def add_comment(pid: int, body: CreateCommentBody, user: dict = Depends(get_curr
     except Exception as e:
         log.warning(f"community add comment failed: {e}")
         return {"error": "Failed to add comment"}
+
+
+@router.post('/upload/image')
+async def upload_image(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload an image for community posts. Returns URL for Markdown embedding."""
+    ext = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in _ALLOWED_IMAGE:
+        raise HTTPException(400, detail=f"Only {', '.join(_ALLOWED_IMAGE)} files allowed")
+    content = await file.read()
+    if len(content) > _MAX_IMG_SIZE:
+        raise HTTPException(400, detail="Image too large (max 5MB)")
+    os.makedirs(_UPLOAD_DIR, exist_ok=True)
+    filename = f"{uuid.uuid4().hex}{ext}"
+    filepath = os.path.join(_UPLOAD_DIR, filename)
+    with open(filepath, 'wb') as f:
+        f.write(content)
+    url = f"/static/community_uploads/{filename}"
+    log.info(f"community: image uploaded {filename} by user={user.get('username')}")
+    return {"url": url, "filename": filename}
+
+
+@router.post('/upload/md')
+async def upload_md(file: UploadFile = File(...), user: dict = Depends(get_current_user)):
+    """Upload a .md file and return its text content for the post editor."""
+    ext = os.path.splitext(file.filename or '')[1].lower()
+    if ext not in _ALLOWED_MD:
+        raise HTTPException(400, detail="Only .md files allowed")
+    content = await file.read()
+    if len(content) > _MAX_MD_SIZE:
+        raise HTTPException(400, detail="Markdown file too large (max 2MB)")
+    try:
+        text = content.decode('utf-8')
+    except UnicodeDecodeError:
+        text = content.decode('gbk', errors='replace')
+    log.info(f"community: md uploaded {file.filename} ({len(text)} chars) by user={user.get('username')}")
+    return {"content": text, "filename": file.filename}

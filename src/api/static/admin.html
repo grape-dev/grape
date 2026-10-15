@@ -68,6 +68,21 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .btn-p:disabled{opacity:.5;cursor:default}
 .btn-o{background:#f2f3f5;color:var(--t);border:1px solid #d8dce4}
 .banner{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:10px;background:#fff8e6;border:1px solid #f0e0b0;color:#8a6d1c;font-size:13px;margin-bottom:14px}
+
+/* ===== 用户列表 / 白名单页面（浅色背景覆盖） ===== */
+#usersView .ipt,#whitelistView .ipt{background:#fff;color:var(--t);border:1px solid #d8dce4;border-radius:8px;margin-bottom:0}
+#usersView .ipt:focus,#whitelistView .ipt:focus{border-color:var(--a)}
+#usersView .ipt::placeholder,#whitelistView .ipt::placeholder{color:#aaa}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{padding:8px 10px;text-align:left;border-bottom:2px solid #e3e6ee;color:var(--t2);font-weight:600;white-space:nowrap}
+.tbl td{padding:8px 10px;border-bottom:1px solid #f0f1f4;color:var(--t)}
+.tbl tr:hover td{background:#f7f8fa}
+.tag-s{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#e3f7ec;color:#1a8a3e}
+.tag-d{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#fce8e8;color:#c93030}
+.tag-w{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#fff3e0;color:#b0651a}
+.f-row select{flex:1;padding:9px 12px;border-radius:8px;border:1px solid #d8dce4;font-size:13px;outline:none;background:#fff;color:var(--t)}
+.f-row select:focus{border-color:var(--a)}
+#whitelistView .f-row label{width:auto;font-size:13px;color:var(--t2);flex-shrink:0}
 .banner.warn{background:#fdeaea;border-color:#f3c2c2;color:#9a2b2b}
 .banner button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#8a6d1c;color:#fff;cursor:pointer;font-size:12px}
 .banner.warn button{background:#9a2b2b}
@@ -129,6 +144,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
     <div class="sb-nav">
       <div class="grp">配置中心</div>
       <a class="act" onclick="showCfg()"><span class="ic">⚙</span>平台凭据</a>
+      <div class="grp">用户管理</div>
+      <a onclick="showUsers(1, event)"><span class="ic">👥</span>用户列表</a>
+      <a onclick="showWhitelist(event)"><span class="ic">📋</span>注册白名单</a>
       <div class="grp">账号</div>
       <a onclick="openPwdModal('self')"><span class="ic">🔑</span>修改密码</a>
       <a onclick="logout()"><span class="ic">↪</span>退出登录</a>
@@ -168,9 +186,69 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <span class="st">保存后写入 configs/global-bot-token.json 并同步生效</span>
       </div>
     </div>
+    
+    <!-- 用户管理区域 -->
+    <div id="usersView" style="display:none">
+    <div class="tb"><div class="bc"><b>用户管理</b> <span style="color:var(--t2);font-size:12px;margin-left:8px" id="userCount"></span></div>
+      <div style="margin-left:auto;display:flex;gap:8px">
+        <input id="userSearch" class="ipt" style="width:200px;padding:6px 10px;font-size:13px" placeholder="搜索用户名/邮箱" onkeyup="if(event.key==='Enter')showUsers(1)">
+        <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="showUsers(1)">搜索</button>
+      </div>
+    </div>
+    <div class="ct">
+      <table class="tbl" id="usersTable" style="width:100%;border-collapse:collapse;font-size:13px">
+        <thead><tr style="text-align:left;border-bottom:2px solid #e3e6ee">
+          <th style="padding:8px">ID</th><th style="padding:8px">用户名</th><th style="padding:8px">邮箱</th>
+          <th style="padding:8px">状态</th><th style="padding:8px">绑定</th><th style="padding:8px">最近登录</th>
+          <th style="padding:8px">操作</th>
+        </tr></thead>
+        <tbody id="usersTbody"></tbody>
+      </table>
+      <div id="userPager" style="margin-top:16px;display:flex;gap:8px;align-items:center;justify-content:center"></div>
+    </div>
+  </div>
+
+  <!-- 白名单管理区域 -->
+  <div id="whitelistView" style="display:none">
+    <div class="tb"><div class="bc"><b>注册白名单</b></div></div>
+    <div class="ct">
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-h"><h2>添加白名单</h2></div>
+        <div class="f-row">
+          <label>类型</label>
+          <select id="wl_type" class="ipt" style="width:120px"><option value="email">邮箱</option><option value="domain">域名</option></select>
+          <label>值</label>
+          <input id="wl_value" class="ipt" style="width:240px" placeholder="user@example.com 或 @company.com">
+          <label>备注</label>
+          <input id="wl_remark" class="ipt" style="width:160px" placeholder="可选">
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="addWhitelist()">添加</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>开放注册</h2></div>
+        <div class="f-row">
+          <label>开放注册开关</label>
+          <select id="allow_signup" class="ipt" style="width:120px"><option value="0">关闭</option><option value="1">开启</option></select>
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="saveAllowSignup()">保存</button>
+        </div>
+        <div class="hint">关闭时仅白名单内邮箱可注册；开启时任意邮箱可注册</div>
+      </div>
+      <div class="card">
+        <div class="card-h"><h2>白名单列表</h2></div>
+        <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="text-align:left;border-bottom:2px solid #e3e6ee">
+            <th style="padding:8px">ID</th><th style="padding:8px">类型</th><th style="padding:8px">值</th>
+            <th style="padding:8px">备注</th><th style="padding:8px">创建时间</th><th style="padding:8px">操作</th>
+          </tr></thead>
+          <tbody id="whitelistTbody"></tbody>
+        </table>
+      </div>
+    </div>
+    </div>
+  </div>
   </div>
 </div>
 
-<script src="/static/js/admin.js?v=20261008-1"></script>
+<script src="/static/js/admin.js?v=20261011-3"></script>
 </body>
 </html>

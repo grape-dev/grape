@@ -17,6 +17,11 @@ class RuntimeGoneError(Exception):
     pass
 
 
+class CredentialRevokedError(Exception):
+    """401 凭据被吊销（revoke）——不可恢复，调用方应中止任务并退出 worker 进程。"""
+    pass
+
+
 class RuntimeClient:
     def __init__(self, server: str, token: str, max_connections: int = 10, timeout: float = 30.0):
         self.base = server.rstrip("/")
@@ -58,7 +63,11 @@ class RuntimeClient:
         self._session = None
 
     async def _request(self, method: str, path: str, body=None, retries: int = 4) -> dict | None:
-        """HTTP 请求 + 指数退避。404 且含 runtime → RuntimeGone。返回 JSON 或 None。"""
+        """HTTP 请求 + 指数退避。404 且含 runtime → RuntimeGone。返回 JSON 或 None。
+
+        401 鉴权失败（凭据被吊销/revoke）抛 CredentialRevokedError——调用方感知后
+        应中止任务并退出进程，而不是当网络错误无限重试（2026-09-30 吊销场景复盘）。
+        """
         delay = 4
         attempt = 0
         while True:
@@ -70,6 +79,10 @@ class RuntimeClient:
                         raise RetryableError(f"http {resp.status}")
                     if resp.status == 404 and "runtime" in path:
                         raise RuntimeGoneError(path)
+                    if resp.status == 401:
+                        txt = (await resp.text())[:200]
+                        log.warning(f"RuntimeClient {method} {path} -> 401 (credential revoked): {txt}")
+                        raise CredentialRevokedError(path)
                     if resp.status >= 400:
                         txt = (await resp.text())[:200]
                         if resp.status == 410:
@@ -83,6 +96,8 @@ class RuntimeClient:
                         return await resp.json()
                     except Exception:
                         return {}
+            except CredentialRevokedError:
+                raise  # 凭据失效不重试，直接上抛——调用方决定退出
             except RuntimeGoneError:
                 log.warning(f"runtime_gone: {path}, clearing and re-registering")
                 return None  # 调用方处理重注册
@@ -217,12 +232,16 @@ class RuntimeClient:
                     if state and state.get("status") in ("failed", "cancelled", "completed"):
                         log.info(f"report_messages: task {task_id} is {state.get('status')} on server, returning None")
                         return None  # task truly terminated
+                except CredentialRevokedError:
+                    raise  # 401 二次确认也吊销——上抛让执行中止
                 except Exception:
                     pass
                 # Network error (server restart) — don't abort, let worker continue
                 log.warning(f"report_messages: task {task_id} network error (not 410), returning empty dict to continue")
                 return {}
             return data
+        except CredentialRevokedError:
+            raise  # 凭据被吊销——不让外层当网络错误吞掉，调用方中止任务
         except Exception as e:
             log.warning(f"report_messages: task {task_id} exception: {e}, returning empty dict to continue")
             return {}

@@ -132,7 +132,29 @@ async def _send_card_reply(ctx, api, msg_id, card):
     """发送自定义卡片回复，返回是否成功
 
     自动在卡片底部追加[帮助]按钮，与 reply_card 行为一致。
+    card 2.0（schema=="2.0"）：跳过帮助按钮追加（2.0 有自己的 note/footer 结构），原样发送。
     """
+    if card.get("schema") == "2.0":
+        token = await api._ensure_token(ctx)
+        if not token:
+            return False
+        session = await api._get_session()
+        url = "https://open.feishu.cn/open-apis/im/v1/messages/" + msg_id + "/reply"
+        payload = {"msg_type": "interactive", "content": json.dumps(card, ensure_ascii=False)}
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                data = await resp.json()
+                if data.get("code", -1) == 0:
+                    ctx.metrics.messages_sent += 1
+                    log.info(f"[{ctx.name}] _send_card_reply(v2) ok")
+                    return True
+                log.warning(f"[{ctx.name}] _send_card_reply(v2) failed: code={data.get('code')} msg={data.get('msg','')[:60]}")
+                return False
+        except Exception as e:
+            ctx.metrics.messages_failed += 1
+            log.warning(f"[{ctx.name}] _send_card_reply(v2) error: {e}")
+            return False
     # 追加 [帮助] 按钮（如果卡片还没有）
     elements = card.get("elements", [])
     has_help = any(
@@ -276,10 +298,254 @@ def get_user_id_by_app_id(app_id: str) -> int | None:
     return None
 
 
+# ====== Autopilot 飞书卡片交互（autopilot-feishu-subscription-design.md §4.5）======
+
+_SEV_MARK = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+
+
+def _autopilot_exec_row(exec_id: int):
+    """查 exec + 所属任务 + 仓库 + 场景列表（一次查全，减少 DB 往返延迟）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT t.repo_key, t.name, e.findings_json, e.result, e.status "
+            "FROM autopilot_executions e JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
+            (exec_id,)).fetchone()
+        if not row:
+            return None
+        # 同一事务查场景列表（省一次 db_lock + 往返）
+        scene_rows = c.execute(
+            "SELECT scene_id, name FROM devops_pipeline_scene "
+            "WHERE repo_key=? AND is_active=1 ORDER BY name", (row[0] or "",)).fetchall()
+    try:
+        findings_data = json.loads(row[2]) if row[2] else {}
+    except json.JSONDecodeError:
+        findings_data = {}
+    return {"repo_key": row[0] or "", "task_name": row[1] or "", "findings": findings_data,
+            "summary": row[3] or "", "status": row[4] or "",
+            "scenes": [{"scene_id": r[0], "name": r[1] or r[0]} for r in scene_rows]}
+
+
+def _autopilot_user_allowed(uid: int, repo_key: str) -> bool:
+    """点击用户对该仓库是否有权限（复用 get_managed_repos，结果短时缓存减少 DB 开销）。"""
+    if not uid or not repo_key:
+        return False
+    try:
+        from src.user.db import get_managed_repos
+        repos = get_managed_repos(uid) or []
+        return any(r.get("repo_key") == repo_key for r in repos)
+    except Exception as e:
+        log.warning(f"[finding-card] access check failed uid={uid}: {e}")
+        return False
+
+
+def _autopilot_get_scenes(repo_key: str) -> list:
+    """查仓库的场景列表（供派发时选择目标场景）。返回 [{scene_id, name}]。"""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT scene_id, name FROM devops_pipeline_scene "
+                "WHERE repo_key=? AND is_active=1 ORDER BY name", (repo_key,)).fetchall()
+        return [{"scene_id": r[0], "name": r[1] or r[0]} for r in rows]
+    except Exception as e:
+        log.warning(f"[finding-card] get scenes failed: {e}")
+        return []
+
+
+def _autopilot_state_card(info: dict, exec_id: int, state: str = "list",
+                          finding_id: str = "", scene_id: str = "") -> dict:
+    """统一状态卡构建（卡片 2.0，原地更新用同一函数）。
+
+    状态流转（A 方案：一张卡原地变，不产生新消息）：
+    - list:     问题列表 + 下拉选择（初始态）
+    - scene:    选中问题后 → 显示问题详情 + 场景下拉 + 确认/返回按钮
+    - result:   派发完成 → 显示结果 + 继续选择按钮（回到 list 态）
+    """
+    findings = info["findings"].get("findings", [])
+    pending = [f for f in findings if not f.get("dispatched_issue_number")]
+    dispatched = [f for f in findings if f.get("dispatched_issue_number")]
+    body = []
+
+    # 结论区（所有状态都显示）
+    if info["summary"]:
+        body.append({"tag": "div", "text": {"tag": "lark_md",
+                                            "content": f"**{info['summary'][:300]}**"}})
+
+    if state == "result":
+        # 派发结果态：finding_id 的最新状态已由 _dispatch_finding_core 回写
+        finding = next((f for f in findings if f.get("id") == finding_id), None)
+        _iss = finding.get("dispatched_issue_number") if finding else None
+        if _iss:
+            body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                "content": f"**已派发为 Issue #{_iss}**\n"
+                                                           f"<font color='grey'>{finding.get('title','')} 已进入流水线</font>"}})
+        else:
+            body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                "content": "**派发失败**\n请稍后重试或前往网页操作。"}})
+        body.append({"tag": "hr"})
+        # 显示剩余待派发 + 继续按钮
+        if pending:
+            body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                "content": f"剩余 {len(pending)} 个待派发问题"}})
+            body.append({"tag": "button", "text": {"tag": "plain_text", "content": "继续选择问题"},
+                         "type": "primary", "behaviors": [{"type": "callback", "value": {
+                             "cmd": "/finding-list", "exec_id": exec_id}}]})
+        else:
+            body.append({"tag": "div", "text": {"tag": "lark_md", "content": "**所有问题已派发**"}})
+        return {"schema": "2.0", "header": {"title": {"tag": "plain_text",
+                                            "content": f"任务产出 · {info['task_name'][:30]}"},
+                                            "template": "green" if _iss else "red"},
+                "body": {"elements": body}}
+
+    if state == "scene":
+        # 选场景态：显示选中的问题 + 场景下拉 + 确认/返回
+        finding = next((f for f in findings if f.get("id") == finding_id), None)
+        if not finding:
+            body.append({"tag": "div", "text": {"tag": "lark_md", "content": "**问题不存在，请重新选择**"}})
+        else:
+            _sev = (finding.get("severity") or "medium").lower()
+            _mark = _SEV_MARK.get(_sev, "⚪")
+            _desc = (finding.get("description") or "").replace("\n", " ")[:120]
+            body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                "content": f"{_mark} **{finding.get('title', '')}**\n"
+                                                           f"<font color='grey'>{_desc}</font>"}})
+            body.append({"tag": "hr"})
+            body.append({"tag": "div", "text": {"tag": "lark_md", "content": "**选择目标场景**"}})
+            scenes = info.get("scenes") or []
+            if scene_id:
+                # 已选场景：直接显示场景名（不用 select 的 value 设初始选中——延迟更新时不可靠）
+                _sname = next((s["name"] for s in scenes if s["scene_id"] == scene_id), scene_id)
+                body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                    "content": f"**{_sname}**"}})
+                # 重新选择场景按钮（只清 scene_id，保留 finding_id，回到下拉态）
+                body.append({"tag": "button", "text": {"tag": "plain_text", "content": "重新选择场景"},
+                             "behaviors": [{"type": "callback", "value": {
+                                 "cmd": "/finding-rescene", "exec_id": exec_id,
+                                 "finding_id": finding_id}}]})
+            else:
+                # 未选场景：显示下拉选择 + 智能推荐提示
+                body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                    "content": "<font color='grey'>不选则根据问题类型智能推荐场景</font>"}})
+                options = []
+                for s in scenes:
+                    options.append({"text": {"tag": "plain_text", "content": s["name"][:40]},
+                                    "value": json.dumps({"cmd": "/finding-scene", "exec_id": exec_id,
+                                                         "finding_id": finding_id, "scene_id": s["scene_id"]},
+                                                        ensure_ascii=False)})
+                body.append({"tag": "select_static",
+                             "placeholder": {"tag": "plain_text", "content": "选择场景（可选，不选则智能推荐）"},
+                             "options": options})
+            body.append({"tag": "hr"})
+            body.append({"tag": "button", "text": {"tag": "plain_text", "content": "确认派发"},
+                         "type": "primary", "behaviors": [{"type": "callback", "value": {
+                             "cmd": "/finding-dispatch", "exec_id": exec_id,
+                             "finding_id": finding_id, "scene_id": scene_id}}]})
+            body.append({"tag": "button", "text": {"tag": "plain_text", "content": "返回问题列表"},
+                         "behaviors": [{"type": "callback", "value": {
+                             "cmd": "/finding-list", "exec_id": exec_id}}]})
+        return {"schema": "2.0", "header": {"title": {"tag": "plain_text",
+                                            "content": f"确认派发 · {info['task_name'][:30]}"},
+                                            "template": "blue"},
+                "body": {"elements": body}}
+
+    # 默认 list 态
+    if not findings:
+        body.append({"tag": "div", "text": {"tag": "lark_md", "content": "本次执行无待派发产出。"}})
+    else:
+        if pending:
+            lines = ["**待派发问题**"]
+            for i, f in enumerate(pending, 1):
+                _sev = (f.get("severity") or "medium").lower()
+                _mark = _SEV_MARK.get(_sev, "⚪")
+                _desc = (f.get("description") or "").replace("\n", " ")[:60]
+                lines.append(f"{_mark} **{i}. {f.get('title', '')}**")
+                if _desc:
+                    lines.append(f"<font color='grey'>{_desc}</font>")
+            body.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)[:1800]}})
+        else:
+            body.append({"tag": "div", "text": {"tag": "lark_md", "content": "**所有问题已派发**"}})
+        body.append({"tag": "hr"})
+        if dispatched:
+            _d_list = "、".join(f"#{f['dispatched_issue_number']}" for f in dispatched)
+            body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                "content": f"<font color='grey'>已派发 {len(dispatched)} 个：{_d_list}</font>"}})
+            body.append({"tag": "hr"})
+        if pending:
+            options = []
+            for i, f in enumerate(pending, 1):
+                options.append({"text": {"tag": "plain_text", "content": f"{i}. {f.get('title', '')}"[:40]},
+                                "value": json.dumps({"cmd": "/finding-select", "exec_id": exec_id,
+                                                     "finding_id": f.get("id", "")}, ensure_ascii=False)})
+            body.append({"tag": "select_static",
+                         "placeholder": {"tag": "plain_text", "content": "选择要派发的问题"},
+                         "options": options})
+            body.append({"tag": "hr"})
+            body.append({"tag": "div", "text": {"tag": "lark_md",
+                                                "content": "<font color='grey'>选择问题后进入场景选择，确认后派发为 Issue</font>"}})
+    return {"schema": "2.0", "header": {"title": {"tag": "plain_text",
+                                        "content": f"任务产出 · {info['task_name'][:30]}"},
+                                        "template": "blue"},
+            "body": {"elements": body}}
+
+
+async def _autopilot_finding_list_card(ctx, api, msg_id, uid, exec_id, action_token=""):
+    """唤醒问题详情卡（/finding-list）。首次用 reply 发新卡；后续从 list 态回来用延迟更新原地变。"""
+    info = _autopilot_exec_row(exec_id)
+    if not info:
+        await api.reply_card(ctx, msg_id, "**执行记录不存在**")
+        return
+    if not _autopilot_user_allowed(uid, info["repo_key"]):
+        await api.reply_card(ctx, msg_id, "**你没有该仓库的访问权限**")
+        return
+    card = _autopilot_state_card(info, exec_id, state="list")
+    if action_token:
+        await api.update_card_by_token(ctx, action_token, card)
+    else:
+        await _send_card_reply(ctx, api, msg_id, card)
+
+
+async def _autopilot_finding_dispatch(ctx, api, msg_id, uid, exec_id, finding_id,
+                                      scene_id="", action_token=""):
+    """派发选中 finding 为真实 Issue（原地更新卡为 result 态）。"""
+    from fastapi import HTTPException
+    info = _autopilot_exec_row(exec_id)
+    if not info:
+        await api.reply_card(ctx, msg_id, "**执行记录不存在**")
+        return
+    if not _autopilot_user_allowed(uid, info["repo_key"]):
+        await api.reply_card(ctx, msg_id, "**你没有该仓库的访问权限**")
+        return
+    try:
+        from src.auth.grape_account_db import get_grape_account_by_id
+        _acc = get_grape_account_by_id(uid) or {}
+        _uname = _acc.get("username", "")
+        from src.api.routes.autopilot import _dispatch_finding_core
+        result = await _dispatch_finding_core(exec_id, finding_id, scene_id=scene_id,
+                                              user={"id": uid, "username": _uname})
+        # 派发后原地更新卡为 result 态（刷新 info 拿回写后的 findings_json）
+        info2 = _autopilot_exec_row(exec_id)
+        card = _autopilot_state_card(info2 or info, exec_id, state="result", finding_id=finding_id)
+        if action_token:
+            await api.update_card_by_token(ctx, action_token, card)
+        elif result.get("ok"):
+            await _send_card_reply(ctx, api, msg_id, card)
+        log.info(f"[finding-card] dispatch exec={exec_id} fid={finding_id} ok={result.get('ok')}")
+    except HTTPException as he:
+        _msg = he.detail.get("message", str(he.detail)) if isinstance(he.detail, dict) else str(he.detail)
+        await api.reply_card(ctx, msg_id, f"**{_msg}**")
+    except Exception as e:
+        log.warning(f"[finding-card] dispatch failed exec={exec_id} fid={finding_id}: {e}")
+        await api.reply_card(ctx, msg_id, f"**派发异常: {e}**")
+
+
 async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                                 text: str, chat_id: str, sender_id: str, db,
                                 account: str = "", msg_id: str = "",
-                                sender_open_id: str = "", card_value: dict | None = None) -> str:
+                                sender_open_id: str = "", card_value: dict | None = None,
+                                action_token: str = "") -> str:
     """异步命令处理（卡片化导航 feishu-repo-navigation-commands-design.md）。
 
     新命令 /repo /chat /task /new /where /cancel /help 用 reply_card 回复并返回空串（调用方跳过文本回复）；
@@ -445,6 +711,13 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
         value = card_value or {}
         _rk = value.get("repo_key") or ""
         _iss = str(value.get("issue_number") or "").lstrip("#")
+        # 观测：点卡用户归属 / 卡片上下文（awaiting-notify-card-join-fail-analysis.md §5.1）
+        log.info(
+            f"[task-open] entry cmd=/task-open uid={uid} app={getattr(ctx, 'app_id', '') or account or ''} "
+            f"sender_open_id={sender_open_id[:20] if sender_open_id else ''} chat={chat_id[:20]} "
+            f"rk={_rk or ''} issue={_iss or ''} card_conv_id={(value.get('conv_id') or '')[:20] or ''} "
+            f"card_value={dict(value) if value else {}}"
+        )
         if not _rk or not _iss:
             # 纯文本输入 /task-open（无卡片上下文）→ 回退 /task 列表流
             await api.reply_card(ctx, msg_id, "**⚠️ 请使用通知卡片上的按钮，或 `/task` 选择任务。**")
@@ -455,7 +728,7 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                 "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**❌ 未找到关联平台用户**\n请在 Chat Agent 页配置飞书。"}}],
             })
             return ""
-        from src.session_manager import join_feishu_chat, create_conversation, db_lock
+        from src.session_manager import join_feishu_chat, create_conversation, get_conversation, db_lock
         cid = value.get("conv_id") or ""
         _title = f"Issue #{_iss}"
         if not cid:
@@ -472,17 +745,181 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                     await api.reply_card(ctx, msg_id, f"**❌ 无效任务号 {_iss}**")
                     return ""
                 cid = create_conversation(uid, _rk, title=_title, conv_type="task", issue_number=int(_iss))
-        if cid and join_feishu_chat(chat_id, cid, uid):
+        # 观测：目标会话归属 + 点卡 open_id 反查（awaiting-notify-card-join-fail-analysis.md §5.1）
+        _conv_user = ""
+        if cid:
+            try:
+                with db_lock:
+                    _r = db.cursor().execute(
+                        "SELECT user_id FROM chat_conversations WHERE id=?", (cid,)).fetchone()
+                _conv_user = str(_r[0]) if _r else "missing"
+            except Exception as _e:
+                _conv_user = f"err:{_e}"
+        _open_to_user = ""
+        if sender_open_id:
+            try:
+                from src.session_manager import db as _sdb
+                with db_lock:
+                    _r2 = _sdb.cursor().execute(
+                        "SELECT user_id FROM unified_user_mapping WHERE feishu_open_id=? LIMIT 1",
+                        (sender_open_id,)).fetchone()
+                _open_to_user = str(_r2[0]) if _r2 else "unmapped"
+            except Exception as _e:
+                _open_to_user = f"err:{_e}"
+        _has_conv = bool(cid)
+        _joined = bool(cid) and join_feishu_chat(chat_id, cid, uid)
+        log.info(
+            f"[task-open] join_result attempted={_has_conv} joined={_joined} uid={uid} "
+            f"conv_id={(cid or '')[:40] or ''} conv_user={_conv_user} "
+            f"open_id_to_user={_open_to_user} rk={_rk or ''} issue={_iss or ''}"
+        )
+        if _joined:
             _clear_pending_selection(chat_id)
+            # 成功卡片：展示仓库 + 真实会话/Issue 标题（awaiting-notify 优化）
+            # 仓库名：repo_key 去掉 provider 前缀（gitcode:/github:）
+            _repo_show = str(_rk or "")
+            for _pre in ("gitcode:", "github:", "gitlab:"):
+                if _repo_show.startswith(_pre):
+                    _repo_show = _repo_show[len(_pre):]
+                    break
+            # 会话标题：优先 chat_conversations.title（如「Issue #14 · xxx」）；空则回退查 issue.title
+            _conv_title = ""
+            if cid:
+                try:
+                    _ct_conv = get_conversation(cid) or {}
+                    _conv_title = str(_ct_conv.get("title") or "").strip()
+                except Exception:
+                    _conv_title = ""
+            if not _conv_title:
+                try:
+                    with db_lock:
+                        _r3 = db.cursor().execute(
+                            "SELECT title FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                            (_rk, int(_iss) if _iss.isdigit() else 0)).fetchone()
+                    if _r3 and _r3[0]:
+                        _conv_title = f"Issue #{_iss} · {_r3[0]}"
+                except Exception:
+                    pass
+            if not _conv_title:
+                _conv_title = _title  # 兜底 Issue #N（不再与仓库并列出现避免纯重复由外层控制）
+            # Issue 号超链接（lark_md：[text](url)）→ 点击直达 VCS Issue 页
+            _issue_url = ""
+            try:
+                from src.api.issues_center import _vcs_issue_url
+                _issue_url = _vcs_issue_url(_rk, int(_iss) if _iss.isdigit() else 0) or ""
+            except Exception:
+                _issue_url = ""
+            _issue_link = f"[Issue #{_iss}]({_issue_url})" if _issue_url else f"Issue #{_iss}"
+            # 纯「Issue #N」时不叠加 `· Issue #N`（避免重复，如 issue 5 · Issue 5）
+            if _conv_title.strip().lower() == f"issue #{_iss}".lower():
+                _main_line = _issue_link
+            else:
+                # 若标题以 `Issue #N · ` 开头，仅把 issue 号部分换为链接，标题文字保留
+                _t = _conv_title.strip()
+                _has_prefix = _t.lower().startswith(f"issue #{_iss}".lower())
+                if _has_prefix:
+                    _after = _t[len(f"issue #{_iss}"):].lstrip(" ·").strip()
+                    _main_line = f"{_issue_link}" + (f" · {_after}" if _after else "")
+                else:
+                    _main_line = f"{_issue_link} · {_t}"
             await _send_card_reply(ctx, api, msg_id, {
                 "header": {"title": {"tag": "plain_text", "content": "✅ 已进入任务会话"}, "template": "green"},
-                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"**✅ 已进入任务会话**\nIssue #{_iss} · {value.get('title') or _title}"}}],
+                "elements": [{"tag": "div", "text": {"tag": "lark_md", "content":
+                             f"**✅ 已进入任务会话**\n仓库: {_repo_show or '-'}\n{_main_line}"}}],
             })
         else:
             await _send_card_reply(ctx, api, msg_id, {
                 "header": {"title": {"tag": "plain_text", "content": "❌ 进入失败"}, "template": "red"},
                 "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": "**❌ 进入任务会话失败**\n该会话可能不属于当前账号。"}}],
             })
+        return ""
+
+
+    # /finding-list — 唤醒问题详情卡（首次 reply 发新卡；后续从其它态回来用延迟更新原地变）
+    if cmd == "/finding-list":
+        value = card_value or {}
+        _exec_id = value.get("exec_id") or 0
+        if not _exec_id:
+            return ""
+        if not uid:
+            await api.reply_card(ctx, msg_id, "**未关联平台用户，请在 Chat Agent 页配置飞书**")
+            return ""
+        await _autopilot_finding_list_card(ctx, api, msg_id, uid, int(_exec_id),
+                                           action_token=action_token)
+        return ""
+
+    # /finding-select — 下拉选中问题 → 原地更新卡为「选场景」态
+    if cmd == "/finding-select":
+        value = card_value or {}
+        _exec_id = value.get("exec_id") or 0
+        _fid = str(value.get("finding_id") or "")
+        if not _exec_id or not _fid:
+            return ""
+        if not uid:
+            return ""
+        info = _autopilot_exec_row(int(_exec_id))
+        if not info or not _autopilot_user_allowed(uid, info["repo_key"]):
+            return ""
+        finding = next((f for f in info["findings"].get("findings", []) if f.get("id") == _fid), None)
+        if not finding or finding.get("dispatched_issue_number"):
+            card = _autopilot_state_card(info, int(_exec_id), state="list")
+            if action_token:
+                await api.update_card_by_token(ctx, action_token, card)
+            return ""
+        card = _autopilot_state_card(info, int(_exec_id), state="scene", finding_id=_fid)
+        if action_token:
+            await api.update_card_by_token(ctx, action_token, card)
+        else:
+            await _send_card_reply(ctx, api, msg_id, card)
+        return ""
+
+    # /finding-scene — 选场景下拉选中 → 原地更新卡（确认按钮带上 scene_id）
+    if cmd == "/finding-scene":
+        value = card_value or {}
+        _exec_id = value.get("exec_id") or 0
+        _fid = str(value.get("finding_id") or "")
+        _sid = str(value.get("scene_id") or "")
+        if not _exec_id or not _fid:
+            return ""
+        info = _autopilot_exec_row(int(_exec_id))
+        if not info:
+            return ""
+        # 原地更新：_autopilot_state_card 的 scene 态已自带「已选场景：xxx」提示
+        # （下拉框上方灰字），scene_id 透传到确认按钮的 value 里
+        card = _autopilot_state_card(info, int(_exec_id), state="scene",
+                                     finding_id=_fid, scene_id=_sid)
+        if action_token:
+            await api.update_card_by_token(ctx, action_token, card)
+        return ""
+
+    # /finding-rescene — 重新选择场景（清空 scene_id，保留 finding_id，回到下拉态）
+    if cmd == "/finding-rescene":
+        value = card_value or {}
+        _exec_id = value.get("exec_id") or 0
+        _fid = str(value.get("finding_id") or "")
+        if not _exec_id or not _fid:
+            return ""
+        info = _autopilot_exec_row(int(_exec_id))
+        if not info:
+            return ""
+        card = _autopilot_state_card(info, int(_exec_id), state="scene",
+                                     finding_id=_fid, scene_id="")
+        if action_token:
+            await api.update_card_by_token(ctx, action_token, card)
+        return ""
+
+    # /finding-dispatch — 确认按钮 → 派发 + 原地更新卡为「结果」态
+    if cmd == "/finding-dispatch":
+        value = card_value or {}
+        _exec_id = value.get("exec_id") or 0
+        _fid = str(value.get("finding_id") or "")
+        _sid = str(value.get("scene_id") or "")
+        if not _exec_id or not _fid:
+            return ""
+        if not uid:
+            return ""
+        await _autopilot_finding_dispatch(ctx, api, msg_id, uid, int(_exec_id), _fid,
+                                          scene_id=_sid, action_token=action_token)
         return ""
 
     # /bind N — 数字按钮直接绑定仓库
@@ -520,6 +957,18 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
         return ""
 
     return ""
+
+
+_BIND_SUCCESS_CARD_TPL = {
+    "header": {"title": {"tag": "plain_text", "content": "✅ 绑定成功"}, "template": "green"},
+    "elements": [
+        {"tag": "div", "text": {"tag": "lark_md", "content": "**✅ 已绑定 `{repo_key}`**\n使用 /chat 选择会话，或直接开始提问。"}},
+        {"tag": "action", "actions": [
+            {"tag": "button", "text": {"tag": "plain_text", "content": "📋 选择会话"}, "value": {"cmd": "/chat"}},
+        ]},
+    ],
+}
+
 
 
 _BIND_SUCCESS_CARD_TPL = {
@@ -856,11 +1305,12 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 from src.session_manager import update_unified_user_info, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
-                    user_row = user_db.get_user(uid)
+                    # D32: 从 grape_accounts 读 username + nickname
+                    from src.auth.grape_account_db import get_grape_account_by_id
+                    user_row = get_grape_account_by_id(uid)
                     username = (user_row or {}).get("username", "") if user_row else ""
                     if username and user_row:
-                        acc = user_db.get_user_account(username) or {}
-                        nickname = acc.get("nickname", "") or ""
+                        nickname = user_row.get("nickname", "") or ""
                         existing = get_feishu_open_id(username, app_id=ctx.app_id)
                         if existing:
                             # 已绑定，无需处理
@@ -914,13 +1364,13 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 log.warning(f"Chat: auto-bind feishu mapping failed: {e}")
 
         if detect_clean_intent(text):
-            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None)
+            result = await process_command_async(ctx, api, "/clean", chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None, action_token=parsed.get("_action_token", ""))
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return
 
         if text.startswith("/"):
-            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None)
+            result = await process_command_async(ctx, api, text, chat_id, parsed.get("sender_id", ""), db, account, msg_id=msg_id, sender_open_id=parsed.get("sender_open_id", ""), card_value=parsed.get("_card_value") or None, action_token=parsed.get("_action_token", ""))
             if result:
                 await api.reply_text(ctx, msg_id, result)
             return

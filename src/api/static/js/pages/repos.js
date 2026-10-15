@@ -1,4 +1,30 @@
 // ====== 仓库选择页：宏观大堂（Lobby）风格 ======
+
+/**
+ * 渲染平台品牌 SVG 图标（全局共享函数）。
+ * 所有需要展示平台标识的位置统一调用此函数，不用 emoji。
+ * 品牌色内联到 SVG fill，全局一致——不依赖父元素 currentColor，不依赖 --brand CSS 变量。
+ * 深色模式通过 CSS .platform-icon-dark 自动提亮。
+ * @param {string} provider — 'gitcode' | 'github'
+ * @param {number} size — 像素尺寸，默认 14
+ * @returns {string} SVG HTML 字符串
+ */
+var PLATFORM_BRAND_COLOR = {
+  gitcode: '#F54A36',
+  github: '#1F2328',
+};
+
+function platformIcon(provider, size) {
+  size = size || 14;
+  var s = 'vertical-align:-2px;flex-shrink:0';
+  var color = PLATFORM_BRAND_COLOR[provider] || 'var(--a)';
+  if (provider === 'github') {
+    return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
+  }
+  // gitcode
+  return '<svg width="' + size + '" height="' + size + '" viewBox="0 0 1024 1024" fill="' + color + '" class="platform-icon" style="' + s + '"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+}
+
 let _projectsContent = '';
 let _projectsRepos = [];
 
@@ -23,6 +49,10 @@ function renderSelectionShell(tab, innerHtml) {
         <a class="${tabCls('workspace')}" onclick="switchSidebarTab('workspace')">${I18N.t('repos.tab.workspace')}</a>
       </nav>
       <div style="display:flex;align-items:center;gap:10px">
+        <div class="lang-toggle" id="lobbyLangToggle" style="display:flex;align-items:center;gap:2px;padding:3px;border-radius:8px;border:1px solid var(--b);background:var(--c)">
+          <button onclick="_setAppLang('zh')" class="lang-btn${I18N.getLang() === 'zh' ? ' active' : ''}" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;white-space:nowrap;${I18N.getLang() === 'zh' ? 'background:var(--a);color:#fff' : 'background:none;color:var(--t3)'}">中</button>
+          <button onclick="_setAppLang('en')" class="lang-btn${I18N.getLang() === 'en' ? ' active' : ''}" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;white-space:nowrap;${I18N.getLang() === 'en' ? 'background:var(--a);color:#fff' : 'background:none;color:var(--t3)'}">EN</button>
+        </div>
         <div id="lobbyOrgDropdown" style="position:relative">
           <button onclick="app._toggleLobbyOrgDropdown()" id="lobbyOrgBtn" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">
             <span style="font-size:14px">🏢</span>
@@ -51,21 +81,8 @@ function renderSelectionShell(tab, innerHtml) {
 
 function switchSidebarTab(tab) {
   if (tab === 'workspace') {
-    API.get('/repos/member').then(d => {
-      const repos = d.repos || [];
-      const hosted = repos.filter(r => r.is_hosted);
-      if (hosted.length > 0) {
-        let saved = null;
-        try { saved = app.currentRepo(); } catch (e) { saved = null; }
-        const matched = saved && hosted.find(r => r.full_name === saved.fullName);
-        const target = matched || hosted[0];
-        selectRepo(target.full_name, target.owner, target.name, target.repo_key);
-      } else {
-        _renderWorkspaceEmpty();
-      }
-    }).catch(() => {
-      switchSidebarTab('projects');
-    });
+    // 直接进入工作台——选第一个已托管仓库，不经过平台选择中间页
+    _enterWorkspaceForPlatform('');
   } else if (tab === 'templates') {
     renderTemplates();
   } else {
@@ -76,6 +93,25 @@ function switchSidebarTab(tab) {
       renderRepos();
     }
   }
+}
+
+function _enterWorkspaceForPlatform(provider) {
+  API.get('/repos/member' + (provider ? '?provider=' + provider : '')).then(function(d) {
+    var repos = d.repos || [];
+    var hosted = repos.filter(function(r) { return r.is_hosted; });
+    if (hosted.length > 0) {
+      var saved = null;
+      try { saved = app.currentRepo(); } catch (e) { saved = null; }
+      var matched = saved && hosted.find(function(r) { return r.full_name === saved.fullName; });
+      var target = matched || hosted[0];
+      selectRepo(target.full_name, target.owner, target.name, target.repo_key);
+    } else {
+      _renderWorkspaceEmpty();
+    }
+  }).catch(function() {
+    // API 失败回退到项目页
+    switchSidebarTab('projects');
+  });
 }
 
 // 无托管仓库时的工作台空态引导
@@ -100,7 +136,7 @@ const _REPO_PAGE_SIZE = 9;
 let _projectSearchQuery = '';
 
 function _searchRepos() {
-  const allRepos = (_projectsRepos || []).slice().sort((a, b) => {
+  const allRepos = _filterByPlatform((_projectsRepos || [])).slice().sort((a, b) => {
     const pa = a.is_hosted ? 2 : a.is_joined ? 1 : 0;
     const pb = b.is_hosted ? 2 : b.is_joined ? 1 : 0;
     if (pa !== pb) return pb - pa;
@@ -122,6 +158,17 @@ function _searchRepos() {
   return { allRepos, filteredRepos, pages, pageRepos };
 }
 
+function _buildNewProjectBtn() {
+  // 新建项目按钮——统一单一入口，平台选择在模态框内完成
+  var platforms = _getAvailablePlatforms();
+  var p = platforms.length >= 1 ? platforms[0] : {key: 'gitcode', name: 'GitCode'};
+  var plusIcon = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>';
+  return '<button class="project-new-btn" onclick="openCreateRepoModal()" title="' + I18N.t('repos.lobby.new_project_btn') + '" style="display:inline-flex;align-items:center;gap:6px">' +
+    plusIcon +
+    '<span>' + I18N.t('repos.lobby.new_project_btn') + '</span>' +
+    '</button>';
+}
+
 function _buildProjectListHtml() {
   const { filteredRepos, pages, pageRepos } = _searchRepos();
 
@@ -135,15 +182,55 @@ function _buildProjectListHtml() {
   }
 
   var cardsHtml = pageRepos.map(function(r) { return _buildProjectCard(r); }).join('');
-  var addCardHtml = '<div class="project-card-add" onclick="openCreateRepoModal()">' +
-    '<span class="pca-ic">＋</span>' +
-    '<b>' + I18N.t('repos.lobby.new_project_btn') + '</b>' +
-    '<span class="pca-tip">' + I18N.t('repos.lobby.new_project_tip') + '</span>' +
-  '</div>';
 
-  return addCardHtml + cardsHtml +
+  return cardsHtml +
     (filteredRepos.length === 0 ? '<div class="lobby-empty" style="grid-column:1/-1;margin:0;border:none;background:none"><div class="lobby-empty-ic">🔭</div><h3>' + I18N.t('repos.lobby.empty_title') + '</h3><p>' + I18N.t('repos.lobby.empty_desc') + '</p></div>' : '') +
     pagerHtml;
+}
+
+// 需求17: 平台切换——按平台筛选仓库
+let _activePlatformFilter = ''; // '' = 全部, 'gitcode' / 'github'
+
+function _getAvailablePlatforms() {
+  var _lu = localStorage.getItem('user') ? JSON.parse(localStorage.getItem('user')) : null;
+  var bindings = (_lu && _lu.bindings) || [];
+  // Always include platforms that have repos even if not in bindings (edge case)
+  var platforms = [];
+  if (bindings.indexOf('gitcode') >= 0) platforms.push({key: 'gitcode', name: 'GitCode'});
+  if (bindings.indexOf('github') >= 0) platforms.push({key: 'github', name: 'GitHub'});
+  return platforms;
+}
+
+function _buildPlatformBar() {
+  var platforms = _getAvailablePlatforms();
+  if (platforms.length <= 1) return ''; // 只有一个平台不需要切换栏
+  var tabs = platforms.map(function(p) {
+    var cls = _activePlatformFilter === p.key ? 'bt bt-tg' : 'bt bt-o';
+    return '<button class="' + cls + '" onclick="switchPlatform(\'' + p.key + '\')" style="font-size:12px">' + platformIcon(p.key, 14) + ' ' + p.name + '</button>';
+  });
+  // "全部" tab
+  var allCls = _activePlatformFilter === '' ? 'bt bt-tg' : 'bt bt-o';
+  tabs.unshift('<button class="' + allCls + '" onclick="switchPlatform(\'\')" style="font-size:12px">' + I18N.t('repos.platform.all') + '</button>');
+  return '<div style="display:flex;gap:6px;margin-bottom:14px">' + tabs.join('') + '</div>';
+}
+
+function switchPlatform(key) {
+  _activePlatformFilter = key;
+  _repoPage = 0;
+  var list = document.getElementById('projectList');
+  if (list) list.innerHTML = _buildProjectListHtml();
+  // Re-render platform bar
+  var bar = document.getElementById('platformBar');
+  if (bar) bar.innerHTML = _buildPlatformBar();
+}
+
+function _filterByPlatform(repos) {
+  if (!_activePlatformFilter) return repos;
+  return repos.filter(function(r) {
+    var rk = r.repo_key || '';
+    if (_activePlatformFilter === 'github') return rk.indexOf('github:') === 0;
+    return rk.indexOf('github:') !== 0; // gitcode = everything not github:
+  });
 }
 
 function renderRepoSelection(repos) {
@@ -176,6 +263,7 @@ function renderRepoSelection(repos) {
       '<div class="project-section-header">' +
         '<div class="project-section-header-left"><h2>' + I18N.t('repos.lobby.my_projects') + '</h2></div>' +
         '<div class="project-section-header-right">' +
+          _buildNewProjectBtn() +
           '<button class="project-refresh-btn" onclick="refreshRepos(this)" title="' + I18N.t('repos.lobby.refresh_title') + '">' + I18N.t('repos.lobby.refresh_btn') + '</button>' +
           '<input class="project-search" id="projectSearch" type="text" placeholder="🔍 ' + I18N.t('repos.lobby.search_placeholder') + '" value="' + _projectSearchQuery + '" oninput="onProjectSearch(this.value)">' +
         '</div>' +
@@ -186,7 +274,17 @@ function renderRepoSelection(repos) {
   '</div>';
 
   _projectsContent = inner;
-  renderSelectionShell('projects', inner);
+
+  // 需求17: 插入平台切换栏（多平台绑定时显示）
+  var platformBarHtml = _buildPlatformBar();
+  if (platformBarHtml) {
+    _projectsContent = _projectsContent.replace(
+      '<div class="project-list" id="projectList">',
+      '<div id="platformBar">' + platformBarHtml + '</div><div class="project-list" id="projectList">'
+    );
+  }
+
+  renderSelectionShell('projects', _projectsContent);
 }
 
 function _loadOrgSection() {
@@ -257,9 +355,8 @@ function _repoPlatform(r) {
 
 function _repoPlatformIcon(r) {
   var rk = r.repo_key || '';
-  if (rk.indexOf('github:') === 0)
-    return '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>';
-  return '<svg width="14" height="14" viewBox="0 0 1024 1024" fill="currentColor" style="vertical-align:-2px"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>';
+  var provider = (rk.indexOf('github:') === 0) ? 'github' : 'gitcode';
+  return platformIcon(provider, 14);
 }
 
 function _buildProjectCard(r) {
@@ -556,8 +653,29 @@ function _doUnhost(fullName) {
 }
 
 // ====== 创建新项目弹窗 ======
-function openCreateRepoModal() {
+function openCreateRepoModal(presetProvider) {
   closeCreateRepoModal();
+  var platforms = _getAvailablePlatforms();
+  var showPlatformSelect = platforms.length > 1;
+  var selectedProvider = presetProvider || (platforms.length > 0 ? platforms[0].key : 'gitcode');
+
+  // R26: 平台选择区域（仅多平台时显示）
+  var platformSelectHtml = '';
+  if (showPlatformSelect) {
+    platformSelectHtml = '<div class="create-repo-field">' +
+      '<label>' + I18N.t('repos.create.platform_label') + ' <span class="cr-req">*</span></label>' +
+      '<div class="create-repo-platforms" style="display:grid;grid-template-columns:' + '1fr '.repeat(platforms.length) + ';gap:10px">';
+    platforms.forEach(function(p) {
+      var cls = p.key === selectedProvider ? 'cr-platform cr-platform-act' : 'cr-platform';
+      platformSelectHtml += '<button type="button" class="' + cls + '" data-provider="' + p.key + '" onclick="_selectCreatePlatform(this)" ' +
+        'style="display:flex;align-items:center;justify-content:center;gap:6px;padding:10px 14px;border-radius:10px;border:2px solid ' +
+        (p.key === selectedProvider ? 'var(--a)' : 'var(--b)') + ';background:' + (p.key === selectedProvider ? 'var(--bg)' : 'var(--c)') +
+        ';cursor:pointer;font-size:13px;font-weight:500;transition:all .2s">' +
+        platformIcon(p.key, 18) + ' ' + p.name + '</button>';
+    });
+    platformSelectHtml += '</div></div>';
+  }
+
   const modal = document.createElement('div');
   modal.id = 'createRepoModal';
   modal.className = 'create-repo-overlay';
@@ -573,6 +691,7 @@ function openCreateRepoModal() {
       <button class="create-repo-x" onclick="closeCreateRepoModal()">✕</button>
     </div>
     <form class="create-repo-form" onsubmit="submitCreateRepo(event)">
+      ${platformSelectHtml}
       <div class="create-repo-field">
         <label for="crName">${I18N.t('repos.create.name_label')} <span class="cr-req">*</span></label>
         <input id="crName" type="text" placeholder="${I18N.t('repos.create.name_placeholder')}" autocomplete="off" maxlength="64" required>
@@ -604,6 +723,17 @@ function openCreateRepoModal() {
   if (input) setTimeout(() => input.focus(), 60);
 }
 
+function _selectCreatePlatform(btn) {
+  document.querySelectorAll('.cr-platform').forEach(function(b) {
+    b.classList.remove('cr-platform-act');
+    b.style.borderColor = 'var(--b)';
+    b.style.background = 'var(--c)';
+  });
+  btn.classList.add('cr-platform-act');
+  btn.style.borderColor = 'var(--a)';
+  btn.style.background = 'var(--bg)';
+}
+
 function closeCreateRepoModal() {
   const m = document.getElementById('createRepoModal');
   if (m) m.remove();
@@ -631,6 +761,10 @@ function submitCreateRepo(e) {
   if (txt) txt.style.display = 'none';
   if (ld) ld.style.display = '';
 
+  // R26: 获取用户选择的平台
+  var platformBtn = document.querySelector('.cr-platform-act');
+  var provider = platformBtn ? platformBtn.getAttribute('data-provider') : '';
+
   API.get('/repos/check-name?name=' + encodeURIComponent(name))
     .then(check => {
       if (check.exists) {
@@ -640,9 +774,13 @@ function submitCreateRepo(e) {
         app.showToast(I18N.t('repos.create.err_exists', {name: check.full_name}));
         return;
       }
-      API.post('/repos/create', {name, description: desc, visibility}, 120000)
+      API.post('/repos/create', {name, description: desc, visibility, provider}, 120000)
         .then(r => {
-          app.showToast(I18N.t('repos.create.success', {name: (r.full_name || name)}));
+          if (r.hosted === false && r.message) {
+            app.showToast(r.message);
+          } else {
+            app.showToast(I18N.t('repos.create.success', {name: (r.full_name || name)}));
+          }
           closeCreateRepoModal();
           if (typeof _projectsRepos !== 'undefined') {
             API.get('/repos/member').then(d => {

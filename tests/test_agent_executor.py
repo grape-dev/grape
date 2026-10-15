@@ -566,3 +566,200 @@ class TestExecutorPipeInvocation:
         assert "script" not in captured["cmd"]
         assert captured["cmd"][1] == "run"
         assert captured["stdout"] == _subprocess.PIPE, "应为纯管道 stdout"
+
+
+class TestAbnormalExitRecovery:
+    """issue #317：引擎异常退出（exit!=0 且 stderr 空）遗言补采 + OOM 标记 + 自动幂等重试一次。"""
+
+    def _make_popen(self, calls):
+        """与 TestStreamAgentSessionAutoRetry 同构的 FakePopen 工厂。"""
+        class FakePipe:
+            def __init__(self, data=b""):
+                self._data = data
+            def readline(self, chunk=b""):
+                if self._data:
+                    line, self._data = self._data.split(b"\n", 1)
+                    return line + b"\n"
+                return b""
+            def read(self, *a, **k):
+                return self._data
+            def close(self):
+                pass
+
+        class FakePopen:
+            def __init__(self, *args, **kwargs):
+                idx = self.__class__.call_count
+                self.__class__.call_count += 1
+                spec = calls[min(idx, len(calls) - 1)]
+                self.returncode = spec.get("returncode", 0)
+                self._stdout = spec.get("stdout", "")
+                self._stderr = spec.get("stderr", "")
+                self.__class__.last_args = args
+            @property
+            def stdout(self):
+                return FakePipe(self._stdout.encode("utf-8"))
+            @property
+            def stderr(self):
+                return FakePipe(self._stderr.encode("utf-8"))
+            def wait(self, timeout=None):
+                return self.returncode
+
+        FakePopen.call_count = 0
+        return FakePopen
+
+    def test_empty_stderr_supplements_tail_without_retry(self):
+        """场景1（空 stderr 补采）：exit=1、stderr 空、stdout 仅裸行报错（parsed=0）
+        → 不重跑，但 errors 补采 stdout 尾部摘要。"""
+        from unittest.mock import patch
+        from src.runtime import stream_runtime
+
+        calls = [
+            {"returncode": 1, "stdout": "Error: permission denied\n", "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == 1
+        assert FakePopen.call_count == 1, f"raw error should not retry, got {FakePopen.call_count}"
+        tail_errs = [e for e in done.get("errors", []) if e.startswith("agent_logs tail")]
+        assert tail_errs, f"errors should contain supplemented tail, got {done.get('errors')}"
+        assert "permission denied" in tail_errs[0]
+
+    def test_abrupt_exit_retries_once_and_recovers(self):
+        """场景3（重试）：exit=1、stderr 空、已有解析事件（result 截断形态）→ 自动重跑一次并成功。"""
+        from unittest.mock import patch
+        from src.runtime import stream_runtime
+
+        truncated_stdout = (
+            '{"type":"step_start","sessionID":"ses_trunc","part":{"type":"step-start"}}\n'
+            '{"type":"text","part":{"type":"text","text":"PARTIAL"}}\n'
+        )
+        success_stdout = (
+            '{"type":"text","part":{"type":"text","text":"RECOVERED"}}\n'
+        )
+        calls = [
+            {"returncode": 1, "stdout": truncated_stdout, "stderr": ""},
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
+
+        done_events = [(et, d) for et, d in events if et == "done"]
+        assert len(done_events) == 1, f"expected exactly 1 done event, got {len(done_events)}"
+        done = done_events[0][1]
+        assert done["exit_code"] == 0, done
+        assert "RECOVERED" in done["text"]
+        assert FakePopen.call_count == 2, f"expected exactly 2 Popen calls, got {FakePopen.call_count}"
+        second_args = FakePopen.last_args[0]
+        assert "--session" not in second_args, f"retry should run without session, got {second_args}"
+
+    def test_abrupt_exit_retry_idempotent_single_retry_single_done(self):
+        """场景3（重试幂等）：首跑与重跑均异常退出 → 恰好重试一次（不叠加）、单一 done、
+        最终 errors 含第二次运行的遗言尾部。"""
+        from unittest.mock import patch
+        from src.runtime import stream_runtime
+
+        truncated_stdout = (
+            '{"type":"text","part":{"type":"text","text":"PARTIAL"}}\n'
+        )
+        calls = [
+            {"returncode": 1, "stdout": truncated_stdout, "stderr": ""},
+            {"returncode": 1, "stdout": truncated_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
+
+        done_events = [(et, d) for et, d in events if et == "done"]
+        assert len(done_events) == 1, f"expected exactly 1 done event, got {len(done_events)}"
+        done = done_events[0][1]
+        assert done["exit_code"] == 1
+        assert FakePopen.call_count == 2, \
+            f"retry must happen exactly once (2 Popen calls), got {FakePopen.call_count}"
+        tail_errs = [e for e in done.get("errors", []) if e.startswith("agent_logs tail")]
+        assert tail_errs, f"final done should carry last-words tail, got {done.get('errors')}"
+
+    def test_session_missing_retry_not_stacked_with_abrupt_retry(self):
+        """场景3（重试幂等）：session 失效重跑后仍异常退出 → 不再叠加第二次重试
+        （每流最多一次重试额度共享）。"""
+        from unittest.mock import patch
+        from src.runtime import stream_runtime
+
+        stale_stdout = (
+            '{"type":"step_start","sessionID":"ses_a","part":{"type":"step-start"}}\n'
+        )
+        calls = [
+            # 首跑：带死 session、exit 1、stderr 空、parsed>=1 且无 text → _stale_fail 重跑
+            {"returncode": 1, "stdout": stale_stdout, "stderr": ""},
+            # 重跑（无 session）：仍异常退出
+            {"returncode": 1, "stdout": stale_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+            events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead",
+                                         backend_name="opencode"))
+
+        done_events = [(et, d) for et, d in events if et == "done"]
+        assert len(done_events) == 1, f"expected exactly 1 done event, got {len(done_events)}"
+        assert FakePopen.call_count == 2, \
+            f"session retry + abrupt retry must not stack (2 total), got {FakePopen.call_count}"
+
+    def test_oom_sigkill_marked_suspected_oom(self):
+        """场景2（OOM 标记）：returncode=-9 且系统日志有 oom-killer 证据 → suspected OOM。"""
+        from unittest.mock import patch
+        from src.runtime import stream_runtime
+
+        partial_stdout = (
+            '{"type":"text","part":{"type":"text","text":"WORKING"}}\n'
+        )
+        success_stdout = (
+            '{"type":"text","part":{"type":"text","text":"AFTER_OOM"}}\n'
+        )
+        calls = [
+            {"returncode": -9, "stdout": partial_stdout, "stderr": ""},
+            {"returncode": 0, "stdout": success_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"), \
+             patch("src.agent.executor._oom_kill_evidence", return_value=True):
+            events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        # 重试恢复成功，但首跑 OOM 判定保留在最终事件 errors（可追溯）
+        assert done["exit_code"] == 0, done
+        oom_notes = [e for e in done.get("errors", []) if "suspected OOM" in e]
+        assert oom_notes, f"errors should keep suspected OOM marker, got {done.get('errors')}"
+
+    def test_oom_sigkill_no_evidence_marked(self):
+        """场景2（OOM 标记）：returncode=-9 但系统日志无证据 → SIGKILL 无证据标记，非 OOM。"""
+        from unittest.mock import patch
+        from src.runtime import stream_runtime
+
+        partial_stdout = (
+            '{"type":"text","part":{"type":"text","text":"WORKING"}}\n'
+        )
+        calls = [
+            {"returncode": -9, "stdout": partial_stdout, "stderr": ""},
+            {"returncode": -9, "stdout": partial_stdout, "stderr": ""},
+        ]
+        FakePopen = self._make_popen(calls)
+        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
+             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"), \
+             patch("src.agent.executor._oom_kill_evidence", return_value=False):
+            events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
+
+        done = [d for et, d in events if et == "done"][0]
+        assert done["exit_code"] == -9
+        kill_notes = [e for e in done.get("errors", [])
+                      if "killed by SIGKILL" in e and "no oom-killer evidence" in e]
+        assert kill_notes, f"errors should note SIGKILL without evidence, got {done.get('errors')}"
+        assert not any("suspected OOM" in e and "no oom-killer" not in e
+                       for e in done.get("errors", []))

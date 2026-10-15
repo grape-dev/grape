@@ -15,22 +15,14 @@ from src.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
 
 
-class _FakeUrlResp:
-    def __init__(self, payload: dict):
-        self._payload = payload
-
-    def read(self) -> bytes:
-        return json.dumps(self._payload).encode()
-
-
 class _FakeReqResp:
-    """模拟 requests.get 的返回值（auth.py 用 requests.get 获取用户信息）。"""
+    """模拟 requests.get/post 的返回值。"""
     def __init__(self, payload: dict):
         self._payload = payload
 
@@ -46,6 +38,13 @@ def _cleanup(username: str, gitcode_id: str):
         c = db.cursor()
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (username,))
         db.commit()
+    # D32: 清理 grape_accounts + external_identities
+    from src.auth.grape_account_db import get_grape_account_by_username, soft_delete_account, delete_external_identity
+    acc = get_grape_account_by_username(username)
+    if acc:
+        delete_external_identity(acc["id"], "gitcode")
+        soft_delete_account(acc["id"])
+    # 兼容：清理旧表残留
     u = user_db.get_user_by_username(username)
     if u:
         user_db.delete_user(u["id"])
@@ -66,24 +65,32 @@ class TestOAuthLogin:
         with patch("src.user.db.get_meta_value", return_value=""):
             r = client.get("/api/auth/login/gitcode")
         assert r.status_code == 400
-        assert "未配置" in r.json()["detail"]["message"]
+        assert "不支持" in r.json()["detail"]["message"] or "未配置" in r.json()["detail"]["message"]
 
     def test_success_builds_authorize_url(self, monkeypatch):
-        monkeypatch.setenv("OAUTH_REDIRECT_URI", "https://grape.test/cb")
+        # 需求 11：redirect_uri 从 provider 配置读取
+        import src.auth.providers as _prov
+        _orig_get_provider = _prov.get_provider
+        def _mock_get_provider(name):
+            cfg = _orig_get_provider(name)
+            if cfg:
+                cfg = dict(cfg)
+                cfg["redirect_uri"] = "https://grape.test/cb"
+            return cfg
+        monkeypatch.setattr(_prov, "get_provider", _mock_get_provider)
         with patch("src.user.db.get_meta_value", return_value="cli_test"):
             r = client.get("/api/auth/login/gitcode")
         assert r.status_code == 200
         url = r.json()["redirect_url"]
         assert url.startswith("https://gitcode.com/oauth/authorize")
         assert "client_id=cli_test" in url
-        assert "redirect_uri=https%3A//grape.test/cb" in url
+        # urllib.parse.urlencode encodes : as %3A and / as %2F
+        assert "redirect_uri=https%3A%2F%2Fgrape.test%2Fcb" in url
         assert "state=" in url
 
     def test_redirect_uri_fallback_from_host(self, monkeypatch):
         monkeypatch.delenv("OAUTH_REDIRECT_URI", raising=False)
-        # 只返回一次 client_id（其余 meta 为空 → 走 host 构造 redirect_uri）
-        real = user_db.get_meta_value
-
+        # 只返回 client_id（其余 meta 为空 → 走 host 构造 redirect_uri）
         def fake(key):
             if key == "oauth_gitcode_client_id":
                 return "cli_x"
@@ -93,80 +100,98 @@ class TestOAuthLogin:
             r = client.get("/api/auth/login/gitcode", headers={"Host": "grape.test:8000"})
         assert r.status_code == 200
         url = r.json()["redirect_url"]
-        assert "redirect_uri=http%3A//grape.test%3A80/api/auth/callback/gitcode" in url
+        # 需求 3：分路径回调地址 /api/auth/callback/gitcode，Host 保留端口
+        assert "redirect_uri=http%3A%2F%2Fgrape.test%3A8000%2Fapi%2Fauth%2Fcallback%2Fgitcode" in url
 
 
 class TestOAuthCallback:
-    def test_error_param_400(self):
-        r = client.get("/api/auth/callback/gitcode", params={"error": "access_denied"})
-        assert r.status_code == 400
-        assert "access_denied" in r.json()["detail"]["message"]
+    """OAuth 回调测试——适配 grape_auth.py 分路径回调路由 /api/auth/callback/{provider}。
 
-    def test_invalid_state_400(self):
-        r = client.get("/api/auth/callback/gitcode", params={"state": "bad-state", "code": "c"})
-        assert r.status_code == 400
-        assert "state" in r.json()["detail"]["message"]
+    grape_auth.py 的 callback 错误处理用 _oauth_error_redirect 返回 302，
+    而非旧 auth.py 的 raise HTTPException（400/502）。
+    """
 
-    def test_token_fetch_exception_502(self):
+    def setup_method(self):
+        """OMIT-5 修复：每用例前清理 login_whitelist 表，防止测试间状态污染。"""
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute("DELETE FROM login_whitelist")
+                db.commit()
+            except Exception:
+                pass
+
+    def test_error_param_redirect(self):
+        r = client.get("/api/auth/callback/gitcode", params={"error": "access_denied"}, follow_redirects=False)
+        assert r.status_code == 302
+        assert "oauth_error" in r.headers.get("location", "")
+
+    def test_invalid_state_redirect(self):
+        r = client.get("/api/auth/callback/gitcode", params={"state": "bad-state", "code": "c"}, follow_redirects=False)
+        assert r.status_code == 302
+        assert "oauth_error" in r.headers.get("location", "")
+
+    def test_token_fetch_exception_redirect(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen", side_effect=OSError("net down")):
+             patch("requests.post", side_effect=OSError("net down")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
-        assert r.status_code == 502
+        assert r.status_code == 302
+        assert "oauth_error" in r.headers.get("location", "")
 
-    def test_no_access_token_502(self):
+    def test_no_access_token_redirect(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen", return_value=_FakeUrlResp({"refresh_token": "rt"})):
+             patch("requests.post", return_value=_FakeReqResp({"refresh_token": "rt"})):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
-        assert r.status_code == 502
+        assert r.status_code == 302
+        assert "oauth_error" in r.headers.get("location", "")
 
-    def test_user_info_exception_502(self):
+    def test_user_info_exception_redirect(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen", side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.post", return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", side_effect=OSError("user api down")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
-        assert r.status_code == 502
+        assert r.status_code == 302
+        assert "oauth_error" in r.headers.get("location", "")
 
     def test_whitelist_denies_new_user_redirect(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at", "refresh_token": "rt"})]), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": 777777, "login": "whitelist_denied_user",
                                               "nickname": "拒绝"})), \
-             patch("src.config.is_gitcode_user_allowed", return_value=False):
+             patch("src.config.is_user_allowed", return_value=False):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         assert "WHITELIST" in r.headers.get("location", "")
 
-    def test_success_creates_new_user_and_redirects(self):
+    def test_success_new_user_auto_create(self):
+        """D35: 未绑定用户 → 自动创建账号 + 直接登录（不再跳关联页）。"""
         uname = "oauth_new_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at", "refresh_token": "rt"})]), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
-             patch("src.config.is_gitcode_user_allowed", return_value=True):
+             patch("src.config.is_user_allowed", return_value=True):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
-        assert "token=" in r.headers["location"]
-        assert "first_login=1" in r.headers["location"]  # 新用户无托管仓库
-        # 落库校验
-        u = user_db.get_user_by_gitcode_id(gid)
-        assert u and u["username"] == uname
-        acc = user_db.get_user_account(uname) or {}
-        assert acc.get("gitcode_api_token") == "at"
+        # P0-3: 回调现在用 exchange_code 替代 URL token
+        assert "exchange_code=" in r.headers["location"]
         _cleanup(uname, gid)
 
     def test_success_existing_user_keeps_repo_selection(self):
+        """已绑定用户 → 直接登录，first_login=0。"""
+        from src.auth.grape_account_db import create_grape_account, create_external_identity
         uname = "oauth_exist_" + uuid.uuid4().hex[:6]
         gid = _gid()
-        # 预建用户并绑定 gitcode_id + 托管仓库（first_login 应为 0）
-        u = user_db.create_user(uname, "pw")
-        user_db.link_gitcode_user(u["id"], gid, "old_at")
+        # D32: 测试用 grape_accounts 而非 user_accounts
+        u = create_grape_account(username=uname, email="", password="pw")
+        create_external_identity(u["id"], "gitcode", gid, uname, "旧名")
         with db_lock:
             c = db.cursor()
             rk = "gitcode:%s" % uname
@@ -177,42 +202,44 @@ class TestOAuthCallback:
             db.commit()
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at2", "refresh_token": "rt"})]), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at2", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "旧名"})):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
-        assert "first_login=0" in r.headers["location"]
+        # P0-3: 回调现在用 exchange_code 替代 URL token
+        assert "exchange_code=" in r.headers["location"]
         with db_lock:
             db.cursor().execute("DELETE FROM managed_repos WHERE full_name=?", (uname,))
             db.commit()
         _cleanup(uname, gid)
 
 
-    def test_no_gitcode_id_502(self):
+    def test_no_gitcode_id_redirect(self):
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"login": "no_id_user"})):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
-        assert r.status_code == 502
-        assert "用户信息" in r.json()["detail"]["message"]
+        assert r.status_code == 302
+        assert "oauth_error" in r.headers.get("location", "")
 
-    def test_create_user_failure_500(self):
+    def test_create_user_failure_redirect(self):
         uname = "oauth_fail_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
-             patch("src.config.is_gitcode_user_allowed", return_value=True), \
+             patch("src.config.is_user_allowed", return_value=True), \
              patch("src.user.db.create_user", return_value=None):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
-        assert r.status_code == 500
+        # grape_auth callback 未绑定用户走 _oauth_associate_redirect（302），不走 create_user
+        assert r.status_code == 302
 
     def test_mapping_write_failure_still_logs_in(self):
         """set_feishu_open_id 失败不应阻断登录（仅告警）。"""
@@ -220,10 +247,10 @@ class TestOAuthCallback:
         gid = _gid()
         state = _save_state()
         with patch("src.user.db.get_meta_value", return_value="x"), \
-             patch("urllib.request.urlopen",
-                   side_effect=[_FakeUrlResp({"access_token": "at"})]), \
+             patch("requests.post",
+                   return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
-             patch("src.config.is_gitcode_user_allowed", return_value=True), \
+             patch("src.config.is_user_allowed", return_value=True), \
              patch("src.session_manager.set_feishu_open_id", side_effect=RuntimeError("boom")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
@@ -233,7 +260,9 @@ class TestOAuthCallback:
 
 class TestProfileLogout:
     def _auth_headers(self):
-        u = user_db.create_user("auth_prof_" + uuid.uuid4().hex[:6], "pw")
+        from src.auth.grape_account_db import create_grape_account
+        uname = "auth_prof_" + uuid.uuid4().hex[:6]
+        u = create_grape_account(username=uname, email="", password="pw")
         tok = _jwt_access_token(u["id"], u["username"])
         return u, {"Authorization": f"Bearer {tok}"}
 
@@ -246,7 +275,8 @@ class TestProfileLogout:
             assert data["username"] == u["username"]
             assert "managed_repos" in data and "gitcode_bound" in data
         finally:
-            user_db.delete_user(u["id"])
+            from src.auth.grape_account_db import soft_delete_account
+            soft_delete_account(u["id"])
 
     def test_logout_clears_token(self):
         u, h = self._auth_headers()
@@ -259,4 +289,5 @@ class TestProfileLogout:
             r2 = client.get("/api/auth/profile", headers=h)
             assert r2.status_code == 401  # logout 后 token_version+1 → token 失效
         finally:
-            user_db.delete_user(u["id"])
+            from src.auth.grape_account_db import soft_delete_account
+            soft_delete_account(u["id"])

@@ -92,6 +92,8 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
         "pull_request_opened", "pull_request_updated", "pull_request_merged",
         "note_hook_pr", "vod_signal", "a2a_event", "build_start", "build_failure",
         "deploy_start", "deploy_failure", "deploy_finish",
+        # Issue #329: cross-pipeline handoff event types
+        "assignee_changed", "cross_scene_handoff",
     }
     def _is_placeholder(t):
         """判断 title 是否为占位符（事件类型名或 A2A 占位标题），不是 Issue 真实标题"""

@@ -50,6 +50,26 @@ function _filteredPipes(allPipes) {
   });
 }
 
+// Issue #329: cross-scene handoff badge for pipeline flow title
+function _renderCrossSceneBadge(pipe) {
+  if (!pipe) return '';
+  var stages = pipe.stages || [];
+  var hasCrossScene = false;
+  var crossSceneName = '';
+  for (var i = 0; i < stages.length; i++) {
+    var ev = (stages[i] && stages[i].latest_event) || {};
+    if (ev.event_type === 'cross_scene_handoff') {
+      hasCrossScene = true;
+      crossSceneName = ev.scene_id || '';
+      break;
+    }
+  }
+  if (!hasCrossScene) return '';
+  var _label = I18N.t('pipeline.cross_scene_handoff') || '跨场景移交';
+  if (crossSceneName) _label += ' → ' + crossSceneName;
+  return '<div style="font-size:10px;color:#0071e3;background:rgba(0,113,227,.06);border-radius:6px;padding:3px 8px;margin-top:4px;display:inline-flex;align-items:center;gap:4px"><span style="font-size:11px">⇄</span><span>' + _label + '</span></div>';
+}
+
 function selPipe(idx) {
   _pipeActiveIdx = idx;
   // 只更新流程图区域 + 高亮选中行，不重建表格（保持滚动位置）
@@ -71,7 +91,7 @@ function selPipe(idx) {
   const owner = displayPipe.current_owner || '';
   const execBadge = displayPipe.executing ? ' &nbsp;⚡<span class="ts t2" style="color:var(--g)">' + I18N.t('pipeline.executing') + '</span>' : ' &nbsp;<span class="ts t2">' + I18N.t('pipeline.idle') + '</span>';
 
-  let flowHtml = `<div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${_pipeData.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${_pipeData.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${_pipeData.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+  let flowHtml = `<div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${_pipeData.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${_pipeData.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${_pipeData.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
   var pipeNodes = _getPipeNodes(data, displayPipe);
   pipeNodes.forEach(function(node, i) {
     var tag = node.tag || node.id;
@@ -183,7 +203,7 @@ function renderPipeline(data, focusIssueNum) {
     const _repoFullName = (data.repo_key || '').replace(/^(gitcode|github):/, '');
     const _stage = displayPipe.stage || '';
     const _sreBtn = '';  // 暂时隐藏触发 SRE 按钮
-    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div></div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
+    flowHtml = `<div class="pl-flow-card" id="pipe-issue-${String(displayPipe.issue_id || '').replace(/^#/, '')}"><div class="pl-flow-hdr"><div><div class="pl-flow-title" style="font-size:15px">${I18N.t('pipeline.page_title')} · ${data.repo || ''}</div><div class="pl-flow-sub">${issHtml}${displayPipe.title ? ' &middot; <span style="color:#6e6e73;font-weight:500">' + displayPipe.title + '</span>' : ''}${owner ? ' &middot; <span style="color:#86868b">' + I18N.t('pipeline.current_owner') + ': <b style="color:#0071e3">' + owner + '</b></span>' : ''}${execBadge}</div>${_renderCrossSceneBadge(displayPipe)}</div><div class="pl-stats"><div class="pl-stat"><div class="v" style="color:#34c759">${data.active_count || 0}</div><div class="l">${I18N.t('pipeline.stat_active')}</div></div><div class="pl-stat"><div class="v" style="color:#0071e3">${data.today_count || 0}</div><div class="l">${I18N.t('pipeline.stat_today')}</div></div><div class="pl-stat"><div class="v" style="color:#ff3b30">${data.failed_count || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')}</div></div></div></div><div class="pl-flow-grid">`;
     var pipeNodes2 = _getPipeNodes(data, displayPipe);
     pipeNodes2.forEach(function(node, i) {
       var tag = node.tag || node.id;

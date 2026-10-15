@@ -81,28 +81,43 @@ _PERMISSION_TO_GITCODE = {
 
 
 def add_collaborator(api_token: str, owner: str, repo: str, username: str,
-                     permission: str = "maintainer") -> bool:
+                     permission: str = "maintainer") -> tuple[bool, str]:
     """将用户添加为仓库协作者（GitCode 邀请制：创建邀请，需对方接受）。
 
     注意：
       - api_token 必须是仓库所有者/管理员的 token（GitCode 拒绝用 bot 自己 token 邀请自己）。
       - GitCode PUT body 字段名是单数 `permission`，枚举值：pull/push/admin/customized。
       - 已存在成员 / 已被邀请（400"已是成员"）视为成功（幂等）。
-      - 不再静默降级：maintainer 邀请失败直接返回 False，由调用方决定是否拒绝托管。
+      - 不再静默降级：maintainer 邀请失败直接返回 (False, error_detail)，由调用方决定是否拒绝托管。
+    返回：(True, "") 成功；(False, error_detail) 失败——error_detail 为友好错误文案。
     """
     if not username or not api_token:
-        return False
+        return False, "Token 或用户名缺失"
     gitcode_perm = _PERMISSION_TO_GITCODE.get((permission or "").lower(), permission)
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/collaborators/{urllib.parse.quote(username, safe='')}"
     try:
         _req("PUT", url, api_token, {"permission": gitcode_perm})
-        return True
+        return True, ""
     except RuntimeError as e:
-        # 已是成员 / 已被邀请（幂等成功）：说明该用户已在仓库的成员或邀请列表中
+        # 已是成员 / 已被邀请（幂等成功）
         if any(k in str(e) for k in ("已经是项目中的成员", "已经是", "已存在", "已被邀请", "已邀请", "已经邀请")):
-            return True
+            return True, ""
+        # 提取 HTTP code 做差异化提示
+        code = _extract_http_code(e)
+        if code == 401:
+            err = "GitCode Token 已过期，请重新登录后再试"
+        elif code == 403:
+            err = "无权限操作，请确认你是仓库管理员"
+        elif code == 404:
+            err = f"仓库 {owner}/{repo} 不存在"
+        elif code in (500, 502, 503, 504):
+            err = "GitCode 服务暂时不可用，请稍后重试"
+        elif code == 429:
+            err = "GitCode API 调用过于频繁，请稍后重试"
+        else:
+            err = f"邀请失败（HTTP {code}）" if code else f"邀请失败: {e}"
         log.warning(f"add_collaborator failed: {e}")
-        return False
+        return False, err
 
 
 def remove_collaborator(api_token: str, owner: str, repo: str, username: str) -> bool:
@@ -351,7 +366,7 @@ def create_repo(api_token: str, name: str, description: str = "", private: bool 
     return result
 
 
-def _run_git(args: list[str], cwd: str) -> str:
+def _run_git(args: list[str], cwd: str, timeout: int = 120) -> str:
     """在指定目录执行 git 命令，返回 stdout。失败抛 RuntimeError。"""
     import subprocess
     try:
@@ -360,7 +375,7 @@ def _run_git(args: list[str], cwd: str) -> str:
             cwd=cwd,
             capture_output=True,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
     except FileNotFoundError:
         raise RuntimeError("服务器未安装 git CLI")
@@ -491,16 +506,8 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
         if _git_has_changes(workdir):
             _run_git(["commit", "-m", "Init from project template"], workdir)
         _run_git(["branch", "-M", "main"], workdir)
-        # push 单独设 180s 超时（大仓库 push 到 GitCode 可能较慢）
-        import subprocess
-        try:
-            p = subprocess.run(["git", "push", "--force", "-u", "origin", "HEAD:main"],
-                cwd=workdir, capture_output=True, text=True, timeout=180)
-            if p.returncode != 0:
-                err = (p.stderr or p.stdout or "").strip()[:500]
-                raise RuntimeError(f"git push --force 失败: {err}")
-        except subprocess.TimeoutExpired:
-            raise RuntimeError("git push 超时（180s），仓库可能过大")
+        # D43: push 统一走 _run_git（可被测试 mock），超时 180s
+        _run_git(["push", "--force", "-u", "origin", "HEAD:main"], workdir, timeout=180)
         return True
     finally:
         shutil.rmtree(tmp, ignore_errors=True)

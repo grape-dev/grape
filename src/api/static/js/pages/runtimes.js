@@ -210,14 +210,17 @@ function _summaryStatsBar(data, devices) {
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
 
-// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex）
+// 引擎半透明底图：logo 图片水印（右下角，区分 opencode/hermes/codearts/codex/aishell）
 function _engineWatermark(name) {
   const n = (name || '').toLowerCase();
+  if (n.includes('aishell') || n.includes('hwcloud')) {
+    return `<img src="/static/img/engines/AIShell.svg" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+  }
   if (n.includes('opencode')) {
     return `<img src="/static/img/engines/opencode.png" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
   if (n.includes('hermes')) {
-    return `<img src="/static/img/engines/Hermes.png" style="position:absolute;right:-18px;bottom:-30px;width:130px;height:130px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
+    return `<img src="/static/img/engines/Hermes.png" style="position:absolute;right:12px;bottom:8px;width:56px;height:56px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
   }
   if (n.includes('codearts')) {
     return `<img src="/static/img/engines/codearts.jpg" style="position:absolute;right:12px;bottom:8px;width:50px;height:50px;object-fit:contain;opacity:.25;pointer-events:none" alt="">`;
@@ -319,6 +322,7 @@ function renderRuntimes(data) {
   const _availTypes = _runtimeTab === 'engines'
     ? [...new Set((data.runtimes||[]).map(e => {
         const n = ((e.instance_name || e.name || '')).toLowerCase();
+        if (n.includes('aishell') || n.includes('hwcloud')) return 'aishell';
         if (n.includes('hermes')) return 'hermes';
         if (n.includes('opencode')) return 'opencode';
         if (n.includes('codearts')) return 'codearts';
@@ -331,7 +335,7 @@ function renderRuntimes(data) {
   // 筛选标签从后端返回的 avail_scopes 生成（不依赖当前页数据）
   const _availScopes = _runtimeTab === 'engines' ? (data.avail_scopes || []) : (_rtDevAvailScopes || []);
   const _hasScope = (sc) => _availScopes.includes(sc);
-  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' };
+  const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', aishell: '#0a8cd8' };
   // 收集可用场景和标签（从引擎数据提取）
   const _allRuntimes = (data.runtimes || []);
   const _availScenes = [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))].filter(Boolean);
@@ -1786,7 +1790,11 @@ function _showCreateEnvForm() {
 
   function _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt) {
     // Step 1: 生成凭据（模板预检已通过）
-    API.post('/settings/runtime-credentials', { name: credName, scope: 'repo', repo_key: repoKey }).then(function(d) {
+    // scope 默认个人级（user，2026-10-13 调整）：DevSpace 设备作为创建者的个人引擎池，
+    // 服务其所有仓库任务；此前硬编码 repo scope 导致设备只服务创建时所在仓库
+    // （绑定仓库不可达时任务按 #253 诚实失败，调度面窄）。repoKey 仍传给后端做
+    // 环境命名/备注参考，但不再限定调度范围。
+    API.post('/settings/runtime-credentials', { name: credName, scope: 'user' }).then(function(d) {
       var grapeToken = d.token || '';
       var credId = d.id || 0;
       if (!grapeToken) { app.showToast(I18N.t('runtimes.devspace.cred_gen_failed')); _refreshDevspaceList(); return; }

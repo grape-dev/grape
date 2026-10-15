@@ -51,5 +51,6 @@
   "status_skipped": "Skipped",
   "page_info": "Page {{cur}} / {{total}}",
   "prev_page": "Previous",
-  "next_page": "Next"
+  "next_page": "Next",
+  "cross_scene_handoff": "Cross-Scene Handoff"
 }

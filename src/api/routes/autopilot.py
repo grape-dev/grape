@@ -82,6 +82,14 @@ def _check_exec_access(user: dict, exec_id: int) -> dict:
     return {"id": row[0], "task_id": row[1], "repo_key": repo_key}
 
 
+def _autopilot_exec_cols() -> list:
+    """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("PRAGMA table_info(autopilot_executions)")
+        return [r[1] for r in c.fetchall()]
+
+
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
     import json as _json
@@ -409,13 +417,21 @@ def list_executions(
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """查询执行日志（可按 task_id / status 筛选，分页）。"""
+    """查询执行日志（可按 task_id / status 筛选，分页）。
+
+    Issue #258: 响应增加 agent_task_ids 字段（老流水线任务，通过 issue_number + repo_key 关联）。
+    Issue #261: 响应增加 agent_task_id 字段（单 agent 定时任务，通过 event_seq=exec_id 关联），
+    新版 autopilot 无 issue_number，agent_task_id 为主要日志查看入口。
+    """
     # 如果指定了 task_id，校验归属
     if task_id is not None:
         _check_task_access(user, task_id)
+    # v3.0: autopilot_executions 不再有 issue_number 列（旧字段物理保留则兼容读取）
+    _has_issue_num_col = "issue_number" in _autopilot_exec_cols()
+    _issue_num_expr = "e.issue_number" if _has_issue_num_col else "'' AS issue_number"
     sql = ("SELECT e.id, e.task_id, e.status, e.retry_count, e.result, e.error, "
-           "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json "
-           "FROM autopilot_executions e WHERE 1=1")
+           "e.started_at, e.completed_at, e.created_at, e.agent_type, e.findings_json, "
+           + _issue_num_expr + " FROM autopilot_executions e WHERE 1=1")
     count_sql = "SELECT COUNT(*) FROM autopilot_executions e WHERE 1=1"
     conditions = []
     params = []
@@ -434,22 +450,46 @@ def list_executions(
         c = db.cursor()
         rows = c.execute(sql, params).fetchall()
         total = c.execute(count_sql, params[:-2]).fetchone()[0]
+        # 批量查各 task 的 repo_key（避免 N+1）
+        task_ids = set(r[1] for r in rows)
+        repo_key_map = {}
+        if task_ids:
+            ph = ",".join("?" * len(task_ids))
+            tk_rows = c.execute(
+                f"SELECT id, repo_key FROM autopilot_tasks WHERE id IN ({ph})",
+                list(task_ids)
+            ).fetchall()
+            repo_key_map = {t[0]: t[1] or "" for t in tk_rows}
+    # Issue #258: 查 agent_task_ids（复用 _find_agent_task_ids）
+    from src.api.issues_center import _find_agent_task_ids
     executions = []
     for r in rows:
-        # 反查 agent_task_id（event_seq = exec_id）
+        exec_id = r[0]
+        tid = r[1]
+        issue_number = r[11] or ""
+        # 反查 agent_task_id（event_seq = exec_id，旧路径）
         agent_task_id = ""
         try:
             with db_lock:
                 c2 = db.cursor()
-                c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (r[0],))
+                c2.execute("SELECT id FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (exec_id,))
                 at_row = c2.fetchone()
                 if at_row:
                     agent_task_id = at_row[0]
         except Exception:
             pass
+        # Issue #258: 查 agent_task_ids（issue_number + repo_key 关联，支持多阶段）
+        agent_task_ids: list[str] = []
+        if issue_number:
+            rk = repo_key_map.get(tid, "")
+            if rk:
+                try:
+                    agent_task_ids = _find_agent_task_ids(rk, int(issue_number))
+                except Exception:
+                    agent_task_ids = []
         executions.append({
-            "id": r[0],
-            "task_id": r[1],
+            "id": exec_id,
+            "task_id": tid,
             "status": r[2],
             "retry_count": r[3],
             "result": r[4] or "",
@@ -459,7 +499,9 @@ def list_executions(
             "created_at": r[8] or "",
             "agent_type": r[9] or "",
             "has_findings": bool(r[10]),
+            "issue_number": issue_number,
             "agent_task_id": agent_task_id,
+            "agent_task_ids": agent_task_ids,
         })
     return {"executions": executions, "total": total, "limit": limit, "offset": offset}
 
@@ -482,11 +524,12 @@ def get_findings(exec_id: int, user: dict = Depends(get_current_user)):
     if findings_json:
         try:
             data = json.loads(findings_json)
-            return {"summary": data.get("summary", ""), "findings": data.get("findings", []),
+            return {"result": data.get("result", ""), "summary": data.get("summary", ""),
+                    "findings": data.get("findings", []),
                     "parse_error": data.get("parse_error", "")}
         except json.JSONDecodeError:
-            return {"summary": "", "findings": [], "parse_error": "invalid json in findings_json"}
-    return {"summary": "", "findings": [], "parse_error": "no findings"}
+            return {"result": "", "summary": "", "findings": [], "parse_error": "invalid json in findings_json"}
+    return {"result": "", "summary": "", "findings": [], "parse_error": "no findings"}
 
 
 # ====== 问题派发 ======
@@ -498,43 +541,47 @@ class DispatchBody(BaseModel):
     scene_id: Optional[str] = None
 
 
-@router.post("/executions/{exec_id}/dispatch")
-async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depends(get_current_user)):
-    """将某个 finding 派发为真实 Issue，走完整流水线。"""
-    exec_info = _check_exec_access(user, exec_id)
-    repo_key = exec_info["repo_key"]
+async def _dispatch_finding_core(exec_id: int, finding_id: str,
+                                 title: str = "", description: str = "",
+                                 scene_id: str = "", user: dict = None):
+    """派发核心逻辑（autopilot-feishu-subscription-design.md §4.7）。
 
-    # 读取 findings_json
+    从路由 dispatch_finding 抽出，供 Web 路由与飞书 /finding-dispatch handler 共用，
+    避免两份实现漂移。user 为内部身份 dict（含 id/username/token）。
+    抛 HTTPException 语义错误（404/409/400），调用方自行捕获转回复卡。
+    返回 {ok, issue_number, message}。
+    """
     with db_lock:
         c = db.cursor()
         row = c.execute(
-            "SELECT findings_json FROM autopilot_executions WHERE id=?",
-            (exec_id,)
-        ).fetchone()
-    if not row or not row[0]:
+            "SELECT t.repo_key, e.findings_json FROM autopilot_executions e "
+            "JOIN autopilot_tasks t ON e.task_id=t.id WHERE e.id=?",
+            (exec_id,)).fetchone()
+    if not row or not row[1]:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无 findings 可派发"})
-
+    repo_key = row[0]
     try:
-        findings_data = json.loads(row[0])
+        findings_data = json.loads(row[1])
     except json.JSONDecodeError:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "findings_json 格式错误"})
 
     # 找到对应的 finding
     finding = None
     for f in findings_data.get("findings", []):
-        if f.get("id") == body.finding_id:
+        if f.get("id") == finding_id:
             finding = f
             break
     if not finding:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"finding {body.finding_id} not found"})
+        raise HTTPException(status_code=404, detail={"code": 404,
+                                                     "message": f"finding {finding_id} not found"})
 
     # 检查是否已派发
     if finding.get("dispatched_issue_number"):
         raise HTTPException(status_code=409, detail={"code": 409,
-                                                      "message": f"已派发过 (Issue #{finding['dispatched_issue_number']})",
-                                                      "issue_number": finding["dispatched_issue_number"]})
+                                                     "message": f"已派发过 (Issue #{finding['dispatched_issue_number']})",
+                                                     "issue_number": finding["dispatched_issue_number"]})
 
-    # 创建真实 Issue（前端可覆盖标题/描述/场景）
+    # 创建真实 Issue（调用方传的 title/desc/scene_id 优先，否则用 finding 原值）
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
 
@@ -550,15 +597,17 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
     except Exception:
         pass
 
-    # 调 create_task_via_issue（前端传的 title/desc/scene_id 优先，否则用 finding 原值）
+    # 调 create_task_via_issue（调用方传的 title/desc/scene_id 优先，否则用 finding 原值）
     from src.api.issues_center import TaskCreateBody, create_task_via_issue
+    log.info(f"[dispatch-debug] exec={exec_id} fid={finding_id} scene_id={scene_id!r} title={title!r}")
     issue_body = TaskCreateBody(
         repo_key=repo_key,
-        title=body.title or finding["title"],
-        description=body.description or finding.get("description", ""),
-        scene_id=body.scene_id or "",
+        title=title or finding["title"],
+        description=description or finding.get("description", ""),
+        scene_id=scene_id or "",
     )
-    internal_user = {"id": user.get("id", 0), "username": user.get("username", owner),
+    internal_user = {"id": (user or {}).get("id", 0),
+                     "username": (user or {}).get("username", owner),
                      "token": repo_token, "auth_type": "internal"}
     result = await create_task_via_issue(issue_body, user=internal_user)
     issue_number = str(result.get("issue_number", ""))
@@ -572,9 +621,85 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
                 (json.dumps(findings_data, ensure_ascii=False), exec_id)
             )
             db.commit()
-        log.info(f"Autopilot: finding {body.finding_id} dispatched as Issue #{issue_number} (exec={exec_id})")
+        log.info(f"Autopilot: finding {finding_id} dispatched as Issue #{issue_number} (exec={exec_id})")
         return {"ok": True, "issue_number": issue_number, "message": f"已创建 Issue #{issue_number}"}
     return {"ok": False, "message": f"创建 Issue 失败: {result}"}
+
+
+@router.post("/executions/{exec_id}/dispatch")
+async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depends(get_current_user)):
+    """将某个 finding 派发为真实 Issue，走完整流水线。"""
+    exec_info = _check_exec_access(user, exec_id)
+    log.info(f"[dispatch-debug] body.scene_id={body.scene_id!r} body.title={body.title!r}")
+
+    # 权限/仓库校验后走共用核心（权限模型与路由原本一致）
+    return await _dispatch_finding_core(exec_id, body.finding_id,
+                                        body.title or "", body.description or "",
+                                        body.scene_id or "", user=user)
+
+
+# ====== 飞书订阅（autopilot-feishu-subscription-design.md §4.3）======
+
+def _check_subscription_table() -> bool:
+    """表结构保障：订阅表缺失（建表失败极端场景）时接口明确报错，而非裸 500。
+
+    用 PRAGMA table_info（mysql_compat 已有 information_schema 特判翻译，跨 SQLite/MySQL 通用；
+    sqlite_master 带 WHERE 的写法不被兼容层翻译，MySQL 上会炸）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(autopilot_subscriptions)").fetchall()]
+        return "task_id" in cols
+    except Exception as e:
+        log.warning(f"Autopilot subscription table check failed: {e}")
+        return False
+
+
+@router.post("/tasks/{task_id}/subscribe")
+def subscribe_task(task_id: int, user: dict = Depends(get_current_user)):
+    """订阅任务飞书通知（幂等：UNIQUE 冲突=已订阅）。需对该任务仓库有权限。"""
+    if not _check_subscription_table():
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "订阅表未初始化，请联系管理员"})
+    _check_task_access(user, task_id)  # 校验 task 存在 + 仓库归属
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO autopilot_subscriptions (task_id, user_id) VALUES (?, ?)",
+                      (task_id, user["id"]))
+            db.commit()
+    except Exception:
+        # UNIQUE 冲突 → 幂等已订阅（表结构保障：其它 SQL 错误也走此分支返回已订阅，日志可查）
+        db.rollback()
+        log.info(f"Autopilot subscribe: task={task_id} user={user['id']} already subscribed or conflict")
+    return {"ok": True, "subscribed": True}
+
+
+@router.delete("/tasks/{task_id}/subscribe")
+def unsubscribe_task(task_id: int, user: dict = Depends(get_current_user)):
+    """退订任务飞书通知（幂等：不存在也返回成功）。"""
+    if not _check_subscription_table():
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "订阅表未初始化，请联系管理员"})
+    _check_task_access(user, task_id)
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM autopilot_subscriptions WHERE task_id=? AND user_id=?",
+                  (task_id, user["id"]))
+        db.commit()
+    return {"ok": True, "subscribed": False}
+
+
+@router.get("/tasks/{task_id}/subscription")
+def get_subscription(task_id: int, user: dict = Depends(get_current_user)):
+    """查询当前用户对此任务的订阅状态（详情页按钮渲染用）。"""
+    if not _check_subscription_table():
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "订阅表未初始化，请联系管理员"})
+    _check_task_access(user, task_id)
+    with db_lock:
+        c = db.cursor()
+        row = c.execute("SELECT 1 FROM autopilot_subscriptions WHERE task_id=? AND user_id=?",
+                        (task_id, user["id"])).fetchone()
+    return {"subscribed": bool(row)}
 
 
 # ====== 巡检指令润色 ======

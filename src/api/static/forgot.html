@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-title="title_forgot">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title data-i18n="app.login.title_forgot">重置密码 — Grape</title>
+<link rel="icon" type="image/png" href="/static/logo-64.png">
+<link rel="stylesheet" href="/static/css/app.css?v=75">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
+<link rel="stylesheet" href="/static/css/auth.css?v=6">
+<script>
+(function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.setAttribute('data-i18n-pending','1');})();
+</script>
+<style>
+[data-i18n-pending="1"] [data-i18n]{visibility:hidden}
+[data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
+</style>
+<script src="/static/js/i18n.js?v=13"></script>
+<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('25');});</script>
+</head>
+<body>
+
+<div class="auth-page" id="authPage">
+<div class="auth-card">
+
+<img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
+<h1 data-i18n="app.login.forgot_title">重置密码</h1>
+<p class="subtitle" data-i18n="app.login.forgot_sub">输入注册邮箱获取验证码</p>
+
+<div class="step-items" id="stepIndicator">
+  <div class="step-item active" id="dot1"><div class="step-item-circle">1</div><span data-i18n="app.login.step_label_email">邮箱</span></div>
+  <div class="step-line"></div>
+  <div class="step-item" id="dot2"><div class="step-item-circle">2</div><span data-i18n="app.login.step_label_verify">验证码</span></div>
+  <div class="step-line"></div>
+  <div class="step-item" id="dot3"><div class="step-item-circle">3</div><span data-i18n="app.login.step_label_done">完成</span></div>
+</div>
+
+<!-- Step 1 -->
+<div id="forgotStep1" class="auth-panel" style="display:block">
+<form onsubmit="event.preventDefault();sendForgotCode()">
+  <div class="field-group">
+    <label class="field-label" for="forgotEmail" data-i18n="app.login.email">邮箱</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="forgotEmail" type="email"
+        placeholder="you@example.com" data-i18n-placeholder="app.login.email_placeholder"
+        autocomplete="email" inputmode="email"
+        aria-describedby="forgotEmailErr"
+        oninput="Auth.clearErrorOnInput('forgotEmail')"
+        onblur="Auth.blurValidate('forgotEmail',function(v){return v&&v.indexOf('@')<0?Auth.t('app.login.err_email_format'):null;})">
+    </div>
+    <p class="field-error" id="forgotEmailErr" role="alert" aria-live="polite"></p>
+  </div>
+  <button class="auth-btn" id="forgotSendBtn" type="submit">
+    <span data-i18n="app.login.send_code">发送验证码</span>
+  </button>
+</form>
+</div>
+
+<!-- Step 2 -->
+<div id="forgotStep2" class="auth-panel" style="display:none">
+<form onsubmit="event.preventDefault();resetPassword()">
+  <div class="field-group">
+    <label class="field-label" data-i18n="app.login.email">邮箱</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="forgotEmailDisplay" type="email" disabled>
+    </div>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="forgotCode" data-i18n="app.login.verify_code">验证码</label>
+    <div class="code-row">
+      <input class="field-input" id="forgotCode" type="text"
+        placeholder="6位验证码" maxlength="6" data-i18n-placeholder="app.login.code_placeholder"
+        inputmode="numeric" autocomplete="one-time-code" enterkeyhint="next"
+        aria-describedby="forgotCodeErr">
+      <button type="button" class="send-code-btn" id="forgotResendBtn" onclick="resendForgotCode()" data-i18n="app.login.resend_code">重新发送</button>
+    </div>
+    <p class="field-error" id="forgotCodeErr" role="alert" aria-live="polite"></p>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="forgotNewPass" data-i18n="app.login.new_password">新密码</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="forgotNewPass" type="password"
+        placeholder="至少8个字符" data-i18n-placeholder="app.login.password_placeholder"
+        autocomplete="new-password"
+        aria-describedby="forgotNewPassErr"
+        oninput="onNewPwdInput()"
+        onblur="Auth.blurValidate('forgotNewPass',function(v){return v&&v.length<8?Auth.t('app.login.pwd_req_length'):null;})">
+      <button type="button" class="pwd-toggle" onclick="Auth.togglePwd('forgotNewPass',this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <div class="pwd-strength pwd-strength-focus" id="forgotNewPassStrength">
+      <div class="pwd-strength-bar"><div class="pwd-strength-fill" id="newPwdStrengthFill"></div></div>
+      <p class="pwd-strength-label" id="newPwdStrengthLabel" data-i18n="app.login.pwd_strength">密码强度</p>
+    </div>
+    <ul class="pwd-reqs pwd-reqs-focus" id="newPwdReqs">
+      <li id="newreq-len" data-i18n="app.login.pwd_req_length">至少8个字符</li>
+      <li id="newreq-complex" data-i18n="app.login.pwd_req_alnum">包含字母和数字</li>
+    </ul>
+    <p class="field-error" id="forgotNewPassErr" role="alert" aria-live="polite"></p>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="forgotNewPassConfirm" data-i18n="app.login.confirm_new_password">确认新密码</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="forgotNewPassConfirm" type="password"
+        placeholder="再次输入新密码" data-i18n-placeholder="app.login.confirm_new_password_placeholder" autocomplete="new-password" enterkeyhint="done"
+        aria-describedby="forgotConfirmErr"
+        oninput="Auth.clearErrorOnInput('forgotNewPassConfirm')"
+        onblur="Auth.blurValidate('forgotNewPassConfirm',function(v){return v&&v!==$('forgotNewPass').value.trim()?Auth.t('app.login.err_confirm_mismatch'):null;})">
+      <button type="button" class="pwd-toggle" onclick="Auth.togglePwd('forgotNewPassConfirm',this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <p class="field-error" id="forgotConfirmErr" role="alert" aria-live="polite"></p>
+  </div>
+  <button class="auth-btn" id="forgotResetBtn" type="submit" data-i18n="app.login.reset_password_btn">重置密码</button>
+  <button class="auth-btn-secondary" type="button" onclick="backToStep1()" data-i18n="app.login.back_to_edit_email">← 返回修改邮箱</button>
+</form>
+</div>
+
+<!-- Step 3 -->
+<div id="forgotStep3" style="display:none">
+  <div class="auth-success">
+    <div class="success-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    </div>
+    <p class="success-title" data-i18n="app.login.toast_reset_success">密码重置成功</p>
+    <p class="success-msg" data-i18n="app.login.toast_use_new_password">请使用新密码登录</p>
+  </div>
+</div>
+
+<div class="auth-links" id="backLinks">
+  <span data-i18n="app.login.remember">想起来了？</span>
+  <span class="dot">·</span>
+  <a href="/" data-i18n="app.login.back_to_login">返回登录</a>
+</div>
+
+<!-- 语言切换 -->
+<div class="lang-switch" onclick="Auth.toggleLang()">
+  <span id="langSwitchLabel">EN</span>
+</div>
+
+</div>
+</div>
+
+<script src="/static/js/api.js?v=27"></script>
+<script src="/static/js/auth.js?v=5"></script>
+<script>
+Auth.initI18n();
+function $(id){return document.getElementById(id)}
+
+// 验证规则
+var EMAIL_RULE = function(v){return v&&v.indexOf('@')<0?Auth.t('app.login.err_email_format'):null;};
+var NEWPWD_RULE = function(v){return v&&v.length<8?Auth.t('app.login.pwd_req_length'):null;};
+var CONFIRM_RULE = function(v){return v&&v!==$('forgotNewPass').value.trim()?Auth.t('app.login.err_confirm_mismatch'):null;};
+
+function onNewPwdInput(){
+  Auth.clearErrorOnInput('forgotNewPass');
+  Auth.updatePwdStrength('forgotNewPass',{
+    strengthId:'forgotNewPassStrength', fillId:'newPwdStrengthFill',
+    labelId:'newPwdStrengthLabel', reqsId:'newPwdReqs',
+    reqs:[
+      {id:'newreq-len', test:function(p){return p.length>=8}},
+      {id:'newreq-complex', test:function(p){return /[a-zA-Z]/.test(p)&&/\d/.test(p)}}
+    ]
+  });
+}
+
+function sendForgotCode(){
+  if(!Auth.submitValidate('forgotEmail',function(v){return v?EMAIL_RULE(v):Auth.t('app.login.err_email_required');}))return;
+  var e=$('forgotEmail').value.trim();
+  var btn=$('forgotSendBtn');
+  Auth.setBtnLoading(btn,true);
+  API.post('/auth/forgot-password/send-code',{email:e}).then(function(){
+    Auth.setBtnLoading(btn,false);
+    Auth.showToast(Auth.t('app.login.toast_code_sent') + ' ' + e);
+    $('forgotStep1').style.display='none';
+    $('forgotStep2').style.display='block';
+    $('forgotEmailDisplay').value=e;
+    $('dot1').className='step-item done';
+    $('dot2').className='step-item active';
+    setTimeout(function(){$('forgotCode').focus()},100);
+    Auth.startCountdown('forgotResendBtn');
+  }).catch(function(err){
+    Auth.setBtnLoading(btn,false);
+    var msg=err.message||Auth.t('app.login.toast_send_failed');
+    if(msg.indexOf('邮箱')>=0||msg.indexOf('email')>=0)Auth.showFieldError('forgotEmail',msg);
+    else Auth.showToast(msg);
+  });
+}
+
+function resendForgotCode(){
+  var e=$('forgotEmail').value.trim();
+  API.post('/auth/forgot-password/send-code',{email:e}).then(function(){
+    Auth.showToast(Auth.t('app.login.toast_code_resent'));
+    Auth.startCountdown('forgotResendBtn');
+  }).catch(function(err){Auth.showToast(err.message||Auth.t('app.login.toast_send_failed'));});
+}
+
+function backToStep1(){
+  $('forgotStep2').style.display='none';
+  $('forgotStep1').style.display='block';
+  $('dot1').className='step-item active';
+  $('dot2').className='step-item';
+  $('forgotCode').value='';
+  $('forgotNewPass').value='';
+  $('forgotNewPassConfirm').value='';
+  $('forgotEmail').focus();
+}
+
+function resetPassword(){
+  var e=$('forgotEmail').value.trim(),c=$('forgotCode').value.trim();
+  var np=$('forgotNewPass').value.trim(),npc=$('forgotNewPassConfirm').value.trim();
+  // submit 统一验证
+  var valid=true;
+  if(!Auth.submitValidate('forgotCode',function(v){return v?(v.length!==6?Auth.t('app.login.err_code_format'):null):Auth.t('app.login.err_code_required');}))valid=false;
+  if(!Auth.submitValidate('forgotNewPass',function(v){return v?NEWPWD_RULE(v):Auth.t('app.login.err_new_password_required');}))valid=false;
+  if(!Auth.submitValidate('forgotNewPassConfirm',function(v){return v?CONFIRM_RULE(v):Auth.t('app.login.err_confirm_new_required');}))valid=false;
+  if(!valid)return;
+
+  var btn=$('forgotResetBtn');
+  Auth.setBtnLoading(btn,true);
+  API.post('/auth/forgot-password/reset',{email:e,code:c,new_password:np}).then(function(){
+    Auth.setBtnLoading(btn,false);
+    $('forgotStep2').style.display='none';
+    $('forgotStep3').style.display='block';
+    $('stepIndicator').style.display='none';
+    $('backLinks').style.display='none';
+    setTimeout(function(){window.location.href='/?reset=1'},2000);
+  }).catch(function(err){
+    Auth.setBtnLoading(btn,false);
+    var msg=err.message||Auth.t('app.login.toast_reset_failed');
+    if(msg.indexOf('验证码')>=0||msg.indexOf('code')>=0){Auth.showFieldError('forgotCode',msg);$('forgotCode').focus();}
+    else Auth.showToast(msg);
+  });
+}
+
+function _onLangChange(){
+  // 动态文案已在 _applyI18n 中通过 data-i18n 自动更新
+  // 此处可补充非 data-i18n 的动态内容
+}
+
+document.addEventListener('DOMContentLoaded',function(){$('forgotEmail').focus();});
+</script>
+</body>
+</html>

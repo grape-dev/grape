@@ -1,0 +1,445 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-title="title_register">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title data-i18n="app.login.title_register">注册 — Grape</title>
+<link rel="icon" type="image/png" href="/static/logo-64.png">
+<link rel="stylesheet" href="/static/css/app.css?v=75">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
+<link rel="stylesheet" href="/static/css/auth.css?v=6">
+<script>
+(function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.setAttribute('data-i18n-pending','1');})();
+</script>
+<style>
+[data-i18n-pending="1"] [data-i18n]{visibility:hidden}
+[data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
+</style>
+<script src="/static/js/i18n.js?v=13"></script>
+<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('25');});</script>
+</head>
+<body>
+
+<div class="auth-page" id="authPage">
+<div class="auth-card">
+
+<img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
+<h1 id="pageTitle" data-i18n="app.login.register_title">注册 Grape 账号</h1>
+<p class="subtitle" id="pageSub" data-i18n="app.login.register_sub">Multi-Agent DevOps</p>
+
+<!-- 步骤指示器 -->
+<div class="step-items" id="stepIndicator">
+  <div class="step-item active" id="dot1"><div class="step-item-circle">1</div><span data-i18n="app.login.step_label_info">填写信息</span></div>
+  <div class="step-line" id="stepLine"></div>
+  <div class="step-item" id="dot2"><div class="step-item-circle">2</div><span data-i18n="app.login.step_label_verify">验证码</span></div>
+</div>
+
+<!-- OAuth 关联模式 -->
+<div id="oauthTabs" style="display:none">
+  <div class="oauth-tabs">
+    <div class="oauth-tab active" id="tabRegister" onclick="switchTab('register')" data-i18n="app.login.register_new">注册新账号</div>
+    <div class="oauth-tab" id="tabAssociate" onclick="switchTab('associate')" data-i18n="app.login.associate_existing">关联已有账号</div>
+  </div>
+  <div class="oauth-info" id="oauthInfo"></div>
+</div>
+
+<!-- ============ 注册表单 ============ -->
+<form id="registerPanel" class="auth-panel" onsubmit="event.preventDefault();goToStep2()">
+  <div class="field-group">
+    <label class="field-label" for="regUsername" data-i18n="app.login.username">用户名</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="regUsername" type="text"
+        placeholder="3-32字符，字母、数字、下划线"
+        data-i18n-placeholder="app.login.username_placeholder"
+        autocomplete="username" autocapitalize="none" autocorrect="off"
+        aria-describedby="regUsernameErr"
+        oninput="Auth.clearErrorOnInput('regUsername')"
+        onblur="onBlurValidate('regUsername')">
+    </div>
+    <p class="field-error" id="regUsernameErr" role="alert" aria-live="polite"></p>
+  </div>
+
+  <div class="field-group" id="emailField">
+    <label class="field-label" for="regEmail" data-i18n="app.login.email">邮箱</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="regEmail" type="email"
+        placeholder="you@example.com"
+        data-i18n-placeholder="app.login.email_placeholder"
+        autocomplete="email" inputmode="email"
+        aria-describedby="regEmailErr"
+        oninput="Auth.clearErrorOnInput('regEmail')"
+        onblur="onBlurValidate('regEmail')">
+    </div>
+    <p class="field-error" id="regEmailErr" role="alert" aria-live="polite"></p>
+  </div>
+
+  <div class="field-group" id="passwordField">
+    <label class="field-label" for="regPassword" data-i18n="app.login.password">密码</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="regPassword" type="password"
+        placeholder="至少8个字符"
+        data-i18n-placeholder="app.login.password_placeholder"
+        autocomplete="new-password"
+        aria-describedby="regPasswordErr"
+        oninput="onPwdInput()"
+        onblur="onBlurValidate('regPassword')">
+      <button type="button" class="pwd-toggle" onclick="Auth.togglePwd('regPassword',this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <!-- 密码强度：聚焦时展开，失焦后如果密码有效则收起 -->
+    <div class="pwd-strength pwd-strength-focus" id="regPasswordStrength">
+      <div class="pwd-strength-bar"><div class="pwd-strength-fill" id="pwdStrengthFill"></div></div>
+      <p class="pwd-strength-label" id="pwdStrengthLabel" data-i18n="app.login.pwd_strength">密码强度</p>
+    </div>
+    <ul class="pwd-reqs pwd-reqs-focus" id="pwdReqs">
+      <li id="req-len" data-i18n="app.login.pwd_req_length">至少8个字符</li>
+      <li id="req-complex" data-i18n="app.login.pwd_req_alnum">包含字母和数字</li>
+      <li id="req-notmatch" data-i18n="app.login.pwd_req_not_match">不与用户名/邮箱相同</li>
+    </ul>
+    <p class="field-error" id="regPasswordErr" role="alert" aria-live="polite"></p>
+  </div>
+
+  <div class="field-group" id="passwordConfirmField">
+    <label class="field-label" for="regPasswordConfirm" data-i18n="app.login.confirm_password">确认密码</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="regPasswordConfirm" type="password"
+        placeholder="再次输入密码" data-i18n-placeholder="app.login.confirm_password_placeholder" autocomplete="new-password"
+        aria-describedby="regPasswordConfirmErr"
+        oninput="Auth.clearErrorOnInput('regPasswordConfirm')"
+        onblur="onBlurValidate('regPasswordConfirm')">
+      <button type="button" class="pwd-toggle" onclick="Auth.togglePwd('regPasswordConfirm',this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <p class="field-error" id="regPasswordConfirmErr" role="alert" aria-live="polite"></p>
+  </div>
+
+  <!-- 验证码区域 -->
+  <div id="regCodeArea" style="display:none">
+    <div class="field-group">
+      <label class="field-label" for="regCode" data-i18n="app.login.verify_code">验证码</label>
+      <div class="code-row">
+        <input class="field-input" id="regCode" type="text"
+          placeholder="6位验证码" data-i18n-placeholder="app.login.code_placeholder"
+          maxlength="6" inputmode="numeric" autocomplete="one-time-code" enterkeyhint="done"
+          aria-describedby="regCodeErr">
+        <button class="send-code-btn" id="regSendBtn" type="button" onclick="resendCode()" data-i18n="app.login.resend_code">重新发送</button>
+      </div>
+      <p class="field-error" id="regCodeErr" role="alert" aria-live="polite"></p>
+    </div>
+    <button class="auth-btn" id="regVerifyBtn" type="button" onclick="registerVerify()">
+      <span data-i18n="app.login.register_btn">注册</span>
+    </button>
+    <button class="auth-btn-secondary" type="button" onclick="backToStep1()" data-i18n="app.login.back_to_edit_info">← 返回修改信息</button>
+  </div>
+
+  <div id="regStep1Btn">
+    <button class="auth-btn" type="submit" id="regSubmitBtn">
+      <span data-i18n="app.login.send_code">发送验证码</span>
+    </button>
+  </div>
+</form>
+
+<!-- ============ 关联已有账号表单 ============ -->
+<form id="associatePanel" class="auth-panel" style="display:none" onsubmit="event.preventDefault();associateAccount()">
+  <div class="field-group">
+    <label class="field-label" for="assocIdentifier" data-i18n="app.login.account_or_email">用户名或邮箱</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="assocIdentifier" type="text"
+        placeholder="输入 Grape 账号用户名或邮箱" data-i18n-placeholder="app.login.empty_input"
+        autocomplete="username" autocapitalize="none"
+        aria-describedby="assocIdentifierErr"
+        oninput="Auth.clearErrorOnInput('assocIdentifier')">
+    </div>
+    <p class="field-error" id="assocIdentifierErr" role="alert" aria-live="polite"></p>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="assocPassword" data-i18n="app.login.password">密码</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="assocPassword" type="password"
+        placeholder="输入密码" data-i18n-placeholder="app.login.password_placeholder" autocomplete="current-password"
+        aria-describedby="assocPasswordErr"
+        oninput="Auth.clearErrorOnInput('assocPassword')">
+      <button type="button" class="pwd-toggle" onclick="Auth.togglePwd('assocPassword',this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+      </button>
+    </div>
+    <p class="field-error" id="assocPasswordErr" role="alert" aria-live="polite"></p>
+  </div>
+  <button class="auth-btn" id="assocBtn" type="submit" data-i18n="app.login.associate_btn">关联并登录</button>
+</form>
+
+<!-- ============ 成功状态 ============ -->
+<div id="successPanel" style="display:none">
+  <div class="auth-success">
+    <div class="success-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+    </div>
+    <p class="success-title" id="successTitle" data-i18n="app.login.toast_register_success">注册成功</p>
+    <p class="success-msg" id="successMsg" data-i18n="app.login.toast_logging_in">正在登录...</p>
+  </div>
+</div>
+
+<div class="auth-links">
+  <span data-i18n="app.login.have_account">已有账号？</span>
+  <span class="dot">·</span>
+  <a href="/" data-i18n="app.login.back_to_login">返回登录</a>
+</div>
+
+<div class="lang-switch" onclick="Auth.toggleLang()"><span id="langSwitchLabel">EN</span></div>
+
+</div>
+</div>
+
+<script src="/static/js/api.js?v=27"></script>
+<script src="/static/js/auth.js?v=5"></script>
+<script>
+Auth.initI18n();
+function $(id){return document.getElementById(id)}
+
+// OAuth 模式
+var oauthMode=false,oauthState='',oauthProvider='',oauthExternalLogin='';
+(function initOAuthMode(){
+  var params=new URLSearchParams(location.search);
+  if(params.get('oauth_associate')==='1'){
+    oauthMode=true;oauthState=params.get('state')||'';oauthProvider=params.get('provider')||'';
+    oauthExternalLogin=params.get('external_login')||'';
+    var externalName=params.get('external_name')||oauthExternalLogin;
+    $('oauthTabs').style.display='block';
+    var providerLabel=oauthProvider==='gitcode'?'GitCode':oauthProvider==='github'?'GitHub':oauthProvider;
+    $('pageTitle').textContent=Auth.t('app.login.associate_title').replace('{provider}',providerLabel);
+    $('pageSub').textContent=Auth.t('app.login.select_tab_hint');
+    $('oauthInfo').innerHTML=Auth.t('app.login.oauth_not_associated').replace('{name}','<b>'+Auth.escHtml(externalName)+'</b>').replace('{login}',Auth.escHtml(oauthExternalLogin));
+    $('emailField').style.display='none';
+    $('stepIndicator').style.display='none';
+  }
+})();
+
+function switchTab(tab){
+  if(tab==='register'){$('tabRegister').className='oauth-tab active';$('tabAssociate').className='oauth-tab';$('registerPanel').style.display='block';$('associatePanel').style.display='none';}
+  else{$('tabRegister').className='oauth-tab';$('tabAssociate').className='oauth-tab active';$('registerPanel').style.display='none';$('associatePanel').style.display='block';}
+}
+
+// ============ 验证规则 ============
+var RULES = {
+  regUsername: function(v){
+    if(!v) return Auth.t('app.login.err_username_required');
+    if(v.length<3||v.length>32) return Auth.t('app.login.err_username_length');
+    if(!/^[a-zA-Z0-9_]+$/.test(v)) return Auth.t('app.login.err_username_format');
+    return null;
+  },
+  regEmail: function(v){
+    if(!v) return Auth.t('app.login.err_email_required');
+    if(v.indexOf('@')<0||v.indexOf('.')<0) return Auth.t('app.login.err_email_format');
+    return null;
+  },
+  regPassword: function(v){
+    if(!v) return Auth.t('app.login.err_password_required');
+    if(v.length<8) return Auth.t('app.login.err_password_length');
+    return null;
+  },
+  regPasswordConfirm: function(v){
+    if(!v) return Auth.t('app.login.err_confirm_required');
+    if(v!==$('regPassword').value.trim()) return Auth.t('app.login.err_confirm_mismatch');
+    return null;
+  },
+};
+
+// P-UX: blur 验证 — 仅验证非空字段（空字段不报错）
+function onBlurValidate(fieldId){
+  var rule = RULES[fieldId];
+  if(!rule) return;
+  Auth.blurValidate(fieldId, rule);
+}
+
+// ============ 密码强度 ============
+function onPwdInput(){
+  Auth.clearErrorOnInput('regPassword');
+  Auth.updatePwdStrength('regPassword',{
+    strengthId:'regPasswordStrength', fillId:'pwdStrengthFill',
+    labelId:'pwdStrengthLabel', reqsId:'pwdReqs',
+    reqs:[
+      {id:'req-len', test:function(p){return p.length>=8}},
+      {id:'req-complex', test:function(p){return /[a-zA-Z]/.test(p)&&/\d/.test(p)}},
+      {id:'req-notmatch', test:function(p){
+        var u=$('regUsername').value.trim().toLowerCase();
+        var e=$('regEmail').value.trim().toLowerCase();
+        return p.length>0 && p.toLowerCase()!==u && p.toLowerCase()!==e;
+      }}
+    ]
+  });
+}
+
+// ============ 步骤管理 ============
+function goToStep2(){
+  // P-UX: submit 时统一验证所有必填字段（空字段也报错）
+  var valid=true;
+  if(!Auth.submitValidate('regUsername',RULES.regUsername))valid=false;
+  if(!oauthMode){if(!Auth.submitValidate('regEmail',RULES.regEmail))valid=false;}
+  if(!Auth.submitValidate('regPassword',RULES.regPassword))valid=false;
+  if(!Auth.submitValidate('regPasswordConfirm',RULES.regPasswordConfirm))valid=false;
+  if(!valid)return;
+
+  if(oauthMode){doOAuthRegister();return;}
+
+  var u=$('regUsername').value.trim(),e=$('regEmail').value.trim(),p=$('regPassword').value.trim();
+  var btn=$('regSubmitBtn');
+  Auth.setBtnLoading(btn,true);
+
+  API.post('/auth/register/send-code',{username:u,email:e,password:p}).then(function(){
+    Auth.setBtnLoading(btn,false);
+    Auth.showToast(Auth.t('app.login.toast_code_sent') + ' ' + e);
+    $('regStep1Btn').style.display='none';
+    $('regCodeArea').style.display='block';
+    $('regEmail').disabled=true;
+    $('regPassword').disabled=true;
+    $('regPasswordConfirm').disabled=true;
+    $('dot1').className='step-item done';
+    $('stepLine').className='step-line done';
+    $('dot2').className='step-item active';
+    setTimeout(function(){$('regCode').focus()},100);
+    Auth.startCountdown('regSendBtn');
+  }).catch(function(err){
+    Auth.setBtnLoading(btn,false);
+    var msg=err.message||Auth.t('app.login.toast_send_failed');
+    if(msg.indexOf('用户名')>=0||msg.indexOf('username')>=0)Auth.showFieldError('regUsername',msg);
+    else if(msg.indexOf('邮箱')>=0||msg.indexOf('email')>=0)Auth.showFieldError('regEmail',msg);
+    else if(msg.indexOf('密码')>=0||msg.indexOf('password')>=0)Auth.showFieldError('regPassword',msg);
+    else Auth.showToast(msg);
+  });
+}
+
+function backToStep1(){
+  $('regCodeArea').style.display='none';
+  $('regStep1Btn').style.display='block';
+  $('regEmail').disabled=false;
+  $('regPassword').disabled=false;
+  $('regPasswordConfirm').disabled=false;
+  $('dot1').className='step-item active';
+  $('stepLine').className='step-line';
+  $('dot2').className='step-item';
+  $('regCode').value='';
+  $('regUsername').focus();
+}
+
+function resendCode(){
+  var u=$('regUsername').value.trim(),e=$('regEmail').value.trim(),p=$('regPassword').value.trim();
+  API.post('/auth/register/send-code',{username:u,email:e,password:p}).then(function(){
+    Auth.showToast(Auth.t('app.login.toast_code_resent'));
+    Auth.startCountdown('regSendBtn');
+  }).catch(function(err){Auth.showToast(err.message||Auth.t('app.login.toast_send_failed'));});
+}
+
+function registerVerify(){
+  var u=$('regUsername').value.trim(),e=$('regEmail').value.trim();
+  var p=$('regPassword').value.trim(),pc=$('regPasswordConfirm').value.trim(),c=$('regCode').value.trim();
+  Auth.clearFieldError('regCode');
+  if(!c){Auth.showFieldError('regCode',Auth.t('app.login.err_code_required'));$('regCode').focus();return;}
+  if(c.length!==6){Auth.showFieldError('regCode',Auth.t('app.login.err_code_format'));return;}
+  if(p!==pc){Auth.showToast(Auth.t('app.login.err_confirm_mismatch'));return;}
+
+  var btn=$('regVerifyBtn');
+  Auth.setBtnLoading(btn,true);
+  API.post('/auth/register/verify',{username:u,email:e,password:p,code:c,lang:I18N.getLang()}).then(function(d){
+    Auth.setBtnLoading(btn,false);
+    $('registerPanel').style.display='none';
+    $('successPanel').style.display='block';
+    $('stepIndicator').style.display='none';
+    localStorage.setItem('token',d.token);
+    localStorage.setItem('user',JSON.stringify(d.user));
+    setTimeout(function(){window.location.href='/'},2000);
+  }).catch(function(err){
+    Auth.setBtnLoading(btn,false);
+    var msg=err.message||Auth.t('app.login.toast_register_failed');
+    if(msg.indexOf('验证码')>=0||msg.indexOf('code')>=0){Auth.showFieldError('regCode',msg);$('regCode').focus();}
+    else Auth.showToast(msg);
+  });
+}
+
+function doOAuthRegister(){
+  var u=$('regUsername').value.trim(),p=$('regPassword').value.trim();
+  var btn=$('regSubmitBtn');
+  Auth.setBtnLoading(btn,true);
+  API.post('/auth/login/'+oauthProvider+'/register',{state:oauthState,username:u,password:p,lang:I18N.getLang()}).then(function(d){
+    Auth.setBtnLoading(btn,false);
+    localStorage.setItem('token',d.token);
+    localStorage.setItem('user',JSON.stringify(d.user));
+    $('registerPanel').style.display='none';
+    $('successPanel').style.display='block';
+    $('successTitle').textContent=Auth.t('app.login.toast_associate_success');
+    $('successMsg').textContent=Auth.t('app.login.toast_logging_in');
+    setTimeout(function(){window.location.href='/'},2000);
+  }).catch(function(err){
+    Auth.setBtnLoading(btn,false);
+    var msg=err.message||Auth.t('app.login.toast_register_failed');
+    if(msg.indexOf('用户名')>=0||msg.indexOf('username')>=0)Auth.showFieldError('regUsername',msg);
+    else Auth.showToast(msg);
+  });
+}
+
+function associateAccount(){
+  // submit 验证（空字段也报错）
+  var valid=true;
+  if(!Auth.submitValidate('assocIdentifier',function(v){return v?null:Auth.t('app.login.err_identifier_required');}))valid=false;
+  if(!Auth.submitValidate('assocPassword',function(v){return v?null:Auth.t('app.login.err_password_required');}))valid=false;
+  if(!valid)return;
+  var idf=$('assocIdentifier').value.trim(),pwd=$('assocPassword').value.trim();
+  var btn=$('assocBtn');
+  Auth.setBtnLoading(btn,true);
+  API.post('/auth/login/'+oauthProvider+'/associate',{state:oauthState,identifier:idf,password:pwd}).then(function(d){
+    Auth.setBtnLoading(btn,false);
+    localStorage.setItem('token',d.token);
+    localStorage.setItem('user',JSON.stringify(d.user));
+    $('associatePanel').style.display='none';
+    $('successPanel').style.display='block';
+    $('successTitle').textContent=Auth.t('app.login.toast_associate_success');
+    $('successMsg').textContent=Auth.t('app.login.toast_logging_in');
+    setTimeout(function(){window.location.href='/'},2000);
+  }).catch(function(err){
+    Auth.setBtnLoading(btn,false);
+    var msg=err.message||Auth.t('app.login.toast_associate_failed');
+    if(msg.indexOf('密码')>=0||msg.indexOf('账号')>=0||msg.indexOf('用户')>=0||msg.indexOf('password')>=0)Auth.showFieldError('assocIdentifier',msg);
+    else Auth.showToast(msg);
+  });
+}
+
+// ============ 语言切换回调 ============
+function _onLangChange(){
+  // 刷新密码强度动态文案（如果密码已输入）
+  var pwdEl=$('regPassword');
+  if(pwdEl&&pwdEl.value){
+    onPwdInput();
+  }
+  // 刷新 OAuth 动态文案
+  if(oauthMode){
+    var providerLabel=oauthProvider==='gitcode'?'GitCode':oauthProvider==='github'?'GitHub':oauthProvider;
+    $('pageTitle').textContent=Auth.t('app.login.associate_title').replace('{provider}',providerLabel);
+    $('pageSub').textContent=Auth.t('app.login.select_tab_hint');
+    var externalName='';
+    var params=new URLSearchParams(location.search);
+    externalName=params.get('external_name')||oauthExternalLogin;
+    $('oauthInfo').innerHTML=Auth.t('app.login.oauth_not_associated').replace('{name}','<b>'+Auth.escHtml(externalName)+'</b>').replace('{login}',Auth.escHtml(oauthExternalLogin));
+  }
+  // 刷新成功面板动态文案（如果正在显示）
+  var sp=$('successPanel');
+  if(sp&&sp.style.display!=='none'){
+    var st=$('successTitle');
+    var sm=$('successMsg');
+    // 根据当前状态决定文案
+    if(oauthMode){
+      if(st) st.textContent=Auth.t('app.login.toast_associate_success');
+    }else{
+      if(st) st.textContent=Auth.t('app.login.toast_register_success');
+    }
+    if(sm) sm.textContent=Auth.t('app.login.toast_logging_in');
+  }
+}
+
+document.addEventListener('DOMContentLoaded',function(){
+  if(!oauthMode){var el=$('regUsername');if(el)el.focus();}
+});
+</script>
+</body>
+</html>

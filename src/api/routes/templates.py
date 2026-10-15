@@ -5,6 +5,7 @@ from pydantic import BaseModel
 from src.api.deps import require_no_session_token, require_org_member
 from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
+from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
 
@@ -146,6 +147,7 @@ def get_template_preview(template_id: str, user: dict = Depends(require_no_sessi
 class CreateTemplateRequest(BaseModel):
     template_id: str
     repo_name: str = ""
+    provider: str = ""  # gitcode | github，空时自动选择
 
 
 @router.post("/create", operation_id="project_template_create", summary="Create project from template", description="One-shot create: create repo -> write template code -> auto-host -> apply dev scene.")
@@ -157,9 +159,18 @@ async def create_from_template(body: CreateTemplateRequest,
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"模板 '{body.template_id}' 不存在"})
     tpl = ctx["template"]
 
-    # 按 provider 分流：优先 GitHub token，降级 GitCode
+    # 按 provider 分流：前端显式传 provider 时用指定平台，否则自动选择
     from src.api.routes.repos import _get_user_provider_and_token
-    provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""))
+    if body.provider in ("gitcode", "github"):
+        if body.provider == "gitcode":
+            api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
+        else:
+            api_token = get_user_github_token(user["username"])
+        provider = body.provider
+        if not api_token:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
+    else:
+        provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
@@ -217,7 +228,7 @@ async def create_from_template(body: CreateTemplateRequest,
     bot_username = ""
     try:
         from src.api.routes.repos import RepoAction, host_repo
-        host_result = await asyncio.to_thread(host_repo, RepoAction(full_name=full_name), user)
+        host_result = await asyncio.to_thread(host_repo, RepoAction(full_name=full_name), user, provider=provider)
         webhook_id = host_result.get("webhook_id", 0) or 0
     except HTTPException as e:
         # 托管失败（如 bot 未成为维护者）— 不中断流程，记录警告
@@ -289,4 +300,5 @@ async def create_from_template(body: CreateTemplateRequest,
             "host_warning": host_warning,
             "message": msg,
             "provider": provider,
+            "scene_id": tpl.get("scene_id") or ctx.get("scene_id") or "",
             "repo_key": _to_rk(full_name, provider=provider) if provider else ""}

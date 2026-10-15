@@ -170,22 +170,29 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 row = c.fetchone()
                 if row:
                     return row[0]
-                # 2. 二级回退：直接查 user_accounts（Issue #211，非 OAuth 注册用户）
+                # 2. 二级回退：查 grape_accounts（D32-补丁）+ external_identities
                 c.execute(
-                    "SELECT id FROM user_accounts "
-                    "WHERE (username=? OR gitcode_id=?) AND id>0 LIMIT 1",
-                    (issue_creator, issue_creator))
+                    "SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1",
+                    (issue_creator,))
                 row = c.fetchone()
                 if row:
                     return row[0]
-                # 3. user_repos 回退：按创建者过滤（JOIN user_accounts），非取第一个 join 用户
+                # 按 external_id 查（issue_creator 可能是 gitcode_id）
+                c.execute(
+                    "SELECT ei.grape_user_id FROM external_identities ei "
+                    "WHERE ei.provider='gitcode' AND ei.external_id=? LIMIT 1",
+                    (issue_creator,))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+                # 3. user_repos 回退：按创建者过滤（JOIN grape_accounts）
                 c.execute(
                     "SELECT ur.user_id FROM user_repos ur "
-                    "JOIN user_accounts ua ON ua.id = ur.user_id "
-                    "WHERE (ua.username=? OR ua.gitcode_id=?) "
+                    "JOIN grape_accounts ga ON ga.id = ur.user_id "
+                    "WHERE ga.username=? "
                     "AND (ur.repo_key=? OR ur.repo_key=?) AND ur.is_join=1 "
                     "LIMIT 1",
-                    (issue_creator, issue_creator, repo, f"gitcode:{repo}"))
+                    (issue_creator, repo, f"gitcode:{repo}"))
                 row = c.fetchone()
                 return row[0] if row else 0
             # issue_creator 为空：保留原逻辑（取第一个 join 用户）
@@ -476,7 +483,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                 uc = _udb.cursor()
                 uc.execute(
                     "SELECT ur.repo_key FROM user_repos ur "
-                    "JOIN user_accounts ua ON ua.id = ur.user_id "
+                    "JOIN grape_accounts ua ON ua.id = ur.user_id "
                     "WHERE ua.username = ? AND ur.is_join = 1", (username,))
                 for row in uc.fetchall():
                     user_repos.add(from_repo_key(row[0] or ""))

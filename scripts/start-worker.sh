@@ -17,6 +17,11 @@ if [ "$1" != "--no-daemon" ]; then
     WORKER_PID=$!
     wait $WORKER_PID
     EXIT_CODE=$?
+    if [ "$EXIT_CODE" -eq 42 ]; then
+      # Credential revoked by server (revoke) - restarting is pointless.
+      echo "[$(date '+%Y-%m-%d %H:%M:%S')] Worker exited code=42 (credential revoked by server). Stopping daemon - reinstall with new credential to rejoin."
+      exit 42
+    fi
     NOW=$(date +%s)
     ELAPSED=$((NOW - WINDOW_START))
     if [ $ELAPSED -gt $RESTART_WINDOW ]; then

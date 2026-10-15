@@ -7,6 +7,7 @@ from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
 from .codex import CodexBackend
+from .hwcloud import HwcloudBackend
 
 
 _BACKENDS = {
@@ -14,6 +15,7 @@ _BACKENDS = {
     "codearts": CodeArtsBackend(),
     "hermes": HermesBackend(),
     "codex": CodexBackend(),
+    "hwcloud": HwcloudBackend(),
 }
 
 # 运行中的 agent 子进程注册表：供服务停机时统一终止，避免 uvicorn 优雅停机
@@ -38,6 +40,9 @@ def terminate_active_agents(grace_seconds: int = 5):
 
     子进程被杀 → stdout 管道 EOF → executor 线程的 reader/主循环 break → 线程结束，
     uvicorn `shutdown_default_executor()` 不再等待 → 服务快速退出，避免 stop-sigterm 超时。
+
+    同时将 DB 中所有 running/dispatched 状态的 agent_tasks 和对应 events 标记为 failed，
+    防止服务重启后留下悬空任务（status=running 但实际进程已终止）。
     """
     with _active_procs_lock:
         procs = list(_active_procs)
@@ -49,6 +54,37 @@ def terminate_active_agents(grace_seconds: int = 5):
             pass
     if procs:
         log.info(f"terminate_active_agents: terminated {len(procs)} running agent subprocess(es)")
+    # 标记 DB 中所有 running/dispatched 任务为 failed（防止重启后悬空）
+    try:
+        from src.session_manager import db, db_lock
+        from src.api.event_store import update_event_status
+        import time as _time
+        _now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
+        _reason = "Task terminated by server shutdown (SIGTERM)"
+        with db_lock:
+            c = db.cursor()
+            # 查询所有 running/dispatched 任务
+            c.execute(
+                "SELECT id, event_seq FROM agent_tasks WHERE status IN ('running','dispatched')"
+            )
+            stale_tasks = c.fetchall()
+            for task_id, event_seq in stale_tasks:
+                try:
+                    c.execute(
+                        "UPDATE agent_tasks SET status='failed', exit_code=-1, "
+                        "completed_at=?, stream_ended=1, self_reported=1, errors=? WHERE id=?",
+                        (_now, _reason, task_id)
+                    )
+                    if event_seq:
+                        update_event_status(event_seq, "failed")
+                    log.info(f"terminate_active_agents: marked stale task {task_id} (seq={event_seq}) as failed")
+                except Exception as e:
+                    log.warning(f"terminate_active_agents: failed to mark task {task_id} as failed: {e}")
+            db.commit()
+        if stale_tasks:
+            log.info(f"terminate_active_agents: marked {len(stale_tasks)} stale task(s) as failed")
+    except Exception as e:
+        log.warning(f"terminate_active_agents: stale task cleanup failed: {e}")
 
 
 
@@ -74,6 +110,7 @@ def discover_backends() -> list[dict]:
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
         "hermes": {"cli": "hermes", "pip": "hermes"},
         "codex": {"cli": "codex", "pip": "@openai/codex"},
+        "hwcloud": {"cli": "hwcloud", "pip": ""},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }
     results = []
@@ -148,6 +185,51 @@ def _terminate_proc(proc, label: str = "", grace_seconds: float = 10.0):
     log.warning(f"{label} force killed (SIGKILL) after grace {grace_seconds}s")
 
 
+# ── 引擎异常退出遗言采集与自愈（issue #317）──
+# 已观测 seq 10353/10392：引擎 exit 1、stderr 空、result 截断，事后零线索无法定位。
+_LOG_TAIL_MAX_LINES = 50
+_LOG_TAIL_MAX_BYTES = 4096
+_OOM_KEYWORDS = ("out of memory", "oom-killer", "oom_reaper", "killed process")
+
+
+def _push_log_tail(tail: list, line: str):
+    """维护引擎 stdout 遗言尾部缓冲：末 50 行 / 累计 4KB 截断。"""
+    if not line:
+        return
+    tail.append(line)
+    while tail and (len(tail) > _LOG_TAIL_MAX_LINES
+                    or sum(len(_l) for _l in tail) > _LOG_TAIL_MAX_BYTES):
+        tail.pop(0)
+
+
+def _oom_kill_evidence() -> bool:
+    """启发式检查系统日志中是否有内核 OOM killer 记录（仅 POSIX；5s 超时，异常静默）。"""
+    if not hasattr(os, "getpgid"):
+        return False
+    # ① dmesg / journalctl（容器内可能无权限，逐项降级）
+    for cmd in (["dmesg"], ["journalctl", "-k", "--no-pager", "-n", "200"]):
+        try:
+            _out = subprocess.run(cmd, capture_output=True, timeout=5).stdout
+            _txt = _out.decode("utf-8", "replace").lower()
+            if any(k in _txt for k in _OOM_KEYWORDS):
+                return True
+        except Exception:
+            continue
+    # ② 内核/系统日志文件兜底（读尾部 4KB）
+    for _path in ("/var/log/syslog", "/var/log/messages", "/var/log/kern.log"):
+        try:
+            with open(_path, "rb") as _f:
+                _f.seek(0, 2)
+                _size = _f.tell()
+                _f.seek(max(0, _size - _LOG_TAIL_MAX_BYTES))
+                _txt = _f.read().decode("utf-8", "replace").lower()
+            if any(k in _txt for k in _OOM_KEYWORDS):
+                return True
+        except Exception:
+            continue
+    return False
+
+
 def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
                        account, user_id, env_extra, bot_token, user_token,
                        agent_name, agent_label, max_exec_seconds,
@@ -164,8 +246,8 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
     env = acp.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
 
-    # GitCode token 互斥注入（与 stream_agent 一致，收口到 _assemble_env）：
-    #   chat → 只 USER_GITCODE_TOKEN；事件任务 → 只 BOT_GITCODE_TOKEN（不同时注入）
+    # P2：平台 VCS token（BOT_*/USER_*）不再注入 agent env，收口到 grape CLI + GRAPE_SESSION_TOKEN。
+    # _assemble_env 仅注入机制元数据（VCS_API_BASE/VCS_NAME）与用户云凭据（openai 等）。
     _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
                   label=label, bot_token=bot_token, user_token=user_token,
                   user_id=user_id, repo_key=repo_key)
@@ -215,16 +297,88 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
             yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
 
 
+def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
+                        account, user_id, env_extra, bot_token, user_token,
+                        agent_name, agent_label, max_exec_seconds,
+                        repo_key: str = "") -> Generator:
+    """hwcloud ACP 模式入口：构建 env → 调 hwcloud_acp.HwcloudACPBackend.stream_execute。
+
+    与 _stream_hermes_acp 并行（docs/hwcloud-runtime-acp-design.md）：
+    - provider 凭据经 env 注入（HWCLOUD_PROVIDER_*，hwcloud_acp 写入 per-task
+      settings.json）；来源：env_extra（用户云凭据 provider=opengw 按 user_id 注入）
+    - session_id 一期不使用（resume 不校验存在性，见设计实测行为 §5）
+    """
+    from src.agent.hwcloud_acp import HwcloudACPBackend
+
+    label = f"{agent_label} " if agent_label else ""
+
+    acp = HwcloudACPBackend()
+    env = acp.get_env(account=account, user_id=user_id)
+    env["DEVOPS_EVENT_TYPE"] = event_type
+
+    _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
+                  label=label, bot_token=bot_token, user_token=user_token,
+                  user_id=user_id, repo_key=repo_key)
+    if agent_name:
+        env["AGENT_NAME"] = agent_name
+    if env_extra:
+        env.update(env_extra)
+
+    # 技能路径占位符替换（direct 模式）
+    try:
+        from src.config import replace_skill_dir_placeholders
+        prompt = replace_skill_dir_placeholders(prompt)
+    except Exception:
+        pass
+
+    # 脱敏 token 列表
+    _tokens = [t for t in (bot_token, user_token) if t]
+
+    def _redact_text(text):
+        if not text or not _tokens:
+            return text
+        s = str(text)
+        for t in _tokens:
+            if t:
+                s = s.replace(t, "[REDACTED]")
+        return s
+
+    for evt_type, data in acp.stream_execute(
+        prompt, cwd, session_id=session_id, env=env,
+        max_exec_seconds=max_exec_seconds, agent_label=label,
+    ):
+        if evt_type == "text":
+            yield ("text", _redact_text(data))
+        elif evt_type == "tool_use":
+            if isinstance(data, dict):
+                data["input"] = _redact_text(json.dumps(data.get("input", {}), ensure_ascii=False, default=str))
+            yield ("tool_use", data)
+        elif evt_type == "tool_result":
+            yield ("tool_result", _redact_text(data))
+        elif evt_type == "done":
+            if isinstance(data, dict):
+                data["text"] = _redact_text(data.get("text", ""))
+                data["stderr"] = _redact_text(data.get("stderr", ""))
+            yield ("done", data)
+        else:
+            yield (evt_type, _redact_text(data) if isinstance(data, str) else data)
+
+
 def _assemble_env(env: dict, *, kind: str, label: str = "",
                   bot_token: str = "", user_token: str = "", user_id: int = 0,
                   repo_key: str = "", username: str = "") -> None:
-    """按执行类型组装 GitCode token 与用户云凭据（互斥注入，§十 写操作隔离）。
+    """组装 agent 执行环境（P2：平台 VCS token 不再注入 agent env）。
 
-    - kind="chat"：只注入 USER_GITCODE_TOKEN（DB 兜底；无则 log.error，不以 bot token 冒充用户身份）
-    - kind="devops"：只注入 BOT_GITCODE_TOKEN（事件任务 prompt 只认它），不注入 USER_GITCODE_TOKEN
-    - 用户云凭据（华为云/codearts/自定义）：chat 与 devops(仓库归属用户) 都按 user_id 注入；
-      与 GITCODE token 无关，二者互不影响。
+    - **BOT_GITCODE_TOKEN / BOT_GITHUB_TOKEN / USER_GITCODE_TOKEN / USER_GITHUB_TOKEN / BOT_TOKEN
+      一律不再注入**（vcs-env-token-boundary-audit-design.md P2）：平台长期凭据只在服务端
+      进程内流转，agent 侧统一经 `grape git/git-repo/issues`（携带 GRAPE_SESSION_TOKEN=tk_）转发。
+    - 机制元数据（VCS_API_BASE / VCS_NAME）仍注入，供技能判断平台。
+    - 用户云凭据（非 VCS 平台 token：openai/custom 等）仍按 user_id 注入——这些是
+      chat/任务需要的模型凭据，与 VCS 平台 token 无关。
+    - 参数 bot_token/user_token 仅用于日志脱敏（_tokens 列表），不再写入 env。
     """
+    # 平台 VCS token 不再注入（P2）。bot_token/user_token 保留仅作日志脱敏用途，
+    # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
     if kind == "chat":
         if not user_token and user_id > 0:
             try:
@@ -234,38 +388,12 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 log.warning(f"Fallback resolve user gitcode token failed: {e}")
                 user_token = ""
         if user_token:
-            env["USER_GITCODE_TOKEN"] = user_token
+            log.info(f"{label}chat task: user token present (len={len(user_token)}), NOT injecting into env (P2)")
         else:
-            if bot_token:
-                log.error(f"{label}chat task lacks user token but bot_token provided: "
-                          f"will NOT impersonate user with bot token; GitCode API 401 for user write ops")
-            else:
-                log.warning(f"{label}NO token available for chat agent, GitCode API will 401")
-        # GitHub 用户 token 注入
-        if user_id > 0:
-            try:
-                from src.user.db import get_user_github_token
-                _gh_tok = get_user_github_token(user_id) or ""
-                if not _gh_tok:
-                    # 兜底：从 user_accounts.github_api_token 列读（OAuth 登录时写入）
-                    from src.user.db import _get_username_by_id, get_user_account
-                    _uname = _get_username_by_id(user_id)
-                    if _uname:
-                        _acc = get_user_account(_uname) or {}
-                        _gh_tok = _acc.get("github_api_token", "") or ""
-                if _gh_tok:
-                    env["USER_GITHUB_TOKEN"] = _gh_tok
-            except Exception as e:
-                log.warning(f"GitHub user token inject failed: {e}")
+            log.warning(f"{label}NO user platform token available for chat; VCS ops go through grape CLI + session token")
     elif bot_token:
-        env["BOT_GITCODE_TOKEN"] = bot_token
-        log.info(f"{label}devops event task: user token not applicable, using bot token (len={len(bot_token)})")
-        # GitHub bot token 注入（GitHub 仓库托管时存的是用户 GitHub token）
-        if repo_key and repo_key.startswith("github:"):
-            env["BOT_GITHUB_TOKEN"] = bot_token
-            log.info(f"{label}GitHub repo: also injected BOT_GITHUB_TOKEN")
-        # 通用 BOT_TOKEN 别名（skill 文件中 $BOT_TOKEN 引用，适配多 VCS provider）
-        env["BOT_TOKEN"] = bot_token
+        log.info(f"{label}devops event task: bot token present (len={len(bot_token)}), NOT injecting into env (P2)")
+        # GitHub bot token 不再注入（agent 侧一律 grape CLI 转发）
 
     # VCS API base URL + 名称注入（skill 中 $VCS_API_BASE 引用，适配多 VCS provider）
     if repo_key:
@@ -287,7 +415,11 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
                 if provider in ("huawei_cloud", "codearts"):
                     continue
                 for k, v in cfg.items():
-                    env[k.upper()] = str(v)
+                    k_upper = k.upper()
+                    # 防御：任何以 *_TOKEN / *_KEY / *_SECRET / *_PASSWORD 结尾的云凭据
+                    # 仍属于敏感凭据，但它们是模型云凭据（openai/api_key 等），
+                    # chat 任务确实需要——与 VCS 平台 token 边界不同，按 P2 范围保留。
+                    env[k_upper] = str(v)
                 # provider=openai: api_key → OPENAI_API_KEY（codex 读此变量）
                 if provider == "openai" and cfg.get("api_key"):
                     env["OPENAI_API_KEY"] = str(cfg["api_key"])
@@ -304,7 +436,7 @@ def stream_chat_agent(prompt: str, cwd: str, session_id: str = "",
                       backend_name: str = "",
                       repo_key: str = "",
                       max_exec_seconds: int = 600) -> Generator:
-    """chat 语义专用执行器：以用户身份运行（只注入 USER_GITCODE_TOKEN + 用户云凭据）。
+    """chat 语义专用执行器：以用户身份运行（P2：不注入平台 token，VCS 走 grape CLI + 会话 token）。
 
     与 stream_devops_agent 隔离：本函数签名不含 bot_token，从调用方层面杜绝
     「以仓库 bot token 冒充用户身份」可能（§十 写操作隔离）。
@@ -329,7 +461,7 @@ def stream_devops_agent(prompt: str, cwd: str, session_id: str = "",
                         backend_name: str = "",
                         repo_key: str = "",
                         max_exec_seconds: int = 600) -> Generator:
-    """devops 事件语义专用执行器：以仓库身份运行（只注入 BOT_GITCODE_TOKEN）。
+    """devops 事件语义专用执行器：以仓库身份运行（P2：不注入 VCS 平台 token）。
 
     repo_user_id 为仓库归属用户（仅用于注入云凭据），与 chat 用户 token 严格分离——
     事件任务无法以用户身份写 GitCode（§十 写操作隔离）。签名不含 user_token。
@@ -377,12 +509,20 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         )
         return
 
+    # ── hwcloud ACP 专用路径（docs/hwcloud-runtime-acp-design.md）──
+    if backend_name == "hwcloud":
+        yield from _stream_hwcloud_acp(
+            prompt, cwd, session_id, event_type, backend,
+            account, user_id, env_extra, bot_token, user_token,
+            agent_name, agent_label, max_exec_seconds,
+            repo_key=repo_key,
+        )
+        return
+
     env = backend.get_env(account=account, user_id=user_id)
     env["DEVOPS_EVENT_TYPE"] = event_type
-    # GitCode token 互斥注入（§十 写操作隔离）：
-    #   chat（用户身份）→ 只注入 USER_GITCODE_TOKEN；事件任务（仓库身份）→ 只注入 BOT_GITCODE_TOKEN。
-    #   BOT_GITCODE_TOKEN 与 USER_GITCODE_TOKEN 不同时注入，避免用户对话上下文暴露仓库 bot token。
-    #   判定严格以 event_type 为准（不依赖 user_token 兜底判断，防调用方误传导致误判 chat）。
+    # P2：平台 VCS token（BOT_*/USER_*/BOT_TOKEN）不再注入 agent env——
+    # VCS 操作统一走 grape CLI（携带 GRAPE_SESSION_TOKEN），平台长期凭据只在服务端进程内流转。
     _assemble_env(env, kind=("chat" if event_type == "chat" else "devops"),
                   label=label, bot_token=bot_token, user_token=user_token,
                   user_id=user_id, repo_key=repo_key)
@@ -534,6 +674,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         collected_text = []
         new_session_id = use_session_id
         error_events = []
+        # issue #317：引擎遗言尾部缓冲（exit!=0 且 stderr 空时补采进 errors）
+        _log_tail = []
         step_count = 0
         _last_output = time.time()
         _reader_total = 0
@@ -598,6 +740,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     line = raw_line.decode("utf-8", errors="replace").strip()
                     if not line:
                         continue
+                    _push_log_tail(_log_tail, line)
                     parsed = backend.parse_output(line)
                     if parsed is None:
                         _raw_count += 1
@@ -791,10 +934,31 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             except Exception:
                 pass
 
+        # ── 异常退出遗言补采（issue #317）──
+        # exit!=0 且 stderr 为空 = 引擎"无遗言"死亡：补采 stdout 尾部进 errors；
+        # returncode==-9（外部 SIGKILL，非本 executor 超时杀——那条路径已自带 done）
+        # 结合系统日志启发式判定 OOM。
+        _exit_code = proc.returncode
+        _final_errors = list(error_events)
+        if _exit_code != 0:
+            if _exit_code == -9:
+                if _oom_kill_evidence():
+                    _final_errors.append(
+                        "suspected OOM (SIGKILL, kernel oom-killer evidence in system logs)")
+                else:
+                    _final_errors.append(
+                        "killed by SIGKILL (no oom-killer evidence in system logs)")
+            if not stderr_output.strip() and _log_tail:
+                _final_errors.append(
+                    "agent_logs tail (last 50 lines/4KB):\n"
+                    + _redact("\n".join(_log_tail), _tokens))
+                log.warning(f"{label}{backend.name} abnormal exit={_exit_code} with empty stderr, "
+                            f"supplemented errors from stdout tail ({len(_log_tail)} lines)")
+
         yield ("done", {
-            "exit_code": proc.returncode, "text": _redact(full_text, _tokens),
+            "exit_code": _exit_code, "text": _redact(full_text, _tokens),
             "oc_session_id": new_session_id,
-            "errors": error_events, "stderr": _redact(stderr_output, _tokens),
+            "errors": _final_errors, "stderr": _redact(stderr_output, _tokens),
             "backend": backend.name, "reader_total": _reader_total, "parsed_count": _parsed_count,
             "text_count": _text_count, "tool_count": _tool_count,
         })
@@ -844,6 +1008,40 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                 yield (evt_type, data)
         if done2 is not None:
             done = done2
+
+    # ── 引擎异常退出自愈（issue #317）：exit!=0 且 stderr 为空的"无遗言"死亡 ──
+    # 触发条件收紧为"引擎产出过事件后死亡"（parsed_count>=1，即 result 截断形态，
+    # 如 seq 10353/10392），避免对"启动即裸行报错"（parsed_count=0，如权限错误）盲目重跑。
+    # 幂等性：重试仍在本事件执行内进行——pipeline 已通过 event_active_guard 原子抢占
+    # (repo,issue,agent) 守卫并持有至终态，重试不产生重复事件/重复调度；
+    # 且与上方 session_missing 重跑共享"每流最多一次重试"额度（session_missing=True
+    # 时本分支不再触发），防止叠加双跑产生重复评论。
+    _abrupt_exit = (
+        done.get("exit_code", 0) != 0
+        and not (done.get("stderr") or "").strip()
+        and (done.get("parsed_count") or 0) >= 1
+        and not session_missing
+    )
+    if _abrupt_exit:
+        log.warning(f"{label}{backend.name} abrupt exit={done.get('exit_code')} with empty stderr "
+                    f"(truncated output, parsed={done.get('parsed_count')}), "
+                    f"retrying once without session")
+        run_gen_ar = _run_once("")
+        done_ar = None
+        for evt_type, data in run_gen_ar:
+            if evt_type == "done":
+                done_ar = data
+            else:
+                yield (evt_type, data)
+        if done_ar is not None:
+            # 重试恢复成功时保留首跑的 OOM/SIGKILL 判定标记（事件可追溯，issue #317 验收项）
+            _abrupt_notes = [e for e in (done.get("errors") or [])
+                             if e.startswith(("suspected OOM", "killed by SIGKILL"))]
+            done = done_ar
+            if done.get("exit_code", 0) == 0 and _abrupt_notes:
+                done.setdefault("errors", [])
+                done["errors"] = list(done["errors"]) + [
+                    f"recovered after auto-retry (first run: {n})" for n in _abrupt_notes]
 
     # ── 假完成识别（issue-P5：引擎 exit 0 但零产出）──
     # 场景：模型流挂死后引擎静默收场（codearts #9635）或空 end_turn（opencode #9662）。

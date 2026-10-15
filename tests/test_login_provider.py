@@ -129,30 +129,30 @@ class TestGetCurrentUserLoginProvider:
 
     def test_jwt_with_login_provider_extracted(self):
         from src.api.deps import get_current_user
-        from src.user import db as user_db
+        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "lp_test_" + uuid.uuid4().hex[:6]
-        u = user_db.create_user(uname, "pw")
+        u = create_grape_account(username=uname, email="", password="pw")
         try:
-            token = create_access_token(u["id"], uname, user_db.get_token_version(u["id"]),
+            token = create_access_token(u["id"], uname, get_token_version(u["id"]),
                                         login_provider="gitcode")
             user_obj = get_current_user(authorization=f"Bearer {token}")
             assert user_obj["login_provider"] == "gitcode"
         finally:
-            user_db.delete_user(u["id"])
+            soft_delete_account(u["id"])
 
     def test_jwt_without_login_provider_defaults_empty(self):
         from src.api.deps import get_current_user
-        from src.user import db as user_db
+        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "lp_noprov_" + uuid.uuid4().hex[:6]
-        u = user_db.create_user(uname, "pw")
+        u = create_grape_account(username=uname, email="", password="pw")
         try:
-            token = create_access_token(u["id"], uname, user_db.get_token_version(u["id"]))
+            token = create_access_token(u["id"], uname, get_token_version(u["id"]))
             user_obj = get_current_user(authorization=f"Bearer {token}")
             assert user_obj["login_provider"] == ""
         finally:
-            user_db.delete_user(u["id"])
+            soft_delete_account(u["id"])
 
 
 class TestCreateRefreshTokenLoginProvider:
@@ -202,14 +202,14 @@ class TestRefreshEndpointLoginProvider:
         """POST /auth/refresh 从旧 refresh_token 提取 login_provider 传给新 access_token"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.user import db as user_db
+        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "refresh_lp_" + uuid.uuid4().hex[:6]
-        u = user_db.create_user(uname, "pw")
+        u = create_grape_account(username=uname, email="", password="pw")
         client = TestClient(app)
         try:
             # 构造带 login_provider 的 refresh_token（模拟 OAuth 登录后 cookie）
-            tv = user_db.get_token_version(u["id"])
+            tv = get_token_version(u["id"])
             rt = create_refresh_token(u["id"], uname, tv, login_provider="gitcode")
             # 调 refresh 端点
             r = client.post("/api/auth/refresh",
@@ -225,19 +225,19 @@ class TestRefreshEndpointLoginProvider:
             set_cookie = r.headers.get("set-cookie", "")
             assert "refresh_token" in set_cookie
         finally:
-            user_db.delete_user(u["id"])
+            soft_delete_account(u["id"])
 
     def test_refresh_without_login_provider_stays_empty(self):
         """旧 refresh_token 无 login_provider（密码登录）→ 新 access_token 也无（不伪造）"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.user import db as user_db
+        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "refresh_nolp_" + uuid.uuid4().hex[:6]
-        u = user_db.create_user(uname, "pw")
+        u = create_grape_account(username=uname, email="", password="pw")
         client = TestClient(app)
         try:
-            tv = user_db.get_token_version(u["id"])
+            tv = get_token_version(u["id"])
             rt = create_refresh_token(u["id"], uname, tv)  # 无 login_provider
             r = client.post("/api/auth/refresh",
                             headers={"X-Requested-With": "XMLHttpRequest"},
@@ -248,4 +248,4 @@ class TestRefreshEndpointLoginProvider:
             assert payload is not None
             assert "login_provider" not in payload
         finally:
-            user_db.delete_user(u["id"])
+            soft_delete_account(u["id"])

@@ -7,15 +7,16 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.session_manager import db, db_lock, update_unified_user_info, get_feishu_open_id
-from src.user import db as user_db
+from src.auth.grape_account_db import create_grape_account, soft_delete_account
 
 _USERS = ["uni_1", "uni_2", "uni_3", "uni_4"]
 
 
 def _ensure_users():
     for uname in _USERS:
-        if not user_db.get_user_account(uname):
-            user_db.create_user(uname, "pw_test")
+        from src.auth.grape_account_db import get_grape_account_by_username
+        if not get_grape_account_by_username(uname):
+            create_grape_account(username=uname, email="", password="pw_test")
 
 
 def _clean():

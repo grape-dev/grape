@@ -392,7 +392,7 @@ def _pipeline_from_events(repo_key: str, number: str, events: list[dict]) -> dic
         segments.append(seg)
     return {"issue": {"number": int(number)} if str(number).isdigit() else {"number": number},
             "summary": (segments[-1]["output"]["issue_summary"] if segments else ""),
-            "status": "completed" if any(s["status"] == "completed" for s in segments) else "unknown",
+            "status": (segments[-1]["status"] or "unknown") if segments else "unknown",
             "segments": segments}
 
 
@@ -780,12 +780,29 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     # 统一计算节点状态（与菜单流水线页一致；compute_node_statuses 兼算 latest_event）
     from src.api.pipeline_status import compute_node_statuses
     nodes, _ = compute_node_statuses(nodes, events, _current_stage)
+    # Issue #329: extract carried_context for cross-pipeline continuation source annotation
+    from src.api.session_store import get_carried_context
+    _carried_context = get_carried_context(repo_key, issue_number)
+    _source_issue_number = _carried_context.get("source_issue_number", "") if _carried_context else ""
+
+    # Check for cross_scene_handoff events (Issue #329)
+    _has_cross_scene = False
+    if issue_key:
+        try:
+            _has_cross_scene = any(e.get("event_type") == "cross_scene_handoff" for e in events)
+        except Exception:
+            pass
+
     return {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
         "current_stage": _current_stage,
         "nodes": nodes,
         "events": events,
+        # Issue #329: cross-pipeline continuation fields
+        "carried_context": _carried_context,
+        "source_issue_number": _source_issue_number,
+        "has_cross_scene_handoff": _has_cross_scene,
     }
 
 

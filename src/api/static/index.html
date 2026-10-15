@@ -1,49 +1,114 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-page-title="title_login">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape — Multi-Agent DevOps</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=63">
-<link rel="stylesheet" href="/static/css/apple-theme.css?v=16">
+<link rel="stylesheet" href="/static/css/app.css?v=84">
+<link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
+<link rel="stylesheet" href="/static/css/auth.css?v=6">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
 // Reads localStorage 'grapeTheme' before DOM renders. Default: Liquid Glass (apple).
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
 // Early auth check — prevents login/workbench flash on page load.
-// Checks both localStorage (returning user) and URL ?token= (OAuth callback).
-(function(){if(localStorage.getItem('token')||new URLSearchParams(location.search).get('token'))document.documentElement.setAttribute('data-logged-in','1');})();
+// Checks localStorage (returning user), URL ?token= (legacy OAuth), or ?exchange_code= (new OAuth).
+(function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
+// Early i18n pending — hide [data-i18n] elements until i18n.js applies translations.
+// Only for non-zh users (zh fallback text in HTML is already correct).
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.setAttribute('data-i18n-pending','1');})();
 </script>
 <style>
 /* Default: show login overlay, hide workbench (sidebar+mainView) */
 .sb,.mn{display:none}
 /* Logged-in: hide login overlay, show workbench */
-[data-logged-in="1"] .ln{opacity:0;pointer-events:none}
+[data-logged-in="1"] .auth-page{opacity:0;pointer-events:none}
 [data-logged-in="1"] .sb{display:flex}
+/* i18n pending: hide [data-i18n] text until translations applied (prevents zh→en flash) */
+[data-i18n-pending="1"] [data-i18n]{visibility:hidden}
+[data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
 [data-logged-in="1"] .mn{display:flex}
 </style>
 </head>
 <body>
-
-<div class="ln" id="loginView">
-<div class="lbox">
+<div class="auth-page" id="loginView">
+<div class="auth-card">
 <img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">
 <h1>Grape</h1>
-<p class="sub">Multi-Agent DevOps</p>
-<button class="obtn" id="gitBtn" onclick="app.oauthLogin()">
-  <svg width="18" height="18" viewBox="0 0 1024 1024" fill="currentColor"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>
-  <span data-i18n="app.login.gitcode_login">使用 GitCode 登录</span>
-</button>
-<button class="obtn" id="githubBtn" onclick="app.oauthLoginGithub()" style="margin-top:8px">
-  <svg width="18" height="18" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>
-  <span data-i18n="app.login.github_login">使用 GitHub 登录</span>
-</button>
-<div class="links" style="margin-top:20px">
-  <a onclick="app.openBetaApply()" style="cursor:pointer" data-i18n="app.login.beta_apply">申请内测</a>
-  <span style="color:#8d97a8;margin:0 8px">·</span>
-  <a href="/admin" style="cursor:pointer;color:#8d97a8;font-size:13px" data-i18n="app.login.admin">管理后台</a>
+<p class="subtitle" data-i18n="app.login.register_sub">Multi-Agent DevOps</p>
+<!-- 登录表单 -->
+<form id="pwdLogin" onsubmit="event.preventDefault();app.pwdLogin()">
+  <div class="field-group">
+    <label class="field-label" for="loginUser" data-i18n="app.login.account_or_email">用户名或邮箱</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="loginUser" type="text"
+        placeholder="用户名或邮箱"
+        data-i18n-placeholder="app.login.account_or_email"
+        autocomplete="username" autocapitalize="none" autocorrect="off"
+        aria-describedby="loginUserErr"
+        oninput="app._clearLoginError('loginUser')"
+        onblur="app._blurValidateLogin('loginUser')">
+    </div>
+    <p class="field-error" id="loginUserErr" role="alert" aria-live="polite"></p>
+  </div>
+  <div class="field-group">
+    <label class="field-label" for="loginPass" data-i18n="app.login.password">密码</label>
+    <div class="field-input-wrap">
+      <input class="field-input" id="loginPass" type="password"
+        placeholder="密码"
+        data-i18n-placeholder="app.login.password"
+        autocomplete="current-password"
+        enterkeyhint="go"
+        aria-describedby="loginPassErr"
+        oninput="app._clearLoginError('loginPass')"
+        onblur="app._blurValidateLogin('loginPass')">
+      <button type="button" class="pwd-toggle" onclick="app._toggleLoginPwd(this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+          <circle cx="12" cy="12" r="3"/>
+        </svg>
+      </button>
+    </div>
+    <p class="field-error" id="loginPassErr" role="alert" aria-live="polite"></p>
+  </div>
+  <button class="auth-btn" id="loginBtn" type="submit">
+    <span data-i18n="app.login.login_btn">登录</span>
+  </button>
+</form>
+<!-- 主链接 -->
+<div class="auth-links">
+  <a href="/register" data-i18n="app.login.register">注册账号</a>
+  <span class="dot">·</span>
+  <a href="/forgot" data-i18n="app.login.forgot_password">忘记密码</a>
+</div>
+<!-- OAuth 分隔线 + 按钮（预渲染，避免 API 延时导致布局抖动） -->
+<div id="oauthSection" style="margin-top:20px">
+  <div style="margin:0 0 16px;text-align:center;position:relative">
+    <div style="position:absolute;top:50%;left:0;right:0;height:1px;background:rgba(255,255,255,0.08)"></div>
+    <span style="position:relative;background:transparent;padding:0 16px;font-size:11px;color:#6e6e73;letter-spacing:0.5px" data-i18n="app.login.or_oauth">或使用第三方登录</span>
+  </div>
+  <div style="display:flex;gap:10px" id="oauthBtns">
+    <button class="oauth-btn" style="--brand:#F54A36" onclick="app.oauthLogin('gitcode')">
+      <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>
+      <span data-i18n="app.login.gitcode_login">GitCode</span>
+    </button>
+    <button class="oauth-btn" style="--brand:#1F2328" onclick="app.oauthLogin('github')">
+      <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>
+      <span data-i18n="app.login.github_login">GitHub</span>
+    </button>
+  </div>
+</div>
+<!-- 次要链接 -->
+<div class="auth-links" style="margin-top:16px">
+  <a onclick="app.openBetaApply()" style="cursor:pointer;color:#6e6e73" data-i18n="app.login.beta_apply">申请内测</a>
+  <span class="dot">·</span>
+  <a href="/admin" style="cursor:pointer;color:#6e6e73;font-size:12px" data-i18n="app.login.admin">管理后台</a>
+</div>
+<!-- 语言切换 -->
+<div class="lang-switch" onclick="_toggleLoginLang()">
+<span id="langSwitchLabel">EN</span>
 </div>
 </div>
 </div>
@@ -73,78 +138,177 @@
 <a id="nav-dash" class="act" onclick="app.nav('dash')"><span class="ic">■</span><span data-i18n="app.nav.scene_center">项目场景</span></a>
 <a id="nav-pipe" onclick="app.nav('pipe')"><span class="ic">▶</span><span data-i18n="app.nav.pipeline">流水线</span></a>
 <a id="nav-autopilot" onclick="app.nav('autopilot')"><span class="ic">⏰</span><span data-i18n="app.nav.autopilot">自动化</span></a>
-
 <div class="grp" data-i18n="app.sidebar.devops_agents">DevOps Agents</div>
 <a id="nav-vod" onclick="app.nav('vod')"><span class="ic" style="color:var(--pk)">●</span><span data-i18n="app.nav.vod">VOD Agent</span></a>
 <a id="nav-issue" onclick="app.nav('issue')"><span class="ic" style="color:var(--r)">●</span><span data-i18n="app.nav.issue">Issue Agent</span></a>
 <a id="nav-coding" onclick="app.nav('coding')"><span class="ic" style="color:var(--a)">●</span><span data-i18n="app.nav.coding">Coding Agent</span></a>
 <a id="nav-qa" onclick="app.nav('qa')"><span class="ic" style="color:var(--pu)">●</span><span data-i18n="app.nav.qa">QA Agent</span></a>
 <a id="nav-sre" onclick="app.nav('sre')"><span class="ic" style="color:var(--or)">●</span><span data-i18n="app.nav.sre">SRE Agent</span></a>
-
 <div class="grp" data-i18n="app.sidebar.devops_market">场景中心</div>
 <a id="nav-scene-market" class="act" onclick="app.nav('scene-market')"><span class="ic">◈</span><span data-i18n="app.nav.scene_skill_market">场景·技能</span></a>
 <div class="grp" data-i18n="app.sidebar.knowledge">知识库</div>
 <a id="nav-knowledge" onclick="app.nav('knowledge')"><span class="ic">❖</span><span data-i18n="app.nav.knowledge">项目知识库</span></a>
-
-<div class="grp" data-i18n="app.sidebar.account">用户中心</div>
+<div class="grp" data-i18n="app.sidebar.account">用户设置</div>
 <a id="nav-chat" onclick="app.nav('chat')"><span class="ic">☎</span><span data-i18n="app.nav.chat">Chat Agent</span></a>
 <a id="nav-im-channel" onclick="app.nav('im-channel')"><span class="ic"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg></span><span data-i18n="app.nav.im_channel">IM渠道</span></a>
 <a id="nav-my-feedback" style="display:none"><span class="ic">💬</span><span data-i18n="app.feedback.my_feedback">我的反馈</span></a>
-
 <div class="grp" data-i18n="app.sidebar.device_center">设备中心</div>
 <a id="nav-runtimes" onclick="app.nav('runtimes')"><span class="ic">⚡</span><span data-i18n="app.nav.runtimes">Agent 运行时</span></a>
 <a id="nav-observability" onclick="app.nav('observability')"><span class="ic">📊</span><span data-i18n="app.nav.observability">设备监控</span></a>
-
 <div class="grp" data-i18n="app.sidebar.settings">设置</div>
-<a id="nav-settings-credentials" onclick="app.nav('settings','credentials')"><span class="ic">⚙</span><span data-i18n="app.nav.settings">通用设置</span></a>
 <a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span><span data-i18n="app.nav.gitcode_repo">仓库设置</span></a>
 <a id="nav-organizations" onclick="app.nav('organizations')" style="display:none"><span class="ic">🏢</span><span data-i18n="app.nav.organizations">组织管理</span></a>
 </div>
-<div class="sb-ft">
-<div class="av" id="userAvatar">U</div>
-<div class="by"><span id="userName">User</span><span id="userRole" style="font-size:10px;color:var(--t3)">Maintainer</span></div>
+<div class="sb-ft" id="sbFooter" style="position:relative">
+<div class="av" id="userAvatar" onclick="app._toggleUserMenu()" style="cursor:pointer">U</div>
+<div class="by" onclick="app._toggleUserMenu()" style="cursor:pointer"><span id="userName">User</span><span id="userRole" style="font-size:10px;color:var(--t3)">Maintainer</span></div>
 <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
 <a onclick="app.openHelp()" class="help-btn" data-i18n-title="app.help.button_title" title="使用帮助"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></a>
-<a onclick="app.logout()" style="color:var(--t3);font-size:10px;cursor:pointer;text-decoration:none" title="登出" data-i18n-title="app.logout">↩</a>
+</div>
+<div id="sbUserMenu" style="display:none;position:absolute;bottom:calc(100% + 6px);left:12px;right:12px;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
 </div>
 </div>
-</div>
-
 <div class="mn" id="mainView">
 <div class="tb" id="tb">
 <a class="sb-toggle" id="sbToggle" onclick="app.toggleSidebar()" data-i18n-title="app.sidebar.toggle" title="收起/展开侧边栏"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/></svg></a>
 <div class="bc"><b id="pageTitle"></b> <span id="repoTitle" style="color:var(--a);font-weight:500"></span></div>
 <div class="sp"></div>
-<a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回主页</a>
+<a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回仓库大厅</a>
 <a id="tbFeedback" onclick="openFeedbackDialog()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="问题反馈" data-i18n-title="app.feedback.title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> <span data-i18n="app.feedback.link_text">反馈</span></a>
 <a href="/static/help.html" target="_blank" style="color:var(--t3);font-size:13px;text-decoration:none" data-i18n="app.help.link_text">📖 帮助</a>
-<a id="tbOrgBtn" onclick="app._toggleOrgDropdown()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px" data-i18n="organizations.my_orgs" title="切换组织">🏢 <span data-i18n="organizations.my_orgs">我的组织</span></a>
-<div id="tbOrgMenu" style="display:none;position:fixed;top:52px;right:0;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
+<div class="lang-toggle" id="tbLangToggle" style="display:flex;align-items:center;gap:2px;padding:3px;border-radius:8px;border:1px solid var(--b);background:var(--c)">
+<button onclick="_setAppLang('zh')" class="lang-btn" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">中</button>
+<button onclick="_setAppLang('en')" class="lang-btn" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">EN</button>
+</div>
+<a id="tbOrgBtn" onclick="app._toggleOrgDropdown()" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border:0.5px solid var(--b);border-radius:10px;background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;max-width:200px" title="切换组织">
+  <span style="font-size:14px">🏢</span>
+  <span id="tbOrgName" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap" data-i18n="organizations.my_orgs">我的组织</span>
+  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><polyline points="6 9 12 15 18 9"/></svg>
+</a>
+<div id="tbOrgMenu" style="display:none;position:fixed;top:52px;right:0;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:0.5px solid var(--b);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
 </div>
 <div class="ct" id="pageContent">
 <div class="loading" data-i18n="app.loading">加载中...</div>
 </div>
 </div>
-
-<script src="/static/js/i18n.js?v=7"></script>
-<script>I18N.init('25');</script>
+<script src="/static/js/i18n.js?v=14"></script>
+<script>
+// Delay init until DOM is fully parsed — ensures all [data-i18n] elements exist
+document.addEventListener('DOMContentLoaded', function(){
+  I18N.init('25');
+  _updateLoginLangLabel();
+  _updateAppLangLabel();
+});
+// 语言切换按钮：根据当前语言显示"EN"或"中文"（与 auth.js _updateLangSwitch 逻辑一致）
+function _updateLoginLangLabel(){
+  var el=document.getElementById('langSwitchLabel');
+  if(!el)return;
+  var lang=I18N.getLang();
+  var key='app.login.'+(lang==='zh'?'lang_switch_en':'lang_switch_zh');
+  var val=I18N.t(key);
+  if(!val||val===key) val=lang==='zh'?'EN':'中文';
+  el.textContent=val;
+}
+function _toggleLoginLang(){
+  var newLang=I18N.getLang()==='zh'?'en':'zh';
+  I18N.setLang(newLang).then(function(){
+    _updateLoginLangLabel();
+  });
+}
+// 应用内语言切换（双按钮模式，借鉴 grape.example.com）
+function _updateAppLangLabel(){
+  var lang = I18N.getLang();
+  // 更新所有语言切换组件的 active 状态
+  ['tbLangToggle', 'lobbyLangToggle'].forEach(function(toggleId) {
+    var toggle = document.getElementById(toggleId);
+    if (!toggle) return;
+    var btns = toggle.querySelectorAll('.lang-btn');
+    btns.forEach(function(btn) {
+      var btnLang = btn.textContent.trim() === '中' ? 'zh' : 'en';
+      var isActive = btnLang === lang;
+      btn.classList.toggle('active', isActive);
+      if (isActive) {
+        btn.style.background = 'var(--a)';
+        btn.style.color = '#fff';
+      } else {
+        btn.style.background = 'none';
+        btn.style.color = 'var(--t3)';
+      }
+    });
+  });
+  // 兼容登录页单按钮
+  var loginLabel = document.getElementById('langSwitchLabel');
+  if (loginLabel) {
+    loginLabel.textContent = lang === 'zh' ? 'EN' : '中文';
+  }
+}
+function _setAppLang(lang){
+  if (lang === I18N.getLang()) return;
+  // I18N.setLang 内部调 applyI18nToDOM 更新所有 [data-i18n] 元素文本
+  // 引导页动态内容已加 data-i18n 标记，不需要重新渲染
+  I18N.setLang(lang).then(function(){
+    _updateAppLangLabel();
+  });
+}
+function _toggleAppLang(){
+  var newLang = I18N.getLang() === 'zh' ? 'en' : 'zh';
+  _setAppLang(newLang);
+}
+// 需求3: 重置密码成功后跳转登录页时显示提示
+// 等 I18N 加载完成后再显示（避免 I18N.t 返回原始 key）
+(function(){
+  var p=new URLSearchParams(location.search);
+  if(p.get('reset')==='1'){
+    // 清理 URL 参数（防止刷新重复触发）
+    if(window.history.replaceState){
+      window.history.replaceState(null,'',window.location.pathname);
+    }
+    function _showResetNotice(){
+      // 用 Toast 而不是错误元素（避免误导用户以为输入有错）
+      if(typeof app!=='undefined' && app.showToast){
+        app.showToast(I18N.t('app.login.toast_password_reset_notice'), '', 5000);
+      } else {
+        // app.js 尚未加载（登录页场景）— 用 inline toast 兜底
+        var t=document.createElement('div');
+        t.style.cssText='position:fixed;top:24px;left:50%;transform:translateX(-50%);z-index:9999;padding:12px 24px;border-radius:10px;background:rgba(0,0,0,0.8);color:#fff;font-size:14px;font-weight:500;box-shadow:0 4px 16px rgba(0,0,0,0.2);max-width:90vw;text-align:center';
+        t.textContent=I18N.t('app.login.toast_password_reset_notice');
+        document.body.appendChild(t);
+        setTimeout(function(){if(t.parentNode)t.parentNode.removeChild(t);},5000);
+      }
+    }
+    // 等 I18N 内联 pack 就绪（init 在 DOMContentLoaded 里同步填充内联 pack）
+    if(typeof I18N!=='undefined' && I18N.isLangLoaded && I18N.isLangLoaded(I18N.getLang())){
+      _showResetNotice();
+    } else if(typeof I18N!=='undefined'){
+      // 等 DOMContentLoaded 触发 I18N.init
+      document.addEventListener('DOMContentLoaded',function(){
+        setTimeout(_showResetNotice, 200);
+      });
+    } else {
+      // I18N 完全未加载 — 1 秒后兜底
+      setTimeout(_showResetNotice, 1000);
+    }
+  }
+})();
+</script>
 <script src="/static/js/vendor/vue.global.prod.min.js?v=1"></script>
 <script src="/static/js/vendor/jquery.min.js?v=1"></script>
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/vendor/select2.min.js?v=1"></script>
-<script src="/static/js/api.js?v=27"></script>
-<script src="/static/js/pages/dashboard.js?v=80"></script>
-<script src="/static/js/pages/pipeline.js?v=43"></script>
+<script src="/static/js/api.js?v=28"></script>
+<script src="/static/js/pages/dashboard.js?v=81"></script>
+<script src="/static/js/pages/pipeline.js?v=44"></script>
 <script src="/static/js/pages/agents.js?v=25"></script>
 <script src="/static/js/pages/events.js?v=54"></script>
 <script src="/static/js/pages/chat.js?v=41"></script>
 <script src="/static/js/pages/im_channel.js?v=20"></script>
-<script src="/static/js/pages/repos.js?v=47"></script>
+<script src="/static/js/pages/repos.js?v=58"></script>
 <script src="/static/js/pages/templates.js?v=36"></script>
-<script src="/static/js/pages/issues.js?v=108"></script>
-<script src="/static/js/pages/settings.js?v=23"></script>
-<script src="/static/js/pages/scene-market.js?v=41"></script>
+<script src="/static/js/pages/issues.js?v=113"></script>
+<script src="/static/js/pages/settings.js?v=28"></script>
+<script src="/static/js/pages/account.js?v=33"></script>
+<script src="/static/js/pages/scene-market.js?v=42"></script>
 <script src="/static/js/pages/skills.js?v=45"></script>
 <script src="/static/js/pages/knowledge.js?v=148"></script>
 <script src="/static/js/pages/runtimes.js?v=55"></script>
@@ -153,10 +317,9 @@
 <script src="/static/js/pages/feedback.js?v=7"></script>
 <script src="/static/js/pages/my_feedback.js?v=5"></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=3"></script>
-<script src="/static/js/pages/autopilot.js?v=62"></script>
-<script src="/static/js/app.js?v=125"></script>
+<script src="/static/js/pages/autopilot.js?v=65"></script>
+<script src="/static/js/app.js?v=170"></script>
 <script src="/static/js/auto-recovery.js?v=2"></script>
-
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>
 <div class="help-drawer" id="helpDrawer">

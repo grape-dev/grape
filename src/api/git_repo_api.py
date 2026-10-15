@@ -107,8 +107,8 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
             uid = user.get("id") or 0
             username = user.get("username") or ""
             if not username and uid > 0:
-                from src.user.db import get_user
-                username = (get_user(uid) or {}).get("username", "")
+                from src.auth.grape_account_db import get_grape_account_by_id
+                username = (get_grape_account_by_id(uid) or {}).get("username", "")
             return mod.user_token(username, uid) or ""
         except Exception:
             return ""

@@ -436,6 +436,20 @@ var _TAG_HIGHLIGHTS = {
 };
 
 
+function _buildPlatformSelect() {
+  // 用户绑定的平台列表（从 localStorage 的 user.bindings 读取）
+  var user = JSON.parse(localStorage.getItem('user') || '{}');
+  var bindings = user.bindings || [];
+  if (bindings.length <= 1) return ''; // 只有一个平台不需要选择器
+  var isZh = I18N.getLang() === 'zh';
+  var options = bindings.map(function(p) {
+    var name = p === 'gitcode' ? 'GitCode' : p === 'github' ? 'GitHub' : p;
+    return '<option value="' + p + '">' + name + '</option>';
+  }).join('');
+  return '<select id="ptProvider" style="padding:8px 12px;border:1px solid var(--b);border-radius:var(--rd);font-size:13px;background:var(--bg);outline:none;flex-shrink:0">' + options + '</select>';
+}
+
+
 function createFromTemplate(templateId, defaultName) {
   var t = _findTemplateById(templateId) || {};
   var tplName = t.name || templateId;
@@ -590,6 +604,7 @@ function createFromTemplate(templateId, defaultName) {
         '<div style="flex:1;min-width:0;display:flex;align-items:center;gap:12px">' +
           '<label class="ts t2" style="font-size:13px;white-space:nowrap;flex-shrink:0">' + I18N.t('templates.repo_name') + '</label>' +
           '<input id="ptRepoName" value="' + defaultName + '" style="flex:1;padding:10px 14px;border:1px solid var(--b);border-radius:var(--rd);font-size:14px;outline:none;background:var(--bg);box-sizing:border-box">' +
+          _buildPlatformSelect() +
         '</div>' +
         '<div style="display:flex;align-items:center;gap:8px;flex-shrink:0">' +
           (tplUrl ? '<button class="bt bt-o bt-s" onclick="window.open(\'' + tplUrl + '\',\'_blank\')">\u67e5\u770b\u6e90\u4ee3\u7801 \u2197</button>' : '') +
@@ -632,6 +647,8 @@ function createFromTemplate(templateId, defaultName) {
 
 function doCreateFromTemplate(templateId) {
   var repoName = (document.getElementById('ptRepoName').value || '').trim();
+  var providerEl = document.getElementById('ptProvider');
+  var provider = providerEl ? providerEl.value : '';
   var btn = document.getElementById('ptCreateBtn');
   btn.disabled = true;
   btn.textContent = I18N.t('templates.creating');
@@ -699,7 +716,7 @@ function doCreateFromTemplate(templateId) {
       app.showToast(I18N.t('templates.repo_auto_renamed', {name: finalName}));
     }
     setProgress(25, I18N.t('templates.progress_creating') || I18N.t('templates.progress_creating_repo'));
-    API.post('/project-templates/create', {template_id: templateId, repo_name: repoName}, 300000).then(function(r) {
+    API.post('/project-templates/create', {template_id: templateId, repo_name: repoName, provider: provider}, 300000).then(function(r) {
       clearInterval(_timer);
       setProgress(100, I18N.t('templates.progress_done'));
       var modal = document.getElementById('ptCreateModal');

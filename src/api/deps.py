@@ -1,4 +1,5 @@
 """共享依赖：Token 验证、Token 三层体系、用户信息获取"""
+import time
 import threading
 from fastapi import Header, HTTPException, Request, Depends
 from src.user import db as user_db
@@ -32,6 +33,7 @@ def get_current_user(authorization: str = Header(None)) -> dict:
 
     JWT 无状态验证——签名+过期在 jwt_utils 验证。
     token_version 对比数据库——改密码/logout 后旧 token 失效。
+    用户禁用状态校验——通过内存缓存优化（TTL 5 秒）。
     任何实例都能验证（集群会话共享）。
     """
     if not authorization or not authorization.startswith("Bearer "):
@@ -47,15 +49,53 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     token_ver = int(payload.get("ver", 0))
     if not uid:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
-    # token_version 校验——改密码/logout 后 +1，旧 token 失效
-    db_ver = user_db.get_token_version(uid)
+
+    # token_version + 禁用状态校验（内存缓存优化，TTL 5 秒）
+    db_ver, status = get_user_status_cached(uid)
+
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
+    if status != 1:
+        # 清除缓存，下次查库
+        _user_status_cache.pop(uid, None)
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
+
     # 记录活跃状态——O(1)，不阻塞
     mark_user_active(uid)
     login_provider = payload.get("login_provider", "")
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_USER,
             "login_provider": login_provider}
+
+
+# 用户状态内存缓存：uid → (token_version, status, expire_ts)
+_user_status_cache: dict[int, tuple[int, int, float]] = {}
+
+
+def get_user_status_cached(uid: int) -> tuple[int, int]:
+    """获取用户 token_version + status，优先读缓存（TTL 5 秒）。
+
+    D3 修复：提取为公共函数，供 get_current_user 和 refresh 路由共享缓存。
+    """
+    cached = _user_status_cache.get(uid)
+    now = time.time()
+    if cached and cached[2] > now:
+        return cached[0], cached[1]
+    # 缓存未命中，查库
+    from src.auth.grape_account_db import get_status_and_token_version
+    info = get_status_and_token_version(uid)
+    if info is not None:
+        status, db_ver = info
+    else:
+        # D32: grape_accounts 无此用户 → 不 fallback 旧表，视为无效
+        db_ver = 0
+        status = 0  # 无账号 = 禁用
+    _user_status_cache[uid] = (db_ver, status, now + 5)
+    return db_ver, status
+
+
+def invalidate_user_cache(uid: int) -> None:
+    """主动失效用户状态缓存（密码重置/禁用/登出时调用）。"""
+    _user_status_cache.pop(uid, None)
 
 
 def _extract_api_token(request) -> str:
@@ -105,7 +145,14 @@ def get_current_user_or_api_key(request: Request) -> dict:
         if not info:
             raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid or revoked API Key"})
         uid = info["user_id"]
-        acc = user_db.get_user(uid) or {}
+        # SEC-3: API Key 路径也需校验用户 status
+        db_ver, status = get_user_status_cached(uid)
+        if status != 1:
+            _user_status_cache.pop(uid, None)
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
+        # D32: 从 grape_accounts 读 username
+        from src.auth.grape_account_db import get_grape_account_by_id
+        acc = get_grape_account_by_id(uid) or {}
         mark_user_active(uid)
         return {
             "id": uid,
@@ -175,6 +222,20 @@ def require_no_session_token(user: dict = Depends(get_current_user_or_api_key)) 
     return user
 
 
+def require_jwt_only(user: dict = Depends(get_current_user_or_api_key)) -> dict:
+    """高敏感账号管理端点鉴权：仅允许 JWT，禁止 session_token 和 api_key。
+
+    P1-6: API key 不过期、不加密存储、泄露后可永久操控账号。
+    修改密码 / 设置密码 / 变更邮箱 / 注销账号 / 绑定解绑 等高敏感操作
+    不应通过长期 API key 执行，仅允许 Web JWT（有过期时间 + refresh 轮换）。
+    """
+    auth_type = user.get("auth_type", "jwt")
+    if auth_type != "jwt":
+        raise HTTPException(status_code=403, detail={"code": 403,
+                                                     "message": "This endpoint requires interactive login (JWT). API keys and session tokens are not allowed."})
+    return user
+
+
 def require_org_member(request: Request, user: dict = Depends(get_current_user_or_api_key)) -> dict:
     """组织成员校验依赖。返回 {**user, "org_id": int, "org_role": str}。
 
@@ -195,16 +256,45 @@ def require_org_admin(user: dict = Depends(require_org_member)) -> dict:
     return user
 
 
+def _get_oauth_token_from_identity(username: str, provider: str) -> str:
+    """从 external_identities 表读取用户的 OAuth access_token。
+
+    username → grape_accounts.id → external_identities.access_token（解密）
+    返回 token 或空字符串。
+    """
+    try:
+        from src.auth.grape_account_db import get_grape_account_by_username
+        acc = get_grape_account_by_username(username)
+        if not acc:
+            return ""
+        from src.auth.grape_account_db import get_external_identity
+        # external_identities 按 grape_user_id + provider 查
+        # get_external_identity 是按 provider + external_id 查的，不能直接用
+        from src.session_manager import db, db_lock
+        from src.auth.credential_crypto import decrypt
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT access_token FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? AND status=1",
+                (acc["id"], provider),
+            )
+            row = c.fetchone()
+        if row and row[0]:
+            return decrypt(row[0])
+    except Exception as e:
+        log.warning(f"_get_oauth_token_from_identity({username}, {provider}): {e}")
+    return ""
+
+
 def get_user_token(username: str) -> str:
-    """获取用户的个人 GitCode API Token（Chat Agent 使用）"""
-    acc = user_db.get_user_account(username) or {}
-    return acc.get("gitcode_api_token", "")
+    """获取用户的 GitCode API Token（D32: 只从 external_identities 读，不 fallback 老表）。"""
+    return _get_oauth_token_from_identity(username, "gitcode")
 
 
 def get_user_github_token(username: str) -> str:
-    """获取用户的个人 GitHub API Token"""
-    acc = user_db.get_user_account(username) or {}
-    return acc.get("github_api_token", "")
+    """获取用户的 GitHub API Token（D32: 只从 external_identities 读，不 fallback 老表）。"""
+    return _get_oauth_token_from_identity(username, "github")
 
 
 def _get_user_refresh_lock(user_id: int) -> threading.Lock:
@@ -228,13 +318,11 @@ def try_refresh_gitcode_token(user_id: int) -> str | None:
 def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
     """获取用户 GitCode token，过期时主动预刷新（Issue #52）。
 
-    与 get_user_token 的区别：当 user_id > 0 时，检查 token 年龄，
-    超过 100 分钟（GitCode token 默认 2 小时，留 20 分钟余量）则预刷新。
-    401 时的被动刷新由 _gitcode_api_with_refresh 包装器兜底。
+    D32: 只从 external_identities 读，不 fallback 老表。
     """
     import time as _time
-    acc = user_db.get_user_account(username) or {}
-    token = acc.get("gitcode_api_token", "")
+    # 1. 优先从 external_identities 读
+    token = _get_oauth_token_from_identity(username, "gitcode")
 
     if token and user_id > 0:
         # 检查 token 年龄——临近过期则预刷新
@@ -248,6 +336,7 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
                 return new_token or token
         return token
 
+    # D32: 删除老表 fallback，直接尝试刷新
     if user_id > 0 and not token:
         return try_refresh_gitcode_token(user_id) or ""
 

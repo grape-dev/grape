@@ -186,6 +186,10 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                         _undispatched = (c2.fetchone()[0] or 0) > 0
                     except Exception:
                         pass
+                # Plugin broadcast self-run: task.runtime_id=0 (broadcast) but events.runtime
+                # has the actual instance name written back after execution. Treat as dispatched.
+                if _undispatched and (row[12] or "").strip():
+                    _undispatched = False
                 if not _undispatched:
                     # 2026-10-12 修复（!415 回归）：events.runtime 存的是「实例名」（如
                     # opencode-worker-ecs-hd-ai-wo-0006，任务完成时实际执行引擎写回），
@@ -201,6 +205,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     except Exception:
                         _resolved_rid = None
                     if _resolved_rid:
+                        runtime_id = _resolved_rid
                         c2.execute(
                             "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
@@ -328,13 +333,13 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                         from src.api.event_store import update_event_complete
                         from src.api.event_archive import finalize_event_archive
                         finalize_event_archive(
-                            _task.get("repo_key", ""), _task["event_seq"], "failed",
+                            _task.get("repo_key", ""), _task["event_seq"], "cancelled",
                             exit_code=-1,
                             tokens=[_task.get("repo_gitcode_token") or ""],
                             issue_num_hint=_task.get("issue_id") or "",
                         )
                         update_event_complete(
-                            _task["event_seq"], "failed", exit_code=-1,
+                            _task["event_seq"], "cancelled", exit_code=-1,
                             completed_at=datetime.now(timezone.utc).isoformat(),
                             result="用户手动终止",
                         )
@@ -612,7 +617,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                 " OR rc.scope = 'global'"
                                 " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
                                 " OR (rc.scope = 'user' AND rc.owner_name ="
-                                " (SELECT username FROM user_accounts WHERE id=?)))"
+                                " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
                             )
                             _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", _task_uid]
                         # Query 1: prefer remote (credential_id > 0)
@@ -815,7 +820,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                 " OR rc.scope = 'global'"
                                 " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
                                 " OR (rc.scope = 'user' AND rc.owner_name ="
-                                " (SELECT username FROM user_accounts WHERE id=?)))"
+                                " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
                             )
                             _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", _old_uid]
                         with db_lock:

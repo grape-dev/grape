@@ -197,6 +197,46 @@ class TestBusinessFailureDetection:
         assert service._detect_business_failure("issue", output, text) is False
         assert service._detect_business_failure("coding", output, text) is False
 
+    def test_negation_context_not_flagged_10914(self):
+        """内部误判案例回归：结论"部署验证通过…唯一失败用例为基线既有失败（非本 PR 引入）"
+        → 否定语境不得被长距正则误判为业务失败"""
+        from src.api.event_store import parse_agent_output_json
+        text = ('部署验证通过：20 passed，2 failed\n'
+                '```json\n{"conclusion":"部署验证通过：唯一失败用例为基线既有失败（非本 PR 引入）",'
+                '"next_step":"无需处理，等待人工合并"}\n```')
+        output = parse_agent_output_json(text)
+        assert service._detect_business_failure("sre", output, text) is False, \
+            "否定语境（部署验证通过+基线既有失败）不应判为业务失败"
+
+    def test_conclusion_only_scope_next_step_ignored(self):
+        """方案C作用域：只扫 conclusion；next_step/issue_summary 含失败词不参与判定"""
+        from src.api.event_store import parse_agent_output_json
+        text = ('```json\n{"conclusion":"部署成功，服务可访问",'
+                '"next_step":"关注后续构建，历史上有一次部署失败记录",'
+                '"issue_summary":"曾出现部署失败但已修复"}\n```')
+        output = parse_agent_output_json(text)
+        assert service._detect_business_failure("sre", output, text) is False, \
+            "next_step/issue_summary 中的失败词不应触发（conclusion 为成功）"
+
+    def test_no_structured_output_no_detection(self):
+        """方案C作用域：无结构化输出 → 不降级扫 result_text，不判定"""
+        assert service._detect_business_failure("sre", None, "部署失败，无法继续") is False
+        assert service._detect_business_failure("sre", {}, "部署失败，无法继续") is False
+
+    def test_conclusion_failure_still_detected_short_window(self):
+        """收紧后正斜例：conclusion 内真失败表述仍须命中"""
+        from src.api.event_store import parse_agent_output_json
+        cases = [
+            '{"conclusion":"部署失败，无法继续"}',
+            '{"conclusion":"ECS创建失败(Ecs.0707)，部署中止"}',
+            '{"conclusion":"由于账号未完成实名认证，无法购买ECS实例"}',
+            '{"conclusion":"部署未成功，凭证不足"}',
+        ]
+        for js in cases:
+            output = parse_agent_output_json(f'```json\n{js}\n```')
+            assert service._detect_business_failure("sre", output, js) is True, \
+                f"真失败表述仍应命中: {js}"
+
     def test_complete_task_overrides_exit_code_on_business_failure(self):
         """complete_task 收到 exit_code=0 但业务失败 → task status=failed"""
         # enqueue SRE 任务

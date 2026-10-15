@@ -66,18 +66,112 @@ var I18N = (function () {
       },
       app: {
         login: {
-          gitcode_login: '使用 GitCode 登录',
-          pwd_login: '用户名密码登录',
+          gitcode_login: 'GitCode',
+          github_login: 'GitHub',
+          beta_apply: '申请内测',
+          admin: '管理后台',
           username: '用户名',
           password: '密码',
           login_btn: '登录',
-          back_gitcode: '← 返回 GitCode 登录',
-          failed: '登录失败: {{msg}}'
+          register: '注册账号',
+          forgot_password: '忘记密码',
+          back_to_login: '返回登录',
+          send_code: '发送验证码',
+          resend_code: '重新发送',
+          confirm_new_password_placeholder: '再次输入新密码',
+          register_btn: '注册',
+          reset_password_btn: '重置密码',
+          or_oauth: '或使用第三方登录',
+          failed: '登录失败',
+          oauth_not_configured: 'OAuth未配置，请在管理界面配置',
+          empty_input: '请输入用户名和密码',
+          register_title: '注册 Grape 账号',
+          register_sub: 'Multi-Agent DevOps',
+          username_placeholder: '3-32字符，字母、数字、下划线',
+          email: '邮箱',
+          email_placeholder: 'you@example.com',
+          password_placeholder: '至少8个字符',
+          code_placeholder: '6位验证码',
+          have_account: '已有账号？',
+          forgot_title: '重置密码',
+          forgot_sub: '输入注册邮箱获取验证码',
+          remember: '想起来了？',
+          associate_existing: '关联已有账号',
+          register_new: '注册新账号',
+          associate_btn: '关联并登录',
+          account_or_email: '用户名或邮箱',
+          title_login: '登录 — Grape',
+          title_register: '注册 — Grape',
+          title_forgot: '重置密码 — Grape',
+          pwd_strength: '密码强度',
+          pwd_strength_weak: '弱',
+          pwd_strength_medium: '中',
+          pwd_strength_strong: '强',
+          pwd_req_length: '至少8个字符',
+          pwd_req_alnum: '包含字母和数字',
+          pwd_req_not_match: '不与用户名/邮箱相同',
+          confirm_password: '确认密码',
+          confirm_new_password: '确认新密码',
+          err_username_required: '请输入用户名',
+          err_username_length: '用户名长度3-32字符',
+          err_username_format: '仅允许字母、数字、下划线',
+          err_email_required: '请输入邮箱',
+          err_email_format: '邮箱格式不正确，例如 you@example.com',
+          err_password_required: '请输入密码',
+          err_password_length: '密码至少8个字符',
+          err_confirm_required: '请再次输入密码',
+          err_confirm_mismatch: '两次密码输入不一致',
+          err_code_required: '请输入验证码',
+          err_code_format: '验证码为6位数字',
+          err_new_password_required: '请输入新密码',
+          err_confirm_new_required: '请再次输入新密码',
+          err_identifier_required: '请输入用户名或邮箱',
+          toast_code_sent: '验证码已发送到',
+          toast_code_resent: '验证码已重新发送',
+          toast_send_failed: '发送失败',
+          toast_register_failed: '注册失败',
+          toast_associate_failed: '关联失败',
+          toast_reset_failed: '重置失败',
+          toast_register_success: '注册成功',
+          toast_associate_success: '关联成功',
+          toast_logging_in: '正在登录...',
+          toast_reset_success: '密码重置成功',
+          toast_use_new_password: '请使用新密码登录',
+          toast_password_reset_notice: '密码已重置，请使用新密码登录',
+          back_to_edit_email: '← 返回修改邮箱',
+          back_to_edit_info: '← 返回修改信息',
+          lang_switch_en: 'EN',
+          lang_switch_zh: '中文',
+          step_fill_info: '填写信息',
+          step_verify_code: '验证码',
+          step_success: '完成',
+          step_email: '邮箱',
+          step_code_new_pass: '验证码 + 新密码',
+          show_password: '显示密码',
+          hide_password: '隐藏密码',
+          verify_code: '验证码',
+          code_sent_to_email: '验证码将发送到您的邮箱',
+          new_password: '新密码',
+          select_tab_hint: '选择注册新账号或关联已有账号',
+          confirm_password_placeholder: '再次输入密码',
+          associate_title: '关联 {provider} 账号',
+          oauth_not_associated: '你的 {name}（{login}）尚未关联 Grape 账号',
+          step_label_info: '填写信息',
+          step_label_verify: '验证码',
+          step_label_new_pass: '新密码',
+          step_label_done: '完成',
+          step_label_email: '邮箱',
+          step_next: '下一步'
         },
         repo: {
           select: '选择仓库',
           load_failed: '无法加载仓库列表，请确认 GitCode Token 是否有效'
-        }
+        },
+        help: {
+          drawer_title: '📖 使用帮助 & FAQ',
+          loading: '加载中...'
+        },
+        loading: '加载中...'
       }
     },
     en: {
@@ -102,18 +196,112 @@ var I18N = (function () {
       },
       app: {
         login: {
-          gitcode_login: 'Login with GitCode',
-          pwd_login: 'Username & Password Login',
+          gitcode_login: 'GitCode',
+          github_login: 'GitHub',
+          beta_apply: 'Apply for Beta',
+          admin: 'Admin Console',
           username: 'Username',
           password: 'Password',
-          login_btn: 'Login',
-          back_gitcode: '← Back to GitCode Login',
-          failed: 'Login failed: {{msg}}'
+          login_btn: 'Sign In',
+          register: 'Register',
+          forgot_password: 'Forgot Password',
+          back_to_login: 'Back to Login',
+          send_code: 'Send Code',
+          resend_code: 'Resend',
+          confirm_new_password_placeholder: 'Enter new password again',
+          register_btn: 'Register',
+          reset_password_btn: 'Reset Password',
+          or_oauth: 'or sign in with',
+          failed: 'Login failed',
+          oauth_not_configured: 'OAuth not configured, please configure it in the admin console',
+          empty_input: 'Please enter username and password',
+          register_title: 'Create Grape Account',
+          register_sub: 'Multi-Agent DevOps',
+          username_placeholder: '3-32 chars, letters, digits, underscore',
+          email: 'Email',
+          email_placeholder: 'you@example.com',
+          password_placeholder: 'At least 8 characters',
+          code_placeholder: '6-digit code',
+          have_account: 'Already have an account?',
+          forgot_title: 'Reset Password',
+          forgot_sub: 'Enter your registered email to get a code',
+          remember: 'Remembered?',
+          associate_existing: 'Link Existing Account',
+          register_new: 'Register New Account',
+          associate_btn: 'Link & Sign In',
+          account_or_email: 'Username or Email',
+          title_login: 'Sign In — Grape',
+          title_register: 'Register — Grape',
+          title_forgot: 'Reset Password — Grape',
+          pwd_strength: 'Password Strength',
+          pwd_strength_weak: 'Weak',
+          pwd_strength_medium: 'Medium',
+          pwd_strength_strong: 'Strong',
+          pwd_req_length: 'At least 8 characters',
+          pwd_req_alnum: 'Contains letters and numbers',
+          pwd_req_not_match: 'Not same as username/email',
+          confirm_password: 'Confirm Password',
+          confirm_new_password: 'Confirm New Password',
+          err_username_required: 'Please enter username',
+          err_username_length: 'Username must be 3-32 characters',
+          err_username_format: 'Only letters, digits, and underscore allowed',
+          err_email_required: 'Please enter email',
+          err_email_format: 'Invalid email format, e.g. you@example.com',
+          err_password_required: 'Please enter password',
+          err_password_length: 'Password must be at least 8 characters',
+          err_confirm_required: 'Please enter password again',
+          err_confirm_mismatch: 'Passwords do not match',
+          err_code_required: 'Please enter verification code',
+          err_code_format: 'Code must be 6 digits',
+          err_new_password_required: 'Please enter new password',
+          err_confirm_new_required: 'Please enter new password again',
+          err_identifier_required: 'Please enter username or email',
+          toast_code_sent: 'Code sent to',
+          toast_code_resent: 'Code resent',
+          toast_send_failed: 'Send failed',
+          toast_register_failed: 'Registration failed',
+          toast_associate_failed: 'Link failed',
+          toast_reset_failed: 'Reset failed',
+          toast_register_success: 'Registration successful',
+          toast_associate_success: 'Account linked',
+          toast_logging_in: 'Logging in...',
+          toast_reset_success: 'Password reset successful',
+          toast_use_new_password: 'Please sign in with your new password',
+          toast_password_reset_notice: 'Password has been reset. Please sign in with your new password.',
+          back_to_edit_email: '← Back to edit email',
+          back_to_edit_info: '← Back to edit info',
+          lang_switch_en: 'EN',
+          lang_switch_zh: '中文',
+          step_fill_info: 'Info',
+          step_verify_code: 'Verify',
+          step_success: 'Done',
+          step_email: 'Email',
+          step_code_new_pass: 'Code + New Password',
+          show_password: 'Show password',
+          hide_password: 'Hide password',
+          verify_code: 'Verification Code',
+          code_sent_to_email: 'A verification code will be sent to your email',
+          new_password: 'New Password',
+          select_tab_hint: 'Register a new account or link an existing one',
+          confirm_password_placeholder: 'Enter password again',
+          associate_title: 'Link {provider} Account',
+          oauth_not_associated: 'Your {name} ({login}) is not yet linked to a Grape account',
+          step_label_info: 'Info',
+          step_label_verify: 'Verify',
+          step_label_new_pass: 'New Password',
+          step_label_done: 'Done',
+          step_label_email: 'Email',
+          step_next: 'Next'
         },
         repo: {
           select: 'Select Repository',
           load_failed: 'Failed to load repository list. Please check your GitCode Token.'
-        }
+        },
+        help: {
+          drawer_title: '📖 Help & FAQ',
+          loading: 'Loading...'
+        },
+        loading: 'Loading...'
       }
     }
   };
@@ -197,10 +385,10 @@ var I18N = (function () {
     return cur;
   }
 
-  // ── _interpolate(str, vars): replace {{name}} placeholders ──
+  // ── _interpolate(str, vars): replace {name} and {{name}} placeholders ──
   function _interpolate(str, vars) {
     if (!str || typeof str !== 'string' || !vars) return str;
-    return str.replace(/\{\{(\w+)\}\}/g, function (match, name) {
+    return str.replace(/\{\{?(\w+)\}?\}/g, function (match, name) {
       return vars.hasOwnProperty(name) ? String(vars[name]) : match;
     });
   }
@@ -318,10 +506,24 @@ var I18N = (function () {
         var activeTab = document.querySelector('.stabs a.ac');
         var tabId = activeTab ? (activeTab.getAttribute('onclick') || '').match(/'([^']+)'/) : null;
         var savedTab = tabId ? tabId[1] : null;
-        renderSettings(savedTab || 'credentials');
+        renderSettings(savedTab || 'gitcode');
         return true;
       } catch (e) {
         console.warn('[i18n] _rerenderCurrentPage renderSettings failed:', e.message);
+        return false;
+      }
+    }
+
+    // For account page, preserve the active sub-tab across re-render
+    if (view === 'account' && typeof renderAccount === 'function') {
+      try {
+        var acctTab = document.querySelector('.stabs a.ac');
+        var acctTabId = acctTab ? (acctTab.getAttribute('onclick') || '').match(/'([^']+)'/) : null;
+        var savedAcctTab = acctTabId ? acctTabId[1] : null;
+        renderAccount(savedAcctTab || 'profile');
+        return true;
+      } catch (e) {
+        console.warn('[i18n] _rerenderCurrentPage renderAccount failed:', e.message);
         return false;
       }
     }
@@ -419,6 +621,12 @@ var I18N = (function () {
       if (titleTranslated && titleTranslated !== titleKey) {
         titleEl.setAttribute('title', titleTranslated);
       }
+    }
+
+    // Remove i18n pending flag — translations applied, reveal text
+    var html = document.documentElement;
+    if (html && html.hasAttribute('data-i18n-pending')) {
+      html.removeAttribute('data-i18n-pending');
     }
   }
 

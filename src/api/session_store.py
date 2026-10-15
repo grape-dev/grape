@@ -229,6 +229,26 @@ def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: 
     log.info(f"IssueScene: repo={repo_key} issue={issue_id} scene={scene_id} uid={scene_user_id}")
 
 
+def get_carried_context(repo_key: str, issue_number: int) -> dict:
+    """Issue #329: 读取 issue 表 carried_context 列，返回解析后的 dict（无记录/异常返回 {}）。
+
+    集中在此避免路由层裸 SQL 绕数据访问层。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT carried_context FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, issue_number))
+            row = c.fetchone()
+        if row and row[0]:
+            return _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+    except Exception:
+        pass
+    return {}
+
+
 def set_scene_override_flag(repo_key: str, issue_id: str, allowed: bool):
     """设置 Issue 是否允许 VOD 覆盖场景（allow_scene_override）。Phase C3：仅写 issue 单表。"""
     val = 1 if allowed else 0

@@ -17,6 +17,7 @@ var _apSelected = new Set();    // 选中的任务ID
 var _apEditingId = null;        // 编辑模式时的任务ID
 var _apCronMode = 'at';      // daily / weekly / custom
 var _apDetailId = null;         // 详情页任务ID
+var _apDetailRepoKey = '';      // 详情页任务仓库 key（dispatch 弹窗查场景用）
 
 // ===== 模板（title/desc 走 i18n；instruction 是发给 agent 的指令内容，保持原文不翻译）=====
 var _AP_TEMPLATES = [
@@ -1463,11 +1464,43 @@ function renderAutopilotDetail(id) {
   pc.innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
   API.get('/autopilot/tasks/' + id).then(function(t) {
     if (window._currentView !== 'autopilot-detail') return;
+    _apDetailRepoKey = t.repo_key || '';
     pc.innerHTML = _apDetailHTML(t);
     _apLoadExecutions(id);
+    _apRefreshSubscribe(id);
   }).catch(function(e) {
     pc.innerHTML = '<div class="error">' + _apt('detail.load_failed', {msg: _esc(e.message||e)}) + '</div>';
   });
+}
+
+// ===== 飞书订阅按钮（autopilot-feishu-subscription-design.md §6）=====
+function _apRefreshSubscribe(taskId) {
+  API.get('/autopilot/tasks/' + taskId + '/subscription').then(function(d) {
+    _apRenderSubscribeBtn(!!d.subscribed);
+  }).catch(function() {});
+}
+
+function _apRenderSubscribeBtn(subscribed) {
+  var btn = $('apSubscribeBtn');
+  if (!btn) return;
+  btn.textContent = subscribed ? _apt('detail.subscribed') : _apt('detail.subscribe');
+  btn.classList.toggle('bt-p', subscribed);
+  btn.classList.toggle('bt-o', !subscribed);
+  btn.style.color = subscribed ? '' : 'rgba(0,113,227,1)';
+}
+
+function _apToggleSubscribe() {
+  var btn = $('apSubscribeBtn');
+  if (!btn) return;
+  var taskId = btn.getAttribute('data-task-id');
+  // 当前态从渲染态读（与 _apRenderSubscribeBtn 同源）
+  var subscribed = btn.classList.contains('bt-p');
+  var done = function() { _apRenderSubscribeBtn(!subscribed); if (app&&app.showToast) app.showToast(!subscribed ? _apt('detail.subscribe_on') : _apt('detail.subscribe_off')); };
+  if (subscribed) {
+    API.del('/autopilot/tasks/' + taskId + '/subscribe').then(done).catch(function(e) { if (app&&app.showToast) app.showToast((e.message||e)); });
+  } else {
+    API.post('/autopilot/tasks/' + taskId + '/subscribe', {}).then(done).catch(function(e) { if (app&&app.showToast) app.showToast((e.message||e)); });
+  }
 }
 
 function _apDetailHTML(t) {
@@ -1497,6 +1530,7 @@ function _apDetailHTML(t) {
       '</label>' +
       '<button class="bt bt-o" onclick="_apEdit(' + t.id + ')">' + _apt('detail.edit') + '</button>' +
       '<button class="bt bt-p" onclick="_apTrigger(' + t.id + ')">' + _apt('detail.trigger') + '</button>' +
+      '<button class="bt bt-o" id="apSubscribeBtn" data-task-id="' + t.id + '" onclick="_apToggleSubscribe()">' + _apt('detail.subscribe') + '</button>' +
     '</div>' +
     // 任务信息
     '<div class="cd" id="apTaskInfoCard" style="margin-bottom:16px">' +
@@ -1740,7 +1774,7 @@ function _apToggleExecDetail(execId, rowEl) {
     detail.classList.add('open');
     var arrow = rowEl.querySelector('.ap-exec-arrow');
     if (arrow) arrow.style.transform = 'rotate(180deg)';
-    // 懒加载 findings
+    // 懒加载 findings + 结论区块（autopilot-feishu-subscription-design.md §6：判级徽标+概览）
     var findingsContainer = $('apExecFindings_' + execId);
     if (findingsContainer && !findingsContainer.dataset.loaded) {
       findingsContainer.dataset.loaded = '1';
@@ -1887,13 +1921,13 @@ function _apDispatchFinding(execId, findingId, btn) {
 }
 
 function _apShowDispatchDialog(execId, finding, btn) {
-  // 获取当前仓库的场景列表
-  var repo = (typeof app !== 'undefined' && app.currentRepo()) ? (app.currentRepo().fullName || '') : '';
+  // 从详情页 task 取 repo_key（autopilot 详情页不在 currentRepo 上下文）
+  var repo = _apDetailRepoKey.replace(/^(gitcode|github):/, '');
   API.get('/scenes?repo=' + encodeURIComponent(repo)).then(function(d) {
     var scenes = d.scenes || [];
     var sceneOpts = '<option value="">' + _apt('dispatch.scene_smart') + '</option>' +
       scenes.map(function(s) {
-        return '<option value="' + _esc(s.scene_id) + '">' + _esc(s.name || s.scene_id) + '</option>';
+        return '<option value="' + _esc(s.id || s.scene_id || '') + '">' + _esc(s.name || s.id || '') + '</option>';
       }).join('');
 
     var overlay = document.createElement('div');

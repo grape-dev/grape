@@ -1,0 +1,205 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OAuth Callback</title>
+<style>
+body{margin:0;display:flex;align-items:center;justify-content:center;height:100vh;background:#f5f5f7;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+.spinner{width:24px;height:24px;border:3px solid #e0e0e0;border-top-color:#007aff;border-radius:50%;animation:spin 0.8s linear infinite;margin-right:12px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.txt{color:#86868b;font-size:14px}
+.fallback{display:none;text-align:center;padding:40px;max-width:400px}
+.fallback h3{font-size:18px;color:#1d1d1f;margin:0 0 12px}
+.fallback p{font-size:14px;color:#86868b;line-height:1.6;margin:0 0 20px}
+.fallback button{background:#007aff;color:#fff;border:none;border-radius:8px;padding:10px 24px;font-size:14px;cursor:pointer}
+.fallback button:hover{background:#0066d6}
+</style>
+</head>
+<body>
+<div id="loading" style="display:flex;align-items:center">
+<div class="spinner"></div>
+<span class="txt" id="status">Processing...</span>
+</div>
+<div id="fallback" class="fallback">
+<h3 id="fbTitle"></h3>
+<p id="fbMsg"></p>
+<button id="fbBtn"></button>
+</div>
+<script>
+(function(){
+  var params = new URLSearchParams(window.location.search);
+
+  // 构建回传给父窗口的结果——不包含 access_token / binding_ticket 等敏感凭证
+  var result = {type: 'oauth_result'};
+
+  var bindSuccess = params.get('bind_success');
+  var bindError   = params.get('bind_error');
+  var needTransfer = params.get('need_transfer');
+  var exchangeCode = params.get('exchange_code');
+  var oauthError   = params.get('oauth_error');
+  var oauthAssociate = params.get('oauth_associate');
+  var deleteOauthState = params.get('delete_oauth_state');
+
+  if (bindSuccess) {
+    result.action = 'bind';
+    result.success = true;
+    result.provider = bindSuccess;
+  } else if (bindError) {
+    result.action = 'bind';
+    result.success = false;
+    result.error = decodeURIComponent(bindError.replace(/\+/g, ' '));
+  } else if (needTransfer) {
+    // 不传 binding_ticket——父窗口用 JWT 调 GET /auth/transfer-context 获取
+    result.action = 'bind';
+    result.success = false;
+    result.need_transfer = true;
+    result.provider = needTransfer;
+  } else if (exchangeCode) {
+    result.action = 'login';
+    result.success = true;
+    result.exchange_code = exchangeCode;
+  } else if (oauthError) {
+    result.action = 'login';
+    result.success = false;
+    result.error = decodeURIComponent(oauthError.replace(/\+/g, ' '));
+  } else if (oauthAssociate) {
+    result.action = 'login';
+    result.success = false;
+    result.need_link = true;
+    result.provider = params.get('provider') || '';
+    result.state = params.get('state') || '';
+    result.external_login = params.get('external_login') || '';
+    result.external_name = params.get('external_name') || '';
+  } else if (deleteOauthState) {
+    result.action = 'delete';
+    result.success = true;
+    result.delete_oauth_state = deleteOauthState;
+  } else {
+    // 未知参数——通用错误
+    result.action = 'unknown';
+    result.success = false;
+    result.error = 'no_result';
+  }
+
+  // 保存原始搜索参数（降级时需要用）
+  var originalSearch = window.location.search;
+
+  // 立即清理 URL 参数（防止 exchange_code 等留在浏览器历史/Referer）
+  try {
+    history.replaceState({}, '', window.location.pathname);
+  } catch(e) {}
+
+  function hideLoading() {
+    var el = document.getElementById('loading');
+    if (el) el.style.display = 'none';
+  }
+  function showFallback(title, msg, btnText) {
+    hideLoading();
+    var el = document.getElementById('fallback');
+    if (el) el.style.display = 'block';
+    document.getElementById('fbTitle').textContent = title;
+    document.getElementById('fbMsg').textContent = msg;
+    document.getElementById('fbBtn').textContent = btnText;
+  }
+
+  function sendAndClose() {
+    if (window.opener && !window.opener.closed) {
+      // targetOrigin 显式指定为当前 origin，不用 '*'
+      window.opener.postMessage(result, window.location.origin);
+      // 给父窗口一点时间处理消息后再关闭
+      setTimeout(function(){
+        try { window.close(); } catch(e) {}
+        // 如果 window.close() 没生效（浏览器限制），显示可关闭提示
+        setTimeout(function() {
+          if (!window.closed) {
+            showFallback(
+              '授权已完成',
+              '授权结果已传回主窗口，您可以关闭此窗口。',
+              '关闭窗口'
+            );
+          }
+        }, 500);
+      }, 100);
+    } else {
+      // 降级：window.opener 不存在（noopener / 浏览器隐私策略 / COOP / 跨域切断 / 非 popup 场景）。
+      // 铁律：服务端不做判断，前端中间页做判断。opener 不存在时不自动跳主站——
+      // 因为无法区分"真正的非 popup"和"opener 被切断的 popup"，
+      // 跳主站可能在弹窗里加载完整 SPA，重现原问题。
+      // 统一显示静态提示页（友好文案），用户手动关闭后由父窗口轮询兜底。
+      // 双语提示——此页面不加载 i18n.js（设计决策：保持中间页零依赖）。
+      var pName = (result.provider === 'github') ? 'GitHub' : 'GitCode';
+      var MESSAGES = {
+        bindSuccess:    {title: pName + ' 绑定成功 / Bind Success',    msg: '授权结果已传回主窗口，您可以关闭此窗口。Authorization complete, you can close this window.'},
+        needTransfer:   {title: '需要确认 / Confirmation Needed',       msg: '请在主窗口中完成绑定转移确认。您可以关闭此窗口。Please complete the transfer confirmation in the main window.'},
+        loginSuccess:   {title: '登录成功 / Login Success',             msg: '正在返回主窗口，您可以关闭此窗口。Returning to main window, you can close this window.'},
+        deleteSuccess:  {title: '认证完成 / Verification Complete',     msg: '请在主窗口完成注销操作。您可以关闭此窗口。Please complete account deletion in the main window.'},
+        bindError:      {title: '绑定失败 / Bind Failed',               msg: ''},
+        loginError:     {title: '登录失败 / Login Failed',              msg: ''},
+        deleteError:    {title: '注销认证失败 / Delete Auth Failed',    msg: ''},
+        generic:        {title: '授权已完成 / Authorization Complete',  msg: '请返回主窗口查看结果。Please return to the main window to check the result.'}
+      };
+      // 错误码到友好文案映射
+      var ERROR_MESSAGES = {
+        'state_invalid':      '授权会话已过期，请重试 / Session expired, please retry',
+        'auth_failed':        '授权失败，请重试 / Authorization failed, please retry',
+        'provider_unknown':   '未知的平台类型 / Unknown provider',
+        'provider_mismatch':  '平台不匹配，请重试 / Provider mismatch, please retry',
+        'delete_mismatch':    '注销认证用户不匹配 / Delete auth user mismatch',
+        'WHITELIST':          '用户不在白名单中 / User not in whitelist',
+        'account_not_found':  '账号不存在 / Account not found',
+        'account_disabled':   '账号已被禁用 / Account disabled'
+      };
+      function friendlyError(code) {
+        if (!code) return '';
+        // WHITELIST 错误格式为 WHITELIST:provider:login
+        if (code.indexOf('WHITELIST') === 0) return ERROR_MESSAGES['WHITELIST'];
+        return ERROR_MESSAGES[code] || code;
+      }
+      var m;
+      if (result.success && result.action === 'bind') {
+        m = MESSAGES.bindSuccess;
+      } else if (result.need_transfer) {
+        m = MESSAGES.needTransfer;
+      } else if (result.exchange_code) {
+        m = MESSAGES.loginSuccess;
+      } else if (result.action === 'delete' && result.delete_oauth_state) {
+        m = MESSAGES.deleteSuccess;
+      } else if (result.error) {
+        if (result.action === 'bind') m = MESSAGES.bindError;
+        else if (result.action === 'delete') m = MESSAGES.deleteError;
+        else m = MESSAGES.loginError;
+        m = {title: m.title, msg: friendlyError(result.error)};
+      } else {
+        m = MESSAGES.generic;
+      }
+      // 显示静态提示页（友好文案）+ 自适应按钮。
+      // 按钮先尝试 window.close()，失败（全页跳转场景）则跳主站携带错误码。
+      // 弹窗场景（含 opener 被切断）：window.close() 成功，窗口关闭。
+      // 全页跳转场景：window.close() 被浏览器拒绝，setTimeout 触发跳主站。
+      // 一个按钮覆盖全部场景，不需要 cookie 区分。
+      showFallback(m.title, m.msg, '继续 / Continue');
+      var btn = document.getElementById('fbBtn');
+      if (btn) {
+        var homeParams = new URLSearchParams(originalSearch);
+        homeParams.delete('exchange_code');
+        homeParams.delete('state');
+        var qs = homeParams.toString();
+        var homeUrl = '/' + (qs ? '?' + qs : '');
+        btn.onclick = function() {
+          window.close();
+          setTimeout(function() {
+            if (!window.closed) {
+              window.location.href = homeUrl;
+            }
+          }, 100);
+        };
+      }
+    }
+  }
+
+  sendAndClose();
+})();
+</script>
+</body>
+</html>

@@ -364,6 +364,7 @@ window._openBoardDetail = function(taskId) {
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskConversation(window._tasksById[${t.id}])">${I18N.t('issues.detail.go_conversation')}</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px" onclick="openTaskCopyModal(${t.id})">⎘ ${I18N.t('issues.detail.copy_task')}</button>
       ${_renderTaskActionsInline(t)}
+      ${_renderCrossPipelineButton(t)}
     </div>
     <div id="_boardDetailContent">${_detailHtml(t)}</div>
     <div id="_boardPipelineSection" style="margin-top:12px">
@@ -597,6 +598,14 @@ function _renderPipelineSection(data) {
   html += `<div style="${_cardTitle}">`;
   html += `<span>${I18N.t('tasks.pipeline_scene')||'流水线'}</span>`;
   html += `</div>`;
+  // Issue #329: cross-pipeline continuation source annotation
+  var _sourceIssue = data.source_issue_number || (data.carried_context && data.carried_context.source_issue_number) || '';
+  var _sourceScene = (data.carried_context && data.carried_context.source_scene_name) || (data.carried_context && data.carried_context.source_scene_id) || '';
+  if (_sourceIssue) {
+    var _sourceLabel = (I18N.t('issues.cross_pipeline.continuation_from')||'⇄ 接续自') + ' #' + _sourceIssue;
+    if (_sourceScene) _sourceLabel += '（' + _sourceScene + '）';
+    html += `<div style="font-size:11px;color:#0071e3;background:rgba(0,113,227,.06);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">⇄</span><span>${_sourceLabel}</span></div>`;
+  }
   // 流水线节点进度条
   if (nodes.length > 0) {
     html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';
@@ -639,6 +648,13 @@ function _renderPipelineSection(data) {
       var isLast = i === events.length - 1;
       var statusCol = e.status === 'completed' ? '#34c759' : e.status === 'failed' ? '#ef4444' : e.status === 'cancelled' ? '#86868b' : '#3b82f6';
       var statusIcon = e.status === 'completed' ? '✓' : e.status === 'failed' ? '✕' : e.status === 'cancelled' ? '○' : '●';
+      // Issue #329: cross-scene handoff events get special annotation
+      var isCrossScene = e.event_type === 'cross_scene_handoff' || e.event_type === 'assignee_changed';
+      var crossSceneIcon = isCrossScene ? '⇄ ' : '';
+      var crossSceneBadge = '';
+      if (isCrossScene && e.scene_id) {
+        crossSceneBadge = ' <span style="font-size:9px;color:#0071e3;background:rgba(0,113,227,.08);border-radius:999px;padding:1px 6px">' + (e.scene_id || '') + '</span>';
+      }
       var evSeq = e.seq || '';
       var evClick = evSeq ? ' onclick="event.stopPropagation();_jumpToNodeEvent(' + evSeq + ')"' : '';
       var evCursor = evSeq ? ';cursor:pointer' : '';
@@ -649,7 +665,7 @@ function _renderPipelineSection(data) {
       html += `</div>`;
       html += `<div style="flex:1;min-width:0;padding-top:1px${evCursor}">`;
       html += `<div style="display:flex;align-items:baseline;justify-content:space-between;gap:8px">`;
-      html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${e.agent_type || e.event_type || ''}</span>`;
+      html += `<span style="font-size:11px;font-weight:600;color:var(--t1,#1d1d1f);font-family:-apple-system,BlinkMacSystemFont,sans-serif">${crossSceneIcon}${e.agent_type || e.event_type || ''}${crossSceneBadge}</span>`;
       html += `<span style="font-size:10px;color:var(--t3,#86868b);white-space:nowrap">${_fmtEventTime(e.created_at)}</span>`;
       html += `</div>`;
       if (e.title) html += `<div style="font-size:10px;color:var(--t2,#3a3a3c);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${e.title}</div>`;
@@ -1694,6 +1710,154 @@ function copyTaskSubmit() {
       showErr(I18N.t('tasks.copy.err_create_failed', {msg: msg}));
     });
 }
+
+// ===== 跨流水线移交（Issue #329）=====
+function _renderCrossPipelineButton(t) {
+  // Show handoff button for all statuses (including completed/cancelled/failed)
+  var _label = I18N.t('issues.cross_pipeline.handoff_btn')||'移交到其他流水线';
+  return `<button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;border-radius:8px;font-size:11px;color:#0071e3;border-color:rgba(0,113,227,.3)" onclick="openCrossPipelineModal(${t.id})">⇄ ${_label}</button>`;
+}
+
+let _crossPipelineModal = null;
+
+window.openCrossPipelineModal = function(taskId) {
+  var t = window._tasksById[taskId] || window._currentDetailTask;
+  if (!t) return;
+  var repo = app.currentRepo();
+  var defaultRepo = repo ? repo.fullName : (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  if (_crossPipelineModal) _crossPipelineModal.remove();
+  var esc = function(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
+
+  var ov = document.createElement('div');
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:0.5px solid #d2d2d7;border-radius:14px;padding:20px 22px;box-shadow:0 10px 40px rgba(0,0,0,.15);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 16px">
+      <h3 style="margin:0;font-size:15px;font-weight:600;color:#1d1d1f">⇄ ${(I18N.t('issues.cross_pipeline.modal_title')||'跨流水线移交')}</h3>
+      <button onclick="document.getElementById('crossPipelineOverlay').remove()" style="background:none;border:none;font-size:18px;color:#86868b;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#86868b'">✕</button>
+    </div>
+    <div style="display:flex;flex-direction:column;gap:12px;font-size:13px">
+      <div style="font-size:11px;color:#86868b">${I18N.t('issues.cross_pipeline.issue_label')||'当前需求'}: <b style="color:#1d1d1f">#${esc(t.issue_number)} ${esc(t.title || '')}</b></div>
+      <div style="display:flex;flex-direction:column;gap:4px">
+        <div style="font-size:12px;font-weight:600;color:#1d1d1f">${I18N.t('issues.cross_pipeline.target_scene')||'目标流水线场景'}</div>
+        <select id="cpTargetScene" style="padding:8px 12px;border:0.5px solid #d2d2d7;border-radius:8px;background:#fff;color:#1d1d1f;font-size:13px;outline:none;transition:border-color .2s" onchange="_onCrossPipelineSceneChange()">
+          <option value="">${I18N.t('issues.cross_pipeline.loading_scenes')||'加载场景中...'}</option>
+        </select>
+      </div>
+      <div id="cpAssigneeHint" style="font-size:11px;color:#86868b;background:rgba(0,113,227,.04);border-radius:8px;padding:8px 12px;display:none">
+        <span>${I18N.t('issues.cross_pipeline.assignee_hint')||'归属者将自动变更为目标场景归属者'}</span>
+      </div>
+      <div id="cpError" style="display:none;color:#ff3b30;font-size:12px;background:rgba(255,59,48,.06);border:0.5px solid rgba(255,59,48,.2);border-radius:8px;padding:8px 12px"></div>
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:18px">
+      <button class="tsk-btn tsk-btn-ghost" onclick="document.getElementById('crossPipelineOverlay').remove()">${I18N.t('tasks.create.btn_cancel')||'取消'}</button>
+      <button class="tsk-btn tsk-btn-primary" id="cpSubmitBtn" onclick="crossPipelineSubmit(${t.id})" style="background:#0071e3">${I18N.t('issues.cross_pipeline.btn_submit')||'确认移交'}</button>
+    </div>
+  </div>`;
+  ov.id = 'crossPipelineOverlay';
+  document.body.appendChild(ov);
+  _crossPipelineModal = ov;
+
+  // Async load scenes with vod node
+  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
+    var sel = document.getElementById('cpTargetScene');
+    if (!sel) return;
+    sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.scene_placeholder')||'请选择目标场景') + '</option>';
+    var scenes = d.scenes || [];
+    var hasValid = false;
+    scenes.forEach(function(s) {
+      var nodes = (s.pipeline && s.pipeline.nodes) || [];
+      var hasVod = nodes.some(function(n) { return (n.id || n.tag) === 'vod'; });
+      if (hasVod) {
+        hasValid = true;
+        var opt = document.createElement('option');
+        opt.value = s.id;
+        opt.textContent = (s.display_name || s.name || s.id);
+        opt._sceneData = s;
+        sel.appendChild(opt);
+      }
+    });
+    if (!hasValid) {
+      sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.no_vod_scenes')||'无可用场景（需含 vod 节点）') + '</option>';
+    }
+  }).catch(function(){});
+};
+
+window._onCrossPipelineSceneChange = function() {
+  var sel = document.getElementById('cpTargetScene');
+  if (!sel) return;
+  var hint = document.getElementById('cpAssigneeHint');
+  var selected = sel.options[sel.selectedIndex];
+  if (!selected || !selected.value) {
+    if (hint) hint.style.display = 'none';
+    return;
+  }
+  // Show assignee hint
+  if (hint) hint.style.display = 'block';
+};
+
+window.crossPipelineSubmit = function(taskId) {
+  var t = window._tasksById[taskId] || window._currentDetailTask;
+  if (!t) return;
+  var sceneSel = document.getElementById('cpTargetScene');
+  var errEl = document.getElementById('cpError');
+  var showErr = function(msg) { if (errEl) { errEl.style.display = 'block'; errEl.textContent = msg; } };
+  var targetSceneId = (sceneSel || {}).value || '';
+  if (!targetSceneId) { showErr(I18N.t('issues.cross_pipeline.err_no_scene')||'请选择目标场景'); return; }
+  var engineConfig = null;
+
+  var btn = document.getElementById('cpSubmitBtn');
+  if (btn) { btn.disabled = true; btn.textContent = I18N.t('issues.cross_pipeline.btn_submitting')||'移交中...'; }
+
+  var repo = app.currentRepo();
+  var repoKey = (t.repo_key || '').replace(/^(github|gitcode):/, '');
+  var carriedContext = {
+    source_issue_number: t.issue_number,
+    source_scene_id: t.scene_id || '',
+    source_scene_name: t.scene_name || '',
+    spec_ref: '',
+    rating: 'ready',
+    work_branch: (sceneSel.options[sceneSel.selectedIndex]._sceneData && sceneSel.options[sceneSel.selectedIndex]._sceneData.work_branch) || 'main',
+  };
+
+  API.post('/a2a', {
+    agent: 'vod',
+    payload: {
+      repository: repoKey,
+      account: repoKey.split('/')[0] || repoKey,
+      issue_number: parseInt(t.issue_number) || t.issue_number,
+      context: I18N.t('issues.cross_pipeline.a2a_context')||'跨流水线接续：请快速复核后流转至 issue 确认 Spec',
+      target_scene_id: targetSceneId,
+      target_node: 'vod',
+      carried_context: carriedContext,
+      target_assignee: '',
+      engine_config: engineConfig,
+    }
+  }).then(function(d) {
+    var ov = document.getElementById('crossPipelineOverlay');
+    if (ov) ov.remove();
+    if (d.skipped) {
+      var _skipMsg = I18N.t('issues.cross_pipeline.skipped')||'移交已跳过';
+      if (d.skipped === 'duplicate_handoff') _skipMsg = I18N.t('issues.cross_pipeline.skipped_dup')||'该需求已在此场景有未完成事件，已拦截重复移交';
+      else if (d.skipped === 'target_scene_missing_node') _skipMsg = I18N.t('issues.cross_pipeline.skipped_no_vod')||'目标场景不含 vod 节点';
+      app.showToast(_skipMsg);
+    } else if (d.seq > 0) {
+      var _sceneName = sceneSel.options[sceneSel.selectedIndex].textContent || targetSceneId;
+      app.showToast((I18N.t('issues.cross_pipeline.success_toast')||'已移交至 {scene} 流水线').replace('{scene}', _sceneName));
+    } else {
+      app.showToast(I18N.t('issues.cross_pipeline.result_unknown')||'移交结果未知');
+    }
+    // Refresh pipeline section
+    if (t.id) {
+      API.get('/issues/' + t.id + '/pipeline').then(function(data) {
+        _renderPipelineSection(data);
+      }).catch(function(){});
+    }
+  }).catch(function(e) {
+    if (btn) { btn.disabled = false; btn.textContent = I18N.t('issues.cross_pipeline.btn_submit')||'确认移交'; }
+    var msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
+    showErr((I18N.t('issues.cross_pipeline.err_failed')||'移交失败: ') + msg);
+  });
+};
 
 // @deprecated 死代码——UI 无调用点。如需启用，catch 里的 alert 应改为 app.showToast。
 function changeTaskStatus(taskId, status) {

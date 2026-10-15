@@ -76,7 +76,7 @@ if to_repo_key(repo_key) != to_repo_key(session_repo):
 
 ### 2.4 集群 base 核对（运维/CLI 配置）
 
-- 核对 agent 会话 的 `GRAPE_SERVER_URL` / CLI `server_base_url` 与集群主服务 `grapedev.cn` 一致；区分 worker 上报基址 `worker.grapedev.cn`（仅 worker 注册用）。
+- 核对 agent 会话 的 `GRAPE_SERVER_URL` / CLI `server_base_url` 与集群主服务 `grape.example.com` 一致；区分 worker 上报基址 `worker.grape.example.com`（仅 worker 注册用）。
 - 校验主服务 `/api/issues/{id}/awaiting-input` 是否已随部署生效（`grape refresh` 后 `grape issues awaiting-input --help` 可见）。
 - 若集群节点与主服务版本不一致（旧 weekly-04），升/对齐后重测「卡片 id 2351」调用。
 

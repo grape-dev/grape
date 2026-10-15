@@ -42,10 +42,23 @@ def test_member_in_whitelist_allowed(whitelist_path):
     assert cfg.is_gitcode_user_allowed("Jason7602") is True
 
 
-def test_non_member_denied(whitelist_path):
-    """白名单含 userA → userB 拒绝"""
+def test_non_member_denied(whitelist_path, monkeypatch):
+    """白名单含 userA → userB 拒绝。
+
+    新逻辑（issue #333 问题14）：login_whitelist_enabled 开关启用时才校验。
+    文件白名单是 DB 不可用时的降级路径。测试需 mock 开关启用 + DB 异常强制走文件降级。
+    """
     import src.config as cfg
+    # 模拟开关启用
+    monkeypatch.setattr(cfg, "_is_login_whitelist_enabled", lambda: True)
+    # 模拟 DB 查询抛异常——强制走文件白名单降级路径
+    from src.session_manager import db_lock
+    mock_db = type('MockDB', (), {'cursor': lambda self: (_ for _ in ()).throw(RuntimeError('DB unavailable'))})()
+    monkeypatch.setattr('src.session_manager.db', mock_db)
     _write(whitelist_path, {"whitelist": ["userA"]})
+    # 重置缓存确保走新 mock
+    cfg._WL_ENABLED_CACHE = True
+    cfg._WL_CACHE_TS = float('inf')
     assert cfg.is_gitcode_user_allowed("userB") is False
 
 

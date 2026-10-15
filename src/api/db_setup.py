@@ -583,10 +583,10 @@ _LOGIN_WHITELIST_DDL = """
 CREATE TABLE IF NOT EXISTS login_whitelist (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     gitcode_username VARCHAR(64) DEFAULT NULL,
+    github_username TEXT DEFAULT '',
     remark VARCHAR(128) DEFAULT '',
     created_by VARCHAR(64) DEFAULT '',
     created_at TEXT DEFAULT (datetime('now')),
-    github_username TEXT DEFAULT '',
     UNIQUE (gitcode_username)
 )
 """
@@ -1001,6 +1001,188 @@ _NEW_TABLES.extend([
     ("org_invitation", _ORG_INVITATION_DDL),
 ])
 
+# ===== 账号体系新表 =====
+_GRAPE_ACCOUNTS_DDL = """
+CREATE TABLE IF NOT EXISTS grape_accounts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    username        VARCHAR(64) NOT NULL UNIQUE,
+    email           VARCHAR(255) DEFAULT NULL,
+    email_source    VARCHAR(16) DEFAULT NULL,
+    password_hash   TEXT NOT NULL DEFAULT '',
+    nickname        VARCHAR(128) DEFAULT '',
+    avatar_url      VARCHAR(512) DEFAULT '',
+    status          INTEGER DEFAULT 1,
+    token_version   INTEGER DEFAULT 0,
+    email_verified  INTEGER DEFAULT 0,
+    email_is_placeholder INTEGER DEFAULT 0,
+    created_by_oauth    INTEGER DEFAULT 0,
+    last_active_at  TEXT DEFAULT NULL,
+    last_login_at   TEXT DEFAULT NULL,
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_EXTERNAL_IDENTITIES_DDL = """
+CREATE TABLE IF NOT EXISTS external_identities (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    grape_user_id     INTEGER NOT NULL,
+    provider          VARCHAR(32) NOT NULL,
+    external_id       VARCHAR(128) NOT NULL,
+    external_login    VARCHAR(128) DEFAULT '',
+    external_name     VARCHAR(128) DEFAULT '',
+    external_avatar   VARCHAR(512) DEFAULT '',
+    access_token      TEXT DEFAULT '',
+    refresh_token     TEXT DEFAULT '',
+    token_expires_at  TEXT DEFAULT '',
+    metadata          TEXT DEFAULT '{}',
+    status            INTEGER DEFAULT 1,
+    unbound_at        TEXT DEFAULT NULL,
+    created_at        TEXT DEFAULT (datetime('now')),
+    updated_at        TEXT DEFAULT (datetime('now')),
+    UNIQUE (provider, external_id),
+    UNIQUE (grape_user_id, provider)
+)
+"""
+
+_VERIFICATION_CODES_DDL = """
+CREATE TABLE IF NOT EXISTS verification_codes (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    email        VARCHAR(255) NOT NULL,
+    code_hash    VARCHAR(64) NOT NULL,
+    scene        VARCHAR(32) NOT NULL,
+    ip           VARCHAR(64) DEFAULT '',
+    attempts     INTEGER DEFAULT 0,
+    used         INTEGER DEFAULT 0,
+    expires_at   TEXT NOT NULL,
+    created_at   TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_AUDIT_LOGS_DDL = """
+CREATE TABLE IF NOT EXISTS audit_logs (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    seq          INTEGER NOT NULL UNIQUE,
+    event_type   VARCHAR(64) NOT NULL,
+    user_id      INTEGER DEFAULT 0,
+    operator_id  INTEGER DEFAULT 0,
+    ip           VARCHAR(64) DEFAULT '',
+    detail       TEXT DEFAULT '{}',
+    prev_hash    VARCHAR(64) DEFAULT '',
+    curr_hash    VARCHAR(64) DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_SIGNUP_WHITELIST_DDL = """
+CREATE TABLE IF NOT EXISTS signup_whitelist (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    type         VARCHAR(16) NOT NULL,
+    value        VARCHAR(255) NOT NULL,
+    remark       VARCHAR(128) DEFAULT '',
+    created_by   VARCHAR(64) DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE (type, value)
+)
+"""
+
+_LOGIN_FAILURES_DDL = """
+CREATE TABLE IF NOT EXISTS login_failures (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    identifier   VARCHAR(255) NOT NULL,
+    ip           VARCHAR(64) DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# P0-3: OAuth 回调成功后的一次性交换码——替代 URL 直接传递 access_token
+_EXCHANGE_CODES_DDL = """
+CREATE TABLE IF NOT EXISTS exchange_codes (
+    code         TEXT PRIMARY KEY,
+    user_id      INTEGER NOT NULL,
+    username     VARCHAR(64) NOT NULL,
+    provider     VARCHAR(32) NOT NULL,
+    token_version INTEGER DEFAULT 0,
+    is_new       INTEGER DEFAULT 0,
+    created_at   REAL NOT NULL,
+    expires      REAL NOT NULL
+)
+"""
+
+_BINDING_TICKETS_DDL = """
+CREATE TABLE IF NOT EXISTS binding_tickets (
+    ticket           TEXT PRIMARY KEY,
+    initiating_user_id  INTEGER NOT NULL,
+    provider         VARCHAR(32) NOT NULL,
+    external_id      VARCHAR(128) NOT NULL,
+    external_login   VARCHAR(128) DEFAULT '',
+    external_name    VARCHAR(128) DEFAULT '',
+    external_avatar  VARCHAR(512) DEFAULT '',
+    original_user_id INTEGER NOT NULL,
+    created_at       REAL NOT NULL,
+    expires          REAL NOT NULL
+)
+"""
+
+_NEW_TABLES.extend([
+    ("grape_accounts", _GRAPE_ACCOUNTS_DDL),
+    ("external_identities", _EXTERNAL_IDENTITIES_DDL),
+    ("verification_codes", _VERIFICATION_CODES_DDL),
+    ("audit_logs", _AUDIT_LOGS_DDL),
+    ("signup_whitelist", _SIGNUP_WHITELIST_DDL),
+    ("login_failures", _LOGIN_FAILURES_DDL),
+    ("exchange_codes", _EXCHANGE_CODES_DDL),
+    ("binding_tickets", _BINDING_TICKETS_DDL),
+])
+
+# grape_accounts email 唯一索引（D12: 统一用 NULL 表示无 email，普通唯一索引）
+# SQL 标准中 NULL 不参与唯一约束，多行 NULL 不冲突，SQLite 和 MySQL 行为一致
+_GRAPE_ACCOUNTS_INDEX_SQLITE = """
+CREATE UNIQUE INDEX IF NOT EXISTS uq_active_email
+ON grape_accounts(email)
+"""
+
+# ===== Community tables (grape-website community page) =====
+_COMMUNITY_DDL = """
+CREATE TABLE IF NOT EXISTS community_posts (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id         INTEGER NOT NULL DEFAULT 0,
+    username        TEXT NOT NULL DEFAULT '',
+    title           TEXT NOT NULL,
+    content         TEXT DEFAULT '',
+    category        TEXT DEFAULT 'tech',
+    views           INTEGER DEFAULT 0,
+    likes           INTEGER DEFAULT 0,
+    comments_count  INTEGER DEFAULT 0,
+    is_deleted      INTEGER DEFAULT 0,
+    created_at      TEXT DEFAULT (datetime('now'))
+)"""
+
+_COMMUNITY_COMMENTS_DDL = """
+CREATE TABLE IF NOT EXISTS community_comments (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id     INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL DEFAULT 0,
+    username    TEXT NOT NULL DEFAULT '',
+    content     TEXT NOT NULL,
+    is_deleted  INTEGER DEFAULT 0,
+    created_at  TEXT DEFAULT (datetime('now'))
+)"""
+
+_COMMUNITY_LIKES_DDL = """
+CREATE TABLE IF NOT EXISTS community_post_likes (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    post_id     INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    UNIQUE(post_id, user_id)
+)"""
+
+_NEW_TABLES.extend([
+    ("community_posts", _COMMUNITY_DDL),
+    ("community_comments", _COMMUNITY_COMMENTS_DDL),
+    ("community_post_likes", _COMMUNITY_LIKES_DDL),
+])
+
 # 需要 org_id 列的核心表
 _ORG_ID_TABLES = [
     "managed_repos",
@@ -1168,6 +1350,78 @@ def _create_tables():
             log.info(f"Table '{name}' ready")
         except Exception as e:
             log.warning(f"Create table '{name}' failed: {e}")
+
+    # grape_accounts email 唯一索引（D12: 统一用 NULL + 普通唯一索引，SQLite 和 MySQL 统一语法）
+    # 幂等补列：verification_codes.ip（老库可能缺此列）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "verification_codes", "ip", "VARCHAR(64) DEFAULT ''")
+            db.commit()
+    except Exception as e:
+        log.warning(f"Ensure verification_codes.ip column failed: {e}")
+
+    # D11: 幂等补列 grape_accounts.last_login_at + email_verified
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "grape_accounts", "last_login_at", "TEXT DEFAULT NULL")
+            _ensure_column(c, "grape_accounts", "email_verified", "INTEGER DEFAULT 0")
+            _ensure_column(c, "grape_accounts", "email_source", "VARCHAR(16) DEFAULT NULL")
+            _ensure_column(c, "grape_accounts", "email_is_placeholder", "INTEGER DEFAULT 0")
+            _ensure_column(c, "grape_accounts", "created_by_oauth", "INTEGER DEFAULT 0")
+            db.commit()
+    except Exception as e:
+        log.warning(f"Ensure grape_accounts columns failed: {e}")
+
+    # D22: 幂等补列 external_identities.status + unbound_at（软删除/恢复绑定）
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "external_identities", "status", "INTEGER DEFAULT 1")
+            _ensure_column(c, "external_identities", "unbound_at", "TEXT DEFAULT NULL")
+            db.commit()
+    except Exception as e:
+        log.warning(f"Ensure external_identities columns failed: {e}")
+
+    # 修复 email 列 Default：MySQL 可能把 VARCHAR 默认设为空字符串而非 NULL，
+    # 导致绕过代码直接 INSERT 时多个空串触发唯一冲突。
+    # 幂等 ALTER MODIFY 把 Default 改回 NULL（MySQL 专用，SQLite 不支持 MODIFY）。
+    try:
+        from src.mysql_compat import get_db_backend
+        if get_db_backend() == "mysql":
+            with db_lock:
+                db.execute("ALTER TABLE grape_accounts MODIFY COLUMN email VARCHAR(255) DEFAULT NULL")
+                db.commit()
+                log.info("grape_accounts.email Default corrected to NULL")
+    except Exception as e:
+        log.warning(f"Fix email Default failed (may be SQLite, expected): {e}")
+
+    _index_sqls = [
+        # verification_codes 索引
+        "CREATE INDEX IF NOT EXISTS idx_vc_email_scene "
+        "ON verification_codes(email, scene, used, expires_at)",
+        "CREATE INDEX IF NOT EXISTS idx_vc_ip_time "
+        "ON verification_codes(ip, created_at)",
+        # login_failures 索引
+        "CREATE INDEX IF NOT EXISTS idx_lf_identifier_time "
+        "ON login_failures(identifier, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_lf_ip_time "
+        "ON login_failures(ip, created_at)",
+        # audit_logs 索引（seq UNIQUE 约束——集群并发安全，DDL 中已有 UNIQUE，此索引兼容已有表）
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_seq "
+        "ON audit_logs(seq)",
+        # grape_accounts email 唯一索引（D12: NULL + 普通唯一索引，SQLite + MySQL 统一）
+        _GRAPE_ACCOUNTS_INDEX_SQLITE,
+    ]
+
+    for idx_sql in _index_sqls:
+        try:
+            with db_lock:
+                db.execute(idx_sql)
+                db.commit()
+        except Exception as e:
+            log.warning(f"Create index failed: {e}")
 
 
 def _ensure_column(c, tbl: str, col: str, ddl: str):
@@ -1522,6 +1776,38 @@ def _migrate_whitelist_from_file():
         log.warning(f"Whitelist file migration skipped: {e}")
 
 
+def _ensure_whitelist_columns():
+    """确保 login_whitelist 表有所有 provider 配置的白名单列。
+
+    遍历 oauth_providers 配置，对每个 provider 的 whitelist_column
+    检查列是否存在，不存在则 ALTER TABLE 添加。新增平台无需手动建列。
+    """
+    try:
+        from src.auth.providers import list_providers, get_provider
+        with db_lock:
+            c = db.cursor()
+            cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
+            for provider in list_providers():
+                cfg = get_provider(provider) or {}
+                col = cfg.get("whitelist_column")
+                if not col or col in cols:
+                    continue
+                # 列名安全校验
+                import re as _re
+                if not _re.match(r'^[a-z_]+$', col):
+                    log.warning(f"Invalid whitelist_column '{col}' for provider {provider}, skipping")
+                    continue
+                try:
+                    c.execute(f"ALTER TABLE login_whitelist ADD COLUMN {col} TEXT DEFAULT ''")
+                    cols.append(col)
+                    log.info(f"Added whitelist column: {col} (provider={provider})")
+                except Exception as e:
+                    log.warning(f"Failed to add whitelist column {col}: {e}")
+            db.commit()
+    except Exception as e:
+        log.warning(f"_ensure_whitelist_columns failed: {e}")
+
+
 def _init_scene_category_data():
     """初始化 scene_category 表的 6 条分类数据（幂等）。
 
@@ -1843,6 +2129,7 @@ def init_database():
                 _cleanup_stale_meta()
                 _cleanup_chat_shared_worker_runtime()
                 _migrate_whitelist_from_file()
+                _ensure_whitelist_columns()
                 _cleanup_old_latency_logs()
                 # ===== Issue-11: DevOps 市场数据初始化 =====
                 _init_scene_category_data()
@@ -1877,6 +2164,7 @@ def init_database():
         _cleanup_stale_meta()
         _cleanup_chat_shared_worker_runtime()
         _migrate_whitelist_from_file()
+        _ensure_whitelist_columns()
         _cleanup_old_latency_logs()
         # ===== Issue-11: DevOps 市场数据初始化 =====
         _init_scene_category_data()
@@ -2352,9 +2640,12 @@ def _cleanup_stale_meta():
 def _cleanup_old_latency_logs():
     """清理 7 天前的 API 慢请求日志"""
     try:
+        from src.mysql_compat import get_db_backend
+        is_mysql = get_db_backend() == "mysql"
+        time_expr = "NOW() - INTERVAL 7 DAY" if is_mysql else "datetime('now', '-7 days')"
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM api_latency_log WHERE created_at < datetime('now', '-7 days')")
+            c.execute(f"DELETE FROM api_latency_log WHERE created_at < {time_expr}")
             deleted = c.rowcount
             db.commit()
         if deleted:
@@ -2650,6 +2941,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN repo_key VARCHAR(512) DEFAULT NULL",
         # JWT 撤销——token_version 字段（改密码/logout 时 +1）
         "ALTER TABLE user_accounts ADD COLUMN token_version INTEGER DEFAULT 0",
+        # Issue #281: admin 禁用用户标记——独立于 token_version，心跳/登录不可绕过
+        "ALTER TABLE user_accounts ADD COLUMN is_disabled INTEGER DEFAULT 0",
         # GitHub OAuth 集成——user_accounts 新增 github 字段
         "ALTER TABLE user_accounts ADD COLUMN github_id TEXT DEFAULT ''",
         "ALTER TABLE user_accounts ADD COLUMN github_api_token TEXT DEFAULT ''",
@@ -2939,54 +3232,40 @@ def _migrate_tables():
                 log.info(f"Migrated managed_repos.bot_username legacy placeholder -> {_global_bot_username} ({c.rowcount} rows)")
     except Exception as e:
         log.warning(f"Migrate bot_username placeholder failed: {e}")
-    # 首次运行加载配置:从 global-bot-token.json 将 OAuth 配置写入 meta 表(仅 meta 无该 key 时)
-    # 兼容旧版:若存在 user_accounts default 账户,仍尝试从其中迁移 OAuth 配置到 meta 表
+    # default 账户迁移（旧版兼容——OAuth 配置曾存于 user_accounts default 账户）
+    # OAuth 配置迁移由 migrate_oauth_providers() 统一处理（user/db.py 模块加载时执行）
     try:
-        import json as _cfg_json, os as _cfg_os
-        _cfg_path = _cfg_os.path.join(_CONFIG_DIR, "global-bot-token.json")
-        _cfg_data = {}
-        if _cfg_os.path.exists(_cfg_path):
-            with open(_cfg_path, "r", encoding="utf-8") as _f:
-                _cfg_data = _cfg_json.load(_f) or {}
-        _oauth_keys = [
-            ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
-            ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
-            ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
-            ("github_oauth_client_id", "oauth_github_client_id"),
-            ("github_oauth_client_secret", "oauth_github_client_secret"),
-            ("github_oauth_redirect_uri", "oauth_github_redirect_uri"),
-        ]
         with db_lock:
             c = db.cursor()
-            migrated = False
-            # 1. 优先从 global-bot-token.json 首次加载
-            for src_key, meta_key in _oauth_keys:
-                val = _cfg_data.get(src_key, "") or ""
-                if val:
-                    c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
-                    if c.fetchone()[0] == 0:
-                        c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
-                        migrated = True
-            # 2. 兼容旧版 default 账户(OAuth 配置曾存于 user_accounts)
             c.execute("SELECT * FROM user_accounts WHERE username='default'")
             row = c.fetchone()
             if row:
                 cols = [d[0] for d in c.description]
                 acc = dict(zip(cols, row))
+                # 迁移 default 账户中的 OAuth 配置到 meta 表（幂等）
+                _oauth_keys = [
+                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
+                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
+                    ("github_oauth_client_id", "oauth_github_client_id"),
+                    ("github_oauth_client_secret", "oauth_github_client_secret"),
+                    # 不迁移 redirect_uri——D27 已废弃
+                ]
+                migrated = False
                 for src_key, meta_key in _oauth_keys:
                     val = acc.get(src_key, "") or ""
                     if val:
                         c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
                         if c.fetchone()[0] == 0:
-                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                                      (meta_key, val))
                             migrated = True
-                # 3. 删除 default 账户(OAuth 已收敛到 meta 表)
+                # 删除 default 账户（OAuth 已收敛到 meta 表）
                 c.execute("DELETE FROM user_accounts WHERE username='default'")
-            db.commit()
-            if migrated:
-                log.info("Loaded OAuth config (gitcode client id/secret) from global-bot-token.json into meta table")
-            else:
-                log.info("Deleted default account (no config to migrate)")
+                db.commit()
+                if migrated:
+                    log.info("Migrated OAuth config from default account to meta table")
+                else:
+                    log.info("Deleted default account (no config to migrate)")
     except Exception as e:
         log.warning(f"Migrate/delete default account failed: {e}")
     # 迁移旧表 agent_sessions -> devops_agent_session(幂等)
@@ -3468,6 +3747,8 @@ def _migrate_tables():
             _ensure_column(c, "issue", "a2a_seq", "INTEGER")
             _ensure_column(c, "issue", "parent_issue_id", "TEXT DEFAULT ''")
             _ensure_column(c, "issue", "updated_at", "TEXT DEFAULT ''")
+            # Issue #329: cross-pipeline handoff carried context
+            _ensure_column(c, "issue", "carried_context", "TEXT DEFAULT ''")
             db.commit()
     except Exception as e:
         log.warning(f"Phase B2 issue 收编字段补列失败: {e}")

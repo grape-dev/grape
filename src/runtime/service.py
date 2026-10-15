@@ -23,9 +23,10 @@ _DEFAULT_MODE = EXEC_MODE_AUTO
 def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = "", task_user_id: int = 0) -> bool:
     """检查 pool_engine_ids 中的引擎是否有任何一个能真正认领该 tag 的任务。
 
-    检查维度：在线 + healthy + probe_status + 心跳新鲜（Issue #259）+ 有 tag 能力 + scope 匹配 + 并发槽。
-    返回 True = 池里有能干的引擎，不应清空 pool_engine_ids。
-    返回 False = 池里全不可达，应清空 pool_engine_ids 放行。
+    检查维度：在线 + healthy + probe_status + 心跳新鲜（Issue #259）+ 有 tag 能力 + scope 匹配。
+    返回 True = 池里有物理可达的引擎，应保留绑定并排队等待容量。
+    返回 False = 池里全不可达，由调用方诚实失败，不能放行池外引擎。
+    并发容量由实际认领检查；满槽是暂时忙碌，不是不可达（Issue #306）。
 
     Issue #134 扩展：健康分维度不在此函数判定——健康分低但物理可达的引擎
     仍然算 reachable（不清空 pool），claim_by_tag 中的健康分检查会阻止它们认领。
@@ -92,14 +93,6 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                             continue  # user scope 但用户不匹配
                     except Exception:
                         pass
-            # 并发槽可用？
-            c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (eid,))
-            _br = c.fetchone()
-            if _br:
-                _busy = _br[0] or 0
-                _max = _br[1] or 1
-                if _busy >= _max:
-                    continue  # 已满载
             # 全部通过：有能干的引擎（物理可达）
             return True
         except Exception:
@@ -113,7 +106,7 @@ def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str
     """Issue #253 改动2：绑定引擎全部物理不可达 → 任务诚实失败（宁失败，不跑飞）。
 
     claim / claim_by_tag 认领时发现 pool_engine_ids 内引擎全部不可达（离线/心跳过期/
-    无 tag/scope 不符/满槽）时调用。替代原"清空 pool_engine_ids 放行全站"的降级。
+    无 tag/scope 不符）时调用。满槽继续排队。替代原"清空 pool_engine_ids 放行全站"的降级。
 
     Lock contract：调用方必须已持有 db_lock（与 _check_pool_engines_reachable 相同）。
     c 为调用方传入的已持有锁事务的 cursor；本函数内部 commit 并同步事件终态。
@@ -130,7 +123,7 @@ def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str
         pass
     _now = datetime.now(timezone.utc).isoformat()
     _reason = (f"绑定的 {len(engine_ids)} 台引擎（{', '.join(_names) or ', '.join(str(x) for x in engine_ids)}）"
-               f"全部不可达（离线/失联/无对应标签/满载），任务停止派发"
+               f"全部不可达（离线/失联/无对应标签/范围不匹配），任务停止派发"
                f"{'，标签=' + pool_tag if pool_tag else ''}（Issue #253）")
     try:
         c.execute(
@@ -1344,7 +1337,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     "  )) ORDER BY t.created_at ASC LIMIT 1"
                 )
             elif scope == "user":
-                c.execute("SELECT id FROM user_accounts WHERE username=?", (owner_name,))
+                c.execute("SELECT id FROM grape_accounts WHERE username=?", (owner_name,))  # D32-补丁
                 uid_row = c.fetchone()
                 uid = uid_row[0] if uid_row else 0
                 params.append(uid)
@@ -1765,34 +1758,40 @@ def report_progress(task_id, progress):
 def _detect_business_failure(agent_type, output, result_text):
     """检测 agent 进程正常退出(exit_code=0)但业务实际失败的情况。
 
-    解析结构化 JSON 输出的 conclusion/next_step 字段，匹配部署/操作失败关键词。
+    只解析结构化 JSON 输出的 conclusion 字段做失败关键词匹配。
     返回 True 表示业务失败（应覆盖 exit_code 为非 0）。
 
     仅对 sre agent_type 生效（部署类任务），其他 agent 不受影响。
+
+    作用域收紧（issue 内部误判案例教训）：
+    - 旧逻辑拼接 conclusion+next_step+issue_summary 全文匹配，且无结构化输出时
+      降级扫整个 result_text；长距正则 `部署.*失败` 会跨整句把否定语境
+      （"部署验证通过：唯一失败用例为基线既有失败（非本 PR 引入）"）连起来，
+      把成功的任务误标 failed。
+    - 现只扫 conclusion 单字段：它是 agent 对任务结果的一句定性结论，
+      表述短、不含过程叙述，长距正则的跨句连词风险被结构性消除；
+      next_step/issue_summary/result_text 里的过程性描述不再参与判定。
+    - 长距 `.*` 模式一并收紧为短窗口，防止 conclusion 内部仍出现跨从句连词。
     """
     if agent_type != "sre":
         return False
     if not output:
+        # 无结构化输出 → 不做业务失败判定（宁缺勿滥：检测面收窄到 conclusion，
+        # 降级扫 result_text 的路径删除——那是 内部误判案例的主通道）
         return False
-    # 拼接 conclusion + next_step + issue_summary 做全文匹配
-    blob = " ".join(filter(None, [
-        output.get("conclusion", ""),
-        output.get("next_step", ""),
-        output.get("issue_summary", ""),
-    ]))
-    if not blob:
-        # 降级：从 result_text 里匹配
-        blob = result_text or ""
+    blob = output.get("conclusion", "") or ""
     if not blob:
         return False
     import re
     # 失败关键词：部署中止/失败、无法购买/创建、未认证、凭证不足、部署未成功等
+    # （短窗口：部署后最多隔 2 个常见连接字，不再跨句/跨从句连词）
     failure_patterns = [
-        r"部署.*失败", r"部署.*中止", r"部署.*未成功", r"部署.*无法",
+        r"部署[了中于]{0,2}失败", r"部署[了中于]{0,2}中止", r"部署[了中于]{0,2}未成功",
+        r"部署[了中于]{0,2}无法",
         r"无法购买", r"无法创建", r"无法部署",
-        r"未完成.*认证", r"未实名", r"实名认证",
-        r"凭证.*不足|凭证.*缺失|凭证.*无效",
-        r"Ecs\.0707", r"AccessDenied", r"auth.*fail",
+        r"未完成.{0,4}认证", r"未实名", r"实名认证",
+        r"凭证.{0,4}(?:不足|缺失|无效)",
+        r"Ecs\\.0707", r"AccessDenied", r"auth.{0,8}fail",
         r"操作失败", r"执行失败",
         r"无法继续", r"中止\b",
     ]

@@ -69,25 +69,66 @@ class TestWorkerPackage:
 
     def test_version_changes_rebuild(self):
         import src.worker_package as wp
-        # 无 git 环境时版本指纹 = manifest 内容指纹；mtime 变化应触发指纹变化
+        # 无 git 环境时版本指纹 = manifest 内容 sha256 指纹；内容变化触发指纹变化。
+        # （mtime 不参与指纹——内容不变不应重建包，原断言 utime 触发指纹变化是错的）
         m1 = wp._manifest_version()
         cf = os.path.join(wp.ROOT, "src", "config.py")
-        old = os.path.getmtime(cf)
-        os.utime(cf, (old + 5, old + 5))
+        with open(cf, "r", encoding="utf-8") as f:
+            original = f.read()
         try:
+            with open(cf, "a", encoding="utf-8") as f:
+                f.write("\n# test_version_changes_rebuild touch\n")
             m2 = wp._manifest_version()
-            assert m2 != m1
-            p2 = wp.build_package()
-            with open(wp.VERSION_PATH, encoding="utf-8") as f:
-                assert f.read().strip() == wp.package_version()
+            assert m2 != m1, "manifest 指纹应随文件内容变化"
         finally:
-            os.utime(cf, (old, old))
+            with open(cf, "w", encoding="utf-8") as f:
+                f.write(original)
+        # 恢复后指纹复原
+        m3 = wp._manifest_version()
+        assert m3 == m1, "恢复内容后指纹应复原"
 
     def test_manifest_files_exist(self):
         from src.worker_package import MANIFEST, ROOT
         for item in MANIFEST:
             path = os.path.join(ROOT, item)
             assert os.path.exists(path), f"manifest 项缺失: {item}"
+
+    def test_worker_package_import_closure(self, tmp_path):
+        """import 闭包守卫：包解压后必须在干净子进程里可 import（防 MANIFEST 漏文件）。
+
+        背景（2026-10-14 五台 worker 心跳全断事故）：8908cadb1 给 src/config.py 加了
+        顶层 ``from src.auth.security_config import ...``，config.py 在 worker 包里但
+        src/auth/ 不在 → runtime-agent 启动即 ModuleNotFoundError，systemd 无限重启。
+        当时的 test_build_package_contents 只防"多打文件"（服务端泄露），不防"漏打
+        文件"（import 失败）——本测试补上后半边。
+
+        实现要点：必须用 subprocess 干净隔离。曾实测：主进程 sys.path 带着仓库路径时，
+        src.auth 会从仓库（而非包内）解析成功，产生假阳性（import OK 但 worker 实崩）。
+        """
+        import subprocess
+        from src.worker_package import build_package
+        p = build_package()
+        with tarfile.open(p) as tf:
+            tf.extractall(tmp_path, filter="data")
+        pkg_root = os.path.join(str(tmp_path), "grape-worker")
+        assert os.path.isfile(os.path.join(pkg_root, "src", "config.py"))
+
+        code = (
+            "import sys\n"
+            "sys.path.insert(0, sys.argv[1])\n"
+            "import src.config\n"           # 启动链第一环（事故死因）
+            "import src.runtime.agent\n"    # worker 主模块全量闭包
+            "print('IMPORT_CLOSURE_OK')\n"
+        )
+        r = subprocess.run(
+            [sys.executable, "-c", code, pkg_root],
+            capture_output=True, text=True, timeout=300,
+        )
+        assert r.returncode == 0, (
+            f"worker 包 import 闭包失败（stdout={r.stdout.strip()[:500]} "
+            f"stderr={r.stderr.strip()[-800:]}）——MANIFEST 缺文件或新增了顶层服务端 import"
+        )
+        assert "IMPORT_CLOSURE_OK" in r.stdout
 
 
 class TestGrapeCliWheel:
@@ -172,3 +213,31 @@ class TestInstallEndpoints:
         client, _ = self._auth_client()
         r = client.get("/api/runtime/install/latest", headers={"Authorization": "Bearer rta_wrong"})
         assert r.status_code == 401
+
+
+# ===== B5 (Issue #257): 版本归一化测试 =====
+
+class TestNormalizeWorkerVersion:
+    """B5: worker_package.normalize_worker_version 老版本串兼容。"""
+
+    def test_new_format_unchanged(self):
+        from src.worker_package import normalize_worker_version
+        assert normalize_worker_version("h-abc123def456") == "h-abc123def456"
+
+    def test_old_format_strips_suffix(self):
+        from src.worker_package import normalize_worker_version
+        result = normalize_worker_version("h-abc123def4567890-w111abcd-p222abcd")
+        assert result == "h-abc123def456"
+        assert "-w" not in result
+        assert "-p" not in result
+
+    def test_empty_string(self):
+        from src.worker_package import normalize_worker_version
+        assert normalize_worker_version("") == ""
+
+    def test_old_new_same_code_matches(self):
+        """老格式和新格式指向同一代码版本时归一化后相等。"""
+        from src.worker_package import normalize_worker_version
+        old_format = "h-abc123def4567890-w111-p222"
+        new_format = "h-abc123def456"
+        assert normalize_worker_version(old_format) == normalize_worker_version(new_format)

@@ -13,7 +13,7 @@ if sys.version_info < (3, 10):
           file=sys.stderr)
     sys.exit(1)
 
-import asyncio, json, os, random, time
+import asyncio, json, os, random, re, time
 import base64 as _b64
 import zipfile as _zf
 import urllib.request as _urllib
@@ -32,6 +32,11 @@ _CODEARTS_ALLOW_PERMS = [
 ]
 
 from src.config import log, CHAT_CWD_BASE
+from src.runtime.client import CredentialRevokedError
+
+# 凭据吊销信号（全局）：_wrap 独立 task 中感知 401 时置位，主循环检查后退出进程。
+# create_task 的异常不穿透主循环，用 Event 跨 task 传递退出信号。
+_credential_revoked = asyncio.Event()
 
 # Worker 日志内存缓冲区——收集最近 ERROR/WARNING 日志，心跳时上报给主控
 import collections as _collections
@@ -54,6 +59,8 @@ _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
 _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长时间）
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
+_worker_url_probe_cache: dict = {}  # {(rts, task_server_url): (ts, reachable)}
+_worker_url_probe_lock = _threading.Lock()
 _worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 _worker_probe_lock = _threading.Lock()
 _worker_probe_thread = None
@@ -78,12 +85,14 @@ def _probe_hermes_acp(cli_path: str) -> dict:
     start = _time_mod.time()
     proc = None
     try:
+        # 二进制模式（同 _probe_hwcloud_acp 修复——TextIOWrapper 解码缓冲
+        # 会吞掉 select 之后的字节；hermes 暂未触发仅因无大块多字节通知，
+        # 属潜伏同款 bug，一并修复）。
         proc = _subprocess.Popen(
             [agent_cmd, "acp"],
             stdin=_subprocess.PIPE,
             stdout=_subprocess.PIPE,
             stderr=_subprocess.PIPE,
-            text=True,
             bufsize=0,
             start_new_session=True,
         )
@@ -91,7 +100,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         import select as _sel
 
         def _send(msg: dict):
-            proc.stdin.write(_json.dumps(msg) + "\n")
+            proc.stdin.write((_json.dumps(msg) + "\n").encode("utf-8"))
             proc.stdin.flush()
 
         def _read_response(req_id: int, timeout: float) -> dict | None:
@@ -105,7 +114,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                 _line = proc.stdout.readline()
                 if not _line:
                     return None
-                _line = _line.strip()
+                _line = _line.strip().decode("utf-8", errors="replace")
                 if not _line.startswith("{"):
                     continue
                 try:
@@ -192,6 +201,143 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                     pass
 
 
+
+def _probe_hwcloud_acp(cli_path: str) -> dict:
+    """hwcloud ACP 模式探活：initialize + session/new + 轻量 prompt。
+
+    与 hermes 探活同构，差异（docs/hwcloud-runtime-acp-design.md 实测行为）：
+    - 启动命令 （非  子命令）
+    - prompt 前必须 session/new（对空/不存在 sessionId 的 prompt 报 not found）
+    - mcpServers 必须传 []（传 {} 报 -32602）
+    """
+    import json as _json
+    import shutil as _shutil
+
+    agent_cmd = cli_path or _shutil.which("hwcloud") or _shutil.which("hwcloud.cmd")
+    if not agent_cmd:
+        return {"status": "fail", "latency": 0, "error": "hwcloud CLI not found"}
+
+    start = _time_mod.time()
+    proc = None
+    try:
+        # 二进制模式（无 text=True）：TextIOWrapper 的内部解码缓冲会"吞掉"
+        # readline 之后仍在 Python 缓冲区里的字节（hwcloud session/new 发 18KB
+        # available_skills_update 含多字节 UTF-8 → ③ mcp_servers_update 与
+        # ④ response 被 TextIOWrapper 预读进缓冲区）——select 只查内核管道，
+        # 查不到 Python 缓冲区 → 永远 not-ready → 15s 超时假阴性。
+        # 设备侧对照实测：text=True 0/5 OK，二进制模式 5/5 OK（2026-10-13）。
+        # 此前"O_NONBLOCK 与文本缓冲冲突"的结论是同源 bug 的另一种表现。
+        proc = _subprocess.Popen(
+            [agent_cmd, "serve", "--acp"],
+            stdin=_subprocess.PIPE,
+            stdout=_subprocess.PIPE,
+            stderr=_subprocess.PIPE,
+            bufsize=0,
+            start_new_session=True,
+        )
+
+        import select as _sel
+
+        def _send(msg: dict):
+            proc.stdin.write((_json.dumps(msg) + "\n").encode("utf-8"))
+            proc.stdin.flush()
+
+        # select + readline 轮询；二进制模式下 readline 返回 bytes。
+        _fd = proc.stdout.fileno()
+        _probe_buf = [""]
+
+        def _read_response(req_id: int, timeout: float) -> dict | None:
+            deadline = _time_mod.time() + timeout
+            while _time_mod.time() < deadline:
+                _ready, _, _ = _sel.select([_fd], [], [], 0.3)
+                if not _ready:
+                    if proc.poll() is not None:
+                        return None
+                    continue
+                _line = proc.stdout.readline()
+                if not _line:
+                    return None
+                _line = _line.strip().decode("utf-8", errors="replace")
+                if not _line.startswith("{"):
+                    continue
+                try:
+                    _msg = _json.loads(_line)
+                except _json.JSONDecodeError:
+                    continue
+                if "id" not in _msg or "method" in _msg:
+                    if "method" in _msg and "id" in _msg:
+                        # 标准 ACP outcome 结构（openagent server.go 3237 处理 union 判别；
+                        # 旧 {"optionId": ""} 走 legacy 路径且空值 fail-closed）。
+                        # 探活不需要执行工具 → 明确 cancelled。
+                        _send({"jsonrpc": "2.0", "id": _msg["id"],
+                               "result": {"outcome": {"outcome": "cancelled"}}})
+                    continue
+                if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
+                    return _msg
+            return None
+
+        # 1. initialize
+        _send({"jsonrpc": "2.0", "id": 1, "method": "initialize",
+               "params": {"protocolVersion": 1,
+                          "clientInfo": {"name": "grape-probe", "version": "1.0"},
+                          "capabilities": {}}})
+        _init_resp = _read_response(1, _ACP_PROBE_TIMEOUT)
+        if not _init_resp or "error" in _init_resp:
+            latency = round(_time_mod.time() - start, 1)
+            _err = "no response" if not _init_resp else _init_resp["error"].get("message", "")[:200]
+            return {"status": "fail", "latency": latency, "error": f"ACP initialize: {_err}"}
+
+        # 2. session/new（hwcloud 必须先建会话；mcpServers 必须空数组）
+        # cwd 用轻量临时目录：家目录在 devspace/网络挂载场景可能不可写或初始化慢
+        # （session/new 的 process manager + 持久化依赖 cwd 可用），探活不应受其拖累
+        import tempfile as _tempfile
+        _probe_cwd = _tempfile.mkdtemp(prefix="hwcloud-probe-")
+        _send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+               "params": {"cwd": _probe_cwd, "mcpServers": []}})
+        _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
+        if not _new_resp or "error" in _new_resp:
+            latency = round(_time_mod.time() - start, 1)
+            _err = "no response" if not _new_resp else _new_resp["error"].get("message", "")[:200]
+            return {"status": "fail", "latency": latency, "error": f"ACP session/new: {_err}"}
+        _sid = (_new_resp.get("result") or {}).get("sessionId", "")
+
+        # 3. session/prompt "hi" — 端到端验证 provider + 模型推理
+        _send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+               "params": {"sessionId": _sid,
+                          "prompt": [{"type": "text", "text": "hi"}]}})
+        _prompt_resp = _read_response(3, _ACP_PROMPT_TIMEOUT)
+        if not _prompt_resp:
+            latency = round(_time_mod.time() - start, 1)
+            return {"status": "fail", "latency": latency,
+                    "error": f"ACP prompt no response (provider/model unreachable?)"}
+        if "error" in _prompt_resp:
+            latency = round(_time_mod.time() - start, 1)
+            _err = _prompt_resp["error"].get("message", str(_prompt_resp["error"]))[:200]
+            return {"status": "fail", "latency": latency, "error": f"ACP prompt error: {_err}"}
+
+        latency = round(_time_mod.time() - start, 1)
+        _stop = (_prompt_resp.get("result") or {}).get("stopReason", "unknown")
+        return {"status": "ok", "latency": latency, "error": "",
+                "output": f"ACP initialize+session/new+prompt ok (stopReason={_stop})"}
+
+    except FileNotFoundError:
+        return {"status": "fail", "latency": 0, "error": "hwcloud CLI not found"}
+    except Exception as e:
+        latency = round(_time_mod.time() - start, 1)
+        return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+    finally:
+        if proc:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
+
+
+
 def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     """对本机引擎发起测试对话，返回探测结果。
 
@@ -201,6 +347,10 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     # hermes 使用 ACP 模式探活
     if engine_name == "hermes":
         return _probe_hermes_acp(cli_path)
+    # hwcloud 使用 ACP 模式探活（与实际任务执行路径一致：hwcloud serve --acp）
+    if engine_name == "hwcloud":
+        return _probe_hwcloud_acp(cli_path)
+
 
     cmd = _PROBE_COMMANDS.get(engine_name)
     if not cmd:
@@ -593,7 +743,12 @@ def _discover_local_runtimes() -> list[dict]:
         # hermes：ACP 依赖可用才算真健康（缺失时已尝试自动补装）
         if healthy and (r["name"] or "").lower() == "hermes":
             healthy = _ensure_hermes_acp(cli)
-        out.append({"name": r["name"], "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+        # display_name：展示名映射（hwcloud → AIShell；register 接口落 DB display_name 列）
+        from src.runtime.instances import engine_display_name, ENGINE_DISPLAY_NAMES
+        _et = (r["name"] or "").strip().lower()
+        _dn = ENGINE_DISPLAY_NAMES.get(_et, "")
+        out.append({"name": r["name"], "display_name": (_dn.capitalize() if _dn else r["name"]),
+                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
     return out
 
 
@@ -636,6 +791,8 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
         return "codearts"
     if name.startswith("codex"):
         return "codex"
+    if name.startswith("hwcloud") or name.startswith("aishell"):
+        return "hwcloud"
     return "opencode"
 
 
@@ -655,6 +812,9 @@ def _scan_local_skills() -> list[dict]:
         "hermes": engine_skill_dirs("hermes"),
         "opencode": engine_skill_dirs("opencode"),
         "codearts": engine_skill_dirs("codearts"),
+        # hwcloud(AIShell)：~/.hwcloud/skills——修复引擎卡片 skills 列表全空
+        # （扫描映射漏此引擎 → local_skills 上报无 entry → DB 空 → 前端空）
+        "hwcloud": engine_skill_dirs("hwcloud"),
     }
 
     # 用户自建 skill 目录（通过环境变量配置，可选，跨平台分隔符）
@@ -725,6 +885,10 @@ def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
         "hermes": [_os.path.join(home, ".hermes", "skills")],
         "opencode": [_os.path.join(home, ".config", "opencode", "skills")],
         "codearts": [_os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+        # hwcloud(AIShell)：与 _scan_local_skills/engine_skill_dirs 对齐
+        # （.agents/skills 为 openagent 原生全局根，.hwcloud/skills 为 grape 自定义）
+        "hwcloud": [_os.path.join(home, ".agents", "skills"),
+                    _os.path.join(home, ".hwcloud", "skills")],
     }
     extra = _os.environ.get("RUNTIME_EXTRA_SKILL_DIRS", "")
     scan_dirs = list(engine_dirs.get(engine_key, []))
@@ -829,6 +993,37 @@ def _cleanup_task_tmp(task: dict):
         log.info(f"cleaned {cleaned} temp files/dirs from {_tmp} after task")
 
 
+def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
+    """实测 RUNTIME_SERVER_URL 是否可达（内网 worker 判定，1s 短超时 + 60s 结果缓存）。
+
+    仅当 rts 与任务 server_url 不同才需要探测（相同无意义）；探测失败/异常一律
+    返回 False（保持原 server_url，宁可走已知公网地址也不猜内网）。
+    结果按 (rts, task_server_url) 缓存 60s——探测在任务执行路径上，不能每次任务
+    都付 1s 超时（不可达时）。缓存同时记录失败，避免不可达 worker 每任务空等。
+    """
+    if not rts or not task_server_url or rts.rstrip("/") == task_server_url.rstrip("/"):
+        return False
+    cache_key = (rts.rstrip("/"), task_server_url.rstrip("/"))
+    now = _time_mod.time()
+    with _worker_url_probe_lock:
+        hit = _worker_url_probe_cache.get(cache_key)
+        if hit and now - hit[0] < 60:
+            return hit[1]
+    ok = False
+    try:
+        probe_url = rts.rstrip("/") + "/api/health"
+        r = _subprocess.run(
+            ["curl", "-fsS", "--connect-timeout", "1", "--max-time", "2", "-o", "/dev/null", probe_url],
+            capture_output=True, timeout=3,
+        )
+        ok = r.returncode == 0
+    except Exception:
+        ok = False
+    with _worker_url_probe_lock:
+        _worker_url_probe_cache[cache_key] = (now, ok)
+    return ok
+
+
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
     """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
     按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。
@@ -840,6 +1035,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
     # hermes ACP 模式用 `hermes acp`，CLI 模式用 `hermes chat`；两个模式都匹配
     patterns = {
         "hermes": ["hermes acp", "hermes chat", "hermes -z"],
+        "hwcloud": ["hwcloud serve --acp"],
         "codearts": ["codearts run"],
         "codex": ["codex exec"],
     }.get(backend, ["opencode run"])
@@ -1408,7 +1604,13 @@ async def _execute_task(client, task, engine_name: str = ""):
     _is_local_worker = ("localhost" in _rts) or ("127.0.0.1" in _rts) or _rts.startswith("127.")
     _local_base = ""
     _old_server_url = task.get("server_url") or ""
-    if _is_local_worker:
+    if _is_local_worker or _worker_server_url_reachable(_rts, _old_server_url):
+        # 判定改为实测可达（2026-10-12 seq#552 复盘）：本地 worker 或内网 worker
+        # （RUNTIME_SERVER_URL 直连可达，如内网 worker 直连主控内网地址 3ms）
+        # 都覆盖为本 worker 直连地址；远程公网 worker（内网不可达）保持原
+        # server_url（公网 base）。旧逻辑只认 localhost/127.*，内网 worker 的
+        # A2A 走 meta.server_base_url 公网地址 NAT 回环不通 → a2a 调用反复超时
+        # （实测：内网直连 200/3ms，公网地址 NAT 回环三次 5s 超时全挂）。
         _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
         if "://" in _local_base and ":" not in _local_base.split("://", 1)[1]:
             _local_base = _local_base + ":3000"
@@ -1419,16 +1621,15 @@ async def _execute_task(client, task, engine_name: str = ""):
     # 否则 cwd 被 .skills 物化占住（目录存在但无 .git）会导致 `git worktree add` 报
     # "already exists"，coding agent 拿不到 git 基线后自行在项目根外建 worktree → 权限卡死。
     # 见 coding-worktree-skill-collision.md §4.1（方案 A）。
+    # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 注入 agent env——git 操作走 `grape git`。
     try:
         from src.runtime import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
-            _wt = repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                                _num, token=task.get("repo_gitcode_token") or "",
-                                                work_branch=_wb)
-            if _wt:
-                env["GIT_ASKPASS"] = repogit.askpass_path(_wt)
+            repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
+                                          _num, token=task.get("repo_gitcode_token") or "",
+                                          work_branch=_wb)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
@@ -1691,6 +1892,15 @@ async def _execute_task(client, task, engine_name: str = ""):
         _res.dispose()
         _cleanup_task_workdir(task, env)
         return done
+    except CredentialRevokedError:
+        # 凭据被吊销（revoke）——杀引擎进程，上抛让 _wrap/主循环退出 worker。
+        # PR 提交跳过（GitCode token 虽可用，但凭据已吊销说明设备已被管理员移除，
+        # 不应继续产出——避免"代码合入但服务端状态脱节"）。
+        log.error(f"task {tid}: credential revoked during execution, killing engine and aborting")
+        _kill_stale_engine(task, _backend_for_engine(engine_name))
+        _res.dispose()
+        _cleanup_task_workdir(task, env)
+        raise
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
         _res.dispose()
@@ -1699,7 +1909,12 @@ async def _execute_task(client, task, engine_name: str = ""):
 
 
 async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
-    """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。"""
+    """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
+
+    凭据被吊销（401 → CredentialRevokedError）时直接上抛——调用方退出进程，
+    不再当普通失败无限退避重试。
+    """
+    from src.runtime.client import CredentialRevokedError
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
@@ -1711,6 +1926,8 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
             log.info(f"re-registered successfully, new runtime ids: {ids}")
             return ids
         log.warning("re-register returned empty ids")
+    except CredentialRevokedError:
+        raise  # 凭据已吊销——重试无意义，上抛退出
     except Exception as e:
         log.warning(f"re-register failed: {e}")
     return None
@@ -1718,7 +1935,8 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
 
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
-                    _test_execute=None, _test_active=None, _test_active_tasks=None):
+                    _test_execute=None, _test_active=None, _test_active_tasks=None,
+                    _test_active_task_objs=None):
     """主循环：claim → 执行 → 回报，含心跳 + 自动重连自修复。
 
     自修复机制（三层防护，见 worker 自修复重连设计）：
@@ -1729,7 +1947,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     """
     active_sessions = _test_active if _test_active is not None else set()  # D9 串行槽：同 session 已有活跃任务，跳过（服务端 claim 已排除，防御双保险）
     active_tasks = _test_active_tasks if _test_active_tasks is not None else {}  # tid → sid 映射（task_id 去重 + sid 看门狗反查）
-    active_task_objs = {}    # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
+    active_task_objs = _test_active_task_objs if _test_active_task_objs is not None else {}  # tid → task dict（sid 看门狗杀进程需要 task 的 cwd/backend 信息）
     _requeue_cooldown = {}   # sid → 上次 requeue 时间戳，60s 冷却防 claim→requeue 空转死循环
     _sid_watchdog_last = 0.0 # 上次 sid 看门狗扫描时间
     hermes_active = 0         # hermes 引擎限并发 1（模型 API 分钟限流，实测并发双开 429，见 #53）
@@ -1750,6 +1968,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
     last_upgrade_attempt = 0.0
     last_version_check = 0.0
     _local_ver_cached = ""
+    _hb_session_just_reset = False  # B3: flag for version check after session reset
     UPGRADE_BACKOFF_BASE = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_BASE", "60"))
     UPGRADE_BACKOFF_MAX = float(os.environ.get("RUNTIME_UPGRADE_BACKOFF_MAX", "1800"))
     UPGRADE_MAX_RETRIES = int(os.environ.get("RUNTIME_UPGRADE_MAX_RETRIES", "5"))
@@ -1851,6 +2070,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             active_sessions.add(sid)
             active_tasks[tid] = sid
             task["_engine_name"] = e  # 供 sid 看门狗杀进程用
+            task["_claim_time"] = asyncio.get_running_loop().time()  # B2: zombie task age tracking
             active_task_objs[tid] = task
             if e == "hermes":
                 hermes_active += 1
@@ -1892,6 +2112,12 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
                     _kill_stale_engine(t, _backend_for_engine(e))
                     _result = None  # timeout → 走 fail 路径
+                except CredentialRevokedError:
+                    # 凭据吊销——_execute_task 已杀引擎清理。置全局 Event 让主循环
+                    # 下一轮退出进程（_wrap 是 create_task，异常不穿透主循环）。
+                    log.error(f"task {_tid}: credential revoked, signaling main loop to exit")
+                    _credential_revoked.set()
+                    return
                 # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
                 if _test_execute is None:
                     try:
@@ -1911,7 +2137,17 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             if _exit == 0 and not _text and _errs:
                                 await client.fail(_tid, f"engine errors: {'; '.join(_errs[:3])}", exit_code=_exit)
                             elif _exit != 0 and not _text:
-                                await client.fail(_tid, f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}", exit_code=_exit)
+                                # seq#559 排障盲点：errors 空时 fail 消息只剩空壳
+                                # （"engine exit_code=-1, errors: "），真实原因不可见。
+                                # 兜底拼 stderr（引擎快速失败时常有启动报错）；
+                                # 仍无线索时明确标注 errors 为空，提示查 worker 日志。
+                                _stderr_hint = (_result.get("stderr") or "").strip()[:200]
+                                _msg = f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}"
+                                if not _errs and _stderr_hint:
+                                    _msg += f" | stderr: {_stderr_hint}"
+                                elif not _errs:
+                                    _msg += " (engine reported no error details; check worker logs)"
+                                await client.fail(_tid, _msg, exit_code=_exit)
                             else:
                                 await client.complete(_tid, _text, _exit,
                                                       session_id=_result.get("oc_session_id", ""),
@@ -1928,6 +2164,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     hermes_active -= 1
 
             asyncio.create_task(_wrap())
+
+        # ---- 凭据吊销信号（_wrap 是独立 task，异常不穿透主循环——用 Event 传递）----
+        if _credential_revoked.is_set():
+            log.error("credential revoked by server (worker tasks aborted), exiting worker process")
+            raise CredentialRevokedError("credential revoked")
 
         # ---- 心跳 + 失败检测 ----
         now = asyncio.get_running_loop().time()
@@ -1960,6 +2201,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                 if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                     log.warning(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), resetting session")
                     await client.reset_session()
+                    _hb_session_just_reset = True  # B3: trigger independent version check
                 else:
                     log.debug(f"heartbeat failed (streak={heartbeat_fail_streak}/{HEARTBEAT_FAIL_THRESHOLD}), will retry")
             last_heartbeat = now
@@ -1984,14 +2226,17 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     if not _local_ver_cached:
                         _local_ver_cached = _read_local_worker_version()
                     _local_ver = _local_ver_cached
-                    if _latest and _latest != _local_ver:
+                    # B5: normalize old-format version strings for comparison
+                    _latest_n = _normalize_worker_version(_latest)
+                    _local_n = _normalize_worker_version(_local_ver)
+                    if _latest_n and _latest_n != _local_n:
                         if not pending_upgrade:
                             log.info(f"Version mismatch: local={_local_ver} "
                                      f"server={_latest}, will upgrade when idle")
                         pending_upgrade = True
                         upgrade_target_version = _latest
-                    elif _latest:
-                        if pending_upgrade and _latest == _local_ver:
+                    elif _latest_n:
+                        if pending_upgrade and _latest_n == _local_n:
                             pending_upgrade = False
                             log.info("Version now matches, clearing pending_upgrade")
                     else:
@@ -2002,6 +2247,78 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             pending_upgrade = False
                             log.info("Auto-upgrade disabled by server (empty latest_version), "
                                      "clearing pending_upgrade")
+            elif _hb_session_just_reset:
+                # B3 (Issue #124): heartbeat was failing (aiohttp session broken) —
+                # version check was only in the success branch, causing a deadlock:
+                # session broken → no heartbeat → no version check → no upgrade →
+                # stale session never recovers. After reset_session(), use the
+                # independent latest_version() GET endpoint to check version so the
+                # worker can still sense new versions and trigger upgrade.
+                _hb_session_just_reset = False
+                if now - last_version_check >= VERSION_CHECK_INTERVAL or not _local_ver_cached:
+                    last_version_check = now
+                    if not _local_ver_cached:
+                        _local_ver_cached = _read_local_worker_version()
+                    _local_ver = _local_ver_cached
+                    try:
+                        _latest = await client.latest_version()
+                    except CredentialRevokedError:
+                        raise  # 凭据吊销——穿透退出
+                    except Exception:
+                        _latest = ""
+                    _latest_n = _normalize_worker_version(_latest)
+                    _local_n = _normalize_worker_version(_local_ver)
+                    if _latest_n and _latest_n != _local_n:
+                        if not pending_upgrade:
+                            log.info(f"Version mismatch (heartbeat failing, via latest_version): "
+                                     f"local={_local_ver} server={_latest}, will upgrade when idle")
+                        pending_upgrade = True
+                        upgrade_target_version = _latest
+                    elif _latest_n and pending_upgrade and _latest_n == _local_n:
+                        pending_upgrade = False
+                        log.info("Version now matches (heartbeat failing), clearing pending_upgrade")
+
+        # ---- B2 (Issue #124): 僵尸任务超龄摘除，防 dispatched 任务永久阻塞升级 ----
+        # 长时间 dispatched 的任务（引擎进程 hang 住，_wrap 的 finally 不执行）会
+        # 让 active_tasks 永不空 → "空闲才升级" 条件永不满足。超龄阈值后查服务端
+        # 终态，已终态→直接摘除；未终态但超龄→也摘除并回调 fail（任务实际已卡死）。
+        _zombie_threshold = _env_float("RUNTIME_ZOMBIE_TASK_THRESHOLD", 6 * 3600)
+        if active_tasks and pending_upgrade:
+            _znow = asyncio.get_running_loop().time()
+            _zombie_tids = []
+            for _ztid, _zsid in list(active_tasks.items()):
+                _zt = active_task_objs.get(_ztid)
+                if not _zt:
+                    continue
+                _claim_t = _zt.get("_claim_time", 0)
+                if _claim_t and (_znow - _claim_t) >= _zombie_threshold:
+                    # 超龄——查服务端终态
+                    try:
+                        _zstate = await client.get_task_state(_ztid)
+                    except Exception:
+                        _zstate = ""
+                    if _zstate in ("failed", "cancelled", "completed", "not_found"):
+                        _zombie_tids.append((_ztid, _zsid, _zstate, True))
+                    else:
+                        # 服务端未终态但 worker 端已超龄→任务卡死，摘除并回调 fail
+                        _zombie_tids.append((_ztid, _zsid, _zstate or "unknown", False))
+            for _ztid, _zsid, _zstate, _is_terminal in _zombie_tids:
+                active_sessions.discard(_zsid)
+                active_tasks.pop(_ztid, None)
+                _zt = active_task_objs.pop(_ztid, None)
+                if _zt:
+                    _backend = _backend_for_engine(_zt.get("_engine_name") or "")
+                    try:
+                        _kill_stale_engine(_zt, _backend)
+                    except Exception:
+                        pass
+                if not _is_terminal:
+                    try:
+                        await client.fail(_ztid, f"zombie task reclaimed (age>{_zombie_threshold:.0f}s, server_state={_zstate})")
+                    except Exception:
+                        pass
+                log.warning(f"zombie reclamation: tid={_ztid} sid={_zsid} state={_zstate} "
+                            f"terminal={_is_terminal}, removed from active_tasks")
 
         # ---- 升级执行（待升级 && 无活跃任务 && 退避已过）----
         if pending_upgrade and not active_tasks:
@@ -2096,6 +2413,22 @@ def _read_local_worker_version() -> str:
             return f.read().strip()
     except Exception:
         return ""
+
+
+def _normalize_worker_version(ver: str) -> str:
+    """归一化 worker 版本串，兼容老格式（Issue #257 B5）。
+
+    老格式版本串形如 h-{manifest16}-w{wheels}-p{python}，新格式为 h-{manifest12}。
+    剥离 -w/-p 后缀并截取指纹主体到 12 位，使老格式版本能与新格式正确比对，
+    避免「代码相同但版本串格式不同」导致的无限升级循环。
+    """
+    if not ver or not isinstance(ver, str):
+        return ""
+    ver = ver.strip()
+    ver = re.split(r'-w[a-f0-9]+-p[a-f0-9]+', ver, maxsplit=1)[0]
+    if ver.startswith("h-") and len(ver) > 14:
+        ver = "h-" + ver[2:14]
+    return ver
 
 
 async def _perform_upgrade(server: str, token: str) -> bool:
@@ -2206,7 +2539,6 @@ def _check_opencode_api_keys():
     本函数在 main() 启动早期运行，发现缺失时输出醒目告警和修复指引，
     让运维在任务失败前发现问题（2026-08-28 事故：5 台 worker 全缺 OPENGW key）。
     """
-    import re as _re
     oc_path = os.path.expanduser("~/.config/opencode/opencode.json")
     if not os.path.isfile(oc_path):
         return
@@ -2216,7 +2548,7 @@ def _check_opencode_api_keys():
     except Exception:
         return
     # 匹配 {env:VAR_NAME} 模式
-    env_refs = set(_re.findall(r'\{env:([A-Z_][A-Z0-9_]*)\}', raw))
+    env_refs = set(re.findall(r'\{env:([A-Z_][A-Z0-9_]*)\}', raw))
     if not env_refs:
         return  # opencode.json 用的是明文 key，不需要环境变量
     missing = [name for name in env_refs if not os.environ.get(name)]
@@ -2327,10 +2659,11 @@ def main():
         client = RuntimeClient(server, token)
 
         # 版本自检（worker-server-delivery-design.md §2.4）：服务端包版本不一致时提示升级
+        # B5: 使用归一化比对，兼容老格式版本串
         try:
             latest = await client.latest_version()
             local = _read_local_worker_version()
-            if latest and local and latest != local:
+            if latest and local and _normalize_worker_version(latest) != _normalize_worker_version(local):
                 from src.runtime.os_adapter import is_windows
                 if is_windows():
                     log.warning(f"Worker 包版本不一致: 本地={local} 服务端={latest}，"
@@ -2350,9 +2683,15 @@ def main():
             from src.runtime.os_adapter import hostname as _hostname
             device = _hostname()
         _local_skills = _scan_local_skills()
-        ids, probe_url = await client.register(installed, device_name=device,
-                                               cli_version=_read_local_worker_version(),
-                                               local_skills=_local_skills)
+        try:
+            ids, probe_url = await client.register(installed, device_name=device,
+                                                   cli_version=_read_local_worker_version(),
+                                                   local_skills=_local_skills)
+        except CredentialRevokedError:
+            print("RUNTIME_TOKEN rejected (revoked or invalid), worker exiting. "
+                  "Reinstall with a new credential to rejoin.", file=sys.stderr)
+            log.error("register 401: credential revoked/invalid, exiting (code 42)")
+            raise SystemExit(42)
         if not ids:
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
@@ -2391,6 +2730,14 @@ def main():
         try:
             await _run_loop(client, ids, poll, heartbeat, max_concurrent, engine_by_rid,
                             installed=installed, device_name=device)
+        except CredentialRevokedError:
+            # 凭据被主控吊销（revoke）——正常退出而非无限重试：
+            # 心跳 401 / 任务执行中 401 都会走到这里。
+            # 退出码 42 区分于崩溃退出（daemon/看门狗可据此决定是否重启）。
+            print("RUNTIME_TOKEN revoked by server, worker exiting. "
+                  "Reinstall with a new credential to rejoin.", file=sys.stderr)
+            log.error("credential revoked by server, worker exiting (code 42)")
+            raise SystemExit(42)
         finally:
             if _worker_sweep_task and not _worker_sweep_task.done():
                 _worker_sweep_task.cancel()

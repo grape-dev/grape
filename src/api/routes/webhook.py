@@ -311,6 +311,253 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     }
 
 
+def _cross_pipeline_handoff(
+    repo_key: str, issue_number: str, target_scene_id: str, target_node: str,
+    carried_context: dict, target_assignee: str, engine_config, context: str,
+    repository: str, account: str,
+) -> dict:
+    """Issue #329: Cross-pipeline handoff — redirect A2A to target scene's vod node.
+
+    This function:
+    1. Validates that the target scene exists and contains the target_node (vod).
+    2. Checks for duplicate handoff (non-terminal event chain for same Issue in target scene).
+    3. Persists carried_context + target_assignee + engine_config on the issue_state.
+    4. Creates a cross_scene_handoff event for audit trail.
+    5. If target_assignee is provided, records assignee_changed event (old_assignee captured in step 3).
+    6. Dispatches an A2A event to the target scene's target_node.
+    7. The target_node (vod) receives the carried_context via the a2a context field and proceeds.
+
+    Returns {"ok": True, "response": <response dict>} on success,
+    {"ok": False, "error": "<skip reason>"} on interception.
+    """
+    from src.api.pipeline_config import get_pipeline_config
+    from src.config import log
+
+    # 1. Validate target scene exists and contains the target_node
+    target_cfg = get_pipeline_config(target_scene_id, repo_key=repo_key)
+    _target_scene_name = target_cfg.get("display_name", target_scene_id) if target_cfg else target_scene_id
+    target_nodes = (target_cfg or {}).get("nodes") or []
+    target_node_ids = [n.get("id") or n.get("tag") for n in target_nodes]
+    if target_node not in target_node_ids:
+        log.info(f"A2A #329: target scene '{target_scene_id}' does not contain node '{target_node}', nodes={target_node_ids}")
+        return {"ok": False, "error": "target_scene_missing_node"}
+
+    # 2. Duplicate handoff check: same Issue already has a non-terminal event in target scene
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
+                "AND event_type='a2a_event' AND status IN ('running','dispatched') "
+                "AND scene_id=? ORDER BY seq DESC LIMIT 1",
+                (repo_key, f"#{issue_number}", target_scene_id))
+            _existing = c.fetchone()
+        if _existing:
+            log.info(f"A2A #329: duplicate handoff skip — issue=#{issue_number} already has running event in scene={target_scene_id} seq={_existing[0]}")
+            return {"ok": False, "error": "duplicate_handoff"}
+    except Exception as _de:
+        log.warning(f"A2A #329: duplicate check failed: {_de}")
+
+    # 3. Persist carried_context + engine_config on issue_state
+    #    Also capture old_assignee BEFORE the UPDATE so the audit trail in step 5
+    #    records the original owner rather than an empty string.
+    _old_assignee = ""
+    try:
+        from src.api.session_store import set_issue_scene, set_issue_stage
+        from src.session_manager import db, db_lock
+        _issue_key = f"#{issue_number}"
+        _issue_num = int(issue_number)
+        # Read current assignee BEFORE writing (audit trail needs the old value)
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT assignee FROM issue WHERE repo_key=? AND issue_number=?",
+                (repo_key, _issue_num))
+            _row = c.fetchone()
+        if _row:
+            _old_assignee = _row[0] or ""
+        set_issue_scene(repo_key, _issue_key, target_scene_id)
+        # Update stage to target_node (e.g. vod) to reflect cross-pipeline continuation.
+        # owner_agent uses target_node as the responsible agent tag (matches event_pipeline.py pattern).
+        set_issue_stage(repo_key, _issue_key, target_node, target_node,
+                        assignee=target_assignee)
+        log.info(f"A2A #329: issue_state updated scene={target_scene_id} stage={target_node} old_assignee={_old_assignee}")
+    except Exception as _se:
+        log.warning(f"A2A #329: issue_state update failed: {_se}")
+
+    # 4. Persist carried_context metadata (source_issue_number, spec_ref, etc.)
+    _cc = carried_context if isinstance(carried_context, dict) else {}
+    if _cc:
+        try:
+            from src.session_manager import db as _sdb, db_lock as _sdl
+            _cc_json = json.dumps(_cc)
+            with _sdl:
+                _sc = _sdb.cursor()
+                _sc.execute(
+                    "UPDATE issue SET carried_context=? WHERE repo_key=? AND issue_number=?",
+                    (_cc_json, repo_key, int(issue_number)))
+                _sdb.commit()
+        except Exception:
+            # carried_context column may not exist yet — store in issue_state metadata
+            log.info("A2A #329: carried_context column not available, skipping persist")
+
+    # 5. Assignee change audit event (assignee already written by set_issue_stage in step 3;
+    #    only record the assignee_changed event with old_assignee captured in step 3)
+    if target_assignee:
+        try:
+            from src.api.event_store import append_event
+            # Record assignee_changed event for audit trail
+            # (the actual assignee UPDATE was done by set_issue_stage in step 3;
+            #  we only append the audit event here to avoid a duplicate write + race window)
+            append_event(
+                repo_key=repo_key,
+                event_type="assignee_changed",
+                title=f"Assignee changed to {target_assignee}",
+                issue_id=f"#{issue_number}",
+                agent_type="vod",
+                source="a2a",
+                actor="",
+                summary=f"Cross-pipeline handoff: assignee changed from {_old_assignee or '(none)'} to {target_assignee}",
+                payload={
+                    "repository": repository,
+                    "issue_number": issue_number,
+                    "old_assignee": _old_assignee,
+                    "new_assignee": target_assignee,
+                    "target_scene_id": target_scene_id,
+                    "source_issue_number": _cc.get("source_issue_number", ""),
+                },
+                status="completed",
+                scene_id=target_scene_id,
+            )
+            log.info(f"A2A #329: assignee changed from {_old_assignee or '(none)'} to {target_assignee} for issue=#{issue_number}")
+        except Exception as _ae:
+            log.warning(f"A2A #329: assignee change event failed: {_ae}")
+
+    # 6. Create cross_scene_handoff audit event
+    try:
+        from src.api.event_store import append_event
+        append_event(
+            repo_key=repo_key,
+            event_type="cross_scene_handoff",
+            title=f"Cross-pipeline handoff → {_target_scene_name}/{target_node}",
+            issue_id=f"#{issue_number}",
+            agent_type=target_node,
+            source="a2a",
+            actor="",
+            summary=f"Handoff to scene={_target_scene_name} node={target_node}",
+            payload={
+                "repository": repository,
+                "issue_number": issue_number,
+                "target_scene_id": target_scene_id,
+                "target_node": target_node,
+                "carried_context": _cc,
+                "target_assignee": target_assignee,
+                "engine_config": engine_config,
+                "context": context[:500],
+            },
+            status="completed",
+            scene_id=target_scene_id,
+        )
+    except Exception as _ce:
+        log.warning(f"A2A #329: cross_scene_handoff event record failed: {_ce}")
+
+    # 7. Dispatch A2A to target_node in target scene (normal A2A flow, but with scene override)
+    # The target_node (vod) will receive the carried_context via the a2a context field.
+    _handoff_context = context
+    if not _handoff_context and _cc:
+        _handoff_context = f"跨流水线接续：来源 Issue #{_cc.get('source_issue_number', issue_number)}，目标场景 {target_scene_id}，评级 {_cc.get('rating', 'N/A')}。Spec 参考: {_cc.get('spec_ref', 'N/A')}"
+
+    try:
+        from src.api.event_store import append_event
+        _a2a_title = f"Cross-pipeline A2A → {target_node}"
+        try:
+            from src.api.issues_center import _get_issue_title
+            _a2a_title = _get_issue_title(repo_key, int(issue_number)) or _a2a_title
+        except Exception:
+            pass
+        seq = append_event(
+            repo_key=repo_key,
+            event_type="a2a_event",
+            title=_a2a_title,
+            issue_id=f"#{issue_number}",
+            source="a2a",
+            agent_type=target_node,
+            actor="",
+            summary=f"A2A: → {target_node} (cross-pipeline, scene={_target_scene_name})",
+            payload={
+                "repository": repository,
+                "account": account,
+                "issue_number": issue_number,
+                "pr_number": "",
+                "context": _handoff_context[:500],
+                "target_scene_id": target_scene_id,
+                "carried_context": _cc,
+                "engine_config": engine_config,
+            },
+            status="running",
+            scene_id=target_scene_id,
+        )
+        log.info(f"A2A #329: cross-pipeline a2a_event created seq={seq}")
+        # Trigger pipeline execution for the new event (same as normal A2A path)
+        try:
+            from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
+            import asyncio as _aio
+            handoff_event = GrapeEvent(
+                domain=EventDomain.AGENT,
+                type="agent/handoff",
+                repo_key=repo_key,
+                issue_id=f"#{issue_number}",
+                agent_type=target_node,
+                seq=seq,
+                payload={
+                    "target_agent": target_node,
+                    "node_id": target_node,
+                    "scene_id": target_scene_id,
+                    "runtime_id": 0,
+                    "evt": {
+                        "type": "a2a_event",
+                        "repository": repository,
+                        "source": "a2a",
+                        "actor": "",
+                        "account": account,
+                        "issue_id": str(issue_number) if issue_number else "",
+                        "_a2a_context": context,
+                        "payload": {
+                            "repository": repository,
+                            "account": account,
+                            "issue_number": issue_number,
+                            "pr_number": None,
+                            "context": context,
+                            "carried_context": carried_context or {},
+                            "engine_config": engine_config,
+                            "target_scene_id": target_scene_id,
+                        },
+                    },
+                },
+            )
+            _bus = get_event_bus()
+            if not _bus.has_listeners("agent/handoff"):
+                _bus.on_sync("agent/handoff", _on_handoff_dispatch)
+            _loop = _aio.get_event_loop()
+            _loop.create_task(_bus.emit(handoff_event))
+            log.info(f"A2A #329: cross-pipeline event bus dispatch seq={seq}")
+        except Exception as _de2:
+            log.warning(f"A2A #329: event bus dispatch failed, falling back to direct: {_de2}")
+            try:
+                from src.api.event_pipeline import run_pipeline
+                import json as _pj
+                _raw = _pj.dumps({"action": "a2a_event", "seq": seq, "repository": repository, "issue_number": issue_number}).encode()
+                run_pipeline(_raw, {"x-grape-token": "internal"})
+                log.info(f"A2A #329: cross-pipeline direct run_pipeline seq={seq}")
+            except Exception as _de3:
+                log.warning(f"A2A #329: direct run_pipeline also failed: {_de3}")
+        return {"ok": True, "response": {"status": "ok", "seq": seq, "agent": target_node, "scene": target_scene_id, "cross_pipeline": True}}
+    except Exception as _de:
+        log.warning(f"A2A #329: dispatch failed: {_de}")
+        return {"ok": False, "error": "dispatch_failed"}
+
+
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Hand off to another agent (A2A)", description="Agent-to-Agent handoff: dispatches a new event to the target agent. Accepts JWT/session token/API key (public) plus internal bot-token.")
 async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
@@ -351,6 +598,32 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         except Exception:
             repo_key = to_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+
+    # Issue #329: cross-pipeline handoff — extract carried context fields.
+    # When target_scene_id is specified, redirect the A2A to the target scene's
+    # target_node (default vod). This enables cross-pipeline continuation without
+    # creating a duplicate Issue. The dedup guard (acd07be2) naturally prevents
+    # duplicate issue_opened events for the same Issue in the target scene.
+    target_scene_id = payload.get("target_scene_id", "")
+    target_node = payload.get("target_node", "")
+    carried_context = payload.get("carried_context") or {}
+    target_assignee = payload.get("target_assignee", "")
+    engine_config = payload.get("engine_config")
+
+    if target_scene_id and issue_number:
+        _redirect = _cross_pipeline_handoff(
+            repo_key, issue_number, target_scene_id, target_node or "vod",
+            carried_context, target_assignee, engine_config, context, repository, account,
+        )
+        if _redirect.get("ok"):
+            log.info(f"A2A #329: cross-pipeline handoff redirected to scene={target_scene_id} node={target_node or 'vod'}")
+            return _redirect["response"]
+        if _redirect.get("error"):
+            log.info(f"A2A #329: cross-pipeline handoff skipped: {_redirect['error']}")
+            return JSONResponse(status_code=200, content={
+                "status": "ok", "seq": 0, "agent": target_node or "vod",
+                "skipped": _redirect["error"],
+            })
 
     # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
     if issue_number and repo_key:
@@ -409,7 +682,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         _scene_ck = _scene_node_check(repo_key, issue_number, agent_name)
         if not _scene_ck.get("in_scene"):
             log.info(f"A2A: agent '{agent_name}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{issue_number}, skipped (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})")
-            return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id")})
+            return JSONResponse(status_code=409, content={"status": "skipped", "seq": 0, "agent": agent_name, "skipped": "not_in_scene", "scene": _scene_ck.get("scene_id"), "message": f"agent '{agent_name}' is not in the current scene pipeline (nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})"})
 
     # 启动后台执行目标 Agent（由 _execute_agent 判定产出后存储事件）
     try:
@@ -521,6 +794,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 "issue_number": issue_number,
                 "pr_number": pr_number,
                 "context": context,
+                # Issue #329: pass through cross-pipeline fields for downstream agents
+                "carried_context": carried_context if (target_scene_id or carried_context) else {},
+                "engine_config": engine_config if (target_scene_id or engine_config) else None,
             },
         }
 
@@ -644,7 +920,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None},
             status="running",
         )
         if not seq:

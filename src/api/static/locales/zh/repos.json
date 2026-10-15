@@ -12,6 +12,8 @@
     "project_sub": "多人协同，打造超级团队",
     "new_project_btn": "新建项目",
     "new_project_tip": "开启你的AI for AI项目之旅",
+    "new_project_prefix": "新建 {{name}}",
+    "create_on_platform": "在 {{name}} 上创建",
     "my_projects": "我的项目",
     "search_placeholder": "搜索项目",
     "from_template": "从模版创建",
@@ -60,6 +62,14 @@
     "th_role": "角色",
     "th_description": "描述"
   },
+  "platform": {
+    "all": "全部"
+  },
+  "workspace": {
+    "hosted_repos_unit": "个已托管仓库",
+    "select_platform_title": "选择平台进入工作台",
+    "select_platform_desc": "选择一个平台查看该平台下的仓库"
+  },
   "available_btn": {
     "join_and_host": "加入并托管"
   },
@@ -89,6 +99,7 @@
   "create": {
     "title": "创建新项目",
     "desc": "在 GitCode 上新建仓库，创建后可立即进入托管工作流。",
+    "platform_label": "目标平台",
     "name_label": "仓库名称",
     "name_placeholder": "例如：my-project",
     "name_hint": "仅限字母、数字、下划线、连字符和点，将以你的账号命名空间创建。",

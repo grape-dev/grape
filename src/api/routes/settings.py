@@ -11,6 +11,26 @@ from src.repo_key import from_repo_key
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
 
+def _check_login_method_before_unbind(user_id: int, provider: str):
+    """P0-4: 手动令牌解绑前检查至少保留一种登录方式。
+
+    与 grape_auth.py 的 unbind_provider 保持一致：
+    - 有密码 → 允许解绑
+    - 无密码但有其他活跃绑定（identity_count > 1）→ 允许解绑
+    - 无密码且只有当前这一条绑定 → 拒绝解绑
+    """
+    from src.auth.grape_account_db import has_password, count_user_identities
+    if not has_password(user_id) and count_user_identities(user_id) <= 1:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "code": 400,
+                "message": "至少保留一种登录方式，请先设置 Grape 密码",
+                "need_set_password": True,
+            },
+        )
+
+
 def _resolve_repo_key(owner_repo: str) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
     from src.repo_key import to_repo_key
@@ -34,26 +54,33 @@ def _resolve_repo_key(owner_repo: str) -> str:
 
 @router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
-    acc = user_db.get_user_account(user["username"]) or {}
+    # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
+    from src.api.deps import get_user_token, get_user_github_token
+    from src.auth.grape_account_db import get_user_identities
+    gitcode_token = get_user_token(user["username"])
+    github_token = get_user_github_token(user["username"])
+    identities = {ident["provider"]: ident for ident in get_user_identities(user["id"])}
+    hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
+    codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
     return {
         "gitcode": {
-            "api_token_exists": bool(acc.get("gitcode_api_token")),
+            "api_token_exists": bool(gitcode_token),
             "account": user["username"],
             "auto_filled": True,
         },
         "github": {
-            "token_exists": bool(acc.get("github_api_token")),
-            "login": acc.get("github_login", ""),
+            "token_exists": bool(github_token),
+            "login": identities.get("github", {}).get("external_login", ""),
         },
         "huawei_cloud": {
-            "ak_exists": bool(acc.get("huawei_cloud_ak")),
-            "sk_exists": bool(acc.get("huawei_cloud_sk")),
-            "ak": acc.get("huawei_cloud_ak", ""),
-            "sk": acc.get("huawei_cloud_sk", ""),
+            "ak_exists": bool(hw_cred.get("ak")),
+            "sk_exists": bool(hw_cred.get("sk")),
+            "ak": hw_cred.get("ak", ""),
+            "sk": hw_cred.get("sk", ""),
         },
         "codearts": {
-            "ak_exists": bool(acc.get("CODEARTS_CLI_AK")),
-            "sk_exists": bool(acc.get("CODEARTS_CLI_SK")),
+            "ak_exists": bool(codearts_cred.get("ak")),
+            "sk_exists": bool(codearts_cred.get("sk")),
         },
     }
 
@@ -64,6 +91,7 @@ class UpdateCredentials(BaseModel):
     codearts_ak: str = ""
     codearts_sk: str = ""
     github_token: str = ""
+    gitcode_token: str = ""
     repo_key: str = ""
 
 
@@ -88,37 +116,32 @@ def _is_placeholder(value: str) -> bool:
 
 @router.put("/credentials", operation_id="settings_credentials_update", summary="Update third-party credentials", description="Updates third-party credentials; placeholder/demo values are rejected. Sending an empty string explicitly clears the field; omitting a field leaves it unchanged.")
 def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_session_token)):
-    acc = user_db.get_user_account(user["username"]) or {}
-    # 区分「未传字段」（不修改）与「传空字符串」（清除）：
-    # model_dump(exclude_unset=True) 仅含请求体中显式传递的字段，未传字段取默认值时不包含在内。
+    # D32: 写入 user_credentials 表，不写 user_accounts
     explicit = body.model_dump(exclude_unset=True)
 
-    def _apply_credential(field: str, acc_key: str):
-        """统一凭据写入逻辑（Issue #237）：
-        - 字段未传 → 不修改（保持已有值）
-        - 字段传空字符串 → 清除（置空）
-        - 字段传非空非占位符值 → 写入
-        - 字段传占位符/demo 值 → 拒绝写入（保持已有值）
-        """
-        if field not in explicit:
+    def _apply_ak_sk(provider: str, ak_field: str, sk_field: str):
+        """统一 AK/SK 写入逻辑（user_credentials 表）"""
+        if ak_field not in explicit and sk_field not in explicit:
             return
-        v = (explicit[field] or "").strip()
-        if v and not _is_placeholder(v):
-            acc[acc_key] = v
-        elif not v:
-            acc[acc_key] = ""
+        cred = user_db.get_credential(user["id"], provider) or {}
+        for field, key in [(ak_field, "ak"), (sk_field, "sk")]:
+            if field not in explicit:
+                continue
+            v = (explicit[field] or "").strip()
+            if v and not _is_placeholder(v):
+                cred[key] = v
+            elif not v:
+                cred[key] = ""
+        user_db.set_credential(user["id"], provider, cred)
 
-    _apply_credential("huawei_cloud_ak", "huawei_cloud_ak")
-    _apply_credential("huawei_cloud_sk", "huawei_cloud_sk")
-    _apply_credential("codearts_ak", "CODEARTS_CLI_AK")
-    _apply_credential("codearts_sk", "CODEARTS_CLI_SK")
+    _apply_ak_sk("huawei_cloud", "huawei_cloud_ak", "huawei_cloud_sk")
+    _apply_ak_sk("codearts", "codearts_ak", "codearts_sk")
 
     # GitHub Token（写入时需验证 token 并获取用户信息；清除时无需验证）
     if "github_token" in explicit:
         _gh_tok = (explicit["github_token"] or "").strip()
         if _gh_tok and not _is_placeholder(_gh_tok):
-            acc["github_api_token"] = _gh_tok
-            # 验证 token 并获取 GitHub 用户信息（api.github.com 可达）
+            # 验证 token 并获取 GitHub 用户信息
             try:
                 import requests as _req
                 _resp = _req.get("https://api.github.com/user",
@@ -126,18 +149,186 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                                  timeout=10)
                 if _resp.status_code == 200:
                     _gh_user = _resp.json()
-                    acc["github_login"] = _gh_user.get("login", "")
-                    # 关联到用户表
-                    user_db.link_github_user(user["id"], str(_gh_user.get("id", "")), _gh_tok, "")
-                    log.info(f"GitHub token saved for user={user['username']}, github_login={_gh_user.get('login', '')}")
+                    gh_id = str(_gh_user.get("id", ""))
+                    gh_login = _gh_user.get("login", "")
+                    # 写入 external_identities（D32: 不再写 user_accounts）
+                    from src.auth.grape_account_db import get_external_identity, get_external_identity_any_status, create_external_identity, update_external_identity_tokens, save_binding_ticket
+                    existing = get_external_identity("github", gh_id)
+                    if existing:
+                        if existing["grape_user_id"] != user["id"]:
+                            raise HTTPException(
+                                status_code=409,
+                                detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
+                            )
+                        _ok = update_external_identity_tokens(existing["grape_user_id"], "github",
+                                                               access_token=_gh_tok,
+                                                               external_name=_gh_user.get("name", ""))
+                        if not _ok:
+                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    else:
+                        # 检查是否存在解绑记录（status=0）属于其他用户
+                        any_status = get_external_identity_any_status("github", gh_id)
+                        if any_status and any_status["status"] == 0 and any_status["grape_user_id"] != user["id"]:
+                            # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
+                            _ticket = save_binding_ticket(
+                                initiating_user_id=user["id"],
+                                provider="github",
+                                external_id=gh_id,
+                                external_login=gh_login,
+                                external_name=_gh_user.get("name", ""),
+                                original_user_id=any_status["grape_user_id"],
+                            )
+                            if not _ticket:
+                                raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "code": 409,
+                                    "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
+                                    "binding_ticket": _ticket,
+                                    "need_transfer": True,
+                                },
+                            )
+                        # 无解绑记录或解绑记录属于当前用户 → 正常创建（create_internal 自动恢复同账号解绑记录）
+                        _ok = create_external_identity(
+                            grape_user_id=user["id"], provider="github",
+                            external_id=gh_id, external_login=gh_login,
+                            external_name=_gh_user.get("name", ""),
+                            access_token=_gh_tok,
+                        )
+                        if not _ok:
+                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
+                elif _resp.status_code == 401:
+                    raise HTTPException(
+                        status_code=401,
+                        detail={"code": 401, "message": "令牌无效或已过期"},
+                    )
                 else:
                     log.warning(f"GitHub token validation failed: {_resp.status_code}")
+                    raise HTTPException(
+                        status_code=401,
+                        detail={"code": 401, "message": "令牌无效或已过期"},
+                    )
+            except HTTPException:
+                raise
             except Exception as _e:
                 log.warning(f"GitHub token validation error: {_e}")
+                raise HTTPException(
+                    status_code=502,
+                    detail={"code": 502, "message": f"GitHub token 验证失败: {_e}"},
+                )
         elif not _gh_tok:
-            acc["github_api_token"] = ""
-            acc["github_login"] = ""
-    user_db.save_user_account(user["username"], acc)
+            # 清除：从 external_identities 删除 GitHub 绑定
+            # P0-4: 解绑前检查至少保留一种登录方式
+            _check_login_method_before_unbind(user["id"], "github")
+            from src.auth.grape_account_db import delete_external_identity
+            delete_external_identity(user["id"], "github")
+
+    # GitCode Token（写入时需验证 token 并获取用户信息；清除时无需验证）
+    if "gitcode_token" in explicit:
+        _gc_tok = (explicit["gitcode_token"] or "").strip()
+        if _gc_tok and not _is_placeholder(_gc_tok):
+            try:
+                import requests as _req
+                # GitCode v5 认证用 access_token 查询参数（Authorization header 会 401 "token not found"）
+                _resp = _req.get("https://gitcode.com/api/v5/user",
+                                 params={"access_token": _gc_tok},
+                                 timeout=10)
+                if _resp.status_code == 200:
+                    _gc_user = _resp.json()
+                    gc_id = str(_gc_user.get("id", ""))
+                    gc_login = _gc_user.get("login", "")
+                    from src.auth.grape_account_db import (
+                        get_external_identity, get_external_identity_any_status,
+                        create_external_identity, save_binding_ticket,
+                        update_external_identity_tokens, delete_external_identity,
+                    )
+                    existing = get_external_identity("gitcode", gc_id)
+                    if existing:
+                        if existing["grape_user_id"] != user["id"]:
+                            raise HTTPException(
+                                status_code=409,
+                                detail={"code": 409, "message": "该平台账号已被其他 Grape 账号绑定"},
+                            )
+                        _ok = update_external_identity_tokens(
+                            existing["grape_user_id"], "gitcode",
+                            access_token=_gc_tok,
+                            external_name=_gc_user.get("name", ""),
+                        )
+                        if not _ok:
+                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    else:
+                        # 检查是否存在解绑记录（status=0）属于其他用户
+                        any_status = get_external_identity_any_status("gitcode", gc_id)
+                        if any_status and any_status["status"] == 0 and any_status["grape_user_id"] != user["id"]:
+                            # 解绑记录属于其他用户 → 生成转移票据，要求前端确认
+                            _ticket = save_binding_ticket(
+                                initiating_user_id=user["id"],
+                                provider="gitcode",
+                                external_id=gc_id,
+                                external_login=gc_login,
+                                external_name=_gc_user.get("name", ""),
+                                original_user_id=any_status["grape_user_id"],
+                            )
+                            if not _ticket:
+                                raise HTTPException(status_code=500, detail={"code": 500, "message": "生成转移票据失败"})
+                            raise HTTPException(
+                                status_code=409,
+                                detail={
+                                    "code": 409,
+                                    "message": "该平台账号曾绑定过其他账号，是否转移到当前账号？",
+                                    "binding_ticket": _ticket,
+                                    "need_transfer": True,
+                                },
+                            )
+                        # 无解绑记录或解绑记录属于当前用户 → 正常创建
+                        _ok = create_external_identity(
+                            grape_user_id=user["id"], provider="gitcode",
+                            external_id=gc_id, external_login=gc_login,
+                            external_name=_gc_user.get("name", ""),
+                            access_token=_gc_tok,
+                        )
+                        if not _ok:
+                            log.error(f"GitCode bind FAILED: create_external_identity returned False for user={user['id']}, gc_id={gc_id}, gc_login={gc_login}")
+                            raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
+                    log.info(f"GitCode token saved for user={user['username']}, gitcode_login={gc_login}")
+                elif _resp.status_code == 401:
+                    raise HTTPException(
+                        status_code=401,
+                        detail={"code": 401, "message": "令牌无效或已过期"},
+                    )
+                else:
+                    log.warning(f"GitCode token validation failed: {_resp.status_code}")
+                    raise HTTPException(
+                        status_code=401,
+                        detail={"code": 401, "message": "令牌无效或已过期"},
+                    )
+            except HTTPException:
+                raise
+            except Exception as _e:
+                log.warning(f"GitCode token validation error: {_e}")
+                raise HTTPException(
+                    status_code=502,
+                    detail={"code": 502, "message": f"GitCode token 验证失败: {_e}"},
+                )
+        elif not _gc_tok:
+            # P0-4: 解绑前检查至少保留一种登录方式
+            _check_login_method_before_unbind(user["id"], "gitcode")
+            from src.auth.grape_account_db import delete_external_identity
+            delete_external_identity(user["id"], "gitcode")
+
+    # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
+    if "github_token" in explicit or "gitcode_token" in explicit:
+        try:
+            from src.session_manager import db as _sm_db, db_lock as _sm_dl
+            with _sm_dl:
+                _c = _sm_db.cursor()
+                _c.execute("DELETE FROM user_repos WHERE user_id=?", (user["id"],))
+                _sm_db.commit()
+        except Exception as e:
+            log.warning(f"update_credentials: clear user_repos failed: {e}")
+
     return {"message": "凭据已更新"}
 
 
@@ -381,7 +572,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT username FROM user_accounts")
+            c.execute("SELECT username FROM grape_accounts")  # D32-补丁
             valid_users = {r[0] for r in c.fetchall()}
         except Exception:
             pass
@@ -435,6 +626,11 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             continue
         rt["instance_name"] = instance_name(rt["name"], cred["device_name"], cid)
         rt["worker_name"] = cred["name"]
+        # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name，
+        # 前端读 rt.name 的所有位置一次生效；内部路由键（DB 行本身）不变
+        from src.runtime.instances import to_display
+        rt["display_name"] = to_display(rt.get("display_name") or rt["name"])
+        rt["name"] = to_display(rt["name"])
         rt["worker_ip"] = cred["last_ip"]
         # 本机直连（cid=0）：owner/scope 取引擎自身 DB 值，不继承空凭据默认值
         if cid == 0:
@@ -450,6 +646,17 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
+        # B5 (Issue #257): worker 版本是否落后（服务端最新版本 vs worker 上报版本）
+        try:
+            from src.worker_package import worker_code_version, normalize_worker_version
+            _latest_wv = worker_code_version()
+            _worker_wv = rt.get("worker_version", "")
+            if _latest_wv and _worker_wv:
+                rt["worker_version_stale"] = normalize_worker_version(_latest_wv) != normalize_worker_version(_worker_wv)
+            else:
+                rt["worker_version_stale"] = False
+        except Exception:
+            rt["worker_version_stale"] = False
         # 引擎健康分（Issue #134 展示增强）
         try:
             from src.runtime.health_scorer import get_health_score
@@ -621,26 +828,40 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
                 continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
             if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
                 continue
-            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result FROM agent_runtimes WHERE credential_id=?", (cid,))
+            c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
+            # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
+            from src.runtime.instances import to_display as _td2
             runtimes = [
-                {"id": x[0], "name": x[1], "version": x[2], "healthy": bool(x[3]),
+                {"id": x[0], "name": _td2(x[1]), "version": x[2], "healthy": bool(x[3]),
                  "installed": bool(x[4]),
                  "instance_name": instance_name(x[1], cred.get("device_name", ""), cid),
                  "health": derive_runtime_health(x[5], x[6], now),
                  "local_skills": _json.loads(x[7] or "[]") if x[7] else [],
-                 "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else []}
+                 "skill_scan_result": _json.loads(x[8] or "[]") if x[8] else [],
+                 "worker_version": x[9] or "" if len(x) > 9 else ""}
                 for x in c.fetchall()
             ]
             for rt in runtimes:
                 _tc = db.cursor()
                 _tc.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rt["id"],))
                 rt["agent_tags"] = [r[0] for r in _tc.fetchall()]
+            # B5: worker 版本落后标记（设备级，取首个引擎的 worker_version）
+            _dev_wv = runtimes[0].get("worker_version", "") if runtimes else ""
+            _dev_wv_stale = False
+            if _dev_wv:
+                try:
+                    from src.worker_package import worker_code_version, normalize_worker_version
+                    _dev_wv_stale = normalize_worker_version(worker_code_version()) != normalize_worker_version(_dev_wv)
+                except Exception:
+                    pass
             devices.append({"credential_id": cid, "name": cred.get("name", ""), "device_name": cred.get("device_name", ""),
                             "credential_status": cred.get("status", "active"), "last_seen_at": cred.get("last_seen_at"),
                             "worker_ip": cred.get("last_ip", ""), "scope": cred.get("scope", "global"),
                             "owner": cred.get("owner_name", ""),
                             "repo_key": from_repo_key(cred.get("repo_key", "")),
                             "health": _device_health(cred.get("status", "active"), cred.get("last_seen_at"), now),
+                            "worker_version": _dev_wv,
+                            "worker_version_stale": _dev_wv_stale,
                             "runtimes": runtimes})
 
     # 本机直连引擎（credential_id=0）：关联到 runtime_credentials 中已有的主控机设备
@@ -663,6 +884,8 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
         rt["health"] = _runtime_health(rt, now)
         _hn = rt.get("host_name") or _local_hostname or ""
         rt["instance_name"] = instance_name(rt["name"], _hn, 0)
+        from src.runtime.instances import to_display as _td
+        rt["name"] = _td(rt["name"])
         target_device = _device_by_name.get(_hn)
         if target_device:
             target_device["runtimes"].append({
@@ -741,7 +964,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     with _dl:
         c = _db.cursor()
         try:
-            c.execute("SELECT username FROM user_accounts")
+            c.execute("SELECT username FROM grape_accounts")  # D32-补丁
             valid_users = {r[0] for r in c.fetchall()}
         except Exception:
             pass

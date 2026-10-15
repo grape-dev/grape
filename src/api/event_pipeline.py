@@ -1109,7 +1109,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         append_skipped_event(repo_key, event_type, "unrecognized_event", issue_id=_pre_issue_id)
         return result
 
-    # 1.5 PR 订阅预匹配（在自循环检测之前，确保 bot 创建/更新的 PR 也能触发其他场景 QA）
+    # 提前解析 actor + bot 判定（Issue #318：1.5 预匹配需区分 bot/非 bot）
+    actor = resolve_actor(evt.get("payload", {}), evt)
+    log.info(f"Pipeline: actor={actor}, event_type={event_type}")
+    _bot_usernames_early = []
+    if actor:
+        from src.user.db import get_all_bot_usernames
+        _bot_usernames_early = get_all_bot_usernames()
+    _is_bot_actor = actor in _bot_usernames_early if actor else False
+
+    # 1.5 PR 订阅预匹配（仅 bot actor：绕过自循环检测让 bot PR 也能触发 QA；
+    #   人类用户跳过预派发，由主路由单次派发——Issue #318 修复双重派发）
     _pr_branch_early = resolve_pr_target_branch(evt)
     if _pr_branch_early and not evt.get("branch"):
         evt["branch"] = _pr_branch_early
@@ -1151,16 +1161,19 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         break
             _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, _issue_qa_skill_early)
             if _pr_sub_matches_early:
-                for _extra in _pr_sub_matches_early:
-                    _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
-                log.info(f"Pipeline: PR subscription pre-match -> scenes={[m[0] for m in _pr_sub_matches_early]} (before self-loop check)")
+                if _is_bot_actor:
+                    _early_dispatched = set()
+                    for _extra in _pr_sub_matches_early:
+                        _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
+                        _early_dispatched.add(_extra[0])
+                    evt["_pr_sub_early_dispatched"] = _early_dispatched
+                    log.info(f"Pipeline: PR subscription pre-match -> scenes={[m[0] for m in _pr_sub_matches_early]} (bot actor, before self-loop check)")
+                else:
+                    log.info(f"Pipeline: PR subscription pre-match skipped (actor={actor} not bot, deferred to main route)")
 
     # 2. 自循环检测：actor 是任一 bot 用户名 → 跳过（评论/评论PR/打标签等 bot 自身动作的回声）
-    actor = resolve_actor(evt.get("payload", {}), evt)
-    log.info(f"Pipeline: actor={actor}, event_type={event_type}")
     if actor:
-        from src.user.db import get_all_bot_usernames
-        bot_usernames = get_all_bot_usernames()
+        bot_usernames = _bot_usernames_early
         if actor in bot_usernames:
             # 多任务模式豁免：bot 创建的子任务 issue_opened（body 含「## 父任务」）不跳过
             _allow_through = False
@@ -1336,7 +1349,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if _pr_branch and not evt.get("branch"):
         evt["branch"] = _pr_branch
     # PR 订阅：无主路由时（PR 无关联 Issue，非 bot 操作未被自循环拦截），
-    # 第一个匹配作为主 agent。PR 订阅的并行分发已在自循环检测前完成（1.5 预匹配）。
+    # 第一个匹配作为主 agent。1.5 预匹配仅 bot actor 时预派发（Issue #318），
+    # 人类用户只走此主路由单次派发。
     if not agent_type and event_type in PR_EVENT_TYPES:
         _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
         if _pr_sub_matches:
@@ -1356,6 +1370,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         _issue_qa_skill = m[1]
                         break
             _pr_sub_matches = _filter_pr_sub_matches(_pr_sub_matches, _issue_scene_id, _issue_qa_skill)
+            # Issue #318 兜底去重：排除 1.5 预匹配已派发的场景（防御 bot actor 未被自循环拦截的边缘情况）
+            _early_dispatched = evt.get("_pr_sub_early_dispatched")
+            if _early_dispatched:
+                _pr_sub_matches = [m for m in _pr_sub_matches if m[0] not in _early_dispatched]
             if _pr_sub_matches:
                 _first = _pr_sub_matches[0]
                 evt["_pr_sub_scene_id"] = _first[0]
@@ -1364,6 +1382,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 if _first[3]:
                     evt["_pr_sub_sre_skill"] = _first[3]
                     evt["_pr_sub_sre_engine_ids"] = _first[4]
+                # 多场景补派（#318 回归修复）：人类用户只走主路由，若只取 _first
+                # 则第 2+ 场景失去唯一触发通道（修复前靠 1.5 预匹配 bug 路径捎带）。
+                # 对称 bot 路径的 1.5 预派发：剩余场景走 _dispatch_pr_subscription_extra
+                # 并行派发（a2a_event）。单场景时 [1:] 为空，不产生额外事件（禁令：
+                # 单场景不得双重触发——#318 修复成果的锁死不变量）。
+                # bot actor 不可达此分支（自循环检测已 return），行为零变化。
+                for _extra in _pr_sub_matches[1:]:
+                    _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
                 agent_type = "qa"
                 log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
     _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
@@ -1484,6 +1510,21 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         from src.api.event_store import append_skipped_event
         append_skipped_event(repo_key, event_type, "agent_disabled", agent_type, issue_id=_pre_issue_id)
         return result
+
+    # 3.4 场景节点校验：webhook 事件路由的 agent 不在当前 Issue 场景的 pipeline nodes 里 → 拦截
+    # 防止 issue_comment 等事件被路由到场景未配置的 agent（如"需求方案分析"场景只有 vod+issue，
+    # 但评论内容含 [Coding Agent] 前缀时被路由到 coding，绕过了 A2A 的 not_in_scene 检查）
+    if _pre_issue_id and agent_type and event_type not in ("a2a_event", "cross_scene_handoff"):
+        try:
+            from src.api.routes.webhook import _scene_node_check
+            _scene_ck = _scene_node_check(repo_key, _pre_issue_id.lstrip("#"), agent_type)
+            if not _scene_ck.get("in_scene"):
+                log.info(f"Pipeline: agent '{agent_type}' not in scene '{_scene_ck.get('scene_id')}' for issue=#{_pre_issue_id}, skip (event_type={event_type}, nodes={[n.get('id') for n in _scene_ck.get('nodes') or []]})")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "not_in_scene", agent_type, issue_id=_pre_issue_id)
+                return result
+        except Exception as _scene_e:
+            log.warning(f"Pipeline: scene node check failed: {_scene_e}")
 
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     backend = None
@@ -1933,13 +1974,25 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             # 无绑定（空 pool）→ 原全站自动选机行为不变
             log.info(f"Pipeline: engine_id=0, auto-selecting local engine for seq={seq}")
             # 尝试取一个本机在线引擎（优先 opencode，其次 codearts，最后 hermes）
+            # org_id 隔离：从 managed_repos 推断仓库 org_id，非个人组织只选该组织引擎
             from src.user.db import get_meta_value as _gmv
             try:
                 from src.session_manager import db as _db, db_lock as _dbl
+                from src.user.org_db import is_org_personal
                 log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
                 with _dbl:
                     _c = _db.cursor()
-                    _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")
+                    # 推断仓库关联的 org_id
+                    _c.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
+                    _mr = _c.fetchone()
+                    _mr_org_id = (_mr[0] if _mr and _mr[0] else 0)
+                    _is_personal = is_org_personal(_mr_org_id) if _mr_org_id else True
+                    if _mr_org_id and not _is_personal:
+                        # 非个人组织：只选 org_id 匹配的引擎（不含 global org_id=0）
+                        _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 AND org_id=? ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1", (_mr_org_id,))
+                    else:
+                        # 个人组织/无组织：选 org_id=0 的本机引擎（兼容全局）
+                        _c.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 AND (org_id=0 OR org_id=?) ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1", (_mr_org_id,))
                     _row = _c.fetchone()
                 log.info(f"Pipeline: engine query done, row={_row}, seq={seq}")
                 if _row:
@@ -2175,25 +2228,29 @@ def _fail_event(seq: int, reason: str):
 
 
 def _pool_only_local_direct() -> int | None:
-    """方案 B（weekly-05）：广播无 worker 时，若全局可执行引擎全为「本机 direct」则回落本机执行。
+    """方案 B/方案 A（weekly-05 / weekly-07 修复）：广播无 worker 时，若存在本机 global direct 引擎则回落本机执行。
 
-    判定：所有 status='online' AND healthy=1 的 agent_runtimes 的 credential_id 是否全为 0
-    （credential_id=0 = 本机 direct 引擎；>0 = 远端 worker 引擎池）。
-    - 全本机 → 返回首个在线健康引擎 id（服务端 self-run）
-    - 无在线引擎 或 存在远端 worker 引擎 → None（保持广播/等待 worker）
+    判定基准（方案 A 修正，2026-10-13）：
+    - 只看 **scope='global' 且 credential_id=0（本机直连）** 的在线健康引擎；
+    - 不再用"全库所有 online+healthy 引擎 credential_id 全为 0"判定——该旧逻辑会被
+      其他租户的 repo-scope 远端 worker（credential_id>0）破坏，导致本机不自跑、远端又不认领，
+      广播任务永久 queued（见 seq-2310-broadcast-stuck-design.md）。
+    - 多枚本机 global 引擎时按 opencode > codearts > 其他 的优先级取优先级最高的一个。
+    - 无本机 global direct 引擎 → None（保持等待 worker / 或由 scheme C 重派兜底）。
     """
     from src.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
             rows = c.execute(
-                "SELECT id, credential_id FROM agent_runtimes "
-                "WHERE status='online' AND healthy=1 ORDER BY id").fetchall()
+                "SELECT id, name FROM agent_runtimes "
+                "WHERE status='online' AND healthy=1 "
+                "AND credential_id=0 AND scope='global' "
+                "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END, id "
+                "LIMIT 1").fetchall()
         if not rows:
             return None
-        if all((r[1] or 0) == 0 for r in rows):
-            return int(rows[0][0])
-        return None
+        return int(rows[0][0])
     except Exception as e:
         log.warning(f"_pool_only_local_direct failed: {e}")
         return None
@@ -2957,6 +3014,15 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             from src.runtime.service import update_task_status
             update_task_status(task_id, "running")
             log.info(f"direct exec: task {task_id} status -> running")
+            # Write back actual runtime_id for plugin broadcast self-run tasks
+            # (task created with runtime_id=0 for broadcast, but executed locally)
+            if runtime_id and runtime_id > 0:
+                from src.session_manager import db as _sdb, db_lock as _sdl
+                with _sdl:
+                    c = _sdb.cursor()
+                    c.execute("UPDATE agent_tasks SET runtime_id=? WHERE id=? AND (runtime_id IS NULL OR runtime_id=0)", (runtime_id, task_id))
+                    _sdb.commit()
+                log.info(f"direct exec: task {task_id} runtime_id -> {runtime_id}")
         except Exception as e:
             log.warning(f"direct exec: failed to update task {task_id} to running: {e}")
 
@@ -3104,6 +3170,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         env_extra["PR_NUMBER"] = str(_pr_num)
 
     # git worktree（coding/qa/sre，direct 模式；见 multi-issue-isolation-design.md §3.4.1）
+    # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 路径注入 agent env——
+    # agent 侧 git 操作统一走 `grape git`（服务端 git-credential 会话凭据），不依赖 askpass env。
     try:
         from src.runtime import repogit
         _gnum = repogit.issue_num_from(issue_id)
@@ -3111,8 +3179,6 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _wb = env_extra.get("GRAPE_WORK_BRANCH", "")
             _wt = repogit.ensure_issue_worktree(repo_key, agent_type, _gnum,
                                                 token=repo_gitcode_token, work_branch=_wb)
-            if _wt:
-                env_extra["GIT_ASKPASS"] = repogit.askpass_path(_wt)
     except Exception as e:
         log.warning(f"Exec agent: git worktree ensure failed: {e}")
 

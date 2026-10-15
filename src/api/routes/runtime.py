@@ -147,9 +147,9 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         cred_repo_key = (cred_row[3] or "") if cred_row else ""
         cred_org_id = (cred_row[4] or 0) if cred_row else 0
         if cred_scope == "user" and cred_row and cred_row[1]:
-            # owner_id 与 user_accounts.id 对齐（按用户名），找不到保持空
+            # D32-补丁：owner_id 与 grape_accounts.id 对齐（按用户名）
             try:
-                c.execute("SELECT id FROM user_accounts WHERE username=? LIMIT 1", (cred_row[1],))
+                c.execute("SELECT id FROM grape_accounts WHERE username=? LIMIT 1", (cred_row[1],))
                 urow = c.fetchone()
                 if urow:
                     owner_id = str(urow[0])
@@ -992,6 +992,13 @@ def runtime_install_script_ps1():
       irm <server>/api/runtime/install.ps1 | iex
     或带参数：
       & ([scriptblock]::Create((irm <server>/api/runtime/install.ps1))) -Token <rta_...> -Server <server>
+
+    BOM 策略（Issue #298 GBK 乱码复盘）：本端点不预置 UTF-8 BOM——
+    字符串执行路径（irm | iex / [scriptblock]::Create）中 BOM 会被解码为
+    U+FEFF 字符残留在脚本开头，导致 param() 解析失败（实测 2026-09-29）。
+    写文件执行路径（_perform_upgrade 下载到临时 .ps1）由下载方补 BOM
+    （agent.py 已有 startswith(bom) 检测），两场景互不干扰。
+    GBK 防护靠脚本本体 ASCII 化日志 + charset=utf-8 响应头。
     """
     from fastapi.responses import PlainTextResponse
     script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
@@ -1003,7 +1010,7 @@ def runtime_install_script_ps1():
             content = f.read()
     except Exception:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "read install script failed"})
-    return PlainTextResponse(content, media_type="text/plain")
+    return PlainTextResponse(content, media_type="text/plain; charset=utf-8")
 
 
 @router.get("/start-worker.ps1")
@@ -1011,6 +1018,9 @@ def runtime_start_worker_script_ps1():
     """返回 Windows Worker 启动脚本 start-worker.ps1（只读）。
 
     供 install-worker.ps1 下载后写入文件，避免 here-string 转义问题。
+    与 install.ps1 不同：本端点消费方是 irm -OutFile（写文件后 -File 执行），
+    无字符串直传场景——预置 UTF-8 BOM 落盘后 PS5.1 可正确识别编码，
+    中文注释不乱码。脚本本体含中文注释（60行），必须带 BOM。
     """
     from fastapi.responses import PlainTextResponse
     script_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))),
@@ -1022,7 +1032,8 @@ def runtime_start_worker_script_ps1():
             content = f.read()
     except Exception:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "read start-worker script failed"})
-    return PlainTextResponse(content, media_type="text/plain")
+    body = b"\xef\xbb\xbf" + content.encode("utf-8")
+    return PlainTextResponse(body, media_type="text/plain; charset=utf-8")
 
 
 @router.get("/install/latest")

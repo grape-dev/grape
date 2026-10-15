@@ -22,10 +22,10 @@ router = APIRouter(prefix="/api/devstage", tags=["devstage"])
 
 
 def _get_ak_sk(user: dict) -> tuple:
-    """从用户账户获取华为云 AK/SK"""
-    acc = user_db.get_user_account(user["username"]) or {}
-    ak = (acc.get("huawei_cloud_ak") or "").strip()
-    sk = (acc.get("huawei_cloud_sk") or "").strip()
+    """从 user_credentials 表获取华为云 AK/SK（D32: 不查 user_accounts）"""
+    cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
+    ak = (cred.get("ak") or "").strip()
+    sk = (cred.get("sk") or "").strip()
     if not ak or not sk:
         raise HTTPException(status_code=400, detail={
             "code": 400,
@@ -79,12 +79,12 @@ class CreateEnvBody(BaseModel):
 def get_devstage_config(user: dict = Depends(require_no_session_token)):
     """获取 DevStage 配置状态"""
     base_url = _resolve_base_url()
-    acc = user_db.get_user_account(user["username"]) or {}
+    cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     return {
         "base_url": base_url,
         "configured": bool(base_url),
-        "ak_exists": bool(acc.get("huawei_cloud_ak", "")),
-        "sk_exists": bool(acc.get("huawei_cloud_sk", "")),
+        "ak_exists": bool(cred.get("ak")),
+        "sk_exists": bool(cred.get("sk")),
     }
 
 
@@ -99,12 +99,13 @@ def update_devstage_config(body: dict = {}, user: dict = Depends(require_no_sess
     ak = (body.get("ak") or "").strip()
     sk = (body.get("sk") or "").strip()
     if ak or sk:
-        acc = user_db.get_user_account(user["username"]) or {}
+        # D32: 写入 user_credentials 表，不写 user_accounts
+        cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
         if ak:
-            acc["huawei_cloud_ak"] = ak
+            cred["ak"] = ak
         if sk:
-            acc["huawei_cloud_sk"] = sk
-        user_db.save_user_account(user["username"], acc)
+            cred["sk"] = sk
+        user_db.set_credential(user["id"], "huawei_cloud", cred)
     return {"message": "DevStage 配置已更新"}
 
 

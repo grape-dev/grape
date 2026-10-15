@@ -494,8 +494,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 _dev_name = rdev or ""
                 if (cid or 0) == 0:
                     _dev_name = rhost or "本机直连"
+                from src.runtime.instances import to_display as _td
                 runtime_list.append({
-                    "id": rid, "name": rname or "", "status": rstatus or "offline",
+                    "id": rid, "name": _td(rname or ""), "status": rstatus or "offline",
                     "health": health, "mode": mode,
                     "provider": rprovider or "", "last_seen_at": normalize_event_time(rlast_seen),
                     "healthy": bool(rhealthy), "busy_slots": rbusy or 0, "max_concurrent": max_conc,

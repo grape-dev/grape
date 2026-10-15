@@ -124,3 +124,15 @@ src/api/static/uploads/
 # git askpass credential script (outputs token env vars, must not be committed)
 .git-askpass.sh
 venv/
+
+# review bot temp drafts
+.review-body-*.json
+configs/email.json
+configs/crypto.json
+configs/security.json
+configs/*.local.json
+
+# temp stage/e2e files
+_grape_stage2*
+_e2e_test.py
+configs/oauth-providers.json

@@ -47,7 +47,8 @@ def issue_session_token(*, session_key: str, repo_key: str, agent_type: str,
             c.execute(
                 "INSERT INTO session_api_tokens (session_key, repo_key, agent_type, user_id, token_sha256, expires_at) "
                 "VALUES (?,?,?,?,?,?)",
-                (session_key, repo_key, agent_type, user_id, _sha256(token), str(_now() + ttl)),
+                # P2-7: 直接存整数而非字符串，避免类型转换开销和 MySQL 索引问题
+                (session_key, repo_key, agent_type, user_id, _sha256(token), _now() + ttl),
             )
             db.commit()
         return token
@@ -113,7 +114,8 @@ def revoke_session_token(session_key: str) -> bool:
             c = db.cursor()
             c.execute(
                 "UPDATE session_api_tokens SET expires_at=? WHERE session_key=?",
-                (str(_now() + SESSION_TOKEN_REVOKE_GRACE), session_key),
+                # P2-7: 直接存整数
+                (_now() + SESSION_TOKEN_REVOKE_GRACE, session_key),
             )
             db.commit()
             return c.rowcount > 0

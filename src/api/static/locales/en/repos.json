@@ -12,6 +12,8 @@
     "project_sub": "Collaborate and build a super team",
     "new_project_btn": "New Project",
     "new_project_tip": "Start your AI-for-AI project journey",
+    "new_project_prefix": "New {{name}}",
+    "create_on_platform": "Create on {{name}}",
     "my_projects": "My Projects",
     "search_placeholder": "Search projects",
     "from_template": "From Template",
@@ -60,6 +62,14 @@
     "th_role": "Role",
     "th_description": "Description"
   },
+  "platform": {
+    "all": "All"
+  },
+  "workspace": {
+    "hosted_repos_unit": "hosted repos",
+    "select_platform_title": "Select Platform to Enter Workspace",
+    "select_platform_desc": "Choose a platform to view its repositories"
+  },
   "available_btn": {
     "join_and_host": "Join & Host"
   },
@@ -89,6 +99,7 @@
   "create": {
     "title": "Create New Project",
     "desc": "Create a new repository on GitCode. You can enter the hosting workflow immediately after creation.",
+    "platform_label": "Platform",
     "name_label": "Repository Name",
     "name_placeholder": "e.g. my-project",
     "name_hint": "Only letters, numbers, underscores, hyphens and dots allowed. Will be created under your account namespace.",
