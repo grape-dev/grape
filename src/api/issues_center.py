@@ -1287,8 +1287,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
                                               provider="github" if _is_github else "gitcode")
     except RuntimeError as e:
+        # Issue #345: 先判断是否 401 认证失败，非 401 走通用错误
+        from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG
+        if is_auth_error_exc(e):
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"查重失败，{BOT_TOKEN_INVALID_MSG}: {str(e)[:200]}"})
         raise HTTPException(status_code=502, detail={"code": 502,
-                                                     "message": f"查重失败，Bot Token 可能失效: {str(e)[:200]}"})
+                                                     "message": f"查重失败: {str(e)[:200]}"})
     created = False
     if issue_num is not None:
         raise HTTPException(status_code=409, detail={"code": 409,
@@ -1334,9 +1339,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "message": f"创建 Issue 失败：参数错误: {_err_msg[:200]}"
                 })
             if _http_code == 401:
+                # Issue #345: 引用公共常量
+                from src.vcs.token_error import BOT_TOKEN_INVALID_MSG
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
-                    "message": "创建 Issue 失败：Bot Token 可能失效，请检查仓库 Bot Token 配置"
+                    "message": f"创建 Issue 失败：{BOT_TOKEN_INVALID_MSG}"
                 })
             raise HTTPException(status_code=502, detail={
                 "code": 502,

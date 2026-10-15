@@ -737,16 +737,9 @@ class FeishuAsync:
             from src.user.db import get_bot_token_by_repo
             api_token = get_bot_token_by_repo(owner, repo)
             if not api_token:
-                try:
-                    import json as _json, os as _os
-                    _gbt_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))),
-                                              "..", "..", "configs", "global-bot-token.json")
-                    if _os.path.exists(_gbt_path):
-                        with open(_gbt_path, "r", encoding="utf-8") as _f:
-                            _gbt = _json.load(_f)
-                        api_token = _gbt.get("gitcode_api_token", "") or ""
-                except Exception:
-                    pass
+                # Issue #345: 改用统一入口
+                from src.user.db import get_global_gitcode_bot_token
+                api_token = get_global_gitcode_bot_token()
         if not api_token:
             log.warning(f"[{ctx.name}] sync mapping: no bot token for {repo_key}, skipping")
             return 0

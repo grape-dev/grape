@@ -127,7 +127,7 @@
   "unhosted_title": "Unhosted Repositories",
   "bot": {
     "title": "Bot Collaborator Required",
-    "not_configured": "GitHub Bot is not configured. Please ask the admin to set github_bot_token and github_bot_username in global-bot-token.json. The repository is hosted, but Agent operations may be limited.",
+    "not_configured": "GitHub Bot is not configured. Please ask the admin to set GitHub Bot Token and Username in the config center. The repository is hosted, but Agent operations may be limited.",
     "invite_pending": "Bot {{bot}} has been invited to the repository, but the invitation has not been accepted yet.\nPlease go to GitHub repository Settings → Collaborators to accept the invitation, or manually add {{bot}} as a maintainer.",
     "add_failed": "Failed to automatically add Bot {{bot}} as a repository maintainer.\nPlease go to GitHub repository Settings → Collaborators and manually add {{bot}} as a Maintainer.",
     "insufficient": "Bot {{bot}} has joined the repository but has insufficient permissions.\nPlease set {{bot}}'s permission to Maintainer or Admin in GitHub repository Settings → Collaborators.",

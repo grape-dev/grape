@@ -1,10 +1,12 @@
-"""global-bot-token.json + oauth-providers.json 读写 + meta 表同步。
+"""Bot config DB meta + oauth-providers.json 读写。
 
-两个配置文件各自独立：
-- global-bot-token.json：Bot 运行时配置（api_token / webhook_token / bot_usernames），文件唯一权威源
+Issue #345: Bot 配置从文件迁移到 DB meta 表（DB 是唯一权威源）。
+global-bot-token.json 保留只读，仅供启动迁移读取（迁移后不再被运行时访问）。
+
+- Bot 运行时配置（api_token / webhook_token / bot_usernames）：DB meta 表，唯一权威源
 - oauth-providers.json：账号体系 OAuth 配置（协议参数 + 凭据），meta 表同步后运行时从 DB 读取
 
-admin 配置中心 save_config 分流：bot 字段写 global-bot-token.json，OAuth 字段写 oauth-providers.json + 同步 meta 表。
+admin 配置中心 save_config 分流：bot 字段写 DB meta，OAuth 字段写 oauth-providers.json + 同步 meta 表。
 前端 API 不变（ConfigBody 扁平结构不变），后端做扁平→嵌套映射。
 """
 import json
@@ -15,10 +17,11 @@ from src.config import log, CONFIG_DIR
 _GBT_PATH = os.path.join(CONFIG_DIR, "global-bot-token.json")
 _OAUTH_PATH = os.path.join(CONFIG_DIR, "oauth-providers.json")
 
-# Bot 字段——继续写 global-bot-token.json
+# Bot 字段——写入 DB meta 表（Issue #345: DB 是唯一权威源）
 _BOT_FIELDS = [
     "gitcode_api_token",
     "github_bot_token",
+    "github_bot_username",
     "gitcode_webhook_token",
     "webhook_url",
     "bot_usernames",
@@ -42,7 +45,11 @@ def get_config_path() -> str:
 
 
 def load_config() -> dict:
-    """读取 global-bot-token.json；不存在或损坏返回空 dict。"""
+    """Read global-bot-token.json; return empty dict if missing or corrupt.
+
+    Note: Used only by startup migration (_migrate_global_bot_token_to_db).
+    Runtime code reads from DB meta table via unified entry functions.
+    """
     try:
         if os.path.exists(_GBT_PATH):
             with open(_GBT_PATH, "r", encoding="utf-8") as f:
@@ -56,23 +63,36 @@ def load_config() -> dict:
 def read_public_config() -> dict:
     """返回脱敏配置（前端展示）。
 
-    Bot 配置从 global-bot-token.json 读取。
-    OAuth 配置优先从 meta 表读取（运行时权威，可能由管理员通过 API 修改未落盘文件）。
+    Issue #345: Bot 字段从 DB meta 表读取（DB 是唯一权威源）。
+    OAuth 配置从 meta 表读取。
     """
     from src.user.db import get_meta_value
-    bot_data = load_config()
+    import json as _json
     out = {}
-    # Bot 字段
-    for field in _BOT_FIELDS:
-        val = bot_data.get(field, "")
+    # Bot 字段——从 DB meta 表读取（Issue #345）
+    _BOT_META_MAP = {
+        "gitcode_api_token": "global_bot_gitcode_token",
+        "github_bot_token": "global_bot_github_token",
+        "github_bot_username": "global_bot_github_username",
+        "gitcode_webhook_token": "gitcode_webhook_token",
+        "webhook_url": "webhook_url",
+        "bot_usernames": "global_bot_usernames",
+    }
+    for field, meta_key in _BOT_META_MAP.items():
+        val = get_meta_value(meta_key) or ""
+        if field == "bot_usernames" and val:
+            try:
+                val = _json.loads(val)
+            except Exception:
+                val = []
         if isinstance(val, list):
             out[field] = val
         elif isinstance(val, str) and val:
             tail = val[-4:] if len(val) >= 4 else val
             out[f"{field}_present"] = True
             out[f"{field}_tail"] = tail
-            # 非敏感字段回显明文：webhook_url
-            if field == "webhook_url":
+            # 非敏感字段回显明文：webhook_url / github_bot_username
+            if field in ("webhook_url", "github_bot_username"):
                 out[field] = val
     # OAuth 字段从 meta 表读取
     for flat_field, (provider, cred_field) in _OAUTH_FIELD_MAP.items():
@@ -94,26 +114,40 @@ def read_public_config() -> dict:
 
 
 def save_config(payload: dict) -> dict:
-    """保存配置——分流到两个文件。
+    """保存配置——分流到 DB meta + oauth-providers.json。
 
-    Bot 字段写 global-bot-token.json。
+    Issue #345: Bot 字段写 DB meta 表（唯一权威源），不写文件。
     OAuth 字段写 oauth-providers.json + 同步 meta 表。
 
     只更新 payload 中给出的字段；未给出的字段保留原值。
     返回落盘后的完整配置（脱敏）。
     """
-    # 1. Bot 字段 → global-bot-token.json
+    # 1. Bot 字段 → DB meta（唯一权威源）
+    # Issue #345: 集群部署下 DB 是唯一权威源，不再写文件。
+    # global-bot-token.json 保留只读，仅供启动迁移读取（迁移后不再被运行时访问）。
     bot_payload = {k: v for k, v in payload.items() if k in _BOT_FIELDS}
     if bot_payload:
-        data = load_config()
-        for field in _BOT_FIELDS:
+        from src.user.db import set_meta_value
+        import json as _json
+        _BOT_META_MAP = {
+            "gitcode_api_token": "global_bot_gitcode_token",
+            "github_bot_token": "global_bot_github_token",
+            "github_bot_username": "global_bot_github_username",
+            "gitcode_webhook_token": "gitcode_webhook_token",
+            "webhook_url": "webhook_url",
+            "bot_usernames": "global_bot_usernames",
+        }
+        for field, meta_key in _BOT_META_MAP.items():
             if field in bot_payload:
-                data[field] = bot_payload[field]
-        tmp = _GBT_PATH + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=2)
-        os.replace(tmp, _GBT_PATH)
-        log.info("admin config_store: global-bot-token.json updated")
+                val = bot_payload[field]
+                if isinstance(val, list):
+                    set_meta_value(meta_key, _json.dumps(val))
+                else:
+                    set_meta_value(meta_key, str(val) if val else "")
+        # Issue #345: 清除本实例缓存（当前实例立即生效，其他实例最多 60s TTL 后生效）
+        from src.user.db import _invalidate_global_bot_cache
+        _invalidate_global_bot_cache()
+        log.info("admin config_store: bot config updated (DB)")
 
     # 2. OAuth 字段 → oauth-providers.json + 同步 meta 表
     oauth_payload = {k: v for k, v in payload.items() if k in _OAUTH_FIELD_MAP}

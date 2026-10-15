@@ -856,17 +856,11 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_se
     from src.user.db import get_bot_token_by_repo
 
     # 仓库 bot token → 全局 bot token
+    # Issue #345: 改用统一入口
+    from src.user.db import get_global_gitcode_bot_token
     token = get_bot_token_by_repo(owner, repo)
     if not token:
-        try:
-            import os as _os, json as _json
-            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-            if _os.path.exists(_gbt_path):
-                with open(_gbt_path, "r", encoding="utf-8") as _f:
-                    _gbt = _json.load(_f)
-                token = _gbt.get("gitcode_api_token", "") or ""
-        except Exception:
-            pass
+        token = get_global_gitcode_bot_token()
     if not token:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
 
@@ -954,17 +948,11 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     from src.user.db import get_bot_token_by_repo
 
     # 仓库 bot token → 全局 bot token
+    # Issue #345: 改用统一入口
+    from src.user.db import get_global_gitcode_bot_token
     token = get_bot_token_by_repo(owner, repo)
     if not token:
-        try:
-            import os as _os, json as _json
-            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-            if _os.path.exists(_gbt_path):
-                with open(_gbt_path, "r", encoding="utf-8") as _f:
-                    _gbt = _json.load(_f)
-                token = _gbt.get("gitcode_api_token", "") or ""
-        except Exception:
-            pass
+        token = get_global_gitcode_bot_token()
     if not token:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法创建分支"})
 

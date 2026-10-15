@@ -2858,6 +2858,74 @@ def _tasks_to_issue_rename_pre_create():
         log.warning(f"Phase B1 tasks->issue pre-create rename failed: {e}")
 
 
+def _migrate_global_bot_token_to_db():
+    """Issue #345: 全局 bot token 从文件迁移到 DB meta 表。
+
+    集群安全：用 src/lock.py distributed_locks 表保护，N 个实例同时启动不冲突。
+    set_meta_value 本身是 INSERT OR REPLACE（UPSERT 语义），多实例并发写同一值结果一致。
+    幂等：DB 已有值则跳过。
+    """
+    from src.lock import acquire_lock, release_lock
+    if not acquire_lock("migrate_global_bot_token", ttl=60):
+        return  # 其他实例正在迁移，跳过
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        # 用独立标记 key 判断是否已迁移，不用 token 值的 truthiness
+        # （admin 可能把 token 清空，空值不应触发重新迁移覆盖）
+        if get_meta_value("global_bot_token_migrated") == "1":
+            return  # 已迁移
+        import json, os
+        _gbt_path = os.path.join(_CONFIG_DIR, "global-bot-token.json")
+        if not os.path.exists(_gbt_path):
+            return
+        with open(_gbt_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # Issue #345: 逐字段迁移——DB 已有值则跳过该字段（不覆盖 admin 已配置的值）
+        # 跳过明显的占位符值（含省略号/过短）
+        def _is_valid_token(val):
+            """最小格式校验：非空、不含省略号、长度 >= 20。
+
+            20 is an empirical threshold — production GitCode PATs are ~25 chars.
+            Placeholder values in example configs (e.g. "ghp_zG...uUef") are shorter
+            or contain ellipsis. This only affects migration (file → DB first boot);
+            tokens rejected here fall back to file read until admin configures via API.
+            """
+            if not val or not isinstance(val, str):
+                return False
+            if "..." in val:
+                return False
+            return len(val) >= 20
+        def _migrate_field(meta_key, file_key, validator=None):
+            """DB 无值 + 文件有值 → 迁移；DB 有值 → 跳过。"""
+            db_val = get_meta_value(meta_key)
+            if db_val:
+                return  # DB 已有值，不覆盖
+            file_val = data.get(file_key)
+            if not file_val:
+                return
+            if validator and not validator(file_val):
+                log.warning(f"Issue #345: skip migrating {file_key} (looks like placeholder: len={len(str(file_val))})")
+                return
+            if isinstance(file_val, list):
+                set_meta_value(meta_key, json.dumps(file_val))
+            else:
+                set_meta_value(meta_key, str(file_val))
+        _migrate_field("global_bot_gitcode_token", "gitcode_api_token", _is_valid_token)
+        _migrate_field("global_bot_github_token", "github_bot_token", _is_valid_token)
+        _migrate_field("global_bot_github_username", "github_bot_username")
+        _migrate_field("global_bot_usernames", "bot_usernames")
+        _migrate_field("webhook_url", "webhook_url")
+        # webhook token 文件里字段名可能是 gitcode_webhook_token 或 webhook_secret
+        _migrate_field("gitcode_webhook_token", "gitcode_webhook_token")
+        if not get_meta_value("gitcode_webhook_token"):
+            _migrate_field("gitcode_webhook_token", "webhook_secret")
+        # 标记迁移完成（独立标记 key，不依赖 token 值的 truthiness）
+        set_meta_value("global_bot_token_migrated", "1")
+        log.info("Issue #345: Global bot token migrated from file to DB meta")
+    finally:
+        release_lock("migrate_global_bot_token")
+
+
 def _migrate_tables():
     """已有数据库的 schema 迁移"""
     # ===== new-version2 数据安全:迁移前自动备份(仅在有改动性迁移时触发一次)=====
@@ -3225,26 +3293,53 @@ def _migrate_tables():
                         log.info(f"Migrated {cnt} repo_im_group_binding im_app_id='default' -> {row[0]}")
     except Exception as e:
         log.warning(f"Migrate repo_im_group_binding im_app_id failed: {e}")
-    # 清理历史 bot_username 占位值:'devops-bot' -> 全局 bot 实际用户名(configs/global-bot-token.json)
+    # 清理历史 bot_username 占位值 + 纠正跨平台回填错误
+    # Issue #345: 按 repo_key 前缀分流——github: 取 github_bot_username，其余取 GitCode bot name
     try:
-        import json as _gbt_json, os as _gbt_os
-        _gbt_path = _gbt_os.path.join(_CONFIG_DIR, "global-bot-token.json")
-        _global_bot_username = ""
-        if _gbt_os.path.exists(_gbt_path):
-            with open(_gbt_path, "r", encoding="utf-8") as _f:
-                _gbt_data = _gbt_json.load(_f)
-            _us = _gbt_data.get("bot_usernames") or []
-            _global_bot_username = _us[0] if _us else ""
-        if _global_bot_username:
-            with db_lock:
-                c = db.cursor()
-                # 历史占位值 'devops-bot'(非实际 GitCode 用户名)-> 替换为全局 bot 用户名
-                c.execute("UPDATE managed_repos SET bot_username=? WHERE bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL",
-                          (_global_bot_username,))
-                db.commit()
-                log.info(f"Migrated managed_repos.bot_username legacy placeholder -> {_global_bot_username} ({c.rowcount} rows)")
+        from src.user.db import get_global_bot_usernames, get_global_github_bot_username
+        _us = get_global_bot_usernames()
+        _gitcode_bot_name = _us[0] if _us else ""
+        _github_bot_name = get_global_github_bot_username()
+        with db_lock:
+            c = db.cursor()
+            # GitCode 仓库：bot_username 为空或占位值 → 填 GitCode bot name
+            if _gitcode_bot_name:
+                c.execute(
+                    "UPDATE managed_repos SET bot_username=? "
+                    "WHERE (bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL) "
+                    "AND repo_key NOT LIKE 'github:%'",
+                    (_gitcode_bot_name,))
+                _gc_rows = c.rowcount
+            else:
+                _gc_rows = 0
+            # GitHub 仓库：bot_username 为空或占位值 → 填 GitHub bot username
+            if _github_bot_name:
+                c.execute(
+                    "UPDATE managed_repos SET bot_username=? "
+                    "WHERE (bot_username='devops-bot' OR bot_username='' OR bot_username IS NULL) "
+                    "AND repo_key LIKE 'github:%'",
+                    (_github_bot_name,))
+                _gh_rows = c.rowcount
+            else:
+                _gh_rows = 0
+            # 纠正历史跨平台回填错误：GitHub 仓被填成 GitCode bot name → 修正为 GitHub bot username
+            if _github_bot_name and _gitcode_bot_name and _github_bot_name != _gitcode_bot_name:
+                c.execute(
+                    "UPDATE managed_repos SET bot_username=? "
+                    "WHERE bot_username=? AND repo_key LIKE 'github:%'",
+                    (_github_bot_name, _gitcode_bot_name))
+                _fix_rows = c.rowcount
+            else:
+                _fix_rows = 0
+            db.commit()
+            log.info(f"Migrated bot_username: gitcode={_gc_rows}, github={_gh_rows}, cross-platform-fix={_fix_rows}")
     except Exception as e:
         log.warning(f"Migrate bot_username placeholder failed: {e}")
+    # Issue #345: 全局 bot token 从文件迁移到 DB meta 表（幂等，集群安全）
+    try:
+        _migrate_global_bot_token_to_db()
+    except Exception as e:
+        log.warning(f"Issue #345: migrate global bot token to DB failed: {e}")
     # default 账户迁移（旧版兼容——OAuth 配置曾存于 user_accounts default 账户）
     # OAuth 配置迁移由 migrate_oauth_providers() 统一处理（user/db.py 模块加载时执行）
     try:

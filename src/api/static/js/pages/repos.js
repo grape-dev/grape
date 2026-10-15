@@ -535,7 +535,7 @@ function _showBotCollaboratorPrompt(resp, fullName, owner, name, repoKey) {
 
   if (status === 'not_configured') {
     title = I18N.t('repos.bot.title') || 'Bot 未配置';
-    message = I18N.t('repos.bot.not_configured') || 'GitHub Bot 未配置，请联系管理员在 global-bot-token.json 中设置 github_bot_token 和 github_bot_username。仓库已托管，但 Agent 自动操作可能受限。';
+    message = I18N.t('repos.bot.not_configured') || 'GitHub Bot 未配置，请联系管理员在配置中心设置 GitHub Bot Token 和 Username。仓库已托管，但 Agent 自动操作可能受限。';
   } else if (status === 'invite_pending') {
     title = I18N.t('repos.bot.title') || '需要添加 Bot 为维护者';
     message = (I18N.t('repos.bot.invite_pending') || 'Bot {{bot}} 已被邀请加入仓库，但邀请尚未被接受。\n请前往 GitHub 仓库 Settings → Collaborators 接受邀请，或手动将 {{bot}} 添加为维护者。')

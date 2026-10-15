@@ -239,6 +239,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Local claimer start failed: {e}")
 
+    # Issue #345: 全局 bot token 健康探活——每 5 分钟探活，集群下分布式锁保证单实例执行
+    try:
+        from src.runtime.bot_token_health import start_bot_token_health
+        start_bot_token_health()
+    except Exception as e:
+        log.warning(f"Bot token health check start failed: {e}")
+
     # D7: 冷静期定时任务：每天执行一次，匿名化超 30 天的冷静期账号（需求 22）
     try:
         from src.admin.cooldown import start_cooldown_scheduler

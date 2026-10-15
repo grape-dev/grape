@@ -488,11 +488,13 @@ def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
     """confirm-done 后同步关闭 GitCode/GitHub Issue（降级不阻断）。
 
     Returns:
-        {"gitcode": "success|failed|skipped", "github": "success|failed|skipped"}
+        {"gitcode": "success|failed|skipped|bot_token_failed", "github": "...",
+         "message": str}
         — gitcode 始终尝试关闭（无 issue_number 时 skipped）；github 仅当 repo_key
         以 github: 开头时尝试关闭，否则 skipped。
+        bot_token_failed: bot token 可能失效，issue 未关闭（方向3 降级提示）。
     """
-    result = {"gitcode": "skipped", "github": "skipped"}
+    result = {"gitcode": "skipped", "github": "skipped", "message": ""}
     if not issue_number:
         return result
     try:
@@ -515,6 +517,11 @@ def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
         if _gh_rk:
             result["github"] = _try_close_issue_for_repo(_gh_rk, issue_number, user, is_github=True)
         # 无镜像 → 保持 skipped
+
+    # Issue #345: bot_token_failed 时设置用户可见提示
+    if "bot_token_failed" in (result["gitcode"], result["github"]):
+        from src.vcs.token_error import BOT_TOKEN_INVALID_MSG
+        result["message"] = f"Issue 关闭失败：{BOT_TOKEN_INVALID_MSG}"
 
     return result
 
@@ -598,9 +605,19 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
         if isinstance(resp, dict) and "error" not in resp:
             log.info(f"confirm-done: closed {repo_key}#{issue_number}")
             return "success"
+        # Issue #345: 识别 401 返回 Bot Token 失效标记
+        from src.vcs.token_error import is_auth_error_result
+        if is_auth_error_result(resp):
+            log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} → Bot Token 可能失效")
+            return "bot_token_failed"
         log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} → {resp}")
         return "failed"
     except Exception as e:
+        # Issue #345: 异常路径也检查 401
+        from src.vcs.token_error import is_auth_error_exc
+        if is_auth_error_exc(e):
+            log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} → Bot Token 可能失效 (exc)")
+            return "bot_token_failed"
         log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} exception: {e}")
         return "failed"
 
@@ -1267,6 +1284,11 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         except HTTPException:
             raise
         except Exception as e:
+            # Issue #345: 识别 401 返回 Bot Token 失效提示
+            from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG
+            if is_auth_error_exc(e):
+                raise HTTPException(status_code=502, detail={"code": 502,
+                                                             "message": f"评论失败：{BOT_TOKEN_INVALID_MSG}"})
             raise HTTPException(status_code=502, detail={"code": 502,
                                                          "message": f"GitCode 评论失败: {str(e)[:200]}"})
     if conv_id:

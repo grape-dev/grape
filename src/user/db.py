@@ -958,8 +958,18 @@ def init_db():
                     if not names:
                         continue
                     bot_name = names[0]
-                    c.execute("UPDATE managed_repos SET bot_username=? WHERE full_name=? AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname))
-                    c.execute("UPDATE managed_repos SET bot_username=? WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL)", (bot_name, uname, uname))
+                    # Issue #345: 按 repo_key 前缀分流——github: 仓不填 GitCode bot name
+                    # user_accounts.bot_usernames 是 GitCode 的 bot 列表，只填 GitCode 仓库
+                    c.execute(
+                        "UPDATE managed_repos SET bot_username=? "
+                        "WHERE full_name=? AND (bot_username='' OR bot_username IS NULL) "
+                        "AND repo_key NOT LIKE 'github:%'",
+                        (bot_name, uname))
+                    c.execute(
+                        "UPDATE managed_repos SET bot_username=? "
+                        "WHERE (repo_owner=? OR full_name=?) AND (bot_username='' OR bot_username IS NULL) "
+                        "AND repo_key NOT LIKE 'github:%'",
+                        (bot_name, uname, uname))
                 # 兜底：managed_repos 有 bot_gitcode_token 但无 bot_username 时设置默认值
                 c.execute("UPDATE managed_repos SET bot_username=COALESCE(NULLIF(bot_username,''), 'devops-bot') WHERE bot_username='' OR bot_username IS NULL")
             db.commit()
@@ -1454,21 +1464,14 @@ def _get_managed_webhook_id(repo_key: str) -> int:
 
 
 def get_global_bot_credential() -> tuple[str, str]:
-    """读取全局 bot 配置，返回 (bot_token, bot_username)。"""
-    import json, os as _os
-    _gbt_path = _os.path.join(_os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))),
-                              "configs", "global-bot-token.json")
-    try:
-        if _os.path.exists(_gbt_path):
-            with open(_gbt_path, "r", encoding="utf-8") as f:
-                d = json.load(f)
-            tok = d.get("gitcode_api_token", "") or ""
-            us = (d.get("bot_usernames") or [])
-            user = us[0] if us else ""
-            return tok, user
-    except Exception as e:
-        log.warning(f"get_global_bot_credential failed: {e}")
-    return "", ""
+    """读取全局 bot 配置，返回 (bot_token, bot_username)。
+
+    Issue #345: 改用统一入口（DB 优先 → 文件 fallback）。
+    """
+    tok = get_global_gitcode_bot_token()
+    us = get_global_bot_usernames()
+    user = us[0] if us else ""
+    return tok, user
 
 
 def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False) -> list[dict]:
@@ -1613,17 +1616,122 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
     return ""
 
 
-def _get_global_bot_token() -> str:
-    """读取全局 bot token（configs/global-bot-token.json）"""
+# Issue #345: 全局 bot token 内存缓存——TTL 60 秒
+# bot token 变更频率极低（admin 偶尔改一次），60 秒 TTL 意味着最多 60 秒后所有实例看到新值。
+# 集群下不需要缓存失效通知（无 Redis），TTL 自然过期即可。
+_global_bot_cache: dict[str, tuple] = {}  # key → (value, expire_ts)
+_GLOBAL_BOT_CACHE_TTL = 60
+
+
+def _cached_get_meta(key: str, file_fallback_fn=None) -> str:
+    """带 TTL 缓存的 meta 读取，DB 无值时 fallback 到文件。
+
+    file_fallback_fn: 可选的文件读取函数，DB 返回空时调用。
+    确保迁移失败或集群竞态时系统仍可用（向前兼容）。
+
+    迁移完成后（meta.global_bot_token_migrated=1），不再 fallback 到文件——
+    admin 清空字段时 DB 存空字符串，不会被文件旧值顶回来。
+    """
+    import time as _t
+    now = _t.time()
+    cached = _global_bot_cache.get(key)
+    if cached:
+        val, expire = cached
+        if now < expire:
+            return val
+    val = get_meta_value(key) or ""
+    # 只在迁移未完成时 fallback 到文件
+    if not val and file_fallback_fn:
+        try:
+            _migrated = get_meta_value("global_bot_token_migrated") == "1"
+        except Exception:
+            _migrated = False
+        if not _migrated:
+            val = file_fallback_fn()
+    _global_bot_cache[key] = (val, now + _GLOBAL_BOT_CACHE_TTL)
+    return val
+
+
+def _invalidate_global_bot_cache():
+    """清除全局 bot token 缓存（admin 改配置后调用）。"""
+    _global_bot_cache.clear()
+
+
+def _read_gbt_file_field(field: str) -> str:
+    """从 global-bot-token.json 读取指定字段（文件 fallback 用）。"""
     import json, os
     try:
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
+        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                  "configs", "global-bot-token.json")
         if os.path.exists(_gbt_path):
             with open(_gbt_path, "r", encoding="utf-8") as f:
-                return json.load(f).get("gitcode_api_token", "") or ""
+                return json.load(f).get(field, "") or ""
     except Exception as e:
-        log.warning(f"Failed to load global bot token: {e}")
+        log.warning(f"Failed to read {field} from global-bot-token.json: {e}")
     return ""
+
+
+def _read_gbt_file_usernames() -> str:
+    """从 global-bot-token.json 读取 bot_usernames（JSON 数组，返回原始字符串）。"""
+    import json, os
+    try:
+        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                  "configs", "global-bot-token.json")
+        if os.path.exists(_gbt_path):
+            with open(_gbt_path, "r", encoding="utf-8") as f:
+                us = json.load(f).get("bot_usernames") or []
+                return json.dumps(us) if us else ""
+    except Exception:
+        pass
+    return ""
+
+
+def get_global_gitcode_bot_token() -> str:
+    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
+
+    Issue #345: DB 是权威源。文件 fallback 确保迁移失败或集群竞态时系统仍可用。
+    """
+    return _cached_get_meta("global_bot_gitcode_token",
+                            file_fallback_fn=lambda: _read_gbt_file_field("gitcode_api_token"))
+
+
+def get_global_github_bot_token() -> str:
+    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存，GitHub 版）。"""
+    return _cached_get_meta("global_bot_github_token",
+                            file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
+
+
+def get_global_github_bot_username() -> str:
+    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。
+
+    GitHub bot username 不在 bot_usernames 列表中（那是 GitCode 的），
+    需要单独存储。用于 GitHub 仓库托管时移除 bot 协作者身份。
+    """
+    return _cached_get_meta("global_bot_github_username",
+                            file_fallback_fn=lambda: _read_gbt_file_field("github_bot_username"))
+
+
+def get_global_bot_usernames() -> list[str]:
+    """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。"""
+    raw = _cached_get_meta("global_bot_usernames",
+                           file_fallback_fn=_read_gbt_file_usernames)
+    if raw:
+        try:
+            import json
+            val = json.loads(raw)
+            return val if isinstance(val, list) else []
+        except Exception:
+            pass
+    return []
+
+
+def _get_global_bot_token() -> str:
+    """读取全局 GitCode bot token——向后兼容包装。
+
+    Issue #345: 内部改为调用统一入口 get_global_gitcode_bot_token()。
+    保留原函数名避免大量调用方改动。
+    """
+    return get_global_gitcode_bot_token()
 
 
 def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
@@ -1719,16 +1827,8 @@ def get_github_token(repo_key: str = "") -> str:
                         return i["access_token"]
     except Exception as e:
         log.warning(f"get_github_token: query external_identities failed: {e}")
-    # 3. 全局 github_api_token（configs/global-bot-token.json）
-    try:
-        import json, os
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
-        if os.path.exists(_gbt_path):
-            with open(_gbt_path, "r", encoding="utf-8") as f:
-                return json.load(f).get("github_bot_token", "") or ""
-    except Exception as e:
-        log.warning(f"get_github_token: load global token failed: {e}")
-    return ""
+    # 3. 全局 github bot token（Issue #345: DB 优先 → 文件 fallback）
+    return get_global_github_bot_token()
 
 
 def get_agent_bot_token(repo_key: str) -> str:
@@ -1921,7 +2021,9 @@ def delete_user_account(username: str) -> bool:
 
 def get_all_bot_usernames() -> list[str]:
     """获取所有托管仓库配置的 bot 用户名列表（用于 self-comment 检测）。
-    包含 managed_repos.bot_username + 全局 bot（configs/global-bot-token.json）。"""
+
+    Issue #345: 全局 bot 用户名改用统一入口（DB 优先 → 文件 fallback）。
+    """
     result = []
     with db_lock:
         c = db.cursor()
@@ -1932,16 +2034,7 @@ def get_all_bot_usernames() -> list[str]:
         except Exception:
             pass
     # 全局 bot 用户名（self-comment 检测必须包含，否则 bot 自己评论会死循环）
-    try:
-        import json, os
-        _gbt_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
-        if os.path.exists(_gbt_path):
-            with open(_gbt_path, "r", encoding="utf-8") as f:
-                _gbt = json.load(f)
-            _us = _gbt.get("bot_usernames") or []
-            result.extend(_us)
-    except Exception:
-        pass
+    result.extend(get_global_bot_usernames())
     return list(set(r for r in result if r))
 
 

@@ -3,7 +3,7 @@
 - admin 账号独立于 user_accounts（admin_accounts 表）
 - 认证：JWT + role=admin（require_admin）
 - 配置中心：GitCode/GitHub bot token + OAuth client_id/secret + bot_usernames
-  保存落盘 configs/global-bot-token.json + 同步 meta 表
+  保存到 DB meta 表（Issue #345: DB 是唯一权威源）
 """
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
@@ -46,9 +46,12 @@ class ConfigBody(BaseModel):
     gitcode_oauth_client_id: str = ""
     gitcode_oauth_client_secret: str = ""
     github_bot_token: str = ""
+    github_bot_username: str = ""
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
     bot_usernames: list[str] = []
+    webhook_url: str = ""
+    gitcode_webhook_token: str = ""
 
 
 class VerifyTokenBody(BaseModel):
@@ -141,7 +144,7 @@ def admin_status():
 # ====== 配置中心 ======
 
 @router.get("/config", operation_id="admin_config_get", summary="Get platform config (masked)",
-            description="Returns masked config from global-bot-token.json + oauth-providers.json. Admin only.")
+            description="Returns masked config from DB meta table. Admin only.")
 def get_config(admin: dict = Depends(require_admin)):
     from src.admin.config_store import read_public_config
     from src.user.db import get_meta_value
@@ -154,7 +157,7 @@ def get_config(admin: dict = Depends(require_admin)):
 
 
 @router.put("/config", operation_id="admin_config_put", summary="Save platform config",
-            description="Writes to configs/global-bot-token.json and syncs OAuth to meta table. Admin only.")
+            description="Saves bot config to DB meta table, OAuth to oauth-providers.json + meta. Admin only.")
 def put_config(body: ConfigBody, admin: dict = Depends(require_admin)):
     payload = body.model_dump(exclude_none=True)
     # 只保存非空字段（脱敏读、增量写）
@@ -305,3 +308,22 @@ def admin_allow_signup(body: AllowSignupBody, admin: dict = Depends(require_admi
     from src.user import db as user_db
     user_db.set_meta_value("allow_signup", "1" if body.enabled else "0")
     return {"message": "已更新", "allow_signup": body.enabled}
+
+
+@router.get("/bot-token-health", operation_id="admin_bot_token_health",
+             summary="Get global bot token health status")
+def get_bot_token_health(admin: dict = Depends(require_admin)):
+    """Issue #345: 查询全局 bot token 健康状态。
+
+    从 DB meta 表读取最近一次探活结果（集群共享）。
+    """
+    import json
+    from src.user.db import get_meta_value
+    raw = get_meta_value("bot_token_health")
+    if raw:
+        try:
+            return json.loads(raw)
+        except Exception:
+            pass
+    return {"overall": "healthy", "platforms": {},
+            "checked_at": "", "note": "尚未执行探活"}

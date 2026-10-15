@@ -2388,9 +2388,17 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                 row = c.fetchone()
                 _bot_name = row[0] if row else ""
             if not _bot_name:
-                from src.repo_key import split_owner_repo
-                _o, _r = split_owner_repo(repo_key)
-                _bot_name = _o
+                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
+                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
+                from src.repo_key import parse_repo_key
+                _prov, _o, _r = parse_repo_key(_rk)
+                if _prov == "github":
+                    from src.user.db import get_global_github_bot_username
+                    _bot_name = get_global_github_bot_username()
+                else:
+                    from src.user.db import get_global_bot_usernames
+                    _us = get_global_bot_usernames()
+                    _bot_name = _us[0] if _us else ""
             env_extra["BOT_USERNAME"] = _bot_name
         except Exception:
             pass
@@ -2617,7 +2625,17 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
                 row = c.fetchone()
                 _bot_name = row[0] if row else ""
             if not _bot_name:
-                _bot_name = _owner
+                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
+                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
+                from src.repo_key import parse_repo_key
+                _prov, _o, _r = parse_repo_key(_rk)
+                if _prov == "github":
+                    from src.user.db import get_global_github_bot_username
+                    _bot_name = get_global_github_bot_username()
+                else:
+                    from src.user.db import get_global_bot_usernames
+                    _us = get_global_bot_usernames()
+                    _bot_name = _us[0] if _us else ""
             env["BOT_USERNAME"] = _bot_name
         except Exception:
             pass
@@ -3123,9 +3141,17 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 row = c.fetchone()
                 _bot_name = row[0] if row else ""
             if not _bot_name:
-                from src.repo_key import split_owner_repo
-                _o, _r = split_owner_repo(repo_key)
-                _bot_name = _o
+                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
+                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
+                from src.repo_key import parse_repo_key
+                _prov, _o, _r = parse_repo_key(_rk)
+                if _prov == "github":
+                    from src.user.db import get_global_github_bot_username
+                    _bot_name = get_global_github_bot_username()
+                else:
+                    from src.user.db import get_global_bot_usernames
+                    _us = get_global_bot_usernames()
+                    _bot_name = _us[0] if _us else ""
             env_extra["BOT_USERNAME"] = _bot_name
         except Exception:
             pass

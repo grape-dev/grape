@@ -99,6 +99,9 @@
       var os = c.oauth_status || {};
       applyToField('f_gitcode_api_token', c.gitcode_api_token_present, c.gitcode_api_token_tail);
       applyToField('f_github_bot_token', c.github_bot_token_present, c.github_bot_token_tail);
+      // github_bot_username 非敏感，回显明文
+      $2('f_github_bot_username').value = c.github_bot_username || '';
+      $2('f_github_bot_username').placeholder = c.github_bot_username_present ? '● 已配置' : 'GitHub bot username';
       // client_id / redirect_uri 非敏感，回显明文；secret 占位提示
       $2('f_gitcode_oauth_client_id').value = c.gitcode_oauth_client_id || '';
       $2('f_gitcode_oauth_client_id').placeholder = c.gitcode_oauth_client_id_present ? '● 已配置' : 'GitCode OAuth App Client ID';
@@ -113,6 +116,10 @@
       $2('f_github_oauth_redirect_uri').value = c.github_oauth_redirect_uri || '';
       $2('f_github_oauth_redirect_uri').placeholder = '留空自动推断';
       $2('f_bot_usernames').value = (c.bot_usernames || []).join(', ');
+      // webhook_url non-sensitive, show plaintext; gitcode_webhook_token sensitive, masked
+      $2('f_webhook_url').value = c.webhook_url || '';
+      $2('f_webhook_url').placeholder = c.webhook_url_present ? '● 已配置' : 'GitCode webhook callback URL';
+      applyToField('f_gitcode_webhook_token', c.gitcode_webhook_token_present, c.gitcode_webhook_token_tail);
     }).catch(function (e) { toast('加载配置失败: ' + e.message, false); });
   }
 
@@ -129,6 +136,8 @@
     var githubTok = $2('f_github_bot_token').value.trim();
     if (gitcodeTok) body.gitcode_api_token = gitcodeTok;
     if (githubTok) body.github_bot_token = githubTok;
+    var githubBotUser = $2('f_github_bot_username').value.trim();
+    if (githubBotUser) body.github_bot_username = githubBotUser;
     var gcdClientId = $2('f_gitcode_oauth_client_id').value.trim();
     if (gcdClientId && gcdClientId.indexOf('●') < 0) body.gitcode_oauth_client_id = gcdClientId;
     var gcdClientSec = $2('f_gitcode_oauth_client_secret').value.trim();
@@ -143,6 +152,10 @@
     if (ghRedirect) body.github_oauth_redirect_uri = ghRedirect;
     var us = $2('f_bot_usernames').value.split(',').map(function (s) { return s.trim(); }).filter(Boolean);
     if (us.length) body.bot_usernames = us;
+    var webhookUrl = $2('f_webhook_url').value.trim();
+    if (webhookUrl) body.webhook_url = webhookUrl;
+    var webhookToken = $2('f_gitcode_webhook_token').value.trim();
+    if (webhookToken) body.gitcode_webhook_token = webhookToken;
     api('/config', { method: 'PUT', body: body }).then(function (d) {
       toast('配置已保存', true);
       showCfg();

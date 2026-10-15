@@ -603,14 +603,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
             _create_global_bot_token = ""
         else:
             _create_global_bot_token = ""
-            try:
-                import json as _json, os as _os2
-                _gbt_path2 = _os2.path.join(_os2.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-                if _os2.path.exists(_gbt_path2):
-                    with open(_gbt_path2, "r", encoding="utf-8") as _f2:
-                        _create_global_bot_token = _json.load(_f2).get("gitcode_api_token", "") or ""
-            except Exception:
-                pass
+            # Issue #345: 改用统一入口
+            from src.user.db import get_global_gitcode_bot_token
+            _create_global_bot_token = get_global_gitcode_bot_token()
         try:
             if provider == "github":
                 existing_id = find_existing_github_webhook(api_token, owner, repo_name, webhook_url)
@@ -754,18 +749,12 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         repo_key = to_repo_key(body.full_name, provider="github")
 
         # 读取 GitHub bot 全局配置
-        gh_bot_token = ""
-        gh_bot_username = ""
-        try:
-            import json as _json, os as _os
-            _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-            if _os.path.exists(_gbt_path):
-                with open(_gbt_path, "r", encoding="utf-8") as _f:
-                    _gbt = _json.load(_f)
-                gh_bot_token = _gbt.get("github_bot_token", "") or ""
-                gh_bot_username = _gbt.get("github_bot_username", "") or ""
-        except Exception:
-            pass
+        # Issue #345: 改用统一入口
+        from src.user.db import get_global_github_bot_token
+        gh_bot_token = get_global_github_bot_token()
+        # Issue #345: GitHub bot username 从 DB meta 读取
+        from src.user.db import get_global_github_bot_username
+        gh_bot_username = get_global_github_bot_username()
 
         try:
             def _find_gh_hook(token, _owner=owner, _repo=repo_name, _url=webhook_url):
@@ -796,24 +785,15 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
 
     # ===== GitCode 仓库托管（原有逻辑）=====
-    # 读取全局 bot 配置（configs/global-bot-token.json）
-    global_bot_token = ""
-    global_bot_username = ""
-    try:
-        import json, os as _os
-        _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-        if _os.path.exists(_gbt_path):
-            with open(_gbt_path, "r", encoding="utf-8") as _f:
-                _gbt = json.load(_f)
-            global_bot_token = _gbt.get("gitcode_api_token", "") or ""
-            _us = _gbt.get("bot_usernames") or []
-            global_bot_username = _us[0] if _us else ""
-    except Exception:
-        pass
+    # Issue #345: 改用统一入口读取全局 bot 配置
+    from src.user.db import get_global_gitcode_bot_token, get_global_bot_usernames
+    global_bot_token = get_global_gitcode_bot_token()
+    _us = get_global_bot_usernames()
+    global_bot_username = _us[0] if _us else ""
 
     # webhook 统一用全局 bot token 创建/查（方案 C：webhook 归 bot 管辖，个人 token 避免限流）
     if not global_bot_token:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "全局 Bot Token 未配置，无法创建 webhook（请联系管理员检查 configs/global-bot-token.json）"})
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "全局 Bot Token 未配置，无法创建 webhook（请联系管理员在配置中心检查 Bot Token 配置）"})
     webhook_token = global_bot_token
 
     from src.user.repo_manager import _check_collaborator_admin, _req
@@ -1187,27 +1167,17 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
         if not api_token:
             api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
         if not api_token:
-            try:
-                import json as _json, os as _os
-                _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-                if _os.path.exists(_gbt_path):
-                    with open(_gbt_path, "r", encoding="utf-8") as _f:
-                        api_token = _json.load(_f).get("github_bot_token", "") or ""
-            except Exception:
-                pass
+            # Issue #345: 改用统一入口
+            from src.user.db import get_global_github_bot_token
+            api_token = get_global_github_bot_token()
     else:
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
         if not api_token:
             api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
         if not api_token:
-            try:
-                import json as _json, os as _os
-                _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
-                if _os.path.exists(_gbt_path):
-                    with open(_gbt_path, "r", encoding="utf-8") as _f:
-                        api_token = _json.load(_f).get("gitcode_api_token", "") or ""
-            except Exception:
-                pass
+            # Issue #345: 改用统一入口
+            from src.user.db import get_global_gitcode_bot_token
+            api_token = get_global_gitcode_bot_token()
 
     # 删除 webhook（按 provider 选择 API）
     if api_token:
@@ -1237,16 +1207,14 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
                 repo_bot_username = _r.get("bot_username", "") or ""
                 break
         # 全局 bot 用户名
-        _gbt_path = _os.path.join(_os.path.dirname(__file__), "..", "..", "..", "configs", "global-bot-token.json")
+        # Issue #345: 改用统一入口
+        from src.user.db import get_global_bot_usernames, get_global_github_bot_username
         global_bot_username = ""
-        if _os.path.exists(_gbt_path):
-            with open(_gbt_path, "r", encoding="utf-8") as _f:
-                _gbt = json.load(_f)
-            if repo_provider == "github":
-                global_bot_username = _gbt.get("github_bot_username", "") or ""
-            else:
-                _us = _gbt.get("bot_usernames") or []
-                global_bot_username = _us[0] if _us else ""
+        if repo_provider == "github":
+            global_bot_username = get_global_github_bot_username()
+        else:
+            _us = get_global_bot_usernames()
+            global_bot_username = _us[0] if _us else ""
         # owner token 按 provider 分流
         if repo_provider == "github":
             from src.api.deps import get_user_github_token_with_refresh

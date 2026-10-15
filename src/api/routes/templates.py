@@ -40,21 +40,24 @@ def _find_template(template_id: str) -> dict | None:
 
 
 def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
-    """读取全局 bot 配置，返回 (bot_token, bot_username)。按 provider 选 token 字段。"""
-    bot_token, bot_username = "", ""
-    try:
-        path = os.path.join(CONFIG_DIR, "global-bot-token.json")
-        if os.path.exists(path):
-            with open(path, "r", encoding="utf-8") as f:
-                gbt = json.load(f)
-            if provider == "github":
-                bot_token = gbt.get("github_bot_token", "") or gbt.get("gitcode_api_token", "") or ""
-            else:
-                bot_token = gbt.get("gitcode_api_token", "") or ""
-            us = gbt.get("bot_usernames") or []
-            bot_username = us[0] if us else ""
-    except Exception as e:
-        log.warning(f"load global bot config failed: {e}")
+    """Read global bot config, return (bot_token, bot_username). Token and username
+    are both selected by provider.
+
+    Issue #345: Use unified DB entry (DB-first with file fallback).
+    """
+    from src.user.db import (
+        get_global_gitcode_bot_token,
+        get_global_github_bot_token,
+        get_global_bot_usernames,
+        get_global_github_bot_username,
+    )
+    if provider == "github":
+        bot_token = get_global_github_bot_token()
+        bot_username = get_global_github_bot_username()
+    else:
+        bot_token = get_global_gitcode_bot_token()
+        us = get_global_bot_usernames()
+        bot_username = us[0] if us else ""
     return bot_token, bot_username
 
 
@@ -244,8 +247,8 @@ async def create_from_template(body: CreateTemplateRequest,
         log.info(f"template host: webhook_id={webhook_id} exists, suppressing host_warning: {host_warning}")
         host_warning = ""
 
-    # 读取实际 bot 用户名（从 global-bot-token.json），用于提醒文案
-    _, bot_username = _load_global_bot_config()
+    # Read actual bot username (from DB meta table), for reminder text
+    _, bot_username = _load_global_bot_config(provider=provider)
     if not bot_username:
         bot_username = "grape_bot"
 

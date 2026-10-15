@@ -127,7 +127,7 @@
   "unhosted_title": "未托管仓库",
   "bot": {
     "title": "需要添加 Bot 为维护者",
-    "not_configured": "GitHub Bot 未配置，请联系管理员在 global-bot-token.json 中设置 github_bot_token 和 github_bot_username。仓库已托管，但 Agent 自动操作可能受限。",
+    "not_configured": "GitHub Bot 未配置，请联系管理员在配置中心设置 GitHub Bot Token 和 Username。仓库已托管，但 Agent 自动操作可能受限。",
     "invite_pending": "Bot {{bot}} 已被邀请加入仓库，但邀请尚未被接受。\n请前往 GitHub 仓库 Settings → Collaborators 接受邀请，或手动将 {{bot}} 添加为维护者。",
     "add_failed": "自动添加 Bot {{bot}} 为仓库维护者失败。\n请前往 GitHub 仓库 Settings → Collaborators 手动添加 {{bot}} 为维护者（Maintainer）。",
     "insufficient": "Bot {{bot}} 已加入仓库但权限不足。\n请在 GitHub 仓库 Settings → Collaborators 中将 {{bot}} 的权限设为 Maintainer 或 Admin。",

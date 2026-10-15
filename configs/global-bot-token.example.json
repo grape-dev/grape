@@ -4,9 +4,12 @@
   "gitcode_oauth_client_secret": "",
   "gitcode_oauth_redirect_uri": "",
   "github_bot_token": "",
+  "github_bot_username": "",
   "github_oauth_client_id": "",
   "github_oauth_client_secret": "",
   "github_oauth_redirect_uri": "",
   "bot_usernames": [],
-  "description": "全局 DevOps Bot 配置模板：gitcode_api_token / github_bot_token（各平台 bot 账户 token，fallback 用）、gitcode_oauth_* / github_oauth_*（各平台 OAuth 登录凭据 client_id/client_secret/redirect_uri，首次运行加载到 meta 表；redirect_uri 留空则自动推断）、bot_usernames（self-comment 检测用 bot 用户名，可由 token 调 /api/v5/user 自动获取）。复制为 global-bot-token.json 并填入真实值。"
+  "webhook_url": "",
+  "gitcode_webhook_token": "",
+  "description": "Global DevOps Bot config template. Copy to global-bot-token.json and fill in real values.\n\nFields:\n- gitcode_api_token: GitCode bot PAT (write operations: create/close/comment issues)\n- github_bot_token: GitHub bot PAT (write operations: create/close/comment issues)\n- github_bot_username: GitHub bot account username (for collaborator management)\n- gitcode_oauth_client_id/secret/redirect_uri: GitCode OAuth login credentials (loaded to meta table on first run; redirect_uri auto-inferred if empty)\n- github_oauth_client_id/secret/redirect_uri: GitHub OAuth login credentials (loaded to meta table on first run; redirect_uri auto-inferred if empty)\n- bot_usernames: GitCode bot usernames for self-comment detection (array, can be auto-fetched via /api/v5/user)\n- webhook_url: GitCode webhook callback URL (e.g. https://your-domain/webhook/gitcode)\n- gitcode_webhook_token: GitCode webhook secret for signature verification (also accepted as field name 'webhook_secret')\n\nIssue #345: On startup, all fields are migrated from this file to DB meta table.\nDB becomes the authority at runtime; this file is preserved as read-only migration source.\nAdmin config center (PUT /api/admin/config) writes to DB directly, not this file."
 }
