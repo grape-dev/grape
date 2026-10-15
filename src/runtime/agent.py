@@ -1612,7 +1612,9 @@ async def _execute_task(client, task, engine_name: str = ""):
         # A2A 走 meta.server_base_url 公网地址 NAT 回环不通 → a2a 调用反复超时
         # （实测：内网直连 200/3ms，公网地址 NAT 回环三次 5s 超时全挂）。
         _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
-        if "://" in _local_base and ":" not in _local_base.split("://", 1)[1]:
+        # 只有 http:// 才补 :3000（开发默认端口）；https 隐含 443，生产是 ELB→nginx→8000，
+        # 公网 443 上没人监听 3000，补了必然 TCP 超时（2026-10-15 外部 ECS 12122 事故）。
+        if _local_base.startswith("http://") and ":" not in _local_base.split("://", 1)[1]:
             _local_base = _local_base + ":3000"
         env["GRAPE_SERVER_URL"] = _local_base
         task["server_url"] = _local_base
@@ -1908,7 +1910,8 @@ async def _execute_task(client, task, engine_name: str = ""):
         return {"_error": str(e), "_started": started}
 
 
-async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
+async def _reregister(client, installed, device_name, cli_version: str = "",
+                     engine_by_rid: dict | None = None) -> list[int] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
 
     凭据被吊销（401 → CredentialRevokedError）时直接上抛——调用方退出进程，
@@ -1924,6 +1927,20 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
             for rid in ids:
                 await client.recover_orphans(rid)
             log.info(f"re-registered successfully, new runtime ids: {ids}")
+            # Rebuild engine_by_rid on re-register: a re-register may be
+            # assigned fresh runtime ids (e.g. after an account id-migration
+            # changes credential owner_id, the server INSERTs new engine rows),
+            # and the stale map lacks the new rid -> engine_by_rid.get(rid)
+            # returns an empty string -> _backend_for_engine('') falls back to
+            # 'opencode', so scene-bound engines (hwcloud/hermes/...) could be
+            # executed by the opencode backend (observed in production).
+            # Same construction as the startup register path, keeping the
+            # rid -> engine-instance -> backend mapping consistent.
+            if engine_by_rid is not None:
+                from src.runtime.instances import instance_name as _inst_name
+                for rid, r in zip(ids, installed):
+                    engine_by_rid[rid] = _inst_name(r.get("name", ""), device_name, 0)
+                log.info(f"engine_by_rid refreshed: {list(engine_by_rid.values())}")
             return ids
         log.warning("re-register returned empty ids")
     except CredentialRevokedError:
@@ -1978,7 +1995,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version(),
+                                        engine_by_rid=engine_by_rid)
             if new_ids:
                 runtime_ids = new_ids
                 heartbeat_fail_streak = 0
@@ -2208,7 +2226,8 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version(),
+                                        engine_by_rid=engine_by_rid)
                 if new_ids:
                     runtime_ids = new_ids
                     heartbeat_fail_streak = 0

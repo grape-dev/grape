@@ -122,6 +122,40 @@ class TestTranslateSql:
         assert mc.translate_sql("SELECT 'gitcode:' || repo_key FROM t") == \
             "SELECT CONCAT('gitcode:', repo_key) FROM t"
 
+    def test_cast_as_text_to_char(self):
+        """CAST(seq AS TEXT) → CAST(seq AS CHAR)（MySQL 不支持 TEXT 作 CAST 目标）"""
+        out = mc.translate_sql("SELECT * FROM events WHERE CAST(seq AS TEXT) LIKE %s")
+        assert "CAST(seq AS CHAR)" in out
+        assert "AS TEXT" not in out
+
+    def test_cast_as_text_case_insensitive(self):
+        """大小写不敏感：CAST(seq AS text) 同样翻译"""
+        out = mc.translate_sql("SELECT CAST(seq AS text) FROM t")
+        assert "CAST(seq AS CHAR)" in out
+
+    def test_cast_as_text_preserves_expression(self):
+        """CAST(复杂表达式 AS TEXT) → CAST(复杂表达式 AS CHAR)"""
+        out = mc.translate_sql("SELECT CAST(seq || ':' || title AS TEXT) FROM t")
+        assert "AS CHAR)" in out
+        assert "AS TEXT" not in out
+
+    def test_cast_as_char_not_double_translated(self):
+        """已经是 CAST(x AS CHAR) 的不被修改"""
+        sql = "SELECT CAST(seq AS CHAR) FROM t"
+        assert mc.translate_sql(sql) == sql
+
+    def test_agent_keyword_search_sql_translated(self):
+        """回归测试 #328: agents.py keyword 搜索 SQL 中的 CAST(seq AS TEXT) 被翻译为 CHAR。
+        模拟实际 WHERE 子句，确保 MySQL 后端不再 1064 语法错误。"""
+        sql = ("SELECT seq, event_type, title FROM events WHERE "
+               "repo_key IN (%s) AND agent_type=%s AND "
+               "(CAST(seq AS TEXT) LIKE %s OR issue_id LIKE %s OR event_type LIKE %s "
+               "OR title LIKE %s OR summary LIKE %s OR actor LIKE %s) "
+               "ORDER BY seq DESC LIMIT %s OFFSET %s")
+        out = mc.translate_sql(sql)
+        assert "CAST(seq AS CHAR)" in out
+        assert "CAST(seq AS TEXT)" not in out
+
     def test_qmark_to_placeholder(self):
         assert mc.translate_sql("SELECT * FROM t WHERE a=? AND b=?") == \
             "SELECT * FROM t WHERE a=%s AND b=%s"

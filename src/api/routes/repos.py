@@ -6,6 +6,7 @@ from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
 from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token, require_no_session_token, require_org_member
+from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
@@ -264,7 +265,13 @@ def _probe_stale_repos(api_token: str, user_id: int):
 
     for repo_key, owner, repo_name in stale_keys:
         log.info(f"managed repos: repo {repo_key} stale (deleted or webhook lost), auto-cleanup")
-        _cleanup_repo_data(repo_key, owner, repo_name)
+        # Issue #340：级联清空全部关联数据（含需求中心 Issue 卡片/流水线/场景关联）
+        from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+        try:
+            cascade_cleanup_repo_data(repo_key, owner, repo_name, trigger="polling")
+        except RepoCleanupError as e:
+            log.warning(f"managed repos: cascade cleanup {repo_key} failed (rolled back): {e}")
+            continue  # 保留 managed 记录，下次探活重试
         user_db.remove_managed_repo(repo_key)
 
 
@@ -280,39 +287,31 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     """
     from datetime import datetime
 
-    # 获取用户绑定的全部平台 token
-    gitcode_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    github_token = get_user_github_token(user["username"])
+    # Issue #343 修复: 不再预获取 token（with_oauth_token 内部获取+预刷新），
+    # 只需确定用户绑定了哪些平台
+    from src.auth.grape_account_db import get_user_identities
+    _identities = get_user_identities(user["id"])
+    _bound_providers = {i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github")}
+    if not _bound_providers:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
     # 需求 17: 前端显式指定 provider 时只拉该平台
     if provider in ("gitcode", "github"):
-        if provider == "gitcode":
-            api_tokens = {"gitcode": gitcode_token} if gitcode_token else {}
-        else:
-            api_tokens = {"github": github_token} if github_token else {}
-        if not api_tokens:
+        if provider not in _bound_providers:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
+        _providers = [provider]
     else:
-        # 不传 provider → 拉取全部绑定平台
-        api_tokens = {}
-        if gitcode_token:
-            api_tokens["gitcode"] = gitcode_token
-        if github_token:
-            api_tokens["github"] = github_token
-    if not api_tokens:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+        _providers = list(_bound_providers)
 
-    # 异步探活清理失效托管（C2）：仅 GitCode 探活
-    if "gitcode" in api_tokens:
+    # Issue #343 修复: _probe_stale_repos 需要 token，走 with_oauth_token 获取
+    if "gitcode" in _providers:
         try:
-            import threading
-            threading.Thread(
-                target=_probe_stale_repos,
-                args=(api_tokens["gitcode"], user["id"]),
-                daemon=True,
-            ).start()
+            def _probe(token, _uid=user["id"]):
+                _probe_stale_repos(token, _uid)
+                return []  # 返回空列表，不需要结果
+            with_oauth_token(user, "gitcode", _probe)
         except Exception as e:
-            log.warning(f"member: background stale probe start failed: {e}")
+            log.warning(f"member: stale probe failed (non-fatal): {e}")
 
     # 优先读取 DB 缓存（未过期）——按组织过滤
     org_id = user.get("org_id", 0)
@@ -338,7 +337,7 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
 
     def _filter_by_provider(repos_list):
         """按 provider 过滤缓存（repo_key 前缀匹配）"""
-        if provider in ("gitcode", "github") and len(api_tokens) == 1:
+        if provider in ("gitcode", "github") and len(_providers) == 1:
             pfx = provider + ":"
             return [r for r in repos_list if (r.get("repo_key", "").startswith(pfx) or
                        (provider == "gitcode" and not r.get("repo_key", "").startswith("github:")))]
@@ -351,13 +350,35 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 每个平台独立 try/catch：一个平台拉取失败（如网络不通）不影响其他平台
     all_repos = []
     failed_providers = []
-    for p, token in api_tokens.items():
+    _reauth_provider = ""  # P1-6 软失败: 记录需要重新授权的平台，不中断其他平台
+    for p in _providers:
         try:
-            repos = _fetch_and_cache(user["id"], token, p)
+            def _fetch(token, _uid=user["id"], _p=p):
+                return _fetch_and_cache(_uid, token, _p)
+            repos = with_oauth_token(user, p, _fetch)
             all_repos.extend(repos)
+        except HTTPException as _he:
+            # P1-6 软失败: 401 reauth_required 不中断循环，记录后继续拉其他平台
+            if _he.status_code == 401 and not _reauth_provider:
+                _reauth_provider = p
+                failed_providers.append(p)
+            else:
+                raise  # 非 401 的 HTTPException 仍然直接抛出
         except Exception as e:
             log.warning(f"Fetch repos for {p} failed (user={user['username']}): {e}")
             failed_providers.append(p)
+
+    # P1-6 软失败: 有结果但某平台需要重新授权 → 返回部分结果 + reauth 标记
+    if _reauth_provider and all_repos:
+        # 去重后返回已有结果，附加 reauth 提示
+        _seen = set()
+        _deduped = [r for r in all_repos if r.get("repo_key","") not in _seen and not _seen.add(r.get("repo_key",""))]
+        return {"repos": _filter_repos(user["id"], _filter_by_provider(_deduped), org_id=_filter_org_id),
+                "_partial": True, "_reauth_provider": _reauth_provider}
+    # 有平台需要重新授权且无任何结果 → 抛 401 让前端提示
+    if _reauth_provider and not all_repos and not cached:
+        raise HTTPException(status_code=401, detail={"code": 401,
+            "message": f"{_reauth_provider} 授权已过期，请重新登录授权", "action": "reauth_required"})
 
     if not all_repos and cached:
         # 全部平台都失败 → 用旧缓存兜底
@@ -405,30 +426,45 @@ def sync_repos(user: dict = Depends(require_org_member)):
     组织隔离：同步 GitCode 全量到 user_repos 缓存，但返回时按当前组织过滤
     （只返回该组织已托管的仓库 + 个人组织返回全量）。
     """
-    # 多平台拉取（与 list_member_repos 一致）
-    gitcode_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    github_token = get_user_github_token(user["username"])
-    api_tokens = {}
-    if gitcode_token:
-        api_tokens["gitcode"] = gitcode_token
-    if github_token:
-        api_tokens["github"] = github_token
-    if not api_tokens:
+    # Issue #343 修复: 不再预获取 token（with_oauth_token 内部获取+预刷新）
+    from src.auth.grape_account_db import get_user_identities
+    _identities = get_user_identities(user["id"])
+    _providers = [i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github")]
+    if not _providers:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
-    if "gitcode" in api_tokens:
-        _probe_stale_repos(api_tokens["gitcode"], user["id"])
+    if "gitcode" in _providers:
+        try:
+            def _probe(token, _uid=user["id"]):
+                _probe_stale_repos(token, _uid)
+                return []
+            with_oauth_token(user, "gitcode", _probe)
+        except Exception as e:
+            log.warning(f"sync: stale probe failed (non-fatal): {e}")
 
     # 每个平台独立 try/catch
     all_repos = []
     failed_providers = []
-    for p, token in api_tokens.items():
+    _reauth_provider = ""  # P1-6 软失败: 记录需要重新授权的平台，不中断其他平台
+    for p in _providers:
         try:
-            repos = _fetch_and_cache(user["id"], token, p)
+            def _fetch(token, _uid=user["id"], _p=p):
+                return _fetch_and_cache(_uid, token, _p)
+            repos = with_oauth_token(user, p, _fetch)
             all_repos.extend(repos)
+        except HTTPException as _he:
+            # P1-6 软失败: 401 reauth_required 不中断循环，记录后继续拉其他平台
+            if _he.status_code == 401 and not _reauth_provider:
+                _reauth_provider = p
+                failed_providers.append(p)
+            else:
+                raise
         except Exception as e:
             log.warning(f"Sync repos for {p} failed (user={user['username']}): {e}")
             failed_providers.append(p)
+
+    # P1-6 软失败: 有结果但某平台需要重新授权 → 继续保存+返回部分结果 + reauth 标记
+    _has_reauth = bool(_reauth_provider)
 
     if not all_repos:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "同步失败，请稍后重试"})
@@ -447,6 +483,13 @@ def sync_repos(user: dict = Depends(require_org_member)):
     # 个人组织不隔离（显示全量用户仓库），非个人组织才隔离
     from src.user.org_db import is_org_personal
     _filter_org_id = 0 if is_org_personal(org_id) else org_id
+    if _has_reauth:
+        _msg = f"同步成功（{_reauth_provider} 授权已过期，请重新登录授权）"
+        if _filter_org_id:
+            return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id),
+                    "message": _msg, "_partial": True, "_reauth_provider": _reauth_provider}
+        return {"repos": _filter_repos(user["id"], repos, org_id=0),
+                "message": _msg, "_partial": True, "_reauth_provider": _reauth_provider}
     if _filter_org_id:
         # 非个人组织：已托管到其他组织的仓库不显示，未托管的显示
         return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id), "message": "同步成功"}
@@ -541,7 +584,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     repo_name = repo_info.get("name") or name
 
     try:
-        _fetch_and_cache(user["id"], api_token, provider)
+        def _fetch(token, _uid=user["id"], _p=provider):
+            return _fetch_and_cache(_uid, token, _p)
+        with_oauth_token(user, provider, _fetch)
     except Exception:
         pass
 
@@ -723,7 +768,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             pass
 
         try:
-            existing_id = find_existing_github_webhook(api_token, owner, repo_name, webhook_url)
+            def _find_gh_hook(token, _owner=owner, _repo=repo_name, _url=webhook_url):
+                return find_existing_github_webhook(token, _owner, _repo, _url)
+            existing_id = with_oauth_token(user, "github", _find_gh_hook)
             if existing_id:
                 user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                          github_webhook_token=api_token,
@@ -771,7 +818,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
 
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
-        user_data = _req("GET", f"https://gitcode.com/api/v5/user", api_token)
+        def _get_user(token):
+            return _req("GET", f"https://gitcode.com/api/v5/user", token)
+        user_data = with_oauth_token(user, "gitcode", _get_user)
         current_user = user_data.get("login", "")
         if not current_user:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
@@ -779,7 +828,24 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         if current_user == owner:
             is_admin = True
         else:
-            is_admin = _check_collaborator_admin(api_token, owner, repo_name, current_user)
+            def _check_admin(token, _owner=owner, _repo=repo_name, _cu=current_user):
+                # P1-1 返工: 直接调 _req 绕过 _check_collaborator_admin 的 except RuntimeError: return False，
+                # 让原始 401/403 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+                import urllib.parse as _up
+                _perm_url = f"https://gitcode.com/api/v5/repos/{_owner}/{_up.quote(_repo, safe='')}/collaborators/{_up.quote(_cu, safe='')}/permission"
+                _data = _req("GET", _perm_url, token)
+                _access_level = 0
+                try:
+                    _access_level = int(_data.get("access_level", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                if _access_level >= 40:
+                    return True
+                if str(_data.get("permission", "") or "").lower() == "admin":
+                    return True
+                _perm = _data.get("permissions") or {}
+                return bool(_perm.get("admin")) if isinstance(_perm, dict) else False
+            is_admin = with_oauth_token(user, "gitcode", _check_admin)
 
         if not is_admin:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限托管，请联系管理员"})
@@ -903,7 +969,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
         raise HTTPException(status_code=503, detail={"code": 503, "message": "GitCode API 调用过于频繁，请稍后重试"})
 
     if not bot_ok:
-        # 邀请 + 接受
+        # 邀请 + 接受（owner token）
         add_collaborator(api_token, owner, repo, bot_username, "maintainer")[0]
         accept_invite_for_repo(bot_token, owner, repo)
         try:
@@ -1068,115 +1134,21 @@ def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_s
 def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     """解除托管时的同步清理：关联数据表 + 仓库 skill 目录 + workspace 目录。
 
+    Issue #340：升级为级联清理（issue/issue_state/agent_tasks/devops_pipeline_scene 等
+    全量关联数据 + 事务化 + 审计日志），统一入口见 src/repo_cleanup.py。
+    本函数保留为兼容包装（历史调用方/测试）；DB 事务失败时降级为旧行为（记日志不抛出）。
+
     repo_key 为 owner/repo（无前缀）；兼容历史可能存在的 gitcode: 前缀数据。
     用户维度数据（workspaces/chat/{user_id}、workspaces/{owner} 根）不清理。
     返回清理统计。
     """
-    import re, shutil, os
-    from src.session_manager import db, db_lock
-
-    stats = {"tables": 0, "skill_dirs": 0, "workspace_dirs": 0}
-    keys = [repo_key]
-    if not repo_key.startswith("gitcode:"):
-        keys.append(f"gitcode:{repo_key}")
-    if repo_key.startswith("gitcode:"):
-        keys.append(repo_key[8:])
-    keys = list(dict.fromkeys(k for k in keys if k))
-
-    # 路径安全校验：owner/repo 仅允许字母数字、点、下划线、连字符（防路径穿越）
-    if not re.match(r'^[\w.\-]+$', owner) or not re.match(r'^[\w.\-]+$', repo):
-        log.warning(f"Cleanup skipped: invalid owner/repo {owner}/{repo}")
-        return stats
-
-    with db_lock:
-        c = db.cursor()
-        try:
-            # 1. vod_conversations（依赖 devops_agent_session.id，需在删 agent_session 前）
-            placeholders = ",".join("?" for _ in keys)
-            c.execute(f"DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key IN ({placeholders}))", keys)
-            stats["tables"] += c.rowcount
-            # 2. chat_messages（依赖 chat_conversations.id，需在删 conversations 前）
-            c.execute(f"SELECT id FROM chat_conversations WHERE repo_key IN ({placeholders})", keys)
-            conv_ids = [r[0] for r in c.fetchall()]
-            if conv_ids:
-                cid_ph = ",".join("?" for _ in conv_ids)
-                c.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({cid_ph})", conv_ids)
-                stats["tables"] += c.rowcount
-            # 3. 直接按 repo_key 匹配的表
-            for tbl in ("events", "event_skipped", "chat_conversations", "chat_agent_session",
-                        "repo_im_group_binding", "pipeline_instances", "devops_agent_session",
-                        "issue_agent_session"):
-                try:
-                    c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({placeholders})", keys)
-                    stats["tables"] += c.rowcount
-                except Exception as e:
-                    log.warning(f"Cleanup {tbl} failed: {e}")
-            # 4. 仓库 skill 记录
-            try:
-                c.execute("DELETE FROM skill WHERE scope='repo' AND owner_id IN ({})".format(",".join("?" for _ in keys)), keys)
-                stats["tables"] += c.rowcount
-            except Exception as e:
-                log.warning(f"Cleanup skill records failed: {e}")
-            # 4.5 onboarding 幂等标记（删仓库即作废，重建同名仓库应重新引导）
-            #     标记 key 形如 `onboarded:{repo_key}`（repo_key 可能带/不带 gitcode: 前缀）
-            try:
-                _ob_keys = [f"onboarded:{k}" for k in keys]
-                _ob_ph = ",".join("?" for _ in _ob_keys)
-                c.execute(f"DELETE FROM meta WHERE `key` IN ({_ob_ph})", _ob_keys)
-                if c.rowcount:
-                    log.info(f"Cleanup onboarding marks: {c.rowcount} removed ({_ob_keys})")
-            except Exception as e:
-                log.warning(f"Cleanup onboarding marks failed: {e}")
-            db.commit()
-        except Exception as e:
-            log.warning(f"Cleanup DB failed: {e}")
-
-    # 5. 仓库 skill 目录（skills/repo/{repo_key}/）
+    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
     try:
-        from src.user.db import SKILL_DIR
-        _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")
-        for k in keys:
-            _dir = os.path.join(_repo_skills_base, k)
-            if os.path.isdir(_dir):
-                shutil.rmtree(_dir)
-                stats["skill_dirs"] += 1
-    except Exception as e:
-        log.warning(f"Cleanup skill dir failed: {e}")
-
-    # 6. workspace 目录（data/workspaces/...）
-    try:
-        from src.config import WORKSPACE_DIR
-        from src.repo_key import parse_repo_key, workspace_repo_dir
-        _ws_base = WORKSPACE_DIR
-        _provider, _, _ = parse_repo_key(keys[0]) if keys else ("gitcode", "", "")
-        _provider = _provider or "gitcode"
-        # 新路径（含 provider 隔离）+ 旧路径兼容（无 provider + 带前缀）
-        candidates = [
-            # 新：{WORKSPACE_DIR}/{provider}/{owner}/{repo}
-            workspace_repo_dir(keys[0]) if keys else "",
-            # 旧：{WORKSPACE_DIR}/{owner}/{repo}
-            os.path.join(_ws_base, owner, repo),
-            # vod-agent 平级目录
-            os.path.join(_ws_base, repo),
-            # feishu/vod 旧路径 + 新路径（含 provider 段）
-            os.path.join(_ws_base, "feishu", f"{owner}_{repo}"),
-            os.path.join(_ws_base, "vod", f"{owner}_{repo}"),
-            os.path.join(_ws_base, "vod", _provider, f"{owner}_{repo}"),
-            # history 旧路径 + 新路径
-            os.path.join(_ws_base, "history", owner, repo),
-            os.path.join(_ws_base, "history", f"gitcode:{owner}", repo),
-            os.path.join(_ws_base, "history", owner, _provider, f"{owner}_{repo}"),
-        ]
-        for _dir in candidates:
-            _abs = os.path.normpath(_dir)
-            if os.path.isdir(_abs) and _abs.startswith(os.path.normpath(_ws_base) + os.sep):
-                shutil.rmtree(_abs)
-                stats["workspace_dirs"] += 1
-    except Exception as e:
-        log.warning(f"Cleanup workspace dir failed: {e}")
-
-    log.info(f"Cleanup repo {repo_key}: {stats}")
-    return stats
+        return cascade_cleanup_repo_data(repo_key, owner, repo, trigger="legacy")
+    except RepoCleanupError:
+        # 事务已回滚：返回空统计（与旧行为一致，不产生半清理）
+        return {"tables": 0, "skill_dirs": 0, "workspace_dirs": 0,
+                "dry_run": False, "trigger": "legacy"}
 
 
 @router.post("/remove", operation_id="repos_remove", summary="Remove hosting", description="Removes hosting for a repository (unregisters webhook/bot bindings).")
@@ -1312,9 +1284,20 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     removed = user_db.remove_managed_repo(repo_key)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
-    # 同步清理：关联数据表 + 仓库 skill + workspace 目录（替代原 remove_agent_sessions）
-    _cleanup_repo_data(body.full_name, owner, repo_name)
-    return {"message": "已移除仓库"}
+    # Issue #340 级联清理：需求中心 Issue 卡片、流水线/事件、知识基线、场景关联、
+    # 会话/技能/IM 绑定等全部关联数据，事务化 + 审计日志；失败可重试且无半清理。
+    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+    try:
+        _stats = cascade_cleanup_repo_data(repo_key, owner, repo_name,
+                                           trigger="platform",
+                                           operator_id=user.get("id", 0) or 0)
+        log.info(f"repos/remove: cascade cleanup {repo_key} done: {_stats}")
+    except RepoCleanupError as e:
+        # DB 事务已回滚（managed_repos 移除独立提交，可重试：再次解除托管会 404，
+        # 故返回明确错误提示用户重试清理）
+        raise HTTPException(status_code=500, detail={
+            "code": 500, "message": f"关联数据清理失败（已回滚，无半清理），请重试: {e}"})
+    return {"message": "已移除仓库，并已清空全部相关数据"}
 
 
 @router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded). Dual: user (JWT/API key) and session token (tk_, repo scope must match).")

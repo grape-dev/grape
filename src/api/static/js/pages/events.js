@@ -49,10 +49,13 @@ function navEvent(seq) {
   });
 }
 
-// ===== 事件详情 running 状态自动轮询（2026-10-12）=====
+// ===== 事件详情 running 状态自动轮询（2026-10-12 / Issue #342 局部化）=====
 // 背景：A2A 补发/新事件跳转后，事件最初是 running 且引擎未认领（无 engine_instance、
 // 日志空），详情页一次渲染就静止 → 用户必须手动刷新。此轮询仅对非终态事件生效，
-// 5s 间隔，复用 navEvent 的局部刷新（不重置 pageContent，避免闪抖）。
+// 5s 间隔。
+// Issue #342：轮询回调不再整页重写 pageContent（原 renderEventDetail 全量 innerHTML
+// 会重置折叠态/已加载 prompt/对话输入/滚动位置，造成持续闪动的"整页刷新"体验），
+// 改为 _patchEventDetail 定向更新动态片段；数据指纹未变化时零 DOM 写入。
 var _eventPollTimer = null;
 var _eventPollSeq = 0;
 var _eventPollBusy = false;
@@ -78,7 +81,14 @@ function _startEventPoll(data) {
       _eventPollBusy = false;
       // 用户已切到别的事件 → 停止（新事件的 renderEventDetail 会自己重启轮询）
       if (window._currentView !== 'event' || _eventPollSeq !== d.seq) return;
-      renderEventDetail(d);  // 终态时 renderEventDetail 内部会 _stopEventPoll
+      if (d.status === 'completed' || d.status === 'failed' || d.status === 'cancelled') {
+        // 终态 → 停止轮询，完整渲染一次最终结论与终态按钮（此后不再刷新）
+        _stopEventPoll();
+        renderEventDetail(d);
+        return;
+      }
+      // 非终态 → 定向局部更新（Issue #342：不整页重写，保留折叠/输入/滚动等交互状态）
+      _patchEventDetail(d);
     }).catch(function() {
       _eventPollBusy = false;
     });
@@ -88,6 +98,120 @@ function _startEventPoll(data) {
 function _stopEventPoll() {
   if (_eventPollTimer) { clearInterval(_eventPollTimer); _eventPollTimer = null; }
   _eventPollSeq = 0;
+}
+
+// ===== 事件详情动态片段构建与定向局部更新（Issue #342）=====
+// 将随事件状态变化的字段抽为片段构建函数：renderEventDetail（全量）与
+// _patchEventDetail（轮询局部）复用同一构建逻辑，保证两条路径渲染结果一致。
+var _evLastFp = '';
+
+function _evResultOf(data) {
+  return data.result || data.summary || '';
+}
+
+// M4：结构化产出（唯一结论）：优先 event.json archive.output，其次 events.result 自身的结构化 JSON。
+function _evBuildStructuredHtml(o) {
+  if (!o) return '';
+  const actions = Array.isArray(o.actions) ? o.actions.map(a => `<div>• ${a}</div>`).join('') : '';
+  const arts = Array.isArray(o.artifacts) ? o.artifacts.map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('') : '';
+  return `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_conclusion')}</b> ${o.conclusion}</div>` : ''}
+    ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_actions')}</b> ${actions}</div>` : ''}
+    ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_artifacts')}</b> ${arts}</div>` : ''}
+    ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_next_step')}</b> ${o.next_step}</div>` : ''}
+    ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${I18N.t('events.label_issue_summary')}</b> ${o.issue_summary}</div>` : ''}`;
+}
+
+function _evTryStructuredResult(r) {
+  if (!r) return null;
+  const s = String(r).trim();
+  if (!(s.startsWith('{') && s.endsWith('}'))) return null;
+  try {
+    const o = JSON.parse(s);
+    return (o && (o.conclusion || o.actions || o.artifacts || o.issue_summary)) ? o : null;
+  } catch (e) { return null; }
+}
+
+// 区块1头部右侧摘要（Trigger · Actor · 状态图标 · 时长）
+function _evInfoSummaryText(data) {
+  return `${data.event_type || '—'} · ${data.actor || '—'} · ${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
+}
+
+function _evEngineText(data) {
+  return `<span style="color:var(--t3)">Engine:</span> ${(() => { if (!data.engine_instance) return '<span class="ts t3">' + I18N.t('events.engine_undispatched') + '</span>'; const h = data.engine_health; let health = ''; if (h && h.score !== null && h.score !== undefined) { const sc = h.score === 0 ? 'var(--r)' : h.score < 50 ? 'var(--y)' : 'var(--g)'; const hb = h.heartbeat_alive === false ? ' · 失联' : ''; health = ` · <span style="color:${sc};font-weight:600">健康分 ${h.score}</span>${h.consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败 ${h.consecutive_failures}</span>` : ''}${hb}`; } return `<b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}${health}`; })()}`;
+}
+
+function _evDurationText(data) {
+  return `<span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}`;
+}
+
+// 重新派发按钮显示条件（event-redispatch-design.md §3.1）：
+// failed / running>10min / 关联 task 卡在 dispatched
+function _evRedispatchVisible(data) {
+  const _ts = data.started_at ? new Date(data.started_at).getTime() : 0;
+  return data.status === 'failed' ||
+    (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
+    (data.task && data.task.task_status === 'dispatched');
+}
+
+function _evStatusText(data) {
+  // A2A 重新派发按钮显示条件（a2a-redo-button-design.md §2）：
+  // completed + 真实 Issue（PR 订阅伪 #pr_ 不允许 A2A）
+  const _redispatchVisible = _evRedispatchVisible(data);
+  const _a2aRedoVisible =
+    data.status === 'completed' &&
+    data.issue_id && !String(data.issue_id).startsWith('#pr_');
+  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
+}
+
+function _evFailReasonText(data) {
+  const result = _evResultOf(data);
+  return (data.status === 'failed' && result) ? `<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason')||'失败原因'}：</b>${String(result).substring(0, 500)}</div>` : '';
+}
+
+function _evLogRowText(data) {
+  return data.task && data.task.task_id
+    ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_realtime_log')}</a></div>`
+    : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_log')}</a></div>`;
+}
+
+function _evProcessingText(data) {
+  const result = _evResultOf(data);
+  const arch = data.archive || null;
+  const structuredHtml = _evBuildStructuredHtml((arch && arch.output) || _evTryStructuredResult(result));
+  return structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>`
+    : `${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}`;
+}
+
+// 轮询指纹：动态字段集合不变 → 跳过一切 DOM 写入（零闪动）
+function _evFingerprint(d) {
+  return JSON.stringify([d.status, d.duration, d.result, d.summary, d.engine_instance, d.runtime, d.backend,
+    d.engine_device, d.engine_ip, (d.engine_health && d.engine_health.score) || null,
+    d.archive && d.archive.output ? JSON.stringify(d.archive.output) : null,
+    (d.task && d.task.task_status) || '', (d.task && d.task.task_id) || '',
+    (d.agent_logs || []).length]);
+}
+
+function _evSetFragment(id, html) {
+  const el = document.getElementById(id);
+  if (el) el.innerHTML = html;
+}
+
+// 定向局部更新：仅替换动态片段容器内容，保留折叠态/prompt/对话输入/滚动等交互状态。
+// 页面结构不存在（如事件切换竞态）→ 退回全量渲染兜底。
+function _patchEventDetail(data) {
+  if (_convSeq !== data.seq || !document.getElementById('evDetailGrid')) { renderEventDetail(data); return; }
+  const fp = _evFingerprint(data);
+  if (fp === _evLastFp) return;
+  _evLastFp = fp;
+  _convSeq = data.seq;
+  if (data.agent_type) _convAgent = data.agent_type;
+  _evSetFragment('evInfoSummary', _evInfoSummaryText(data));
+  _evSetFragment('evEngineRow', _evEngineText(data));
+  _evSetFragment('evDurationRow', _evDurationText(data));
+  _evSetFragment('evStatusRow', _evStatusText(data));
+  _evSetFragment('evFailReason', _evFailReasonText(data));
+  _evSetFragment('evLogRow', _evLogRowText(data));
+  _evSetFragment('evProcessingBody', _evProcessingText(data));
 }
 
 function renderEventDetail(data) {
@@ -103,9 +227,10 @@ function renderEventDetail(data) {
   // 2026-10-12：running 事件自动轮询刷新（A2A 补发/新事件跳转后无需手动刷新即可
   // 看到引擎认领与日志）。终态或离开 event 页即停止；renderEventDetail 复入时重启。
   _startEventPoll(data);
+  // Issue #342：记录数据指纹，轮询据此判断是否需要局部更新（未变化零 DOM 写入）
+  _evLastFp = _evFingerprint(data);
   const agent = data.agent_type || 'vod';
   const agentName = (_AGENT_TYPES[agent] && _AGENT_TYPES[agent].display_name) || agent;
-  const result = data.result || data.summary || '';
   _convSeq = data.seq;
   _convAgent = agent;
 
@@ -122,47 +247,6 @@ function renderEventDetail(data) {
     ? `<a href="${_vcsUrl(data.repo_key, _vcsPath)}" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">${_label}</a>`
     : `${_label === 'Issue ' ? 'Issue —' : _label}`;
 
-  // 重新派发按钮显示条件（event-redispatch-design.md §3.1）：
-  // failed / running>10min / 关联 task 卡在 dispatched
-  const _ts = data.started_at ? new Date(data.started_at).getTime() : 0;
-  const _redispatchVisible =
-    data.status === 'failed' ||
-    (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
-    (data.task && data.task.task_status === 'dispatched');
-  // A2A 重新派发按钮显示条件（a2a-redo-button-design.md §2）：
-  // completed + 真实 Issue（PR 订阅伪 #pr_ 不允许 A2A）
-  const _a2aRedoVisible =
-    data.status === 'completed' &&
-    data.issue_id && !String(data.issue_id).startsWith('#pr_');
-
-  // M4：结构化产出（唯一结论）：优先 event.json archive.output，其次 events.result 自身的结构化 JSON。
-  // "Agent 处理记录" 作为方框外部左上角标题，与下方结构化结论分离（不再重复展示 result 原文）。
-  const _buildStructuredHtml = (o) => {
-    if (!o) return '';
-    const actions = Array.isArray(o.actions) ? o.actions.map(a => `<div>• ${a}</div>`).join('') : '';
-    const arts = Array.isArray(o.artifacts) ? o.artifacts.map(a => `<span class="tgx" style="margin-right:6px">${a}</span>`).join('') : '';
-    return `${o.conclusion ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_conclusion')}</b> ${o.conclusion}</div>` : ''}
-      ${actions ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_actions')}</b> ${actions}</div>` : ''}
-      ${arts ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_artifacts')}</b> ${arts}</div>` : ''}
-      ${o.next_step ? `<div style="font-size:12px;margin-bottom:3px"><b>${I18N.t('events.label_next_step')}</b> ${o.next_step}</div>` : ''}
-      ${o.issue_summary ? `<div style="font-size:12px;color:var(--a)"><b>${I18N.t('events.label_issue_summary')}</b> ${o.issue_summary}</div>` : ''}`;
-  };
-  const _tryStructuredResult = (r) => {
-    if (!r) return null;
-    const s = String(r).trim();
-    if (!(s.startsWith('{') && s.endsWith('}'))) return null;
-    try {
-      const o = JSON.parse(s);
-      return (o && (o.conclusion || o.actions || o.artifacts || o.issue_summary)) ? o : null;
-    } catch (e) { return null; }
-  };
-  const arch = data.archive || null;
-  let structuredHtml = _buildStructuredHtml((arch && arch.output) || _tryStructuredResult(result));
-
-  // 上下文折叠区块摘要（折叠时显示）
-  const _ctxSummary = `${data.event_type || '—'} · ${data.actor || '—'}`;
-  const _infoSummary = `${data.status === 'completed' ? '✅' : data.status === 'failed' ? '❌' : '⏳'} ${data.duration ? data.duration + 's' : '—'}`;
-
   // 返回按钮：优先返回需求详情页（携带需求上下文），否则 history.back()
   var _backBtn = '';
   if (window._eventFromTask && window._eventFromTask.taskId) {
@@ -170,6 +254,8 @@ function renderEventDetail(data) {
   } else {
     _backBtn = `<button class="bt bt-o bt-s" onclick="window.history.back()" style="margin-bottom:12px">← ${I18N.t('common.back')||'返回'}</button>`;
   }
+  // 动态区块（Issue #342）：加 id 的片段容器由 _patchEventDetail 轮询定向更新，
+  // 全量渲染与局部更新共用 _evXxxText 构建函数，保证两条路径渲染一致。
   const html = `${_backBtn}
   <div id="evDetailGrid" style="display:grid;grid-template-columns:1fr;gap:14px;height:calc(100vh - 160px);overflow:hidden">
     <!-- 左栏大框：导航 + 可折叠区块 + 处理记录+答复结论 -->
@@ -185,7 +271,7 @@ function renderEventDetail(data) {
         <div class="ev-section-header" onclick="_toggleEvSection('ctxInfo', this)" style="display:flex;align-items:center;gap:6px;cursor:pointer;padding:6px 0;user-select:none">
           <span class="ev-arrow" style="font-size:10px;transition:transform .2s;display:inline-block">▼</span>
           <span style="font-size:12px;font-weight:600">${I18N.t('events.section_context_info')}</span>
-          <span class="ts t3" style="font-size:11px;margin-left:auto">${_ctxSummary} · ${_infoSummary}</span>
+          <span id="evInfoSummary" class="ts t3" style="font-size:11px;margin-left:auto">${_evInfoSummaryText(data)}</span>
         </div>
         <div id="ctxInfo" class="ev-section-body" style="display:grid;grid-template-columns:1fr 1fr;gap:14px;padding-bottom:10px;border-bottom:1px solid var(--b)">
           <div>
@@ -202,14 +288,12 @@ function renderEventDetail(data) {
             <h3 style="font-size:12px;font-weight:600;margin-bottom:6px">${I18N.t('events.section_info')}</h3>
             <div style="font-size:11px;color:var(--t2);line-height:1.8">
               <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
-              <div><span style="color:var(--t3)">Engine:</span> ${(() => { if (!data.engine_instance) return '<span class="ts t3">' + I18N.t('events.engine_undispatched') + '</span>'; const h = data.engine_health; let health = ''; if (h && h.score !== null && h.score !== undefined) { const sc = h.score === 0 ? 'var(--r)' : h.score < 50 ? 'var(--y)' : 'var(--g)'; const hb = h.heartbeat_alive === false ? ' · 失联' : ''; health = ` · <span style="color:${sc};font-weight:600">健康分 ${h.score}</span>${h.consecutive_failures > 0 ? ` <span class="ts t3" style="font-size:10px">连续失败 ${h.consecutive_failures}</span>` : ''}${hb}`; } return `<b>${data.runtime || data.backend || 'OpenCode'}</b>${data.engine_device ? `<span class="ts t3"> · ${data.engine_device}</span>` : ''}${data.engine_ip ? `<span class="ts t3"> · ${data.engine_ip}</span>` : ''}${health}`; })()}</div>
+              <div id="evEngineRow">${_evEngineText(data)}</div>
               <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
-              <div><span style="color:var(--t3)">Duration:</span> ${data.duration ? data.duration + 's' : '—'}</div>
-              <div><span style="color:var(--t3)">Status:</span> <span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}</div>
-              ${data.status === 'failed' && result ? `<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason')||'失败原因'}：</b>${String(result).substring(0, 500)}</div>` : ''}
-              ${data.task && data.task.task_id
-                ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_realtime_log')}</a></div>`
-                : `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openInlineLog(${data.seq}, 'seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_log')}</a></div>`}
+              <div id="evDurationRow">${_evDurationText(data)}</div>
+              <div id="evStatusRow">${_evStatusText(data)}</div>
+              <div id="evFailReason">${_evFailReasonText(data)}</div>
+              <div id="evLogRow">${_evLogRowText(data)}</div>
               <div id="convGate" style="display:none"></div>
             </div>
           </div>
@@ -229,10 +313,7 @@ function renderEventDetail(data) {
       </div>
       <!-- 区块3：Agent 处理记录与答复结论（统一标题，内置框+结论，整体滑动） -->
       <h3 style="font-size:13px;font-weight:600;margin-bottom:6px;flex-shrink:0">${I18N.t('events.section_processing')}</h3>
-      <div style="flex:1;overflow-y:auto;background:var(--bg);color:var(--t);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">
-        ${structuredHtml ? `<div style="margin-bottom:12px;padding:10px 12px;background:#f0f1f4;border-radius:6px;border-left:3px solid var(--a)">${structuredHtml}</div>`
-          : `${result ? renderMarkdown(result) : '<div style="color:var(--t3)">' + I18N.t('events.no_conclusion') + '</div>'}`}
-      </div>
+      <div id="evProcessingBody" style="flex:1;overflow-y:auto;background:var(--bg);color:var(--t);border-radius:8px;padding:14px;font-size:13px;line-height:1.6">${_evProcessingText(data)}</div>
       <div id="convOutcome" class="cd mt12" style="padding:10px;font-size:11px;flex-shrink:0;display:none"></div>
     </div>
     <!-- 右栏：对话面板（有对话/门禁开放才显示，见 loadConversation 条件渲染 Issue #35） -->

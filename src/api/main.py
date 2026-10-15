@@ -230,6 +230,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Autopilot scheduler start failed: {e}")
 
+    # 本机 direct 引擎一等认领器（local-claimer-first-class-broadcast-design.md）：
+    # 让本机引擎与远端 worker 同级参与广播认领（同一条 claim_by_tag 检查链）。
+    # GRAPE_LOCAL_CLAIMER=0 可关闭（回退为纯远端认领）。
+    try:
+        from src.runtime.local_claimer import start_local_claimer
+        start_local_claimer()
+    except Exception as e:
+        log.warning(f"Local claimer start failed: {e}")
+
     # D7: 冷静期定时任务：每天执行一次，匿名化超 30 天的冷静期账号（需求 22）
     try:
         from src.admin.cooldown import start_cooldown_scheduler
@@ -253,24 +262,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
 
-    # D32: user_accounts → grape_accounts 数据迁移（异步，不阻塞启动，幂等）
+    # D32: user_accounts → grape_accounts 数据迁移（Issue #343: yield 前同步等待完成）
+    # P1-1 修复: 原异步执行不等待就 yield，迁移期间用户请求读到旧 user_id 导致数据错位。
+    # 改为 yield 前同步等待完成（幂等，已迁移环境秒返回）。
     try:
-        async def _d32_migrate_wrapper():
-            from scripts.migrate_user_accounts_to_grape import run_migration
-            await asyncio.to_thread(run_migration, False)
-
-        _d32_task = asyncio.create_task(_d32_migrate_wrapper())
-
-        def _on_d32_done(task: asyncio.Task):
-            if task.exception():
-                log.error(f"D32 migration task failed: {task.exception()}", exc_info=task.exception())
-            else:
-                log.info("D32 migration completed (async)")
-        _d32_task.add_done_callback(_on_d32_done)
-        app.state.d32_migrate_task = _d32_task
-        log.info("D32 migration started (async)")
+        from scripts.migrate_user_accounts_to_grape import run_migration
+        await asyncio.to_thread(run_migration, False)
+        log.info("D32 migration completed (sync, pre-yield)")
     except Exception as e:
-        log.warning(f"D32 migration start failed: {e}")
+        log.error(f"D32 migration failed: {e}", exc_info=e)
+        app.state.d32_migration_failed = True
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -947,6 +948,15 @@ async def readiness(request: Request):
         # 不阻断 readiness（模板缺失不影响核心功能，但标记告警）
         if status == "ok":
             status = "degraded"
+    # P1-1 修复: /readyz 检查 D32 迁移状态
+    # 迁移在 lifespan yield 前同步完成，但如果迁移异常退出，服务仍会启动
+    _d32_failed = getattr(app, "state", None)
+    if _d32_failed and getattr(_d32_failed, "d32_migration_failed", False):
+        checks["migration"] = "error: D32 migration failed"
+        status = "not_ready"
+        http_status = 503
+    else:
+        checks["migration"] = "ok"
     resp = JSONResponse(
         status_code=http_status,
         content={"status": status, "checks": checks},

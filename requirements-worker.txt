@@ -9,5 +9,6 @@
 # Requires Python >= 3.10 (code uses X | None union syntax); recommended: build venv with python3.12:
 #   python3.12 -m venv .venv && .venv/bin/pip install -r requirements-worker.txt
 aiohttp>=3.9
+bcrypt>=4.0
 click>=8.0
 httpx>=0.24

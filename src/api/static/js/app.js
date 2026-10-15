@@ -1241,6 +1241,11 @@ function loadAgentTypes() {
       _convStreamAbort.abort();
       _convStreamAbort = null;
     }
+    // Issue #342：离开事件详情立即停止 running 轮询定时器（不等下一 tick 自检，
+    // 避免离开后 5s 内残留 tick 触发无效请求/局部更新）
+    if (view !== 'event' && typeof _stopEventPoll === 'function') {
+      _stopEventPoll();
+    }
 
     // 技能详情返回：记录来源视图（pushHistory 之前 history.state 还是上一个视图）
     if (view === 'skill') {
@@ -1396,7 +1401,9 @@ function loadAgentTypes() {
       renderImChannel();
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.current_project');
-      renderTasks();
+      // Issue #341: #tasks/<issue号> 深链——把 hash 中的编号透传给需求中心，
+      // 纯数字 param 由 renderTasks 解析为待打开详情的 issue_number
+      renderTasks(param);
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'gitcode');

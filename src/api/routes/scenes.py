@@ -503,7 +503,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
-    from src.api.deps import get_user_token_with_refresh
+    from src.api.oauth_token import with_oauth_token
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
 
@@ -521,10 +521,17 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     tpl = tpl_ctx["template"]
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
-    api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    if not api_token:
-        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
-    gitcode_login = get_user_gitcode_login(api_token)
+    # Issue #343 修复: 不吞 401 异常——token 过期时正确抛给前端，不返回假数据
+    # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
+    # 让原始 401 RuntimeError 穿透到 with_oauth_token，_is_token_error 能匹配 (401) 格式触发刷新。
+    from src.user.repo_manager import _req
+    def _get_login(token):
+        data = _req("GET", "https://gitcode.com/api/v5/user", token)
+        login = data.get("login", "") if isinstance(data, dict) else ""
+        if not login:
+            raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
+        return login
+    gitcode_login = with_oauth_token(user, "gitcode", _get_login)
     if not gitcode_login:
         return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
 
@@ -585,7 +592,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
-    from src.api.deps import get_user_token_with_refresh
+    from src.api.oauth_token import with_oauth_token
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
 
@@ -604,10 +611,16 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
     # 拿用户的 GitCode login
-    api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
-    gitcode_login = get_user_gitcode_login(api_token)
+    # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
+    # 让原始 401 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+    from src.user.repo_manager import _req
+    def _get_login(token):
+        data = _req("GET", "https://gitcode.com/api/v5/user", token)
+        login = data.get("login", "") if isinstance(data, dict) else ""
+        if not login:
+            raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
+        return login
+    gitcode_login = with_oauth_token(user, "gitcode", _get_login)
     if not gitcode_login:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户 GitCode 身份"})
 
@@ -1435,11 +1448,13 @@ class ApplySceneRequest(BaseModel):
     scene_id: str
 
 
-def _validate_scene_engine_ids(nodes: list, repo_key: str):
+def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     """校验场景 nodes 的 engine_runtime_ids：
     1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
     3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
+    4. SRE 节点：引擎必须为个人级（scope=user）且 owner_id==当前用户（sre-personal-machine §3.7 Q2/Q3）
+    5. SRE 节点 enabled 且 engine_runtime_ids 为空 → 400（SRE 空 ≠ 广播，= 无引擎无法派发）
 
     校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
@@ -1449,9 +1464,14 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str):
     for node in nodes:
         tag = node.get("tag") or node.get("id") or ""
         eids = node.get("engine_runtime_ids") or []
-        if not eids:
-            continue
         if not tag:
+            continue
+        # SRE 空 = 无引擎：启用状态下不允许保存（Q2 裁定）
+        if tag == "sre" and node.get("enabled") is not False and not eids:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": "SRE Agent 只能使用个人级机器，请先选择个人机器（引擎列表不能为空）"})
+        if not eids:
             continue
         for eid in eids:
             try:
@@ -1471,6 +1491,16 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str):
                 log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
                 continue
             _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
+            # SRE 专属：引擎必须为个人级且属于当前用户（scope=user, owner_id=username）
+            if tag == "sre":
+                if _scope != "user":
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400,
+                        "message": f"SRE Agent 只能使用个人级机器，引擎 {_eid} 不是个人级（scope={_scope}）"})
+                if _owner_id and username and _owner_id != username:
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400,
+                        "message": f"SRE Agent 只能使用当前用户自己的个人机器，引擎 {_eid} 属于 {_owner_id}"})
             # scope=repo 时校验仓库归属
             if _scope == "repo" and _cred_id > 0:
                 _owner_norm = (from_repo_key(_owner_id) or "").strip()
@@ -1517,7 +1547,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库级场景需要先选择仓库"})
 
     # 校验 engine_runtime_ids：scope=repo 的引擎必须属于当前仓库，且 tag 必须包含节点标签
-    _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key)
+    _validate_scene_engine_ids(nodes_json := [n.model_dump() for n in body.nodes], repo_key, user.get("username") or "")
 
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     if body.pr_subscription_enabled:
@@ -1568,7 +1598,7 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
     nodes_json = [n.model_dump() for n in body.nodes]
     if repo_key:
-        _validate_scene_engine_ids(nodes_json, repo_key)
+        _validate_scene_engine_ids(nodes_json, repo_key, user.get("username") or "")
 
     # PR 订阅开启时校验：QA 节点必须启用且有 skill
     _pr_sub_on = body.pr_subscription_enabled

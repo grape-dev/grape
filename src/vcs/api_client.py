@@ -157,6 +157,17 @@ class VcsApiClient:
             return self._gitlab_request("GET", f"/projects/{project_id}")
         return {"error": f"unsupported provider: {self.provider}"}
 
+    def repo_exists(self) -> bool:
+        """探测仓库是否存在（Issue #340 代码仓删除感知）。
+
+        404 → False（已删除）；200 → True；其他错误（403/网络）→ True（不误判，
+        交由探活轮询/webhook 双通道兜底）。
+        """
+        info = self.get_repo_info()
+        if isinstance(info, dict) and str(info.get("error", "")).strip() == "HTTP 404":
+            return False
+        return True
+
     # === 平台内部实现 ===
 
     def _gitcode_request(self, method: str, path: str, data: dict | None = None) -> dict:

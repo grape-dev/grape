@@ -4,6 +4,7 @@
   "view_repo_all": "仓库全部",
   "loading": "加载中...",
   "load_failed": "加载失败: {{msg}}",
+  "deeplink_not_found": "未找到需求 #{{n}}，已返回任务列表",
   "view_list": "列表",
   "view_board": "看板",
   "stage_vod": "VOD",

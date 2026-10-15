@@ -136,3 +136,4 @@ configs/*.local.json
 _grape_stage2*
 _e2e_test.py
 configs/oauth-providers.json
+.upgrade-backup/

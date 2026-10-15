@@ -218,12 +218,11 @@ class TestCreateIssue:
     def test_create_ok(self):
         from unittest.mock import patch
         _mk_issue_state(20, stage="vod")  # 预置避免走 GitCode API
-        # 用 mock 覆盖 GitCode create + token，防止真实 API 调用
+        # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
         with patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
-             patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
-             patch("src.api.issues_center._gitcode_api_with_refresh") as _mock_api, \
+             patch("src.user.db.get_repo_bot_token", return_value="test_tok"), \
+             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 20}), \
              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
-            _mock_api.return_value = {"number": 20}
             _mock_ensure.return_value = 20
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",
@@ -237,12 +236,10 @@ class TestCreateIssue:
     def test_create_duplicate_title_not_blocked(self):
         """Issue #202: 同名需求不再被 409 阻断——即使已存在同名 open Issue，仍允许创建新 Issue。"""
         from unittest.mock import patch
-        # mock _find_open_issue_by_title 返回已存在 Issue 编号（模拟同名已存在）
-        # 期望：不再返回 409，而是继续创建新 Issue（created=True）
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
-             patch("src.api.issues_center._gitcode_api_with_refresh") as _mock_api, \
+        # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
+        with patch("src.user.db.get_repo_bot_token", return_value="test_tok"), \
+             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 21}), \
              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
-            _mock_api.return_value = {"number": 21}
             _mock_ensure.return_value = 21
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",

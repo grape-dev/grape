@@ -49,7 +49,7 @@ def refresh_token(request: Request, response: Response):
 
     # D3 修复：复用 deps.py 缓存校验 token_version + status
     from src.api.deps import get_user_status_cached, invalidate_user_cache
-    db_ver, status = get_user_status_cached(uid)
+    db_ver, status, _ = get_user_status_cached(uid)
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
     if status != 1:

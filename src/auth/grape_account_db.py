@@ -357,22 +357,25 @@ def increment_token_version(user_id: int) -> None:
         log.warning(f"Increment token version failed: {e}")
 
 
-def get_status_and_token_version(user_id: int) -> "tuple[int, int] | None":
-    """获取用户状态和 token_version（鉴权中间件用）。
+def get_status_and_token_version(user_id: int) -> "tuple[int, int, str] | None":
+    """获取用户状态、token_version 和 username（鉴权中间件用）。
 
-    返回 (status, token_version) 或 None。
+    Issue #343: 返回 username 用于 JWT payload 一致性校验，
+    防止旧 JWT sub=旧id 撞上新表有效用户后拿别人 id 写数据。
+
+    返回 (status, token_version, username) 或 None。
     """
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT status, token_version FROM grape_accounts WHERE id=?",
+                "SELECT status, token_version, username FROM grape_accounts WHERE id=?",
                 (user_id,),
             )
             row = c.fetchone()
         if not row:
             return None
-        return (row[0], row[1] if row[1] is not None else 0)
+        return (row[0], row[1] if row[1] is not None else 0, row[2] or "")
     except Exception:
         return None
 
@@ -582,6 +585,7 @@ def create_external_identity(
     external_avatar: str = "",
     access_token: str = "",
     refresh_token: str = "",
+    expires_in: int = 0,
 ) -> bool:
     """创建或恢复第三方绑定关系。D10: access_token/refresh_token 加密存储。
 
@@ -589,6 +593,11 @@ def create_external_identity(
     恢复为 status=1 并更新 token/用户信息，而非 INSERT（会因 UNIQUE 约束冲突失败）。
     """
     from src.auth.credential_crypto import encrypt
+    import time as _time
+    _expires_at_str = ""
+    if expires_in:
+        _expires_at_str = _time.strftime("%Y-%m-%d %H:%M:%S",
+                                         _time.gmtime(_time.time() + expires_in))
     try:
         with db_lock:
             c = db.cursor()
@@ -601,16 +610,15 @@ def create_external_identity(
             )
             existing_active = c.fetchone()
             if existing_active:
-                import time as _time
                 now = _time.strftime("%Y-%m-%d %H:%M:%S")
                 c.execute(
                     "UPDATE external_identities SET "
                     "external_id=?, external_login=?, external_name=?, "
                     "external_avatar=?, access_token=?, refresh_token=?, "
-                    "updated_at=? WHERE id=?",
+                    "token_expires_at=?, updated_at=? WHERE id=?",
                     (external_id, external_login, external_name,
                      external_avatar, encrypt(access_token), encrypt(refresh_token),
-                     now, existing_active[0]),
+                     _expires_at_str, now, existing_active[0]),
                 )
                 db.commit()
                 return True
@@ -624,17 +632,16 @@ def create_external_identity(
             if existing:
                 # 恢复解绑记录
                 # BUG-NEW-3 修复：用 Python 时间戳替代 datetime('now')，兼容 MySQL
-                import time as _time
                 now = _time.strftime("%Y-%m-%d %H:%M:%S")
                 c.execute(
                     "UPDATE external_identities SET "
                     "grape_user_id=?, status=1, external_login=?, external_name=?, "
                     "external_avatar=?, access_token=?, refresh_token=?, "
-                    "unbound_at=NULL, updated_at=? "
+                    "token_expires_at=?, unbound_at=NULL, updated_at=? "
                     "WHERE id=?",
                     (grape_user_id, external_login, external_name,
                      external_avatar, encrypt(access_token), encrypt(refresh_token),
-                     now, existing[0]),
+                     _expires_at_str, now, existing[0]),
                 )
                 db.commit()
                 return True
@@ -648,11 +655,11 @@ def create_external_identity(
             c.execute(
                 "INSERT INTO external_identities "
                 "(grape_user_id, provider, external_id, external_login, "
-                "external_name, external_avatar, access_token, refresh_token) "
-                "VALUES (?,?,?,?,?,?,?,?)",
+                "external_name, external_avatar, access_token, refresh_token, token_expires_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
                 (grape_user_id, provider, external_id, external_login,
                  external_name, external_avatar,
-                 encrypt(access_token), encrypt(refresh_token)),
+                 encrypt(access_token), encrypt(refresh_token), _expires_at_str),
             )
             db.commit()
             return True
@@ -975,6 +982,7 @@ def restore_binding_in_tx(
     cursor, old_user_id: int, new_user_id: int, provider: str, external_id: str,
     external_login: str = "", external_name: str = "", external_avatar: str = "",
     access_token: str = "", refresh_token: str = "",
+    expires_in: int = 0,
 ) -> bool:
     """需求 6 Step 2（MySQL 安全版）：在调用方事务内恢复绑定（只写不读）。
 
@@ -986,10 +994,15 @@ def restore_binding_in_tx(
     如果 rowcount=0（status=0 记录不存在），走清理+INSERT。
 
     ⚠️ 此函数不含任何 SELECT，在 MySQL 下事务不会被 auto-commit 架空。
+    Issue #343 P1-4 修复: 新增 expires_in 参数，恢复绑定时写入 token_expires_at。
     """
     from src.auth.credential_crypto import encrypt
     import time as _t
     now = _t.strftime("%Y-%m-%d %H:%M:%S")
+    _expires_at_str = ""
+    if expires_in:
+        _expires_at_str = _t.strftime("%Y-%m-%d %H:%M:%S",
+                                       _t.gmtime(_t.time() + expires_in))
     try:
         c = cursor
         # 尝试恢复 status=0 记录（unbind_placeholder_binding 刚写入的）
@@ -997,11 +1010,11 @@ def restore_binding_in_tx(
             "UPDATE external_identities SET "
             "grape_user_id=?, status=1, external_id=?, external_login=?, "
             "external_name=?, external_avatar=?, access_token=?, refresh_token=?, "
-            "unbound_at=NULL, updated_at=? "
+            "token_expires_at=?, unbound_at=NULL, updated_at=? "
             "WHERE grape_user_id=? AND provider=? AND status=0",
             (new_user_id, external_id, external_login, external_name,
              external_avatar, encrypt(access_token), encrypt(refresh_token),
-             now, old_user_id, provider),
+             _expires_at_str, now, old_user_id, provider),
         )
         if c.rowcount > 0:
             return True
@@ -1013,11 +1026,11 @@ def restore_binding_in_tx(
         c.execute(
             "INSERT INTO external_identities "
             "(grape_user_id, provider, external_id, external_login, "
-            "external_name, external_avatar, access_token, refresh_token) "
-            "VALUES (?,?,?,?,?,?,?,?)",
+            "external_name, external_avatar, access_token, refresh_token, token_expires_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?)",
             (new_user_id, provider, external_id, external_login,
              external_name, external_avatar,
-             encrypt(access_token), encrypt(refresh_token)),
+             encrypt(access_token), encrypt(refresh_token), _expires_at_str),
         )
         return True
     except Exception as e:
@@ -1116,6 +1129,7 @@ def update_external_identity_tokens(
     provider: str,
     access_token: str = "",
     refresh_token: str = "",
+    expires_in: int = 0,
     external_name: str = "",
     external_avatar: str = "",
 ) -> bool:
@@ -1132,6 +1146,12 @@ def update_external_identity_tokens(
             if refresh_token:
                 sets.append("refresh_token=?")
                 params.append(encrypt(refresh_token))
+            if expires_in:
+                import time as _time
+                _expires_at_str = _time.strftime("%Y-%m-%d %H:%M:%S",
+                                                 _time.gmtime(_time.time() + expires_in))
+                sets.append("token_expires_at=?")
+                params.append(_expires_at_str)
             if external_name:
                 sets.append("external_name=?")
                 params.append(external_name)
@@ -1191,16 +1211,22 @@ def restore_external_identity(
     refresh_token: str = "",
     external_name: str = "",
     external_avatar: str = "",
+    expires_in: int = 0,
 ) -> bool:
     """恢复绑定为活跃状态（status 0→1），同时更新 token 和用户信息。
 
     D10: access_token/refresh_token 加密存储。
     P2 加固：在同一事务内检查原用户是否已有同 provider 的活跃绑定（status=1），
     如果有则先标记为 status=0，避免 UNIQUE(grape_user_id, provider) 冲突。
+    Issue #343 P1-4 修复: 新增 expires_in 参数，恢复绑定时写入 token_expires_at。
     """
     from src.auth.credential_crypto import encrypt
     import time as _time
     now = _time.strftime("%Y-%m-%d %H:%M:%S")
+    _expires_at_str = ""
+    if expires_in:
+        _expires_at_str = _time.strftime("%Y-%m-%d %H:%M:%S",
+                                         _time.gmtime(_time.time() + expires_in))
     try:
         with db_lock:
             c = db.cursor()
@@ -1234,6 +1260,10 @@ def restore_external_identity(
             if external_avatar:
                 sets.append("external_avatar=?")
                 params.append(external_avatar)
+            # Issue #343 P1-4: 恢复绑定时写入 token_expires_at
+            if _expires_at_str:
+                sets.append("token_expires_at=?")
+                params.append(_expires_at_str)
             params.extend([grape_user_id, provider])
             c.execute(
                 f"UPDATE external_identities SET {', '.join(sets)} "

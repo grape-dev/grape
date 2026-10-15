@@ -6,11 +6,12 @@
 2. 每行的全部数据（grape_accounts + external_identities + user_credentials）
    一次性迁完才标记 migrated=1，保证不遗漏
 3. 每一步用 NOT EXISTS 幂等检查，重跑不产生重复数据
-4. 服务启动时自动异步执行（main.py lifespan），不阻塞启动
+4. 服务启动时自动执行（main.py lifespan yield 前同步等待完成）
 
-两阶段：
+三阶段：
   阶段 1：用户数据 + OAuth 绑定 + 业务凭据
-  阶段 2：关联表 user_id 更新（user_repos/chat_conversations/organization/org_member）
+  阶段 2：关联表 user_id 更新（27 张表，含 issue/issue_state/agent_tasks 等）
+  阶段 3：全表孤儿 ID 扫描（迁移后校验，有孤儿则需人工处理）
 
 用法：
     .venv/bin/python -m scripts.migrate_user_accounts_to_grape --dry-run
@@ -100,8 +101,8 @@ def _ensure_external_identity(grape_user_id, provider, external_id,
             c.execute(
                 "INSERT INTO external_identities "
                 "(grape_user_id, provider, external_id, external_login, "
-                " access_token, refresh_token, status, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, '', 1, datetime('now'), datetime('now'))",
+                " access_token, refresh_token, status, token_expires_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, '', 1, '', datetime('now'), datetime('now'))",
                 (grape_user_id, provider, external_id, external_login or "",
                  encrypted_token)
             )
@@ -112,11 +113,13 @@ def _ensure_external_identity(grape_user_id, provider, external_id,
         return False
 
 
-def _ensure_user_credentials(grape_user_id, provider, config_json, dry_run) -> bool:
+def _ensure_user_credentials(grape_user_id, provider, config_json, dry_run, source_username="") -> bool:
     """创建 user_credentials 记录（如不存在）。
 
     幂等：按 (user_id, provider) 查已有 → 跳过。
     P1-5 修复：SELECT 和 INSERT 在同一个 db_lock 内，消除 TOCTOU 竞态。
+    Issue #343: 撞 ID 防护——写入前核对 grape_user_id 对应的 username 是否和源用户一致，
+    不一致说明旧 ID 撞上了新表另一个用户，打 WARNING 拒绝写入。
     返回 True 表示已存在或创建成功，False 表示创建失败。
     """
     if not config_json:
@@ -125,6 +128,18 @@ def _ensure_user_credentials(grape_user_id, provider, config_json, dry_run) -> b
     try:
         with db_lock:
             c = db.cursor()
+            # Issue #343: 撞 ID 防护——核对 grape_user_id 的 username 是否和源用户一致
+            if source_username:
+                c.execute("SELECT username FROM grape_accounts WHERE id=?", (grape_user_id,))
+                row = c.fetchone()
+                if row and row[0] != source_username:
+                    log.warning(
+                        f"  [WARNING] _ensure_user_credentials: user_id={grape_user_id} "
+                        f"belongs to '{row[0]}' not '{source_username}' (ID collision), "
+                        f"skipping {provider} credentials to avoid overwriting wrong user's data"
+                    )
+                    return False
+
             c.execute(
                 "SELECT 1 FROM user_credentials WHERE user_id = ? AND provider = ?",
                 (grape_user_id, provider)
@@ -191,18 +206,19 @@ def _migrate_one_user(row, dry_run) -> tuple[int, int] | None:
             failures.append("github_external_identity")
 
     # 3. user_credentials — 业务凭据
+    # Issue #343: 传 source_username 做撞 ID 防护
     if hw_ak or hw_sk:
         if not _ensure_user_credentials(
             new_id, "huawei_cloud",
             json.dumps({"ak": hw_ak or "", "sk": hw_sk or ""}, ensure_ascii=False),
-            dry_run
+            dry_run, source_username=username
         ):
             failures.append("huawei_cloud_credentials")
     if codearts_ak or codearts_sk:
         if not _ensure_user_credentials(
             new_id, "codearts",
             json.dumps({"ak": codearts_ak or "", "sk": codearts_sk or ""}, ensure_ascii=False),
-            dry_run
+            dry_run, source_username=username
         ):
             failures.append("codearts_credentials")
     if feishu_app_id or feishu_app_secret:
@@ -210,7 +226,7 @@ def _migrate_one_user(row, dry_run) -> tuple[int, int] | None:
             new_id, "feishu",
             json.dumps({"app_id": feishu_app_id or "", "app_secret": feishu_app_secret or ""},
                        ensure_ascii=False),
-            dry_run
+            dry_run, source_username=username
         ):
             failures.append("feishu_credentials")
 
@@ -266,6 +282,46 @@ def _migrate_user_accounts(dry_run: bool) -> dict[int, int]:
     return id_map
 
 
+# ── 辅助函数 ──────────────────────────────────────────────────────────
+
+def _get_pk_columns(table: str) -> list[str]:
+    """获取表的主键列名列表（用于逐行 UPDATE 定位单行）。
+
+    SQLite: PRAGMA table_info → pk 标记。
+    MySQL: PRAGMA table_info 靠 mysql_compat 翻译；如翻译失败则 fallback SHOW KEYS。
+    返回空列表表示无主键（fallback 到批量 UPDATE）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"PRAGMA table_info({table})")
+            cols = c.fetchall()
+        pk_cols = [r[1] for r in cols if r[5] > 0]  # r[5] = pk flag
+        if not pk_cols:
+            # 无显式主键，用所有列做 WHERE（近似 rowid 级别定位）
+            return [r[1] for r in cols] if cols else []
+        return sorted(pk_cols, key=lambda col: next(r[5] for r in cols if r[1] == col))
+    except Exception as e:
+        log.warning(f"_get_pk_columns({table}) PRAGMA failed: {e}, trying SHOW KEYS fallback")
+    # Issue #343 修复: MySQL 环境 PRAGMA 翻译可能失败，fallback 到 SHOW KEYS
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SHOW KEYS FROM {table} WHERE Key_name='PRIMARY'"
+            )
+            rows = c.fetchall()
+        # SHOW KEYS 返回列顺序: Table, Non_unique, Key_name, Seq_in_index, Column_name, ...
+        if rows:
+            pk_cols = [r[4] for r in rows if r[4]]
+            # 按 Seq_in_index 排序（复合主键顺序很重要）
+            pk_cols = sorted(pk_cols, key=lambda col: next(r[3] for r in rows if r[4] == col))
+            return pk_cols
+    except Exception as e2:
+        log.warning(f"_get_pk_columns({table}) SHOW KEYS fallback also failed: {e2}")
+    return []
+
+
 # ── 阶段 2：关联表 user_id 更新 ────────────────────────────────────────
 
 def _update_related_tables(id_map: dict[int, int], dry_run: bool) -> None:
@@ -275,10 +331,38 @@ def _update_related_tables(id_map: dict[int, int], dry_run: bool) -> None:
     避免误改 grape_accounts 中同 id 的其他用户数据。
     """
     tables = [
+        # 原有 4 张
         ("user_repos", "user_id"),
         ("chat_conversations", "user_id"),
         ("organization", "owner_id"),
         ("org_member", "user_id"),
+        # Issue #343: 补全遗漏的用户归属列（INTEGER 类型，存 user_id）
+        ("issue", "user_id"),
+        ("issue", "scene_user_id"),
+        ("issue_state", "scene_user_id"),
+        ("agent_tasks", "user_id"),
+        ("scene_market", "source_user_id"),
+        ("scene_likes", "user_id"),
+        ("skill_likes", "user_id"),
+        ("session_api_tokens", "user_id"),
+        ("api_tokens", "user_id"),
+        ("user_feedback", "user_id"),
+        ("org_invitation", "invitee_user_id"),
+        ("audit_logs", "user_id"),
+        ("exchange_codes", "user_id"),
+        ("autopilot_tasks", "created_by"),
+        # Issue #343 P1-3 修复: created_by_oauth 是布尔标志(0/1)不是 user_id，从迁移列表删除
+        # ("grape_accounts", "created_by_oauth"),  — removed (boolean flag, not a user_id)
+        ("community_posts", "user_id"),
+        ("community_comments", "user_id"),
+        ("community_post_likes", "user_id"),
+        ("external_identities", "grape_user_id"),
+        ("unified_user_mapping", "user_id"),
+        ("feishu_onboard_task", "user_id"),
+        ("binding_tickets", "initiating_user_id"),
+        ("binding_tickets", "original_user_id"),
+        # Issue #343: user_credentials 也加入，让撞 ID WARNING + 孤儿扫描兜住凭据归属
+        ("user_credentials", "user_id"),
     ]
 
     print(f"\n[阶段 2] 更新关联表（{len(id_map)} 个映射）")
@@ -286,39 +370,192 @@ def _update_related_tables(id_map: dict[int, int], dry_run: bool) -> None:
     for table, column in tables:
         updated = 0
         skipped = 0
+        collisions = 0
 
         for old_id, new_id in id_map.items():
             with db_lock:
                 c = db.cursor()
+                # 查旧 ID 的总行数（含撞 ID 的）
+                c.execute(f"SELECT COUNT(*) FROM {table} WHERE {column} = ?", (old_id,))
+                total = c.fetchone()[0]
+                # 查真正需要迁移的（不在 grape_accounts 中的）
                 c.execute(
                     f"SELECT COUNT(*) FROM {table} "
                     f"WHERE {column} = ? "
                     f"AND {column} NOT IN (SELECT id FROM grape_accounts)",
                     (old_id,)
                 )
-                count = c.fetchone()[0]
+                migratable = c.fetchone()[0]
 
-                if count == 0:
+                if migratable == 0:
+                    if total > 0:
+                        # 旧 ID 撞上了新表另一个用户 → 无法自动迁移
+                        log.warning(
+                            f"  [WARNING] {table}.{column}: {total} 行 old_id={old_id} "
+                            f"撞上新用户 ID，无法自动迁移，需人工核对"
+                        )
+                        collisions += total
                     skipped += 1
                     continue
 
                 if dry_run:
-                    print(f"  [DRY-RUN] {table}.{column}: {count} 行 {old_id} → {new_id}")
+                    print(f"  [DRY-RUN] {table}.{column}: {migratable} 行 {old_id} → {new_id}")
                     skipped += 1
                     continue
 
-                c.execute(
-                    f"UPDATE {table} SET {column} = ? "
-                    f"WHERE {column} = ? "
-                    f"AND {column} NOT IN (SELECT id FROM grape_accounts)",
-                    (new_id, old_id)
-                )
-                db.commit()
-                updated += count
+                # Issue #343: 按行 UPDATE + try/except，撞 UNIQUE 键时跳过单条继续
+                # 旧逻辑一条 UPDATE 语句批量改，撞主键直接整个异常终止
+                try:
+                    # 先查需要迁移的行主键（用于逐行 UPDATE）
+                    pk_cols = _get_pk_columns(table)
+                    if pk_cols:
+                        placeholders = ",".join(["?"] * len(pk_cols))
+                        c.execute(
+                            f"SELECT {','.join(pk_cols)} FROM {table} "
+                            f"WHERE {column} = ? "
+                            f"AND {column} NOT IN (SELECT id FROM grape_accounts)",
+                            (old_id,)
+                        )
+                        rows_to_migrate = c.fetchall()
+                        row_collisions = 0
+                        for row_pk in rows_to_migrate:
+                            try:
+                                set_clause = f"{column} = ?"
+                                where_clause = " AND ".join(
+                                    f"{pk_cols[i]} = ?" for i in range(len(pk_cols))
+                                )
+                                c.execute(
+                                    f"UPDATE {table} SET {set_clause} "
+                                    f"WHERE {where_clause}",
+                                    (new_id, *row_pk)
+                                )
+                                db.commit()
+                                updated += 1
+                            except Exception as row_err:
+                                db.rollback()
+                                row_collisions += 1
+                                log.warning(
+                                    f"  [WARNING] {table}.{column}: row {row_pk} "
+                                    f"{old_id} → {new_id} collided (UNIQUE/PK), skipped: {row_err}"
+                                )
+                        if row_collisions:
+                            collisions += row_collisions
+                    else:
+                        # 无主键表：fallback 到批量 UPDATE
+                        c.execute(
+                            f"UPDATE {table} SET {column} = ? "
+                            f"WHERE {column} = ? "
+                            f"AND {column} NOT IN (SELECT id FROM grape_accounts)",
+                            (new_id, old_id)
+                        )
+                        db.commit()
+                        updated += migratable
+                except Exception as batch_err:
+                    db.rollback()
+                    log.warning(
+                        f"  [WARNING] {table}.{column}: batch UPDATE {old_id} → {new_id} "
+                        f"failed, skipped: {batch_err}"
+                    )
+                    skipped += 1
 
-        print(f"  {table}.{column}: 更新 {updated} 行, 跳过 {skipped} 行")
+        print(f"  {table}.{column}: 更新 {updated} 行, 跳过 {skipped} 行" +
+              (f", 撞ID {collisions} 行" if collisions else ""))
 
     print(f"[阶段 2] 完成")
+
+
+# ── 阶段 3：迁移后全表孤儿 ID 扫描（Issue #343）─────────────────────
+
+def _scan_orphan_ids() -> list[dict]:
+    """扫描所有用户归属列中的孤儿 ID（不在 grape_accounts 中的 user_id）。
+
+    迁移完成后调用，有孤儿说明迁移不完整，需人工处理。
+    """
+    orphan_tables = [
+        ("user_repos", "user_id"),
+        ("chat_conversations", "user_id"),
+        ("organization", "owner_id"),
+        ("org_member", "user_id"),
+        ("issue", "user_id"),
+        ("issue", "scene_user_id"),
+        ("issue_state", "scene_user_id"),
+        ("agent_tasks", "user_id"),
+        ("scene_market", "source_user_id"),
+        ("scene_likes", "user_id"),
+        ("skill_likes", "user_id"),
+        ("session_api_tokens", "user_id"),
+        ("api_tokens", "user_id"),
+        ("user_feedback", "user_id"),
+        ("org_invitation", "invitee_user_id"),
+        ("audit_logs", "user_id"),
+        ("exchange_codes", "user_id"),
+        ("autopilot_tasks", "created_by"),
+        # Issue #343 P1-3 修复: created_by_oauth 是布尔标志(0/1)不是 user_id，从迁移列表删除
+        # ("grape_accounts", "created_by_oauth"),  — removed (boolean flag, not a user_id)
+        ("community_posts", "user_id"),
+        ("community_comments", "user_id"),
+        ("community_post_likes", "user_id"),
+        ("external_identities", "grape_user_id"),
+        ("unified_user_mapping", "user_id"),
+        ("feishu_onboard_task", "user_id"),
+        ("binding_tickets", "initiating_user_id"),
+        ("binding_tickets", "original_user_id"),
+        ("user_credentials", "user_id"),
+    ]
+    orphans = []
+    for table, column in orphan_tables:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"SELECT {column}, COUNT(*) FROM {table} "
+                    f"WHERE {column} != 0 "
+                    f"AND {column} NOT IN (SELECT id FROM grape_accounts) "
+                    f"GROUP BY {column}"
+                )
+                for row in c.fetchall():
+                    orphans.append({"table": table, "column": column,
+                                    "orphan_id": row[0], "count": row[1]})
+        except Exception as e:
+            log.warning(f"  [SCAN] {table}.{column}: scan failed: {e}")
+    return orphans
+
+
+def _scan_id_collisions() -> list[dict]:
+    """扫描撞 ID 错位——user_credentials / external_identities 里的 user_id
+    在 grape_accounts 中存在但 username 和源迁移用户不匹配的情况。
+
+    孤儿扫描扫不出这种错位（旧 ID 是合法新 ID，不是孤儿）。
+    专门检查 user_credentials：如果同一 user_id 的 gitcode_oauth/github_oauth
+    凭据的 access_token 和 external_identities 里的不一致，说明可能撞 ID 错位。
+    """
+    collisions = []
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 查 user_credentials 里有凭据但 external_identities 里无对应绑定的用户
+            # 这些可能是撞 ID 后残留的错位凭据
+            c.execute("""
+                SELECT uc.user_id, uc.provider, ga.username
+                FROM user_credentials uc
+                JOIN grape_accounts ga ON uc.user_id = ga.id
+                WHERE uc.provider IN ('gitcode_oauth', 'github_oauth')
+                AND NOT EXISTS (
+                    SELECT 1 FROM external_identities ei
+                    WHERE ei.grape_user_id = uc.user_id
+                    AND ei.provider = REPLACE(uc.provider, '_oauth', '')
+                    AND ei.status = 1
+                )
+            """)
+            for row in c.fetchall():
+                collisions.append({
+                    "user_id": row[0], "provider": row[1],
+                    "username": row[2],
+                    "issue": "user_credentials has OAuth cred but no matching external_identity"
+                })
+    except Exception as e:
+        log.warning(f"  [SCAN] id collision scan failed: {e}")
+    return collisions
 
 
 # ── DDL ────────────────────────────────────────────────────────────────
@@ -372,7 +609,7 @@ def _repair_missing_credentials(dry_run: bool) -> None:
             if not _ensure_user_credentials(
                 grape_id, "huawei_cloud",
                 json.dumps({"ak": hw_ak or "", "sk": hw_sk or ""}, ensure_ascii=False),
-                dry_run
+                dry_run, source_username=username
             ):
                 log.warning(f"_repair_missing_credentials: failed huawei_cloud for {username}")
             else:
@@ -383,7 +620,7 @@ def _repair_missing_credentials(dry_run: bool) -> None:
             if not _ensure_user_credentials(
                 grape_id, "codearts",
                 json.dumps({"ak": ca_ak or "", "sk": ca_sk or ""}, ensure_ascii=False),
-                dry_run
+                dry_run, source_username=username
             ):
                 log.warning(f"_repair_missing_credentials: failed codearts for {username}")
             else:
@@ -394,7 +631,7 @@ def _repair_missing_credentials(dry_run: bool) -> None:
             if not _ensure_user_credentials(
                 grape_id, "feishu",
                 json.dumps({"app_id": fs_app or "", "app_secret": fs_secret or ""}, ensure_ascii=False),
-                dry_run
+                dry_run, source_username=username
             ):
                 log.warning(f"_repair_missing_credentials: failed feishu for {username}")
             else:
@@ -444,6 +681,31 @@ def run_migration(dry_run: bool = False, force: bool = False) -> dict[int, int]:
 
     # BUG-M1 修复：补迁移已标记 migrated=1 但缺失凭据的用户
     _repair_missing_credentials(dry_run)
+
+    # Issue #343: 迁移后全表孤儿 ID 扫描 + 撞 ID 错位检测
+    if not dry_run:
+        orphans = _scan_orphan_ids()
+        if orphans:
+            print(f"\n[阶段 3] 孤儿 ID 扫描: 发现 {len(orphans)} 组孤儿")
+            for o in orphans:
+                msg = f"  [ORPHAN] {o['table']}.{o['column']}: id={o['orphan_id']} count={o['count']}"
+                print(msg)
+                log.warning(msg)
+            print("[阶段 3] 有孤儿 ID，迁移不完整，需人工处理")
+        else:
+            print(f"\n[阶段 3] 孤儿 ID 扫描: 0 孤儿，迁移完整")
+
+        # 撞 ID 错位检测（孤儿扫描扫不出来的正是这种）
+        collisions = _scan_id_collisions()
+        if collisions:
+            print(f"\n[阶段 3] 撞 ID 错位检测: 发现 {len(collisions)} 组疑似错位")
+            for c in collisions:
+                msg = f"  [COLLISION] user_id={c['user_id']} username={c['username']} provider={c['provider']}: {c['issue']}"
+                print(msg)
+                log.warning(msg)
+            print("[阶段 3] 有撞 ID 错位，需人工核对凭据归属")
+        else:
+            print(f"[阶段 3] 撞 ID 错位检测: 0 错位")
 
     migrated = sum(1 for v in id_map.values() if v != -1)
     log.info(f"D32 migration: 完成，迁移 {migrated} 个用户")
