@@ -137,7 +137,10 @@
   "skill": {
     "no_desc": "无描述",
     "click_detail": "点击查看详情",
-    "detail_unavailable": "详情不可用（点击刷新按钮获取详情）"
+    "detail_unavailable": "详情不可用（点击刷新按钮获取详情）",
+    "search_placeholder": "搜索技能名称或描述",
+    "no_match": "无匹配的技能",
+    "match_count_paren": "（匹配 {count}/{total}）"
   },
   "tag": {
     "all": "全能",

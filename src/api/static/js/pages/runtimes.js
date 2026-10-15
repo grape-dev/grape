@@ -20,6 +20,8 @@ let _rtFilterTag = [];
 let __runtimeData = null;
 let __runtimeDevices = null;
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
+let _engineSkillQuery = '';   // Issue #335: 详情弹窗 skills 搜索关键词
+let _engineSkillCache = {};   // Issue #335: runtimeId → {skills:[名称...], details:[{name,description,...}...]}
 
 // Issue #185: 分页状态
 let _rtPage = 1;        // 当前页码（Engines 用）
@@ -938,6 +940,69 @@ function refreshRuntimes() {
   }).catch(e => app.showToast(I18N.t('runtimes.toast.refresh_failed', {msg: e.message})));
 }
 
+// Issue #335: 技能搜索过滤核心 — name + description 不区分大小写 includes
+function _matchEngineSkill(skillName, details, query) {
+  const detail = (details || []).find(d => d.name === skillName);
+  const desc = detail ? (detail.description || '') : '';
+  return (skillName + ' ' + desc).toLowerCase().includes(query);
+}
+
+// Issue #335: 详情弹窗 skills 列表渲染（带搜索过滤）
+// skills: [名称...]; details: skill_scan_result 或刷新接口返回的 [{name,description,...}...]
+function _renderEngineSkillItems(skills, details, runtimeId) {
+  if (!skills || !skills.length) {
+    return `<div style="color:var(--t3);font-size:12px;padding:8px">${I18N.t('runtimes.empty.no_local_skill')}</div>`;
+  }
+  const query = String(_engineSkillQuery || '').trim().toLowerCase();
+  const filtered = query ? skills.filter(s => _matchEngineSkill(s, details, query)) : skills.slice();
+  if (!filtered.length) {
+    return `<div style="color:var(--t3);font-size:12px;padding:8px">${I18N.t('runtimes.skill.no_match')}</div>`;
+  }
+  return filtered.map(s => {
+    const detail = (details || []).find(d => d.name === s);
+    const desc = detail ? (detail.description || I18N.t('runtimes.skill.no_desc')) : I18N.t('runtimes.skill.click_detail');
+    const detailArg = detail ? JSON.stringify(detail).replace(/'/g, '&#39;').replace(/"/g, '&quot;') : '';
+    return `
+        <div style="padding:8px 12px;border:1px solid var(--b);border-radius:8px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="openSkillDetail('${s}', ${runtimeId}, ${detailArg})">
+          <div style="font-weight:600;font-size:13px;color:var(--t1)">${s}</div>
+          <div style="font-size:11px;color:var(--t3);margin-top:2px">${desc}</div>
+        </div>`;
+  }).join('');
+}
+
+// Issue #335: 搜索输入 oninput — 即时过滤渲染
+function _filterEngineSkills(q) {
+  _engineSkillQuery = String(q || '');
+  const listEl = document.getElementById('engineSkillList');
+  if (!listEl) return;
+  const runtimeId = Number(listEl.getAttribute('data-runtime-id'));
+  const cache = _engineSkillCache[runtimeId] || {skills: [], details: []};
+  listEl.innerHTML = _renderEngineSkillItems(cache.skills, cache.details, runtimeId);
+  _updateEngineSkillCountLabel(cache.skills.length);
+}
+
+// Issue #335: 更新标题行计数（不重建输入框，保持焦点）
+function _updateEngineSkillCountLabel(total) {
+  const el = document.getElementById('engineSkillCountLabel');
+  if (!el) return;
+  const query = String(_engineSkillQuery || '').trim();
+  el.innerHTML = query
+    ? I18N.t('runtimes.skill.match_count_paren', {count: _engineSkillFilteredCount(), total: total})
+    : I18N.t('runtimes.label.skill_count_paren', {count: total});
+}
+
+function _engineSkillFilteredCount() {
+  const listEl = document.getElementById('engineSkillList');
+  if (!listEl) return 0;
+  const runtimeId = Number(listEl.getAttribute('data-runtime-id'));
+  const cache = _engineSkillCache[runtimeId] || {skills: [], details: []};
+  const skills = cache.skills || [];
+  if (!skills.length) return 0;
+  const query = String(_engineSkillQuery || '').trim().toLowerCase();
+  if (!query) return skills.length;
+  return skills.filter(s => _matchEngineSkill(s, cache.details, query)).length;
+}
+
 function renderRuntimesLegacy(data) { renderRuntimes(data); }
 
 function openEngineDetail(runtimeId) {
@@ -948,19 +1013,11 @@ function openEngineDetail(runtimeId) {
   const skills = rt.local_skills || [];
   const skillDetails = rt.skill_scan_result || [];
   const isLocal = rt.credential_id === 0 || rt.is_local;
-  // 如果有详情数据，直接展示带 description 的列表；否则只展示名称
-  const skillListHtml = skills.length
-    ? skills.map(s => {
-        const detail = skillDetails.find(d => d.name === s);
-        const desc = detail ? (detail.description || I18N.t('runtimes.skill.no_desc')) : I18N.t('runtimes.skill.click_detail');
-        const detailArg = detail ? JSON.stringify(detail).replace(/'/g, '&#39;').replace(/"/g, '&quot;') : '';
-        return `
-        <div style="padding:8px 12px;border:1px solid var(--b);border-radius:8px;cursor:pointer;transition:background .15s" onmouseover="this.style.background='var(--bg)'" onmouseout="this.style.background=''" onclick="openSkillDetail('${s}', ${runtimeId}, ${detailArg})">
-          <div style="font-weight:600;font-size:13px;color:var(--t1)">${s}</div>
-          <div style="font-size:11px;color:var(--t3);margin-top:2px">${desc}</div>
-        </div>`;
-      }).join('')
-    : `<div style="color:var(--t3);font-size:12px;padding:8px">${I18N.t('runtimes.empty.no_local_skill')}</div>`;
+  // Issue #335: 写入技能缓存（供搜索过滤用），并重置搜索词（每次打开弹窗从全量开始）
+  _engineSkillCache[runtimeId] = {skills: skills.slice(), details: (skillDetails || []).slice()};
+  _engineSkillQuery = '';
+  // Issue #335: 统一走 _renderEngineSkillItems 支持搜索过滤
+  const skillListHtml = _renderEngineSkillItems(skills, skillDetails, runtimeId);
 
   const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);max-width:680px;width:90%;max-height:85vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
@@ -1010,10 +1067,11 @@ function openEngineDetail(runtimeId) {
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.local_skill_list')} <span style="font-weight:400;color:var(--t3);font-size:12px">${I18N.t('runtimes.label.skill_count_paren', {count: skills.length})}</span></span>
+          <span style="font-weight:600;font-size:14px">${I18N.t('runtimes.label.local_skill_list')} <span id="engineSkillCountLabel" style="font-weight:400;color:var(--t3);font-size:12px">${I18N.t('runtimes.label.skill_count_paren', {count: skills.length})}</span></span>
           <button id="refreshSkillsBtn" class="bt bt-o" style="padding:4px 10px;font-size:12px" onclick="refreshEngineSkills(${runtimeId})">${I18N.t('runtimes.action.refresh_skills')}</button>
         </div>
-        <div id="engineSkillList" style="display:flex;flex-direction:column;gap:6px">${skillListHtml}</div>
+        <input id="engineSkillSearch" type="text" placeholder="${I18N.t('runtimes.skill.search_placeholder')}" value="${_engineSkillQuery}" oninput="_filterEngineSkills(this.value)" style="width:100%;box-sizing:border-box;padding:6px 10px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--bg);color:var(--t1);outline:none;margin-bottom:8px" onfocus="this.style.borderColor='#0071e3'" onblur="this.style.borderColor='var(--b)'">
+        <div id="engineSkillList" data-runtime-id="${runtimeId}" style="display:flex;flex-direction:column;gap:6px">${skillListHtml}</div>
       </div>
     </div>
   </div>`;
@@ -1078,6 +1136,12 @@ function _pollSkillScan(runtimeId, btn, attempt, isFirst) {
     if (!listEl) return;
     const skills = d.skills || [];
     _skillScanDirty = true;  // 标记：关闭弹窗时刷新引擎列表卡片
+    // Issue #335: 刷新结果写入缓存（含详情），按当前搜索词重新过滤渲染
+    _engineSkillCache[runtimeId] = {skills: skills.map(s => s.name), details: skills.slice()};
+    listEl.innerHTML = _renderEngineSkillItems(_engineSkillCache[runtimeId].skills, skills, runtimeId);
+    _updateEngineSkillCountLabel(skills.length);
+    app.showToast(I18N.t('runtimes.toast.scan_complete', {count: skills.length}));
+    return;
     if (!skills.length) {
       listEl.innerHTML = '<div style="color:var(--t3);font-size:12px;padding:8px">' + I18N.t('runtimes.empty.no_local_skill') + '</div>';
     } else {

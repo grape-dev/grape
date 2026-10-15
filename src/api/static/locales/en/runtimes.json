@@ -137,7 +137,10 @@
   "skill": {
     "no_desc": "No description",
     "click_detail": "Click to view details",
-    "detail_unavailable": "Details unavailable (click refresh to get details)"
+    "detail_unavailable": "Details unavailable (click refresh to get details)",
+    "search_placeholder": "Search skills by name or description",
+    "no_match": "No matching skills",
+    "match_count_paren": "({count}/{total} matched)"
   },
   "tag": {
     "all": "All",
