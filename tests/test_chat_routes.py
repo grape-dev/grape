@@ -115,7 +115,10 @@ class TestConversations:
         def _other():
             return {"id": 99002, "username": "other"}
 
+        # 删除路由鉴权走 require_no_session_token → get_current_user_or_api_key，
+        # 仅覆盖 get_current_user 不生效（fixture 的 owner 覆盖残留会放行 → 200）
         app.dependency_overrides[get_current_user] = _other
+        app.dependency_overrides[get_current_user_or_api_key] = _other
         try:
             assert _client.delete(f"/api/chat/conversations/{cid}").status_code == 404
         finally:
