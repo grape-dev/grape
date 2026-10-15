@@ -81,7 +81,7 @@
     "title": "Hosted Repositories",
     "unhost_title": "Unhost",
     "unhost_warning": "⚠️ After unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",
-    "confirm_remove": "⚠️ Are you sure you want to unhost {{name}}?\n\nThis will delete all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files). This cannot be undone.\n\nPlease proceed with caution if you need to keep historical data.",
+    "confirm_remove": "⚠️ Are you sure you want to unhost {{name}}?\n\nThis will wipe ALL related data for this repository on Grape (Issues Center cards, pipeline/event records, project knowledge baseline, scene bindings, sessions, Agent configs, repo skills, workspace files). This cannot be undone.\n\nPlease proceed with caution if you need to keep historical data.",
     "unhost_done": "Unhosted successfully",
     "unhost_failed": "Unhost failed: {{msg}}",
     "select_repo_first": "Please select a repository first",
