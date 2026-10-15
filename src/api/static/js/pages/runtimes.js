@@ -1771,28 +1771,10 @@ function _showCreateEnvForm() {
     var grapeServer = window.location.origin;
     var credName = envName.slice(0, 20);
 
-    // Step 0: 预检模板可用性——模板未发布时不创建凭据，避免脏数据写入 worker 设备
-    var GRAPE_TPL = '4ef59a2b4d3d4909aacd80f6007c00b2';
-    API.get('/devstage/specs?template_id=' + GRAPE_TPL).then(function(specResp) {
-      var specs = specResp.specs || [];
-      if (!specs.length) {
-        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
-        _refreshDevspaceList();
-        return;
-      }
-      // 模板可用，继续创建凭据 + 环境
-      _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
-    }).catch(function(e) {
-      var msg = e.message || '';
-      // 账号未签署服务协议——精准提示
-      if (msg.indexOf('83700031') >= 0 || msg.indexOf('not sign agreement') >= 0) {
-        app.showToast(I18N.t('runtimes.devspace.agreement_not_signed'), 8000);
-      } else {
-        // 模板未发布（AK/SK 未加入白名单）：不创建凭据，直接提示
-        app.showToast(I18N.t('runtimes.devspace.template_not_published'));
-      }
-      _refreshDevspaceList();
-    });
+    // Step 0 预检已移除（2026-10-15）：后端 create_environment 不再查询模板规格
+    // （flavor_id/cores/memory 写死），前端无需预检 /devstage/specs——此前模板未发布时
+    // 预检会直接拦截创建。协议未签署等真实错误由 Step 2 创建接口的错误码兜底提示。
+    _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
   }
 
   function _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt) {
