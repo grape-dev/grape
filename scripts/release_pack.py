@@ -93,12 +93,16 @@ def pack_backend(ts):
         if os.path.isfile(p):
             items.append((p, rf))
     # configs (只保留 *.example.json + 种子 json)
+    # 2026-10-14 账号体系重构补充：security / oauth-providers / email 三个 example 模板——
+    # 账号系统（登录/OAuth/凭据加密/邮件验证）依赖 security.json + oauth-providers.json，
+    # 缺模板则新装环境无从配置（服务端读不到即全部走默认开发模式，生产不可用）。
     config_keep = [
         "agent-description.json", "agent-skill-mapping.json",
         "skill-description.json", "project-templates.json", "pipelines.json",
         "db-backend.example.json", "global-bot-token.example.json",
         "login-whitelist.example.json", "engine-selection.example.json",
         "server-config.example.json",
+        "security.example.json", "oauth-providers.example.json", "email.example.json",
     ]
     for cf in config_keep:
         p = os.path.join(ROOT, "configs", cf)
@@ -131,16 +135,29 @@ def pack_database(ts):
     cur = conn.cursor()
 
     # 种子表 — 导出 DDL + 数据
+    # 2026-10-14 账号体系/场景/模板补充：scene_category + skill_category（场景/技能市场分类，
+    # 缺失则市场页空）、agent_type_runtime_pool（引擎池映射）、featured_templates（精选模板）、
+    # meta 仅 execution_mode/pipeline_mode 两个系统键（运行模式，其余为环境私有数据不入包）。
     seed_tables = [
         "admin_users", "admin_roles", "admin_permission_menus", "admin_role_menu_rel",
         "agent_type", "skill", "event_route_config", "global_im_bot_config",
         "flyway_schema_history",
+        "scene_category", "skill_category", "agent_type_runtime_pool",
+        "featured_templates",
     ]
     # 机密表 — 只导 DDL, 不导数据
+    # 2026-10-14 账号体系重构补充：grape_accounts / external_identities（D32 账号核心表）、
+    # api_tokens / session_api_tokens / task_proxy_tokens（会话与 API 凭据）、
+    # verification_codes / login_failures / exchange_codes（注册验证与登录安全）、
+    # user_llm_credentials（用户模型凭据）。全部含用户数据/密钥，只导结构。
     schema_only_tables = [
         "user_accounts", "user_credentials", "runtime_credentials", "managed_repos",
         "oauth_states", "repo_platform_tokens", "user_vms", "user_vm_repos",
         "unified_user_mapping", "repo_im_group_binding",
+        "grape_accounts", "external_identities",
+        "api_tokens", "session_api_tokens", "task_proxy_tokens",
+        "verification_codes", "login_failures", "exchange_codes",
+        "user_llm_credentials", "user_repos",
     ]
     # 运行时大表 — 只导 DDL
     runtime_tables = [
@@ -160,6 +177,10 @@ def pack_database(ts):
     # engine_capabilities 也只导 DDL
     schema_only_tables.append("engine_capabilities")
     schema_only_tables.append("agent_type_runtime_pool")
+
+    # 2026-10-14：meta 表系统键种子（execution_mode/pipeline_mode）——运行模式决定
+    # plugin/legacy 广播行为，新装环境缺这两个键会回落默认值（与发布验证环境不一致）。
+    # meta 其余键为环境私有（会话指针等），不随包分发。
 
     lines = []
     lines.append(f"-- Grape Database Export {ts}")
@@ -207,6 +228,20 @@ def pack_database(ts):
                             vals.append(f"'{escaped}'")
                     lines.append(f"INSERT INTO `{t}` ({col_str}) VALUES ({', '.join(vals)});")
                 lines.append("")
+
+    # 2026-10-14：meta 系统键种子（execution_mode / pipeline_mode）——从当前库读取，
+    # 缺失时用代码默认（plugin + auto）。保证新装环境与发布验证环境的运行模式一致。
+    try:
+        _mode_defaults = {"execution_mode": "auto", "pipeline_mode": "plugin"}
+        for _mk, _default in _mode_defaults.items():
+            cur.execute("SELECT `value` FROM meta WHERE `key`=%s", (_mk,))
+            _mr = cur.fetchone()
+            _mv = (_mr[0] if _mr and _mr[0] else _default)
+            lines.append(f"INSERT INTO `meta` (`key`, `value`) VALUES ('{_mk}', '{_mv}');")
+        lines.append("")
+    except Exception as _me:
+        # meta 表缺失等场景：跳过（db_setup 启动时会建表，运行模式回落代码默认）
+        pass
 
     lines.append("SET FOREIGN_KEY_CHECKS=1;")
     conn.close()
@@ -365,7 +400,17 @@ mkdir -p data
 cp configs/db-backend.example.json configs/db-backend.json
 cp configs/global-bot-token.example.json configs/global-bot-token.json
 cp configs/login-whitelist.example.json configs/login-whitelist.json
-# 编辑以上文件填入真实 MySQL/GitCode/Webhook 凭据
+# 账号体系（2026-10 重构后必须配置，缺省=开发模式默认密钥，生产不安全）:
+cp configs/security.example.json configs/security.json
+cp configs/oauth-providers.example.json configs/oauth-providers.json
+cp configs/email.example.json configs/email.json
+# 编辑以上文件:
+#   - db-backend.json: MySQL 连接
+#   - global-bot-token.json: GitCode/GitHub bot token + OAuth client 凭据
+#   - security.json: env=production + JWT 密钥池 + 凭据加密密钥（生产必改，否则启动安全检查告警）
+#   - oauth-providers.json: GitCode/GitHub OAuth client_id/secret（账号登录依赖）
+#   - email.json: SMTP/Resend（注册邮箱验证码发送）
+#   - login-whitelist.json: 登录白名单（按需）
 ```
 
 ### 3.3 导入数据库
