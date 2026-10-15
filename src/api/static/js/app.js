@@ -1241,6 +1241,11 @@ function loadAgentTypes() {
       _convStreamAbort.abort();
       _convStreamAbort = null;
     }
+    // Issue #342：离开事件详情立即停止 running 轮询定时器（不等下一 tick 自检，
+    // 避免离开后 5s 内残留 tick 触发无效请求/局部更新）
+    if (view !== 'event' && typeof _stopEventPoll === 'function') {
+      _stopEventPoll();
+    }
 
     // 技能详情返回：记录来源视图（pushHistory 之前 history.state 还是上一个视图）
     if (view === 'skill') {
