@@ -30,6 +30,11 @@ CLAIMER_ENABLED = os.environ.get("GRAPE_LOCAL_CLAIMER", "1").strip().lower() in 
 CLAIM_INTERVAL = 3.0  # 与 worker 的 RUNTIME_POLL_INTERVAL 默认值一致
 
 
+def _claimer_enabled() -> bool:
+    """循环内实时读取开关（QA 审查建议：支持运行态热切换，无需 reload/restart）。"""
+    return os.environ.get("GRAPE_LOCAL_CLAIMER", "1").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _local_direct_engine_ids() -> list[int]:
     """本机 direct 引擎发现：credential_id=0（本机直连）且 scope='global' 且在线。
 
@@ -119,8 +124,6 @@ def _rebuild_evt_from_task(task: dict) -> dict:
                 evt["payload"] = json.loads(r[3]) if r[3] else {}
             except Exception:
                 evt["payload"] = {}
-            if r[1]:
-                evt["repository"] = (task.get("repo_key") or "").split(":", 1)[-1]
             if r[4]:
                 evt["title"] = r[4]
     except Exception as e:
@@ -155,7 +158,17 @@ async def local_claimer_loop():
     """本机 direct 引擎认领主循环——语义与 worker 的 claim 循环对齐。"""
     log.info("Local claimer loop started (3s interval) — local direct engines now "
              "first-class broadcast claimers (see local-claimer-first-class-broadcast-design.md)")
+    _disabled_logged = False
     while True:
+        # 热切换：循环内实时读取 GRAPE_LOCAL_CLAIMER（关闭即时停抢，重新开启即时恢复）
+        if not _claimer_enabled():
+            if not _disabled_logged:
+                log.info("Local claimer disabled at runtime (GRAPE_LOCAL_CLAIMER=0) — "
+                         "local direct engines stop claiming until re-enabled")
+                _disabled_logged = True
+            await asyncio.sleep(CLAIM_INTERVAL)
+            continue
+        _disabled_logged = False
         try:
             from src.runtime.service import claim_by_tag
             for rid in _local_direct_engine_ids():

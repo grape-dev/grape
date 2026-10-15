@@ -2,6 +2,7 @@
 使用 AK/SK 签名（IAM5.0）调用 DevStage API。
 """
 from fastapi import APIRouter, HTTPException, Depends
+import os
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
 from src.user import db as user_db
@@ -197,15 +198,18 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(require_no_sess
     """创建开发环境（默认 AI DEVSPACE 模板，自动注入凭据）。
 
     规格写死（2026-10-15 调整）：不再先查 /v1/specs 模板规格——直接使用固定
-    flavor_id/cores/memory 创建，避免模板规格查询失败（模板未发布/排序变化）阻塞环境创建。
+    flavor_id/cores/memory 创建，避免模板规格查询失败（模板未发布/排序变化）阻塞环境创建；
+    云侧规格下线/变更时可用 GRAPE_DEVSTAGE_* 环境变量覆盖兜底，失败错误码透传前端可定位。
     """
     ak, sk = _get_ak_sk(user)
     # 默认 AI DEVSPACE 模板
     template_id = "4ef59a2b4d3d4909aacd80f6007c00b2"
-    # 固定规格（此前实时查 specs[0]，规格可见性/排序受华为侧发布状态影响）
-    flavor_id = "23ebdfe3b2d34cc4b34a1aaf03d27c54"
-    cores = 3
-    memory = 6
+    # 固定规格（此前实时查 specs[0]，规格可见性/排序受华为侧发布状态影响）；
+    # 云侧规格下线/变更时可用环境变量覆盖兜底（QA 审查建议）：
+    #   GRAPE_DEVSTAGE_FLAVOR_ID / GRAPE_DEVSTAGE_CORES / GRAPE_DEVSTAGE_MEMORY
+    flavor_id = os.environ.get("GRAPE_DEVSTAGE_FLAVOR_ID", "23ebdfe3b2d34cc4b34a1aaf03d27c54")
+    cores = int(os.environ.get("GRAPE_DEVSTAGE_CORES", "3"))
+    memory = int(os.environ.get("GRAPE_DEVSTAGE_MEMORY", "6"))
     try:
         env_vars = None
         init_scripts = None
