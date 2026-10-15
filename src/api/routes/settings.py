@@ -612,7 +612,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             _cred_early = cred_map.get(rt.get("credential_id") or 0) or {}
             _own_user_worker = (_cred_early.get("scope") == "user"
                                 and (_cred_early.get("owner_name") or "") == uname)
-            if not _own_user_worker:
+            # Issue #338 补充：repo scope 凭据不受 org_id 隔离——仓库级设备对仓库成员可见
+            _repo_scope = _cred_early.get("scope") == "repo"
+            if not _own_user_worker and not _repo_scope:
                 # 个人组织：跳过其他非个人组织（org_id>0 且不是自己）的引擎
                 # 但需要检查该 org 是否是个人组织——如果是个人组织则不跳过
                 from src.user.org_db import is_org_personal
@@ -700,10 +702,13 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（可见性由 _visible_credential 的 owner 判定收敛）
+        # Issue #338 补充：repo scope 凭据也不受 org_id 隔离——仓库级设备对仓库成员可见
         _devices_cred_map = {k: v for k, v in cred_map.items()
                              if (v.get("org_id") or 0) in (0, _org_id)
-                             or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)]
+                             or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)
+                             or (v.get("scope") == "repo")}
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
                                      valid_users, _devices_cached, now)
 
