@@ -195,6 +195,10 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
                     "VALUES (?, 'all', 1, 50, 1, ?, ?)",
                     (rid, _now_ec, _now_ec))
+            # capabilities 写入后同步 agent_tags 派生缓存（注册路径原先漏了这一步，
+            # 导致新机器 agent_tags 为空、前端按 tags 过滤时被漏掉——sre-personal-machine 修复）
+            from src.api.routes.settings import _sync_agent_tags
+            _sync_agent_tags(rid, c)
             registered.append({"id": rid, "name": name})
         db.commit()
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，

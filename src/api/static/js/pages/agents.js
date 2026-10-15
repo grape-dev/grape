@@ -120,8 +120,9 @@ function loadCfgOptions() {
       const localLabel = r => r.is_local ? I18N.t('agents.scope.local_direct') : scopeLabel(r.scope);
       const agentType = backendBox.dataset.agent || '';
       // 按标签过滤：展示仓库级/全局/个人引擎（个人引擎仅 owner 自己可见，后端已过滤）
+      // SRE 专属（sre-personal-machine §3.1）：只显示个人级引擎
       const ok = runtimes.filter(r => {
-        if (r.scope !== 'repo' && r.scope !== 'global' && r.scope !== 'user') return false;
+        if (agentType === 'sre' ? r.scope !== 'user' : (r.scope !== 'repo' && r.scope !== 'global' && r.scope !== 'user')) return false;
         const tags = r.agent_tags || [];
         return tags.includes('all') || tags.includes(agentType);
       });
