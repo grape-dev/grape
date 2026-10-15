@@ -23,7 +23,25 @@ class TestA2AQueue:
             c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE 'gitcode:owner/repo%' OR repo_key LIKE 'owner/repo%' OR id LIKE 'sess-a2a-%'")
             c.execute("DELETE FROM agent_runtimes WHERE credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'a2a-cred-%')")
             c.execute("DELETE FROM runtime_credentials WHERE name LIKE 'a2a-cred-%'")
+            # a2a-input-validation-fix：A2A 现在校验仓库真实性（managed_repos），
+            # 测试种子数据同步插入/清理托管记录，让校验与测试数据对齐
+            try:
+                c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:owner/repo'")
+            except Exception:
+                pass
             db.commit()
+
+    def _seed_managed_repo(self):
+        """托管记录种子（a2a-input-validation-fix：A2A 校验仓库真实性）"""
+        with db_lock:
+            c = db.cursor()
+            try:
+                c.execute(
+                    "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
+                    "VALUES ('gitcode:owner/repo', 'owner', 'repo', 'owner/repo')")
+                db.commit()
+            except Exception:
+                pass
 
     def _a2a_body(self, agent="coding", issue_number="5"):
         return {
@@ -88,6 +106,7 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
+        self._seed_managed_repo()
         self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
@@ -107,6 +126,7 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
+        self._seed_managed_repo()
         os.environ["DEVOPS_EXECUTION_MODE"] = "direct"
         client = TestClient(app)
         before = self._task_counts()["tasks"]
@@ -121,6 +141,7 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
+        self._seed_managed_repo()
         self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
@@ -141,6 +162,7 @@ class TestA2AQueue:
         from src.api.main import app
         from src.runtime import service as svc
         self._clean()
+        self._seed_managed_repo()
         self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
@@ -162,6 +184,7 @@ class TestA2AQueue:
         from fastapi.testclient import TestClient
         from src.api.main import app
         self._clean()
+        self._seed_managed_repo()
         self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)
@@ -175,6 +198,7 @@ class TestA2AQueue:
         from src.api.main import app
         from src.api.routes.pipeline import _running_issue_ids
         self._clean()
+        self._seed_managed_repo()
         self._seed_engine_and_session()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
         client = TestClient(app)

@@ -146,5 +146,22 @@
   "skill_no_match": "No matching skills",
   "skill_search_placeholder": "Search skill name/description",
   "skill_clear": "Clear selection",
-  "skill_load_failed": "Failed to load skills"
+  "skill_load_failed": "Failed to load skills",
+  "sre_no_engine": "No personal machines available",
+  "sre_engine_personal_only": "SRE Agent only runs on personal machines. Please connect one first.",
+  "sre_no_machine_title": "No personal machines available",
+  "sre_no_machine_desc": "SRE Agent can only run on personal-level machines. Please connect a personal machine first.",
+  "sre_no_machine_offline_desc": "All your personal machines are offline. Power one on and retry, or host a new machine.",
+  "sre_btn_huawei": "Huawei Cloud AK/SK for free runtime",
+  "sre_btn_host": "I have a personal machine, host it directly",
+  "sre_aksk_title": "Configure Huawei Cloud AK/SK",
+  "sre_aksk_guide": "How to get AK/SK?",
+  "sre_aksk_submit": "Save and continue",
+  "sre_aksk_saved": "AK/SK saved",
+  "sre_aksk_required": "Please enter Access Key and Secret Key",
+  "sre_wake_selected": "Auto-selected {count} personal machines",
+  "sre_add_device_title": "Add device",
+  "sre_retry_wake": "Re-detect personal machines",
+  "sre_select_machine": "Select a personal machine as deployment machine",
+  "sre_save_to_apply": "Save the scene to apply"
 }

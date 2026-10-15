@@ -146,5 +146,22 @@
   "skill_no_match": "无匹配技能",
   "skill_search_placeholder": "搜索技能名称/描述",
   "skill_clear": "清除选择",
-  "skill_load_failed": "技能列表加载失败"
+  "skill_load_failed": "技能列表加载失败",
+  "sre_no_engine": "没有可用的个人机器",
+  "sre_engine_personal_only": "SRE Agent 只能使用个人级机器，请先连接个人机器",
+  "sre_no_machine_title": "没有可用的个人机器",
+  "sre_no_machine_desc": "SRE Agent 只能运行在个人级机器上，请先连接个人机器。",
+  "sre_no_machine_offline_desc": "您的个人机器当前全部离线，可将机器开机后重试，或直接托管新机器。",
+  "sre_btn_huawei": "华为云 AK/SK 获得免费运行时",
+  "sre_btn_host": "我有个人机器，直接托管",
+  "sre_aksk_title": "配置华为云 AK/SK",
+  "sre_aksk_guide": "如何获取 AK/SK？",
+  "sre_aksk_submit": "保存并继续",
+  "sre_aksk_saved": "AK/SK 已保存",
+  "sre_aksk_required": "请输入 Access Key 和 Secret Key",
+  "sre_wake_selected": "已自动选择 {count} 台个人机器",
+  "sre_add_device_title": "添加设备",
+  "sre_retry_wake": "重新检测个人机器",
+  "sre_select_machine": "请选择个人机器作为部署机器",
+  "sre_save_to_apply": "保存场景后生效"
 }

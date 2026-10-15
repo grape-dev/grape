@@ -621,10 +621,20 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
 }
 
 // 应用场景 + 保存高级选项
+// 应用成功后直接跳转到该场景的详情页（scene-detail-local），而不是回场景中心列表
 function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFields) {
   var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName);
   API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(function(r) {
     var sceneIdLocal = r.scene_id;
+    var _navAfterApply = function(extraMsg) {
+      if (app && app.showToast) app.showToast((r.message || I18N.t('skills.toast.apply_success')||'场景已应用') + (extraMsg || ''));
+      // 跳应用后的场景详情页；仓库未切换时先切仓库（apply 可能落在非当前仓库）
+      var curFull = _currentRepoFullName();
+      if (curFull !== repoFull) {
+        _selectRepoAndNav(repoFull, decodeURIComponent(owner), decodeURIComponent(repoName));
+      }
+      app.nav('scene-detail-local', sceneIdLocal);
+    };
     if (!sceneIdLocal) {
       if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
       app.nav('dash');
@@ -634,12 +644,10 @@ function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFi
       work_branch: workBranch,
       custom_fields: customFields
     }).then(function() {
-      if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
-      app.nav('dash');
+      _navAfterApply('');
     }).catch(function(e) {
       console.warn('Advanced options save failed:', e);
-      if (app && app.showToast) app.showToast((r.message || I18N.t('skills.toast.apply_success')||'场景已应用') + '（高级选项保存失败）');
-      app.nav('dash');
+      _navAfterApply('（高级选项保存失败）');
     });
   }).catch(function(e) {
     if (e.status === 409) {

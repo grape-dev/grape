@@ -1191,10 +1191,14 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         from src.runtime.instances import instance_name
         _uname = user.get("username") or ""
         for atype in all_types:
-            engines = (query_engines(repo_key, "global", agent_type=atype)
-                       + query_engines(repo_key, "user", agent_type=atype, username=_uname)
-                       + query_engines(repo_key, "repo", agent_type=atype)
-                       + query_engines(repo_key, "local", agent_type=atype, username=_uname))
+            # SRE 专属逻辑：只能使用个人级（user scope）引擎（docs/weekly-06/sre-personal-machine-design.md §3.1）
+            if atype == "sre":
+                engines = query_engines(repo_key, "user", agent_type="sre", username=_uname)
+            else:
+                engines = (query_engines(repo_key, "global", agent_type=atype)
+                           + query_engines(repo_key, "user", agent_type=atype, username=_uname)
+                           + query_engines(repo_key, "repo", agent_type=atype)
+                           + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
             from src.runtime.health import derive_runtime_health
             import time as _time

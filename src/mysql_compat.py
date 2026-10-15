@@ -285,6 +285,9 @@ def translate_sql(sql: str) -> str:
     sql = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", sql)
     # 'gitcode:' || col → CONCAT('gitcode:', col)
     sql = _CONCAT_RE.sub(r"CONCAT('gitcode:', \1)", sql)
+    # CAST(x AS TEXT) → CAST(x AS CHAR)（MySQL 不支持 TEXT 作为 CAST 目标类型，1064 语法错误；
+    #   CHAR 在 SQLite 中按 TEXT 亲和性处理，双方言兼容）
+    sql = re.sub(r"\bCAST\((.+?)\s+AS\s+TEXT\)", r"CAST(\1 AS CHAR)", sql, flags=re.I)
     # 参数占位符 ? → %s（pymysql 风格）
     sql = _replace_qmarks(sql)
     # meta 表的 key 列是 MySQL 保留字 → 反引号（仅涉及 meta 表的 SQL；跳过字符串字面量）
