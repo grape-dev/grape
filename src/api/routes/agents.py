@@ -263,14 +263,15 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         _evt_params = list(_repo_keys) + [name]
         if keyword:
             _kw = f"%{keyword}%"
-            _evt_where.append("(CAST(seq AS TEXT) LIKE ? OR issue_id LIKE ? OR event_type LIKE ? OR title LIKE ? OR summary LIKE ? OR actor LIKE ?)")
+            _evt_where.append("(CAST(seq AS CHAR) LIKE ? OR issue_id LIKE ? OR event_type LIKE ? OR title LIKE ? OR summary LIKE ? OR actor LIKE ?)")
             _evt_params += [_kw, _kw, _kw, _kw, _kw, _kw]
         _evt_where_sql = " AND ".join(_evt_where)
 
         try:
             c.execute(f"SELECT COUNT(*) FROM events WHERE {_evt_where_sql}", _evt_params)
             events_total = c.fetchone()[0]
-        except Exception:
+        except Exception as e:
+            log.warning(f"agent events search count failed (keyword={keyword!r}): {e}")
             events_total = 0
 
         try:
@@ -289,8 +290,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                  "issue_id": r[13] or "", "repo_key": r[14] or ""}
                 for r in c.fetchall()
             ]
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"agent events search query failed (keyword={keyword!r}): {e}")
 
     COLORS = {"vod": "var(--pk)", "issue": "var(--r)", "coding": "var(--a)", "qa": "var(--pu)", "sre": "var(--or)"}
     BGS = {"vod": "#fde8f0", "issue": "#fce5e5", "coding": "#e3edfd", "qa": "#f3e9fe", "sre": "#fef0e4"}

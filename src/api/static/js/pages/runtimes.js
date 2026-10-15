@@ -380,7 +380,7 @@ function renderEngines(data, devices) {
   const q = (_runtimeSearch || '').toLowerCase().trim();
   const filtered = runtimes.filter(rt => {
     if (q) {
-      const hay = [rt.alias, rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
+      const hay = [rt.alias, rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.agent_tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
     }
     if (_rtFilterType) {
@@ -408,22 +408,29 @@ function renderEngines(data, devices) {
   filtered.forEach(rt => {
     const _hStatus = rt.health || rt.status || 'offline';
     const _cardLeftBorder = RUNTIME_COLOR[_hStatus] || 'var(--t3)';
+    const _engineName = rt.alias || rt.instance_name || rt.name || '—';
+    const _engineType = rt.name || '—';
+    const _engineVersion = rt.version || '—';
+    const _engineInstalled = rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no');
     html += `<div style="background:var(--c);border:1px solid var(--b);border-left:3px solid ${_cardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:14px 16px;box-shadow:var(--sh);cursor:pointer;position:relative;overflow:hidden;display:flex;flex-direction:column" onclick="openEngineDetail(${rt.id})">
       ${_engineWatermark(rt.name)}
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;min-height:24px">
         ${_healthBadge(rt.health)}
         ${_scopeBadge(rt.scope, rt.is_local)}
         <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
-          <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${rt.alias || rt.instance_name || rt.name}</span>
-          ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name})</span>` : ''}
+          <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_engineName}</span>
+          ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name || '—'})</span>` : ''}
           <svg onclick="event.stopPropagation();copyText('${(rt.instance_name || rt.name || '').replace(/'/g, "\\'")}');this.style.color='var(--g)';var _t=this;setTimeout(function(){_t.style.color='var(--t3)'},1500)" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;cursor:pointer;transition:color .2s"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
         </span>
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px 16px;font-size:12px;color:var(--t2);flex:1">
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.engine_type')}</span> ${_engineType}</div>
+        <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.version')}</span> v${_engineVersion}</div>
         <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.worker')}</span> ${rt.worker_name || (rt.is_local ? I18N.t('runtimes.label.local') : '—')}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.skills_label')}</span> ${I18N.t('runtimes.label.skills_count', {count: (rt.local_skills || []).length})}</div>
         <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.scene')}</span> ${_sceneTagSummary(rt.scene_tags)}</div>
         <div style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap"><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.tags')}</span> ${_engineTagSummary(rt.agent_tags)}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:46px">${I18N.t('runtimes.label.installed')}</span> ${_engineInstalled}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:46px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
       </div>
     </div>`;
@@ -1794,6 +1801,7 @@ function _showCreateEnvForm() {
     // 服务其所有仓库任务；此前硬编码 repo scope 导致设备只服务创建时所在仓库
     // （绑定仓库不可达时任务按 #253 诚实失败，调度面窄）。repoKey 仍传给后端做
     // 环境命名/备注参考，但不再限定调度范围。
+    // 另：与 SRE 个人机器语义对齐（sre-personal-machine，本地 mys-local 同日独立同改）。
     API.post('/settings/runtime-credentials', { name: credName, scope: 'user' }).then(function(d) {
       var grapeToken = d.token || '';
       var credId = d.id || 0;
@@ -1946,7 +1954,7 @@ function _execCredCmd(cmd, envId) {
   if (box) {
     var card = box.querySelector('.cd');
     if (card) {
-      card.innerHTML = card.innerHTML + 
+      card.innerHTML = card.innerHTML +
         '<div style="margin-top:10px;padding:12px;background:#f0fdf4;border-radius:6px;font-size:12px;border:1px solid #bbf7d0">' +
         '<div style="font-weight:600;color:#16a34a;margin-bottom:6px">' + I18N.t('runtimes.devspace.cmd_in_clipboard') + '</div>' +
         '<p style="color:#166534;line-height:1.6">1. <a href="https://devstation.myhuaweicloud.com" target="_blank" style="color:#2563eb">' + I18N.t('runtimes.devspace.open_devstation') + '</a><br>' +
@@ -1954,4 +1962,95 @@ function _execCredCmd(cmd, envId) {
         '3. ' + I18N.t('runtimes.devspace.paste_in_terminal') + '</p></div>';
     }
   }
+}
+
+// ====== SRE 专用：添加设备模态弹窗（sre-personal-machine-design §3.4/§3.7 Q4）======
+// 与设备页侧边栏（openAddDevicePanel）共存：本弹窗仅服务于 SRE 唤醒流程，
+// 复用凭据生成（_renderAddDeviceCredForm）与 AI Devspace（_renderAddDeviceDevPanel）内容。
+
+// 打开 SRE 添加设备弹窗。section: 'cred'（凭据生成）| 'dev'（AI Devspace 默认展开）
+function openSreAddDeviceModal(section) {
+  closeSreAddDeviceModal();
+  _stopDevspaceAutoRefresh();
+  var overlay = document.createElement('div');
+  overlay.id = 'sreAddDeviceOverlay';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .25s ease';
+  overlay.onclick = function(e) { if (e.target === overlay) closeSreAddDeviceModal(); };
+
+  var modal = document.createElement('div');
+  modal.id = 'sreAddDeviceModal';
+  modal.style.cssText = 'width:560px;max-width:92vw;max-height:86vh;overflow-y:auto;background:var(--c);border-radius:18px;box-shadow:0 12px 48px rgba(0,0,0,.18);transform:scale(.96);opacity:0;transition:transform .25s ease,opacity .25s ease;display:flex;flex-direction:column';
+
+  modal.innerHTML =
+    // ── 头部 ──
+    '<div style="padding:20px 24px;display:flex;align-items:center;gap:12px;border-bottom:1px solid var(--b);position:sticky;top:0;background:var(--c);z-index:2;border-radius:18px 18px 0 0">' +
+      '<div style="width:36px;height:36px;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+        '<svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></svg>' +
+      '</div>' +
+      '<div style="flex:1;min-width:0">' +
+        '<h3 style="font-size:17px;font-weight:700;margin:0;line-height:1.2">' + (I18N.t('dashboard.sre_add_device_title') || I18N.t('runtimes.action.add_device')) + '</h3>' +
+        '<p style="font-size:12px;color:var(--t3);margin:3px 0 0;line-height:1.3">' + I18N.t('runtimes.devspace.sidebar_subtitle') + '</p>' +
+      '</div>' +
+      '<button onclick="closeSreAddDeviceModal()" style="width:32px;height:32px;border-radius:8px;border:1px solid var(--b);background:var(--bg);cursor:pointer;display:flex;align-items:center;justify-content:center;color:var(--t2);font-size:16px;flex-shrink:0;transition:all .15s" onmouseover="this.style.background=\'#fee2e2\';this.style.color=\'#dc2626\';this.style.borderColor=\'#fecaca\'" onmouseout="this.style.background=\'var(--bg)\';this.style.color=\'var(--t2)\';this.style.borderColor=\'var(--b)\'">✕</button>' +
+    '</div>' +
+    // ── 内容区：两块折叠区（结构同侧边栏，行为复用同一组函数）──
+    '<div style="padding:24px;flex:1">' +
+      // 选项一：生成凭据
+      '<div style="margin-bottom:16px">' +
+        '<div onclick="toggleAddDeviceCred()" style="display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--bg);border:1px solid var(--b);border-radius:12px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'#3b82f6\';this.style.boxShadow=\'0 2px 12px rgba(59,130,246,.08)\'" onmouseout="this.style.borderColor=\'var(--b)\';this.style.boxShadow=\'none\'">' +
+          '<div style="width:42px;height:42px;border-radius:10px;background:#dbeafe;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:15px;font-weight:600;color:var(--t1);line-height:1.3">' + I18N.t('runtimes.action.gen_credential') + '</div>' +
+            '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + I18N.t('runtimes.devspace.cred_hint') + '</div>' +
+          '</div>' +
+          '<svg id="credChevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;transition:transform .3s"><path d="M6 9l6 6 6-6"/></svg>' +
+        '</div>' +
+        '<div id="addDeviceCredArea" style="display:none;max-height:0;overflow:hidden;transition:max-height .35s ease,margin-top .35s ease,opacity .25s ease;opacity:0;margin-top:0"></div>' +
+      '</div>' +
+      // 选项二：AI Devspace
+      '<div style="margin-bottom:16px">' +
+        '<div onclick="toggleAddDeviceDev()" style="display:flex;align-items:center;gap:14px;padding:16px 18px;background:linear-gradient(135deg,rgba(96,165,250,.08),rgba(167,139,250,.08));border:1px solid rgba(96,165,250,.2);border-radius:12px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'rgba(96,165,250,.5)\';this.style.boxShadow=\'0 2px 12px rgba(96,165,250,.12)\'" onmouseout="this.style.borderColor=\'rgba(96,165,250,.2)\';this.style.boxShadow=\'none\'">' +
+          '<div style="width:42px;height:42px;border-radius:10px;background:linear-gradient(135deg,#60a5fa,#a78bfa);display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
+            '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 19a4.5 4.5 0 1 0-1.41-8.78 7 7 0 1 0-13.09 3.78A4.5 4.5 0 0 0 6.5 19z"/></svg>' +
+          '</div>' +
+          '<div style="flex:1;min-width:0">' +
+            '<div style="font-size:15px;font-weight:600;color:var(--t1);line-height:1.3">☁ AI Devspace</div>' +
+            '<div style="font-size:12px;color:var(--t3);margin-top:2px">' + I18N.t('runtimes.devspace.devspace_hint') + '</div>' +
+          '</div>' +
+          '<svg id="devChevron" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;transition:transform .3s"><path d="M6 9l6 6 6-6"/></svg>' +
+        '</div>' +
+        '<div id="addDeviceDevArea" style="display:none;max-height:0;overflow:hidden;transition:max-height .35s ease,margin-top .35s ease,opacity .25s ease;opacity:0;margin-top:0"></div>' +
+      '</div>' +
+    '</div>';
+
+  overlay.appendChild(modal);
+  document.body.appendChild(overlay);
+  setTimeout(function() {
+    overlay.style.opacity = '1';
+    modal.style.transform = 'scale(1)';
+    modal.style.opacity = '1';
+    // 按需展开对应区块（复用侧边栏同一组 toggle 函数，它们按 id 查找 DOM）
+    if (section === 'cred') toggleAddDeviceCred();
+    if (section === 'dev') toggleAddDeviceDev();
+  }, 10);
+}
+
+function closeSreAddDeviceModal() {
+  _stopDevspaceAutoRefresh();
+  var overlay = document.getElementById('sreAddDeviceOverlay');
+  if (!overlay) return;
+  var modal = document.getElementById('sreAddDeviceModal');
+  if (modal) { modal.style.transform = 'scale(.96)'; modal.style.opacity = '0'; }
+  overlay.style.opacity = '0';
+  setTimeout(function() {
+    var el = document.getElementById('sreAddDeviceOverlay');
+    if (el) el.remove();
+  }, 250);
+}
+
+// 是否有 SRE 添加设备弹窗打开（供唤醒流程判断数据刷新时机）
+function isSreAddDeviceModalOpen() {
+  return !!document.getElementById('sreAddDeviceOverlay');
 }

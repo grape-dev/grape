@@ -335,6 +335,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     if not cfg.get("enabled", True):
         return None
     # Plugin 模式：统一广播，engine_runtime_ids 由 get_scene_pool_engine_ids 写入 pool_engine_ids
+    # （SRE 的空列表/非个人级约束在 get_scene_pool_engine_ids 内生效——那里是广播范围的唯一收口）
     try:
         from src.api.event_pipeline import is_plugin_mode
         if is_plugin_mode():
@@ -353,6 +354,20 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
             engine_ids = []
     else:
         engine_ids = []
+    # SRE 派发层约束（sre-personal-machine §3.7 Q3）：只允许 user scope；空 = 无引擎不回退
+    if _sre_personal_only(agent_type):
+        if not engine_ids:
+            return None
+        members = _engines_by_ids(engine_ids, repo, cfg)
+        members = _filter_by_tags(members, agent_type)
+        members = [m for m in members if m.get("scope") == "user"]
+        cand = _apply_filters(members, cfg)
+        cand = _filter_by_health(cand)
+        if not cand:
+            return None
+        if cfg.get("rule") == "order":
+            return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+        return random.choice(cand)["runtime_id"]
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
         members = _engines_by_ids(engine_ids, repo, cfg)
@@ -384,6 +399,14 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     return None
 
 
+def _sre_personal_only(agent_type: str) -> bool:
+    """SRE Agent 是否强制个人级引擎（sre-personal-machine-design §3.7 Q2/Q3）。
+
+    派发层约束：SRE 任务只允许 user scope 引擎；空列表 = 无引擎（不广播、不回退）。
+    """
+    return str(agent_type or "").strip().lower() == "sre"
+
+
 def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0,
                               issue_creator: str = "") -> str | None:
     """获取限定广播引擎列表，返回 JSON 字符串供 agent_tasks.pool_engine_ids 使用。
@@ -392,9 +415,12 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     离线（status!=online）或心跳超时（last_seen_at 距今 > _RUNTIME_STALE_SECONDS，默认 100s）
     的引擎不写入 pool。
 
+    SRE 专属（sre-personal-machine §3.7）：只保留 user scope 引擎；
+    场景没配 SRE 引擎 → None（空 = 无引擎，不广播，调用方报错）。
+
     返回值（三方语义，调用方必须用 is None 显式区分 None 与 ""）：
     - JSON 字符串：场景配了引擎且有健康的 → 限定名单（仅健康引擎）
-    - ""：场景没配引擎 / node 不存在 / 场景查询失败 → 全量广播（原行为不变）
+    - ""：场景没配引擎 / node 不存在 / 场景查询失败 → 全量广播（原行为不变，SRE 除外）
     - None：场景配了引擎但全部不健康 → 全灭，调用方不入队并明确报错（Issue #259 方案A）
     """
     import json
@@ -404,9 +430,18 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
         try:
             from src.api.pipeline_config import get_scene_engine_ids
             ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+            # SRE 空 = 无引擎：不广播，直接全灭语义（Q2 裁定，区别于其他 agent 的 "" 广播）
+            if _sre_personal_only(agent_type) and not ids:
+                return None
             if ids:
                 # Issue #259：写入 pool 前按健康过滤（与 legacy pick_engine 的 _health_ok 同一把尺子）
                 members = _engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection())
+                # SRE 派发层约束（Q3 裁定）：只允许 user scope（配置后引擎 scope 被改也不放行）
+                if _sre_personal_only(agent_type):
+                    _before = len(members)
+                    members = [m for m in members if m.get("scope") == "user"]
+                    if len(members) < _before:
+                        log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人级引擎")
                 healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
                 if healthy_ids:
                     return json.dumps(healthy_ids)

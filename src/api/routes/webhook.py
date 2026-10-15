@@ -571,6 +571,21 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     if not payload.get("issue_number"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing issue_number in payload: 所有 A2A 事件必须关联一个 Issue"})
 
+    # ── A2A 入口有效性校验（a2a-input-validation-fix）：内容错误必须同步 400 拒绝，
+    # 不做"存在性检查"式的放通——否则 agent 拿到 ok 后直接结束任务，错误在异步派发
+    # 内部爆发，任务死机（2026-10-14 实际事故）。
+    repository_early = str(payload.get("repository") or "")
+    issue_number_early = str(payload.get("issue_number") or "")
+    # 1. agent 名必须在平台白名单内（agent 写错目标名时立刻暴露）
+    if agent_name not in ("vod", "issue", "coding", "qa", "sre"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid agent '{agent_name}': must be one of vod/issue/coding/qa/sre"})
+    # 2. issue_number 必须是纯数字（防止传 "#1"、issue 标题、随机文本）
+    if not issue_number_early.isdigit():
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid issue_number '{issue_number_early[:50]}': must be a plain number like '1' (no '#', no text)"})
+    # 3. repository 必须是 owner/repo 二段格式
+    if repository_early.count("/") != 1 or not all(p.strip() for p in repository_early.split("/")):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
+
     repository = payload.get("repository", "")
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
@@ -598,6 +613,23 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         except Exception:
             repo_key = to_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+
+    # ── 仓库真实性校验（a2a-input-validation-fix 第4条，防假仓库）：
+    # repo_key 必须存在于 managed_repos（本平台真实托管）。假仓库/拼错的仓库直接 400 拒绝，
+    # 不让错误内容流入鉴权后的异步派发链路。查表异常时跳过（依赖下游场景节点检查兜底），
+    # 避免表结构问题阻断正常 A2A。
+    try:
+        from src.session_manager import db as _mr_db, db_lock as _mr_lock
+        with _mr_lock:
+            _mr_c = _mr_db.cursor()
+            _mr_c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            if not _mr_c.fetchone():
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
+    except HTTPException:
+        raise
+    except Exception as _mr_e:
+        log.warning(f"A2A: managed_repos existence check failed, skip: {_mr_e}")
+
 
     # Issue #329: cross-pipeline handoff — extract carried context fields.
     # When target_scene_id is specified, redirect the A2A to the target scene's
@@ -1011,7 +1043,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 update_event_status(seq, "failed")
             except Exception:
                 pass
-            return {"status": "ok", "seq": 0, "agent": agent_name}
+            # a2a-input-validation-fix：派发失败必须如实告知调用方（原先返回 status=ok seq=0，
+            # agent 误以为交办成功直接结束任务 → 死机）。失败语义走 failed + error 字段。
+            return JSONResponse(status_code=200, content={"status": "failed", "seq": 0, "agent": agent_name, "error": f"no available engine for agent '{agent_name}' (repo={repository}): 目标引擎不可用，任务未派发，请按失败降级流程处理"})
         # Plugin 模式 + engine_id=0：非 direct 模式均走广播（queue_remote + auto）；仅 direct 走本机 direct
         from src.api.event_pipeline import is_plugin_mode as _is_plugin
         from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE
@@ -1029,7 +1063,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 except Exception:
                     from src.api.event_store import update_event_status
                     update_event_status(seq, "failed")
-                return {"status": "ok", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线"}
+                return {"status": "failed", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"}
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path or "", engine_id,
