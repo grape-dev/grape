@@ -114,12 +114,22 @@ function _applyFilterPopoverState() {
   if (ca) ca.textContent = _filterCreatorExpanded ? '▾' : '▸';
 }
 
-function renderTasks() {
+function renderTasks(param) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   _taskSel = null;   // 进入页面重置选中（避免切换 repo 后详情残留旧仓库任务）
   _taskFilterPopoverOpen = false;
   window._pendingTaskDetailId = null;  // Issue #175: 清理残留，防止意外跳详情
+  // Issue #341: 深链 #tasks/<issue号>——纯数字 param 视为待打开详情的需求编号，
+  // 复用 #166 的 _pendingIssueNumber 匹配链路；_deeplinkIssueNumber 标记来源为 URL 深链，
+  // 供 loadTasks 无匹配时 Toast 提示（区别于场景跳转的静默回退）。
+  // 非/无 param（原 #tasks 入口、场景跳转先设 _pendingIssueNumber 后 nav('tasks')）不受影响。
+  if (param !== undefined && param !== null && /^\d+$/.test(String(param))) {
+    window._pendingIssueNumber = String(param);
+    window._deeplinkIssueNumber = String(param);
+  } else {
+    window._deeplinkIssueNumber = null;
+  }
   el.innerHTML = '<div class="loading">' + I18N.t('tasks.loading') + '</div>';
   loadTasks();
   _startScenePoll();
@@ -246,21 +256,30 @@ function loadTasks() {
       _tasksAll.forEach(t => { window._tasksById[t.id] = t; });
     }
     // Issue #166: 从场景详情页流水线跳转来时，按 issue_number 匹配并打开需求详情
+    // Issue #341: URL 深链 #tasks/<issue号> 复用同一链路（_deeplinkIssueNumber 标记来源）
     if (window._pendingIssueNumber) {
       var _pinNum = window._pendingIssueNumber;
       window._pendingIssueNumber = null;
       var _match = _tasksAll.find(function(t) { return String(t.issue_number) === _pinNum; });
       if (_match) {
+        window._deeplinkIssueNumber = null;  // 深链命中，详情已打开，无需容错提示
         _openBoardDetail(_match.id);
         _openedDetail = true;
       } else if (window._taskDetailFromScene && window._taskDetailFromScene.latestSeq) {
         var _seq = window._taskDetailFromScene.latestSeq;
         window._taskDetailFromScene = null;
+        window._deeplinkIssueNumber = null;
         _render();  // 无匹配任务，渲染列表
         app.nav('event', _seq);
       } else {
         window._taskDetailFromScene = null;
         _render();  // 无匹配任务，渲染列表
+        // Issue #341: 深链编号无匹配（无效编号/不在当前列表）→ Toast 提示已回退列表
+        if (window._deeplinkIssueNumber) {
+          var _dn = window._deeplinkIssueNumber;
+          window._deeplinkIssueNumber = null;
+          if (app && app.showToast) app.showToast(I18N.t('tasks.deeplink_not_found', {n: _dn}));
+        }
       }
     }
     // 从事件详情页返回时，自动打开对应任务详情
@@ -283,6 +302,7 @@ function loadTasks() {
     if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
     if (window._currentView !== 'tasks') return;  // stale guard
     window._pendingTaskDetailId = null;  // Issue #175: 清理待打开详情（loadTasks 失败时不残留）
+    window._deeplinkIssueNumber = null;  // Issue #341: 深链标志同步清理
     el.innerHTML = '<div class="error">' + I18N.t('tasks.load_failed', {msg: e.message}) + '</div>';
   });
 }

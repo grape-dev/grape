@@ -1401,7 +1401,9 @@ function loadAgentTypes() {
       renderImChannel();
     } else if (view === 'tasks') {
       title.textContent = I18N.t('app.current_project');
-      renderTasks();
+      // Issue #341: #tasks/<issue号> 深链——把 hash 中的编号透传给需求中心，
+      // 纯数字 param 由 renderTasks 解析为待打开详情的 issue_number
+      renderTasks(param);
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
       renderSettings(param || 'gitcode');
