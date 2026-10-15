@@ -265,7 +265,13 @@ def _probe_stale_repos(api_token: str, user_id: int):
 
     for repo_key, owner, repo_name in stale_keys:
         log.info(f"managed repos: repo {repo_key} stale (deleted or webhook lost), auto-cleanup")
-        _cleanup_repo_data(repo_key, owner, repo_name)
+        # Issue #340：级联清空全部关联数据（含需求中心 Issue 卡片/流水线/场景关联）
+        from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+        try:
+            cascade_cleanup_repo_data(repo_key, owner, repo_name, trigger="polling")
+        except RepoCleanupError as e:
+            log.warning(f"managed repos: cascade cleanup {repo_key} failed (rolled back): {e}")
+            continue  # 保留 managed 记录，下次探活重试
         user_db.remove_managed_repo(repo_key)
 
 
@@ -1128,115 +1134,21 @@ def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_s
 def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     """解除托管时的同步清理：关联数据表 + 仓库 skill 目录 + workspace 目录。
 
+    Issue #340：升级为级联清理（issue/issue_state/agent_tasks/devops_pipeline_scene 等
+    全量关联数据 + 事务化 + 审计日志），统一入口见 src/repo_cleanup.py。
+    本函数保留为兼容包装（历史调用方/测试）；DB 事务失败时降级为旧行为（记日志不抛出）。
+
     repo_key 为 owner/repo（无前缀）；兼容历史可能存在的 gitcode: 前缀数据。
     用户维度数据（workspaces/chat/{user_id}、workspaces/{owner} 根）不清理。
     返回清理统计。
     """
-    import re, shutil, os
-    from src.session_manager import db, db_lock
-
-    stats = {"tables": 0, "skill_dirs": 0, "workspace_dirs": 0}
-    keys = [repo_key]
-    if not repo_key.startswith("gitcode:"):
-        keys.append(f"gitcode:{repo_key}")
-    if repo_key.startswith("gitcode:"):
-        keys.append(repo_key[8:])
-    keys = list(dict.fromkeys(k for k in keys if k))
-
-    # 路径安全校验：owner/repo 仅允许字母数字、点、下划线、连字符（防路径穿越）
-    if not re.match(r'^[\w.\-]+$', owner) or not re.match(r'^[\w.\-]+$', repo):
-        log.warning(f"Cleanup skipped: invalid owner/repo {owner}/{repo}")
-        return stats
-
-    with db_lock:
-        c = db.cursor()
-        try:
-            # 1. vod_conversations（依赖 devops_agent_session.id，需在删 agent_session 前）
-            placeholders = ",".join("?" for _ in keys)
-            c.execute(f"DELETE FROM vod_conversations WHERE agent_session_id IN (SELECT id FROM devops_agent_session WHERE repo_key IN ({placeholders}))", keys)
-            stats["tables"] += c.rowcount
-            # 2. chat_messages（依赖 chat_conversations.id，需在删 conversations 前）
-            c.execute(f"SELECT id FROM chat_conversations WHERE repo_key IN ({placeholders})", keys)
-            conv_ids = [r[0] for r in c.fetchall()]
-            if conv_ids:
-                cid_ph = ",".join("?" for _ in conv_ids)
-                c.execute(f"DELETE FROM chat_messages WHERE conversation_id IN ({cid_ph})", conv_ids)
-                stats["tables"] += c.rowcount
-            # 3. 直接按 repo_key 匹配的表
-            for tbl in ("events", "event_skipped", "chat_conversations", "chat_agent_session",
-                        "repo_im_group_binding", "pipeline_instances", "devops_agent_session",
-                        "issue_agent_session"):
-                try:
-                    c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({placeholders})", keys)
-                    stats["tables"] += c.rowcount
-                except Exception as e:
-                    log.warning(f"Cleanup {tbl} failed: {e}")
-            # 4. 仓库 skill 记录
-            try:
-                c.execute("DELETE FROM skill WHERE scope='repo' AND owner_id IN ({})".format(",".join("?" for _ in keys)), keys)
-                stats["tables"] += c.rowcount
-            except Exception as e:
-                log.warning(f"Cleanup skill records failed: {e}")
-            # 4.5 onboarding 幂等标记（删仓库即作废，重建同名仓库应重新引导）
-            #     标记 key 形如 `onboarded:{repo_key}`（repo_key 可能带/不带 gitcode: 前缀）
-            try:
-                _ob_keys = [f"onboarded:{k}" for k in keys]
-                _ob_ph = ",".join("?" for _ in _ob_keys)
-                c.execute(f"DELETE FROM meta WHERE `key` IN ({_ob_ph})", _ob_keys)
-                if c.rowcount:
-                    log.info(f"Cleanup onboarding marks: {c.rowcount} removed ({_ob_keys})")
-            except Exception as e:
-                log.warning(f"Cleanup onboarding marks failed: {e}")
-            db.commit()
-        except Exception as e:
-            log.warning(f"Cleanup DB failed: {e}")
-
-    # 5. 仓库 skill 目录（skills/repo/{repo_key}/）
+    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
     try:
-        from src.user.db import SKILL_DIR
-        _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")
-        for k in keys:
-            _dir = os.path.join(_repo_skills_base, k)
-            if os.path.isdir(_dir):
-                shutil.rmtree(_dir)
-                stats["skill_dirs"] += 1
-    except Exception as e:
-        log.warning(f"Cleanup skill dir failed: {e}")
-
-    # 6. workspace 目录（data/workspaces/...）
-    try:
-        from src.config import WORKSPACE_DIR
-        from src.repo_key import parse_repo_key, workspace_repo_dir
-        _ws_base = WORKSPACE_DIR
-        _provider, _, _ = parse_repo_key(keys[0]) if keys else ("gitcode", "", "")
-        _provider = _provider or "gitcode"
-        # 新路径（含 provider 隔离）+ 旧路径兼容（无 provider + 带前缀）
-        candidates = [
-            # 新：{WORKSPACE_DIR}/{provider}/{owner}/{repo}
-            workspace_repo_dir(keys[0]) if keys else "",
-            # 旧：{WORKSPACE_DIR}/{owner}/{repo}
-            os.path.join(_ws_base, owner, repo),
-            # vod-agent 平级目录
-            os.path.join(_ws_base, repo),
-            # feishu/vod 旧路径 + 新路径（含 provider 段）
-            os.path.join(_ws_base, "feishu", f"{owner}_{repo}"),
-            os.path.join(_ws_base, "vod", f"{owner}_{repo}"),
-            os.path.join(_ws_base, "vod", _provider, f"{owner}_{repo}"),
-            # history 旧路径 + 新路径
-            os.path.join(_ws_base, "history", owner, repo),
-            os.path.join(_ws_base, "history", f"gitcode:{owner}", repo),
-            os.path.join(_ws_base, "history", owner, _provider, f"{owner}_{repo}"),
-        ]
-        for _dir in candidates:
-            _abs = os.path.normpath(_dir)
-            if os.path.isdir(_abs) and _abs.startswith(os.path.normpath(_ws_base) + os.sep):
-                shutil.rmtree(_abs)
-                stats["workspace_dirs"] += 1
-    except Exception as e:
-        log.warning(f"Cleanup workspace dir failed: {e}")
-
-    log.info(f"Cleanup repo {repo_key}: {stats}")
-    return stats
+        return cascade_cleanup_repo_data(repo_key, owner, repo, trigger="legacy")
+    except RepoCleanupError:
+        # 事务已回滚：返回空统计（与旧行为一致，不产生半清理）
+        return {"tables": 0, "skill_dirs": 0, "workspace_dirs": 0,
+                "dry_run": False, "trigger": "legacy"}
 
 
 @router.post("/remove", operation_id="repos_remove", summary="Remove hosting", description="Removes hosting for a repository (unregisters webhook/bot bindings).")
@@ -1372,9 +1284,20 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     removed = user_db.remove_managed_repo(repo_key)
     if not removed:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
-    # 同步清理：关联数据表 + 仓库 skill + workspace 目录（替代原 remove_agent_sessions）
-    _cleanup_repo_data(body.full_name, owner, repo_name)
-    return {"message": "已移除仓库"}
+    # Issue #340 级联清理：需求中心 Issue 卡片、流水线/事件、知识基线、场景关联、
+    # 会话/技能/IM 绑定等全部关联数据，事务化 + 审计日志；失败可重试且无半清理。
+    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+    try:
+        _stats = cascade_cleanup_repo_data(repo_key, owner, repo_name,
+                                           trigger="platform",
+                                           operator_id=user.get("id", 0) or 0)
+        log.info(f"repos/remove: cascade cleanup {repo_key} done: {_stats}")
+    except RepoCleanupError as e:
+        # DB 事务已回滚（managed_repos 移除独立提交，可重试：再次解除托管会 404，
+        # 故返回明确错误提示用户重试清理）
+        raise HTTPException(status_code=500, detail={
+            "code": 500, "message": f"关联数据清理失败（已回滚，无半清理），请重试: {e}"})
+    return {"message": "已移除仓库，并已清空全部相关数据"}
 
 
 @router.get("/{owner}/{repo}/project-info", operation_id="repos_project_info", summary="Get project knowledge", description="Reads the authoritative project-knowledge baseline for a repository: files (full text) + meta (commit/branches/updated/degraded). Dual: user (JWT/API key) and session token (tk_, repo scope must match).")

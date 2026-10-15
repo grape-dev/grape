@@ -10,6 +10,79 @@ from src.api.event_pipeline import run_pipeline
 router = APIRouter(tags=["webhook"])
 
 
+# Issue #340：仓库删除 webhook 事件名（GitCode/GitHub，大小写不敏感匹配）
+_REPO_DELETE_EVENT_HEADERS = {
+    "repo.destroyed", "repository.destroyed", "repo.deleted", "repository.deleted",
+    "repository destroyed", "repository deleted", "project.destroyed",
+}
+_REPO_DELETE_ACTION_EVENTS = {"delete", "deleted", "destroyed"}
+
+
+def _is_repo_delete_event(event_header: str, payload: dict) -> bool:
+    """识别 webhook 事件是否为仓库删除（Issue #340 触发路径二）。
+
+    - GitCode：X-Gitcode-Event 头（如 repo.destroyed）或 body action；
+    - GitHub：X-GitHub-Event=repository 且 action=deleted；
+    - 兼容部分平台把 action 放在 body 顶层或 event 字段。
+    """
+    header = (event_header or "").strip().lower()
+    if header in _REPO_DELETE_EVENT_HEADERS:
+        return True
+    # 头名含 repo/repository 且动词为删除/销毁（宽松匹配，防平台命名差异）
+    if ("repo" in header or "project" in header) and (
+            "delet" in header or "destroy" in header or "remove" in header):
+        return True
+    action = ""
+    if isinstance(payload, dict):
+        action = str(payload.get("action", "") or payload.get("event", "") or "").strip().lower()
+    if header in ("repository", "repo", "project") and action in _REPO_DELETE_ACTION_EVENTS:
+        return True
+    return False
+
+
+def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
+    """仓库删除事件处理：级联清空平台内全部关联数据（Issue #340）。
+
+    与平台侧"解除托管"等价：cascade_cleanup_repo_data + 移除 managed_repos。
+    """
+    from src.repo_key import to_repo_key
+    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+    from src.user import db as user_db
+    from src.session_manager import db as _db, db_lock
+
+    repo_key = to_repo_key(repo, provider=provider)
+    owner, _, repo_name = repo.partition("/")
+
+    # 读取托管记录（清理前取 owner/repo 名，删除后即失效）
+    _owner, _repo_name = owner, repo_name
+    try:
+        with db_lock:
+            c = _db.cursor()
+            c.execute("SELECT repo_owner, repo_name FROM managed_repos WHERE repo_key=?",
+                      (repo_key,))
+            row = c.fetchone()
+            if row and row[0] and row[1]:
+                _owner, _repo_name = row[0], row[1]
+    except Exception:
+        pass
+
+    try:
+        stats = cascade_cleanup_repo_data(repo_key, _owner, _repo_name,
+                                          trigger="webhook")
+        log.info(f"Webhook repo-deleted: cascade cleanup {repo_key} done ({trigger_detail}): {stats}")
+    except RepoCleanupError as e:
+        # 事务已回滚；保留 managed 记录，探活轮询兜底重试
+        log.warning(f"Webhook repo-deleted: cascade cleanup {repo_key} failed (rolled back, "
+                    f"polling will retry): {e}")
+        return {"status": "cleanup_failed_retryable", "message": str(e)}
+
+    try:
+        user_db.remove_managed_repo(repo_key)
+    except Exception as e:
+        log.warning(f"Webhook repo-deleted: remove managed_repos {repo_key} failed: {e}")
+    return {"status": "repo_deleted", "message": "repository deleted, cascade cleanup done"}
+
+
 async def _on_handoff_dispatch(event):
     """Event-driven A2A dispatch listener (Phase 4).
 
@@ -118,6 +191,12 @@ async def gitcode_webhook(request: Request):
 
     log.info(f"Webhook: token OK, repo={repo}, event={event_header}")
 
+    # Issue #340 触发路径二：仓库删除事件 → 级联清空平台内全部关联数据
+    if _is_repo_delete_event(event_header, payload):
+        result = _handle_repo_deleted(repo, "gitcode", f"event={event_header}")
+        status_code = 200 if result.get("status") == "repo_deleted" else 500
+        return JSONResponse(status_code=status_code, content=result)
+
     # 5. 处理事件 — 异步执行，立即返回 200 避免 GitCode webhook 超时 (503)
     import asyncio as _aio
     loop = _aio.get_event_loop()
@@ -177,6 +256,16 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
     log.info(f"GitHub Webhook: verified, repo={repo}, event={event_header}")
+
+    # Issue #340 触发路径二：仓库删除事件（X-GitHub-Event=repository + action=deleted）
+    try:
+        _gh_payload = json.loads(body)
+    except Exception:
+        _gh_payload = {}
+    if _is_repo_delete_event(event_header, _gh_payload):
+        result = _handle_repo_deleted(repo, "github", f"event={event_header}")
+        status_code = 200 if result.get("status") == "repo_deleted" else 500
+        return JSONResponse(status_code=status_code, content=result)
 
     import asyncio as _aio
     _aio.ensure_future(_aio.to_thread(run_pipeline, body, dict(headers),
