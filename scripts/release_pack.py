@@ -28,6 +28,14 @@ TEMPLATE_REPO = os.environ.get("GRAPE_TEMPLATE_ROOT", "/opt/grape-template")
 
 # ---- 工具函数 ----
 
+def _sql_escape_str(v):
+    """SQL 字符串字面量转义（导出种子 INSERT 用）：反斜杠与单引号。
+
+    库内 value 含单引号/反斜杠时，未转义的 f-string 拼接会破坏导出 SQL
+    语法（QA 审查 Required 发现）；所有 INSERT 值生成统一复用本函数。
+    """
+    return str(v).replace("\\", "\\\\").replace("'", "\\'")
+
 def sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as f:
@@ -224,7 +232,7 @@ def pack_database(ts):
                         elif isinstance(v, bytes):
                             vals.append(f"0x{v.hex()}")
                         else:
-                            escaped = str(v).replace("\\", "\\\\").replace("'", "\\'")
+                            escaped = _sql_escape_str(v)
                             vals.append(f"'{escaped}'")
                     lines.append(f"INSERT INTO `{t}` ({col_str}) VALUES ({', '.join(vals)});")
                 lines.append("")
@@ -237,7 +245,8 @@ def pack_database(ts):
             cur.execute("SELECT `value` FROM meta WHERE `key`=%s", (_mk,))
             _mr = cur.fetchone()
             _mv = (_mr[0] if _mr and _mr[0] else _default)
-            lines.append(f"INSERT INTO `meta` (`key`, `value`) VALUES ('{_mk}', '{_mv}');")
+            _mv_escaped = _sql_escape_str(_mv)
+            lines.append(f"INSERT INTO `meta` (`key`, `value`) VALUES ('{_mk}', '{_mv_escaped}');")
         lines.append("")
     except Exception as _me:
         # meta 表缺失等场景：跳过（db_setup 启动时会建表，运行模式回落代码默认）
