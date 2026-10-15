@@ -347,6 +347,7 @@ _TASK_COLUMNS = (
     "user_gitcode_token, "
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
+    "pool_engine_source, "
     "status, stream_ended, self_reported, "
     "exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
@@ -694,7 +695,8 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  skill="", skill_path="", skill_id=0, server_url="", issue_session_id="",
                  project_info_files=None, project_info_meta=None, knowledge_files=None,
                  project_info_file_urls=None, knowledge_file_urls=None,
-                 pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids=""):
+                 pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
+                 pool_engine_source=""):
     """业务层入队：确定路由（D3）+ 快照 + 技能打包 + 凭据注入。返回 task_id。
 
     引擎池（agent-cluster-design.md §4.1/§4.2）：runtime_id=0 + pool_agent_type 非空
@@ -706,6 +708,11 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
 
     skill_id：skill 表主键，优先于 skill_name 解析（避免 user/repo scope 的 owner_id 不匹配）。
     skill_id=0 时回退 resolve_skill_id 按名字解析（向后兼容）。
+
+    pool_engine_source（local-claimer 设计）：pool_engine_ids 的来源标记——
+    'scene' = 用户在场景里显式绑定（白名单全灭时保持 failed，Issue #253 硬约束）；
+    'auto'  = 引擎自动选择/兜底产生的绑定（全灭时可降级放行全站，可审计）；
+    ''      = 未标记（历史任务，按 scene 对待——保守不降级）。
     """
     if not agent_session_id:
         raise ValueError("agent_session_id is required")
@@ -835,6 +842,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             "project_info_file_urls": json.dumps(project_info_file_urls), "knowledge_file_urls": json.dumps(knowledge_file_urls),
             "attempts": 0, "pool_agent_type": pool_agent_type or "", "affinity_runtime_id": affinity_runtime_id or 0,
             "pool_tag": pool_tag or "", "pool_engine_ids": pool_engine_ids or "",
+            "pool_engine_source": pool_engine_source or "",
             "status": "queued", "exit_code": None, "result_text": "", "errors": "", "stderr": "",
             "usage_json": "{}", "started_at": None, "completed_at": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
@@ -2548,9 +2556,11 @@ def _check_stale_queued_tasks():
     当任务 queued 超过 _STALE_QUEUED_THRESHOLD（默认 120 秒）且 pool_engine_ids 非空时，
     按 issue #253 硬约束语义收敛（方案 A：低健康分限时等待，超时失败）：
     - 池中有健康引擎 → 等待（引擎可能马上认领）
-    - 引擎不健康但物理可达 → 有界等待：超时后任务 failed（替代原无限等待死区，
-      #253 事故第一次派发挂 28 分钟的形态）
-    - 引擎既不健康又不可达 → 任务 failed（替代原"清空 pool_engine_ids 放行全站"）
+    - 引擎不健康但物理可达 → 有界等待：超时后按来源分流（local-claimer 设计 §3.3）：
+        * pool_engine_source='auto'（系统自动选择的绑定）→ 降级：清空白名单重新入队
+          （放行全站认领，含本机 direct 引擎），置 source='degraded' 防反复，result 记录审计
+        * 'scene'/''（用户显式绑定/历史未标记）→ 任务 failed（#253 硬约束，不跑飞）
+    - 引擎既不健康又不可达 → 同上按来源分流（auto 降级 / scene 失败）
 
     空绑定任务不进本函数（查询条件 pool_engine_ids!=''），广播语义不受影响。
     """
@@ -2576,6 +2586,27 @@ def _check_stale_queued_tasks():
                     _engine_ids = []
                 if _engine_ids and _check_pool_has_healthy(_engine_ids):
                     continue  # 池中有健康引擎，继续等待
+                # local-claimer 设计 §3.3：白名单全灭时按来源分流（显式绑定不降级，自动绑定放行）
+                _source = ""
+                try:
+                    c.execute("SELECT pool_engine_source FROM agent_tasks WHERE id=?", (tid,))
+                    _sr = c.fetchone()
+                    _source = (_sr[0] or "") if _sr else ""
+                except Exception:
+                    _source = ""
+                if _source == "auto":
+                    # 系统自动选择的绑定全灭 → 降级放行全站（含本机 direct），只降一次
+                    c.execute(
+                        "UPDATE agent_tasks SET pool_engine_ids='', pool_engine_source='degraded', "
+                        "result_text=COALESCE(NULLIF(result_text,''), ?) WHERE id=? AND status='queued'",
+                        (f"[degraded] bound engines {_engine_ids} all unhealthy/unreachable at "
+                         f"{datetime.now(timezone.utc).isoformat()}; released to global pool "
+                         f"(source=auto, local-claimer design)", tid))
+                    db.commit()
+                    log.info(f"_check_stale_queued_tasks: engine(s) {_engine_ids} all down, "
+                             f"source=auto -> degraded release task {tid} to global pool")
+                    continue
+                # 'scene' / '' / 'degraded'：用户显式绑定（或历史/已降级）→ 保持 #253 硬约束
                 # 健康分不达标 → 再检查物理可达性（在线 + 有 tag 能力 + scope 匹配 + 有并发槽）
                 # Issue #253 方案 A：物理可达但低分 → 限时等待已到点（120s），诚实失败；
                 # 物理不可达 → 直接失败（不撕证放行全站）

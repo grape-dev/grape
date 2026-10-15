@@ -230,6 +230,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Autopilot scheduler start failed: {e}")
 
+    # 本机 direct 引擎一等认领器（local-claimer-first-class-broadcast-design.md）：
+    # 让本机引擎与远端 worker 同级参与广播认领（同一条 claim_by_tag 检查链）。
+    # GRAPE_LOCAL_CLAIMER=0 可关闭（回退为纯远端认领）。
+    try:
+        from src.runtime.local_claimer import start_local_claimer
+        start_local_claimer()
+    except Exception as e:
+        log.warning(f"Local claimer start failed: {e}")
+
     # D7: 冷静期定时任务：每天执行一次，匿名化超 30 天的冷静期账号（需求 22）
     try:
         from src.admin.cooldown import start_cooldown_scheduler

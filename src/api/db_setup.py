@@ -317,6 +317,7 @@ CREATE TABLE IF NOT EXISTS agent_tasks (
     project_info_file_urls TEXT DEFAULT '',       -- project-info 文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     knowledge_file_urls    TEXT DEFAULT '',       -- 知识文件的 OBS 临时 URL 列表（JSON 数组，见 knowledge-obs-design）
     pool_engine_ids    TEXT DEFAULT '',           -- 限定广播引擎列表（JSON 数组如[76,77]，空=全量广播）
+    pool_engine_source TEXT DEFAULT '',           -- pool_engine_ids 来源：scene=用户场景绑定 / auto=自动选择（降级判别，local-claimer 设计）
     status            TEXT DEFAULT 'queued', -- queued/dispatched/running/completed/failed/cancelled
     exit_code         INTEGER DEFAULT NULL,
     result_text       MEDIUMTEXT DEFAULT '',
@@ -3825,6 +3826,9 @@ def _migrate_tables():
             c = db.cursor()
             _ensure_column(c, "agent_tasks", "pool_engine_ids", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "user_gitcode_token", "TEXT DEFAULT ''")
+            # local-claimer 设计：pool_engine_ids 来源标记（scene=用户显式绑定 / auto=自动选择；
+            # 白名单全灭时降级放行的判别依据，见 local-claimer-first-class-broadcast-design.md §3.3）
+            _ensure_column(c, "agent_tasks", "pool_engine_source", "TEXT DEFAULT ''")
             db.commit()
         log.info("Added pool_engine_ids column to agent_tasks")
     except Exception as e:

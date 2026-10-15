@@ -1908,10 +1908,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.warning(f"Pipeline: 智能推荐 opencode 过滤失败: {_oe}")
         log.info(f"Pipeline (plugin broadcast): engine_id=0 pool_tag={agent_type} pool_engine_ids={_pool_engine_ids} seq={seq}")
         if _be and seq > 0 and (skill_name or _is_scene_recommend):
+            # local-claimer 设计：场景绑定 → 'scene'（#253 硬约束，全灭不降级）；
+            # 智能推荐的 opencode 限定是系统自动选择 → 'auto'（全灭可降级放行）
+            _pes = "auto" if _is_scene_recommend else "scene"
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id,
                                    pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
-                                   is_scene_recommend=_is_scene_recommend)
+                                   is_scene_recommend=_is_scene_recommend,
+                                   pool_engine_source=_pes)
         return result
     # backend 必须取已注册引擎的类型名（不沿用会话/字面默认），确保执行 CLI 与选中引擎一致
     _be = engine_name(engine_id) or backend
@@ -2227,49 +2231,35 @@ def _fail_event(seq: int, reason: str):
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
 
 
-def _pool_only_local_direct() -> int | None:
-    """方案 B/方案 A（weekly-05 / weekly-07 修复）：广播无 worker 时，若存在本机 global direct 引擎则回落本机执行。
-
-    判定基准（方案 A 修正，2026-10-13）：
-    - 只看 **scope='global' 且 credential_id=0（本机直连）** 的在线健康引擎；
-    - 不再用"全库所有 online+healthy 引擎 credential_id 全为 0"判定——该旧逻辑会被
-      其他租户的 repo-scope 远端 worker（credential_id>0）破坏，导致本机不自跑、远端又不认领，
-      广播任务永久 queued（见 seq-2310-broadcast-stuck-design.md）。
-    - 多枚本机 global 引擎时按 opencode > codearts > 其他 的优先级取优先级最高的一个。
-    - 无本机 global direct 引擎 → None（保持等待 worker / 或由 scheme C 重派兜底）。
-    """
-    from src.session_manager import db, db_lock
-    try:
-        with db_lock:
-            c = db.cursor()
-            rows = c.execute(
-                "SELECT id, name FROM agent_runtimes "
-                "WHERE status='online' AND healthy=1 "
-                "AND credential_id=0 AND scope='global' "
-                "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END, id "
-                "LIMIT 1").fetchall()
-        if not rows:
-            return None
-        return int(rows[0][0])
-    except Exception as e:
-        log.warning(f"_pool_only_local_direct failed: {e}")
-        return None
+# _pool_only_local_direct（方案B/方案A self-run 兜底）已随 self-run 块一并移除
+# （local-claimer 设计第二个 PR）。本机 direct 引擎的发现逻辑由
+# src/runtime/local_claimer.py 的 _local_direct_engine_ids 承接。
 
 
 def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
                            skill_id, skill_path, runtime_id, issue_id="", pool_engine_ids="", user_id=0,
-                           is_scene_recommend=False):
+                           is_scene_recommend=False, pool_engine_source=""):
     """init_event_json -> enqueue_task (deterministic routing runtime_id).
     Local worker / remote RuntimeAgent consume.
 
     Plugin mode (GRAPE_PIPELINE_MODE=plugin): sets pool_tag on enqueue
     so workers with matching engine tags can claim via claim_by_tag.
+
+    pool_engine_source（local-claimer 设计）：pool_engine_ids 来源标记。
+    场景绑定路径传 'scene'，引擎自动选择传 'auto'；空=未标记（历史语义，
+    降级判定按 scene 保守处理）。调用方未显式传时：带 pool_engine_ids 且
+    evt 带 scene 上下文 → 'scene'，否则 'auto'。
     """
     from src.api.event_archive import init_event_json
     from src.runtime.service import enqueue_task, get_execution_mode
     from src.runtime.instances import runtime_instance_name
     from src.repo_key import from_repo_key
     import os as _os
+
+    # local-claimer 设计：未显式指定时按上下文推导来源（带场景上下文的绑定 = scene）
+    if pool_engine_ids and not pool_engine_source:
+        _scene_ctx = evt.get("scene_id") or evt.get("_scene_id") or ""
+        pool_engine_source = "scene" if _scene_ctx else "auto"
 
     issue_id = issue_id or evt.get("issue_id", "") or "#0"
     # 1) 路由判定：
@@ -2452,28 +2442,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _mode_tag = "plugin" if is_plugin_mode() else "legacy"
     log.info(f"Pipeline: enqueued task={tid} seq={seq} repo={repo_key} agent={agent_type} engine={runtime_id} issue_session={issue_session_id or '-'} mode={get_execution_mode()} dispatch={_mode_tag} pool_tag={_pool_tag or '-'}")
 
-    # 方案 B（weekly-05）：plugin 广播无 worker 认领时，若全局引擎全为本机 direct → 服务端 self-run
-    if not runtime_id and _pool_agent_type:
-        try:
-            _local_rid = _pool_only_local_direct()
-            if _local_rid:
-                log.info(f"Pipeline enqueue: pool only local direct, self-run seq={seq} rid={_local_rid}")
-                from src.runtime.engine_select import engine_name as _en
-                from src.runtime.instances import runtime_instance_name as _rin
-                _be = _en(_local_rid) or _rin(_local_rid) or backend or ""
-                _evt2 = dict(evt)
-                _evt2.setdefault("repo_key", repo_key)
-                _evt2.setdefault("issue_id", issue_id)
-                _evt2.setdefault("repository", from_repo_key(repo_key))
-                _evt2.setdefault("skill_path", skill_path)
-                # 从本地 import（模块内协程函数）
-                from src.api.event_pipeline import _execute_agent as _exe_agent
-                from src.api.event_pipeline import start_direct_agent as _sda
-                _sda(_exe_agent, (
-                    repo_key, seq, agent_type, _be, skill_name, _evt2, _local_rid, tid,
-                ), name=f"self-{seq}")
-        except Exception as e:
-            log.warning(f"Pipeline enqueue: local self-run failed for seq={seq}: {e}")
+    # 方案 B self-run 兜底已移除（local-claimer 设计第二个 PR，2026-10-14 issue #6 复发后）：
+    # 本机 direct 引擎现由 local_claimer_loop 以一等认领者身份参与广播（与远端 worker 同一条
+    # claim_by_tag 检查链：白名单/健康分/满载/scope 全约束）。此处的 self-run 会在入队同一毫秒
+    # 抢跑绑定引擎的任务（2026-10-14 pvs-zombies-demo2 issue #4/#6 两轮事故根因），不再需要。
 
 
 def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
