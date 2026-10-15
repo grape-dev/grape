@@ -1612,7 +1612,9 @@ async def _execute_task(client, task, engine_name: str = ""):
         # A2A 走 meta.server_base_url 公网地址 NAT 回环不通 → a2a 调用反复超时
         # （实测：内网直连 200/3ms，公网地址 NAT 回环三次 5s 超时全挂）。
         _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
-        if "://" in _local_base and ":" not in _local_base.split("://", 1)[1]:
+        # 只有 http:// 才补 :3000（开发默认端口）；https 隐含 443，生产是 ELB→nginx→8000，
+        # 公网 443 上没人监听 3000，补了必然 TCP 超时（2026-10-15 外部 ECS 12122 事故）。
+        if _local_base.startswith("http://") and ":" not in _local_base.split("://", 1)[1]:
             _local_base = _local_base + ":3000"
         env["GRAPE_SERVER_URL"] = _local_base
         task["server_url"] = _local_base
