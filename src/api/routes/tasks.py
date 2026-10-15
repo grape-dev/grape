@@ -58,8 +58,6 @@ from src.api.issues_center import (  # noqa: F401
     _get_issue_title,
     _get_task_issue_info,
     _get_user_id_by_gitcode,
-    _gitcode_api_with_refresh,
-    _is_gitcode_401,
     _patch_github_issue_body,
     _patch_issue_body,
     _post_gitcode_issue,

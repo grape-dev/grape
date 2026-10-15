@@ -1660,6 +1660,28 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
     return ""
 
 
+def get_repo_bot_token(repo_key: str = "") -> str:
+    """获取仓库级 bot token（不含 agent session token）。
+
+    Issue #343: 建单/关单/评论等用户交互写操作用此函数，不用 get_gitcode_token——
+    后者第一优先级是 devops_agent_session.repo_gitcode_token（agent 专属，scope 可能受限）。
+    本函数跳过 agent session，直接用 managed_repos.bot_gitcode_token → 全局 bot token。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return ""
+    # 1. managed_repos.bot_gitcode_token（仓库级配置）
+    if "/" in repo_key:
+        from src.repo_key import split_owner_repo
+        owner, repo = split_owner_repo(repo_key)
+        tok = get_bot_token_by_repo(owner, repo)
+        if tok:
+            return tok
+    # 2. 全局 bot token
+    return _get_global_bot_token()
+
+
 def get_github_token(repo_key: str = "") -> str:
     """统一获取 GitHub API Token（对应 get_gitcode_token 的 GitHub 版）。
 
@@ -1684,15 +1706,15 @@ def get_github_token(repo_key: str = "") -> str:
                 return row[0]
     except Exception as e:
         log.warning(f"get_github_token: query managed_repos failed: {e}")
-    # 2. 仓库 owner 的 GitHub token（D32-补丁：从 external_identities 读）
+    # 2. 仓库 owner 的 GitHub token（D32-补丁：从 external_identities 读，需含 access_token）
     try:
         from src.repo_key import parse_repo_key
-        from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities
+        from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities_with_tokens
         _prov, owner, _name = parse_repo_key(repo_key)
         if owner:
             acc = get_grape_account_by_username(owner)
             if acc:
-                for i in get_user_identities(acc["id"]):
+                for i in get_user_identities_with_tokens(acc["id"]):
                     if i.get("provider") == "github" and i.get("access_token"):
                         return i["access_token"]
     except Exception as e:
@@ -1728,8 +1750,14 @@ def get_user_gitcode_token(user_id: int) -> str:
     return ""
 
 
-def get_user_github_token(user_id: int) -> str:
-    """获取用户的 GitHub API token（D32-补丁：通过 get_credentials 从 external_identities 读）"""
+def get_user_github_token_by_id(user_id: int) -> str:
+    """获取用户的 GitHub API token（D32-补丁：通过 get_credentials 从 external_identities 读）。
+
+    Issue #343: 原名 get_user_github_token(user_id: int) 与 deps.py 的
+    get_user_github_token(username: str) 同名不同签名，极易混淆。
+    改名为 get_user_github_token_by_id 消除歧义。
+    保留 get_user_github_token 作为别名向后兼容（内部调用）。
+    """
     if not user_id or user_id <= 0:
         return ""
     try:
@@ -1738,8 +1766,13 @@ def get_user_github_token(user_id: int) -> str:
             if c.get("provider") == "github":
                 return c.get("config", {}).get("token", "") or ""
     except Exception as e:
-        log.warning(f"get_user_github_token failed for user={user_id}: {e}")
+        log.warning(f"get_user_github_token_by_id failed for user={user_id}: {e}")
     return ""
+
+
+def get_user_github_token(user_id: int) -> str:
+    """向后兼容别名，委托给 get_user_github_token_by_id。"""
+    return get_user_github_token_by_id(user_id)
 
 
 def _get_username_by_id(user_id: int) -> str:
@@ -2259,6 +2292,7 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
 
     new_access = token_data.get("access_token", "")
     new_refresh = token_data.get("refresh_token", "")
+    new_expires_in = token_data.get("expires_in", 0)
     if not new_access:
         log.warning(f"refresh_oauth: no access_token in response for user={user_id}, provider={provider}")
         return None
@@ -2269,18 +2303,25 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         user_id, provider,
         access_token=new_access,
         refresh_token=new_refresh,
+        expires_in=new_expires_in,
     )
 
-    # 5. 同步更新 user_credentials（迁移期保留，上层 deps.py 读 fetched_at 判断过期）
+    # 5. 同步更新 user_credentials（迁移期保留，上层 deps.py 读 fetched_at/token_expires_at 判断过期）
+    # Issue #343: cred 不存在时创建新条目，否则预刷新永远跳过（user_credentials 无 gitcode_oauth → 死路）
     provider_key = f"{provider}_oauth"
     cred = get_credential(user_id, provider_key)
-    if cred:
-        new_cred = dict(cred)
-        new_cred["access_token"] = new_access
-        if new_refresh:
-            new_cred["refresh_token"] = new_refresh
-        new_cred["fetched_at"] = int(time.time())
-        set_credential(user_id, provider_key, new_cred)
+    new_cred = dict(cred) if cred else {}
+    new_cred["access_token"] = new_access
+    if new_refresh:
+        new_cred["refresh_token"] = new_refresh
+    new_cred["fetched_at"] = int(time.time())
+    if new_expires_in:
+        # Issue #343: 统一 token_expires_at 格式为 epoch int（和 external_identities 的 TEXT 格式不同，
+        # 但 user_credentials 的 config_json 是 JSON dict，int 更自然）。
+        # deps.py get_user_token_with_refresh 读此处 token_expires_at 做 (epoch - now) < 600 数值比较。
+        new_cred["token_expires_at"] = int(time.time()) + new_expires_in
+        new_cred["expires_in"] = new_expires_in
+    set_credential(user_id, provider_key, new_cred)
 
     log.info(f"refresh_oauth: success for user={user_id}, provider={provider}")
     return new_access

@@ -215,7 +215,7 @@ def test_list_api_tokens_masks_secret(client):
 
 def test_t7_jwt_via_unified_entry(client):
     user = _make_user("t7")
-    jwt = create_access_token(user["id"], "t7")
+    jwt = create_access_token(user["id"], user["username"])
     r = client.get("/probe", headers={"Authorization": f"Bearer {jwt}"})
     assert r.status_code == 200
     assert r.json()["auth_type"] == "jwt"

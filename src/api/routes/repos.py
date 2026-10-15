@@ -6,6 +6,7 @@ from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
 from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token, require_no_session_token, require_org_member
+from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
 
@@ -280,39 +281,31 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     """
     from datetime import datetime
 
-    # 获取用户绑定的全部平台 token
-    gitcode_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    github_token = get_user_github_token(user["username"])
+    # Issue #343 修复: 不再预获取 token（with_oauth_token 内部获取+预刷新），
+    # 只需确定用户绑定了哪些平台
+    from src.auth.grape_account_db import get_user_identities
+    _identities = get_user_identities(user["id"])
+    _bound_providers = {i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github")}
+    if not _bound_providers:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
 
     # 需求 17: 前端显式指定 provider 时只拉该平台
     if provider in ("gitcode", "github"):
-        if provider == "gitcode":
-            api_tokens = {"gitcode": gitcode_token} if gitcode_token else {}
-        else:
-            api_tokens = {"github": github_token} if github_token else {}
-        if not api_tokens:
+        if provider not in _bound_providers:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})
+        _providers = [provider]
     else:
-        # 不传 provider → 拉取全部绑定平台
-        api_tokens = {}
-        if gitcode_token:
-            api_tokens["gitcode"] = gitcode_token
-        if github_token:
-            api_tokens["github"] = github_token
-    if not api_tokens:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置，请先通过 OAuth 登录或配置个人 Token"})
+        _providers = list(_bound_providers)
 
-    # 异步探活清理失效托管（C2）：仅 GitCode 探活
-    if "gitcode" in api_tokens:
+    # Issue #343 修复: _probe_stale_repos 需要 token，走 with_oauth_token 获取
+    if "gitcode" in _providers:
         try:
-            import threading
-            threading.Thread(
-                target=_probe_stale_repos,
-                args=(api_tokens["gitcode"], user["id"]),
-                daemon=True,
-            ).start()
+            def _probe(token, _uid=user["id"]):
+                _probe_stale_repos(token, _uid)
+                return []  # 返回空列表，不需要结果
+            with_oauth_token(user, "gitcode", _probe)
         except Exception as e:
-            log.warning(f"member: background stale probe start failed: {e}")
+            log.warning(f"member: stale probe failed (non-fatal): {e}")
 
     # 优先读取 DB 缓存（未过期）——按组织过滤
     org_id = user.get("org_id", 0)
@@ -338,7 +331,7 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
 
     def _filter_by_provider(repos_list):
         """按 provider 过滤缓存（repo_key 前缀匹配）"""
-        if provider in ("gitcode", "github") and len(api_tokens) == 1:
+        if provider in ("gitcode", "github") and len(_providers) == 1:
             pfx = provider + ":"
             return [r for r in repos_list if (r.get("repo_key", "").startswith(pfx) or
                        (provider == "gitcode" and not r.get("repo_key", "").startswith("github:")))]
@@ -351,13 +344,35 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 每个平台独立 try/catch：一个平台拉取失败（如网络不通）不影响其他平台
     all_repos = []
     failed_providers = []
-    for p, token in api_tokens.items():
+    _reauth_provider = ""  # P1-6 软失败: 记录需要重新授权的平台，不中断其他平台
+    for p in _providers:
         try:
-            repos = _fetch_and_cache(user["id"], token, p)
+            def _fetch(token, _uid=user["id"], _p=p):
+                return _fetch_and_cache(_uid, token, _p)
+            repos = with_oauth_token(user, p, _fetch)
             all_repos.extend(repos)
+        except HTTPException as _he:
+            # P1-6 软失败: 401 reauth_required 不中断循环，记录后继续拉其他平台
+            if _he.status_code == 401 and not _reauth_provider:
+                _reauth_provider = p
+                failed_providers.append(p)
+            else:
+                raise  # 非 401 的 HTTPException 仍然直接抛出
         except Exception as e:
             log.warning(f"Fetch repos for {p} failed (user={user['username']}): {e}")
             failed_providers.append(p)
+
+    # P1-6 软失败: 有结果但某平台需要重新授权 → 返回部分结果 + reauth 标记
+    if _reauth_provider and all_repos:
+        # 去重后返回已有结果，附加 reauth 提示
+        _seen = set()
+        _deduped = [r for r in all_repos if r.get("repo_key","") not in _seen and not _seen.add(r.get("repo_key",""))]
+        return {"repos": _filter_repos(user["id"], _filter_by_provider(_deduped), org_id=_filter_org_id),
+                "_partial": True, "_reauth_provider": _reauth_provider}
+    # 有平台需要重新授权且无任何结果 → 抛 401 让前端提示
+    if _reauth_provider and not all_repos and not cached:
+        raise HTTPException(status_code=401, detail={"code": 401,
+            "message": f"{_reauth_provider} 授权已过期，请重新登录授权", "action": "reauth_required"})
 
     if not all_repos and cached:
         # 全部平台都失败 → 用旧缓存兜底
@@ -405,30 +420,45 @@ def sync_repos(user: dict = Depends(require_org_member)):
     组织隔离：同步 GitCode 全量到 user_repos 缓存，但返回时按当前组织过滤
     （只返回该组织已托管的仓库 + 个人组织返回全量）。
     """
-    # 多平台拉取（与 list_member_repos 一致）
-    gitcode_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    github_token = get_user_github_token(user["username"])
-    api_tokens = {}
-    if gitcode_token:
-        api_tokens["gitcode"] = gitcode_token
-    if github_token:
-        api_tokens["github"] = github_token
-    if not api_tokens:
+    # Issue #343 修复: 不再预获取 token（with_oauth_token 内部获取+预刷新）
+    from src.auth.grape_account_db import get_user_identities
+    _identities = get_user_identities(user["id"])
+    _providers = [i["provider"] for i in _identities if i.get("provider") in ("gitcode", "github")]
+    if not _providers:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
-    if "gitcode" in api_tokens:
-        _probe_stale_repos(api_tokens["gitcode"], user["id"])
+    if "gitcode" in _providers:
+        try:
+            def _probe(token, _uid=user["id"]):
+                _probe_stale_repos(token, _uid)
+                return []
+            with_oauth_token(user, "gitcode", _probe)
+        except Exception as e:
+            log.warning(f"sync: stale probe failed (non-fatal): {e}")
 
     # 每个平台独立 try/catch
     all_repos = []
     failed_providers = []
-    for p, token in api_tokens.items():
+    _reauth_provider = ""  # P1-6 软失败: 记录需要重新授权的平台，不中断其他平台
+    for p in _providers:
         try:
-            repos = _fetch_and_cache(user["id"], token, p)
+            def _fetch(token, _uid=user["id"], _p=p):
+                return _fetch_and_cache(_uid, token, _p)
+            repos = with_oauth_token(user, p, _fetch)
             all_repos.extend(repos)
+        except HTTPException as _he:
+            # P1-6 软失败: 401 reauth_required 不中断循环，记录后继续拉其他平台
+            if _he.status_code == 401 and not _reauth_provider:
+                _reauth_provider = p
+                failed_providers.append(p)
+            else:
+                raise
         except Exception as e:
             log.warning(f"Sync repos for {p} failed (user={user['username']}): {e}")
             failed_providers.append(p)
+
+    # P1-6 软失败: 有结果但某平台需要重新授权 → 继续保存+返回部分结果 + reauth 标记
+    _has_reauth = bool(_reauth_provider)
 
     if not all_repos:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "同步失败，请稍后重试"})
@@ -447,6 +477,13 @@ def sync_repos(user: dict = Depends(require_org_member)):
     # 个人组织不隔离（显示全量用户仓库），非个人组织才隔离
     from src.user.org_db import is_org_personal
     _filter_org_id = 0 if is_org_personal(org_id) else org_id
+    if _has_reauth:
+        _msg = f"同步成功（{_reauth_provider} 授权已过期，请重新登录授权）"
+        if _filter_org_id:
+            return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id),
+                    "message": _msg, "_partial": True, "_reauth_provider": _reauth_provider}
+        return {"repos": _filter_repos(user["id"], repos, org_id=0),
+                "message": _msg, "_partial": True, "_reauth_provider": _reauth_provider}
     if _filter_org_id:
         # 非个人组织：已托管到其他组织的仓库不显示，未托管的显示
         return {"repos": _filter_repos(user["id"], repos, org_id=_filter_org_id), "message": "同步成功"}
@@ -541,7 +578,9 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     repo_name = repo_info.get("name") or name
 
     try:
-        _fetch_and_cache(user["id"], api_token, provider)
+        def _fetch(token, _uid=user["id"], _p=provider):
+            return _fetch_and_cache(_uid, token, _p)
+        with_oauth_token(user, provider, _fetch)
     except Exception:
         pass
 
@@ -723,7 +762,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             pass
 
         try:
-            existing_id = find_existing_github_webhook(api_token, owner, repo_name, webhook_url)
+            def _find_gh_hook(token, _owner=owner, _repo=repo_name, _url=webhook_url):
+                return find_existing_github_webhook(token, _owner, _repo, _url)
+            existing_id = with_oauth_token(user, "github", _find_gh_hook)
             if existing_id:
                 user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
                                          github_webhook_token=api_token,
@@ -771,7 +812,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
 
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
-        user_data = _req("GET", f"https://gitcode.com/api/v5/user", api_token)
+        def _get_user(token):
+            return _req("GET", f"https://gitcode.com/api/v5/user", token)
+        user_data = with_oauth_token(user, "gitcode", _get_user)
         current_user = user_data.get("login", "")
         if not current_user:
             raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户身份"})
@@ -779,7 +822,24 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         if current_user == owner:
             is_admin = True
         else:
-            is_admin = _check_collaborator_admin(api_token, owner, repo_name, current_user)
+            def _check_admin(token, _owner=owner, _repo=repo_name, _cu=current_user):
+                # P1-1 返工: 直接调 _req 绕过 _check_collaborator_admin 的 except RuntimeError: return False，
+                # 让原始 401/403 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+                import urllib.parse as _up
+                _perm_url = f"https://gitcode.com/api/v5/repos/{_owner}/{_up.quote(_repo, safe='')}/collaborators/{_up.quote(_cu, safe='')}/permission"
+                _data = _req("GET", _perm_url, token)
+                _access_level = 0
+                try:
+                    _access_level = int(_data.get("access_level", 0) or 0)
+                except (TypeError, ValueError):
+                    pass
+                if _access_level >= 40:
+                    return True
+                if str(_data.get("permission", "") or "").lower() == "admin":
+                    return True
+                _perm = _data.get("permissions") or {}
+                return bool(_perm.get("admin")) if isinstance(_perm, dict) else False
+            is_admin = with_oauth_token(user, "gitcode", _check_admin)
 
         if not is_admin:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限托管，请联系管理员"})
@@ -903,7 +963,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
         raise HTTPException(status_code=503, detail={"code": 503, "message": "GitCode API 调用过于频繁，请稍后重试"})
 
     if not bot_ok:
-        # 邀请 + 接受
+        # 邀请 + 接受（owner token）
         add_collaborator(api_token, owner, repo, bot_username, "maintainer")[0]
         accept_invite_for_repo(bot_token, owner, repo)
         try:

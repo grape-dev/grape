@@ -51,7 +51,7 @@ def get_current_user(authorization: str = Header(None)) -> dict:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
 
     # token_version + 禁用状态校验（内存缓存优化，TTL 5 秒）
-    db_ver, status = get_user_status_cached(uid)
+    db_ver, status, db_username = get_user_status_cached(uid)
 
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
@@ -60,6 +60,12 @@ def get_current_user(authorization: str = Header(None)) -> dict:
         _user_status_cache.pop(uid, None)
         raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
 
+    # Issue #343: username/id 一致性校验——防止旧 JWT sub=旧id 撞上新表有效用户
+    # JWT payload 里的 username 必须和库里 sub 对应的 username 一致
+    if db_username and username and db_username != username:
+        _user_status_cache.pop(uid, None)
+        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session invalid"})
+
     # 记录活跃状态——O(1)，不阻塞
     mark_user_active(uid)
     login_provider = payload.get("login_provider", "")
@@ -67,30 +73,32 @@ def get_current_user(authorization: str = Header(None)) -> dict:
             "login_provider": login_provider}
 
 
-# 用户状态内存缓存：uid → (token_version, status, expire_ts)
-_user_status_cache: dict[int, tuple[int, int, float]] = {}
+# 用户状态内存缓存：uid → (token_version, status, username, expire_ts)
+_user_status_cache: dict[int, tuple[int, int, str, float]] = {}
 
 
-def get_user_status_cached(uid: int) -> tuple[int, int]:
-    """获取用户 token_version + status，优先读缓存（TTL 5 秒）。
+def get_user_status_cached(uid: int) -> tuple[int, int, str]:
+    """获取用户 token_version + status + username，优先读缓存（TTL 5 秒）。
 
     D3 修复：提取为公共函数，供 get_current_user 和 refresh 路由共享缓存。
+    Issue #343: 返回 username 用于 JWT 一致性校验。
     """
     cached = _user_status_cache.get(uid)
     now = time.time()
-    if cached and cached[2] > now:
-        return cached[0], cached[1]
+    if cached and cached[3] > now:
+        return cached[0], cached[1], cached[2]
     # 缓存未命中，查库
     from src.auth.grape_account_db import get_status_and_token_version
     info = get_status_and_token_version(uid)
     if info is not None:
-        status, db_ver = info
+        status, db_ver, username = info
     else:
         # D32: grape_accounts 无此用户 → 不 fallback 旧表，视为无效
         db_ver = 0
         status = 0  # 无账号 = 禁用
-    _user_status_cache[uid] = (db_ver, status, now + 5)
-    return db_ver, status
+        username = ""
+    _user_status_cache[uid] = (db_ver, status, username, now + 5)
+    return db_ver, status, username
 
 
 def invalidate_user_cache(uid: int) -> None:
@@ -146,7 +154,7 @@ def get_current_user_or_api_key(request: Request) -> dict:
             raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid or revoked API Key"})
         uid = info["user_id"]
         # SEC-3: API Key 路径也需校验用户 status
-        db_ver, status = get_user_status_cached(uid)
+        db_ver, status, _ = get_user_status_cached(uid)
         if status != 1:
             _user_status_cache.pop(uid, None)
             raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
@@ -297,6 +305,46 @@ def get_user_github_token(username: str) -> str:
     return _get_oauth_token_from_identity(username, "github")
 
 
+def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
+    """获取用户 GitHub token，过期时主动预刷新（Issue #343）。
+
+    和 get_user_token_with_refresh（GitCode 版）对称：
+    优先从 external_identities 读，检查 user_credentials 中的 token_expires_at，
+    临近过期时调用 refresh_oauth_token 预刷新。
+    """
+    import time as _time
+    token = _get_oauth_token_from_identity(username, "github")
+
+    if token and user_id > 0:
+        cred = user_db.get_credential(user_id, "github_oauth")
+        if cred:
+            now = int(_time.time())
+            need_refresh = False
+            token_expires_at = cred.get("token_expires_at", 0)
+            # 兼容 int 和 TEXT 两种格式
+            if isinstance(token_expires_at, str):
+                from datetime import datetime as _dt
+                try:
+                    token_expires_at = int(_dt.strptime(token_expires_at, "%Y-%m-%d %H:%M:%S").timestamp())
+                except (ValueError, OSError):
+                    token_expires_at = 0
+            if token_expires_at:
+                need_refresh = (token_expires_at - now) < 600
+            else:
+                fetched_at = cred.get("fetched_at", 0)
+                age = now - fetched_at if fetched_at else 0
+                need_refresh = age > 1800
+            if need_refresh:
+                new_token = user_db.refresh_oauth_token(user_id, "github")
+                return new_token or token
+        return token
+
+    if user_id > 0 and not token:
+        return user_db.refresh_oauth_token(user_id, "github") or ""
+
+    return token
+
+
 def _get_user_refresh_lock(user_id: int) -> threading.Lock:
     """获取用户级别的 GitCode OAuth 刷新锁（懒创建，Issue #52）。"""
     with _gitcode_refresh_locks_guard:
@@ -316,22 +364,44 @@ def try_refresh_gitcode_token(user_id: int) -> str | None:
 
 
 def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
-    """获取用户 GitCode token，过期时主动预刷新（Issue #52）。
+    """获取用户 GitCode token，过期时主动预刷新（Issue #52 + Issue #343）。
 
-    D32: 只从 external_identities 读，不 fallback 老表。
+    Issue #343: 改用 token_expires_at 实际过期时间预刷新（提前 10 分钟），
+    无 token_expires_at 时降级用 fetched_at + 30 分钟（匹配实测最短寿命）。
+
+    Issue #343 修复: token_expires_at 在 user_credentials(config_json) 中存为 epoch int，
+    在 external_identities 列中存为 TEXT 格式（如 "2026-10-15 12:00:00"）。
+    本函数从 user_credentials 读，值为 int，直接做数值比较。
+    如从 external_identities 读 TEXT 格式，用 _parse_token_expires_at 统一转 epoch int。
     """
     import time as _time
     # 1. 优先从 external_identities 读
     token = _get_oauth_token_from_identity(username, "gitcode")
 
     if token and user_id > 0:
-        # 检查 token 年龄——临近过期则预刷新
+        # 检查 token 是否临近过期
         cred = user_db.get_credential(user_id, "gitcode_oauth")
         if cred:
-            fetched_at = cred.get("fetched_at", 0)
-            age = int(_time.time()) - fetched_at if fetched_at else 0
-            # 超过 100 分钟（6000 秒）预刷新
-            if age > 6000:
+            now = int(_time.time())
+            need_refresh = False
+            token_expires_at = cred.get("token_expires_at", 0)
+            # 统一转 epoch int（兼容 int 和 TEXT 两种格式）
+            if isinstance(token_expires_at, str):
+                from datetime import datetime as _dt
+                try:
+                    token_expires_at = int(_dt.strptime(token_expires_at, "%Y-%m-%d %H:%M:%S").timestamp())
+                except (ValueError, OSError):
+                    token_expires_at = 0
+            if token_expires_at:
+                # 有过期时间：距过期不足 10 分钟（600 秒）则预刷新
+                need_refresh = (token_expires_at - now) < 600
+            else:
+                # 降级：无过期时间（历史数据），用 fetched_at + 30 分钟
+                # Issue #343: 实测最短 15 分钟，30 分钟降级比 60 分钟更安全
+                fetched_at = cred.get("fetched_at", 0)
+                age = now - fetched_at if fetched_at else 0
+                need_refresh = age > 1800
+            if need_refresh:
                 new_token = try_refresh_gitcode_token(user_id)
                 return new_token or token
         return token

@@ -503,7 +503,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
-    from src.api.deps import get_user_token_with_refresh
+    from src.api.oauth_token import with_oauth_token
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
 
@@ -521,10 +521,17 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     tpl = tpl_ctx["template"]
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
-    api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    if not api_token:
-        return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
-    gitcode_login = get_user_gitcode_login(api_token)
+    # Issue #343 修复: 不吞 401 异常——token 过期时正确抛给前端，不返回假数据
+    # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
+    # 让原始 401 RuntimeError 穿透到 with_oauth_token，_is_token_error 能匹配 (401) 格式触发刷新。
+    from src.user.repo_manager import _req
+    def _get_login(token):
+        data = _req("GET", "https://gitcode.com/api/v5/user", token)
+        login = data.get("login", "") if isinstance(data, dict) else ""
+        if not login:
+            raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
+        return login
+    gitcode_login = with_oauth_token(user, "gitcode", _get_login)
     if not gitcode_login:
         return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
 
@@ -585,7 +592,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
-    from src.api.deps import get_user_token_with_refresh
+    from src.api.oauth_token import with_oauth_token
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
 
@@ -604,10 +611,16 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
     # 拿用户的 GitCode login
-    api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    if not api_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
-    gitcode_login = get_user_gitcode_login(api_token)
+    # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
+    # 让原始 401 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+    from src.user.repo_manager import _req
+    def _get_login(token):
+        data = _req("GET", "https://gitcode.com/api/v5/user", token)
+        login = data.get("login", "") if isinstance(data, dict) else ""
+        if not login:
+            raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
+        return login
+    gitcode_login = with_oauth_token(user, "gitcode", _get_login)
     if not gitcode_login:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户 GitCode 身份"})
 

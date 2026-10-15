@@ -790,6 +790,15 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
 )
 """
 
+_AUTOPILOT_SUBSCRIPTIONS_DDL = """
+CREATE TABLE IF NOT EXISTS autopilot_subscriptions (
+    task_id     INTEGER NOT NULL,
+    user_id     INTEGER NOT NULL,
+    created_at  TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (task_id, user_id)
+)
+"""
+
 _ADMIN_ACCOUNTS_TABLE_DDL = """
 CREATE TABLE IF NOT EXISTS admin_accounts (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -951,6 +960,7 @@ CREATE TABLE IF NOT EXISTS user_feedback (
     # ===== Issue #150: Autopilot 定时自动化任务表 =====
     ("autopilot_tasks", _AUTOPILOT_TASKS_DDL),
     ("autopilot_executions", _AUTOPILOT_EXECUTIONS_DDL),
+    ("autopilot_subscriptions", _AUTOPILOT_SUBSCRIPTIONS_DDL),
 ]
 
 # ===== Organization（组织）特性 =====
@@ -4194,5 +4204,24 @@ def _backfill_scene_display_names():
 
     # ===== Organization 特性迁移 =====
     _migrate_add_org_id_columns()
-    _migrate_create_personal_orgs()
-    _migrate_data_to_personal_orgs()
+    # Issue #343: 删除 _migrate_create_personal_orgs / _migrate_data_to_personal_orgs 调用
+    # 这两个函数读 user_accounts 旧表用旧 ID 建组织，每次启动重复建，导致个人组织碎片化
+    # （每用户 2~4 个个人组织）+ owner 挂错人（旧 ID 撞新用户）
+    # 运行时 _ensure_personal_org（grape_auth.py）已在用户登录时按新 ID 正确建组织，不需要启动脚本重复建
+    # _migrate_create_personal_orgs()  — removed
+    # _migrate_data_to_personal_orgs()  — removed
+
+    # Issue #343 P1-3: token_version+1 集成到 init_database，不依赖人工 SQL
+    # 一次性强制旧 JWT 失效（旧 JWT sub=旧id 撞新表用户导致错位写入）。
+    # 用 meta 表标记确保只执行一次（幂等）。
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT value FROM meta WHERE key='issue343_jwt_invalidated'")
+            if not c.fetchone():
+                c.execute("UPDATE grape_accounts SET token_version = token_version + 1")
+                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('issue343_jwt_invalidated', '1')")
+                db.commit()
+                log.info("Issue #343: token_version +1 applied (old JWTs invalidated)")
+    except Exception as e:
+        log.warning(f"Issue #343 token_version invalidation failed: {e}")

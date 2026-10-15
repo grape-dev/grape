@@ -1824,6 +1824,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     conv_id = body.conversation_id
     # Issue #52: 用带预刷新的 token 获取
     from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)

@@ -1043,46 +1043,65 @@ def resume_issue_task(repo_key: str, issue_number: int):
 
 def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
                              provider: str = "gitcode") -> int | None:
-    """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。"""
+    """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。
+
+    Issue #343: 分页循环查全部 open issue，不只看前 50 条。
+    Issue #343: 查重失败时抛异常而非静默返回 None，防止 token 失效时重复建单。
+    返回 issue number（找到）或 None（真没找到）。token 失效时抛 RuntimeError。
+    """
     if provider == "github":
         from src.user.repo_manager import _github_req
+        page = 1
+        while page <= 10:
+            try:
+                data = _github_req("GET",
+                                   f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=50&page={page}",
+                                   api_token)
+            except Exception as e:
+                raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
+            items = data if isinstance(data, list) else []
+            if not items:
+                break
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("title") or "").strip() == title.strip():
+                    n = it.get("number")
+                    if n:
+                        return int(n)
+            if len(items) < 50:
+                break  # 最后一页
+            page += 1
+        return None
+    # GitCode
+    from src.user.repo_manager import _req
+    page = 1
+    while page <= 10:
         try:
-            data = _github_req("GET",
-                               f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=50",
-                               api_token)
-        except Exception:
-            return None
-        items = data if isinstance(data, list) else []
+            data = _req("GET",
+                        f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=open&per_page=50&page={page}",
+                        api_token)
+        except Exception as e:
+            raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
+        if isinstance(data, dict):
+            _cand = data.get("data") if isinstance(data.get("data"), list) else (data.get("items") or data.get("records") or [])
+            items = _cand or []
+        else:
+            items = data if isinstance(data, list) else []
+        if not items:
+            break
         for it in items:
             if not isinstance(it, dict):
                 continue
             if str(it.get("title") or "").strip() == title.strip():
-                n = it.get("number")
-                if n:
-                    return int(n)
-        return None
-    # GitCode
-    from src.user.repo_manager import _req
-    try:
-        data = _req("GET",
-                    f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=all&per_page=50&page=1",
-                    api_token)
-    except Exception:
-        return None
-    if isinstance(data, dict):
-        _cand = data.get("data") if isinstance(data.get("data"), list) else (data.get("items") or data.get("records") or [])
-        items = _cand or []
-    else:
-        items = data if isinstance(data, list) else []
-    for it in items:
-        if not isinstance(it, dict):
-            continue
-        if str(it.get("title") or "").strip() == title.strip():
-            st = str(it.get("state") or "").lower()
-            if st in ("open", "opened", "active", "1", "todo"):
-                n = it.get("number") or it.get("iid") or it.get("id")
-                if n:
-                    return int(n)
+                st = str(it.get("state") or "").lower()
+                if st in ("open", "opened", "active", "1", "todo"):
+                    n = it.get("number") or it.get("iid") or it.get("id")
+                    if n:
+                        return int(n)
+        if len(items) < 50:
+            break  # 最后一页
+        page += 1
     return None
 
 
@@ -1127,44 +1146,6 @@ def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
     if assignee:
         body["assignees"] = [assignee]
     return _github_req("POST", f"https://api.github.com/repos/{owner}/{repo}/issues", api_token, body)
-
-
-def _is_gitcode_401(err: Exception) -> bool:
-    """判断异常是否为 GitCode API 401 Bad credentials（Issue #52）。"""
-    msg = str(err)
-    return "401" in msg or "Bad credentials" in msg
-
-
-def _gitcode_api_with_refresh(user: dict, api_call_fn, *args, **kwargs):
-    """包装 GitCode API 调用——401 时自动刷新 OAuth token 并重试一次（Issue #52）。
-
-    user: 当前登录用户 dict（含 id, username）
-    api_call_fn: 实际调 GitCode API 的函数，第一个位置参数是 token
-    *args, **kwargs: 传给 api_call_fn 的其余参数（owner, repo, title 等）
-
-    返回 api_call_fn 的结果，或抛 HTTPException（刷新失败时）。
-    """
-    from src.api.deps import get_user_token, try_refresh_gitcode_token
-
-    username = user["username"]
-    user_id = user["id"]
-    token = get_user_token(username)
-
-    try:
-        return api_call_fn(token, *args, **kwargs)
-    except RuntimeError as e:
-        if not _is_gitcode_401(e):
-            raise  # 非 401 错误不处理
-        # 401 → 尝试刷新 token
-        new_token = try_refresh_gitcode_token(user_id)
-        if not new_token:
-            raise HTTPException(status_code=401, detail={
-                "code": 401,
-                "message": "GitCode 授权已过期，请重新登录授权",
-                "action": "reauth_required"
-            })
-        # 刷新成功 → 重试一次
-        return api_call_fn(new_token, *args, **kwargs)
 
 
 def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
@@ -1262,19 +1243,41 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     if _preauth_token:
         api_token = _preauth_token
     elif _is_github:
-        from src.user.db import get_user_github_token
-        api_token = get_user_github_token(user["id"]) or ""
+        # Issue #343: GitHub 写操作同样走仓库 bot token
+        from src.user.db import get_github_token
+        api_token = get_github_token(repo_key=repo_key)
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitHub API Token 未配置"})
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
     else:
-        from src.api.deps import get_user_token_with_refresh
-        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+        # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
+        from src.user.db import get_repo_bot_token
+        api_token = get_repo_bot_token(repo_key=repo_key)
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
-    assignee = (body.assignee or "").strip() or user["username"]
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 Bot Token 未配置，请在仓库设置中配置 GitCode Bot Token"})
+    # Issue #343: assignee 优先用 GitCode/GitHub 登录名（external_login），
+    # 而非 grape 平台 username——GitCode 侧 assignee 必须是平台登录名
+    if body.assignee and body.assignee.strip():
+        assignee = body.assignee.strip()
+    else:
+        assignee = user["username"]  # 默认 fallback
+        # 尝试从 external_identities 查真实 GitCode/GitHub 登录名
+        try:
+            from src.auth.grape_account_db import get_user_identities
+            _provider_name = "github" if _is_github else "gitcode"
+            for ident in get_user_identities(user["id"]):
+                if ident.get("provider") == _provider_name and ident.get("external_login"):
+                    assignee = ident["external_login"]
+                    break
+        except Exception:
+            pass  # 查不到就用 grape username fallback
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
-    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
-                                          provider="github" if _is_github else "gitcode")
+    # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
+    try:
+        issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
+                                              provider="github" if _is_github else "gitcode")
+    except RuntimeError as e:
+        raise HTTPException(status_code=502, detail={"code": 502,
+                                                     "message": f"查重失败，Bot Token 可能失效: {str(e)[:200]}"})
     created = False
     if issue_num is not None:
         raise HTTPException(status_code=409, detail={"code": 409,
@@ -1294,18 +1297,40 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     _attachments.append(f"[{_att['filename']}]({_att['url']})")
             if _attachments:
                 _desc_with_attach += "\n\n## 附件\n" + "\n".join(_attachments)
-        if _is_github:
-            resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
-                                      _desc_with_attach, assignee=assignee)
-        elif _preauth_token:
-            resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
-                                       _desc_with_attach, assignee=assignee)
-        else:
-            # Issue #52: 401 时自动刷新 OAuth token 并重试
-            resp = _gitcode_api_with_refresh(
-                user, _post_gitcode_issue, owner, rname, body.title.strip(),
-                _desc_with_attach, assignee=assignee
-            )
+        # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
+        try:
+            if _is_github:
+                resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
+                                          _desc_with_attach, assignee=assignee)
+            else:
+                # Issue #343: GitCode 写操作走 bot token，直接调用不需要 refresh 包装
+                resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
+                                           _desc_with_attach, assignee=assignee)
+        except Exception as _create_err:
+            _err_msg = str(_create_err)
+            # 从 RuntimeError 消息提取 HTTP code（格式: "failed (403): ..."）
+            import re as _re
+            _codes = _re.findall(r'\((\d{3})\)', _err_msg)
+            _http_code = int(_codes[0]) if _codes else 0
+            if _http_code == 403:
+                raise HTTPException(status_code=403, detail={
+                    "code": 403,
+                    "message": f"创建 Issue 失败：处理人无效或无权限（assignee={assignee}），请检查 assignee 是否为有效的 {('GitHub' if _is_github else 'GitCode')} 用户名"
+                })
+            if _http_code == 422:
+                raise HTTPException(status_code=422, detail={
+                    "code": 422,
+                    "message": f"创建 Issue 失败：参数错误: {_err_msg[:200]}"
+                })
+            if _http_code == 401:
+                raise HTTPException(status_code=502, detail={
+                    "code": 502,
+                    "message": "创建 Issue 失败：Bot Token 可能失效，请检查仓库 Bot Token 配置"
+                })
+            raise HTTPException(status_code=502, detail={
+                "code": 502,
+                "message": f"创建 Issue 失败: {_err_msg[:200]}"
+            })
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
@@ -1344,7 +1369,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if body.scene_id and body.scene_id != "vod-auto":
             from src.api.session_store import set_issue_scene
             from src.runtime.engine_select import _repo_user_id
-            scene_uid = _repo_user_id(repo_key, issue_creator=user["username"]) or 0
+            # Issue #343 问题十一修复: issue_creator 必须是 GitCode/GitHub 登录名（external_login），
+            # 不能用平台名 user["username"]——_repo_user_id 查的是 unified_user_mapping.gitcode_user
+            scene_uid = _repo_user_id(repo_key, issue_creator=assignee) or 0
             set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
     except Exception as _e:
         from src.config import log
@@ -1383,16 +1410,11 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         try:
             _marker = "\n\n---\n[multi-task-mode] 本任务启用多任务模式，将由 Issue Agent 自动判断是否拆分为子任务执行。"
             if _is_github:
-                # GitHub: 直接用用户 github_api_token
-                from src.user.db import get_user_github_token
-                _gh_token = get_user_github_token(user["id"]) or ""
-                if _gh_token:
-                    _patch_github_issue_body(_gh_token, owner, rname, issue_num, (body.description or "") + _marker)
-            elif _preauth_token:
-                _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
+                # Issue #343: GitHub 写操作走 bot token
+                _patch_github_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
             else:
-                # Issue #52: 401 时自动刷新 token 重试
-                _gitcode_api_with_refresh(user, _patch_issue_body, owner, rname, issue_num, (body.description or "") + _marker)
+                # Issue #343: GitCode 写操作走 bot token
+                _patch_issue_body(api_token, owner, rname, issue_num, (body.description or "") + _marker)
         except HTTPException:
             raise  # reauth_required 需要传递给前端
         except Exception as _e:
@@ -1414,14 +1436,17 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 使补发事件与对应平台真实 webhook 形态一致（可读性/排查 + 去重指纹一致），
             # 不再对 GitCode 也发 GitHub 格式合成 payload 造成「GitHub 事件」误判。
             import json as _pipe_json
-            _assign = assignee or user["username"]
+            # Issue #343 问题十一修复: pipeline 创建人必须用 external_login（assignee），不能 fallback 到平台名
+            # assignee 此时已经是 external_login（1257-1272 行从 external_identities 查到）或用户传入的值
+            # assignee 为空时不填创建人字段，让 pipeline 降级用 owner
+            _assign = assignee or ""
             if _is_github:
                 _pipe_payload = {
                     "action": "opened",
                     "issue": {"number": int(issue_num), "title": body.title.strip(),
-                              "user": {"login": _assign}},
+                              "user": {"login": _assign} if _assign else {}},
                     "repository": {"full_name": f"{owner}/{rname}"},
-                    "sender": {"login": _assign},
+                    "sender": {"login": _assign} if _assign else {},
                 }
                 _pipe_headers = {"Content-Type": "application/json", "X-GitHub-Event": "issues"}
             else:
@@ -1430,7 +1455,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "object_attributes": {"iid": int(issue_num), "title": body.title.strip(),
                                           "action": "open"},
                     "project": {"path_with_namespace": f"{owner}/{rname}"},
-                    "user": {"username": _assign},
+                    "user": {"username": _assign} if _assign else {},
                 }
                 _pipe_headers = {"Content-Type": "application/json", "X-Gitcode-Event": "issue_opened"}
             from src.api.event_pipeline import run_pipeline

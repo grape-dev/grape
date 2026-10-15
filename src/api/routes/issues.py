@@ -526,24 +526,59 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
     if not owner or not repo:
         return "skipped"
 
-    # 获取 token
+    # 获取 token — Issue #343: 写操作走 bot token 优先，与建单路径对称
+    # Issue #343 修复: bot token 失败时 fallback 到用户 token，用户 token 路径走 with_oauth_token
     token = ""
+    _use_user_token_fallback = False
     try:
         if is_github:
-            # 优先用用户个人 GitHub token（与 clarify_issue 一致），其次 bot token
-            from src.user.db import get_user_github_token as _get_ugh
+            # GitHub: bot token 优先，用户 token fallback
             from src.user.db import get_github_token as _get_gh
-            token = (_get_ugh(user["id"]) if user.get("id") else "") or _get_gh(repo_key=repo_key) or ""
+            token = _get_gh(repo_key=repo_key) or ""
+            if not token and user.get("id"):
+                # P1-2 修复: 和 GitCode 路径对称——只设 flag 不获取 token，
+                # 让 with_oauth_token 内部用 get_user_github_token_with_refresh 获取（有预刷新）
+                _use_user_token_fallback = True
         else:
-            from src.api.deps import get_user_token_with_refresh
-            token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+            # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
+            from src.user.db import get_repo_bot_token as _get_gc
+            token = _get_gc(repo_key=repo_key) or ""
+            if not token:
+                # bot token 未配置，fallback 用户 token（走 with_oauth_token 保护）
+                _use_user_token_fallback = True
     except Exception as e:
         log.warning(f"confirm-done close_issue: get token for {repo_key} failed: {e}")
 
-    if not token:
+    if not token and not _use_user_token_fallback:
         log.info(f"confirm-done close_issue: no token for {repo_key}, skipping")
         return "skipped"
 
+    # Issue #343 修复: 用户 token fallback 路径走 with_oauth_token 保护（预刷新 + 401 重试）
+    if _use_user_token_fallback and not token:
+        # bot token 未配置，通过 with_oauth_token 获取用户 token 并执行关闭
+        try:
+            from src.api.oauth_token import with_oauth_token
+            from src.vcs.api_client import VcsApiClient
+            _provider_name = "github" if is_github else "gitcode"
+            def _do_close(token, _provider=provider, _owner=owner, _repo=repo, _num=issue_number):
+                c = VcsApiClient(_provider, token, _owner, _repo)
+                # 幂等检查
+                state = c.get_issue_state(_num)
+                if state == "closed":
+                    return "skipped"
+                resp = c.close_issue(_num)
+                if isinstance(resp, dict) and "error" not in resp:
+                    return "success"
+                return "failed"
+            result = with_oauth_token(user, _provider_name, _do_close)
+            if result == "success":
+                log.info(f"confirm-done: closed {repo_key}#{issue_number} (user token)")
+            return result
+        except Exception as e:
+            log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} user token failed: {e}")
+            return "failed"
+
+    # bot token 路径：直接调用
     from src.vcs.api_client import VcsApiClient
     client = VcsApiClient(provider, token, owner, repo)
 
@@ -1054,7 +1089,7 @@ class _IssueClarifyBody(BaseModel):
 @router.post("/{issue_id}/clarify", operation_id="issues_clarify", summary="Reply issue clarification", description="Developer replies to an agent clarification: posts a GitCode issue comment and writes to the task conversation.")
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
     """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。"""
-    from src.api.issues_center import _get_task_issue_info, _gitcode_api_with_refresh, _is_gitcode_401
+    from src.api.issues_center import _get_task_issue_info
     from src.session_manager import db, db_lock
     msg = (body.message or "").strip()
     if not msg:
@@ -1065,15 +1100,19 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     repo_key, issue_number, conv_id = info
     _is_github = repo_key.startswith("github:")
     if _is_github:
-        from src.user.db import get_user_github_token
-        api_token = get_user_github_token(user["id"]) or ""
+        # Issue #343: GitHub 写操作走仓库 bot token
+        from src.user.db import get_github_token
+        from src.repo_key import to_repo_key
+        api_token = get_github_token(repo_key=to_repo_key(repo_key, provider="github"))
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitHub API Token 未配置"})
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
     else:
-        from src.api.deps import get_user_token_with_refresh
-        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+        # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
+        from src.user.db import get_repo_bot_token
+        from src.repo_key import to_repo_key
+        api_token = get_repo_bot_token(repo_key=to_repo_key(repo_key))
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 Bot Token 未配置"})
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
@@ -1103,16 +1142,12 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
             except _uerr.URLError as e:
                 raise RuntimeError(f"Cannot reach GitCode API: {e.reason}")
         try:
-            _gitcode_api_with_refresh(user, _post_comment)
+            # Issue #343: bot token 直接调用，不需要 refresh 包装
+            _post_comment(api_token)
             log.info(f"Issue clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
         except HTTPException:
             raise
         except Exception as e:
-            if _is_gitcode_401(e):
-                raise HTTPException(status_code=401, detail={
-                    "code": 401, "message": "GitCode 授权已过期，请重新登录授权",
-                    "action": "reauth_required"
-                })
             raise HTTPException(status_code=502, detail={"code": 502,
                                                          "message": f"GitCode 评论失败: {str(e)[:200]}"})
     if conv_id:

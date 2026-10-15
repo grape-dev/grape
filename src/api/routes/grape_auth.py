@@ -1303,7 +1303,7 @@ def oauth_login(provider: str, popup: bool = False, request: Request = None, lan
                 token_ver = int(payload.get("ver", 0))
                 if uid:
                     from src.api.deps import get_user_status_cached
-                    db_ver, status = get_user_status_cached(uid)
+                    db_ver, status, _ = get_user_status_cached(uid)
                     if token_ver == db_ver and status == 1:
                         # 已登录且有效 → 转绑定流程
                         extra_state = {"binding_user_id": uid}
@@ -1365,7 +1365,7 @@ def _handle_oauth_delete(request, provider, external_id, user_info, delete_accou
     return RedirectResponse(url=url, status_code=302)
 
 
-def _handle_oauth_bind(request, provider, external_id, user_info, access_token, refresh_token, binding_user_id, popup=False):
+def _handle_oauth_bind(request, provider, external_id, user_info, access_token, refresh_token, binding_user_id, popup=False, expires_in=0):
     """绑定流程——检查重复绑定 → 写入 external_identities → 重定向回用户中心。
 
     需求 6：占位账号合并与新绑定创建在同一个 with db_lock 事务内执行。
@@ -1408,6 +1408,7 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
                         external_avatar=user_info.get("external_avatar", ""),
                         access_token=access_token,
                         refresh_token=refresh_token,
+                        expires_in=expires_in,
                     ):
                         _sm_db.rollback()
                         return _bind_error_redirect(request, "bind_failed", popup=popup)
@@ -1506,6 +1507,7 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
         external_avatar=user_info.get("external_avatar", ""),
         access_token=access_token,
         refresh_token=refresh_token,
+        expires_in=expires_in,
     )
     if not bind_ok:
         return _bind_error_redirect(request, "bind_failed", popup=popup)
@@ -1520,7 +1522,7 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
     return RedirectResponse(url=url, status_code=302)
 
 
-def _handle_oauth_login(request, provider, external_id, user_info, access_token, refresh_token, popup=False, state_data=None):
+def _handle_oauth_login(request, provider, external_id, user_info, access_token, refresh_token, popup=False, state_data=None, expires_in=0):
     """登录流程——已绑定直接登录 / 未绑定自动创建或跳关联页。"""
     from src.auth.grape_account_db import get_external_identity
     binding = get_external_identity(provider, external_id)
@@ -1539,6 +1541,7 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         _token_updated = update_external_identity_tokens(grape_user_id, provider,
                                         access_token=access_token,
                                         refresh_token=refresh_token,
+                                        expires_in=expires_in,
                                         external_name=user_info.get("external_name", ""),
                                         external_avatar=user_info.get("external_avatar", ""))
         if not _token_updated:
@@ -1589,6 +1592,7 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
             refresh_token=refresh_token,
             external_name=user_info.get("external_name", ""),
             external_avatar=user_info.get("external_avatar", ""),
+            expires_in=expires_in,
         )
         if not restored:
             return _oauth_error_redirect(request, "rebind_failed", popup=popup)
@@ -1666,6 +1670,7 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         external_avatar=user_info.get("external_avatar", ""),
         access_token=access_token,
         refresh_token=refresh_token,
+        expires_in=expires_in,
     )
     if not bind_ok:
         log.warning(f"OAuth auto-create: bind failed for user {account['id']}, provider={provider}, rolling back")
@@ -1775,6 +1780,7 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
 
     access_token = token_data.get("access_token", "")
     refresh_token = token_data.get("refresh_token", "")
+    expires_in = token_data.get("expires_in", 0)
     if not access_token:
         err_fn = _bind_error_redirect if binding_user_id else _oauth_error_redirect
         resp = err_fn(request, "token_failed", popup=popup)
@@ -1802,10 +1808,10 @@ def oauth_callback(request: Request, provider: str, code: str = "", state: str =
     if delete_account_user_id:
         return _handle_oauth_delete(request, provider, external_id, user_info, delete_account_user_id, popup=popup)
     if binding_user_id:
-        return _handle_oauth_bind(request, provider, external_id, user_info, access_token, refresh_token, binding_user_id, popup=popup)
+        return _handle_oauth_bind(request, provider, external_id, user_info, access_token, refresh_token, binding_user_id, popup=popup, expires_in=expires_in)
 
     # login flow：_handle_oauth_login 返回的 RedirectResponse 上清除 nonce cookie
-    login_resp = _handle_oauth_login(request, provider, external_id, user_info, access_token, refresh_token, popup=popup, state_data=state_data)
+    login_resp = _handle_oauth_login(request, provider, external_id, user_info, access_token, refresh_token, popup=popup, state_data=state_data, expires_in=expires_in)
     if is_login_flow and hasattr(login_resp, "delete_cookie"):
         login_resp.delete_cookie("oauth_nonce", path="/")
     return login_resp
