@@ -105,7 +105,8 @@ class TestOAuth:
     def test_save_validate_flow(self):
         state = "test-state-" + uuid.uuid4().hex[:8]
         udb.save_oauth_state(state, "gitcode", {"k": 1})
-        assert udb.validate_oauth_state(state, "gitcode") == {"k": 1}
+        data = udb.validate_oauth_state(state, "gitcode")
+        assert data == {"k": 1, "_provider": "gitcode"}
         # 消耗后失效
         assert udb.validate_oauth_state(state, "gitcode") is None
 
@@ -151,12 +152,11 @@ class TestCredentials:
     def test_get_credentials_from_account_fields(self):
         u, uname = self._user()
         try:
-            acc = udb.get_user_account(uname) or {}
-            acc["gitcode_api_token"] = "tok_1"
-            acc["feishu_app_id"] = "cli_f"
-            acc["huawei_cloud_ak"] = "ak"
-            acc["CODEARTS_CLI_AK"] = "ck"
-            udb.save_user_account(uname, acc)
+            # D32-补丁：get_credentials 现在从 user_credentials 表 + external_identities 读
+            udb.set_credential(u["id"], "gitcode", {"token": "tok_1"})
+            udb.set_credential(u["id"], "feishu", {"app_id": "cli_f"})
+            udb.set_credential(u["id"], "huawei_cloud", {"ak": "ak"})
+            udb.set_credential(u["id"], "codearts", {"ak": "ck"})
             creds = udb.get_credentials(u["id"])
             providers = {c["provider"] for c in creds}
             assert {"gitcode", "feishu", "huawei_cloud", "codearts"} <= providers
@@ -358,7 +358,7 @@ class TestMetaAccounts:
         try:
             names = udb.get_all_bot_usernames()
             assert "repo_bot" in names
-            assert "grape_bot" in names  # 全局 bot（configs/global-bot-token.json）
+            assert "grape_dev_bot" in names  # 全局 bot（configs/global-bot-token.json）
         finally:
             with db_lock:
                 db.cursor().execute("DELETE FROM managed_repos WHERE repo_key=?", (rk,))

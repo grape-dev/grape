@@ -90,7 +90,7 @@ function loadObs(dom, extraInit) {
 
 function makeWorkers(n) {
   const list = [];
-  for (let i = 0; i < n; i++) list.push({ id:i, device_name:'dev-'+String(i).padStart(3,'0'), name:'w-'+i, health:'online', last_ip:'10.0.0.'+(i+1), last_seen_at:'2026-09-12T10:00:00Z', cpu_percent:i*5, memory_percent:i*3, tmp_percent:10, disk_percent:20 });
+  for (let i = 0; i < n; i++) list.push({ id:i, device_name:'dev-'+String(i).padStart(3,'0'), name:'w-'+i, health:'online', last_ip:'10.0.0.'+(i+1), last_seen_at:'2026-09-12T10:00:00Z', cpu_percent:i*5, memory_percent:i*3, tmp_percent:10, disk_percent:20, bandwidth_percent:i*2 });
   return { total:n, online:Math.ceil(n/3), offline:n-Math.ceil(n/3), list };
 }
 
@@ -192,6 +192,35 @@ test('updateOverview: \u4ec5\u904d\u5386\u5f53\u524d\u9875\u5143\u7d20', () => {
     return { result: __result };
   `);
   assert.strictEqual(m.result, true, 'updateOverview \u5e94\u8fd4\u56de true');
+});
+
+test('Worker card 包含带宽占用率进度条 (bandwidth)', () => {
+  const dom = makeDom();
+  const m = loadObs(dom);
+  const ops = { workers: makeWorkers(1), runtimes: { total:0, online:0, offline:0, list:[] } };
+  const html = m.renderOverview(ops, {});
+  assert.ok(html.includes('wk-0-bw-bar'), '卡片应包含带宽进度条元素 wk-0-bw-bar');
+  assert.ok(html.includes('observability.bandwidth'), '卡片应引用 i18n key observability.bandwidth');
+});
+
+test('updateOverview 正确更新带宽进度条 (wk-*-bw)', () => {
+  const dom = makeDom();
+  const ops = { workers: makeWorkers(2), runtimes: { total:0, online:0, offline:0, list:[] } };
+  const m = loadObs(dom, `
+    renderOverview(${JSON.stringify(ops)}, {});
+    _obsData = { ops: ${JSON.stringify(ops)}, realtime: null };
+    var res = updateOverview(${JSON.stringify(ops)}, {});
+    return { result: res };
+  `);
+  assert.strictEqual(m.result, true, 'updateOverview 应返回 true');
+});
+
+test('Worker 0条: 不显示带宽占位', () => {
+  const dom = makeDom();
+  const m = loadObs(dom);
+  const ops = { workers: { total:0, online:0, offline:0, list:[] }, runtimes: { total:0, online:0, offline:0, list:[] } };
+  const html = m.renderOverview(ops, {});
+  assert.ok(!html.includes('wk-0-bw-bar'), '0条 worker 时不应有带宽进度条');
 });
 
 test('页码越界自动钳制: _workerPage=99 + 15条 → 重置为 0', () => {

@@ -76,3 +76,84 @@ def test_start_worker_ps1_exists_on_disk():
     assert "src.runtime.agent" in content
     assert "Restart" in content or "restart" in content.lower()
     assert "daemon" in content.lower() or "NoDaemon" in content
+
+
+# ===== B1 (Issue #257): venv 三级自愈测试 =====
+
+class TestVenvSelfHealing:
+    """B1: install-worker.sh / .ps1 venv pip 损坏三级自愈。"""
+
+    def test_install_sh_has_pip_health_check(self):
+        """install-worker.sh 应检测 pip 可用性（不只是文件存在）。"""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.sh")
+        content = open(p, encoding="utf-8").read()
+        # 应含 pip --version 健康检测
+        assert "pip --version" in content or "_venv_pip_ok" in content
+        # 应含三级自愈
+        assert "ensurepip" in content
+        assert "get-pip" in content or "bootstrap.pypa.io" in content
+        assert "rm -rf" in content and "venv" in content.lower()  # Level 3: 重建 venv
+
+    def test_install_ps1_has_pip_health_check(self):
+        """install-worker.ps1 应检测 pip 可用性（不只是 Test-Path）。"""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.ps1")
+        content = open(p, encoding="utf-8").read()
+        # 应含 pip --version 健康检测
+        assert "_VenvPipOk" in content or "pip --version" in content
+        # 应含三级自愈
+        assert "ensurepip" in content
+        assert "get-pip" in content or "bootstrap.pypa.io" in content
+        assert "Rebuild" in content or "rebuild" in content  # Level 3: 重建 venv
+
+    def test_install_sh_three_level_progression(self):
+        """install-worker.sh 应有三级递进自愈结构。"""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.sh")
+        content = open(p, encoding="utf-8").read()
+        # 三级标记
+        assert "[1/3]" in content
+        assert "[2/3]" in content
+        assert "[3/3]" in content
+
+
+# ===== B4 (Issue #257): Windows GBK 乱码修复测试 =====
+
+class TestInstallPs1Bom:
+    """B4 复盘（2026-09-29）：install.ps1 端点不预置 BOM（字符串执行场景），start-worker.ps1 端点预置。"""
+
+    def test_install_ps1_endpoint_returns_bom(self):
+        """GET /api/runtime/install.ps1 返回内容应无 BOM（字符串执行：irm | iex / [scriptblock]::Create）。
+
+        BOM 会被 irm 解码为 U+FEFF 残留在脚本串开头，PS5.1 解析 param() 失败。
+        文件执行场景由 _perform_upgrade 下载侧补 BOM（agent.py startswith 检测）。
+        """
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        client = TestClient(app)
+        r = client.get("/api/runtime/install.ps1")
+        assert r.status_code == 200
+        raw = r.content
+        assert raw[:3] != b"\xef\xbb\xbf", "install.ps1 response must NOT start with BOM (breaks [scriptblock]::Create)"
+        assert raw[:1] == b"#", "install.ps1 should start with comment header"
+
+    def test_start_worker_ps1_endpoint_returns_bom(self):
+        """GET /api/runtime/start-worker.ps1 返回内容应预置 UTF-8 BOM（irm -OutFile 写文件场景）。"""
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        client = TestClient(app)
+        r = client.get("/api/runtime/start-worker.ps1")
+        assert r.status_code == 200
+        raw = r.content
+        assert raw[:3] == b"\xef\xbb\xbf", "start-worker.ps1 response should start with UTF-8 BOM (file scenario)"
+
+    def test_install_ps1_log_messages_are_ascii(self):
+        """install-worker.ps1 的 Log/Fail 消息应 ASCII 化（无中文）。"""
+        p = os.path.join(os.path.dirname(__file__), "..", "scripts", "install-worker.ps1")
+        content = open(p, encoding="utf-8").read()
+        # 提取所有 Log "..." 和 Fail "..." 行
+        import re
+        log_fail_lines = re.findall(r'(?:Log|Fail)\s*"([^"]*)"', content)
+        for msg in log_fail_lines:
+            # Log/Fail 消息中不应含非 ASCII 字符
+            non_ascii = [c for c in msg if ord(c) > 127]
+            assert not non_ascii, f"Log/Fail message contains non-ASCII: {msg}"
+

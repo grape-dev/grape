@@ -87,6 +87,13 @@
 
   // ====== 配置中心 ======
   function showCfg() {
+    // 隐藏用户管理和白名单区域
+    document.getElementById('usersView').style.display = 'none';
+    document.getElementById('whitelistView').style.display = 'none';
+    // 显示配置区域
+    document.querySelector('.mn > div:first-child').style.display = '';
+    var cfgCt = document.querySelector('.mn .ct');
+    if (cfgCt) cfgCt.style.display = '';
     api('/config').then(function (d) {
       var c = d.config || {};
       var os = c.oauth_status || {};
@@ -173,4 +180,153 @@
   window.saveConfig = saveConfig;
   window.verifyToken = verifyToken;
   document.addEventListener('DOMContentLoaded', init);
+  // ===== D6: 用户管理 =====
+  var _userPage = 1;
+
+  function showUsers(page, ev) {
+    _userPage = page || 1;
+    var navItems = document.querySelectorAll('.sb-nav a');
+    navItems.forEach(function(a){a.classList.remove('act')});
+    if (ev && ev.target) ev.target.classList.add('act');
+    document.querySelector('.mn > div:first-child').style.display = 'none'; // hide config tb
+    var cfgCt = document.querySelector('.mn .ct');
+    if (cfgCt) cfgCt.style.display = 'none';
+    document.getElementById('usersView').style.display = '';
+    document.getElementById('whitelistView').style.display = 'none';
+
+    var q = (document.getElementById('userSearch') || {}).value || '';
+    api('/users?page=' + _userPage + '&per_page=20&q=' + encodeURIComponent(q)).then(function(d) {
+      var tbody = document.getElementById('usersTbody');
+      tbody.innerHTML = '';
+      var statusMap = {0:'禁用',1:'正常',2:'已注销',3:'冷静期'};
+      var statusColor = {0:'#dc2828',1:'#1ca44c',2:'#86868b',3:'#f5a623'};
+      d.users.forEach(function(u) {
+        var tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid #e3e6ee';
+        var actions = '';
+        if (u.status === 1) {
+          actions = '<button class="btn" style="padding:4px 10px;font-size:12px;color:#dc2828" onclick="disableUser(' + u.id + ')">禁用</button>';
+        } else if (u.status === 0) {
+          actions = '<button class="btn btn-p" style="padding:4px 10px;font-size:12px" onclick="restoreUser(' + u.id + ')">恢复</button>';
+        } else if (u.status === 3) {
+          actions = '<button class="btn btn-p" style="padding:4px 10px;font-size:12px" onclick="restoreUser(' + u.id + ')">恢复</button>';
+        }
+        tr.innerHTML =
+          '<td style="padding:8px">' + u.id + '</td>' +
+          '<td style="padding:8px">' + esc(u.username) + '</td>' +
+          '<td style="padding:8px">' + esc(u.email || '-') + '</td>' +
+          '<td style="padding:8px;color:' + (statusColor[u.status]||'#86868b') + '">' + (statusMap[u.status]||u.status) + '</td>' +
+          '<td style="padding:8px">' + (u.bindings ? u.bindings.join(', ') : '-') + '</td>' +
+          '<td style="padding:8px;color:var(--t2)">' + (u.last_login_at || '-') + '</td>' +
+          '<td style="padding:8px">' + actions + '</td>';
+        tbody.appendChild(tr);
+      });
+      document.getElementById('userCount').textContent = '(共 ' + d.total + ' 人)';
+      // pager
+      var pager = document.getElementById('userPager');
+      var totalPages = Math.ceil(d.total / 20);
+      pager.innerHTML = '';
+      if (totalPages > 1) {
+        for (var i = 1; i <= totalPages; i++) {
+          var btn = document.createElement('button');
+          btn.textContent = i;
+          btn.className = 'btn' + (i === _userPage ? ' btn-p' : '');
+          btn.style.cssText = 'padding:4px 10px;font-size:12px;margin:0 2px';
+          btn.onclick = function(p){ return function(){ showUsers(p); }; }(i);
+          pager.appendChild(btn);
+        }
+      }
+    }).catch(function(e) { toast('加载用户列表失败: ' + e.message, false); });
+  }
+
+  function disableUser(uid) {
+    if (!confirm('确定禁用此用户？')) return;
+    api('/users/' + uid + '/disable', {method: 'POST', body: {reason: 'admin_disabled'}}).then(function() {
+      toast('用户已禁用', true);
+      showUsers(_userPage);
+    }).catch(function(e) { toast('禁用失败: ' + e.message, false); });
+  }
+
+  function restoreUser(uid) {
+    api('/users/' + uid + '/restore', {method: 'POST'}).then(function() {
+      toast('用户已恢复', true);
+      showUsers(_userPage);
+    }).catch(function(e) { toast('恢复失败: ' + e.message, false); });
+  }
+
+  function showWhitelist(ev) {
+    var navItems = document.querySelectorAll('.sb-nav a');
+    navItems.forEach(function(a){a.classList.remove('act')});
+    if (ev && ev.target) ev.target.classList.add('act');
+    document.querySelector('.mn > div:first-child').style.display = 'none';
+    var cfgCt = document.querySelector('.mn .ct');
+    if (cfgCt) cfgCt.style.display = 'none';
+    document.getElementById('usersView').style.display = 'none';
+    document.getElementById('whitelistView').style.display = '';
+    loadWhitelist();
+    loadAllowSignup();
+  }
+
+  function loadWhitelist() {
+    api('/signup-whitelist').then(function(d) {
+      var tbody = document.getElementById('whitelistTbody');
+      tbody.innerHTML = '';
+      (d.whitelist || []).forEach(function(w) {
+        var tr = document.createElement('tr');
+        tr.style.borderBottom = '1px solid #e3e6ee';
+        tr.innerHTML =
+          '<td style="padding:8px">' + w.id + '</td>' +
+          '<td style="padding:8px">' + (w.type === 'email' ? '邮箱' : '域名') + '</td>' +
+          '<td style="padding:8px">' + esc(w.value) + '</td>' +
+          '<td style="padding:8px">' + esc(w.remark || '-') + '</td>' +
+          '<td style="padding:8px;color:var(--t2)">' + (w.created_at || '-') + '</td>' +
+          '<td style="padding:8px"><button class="btn" style="padding:4px 10px;font-size:12px;color:#dc2828" onclick="deleteWhitelist(' + w.id + ')">删除</button></td>';
+        tbody.appendChild(tr);
+      });
+    }).catch(function(e) { toast('加载白名单失败: ' + e.message, false); });
+  }
+
+  function addWhitelist() {
+    var type = document.getElementById('wl_type').value;
+    var value = document.getElementById('wl_value').value.trim();
+    var remark = document.getElementById('wl_remark').value.trim();
+    if (!value) { toast('请输入值', false); return; }
+    api('/signup-whitelist', {method: 'POST', body: {type: type, value: value, remark: remark}}).then(function() {
+      toast('已添加', true);
+      document.getElementById('wl_value').value = '';
+      document.getElementById('wl_remark').value = '';
+      loadWhitelist();
+    }).catch(function(e) { toast('添加失败: ' + e.message, false); });
+  }
+
+  function deleteWhitelist(id) {
+    api('/signup-whitelist/' + id, {method: 'DELETE'}).then(function() {
+      toast('已删除', true);
+      loadWhitelist();
+    }).catch(function(e) { toast('删除失败: ' + e.message, false); });
+  }
+
+  function loadAllowSignup() {
+    api('/config').then(function(d) {
+      var v = (d.config || {}).allow_signup || '0';
+      document.getElementById('allow_signup').value = v === '1' ? '1' : '0';
+    }).catch(function(){});
+  }
+
+  function saveAllowSignup() {
+    var v = document.getElementById('allow_signup').value === '1';
+    api('/allow-signup', {method: 'PUT', body: {enabled: v}}).then(function() {
+      toast('已更新', true);
+    }).catch(function(e) { toast('更新失败: ' + e.message, false); });
+  }
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML; }
+
+  window.showUsers = showUsers;
+  window.showWhitelist = showWhitelist;
+  window.disableUser = disableUser;
+  window.restoreUser = restoreUser;
+  window.addWhitelist = addWhitelist;
+  window.deleteWhitelist = deleteWhitelist;
+  window.saveAllowSignup = saveAllowSignup;
 })();

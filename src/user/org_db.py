@@ -130,7 +130,7 @@ def get_org_members(org_id: int) -> list[dict]:
         c.execute(
             "SELECT m.*, u.username, u.nickname "
             "FROM org_member m "
-            "INNER JOIN user_accounts u ON u.id = m.user_id "
+            "INNER JOIN grape_accounts u ON u.id = m.user_id "
             "WHERE m.org_id=? ORDER BY m.role, m.joined_at",
             (org_id,)
         )

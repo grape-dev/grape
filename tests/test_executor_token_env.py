@@ -1,8 +1,9 @@
-"""stream_agent 的 GitCode token 环境注入兜底逻辑测试。
+"""stream_agent 的 VCS 平台 token 注入消除测试（P2：vcs-env-token-boundary-audit-design.md）。
 
-USER_GITCODE_TOKEN 为空时会导致 chat agent 调 GitCode API 401（创建/查询 Issue 失败）。
-修复：用户 token 为空 → 依次兜底 用户登录绑定的 token（user_accounts）→ 仓库 api token
-（bot_token，worker 侧 repo_gitcode_token / 事件流水线仓库 bot token）。
+P2 语义：`BOT_GITCODE_TOKEN / BOT_GITHUB_TOKEN / USER_GITCODE_TOKEN / USER_GITHUB_TOKEN / BOT_TOKEN`
+一律不再注入 agent env——平台长期凭据只在服务端进程内流转，agent 侧统一经
+`grape git/git-repo/issues`（携带 GRAPE_SESSION_TOKEN=tk_）转发。
+机制元数据（VCS_API_BASE / VCS_NAME）仍注入，供技能判断平台。
 """
 import os
 import sys
@@ -72,7 +73,19 @@ class _FakeBackend:
         return None
 
 
-def _run_stream(user_token="", bot_token="", user_id=0, db_user_token="", event_type="chat"):
+_PLATFORM_TOKEN_ENVS = (
+    "BOT_GITCODE_TOKEN", "BOT_GITHUB_TOKEN",
+    "USER_GITCODE_TOKEN", "USER_GITHUB_TOKEN", "BOT_TOKEN",
+)
+
+
+def _assert_no_platform_tokens(env):
+    for k in _PLATFORM_TOKEN_ENVS:
+        assert k not in env, f"P2: {k} must NOT be injected into agent env"
+
+
+def _run_stream(user_token="", bot_token="", user_id=0, db_user_token="", event_type="chat",
+                repo_key="gitcode:owner/repo"):
     # 经 src.runtime.executor 导入可绕开 agent→runtime 循环导入（与 tests 同款用法）
     from src.runtime.executor import stream_agent
 
@@ -88,58 +101,50 @@ def _run_stream(user_token="", bot_token="", user_id=0, db_user_token="", event_
             prompt="hi", cwd="/tmp", session_id="", event_type=event_type,
             backend_name="fake", account="u", user_id=user_id,
             user_token=user_token, bot_token=bot_token, max_exec_seconds=60,
+            repo_key=repo_key,
         ))
     return fake_popen.captured
 
 
-def test_user_token_wins_over_bot_token():
-    """chat + user_token + bot_token：互斥——只用用户 token，不注入 BOT_GITCODE_TOKEN。"""
+def test_no_platform_tokens_chat_with_user_token():
+    """chat + user_token：P2 不再注入 USER_GITCODE_TOKEN。"""
     env = _run_stream(user_token="USR", bot_token="BOT")
-    assert env["USER_GITCODE_TOKEN"] == "USR"
-    assert "BOT_GITCODE_TOKEN" not in env
+    _assert_no_platform_tokens(env)
 
 
-def test_bot_token_fallback_when_user_token_empty():
-    """chat + user_id=0（无用户身份）→ 不注入 USER_GITCODE_TOKEN（不应以 bot token 冒充用户身份）。"""
+def test_no_platform_tokens_chat_without_identity():
+    """chat + 无用户身份：P2 仍不注入任何平台 token。"""
     env = _run_stream(user_token="", bot_token="BOT1", user_id=0)
-    assert "USER_GITCODE_TOKEN" not in env
-    assert "BOT_GITCODE_TOKEN" not in env
+    _assert_no_platform_tokens(env)
 
 
-def test_db_user_token_fallback():
-    """user_token 传空但用户登录时绑定过 token → 入库查询兜底"""
+def test_no_platform_tokens_chat_db_user_token():
+    """chat + user_id>0 + DB 用户 token：P2 不注入（服务端按会话主体执行）。"""
     env = _run_stream(user_token="", bot_token="", user_id=3, db_user_token="DBUSR")
-    assert env["USER_GITCODE_TOKEN"] == "DBUSR"
+    _assert_no_platform_tokens(env)
 
 
-def test_db_empty_then_bot_not_injected():
-    """chat + DB 无用户 token + 只有 bot token → 不注入 USER_GITCODE_TOKEN（报错，不冒充用户身份）。"""
-    env = _run_stream(user_token="", bot_token="BOT1", user_id=3, db_user_token="", event_type="chat")
-    assert "USER_GITCODE_TOKEN" not in env
-    assert "BOT_GITCODE_TOKEN" not in env
+def test_no_platform_tokens_devops_event():
+    """devops 事件任务（非 chat）：P2 不再注入 BOT 平台 token。"""
+    env = _run_stream(user_token="", bot_token="BOT_EVT", user_id=7,
+                      db_user_token="DBUSR", event_type="issue_opened")
+    _assert_no_platform_tokens(env)
 
 
-def test_no_token_no_injection():
-    env = _run_stream(user_token="", bot_token="", user_id=3, db_user_token="")
-    assert "USER_GITCODE_TOKEN" not in env
+def test_vcs_api_base_still_injected():
+    """机制元数据 VCS_API_BASE / VCS_NAME 仍注入（技能判断平台用，非 token）。"""
+    env = _run_stream(user_token="USR", repo_key="github:owner/repo")
+    _assert_no_platform_tokens(env)
+    assert env["VCS_API_BASE"] == "https://api.github.com"
+    assert env["VCS_NAME"] == "GitHub"
 
 
-def test_devops_event_task_uses_only_bot_token():
-    """devops 事件任务（非 chat）：只注入 BOT_GITCODE_TOKEN，不注入 USER_GITCODE_TOKEN。
-
-    回归：production 事件任务（vod/issue 引导等）曾误走 user-token 兜底并刷 WARNING
-    （见 docs/weekly-01/user-gitcode-token-mis-inject-fix-design.md）。
-    """
-    env = _run_stream(user_token="", bot_token="BOT_EVT", user_id=7, db_user_token="DBUSR", event_type="issue_opened")
-    assert "USER_GITCODE_TOKEN" not in env
-    assert env["BOT_GITCODE_TOKEN"] == "BOT_EVT"
-
-
-def test_chat_with_db_user_token_still_injected():
-    """chat + user_id>0 + DB 有用户 token → 仍查库注入（用户身份写操作），不注入 BOT。"""
-    env = _run_stream(user_token="", bot_token="BOT", user_id=3, db_user_token="DBUSR", event_type="chat")
-    assert env["USER_GITCODE_TOKEN"] == "DBUSR"
-    assert "BOT_GITCODE_TOKEN" not in env
+def test_mechanism_metadata_kept():
+    """事件机制元数据（DEVOPS_EVENT_TYPE）仍注入；不注入平台 token。"""
+    env = _run_stream(user_token="", bot_token="BOT_EVT", user_id=7,
+                      event_type="issue_opened")
+    assert env["DEVOPS_EVENT_TYPE"] == "issue_opened"
+    _assert_no_platform_tokens(env)
 
 
 # ===================== stream_chat_agent / stream_devops_agent 隔离 =====================
@@ -159,6 +164,7 @@ def _run_chat_fn(user_token="", bot_token="", user_id=0):
         list(stream_chat_agent(
             prompt="hi", cwd="/tmp", session_id="", backend_name="fake",
             account="u", user_id=user_id, user_token=user_token, max_exec_seconds=60,
+            repo_key="gitcode:owner/repo",
         ))
     return fake_popen.captured
 
@@ -179,26 +185,20 @@ def _run_devops_fn(bot_token="", user_token="", repo_user_id=0):
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
             backend_name="fake", account="u", repo_user_id=repo_user_id,
             bot_token=bot_token, max_exec_seconds=60,
+            repo_key="gitcode:owner/repo",
         ))
     return fake_popen.captured
 
 
-def test_chat_fn_only_user_token():
-    """stream_chat_agent：只要 user_token（用户身份），签名无 bot_token → 绝不注入 BOT。"""
+def test_chat_fn_injects_no_platform_token():
+    """stream_chat_agent：P2 不注入任何平台 token，仅机制元数据。"""
     env = _run_chat_fn(user_token="USR", user_id=3)
-    assert env["USER_GITCODE_TOKEN"] == "USR"
-    assert "BOT_GITCODE_TOKEN" not in env
+    _assert_no_platform_tokens(env)
+    assert env["VCS_API_BASE"] == "https://gitcode.com/api/v5"
 
 
-def test_devops_fn_only_bot_token():
-    """stream_devops_agent：只注入 BOT（仓库身份），签名无 user_token → 绝不注入 USER。"""
+def test_devops_fn_injects_no_platform_token():
+    """stream_devops_agent：P2 不注入 BOT 平台 token。"""
     env = _run_devops_fn(bot_token="BOT_EVT", repo_user_id=7)
-    assert "USER_GITCODE_TOKEN" not in env
-    assert env["BOT_GITCODE_TOKEN"] == "BOT_EVT"
-
-
-def test_devops_fn_ignore_db_user_token():
-    """stream_devops_agent 即使 DB 有用户 token 也不注入（事件任务不以用户身份写 GitCode）。"""
-    env = _run_devops_fn(bot_token="BOT_EVT", repo_user_id=7)
-    assert "USER_GITCODE_TOKEN" not in env
-    assert env["BOT_GITCODE_TOKEN"] == "BOT_EVT"
+    _assert_no_platform_tokens(env)
+    assert env["DEVOPS_EVENT_TYPE"] == "issue_opened"

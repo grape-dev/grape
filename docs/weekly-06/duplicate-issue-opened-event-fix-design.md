@@ -162,7 +162,7 @@ if created:
 | UT-09 | create_task 补发 = GitHub 格式（github 仓库兼容） | `create_task_via_issue`（github: 前缀仓库） | payload 为 `action/issue/repository/sender`，header `X-GitHub-Event: issues` | D 不回归 GitHub |
 | UT-10 | 补发保留：webhook 缺失场景有兜底（方案 B） | mock 掉 webhook 通道，仅 create_task 补发路径 | 依旧产生 issue_opened 事件并派发 vod（不静默丢需求） | B |
 
-### 6.2 集群实测回归（grapedev.cn）
+### 6.2 集群实测回归（grape.example.com）
 
 | 编号 | 场景 | 步骤 | 断言 |
 |------|------|------|------|

@@ -201,10 +201,14 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
       hermes: ~/.hermes/skills
       opencode: ~/.config/opencode/skills
       codearts: ~/.codeartsdoer/cli-data/system/skills
+      hwcloud(AIShell): ~/.hwcloud/skills + ~/.agents/skills（后者为 openagent
+      原生全局 skill 根——acp/server.go buildSessionSkillProvider 约定，
+      任务执行时 agent 实际读取的目录；前者为 grape 侧自定义路径，两者都扫）
     Windows:
       hermes: %USERPROFILE%\\.hermes\\skills
       opencode: %USERPROFILE%\\.config\\opencode\\skills
       codearts: %USERPROFILE%\\.codeartsdoer\\cli-data\\system\\skills
+      hwcloud(AIShell): %USERPROFILE%\\.hwcloud\\skills + %USERPROFILE%\\.agents\\skills
     """
     home = home_dir()
     key = (engine_name or "").strip().lower()
@@ -212,6 +216,12 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
         "hermes": [os.path.join(home, ".hermes", "skills")],
         "opencode": [os.path.join(home, ".config", "opencode", "skills")],
         "codearts": [os.path.join(home, ".codeartsdoer", "cli-data", "system", "skills")],
+        # hwcloud(AIShell) 双路径：~/.agents/skills 是 openagent 原生全局 skill 根
+        # （acp/server.go:1846 约定，agent 任务执行时实际读取），~/.hwcloud/skills 为
+        # grape 侧自定义。多路径列表天然支持——另可用 RUNTIME_EXTRA_SKILL_DIRS
+        # env（冒号分隔）追加任意目录，扫描时合并进所有引擎。
+        "hwcloud": [os.path.join(home, ".agents", "skills"),
+                    os.path.join(home, ".hwcloud", "skills")],
     }
     return mapping.get(key, [])
 

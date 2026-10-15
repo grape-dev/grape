@@ -3,6 +3,7 @@ import json, asyncio, tempfile, os, threading, time
 
 from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.prompt_builder import build_general_chat_prompt
+from src.auth.grape_account_db import get_grape_account_by_username as _get_acc
 
 def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响。
@@ -326,7 +327,7 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
 
 
 def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str, repo_key: str = "") -> str:
-    """解析注入 agent 的 GitCode token：优先用户当前 token（user_accounts），
+    """解析注入 agent 的 GitCode token：优先用户当前 token（external_identities），
     并在会话缓存过期/为空时刷新 conversation.user_gitcode_token。
 
     修复：会话创建时缓存旧 token（曾 401 Bad credentials），非空缓存永不被回填刷新
@@ -363,7 +364,7 @@ def _build_web_user_info(user: dict, acc: dict | None = None) -> str:
     """构建 Web Chat prompt 的用户基本信息（与飞书 user_info 格式一致）。
 
     user 为 FastAPI 当前用户 dict（username 即 GitCode 登录名）；
-    acc 为 user_accounts 行（含 nickname/gitcode_id）。注入后使 Web Agent
+    acc 为 grape_accounts 行（含 nickname）。注入后使 Web Agent
     感知说话者身份（chat-prompt-overview.md §2.1，补 Web Chat 无 user_info 缺口）。
     """
     try:
@@ -552,7 +553,6 @@ def _chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
 @router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
 async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
-    acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
     from src.api.deps import get_user_token_with_refresh
     user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
@@ -609,6 +609,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
+    acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
@@ -717,7 +718,6 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
 @router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
-    acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
     from src.api.deps import get_user_token_with_refresh
     user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
@@ -744,6 +744,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
+    acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
@@ -1053,9 +1054,6 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     from src.api.session_store import get_or_create_agent_session
     from src.config import log as _log
     import os as _os
-    import src.user.db as _user_db
-    acc = _user_db.get_user_account(user.get("username") or "") or {}
-
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
     # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
@@ -1091,6 +1089,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     #（见 task-conversation-prompt-align-design.md §3.2）
     conv = get_conversation(conv_id) if conv_id else None
     history = get_messages(conv_id, limit=10) if conv_id else []
+    acc = _get_acc(user.get("username") or "") or {}
     _rsid = session.get("runtime_session_id") or ""
     has_valid_session = bool(_rsid.startswith("ses_"))
     if conv and conv.get("conv_type") == "task":
@@ -1458,9 +1457,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     from src.api.chat_task_manager import ChatTaskManager
 
     conv_id = body.conversation_id
-    acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取
-    from src.api.deps import get_user_token_with_refresh
     user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
@@ -1484,6 +1481,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
+    acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
@@ -1823,10 +1821,8 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     """send/async 的同步实现（在线程池中执行，不阻塞 event loop）。"""
     import time as _t, uuid as _uuid
     conv_id = body.conversation_id
-    acc = user_db.get_user_account(user["username"]) or {}
     # Issue #52: 用带预刷新的 token 获取
     from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
 
     if conv_id:
         conv = get_conversation(conv_id)
@@ -1849,6 +1845,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     backend_name = cfg.get("backend", "")
     skill_name = cfg.get("skill", "") or "chat"
     skill_id = cfg.get("skill_id", 0) or 0
+    acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
     gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)

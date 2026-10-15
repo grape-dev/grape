@@ -217,26 +217,34 @@ try:
         log.info("Added unified_user_mapping.gitcode_id column")
 except Exception as e:
     log.warning(f"Add unified_user_mapping.gitcode_id failed: {e}")
-# 回填 unified_user_mapping：user_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
+# 回填 unified_user_mapping：grape_accounts 已有但未映射的用户（INSERT OR IGNORE 不覆盖已有飞书绑定）
 # 使 /api/tasks/notify 能解析 assignee→user_id（tasks.py:52）；幂等，每次启动执行
 try:
-    # 先检查 user_accounts 表是否存在（首次启动时可能还未创建）
-    _has_ua = db.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='user_accounts'").fetchone()
-    if _has_ua:
+    # D32-补丁：从 grape_accounts + external_identities 回填 unified_user_mapping
+    # D43: 用 SHOW TABLES 替代 sqlite_master（MySQL 兼容；MySQLCompatDB 会转换 INSERT OR IGNORE）
+    try:
+        _has_ga = db.execute("SELECT 1 FROM grape_accounts LIMIT 1").fetchone()
+    except Exception:
+        _has_ga = None  # 表不存在
+    if _has_ga:
         db.execute(
             "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
-            "SELECT id, username, nickname FROM user_accounts WHERE id>0"
+            "SELECT id, username, nickname FROM grape_accounts WHERE id>0"
         )
-        # Issue #211: 补充 gitcode_id 关联，确保非 OAuth 注册用户也能建立映射
-        # user_accounts.gitcode_id 非空时，更新映射表对应字段（已有行不覆盖，仅补充空值）
-        db.execute(
-            "UPDATE unified_user_mapping SET gitcode_id = "
-            "(SELECT gitcode_id FROM user_accounts WHERE user_accounts.id = unified_user_mapping.user_id) "
-            "WHERE gitcode_id='' AND user_id IN (SELECT id FROM user_accounts WHERE gitcode_id!='')"
-        )
+        # 补充 gitcode_id 关联：从 external_identities 读
+        try:
+            db.execute(
+                "UPDATE unified_user_mapping SET gitcode_id = "
+                "(SELECT ei.external_id FROM external_identities ei "
+                "WHERE ei.grape_user_id = unified_user_mapping.user_id AND ei.provider='gitcode') "
+                "WHERE gitcode_id='' AND user_id IN "
+                "(SELECT grape_user_id FROM external_identities WHERE provider='gitcode')"
+            )
+        except Exception:
+            pass  # external_identities 表可能不存在
         db.commit()
     else:
-        log.info("user_accounts table not yet created, skipping backfill")
+        log.info("grape_accounts table not yet created, skipping backfill")
 except Exception as e:
     log.warning(f"Backfill unified_user_mapping failed: {e}")
 # 兼容列迁移：unified_user_mapping 增加 app_id（feishu-app-scoped-openid-fix.md，open_id 为 app 级）
@@ -428,11 +436,11 @@ def get_feishu_open_id(gitcode_user, app_id=""):
 
 
 def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_nickname="", app_id=""):
-    """更新 GitCode → Feishu 用户映射（user_id = user_accounts.id，按 gitcode_user 关联）。
+    """更新 GitCode → Feishu 用户映射（user_id = grape_accounts.id，按 gitcode_user 关联）。
 
     管理 unified_user_mapping 整行：gitcode_user/gitcode_nickname/feishu_open_id/feishu_name/app_id/updated_at。
-    gitcode_nickname 优先取传入值，否则从 user_accounts.nickname 获取。
-    user_id 始终为真实 user_accounts.id：若该 gitcode_user 未在 user_accounts 中，
+    gitcode_nickname 优先取传入值，否则从 grape_accounts.nickname 获取。
+    user_id 始终为真实 grape_accounts.id：若该 gitcode_user 未在 grape_accounts 中，
     则尝试按已有记录更新；两者都不可得时跳过（不写入负数占位）。
 
     判定逻辑（feishu-app-scoped-openid-fix.md §2.2，"清空"由 app_id 变化触发，而非 open_id 为空）：
@@ -440,14 +448,18 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
       - open_id 非空 → 写 open_id + feishu_name(有则写) + app_id(有则写)；
       - 否则（open_id 空且 app 未变，如 OAuth 登录）→ 仅刷 gitcode_nickname/updated_at，保留 open_id/app_id。
     """
-    from src.user import db as user_db
+    # D32: 从 grape_accounts 读 user_id + nickname
+    # 直接用本模块 db 查询（避免 grape_account_db 模块缓存的 db 引用在测试中被隔离）
     user_id = 0
     try:
-        acc = user_db.get_user_account(gitcode_user)
-        if acc:
-            user_id = acc.get("id", 0)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id, nickname FROM grape_accounts WHERE username=? AND status=1 LIMIT 1", (gitcode_user,))
+            row = c.fetchone()
+        if row:
+            user_id = row[0]
             if not gitcode_nickname:
-                gitcode_nickname = acc.get("nickname", "") or ""
+                gitcode_nickname = row[1] or ""
     except Exception:
         pass
 
@@ -488,8 +500,8 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
                     (gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), row[0])
                 )
             else:
-                # 无 user_id 也无已有记录：跳过（user_id 必须为真实 user_accounts.id）
-                log.info(f"update_unified_user_info: skip mapping for {gitcode_user} (no user_accounts record)")
+                # 无 user_id 也无已有记录：跳过（user_id 必须为真实 grape_accounts.id）
+                log.info(f"update_unified_user_info: skip mapping for {gitcode_user} (no grape_accounts record)")
                 return False
         db.commit()
         return True
@@ -683,6 +695,10 @@ def join_feishu_chat(chat_id: str, conv_id: str, user_id: int) -> bool:
         c.execute("SELECT user_id FROM chat_conversations WHERE id=?", (conv_id,))
         row = c.fetchone()
         if not row or row[0] != user_id:
+            log.warning(
+                f"join_feishu_chat deny: conv={conv_id[:40] or ''} conv_user={row[0] if row else 'missing'} "
+                f"uid={user_id} chat={chat_id[:20] if chat_id else ''}"
+            )
             return False
         # 清旧：清空当前持有该 chat_id 的其它 conversation
         c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=? AND id!=?", (chat_id, conv_id))

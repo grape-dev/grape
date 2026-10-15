@@ -23,9 +23,40 @@ def sanitize_device(device_name: str, max_len: int = 24) -> str:
     return f"{head}-{tail}".strip("-")[:max_len].strip("-")
 
 
-def instance_name(engine_type: str, device_name: str, credential_id) -> str:
-    """派生唯一引擎实例名：`{type}-{device_suffix}`；无 device_name 回退 `{type}-cred{credential_id}`。"""
+# 引擎显示名映射（内部标识 → 用户可见名）。
+# hwcloud → aishell（2026-10-13）：DB name/路由键/binary 全部保持 hwcloud 不动，
+# 仅展示层（instance_name 派生前缀/display_name/前端卡片）用 AIShell。
+# 显示名要求 sanitize_device 合法（小写字母数字）；注册时 display_name 用大写 AIShell。
+ENGINE_DISPLAY_NAMES = {
+    "hwcloud": "aishell",
+}
+
+
+def engine_display_name(engine_type: str) -> str:
+    """内部引擎名 → 展示名（小写，instance_name 派生用）；未映射原样返回。"""
     et = (engine_type or "engine").strip().lower()
+    return ENGINE_DISPLAY_NAMES.get(et, et)
+
+
+def to_display(name: str) -> str:
+    """API 出口统一显示名转换（大写 AIShell）：内部名 hwcloud → AIShell。
+
+    供 settings/dashboard 等 API 在返回引擎列表前替换 name/display_name 字段，
+    前端所有读 rt.name 的位置一次生效。内部路由键不受影响（仅出口转换）。
+    """
+    et = (name or "").strip().lower()
+    dn = ENGINE_DISPLAY_NAMES.get(et, "")
+    if not dn:
+        return name or ""
+    return dn.upper() if dn == "aishell" else dn
+
+
+def instance_name(engine_type: str, device_name: str, credential_id) -> str:
+    """派生唯一引擎实例名：`{display_name}-{device_suffix}`；无 device_name 回退 `{display_name}-cred{credential_id}`。
+
+    展示名映射见 ENGINE_DISPLAY_NAMES（hwcloud 派生 aishell-worker-xxx）。
+    """
+    et = engine_display_name(engine_type)
     suffix = sanitize_device(device_name)
     if not suffix:
         suffix = f"cred{credential_id or 0}"
@@ -65,7 +96,12 @@ def resolve_instance_id(engine_name: str, scope: str | None = None) -> int | Non
                 ORDER BY CASE WHEN ar.credential_id = 0 OR rc.status IS NULL OR rc.status = 'active' THEN 0 ELSE 1 END, ar.id
             """)
         for rid, et, cid, dev, cst in c.fetchall():
-            if instance_name(et, dev or "", cid) == target:
+            # 双名匹配（ENGINE_DISPLAY_NAMES 引入后的兼容）：先试新派生名
+            # （aishell-worker-xxx），再试原名派生（hwcloud-worker-xxx）——历史
+            # 保存的 Agent 绑定/Chat 配置仍是旧名，改名不断链。
+            _new = instance_name(et, dev or "", cid)
+            _old = f"{(et or 'engine').strip().lower()}-{sanitize_device(dev or '') or f'cred{cid or 0}'}"
+            if _new == target or (_new != _old and _old == target):
                 # 可用：本机直连（cred 0）、凭据行不存在（LEFT JOIN 无行，测试/新环境）、凭据 active；
                 # 仅凭据存在且 revoked 的旧行排除（2026-08-17 修复）
                 if (cid or 0) == 0 or cst is None or cst == "active":

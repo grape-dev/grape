@@ -364,9 +364,12 @@ class TestNoCurlTemplates:
         prompt = pb.build_issue_chat_prompt("hi", "org/repo", [], conv)
         assert "curl" not in prompt
 
-    def test_devops_prompt_keeps_token_env_name(self, pb, base_evt):
+    def test_devops_prompt_guides_grape_cli_not_token_env(self, pb, base_evt):
+        """P2：prompt 引导用 grape CLI + GRAPE_SESSION_TOKEN，不再指示平台 token env。"""
         prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")
-        assert "BOT_GITCODE_TOKEN" in prompt
+        assert "BOT_GITCODE_TOKEN" not in prompt
+        assert "USER_GITCODE_TOKEN" not in prompt
+        assert "grape" in prompt and "GRAPE_SESSION_TOKEN" in prompt
 
     def test_devops_prompt_keeps_repo_identifier(self, pb, base_evt):
         prompt = pb.build_devops_agent_prompt(base_evt, [], "", ["issue"], agent_type="issue")

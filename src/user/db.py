@@ -1,10 +1,41 @@
-"""用户系统数据库：users/credentials/vms/skills 表管理"""
-import json, hashlib, time, os
+"""用户系统数据库：users/credentials/vms/skills 表管理
+
+D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
+以下函数标记为 @deprecated——新代码不应调用，应使用 grape_account_db.py 中的对应函数：
+  get_user/get_user_by_username → get_grape_account_by_id/get_grape_account_by_username
+  create_user → create_grape_account
+  verify_user → verify_grape_account
+  update_password → grape_account_db.update_password
+  get_token_version → grape_account_db.get_token_version
+  increment_token_version → grape_account_db.increment_token_version
+  get_user_account → get_grape_account_by_username
+  link_gitcode_user/link_github_user → create_external_identity
+  get_user_by_gitcode_id/get_user_by_github_id → get_external_identity
+"""
+import json, hashlib, time, os, warnings
 from src.session_manager import db, db_lock
 from src.config import log
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
 # OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
+
+
+def _deprecated_user_accounts_fn(replacement: str = ""):
+    """装饰器：标记 user_accounts 老表函数为 deprecated。
+    调用时发出 DeprecationWarning，日志记录。
+    """
+    import functools
+    def decorator(fn):
+        @functools.wraps(fn)
+        def wrapper(*args, **kwargs):
+            msg = f"user_accounts.{fn.__name__}() is deprecated"
+            if replacement:
+                msg += f", use {replacement} instead"
+            warnings.warn(msg, DeprecationWarning, stacklevel=2)
+            log.warning(f"Deprecated function called: {fn.__name__}() — {msg}")
+            return fn(*args, **kwargs)
+        return wrapper
+    return decorator
 
 
 # ====== 用户账户表（合并 users + bot_accounts） ======
@@ -44,6 +75,7 @@ def _hash_password(password: str) -> str:
     return hashlib.sha256(password.encode()).hexdigest()
 
 
+@_deprecated_user_accounts_fn("create_grape_account")
 def create_user(username: str, password: str, created_by: int = 0) -> dict | None:
     """创建普通用户，返回用户信息或 None。
 
@@ -74,6 +106,7 @@ def create_user(username: str, password: str, created_by: int = 0) -> dict | Non
         return None
 
 
+@_deprecated_user_accounts_fn("get_grape_account_by_id")
 def get_user(user_id: int) -> dict | None:
     with db_lock:
         c = db.cursor()
@@ -84,6 +117,7 @@ def get_user(user_id: int) -> dict | None:
     return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
 
 
+@_deprecated_user_accounts_fn("get_grape_account_by_username")
 def get_user_by_username(username: str) -> dict | None:
     with db_lock:
         c = db.cursor()
@@ -94,6 +128,7 @@ def get_user_by_username(username: str) -> dict | None:
     return {"id": row[0], "username": row[1], "password_hash": row[2], "created_by": row[3], "created_at": row[4]}
 
 
+@_deprecated_user_accounts_fn("admin/db.py list_grape_accounts")
 def list_users() -> list[dict]:
     with db_lock:
         c = db.cursor()
@@ -101,6 +136,7 @@ def list_users() -> list[dict]:
         return [{"id": r[0], "username": r[1], "created_by": r[2], "created_at": r[3]} for r in c.fetchall()]
 
 
+@_deprecated_user_accounts_fn("grape_account_db.soft_delete_account")
 def delete_user(user_id: int) -> bool:
     try:
         with db_lock:
@@ -113,6 +149,7 @@ def delete_user(user_id: int) -> bool:
         return False
 
 
+@_deprecated_user_accounts_fn("grape_account_db.update_password")
 def update_password(user_id: int, new_password: str) -> bool:
     try:
         pw_hash = _hash_password(new_password)
@@ -126,19 +163,30 @@ def update_password(user_id: int, new_password: str) -> bool:
         return False
 
 
+@_deprecated_user_accounts_fn("grape_account_db.verify_grape_account")
 def verify_user(username: str, password: str) -> dict | None:
-    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None"""
+    """验证用户名密码，成功返回用户信息（含 token_version），失败返回 None。
+
+    被管理员禁用的用户（is_disabled=1）返回 None（Issue #281：admin 禁用后旧体系登录口立即失效）。
+    """
     user = get_user_by_username(username)
     if not user:
         return None
     if user["password_hash"] != _hash_password(password):
         return None
     token_version = get_token_version(user["id"])
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT is_disabled FROM user_accounts WHERE id=?", (user["id"],))
+        row = c.fetchone()
+    if row and row[0]:
+        return None
     return {"id": user["id"], "username": user["username"], "created_by": user["created_by"], "created_at": user["created_at"], "token_version": token_version}
 
 
 # ====== JWT token_version 管理 ======
 
+@_deprecated_user_accounts_fn("grape_account_db.get_token_version")
 def get_token_version(user_id: int) -> int:
     """获取用户的 token_version——JWT verify 时对比，不匹配则 token 失效。
     用户不存在时返回 -1（不等于任何有效 token 的 ver=0，使旧 token 失效）。"""
@@ -151,6 +199,7 @@ def get_token_version(user_id: int) -> int:
     return (row[0] if row[0] is not None else 0)
 
 
+@_deprecated_user_accounts_fn("grape_account_db.increment_token_version")
 def increment_token_version(user_id: int) -> None:
     """token_version+1——改密码/logout 时调用，使所有旧 token 失效"""
     with db_lock:
@@ -165,12 +214,12 @@ def batch_update_last_active(uids: list) -> None:
         return
     with db_lock:
         c = db.cursor()
-        # 分批，每批 1000
+        # D32-补丁：更新 grape_accounts.last_active_at（不写 user_accounts 老表）
         for i in range(0, len(uids), 1000):
             batch = uids[i:i+1000]
             placeholders = ",".join(["?"] * len(batch))
             c.execute(
-                f"UPDATE user_accounts SET last_active_at=datetime('now') WHERE id IN ({placeholders})",
+                f"UPDATE grape_accounts SET last_active_at=datetime('now') WHERE id IN ({placeholders})",
                 batch,
             )
         db.commit()
@@ -215,14 +264,24 @@ def _cleanup_expired_oauth_states():
 
 
 def save_oauth_state(state: str, provider: str, data: dict | None = None):
-    """保存 OAuth state（防 CSRF，10 分钟过期，DB 共享存储——集群多实例可用）。"""
+    """保存 OAuth state（防 CSRF，10 分钟过期，DB 共享存储——集群多实例可用）。
+
+    P2-1: 懒清理——每次保存时顺带删除过期记录（概率性，避免全表扫描开销）。
+    """
     import json as _json
     expires = time.time() + 600
     try:
         with db_lock:
             c = db.cursor()
+            # P2-1: 懒清理——概率性删除过期 state（每次保存时 1/10 概率触发）
+            import random as _rnd
+            if _rnd.random() < 0.1:
+                c.execute("DELETE FROM oauth_states WHERE expires < ?", (time.time(),))
+            # P2 加固：用 INSERT 而非 INSERT OR REPLACE——state 是 SHA-256 随机值，
+            # 碰撞概率可忽略。如果碰巧碰撞（INSERT 失败），旧 state 不会被覆盖，
+            # 调用方会收到异常并重试。INSERT OR REPLACE 会静默覆盖未消费的旧 state。
             c.execute(
-                "INSERT OR REPLACE INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
+                "INSERT INTO oauth_states (state, provider, data_json, expires) VALUES (?,?,?,?)",
                 (state, provider, _json.dumps(data or {}), expires),
             )
             db.commit()
@@ -231,27 +290,130 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
         log.warning(f"save_oauth_state failed: {e}")
 
 
-def validate_oauth_state(state: str, provider: str) -> dict | None:
-    """验证并消耗 OAuth state（查 + 删），返回 data 或 None。"""
-    import json as _json
+# P0-3: exchange_code 一次性交换码——替代 URL 传递 access_token
+def save_exchange_code(code: str, user_id: int, username: str,
+                       provider: str, token_version: int, is_new: bool) -> bool:
+    """保存一次性 exchange code（10 秒过期）。
+
+    P2-1: 懒清理——每次保存时顺带删除过期 exchange_codes。
+    """
+    import time as _t
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT provider, data_json, expires FROM oauth_states WHERE state=?", (state,))
+            c.execute("DELETE FROM exchange_codes WHERE expires < ?", (_t.time(),))
+            c.execute(
+                "INSERT OR REPLACE INTO exchange_codes "
+                "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (code, user_id, username, provider, token_version,
+                 1 if is_new else 0, _t.time(), _t.time() + 10),
+            )
+            db.commit()
+        return True
+    except Exception as e:
+        log.warning(f"save_exchange_code failed: {e}")
+        return False
+
+
+def validate_exchange_code(code: str) -> dict | None:
+    """验证并原子消费 exchange code（SELECT + DELETE + rowcount 检查）。
+
+    与 validate_oauth_state 一致：DELETE rowcount=0 说明已被其他请求消费，
+    返回 None。保证一次性消费在 MySQL 多实例下也成立。
+    """
+    import time as _t
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT user_id, username, provider, token_version, is_new, expires "
+                "FROM exchange_codes WHERE code=?", (code,)
+            )
             row = c.fetchone()
             if row:
-                c.execute("DELETE FROM oauth_states WHERE state=?", (state,))
-                db.commit()
+                # 原子消费：DELETE 带 expires 条件，确保过期的 code 不能被消费
+                c.execute(
+                    "DELETE FROM exchange_codes WHERE code=? AND expires > ?",
+                    (code, _t.time()),
+                )
+                if c.rowcount == 0:
+                    # 已被消费或已过期
+                    db.commit()
+                    return None
+            db.commit()
+        if not row:
+            return None
+        if _t.time() > row[5]:
+            return None
+        return {
+            "user_id": row[0], "username": row[1], "provider": row[2],
+            "token_version": row[3], "is_new": bool(row[4]),
+        }
+    except Exception as e:
+        log.warning(f"validate_exchange_code failed: {e}")
+        return None
+
+
+def cleanup_expired_exchange_codes() -> int:
+    """清理过期的 exchange codes（防积累）。"""
+    import time as _t
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM exchange_codes WHERE expires < ?", (_t.time(),))
+            db.commit()
+            return c.rowcount
+    except Exception:
+        return 0
+
+
+def validate_oauth_state(state: str, provider: str = "") -> dict | None:
+    """验证并原子消费 OAuth state（SELECT + DELETE + rowcount 检查）。
+
+    需求 2：原子消费，确保只有一个请求拿到 state 数据。
+    - SQLite/单实例：db_lock 保证线程安全
+    - MySQL 多实例：db_lock 跨实例无效，原子性靠 DELETE rowcount 保证
+    - 不使用 FOR UPDATE，避免方言判断
+
+    D26 修复：provider 参数改为可选——统一回调地址时不传 provider，
+    从查询结果取 provider 返回给调用方。传了 provider 则做额外校验。
+
+    返回的 dict 额外包含 "_provider" 字段（从 DB 记录恢复）。
+    """
+    import json as _json
+    import time as _time
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT provider, data_json, expires FROM oauth_states WHERE state=?",
+                (state,),
+            )
+            row = c.fetchone()
+            if row:
+                # 原子消费：DELETE 带 state + expires 条件
+                # rowcount=0 说明已被其他请求消费或已过期
+                c.execute(
+                    "DELETE FROM oauth_states WHERE state=? AND expires > ?",
+                    (state, _time.time()),
+                )
+                if c.rowcount == 0:
+                    # 已被消费或已过期，不能使用 SELECT 到的数据
+                    db.commit()
+                    log.warning(f"validate_oauth_state: state={state[:20]}... already consumed or expired")
+                    return None
+            db.commit()
         if not row:
             log.warning(f"validate_oauth_state: state={state[:20]}... NOT FOUND")
             return None
-        if row[0] != provider:
-            log.warning(f"validate_oauth_state: provider mismatch")
+        db_provider = row[0]
+        if provider and provider != db_provider:
+            log.warning(f"validate_oauth_state: provider mismatch (expected={provider}, db={db_provider})")
             return None
-        if time.time() > row[2]:
-            log.warning(f"validate_oauth_state: state expired")
-            return None
-        return _json.loads(row[1] or "{}")
+        data = _json.loads(row[1] or "{}")
+        data["_provider"] = db_provider
+        return data
     except Exception as e:
         log.warning(f"validate_oauth_state failed: {e}")
         return None
@@ -262,6 +424,7 @@ def validate_oauth_state(state: str, provider: str) -> dict | None:
 
 
 
+@_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
 def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     """通过 GitCode 用户 ID 查找本地用户"""
     with db_lock:
@@ -273,6 +436,7 @@ def get_user_by_gitcode_id(gitcode_id: str) -> dict | None:
     return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
 
 
+@_deprecated_user_accounts_fn("grape_account_db.create_external_identity")
 def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_token: str = "") -> bool:
     """绑定本地用户与 GitCode 用户，存储 access_token 到 user_credentials"""
     try:
@@ -293,6 +457,7 @@ def link_gitcode_user(user_id: int, gitcode_id: str, access_token: str, refresh_
         return False
 
 
+@_deprecated_user_accounts_fn("grape_account_db.get_external_identity")
 def get_user_by_github_id(github_id: str) -> dict | None:
     """通过 GitHub 用户 ID 查找本地用户"""
     with db_lock:
@@ -304,6 +469,7 @@ def get_user_by_github_id(github_id: str) -> dict | None:
     return {"id": row[0], "username": row[1], "created_by": row[2], "created_at": row[3]}
 
 
+@_deprecated_user_accounts_fn("grape_account_db.create_external_identity")
 def link_github_user(user_id: int, github_id: str, access_token: str, refresh_token: str = "") -> bool:
     """绑定本地用户与 GitHub 用户，存储 access_token 到 user_credentials"""
     try:
@@ -352,34 +518,31 @@ def set_credential(user_id: int, provider: str, config: dict) -> bool:
 
 
 def get_credentials(user_id: int) -> list[dict]:
-    """获取用户凭据（从 user_accounts 表读取）"""
+    """获取用户凭据（D32-补丁：从 user_credentials 表 + external_identities 读，不查 user_accounts）"""
+    result = []
+    # 1. user_credentials 表（huawei_cloud/codearts/feishu 等非 OAuth 凭据）
     with db_lock:
         c = db.cursor()
-        c.execute(f"SELECT {','.join(USER_ACCOUNT_FIELDS)} FROM user_accounts WHERE id=?", (user_id,))
-        row = c.fetchone()
-    if not row:
-        return []
-    d = dict(zip(USER_ACCOUNT_FIELDS, row))
-    result = []
-    if d.get("gitcode_api_token"):
-        result.append({"provider": "gitcode", "config": {"token": d["gitcode_api_token"]}})
-    if d.get("github_api_token"):
-        result.append({"provider": "github", "config": {"token": d["github_api_token"]}})
-    if d.get("feishu_app_id") or d.get("feishu_app_secret"):
-        cfg = {}
-        if d.get("feishu_app_id"): cfg["app_id"] = d["feishu_app_id"]
-        if d.get("feishu_app_secret"): cfg["app_secret"] = d["feishu_app_secret"]
-        result.append({"provider": "feishu", "config": cfg})
-    if d.get("huawei_cloud_ak") or d.get("huawei_cloud_sk"):
-        cfg = {}
-        if d.get("huawei_cloud_ak"): cfg["ak"] = d["huawei_cloud_ak"]
-        if d.get("huawei_cloud_sk"): cfg["sk"] = d["huawei_cloud_sk"]
-        result.append({"provider": "huawei_cloud", "config": cfg})
-    if d.get("CODEARTS_CLI_AK") or d.get("CODEARTS_CLI_SK"):
-        cfg = {}
-        if d.get("CODEARTS_CLI_AK"): cfg["ak"] = d["CODEARTS_CLI_AK"]
-        if d.get("CODEARTS_CLI_SK"): cfg["sk"] = d["CODEARTS_CLI_SK"]
-        result.append({"provider": "codearts", "config": cfg})
+        c.execute("SELECT provider, config_json FROM user_credentials WHERE user_id=?", (user_id,))
+        rows = c.fetchall()
+    for provider, config_json in rows:
+        try:
+            cfg = json.loads(config_json) if config_json else {}
+            result.append({"provider": provider, "config": cfg})
+        except Exception:
+            pass
+    # 2. external_identities（gitcode/github OAuth token）
+    # BUG-1 修复：get_user_identities 不含 access_token 列（防泄露到前端），
+    # 改用 get_user_identities_with_tokens 读取解密后的 token。
+    try:
+        from src.auth.grape_account_db import get_user_identities_with_tokens
+        for ident in get_user_identities_with_tokens(user_id):
+            provider = ident.get("provider", "")
+            token = ident.get("access_token", "")
+            if provider and token:
+                result.append({"provider": provider, "config": {"token": token}})
+    except Exception as e:
+        log.warning(f"get_credentials: read external_identities failed: {e}")
     return result
 
 
@@ -819,6 +982,11 @@ def init_db():
             log.warning(f"Cleanup user_accounts columns failed: {e}")
         db.commit()
     _cleanup_expired_oauth_states()
+    # P2-1: 启动时也清理过期的 exchange_codes
+    try:
+        cleanup_expired_exchange_codes()
+    except Exception:
+        pass
 
 
 # ====== 自定义技能 CRUD ======
@@ -1463,7 +1631,7 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
 
     - repo_key 非空 → bot token：devops_agent_session.repo_gitcode_token
       → managed_repos.bot_gitcode_token（get_bot_token_by_repo）→ 全局 bot token
-    - user_id > 0 → user token（user_accounts.gitcode_api_token）
+    - user_id > 0 → user token（通过 get_user_gitcode_token 从 external_identities 读）
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1495,7 +1663,7 @@ def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
 def get_github_token(repo_key: str = "") -> str:
     """统一获取 GitHub API Token（对应 get_gitcode_token 的 GitHub 版）。
 
-    - repo_key 非空 → bot token：managed_repos.bot_github_token → 仓库 owner 的 user_accounts.github_api_token → 全局
+    - repo_key 非空 → bot token：managed_repos.bot_github_token → 仓库 owner 的 external_identities → 全局
     - 无 repo_key → 空（用户级 token 走 get_user_github_token）
     """
     from src.repo_key import to_repo_key, parse_repo_key
@@ -1516,19 +1684,19 @@ def get_github_token(repo_key: str = "") -> str:
                 return row[0]
     except Exception as e:
         log.warning(f"get_github_token: query managed_repos failed: {e}")
-    # 2. 仓库 owner 的 user_accounts.github_api_token（OAuth 登录时自动获取）
+    # 2. 仓库 owner 的 GitHub token（D32-补丁：从 external_identities 读）
     try:
         from src.repo_key import parse_repo_key
+        from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities
         _prov, owner, _name = parse_repo_key(repo_key)
         if owner:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT github_api_token FROM user_accounts WHERE username=? AND github_api_token!='' LIMIT 1", (owner,))
-                row = c.fetchone()
-                if row and row[0]:
-                    return row[0]
+            acc = get_grape_account_by_username(owner)
+            if acc:
+                for i in get_user_identities(acc["id"]):
+                    if i.get("provider") == "github" and i.get("access_token"):
+                        return i["access_token"]
     except Exception as e:
-        log.warning(f"get_github_token: query user_accounts failed: {e}")
+        log.warning(f"get_github_token: query external_identities failed: {e}")
     # 3. 全局 github_api_token（configs/global-bot-token.json）
     try:
         import json, os
@@ -1547,7 +1715,7 @@ def get_agent_bot_token(repo_key: str) -> str:
 
 
 def get_user_gitcode_token(user_id: int) -> str:
-    """获取用户的 GitCode API token（user_accounts.gitcode_api_token）"""
+    """获取用户的 GitCode API token（D32-补丁：通过 get_credentials 从 external_identities 读）"""
     if not user_id or user_id <= 0:
         return ""
     try:
@@ -1561,7 +1729,7 @@ def get_user_gitcode_token(user_id: int) -> str:
 
 
 def get_user_github_token(user_id: int) -> str:
-    """获取用户的 GitHub API token（user_accounts.github_api_token）"""
+    """获取用户的 GitHub API token（D32-补丁：通过 get_credentials 从 external_identities 读）"""
     if not user_id or user_id <= 0:
         return ""
     try:
@@ -1575,83 +1743,21 @@ def get_user_github_token(user_id: int) -> str:
 
 
 def _get_username_by_id(user_id: int) -> str:
-    """根据 user_id 查 username。"""
-    with db_lock:
-        c = db.cursor()
-        c.execute("SELECT username FROM user_accounts WHERE id=?", (user_id,))
-        row = c.fetchone()
-    return row[0] if row else ""
+    """根据 user_id 查 username（D32-补丁：查 grape_accounts，不查 user_accounts）。"""
+    try:
+        from src.auth.grape_account_db import get_grape_account_by_id
+        acc = get_grape_account_by_id(user_id)
+        return acc["username"] if acc else ""
+    except Exception:
+        return ""
 
 
 def refresh_gitcode_oauth_token(user_id: int) -> str | None:
     """用 refresh_token 刷新 GitCode OAuth access_token（Issue #52）。
 
-    读取 user_credentials (provider=gitcode_oauth) 中存储的 refresh_token，
-    调用 GitCode OAuth token endpoint 刷新 access_token。
-
-    成功时更新两处存储：
-    - user_credentials.config_json.access_token（OAuth 凭据原始存储）
-    - user_accounts.gitcode_api_token（API 调用实际读取的字段）
-
-    返回新的 access_token，失败返回 None。
+    D32-补丁：委托给通用 refresh_oauth_token(user_id, "gitcode")，消除代码重复。
     """
-    import urllib.request, urllib.parse, json as _json
-
-    # 1. 读取存储的 refresh_token
-    cred = get_credential(user_id, "gitcode_oauth")
-    if not cred or not cred.get("refresh_token"):
-        log.warning(f"refresh_gitcode_oauth: no refresh_token for user={user_id}")
-        return None
-
-    rt = cred["refresh_token"]
-    client_id = get_meta_value("oauth_gitcode_client_id")
-    client_secret = get_meta_value("oauth_gitcode_client_secret")
-    if not client_id or not client_secret:
-        log.warning("refresh_gitcode_oauth: OAuth client_id/secret not configured")
-        return None
-
-    # 2. 调 GitCode OAuth refresh endpoint
-    try:
-        req = urllib.request.Request(
-            "https://gitcode.com/oauth/token",
-            data=urllib.parse.urlencode({
-                "grant_type": "refresh_token",
-                "refresh_token": rt,
-                "client_id": client_id,
-                "client_secret": client_secret,
-            }).encode(),
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-            method="POST"
-        )
-        resp = urllib.request.urlopen(req, timeout=10)
-        token_data = _json.loads(resp.read())
-    except Exception as e:
-        log.warning(f"refresh_gitcode_oauth: refresh failed for user={user_id}: {e}")
-        return None
-
-    new_access = token_data.get("access_token", "")
-    new_refresh = token_data.get("refresh_token", "")
-    if not new_access:
-        log.warning(f"refresh_gitcode_oauth: no access_token in response for user={user_id}")
-        return None
-
-    # 3. 更新存储（access_token + refresh_token 如果返回了新的）
-    new_cred = dict(cred)
-    new_cred["access_token"] = new_access
-    if new_refresh:
-        new_cred["refresh_token"] = new_refresh
-    new_cred["fetched_at"] = int(time.time())
-    set_credential(user_id, "gitcode_oauth", new_cred)
-
-    # 同步更新 user_accounts.gitcode_api_token（API 调用实际读取的字段）
-    username = _get_username_by_id(user_id)
-    if username:
-        acc = get_user_account(username) or {}
-        acc["gitcode_api_token"] = new_access
-        save_user_account(username, acc)
-
-    log.info(f"refresh_gitcode_oauth: success for user={user_id}")
-    return new_access
+    return refresh_oauth_token(user_id, "gitcode")
 
 
 def get_webhook_token_by_repo(full_name: str) -> str:
@@ -1738,6 +1844,7 @@ def get_all_user_accounts() -> list[dict]:
     return result
 
 
+@_deprecated_user_accounts_fn("grape_account_db.get_grape_account_by_username")
 def get_user_account(username: str) -> dict | None:
     """获取单个用户账户"""
     with db_lock:
@@ -1770,6 +1877,7 @@ def save_user_account(username: str, data: dict):
         db.commit()
 
 
+@_deprecated_user_accounts_fn("grape_account_db.soft_delete_account")
 def delete_user_account(username: str) -> bool:
     with db_lock:
         c = db.cursor()
@@ -1875,42 +1983,307 @@ def get_webhook_url() -> str:
         return ""
 
 
-def migrate_accounts_from_json():
-    """首次运行加载配置：从 global-bot-token.json 将 GitCode OAuth 配置写入 meta 表（仅首次/幂等）。
+def migrate_oauth_providers():
+    """从配置文件同步 OAuth 配置到 meta 表——统一入口。
 
-    accounts.json 已废弃删除；OAuth 凭据收敛到 configs/global-bot-token.json。
-    user_accounts 账户通过 OAuth 登录动态创建，无需预置。
+    优先级：oauth-providers.json > global-bot-token.json（向前兼容）。
+
+    - 协议参数（oauth_providers_config）：覆盖模式（配置文件是真相源）
+    - 凭据（client_id/secret）：幂等模式（仅首次写入，管理员可通过 API 修改不被覆盖）
     """
-    path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "configs", "global-bot-token.json")
-    if not os.path.exists(path):
+    config_dir = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))), "configs")
+
+    # 1. 尝试读取 oauth-providers.json
+    new_path = os.path.join(config_dir, "oauth-providers.json")
+    if os.path.exists(new_path):
+        try:
+            with open(new_path, encoding="utf-8") as f:
+                data = json.load(f) or {}
+        except Exception as e:
+            log.warning(f"Failed to load oauth-providers.json: {e}")
+            data = {}
+        if data:
+            try:
+                _sync_providers_from_config(data)
+            except Exception as e:
+                log.warning(f"migrate_oauth_providers: sync from oauth-providers.json failed: {e}")
+            return
+
+    # 2. 向前兼容：读取 global-bot-token.json 中的旧 OAuth 字段
+    old_path = os.path.join(config_dir, "global-bot-token.json")
+    if not os.path.exists(old_path):
         return
     try:
-        with open(path, encoding="utf-8") as f:
+        with open(old_path, encoding="utf-8") as f:
             data = json.load(f) or {}
-        _oauth_keys = [
-            ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
-            ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
-            ("gitcode_oauth_redirect_uri", "oauth_gitcode_redirect_uri"),
-            ("github_oauth_client_id", "oauth_github_client_id"),
-            ("github_oauth_client_secret", "oauth_github_client_secret"),
-            ("github_oauth_redirect_uri", "oauth_github_redirect_uri"),
-        ]
-        loaded = []
+    except Exception as e:
+        log.warning(f"Failed to load global-bot-token.json: {e}")
+        return
+    _oauth_keys = [
+        ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
+        ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
+        ("github_oauth_client_id", "oauth_github_client_id"),
+        ("github_oauth_client_secret", "oauth_github_client_secret"),
+    ]
+    loaded = []
+    try:
         with db_lock:
+            c = db.cursor()
             for src_key, meta_key in _oauth_keys:
                 val = data.get(src_key, "") or ""
                 if not val:
                     continue
-                c = db.cursor()
                 c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
                 if c.fetchone()[0] == 0:
-                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)", (meta_key, val))
+                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                              (meta_key, val))
                     loaded.append(meta_key)
             db.commit()
         if loaded:
-            log.info(f"Loaded OAuth config from global-bot-token.json into meta: {loaded}")
+            log.info(f"Loaded OAuth credentials from global-bot-token.json (fallback): {loaded}")
     except Exception as e:
-        log.warning(f"Migration from global-bot-token.json failed: {e}")
+        log.warning(f"migrate_oauth_providers: fallback sync failed: {e}")
+    # 协议参数不写——由 _DEFAULT_PROVIDERS 兜底
+
+
+def _sync_providers_from_config(data: dict):
+    """从 oauth-providers.json 格式的配置同步到 meta 表。
+
+    新文件格式：嵌套的 { provider: { name, auth_url, ..., client_id, client_secret } }
+    - 协议参数（不含 client_id/secret）：覆盖写入 oauth_providers_config
+    - 凭据（client_id/secret）：幂等写入 oauth_{provider}_client_id/secret
+    """
+    providers_cfg = {}
+    loaded_creds = []
+    with db_lock:
+        c = db.cursor()
+        for provider, cfg in data.items():
+            # 剥离 client_id/secret，只存协议参数
+            prov_cfg = {k: v for k, v in cfg.items()
+                        if k not in ("client_id", "client_secret")}
+            providers_cfg[provider] = prov_cfg
+            # 幂等同步凭据
+            for cred_field in ("client_id", "client_secret"):
+                val = cfg.get(cred_field, "") or ""
+                if not val:
+                    continue
+                meta_key = f"oauth_{provider}_{cred_field}"
+                c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                if c.fetchone()[0] == 0:
+                    c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                              (meta_key, val))
+                    loaded_creds.append(meta_key)
+        # 覆盖写入协议参数
+        if providers_cfg:
+            import json as _json
+            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                      ("oauth_providers_config", _json.dumps(providers_cfg, ensure_ascii=False)))
+        db.commit()
+    log.info(f"Synced OAuth providers from oauth-providers.json: "
+             f"providers={list(providers_cfg.keys())}, credentials={loaded_creds}")
+
+
+def migrate_accounts_from_json():
+    """首次运行加载配置：迁移旧数据到 meta 表。
+
+    OAuth 配置迁移已移交给 migrate_oauth_providers()（统一入口）。
+    本函数仅保留 default 账户清理（旧版 user_accounts default 账户的 OAuth 配置迁移到 meta 表）。
+    """
+    # OAuth 配置由 migrate_oauth_providers 统一处理
+    migrate_oauth_providers()
+
+    # default 账户迁移（旧版兼容——OAuth 配置曾存于 user_accounts default 账户）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT * FROM user_accounts WHERE username='default'")
+            row = c.fetchone()
+            if row:
+                cols = [d[0] for d in c.description]
+                acc = dict(zip(cols, row))
+                _oauth_keys = [
+                    ("gitcode_oauth_client_id", "oauth_gitcode_client_id"),
+                    ("gitcode_oauth_client_secret", "oauth_gitcode_client_secret"),
+                    ("github_oauth_client_id", "oauth_github_client_id"),
+                    ("github_oauth_client_secret", "oauth_github_client_secret"),
+                    # 不迁移 redirect_uri——D27 已废弃
+                ]
+                migrated = False
+                for src_key, meta_key in _oauth_keys:
+                    val = acc.get(src_key, "") or ""
+                    if val:
+                        c.execute("SELECT COUNT(*) FROM meta WHERE key=?", (meta_key,))
+                        if c.fetchone()[0] == 0:
+                            c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?,?)",
+                                      (meta_key, val))
+                            migrated = True
+                c.execute("DELETE FROM user_accounts WHERE username='default'")
+                db.commit()
+                if migrated:
+                    log.info("Migrated OAuth config from default account to meta table")
+                else:
+                    log.info("Deleted default account (no config to migrate)")
+    except Exception as e:
+        log.warning(f"Migrate/delete default account failed: {e}")
+
+
+def link_user_provider(user_id: int, provider: str, external_id: str,
+                        access_token: str, refresh_token: str = "") -> bool:
+    """通用 OAuth 绑定——统一写入 user_credentials。
+
+    D32-补丁：不再写 user_accounts 老表专属列（gitcode_id/github_id）。
+    此函数已无外部调用方（_sync_legacy_binding 已删除），保留仅作历史兼容。
+    """
+    provider_key = f"{provider}_oauth"
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 统一写入 user_credentials
+            c.execute("INSERT OR REPLACE INTO user_credentials (user_id, provider, config_json, updated_at) VALUES (?,?,?,datetime('now'))",
+                      (user_id, provider_key, json.dumps({
+                          f"{provider}_id": external_id,
+                          "access_token": access_token,
+                          "refresh_token": refresh_token,
+                          "fetched_at": int(time.time())
+                      }, ensure_ascii=False)))
+            db.commit()
+            return True
+    except Exception as e:
+        log.warning(f"Link {provider} user failed: {e}")
+        return False
+
+
+def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
+    """从 external_identities 读 refresh_token（权威存储，解密）。
+
+    需求 4：fallback 判定链的第一步。
+    - 无记录 → 返回空
+    - refresh_token 字段为空 → 返回空
+    - 解密失败 → 返回空（safe 模式，不抛异常）
+    - 解密成功 → 返回明文
+    """
+    try:
+        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        from src.auth.credential_crypto import decrypt
+        with _sm_dl:
+            c = _sm_db.cursor()
+            c.execute(
+                "SELECT refresh_token FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? AND status=1",
+                (user_id, provider),
+            )
+            row = c.fetchone()
+        if not row or not row[0]:
+            return ""
+        try:
+            return decrypt(row[0])
+        except Exception as e:
+            log.warning(f"refresh_oauth: decrypt refresh_token failed for "
+                       f"user={user_id}, provider={provider}: {e}")
+            return ""
+    except Exception as e:
+        log.warning(f"_read_refresh_token_from_identity failed: {e}")
+        return ""
+
+
+def _read_refresh_token_from_credentials(user_id: int, provider: str) -> str:
+    """从 user_credentials 读 refresh_token（迁移期 fallback）。
+
+    使用同一密钥解密——如果 external_identities 解密失败，
+    user_credentials 大概率也解密失败。
+    """
+    provider_key = f"{provider}_oauth"
+    cred = get_credential(user_id, provider_key)
+    if not cred or not cred.get("refresh_token"):
+        return ""
+    return cred["refresh_token"]
+
+
+def refresh_oauth_token(user_id: int, provider: str) -> str | None:
+    """通用 OAuth token 刷新——用 provider 配置里的 token_url，消除硬编码 URL。
+
+    需求 4：refresh_token 权威存储改为 external_identities（加密），
+    fallback 读 user_credentials（迁移期兼容）。
+    需求 5：删除 provider 硬编码，统一更新 external_identities。
+
+    成功时更新：
+    - external_identities.access_token + refresh_token（权威存储）
+    - user_credentials.config_json（迁移期同步保留）
+
+    返回新的 access_token，失败返回 None。
+    """
+    import urllib.request, urllib.parse, json as _json
+
+    # 1. 从 external_identities 读 refresh_token（权威存储）
+    rt = _read_refresh_token_from_identity(user_id, provider)
+    if not rt:
+        # fallback：从 user_credentials 读（迁移期兼容）
+        rt = _read_refresh_token_from_credentials(user_id, provider)
+    if not rt:
+        log.warning(f"refresh_oauth: no refresh_token for user={user_id}, provider={provider}")
+        return None
+
+    client_id = get_meta_value(f"oauth_{provider}_client_id")
+    client_secret = get_meta_value(f"oauth_{provider}_client_secret")
+    if not client_id or not client_secret:
+        log.warning(f"refresh_oauth: OAuth client_id/secret not configured for {provider}")
+        return None
+
+    # 2. 获取 token_url（从 provider 配置）
+    from src.auth.providers import get_provider
+    cfg = get_provider(provider)
+    if not cfg:
+        log.warning(f"refresh_oauth: provider {provider} not configured")
+        return None
+    token_url = cfg["token_url"]
+
+    # 3. 调 OAuth refresh endpoint
+    try:
+        req = urllib.request.Request(
+            token_url,
+            data=urllib.parse.urlencode({
+                "grant_type": "refresh_token",
+                "refresh_token": rt,
+                "client_id": client_id,
+                "client_secret": client_secret,
+            }).encode(),
+            headers={"Content-Type": "application/x-www-form-urlencoded"},
+            method="POST"
+        )
+        resp = urllib.request.urlopen(req, timeout=10)
+        token_data = _json.loads(resp.read())
+    except Exception as e:
+        log.warning(f"refresh_oauth: refresh failed for user={user_id}, provider={provider}: {e}")
+        return None
+
+    new_access = token_data.get("access_token", "")
+    new_refresh = token_data.get("refresh_token", "")
+    if not new_access:
+        log.warning(f"refresh_oauth: no access_token in response for user={user_id}, provider={provider}")
+        return None
+
+    # 4. 更新 external_identities（权威存储）——不限制 provider
+    from src.auth.grape_account_db import update_external_identity_tokens
+    update_external_identity_tokens(
+        user_id, provider,
+        access_token=new_access,
+        refresh_token=new_refresh,
+    )
+
+    # 5. 同步更新 user_credentials（迁移期保留，上层 deps.py 读 fetched_at 判断过期）
+    provider_key = f"{provider}_oauth"
+    cred = get_credential(user_id, provider_key)
+    if cred:
+        new_cred = dict(cred)
+        new_cred["access_token"] = new_access
+        if new_refresh:
+            new_cred["refresh_token"] = new_refresh
+        new_cred["fetched_at"] = int(time.time())
+        set_credential(user_id, provider_key, new_cred)
+
+    log.info(f"refresh_oauth: success for user={user_id}, provider={provider}")
+    return new_access
 
 
 # 启动时初始化 + 迁移
@@ -2133,17 +2506,19 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, org_id FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, org_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return _rows_to_runtimes(c.fetchall())
 
 
 
 def _rows_to_runtimes(rows) -> list[dict]:
     """将 DB 行列表转为 runtime dict 列表（供 get_agent_runtimes / paged 复用）。"""
+    # AIShell 显示名（2026-10-13）：出口统一转换 name/display_name（内部键不变）
+    from src.runtime.instances import to_display as _td
     return [
-        {"id": r[0], "name": r[1], "display_name": r[2], "installed": bool(r[3]),
+        {"id": r[0], "name": _td(r[1]), "display_name": _td(r[2] or r[1]), "installed": bool(r[3]),
          "cli_path": r[4], "version": r[5], "healthy": bool(r[6]),
          "pip_package": r[7], "updated_at": r[8], "scope": r[9], "owner_id": r[10],
          "credential_id": r[11] or 0, "status": r[12] or "", "last_seen_at": r[13],
@@ -2154,7 +2529,8 @@ def _rows_to_runtimes(rows) -> list[dict]:
          "max_concurrent": r[18] or 20,
          "scene_tags": json.loads(r[19]) if r[19] else ["default"],
          "alias": r[20] or "",
-         "org_id": r[21] or 0}
+         "worker_version": r[21] or "",
+         "org_id": r[22] or 0}
         for r in rows
     ]
 

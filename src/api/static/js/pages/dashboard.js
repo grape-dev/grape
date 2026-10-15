@@ -834,120 +834,6 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     container.appendChild(row);
   };
 
-  // Issue #242: 关联仓库配置
-  window._linkedRepoOptions = [];
-  window._linkedRepoBranchCache = {};  // repo_key -> branches[]
-  window._addLinkedRepoInline = function(repoKey, branch) {
-    var container = document.getElementById('advLinkedReposInline');
-    if (!container) return;
-    var row = document.createElement('div');
-    row.className = 'adv-kv';
-    row.style.alignItems = 'center';
-    var selId = 'lrRepo_' + Math.random().toString(36).slice(2,8);
-    var brId = 'lrBranch_' + Math.random().toString(36).slice(2,8);
-    // 用 DOM API 构造 select/option，避免 HTML 字符串拼接导致 XSS（Issue #242 审查 Optional 加固）
-    var sel = document.createElement('select');
-    sel.className = 'adv-kv-key';
-    sel.id = selId;
-    sel.style.cssText = 'flex:0 0 200px;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
-    var defOpt = document.createElement('option');
-    defOpt.value = '';
-    defOpt.textContent = '选择仓库';
-    sel.appendChild(defOpt);
-    (window._linkedRepoOptions || []).forEach(function(r) {
-      var rk = r.repo_key || r.full_name || '';
-      var fn = r.full_name || rk;
-      var opt = document.createElement('option');
-      opt.value = rk;
-      opt.textContent = fn;
-      if (rk === repoKey) opt.selected = true;
-      sel.appendChild(opt);
-    });
-    // 分支下拉框
-    var brSel = document.createElement('select');
-    brSel.className = 'adv-kv-val';
-    brSel.id = brId;
-    brSel.style.cssText = 'flex:1;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
-    var brDefOpt = document.createElement('option');
-    brDefOpt.value = '';
-    brDefOpt.textContent = '分支（默认 main）';
-    brSel.appendChild(brDefOpt);
-
-    // 加载分支列表
-    function _loadBranches(rk, selectedBranch) {
-      brSel.innerHTML = '';
-      var def = document.createElement('option');
-      def.value = '';
-      def.textContent = '分支（默认 main）';
-      brSel.appendChild(def);
-      if (!rk) return;
-      // 解析 owner/repo
-      var parts = stripRepoPrefix(rk).split('/');
-      if (parts.length < 2) { brDefOpt.textContent = '分支（默认 main）'; return; }
-      var owner = parts[0], repo = parts[1];
-      // 优先用缓存
-      if (window._linkedRepoBranchCache[rk]) {
-        _fillBranchOptions(window._linkedRepoBranchCache[rk], selectedBranch);
-        return;
-      }
-      // 临时 loading 状态
-      var loadOpt = document.createElement('option');
-      loadOpt.value = '';
-      loadOpt.textContent = '加载中...';
-      brSel.appendChild(loadOpt);
-      API.get('/scenes/branches/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)).then(function(b) {
-        var branches = (b && b.branches) || [];
-        window._linkedRepoBranchCache[rk] = branches;
-        brSel.removeChild(loadOpt);
-        _fillBranchOptions(branches, selectedBranch);
-      }).catch(function() {
-        brSel.removeChild(loadOpt);
-        // 加载失败回退为手动输入提示
-        var failOpt = document.createElement('option');
-        failOpt.value = '';
-        failOpt.textContent = '加载失败，默认 main';
-        brSel.appendChild(failOpt);
-      });
-    }
-    function _fillBranchOptions(branches, selectedBranch) {
-      branches.forEach(function(br) {
-        var opt = document.createElement('option');
-        opt.value = br.name;
-        opt.textContent = br.name + (br.protected ? ' 🔒' : '');
-        if (selectedBranch && br.name === selectedBranch) opt.selected = true;
-        brSel.appendChild(opt);
-      });
-      // 如果指定分支不在列表中，追加一个自定义选项
-      if (selectedBranch && !branches.some(function(br) { return br.name === selectedBranch; })) {
-        var opt = document.createElement('option');
-        opt.value = selectedBranch;
-        opt.textContent = selectedBranch + ' (自定义)';
-        opt.selected = true;
-        brSel.appendChild(opt);
-      }
-    }
-
-    // 仓库选择变更时重新加载分支
-    sel.addEventListener('change', function() {
-      var rk = this.value;
-      _loadBranches(rk, '');
-    });
-
-    // 初始加载分支
-    if (repoKey) {
-      _loadBranches(repoKey, branch);
-    }
-
-    var delBtn = document.createElement('button');
-    delBtn.className = 'adv-del';
-    delBtn.textContent = '×';
-    delBtn.onclick = function() { this.parentElement.remove(); };
-    row.appendChild(sel);
-    row.appendChild(brSel);
-    row.appendChild(delBtn);
-    container.appendChild(row);
-  };
-
   window._createNewBranchInline = function(owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
     var refs = (document.getElementById('newBranchRefInline') || {}).value || 'main';
@@ -1709,6 +1595,14 @@ function _enterCreateStandardMode(data, owner, name) {
     .ap-nd-desc{font-size:11px;color:#86868b;line-height:1.5;margin-bottom:10px;font-weight:400}
     .det-card-wrap{background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;padding:24px;margin-bottom:16px;box-shadow:0 1px 4px rgba(0,0,0,.05)}
     .scn-applied-badge{font-size:11px;font-weight:500;padding:5px 14px;border-radius:999px;background:rgba(52,199,89,.1);color:#34c759;display:inline-flex;align-items:center;gap:3px;border:1px solid rgba(52,199,89,.2)}
+    /* 高级选项行（与编辑详情页 _renderLocalSceneDetailPage 一致：自定义配置 + 关联仓库行） */
+    .adv-kv{display:flex;gap:8px;align-items:center}
+    .adv-kv input{padding:8px 12px;border:none;border-radius:12px;font-size:12px;outline:none;background:#f5f5f7;transition:background .15s}
+    .adv-kv input:focus{background:#ebebed}
+    .adv-kv-key{flex:0 0 200px}
+    .adv-kv-val{flex:1}
+    .adv-del{width:28px;height:28px;border-radius:999px;border:none;background:rgba(255,59,48,.08);color:#ff3b30;cursor:pointer;font-size:14px;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+    .adv-del:hover{background:rgba(255,59,48,.15)}
     select{appearance:none;-webkit-appearance:none;-moz-appearance:none;background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' fill='none'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%2386868b' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 10px center;padding-right:28px!important;border-radius:8px;cursor:pointer}
     select option{padding:8px 12px;background:#fff;color:#1d1d1f;font-size:12px}
     select option:checked{background:#0071e3;color:#fff}
@@ -1781,9 +1675,20 @@ function _enterCreateStandardMode(data, owner, name) {
       <div id="advCustomFieldsInline" style="display:flex;flex-direction:column;gap:8px"></div>
       <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addCustomFieldInline()">+ ${I18N.t('dashboard.add_config')||'添加配置项'}</button>
     </div>
+    <div style="padding:12px 0 4px;border-top:1px solid rgba(0,0,0,.04);margin-top:12px">
+      <div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">关联仓库</div>
+      <div style="font-size:11px;color:#a1a1a6;margin-bottom:8px;line-height:1.5">配置关联仓库后，一次需求开发可同时操作多个仓库，开发完成后向每个有改动的仓库分别提交 PR</div>
+      <div id="advLinkedReposInline" style="display:flex;flex-direction:column;gap:8px"></div>
+      <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addLinkedRepoInline()">+ 添加关联仓库</button>
+    </div>
   </div>`;
 
   el.innerHTML = html;
+
+  // Issue #307: 加载托管仓库列表供关联仓库选择
+  API.get('/repos/managed').then(function(d) {
+    window._linkedRepoOptions = (d && d.repos) || [];
+  }).catch(function() { window._linkedRepoOptions = []; });
 
   // PR 订阅开关（创建页，只切 UI，保存时一起提交）
   let _createPrSubEnabled = false;
@@ -1910,9 +1815,18 @@ function _enterCreateStandardMode(data, owner, name) {
       var _collectedFields = _cfCollectFields('#advCustomFieldsInline');
       if (_collectedFields.error) { app.showToast && app.showToast(_collectedFields.error); return; }
       var fields = _collectedFields.fields;
+      // Issue #307: 收集关联仓库
+      var linkedRepos = [];
+      document.querySelectorAll('#advLinkedReposInline .adv-kv').forEach(function(row) {
+        var sel = row.querySelector('select.adv-kv-key');
+        var brSel = row.querySelector('select.adv-kv-val');
+        var rk = sel ? sel.value : '';
+        var bn = brSel ? brSel.value.trim() : '';
+        if (rk) linkedRepos.push({ repo_key: rk, branch: bn || 'main' });
+      });
       // 有高级选项就一并保存，然后刷新 dashboard 跳项目场景
-      var advPromise = (workBranch || fields.length) ?
-        API.put('/scenes/' + encodeURIComponent(r.scene_id) + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name), { work_branch: workBranch, custom_fields: fields }) :
+      var advPromise = (workBranch || fields.length || linkedRepos.length) ?
+        API.put('/scenes/' + encodeURIComponent(r.scene_id) + '/advanced-options?repo=' + encodeURIComponent(owner + '/' + name), { work_branch: workBranch, custom_fields: fields, linked_repos: linkedRepos }) :
         Promise.resolve();
       advPromise.then(function() {
         app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
@@ -1935,10 +1849,126 @@ function _enterCreateStandardMode(data, owner, name) {
 };
 
 
+// Issue #242/#307: 关联仓库配置（顶层函数，确保添加场景页未先访问详情页时可用）
+window._linkedRepoOptions = [];
+window._linkedRepoBranchCache = {};  // repo_key -> branches[]
+window._addLinkedRepoInline = function(repoKey, branch) {
+  var container = document.getElementById('advLinkedReposInline');
+  if (!container) return;
+  var row = document.createElement('div');
+  row.className = 'adv-kv';
+  row.style.alignItems = 'center';
+  var selId = 'lrRepo_' + Math.random().toString(36).slice(2,8);
+  var brId = 'lrBranch_' + Math.random().toString(36).slice(2,8);
+  // 用 DOM API 构造 select/option，避免 HTML 字符串拼接导致 XSS（Issue #242 审查 Optional 加固）
+  var sel = document.createElement('select');
+  sel.className = 'adv-kv-key';
+  sel.id = selId;
+  sel.style.cssText = 'flex:0 0 200px;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
+  var defOpt = document.createElement('option');
+  defOpt.value = '';
+  defOpt.textContent = '选择仓库';
+  sel.appendChild(defOpt);
+  (window._linkedRepoOptions || []).forEach(function(r) {
+    var rk = r.repo_key || r.full_name || '';
+    var fn = r.full_name || rk;
+    var opt = document.createElement('option');
+    opt.value = rk;
+    opt.textContent = fn;
+    if (rk === repoKey) opt.selected = true;
+    sel.appendChild(opt);
+  });
+  // 分支下拉框
+  var brSel = document.createElement('select');
+  brSel.className = 'adv-kv-val';
+  brSel.id = brId;
+  brSel.style.cssText = 'flex:1;padding:8px 12px;border:none;border-radius:12px;font-size:12px;background:#f5f5f7;color:#1d1d1f;outline:none;cursor:pointer';
+  var brDefOpt = document.createElement('option');
+  brDefOpt.value = '';
+  brDefOpt.textContent = '分支（默认 main）';
+  brSel.appendChild(brDefOpt);
+
+  // 加载分支列表
+  function _loadBranches(rk, selectedBranch) {
+    brSel.innerHTML = '';
+    var def = document.createElement('option');
+    def.value = '';
+    def.textContent = '分支（默认 main）';
+    brSel.appendChild(def);
+    if (!rk) return;
+    // 解析 owner/repo
+    var parts = stripRepoPrefix(rk).split('/');
+    if (parts.length < 2) { brDefOpt.textContent = '分支（默认 main）'; return; }
+    var owner = parts[0], repo = parts[1];
+    // 优先用缓存
+    if (window._linkedRepoBranchCache[rk]) {
+      _fillBranchOptions(window._linkedRepoBranchCache[rk], selectedBranch);
+      return;
+    }
+    // 临时 loading 状态
+    var loadOpt = document.createElement('option');
+    loadOpt.value = '';
+    loadOpt.textContent = '加载中...';
+    brSel.appendChild(loadOpt);
+    API.get('/scenes/branches/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)).then(function(b) {
+      var branches = (b && b.branches) || [];
+      window._linkedRepoBranchCache[rk] = branches;
+      brSel.removeChild(loadOpt);
+      _fillBranchOptions(branches, selectedBranch);
+    }).catch(function() {
+      brSel.removeChild(loadOpt);
+      // 加载失败回退为手动输入提示
+      var failOpt = document.createElement('option');
+      failOpt.value = '';
+      failOpt.textContent = '加载失败，默认 main';
+      brSel.appendChild(failOpt);
+    });
+  }
+  function _fillBranchOptions(branches, selectedBranch) {
+    branches.forEach(function(br) {
+      var opt = document.createElement('option');
+      opt.value = br.name;
+      opt.textContent = br.name + (br.protected ? ' 🔒' : '');
+      if (selectedBranch && br.name === selectedBranch) opt.selected = true;
+      brSel.appendChild(opt);
+    });
+    // 如果指定分支不在列表中，追加一个自定义选项
+    if (selectedBranch && !branches.some(function(br) { return br.name === selectedBranch; })) {
+      var opt = document.createElement('option');
+      opt.value = selectedBranch;
+      opt.textContent = selectedBranch + ' (自定义)';
+      opt.selected = true;
+      brSel.appendChild(opt);
+    }
+  }
+
+  // 仓库选择变更时重新加载分支
+  sel.addEventListener('change', function() {
+    var rk = this.value;
+    _loadBranches(rk, '');
+  });
+
+  // 初始加载分支
+  if (repoKey) {
+    _loadBranches(repoKey, branch);
+  }
+
+  var delBtn = document.createElement('button');
+  delBtn.className = 'adv-del';
+  delBtn.textContent = '×';
+  delBtn.onclick = function() { this.parentElement.remove(); };
+  row.appendChild(sel);
+  row.appendChild(brSel);
+  row.appendChild(delBtn);
+  container.appendChild(row);
+};
+
 // 加载高级选项到详情页内联区域
 function _loadAdvancedOptionsInline(sceneId, owner, name) {
-  // Issue #242: 加载托管仓库列表供关联仓库选择
-  API.get('/repos/managed').then(function(d) {
+  // Issue #242/#307: 每次加载清空分支缓存，避免上次访问残留
+  window._linkedRepoBranchCache = {};
+  // Issue #242: 加载托管仓库列表供关联仓库选择（先加载，再加载高级选项，避免竞态导致下拉框为空）
+  var _reposPromise = API.get('/repos/managed').then(function(d) {
     window._linkedRepoOptions = (d && d.repos) || [];
   }).catch(function() { window._linkedRepoOptions = []; });
 
@@ -1965,12 +1995,14 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
       container.innerHTML = '';
       fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
     }
-    // Issue #242: 加载关联仓库
+    // Issue #242: 加载关联仓库（等托管仓库列表加载完成后再渲染，确保下拉框有选项）
     var linkedRepos = d.linked_repos || [];
     var lrContainer = document.getElementById('advLinkedReposInline');
     if (lrContainer) {
       lrContainer.innerHTML = '';
-      linkedRepos.forEach(function(lr) { window._addLinkedRepoInline(lr.repo_key, lr.branch); });
+      _reposPromise.then(function() {
+        linkedRepos.forEach(function(lr) { window._addLinkedRepoInline(lr.repo_key, lr.branch); });
+      });
     }
   }).catch(function() {});
 }

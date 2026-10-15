@@ -161,3 +161,62 @@ class TestNotifyObservability:
         assert counts.get("sent_ok") == 1
         assert counts.get("skipped_no_ctx", 0) == 0
         api.send_card_to_user.assert_awaited_once()
+
+
+class TestHeartbeat:
+    """heartbeat() 幂等与实例存活判定（cluster-seq-11130 根因回归：UPSERT 需跨后端可用）。"""
+
+    def _heartbeat(self):
+        bl.BotLeaseStore(instance_id="hb-inst").heartbeat(hostname="h", ip="")
+
+    def test_heartbeat_writes_instance(self):
+        _clean()
+        try:
+            self._heartbeat()
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT instance_id, hostname, im_enabled, last_heartbeat "
+                    "FROM grape_im_instance WHERE instance_id='hb-inst'").fetchall()
+            assert len(rows) == 1
+            assert rows[0][0] == "hb-inst" and rows[0][1] == "h"
+            assert rows[0][2] == 1
+            assert rows[0][3]  # last_heartbeat 非空
+        finally:
+            _clean()
+
+    def test_heartbeat_idempotent_no_duplicate_row(self):
+        _clean()
+        try:
+            self._heartbeat()
+            self._heartbeat()  # 重复心跳不产生第二行
+            with db_lock:
+                rows = db.cursor().execute(
+                    "SELECT instance_id FROM grape_im_instance WHERE instance_id='hb-inst'").fetchall()
+            assert len(rows) == 1
+        finally:
+            _clean()
+
+    def test_list_active_instances_returns_heartbeated(self):
+        _clean()
+        try:
+            self._heartbeat()
+            actives = bl.BotLeaseStore(instance_id="x").list_active_instances(timeout=45)
+            assert "hb-inst" in actives
+        finally:
+            _clean()
+
+    def test_owner_alive_true_after_heartbeat(self):
+        _clean()
+        try:
+            self._heartbeat()
+            assert bl.BotLeaseStore(instance_id="x").is_owner_alive("hb-inst", timeout=45) is True
+        finally:
+            _clean()
+
+    def test_owner_alive_false_when_no_heartbeat(self):
+        _clean()
+        try:
+            store = bl.BotLeaseStore(instance_id="x")
+            assert store.is_owner_alive("never-heartbeat", timeout=45) is False
+        finally:
+            _clean()

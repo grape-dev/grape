@@ -130,6 +130,10 @@ const API = (() => {
   // 注意：JWT exp 按客户端本地时间算，时钟偏差可能导致 remaining 不准——401 被动刷新兜底。
   async function ensureTokenValid() {
     const token = localStorage.getItem('token');
+    // 无 token（未登录/已退出）→ 不尝试 refresh，直接返回 null
+    // refresh 依赖 refresh_token cookie，logout 已清；尝试 refresh 会触发 location.href='/login' 导航，
+    // 干扰后续 pwdLogin 流程（doRefresh 的页面跳转和 pwdLogin 的 showApp 竞态）
+    if (!token) return null;
     const remaining = _getRemainingMs(token);
     if (remaining > _REFRESH_THRESHOLD_MS) return token;
     // 剩余不足阈值——刷新（doRefresh 内部有 _refreshPromise 单例）

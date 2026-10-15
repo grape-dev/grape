@@ -26,7 +26,7 @@ param(
 $ErrorActionPreference = "Stop"
 
 function Log([string]$msg) { Write-Host "[install-worker] $msg" }
-function Fail([string]$msg) { Write-Error "[install-worker] 错误: $msg"; exit 1 }
+function Fail([string]$msg) { Write-Error "[install-worker] ERROR: $msg"; exit 1 }
 
 # ===== 参数校验 =====
 if (-not $Token) {
@@ -34,12 +34,12 @@ if (-not $Token) {
     $Token = $env:RUNTIME_TOKEN
 }
 if (-not $Token) {
-    Fail "缺少 -Token（rta_ 凭据，在主控 WebUI「Workers」页生成）"
+    Fail "Missing -Token (rta_ credential, generate it from the controller WebUI Workers page)"
 }
 
 if (-not $Server) {
     $Server = "https://grape.example.com"
-    Log "未指定 -Server，使用默认 $Server（如不对请加 -Server https://<你的主控域名>）"
+    Log "No -Server specified, using default $Server (add -Server https://<your-controller> if incorrect)"
 }
 $Server = $Server.TrimEnd('/')
 
@@ -57,7 +57,7 @@ $CfgDir = Join-Path $HOME ".grape"
 $EnvFile = Join-Path $CfgDir "runtime.env"
 $VersionFile = Join-Path $CfgDir "worker.version"
 
-Log "安装目录: $Dir | 设备名: $Device | 主控: $Server"
+Log "Install dir: $Dir | Device: $Device | Server: $Server"
 
 # ===== 1. 准备 Python >= 3.10 =====
 function Find-Python {
@@ -79,18 +79,18 @@ function Find-Python {
 
 $Py = Find-Python
 if (-not $Py) {
-    Log "未找到系统 Python>=3.10，将尝试使用包内自带解释器（解压后自动探测）"
+    Log "No system Python>=3.10 found, will try bundled interpreter (auto-detected after extract)"
 }
 
 # ===== 2. 下载运行包（公开端点，无需鉴权）=====
 $PkgUrl = "$Server/api/runtime/grape-worker.tar.gz"
 $TmpPkg = Join-Path $env:TEMP "grape-worker-$(Get-Random).tar.gz"
-Log "下载运行包: $PkgUrl"
+Log "Downloading package: $PkgUrl"
 try {
     Invoke-WebRequest -Uri $PkgUrl -OutFile $TmpPkg -UseBasicParsing -TimeoutSec 30
 } catch {
     Remove-Item $TmpPkg -ErrorAction SilentlyContinue
-    Fail "下载运行包失败: $PkgUrl（请确认主控地址/网络可达）"
+    Fail "Download failed: $PkgUrl (check controller address/network)"
 }
 
 # ===== 3. 解压到安装目录（幂等，升级前备份旧代码供回滚）=====
@@ -110,15 +110,15 @@ if (Test-Path $srcDir) {
     if (Test-Path $versionFilePath) {
         Copy-Item -Path $versionFilePath -Destination (Join-Path $upgradeBackupDir "VERSION") -Force -ErrorAction SilentlyContinue
     }
-    Log "已备份当前代码到 $upgradeBackupDir（升级失败时自动回滚）"
+    Log "Backed up current code to $upgradeBackupDir (auto-rollback on upgrade failure)"
 }
 
 # restore_upgrade_backup: 恢复备份的旧代码并重启 agent（回滚函数，与 Linux 对齐）
 function restore_upgrade_backup {
-    Log "!!! 新 agent 启动失败，回滚到升级前代码并重启旧 agent !!!"
+    Log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting old agent !!!"
     $backupSrc = Join-Path $upgradeBackupDir "src"
     if (-not (Test-Path $backupSrc)) {
-        Log "回滚失败: 无备份（$upgradeBackupDir 不存在，可能是全新安装）—— worker 将保持失联，需人工介入"
+        Log "Rollback failed: no backup ($upgradeBackupDir missing, maybe fresh install) - worker stays offline, manual intervention needed"
         return $false
     }
     if (Test-Path $srcDir) { Remove-Item $srcDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -128,7 +128,7 @@ function restore_upgrade_backup {
         Copy-Item -Path $backupVer -Destination $versionFilePath -Force -ErrorAction SilentlyContinue
     }
     $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "未知版本" }
-    Log "已恢复旧代码（$restoredVer）"
+    Log "Restored old code ($restoredVer)"
     # 重启旧 agent
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
     Start-Sleep -Seconds 5
@@ -136,14 +136,14 @@ function restore_upgrade_backup {
         $_.CommandLine -like "*src.runtime.agent*"
     } | Select-Object -First 1
     if ($restoredProc) {
-        Log "回滚成功：旧 agent 已恢复运行"
+        Log "Rollback OK: old agent restored and running"
         return $true
     }
-    Log "回滚后 agent 仍未运行—— worker 失联，需人工介入（日志: $workerLog）"
+    Log "Agent still not running after rollback - worker offline, check log: $workerLog"
     return $false
 }
 
-Log "解压运行包到 $Dir"
+Log "Extracting runtime package to $Dir"
 try {
     # Windows 没有 tar 命令时用 .NET System.IO.Compression
     $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
@@ -177,7 +177,7 @@ try {
                     Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
                 }
             } else {
-                Log "tar 退出码非零（可能是符号链接错误），关键文件已解压，继续安装"
+                Log "tar exit code non-zero (possible symlink error), key files extracted, continuing"
             }
         }
     } else {
@@ -202,7 +202,7 @@ with tarfile.open(tmp) as t:
 " $TmpPkg $Dir 2>$null
     }
 } catch {
-    Fail "解压运行包失败: $_"
+    Fail "Extract failed: $_"
 }
 Remove-Item $TmpPkg -ErrorAction SilentlyContinue
 
@@ -212,7 +212,7 @@ if (-not (Test-Path $CfgDir)) {
 if (Test-Path (Join-Path $Dir "VERSION")) {
     Copy-Item (Join-Path $Dir "VERSION") $VersionFile -Force -ErrorAction SilentlyContinue
     $ver = Get-Content $VersionFile -ErrorAction SilentlyContinue
-    if ($ver) { Log "Worker 版本: $ver" }
+    if ($ver) { Log "Worker version: $ver" }
 }
 
 # data 目录
@@ -226,28 +226,71 @@ if (-not $Py) {
     $bundledPy = Join-Path $Dir "python\python.exe"
     if (Test-Path $bundledPy) {
         $Py = $bundledPy
-        Log "使用包内自带 Python"
+        Log "Using bundled Python"
     }
 }
 if (-not $Py) {
-    Fail "未找到 Python>=3.10，请先安装 Python 3.10+ 后重试（https://python.org/downloads）"
+    Fail "Python>=3.10 not found. Please install Python 3.10+ first (https://python.org/downloads)"
 }
-Log "使用 Python: $Py ($(& $Py --version 2>&1))"
+Log "Using Python: $Py ($(& $Py --version 2>&1))"
 
-# ===== 4. 建 venv + 最小依赖 =====
+# ===== 4. venv + deps (B1: three-level pip self-healing) =====
 $VenvPy = Join-Path $Venv "Scripts\python.exe"
 $VenvPip = Join-Path $Venv "Scripts\pip.exe"
 
+function _VenvPipOk {
+    try { & $VenvPy -m pip --version 2>$null | Out-Null; return $LASTEXITCODE -eq 0 } catch { return $false }
+}
+
 if (-not (Test-Path $VenvPy)) {
-    Log "创建 venv ($Py)"
+    Log "Creating venv ($Py)"
     & $Py -m venv $Venv
 }
 
-if (-not (Test-Path $VenvPip)) {
-    Log "venv 缺 pip, 手动安装 ensurepip..."
+if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
+    Log "venv pip missing or broken, starting 3-level self-healing..."
+    # Level 1: ensurepip
+    Log "  [1/3] ensurepip --upgrade..."
     & $VenvPy -m ensurepip --upgrade 2>$null
+    if (-not (_VenvPipOk)) {
+        # Level 2: get-pip.py
+        Log "  [2/3] ensurepip failed, trying get-pip.py..."
+        $getPipUrl = "https://bootstrap.pypa.io/get-pip.py"
+        $getPkgTmp = Join-Path $env:TEMP "get-pip-$(Get-Random).py"
+        try {
+            Invoke-WebRequest -Uri $getPipUrl -OutFile $getPkgTmp -UseBasicParsing -TimeoutSec 30
+            & $VenvPy $getPkgTmp 2>$null
+            Remove-Item $getPkgTmp -ErrorAction SilentlyContinue
+        } catch {
+            Log "  get-pip.py download failed: $_"
+        }
+        if (-not (_VenvPipOk)) {
+            # Level 3: rebuild venv
+            Log "  [3/3] pip severely broken (site-packages damaged), rebuilding venv..."
+            $savedVer = ""
+            if (Test-Path $VersionFile) { $savedVer = Get-Content $VersionFile -ErrorAction SilentlyContinue }
+            Remove-Item $Venv -Recurse -Force -ErrorAction SilentlyContinue
+            & $Py -m venv $Venv
+            & $VenvPy -m ensurepip --upgrade 2>$null
+            if (-not (_VenvPipOk)) {
+                $getPkgTmp2 = Join-Path $env:TEMP "get-pip-$(Get-Random).py"
+                try {
+                    Invoke-WebRequest -Uri $getPipUrl -OutFile $getPkgTmp2 -UseBasicParsing -TimeoutSec 30
+                    & $VenvPy $getPkgTmp2 2>$null
+                    Remove-Item $getPkgTmp2 -ErrorAction SilentlyContinue
+                } catch {}
+            }
+            if ($savedVer) { Set-Content -Path $VersionFile -Value $savedVer -Encoding UTF8 -ErrorAction SilentlyContinue }
+            if (_VenvPipOk) {
+                Log "  venv rebuilt, pip restored"
+            } else {
+                Fail "venv 3-level self-healing all failed. Please manually delete $Venv and retry."
+            }
+        }
+    }
     if (-not (Test-Path $VenvPip)) {
-        & $VenvPy -m pip install --upgrade pip 2>$null
+        $VenvPip3 = Join-Path $Venv "Scripts\pip3.exe"
+        if (Test-Path $VenvPip3) { $VenvPip = $VenvPip3 }
     }
 }
 
@@ -256,48 +299,63 @@ if (Test-Path $reqFile) {
     $pipIndex = $env:PIP_INDEX_URL
     if (-not $pipIndex) { $pipIndex = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 
-    # 离线 wheels 优先
+    # 离线 wheels 优先 —— 仅 Linux aarch64（wheels 按打包机平台 aarch64 manylinux 下载，
+    # 其他平台（Windows/x86_64）离线装必失败，直接走在线，避免无谓报错刷屏）
     $wheelsDir = Join-Path $Dir "wheels"
+    $useWheels = $false
     if ((Test-Path $wheelsDir) -and (Get-ChildItem "$wheelsDir\*.whl" -ErrorAction SilentlyContinue)) {
-        Log "离线安装依赖（包内 wheels）"
+        # Linux aarch64 only: bundled wheels are built for aarch64 manylinux;
+        # other platforms (Windows/x86_64) always fail offline, go online directly.
+        $isArm = $env:PROCESSOR_ARCHITECTURE -match "ARM64"
+        if ($isArm) {
+            $useWheels = $true
+        } else {
+            Log "Non-Linux/arm64 host detected, skipping bundled wheels, installing online"
+        }
+    }
+    if ($useWheels) {
+        Log "Installing deps from bundled wheels (offline)"
         & $VenvPip install --quiet --no-index --find-links $wheelsDir -r $reqFile
         if ($LASTEXITCODE -ne 0) {
-            Log "离线安装失败，回退在线安装..."
+            Log "Offline install failed (common on Windows - binary wheel platform mismatch), falling back to online..."
             & $VenvPip install --quiet -i $pipIndex --retries 3 --timeout 30 -r $reqFile
             if ($LASTEXITCODE -ne 0) {
-                Fail "依赖安装失败：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+                Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
             }
         }
     } else {
-        Log "在线安装依赖（镜像: $pipIndex，首次需数分钟）"
+        Log "Installing deps online (mirror: $pipIndex, first run takes minutes)"
         & $VenvPip install --quiet -i $pipIndex --retries 3 --timeout 30 -r $reqFile
         if ($LASTEXITCODE -ne 0) {
-            Fail "依赖安装失败：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+            Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
         }
     }
 }
 
-# ===== 4.5 安装 grape CLI（离线 wheel 优先，回退在线）=====
-$grapeWheel = Get-ChildItem "$wheelsDir\grape-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
+# ===== 4.5 安装 grape CLI（离线 wheel 优先，回退在线；非 Linux/arm64 平台直接在线）=====
+$grapeWheel = $null
+if ($useWheels) {
+    $grapeWheel = Get-ChildItem "$wheelsDir\grape-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
+}
 if ($grapeWheel) {
     & $VenvPip install -q --no-index --find-links $wheelsDir grape 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Log "grape CLI 已装（离线 wheel）: $Venv\Scripts\grape.exe"
+        Log "grape CLI installed (offline wheel): $Venv\Scripts\grape.exe"
     } else {
-        Log "离线 grape wheel 安装失败，回退在线..."
+        Log "Offline grape wheel install failed, falling back to online..."
         & $VenvPip install -q --no-cache-dir "git+https://gitcode.com/grape-dev/grape-cli.git" 2>$null
         if ($LASTEXITCODE -eq 0) {
-            Log "grape CLI 已装（在线）"
+            Log "grape CLI installed (online)"
         } else {
-            Log "警告: grape-cli 安装失败，不影响 worker 运行"
+            Log "Warning: grape-cli install failed, worker will run without grape CLI"
         }
     }
 } else {
     & $VenvPip install -q --no-cache-dir "git+https://gitcode.com/grape-dev/grape-cli.git" 2>$null
     if ($LASTEXITCODE -eq 0) {
-        Log "grape CLI 已装（在线）"
+        Log "grape CLI installed (online)"
     } else {
-        Log "警告: grape-cli 在线安装失败，不影响 worker 运行"
+        Log "Warning: grape-cli online install failed, worker will run without grape CLI"
     }
 }
 
@@ -347,22 +405,21 @@ try {
     $acl.AddAccessRule($rule)
     Set-Acl -Path $EnvFile -AclObject $acl
 } catch {
-    Log "警告: 设置配置文件权限失败（不影响功能）"
+    Log "Warning: failed to set config file permissions (non-blocking)"
 }
-Log "接入配置已写入 $EnvFile（token + 主控地址）"
+Log "Config written to $EnvFile (token + controller address)"
 
 # ===== 6. 生成启动脚本并启动 =====
 $startScript = Join-Path $Dir "start-worker.ps1"
 
-# 每次升级都重新下载 start-worker.ps1（与 Linux 侧 cat > $START_SCRIPT 行为对齐，
-# 确保升级时 daemon 逻辑也同步更新，避免旧版 start-worker.ps1 与新代码不匹配）
-Log "下载 start-worker.ps1..."
+# # Re-download start-worker.ps1 on every upgrade (aligns with Linux side; keeps daemon logic in sync)
+Log "Downloading start-worker.ps1..."
 try {
     $startUrl = "$Server/api/runtime/start-worker.ps1"
     irm $startUrl -OutFile $startScript
-    Log "start-worker.ps1 已下载"
+    Log "start-worker.ps1 downloaded"
 } catch {
-    Log "警告: 下载 start-worker.ps1 失败: $_（不影响安装，worker 可手动启动）"
+    Log "Warning: failed to download start-worker.ps1: $_ (non-blocking, worker can be started manually)"
 }
 
 # 停掉旧 daemon（start-worker.ps1 的 powershell 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
@@ -397,12 +454,12 @@ $workerProc = Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAc
 } | Select-Object -First 1
 
 if (-not $workerProc) {
-    Log "新 agent 启动失败（进程不存在），尝试回滚旧版本..."
+    Log "New agent failed to start (process missing), rolling back..."
     restore_upgrade_backup
-    Fail "新 agent 启动失败（已尝试回滚旧版本），日志: $workerLog"
+    Fail "New agent failed to start (rollback attempted), log: $workerLog"
 }
 
-Log "新 agent 进程已启动（pid $($workerProc.ProcessId)），等待注册..."
+Log "New agent started (pid $($workerProc.ProcessId)), waiting for registration..."
 
 # 等待注册成功（最多 30s）
 $regOk = $false
@@ -418,19 +475,19 @@ for ($i = 1; $i -le 10; $i++) {
 }
 
 if ($regOk) {
-    Log "已后台启动并注册成功（pid $($workerProc.ProcessId)），日志: $workerLog"
+    Log "Started in background and registered (pid $($workerProc.ProcessId)), log: $workerLog"
 } else {
-    Log "新 agent 进程存活但 30s 未注册成功，尝试回滚旧版本..."
+    Log "Agent alive but not registered after 30s, rolling back..."
     $rollbackOk = restore_upgrade_backup
     if ($rollbackOk) {
-        Log "已回滚旧版本（新版本可能无法连接 master）"
+        Log "Rolled back to old version (new version may not reach master)"
     } else {
-        Log "回滚失败，worker 状态异常，请人工检查: $workerLog"
+        Log "Rollback failed, worker state abnormal, check log: $workerLog"
     }
 }
 
 # ===== 6.5 hermes 沙箱降级标注 =====
-Log "注意: hermes 沙箱（namespace/cgroup 隔离）在 Windows 上不支持，已降级关闭。其他引擎不受影响。"
+Log "Note: hermes sandbox (namespace/cgroup isolation) is not supported on Windows, disabled. Other engines are unaffected."
 
 # ===== 7. 执行引擎提示 =====
 $engineHints = @()
@@ -455,12 +512,12 @@ foreach ($eng in $engines) {
 }
 
 if ($engineHints.Count -gt 0) {
-    Log "未检测到部分执行引擎。请自行安装后重启 worker："
+    Log "Some execution engines not detected. Install them and restart worker:"
     foreach ($hint in $engineHints) { Log $hint }
     Log "  $startScript"
-    Log "（引擎类型不限定，worker 启动会自动发现本机已装引擎并注册）"
+    Log "(Engine type is not restricted; worker auto-discovers and registers installed engines on startup)"
 }
 
-Log "安装完成！验证注册："
-Log "  查看日志: $workerLog  → 应看到 RuntimeAgent registered: [...]"
-Log "  主控 WebUI Workers 页应出现设备 $Device"
+Log "Install complete! Verify registration:"
+Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"
+Log "  Controller WebUI Workers page should show device $Device"

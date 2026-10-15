@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from src.admin import db as admin_db
 from src.api.deps import require_admin
 from src.config import log
+from src.auth.cookie_utils import _cookie_secure
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -19,12 +20,11 @@ _COOKIE_MAX_AGE = 7 * 24 * 3600
 
 
 def _set_refresh_cookie(response: Response, refresh_token: str):
-    from src.config import COOKIE_SECURE
     response.set_cookie(
         key=_COOKIE_NAME,
         value=refresh_token,
         httponly=True,
-        secure=COOKIE_SECURE,
+        secure=_cookie_secure(),
         samesite="strict",
         path=_COOKIE_PATH,
         max_age=_COOKIE_MAX_AGE,
@@ -45,11 +45,9 @@ class ConfigBody(BaseModel):
     gitcode_api_token: str = ""
     gitcode_oauth_client_id: str = ""
     gitcode_oauth_client_secret: str = ""
-    gitcode_oauth_redirect_uri: str = ""
     github_bot_token: str = ""
     github_oauth_client_id: str = ""
     github_oauth_client_secret: str = ""
-    github_oauth_redirect_uri: str = ""
     bot_usernames: list[str] = []
 
 
@@ -143,16 +141,14 @@ def admin_status():
 # ====== 配置中心 ======
 
 @router.get("/config", operation_id="admin_config_get", summary="Get platform config (masked)",
-            description="Returns masked config from global-bot-token.json. Admin only.")
+            description="Returns masked config from global-bot-token.json + oauth-providers.json. Admin only.")
 def get_config(admin: dict = Depends(require_admin)):
     from src.admin.config_store import read_public_config
     from src.user.db import get_meta_value
+    config = read_public_config()
     return {
-        "config": read_public_config(),
-        "oauth_status": {
-            "gitcode": bool(get_meta_value("oauth_gitcode_client_id")),
-            "github": bool(get_meta_value("oauth_github_client_id")),
-        },
+        "config": config,
+        "oauth_status": config.get("oauth_status", {}),
         "pwd_initial": get_meta_value("admin_pwd_initial") == "1",
     }
 
@@ -181,3 +177,131 @@ def verify_platform_token(body: VerifyTokenBody, admin: dict = Depends(require_a
         return {"ok": bool(info.get("login")), "login": info.get("login", ""), "name": info.get("name", "")}
     except Exception as e:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"token 校验失败: {str(e)[:200]}"})
+
+# ===========================================================================
+# D6: 用户管理路由（需求 21）
+# ===========================================================================
+
+class DisableUserBody(BaseModel):
+    reason: str = ""
+
+
+class WhitelistBody(BaseModel):
+    type: str  # email / domain
+    value: str
+    remark: str = ""
+
+
+class AllowSignupBody(BaseModel):
+    enabled: bool
+
+
+@router.get("/users", operation_id="admin_users_list",
+             summary="List grape users with pagination and search")
+def admin_list_users(page: int = 1, per_page: int = 20, q: str = "",
+                     admin: dict = Depends(require_admin)):
+    """分页查询 grape_accounts 用户列表。"""
+    result = admin_db.list_grape_users(page=page, per_page=per_page, q=q)
+    return result
+
+
+@router.get("/users/{user_id}", operation_id="admin_user_detail",
+             summary="Get grape user detail")
+def admin_user_detail(user_id: int, admin: dict = Depends(require_admin)):
+    """获取用户详情（含绑定信息、是否有密码）。"""
+    detail = admin_db.get_grape_user_detail(user_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "用户不存在"})
+    return detail
+
+
+@router.post("/users/{user_id}/disable", operation_id="admin_user_disable",
+              summary="Disable grape user")
+def admin_disable_user(user_id: int, body: DisableUserBody,
+                       admin: dict = Depends(require_admin)):
+    """禁用用户（status=0）。"""
+    # 需求21: 管理员不可禁用自己
+    from src.auth.grape_account_db import get_grape_account_by_id
+    target_user = get_grape_account_by_id(user_id)
+    if target_user and target_user["username"] == admin.get("username"):
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "不可禁用自己的账号",
+        })
+    ok = admin_db.disable_grape_user(user_id, body.reason)
+    if not ok:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "用户不存在或非正常状态"})
+    # 清除鉴权缓存
+    from src.api.deps import invalidate_user_cache
+    invalidate_user_cache(user_id)
+    # 记录审计日志
+    from src.auth import audit as auth_audit
+    auth_audit.log_audit("account_disabled", operator_id=admin["id"],
+                         user_id=user_id, detail={"reason": body.reason})
+    return {"message": "用户已禁用"}
+
+
+@router.post("/users/{user_id}/restore", operation_id="admin_user_restore",
+              summary="Restore grape user (from disabled or cooldown)")
+def admin_restore_user(user_id: int, admin: dict = Depends(require_admin)):
+    """恢复用户（status=0 禁用 或 status=3 冷静期 → status=1）。"""
+    ok = admin_db.restore_grape_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "用户不存在或非可恢复状态"})
+    from src.api.deps import invalidate_user_cache
+    invalidate_user_cache(user_id)
+    from src.auth import audit as auth_audit
+    auth_audit.log_audit("account_restored", operator_id=admin["id"],
+                         user_id=user_id)
+    # 需求22: 恢复后通知用户（如有邮箱）
+    from src.auth.grape_account_db import get_grape_account_by_id
+    restored_user = get_grape_account_by_id(user_id)
+    if restored_user and restored_user.get("email"):
+        from src.auth.email_service import get_email_service
+        try:
+            get_email_service().send_notification(
+                restored_user["email"],
+                "账号已恢复",
+                "您的 Grape 账号已被管理员恢复，现在可以正常登录使用了。"
+            )
+        except Exception:
+            pass  # 通知邮件发送失败不影响恢复操作
+    return {"message": "用户已恢复"}
+
+
+@router.get("/signup-whitelist", operation_id="admin_signup_whitelist_list",
+             summary="List signup whitelist")
+def admin_list_whitelist(admin: dict = Depends(require_admin)):
+    """获取注册白名单列表。"""
+    return {"whitelist": admin_db.list_signup_whitelist()}
+
+
+@router.post("/signup-whitelist", operation_id="admin_signup_whitelist_add",
+              summary="Add signup whitelist entry")
+def admin_add_whitelist(body: WhitelistBody, admin: dict = Depends(require_admin)):
+    """添加注册白名单。"""
+    if body.type not in ("email", "domain"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "type 必须是 email 或 domain"})
+    ok = admin_db.add_signup_whitelist(body.type, body.value, body.remark)
+    if not ok:
+        raise HTTPException(status_code=409, detail={"code": 409, "message": "白名单条目已存在"})
+    return {"message": "已添加"}
+
+
+@router.delete("/signup-whitelist/{item_id}", operation_id="admin_signup_whitelist_delete",
+                summary="Delete signup whitelist entry")
+def admin_delete_whitelist(item_id: int, admin: dict = Depends(require_admin)):
+    """删除注册白名单。"""
+    ok = admin_db.delete_signup_whitelist(item_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "白名单条目不存在"})
+    return {"message": "已删除"}
+
+
+@router.put("/allow-signup", operation_id="admin_allow_signup_put",
+             summary="Toggle open signup")
+def admin_allow_signup(body: AllowSignupBody, admin: dict = Depends(require_admin)):
+    """开启/关闭开放注册。"""
+    from src.user import db as user_db
+    user_db.set_meta_value("allow_signup", "1" if body.enabled else "0")
+    return {"message": "已更新", "allow_signup": body.enabled}

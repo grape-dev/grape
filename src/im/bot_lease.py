@@ -226,14 +226,29 @@ class BotLeaseStore:
             from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
-                c.execute(
-                    "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) "
-                    "VALUES (?,?,?,1) "
-                    "ON CONFLICT(instance_id) DO UPDATE SET "
-                    "last_heartbeat=datetime('now'), hostname=COALESCE(excluded.hostname, hostname), "
-                    "ip=COALESCE(excluded.ip, ip), im_enabled=1",
-                    (self.instance_id, hostname, ip),
-                )
+                # MySQL 后端无 ON CONFLICT（SQLite 方言），等价翻译为
+                # ON DUPLICATE KEY UPDATE（instance_id 唯一键）；excluded.x → VALUES(x)。
+                # 实测 2026-10-12：不翻译时 MySQL 1064，心跳每 10s 刷 warning、
+                # grape_im_instance 永远空表 → lease 环 owner 计算退化为单实例。
+                from src.session_manager import _is_mysql_backend
+                if _is_mysql_backend():
+                    c.execute(
+                        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) "
+                        "VALUES (?,?,?,1) "
+                        "ON DUPLICATE KEY UPDATE "
+                        "last_heartbeat=CAST(NOW() AS CHAR), hostname=COALESCE(VALUES(hostname), hostname), "
+                        "ip=COALESCE(VALUES(ip), ip), im_enabled=1",
+                        (self.instance_id, hostname, ip),
+                    )
+                else:
+                    c.execute(
+                        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) "
+                        "VALUES (?,?,?,1) "
+                        "ON CONFLICT(instance_id) DO UPDATE SET "
+                        "last_heartbeat=datetime('now'), hostname=COALESCE(excluded.hostname, hostname), "
+                        "ip=COALESCE(excluded.ip, ip), im_enabled=1",
+                        (self.instance_id, hostname, ip),
+                    )
                 db.commit()
         except Exception as e:
             log.warning(f"[lease] heartbeat error: {e}")

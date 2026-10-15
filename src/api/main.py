@@ -8,16 +8,83 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs
+from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community
 
 
 bot_manager = None
+
+
+def _startup_security_check():
+    """生产环境启动安全门禁。
+
+    校验 JWT 密钥安全性、密钥轮换配置、邮件服务配置。
+    开发环境跳过所有检查。
+    """
+    from src.config import log
+    from src.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
+
+    if not is_production():
+        return  # 开发环境跳过
+
+    errors = []
+
+    # 1. JWT 密钥黑名单校验
+    from src.api.jwt_utils import validate_jwt_secret
+    if not validate_jwt_secret():
+        errors.append("JWT_SECRET 不安全：命中黑名单，请设置自定义密钥")
+
+    # 2. JWT 密钥轮换配置校验
+    if not get_jwt_kid_current():
+        errors.append("生产环境必须配置 JWT 密钥轮换（security.json jwt.kid_current）")
+    if not get_jwt_secret_keys():
+        errors.append("生产环境必须配置 JWT 密钥池（security.json jwt.secret_keys，格式 kid:secret,...）")
+
+    # 3. 邮件服务配置校验（P2-1: 同时检查 email.json 配置）
+    _has_email_env = os.environ.get("SMTP_HOST") or os.environ.get("RESEND_API_KEY")
+    _has_email_json = False
+    try:
+        email_json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "email.json")
+        if os.path.exists(email_json_path):
+            import json as _json
+            with open(email_json_path) as _f:
+                _email_cfg = _json.load(_f)
+            _has_email_json = bool(_email_cfg.get("smtp", {}).get("host") or _email_cfg.get("resend", {}).get("api_key"))
+    except Exception:
+        pass
+    if not _has_email_env and not _has_email_json:
+        errors.append("生产环境必须配置邮件服务（环境变量 SMTP_HOST/RESEND_API_KEY 或 configs/email.json）")
+
+    # 4. 第三方凭据加密密钥校验（D10）
+    _cred_keys = get_credential_keys()
+    if not _cred_keys or _cred_keys.startswith("dev:"):
+        errors.append("生产环境必须配置凭据加密密钥（security.json credential_keys，格式 kid:base64key）")
+
+    # 5. COOKIE_SECURE 校验（BUG-NEW-1: 生产环境必须启用 Secure cookie）
+    if os.environ.get("COOKIE_SECURE", "false").lower() not in ("true", "1", "yes"):
+        errors.append("生产环境必须设置 COOKIE_SECURE=true（refresh_token cookie 需要 Secure 标志）")
+
+    # 6. OAuth redirect_uri 配置校验（需求 11：每个 provider 必须配置 redirect_uri）
+    from src.auth.providers import get_provider, list_providers
+    missing_redirect = [p for p in list_providers() if not (get_provider(p) or {}).get("redirect_uri")]
+    if missing_redirect:
+        errors.append(f"生产环境必须配置 redirect_uri，缺少: {', '.join(missing_redirect)}")
+
+    if errors:
+        for e in errors:
+            log.error(f"[SECURITY] {e}")
+        raise SystemExit(f"生产环境安全门禁失败：{'; '.join(errors)}")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bot_manager
     from src.config import log
+
+    # 生产环境启动安全门禁
+    try:
+        _startup_security_check()
+    except SystemExit as e:
+        raise
 
     try:
         from src.im.feishu_async import BotManager
@@ -153,12 +220,22 @@ async def lifespan(app: FastAPI):
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
     # Autopilot 定时调度器：每分钟扫描到期任务，创建 Issue 触发流水线
+    # 注：调度器在本 lifespan 下方 IM WS 启动段统一以 start_scheduler() 启动（幂等）；
+    # 此处历史上的 asyncio.create_task(start_scheduler()) 是双重启动——start_scheduler()
+    # 是同步函数返回 None，create_task(None) 抛 "a coroutine was expected"，靠下方幂等
+    # 挡住才没有真双跑，但每次启动刷一条假 warning（9-17 引入，2026-10-14 移除）。
     try:
         from src.runtime.scheduler import start_scheduler
-        asyncio.create_task(start_scheduler())
-        log.info("Autopilot scheduler started")
+        start_scheduler()
     except Exception as e:
         log.warning(f"Autopilot scheduler start failed: {e}")
+
+    # D7: 冷静期定时任务：每天执行一次，匿名化超 30 天的冷静期账号（需求 22）
+    try:
+        from src.admin.cooldown import start_cooldown_scheduler
+        start_cooldown_scheduler()
+    except Exception as e:
+        log.warning(f"Cooldown scheduler start failed: {e}")
 
     # Issue #190：知识库 obs_key/file_path 归一化迁移（异步，不阻塞启动）
     try:
@@ -175,6 +252,25 @@ async def lifespan(app: FastAPI):
         log.info("knowledge_migrate started (async)")
     except Exception as e:
         log.warning(f"knowledge_migrate start failed: {e}")
+
+    # D32: user_accounts → grape_accounts 数据迁移（异步，不阻塞启动，幂等）
+    try:
+        async def _d32_migrate_wrapper():
+            from scripts.migrate_user_accounts_to_grape import run_migration
+            await asyncio.to_thread(run_migration, False)
+
+        _d32_task = asyncio.create_task(_d32_migrate_wrapper())
+
+        def _on_d32_done(task: asyncio.Task):
+            if task.exception():
+                log.error(f"D32 migration task failed: {task.exception()}", exc_info=task.exception())
+            else:
+                log.info("D32 migration completed (async)")
+        _d32_task.add_done_callback(_on_d32_done)
+        app.state.d32_migrate_task = _d32_task
+        log.info("D32 migration started (async)")
+    except Exception as e:
+        log.warning(f"D32 migration start failed: {e}")
 
     # 本机直连引擎周期重探（方案 C，local-direct-health-probe-design.md）：每 10 分钟真实探测 --version，
     # 刷新 agent_runtimes.healthy，防二进制变更/被删后 healthy 过期
@@ -245,7 +341,7 @@ async def lifespan(app: FastAPI):
             _local_ip = "127.0.0.1"
             try:
                 _s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-                _s.connect(("192.168.0.1", 80))
+                _s.connect(("8.8.8.8", 80))
                 _local_ip = _s.getsockname()[0]
                 _s.close()
             except Exception:
@@ -643,6 +739,7 @@ async def api_ping():
     """
     return {"ok": True, "ts": _dt.now(_tz.utc).isoformat()}
 
+app.include_router(grape_auth.router)
 app.include_router(auth.router)
 app.include_router(repos.router)
 # Admin 管理后台（/api/admin/*）
@@ -675,6 +772,7 @@ app.include_router(latency.router)
 app.include_router(feedback.router)
 app.include_router(autopilot.router)
 app.include_router(orgs.router)
+app.include_router(community.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi
@@ -686,6 +784,11 @@ from src.config import WORKSPACE_DIR as _WS_DIR
 _ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
 os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
 app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
+
+# Community uploads (images for markdown posts)
+_COMMUNITY_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "community_uploads")
+os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
+app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
 
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
@@ -717,6 +820,18 @@ if os.path.isdir(STATIC_DIR):
     async def serve_spa():
         return _spa_response()
 
+    @app.get("/register")
+    async def serve_register():
+        """注册页面 — 独立 HTML，不加载主应用 JS。"""
+        return FileResponse(os.path.join(STATIC_DIR, "register.html"),
+                            headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
+    @app.get("/forgot")
+    async def serve_forgot():
+        """忘记密码页面 — 独立 HTML，不加载主应用 JS。"""
+        return FileResponse(os.path.join(STATIC_DIR, "forgot.html"),
+                            headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
     @app.get("/en")
     @app.get("/en/{path:path}")
     async def serve_spa_en(path: str = ""):
@@ -724,6 +839,13 @@ if os.path.isdir(STATIC_DIR):
         if path.startswith("api/") or path.startswith("static/"):
             from fastapi import HTTPException
             raise HTTPException(status_code=404)
+        # 认证页面独立 HTML（不是 SPA view）
+        if path == "register":
+            return FileResponse(os.path.join(STATIC_DIR, "register.html"),
+                                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        if path == "forgot":
+            return FileResponse(os.path.join(STATIC_DIR, "forgot.html"),
+                                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         return _spa_response()
 
     # 注意：SPA catch-all (/{path:path}) 延迟到文件末尾注册，避免拦截 /health /healthz 等系统端点
@@ -966,6 +1088,22 @@ async def serve_admin(path: str = ""):
         resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
         return resp
     raise HTTPException(status_code=404, detail="admin.html not found")
+
+@app.get("/account", include_in_schema=False)
+@app.get("/account/{path:path}", include_in_schema=False)
+async def serve_account_redirect():
+    """旧用户中心 URL 302 重定向到内嵌 SPA view。"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/#account", status_code=302)
+
+@app.get("/oauth-popup-callback.html", include_in_schema=False)
+async def serve_oauth_popup_callback():
+    """OAuth 弹窗回调中间页——极简 HTML，通过 postMessage 通知父窗口后关闭。"""
+    from fastapi.responses import FileResponse
+    resp = FileResponse(os.path.join(STATIC_DIR, "oauth-popup-callback.html"))
+    resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
+    resp.headers["Referrer-Policy"] = "no-referrer"
+    return resp
 
 @app.get("/{path:path}")
 async def spa_catch_all(path: str):

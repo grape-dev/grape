@@ -101,7 +101,7 @@ function _cfCollectFields(prefix) {
 
 const app = (() => {
   const $ = id => document.getElementById(id);
-  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail'];
+  const VIEWS = ['dash','pipe','vod','issue','coding','qa','sre','chat','im-channel','settings','skills','knowledge','runtimes','event','repos','skill','tasks','observability','scene-market','scene-detail','my-feedback','my-feedback-detail','account'];
 
   // ── 浏览器前进/后退支持 ──
   // nav()/goToRepos() 把视图写入 history（#view/param），popstate 回放渲染。
@@ -159,6 +159,11 @@ const app = (() => {
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
+    // 清除当前视图状态——退出/过期后重新登录时 _restoreNavAfterLogin 需要重新路由
+    window._currentView = '';
+    renderOAuthButtons();
+    // 自动聚焦用户名输入
+    setTimeout(function(){var el=$('loginUser');if(el)el.focus()},100);
   }
 
 function loadAgentTypes() {
@@ -173,8 +178,51 @@ function loadAgentTypes() {
     // 工作台已由 CSS 显示，立即展示加载中状态
     $('pageContent').innerHTML = '<div class="loading">' + I18N.t('common.loading') + '</div>';
     loadAgentTypes();
-    // profile 和 repos 并行拉取，不互相等待
-    Promise.all([loadProfile(), loadRepos()]).catch(() => {});
+    // 串行加载：loadProfile 获取 bindings → 根据绑定状态和 hash 路由决定渲染哪个页面
+    loadProfile().then(() => {
+      _restoreNavAfterLogin();
+    }).catch(() => {
+      _restoreNavAfterLogin();  // profile 失败时也走统一路由恢复（检查 bindings → 引导页/loadRepos）
+    });
+  }
+
+  // 统一路由恢复：密码登录 / OAuth 登录 / 页面刷新共用
+  // 优先级：hash 路由 > 有绑定→loadRepos > 无绑定→引导页
+  function _restoreNavAfterLogin() {
+    // 已有视图（如 loadRepos 同步缓存路径已渲染）→ 不覆盖
+    if (window._currentView && window._currentView !== '') return;
+
+    const hash = window.location.hash;
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const bindings = user.bindings || [];
+    const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail', 'account'];
+
+    if (hash && hash.length > 1) {
+      // 有 hash 路由 → 恢复到该页面
+      const parts = hash.substring(1).split('/');
+      const view = parts[0];
+      const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
+      if (noRepoViews.includes(view) || currentRepo()) {
+        nav(view, param);
+      } else {
+        nav('dash');
+      }
+    } else if (bindings.length > 0) {
+      // 有绑定无 hash → 加载仓库列表
+      loadRepos();
+    } else if (currentRepo()) {
+      // 无绑定但有当前仓库 → dashboard
+      nav('dash');
+    } else {
+      // 无绑定无 hash → 引导页
+      goToRepos();
+    }
+  }
+
+  // 提示条已移除——未绑定用户直接显示引导页（goToRepos 处理）
+
+  function _showBindBannerIfNeeded() {
+    // 已移除——未绑定用户通过引导页引导绑定，不需要额外提示条
   }
 
   function loadProfile() {
@@ -191,6 +239,8 @@ function loadAgentTypes() {
       _loadOrgSelect();
       // 加载右上角组织名
       _updateTbOrgName();
+      // 需求 18: OAuth 首次登录补全提示条
+      _checkOAuthCompletion(d);
     }).catch(() => {});
   }
 
@@ -308,7 +358,19 @@ function loadAgentTypes() {
     });
   }
   function _updateTbOrgName() {
-    // 无需更新按钮文字 — 固定显示"我的组织"
+    // Issue #299: 显示当前已选空间名称（而非固定文本"我的组织"）
+    var nameEl = document.getElementById('tbOrgName');
+    if (!nameEl) return;
+    var currentId = localStorage.getItem('current_org_id') || '';
+    if (!currentId) return; // 未选择组织时保留 i18n 默认文本
+    API.get('/orgs').then(function(orgs) {
+      if (!orgs || orgs.length === 0) return;
+      var current = orgs.find(function(o) { return String(o.id) === String(currentId); });
+      if (current && current.name) {
+        nameEl.textContent = current.name;
+        nameEl.removeAttribute('data-i18n'); // 动态填充后移除 i18n 键，防止语言切换覆盖
+      }
+    }).catch(function() {});
   }
 
   // ===== lobby（#repos 全屏页）组织独立下拉菜单 =====
@@ -398,6 +460,126 @@ function loadAgentTypes() {
       document.removeEventListener('click', _closeLobbyUserMenuOnOutside);
     }
   }
+
+  // Sidebar user avatar dropdown (需求15: 个人资料 / 账号设置 / 登出)
+  function _toggleUserMenu() {
+    var menu = document.getElementById('sbUserMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadUserMenu();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeUserMenuOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeUserMenuOnOutside);
+    }
+  }
+
+  function _closeUserMenuOnOutside(e) {
+    var footer = document.getElementById('sbFooter');
+    var menu = document.getElementById('sbUserMenu');
+    if (footer && !footer.contains(e.target)) {
+      if (menu) menu.style.display = 'none';
+      document.removeEventListener('click', _closeUserMenuOnOutside);
+    }
+  }
+
+  // OAuth 绑定回调检查——从 URL 参数提取 bind_success/bind_error 显示 toast
+  function _checkBindSuccess() {
+    var params = new URLSearchParams(window.location.search);
+    var bindSuccess = params.get('bind_success');
+    var bindError = params.get('bind_error');
+    if (bindSuccess) {
+      var label = bindSuccess === 'gitcode' ? 'GitCode' : 'GitHub';
+      showToast(I18N.t('app.login.bind_success', {label: label}),
+                I18N.t('app.login.bind_success_desc'));
+      // D43: 绑定成功后清除仓库缓存，下次拉取获取含新平台的仓库
+      localStorage.removeItem(REPO_CACHE_KEY);
+      localStorage.removeItem('repo_member_cache');
+      // 刷新 localStorage 中的 bindings
+      try {
+        var _u = JSON.parse(localStorage.getItem('user') || '{}');
+        if (!_u.bindings) _u.bindings = [];
+        if (_u.bindings.indexOf(bindSuccess) < 0) _u.bindings.push(bindSuccess);
+        localStorage.setItem('user', JSON.stringify(_u));
+      } catch(e) {}
+      // 清除 URL 参数
+      var cleanUrl = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, '', cleanUrl);
+    }
+    if (bindError) {
+      var rawErr = decodeURIComponent(bindError.replace(/\+/g, ' '));
+      var friendlyMsg = _translateOAuthError(rawErr);
+      showToast(I18N.t('app.login.bind_failed'), friendlyMsg);
+      var cleanUrl2 = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, '', cleanUrl2);
+    }
+    // OAuth 绑定命中历史绑定 → 转移确认
+    var needTransfer = params.get('need_transfer');
+    var transferTicket = params.get('binding_ticket');
+    if (needTransfer && transferTicket) {
+      // 延迟调用，确保 account.js 已加载
+      setTimeout(function() {
+        if (typeof _accountShowTransferConfirm === 'function') {
+          _accountShowTransferConfirm(needTransfer, transferTicket);
+        }
+      }, 500);
+      var cleanUrl3 = window.location.pathname + window.location.hash;
+      window.history.replaceState({}, '', cleanUrl3);
+    }
+  }
+
+  // OAuth 错误翻译——将错误码翻译为用户可理解的语言
+  function _translateOAuthError(msg) {
+    if (!msg) return I18N.t('app.login.bind_failed_retry');
+    // P2-i18n: 新错误码直接走 i18n key
+    var errorKey = 'app.login.oauth_error_' + msg;
+    var translated = I18N.t(errorKey);
+    if (translated && translated !== errorKey) return translated;
+    // 兼容旧的中文/英文消息
+    var lower = msg.toLowerCase();
+    if (lower.indexOf('access_denied') >= 0 || lower.indexOf('denied') >= 0)
+      return I18N.t('app.login.oauth_cancelled');
+    if (lower.indexOf('invalid_state') >= 0)
+      return I18N.t('app.login.oauth_callback_error');
+    if (lower.indexOf('already_bound') >= 0 || lower.indexOf('already') >= 0)
+      return I18N.t('app.login.oauth_already_bound');
+    return msg;
+  }
+
+  // 用户设置返回工作台
+  function _accountGoBack() {
+    var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
+    // 先检查绑定状态——未绑定直接回引导页，不走 nav('dash') 避免 403
+    var _u = JSON.parse(localStorage.getItem('user') || '{}');
+    var _bindings = _u.bindings || [];
+    if (_bindings.length === 0) {
+      goToRepos();
+      return;
+    }
+    var repo = currentRepo();
+    if (repo) {
+      nav('dash');
+    } else {
+      goToRepos();
+    }
+  }
+
+  function _loadUserMenu() {
+    var menu = document.getElementById('sbUserMenu');
+    if (!menu) return;
+    var isZh = I18N.getLang() === 'zh';
+    var html = '';
+    html += '<div onclick="app.nav(\'account\',\'profile\')" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--t);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>👤</span><span>' + I18N.t('app.account.center_title') + '</span></div>';
+    html += '<div onclick="app.nav(\'account\',\'security\')" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>🔒</span><span>' + I18N.t('app.login.account_security_menu') + '</span></div>';
+    html += '<div onclick="app.logout()" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--r);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>↩</span><span>' + (I18N.t("app.logout") || "退出登录") + '</span></div>';
+    menu.innerHTML = html;
+  }
   function _closeLobbyUserMenuOnOutside(e) {
     var dropdown = document.getElementById('lobbyUserDropdown');
     var menu = document.getElementById('lobbyUserMenu');
@@ -409,7 +591,11 @@ function loadAgentTypes() {
   function _loadLobbyUserMenu() {
     var menu = document.getElementById('lobbyUserMenu');
     if (!menu) return;
+    var isZh = I18N.getLang() === 'zh';
     var html = '';
+    // 用户设置
+    html += '<div onclick="app.nav(\'account\',\'profile\')" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--t);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
+      + '<span>👤</span><span>' + I18N.t('app.account.center_title') + '</span></div>';
     // 退出
     html += '<div onclick="app.logout()" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--r);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
       + '<span>↩</span><span>' + (I18N.t("app.logout") || "退出登录") + '</span></div>';
@@ -512,9 +698,21 @@ function loadAgentTypes() {
       }
     }).catch(e => {
       if (cachedRepos) return; // 有缓存时静默，避免覆盖已渲染内容
-      // Issue #63: loadRepos 失败时不隐藏侧边栏、不覆盖 pageContent
-      // 无缓存时侧边栏保持默认状态，用户切 tab 时 nav() 会重新加载页面内容
       console.error('[loadRepos] FAILED:', e.name, e.message);
+    });
+  }
+
+  function _forceSyncRepos() {
+    // 绑定新平台后强制同步仓库列表（调 /repos/sync 不走缓存）
+    API.post('/repos/sync').then(function(d) {
+      var repos = d.repos || [];
+      try {
+        localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos: repos, ts: Date.now()}));
+      } catch(e) {}
+      renderReposFromData(repos);
+    }).catch(function(e) {
+      // 同步失败则降级为普通加载
+      loadRepos(true);
     });
   }
 
@@ -533,6 +731,7 @@ function loadAgentTypes() {
       $('mainView').style.inset = '0';
       $('mainView').style.zIndex = '100';
       $('pageTitle').textContent = I18N.t('app.current_project');
+      // 已绑定但无仓库 → 显示项目页空态（不是新手引导）
       renderRepoSelection(repos);
       return;
     }
@@ -578,14 +777,29 @@ function loadAgentTypes() {
       const sel = $('repoSelect');
       const current = currentRepo();
       if (repos.length === 0) {
-        // 无托管仓库时：仅保留"新增托管"选项，并添加 click 事件兜底
-        // （select 只有 1 个选项时 change 事件不触发，需用 click 兜底）
         sel.innerHTML = '<option value="__add__">＋ ' + (I18N.t('app.repo.add_new') || '新增仓库托管') + '</option>';
         sel.onclick = function() { switchRepo('__add__'); };
       } else {
-        sel.innerHTML = repos.map(r =>
-          `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`
-        ).join('') + '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
+        // 按平台分组：optgroup label 为平台名称
+        var gitcodeRepos = repos.filter(function(r) { return !(r.repo_key || '').startsWith('github:'); });
+        var githubRepos = repos.filter(function(r) { return (r.repo_key || '').startsWith('github:'); });
+        var html = '';
+        if (gitcodeRepos.length > 0) {
+          html += '<optgroup label="GitCode">';
+          gitcodeRepos.forEach(function(r) {
+            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
+          });
+          html += '</optgroup>';
+        }
+        if (githubRepos.length > 0) {
+          html += '<optgroup label="GitHub">';
+          githubRepos.forEach(function(r) {
+            html += `<option value="${r.full_name}" ${current && current.fullName === r.full_name ? 'selected' : ''}>${r.full_name}</option>`;
+          });
+          html += '</optgroup>';
+        }
+        html += '<option value="__add__">＋ ' + I18N.t('app.repo.add_new') + '</option>';
+        sel.innerHTML = html;
         sel.onclick = null;
       }
     }).catch(() => {});
@@ -621,7 +835,165 @@ function loadAgentTypes() {
 
   // 点击 Grape Logo → 返回仓库选择页（与解除托管后跳转的页面完全一致：全屏卡片页）
   // 折中方案：先叠轻量 loading 遮罩（不改变当前布局），API 返回后一次性切换 UI，避免中间态闪烁
+  // 需求 18: OAuth 首次登录补全提示条
+  function _checkOAuthCompletion(profile) {
+    // P0-4: 检测 OAuth 登录（exchange_code 新流程或 token 旧流程）
+    const params = new URLSearchParams(window.location.search);
+    const isOAuthLogin = params.has('exchange_code') || params.has('token');
+    // 也检查 profile 中的 email_verified 标记（exchange_code 流程下 URL 参数已被清除）
+    const isEmailUnverified = profile.email_verified === 0 && !profile.email;
+
+    if (!isOAuthLogin && !isEmailUnverified) return;  // 非 OAuth 登录且邮箱已验证 → 不弹
+
+    // 检查是否已跳过
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const skipKey = 'oauth_completion_skipped_' + (user.username || '');
+    if (localStorage.getItem(skipKey)) return;
+
+    // 检查账号完整度
+    const needsPassword = !user.has_password;
+    const needsEmail = !user.email;
+    const needsVerify = user.email_verified === 0;
+    if (!needsPassword && !needsEmail && !needsVerify) return;  // 已完整
+
+    // 显示提示条
+    const existing = document.getElementById('oauthCompletionBanner');
+    if (existing) return;  // 已显示
+
+    const banner = document.createElement('div');
+    banner.id = 'oauthCompletionBanner';
+    banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:9999;background:var(--warn-bg, rgba(255,204,0,0.12));border-bottom:1px solid var(--warn-border, rgba(255,204,0,0.3));padding:10px 20px;display:flex;align-items:center;justify-content:center;gap:12px;font-size:13px;color:var(--t)';
+    var msg;
+    if (needsEmail) {
+      msg = I18N.t('app.login.oauth_completion_hint');
+    } else if (needsVerify) {
+      msg = I18N.t('app.login.email_unverified_hint') || I18N.t('app.login.oauth_completion_hint');
+    } else {
+      msg = I18N.t('app.login.oauth_completion_hint');
+    }
+    banner.innerHTML =
+      '<span>' + msg + '</span>' +
+      '<button class="bt bt-p" style="font-size:12px;padding:4px 12px" onclick="app.nav(\'account\',\'security\')">' + I18N.t('app.login.go_to_settings') + '</button>' +
+      '<button class="bt bt-o" style="font-size:12px;padding:4px 12px" onclick="app._dismissOAuthCompletion()">' + I18N.t('app.login.skip') + '</button>';
+    document.body.appendChild(banner);
+    document.body.style.paddingTop = '44px';
+  }
+
+  function _dismissOAuthCompletion() {
+    const user = JSON.parse(localStorage.getItem('user') || '{}');
+    const skipKey = 'oauth_completion_skipped_' + (user.username || '');
+    localStorage.setItem(skipKey, '1');
+    const banner = document.getElementById('oauthCompletionBanner');
+    if (banner) banner.remove();
+    document.body.style.paddingTop = '';
+  }
+
+  function _renderBindingGuide() {
+    var isZh = I18N.getLang() === 'zh';
+    var _u = JSON.parse(localStorage.getItem('user') || '{}');
+    var name = (_u.nickname || _u.username || 'User').split('@')[0];
+    var avatar = (name || 'U')[0].toUpperCase();
+
+    // Fetch configured providers to only show available platforms
+    API.get('/auth/providers').then(function(d) {
+      var providers = (d.providers || []).filter(function(p) { return p.configured; });
+      _renderOnboardingShell(providers, isZh, name, avatar);
+    }).catch(function() {
+      // Fallback: show both platforms
+      _renderOnboardingShell([
+        {provider: 'gitcode', name: 'GitCode', brand_color: '#F54A36'},
+        {provider: 'github', name: 'GitHub', brand_color: '#1F2328'}
+      ], isZh, name, avatar);
+    });
+  }
+
+  function _renderOnboardingShell(providers, isZh, name, avatar) {
+    var d = document.getElementById('pageContent');
+    if (!d) return;
+
+    // ── 平台绑定卡片 ──
+    var platformCards = '';
+    providers.forEach(function(p) {
+      var icon = platformIcon(p.provider, 28);
+      // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
+      var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
+      var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
+      var brandVar = '--brand:' + (_brandColor || 'var(--a)');
+      platformCards += '<div class="ob-bind-card" style="' + brandVar + '" onclick="app.bindProvider(\'' + p.provider + '\')">'
+        + '<div class="ob-bind-icon">' + icon + '</div>'
+        + '<div class="ob-bind-name">' + _esc(p.name) + '</div>'
+        + '<button class="bt bt-p ob-bind-btn" data-i18n="app.login.ob_bind_btn">'
+        + I18N.t('app.login.ob_bind_btn') + '</button>'
+        + '</div>';
+    });
+
+    // ── 单屏绑定页面 ──
+    var html = '<div class="lobby">'
+      + '<header class="lobby-head">'
+      +   '<div class="lobby-brand">'
+      +     '<img class="lobby-logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape">'
+      +     '<span class="lobby-brand-name">Grape</span>'
+      +     '<span class="lobby-brand-sub" data-i18n="repos.brand_sub">' + I18N.t('repos.brand_sub') + '</span>'
+      +   '</div>'
+      +   '<div style="flex:1"></div>'
+      +   '<div style="display:flex;align-items:center;gap:10px">'
+      +     '<div class="lang-toggle" id="lobbyLangToggle" style="display:flex;align-items:center;gap:2px;padding:3px;border-radius:8px;border:1px solid var(--b);background:var(--c)">'
+      +       '<button onclick="_setAppLang(\'zh\')" class="lang-btn' + (I18N.getLang() === 'zh' ? ' active' : '') + '" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;white-space:nowrap;' + (I18N.getLang() === 'zh' ? 'background:var(--a);color:#fff' : 'background:none;color:var(--t3)') + '">中</button>'
+      +       '<button onclick="_setAppLang(\'en\')" class="lang-btn' + (I18N.getLang() === 'en' ? ' active' : '') + '" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;white-space:nowrap;' + (I18N.getLang() === 'en' ? 'background:var(--a);color:#fff' : 'background:none;color:var(--t3)') + '">EN</button>'
+      +     '</div>'
+      +     '<div id="lobbyOrgDropdown" style="position:relative">'
+      +       '<button onclick="app._toggleLobbyOrgDropdown()" id="lobbyOrgBtn" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">'
+      +         '<span style="font-size:14px">🏢</span>'
+      +         '<span class="lobby-org-name" id="lobbyOrgName">' + (I18N.t('organizations.my_orgs') || '我的组织') + '</span>'
+      +       '</button>'
+      +       '<div id="lobbyOrgMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:9999;padding:4px"></div>'
+      +     '</div>'
+      +     '<div id="lobbyUserDropdown" style="position:relative">'
+      +       '<button onclick="app._toggleLobbyUserMenu()" style="display:flex;align-items:center;gap:8px;padding:5px 12px;border-radius:8px;border:1px solid var(--b);background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap">'
+      +         '<span class="lobby-avatar">' + avatar + '</span>'
+      +         '<span class="lobby-user-name">' + _esc(name) + '</span>'
+      +       '</button>'
+      +       '<div id="lobbyUserMenu" style="display:none;position:absolute;top:100%;right:0;margin-top:4px;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:9999;padding:4px"></div>'
+      +     '</div>'
+      +   '</div>'
+      + '</header>'
+      + '<main class="lobby-main">'
+      +   '<div class="lobby-content ob-content">'
+      +     _obHeroHtml(name, isZh, platformCards)
+      +   '</div>'
+      + '</main>'
+      + '</div>';
+
+    d.innerHTML = html;
+    d.classList.add('ob-mode');
+    _updateTbOrgName();
+    _updateLobbyOrgName();
+  }
+
+  // ── 离开引导页时清理标记 class ──
+  function _obExitMode() {
+    var d = document.getElementById('pageContent');
+    if (d) d.classList.remove('ob-mode');
+  }
+
+  // ── 欢迎区域（单屏居中）──
+  function _obHeroHtml(name, isZh, platformCards) {
+    return '<section class="ob-hero">'
+      + '<div class="ob-hero-logo"><img src="/static/img/grape-logo.jpg?v=1" alt="Grape"></div>'
+      + '<h1 class="ob-hero-title" data-i18n="app.login.ob_cta_title">' + I18N.t('app.login.ob_cta_title') + '</h1>'
+      + '<p class="ob-hero-sub" data-i18n="app.login.ob_cta_sub">' + I18N.t('app.login.ob_cta_sub') + '</p>'
+      + '<div class="ob-hero-bind">' + platformCards + '</div>'
+      + '<p class="ob-hero-hint" data-i18n="app.login.ob_hero_hint">' + I18N.t('app.login.ob_hero_hint') + '</p>'
+      + '</section>';
+  }
+
+  function _esc(s) {
+    if (!s) return '';
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
   function goToRepos() {
+    _obExitMode();
     _pushHistory('repos', null);
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     localStorage.setItem('sidebarTab', 'projects');
@@ -637,6 +1009,25 @@ function loadAgentTypes() {
       document.body.appendChild(ov);
     }
 
+    // D9: 检查 bindings——未绑定时不调 /repos/member，直接显示绑定引导
+    const _user = JSON.parse(localStorage.getItem('user') || '{}');
+    const _bindings = _user.bindings || [];
+    if (_bindings.length === 0) {
+      // 未绑定任何平台 → 直接显示新手引导页（不渲染 lobby 壳）
+      if (ov) ov.remove();
+      $('sidebar').style.display = 'none';
+      $('tb').style.display = 'none';
+      const mv = $('mainView');
+      mv.style.display = 'flex';
+      mv.style.position = 'fixed';
+      mv.style.inset = '0';
+      mv.style.zIndex = '100';
+      $('pageTitle').textContent = I18N.t('app.current_project');
+      _renderBindingGuide();
+      return;
+    }
+
+    // 已绑定 → 调 /repos/member 加载仓库列表
     API.get('/repos/member').then(d => {
       if (window._currentView !== 'repos') return;  // stale guard
       // 数据就绪，一次性切换 UI
@@ -664,6 +1055,11 @@ function loadAgentTypes() {
       mv.style.inset = '0';
       mv.style.zIndex = '100';
       $('pageTitle').textContent = I18N.t('app.current_project');
+      // Token 未配置 → 显示新手引导页（不渲染 lobby 壳）
+      if (e.message && (e.message.indexOf('Token') >= 0 || e.message.indexOf('未配置') >= 0)) {
+        _renderBindingGuide();
+        return;
+      }
       const pc = $('pageContent');
       if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div></div>';
     });
@@ -808,12 +1204,32 @@ function loadAgentTypes() {
   });
 
   function nav(view, param) {
+    // 离开引导页模式：清理 .ct.ob-mode 标记
+    _obExitMode();
     // Issue #67: 已在 knowledge 页面且 Vue 应用存在时，不重复执行 nav（防止多次 mount 报错）
     if (view === 'knowledge' && window._currentView === 'knowledge' && typeof _knowledgeVueApp !== 'undefined' && _knowledgeVueApp) {
       return;
     }
     const repo = currentRepo();
-    if (!repo && view !== 'repos' && view !== 'settings' && view !== 'tasks' && view !== 'runtimes' && view !== 'observability' && view !== 'scene-market' && view !== 'scene-detail' && view !== 'scene-detail-local' && view !== 'my-feedback' && view !== 'my-feedback-detail' && view !== 'autopilot' && view !== 'autopilot-detail' && view !== 'organizations' && view !== 'dash' && view !== 'pipe' && view !== 'vod' && view !== 'issue' && view !== 'coding' && view !== 'qa' && view !== 'sre' && view !== 'chat' && view !== 'im-channel' && view !== 'skills' && view !== 'event' && view !== 'skill') { loadRepos(); return; }
+    // 需求17: 未绑定平台守卫——依赖仓库的视图需检查 bindings
+    var _repoDependentViews = ['dash', 'pipe', 'vod', 'issue', 'coding', 'qa', 'sre', 'chat', 'im-channel', 'skills', 'skill', 'knowledge', 'scene-market', 'scene-detail', 'scene-detail-local'];
+    var _nonRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'observability', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'organizations', 'account'];
+    if (!repo && _repoDependentViews.indexOf(view) >= 0) {
+      // 检查是否未绑定
+      var _u = JSON.parse(localStorage.getItem('user') || '{}');
+      var _bindings = _u.bindings || [];
+      if (_bindings.length === 0) {
+        // 未绑定 → 提示用户并跳转到新手引导页
+        var _isZh = I18N.getLang() === 'zh';
+        showToast(I18N.t('app.login.link_platform_first'));
+        goToRepos();
+        return;
+      }
+      // 已绑定但无选中仓库 → loadRepos
+      loadRepos();
+      return;
+    }
+    if (!repo && _nonRepoViews.indexOf(view) < 0) { loadRepos(); return; }
 
     // v31: 离开 Chat 页面时中断 SSE（但不清任务状态，后台任务继续跑）
     if (view !== 'chat' && typeof _chatStreamAbort !== 'undefined' && _chatStreamAbort) {
@@ -882,7 +1298,10 @@ function loadAgentTypes() {
     window._navSignal = window._navAbortController.signal;
     window._tabSignal = null;  // 重置 tab signal
     window._currentView = view;
+    // 需求24: 进入非引导页时显示未绑定提示条（在 _currentView 设置后检查）
+    _showBindBannerIfNeeded();
     // 离开 repos 全屏页时恢复 sidebar/tb/mainView 默认布局
+    // account/organizations 分支自行隐藏 sidebar，此处统一恢复 tb/mainView
     if (view !== 'repos') {
       var sb = $('sidebar'); if (sb) sb.style.display = 'flex';
       var tb = $('tb'); if (tb) tb.style.display = 'flex';
@@ -898,6 +1317,9 @@ function loadAgentTypes() {
     window._dashboardEditing = false;
 
     if (repo) {
+      // F5 refresh: ensure sidebar repo dropdown is populated even when
+      // currentRepo() is restored from sessionStorage (skips loadRepos path)
+      if (!$('repoSelect') || $('repoSelect').options.length <= 1) initSidebarRepos();
       var _rk = repo.repoKey || repo.repo_key || '';
       var _fn = repo.fullName || (repo.owner + '/' + repo.name);
       var _isGithub = _rk.indexOf('github:') === 0;
@@ -977,7 +1399,12 @@ function loadAgentTypes() {
       renderTasks();
     } else if (view === 'settings') {
       title.textContent = I18N.t('app.current_project');
-      renderSettings(param || 'credentials');
+      renderSettings(param || 'gitcode');
+    } else if (view === 'account') {
+      title.textContent = I18N.t('app.account.center_title');
+      // 用户设置：只隐藏侧边栏，保留顶栏，mainView 保持正常布局
+      var _accSb = $('sidebar'); if (_accSb) _accSb.style.display = 'none';
+      renderAccount(param || 'profile');
     } else if (view === 'organizations') {
       title.textContent = I18N.t('app.nav.organizations') || '组织管理';
       repoTitle.textContent = '';
@@ -1065,7 +1492,7 @@ function loadAgentTypes() {
         if (hash && hash.length > 1) {
           const parts = hash.substring(1).split('/');
           const view = parts[0];
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail'];
+          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'scene-detail-local', 'my-feedback', 'my-feedback-detail', 'autopilot', 'autopilot-detail', 'account'];
           if (noRepoViews.includes(view) || currentRepo()) {
             nav(view, parts[1] ? decodeURIComponent(parts[1]) : undefined);
           } else if (currentRepo()) {
@@ -1097,15 +1524,70 @@ function loadAgentTypes() {
     }).catch(() => {});
   }
 
-  function oauthLogin() {
-    API.get('/auth/login/gitcode').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
+  function oauthLogin(provider) {
+    // 登录场景：全页重定向（业界标准，兼容性最强）
+    // 弹窗模式仅用于已登录态的绑定场景（见 account.js _accountDoOauthBind）
+    API.get('/auth/login/' + provider + '?lang=' + I18N.getLang()).then(function(d) {
+      if (d.redirect_url) window.location.href = d.redirect_url;
+    }).catch(function() {
+      showToast(I18N.t('app.login.oauth_not_configured') || 'OAuth未配置');
+    });
   }
-  function oauthLoginGithub() {
-    API.get('/auth/login/github').then(d => { if (d.redirect_url) window.location.href = d.redirect_url; }).catch(e => showToast(I18N.t('app.login.oauth_not_configured')));
+
+  // OAuth provider 图标 SVG（UX-2 修复：内置已知平台图标，未知平台用首字母降级）
+  var _OAUTH_ICONS = {
+    gitcode: '<svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M472.746667 896.853333c-72.533333-8.106667-151.466667-39.253333-200.106667-78.08-27.306667-21.76-72.533333-71.253333-89.6-97.706666-51.626667-80.213333-72.533333-179.626667-57.173333-269.653334 15.36-86.613333 50.773333-154.453333 113.92-216.32 109.653333-107.52 285.44-141.653333 425.813333-82.346666 46.08 19.626667 90.453333 46.933333 108.8 66.986666 35.84 39.68 22.613333 104.106667-25.173333 128-20.48 9.813333-58.453333 10.24-72.96 0.853334-14.933333-9.386667-28.16-35.84-32-62.293334-1.706667-12.8-3.84-23.04-4.266667-23.04-0.853333 0-11.946667 5.973333-23.893333 13.226667-40.106667 23.466667-51.626667 26.88-113.066667 30.72-32.426667 1.706667-67.84 4.693333-78.933333 6.4-20.053333 2.56-44.373333-0.853333-83.2-13.226667l-20.48-6.4 0.853333 42.24c0.426667 40.96 0 43.093333-17.493333 79.36-22.613333 46.933333-30.72 75.52-34.56 117.333334-8.106667 100.693333 46.506667 175.36 150.613333 205.226666 67.413333 19.2 179.2 15.36 239.36-8.533333 58.026667-23.04 108.8-76.8 108.8-114.773333 0-15.786667-20.053333-35.84-41.813333-40.96-8.96-2.56-43.946667-5.546667-77.226667-6.826667-69.973333-2.986667-119.04-9.386667-132.266667-18.346667-13.653333-8.533333-20.48-33.28-14.506666-51.2 5.973333-19.2 15.786667-27.306667 43.946666-37.973333 19.2-7.253333 33.28-8.533333 88.746667-8.533333 118.613333 0 174.08 14.933333 217.6 58.453333 49.92 50.346667 55.466667 127.146667 13.226667 194.986667-62.293333 99.84-135.68 156.586667-235.52 182.613333-33.706667 8.96-122.453333 14.933333-158.72 10.666667z"/></svg>',
+    github: '<svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>'
+  };
+
+  function _oauthIcon(provider, name) {
+    // 已知平台用内置 SVG，未知平台用首字母降级
+    if (_OAUTH_ICONS[provider]) return _OAUTH_ICONS[provider];
+    var letter = (name || provider || '?')[0].toUpperCase();
+    return '<span style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;font-size:11px;font-weight:700;line-height:1">' + _esc(letter) + '</span>';
+  }
+
+  function renderOAuthButtons() {
+    var container = document.getElementById('oauthBtns');
+    var section = document.getElementById('oauthSection');
+    if (!container) return;
+    API.get('/auth/providers').then(function(d) {
+      var providers = d.providers || [];
+      var configured = providers.filter(function(p){return p.configured});
+      if (configured.length === 0) {
+        if (section) section.style.display = 'none';
+        return;
+      }
+      // 预渲染按钮已在 HTML 中，只在平台列表不一致时才重新渲染
+      var existingBtns = container.querySelectorAll('.oauth-btn');
+      var existingNames = Array.prototype.map.call(existingBtns, function(b) {
+        return b.getAttribute('onclick') || '';
+      });
+      var needsRender = configured.length !== existingBtns.length;
+      if (!needsRender) {
+        for (var i = 0; i < configured.length; i++) {
+          var key = "app.oauthLogin('" + configured[i].provider + "')";
+          if (existingNames[i].indexOf(key) === -1) { needsRender = true; break; }
+        }
+      }
+      if (needsRender) {
+        container.innerHTML = configured.map(function(p) {
+          var icon = _oauthIcon(p.provider, p.name);
+          var i18nKey = 'app.login.' + p.provider + '_login';
+          // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
+          var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
+          var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
+          var brandVar = _brandColor ? ' style="--brand:' + _brandColor + '"' : '';
+          return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + brandVar + '>'
+            + icon + '<span data-i18n="' + i18nKey + '">' + p.name + '</span></button>';
+        }).join('');
+        if (typeof I18N !== 'undefined' && I18N.apply) I18N.apply();
+      }
+    }).catch(function() { /* 预渲染按钮保留，不隐藏 */ });
   }
 
   // 内测申请表单
-  function openBetaApply() {
+function openBetaApply() {
     var isZh = I18N.getLang() === 'zh';
     var overlay = document.createElement('div');
     overlay.id = 'betaApplyModal';
@@ -1114,67 +1596,67 @@ function loadAgentTypes() {
     overlay.innerHTML = `
       <div style="background:var(--c,#fff);border-radius:16px;padding:32px;width:480px;max-width:90vw;box-shadow:0 12px 48px rgba(0,0,0,0.15);max-height:90vh;overflow-y:auto">
         <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px">
-          <h2 style="font-size:20px;font-weight:600">${z?'申请内测':'Beta Apply'}</h2>
+          <h2 style="font-size:20px;font-weight:600">${I18N.t('app.login.beta_form_title')}</h2>
           <span onclick="document.getElementById('betaApplyModal').remove()" style="cursor:pointer;font-size:20px;color:var(--t3,#86868b);line-height:1">×</span>
         </div>
-        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'基础信息':'Basic Info'}</div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin-bottom:10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${I18N.t('app.login.beta_form_basic_info')}</div>
         <div style="display:flex;flex-direction:column;gap:12px">
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'平台 <span style="color:var(--r,#dc2828)">*</span>':'Platform <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_platform')}</label>
             <select id="betaPlatform" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
               <option value="gitcode">GitCode</option>
               <option value="github">GitHub</option>
             </select>
           </div>
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'用户名 <span style="color:var(--r,#dc2828)">*</span>':'Username <span style="color:var(--r,#dc2828)">*</span>'}</label>
-            <input id="betaAccountName" type="text" placeholder="${z?'GitCode 或 GitHub 用户名':'GitCode or GitHub username'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_username')}</label>
+            <input id="betaAccountName" type="text" placeholder="${I18N.t('app.login.beta_form_username_placeholder')}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'邮箱 <span style="color:var(--r,#dc2828)">*</span>':'Email <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_email')}</label>
             <input id="betaEmail" type="email" placeholder="user@example.com" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
           <div>
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'手机号':'Phone'} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${z?'选填':'optional'})</span></label>
-            <input id="betaPhone" type="text" placeholder="${z?'选填':'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_phone')} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${I18N.t('app.login.beta_form_optional_lower')})</span></label>
+            <input id="betaPhone" type="text" placeholder="${I18N.t('app.login.beta_form_optional')}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
         </div>
-        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'身份选择':'Identity'}</div>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${I18N.t('app.login.beta_form_identity')}</div>
         <div>
-          <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:8px">${z?'您的身份是？ <span style="color:var(--r,#dc2828)">*</span>':'Your identity? <span style="color:var(--r,#dc2828)">*</span>'}</label>
+          <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:8px">${I18N.t('app.login.beta_form_identity_question')}</label>
           <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px">
-            <div class="ba-id-card" onclick="app.baSelectIdentity('student')" data-id="student" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🎓</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'学生':'Student'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'在校学生':'In school'}</div></div></div>
-            <div class="ba-id-card" onclick="app.baSelectIdentity('enterprise')" data-id="enterprise" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🏢</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'企业':'Enterprise'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'企业团队':'Company team'}</div></div></div>
-            <div class="ba-id-card" onclick="app.baSelectIdentity('opc')" data-id="opc" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">💼</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">OPC</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'独立开发者':'Independent'}</div></div></div>
-            <div class="ba-id-card" onclick="app.baSelectIdentity('other')" data-id="other" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">📋</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${z?'其他':'Other'}</div><div style="font-size:10px;color:var(--t3,#86868b)">${z?'其他身份':'Other identity'}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('student')" data-id="student" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🎓</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${I18N.t('app.login.beta_form_student')}</div><div style="font-size:10px;color:var(--t3,#86868b)">${I18N.t('app.login.beta_form_student_desc')}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('enterprise')" data-id="enterprise" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">🏢</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${I18N.t('app.login.beta_form_enterprise')}</div><div style="font-size:10px;color:var(--t3,#86868b)">${I18N.t('app.login.beta_form_enterprise_desc')}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('opc')" data-id="opc" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">💼</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">OPC</div><div style="font-size:10px;color:var(--t3,#86868b)">${I18N.t('app.login.beta_form_opc_desc')}</div></div></div>
+            <div class="ba-id-card" onclick="app.baSelectIdentity('other')" data-id="other" style="display:flex;align-items:center;gap:8px;padding:10px;border:2px solid var(--b,#e3e6ee);border-radius:10px;cursor:pointer;transition:all .15s"><span style="font-size:18px">📋</span><div><div style="font-size:12px;font-weight:600;color:var(--t,#1d1d1f)">${I18N.t('app.login.beta_form_other')}</div><div style="font-size:10px;color:var(--t3,#86868b)">${I18N.t('app.login.beta_form_other_identity_desc')}</div></div></div>
           </div>
         </div>
         <div id="baBranchStudent" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
           <div style="margin-top:12px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'学历 <span style="color:var(--r,#dc2828)">*</span>':'Education <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_education')}</label>
             <div id="baEdu" style="display:flex;flex-direction:column;gap:6px">
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'本科生':'Undergraduate'}" onchange="app.baToggleOther(this)"> ${z?'本科生':'Undergraduate'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'硕士研究生':'Master'}" onchange="app.baToggleOther(this)"> ${z?'硕士研究生':'Master'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'博士研究生':'PhD'}" onchange="app.baToggleOther(this)"> ${z?'博士研究生':'PhD'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${I18N.t('app.login.beta_form_edu_undergraduate')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_edu_undergraduate')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${I18N.t('app.login.beta_form_edu_master')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_edu_master')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${I18N.t('app.login.beta_form_edu_phd')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_edu_phd')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baEdu" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
           <div style="margin-top:10px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'专业方向 <span style="color:var(--r,#dc2828)">*</span>':'Major <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_major')}</label>
             <div style="display:flex;flex-direction:column;gap:6px">
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baMajor" value="${z?'计算机/软件工程':'CS/SE'}" onchange="app.baToggleOther(this)"> ${z?'计算机/软件工程':'CS/SE'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'人工智能':'AI'}" onchange="app.baToggleOther(this)"> ${z?'人工智能':'AI'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'数据科学':'Data Science'}" onchange="app.baToggleOther(this)"> ${z?'数据科学':'Data Science'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'电子/自动化':'EE/Automation'}" onchange="app.baToggleOther(this)"> ${z?'电子/自动化':'EE'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'其他理工科':'Other STEM'}" onchange="app.baToggleOther(this)"> ${z?'其他理工科':'Other STEM'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'经管/商科':'Business'}" onchange="app.baToggleOther(this)"> ${z?'经管/商科':'Business'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_major_cs')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_major_cs')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_major_ai')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_major_ai')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_major_data_science')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_major_data_science')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_major_ee')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_major_ee_short')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_major_other_stem')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_major_other_stem')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_major_business')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_major_business')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="radio" name="baMajor" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
         <div id="baBranchEnterprise" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
           <div style="margin-top:12px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'企业规模 <span style="color:var(--r,#dc2828)">*</span>':'Company Size <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_company_size')}</label>
             <div id="baSize" style="display:flex;flex-direction:column;gap:6px">
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="1-10人" onchange="app.baToggleOther(this)"> 1-10人</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baSize" value="11-50人" onchange="app.baToggleOther(this)"> 11-50人</label>
@@ -1184,86 +1666,85 @@ function loadAgentTypes() {
             </div>
           </div>
           <div style="margin-top:10px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'角色 <span style="color:var(--r,#dc2828)">*</span>':'Role <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_role')}</label>
             <div id="baRole" style="display:flex;flex-direction:column;gap:6px">
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'开发人员':'Developer'}" onchange="app.baToggleOther(this)"> ${z?'开发人员':'Developer'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'技术负责人/架构师':'Tech Lead'}" onchange="app.baToggleOther(this)"> ${z?'技术负责人/架构师':'Tech Lead'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'产品经理':'PM'}" onchange="app.baToggleOther(this)"> ${z?'产品经理':'PM'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'项目经理':'Project Manager'}" onchange="app.baToggleOther(this)"> ${z?'项目经理':'Project Manager'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'管理人员':'Manager'}" onchange="app.baToggleOther(this)"> ${z?'管理人员':'Manager'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${I18N.t('app.login.beta_form_role_developer')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_role_developer')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${I18N.t('app.login.beta_form_role_tech_lead')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_role_tech_lead')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${I18N.t('app.login.beta_form_role_pm')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_role_pm')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${I18N.t('app.login.beta_form_role_project_manager')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_role_project_manager')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${I18N.t('app.login.beta_form_role_manager')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_role_manager')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baRole" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
           <div style="margin-top:10px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'使用场景 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_use_cases_multi')}</label>
             <div style="display:flex;flex-wrap:wrap;gap:6px">
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'软件开发':'Software Dev'}"> ${z?'软件开发':'Software Dev'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'AI Agent / Agent 开发':'AI Agent'}"> ${z?'AI Agent / Agent 开发':'AI Agent'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'自动化办公':'Automation'}"> ${z?'自动化办公':'Automation'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'企业内部工具':'Internal Tools'}"> ${z?'企业内部工具':'Internal Tools'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'数据分析':'Data Analysis'}"> ${z?'数据分析':'Data Analysis'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'运维 / DevOps':'DevOps'}"> ${z?'运维 / DevOps':'DevOps'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_case_software_dev')}"> ${I18N.t('app.login.beta_form_case_software_dev')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_case_ai_agent')}"> ${I18N.t('app.login.beta_form_case_ai_agent')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_case_automation_office')}"> ${I18N.t('app.login.beta_form_case_automation_office')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_case_internal_tools')}"> ${I18N.t('app.login.beta_form_case_internal_tools')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_case_data_analysis')}"> ${I18N.t('app.login.beta_form_case_data_analysis')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_case_devops')}"> ${I18N.t('app.login.beta_form_case_devops')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baEntCase" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
         <div id="baBranchOpc" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
           <div style="margin-top:12px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'主要从事 <span style="color:var(--r,#dc2828)">*</span>':'Occupation <span style="color:var(--r,#dc2828)">*</span>'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_occupation')}</label>
             <div id="baOcc" style="display:flex;flex-direction:column;gap:6px">
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'软件/IT':'Software/IT'}" onchange="app.baToggleOther(this)"> ${z?'软件/IT':'Software/IT'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${I18N.t('app.login.beta_form_occ_software_it')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_occ_software_it')}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="AI/Agent" onchange="app.baToggleOther(this)"> AI/Agent</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'电商':'E-commerce'}" onchange="app.baToggleOther(this)"> ${z?'电商':'E-commerce'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'内容创作':'Content Creation'}" onchange="app.baToggleOther(this)"> ${z?'内容创作':'Content'}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${I18N.t('app.login.beta_form_occ_ecommerce')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_occ_ecommerce')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${I18N.t('app.login.beta_form_occ_content_creation')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_occ_content')}</label>
               <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="SaaS" onchange="app.baToggleOther(this)"> SaaS</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'咨询/服务':'Consulting'}" onchange="app.baToggleOther(this)"> ${z?'咨询/服务':'Consulting'}</label>
-              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${I18N.t('app.login.beta_form_occ_consulting')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_occ_consulting')}</label>
+              <label style="display:flex;align-items:center;gap:6px;padding:8px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px"><input style="align-self:center" type="radio" name="baOcc" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
           <div style="margin-top:10px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'解决问题 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_solve_cases_multi')}</label>
             <div style="display:flex;flex-wrap:wrap;gap:6px">
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'产品开发':'Product Dev'}"> ${z?'产品开发':'Product Dev'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'编程开发':'Coding'}"> ${z?'编程开发':'Coding'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'Agent 开发':'Agent Dev'}"> ${z?'Agent 开发':'Agent Dev'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'内容生产':'Content'}"> ${z?'内容生产':'Content'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'数据处理/分析':'Data'}"> ${z?'数据处理/分析':'Data'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'运营':'Operations'}"> ${z?'运营':'Operations'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_product_dev')}"> ${I18N.t('app.login.beta_form_case_product_dev')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_coding')}"> ${I18N.t('app.login.beta_form_case_coding')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_agent_dev')}"> ${I18N.t('app.login.beta_form_case_agent_dev')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_automation')}"> ${I18N.t('app.login.beta_form_case_automation')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_content_prod')}"> ${I18N.t('app.login.beta_form_case_content_prod')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_data')}"> ${I18N.t('app.login.beta_form_case_data')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_case_operations')}"> ${I18N.t('app.login.beta_form_case_operations')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOpcCase" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
         <div id="baBranchOther" style="overflow:hidden;max-height:0;opacity:0;transition:all .3s">
           <div style="margin-top:12px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'身份/职业描述 <span style="color:var(--r,#dc2828)">*</span>':'Description <span style="color:var(--r,#dc2828)">*</span>'}</label>
-            <input id="baOtherDesc" type="text" placeholder="${z?'如：自由职业者、研究者':'e.g. Freelancer, Researcher'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_desc')}</label>
+            <input id="baOtherDesc" type="text" placeholder="${I18N.t('app.login.beta_form_desc_placeholder')}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none">
           </div>
           <div style="margin-top:10px">
-            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${z?'使用场景 <span style="color:var(--r,#dc2828)">*</span>（多选）':'Use Cases <span style="color:var(--r,#dc2828)">*</span> (multi)'}</label>
+            <label style="display:block;font-size:12px;color:var(--t2,#5b667b);margin-bottom:4px">${I18N.t('app.login.beta_form_use_cases_multi')}</label>
             <div style="display:flex;flex-wrap:wrap;gap:6px">
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'学习':'Learning'}"> ${z?'学习':'Learning'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'工作':'Work'}"> ${z?'工作':'Work'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'编程':'Coding'}"> ${z?'编程':'Coding'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'创业':'Startup'}"> ${z?'创业':'Startup'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'内容创作':'Content'}"> ${z?'内容创作':'Content'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'数据分析':'Data'}"> ${z?'数据分析':'Data'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'自动化':'Automation'}"> ${z?'自动化':'Automation'}</label>
-              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${z?'其他':'Other'}" onchange="app.baToggleOther(this)"> ${z?'其他':'Other'} <input type="text" class="ba-other-text" placeholder="${z?'请输入':'Input'}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_case_learning')}"> ${I18N.t('app.login.beta_form_case_learning')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_case_work')}"> ${I18N.t('app.login.beta_form_case_work')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_case_programming')}"> ${I18N.t('app.login.beta_form_case_programming')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_case_startup')}"> ${I18N.t('app.login.beta_form_case_startup')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_occ_content')}"> ${I18N.t('app.login.beta_form_occ_content')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_case_data_short')}"> ${I18N.t('app.login.beta_form_case_data_short')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_case_automation')}"> ${I18N.t('app.login.beta_form_case_automation')}</label>
+              <label style="display:flex;align-items:center;gap:4px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;cursor:pointer;font-size:12px;white-space:nowrap"><input style="align-self:center" type="checkbox" class="baOtherCase" value="${I18N.t('app.login.beta_form_other')}" onchange="app.baToggleOther(this)"> ${I18N.t('app.login.beta_form_other')} <input type="text" class="ba-other-text" placeholder="${I18N.t('app.login.beta_form_input_placeholder')}" style="display:none;width:160px;padding:6px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;font-size:12px;outline:none;margin-left:4px"></label>
             </div>
           </div>
         </div>
-        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${z?'申请理由':'Reason'} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${z?'选填':'optional'})</span></div>
-        <textarea id="betaReason" rows="2" placeholder="${z?'选填':'Optional'}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;resize:vertical;font-family:inherit"></textarea>
-        <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${z?'提交申请':'Submit'}</button>
+        <div style="font-size:13px;font-weight:600;color:var(--t2,#5b667b);margin:16px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--b,#f0f1f5)">${I18N.t('app.login.beta_form_reason')} <span style="font-size:10px;color:var(--t3,#a0a0a0)">(${I18N.t('app.login.beta_form_optional_lower')})</span></div>
+        <textarea id="betaReason" rows="2" placeholder="${I18N.t('app.login.beta_form_optional')}" style="width:100%;padding:10px 12px;border:1px solid var(--b,#e3e6ee);border-radius:8px;font-size:13px;background:var(--c,#fff);color:var(--t1,#1d1d1f);outline:none;resize:vertical;font-family:inherit"></textarea>
+        <button id="betaSubmitBtn" onclick="app.submitBetaApply()" style="width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer;margin-top:8px">${I18N.t('app.login.beta_form_submit')}</button>
       </div>`;
     document.body.appendChild(overlay);
     // Issue #205: 移除遮罩点击关闭逻辑，仅通过 × 按钮关闭；表单数据 sessionStorage 持久化
     _baRestoreForm();
     overlay.addEventListener('input', _baSaveForm);
     overlay.addEventListener('change', _baSaveForm);
-  }
-  var _baIdentity = '';
+  }  var _baIdentity = '';
   var _BA_FORM_KEY = 'beta_apply_form';
   function _baCollectFormData() {
     var modal = document.getElementById('betaApplyModal');
@@ -1412,82 +1893,344 @@ function loadAgentTypes() {
     var email = document.getElementById('betaEmail').value.trim();
     var phone = (document.getElementById('betaPhone')||{}).value ? document.getElementById('betaPhone').value.trim() : '';
     var reason = document.getElementById('betaReason').value.trim();
-    if (!accountName) { showToast(isZh ? '请填写用户名' : 'Username is required'); return; }
-    if (!email) { showToast(isZh ? '请填写邮箱' : 'Email is required'); return; }
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast(isZh ? '邮箱格式不正确' : 'Invalid email'); return; }
-    if (!_baIdentity) { showToast(isZh ? '请选择身份' : 'Please select identity'); return; }
+    if (!accountName) { showToast(I18N.t('app.login.beta_username_required')); return; }
+    if (!email) { showToast(I18N.t('app.login.beta_email_required')); return; }
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { showToast(I18N.t('app.login.beta_email_invalid')); return; }
+    if (!_baIdentity) { showToast(I18N.t('app.login.beta_select_identity')); return; }
     var survey = null;
     if (_baIdentity === 'student') {
       var edu = _baRadio('baEdu'), major = _baRadio('baMajor');
-      if (edu === '其他' || edu === 'Other') { var _t = document.querySelector('input[name="baEdu"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); edu = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!edu) { showToast(isZh ? '请输入学历' : 'Enter education'); return; } }
-      if (!edu || !major) { showToast(isZh ? '请完成学历和专业方向' : 'Complete education & major'); return; }
-      if (major === '其他' || major === 'Other') { var _t2 = document.querySelector('input[name="baMajor"]:checked'); if (_t2) { var _tt2 = _t2.parentElement.querySelector('.ba-other-text'); major = _tt2 && _tt2.value.trim() ? _tt2.value.trim() : ''; } if (!major) { showToast(isZh ? '请输入专业方向' : 'Enter major'); return; } }
+      if (edu === '其他' || edu === 'Other') { var _t = document.querySelector('input[name="baEdu"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); edu = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!edu) { showToast(I18N.t('app.login.beta_enter_education')); return; } }
+      if (!edu || !major) { showToast(I18N.t('app.login.beta_complete_education')); return; }
+      if (major === '其他' || major === 'Other') { var _t2 = document.querySelector('input[name="baMajor"]:checked'); if (_t2) { var _tt2 = _t2.parentElement.querySelector('.ba-other-text'); major = _tt2 && _tt2.value.trim() ? _tt2.value.trim() : ''; } if (!major) { showToast(I18N.t('app.login.beta_enter_major')); return; } }
       survey = { identity: 'student', education: edu, major: major };
     } else if (_baIdentity === 'enterprise') {
       var size = _baRadio('baSize'), role = _baRadio('baRole'), cases = _baChecks('baEntCase');
-      if (role === '其他' || role === 'Other') { var _t = document.querySelector('input[name="baRole"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); role = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!role) { showToast(isZh ? '请输入角色' : 'Enter role'); return; } }
-      if (!size || !role || cases.length === 0) { showToast(isZh ? '请完成企业信息' : 'Complete company info'); return; }
+      if (role === '其他' || role === 'Other') { var _t = document.querySelector('input[name="baRole"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); role = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!role) { showToast(I18N.t('app.login.beta_enter_role')); return; } }
+      if (!size || !role || cases.length === 0) { showToast(I18N.t('app.login.beta_complete_company')); return; }
       survey = { identity: 'enterprise', companySize: size, role: role, useCases: cases };
     } else if (_baIdentity === 'opc') {
       var occ = _baRadio('baOcc'), cases2 = _baChecks('baOpcCase');
-      if (occ === '其他' || occ === 'Other') { var _t = document.querySelector('input[name="baOcc"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); occ = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!occ) { showToast(isZh ? '请输入职业' : 'Enter occupation'); return; } }
-      if (!occ || cases2.length === 0) { showToast(isZh ? '请完成OPC信息' : 'Complete OPC info'); return; }
+      if (occ === '其他' || occ === 'Other') { var _t = document.querySelector('input[name="baOcc"]:checked'); if (_t) { var _tt = _t.parentElement.querySelector('.ba-other-text'); occ = _tt && _tt.value.trim() ? _tt.value.trim() : ''; } if (!occ) { showToast(I18N.t('app.login.beta_enter_occupation')); return; } }
+      if (!occ || cases2.length === 0) { showToast(I18N.t('app.login.beta_complete_opc')); return; }
       survey = { identity: 'opc', occupation: occ, useCases: cases2 };
     } else if (_baIdentity === 'other') {
       var desc = (document.getElementById('baOtherDesc')||{}).value ? document.getElementById('baOtherDesc').value.trim() : '';
       var cases3 = _baChecks('baOtherCase');
-      if (!desc || cases3.length === 0) { showToast(isZh ? '请完成描述和场景' : 'Complete description & cases'); return; }
+      if (!desc || cases3.length === 0) { showToast(I18N.t('app.login.beta_complete_desc')); return; }
       survey = { identity: 'other', description: desc, useCases: cases3 };
     }
     var btn = document.getElementById('betaSubmitBtn');
-    btn.disabled = true; btn.textContent = isZh ? '提交中...' : 'Submitting...';
+    btn.disabled = true; btn.textContent = I18N.t('app.login.beta_submitting');
     API.post('/settings/beta-apply/submit', {
       accountType: accountType, accountName: accountName, email: email,
       identityType: _baIdentity, phone: phone, reason: reason, surveyData: survey
     }).then(function(d) {
       if (d.success) {
-        showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        showToast(d.message || I18N.t('app.login.beta_submitted'));
         _baClearForm();
         document.getElementById('betaApplyModal').remove();
       } else if (d.error) {
         showToast(d.error);
-        btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
+        btn.disabled = false; btn.textContent = I18N.t('app.login.beta_submit');
       } else {
-        showToast(d.message || (isZh ? '申请已提交' : 'Submitted'));
+        showToast(d.message || I18N.t('app.login.beta_submitted'));
         _baClearForm();
         document.getElementById('betaApplyModal').remove();
       }
     }).catch(function(e) {
-      showToast((isZh ? '提交失败: ' : 'Failed: ') + (e.message || e));
-      btn.disabled = false; btn.textContent = isZh ? '提交申请' : 'Submit';
+      showToast(I18N.t('app.login.beta_submit_failed_prefix') + (e.message || e));
+      btn.disabled = false; btn.textContent = I18N.t('app.login.beta_submit');
     });
   }
 
-  let pwdVisible = false;
-  function togglePwdLogin() {
-    pwdVisible = !pwdVisible;
-    $('loginLinks').style.display = pwdVisible ? 'none' : '';
-    $('pwdLogin').style.display = pwdVisible ? 'block' : 'none';
-    $('gitBtn').style.display = pwdVisible ? 'none' : '';
+  // ── 登录/注册/忘记密码：独立页面跳转（不再用 display:none 切换）──
+  // P1-9: 删除 togglePwdLogin/toggleRegisterForm/toggleForgotPassword 死代码
+  // 这些函数已被独立页面（/register, /forgot）的 <a href> 替代，从未被调用
+
+  // P1-9: 删除 _startCooldown 死代码 — 认证页面倒计时已由 Auth.startCountdown 统一处理
+
+  // 以下函数仅在主应用 app.js 内保留兼容引用（独立页面有自己的实现）
+  // 注册/忘记密码的交互逻辑已移到 register.html / forgot.html 内联 JS
+
+  // 按钮加载态
+  function _setLoginBtnLoading(btn, loading) {
+    if (!btn) return;
+    if (loading) {
+      btn.disabled = true;
+      btn.dataset.originalHtml = btn.innerHTML;
+      btn.innerHTML = '<div class="spinner"></div>';
+    } else {
+      btn.disabled = false;
+      if (btn.dataset.originalHtml) btn.innerHTML = btn.dataset.originalHtml;
+    }
+  }
+
+  // 密码可见性切换（登录页面）
+  var _loginEyeOpen = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>';
+  var _loginEyeClosed = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>';
+  function _toggleLoginPwd(btn) {
+    var el = $('loginPass');
+    if (el.type === 'password') {
+      el.type = 'text';
+      btn.innerHTML = _loginEyeClosed;
+      btn.setAttribute('aria-label', I18N.t('app.login.hide_password'));
+    } else {
+      el.type = 'password';
+      btn.innerHTML = _loginEyeOpen;
+      btn.setAttribute('aria-label', I18N.t('app.login.show_password'));
+    }
+  }
+
+  // P-UX: oninput 清除错误 — 用户修改时给正反馈
+  function _clearLoginError(fieldId) {
+    var el = $(fieldId);
+    if (!el) return;
+    if (el.getAttribute('aria-invalid') === 'true') {
+      var errEl = $(fieldId + 'Err');
+      if (errEl) { errEl.textContent = ''; errEl.style.display = 'none'; }
+      el.removeAttribute('aria-invalid');
+    }
+  }
+
+  // P-UX: blur 验证 — 仅验证非空字段（空字段不报错，等 submit 统一验证）
+  function _blurValidateLogin(fieldId) {
+    var el = $(fieldId);
+    if (!el) return true;
+    var val = el.value.trim();
+    if (!val) return true; // 空字段不报错
+    _clearLoginError(fieldId);
+    return true;
+  }
+
+  // P-UX: submit 验证 — 所有必填字段统一验证（空字段也报错）
+  function _submitValidateLogin(fieldId) {
+    var el = $(fieldId);
+    var errEl = $(fieldId + 'Err');
+    if (!el || !errEl) return true;
+    var val = el.value.trim();
+    var isZh = I18N.getLang() === 'zh';
+    errEl.textContent = '';
+    errEl.style.display = 'none';
+    el.removeAttribute('aria-invalid');
+    if (!val) {
+      var label = fieldId === 'loginUser'
+        ? I18N.t('app.login.login_user_required')
+        : I18N.t('app.login.login_pass_required');
+      errEl.textContent = label;
+      errEl.style.display = 'block';
+      el.setAttribute('aria-invalid', 'true');
+      return false;
+    }
+    return true;
   }
 
   function pwdLogin() {
-    const u = $('loginUser').value.trim();
-    const p = $('loginPass').value.trim();
-    if (!u || !p) return showToast(I18N.t('app.login.empty_input'));
-    API.post('/auth/login', {username: u, password: p}).then(d => {
+    // P-UX: submit 时统一验证（空字段也报错）
+    var hasErr = false;
+    if (!_submitValidateLogin('loginUser')) hasErr = true;
+    if (!_submitValidateLogin('loginPass')) hasErr = true;
+    if (hasErr) return;
+    var u = $('loginUser').value.trim();
+    var p = $('loginPass').value.trim();
+    // 清除旧 token——避免 ensureTokenValid 尝试 refresh 旧 token 导致 20 秒等待
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    localStorage.removeItem('current_org_id');
+    // 清除旧仓库选择——切换账号登录时 sessionStorage 残留的 currentRepo 会导致新账号路由恢复到 dash 但无权限
+    sessionStorage.removeItem('currentRepo');
+    // 按钮加载态
+    var btn = $('loginBtn');
+    _setLoginBtnLoading(btn, true);
+    API.post('/auth/login', {identifier: u, password: p, lang: I18N.getLang()}).then(d => {
       localStorage.setItem('token', d.token);
-      // refresh_token 在 HttpOnly cookie 里——不需要存 localStorage
       localStorage.setItem('user', JSON.stringify(d.user));
-      API.scheduleProactiveRefresh();  // Issue #86: 启动主动刷新定时器
+      _setLoginBtnLoading(btn, false);
+      API.scheduleProactiveRefresh();
       showApp();
     }).catch(e => {
-      if (e.message && e.message.indexOf('白名单') >= 0) {
+      _setLoginBtnLoading(btn, false);
+      var msg = e.message || 'Failed';
+      // 限流反馈
+      if (msg.includes('锁定') || msg.includes('lock') || msg.includes('IP')) {
+        showToast(msg);
+      } else if (msg.includes('验证码') || msg.includes('captcha') || msg.includes('人机')) {
+        showToast(msg);
+      } else if (msg.includes('白名单')) {
         _showWhitelistGuidance('gitcode', u);
       } else {
-        showToast(I18N.t('app.login.failed') + ': ' + e.message);
+        showToast(I18N.t('app.login.failed') + ': ' + msg);
       }
     });
+  }
+
+  // ===== 账号安全设置页函数 =====
+  function saveProfile() {
+    var nick = $('accNickname') ? $('accNickname').value.trim() : '';
+    API.put('/auth/profile', {nickname: nick}).then(function() {
+      showToast(I18N.t('app.login.save_success'));
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function showChangePassword() {
+    var isZh = I18N.getLang()==='zh';
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">'
+      + '<input class="obtn" id="cpCurr" type="password" placeholder="' + I18N.t('app.login.current_password') + '">'
+      + '<input class="obtn" id="cpNew" type="password" placeholder="' + I18N.t('app.login.new_password') + '">'
+      + '<input class="obtn" id="cpConfirm" type="password" placeholder="' + I18N.t('app.login.confirm_new_password') + '">'
+      + '<button class="bt bt-p" onclick="app.doChangePassword()">' + I18N.t('app.login.confirm_change') + '</button>'
+      + '</div>';
+    showConfirm(html, null, {hideActions: true});
+  }
+
+  function doChangePassword() {
+    var curr = $('cpCurr').value.trim();
+    var np = $('cpNew').value.trim();
+    var cp = $('cpConfirm').value.trim();
+    if (!curr || !np || !cp) return showToast(I18N.t('app.login.fill_all_fields'));
+    if (np !== cp) return showToast(I18N.t('app.login.password_mismatch'));
+    API.post('/auth/change-password', {current_password: curr, new_password: np}).then(function(d) {
+      if (d.token) { localStorage.setItem('token', d.token); API.setToken(d.token); }
+      closeConfirm();
+      showToast(I18N.t('app.login.password_changed'));
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function showSetPassword() {
+    var isZh = I18N.getLang()==='zh';
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">'
+      + '<p style="font-size:12px;color:var(--t2)">' + I18N.t('app.login.code_sent_to_email') + '</p>'
+      + '<button class="bt bt-p" id="spSendBtn" onclick="app.sendSetPasswordCode()">' + I18N.t('app.login.send_code') + '</button>'
+      + '<div id="spStep2" style="display:none;flex-direction:column;gap:8px">'
+      + '<input class="obtn" id="spCode" type="text" placeholder="' + I18N.t('app.login.verification_code_short') + '">'
+      + '<input class="obtn" id="spPwd" type="password" placeholder="' + I18N.t('app.login.new_password') + '">'
+      + '<button class="bt bt-p" onclick="app.doSetPassword()">' + I18N.t('app.login.confirm_set') + '</button>'
+      + '</div>'
+      + '</div>';
+    showConfirm(html, null, {hideActions: true});
+  }
+
+  function sendSetPasswordCode() {
+    API.post('/auth/set-password/send-code').then(function() {
+      showToast(I18N.t('app.login.code_sent'));
+      var step2 = document.getElementById('spStep2');
+      if (step2) step2.style.display = 'flex';
+      var sendBtn = document.getElementById('spSendBtn');
+      if (sendBtn) sendBtn.disabled = true;
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function doSetPassword() {
+    var code = $('spCode').value.trim();
+    var pwd = $('spPwd').value.trim();
+    if (!code || !pwd) return showToast(I18N.t('app.login.fill_all_fields'));
+    API.post('/auth/set-password', {code: code, new_password: pwd}).then(function() {
+      closeConfirm();
+      showToast(I18N.t('app.login.password_set'));
+      renderSettings('account');
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function showChangeEmail() {
+    var isZh = I18N.getLang()==='zh';
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">'
+      + '<div id="ceStep1" style="display:flex;flex-direction:column;gap:8px">'
+      + '<input class="obtn" id="ceEmail" type="text" placeholder="' + I18N.t('app.login.new_email') + '">'
+      + '<button class="bt bt-p" id="ceSendBtn" onclick="app.sendChangeEmailCode()">' + I18N.t('app.login.send_code') + '</button>'
+      + '</div>'
+      + '<div id="ceStep2" style="display:none;flex-direction:column;gap:8px">'
+      + '<p style="font-size:12px;color:var(--t2)" id="ceHint">' + I18N.t('app.login.code_sent_new_email') + '</p>'
+      + '<input class="obtn" id="ceCode" type="text" placeholder="' + I18N.t('app.login.verification_code_short') + '" maxlength="6">'
+      + '<button class="bt bt-p" onclick="app.doChangeEmail()">' + I18N.t('app.login.confirm_change_email') + '</button>'
+      + '</div>'
+      + '</div>';
+    showConfirm(html, null, {hideActions: true});
+  }
+
+  function sendChangeEmailCode() {
+    var email = $('ceEmail').value.trim();
+    if (!email) return showToast(I18N.t('app.login.enter_email'));
+    API.post('/auth/change-email/send-code', {new_email: email}).then(function() {
+      showToast(I18N.t('app.login.code_sent'));
+      var step1 = document.getElementById('ceStep1');
+      var step2 = document.getElementById('ceStep2');
+      if (step1) step1.style.display = 'none';
+      if (step2) step2.style.display = 'flex';
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function doChangeEmail() {
+    var email = $('ceEmail').value.trim();
+    var code = $('ceCode').value.trim();
+    if (!email || !code) return showToast(I18N.t('app.login.fill_all_fields'));
+    API.post('/auth/change-email', {new_email: email, code: code}).then(function() {
+      closeConfirm();
+      showToast(I18N.t('app.login.email_changed'));
+      renderSettings('account');
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function bindProvider(provider) {
+    // 复用设置页的绑定模态框——OAuth + 手动令牌 + spinner + 转移确认 + 成功反馈
+    if (typeof _accountBindProvider === 'function') {
+      _accountBindProvider(provider);
+    } else {
+      // 兜底：account.js 未加载时直接 OAuth 跳转
+      API.get('/auth/bind/' + provider).then(function(d) {
+        if (d.redirect_url) window.location.href = d.redirect_url;
+      }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }
+  }
+
+  function deleteAccount() {
+    var isZh = I18N.getLang()==='zh';
+    var html = '<div style="display:flex;flex-direction:column;gap:8px">'
+      + '<p style="color:var(--r);font-size:12px">' + I18N.t('app.login.delete_account_warning') + '</p>'
+      + '<div id="daStep1" style="display:flex;flex-direction:column;gap:8px">'
+      + '<p style="font-size:12px;color:var(--t2)">' + I18N.t('app.login.choose_verify_method') + '</p>'
+      + '<button class="bt bt-p" onclick="app._daChoosePwd()">' + I18N.t('app.login.verify_with_password') + '</button>'
+      + '<button class="bt bt-s" onclick="app._daChooseCode()">' + I18N.t('app.login.verify_with_code') + '</button>'
+      + '</div>'
+      + '<div id="daStepPwd" style="display:none;flex-direction:column;gap:8px">'
+      + '<input class="obtn" id="daPwd" type="password" placeholder="' + I18N.t('app.login.enter_password') + '">'
+      + '<button class="bt bt-p" style="background:var(--r)" onclick="app.doDeleteAccount()">' + I18N.t('app.login.confirm_delete_account') + '</button>'
+      + '</div>'
+      + '<div id="daStepCode" style="display:none;flex-direction:column;gap:8px">'
+      + '<div style="display:flex;gap:8px"><button class="bt bt-s" onclick="app.sendDeleteAccountCode()">' + I18N.t('app.login.send_code') + '</button></div>'
+      + '<input class="obtn" id="daCode" type="text" placeholder="' + I18N.t('app.login.verification_code_short') + '" maxlength="6">'
+      + '<button class="bt bt-p" style="background:var(--r)" onclick="app.doDeleteAccount()">' + I18N.t('app.login.confirm_delete_account') + '</button>'
+      + '</div>'
+      + '</div>';
+    showConfirm(html, null, {hideActions: true, danger: true});
+  }
+
+  function _daChoosePwd() {
+    document.getElementById('daStep1').style.display = 'none';
+    document.getElementById('daStepPwd').style.display = 'flex';
+  }
+
+  function _daChooseCode() {
+    document.getElementById('daStep1').style.display = 'none';
+    document.getElementById('daStepCode').style.display = 'flex';
+  }
+
+  function sendDeleteAccountCode() {
+    API.post('/auth/delete-account/send-code').then(function() {
+      showToast(I18N.t('app.login.code_sent'));
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+  }
+
+  function doDeleteAccount() {
+    var pwd = $('daPwd').value.trim();
+    var code = $('daCode').value.trim();
+    if (!pwd && !code) return showToast(I18N.t('app.login.enter_password_or_code'));
+    API.post('/auth/delete-account', {password: pwd, code: code}).then(function() {
+      localStorage.removeItem('token');
+      localStorage.removeItem('user');
+      closeConfirm();
+      showLogin();
+      showToast(I18N.t('app.login.account_deleted'));
+    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
   }
 
   function _showWhitelistGuidance(platform, username) {
@@ -1496,42 +2239,66 @@ function loadAgentTypes() {
     overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;background:rgba(0,0,0,0.35);backdrop-filter:blur(6px);-webkit-backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
     var platName = platform === 'github' ? 'GitHub' : 'GitCode';
     overlay.innerHTML =
-      '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">' +
-        '<div style="font-size:48px;margin-bottom:16px">🔒</div>' +
-        '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">账号尚未开通内测权限</h2>' +
-        '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">您的' + platName + (username ? ' 账号 <b>' + username + '</b>' : ' 账号') + '尚未获得内测权限。</p>' +
-        '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">请先申请内测，审核通过后即可登录。</p>' +
-        '<div style="display:flex;gap:8px;justify-content:center">' +
-          '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + platform + '&username=' + encodeURIComponent(username) + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">申请内测</button>' +
-          '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">关闭</button>' +
-        '</div>' +
-      '</div>';
+      '<div style="background:var(--c,#fff);border-radius:20px;padding:40px;text-align:center;width:400px;max-width:90vw;box-shadow:0 16px 64px rgba(0,0,0,0.25)">'
+        + '<div style="font-size:48px;margin-bottom:16px">🔒</div>'
+        + '<h2 style="font-size:18px;font-weight:700;color:var(--t,#1d1d1f);margin-bottom:8px">' + I18N.t('app.login.whitelist_title') + '</h2>'
+        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:6px">' + I18N.t('app.login.whitelist_desc', {platform: platName, username: username ? ' <b>' + _esc(username) + '</b> ' : ' '}) + '</p>'
+        + '<p style="font-size:14px;color:var(--t2,#86868b);margin-bottom:24px">' + I18N.t('app.login.whitelist_apply_hint') + '</p>'
+        + '<div style="display:flex;gap:8px;justify-content:center">'
+          + '<button onclick="window.location.href=\'/static/beta-apply.html?platform=' + platform + '&username=' + encodeURIComponent(username) + '\'" style="padding:12px 32px;border:none;border-radius:12px;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:14px;font-weight:600;cursor:pointer">' + I18N.t('app.login.whitelist_apply_btn') + '</button>'
+          + '<button onclick="document.getElementById(\'whitelistModal\').remove()" style="padding:12px 24px;border:1px solid var(--b,#e3e6ee);border-radius:12px;background:transparent;color:var(--t,#1d1d1f);font-size:14px;font-weight:500;cursor:pointer">' + I18N.t('common.close') + '</button>'
+        + '</div>'
+      + '</div>';
     document.body.appendChild(overlay);
     overlay.addEventListener('click', function(e) { if (e.target === overlay) overlay.remove(); });
   }
 
   function logout() {
-    API.post('/auth/logout', {}).catch(() => {});
+    // 用原生 fetch 调 logout API——不经过 ensureTokenValid（token 已清，会触发 refresh → 导航到 /login）
+    const _token = localStorage.getItem('token');
+    if (_token) {
+      fetch('/api/auth/logout', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _token},
+        credentials: 'same-origin',
+      }).catch(() => {});
+    }
     // 清除所有用户相关缓存——防止切换账号后看到上一个用户的仓库/事件
     localStorage.removeItem('token');
     localStorage.removeItem('user');
     localStorage.removeItem('currentRepo');
+    localStorage.removeItem('current_org_id');
     sessionStorage.removeItem('currentRepo');
     localStorage.removeItem(REPO_CACHE_KEY);
+    // 清除 URL hash——logout 不 reload 页面，残留 hash 会导致重新登录时路由恢复到错误页面
+    if (window.location.hash && window.location.hash.length > 1) {
+      if (window.history.replaceState) {
+        window.history.replaceState(null, '', window.location.pathname);
+      }
+    }
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
     showLogin();
   }
 
-  function showToast(msg, duration) {
+  function showToast(msg, desc, duration) {
     // Issue #199: 先移除已有 Toast，避免连续提示叠加
     var existing = document.querySelector('[role="status"].app-toast');
     if (existing) existing.remove();
+    // desc 可以是数字（旧调用兼容：showToast(msg, 3000)）
+    if (typeof desc === 'number') { duration = desc; desc = ''; }
+    var ms = typeof duration === 'number' ? duration : 3000;
     var t = document.createElement('div');
     t.style.cssText = 'position:fixed;bottom:24px;left:50%;transform:translateX(-50%) translateY(10px);background:#101724;color:#fff;padding:10px 20px;border-radius:10px;font-size:13px;z-index:10000;box-shadow:0 8px 32px rgba(0,0,0,.18);white-space:pre-line;max-width:80vw;opacity:0;transition:opacity .25s ease,transform .25s cubic-bezier(.25,.1,.25,1)';
     t.setAttribute('role', 'status');
     t.classList.add('app-toast');
-    t.textContent = msg;
+    // 有描述时显示主文案(粗体) + 描述(小字)
+    if (desc) {
+      t.innerHTML = '<div style="font-weight:600">' + _esc(msg) + '</div>'
+        + '<div style="font-size:11px;opacity:.8;margin-top:2px">' + _esc(desc) + '</div>';
+    } else {
+      t.textContent = msg;
+    }
     document.body.appendChild(t);
     // Apple 风格淡入 + 上移
     requestAnimationFrame(function() {
@@ -1543,7 +2310,7 @@ function loadAgentTypes() {
       t.style.opacity = '0';
       t.style.transform = 'translateX(-50%) translateY(10px)';
       setTimeout(function() { t.remove(); }, 300);
-    }, (duration || 2500) - 300);
+    }, ms - 300);
     // 点击 Toast 提前关闭
     t.addEventListener('click', function() {
       clearTimeout(removeTimer);
@@ -1559,24 +2326,29 @@ function loadAgentTypes() {
     closeConfirm();
     var o = opts || {};
     var danger = !!o.danger;
+    var hideActions = !!o.hideActions;
     var confirmText = o.confirmText || (I18N.t('common.confirm') || '确认');
     var cancelText = o.cancelText || (I18N.t('common.cancel') || '取消');
     var overlay = document.createElement('div');
     overlay.id = 'grapeConfirmOverlay';
     overlay.className = 'create-repo-overlay';
-    overlay.innerHTML = '<div class="confirm-modal">' +
-      '<div class="confirm-modal-msg">' + message + '</div>' +
+    var actionsHtml = hideActions ? '' :
       '<div class="confirm-modal-actions">' +
         '<button class="cr-btn cr-btn-ghost" id="grapeConfirmCancel">' + cancelText + '</button>' +
         '<button class="cr-btn ' + (danger ? 'cr-btn-danger' : 'cr-btn-primary') + '" id="grapeConfirmOk">' + confirmText + '</button>' +
-      '</div>' +
+      '</div>';
+    overlay.innerHTML = '<div class="confirm-modal">' +
+      '<div class="confirm-modal-msg">' + message + '</div>' +
+      actionsHtml +
     '</div>';
     document.body.appendChild(overlay);
     document.body.style.overflow = 'hidden';
     function _close() { overlay.remove(); document.body.style.overflow = ''; }
     overlay.onclick = function(e) { if (e.target === overlay) _close(); };
-    document.getElementById('grapeConfirmOk').onclick = function() { _close(); if (onConfirm) onConfirm(); };
-    document.getElementById('grapeConfirmCancel').onclick = _close;
+    if (!hideActions) {
+      document.getElementById('grapeConfirmOk').onclick = function() { _close(); if (onConfirm) onConfirm(); };
+      document.getElementById('grapeConfirmCancel').onclick = _close;
+    }
   }
   function closeConfirm() {
     var ex = document.getElementById('grapeConfirmOverlay');
@@ -1630,21 +2402,71 @@ function loadAgentTypes() {
         var username = parts[2] || '';
         _showWhitelistGuidance(platform, username);
       } else {
-        showToast(decoded, 6000);
+        // P2-i18n: 错误码走 I18N 翻译，不直接显示后端消息
+        var errorKey = 'app.login.oauth_error_' + decoded;
+        var translated = I18N.t(errorKey);
+        showToast(translated && translated !== errorKey ? translated : decoded, 6000);
       }
       if (window.history.replaceState) {
         window.history.replaceState(null, '', window.location.pathname);
       }
     }
 
-    // Check for OAuth token in URL first
+    // 绑定/解绑回调检测（全局，不依赖 nav('account')）
+    _checkBindSuccess();
+
+    // P0-3: Check for exchange_code in URL (new secure flow)
+    const exchangeCode = p.get('exchange_code');
+    if (exchangeCode) {
+      // 立即清除 URL 参数（不等待响应）
+      if (window.history.replaceState) {
+        const lang0 = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
+        const prefix0 = lang0 === 'en' ? '/en' : '';
+        window.history.replaceState(null, '', prefix0 + '/');
+      }
+      // POST /auth/exchange 换 JWT
+      fetch('/api/auth/exchange', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({code: exchangeCode}),
+      }).then(r => {
+        if (!r.ok) throw new Error('exchange failed');
+        return r.json();
+      }).then(d => {
+        localStorage.setItem('token', d.token);
+        localStorage.setItem('app_cache_ver', '43');
+        localStorage.removeItem(REPO_CACHE_KEY);
+        localStorage.removeItem('currentRepo');
+        localStorage.removeItem('current_org_id');
+        sessionStorage.removeItem('currentRepo');
+        if (d.first_login) {
+          sessionStorage.removeItem('currentRepo');
+          $('sidebar').style.display = 'none';
+          $('tb').style.display = 'none';
+          $('mainView').style.display = 'flex';
+          $('mainView').style.position = 'fixed';
+          $('mainView').style.inset = '0';
+          $('mainView').style.zIndex = '100';
+          $('pageTitle').textContent = I18N.t('app.current_project');
+        }
+        showApp();
+        API.scheduleProactiveRefresh();
+      }).catch(e => {
+        showToast(I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+        if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      });
+      return;
+    }
+
+    // Legacy: Check for OAuth token in URL (old flow, kept for transition)
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '36');
-      // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择——防止切换账号后看到旧数据
+      localStorage.setItem('app_cache_ver', '43');
+      // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择+组织上下文——防止切换账号后看到旧数据或 403
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
+      localStorage.removeItem('current_org_id');
       sessionStorage.removeItem('currentRepo');
       if (p.get('first_login') === '1') {
         sessionStorage.removeItem('currentRepo');
@@ -1669,46 +2491,32 @@ function loadAgentTypes() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '36') {
+    if (localStorage.getItem('app_cache_ver') !== '43') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '36');
+      localStorage.setItem('app_cache_ver', '43');
     }
 
     const token = localStorage.getItem('token');
     if (token) {
       showApp();
       API.scheduleProactiveRefresh();  // Issue #86: 页面恢复时启动定时器
-      // Issue #278: showApp() → loadRepos() 的 cachedRepos 同步路径可能已通过
-      // renderReposFromData 恢复了当前 hash 路由（_currentView 已设）。
-      // 此时跳过重复的 hash 导航，避免二次渲染闪烁；仅在尚未导航时才处理。
-      if (window._currentView && window._currentView !== '') {
-        // 已经在 loadRepos 同步路径中恢复了路由，无需再次导航
-      } else {
-        // Handle hash-based navigation (e.g., #runtimes, #settings) on page load
-        const hash = window.location.hash;
-        if (hash && hash.length > 1) {
-          const parts = hash.substring(1).split('/');
-          const view = parts[0];
-          const param = parts[1] ? decodeURIComponent(parts[1]) : undefined;
-          // Views that don't require a repo
-          const noRepoViews = ['repos', 'settings', 'tasks', 'runtimes', 'event', 'scene-market', 'scene-detail', 'my-feedback', 'my-feedback-detail'];
-          if (noRepoViews.includes(view) || currentRepo()) {
-            nav(view, param);
-          } else {
-            nav('dash');
-          }
-        } else if (currentRepo()) {
-          nav('dash');
-        } else {
-          // No repo selected and no hash — go to repo selection
-          goToRepos();
+      // hash 路由恢复由 showApp() → loadProfile() → _restoreNavAfterLogin() 统一处理
+      // 不在这里重复路由恢复，避免和 showApp 异步链竞争
+    } else {
+      // 无 token = 未登录/已退出。清除可能残留的仓库选择和 URL hash，
+      // 防止用户直接导航到 /login（非通过 app.logout() 退出）时状态残留
+      sessionStorage.removeItem('currentRepo');
+      if (window.location.hash && window.location.hash.length > 1) {
+        if (window.history.replaceState) {
+          window.history.replaceState(null, '', window.location.pathname);
         }
       }
-    } else { showLogin(); }
+      showLogin();
+    }
   }
 
   // ── Theme Management (Apple Developer Theme) ──
@@ -1739,7 +2547,7 @@ function loadAgentTypes() {
     }
   }
 
-  return {nav, search, oauthLogin, oauthLoginGithub, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu};
+  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
@@ -1750,7 +2558,22 @@ function _vcsUrl(repoKey, path) {
   var repoPath = parts.length > 1 ? parts[1] : rk;
   return host + '/' + repoPath + (path || '');
 }
-document.addEventListener('DOMContentLoaded', () => app.init());
+document.addEventListener('DOMContentLoaded', function() {
+  // 等 i18n 语言包异步加载完成后初始化，避免刷新页面时 I18N.t() 返回 key
+  if (typeof I18N !== 'undefined' && !I18N.isLangLoaded(I18N.getLang())) {
+    // i18n.init 刚触发 loadPacks（异步），等待最多 3 秒
+    var _waitI18n = function(attempts) {
+      if (I18N.isLangLoaded(I18N.getLang()) || attempts <= 0) {
+        app.init();
+      } else {
+        setTimeout(function() { _waitI18n(attempts - 1); }, 50);
+      }
+    };
+    _waitI18n(60); // 60 * 50ms = 3s
+  } else {
+    app.init();
+  }
+});
 document.addEventListener('keydown', (e) => { if (e.key === 'Escape') app.closeHelp(); });
 
 // Issue #67: 全局苹果风格确认 modal（knowledge.js / skills.js 共用）

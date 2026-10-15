@@ -255,8 +255,17 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     prompt = _build_autopilot_prompt(task, repo_key, repository)
 
     # 5. 物化 workdir（project-info + skill 如果有）
+    # ⚠️ 仅 DIRECT 模式做服务端物化 + {{SKILL_DIR}} 替换（占位符换成服务端本机 ws/.skills 路径）。
+    #    REMOTE/广播模式保留 {{SKILL_DIR}} 占位符——worker 认领后在自己的工位物化技能
+    #    （agent.py: prompt.replace("{{SKILL_DIR}}", skill_dir)），技能内容则由 enqueue_task
+    #    按 skill_name + repo_key 解析打包随任务下发。
+    #    历史 bug（2026-10-13 task 16 两次失败根因）：REMOTE 也走了服务端替换，把服务端的
+    #    /root/grape-workspaces/... 绝对路径烧进 prompt，远端非 root worker（如 0005 liufei 用户）
+    #    读 /root 被拒 → "SKILL.md 无法访问（权限被拒）"。10-12 exec 350 成功纯属 agent 自行
+    #    glob 搜到 /home/{user} 副本自救，不可依赖。
     evt = {"repo_key": repo_key, "issue_id": "", "payload": {}}
-    prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "", prompt)
+    if _is_direct:
+        prompt = _materialize_direct_workdir(ws, repo_key, agent_type, skill_name, evt, "", prompt)
 
     # 6. 环境变量（定时任务不需要场景/issue相关变量）
     agent_display_name = get_agent_display_name(agent_type)
@@ -389,6 +398,20 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
 
     log.info(f"Autopilot exec {exec_id}: enqueuing remote agent={agent_type} engine={inst_name} pool_tag={_pool_tag}")
 
+    # Issue #287：入队前按任务创建者预解析 skill_id（user scope skill 的 owner_id 匹配 created_by）。
+    # user_id 保持 0（_collect_server_env 凭据注入行为零变化）；解析不中时降级 skill_id=0 + warning，不阻断入队。
+    _skill_id = 0
+    if skill_name:
+        try:
+            from src.user.db import resolve_skill_id
+            _skill_id = resolve_skill_id(skill_name, repo_key=repo_key,
+                                         user_id=task.get("created_by") or 0)
+            if not _skill_id:
+                log.warning(f"Autopilot exec {exec_id}: skill '{skill_name}' not resolved for "
+                            f"creator={task.get('created_by')}, enqueue without skill files")
+        except Exception as _se:
+            log.warning(f"Autopilot exec {exec_id}: pre-resolve skill '{skill_name}' failed: {_se}")
+
     try:
         task_id = enqueue_task(
             agent_session_id=agent_session_id,
@@ -408,7 +431,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             agent_type=agent_type,
             skill=skill_name,
             skill_path="",
-            skill_id=0,
+            skill_id=_skill_id,
             server_url=_resolve_server_url(engine_id),
             issue_session_id="",
             pool_agent_type=_pool_tag,

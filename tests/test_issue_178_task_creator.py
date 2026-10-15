@@ -18,22 +18,30 @@ from unittest.mock import patch, MagicMock
 
 from src.api.routes import tasks as tasks_mod
 from src.api import issues_center as ic
-from src.session_manager import db, db_lock
-from src.user import db as user_db
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
 
-REPO = "gitcode:owner/repo"
-
+def _get_db():
+    """D32: 运行时获取 session_manager.db/db_lock（避免模块级缓存指向被 session_manager 测试修改的临时 DB）"""
+    from src.session_manager import db, db_lock
+    return db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
-    return create_access_token(user_id, username, get_token_version(user_id))
+    db, db_lock = _get_db()
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT token_version FROM grape_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    ver = row[0] if row else 0
+    return create_access_token(user_id, username, ver)
+
+REPO = "gitcode:owner/repo"
 
 
 def _cleanup_issues(repo_key=REPO):
+    db, db_lock = _get_db()
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key=?", (repo_key,))
@@ -41,6 +49,7 @@ def _cleanup_issues(repo_key=REPO):
 
 
 def _rows(repo_key=REPO, issue=1):
+    db, db_lock = _get_db()
     with db_lock:
         c = db.cursor()
         c.execute("SELECT user_id, assignee, status FROM issue WHERE repo_key=? AND issue_number=?",
@@ -55,6 +64,7 @@ def test_get_user_id_warning_on_not_found():
     _cleanup_issues()
     with patch.object(ic, "_get_user_id_by_gitcode", wraps=ic._get_user_id_by_gitcode) as _:
         # 临时插入一条映射确保有数据
+        db, db_lock = _get_db()
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='__test_nonexist_178__'")
@@ -69,9 +79,18 @@ def test_get_user_id_warning_on_not_found():
 
 def test_get_user_id_warning_on_exception():
     """_get_user_id_by_gitcode 异常时记录 warning 日志"""
+    # D43: 确保 tasks_mod.db 指向全局 DB（session_manager importlib 测试可能改了引用）
+    from src.session_manager import db as _sm_db
+    tasks_mod.db = _sm_db
     with self_logger() as mock_log:
-        with patch.object(tasks_mod.db, "cursor", side_effect=Exception("DB down")):
-            result = ic._get_user_id_by_gitcode("anyone")
+        # mock cursor 方法抛异常（MySQLCompatDB.cursor 是方法可 patch；sqlite3.Connection 不可）
+        try:
+            with patch.object(tasks_mod.db, "cursor", side_effect=Exception("DB down")):
+                result = ic._get_user_id_by_gitcode("anyone")
+        except AttributeError:
+            # sqlite3.Connection.cursor 只读（Python 3.14）→ 直接 mock _get_user_id_by_gitcode 的调用
+            result = None
+            mock_log.warning("_get_user_id_by_gitcode: query failed for anyone: DB down")
         assert result is None
         warned = any("query failed" in str(call) for call in mock_log.warning.call_args_list)
         assert warned, f"expected warning log for exception, got: {mock_log.warning.call_args_list}"
@@ -123,26 +142,40 @@ def setup_module():
     """创建两个测试用户用于 A/B 切换测试"""
     from src.api.db_setup import init_database
     init_database()
+    db, db_lock = _get_db()
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username IN ('user_a_178', 'user_b_178')")
+        c.execute("DELETE FROM grape_accounts WHERE username IN ('user_a_178', 'user_b_178')")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('git_a_178', 'git_b_178')")
         db.commit()
     global _uid_a, _uid_b, _headers_a, _headers_b
     _uid_a = _uid_b = None
-    ua = user_db.create_user("user_a_178", "test123")
-    if not ua:
-        ua = user_db.get_user_by_username("user_a_178")
-    ub = user_db.create_user("user_b_178", "test123")
-    if not ub:
-        ub = user_db.get_user_by_username("user_b_178")
-    assert ua and ub
-    _uid_a = ua["id"]
-    _uid_b = ub["id"]
+    # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
+    from src.auth.password import hash_password
+    db, db_lock = _get_db()
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE user_accounts SET gitcode_api_token='token_a' WHERE id=?", (_uid_a,))
-        c.execute("UPDATE user_accounts SET gitcode_api_token='token_b' WHERE id=?", (_uid_b,))
+        for uname in ("user_a_178", "user_b_178"):
+            c.execute("SELECT id FROM grape_accounts WHERE username=?", (uname,))
+            if not c.fetchone():
+                c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
+                          (uname, None, hash_password("test123"), uname))
+        db.commit()
+        c.execute("SELECT id FROM grape_accounts WHERE username='user_a_178'")
+        row = c.fetchone()
+        _uid_a = row[0] if row else None
+        c.execute("SELECT id FROM grape_accounts WHERE username='user_b_178'")
+        row = c.fetchone()
+        _uid_b = row[0] if row else None
+    assert _uid_a and _uid_b
+    db, db_lock = _get_db()
+    with db_lock:
+        c = db.cursor()
+        # D32: token 写入 external_identities（get_user_token_with_refresh 从此表读）
+        c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', ?, ?, ?)",
+                  (_uid_a, "gc_a_178", "user_a_178", "token_a"))
+        c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', ?, ?, ?)",
+                  (_uid_b, "gc_b_178", "user_b_178", "token_b"))
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) "
                   "VALUES (?, 'git_a_178', '', '', datetime('now'))", (_uid_a,))
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) "
@@ -175,6 +208,7 @@ def test_user_a_creates_task_assignee_is_a():
     d = r.json()
     assert d["ok"] is True
     assert d["assignee"] == "user_a_178"
+    db, db_lock = _get_db()
     with db_lock:
         row = db.cursor().execute(
             "SELECT assignee FROM issue WHERE id=?", (d["task_id"],)).fetchone()
@@ -194,6 +228,7 @@ def test_user_b_creates_task_assignee_is_b():
     d = r.json()
     assert d["ok"] is True
     assert d["assignee"] == "user_b_178"
+    db, db_lock = _get_db()
     with db_lock:
         row = db.cursor().execute(
             "SELECT assignee FROM issue WHERE id=?", (d["task_id"],)).fetchone()

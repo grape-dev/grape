@@ -1,175 +1,11 @@
 function renderSettings(tab) {
   const el = document.getElementById('pageContent');
   if (!el) return;
-  const current = tab || 'credentials';
-  const tabs = [
-    {id:'credentials', label:I18N.t('settings.tab.credentials')},
-    {id:'apikeys', label: I18N.getLang() === 'zh' ? 'API Keys' : 'API Keys'},
-    {id:'notifications', label:I18N.t('settings.tab.notifications')},
-    {id:'appearance', label:I18N.t('settings.tab.appearance')},
-  ];
+  const current = tab || 'gitcode';
 
-  let html = `<div class="cd"><div class="cd-h"><h2>${I18N.t('settings.page_title')}</h2></div>`;
-  // gitcode 是独立页面，不显示通用设置的 tabs 标签栏
-  if (current !== 'gitcode') {
-    html += `<div class="stabs">${tabs.map(t => `<a class="${t.id === current ? 'ac' : ''}" onclick="renderSettings('${t.id}')">${t.label}</a>`).join('')}</div>`;
-  }
+  let html = `<div class="cd"><div class="cd-h"><h2>${I18N.t('settings.host.title')}</h2></div>`;
 
-  if (current === 'credentials') {
-    html += `<div id="sCredentials"><div class="loading">${I18N.t('settings.common.loading')}</div></div></div>`;
-    el.innerHTML = html;
-    const curRepo = app.currentRepo();
-    const repoQ = curRepo && curRepo.fullName ? '?repo_key=gitcode:' + encodeURIComponent(curRepo.fullName) : '';
-    API.get('/settings/credentials' + repoQ).then(d => {
-      var _sc = document.getElementById('sCredentials');
-      if (!_sc) return;
-      // AK/SK 回显真实值需 HTML 转义（防引号破坏属性）
-      const _esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
-      const _akVal = d.huawei_cloud && d.huawei_cloud.ak_exists ? '********' : '';
-      const _skVal = d.huawei_cloud && d.huawei_cloud.sk_exists ? '********' : '';
-      _sc.innerHTML = `
-        <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.vcs_api_title')}</h3>
-          <div class="srow"><label>${I18N.t('settings.credentials.api_token')}</label><input type="password" id="githubToken" value="${d.github && d.github.token_exists ? '********' : ''}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.gitcode_token_placeholder')}"></div>
-          <div class="srow"><label>${I18N.t('settings.credentials.account')}</label><input type="text" value="${d.gitcode && d.gitcode.account ? d.gitcode.account : (d.github && d.github.login ? d.github.login : '—')}" disabled style="background:#f1f5f9;font-size:10px"></div>
-        </div>
-        <div class="cd mt16"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.huawei_cloud_title')}</h3>
-          <div class="srow" style="align-items:center"><label>${I18N.t('settings.credentials.access_key')}</label><div style="display:flex;align-items:center;gap:6px;flex:1"><input type="password" id="huaweiAk" value="${_akVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.access_key')}" style="flex:1"><button type="button" id="huaweiToggleAk" onclick="toggleHuaweiSecret()" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0">👁</button></div></div>
-          <div class="srow" style="align-items:center"><label>${I18N.t('settings.credentials.secret_key')}</label><div style="display:flex;align-items:center;gap:6px;flex:1"><input type="password" id="huaweiSk" value="${_skVal}" autocomplete="new-password" placeholder="${I18N.t('settings.credentials.secret_key')}" style="flex:1"><button type="button" id="huaweiToggleSk" onclick="toggleHuaweiSecret()" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0">👁</button></div></div>
-          <p class="tx t2 mt8">${I18N.t('settings.credentials.huawei_cloud_desc')}</p>
-          <button class="bt bt-p mt8" onclick="saveCredentials()">${I18N.t('settings.common.save')}</button>
-        </div>
-`;
-    }).catch(e => { var _sc = document.getElementById('sCredentials'); if (_sc) _sc.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
-  } else if (current === 'apikeys') {
-    // ===== Issue #69: API Keys 管理面板 =====
-    html += `<div id="sApiKeys"><div class="loading">${I18N.getLang() === 'zh' ? '加载中...' : 'Loading...'}</div></div></div>`;
-    el.innerHTML = html;
-    loadApiKeys();
-  } else if (current === 'notifications') {
-    html += `<div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.notifications.title')}</h3>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.issue_events')}</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.pr_events')}</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> ${I18N.t('settings.notifications.build_failures')}</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox" checked> ${I18N.t('settings.notifications.release_events')}</label>
-      <label style="display:flex;align-items:center;gap:8px;padding:5px 0;font-size:12px"><input type="checkbox"> ${I18N.t('settings.notifications.vod_signals')}</label>
-    </div></div>`;
-    el.innerHTML = html;
-  } else if (current === 'appearance') {
-    // Appearance / Theme selection
-    const curTheme = app.getTheme ? app.getTheme() : (localStorage.getItem('grapeTheme') || 'apple');
-    const curMode = app.getThemeMode ? app.getThemeMode() : (localStorage.getItem('grapeThemeMode') || 'light');
-    const curLang = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
-    html += `
-    <div class="cd">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:16px">${I18N.t('settings.appearance.title')}</h3>
-      <p class="tx t2" style="margin-bottom:20px;font-size:12px;line-height:1.6">
-        ${I18N.t('settings.appearance.theme_desc')}
-      </p>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:24px">
-        <div id="themeCardDefault" onclick="selectTheme('default')"
-          style="cursor:pointer;border:2px solid ${curTheme==='default'?'var(--a)':'var(--b)'};border-radius:14px;padding:20px;transition:all .25s;background:var(--c)">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-            <span style="font-size:14px;font-weight:600;color:var(--t)">Grape Default</span>
-            ${curTheme==='default'?'<span style="color:var(--a);font-size:12px;font-weight:600">'+I18N.t('settings.appearance.current')+'</span>':''}
-          </div>
-          <div style="height:80px;border-radius:10px;overflow:hidden;border:1px solid var(--b);display:flex">
-            <div style="width:60px;background:#0c1222;display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
-              <div style="width:24px;height:3px;background:#1e2940;border-radius:2px"></div>
-              <div style="width:20px;height:3px;background:#1e2940;border-radius:2px"></div>
-              <div style="width:20px;height:3px;background:#3168e0;border-radius:2px"></div>
-              <div style="width:20px;height:3px;background:#1e2940;border-radius:2px"></div>
-            </div>
-            <div style="flex:1;background:#f5f6f8;padding:10px">
-              <div style="height:4px;width:60%;background:#101724;border-radius:2px;margin-bottom:6px"></div>
-              <div style="height:3px;width:40%;background:#5b667b;border-radius:2px;margin-bottom:8px"></div>
-              <div style="height:30px;background:#fff;border-radius:6px;border:1px solid #e3e6ee"></div>
-            </div>
-          </div>
-          <p style="font-size:11px;color:var(--t3);margin-top:10px">${I18N.t('settings.appearance.default_desc')}</p>
-        </div>
-        <div id="themeCardApple" onclick="selectTheme('apple')"
-          style="cursor:pointer;border:2px solid ${curTheme==='apple'?'var(--a)':'var(--b)'};border-radius:14px;padding:20px;transition:all .25s;background:var(--c)">
-          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-            <span style="font-size:14px;font-weight:600;color:var(--t)">Liquid Glass</span>
-            ${curTheme==='apple'?'<span style="color:var(--a);font-size:12px;font-weight:600">'+I18N.t('settings.appearance.current')+'</span>':''}
-          </div>
-          <div style="height:80px;border-radius:10px;overflow:hidden;border:1px solid #d2d2d7;display:flex">
-            <div style="width:60px;background:rgba(245,245,247,0.8);backdrop-filter:blur(10px);display:flex;flex-direction:column;align-items:center;padding:8px 0;gap:4px">
-              <div style="width:24px;height:3px;background:#d2d2d7;border-radius:2px"></div>
-              <div style="width:20px;height:3px;background:#d2d2d7;border-radius:2px"></div>
-              <div style="width:20px;height:3px;background:#0071e3;border-radius:2px"></div>
-              <div style="width:20px;height:3px;background:#d2d2d7;border-radius:2px"></div>
-            </div>
-            <div style="flex:1;background:#f5f5f7;padding:10px">
-              <div style="height:4px;width:60%;background:#1d1d1f;border-radius:2px;margin-bottom:6px"></div>
-              <div style="height:3px;width:40%;background:#6e6e73;border-radius:2px;margin-bottom:8px"></div>
-              <div style="height:30px;background:#fff;border-radius:12px;border:1px solid #d2d2d7;box-shadow:0 2px 8px rgba(0,0,0,0.04)"></div>
-            </div>
-          </div>
-          <p style="font-size:11px;color:var(--t3);margin-top:10px">${I18N.t('settings.appearance.apple_desc')}</p>
-        </div>
-      </div>
-    </div>
-    <div class="cd mt16" id="themeModeSection" style="${curTheme==='apple'?'':'opacity:0.4;pointer-events:none'}">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.appearance.mode_title')}</h3>
-      <p class="tx t2" style="margin-bottom:14px;font-size:12px">${I18N.t('settings.appearance.mode_desc')}</p>
-      <div style="display:flex;gap:10px">
-        <button onclick="selectThemeMode('light')"
-          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='light'?'var(--a)':'var(--c)'};color:${curMode==='light'?'#fff':'var(--t2)'};transition:all .2s">
-          ${I18N.t('settings.appearance.light')}
-        </button>
-        <button onclick="selectThemeMode('auto')"
-          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curMode==='auto'?'var(--a)':'var(--c)'};color:${curMode==='auto'?'#fff':'var(--t2)'};transition:all .2s">
-          ${I18N.t('settings.appearance.auto')}
-        </button>
-      </div>
-    </div>
-    <div class="cd mt16">
-      <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.language.title')}</h3>
-      <p class="tx t2" style="margin-bottom:14px;font-size:12px">${I18N.t('settings.language.desc')}</p>
-      <div style="display:flex;gap:10px">
-        <button onclick="selectLang('zh')"
-          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curLang==='zh'?'var(--a)':'var(--c)'};color:${curLang==='zh'?'#fff':'var(--t2)'};transition:all .2s">
-          ${I18N.t('settings.language.zh')}
-        </button>
-        <button onclick="selectLang('en')"
-          style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:${curLang==='en'?'var(--a)':'var(--c)'};color:${curLang==='en'?'#fff':'var(--t2)'};transition:all .2s">
-          ${I18N.t('settings.language.en')}
-        </button>
-      </div>
-    </div>
-    </div>`;
-    el.innerHTML = html;
-  } else if (current === 'advanced') {
-    // Advanced settings — pipeline mode toggle
-    html += `<div id="sAdvanced"><div class="loading">${I18N.t('settings.common.loading')}</div></div></div>`;
-    el.innerHTML = html;
-    API.get('/settings/pipeline-mode').then(d => {
-      var _sa = document.getElementById('sAdvanced');
-      if (!_sa) return;
-      const mode = d.mode || 'legacy';
-      const isPlugin = mode === 'plugin';
-      _sa.innerHTML = `
-        <div class="cd">
-          <h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.pipeline.title')}</h3>
-          <p class="tx t2" style="margin-bottom:16px;font-size:12px;line-height:1.6">
-            ${I18N.t('settings.pipeline.plugin_desc')}<br>
-            ${I18N.t('settings.pipeline.traditional_desc')}
-          </p>
-          <div style="display:flex;align-items:center;gap:12px">
-            <button id="pipelineModeToggle" onclick="togglePipelineModeSetting()"
-              style="padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;cursor:pointer;border:1px solid ${isPlugin?'var(--a)':'var(--b)'};background:${isPlugin?'var(--a)':'var(--c)'};color:${isPlugin?'#fff':'var(--t2)'};transition:all .2s">
-              ${isPlugin ? I18N.t('settings.pipeline.plugin') : I18N.t('settings.pipeline.traditional')}
-            </button>
-            <span style="font-size:11px;color:var(--t3)">${isPlugin ? I18N.t('settings.pipeline.status_plugin') : I18N.t('settings.pipeline.status_legacy')}</span>
-          </div>
-          <p style="font-size:11px;color:var(--t3);margin-top:12px">${I18N.t('settings.pipeline.warning')}</p>
-        </div>`;
-    }).catch(e => {
-      var _sa = document.getElementById('sAdvanced');
-      if (_sa) _sa.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message});
-    });
-  } else if (current === 'gitcode') {
+  if (current === 'gitcode') {
     // GitCode Repo 页面 — 需要已有仓库
     const repo = app.currentRepo();
     if (!repo) {
@@ -205,62 +41,9 @@ function renderSettings(tab) {
 const _CRED_PLACEHOLDERS = ['AK-demo-access-key-xxxx', 'SK-demo-secret-key-xxxx', 'ghp_devopsbot_xxxxxxxxxxxxxxxxxxxx'];
 function _isCredPlaceholder(v) {
   v = (v || '').trim();
-  if (!v) return true;                       // 空 = 无值
+  if (!v) return true;
   if (_CRED_PLACEHOLDERS.indexOf(v) >= 0) return true;
-  return /^(AK-demo-|SK-demo-|ghp_devopsbot_)/.test(v);  // 任何 demo/占位前缀一律拒绝
-}
-
-function saveCredentials() {
-  const ak = document.getElementById('huaweiAk');
-  const sk = document.getElementById('huaweiSk');
-  const body = {};
-  const akVal = ak && ak.value ? ak.value.trim() : '';
-
-  const skVal = sk && sk.value ? sk.value.trim() : '';
-  // Issue #237：始终传递 AK/SK（含空字符串=清除），排除 ******** 掩码值（代表未修改）
-  if (akVal !== '********') body.huawei_cloud_ak = akVal;
-  if (skVal !== '********') body.huawei_cloud_sk = skVal;
-
-  // GitHub Token：同样排除 ******** 掩码值；空字符串=清除
-  const ghEl = document.getElementById('githubToken');
-  const ghVal = ghEl && ghEl.value ? ghEl.value.trim() : '';
-  if (ghVal !== '********') body.github_token = ghVal;
-
-  // v4.3：发布令牌按仓库（项目维度）——带当前仓库
-  const cur = app.currentRepo();
-  if (cur && cur.fullName) {
-    const parts = cur.fullName.split('/');
-    if (parts.length === 2) body.repo_key = 'gitcode:' + cur.fullName;
-  }
-  API.put('/settings/credentials', body).then(r => {
-    // 发布目标仓库（配置）与凭据区分提示：含配置类字段提示"配置已更新"
-    app.showToast(I18N.t('settings.common.cred_updated'));
-  }).catch(e => app.showToast(I18N.t('settings.common.update_failed')));
-}
-
-// 华为云 AK/SK 明文显示/隐藏切换
-// 首次点击眼睛时从后端拉取真实值填入输入框（之前回显的是 ******** 掩码）
-let _hwSecretVisible = false;
-let _hwSecretFetched = false;
-function toggleHuaweiSecret() {
-  _hwSecretVisible = !_hwSecretVisible;
-  // 首次切换为明文时，从后端拉取真实 AK/SK 填入输入框
-  if (_hwSecretVisible && !_hwSecretFetched) {
-    _hwSecretFetched = true;
-    API.get('/settings/credentials').then(function(d) {
-      var hw = (d && d.huawei_cloud) || {};
-      if (hw.ak) { var akEl = document.getElementById('huaweiAk'); if (akEl) akEl.value = hw.ak; }
-      if (hw.sk) { var skEl = document.getElementById('huaweiSk'); if (skEl) skEl.value = hw.sk; }
-    }).catch(function() {});
-  }
-  ['huaweiAk', 'huaweiSk'].forEach(id => {
-    const el = document.getElementById(id);
-    if (el) el.type = _hwSecretVisible ? 'text' : 'password';
-  });
-  ['huaweiToggleAk', 'huaweiToggleSk'].forEach(id => {
-    const b = document.getElementById(id);
-    if (b) b.textContent = _hwSecretVisible ? '🙈' : '👁';
-  });
+  return /^(AK-demo-|SK-demo-|ghp_devopsbot_)/.test(v);
 }
 
 function saveGitcodeRepoConfig() {
@@ -286,7 +69,6 @@ function unhostFromSettings(fullName) {
       API.get('/repos/managed').then(md => {
         const remaining = md.repos || [];
         if (wasCurrent || remaining.length === 0) {
-          // 当前仓库被解除或已无托管仓库 → 回到仓库选择页
           API.get('/repos/member').then(d => {
             const repos = d.repos || [];
             document.getElementById('sidebar').style.display = 'none';
@@ -300,7 +82,6 @@ function unhostFromSettings(fullName) {
             renderRepoSelection(repos);
           });
         } else {
-          // 还有其他托管仓库 → 回到 Dashboard
           app.nav('dash');
         }
       });
@@ -366,23 +147,14 @@ function selectLang(lang) {
 
   try {
     I18N.setLang(lang).then(function(result) {
+      // Issue #273：语言切换是即时视觉反馈（整页语言立刻变化），成功路径一律不弹 Toast。
+      // 统一 cached / 全部成功 / 部分成功 / 重试成功 各路径行为——仅全部失败时弹 error Toast。
       if (result.cached) {
         // 缓存命中：setLang 已在内部完成状态变更 + rerender，旧按钮已被替换
-        // 不弹 Toast——缓存命中是秒级操作，用户不需要"成功"反馈
       } else if (result.failed === 0) {
-        // 全部成功：_rerenderCurrentPage 已在 setLang 内同步完成 DOM 重建
-        if (typeof app !== 'undefined' && app.showToast) {
-          // 重试成功用不同文案，避免用户困惑"我没切换为什么弹切换成功"
-          app.showToast(isRetry
-            ? (isZh ? '语言包已重新加载' : 'Language packs reloaded')
-            : I18N.t('common.success'));
-        }
+        // 全部成功：_rerenderCurrentPage 已在 setLang 内同步完成 DOM 重建，无需额外反馈
       } else if (result.failed < result.total) {
-        // 部分成功：DOM 已重建，部分文案靠 t() fallback
-        if (typeof app !== 'undefined' && app.showToast) {
-          var curZh = I18N.getLang() === 'zh';
-          app.showToast(I18N.t('common.success') + ' (' + result.failed + '/' + result.total + (curZh ? ' 个加载失败)' : ' failed)'));
-        }
+        // 部分成功：DOM 已重建，部分文案靠 t() fallback——页面语言已切换，无需 Toast
       } else {
         // 全部失败：setLang 未提交状态变更，_currentLang 仍为旧语言
         // DOM 不重建，旧按钮仍禁用，必须手动恢复

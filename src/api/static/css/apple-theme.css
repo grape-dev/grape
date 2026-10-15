@@ -78,6 +78,35 @@
 [data-theme="apple"] #tlBody::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.4); }
 
 /* ── 3. Login Screen ── */
+/* P2-10: auth-page 自包含块 — 深色认证页面 */
+[data-theme="apple"] .auth-page {
+  background: linear-gradient(180deg, #1d1d1f 0%, #000000 100%);
+}
+[data-theme="apple"] .auth-card .logo {
+  border-radius: 22px;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+}
+[data-theme="apple"] .auth-card h1 {
+  font-weight: 600;
+  letter-spacing: -0.015em;
+}
+[data-theme="apple"] .auth-card .subtitle {
+  color: #86868b;
+  font-weight: 400;
+}
+[data-theme="apple"] .auth-card .auth-btn {
+  border-radius: 980px;
+  background: #0071e3;
+  font-weight: 500;
+  transition: all 0.3s cubic-bezier(0.25,0.1,0.25,1);
+}
+[data-theme="apple"] .auth-card .auth-btn:hover:not(:disabled) {
+  background: #0077ed;
+  transform: scale(1.02);
+  box-shadow: 0 8px 24px rgba(0,113,227,0.3);
+}
+
+/* Legacy .ln/.lbox — 保留兼容 */
 [data-theme="apple"] .ln {
   background: linear-gradient(180deg, #1d1d1f 0%, #000000 100%);
 }
@@ -94,7 +123,7 @@
   font-weight: 400;
 }
 [data-theme="apple"] .lbox .obtn {
-  border-radius: 980px;          /* Apple pill */
+  border-radius: 980px;
   background: #0071e3;
   font-weight: 500;
   transition: all 0.3s cubic-bezier(0.25,0.1,0.25,1);
@@ -281,13 +310,13 @@
 
 /* ── 9. Lobby / Repository Selection ── */
 [data-theme="apple"] .lobby {
-  background: linear-gradient(180deg, #ffffff 0%, #f5f5f7 30%);
+  background: var(--bg);
 }
 [data-theme="apple"] .lobby::before {
-  background: radial-gradient(ellipse at center, rgba(0,113,227,0.06) 0%, rgba(175,82,222,0.04) 45%, transparent 70%);
+  content: none;
 }
 [data-theme="apple"] .lobby::after {
-  background: radial-gradient(circle, rgba(0,113,227,0.04), transparent 65%);
+  content: none;
 }
 [data-theme="apple"] .lobby-head {
   background: rgba(255,255,255,0.72);
@@ -1161,6 +1190,18 @@
 [data-theme="apple"] .ct {
   padding: 24px 32px !important;
 }
+/* 引导页模式：禁用 padding，全屏铺满 */
+[data-theme="apple"] .ct.ob-mode {
+  padding: 0 !important;
+  overflow: hidden !important;
+  display: flex;
+  flex-direction: column;
+}
+[data-theme="apple"] .ct.ob-mode > .lobby {
+  margin: 0;
+  height: 100%;
+  min-height: 0;
+}
 
 /* Top bar: consistent height and padding */
 [data-theme="apple"] .tb {
@@ -1508,4 +1549,23 @@
   background: rgba(255,255,255,0.08);
   border-color: rgba(255,255,255,0.1);
   color: var(--t3);
+}
+
+/* ── OAuth 按钮毛玻璃风格 ── */
+[data-theme="apple"] .lbox #gitBtn,
+[data-theme="apple"] .lbox #githubBtn {
+  background: rgba(255,255,255,0.06);
+  backdrop-filter: blur(20px) saturate(180%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  border: 1px solid rgba(255,255,255,0.1);
+  color: #f5f5f7;
+  font-weight: 500;
+  font-size: 13px;
+  transition: all 0.3s cubic-bezier(0.25,0.1,0.25,1);
+}
+[data-theme="apple"] .lbox #gitBtn:hover,
+[data-theme="apple"] .lbox #githubBtn:hover {
+  background: rgba(255,255,255,0.1);
+  border-color: rgba(255,255,255,0.2);
+  transform: scale(1.02);
 }

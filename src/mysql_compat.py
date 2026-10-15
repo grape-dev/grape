@@ -230,6 +230,22 @@ def _translate_create_table(sql: str) -> str:
     return head + ", ".join(out) + ")" + trailing
 
 
+# INSERT ... ON CONFLICT(<pk>) DO UPDATE SET <col>=<expr(excluded.col)> ... → MySQL ON DUPLICATE KEY UPDATE
+# 匹配到 DO UPDATE SET 子句末尾（到语句尾；不跨多语句）。
+_CONFLICT_UPSERT_RE = re.compile(
+    r"(?is)\bON\s+CONFLICT\s*\(([`\"\w]+)\)\s+DO\s+UPDATE\s+SET\s+"
+    r"(.+?)(?=(?:\bON\s+CONFLICT\b)|$)")
+
+def _mysql_upsert_repl(m):
+    """SQLite: ON CONFLICT(pk) DO UPDATE SET a=expr(excluded.a) → MySQL: ON DUPLICATE KEY UPDATE a=expr(VALUES(a))"""
+    _sets = m.group(2)
+    # excluded.`col`（反引号列名）→ VALUES(`col`)；excluded.col（裸列名）→ VALUES(col)
+    # 注意不能用 \b 锚定（反引号非词字符会截断列名），分带/不带反引号两类处理
+    _sets = re.sub(r"excluded\.`([^`]*)`", r"VALUES(`\1`)", _sets)
+    _sets = re.sub(r"excluded\.([A-Za-z0-9_]+)", r"VALUES(\1)", _sets)
+    return "ON DUPLICATE KEY UPDATE " + _sets
+
+
 def translate_sql(sql: str) -> str:
     """把 SQLite 方言 SQL 翻译为 MySQL 方言。"""
     if not sql or not sql.strip():
@@ -261,6 +277,10 @@ def translate_sql(sql: str) -> str:
     sql = re.sub(r"\bINSERT\s+OR\s+REPLACE\s+INTO\b", "REPLACE INTO", sql, flags=re.I)
     # INSERT OR IGNORE INTO → INSERT IGNORE INTO
     sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT IGNORE INTO", sql, flags=re.I)
+    # INSERT ... ON CONFLICT(<pk>) DO UPDATE SET <col>=... excluded.col ...（SQLite/PostgreSQL 方言）
+    # → ON DUPLICATE KEY UPDATE <col>=... VALUES(col) ...（MySQL 方言，8.0.20 以下用 VALUES()）
+    # 关键引用：src/im/bot_lease.py heartbeat() 的实例心跳 UPSERT，缺失翻译会 1064（cluster-seq-11130 根因）。
+    sql = _CONFLICT_UPSERT_RE.sub(_mysql_upsert_repl, sql)
     # datetime('now') → CAST(NOW() AS CHAR)
     sql = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", sql)
     # 'gitcode:' || col → CONCAT('gitcode:', col)

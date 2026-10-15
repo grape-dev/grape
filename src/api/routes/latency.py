@@ -25,10 +25,17 @@ def _maybe_cleanup():
         return
     _last_cleanup = now
     try:
+        from src.mysql_compat import get_db_backend
+        is_mysql = get_db_backend() == "mysql"
         with db_lock:
             c = db.cursor()
-            # 1. 删除超期记录
-            c.execute(f"DELETE FROM api_latency_log WHERE created_at < datetime('now', '-{_CLEANUP_RETENTION_DAYS} days')")
+            # 1. 删除超期记录（SQLite 用 datetime('now', '-N days')；MySQL 用 NOW() - INTERVAL N DAY）
+            time_expr = (
+                f"NOW() - INTERVAL {_CLEANUP_RETENTION_DAYS} DAY"
+                if is_mysql
+                else f"datetime('now', '-{_CLEANUP_RETENTION_DAYS} days')"
+            )
+            c.execute(f"DELETE FROM api_latency_log WHERE created_at < {time_expr}")
             # 2. 数据量超限时删除最旧记录
             count = c.execute("SELECT COUNT(*) FROM api_latency_log").fetchone()[0]
             if count > _MAX_ROWS:

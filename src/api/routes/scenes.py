@@ -503,7 +503,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
-    from src.api.deps import get_user_token
+    from src.api.deps import get_user_token_with_refresh
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
 
@@ -521,7 +521,7 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     tpl = tpl_ctx["template"]
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
-    api_token = get_user_token(user["username"])
+    api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     if not api_token:
         return {"repo_exists": False, "scene_applied": False, "full_name": "", "scene_name": ""}
     gitcode_login = get_user_gitcode_login(api_token)
@@ -585,7 +585,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
     from src.repo_key import to_repo_key
-    from src.api.deps import get_user_token
+    from src.api.deps import get_user_token_with_refresh
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
 
@@ -604,7 +604,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     repo_name = tpl.get("default_repo_name", tpl.get("id", ""))
 
     # 拿用户的 GitCode login
-    api_token = get_user_token(user["username"])
+    api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode API Token 未配置"})
     gitcode_login = get_user_gitcode_login(api_token)

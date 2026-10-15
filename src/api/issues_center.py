@@ -1570,15 +1570,23 @@ def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
     return row[0], row[1], row[2] or ""
 
 
-def _find_agent_task_ids(repo_key: str, issue_number: int) -> list[str]:
-    """按 repo_key + issue_id 关联 agent_tasks（agent 执行产生的 task_messages 以此为外键）。"""
+def _find_agent_task_ids(repo_key: str, issue_number) -> list[str]:
+    """按 repo_key + issue_id 关联 agent_tasks（agent 执行产生的 task_messages 以此为外键）。
+
+    issue_number 兼容 int / str：
+    - int 56 或 '56' → 规范化为 '#56'（agent_tasks.issue_id 统一带 # 前缀存储）
+    - '#56' → 原样使用
+    """
     from src.repo_key import to_repo_key
     rk = to_repo_key(repo_key)
+    iid = str(issue_number).strip()
+    if not iid.startswith("#"):
+        iid = "#" + iid
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT id FROM agent_tasks WHERE repo_key=? AND issue_id=? ORDER BY created_at DESC",
-            (rk, issue_number))
+            (rk, iid))
         return [r[0] for r in c.fetchall()]
 
 def _build_assignee_filter(assignees: str, clauses: list, params: list):
@@ -1592,13 +1600,21 @@ def _build_assignee_filter(assignees: str, clauses: list, params: list):
         params.extend(_list)
 
 def _batch_fetch_pr_issue_keys(keys: list) -> set:
-    """批量查 events 表，返回 issue 关联了 PR 事件的 (repo_key, issue_id) 集合。
+    """批量查 events 表，返回 issue 本身是 PR 的 (repo_key, issue_id) 集合。
 
     跨仓库 A2A 场景中，agent 在目标仓库创建 PR（而非 Issue），
     issue 表存的 issue_number 实际是 PR 编号，前端链接应用 /pull/ 而非 /issues/。
+
+    判定收紧（需求详情页标签误判修复）：PR 类事件挂 #N 有两种含义——
+    ① 跨仓 A2A 建的"PR 形态需求"（issue_number 即 PR 号，无 issue 生命周期事件）；
+    ② 普通真实 Issue 的交付关联（PR resolved/Closes #N，PR 事件只是来交付这个 issue 的，
+    issue 侧同时存在 issue_opened 等生命周期事件）。
+    ② 不算 PR——否则需求流转到待审核/已完成时详情页 Issue 行错标成 PR。
+    只有"存在 PR 事件且从无 issue 生命周期事件"的编号才判为 ①。
     """
-    from src.vcs.event_types import ALL_PR_EVENTS
+    from src.vcs.event_types import ALL_PR_EVENTS, ALL_ISSUE_EVENTS
     _pr_types = tuple(ALL_PR_EVENTS)
+    _issue_types = tuple(ALL_ISSUE_EVENTS)
     out: set = set()
     if not keys:
         return out
@@ -1614,8 +1630,18 @@ def _batch_fetch_pr_issue_keys(keys: list) -> set:
                     f"SELECT DISTINCT repo_key, issue_id FROM events "
                     f"WHERE ({_ors}) AND event_type IN ({_ph})",
                     _flat + list(_pr_types))
-                for row in c.fetchall():
-                    out.add((row[0], row[1]))
+                _pr_hits = {(row[0], row[1]) for row in c.fetchall()}
+                if not _pr_hits:
+                    continue
+                # 排除②：同编号存在 issue 生命周期事件 → 真实 Issue，PR 只是交付关联
+                _ph2 = ",".join("?" * len(_issue_types))
+                _ors2 = " OR ".join(["(repo_key=? AND issue_id=?)"] * len(_chunk))
+                c.execute(
+                    f"SELECT DISTINCT repo_key, issue_id FROM events "
+                    f"WHERE ({_ors2}) AND event_type IN ({_ph2})",
+                    _flat + list(_issue_types))
+                _issue_hits = {(row[0], row[1]) for row in c.fetchall()}
+                out |= (_pr_hits - _issue_hits)
         except Exception as e:
             log.warning(f"batch pr_issue_keys fetch failed: {e}")
     return out

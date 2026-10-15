@@ -221,7 +221,6 @@ def build_role_definition(skills=None, agent_type="", repo_key="") -> str:
     - `## 角色定义` 章节标题由调用方注入（方向 B）。
     """
     _vcs = _vcs_name(repo_key)
-    _bot_token_env = _vcs_bot_token_env(repo_key)
     _code_rule = (
         "You MAY write code, modify files, create branches, and execute git commands - within the scope of the current Issue"
         if agent_type == "coding"
@@ -234,12 +233,12 @@ def build_role_definition(skills=None, agent_type="", repo_key="") -> str:
         "- Repository (GitCode/GitHub) API operations",
         "",
         "## SECURITY (MUST FOLLOW):",
-        f"1. Use ONLY the {_vcs} token provided in this prompt ({_bot_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.",
+        f"1. Access ALL {_vcs} operations ONLY through the `grape` CLI (`grape git/git-repo/issues/...`, carrying GRAPE_SESSION_TOKEN). NEVER read, guess, or use any platform token from the database, config files, logs, environment, or history. Do NOT call VCS APIs with raw tokens.",
         "2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.",
         f"3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs admin/maintainer permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.",
         "4. NEVER write any token into files, logs, or comments.",
         f"5. {_code_rule}",
-        "6. Always reply in Chinese. Never include internal reasoning, process steps, or English analysis in your reply.",
+        "6. Always reply in the same language as the Issue/comment context (if the user writes in Chinese, reply in Chinese; if English, reply in English). Never include internal reasoning, process steps, or English analysis in your reply.",
         "7. MEDIA EXCEPTION (overrides rule 5): When the prompt contains the section \"## 用户上传的图片分析\" or \"## 用户上传的视频分析\", the image/video has already been analyzed by the system. You MUST answer the user's question based on that analysis. This includes ANY question about the image/video - UI/UX, design, layout, content, code shown in the screenshot, architecture, video content, etc. These are NOT \"non-DevOps topics\". Do NOT refuse. Do NOT say you cannot help with design or UI. Just answer based on the analysis provided.",
     ]
     return "\n".join(rules)
@@ -343,7 +342,6 @@ def _build_base_chat_role(repo_key="") -> str:
     避免措辞漂移（A4）。
     """
     _vcs = _vcs_name(repo_key)
-    _token_env = _vcs_token_env(repo_key)
     return f"""You are a DevOps operations assistant. Your domain:
 - Code review, build diagnosis, deployment guard, incident triage
 - Issue/PR analysis, changelog generation, repository management
@@ -352,7 +350,7 @@ def _build_base_chat_role(repo_key="") -> str:
 You have no abilities outside DevOps (no weather, email, documents, PDF, Excel, writing, meetings, voice, etc.).
 
 SECURITY (MUST FOLLOW):
-1. Use ONLY the {_vcs} token provided in this prompt ({_token_env}). NEVER read, guess, or use any other token from the database, config files, logs, or history.
+1. Access ALL {_vcs} operations ONLY through the `grape` CLI (`grape git/git-repo/issues/...`, carrying GRAPE_SESSION_TOKEN). NEVER read, guess, or use any platform token from the database, config files, logs, environment, or history. Do NOT call VCS APIs with raw tokens.
 2. NEVER access the bot's internal data/ and configs/ directories, sessions.db, user_accounts table, or any bot-internal data.
 3. If the {_vcs} API returns 403 (no permission): STOP that operation and tell the user the action needs the required permission (configure it manually in {_vcs}). NEVER try other tokens or workarounds.
 4. NEVER write any token into files, logs, or comments."""
@@ -1006,9 +1004,10 @@ def build_event_chat_prompt(evt: dict, user_message: str, thread: list,
 
     parts.append(f"## User Message\n{user_message}")
     _rk = evt.get("repo_key", "")
-    _bot_token_env = _vcs_bot_token_env(_rk)
     _seq = evt.get("seq", "")
-    parts.append(f"Reply concisely in Chinese; to accumulate shared knowledge or intervene in the flow, call the corresponding endpoints (POST /api/events/{_seq}/knowledge、/flow/reset, with {_bot_token_env}).")
+    parts.append("Reply concisely, in the same language the user used; to accumulate shared knowledge or intervene in the flow, call the corresponding endpoints "
+                 f"(POST /api/events/{_seq}/knowledge、/flow/reset, authenticated with your GRAPE_SESSION_TOKEN via `Authorization: Bearer ${{GRAPE_SESSION_TOKEN}}`). "
+                 "Never use raw platform tokens.")
     return "\n\n".join(parts), _injected_ids
 
 

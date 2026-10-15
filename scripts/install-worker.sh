@@ -129,6 +129,28 @@ log "解压运行包到 $INSTALL_DIR"
 tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "解压运行包失败"
 rm -f "$TMP_PKG"
 
+# ===== 3.5 升级前 import 冒烟检查（2026-10-14 五台 worker 心跳全断事故）=====
+# 解压完成后、停旧进程之前，用目标 venv 实际 import 新代码。
+# 拦截"包内缺模块/顶层 import 指向未打包模块"类坏包（当天事故：config.py 顶层
+# import src.auth，但 src/auth/ 不在 MANIFEST → runtime-agent 启动即
+# ModuleNotFoundError，systemd 5s 无限重启 6 小时，worker 永久失联）。
+# 冒烟失败 → fail 并保留旧代码不动（第 6 步还没执行，旧进程仍在运行），
+# worker 继续用旧版本心跳，等下一个修复版本——零中断。
+# 注意：全新安装（无旧代码）时冒烟失败同样 fail，避免装出必死的实例。
+_smoke_check() {
+  [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
+  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" >/dev/null 2>&1; then
+    log "新代码 import 冒烟检查通过"
+    return 0
+  else
+    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" 2>&1 | tail -1)"
+    log "!!! 新代码 import 冒烟检查失败：$_smoke_err"
+    log "!!! 拒绝升级（旧代码未动，worker 保持当前版本运行）——请把此日志反馈主控维护者"
+    return 1
+  fi
+}
+_smoke_check || fail "新运行包 import 冒烟失败（坏包），已中止升级，旧代码未受影响"
+
 # restore_upgrade_backup <起服务方式>：恢复备份的旧代码并按传入方式重启 agent。
 # systemd: restore_upgrade_backup systemd；nohup: restore_upgrade_backup nohup
 restore_upgrade_backup() {
@@ -197,28 +219,58 @@ fi
 log "使用 Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
 
 # ===== 4. 建 venv + 最小依赖 =====
-if [ ! -x "$VENV/bin/python" ]; then
+# venv 三级自愈（Issue #257 B1）：pip 文件在但损坏（ModuleNotFoundError）时递进修复
+#   Level 1: ensurepip --upgrade
+#   Level 2: get-pip.py（curl 下载执行）
+#   Level 3: 删除 .venv 重建（site-packages 损坏，pip+aiohttp 都丢）
+_venv_python_ok() { "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version_info >= (3,10) else 1)' 2>/dev/null; }
+_venv_pip_ok() { "$VENV/bin/python" -m pip --version >/dev/null 2>&1; }
+
+if [ ! -x "$VENV/bin/python" ] || ! _venv_python_ok; then
   log "创建 venv ($PY)"
+  rm -rf "$VENV"
   "$PY" -m venv "$VENV"
 fi
-# 确保 venv 内有 pip（某些系统 ensurepip 缺失导致 venv 无 pip）
-# 某些旧 venv 只有 pip3 没有 pip 软链接，统一用 PIP_CMD 变量
+
+# 确保 venv 内有 pip 且可用（文件存在 ≠ 可用——Issue #123 pip 损坏场景）
 PIP_CMD="$VENV/bin/pip"
-if [ ! -x "$PIP_CMD" ]; then
-  if [ -x "$VENV/bin/pip3" ]; then
-    log "venv 无 pip（有 pip3），使用 pip3 作为替代"
-    PIP_CMD="$VENV/bin/pip3"
-    # 尝试修复 pip 软链接（不影响 pip3 使用）
-    "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || true
+if [ -x "$PIP_CMD" ] && _venv_pip_ok; then
+  : # pip 文件在且可正常 import，无需修复
+elif [ -x "$VENV/bin/pip3" ] && "$VENV/bin/python" -m pip3 --version >/dev/null 2>&1; then
+  log "venv 无 pip（有 pip3），使用 pip3 作为替代"
+  PIP_CMD="$VENV/bin/pip3"
+else
+  # pip 缺失或损坏——三级递进自愈
+  log "venv pip 不可用，启动三级自愈..."
+  # Level 1: ensurepip
+  log "  [1/3] 尝试 ensurepip --upgrade..."
+  if "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 && _venv_pip_ok; then
+    log "  ensurepip 修复成功"
   else
-    log "venv 缺 pip, 手动安装 ensurepip..."
-    "$VENV/bin/python" -m ensurepip --upgrade 2>/dev/null || \
-      "$VENV/bin/python" -m pip install --upgrade pip 2>/dev/null || \
-      curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" 2>/dev/null || true
-    # 再次检查
-    if [ ! -x "$PIP_CMD" ] && [ -x "$VENV/bin/pip3" ]; then
-      PIP_CMD="$VENV/bin/pip3"
+    # Level 2: get-pip.py
+    log "  [2/3] ensurepip 无效，尝试 get-pip.py..."
+    if curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" >/dev/null 2>&1 && _venv_pip_ok; then
+      log "  get-pip.py 修复成功"
+    else
+      # Level 3: 重建 venv
+      log "  [3/3] pip 损坏严重（site-packages 损坏），重建 venv..."
+      _saved_ver=""
+      [ -f "$VERSION_FILE" ] && _saved_ver=$(cat "$VERSION_FILE" 2>/dev/null || true)
+      rm -rf "$VENV"
+      "$PY" -m venv "$VENV"
+      "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 || \
+        curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" >/dev/null 2>&1 || true
+      [ -n "$_saved_ver" ] && echo "$_saved_ver" > "$VERSION_FILE" 2>/dev/null || true
+      if _venv_pip_ok; then
+        log "  venv 重建成功，pip 已恢复"
+      else
+        fail "venv 三级自愈均失败，pip 仍不可用。请手动删除 $VENV 后重试，或安装 python3-venv 包"
+      fi
     fi
+  fi
+  # 统一 PIP_CMD（ensurepip/get-pip 可能只装 pip3）
+  if [ ! -x "$PIP_CMD" ] && [ -x "$VENV/bin/pip3" ]; then
+    PIP_CMD="$VENV/bin/pip3"
   fi
 fi
 if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
@@ -392,7 +444,35 @@ EOF
   systemctl daemon-reload
   systemctl enable runtime-agent >/dev/null 2>&1 || true
   systemctl restart runtime-agent || { restore_upgrade_backup systemd || true; fail "新 agent 启动失败（已尝试回滚旧版本，请查 journalctl -u runtime-agent）"; }
-  log "已通过 systemd 启动（runtime-agent）"
+  # 启动验证 + 失败回滚（2026-10-14 五台 worker 心跳全断事故补齐）：
+  # `systemctl restart` 对 Type=simple 单元在进程 spawn 即返回成功，agent 随后
+  # 崩溃（如 import 失败）它感知不到——nohup 分支自 2026-10-08 起有 3s+30s
+  # 注册验证，systemd 分支此前缺失，导致坏包升级后 systemd 无限重启 6 小时。
+  # 现验证两件事：3s 后单元仍 active（非 auto-restart 僵尸循环）且 journal
+  # 无 Traceback；30s 内日志出现 registered。任一失败 → 回滚旧代码重启。
+  sleep 3
+  _unit_state="$(systemctl show runtime-agent --property=ActiveState --value 2>/dev/null || true)"
+  _unit_sub="$(systemctl show runtime-agent --property=SubState --value 2>/dev/null || true)"
+  if [ "$_unit_state" != "active" ] || [ "$_unit_sub" = "auto-restart" ] \
+     || journalctl -u runtime-agent --since "-10 seconds" --no-pager 2>/dev/null | grep -q "Traceback"; then
+    restore_upgrade_backup systemd || true
+    fail "新 agent 启动即崩溃（active=$_unit_state sub=$_unit_sub，已尝试回滚旧版本），日志: journalctl -u runtime-agent"
+  fi
+  _reg_ok=""
+  for _i in $(seq 1 10); do
+    if journalctl -u runtime-agent --since "-$((30 + $_i * 3)) seconds" --no-pager 2>/dev/null | grep -q "RuntimeAgent registered"; then
+      _reg_ok=1
+      break
+    fi
+    sleep 3
+  done
+  if [ -n "$_reg_ok" ]; then
+    log "已通过 systemd 启动并注册成功（runtime-agent）"
+  elif restore_upgrade_backup systemd; then
+    log "新 agent 30s 未注册成功——已回滚旧版本（新版本可能无法连接 master）"
+  else
+    log "新 agent 注册超时且回滚失败，worker 状态异常，请人工检查: journalctl -u runtime-agent"
+  fi
 else
   # ---- 普通用户 或 容器环境（无 systemd）：nohup/setsid 后台启动 ----
   if [ "$ROOT_MODE" = "1" ] && ! _has_systemd; then

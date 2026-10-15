@@ -15,11 +15,22 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.routes import templates as templates_mod
 from src.user import db as user_db
+from src.session_manager import db as sm_db, db_lock as sm_lock
+from src.auth.grape_account_db import (
+    create_grape_account, get_grape_account_by_username,
+    get_token_version as grape_get_token_version,
+)
+
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
-    return create_access_token(user_id, username, get_token_version(user_id))
+    # D32: 直接查 grape_accounts.token_version
+    with sm_lock:
+        c = sm_db.cursor()
+        c.execute("SELECT token_version FROM grape_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    ver = row[0] if row else 0
+    return create_access_token(user_id, username, ver)
 
 client = TestClient(app)
 
@@ -32,19 +43,36 @@ CONFIG_PATH = os.path.join(ROOT, "configs", "project-templates.json")
 
 def setup_module():
     global _uid, _token, _headers
-    _uid = user_db.create_user("test_tmpl", "test123")
-    if not _uid:
-        _uid = user_db.get_user_by_username("test_tmpl")
-    acc = user_db.get_user_account("test_tmpl") or {}
-    acc["gitcode_api_token"] = "test_tmpl_token_12345"
-    user_db.save_user_account("test_tmpl", acc)
+    # D32: 直接用 SQL 创建 grape_accounts 用户
+    from src.auth.password import hash_password
+    with sm_lock:
+        c = sm_db.cursor()
+        c.execute("SELECT id FROM grape_accounts WHERE username='test_tmpl'")
+        row = c.fetchone()
+        if row:
+            _uid = {"id": row[0], "username": "test_tmpl"}
+        else:
+            c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
+                      ("test_tmpl", None, hash_password("test123"), "test_tmpl"))
+            sm_db.commit()
+            _uid = {"id": c.lastrowid, "username": "test_tmpl"}
+    # D32: token 写入 external_identities
+    with sm_lock:
+        c = sm_db.cursor()
+        c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', ?, ?, ?)",
+                  (_uid["id"], "gc_test_tmpl", "test_tmpl", "test_tmpl_token_12345"))
+        sm_db.commit()
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        with sm_lock:
+            c = sm_db.cursor()
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
+            c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
+            sm_db.commit()
 
 
 def _reload_config():
@@ -150,11 +178,21 @@ class TestCreate:
 
     def test_no_token(self):
         """无 GitCode token 用户 → 400"""
-        uid = user_db.create_user("test_tmpl_notok", "test123")
+        # D32: 直接用 SQL 创建 grape_accounts 用户
+        from src.auth.password import hash_password
+        with sm_lock:
+            c = sm_db.cursor()
+            c.execute("SELECT id FROM grape_accounts WHERE username='test_tmpl_notok'")
+            row = c.fetchone()
+            if row:
+                uid = {"id": row[0], "username": "test_tmpl_notok"}
+            else:
+                c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
+                          ("test_tmpl_notok", None, hash_password("test123"), "test_tmpl_notok"))
+                sm_db.commit()
+                uid = {"id": c.lastrowid, "username": "test_tmpl_notok"}
         try:
-            acc = user_db.get_user_account("test_tmpl_notok") or {}
-            acc["gitcode_api_token"] = ""
-            user_db.save_user_account("test_tmpl_notok", acc)
+            # D32: 不写凭据 → get_user_gitcode_token 返回空
             tok = _jwt_access_token(uid["id"], uid["username"])
             h = {"Authorization": f"Bearer {tok}"}
             with patch.object(templates_mod, "_find_template",
@@ -164,7 +202,10 @@ class TestCreate:
                                 headers=h)
                 assert r.status_code == 400
         finally:
-            user_db.delete_user(uid["id"])
+            with sm_lock:
+                c = sm_db.cursor()
+                c.execute("DELETE FROM grape_accounts WHERE id=?", (uid["id"],))
+                sm_db.commit()
 
     def test_success_local_template(self):
         """成功路径：local 模板，mock 建仓库/push/托管/场景"""
@@ -208,7 +249,7 @@ class TestCreate:
             assert "webhook boom" in data["host_warning"]  # 包含原始错误信息
 
 
-def _fake_host(body, user):
+def _fake_host(body, user, request=None, provider=""):
     return {"message": "仓库托管成功", "webhook_id": 123}
 
 
@@ -261,15 +302,18 @@ class TestRepoManager:
             assert ["push", "--force", "-u", "origin", "HEAD:main"] in cmds
 
     def test_push_git_template_falls_back_to_user_token(self):
-        """git 模板：无 bot token 时回退用户 token 克隆（git 分支需 token 拉取），不应抛错。"""
+        """git 模板：无 bot token 时回退用户 token，push URL 含 user token，不应抛错。"""
         from src.user.repo_manager import push_template_to_repo
         tpl = {"id": "micro-svc", "source": "git", "source_repo": "devops-bot/cloud-native-microsvc"}
         with patch("src.user.repo_manager._run_git") as mock_git, \
              patch("src.user.repo_manager._run_git_has_origin", return_value=False), \
-             patch("src.user.repo_manager._git_has_changes", return_value=True):
+             patch("src.user.repo_manager._git_has_changes", return_value=True), \
+             patch("src.user.repo_manager._download_gitcode_tarball"):
             mock_git.side_effect = [""] * 20
             ok = push_template_to_repo(tpl, "me", "repo", "user_tok", bot_token="")
             assert ok is True
-            clone_call = mock_git.call_args_list[0]
-            assert clone_call[0][0][0] == "clone"
-            assert "oauth2:user_tok@" in clone_call[0][0][2]
+            # D43: git 模板不再用 clone，改为 tarball 下载；验证 remote add 含 user token
+            remote_calls = [c for c in mock_git.call_args_list if c[0][0] and c[0][0][0] == "remote" and c[0][0][1] == "add"]
+            assert len(remote_calls) > 0, f"expected remote add, got: {mock_git.call_args_list}"
+            target_url = remote_calls[0][0][0][3]
+            assert "oauth2:user_tok@" in target_url, f"expected user token in URL, got: {target_url}"

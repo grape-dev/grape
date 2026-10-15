@@ -138,13 +138,14 @@ def delete_organization(org_id: int, user: dict = Depends(require_org_admin)):
 @router.get("/search/users", operation_id="orgs_search_users", summary="搜索用户（添加成员用）")
 def search_users(q: str = "", user: dict = Depends(require_no_session_token)):
     """按用户名模糊搜索用户（用于添加成员时的实时搜索）。"""
+    # D32-补丁：查 grape_accounts，不查 user_accounts
     from src.session_manager import db as _db, db_lock as _dbl
     if not q or len(q) < 1:
         return []
     with _dbl:
         _c = _db.cursor()
         _c.execute(
-            "SELECT id, username, nickname FROM user_accounts "
+            "SELECT id, username, nickname FROM grape_accounts "
             "WHERE username LIKE ? OR nickname LIKE ? "
             "ORDER BY username LIMIT 20",
             (f"%{q}%", f"%{q}%")
@@ -179,20 +180,17 @@ def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_or
     # 支持通过 username 或 user_id 添加
     target_uid = body.user_id
     if not target_uid and body.username:
-        from src.user.db import get_user_by_username
-        target = get_user_by_username(body.username.strip())
+        # D32-补丁：查 grape_accounts，不查 user_accounts
+        from src.auth.grape_account_db import get_grape_account_by_username
+        target = get_grape_account_by_username(body.username.strip())
         if not target:
             raise HTTPException(status_code=404, detail={"code": 404, "message": f"用户 '{body.username}' 不存在"})
         target_uid = target["id"]
     if not target_uid:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "请提供 username 或 user_id"})
-    # 检查目标用户是否存在
-    from src.session_manager import db as _db, db_lock as _dbl
-    with _dbl:
-        _c = _db.cursor()
-        _c.execute("SELECT id, username FROM user_accounts WHERE id=?", (target_uid,))
-        _u = _c.fetchone()
-    if not _u:
+    # 检查目标用户是否存在（D32-补丁：查 grape_accounts）
+    from src.auth.grape_account_db import get_grape_account_by_id
+    if not get_grape_account_by_id(target_uid):
         raise HTTPException(status_code=404, detail={"code": 404, "message": "用户不存在"})
     ok = add_org_member(org_id, target_uid, body.role, invited_by=user["id"])
     if not ok:

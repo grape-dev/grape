@@ -10,7 +10,7 @@
 
 ## 验证结果
 - 新增 8/8 通过；
-- 回归 59 通过、3 失败——经 stash 对照验证为基线（origin/local-liufei）既有失败（`src/agent/sandbox` mock 缺 `build_bwrap_cmd` 属性），与本改动无关。
+- 回归 59 通过、3 失败——经 stash 对照验证为基线（origin (integration branch)）既有失败（`src/agent/sandbox` mock 缺 `build_bwrap_cmd` 属性），与本改动无关。
 
 ## 风险
 - 下限保护确保全局上限始终 ≥ 静默窗口，配置异常不会破坏静默兜底；

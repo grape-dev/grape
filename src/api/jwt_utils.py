@@ -1,10 +1,17 @@
-"""JWT 工具——双 token 机制（access + refresh）。
+"""JWT 工具——双 token 机制（access + refresh）+ 密钥轮换（kid）。
 
 集群多实例共享：所有实例配同一个 JWT_SECRET 环境变量。
 
+密钥轮换（kid）：
+  - 生产环境通过 JWT_SECRET_KEYS 配置多密钥池，格式 "kid1:secret1,kid2:secret2"
+  - JWT_KID_CURRENT 指定当前签发密钥的 kid
+  - 签发时 payload 加 kid 字段，用对应 secret 签名
+  - 验签时先尝试从 payload 取 kid，从密钥池查 secret；无 kid 则 fallback 到 JWT_SECRET（兼容旧 token）
+  - 轮换流程：添加新密钥到 JWT_SECRET_KEYS → 修改 JWT_KID_CURRENT → 旧密钥保留 30 天 → 移除
+
 Access Token：
   - 短有效期（15 分钟）
-  - 用于 API 请求 Authorization: Bearer header
+  - 用于 API 请求 Authorization: Bearer ***
   - 存 localStorage（JS 可读）
 
 Refresh Token：
@@ -27,6 +34,34 @@ _DEFAULT_SECRET = "grape-dev-secret-change-in-production"
 JWT_SECRET = os.environ.get("JWT_SECRET", _DEFAULT_SECRET)
 JWT_ALGORITHM = "HS256"
 
+# 密钥轮换（kid）配置
+# 从 configs/security.json 读取（通过 security_config 模块）
+from src.auth.security_config import get_jwt_secret_keys, get_jwt_kid_current
+_SECRET_KEYS_RAW = get_jwt_secret_keys()
+JWT_KID_CURRENT = get_jwt_kid_current()
+
+def _parse_secret_keys(raw: str) -> dict:
+    """解析 JWT_SECRET_KEYS 环境变量为 {kid: secret} 字典。"""
+    result = {}
+    if not raw:
+        return result
+    for pair in raw.split(","):
+        pair = pair.strip()
+        if ":" in pair:
+            kid, secret = pair.split(":", 1)
+            kid = kid.strip()
+            secret = secret.strip()
+            if kid and secret:
+                result[kid] = secret
+    return result
+
+# 密钥池：kid → secret
+_SECRET_KEYS: dict[str, str] = _parse_secret_keys(_SECRET_KEYS_RAW)
+
+# 当前签发密钥的 kid 和 secret
+_SIGNING_KID: str = JWT_KID_CURRENT if JWT_KID_CURRENT in _SECRET_KEYS else ""
+_SIGNING_SECRET: str = _SECRET_KEYS.get(_SIGNING_KID, "") if _SIGNING_KID else ""
+
 # 过期时间
 ACCESS_TOKEN_TTL = 15 * 60       # 15 分钟
 REFRESH_TOKEN_TTL = 7 * 24 * 3600  # 7 天（滚动续期）
@@ -37,8 +72,40 @@ _INSECURE_SECRETS = {"", _DEFAULT_SECRET, "change-me-in-production"}
 
 
 def validate_jwt_secret() -> bool:
-    """校验 JWT_SECRET 是否安全。生产环境必须返回 True。"""
-    return JWT_SECRET not in _INSECURE_SECRETS
+    """校验 JWT_SECRET 是否安全。生产环境必须返回 True。
+
+    D46 P0-4: 除了黑名单检查，还校验最小长度（HS256 要求 >= 32 字节）。
+    """
+    if JWT_SECRET in _INSECURE_SECRETS:
+        return False
+    if len(JWT_SECRET) < 32:
+        return False
+    return True
+
+
+def _get_signing_secret() -> tuple[str, str]:
+    """获取签发密钥和对应的 kid。
+
+    返回 (secret, kid)。
+    优先使用 kid 密钥池中的密钥；未配置则 fallback 到 JWT_SECRET。
+    """
+    if _SIGNING_SECRET and _SIGNING_KID:
+        return _SIGNING_SECRET, _SIGNING_KID
+    return JWT_SECRET, ""
+
+
+def _get_verify_secret(kid: str) -> str | None:
+    """根据 kid 获取验签密钥。
+
+    D46 P1-5: 区分"有 kid 但未知"和"无 kid"两种情况。
+    - 有 kid 且在密钥池中 → 返回对应 secret
+    - 有 kid 但不在密钥池中 → 返回 None（拒绝验签，旧 kid 已被移除）
+    - 无 kid（旧 token）→ fallback 到 JWT_SECRET（兼容期）
+    """
+    if kid:
+        return _SECRET_KEYS.get(kid)  # 有 kid：从池查，找不到返回 None
+    # 无 kid → fallback 到 JWT_SECRET（兼容旧 token）
+    return JWT_SECRET
 
 
 def create_access_token(user_id: int, username: str, token_version: int = 0,
@@ -50,6 +117,7 @@ def create_access_token(user_id: int, username: str, token_version: int = 0,
     按登录平台优先返回对应 token。密码登录/旧 token 缺省空值，fallback 到现有逻辑。
     role：admin 时置 'admin'，供 require_admin 校验；普通用户缺省空。
     """
+    secret, kid = _get_signing_secret()
     payload = {
         "sub": str(user_id),
         "username": username,
@@ -58,11 +126,13 @@ def create_access_token(user_id: int, username: str, token_version: int = 0,
         "iat": int(time.time()),
         "exp": int(time.time()) + ACCESS_TOKEN_TTL,
     }
+    if kid:
+        payload["kid"] = kid
     if login_provider:
         payload["login_provider"] = login_provider
     if role:
         payload["role"] = role
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
 def create_refresh_token(user_id: int, username: str, token_version: int = 0,
@@ -76,6 +146,7 @@ def create_refresh_token(user_id: int, username: str, token_version: int = 0,
     使刷新后的 access_token 仍携带登录来源。
     role：admin 时置 'admin'；供 /api/admin/refresh 校验。
     """
+    secret, kid = _get_signing_secret()
     now = int(time.time())
     if max_exp is None:
         # 首次签发——设置 30 天绝对上限
@@ -89,11 +160,13 @@ def create_refresh_token(user_id: int, username: str, token_version: int = 0,
         "iat": now,
         "exp": now + REFRESH_TOKEN_TTL,  # 滚动续期——每次 refresh 重新算 7 天
     }
+    if kid:
+        payload["kid"] = kid
     if login_provider:
         payload["login_provider"] = login_provider
     if role:
         payload["role"] = role
-    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
+    return jwt.encode(payload, secret, algorithm=JWT_ALGORITHM)
 
 
 def verify_access_token(token: str) -> dict | None:
@@ -103,11 +176,17 @@ def verify_access_token(token: str) -> dict | None:
     token_version 校验在 deps.py 里做（对比数据库）。
     """
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        # 先解码 header 取 kid（不验签）
+        unverified = jwt.get_unverified_claims(token)
+        kid = unverified.get("kid", "")
+        secret = _get_verify_secret(kid)
+        if secret is None:
+            return None
+        payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "access":
             return None
         return payload
-    except JWTError:
+    except (JWTError, ValueError, TypeError):
         return None
 
 
@@ -124,7 +203,12 @@ def verify_refresh_token(token: str) -> dict | None:
     4. max_exp 未到达（绝对上限 30 天）
     """
     try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        unverified = jwt.get_unverified_claims(token)
+        kid = unverified.get("kid", "")
+        secret = _get_verify_secret(kid)
+        if secret is None:
+            return None
+        payload = jwt.decode(token, secret, algorithms=[JWT_ALGORITHM])
         if payload.get("type") != "refresh":
             return None
         # 检查 max_exp 绝对上限
@@ -132,5 +216,5 @@ def verify_refresh_token(token: str) -> dict | None:
         if max_exp and int(time.time()) > int(max_exp):
             return None  # 到达 30 天绝对上限——强制登录
         return payload
-    except JWTError:
+    except (JWTError, ValueError, TypeError):
         return None

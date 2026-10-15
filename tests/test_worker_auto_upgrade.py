@@ -72,6 +72,12 @@ class TestHeartbeatLatestVersion:
 class TestWorkerAutoUpgrade:
     """Worker 自动升级逻辑测试。"""
 
+    @pytest.fixture(autouse=True)
+    def _no_upgrade_jitter(self):
+        """升级 jitter 随机 0~60s 会睡掉测试窗口（0.25s）导致 flaky——归零。"""
+        with patch("random.uniform", return_value=0):
+            yield
+
     @staticmethod
     async def _drive(loop_coro, duration=0.25):
         t = asyncio.ensure_future(loop_coro)
@@ -93,7 +99,8 @@ class TestWorkerAutoUpgrade:
             "latest_version": "git-newversion-w123-p456"
         }
         with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("random.uniform", return_value=0):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
             m_upgrade.assert_awaited()
@@ -158,7 +165,8 @@ class TestWorkerAutoUpgrade:
             "latest_version": "git-newversion-w123-p456"
         }
         with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("random.uniform", return_value=0):
             try:
                 asyncio.run(self._drive(ra._run_loop(
                     client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4),
@@ -184,7 +192,8 @@ class TestWorkerAutoUpgrade:
         client.heartbeat.side_effect = _fake_hb
         with patch("src.runtime.agent._read_local_worker_version", return_value="git-old-w111-p222"), \
              patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d):
+             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
+             patch("random.uniform", return_value=0):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.02, max_concurrent=4),
                 duration=0.2))
@@ -232,19 +241,154 @@ class TestWorkerAutoUpgrade:
         assert result is False
 
     def test_heartbeat_none_skips_version_check(self):
-        """心跳失败（None）时不执行版本对比。"""
+        """心跳失败（None）时不执行版本对比（版本一致场景）。
+
+        B3 后：心跳失败超阈值时会调 latest_version() 独立端点做版本比对。
+        版本一致时不触发升级。
+        """
         client = AsyncMock()
         client.get_tags.return_value = []
         client.claim_by_tag.return_value = None
         client.claim.return_value = None
         client.heartbeat.return_value = None
         client.reset_session = AsyncMock()
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion"), \
+        client.latest_version.return_value = "h-sameversion"
+        client.get_task_state.return_value = "running"
+        with patch("src.runtime.agent._read_local_worker_version", return_value="h-sameversion"), \
              patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-              patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])):
+             patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])), \
+             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
             m_upgrade.assert_not_awaited()
+
+    def test_heartbeat_failure_triggers_version_check_via_latest_version(self):
+        """B3: 心跳失败超阈值时通过 latest_version() 独立端点感知新版本。
+
+        死锁环：aiohttp 会话坏 → 心跳失败 → 版本检查不执行（仅心跳成功分支）
+        → 不升级 → 会话不恢复。B3 修复后心跳失败也做版本比对。
+        """
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = None  # 心跳始终失败
+        client.reset_session = AsyncMock()
+        client.latest_version.return_value = "h-newversion1234"
+        client.get_task_state.return_value = "running"
+        with patch("src.runtime.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])), \
+             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
+             patch("random.uniform", return_value=0):
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4),
+                duration=0.3))
+            # 心跳失败后 latest_version 被调用做版本比对
+            client.latest_version.assert_awaited()
+            # 版本不一致 → 触发升级
+            m_upgrade.assert_awaited()
+
+
+class TestZombieTaskReclamation:
+    """B2: 僵尸任务超龄摘除测试。"""
+
+    @staticmethod
+    async def _drive(loop_coro, duration=0.25):
+        t = asyncio.ensure_future(loop_coro)
+        await asyncio.sleep(duration)
+        t.cancel()
+        try:
+            await t
+        except (asyncio.CancelledError, Exception):
+            pass
+
+    def test_zombie_task_reclaimed_and_fail_called(self):
+        """超龄僵尸任务被摘除并回调 fail。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": "h-newversion1234"
+        }
+        client.get_task_state.return_value = "dispatched"
+        client.fail = AsyncMock()
+        # 模拟一个已经超龄的僵尸任务（claim_time 设为极小值，阈值 1s → loop.time() - 0.001 > 1）
+        _zombie_task = {"id": "zombie-tid", "_engine_name": "opencode", "_claim_time": 0.001}
+        with patch("src.runtime.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
+             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (1.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)), \
+             patch("random.uniform", return_value=0), \
+             patch("src.runtime.agent._kill_stale_engine"):
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
+                _test_active_tasks={"zombie-tid": "zombie-session"},
+                _test_active_task_objs={"zombie-tid": _zombie_task})))
+            # 僵尸任务被回调 fail
+            client.fail.assert_awaited()
+
+    def test_non_zombie_task_not_reclaimed(self):
+        """未超龄任务不被摘除。"""
+        client = AsyncMock()
+        client.get_tags.return_value = []
+        client.claim_by_tag.return_value = None
+        client.claim.return_value = None
+        client.heartbeat.return_value = {
+            "status": "ok", "cancelled_tasks": [],
+            "latest_version": "h-newversion1234"
+        }
+        client.get_task_state.return_value = "running"
+        client.fail = AsyncMock()
+        with patch("src.runtime.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
+             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (999999.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)):
+            asyncio.run(self._drive(ra._run_loop(
+                client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
+                _test_active_tasks={"fresh-tid": "fresh-session"})))
+            client.fail.assert_not_awaited()
+
+
+class TestNormalizeWorkerVersion:
+    """B5: 版本归一化测试。"""
+
+    def test_new_format_unchanged(self):
+        """新格式版本串（h-12位指纹）归一化后不变。"""
+        assert ra._normalize_worker_version("h-abc123def456") == "h-abc123def456"
+
+    def test_old_format_strips_w_p_suffix(self):
+        """老格式版本串剥离 -w/-p 后缀。"""
+        result = ra._normalize_worker_version("h-abc123def4567890-w111-p222")
+        assert result == "h-abc123def456"
+        assert "-w" not in result
+        assert "-p" not in result
+
+    def test_old_format_git_prefix(self):
+        """老格式 git- 前缀版本串剥离 -w/-p 后缀（git- 不截断，short hash 本就 ≤12 字符）。"""
+        result = ra._normalize_worker_version("git-abc123def456-w111-p222")
+        assert result == "git-abc123def456"
+        assert "-w" not in result
+        assert "-p" not in result
+
+    def test_empty_string(self):
+        """空串归一化后仍为空。"""
+        assert ra._normalize_worker_version("") == ""
+
+    def test_none_like(self):
+        """空值安全处理。"""
+        assert ra._normalize_worker_version(None) == ""
+
+    def test_already_normalized_idempotent(self):
+        """已归一化的版本串再次归一化不变。"""
+        v = "h-abc123def456"
+        assert ra._normalize_worker_version(ra._normalize_worker_version(v)) == v
+
+    def test_old_new_same_code_matches(self):
+        """老格式和新格式指向同一代码版本时归一化后相等。"""
+        old_format = "h-abc123def4567890-w111-p222"
+        new_format = "h-abc123def456"
+        assert ra._normalize_worker_version(old_format) == ra._normalize_worker_version(new_format)
 
 
 class TestReadLocalWorkerVersion:

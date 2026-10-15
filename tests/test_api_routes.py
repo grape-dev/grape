@@ -9,11 +9,21 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
 from src.session_manager import db, db_lock
+from src.auth.grape_account_db import (
+    create_grape_account, get_grape_account_by_username,
+    get_token_version as grape_get_token_version,
+    update_profile as grape_update_profile,
+)
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
-    return create_access_token(user_id, username, get_token_version(user_id))
+    # D32: 直接查 grape_accounts.token_version（不依赖 grape_account_db 模块的 db 引用）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT token_version FROM grape_accounts WHERE id=?", (user_id,))
+        row = c.fetchone()
+    ver = row[0] if row else 0
+    return create_access_token(user_id, username, ver)
 
 client = TestClient(app)
 
@@ -24,17 +34,28 @@ _headers = {}
 
 def setup_module():
     global _uid, _token, _headers
-    _uid = user_db.create_user("test_api", "test123")
-    if not _uid:
-        _uid = user_db.get_user_by_username("test_api")
-    # 给测试用户设置 API Token
-    acc = user_db.get_user_account("test_api") or {}
-    acc["gitcode_api_token"] = "test_api_token_12345"
-    user_db.save_user_account("test_api", acc)
+    # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
+    from src.auth.password import hash_password
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM grape_accounts WHERE username='test_api'")
+        row = c.fetchone()
+        if row:
+            _uid = {"id": row[0], "username": "test_api"}
+        else:
+            c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
+                      ("test_api", None, hash_password("test123"), "test_api"))
+            db.commit()
+            _uid = {"id": c.lastrowid, "username": "test_api"}
+    # D32: token 写入 external_identities（get_user_token_with_refresh 从此表读）
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', ?, ?, ?)",
+                  (_uid["id"], "gc_test_api", "test_api", "test_api_token_12345"))
+        db.commit()
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     # 确保 agent_type 表中有 5 个 Agent 类型和技能
-    from src.session_manager import db, db_lock
     with db_lock:
         # 订阅配置与 configs/agent-description.json 保持一致，避免污染语义
         subscribe_map = {
@@ -59,8 +80,13 @@ def setup_module():
         db.commit()
 
 def teardown_module():
+    # D32: 清理 grape_accounts 中的测试用户
     if _uid:
-        user_db.delete_user(_uid["id"])
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
+            c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (_uid["id"],))
+            db.commit()
 
 
 # ===================== 1. Health & SPA =====================
@@ -108,19 +134,21 @@ class TestAuth:
         assert r.json()["nickname"] == "test_api"
 
     def test_profile_nickname_roundtrip(self):
-        """save_user_account 写 nickname 后 profile 返回该昵称"""
-        # 给测试用户设置一个昵称
-        acc = user_db.get_user_account("test_api") or {}
-        acc["nickname"] = "测试昵称"
-        user_db.save_user_account("test_api", acc)
+        """update_profile 写 nickname 后 profile 返回该昵称"""
+        # D32: 直接用 SQL 更新 grape_accounts.nickname
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE grape_accounts SET nickname=? WHERE id=?", ("测试昵称", _uid["id"]))
+            db.commit()
         try:
             r = client.get("/api/auth/profile", headers=_headers)
             assert r.status_code == 200
             assert r.json()["nickname"] == "测试昵称"
         finally:
-            acc2 = user_db.get_user_account("test_api") or {}
-            acc2["nickname"] = ""
-            user_db.save_user_account("test_api", acc2)
+            with db_lock:
+                c = db.cursor()
+                c.execute("UPDATE grape_accounts SET nickname=? WHERE id=?", ("", _uid["id"]))
+                db.commit()
 
     def test_profile_no_auth(self):
         r = client.get("/api/auth/profile")
@@ -138,8 +166,12 @@ class TestAuth:
         r2 = client.get("/api/auth/profile", headers=_headers)
         assert r2.status_code == 401  # logout 后 token_version+1 → token 失效
         # logout 后 token_version+1——需要用新版本重新生成 token
-        from src.user.db import get_token_version
-        _new_ver = get_token_version(_uid["id"])
+        # D32: 直接查 grape_accounts.token_version
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT token_version FROM grape_accounts WHERE id=?", (_uid["id"],))
+            _tv_row = c.fetchone()
+        _new_ver = _tv_row[0] if _tv_row else 0
         _token = _jwt_access_token(_uid["id"], _uid["username"])
         # _jwt_access_token 默认 ver=0——logout 后需要 ver=新版本
         from src.api.jwt_utils import create_access_token
@@ -567,9 +599,17 @@ class TestAgents:
             c = db.cursor()
             c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"agentskill{uniq}%",))
             c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (repo_key,))
+            c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
+            c.execute("DELETE FROM user_repos WHERE repo_key=?", (repo_key,))
             # 仓库技能（agent_type='sre'）
             c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
                       (skill_name, "agent-skill", "d", "sre", skill_name, "repo", repo_key))
+            # TEST-14: check_repo_access 需 managed_repos + user_repos 关联
+            owner, repo = repo_key.split("/", 1)
+            c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, bot_gitcode_token) VALUES (?,?,?,?,?,?)",
+                      (repo_key, owner, repo, repo, 1, 'b'))
+            c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (?,?,?,?,?,?)",
+                      (_uid["id"], repo_key, owner, repo, 1, 1))
             db.commit()
         try:
             owner, repo = repo_key.split("/", 1)
@@ -585,6 +625,8 @@ class TestAgents:
                 c = db.cursor()
                 c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"agentskill{uniq}%",))
                 c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (repo_key,))
+                c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
+                c.execute("DELETE FROM user_repos WHERE repo_key=?", (repo_key,))
                 db.commit()
 
 
@@ -666,7 +708,15 @@ class TestChat:
                 c.execute("INSERT INTO agent_runtimes (name, display_name, credential_id, installed, healthy, status, scope, owner_id) "
                           "VALUES ('opencode','opencode',0,1,1,'online','global','')")
             db.commit()
-        user = user_db.create_user("chat_def_" + _uuid.uuid4().hex[:6], "pw123")
+        # D32: 直接用 SQL 创建 grape_accounts 用户
+        from src.auth.password import hash_password as _hp
+        _chat_uname = "chat_def_" + _uuid.uuid4().hex[:6]
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
+                      (_chat_uname, None, _hp("pw123"), _chat_uname))
+            db.commit()
+            user = {"id": c.lastrowid, "username": _chat_uname}
         assert user
         tok = _jwt_access_token(user["id"], user["username"])
         hd = {"Authorization": f"Bearer {tok}"}
@@ -685,7 +735,10 @@ class TestChat:
         with db_lock:
             db.cursor().execute("DELETE FROM chat_agent_session WHERE user_id=?", (user["id"],))
             db.commit()
-        user_db.delete_user(user["id"])
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (user["id"],))
+            db.commit()
 
     def test_chat_im_user_isolation(self):
         """Chat IM 配置每用户独立：A 配置后，B 的 GET /chat/config 应为空 IM"""
@@ -709,7 +762,18 @@ class TestChat:
         assert r.json()["im"]["feishu"]["app_id"] == app_a
 
         # 用户 B（新用户，无配置）读不到 A 的 app_id
-        user_b = user_db.get_user_by_username("chat_iso_b") or user_db.create_user("chat_iso_b", "pw123")
+        from src.auth.password import hash_password as _hp2
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM grape_accounts WHERE username='chat_iso_b'")
+            _row = c.fetchone()
+            if _row:
+                user_b = {"id": _row[0], "username": "chat_iso_b"}
+            else:
+                c.execute("INSERT INTO grape_accounts (username, email, password_hash, status, token_version) VALUES (?,?,?,1,0)",
+                          ("chat_iso_b", None, _hp2("pw123")))
+                db.commit()
+                user_b = {"id": c.lastrowid, "username": "chat_iso_b"}
         token_b = _jwt_access_token(user_b["id"], user_b["username"])
         headers_b = {"Authorization": f"Bearer {token_b}"}
         r = client.get("/api/chat/config", headers=headers_b)
@@ -722,7 +786,7 @@ class TestChat:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE im_app_id=? OR user_id IN (?,?)", (app_a, _uid["id"], user_b["id"]))
-            c.execute("DELETE FROM user_accounts WHERE id=?", (user_b["id"],))
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (user_b["id"],))
             c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_a,))
             db.commit()
 
@@ -738,7 +802,18 @@ class TestChat:
         assert r.status_code == 200, f"A save failed: {r.text[:200]}"
 
         # 用户 B 尝试绑定同一 app_id → 400
-        user_b = user_db.get_user_by_username("chat_uniq_b") or user_db.create_user("chat_uniq_b", "pw123")
+        from src.auth.password import hash_password as _hp3
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM grape_accounts WHERE username='chat_uniq_b'")
+            _row = c.fetchone()
+            if _row:
+                user_b = {"id": _row[0], "username": "chat_uniq_b"}
+            else:
+                c.execute("INSERT INTO grape_accounts (username, email, password_hash, status, token_version) VALUES (?,?,?,1,0)",
+                          ("chat_uniq_b", None, _hp3("pw123")))
+                db.commit()
+                user_b = {"id": c.lastrowid, "username": "chat_uniq_b"}
         token_b = _jwt_access_token(user_b["id"], user_b["username"])
         headers_b = {"Authorization": f"Bearer {token_b}"}
         r = client.put("/api/chat/config", json={"im": {"feishu": {"app_id": app_id, "app_secret": "sec_x"}}}, headers=headers_b)
@@ -749,7 +824,7 @@ class TestChat:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM chat_agent_session WHERE im_app_id=? OR user_id IN (?,?)", (app_id, _uid["id"], user_b["id"]))
-            c.execute("DELETE FROM user_accounts WHERE id=?", (user_b["id"],))
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (user_b["id"],))
             c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id=?", (app_id,))
             db.commit()
 
@@ -965,21 +1040,21 @@ class TestSettings:
 
     def test_clear_credentials_empty_string(self):
         """Issue #237：传空字符串应清除已有凭据"""
-        uname = "test_api"
+        # D32: 凭据存于 user_credentials 表，用 get_credential 读
         # 1. 先写入 AK/SK
         client.put("/api/settings/credentials", json={
             "huawei_cloud_ak": "real_ak_123", "huawei_cloud_sk": "real_sk_456"
         }, headers=_headers)
-        acc = user_db.get_user_account(uname)
-        assert acc["huawei_cloud_ak"] == "real_ak_123"
-        assert acc["huawei_cloud_sk"] == "real_sk_456"
+        cred = user_db.get_credential(_uid["id"], "huawei_cloud") or {}
+        assert cred.get("ak") == "real_ak_123"
+        assert cred.get("sk") == "real_sk_456"
         # 2. 传空字符串清除
         client.put("/api/settings/credentials", json={
             "huawei_cloud_ak": "", "huawei_cloud_sk": ""
         }, headers=_headers)
-        acc = user_db.get_user_account(uname)
-        assert acc["huawei_cloud_ak"] == ""
-        assert acc["huawei_cloud_sk"] == ""
+        cred = user_db.get_credential(_uid["id"], "huawei_cloud") or {}
+        assert cred.get("ak", "") == ""
+        assert cred.get("sk", "") == ""
         # 3. GET 端点反映清除后的状态
         r = client.get("/api/settings/credentials", headers=_headers)
         hw = r.json()["huawei_cloud"]
@@ -988,7 +1063,6 @@ class TestSettings:
 
     def test_credentials_not_modified_when_omitted(self):
         """Issue #237：未传字段不应修改已有值"""
-        uname = "test_api"
         client.put("/api/settings/credentials", json={
             "huawei_cloud_ak": "keep_this_ak"
         }, headers=_headers)
@@ -996,13 +1070,12 @@ class TestSettings:
         client.put("/api/settings/credentials", json={
             "huawei_cloud_sk": "new_sk"
         }, headers=_headers)
-        acc = user_db.get_user_account(uname)
-        assert acc["huawei_cloud_ak"] == "keep_this_ak"
-        assert acc["huawei_cloud_sk"] == "new_sk"
+        cred = user_db.get_credential(_uid["id"], "huawei_cloud") or {}
+        assert cred.get("ak") == "keep_this_ak"
+        assert cred.get("sk") == "new_sk"
 
     def test_placeholder_rejected_on_clear(self):
         """Issue #237：占位符值应被拒绝，不覆盖已有值"""
-        uname = "test_api"
         client.put("/api/settings/credentials", json={
             "huawei_cloud_ak": "existing_ak"
         }, headers=_headers)
@@ -1010,24 +1083,46 @@ class TestSettings:
         client.put("/api/settings/credentials", json={
             "huawei_cloud_ak": "AK-demo-access-key-xxxx"
         }, headers=_headers)
-        acc = user_db.get_user_account(uname)
-        assert acc["huawei_cloud_ak"] == "existing_ak"
+        cred = user_db.get_credential(_uid["id"], "huawei_cloud") or {}
+        assert cred.get("ak") == "existing_ak"
 
     def test_clear_github_token(self):
         """Issue #237：传空字符串清除 GitHub token"""
-        uname = "test_api"
-        # 先写入 github token（直接写 DB，跳过网络验证）
-        acc = user_db.get_user_account(uname) or {}
-        acc["github_api_token"] = "ghp_test_token"
-        acc["github_login"] = "testuser"
-        user_db.save_user_account(uname, acc)
+        # D32: 先写入 github token 到 external_identities
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'github', 'gh_test', 'testuser', 'ghp_test_token')",
+                      (_uid["id"],))
+            db.commit()
         # 传空字符串清除
         client.put("/api/settings/credentials", json={
             "github_token": ""
         }, headers=_headers)
-        acc = user_db.get_user_account(uname)
-        assert acc["github_api_token"] == ""
-        assert acc["github_login"] == ""
+        # D32: 清除后 external_identities 中应无 github 绑定
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT access_token FROM external_identities WHERE grape_user_id=? AND provider='github'", (_uid["id"],))
+            row = c.fetchone()
+        assert not row or row[0] == ""
+
+    def test_clear_gitcode_token(self):
+        """对称测试：传空字符串清除 GitCode token"""
+        # 先写入 gitcode token 到 external_identities
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO external_identities (grape_user_id, provider, external_id, external_login, access_token) VALUES (?, 'gitcode', 'gc_test', 'testuser', 'glpat_test_token')",
+                      (_uid["id"],))
+            db.commit()
+        # 传空字符串清除
+        client.put("/api/settings/credentials", json={
+            "gitcode_token": ""
+        }, headers=_headers)
+        # 清除后 external_identities 中应无 gitcode 绑定
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT access_token FROM external_identities WHERE grape_user_id=? AND provider='gitcode'", (_uid["id"],))
+            row = c.fetchone()
+        assert not row or row[0] == ""
 
     def test_notifications(self):
         r = client.get("/api/settings/notifications", headers=_headers)
@@ -1205,8 +1300,39 @@ class TestSettings:
 
 # ===================== 10. Skills =====================
 class TestSkills:
+    # TEST-14: mock OBS storage for upload/convert tests
+    _fake_storage = None
+
+    def setup_method(self):
+        """为每个测试方法创建 FakeStorage mock（仅 OBS 依赖测试需要）。"""
+        from src.storage import StorageBackend
+        class FakeStorage(StorageBackend):
+            def backend_name(self): return "fake"
+            def save_bytes(self, key, data): return key
+            def save_stream(self, key, source): return key
+            def read_bytes(self, key): return b""
+            def read_file(self, key, local_path): return True
+            def exists(self, key): return True
+            def list_keys(self, prefix): return []
+            def delete_prefix(self, prefix): return 0
+            def delete_object(self, key): return True
+            def copy_object(self, src, dst): return True
+            def temporary_url(self, key, expires=300): return f"https://fake.example.com/{key}"
+            def presigned_url(self, key, expires): return f"https://fake.example.com/{key}"
+            def stat(self, key): return {"size": 0}
+            default_expires = 300
+        TestSkills._fake_storage = FakeStorage()
+        # autouse: 全局 patch get_storage，OBS 依赖测试自动走 fake
+        from unittest.mock import patch as _patch
+        self._storage_patch = _patch("src.storage.get_storage", return_value=TestSkills._fake_storage)
+        self._storage_patch.__enter__()
+
+    def teardown_method(self):
+        if hasattr(self, '_storage_patch'):
+            self._storage_patch.__exit__(None, None, None)
+
     def test_skills_list(self):
-        r = client.get("/api/skills/", headers=_headers)
+        r = client.get("/api/skills", headers=_headers)
         assert r.status_code == 200
         assert "skills" in r.json()
         assert len(r.json()["skills"]) > 0
@@ -1296,16 +1422,24 @@ class TestSkills:
         assert row and row[0] == "issue", f"agent_type should be issue, got {row}"
 
     def test_skills_template_download(self):
-        """GET /api/skills/template 应返回可用的 ZIP 技能模板"""
-        import zipfile, io as _io
+        """GET /api/skills/template — OBS 模式返回 {url, expires_in} JSON"""
         r = client.get("/api/skills/template", headers=_headers)
         assert r.status_code == 200, f"Got {r.status_code}: {r.text[:200]}"
-        assert r.headers["content-type"].startswith("application/zip")
-        with zipfile.ZipFile(_io.BytesIO(r.content)) as z:
-            names = z.namelist()
-            valid = z.testzip() is None
-        assert any(n.endswith("SKILL.md") for n in names), f"模板应包含 SKILL.md, got {names}"
-        assert valid
+        # OBS 模式返回 JSON {url, expires_in}；local 模式返回 zip
+        ct = r.headers.get("content-type", "")
+        if ct.startswith("application/json"):
+            data = r.json()
+            assert "url" in data, f"OBS mode should return url, got {data}"
+            assert "expires_in" in data
+        else:
+            # local 模式：直接返回 zip
+            assert ct.startswith("application/zip")
+            import zipfile, io as _io
+            with zipfile.ZipFile(_io.BytesIO(r.content)) as z:
+                names = z.namelist()
+                valid = z.testzip() is None
+            assert any(n.endswith("SKILL.md") for n in names), f"模板应包含 SKILL.md, got {names}"
+            assert valid
 
     def test_skills_upload_repo_scope_via_form(self):
         """scope=repo 通过 form 提交时应正确落到仓库技能目录（此前无 Form() 标注会被当成 query 参数而失效）"""
@@ -1386,8 +1520,9 @@ class TestSkills:
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM skill WHERE skill_name LIKE ?", (f"convskill{uniq}%",))
-            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id) VALUES (?,?,?,?,?,?,?)",
-                      (skill_name, skill_name, "conv test", "vod", skill_name, "user", str(_uid["id"])))
+            # TEST-14: file_path 设 fake OBS 对象键，convert 路由检查此字段
+            c.execute("INSERT INTO skill (skill_name, display_name, description, agent_type, skill_path, scope, owner_id, file_path) VALUES (?,?,?,?,?,?,?,?)",
+                      (skill_name, skill_name, "conv test", "vod", skill_name, "user", str(_uid["id"]), f"custom/{_uid['id']}/{skill_name}"))
             db.commit()
 
         try:
@@ -1405,11 +1540,7 @@ class TestSkills:
             assert repo_row[0] == "repo" and repo_row[1] == rk
             assert repo_row[2] == "vod", f"agent_type should carry over, got {repo_row[2]}"
             assert user_row, "original user skill should be preserved"
-
-            # 目录：仓库目录存在 + 个人目录仍存在
-            repo_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key, skill_name)
-            assert os.path.isdir(repo_dir), "repo skill dir should exist"
-            assert os.path.isdir(user_dir), "original user skill dir should exist"
+            # OBS 模式：不创建本地目录，技能存储在 OBS（FakeStorage copy_object 已 mock）
         finally:
             # 清理
             repo_dir = os.path.join(os.path.dirname(user_db.SKILL_DIR), "repo", repo_key)
@@ -1478,7 +1609,7 @@ class TestSkills:
 # ===================== 11. Search =====================
 class TestSearch:
     def test_search_empty(self):
-        r = client.get("/api/search/?q=test&type=all", headers=_headers)
+        r = client.get("/api/search?q=test&type=all", headers=_headers)
         assert r.status_code == 200
         assert "events" in r.json()
         assert "repos" in r.json()
@@ -1486,7 +1617,7 @@ class TestSearch:
 
     def test_search_no_query(self):
         # q is required by pattern: min_length=1, so empty gives 422
-        r = client.get("/api/search/", headers=_headers)
+        r = client.get("/api/search", headers=_headers)
         assert r.status_code == 422
 
 

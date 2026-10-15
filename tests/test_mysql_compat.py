@@ -155,6 +155,40 @@ class TestTranslateSql:
         assert "DELETE FROM `tasks`" in out
         assert "AS __derived" in out
 
+    # ---- ON CONFLICT DO UPDATE（UPSERT）→ ON DUPLICATE KEY UPDATE（cluster-seq-11130 heartbeat 根因）----
+
+    _HEARTBEAT_SQL = (
+        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) VALUES (?,?,?,1) "
+        "ON CONFLICT(instance_id) DO UPDATE SET "
+        "last_heartbeat=datetime('now'), "
+        "hostname=COALESCE(excluded.hostname, hostname), "
+        "ip=COALESCE(excluded.ip, ip), im_enabled=1"
+    )
+
+    def test_conflict_upsert_to_duplicate_key(self):
+        out = mc.translate_sql(self._HEARTBEAT_SQL)
+        assert "ON DUPLICATE KEY UPDATE" in out
+        assert "ON CONFLICT" not in out
+        assert "excluded." not in out
+        assert "VALUES(hostname)" in out and "VALUES(ip)" in out
+        assert "CAST(NOW() AS CHAR)" in out
+        assert "%s" in out and "?" not in out.replace("VALUES", "")
+
+    def test_conflict_upsert_backtick_excluded_cols(self):
+        sql = ("INSERT INTO t (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET "
+               "v=COALESCE(excluded.`v`, v)")
+        out = mc.translate_sql(sql)
+        assert "ON DUPLICATE KEY UPDATE" in out
+        assert "VALUES(`v`)" in out or "VALUES(v)" in out
+        assert "excluded." not in out
+
+    def test_conflict_upsert_upper_case_insensitive(self):
+        sql = ("insert into t (a) values (1) "
+               "on conflict(a) do update set a=excluded.a")
+        out = mc.translate_sql(sql)
+        assert "ON DUPLICATE KEY UPDATE" in out
+        assert "VALUES(a)" in out and "excluded." not in out
+
     def test_delete_not_in_other_table_not_wrapped(self):
         sql = "DELETE FROM a WHERE id NOT IN (SELECT id FROM b WHERE x=1)"
         out = mc.translate_sql(sql)

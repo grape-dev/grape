@@ -17,10 +17,31 @@ def _restore_shared_session_manager():
     若不在每个用例后恢复，后续测试文件 from src.session_manager import db 会拿到指向
     临时旧 schema 库的连接（缺 runtime_id / chat_conversations / agent_runtimes 等表），
     造成顺序依赖的连锁失败（如 test_tasks / test_web_chat_tooluse / test_worker_package）。
+
+    D32-补丁：保存/恢复原始 db/db_lock 引用，并同步 grape_account_db 的引用。
     """
+    # 保存原始引用
+    import src.session_manager as _sm_orig
+    _orig_db = _sm_orig.db
+    _orig_db_lock = _sm_orig.db_lock
+    import src.auth.grape_account_db as _gad_orig
+    _orig_gad_db = _gad_orig.db
+    _orig_gad_db_lock = _gad_orig.db_lock
     yield
-    for name in ("src.session_manager", "session_manager"):
-        sys.modules.pop(name, None)
+    # 恢复原始引用——_import_session_manager 可能 del+reimport 了 session_manager，
+    # 需要获取当前 sys.modules 中的模块对象
+    import sys as _sys
+    _sm = _sys.modules.get("src.session_manager")
+    if _sm is None:
+        import src.session_manager as _sm
+    _sm.db = _orig_db
+    _sm.db_lock = _orig_db_lock
+    # 同步 grape_account_db（也可能被 _import_session_manager 修改过）
+    _gad = _sys.modules.get("src.auth.grape_account_db")
+    if _gad is None:
+        import src.auth.grape_account_db as _gad
+    _gad.db = _orig_gad_db
+    _gad.db_lock = _orig_gad_db_lock
 
 
 def _import_session_manager(tmp_path):
@@ -58,6 +79,41 @@ def _import_session_manager(tmp_path):
     """)
     sm.db.execute(sm.REPO_IM_GROUP_BINDING_TABLE_SQL)
     sm.db.execute(sm.UNIFIED_USER_MAPPING_TABLE_SQL)
+    # D32-补丁：grape_account_db 从 session_manager.db 读取，临时库需建 grape_accounts 表
+    sm.db.execute("""
+        CREATE TABLE IF NOT EXISTS grape_accounts (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            username        VARCHAR(64) NOT NULL UNIQUE,
+            email           VARCHAR(255) DEFAULT NULL,
+            password_hash   TEXT NOT NULL DEFAULT '',
+            nickname        VARCHAR(128) DEFAULT '',
+            avatar_url      VARCHAR(512) DEFAULT '',
+            status          INTEGER DEFAULT 1,
+            token_version   INTEGER DEFAULT 0,
+            last_active_at  TEXT DEFAULT NULL,
+            last_login_at   TEXT DEFAULT NULL,
+            created_at      TEXT DEFAULT (datetime('now')),
+            updated_at      TEXT DEFAULT (datetime('now'))
+        )
+    """)
+    # D32-补丁：external_identities 表（grape_account_db.get_user_identities 查此表）
+    sm.db.execute("""
+        CREATE TABLE IF NOT EXISTS external_identities (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            grape_user_id     INTEGER NOT NULL,
+            provider          VARCHAR(32) NOT NULL,
+            external_id       VARCHAR(128) NOT NULL,
+            external_login    VARCHAR(128) DEFAULT '',
+            external_name     VARCHAR(128) DEFAULT '',
+            external_avatar   VARCHAR(512) DEFAULT '',
+            access_token      TEXT DEFAULT '',
+            refresh_token     TEXT DEFAULT '',
+            token_expires_at  TEXT DEFAULT '',
+            metadata          TEXT DEFAULT '{}',
+            created_at        TEXT DEFAULT (datetime('now')),
+            updated_at        TEXT DEFAULT (datetime('now'))
+        )
+    """)
     try:
         sm.db.execute("ALTER TABLE repo_im_group_binding ADD COLUMN auto_impl_enabled INTEGER DEFAULT 0")
     except:
@@ -67,6 +123,22 @@ def _import_session_manager(tmp_path):
     except:
         pass
     sm.db.commit()
+    # D32-补丁：TestFeishuUsers 测试需要 user1/user2 在 grape_accounts 中
+    import hashlib
+    for uname in ("user1", "user2"):
+        sm.db.execute(
+            "INSERT OR IGNORE INTO grape_accounts (username, password_hash, nickname, status) "
+            "VALUES (?, ?, ?, 1)",
+            (uname, hashlib.sha256(b"test").hexdigest(), uname))
+    sm.db.commit()
+    # D32-补丁：同步 grape_account_db 的 db/db_lock 引用指向临时库
+    # 否则 grape_account_db 仍缓存全局 DB 引用，查 grape_accounts/external_identities 找不到临时库中的表
+    try:
+        import src.auth.grape_account_db as _gad
+        _gad.db = sm.db
+        _gad.db_lock = sm.db_lock
+    except Exception:
+        pass
     return sm
 
 
@@ -145,12 +217,10 @@ class TestUpdateSession:
 class TestFeishuUsers:
     @pytest.fixture(autouse=True)
     def _ensure_users(self):
-        """set_feishu_open_id 需要 user_id 来自 user_accounts（user_db 全局库）。
-        在全局测试库创建 user1/user2，使映射可写入。"""
-        from src.user import db as user_db
-        for uname in ("user1", "user2"):
-            if not user_db.get_user_account(uname):
-                user_db.create_user(uname, "pw_test")
+        """set_feishu_open_id 需要 user_id 来自 grape_accounts。
+        D32-补丁：update_unified_user_info 从 session_manager.db（临时库）查 grape_accounts。
+        用户在 _import_session_manager 中创建到临时库。
+        """
         yield
 
     def test_set_and_get_open_id(self, tmp_path):

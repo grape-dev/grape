@@ -230,8 +230,11 @@ class TestSessionLifecycle:
         c._session = None
         with patch("aiohttp.ClientSession") as m_sess, patch("aiohttp.TCPConnector") as m_conn:
             _run(c._ensure_session())
-        m_conn.assert_called_once_with(limit=10, force_close=True)
-        m_sess.assert_called_once_with(connector=c._connector)
+        # 连接池优化后的实际参数（keepalive 复用 + CLOSE-WAIT 清理 + 内网 IP ssl 跳过验证）
+        m_conn.assert_called_once_with(limit=10, force_close=False,
+                                       enable_cleanup_closed=True,
+                                       keepalive_timeout=30, ssl=False)
+        m_sess.assert_called_once_with(connector=c._connector, timeout=c._timeout)
         assert c._session is not None
 
     def test_ensure_session_reuses_existing(self):

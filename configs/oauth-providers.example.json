@@ -1,0 +1,36 @@
+{
+  "gitcode": {
+    "name": "GitCode",
+    "auth_url": "https://gitcode.com/oauth/authorize",
+    "token_url": "https://gitcode.com/oauth/token",
+    "user_url": "https://gitcode.com/api/v5/user",
+    "redirect_uri": "https://grape.example.com/api/auth/callback/gitcode",
+    "scope": "all",
+    "id_field": "id",
+    "login_field": "login",
+    "name_field": "nickname",
+    "pkce_enabled": true,
+    "brand_color": "#e7330f",
+    "whitelist_column": "gitcode_username",
+    "accept_header": "application/json",
+    "client_id": "",
+    "client_secret": ""
+  },
+  "github": {
+    "name": "GitHub",
+    "auth_url": "https://github.com/login/oauth/authorize",
+    "token_url": "https://github.com/login/oauth/access_token",
+    "user_url": "https://api.github.com/user",
+    "redirect_uri": "https://grape.example.com/api/auth/callback/github",
+    "scope": "repo user admin:repo_hook offline_access",
+    "id_field": "id",
+    "login_field": "login",
+    "name_field": "name",
+    "pkce_enabled": true,
+    "brand_color": "#24292f",
+    "whitelist_column": "github_username",
+    "accept_header": "application/vnd.github+json",
+    "client_id": "",
+    "client_secret": ""
+  }
+}

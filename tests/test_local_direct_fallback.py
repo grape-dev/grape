@@ -1,10 +1,14 @@
-"""plugin 广播回落本机 direct 引擎测试（weekly-05 plugin-broadcast-local-direct-fallback）。
+"""plugin 广播回落本机 direct 引擎测试（weekly-05 plugin-broadcast-local-direct-fallback + weekly-07 修复）。
 
 覆盖：
-- UT-01 _pool_only_local_direct：全部在线健康引擎 cred=0 → 返回 rid
-- UT-02 _pool_only_local_direct：存在 cred>0（远端 worker 池）→ None
-- UT-03 _pool_only_local_direct：无在线引擎 → None
-- UT-04 _enqueue_pipeline_task 广播 + 全本机 → 触发 start_direct_agent（self-run）
+- UT-01 _pool_only_local_direct：全部本机 cred=0（global）→ 返回 rid
+- UT-02 _pool_only_local_direct：存在远端 worker（cred>0）但仍有本机 global direct → 返回本机 rid（方案 A 修复）
+- UT-03 _pool_only_local_direct：无在线/无本机 global direct → None
+- UT-04 _enqueue_pipeline_task 广播 + 本机 global → 触发 start_direct_agent（self-run）
+- UT-05 _pool_only_local_direct：仅 repo-scope 远端 worker（无本机 global direct）→ None
+- UT-06 _pool_only_local_direct：本机 local + global 均 cred=0 → 优先 global
+- UT-07 _pool_only_local_direct：多枚本机 global → 优先级 opencode > codearts
+- UT-08 _pool_only_local_direct：repo 远端 worker 与 global direct 混合 → 仍返回本机 global（时序无关）
 """
 import os, sys, json
 from unittest.mock import patch, MagicMock
@@ -26,22 +30,35 @@ def _mock_runtimes(rows):
     return mock_db
 
 
-# 辅助：显式建立测试引擎行（隔离，带清理）
+# 辅助：显式建立测试引擎行（隔离，带清理；支持 name/scope）
 _LOCAL_IDS = []
 
 
 def _seed_runtimes(rows):
-    """rows: [(id, credential_id, status, healthy)]——插入可控引擎状态。"""
+    """rows: (id, credential_id, status, healthy[, name[, scope]])——插入可控引擎状态。
+
+    隔离策略（共享 test_sessions.db，多测试文件并发 seed agent_runtimes）：
+    - id 用高位段（70xxx）避免与其它测试（test_cleanup 用 24/25、claim_by_tag 用 76/999/173）撞 id；
+    - seed 前按 name 全清（含 scope 任意），避免与同 name+scope+credential_id 行撞
+      UNIQUE(name, scope, credential_id, owner_id, host_name)。
+    - name 缺省用 `lf-{eid}`，与全库真实引擎名（opencode/codearts/hermes）错开；仅
+      优先级用例（UT-07）显式传真实名以验证 ORDER BY，seed 前会清掉同名残留。
+    """
     global _LOCAL_IDS
     _LOCAL_IDS = [r[0] for r in rows]
+    names = [r[4] if len(r) > 4 else "lf-%d" % r[0] for r in rows]
     with db_lock:
         c = db.cursor()
-        for eid, cred, status, healthy in rows:
-            c.execute("DELETE FROM agent_runtimes WHERE id=?", (eid,))
+        _ph = ",".join("?" * len(names))
+        c.execute(f"DELETE FROM agent_runtimes WHERE name IN ({_ph})", tuple(names))
+        for r in rows:
+            eid, cred, status, healthy = r[0], r[1], r[2], r[3]
+            name = r[4] if len(r) > 4 else "lf-%d" % eid
+            scope = r[5] if len(r) > 5 else "global"
             c.execute(
-                "INSERT INTO agent_runtimes (id, name, status, credential_id, healthy, busy_slots, max_concurrent, agent_tags) "
-                "VALUES (?,?,?,?,?,0,4,'[\"all\"]')",
-                (eid, "t%d" % eid, status, cred, healthy))
+                "INSERT INTO agent_runtimes (id, name, status, credential_id, healthy, busy_slots, max_concurrent, agent_tags, scope) "
+                "VALUES (?,?,?,?,?,0,4,'[\"all\"]',?)",
+                (eid, name, status, cred, healthy, scope))
         db.commit()
 
 
@@ -61,18 +78,22 @@ def _cleanup_runtimes():
 def test_pool_only_local_direct_all_local():
     from src.api import event_pipeline as ep
     try:
-        _seed_runtimes([(2001, 0, "online", 1), (2002, 0, "online", 1)])
+        _seed_runtimes([(2001, 0, "online", 1, "opencode", "global"),
+                        (2002, 0, "online", 1, "codearts", "global")])
         rid = ep._pool_only_local_direct()
         assert rid in (2001, 2002)
     finally:
         _cleanup_runtimes()
 
 
-def test_pool_only_local_direct_with_remote_returns_none():
+def test_pool_only_local_direct_with_remote_returns_local():
+    """方案 A 修复：存在 repo-scope 远端 worker（cred>0）时，只要还有本机 global direct，仍 self-run。"""
     from src.api import event_pipeline as ep
     try:
-        _seed_runtimes([(2003, 0, "online", 1), (2004, 99, "online", 1)])
-        assert ep._pool_only_local_direct() is None
+        _seed_runtimes([(2003, 0, "online", 1, "opencode", "global"),
+                        (2004, 99, "online", 1, "opencode", "repo")])
+        rid = ep._pool_only_local_direct()
+        assert rid == 2003
     finally:
         _cleanup_runtimes()
 
@@ -80,13 +101,72 @@ def test_pool_only_local_direct_with_remote_returns_none():
 def test_pool_only_local_direct_no_online_none():
     from src.api import event_pipeline as ep
     try:
-        _seed_runtimes([(2005, 0, "offline", 0), (2006, 0, "offline", 0)])
+        _seed_runtimes([(2005, 0, "offline", 0, "opencode", "global"),
+                        (2006, 0, "offline", 0, "codearts", "global")])
         assert ep._pool_only_local_direct() is None
     finally:
         _cleanup_runtimes()
 
 
-# UT-04：_enqueue_pipeline_task 广播 + 全本机 → self-run 回落
+# UT-05：仅 repo-scope 远端 worker（无本机 global direct）→ None
+
+def test_pool_only_local_direct_only_remote_repo_worker_none():
+    from src.api import event_pipeline as ep
+    try:
+        _seed_runtimes([(2011, 99, "online", 1, "opencode", "repo")])
+        assert ep._pool_only_local_direct() is None
+    finally:
+        _cleanup_runtimes()
+
+
+def test_pool_only_local_direct_remote_bot_local_repo_none():
+    """本机 repo-scope（cred=0）但无 global direct → 不 self-run（本机 global 才作为部署方自跑）。"""
+    from src.api import event_pipeline as ep
+    try:
+        _seed_runtimes([(2012, 0, "online", 1, "opencode", "repo")])
+        assert ep._pool_only_local_direct() is None
+    finally:
+        _cleanup_runtimes()
+
+
+# UT-06：本机 local + global 均 cred=0 → 优先 global
+
+def test_pool_only_local_direct_global_beats_local():
+    from src.api import event_pipeline as ep
+    try:
+        _seed_runtimes([(2013, 0, "online", 1, "opencode", "local"),
+                        (2014, 0, "online", 1, "codearts", "global")])
+        assert ep._pool_only_local_direct() == 2014
+    finally:
+        _cleanup_runtimes()
+
+
+# UT-07：多枚本机 global → 优先级 opencode > codearts
+
+def test_pool_only_local_direct_priority_opencode_first():
+    from src.api import event_pipeline as ep
+    try:
+        _seed_runtimes([(2015, 0, "online", 1, "codearts", "global"),
+                        (2016, 0, "online", 1, "opencode", "global")])
+        assert ep._pool_only_local_direct() == 2016
+    finally:
+        _cleanup_runtimes()
+
+
+# UT-08：repo 远端 worker 与 global direct 混合（含时序差异）→ 仍返回本机 global
+
+def test_pool_only_local_direct_mixed_remotes_still_local():
+    from src.api import event_pipeline as ep
+    try:
+        _seed_runtimes([(2017, 99, "online", 1, "hermes", "repo"),
+                        (2018, 99, "online", 1, "opencode", "repo"),
+                        (2019, 0, "online", 1, "opencode", "global")])
+        assert ep._pool_only_local_direct() == 2019
+    finally:
+        _cleanup_runtimes()
+
+
+# UT-04：_enqueue_pipeline_task 广播 + 本机 global → self-run 回落
 
 def test_enqueue_broadcast_self_run_when_only_local():
     from src.api import event_pipeline as ep

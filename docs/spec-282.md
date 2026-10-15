@@ -1,6 +1,6 @@
 # Spec: Issue #282 — hermes 引擎 1200s 后超时失败（全局超时对齐）
 
-> 来源：Issue Agent Spec（2026-10-10）| 评级 ready | 目标分支：`local-liufei`
+> 来源：Issue Agent Spec（2026-10-10）| 评级 ready | 目标分支：`integration branch (personal dev branch)`
 
 ## 目标
 消除 hermes ACP 引擎独有的全局墙钟超时硬切：`src/agent/hermes_acp.py` 内循环全局上限从写死倍率 `max_exec_seconds * 2`（=1200s）对齐为外层任务总上限 `RUNTIME_TASK_TIMEOUT`（默认 3600s，同源同默认值）。

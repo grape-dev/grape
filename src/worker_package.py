@@ -36,6 +36,7 @@ MANIFEST = [
     "src/mysql_compat.py",
     "src/user/__init__.py",
     "src/user/db.py",
+    "src/auth/",
     "src/api/__init__.py",
     "src/api/routing.py",
     "src/api/time_utils.py",
@@ -362,6 +363,32 @@ def worker_code_version() -> str:
     ver = "h-" + _manifest_version()[:12]
     _cached_code_version = ver
     _cached_code_version_ts = _now
+    return ver
+
+
+def normalize_worker_version(ver: str) -> str:
+    """归一化 worker 版本串，兼容老格式（Issue #257 B5）。
+
+    老格式版本串形如：
+      h-{manifest16}-w{wheels_fingerprint}-p{python_fingerprint}
+      git-{commit12}-w{...}-p{...}
+    新格式：
+      h-{manifest12}
+
+    本函数剥离 -w/-p 后缀，截取代码指纹主体到 12 位，使老格式版本能与新格式
+    正确比对——避免「代码相同但版本串格式不同」导致的无限升级循环。
+
+    无法识别的格式原样返回（空串原样返回）。
+    """
+    if not ver:
+        return ""
+    ver = ver.strip()
+    # 剥离 -w... -p... 后缀（老格式 package_version 附加的 wheels/python 指纹）
+    import re as _re
+    ver = _re.split(r'-w[a-f0-9]+-p[a-f0-9]+', ver, maxsplit=1)[0]
+    # h- 前缀：截取指纹主体到 12 位（新格式标准长度）
+    if ver.startswith("h-") and len(ver) > 14:
+        ver = "h-" + ver[2:14]
     return ver
 
 

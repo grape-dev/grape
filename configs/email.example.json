@@ -1,0 +1,39 @@
+{
+  "_comment": "邮件服务配置 — 复制此文件为 configs/email.json 并填入真实值。改后无需重启。",
+
+  "_env_help": "运行环境：development = 开发模式（允许固定验证码/日志降级）| production = 生产模式（强制邮件服务，固定验证码自动忽略）| 留空 = 等同 development",
+  "env": "development",
+
+  "_mode_help": "smtp = 通过 SMTP 中继发送（QQ邮箱/163/Gmail/企业邮箱）| resend = 通过 Resend API 发送（云服务，无需 SMTP）| 留空 = 非生产环境自动降级为日志输出（不发送真实邮件）",
+  "mode": "smtp",
+
+  "_from_email_help": "发件人地址，收件人看到的来源。如 noreply@yourdomain.com",
+  "from_email": "noreply@grape.dev",
+
+  "_smtp_help": "SMTP 中继配置 — mode=smtp 时必填。常见邮箱：QQ smtp.qq.com:465 | 163 smtp.163.com:465 | Gmail smtp.gmail.com:587 | 腾讯企业邮 smtp.exmail.qq.com:465 | 阿里云企业邮 smtp.qiye.aliyun.com:465",
+  "smtp": {
+    "_host_help": "SMTP 服务器地址，如 smtp.qq.com",
+    "host": "smtp.qq.com",
+
+    "_port_help": "端口：465 = SMTPS(SSL隐式加密) | 587 = STARTTLS(明文连接后升级加密) | 25 = 明文(不推荐)",
+    "port": 465,
+
+    "_username_help": "发件账号，通常是你的邮箱地址，如 your@qq.com",
+    "username": "your@qq.com",
+
+    "_password_help": "SMTP 授权码（不是登录密码！）。各邮箱获取方式：QQ邮箱→设置→账户→POP3/SMTP服务→开启→获取授权码 | 163→设置→POP3/SMTP→开启→设置授权码 | Gmail→账户→App密码",
+    "password": "your_smtp_authorization_code",
+
+    "_use_tls_help": "是否启用 TLS 加密。465 和 587 端口都建议设 true。25 端口设 false",
+    "use_tls": true
+  },
+
+  "_resend_help": "Resend API 配置 — mode=resend 时必填。注册地址 resend.com，免费额度 100封/天。域名需在 Resend 后台验证",
+  "resend": {
+    "_api_key_help": "Resend API Key，在 resend.com/api-keys 创建",
+    "api_key": ""
+  },
+
+  "_dev_code_help": "开发环境固定验证码 — 非生产环境填 6 位数字则跳过真实邮件发送，输入此码即可通过验证。生产环境（env=production）自动忽略此字段。留空 = 不启用固定验证码",
+  "dev_verification_code": ""
+}

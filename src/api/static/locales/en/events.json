@@ -20,6 +20,8 @@
   "local_retry_toast_failed": "Local retry failed: {{msg}}",
   "btn_terminate": "⏹ Terminate",
   "terminate_title": "Force terminate the running Agent",
+  "terminate_confirm_msg": "Terminate this running Agent task?<br>This cannot be undone. Work in progress will be lost and the task must be redispatched.",
+  "terminate_confirm_ok": "Confirm Terminate",
   "view_realtime_log": "📜 View Live Logs",
   "view_log": "📜 View Logs",
   "section_context_info": "Event Context & Info",

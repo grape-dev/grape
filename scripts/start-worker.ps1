@@ -46,6 +46,12 @@ if (-not $NoDaemon) {
             -WorkingDirectory $WorkerDir -WindowStyle Hidden -PassThru
         $proc.WaitForExit()
         $ExitCode = $proc.ExitCode
+        if ($ExitCode -eq 42) {
+            # Credential revoked by server (revoke) - restarting is pointless,
+            # the token is dead. Stop the daemon; reinstall with a new credential.
+            Write-Host "[$ts] Worker exited code=42 (credential revoked by server). Stopping daemon - reinstall with new credential to rejoin."
+            exit 42
+        }
         $Now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
         $Elapsed = $Now - $WindowStart
         if ($Elapsed -gt $RestartWindow) {

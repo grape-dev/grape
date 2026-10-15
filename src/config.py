@@ -191,6 +191,24 @@ OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 # Cookie 安全——生产 HTTPS 默认 secure=True，开发 HTTP 配 COOKIE_SECURE=false
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
 
+# 注意：此处禁止 import src.auth.*（worker 包含 config.py 但不含 src/auth/，
+# 顶层 import 会直接打崩 runtime-agent 启动，2026-10-14 五台 worker 心跳全断事故根因）。
+# 服务端如需 is_production，直接 from src.auth.security_config import is_production。
+# IS_PRODUCTION 常量已删除：全库零消费（死代码）。
+
+# JWT 密钥安全门禁
+_INSECURE_JWT_SECRETS = {"", "grape-dev-secret-change-in-production", "change-me-in-production"}
+
+# 邮件服务配置（环境变量驱动）
+SMTP_HOST = os.environ.get("SMTP_HOST", "").strip()
+SMTP_PORT = int(os.environ.get("SMTP_PORT", "25"))
+SMTP_USERNAME = os.environ.get("SMTP_USERNAME", "").strip()
+SMTP_PASSWORD = os.environ.get("SMTP_PASSWORD", "").strip()
+SMTP_TLS = os.environ.get("SMTP_TLS", "true").lower() in ("1", "true", "yes")
+SMTP_FROM_EMAIL = os.environ.get("SMTP_FROM_EMAIL", "noreply@grape.dev").strip()
+RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "").strip()
+GRAPE_DEV_VERIFICATION_CODE = os.environ.get("GRAPE_DEV_VERIFICATION_CODE", "").strip()
+
 # ====== 数据库路径（可通过环境变量指向独立测试库，防止测试污染生产库）======
 DB_PATH = os.environ.get("DEVOPS_DB_PATH", os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "data/sessions.db")))
 
@@ -205,14 +223,10 @@ def get_account(name=None) -> dict:
 
 
 def _load_accounts():
-    """从 user_accounts 表加载账户配置"""
-    global ACCOUNTS, _DEFAULT_ACCOUNT
-    ACCOUNTS = {}
+    """D32-补丁：不再从 user_accounts 加载 ACCOUNTS 字典（死代码，无调用方）。
+    保留 webhook_url / server_base_url 自动检测逻辑。
+    """
     try:
-        from src.user.db import get_all_user_accounts
-        for a in get_all_user_accounts():
-            ACCOUNTS[a["name"]] = a
-        # 自动检测并填入 webhook_url / server_base_url（全局配置 → meta 表）
         def _detect_server_base():
             methods = [
                 "https://api.ipify.org?format=json",
@@ -239,7 +253,6 @@ def _load_accounts():
         try:
             from src.user.db import get_meta_value, set_meta_value
             _cfg = read_server_config()
-            # webhook_url（GitCode 回调注册用）：configs/server-config.json 显式配置 > 自动检测
             if not get_meta_value("webhook_url"):
                 _wh = (_cfg.get("webhook_url") or "").strip()
                 if _wh:
@@ -250,7 +263,6 @@ def _load_accounts():
                     if base:
                         set_meta_value("webhook_url", base + "/webhook/gitcode")
                         log.info(f"Auto-detected webhook URL: {base}/webhook/gitcode")
-            # server_base_url（A2A/tasks 等协议端点基址）：配置文件 > 自动检测
             if not get_meta_value("server_base_url"):
                 _sb = (_cfg.get("server_base_url") or "").strip().rstrip("/")
                 if _sb:
@@ -263,25 +275,13 @@ def _load_accounts():
                         log.info(f"Auto-detected server base URL: {base}")
         except Exception:
             pass
-        log.info(f"Loaded {len(ACCOUNTS)} accounts from DB")
     except Exception as e:
-        log.warning(f"Failed to load accounts from DB: {e}")
+        log.warning(f"Failed to load server config: {e}")
 
 
 def save_accounts(new_accounts: list):
-    """将账户列表写入 DB 并重载"""
-    from src.user.db import save_user_account, delete_user_account
-    existing = set(ACCOUNTS.keys())
-    new_names = set()
-    for a in new_accounts:
-        name = a.get("name", "")
-        if not name:
-            continue
-        save_user_account(name, a)
-        new_names.add(name)
-    for n in existing - new_names:
-        delete_user_account(n)
-    _load_accounts()
+    """D32-补丁：已废弃——ACCOUNTS 字典无调用方，不再写 user_accounts 老表。"""
+    pass
 
 
 # ====== 事件路由 ======
@@ -322,28 +322,91 @@ def read_server_config() -> dict:
     return {}
 
 
-def is_gitcode_user_allowed(gitcode_login: str) -> bool:
-    """白名单判定（GitCode 用户名，非昵称）。
+_WL_ENABLED_CACHE = None
+_WL_CACHE_TS = 0.0
+_WL_CACHE_TTL = 60.0  # 60s TTL—meta 配置变更频率极低
 
-    优先查 DB（login_whitelist 表），降级读 login-whitelist.json 文件。
-    - DB 表存在且有数据 → gitcode_login 必须在表中
-    - DB 不可用 → 降级文件逻辑
-    - 文件缺失 / whitelist 为空 → 全部放行（默认开放）
-    - 读取异常 → 保守放行（避免误锁所有用户）
+
+def _is_login_whitelist_enabled() -> bool:
+    """登录白名单是否启用。
+
+    显式开关：meta 表 login_whitelist_enabled（true=启用，false=关闭）。
+    兼容旧部署：meta 未设置时回退到旧逻辑——login_whitelist 表有数据则启用，
+    并打 WARNING 日志提示管理员显式设置开关。
+    异常时默认关闭（不拦截），避免误锁所有用户。
+    结果缓存 60 秒（meta 配置变更频率极低）。
     """
-    if not gitcode_login:
+    import time as _t
+    global _WL_ENABLED_CACHE, _WL_CACHE_TS
+    now = _t.time()
+    if _WL_ENABLED_CACHE is not None and (now - _WL_CACHE_TS) < _WL_CACHE_TTL:
+        return _WL_ENABLED_CACHE
+    try:
+        from src.user.db import get_meta_value
+        val = get_meta_value("login_whitelist_enabled")
+        if val is not None and val != "":
+            result = val.lower() in ("true", "1", "yes")
+        else:
+            # meta 未设置——兼容旧部署：表有数据则隐式启用
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
+                if count > 0:
+                    log.warning(
+                        "login_whitelist has %d entries but meta 'login_whitelist_enabled' is not set. "
+                        "Falling back to legacy implicit enable. "
+                        "Set meta 'login_whitelist_enabled=true' to explicitly enable, "
+                        "or 'false' to disable.", count
+                    )
+                    result = True
+                else:
+                    result = False
+    except Exception:
+        result = False  # 异常时默认关闭（不拦截）
+    _WL_ENABLED_CACHE = result
+    _WL_CACHE_TS = now
+    return result
+
+
+def is_user_allowed(whitelist_column: str, login: str) -> bool:
+    """通用白名单判定——需显式启用才校验，未启用时全部放行。
+
+    开关：meta 表 login_whitelist_enabled（true=启用，未设置=关闭）
+    启用时：按平台列独立校验 login_whitelist 表
+    未启用时：直接返回 True
+    降级：DB 不可用时读 login-whitelist.json 文件
+    - 文件缺失 / whitelist 为空 → 全部放行
+    - 读取异常 → 放行（避免误锁所有用户）
+    """
+    if not login:
         return False
-    # 优先查 DB
+
+    # 显式开关检查——关闭时全部放行
+    if not _is_login_whitelist_enabled():
+        return True
+
+    # 列名安全校验（防 SQL 注入——列名来自 provider 配置）
+    import re
+    if not re.match(r'^[a-z_]+$', whitelist_column):
+        log.warning(f"is_user_allowed: invalid whitelist_column='{whitelist_column}'")
+        return False
+    # 查 DB——按平台列独立校验
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
+            # P2-6: 检查表非空，避免开关启用但表为空时锁死所有用户
             count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
-            if count > 0:
-                row = c.execute("SELECT 1 FROM login_whitelist WHERE gitcode_username=?", (gitcode_login,)).fetchone()
-                return row is not None
+            if count == 0:
+                log.warning("login_whitelist_enabled=true but table is empty — allowing all logins")
+                return True
+            row = c.execute(
+                f"SELECT 1 FROM login_whitelist WHERE {whitelist_column}=?", (login,)
+            ).fetchone()
+            return row is not None
     except Exception:
-        pass  # DB 不可用，降级文件
+        pass  # DB 不可用或列不存在，降级文件
     # 降级：读文件
     try:
         if not os.path.exists(LOGIN_WHITELIST_PATH):
@@ -353,43 +416,19 @@ def is_gitcode_user_allowed(gitcode_login: str) -> bool:
         wl = data.get("whitelist") if isinstance(data, dict) else None
         if not wl:
             return True
-        return gitcode_login in wl
+        return login in wl
     except Exception:
         return True
+
+
+def is_gitcode_user_allowed(gitcode_login: str) -> bool:
+    """白名单判定（GitCode 用户名）——委托通用函数。"""
+    return is_user_allowed("gitcode_username", gitcode_login)
 
 
 def is_github_user_allowed(github_login: str) -> bool:
-    """白名单判定（GitHub 用户名）。
-
-    优先查 DB（login_whitelist 表 github_username 列），降级读 login-whitelist.json 文件。
-    - DB 表存在且有数据 → github_login 必须在 github_username 列中
-    - DB 不可用 → 降级文件逻辑
-    - 文件缺失 / whitelist 为空 → 全部放行（默认开放）
-    - 读取异常 → 保守放行（避免误锁所有用户）
-    """
-    if not github_login:
-        return False
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            count = c.execute("SELECT COUNT(*) FROM login_whitelist").fetchone()[0]
-            if count > 0:
-                row = c.execute("SELECT 1 FROM login_whitelist WHERE github_username=?", (github_login,)).fetchone()
-                return row is not None
-    except Exception:
-        pass
-    try:
-        if not os.path.exists(LOGIN_WHITELIST_PATH):
-            return True
-        with open(LOGIN_WHITELIST_PATH, encoding="utf-8") as f:
-            data = json.load(f)
-        wl = data.get("whitelist") if isinstance(data, dict) else None
-        if not wl:
-            return True
-        return github_login in wl
-    except Exception:
-        return True
+    """白名单判定（GitHub 用户名）——委托通用函数。"""
+    return is_user_allowed("github_username", github_login)
 
 
 # ====== 技能目录解析（按 agent_type 一层分组：skills/<agent_type>/<skill>/SKILL.md）======
@@ -491,6 +530,9 @@ BWRAP_RO_ENGINE = {
     "opencode": ("~/.nvm", "~/.config/opencode", "~/.cache", "~/.opencode"),
     "codearts": ("~/.codeartsdoer", "~/.nvm", "~/.local", "~/.cache"),
     "hermes": ("~/.local",),
+    # hwcloud: 二进制在 ~/.local/bin（同 hermes），settings/会话由 OPENAGENT_CLI_CONFIG
+    # 指到 ~/.cache/hwcloud-acp-homes/<cwd-hash>/（BWRAP_RW_ENGINE rw 挂载）。
+    "hwcloud": ("~/.local",),
     # codex: 二进制 /usr/local/bin/codex 已在 COMMON(/usr/local) 覆盖。
     # ~/.codex 和 ~/.cache 在 BWRAP_RW_ENGINE 中 rw 挂载（需写 sessions/logs/cache）。
 }
@@ -505,6 +547,10 @@ BWRAP_RW_ENGINE = {
     "opencode": ("/var/cache/bun-compile",),
     "codearts": ("~/.codeartsdoer", "~/.cache/codearts-tasks", "/var/cache/codearts-tasks", "/var/cache/bun-compile"),
     "hermes": (_hermes_home,),
+    # hwcloud: 会话 sqlite + per-task settings.json 全在 ~/.cache/hwcloud-acp-homes/
+    # （hwcloud_acp._task_home_root，按 cwd-hash 分片；sandbox 模块同 hermes overlay
+    # 按 md5(cwd) 动态 rw-bind，这里是根目录兜底挂载）
+    "hwcloud": ("~/.cache/hwcloud-acp-homes",),
     # codex: 运行时写 ~/.codex（sqlite/sessions/logs/history）+ ~/.cache（缓存）
     "codex": ("~/.codex", "~/.cache"),
 }

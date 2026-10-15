@@ -27,8 +27,15 @@ def _clean_token_tables():
     """每用例前清空 token 表：Windows 下旧库残留跨运行，防键值冲突。"""
     from src.session_manager import db, db_lock
     with db_lock:
-        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
-        db.cursor().execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
+        db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%' OR session_key LIKE 'task-%' OR session_key LIKE 'sess-%' OR session_key LIKE 'task_%' OR session_key LIKE 'sess_%'")
+        # OMIT-4 修复：api_tokens 表 schema 已改为 token_sha256（无 token 列），
+        # 按 name + user_id 清理测试数据（user_id 来自 grape_accounts）
+        db.cursor().execute(
+            "DELETE FROM api_tokens WHERE name LIKE 'ci%' OR name LIKE 'mask-%' OR "
+            "user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'tester_%' OR username LIKE 't1_%' OR "
+            "username LIKE 't2_%' OR username LIKE 't3_%' OR username LIKE 't4_%' OR username LIKE 't6_%' OR "
+            "username LIKE 't7_%' OR username LIKE 't8_%' OR username LIKE 't9_%')"
+        )
         db.commit()
     yield
 
@@ -48,8 +55,9 @@ def client():
 def _make_user(username: str = "tester") -> dict:
     # 唯一用户名：避免 Windows 下测试库文件被占用未能删除导致的跨运行 UNIQUE 冲突
     import uuid
-    from src.user import db as _db
-    return _db.create_user(f"{username}_{uuid.uuid4().hex[:8]}", "pw")
+    # OMIT-4 修复：D32 后业务代码只查 grape_accounts，需用 create_grape_account 创建
+    from src.auth.grape_account_db import create_grape_account
+    return create_grape_account(f"{username}_{uuid.uuid4().hex[:8]}", "", "pw")
 
 
 # ==================== 方式 A：会话级临时 token ====================
@@ -103,6 +111,12 @@ def test_t3_t5_revoke_session_token_invalid(client):
         session_key="task-3", repo_key="o/r", agent_type="vod")
     assert client.get("/probe", headers={"Authorization": f"Bearer {plain}"}).status_code == 200
     assert auth_token.revoke_session_token("task-3") is True
+    # revoke 改为延迟过期（180s 宽限期），宽限期内 token 仍有效
+    # 模拟过期：手动将 expires_at 设为过去时间
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute("UPDATE session_api_tokens SET expires_at=? WHERE session_key=?", ("0", "task-3"))
+        db.commit()
     assert client.get("/probe", headers={"Authorization": f"Bearer {plain}"}).status_code == 401
     assert auth_token.verify_session_token(plain) is None
 
@@ -113,6 +127,11 @@ def test_t8_session_token_scope_not_shared():
     p2 = auth_token.issue_session_token(session_key="sess-b", repo_key="other/r", agent_type="vod")
     # 会话 a 的 token 作用域绑定在 o/r；会话 b 独立
     assert auth_token.revoke_session_token("sess-a") is True
+    # revoke 改为延迟过期（180s 宽限期），手动模拟过期
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.cursor().execute("UPDATE session_api_tokens SET expires_at=? WHERE session_key=?", ("0", "sess-a"))
+        db.commit()
     assert auth_token.verify_session_token(p1) is None
     assert auth_token.verify_session_token(p2) is not None   # b 不受 a 失效影响
 

@@ -27,21 +27,29 @@ def _make_ctx(app_id="cli_p2ptest"):
 
 
 def _seed_user_and_bot(username, app_id, user_id):
-    """创建 user_accounts 用户 + chat_agent_session 关联 app_id（用真实 user id）"""
-    from src.user import db as user_db
+    """创建 grape_accounts 用户 + chat_agent_session 关联 app_id（用真实 user id）"""
     from src.session_manager import db, db_lock
-    user = user_db.get_user_by_username(username) or user_db.create_user(username, "pw")
-    real_uid = user["id"]
-    acc = user_db.get_user_account(username) or {}
-    acc["nickname"] = "测试昵称"
-    user_db.save_user_account(username, acc)
+    from src.auth.password import hash_password
+    # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id, nickname FROM grape_accounts WHERE username=?", (username,))
+        row = c.fetchone()
+        if row:
+            real_uid = row[0]
+            c.execute("UPDATE grape_accounts SET nickname=? WHERE id=?", ("测试昵称", real_uid))
+        else:
+            c.execute("INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) VALUES (?,?,?,?,1,0)",
+                      (username, None, hash_password("pw"), "测试昵称"))
+            db.commit()
+            real_uid = c.lastrowid
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM chat_agent_session WHERE im_app_id=?", (app_id,))
         c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_provider) VALUES (?,?,?,?,?)",
                   (f"sess-{app_id}", real_uid, "", app_id, "feishu"))
         db.commit()
-    return user
+    return {"id": real_uid, "username": username}
 
 
 async def _send(parsed, app_id="cli_p2ptest"):
