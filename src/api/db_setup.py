@@ -1386,11 +1386,13 @@ def _create_tables():
         log.warning(f"Ensure grape_accounts columns failed: {e}")
 
     # D22: 幂等补列 external_identities.status + unbound_at（软删除/恢复绑定）
+    # Issue #344: 补 token_expires_at 列（#343 新增字段，早期建表可能缺失）
     try:
         with db_lock:
             c = db.cursor()
             _ensure_column(c, "external_identities", "status", "INTEGER DEFAULT 1")
             _ensure_column(c, "external_identities", "unbound_at", "TEXT DEFAULT NULL")
+            _ensure_column(c, "external_identities", "token_expires_at", "TEXT DEFAULT ''")
             db.commit()
     except Exception as e:
         log.warning(f"Ensure external_identities columns failed: {e}")
@@ -4229,3 +4231,19 @@ def _backfill_scene_display_names():
                 log.info("Issue #343: token_version +1 applied (old JWTs invalidated)")
     except Exception as e:
         log.warning(f"Issue #343 token_version invalidation failed: {e}")
+
+    # Issue #344: clear cached plaintext OAuth tokens from chat_conversations and agent_tasks
+    # agent now reads token from external_identities at runtime (with pre-refresh)
+    # meta-guard ensures one-time execution (aligned with #343 pattern)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT value FROM meta WHERE key='issue344_tokens_cleared'")
+            if not c.fetchone():
+                c.execute("UPDATE chat_conversations SET user_gitcode_token = '' WHERE user_gitcode_token != ''")
+                c.execute("UPDATE agent_tasks SET user_gitcode_token = '' WHERE user_gitcode_token != ''")
+                c.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('issue344_tokens_cleared', '1')")
+                db.commit()
+                log.info("Issue #344: cleared cached plaintext tokens from chat_conversations and agent_tasks")
+    except Exception as e:
+        log.warning(f"Issue #344 token cleanup failed: {e}")

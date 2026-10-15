@@ -4,6 +4,7 @@
 见 src/api/static/grape-task-logs-analysis.md。
 """
 import asyncio
+from src.auth import grape_account_db
 import json
 
 import pytest
@@ -15,7 +16,7 @@ from src.runtime.task_log_stream import subscribe, unsubscribe, fanout, _subscri
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -45,7 +46,7 @@ def _make_task(task_id="t1", status="running"):
 def _mk_user_token():
     import uuid
     from src.user import db as user_db
-    u = user_db.create_user(f"tasklog_{uuid.uuid4().hex[:8]}", "pw123456")
+    u = grape_account_db.create_grape_account(f"tasklog_{uuid.uuid4().hex[:8]}", email=None, password="pw123456")
     return _jwt_access_token(u["id"], u["username"])
 
 

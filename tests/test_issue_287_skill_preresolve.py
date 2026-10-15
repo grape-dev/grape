@@ -16,22 +16,23 @@ import pytest
 from unittest.mock import patch
 
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.runtime import scheduler
 from src.session_manager import db, db_lock
 
 
 def _mk_user(prefix="ap287"):
     uname = f"{prefix}_{uuid.uuid4().hex[:8]}"
-    u = user_db.create_user(uname, "pw123")
+    u = grape_account_db.create_grape_account(uname, email=None, password="pw123")
     if not u:
-        u = user_db.get_user_by_username(uname)
+        u = grape_account_db.get_grape_account_by_username(uname)
     return u, uname
 
 
 def _cleanup(uname):
-    u = user_db.get_user_by_username(uname)
+    u = grape_account_db.get_grape_account_by_username(uname)
     if u:
-        user_db.delete_user(u["id"])
+        grape_account_db.soft_delete_account(u["id"])
     with db_lock:
         db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (uname,))
         db.commit()
@@ -55,11 +56,8 @@ class TestAutopilotSkillPreResolve:
 
         statuses = []
 
-        with patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue), \
-             patch("src.api.session_store.get_or_create_agent_session",
-                   return_value={"id": "sess-287"}), \
-             patch("src.prompt_builder._resolve_server_url", return_value="http://srv"), \
-             patch.object(scheduler, "_update_execution_result",
+        with patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue),              patch("src.api.session_store.get_or_create_agent_session",
+                   return_value={"id": "sess-287"}),              patch("src.prompt_builder._resolve_server_url", return_value="http://srv"),              patch.object(scheduler, "_update_execution_result",
                           side_effect=lambda *a, **k: statuses.append(a)):
             scheduler._execute_autopilot_remote(
                 repo_key="gitcode:org/test287", task=task, exec_id=998287,
@@ -77,8 +75,7 @@ class TestAutopilotSkillPreResolve:
             sid = _mk_user_skill(u["id"], sname)
             task = {"created_by": u["id"], "engine_runtime_ids": ""}
             captured, statuses = self._run_remote(task, sname)
-            assert captured.get("skill_id") == sid, \
-                f"应传预解析 skill_id={sid}, got {captured.get('skill_id')}"
+            assert captured.get("skill_id") == sid,                 f"应传预解析 skill_id={sid}, got {captured.get('skill_id')}"
             assert captured.get("user_id") == 0, "user_id 必须保持 0（Issue #287 边界）"
             assert captured.get("skill") == sname
             assert "dispatched" in [s[1] for s in statuses], statuses

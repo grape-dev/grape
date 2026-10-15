@@ -31,7 +31,7 @@ client = TestClient(app)
 
 def _jwt(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -55,7 +55,7 @@ def _setup():
         c = db.cursor()
         try:
             c.execute("DELETE FROM skill WHERE skill_name='test-skill-179' AND scope='user'")
-            c.execute("DELETE FROM user_accounts WHERE username='test_issue179'")
+            c.execute("DELETE FROM grape_accounts WHERE username='test_issue179'")
             db.commit()
         except Exception:
             pass
@@ -227,10 +227,10 @@ class TestApiEndpoints:
     """API 接口测试"""
 
     def _headers(self):
-        from src.user.db import create_user, get_user_by_username
-        uid = create_user("test_issue179", "test123")
+        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_username
+        uid = create_grape_account("test_issue179", email=None, password="test123")
         if not uid:
-            uid = get_user_by_username("test_issue179")
+            uid = get_grape_account_by_username("test_issue179")
         token = _jwt(uid["id"], uid["username"])
         return {"Authorization": f"Bearer {token}"}
 
@@ -307,14 +307,14 @@ class TestUploadCategoryValidation:
     """upload category_id 存在性校验"""
 
     def _headers(self):
-        from src.user.db import create_user, get_user_by_username
-        uid = create_user("test_issue179", "test123")
+        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_username
+        uid = create_grape_account("test_issue179", email=None, password="test123")
         if not uid:
-            user = get_user_by_username("test_issue179")
+            user = get_grape_account_by_username("test_issue179")
             uid = int(user["id"]) if user else 1
         uid = int(uid)
         from src.api.jwt_utils import create_access_token
-        from src.user.db import get_token_version
+        from src.auth.grape_account_db import get_token_version
         token = create_access_token(uid, "test_issue179", get_token_version(uid))
         return {"Authorization": f"Bearer {token}"}
 

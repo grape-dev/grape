@@ -17,7 +17,8 @@ from src.api.main import app
 from src.api.jwt_utils import create_access_token
 from src.api import auth_token
 from src.user import db as user_db
-from src.user.db import get_token_version
+from src.auth import grape_account_db
+from src.auth.grape_account_db import get_token_version
 from src.session_manager import db, db_lock
 
 
@@ -25,14 +26,14 @@ from src.session_manager import db, db_lock
 def _clean_token_tables():
     """每用例前清空 token 表，防跨运行残留。"""
     with db_lock:
-        db.cursor().execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
+        db.cursor().execute("DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.commit()
     yield
 
 
 def _make_user(username: str = "tester69") -> dict:
-    return user_db.create_user(f"{username}_{uuid.uuid4().hex[:8]}", "pw")
+    return grape_account_db.create_grape_account(f"{username}_{uuid.uuid4().hex[:8]}", email=None, password="pw")
 
 
 def _jwt_token(user: dict) -> str:

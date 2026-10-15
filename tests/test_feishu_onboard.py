@@ -21,11 +21,12 @@ os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -50,9 +51,9 @@ def _result():
 def setup_module():
     global _uid, _username, _token, _headers
     _username = "onboard_" + uuid.uuid4().hex[:8]
-    _uid = user_db.create_user(_username, "pw123")
+    _uid = grape_account_db.create_grape_account(_username, email=None, password="pw123")
     if not _uid:
-        _uid = user_db.get_user_by_username(_username)
+        _uid = grape_account_db.get_grape_account_by_username(_username)
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 
@@ -65,10 +66,10 @@ def teardown_module():
             c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (_uid["id"],))
             c.execute("DELETE FROM chat_agent_session WHERE user_id=?", (_uid["id"],))
             c.execute("DELETE FROM devops_agent_session WHERE repo_key LIKE ? OR repo_key LIKE ?", (f"repo_{_uid['id']}", f"gitcode:owner{_uid['id']}%"))
-            c.execute("DELETE FROM user_accounts WHERE id=?", (_uid["id"],))
+            c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
             c.execute("DELETE FROM global_im_bot_config WHERE bot_app_id LIKE 'cli_onboard_%' OR bot_app_id LIKE 'cli_vod_%'")
             db.commit()
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
 
 
 def _clean_tasks():
@@ -353,7 +354,7 @@ class TestStatusEndpoint:
     def test_status_cross_user_403(self):
         """他人 task_id → 403 防越权"""
         _clean_tasks()
-        user_b = user_db.create_user("onboard_b_" + uuid.uuid4().hex[:6], "pw123")
+        user_b = grape_account_db.create_grape_account("onboard_b_" + uuid.uuid4().hex[:6], email=None, password="pw123")
         task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
         # 换用 user_b 查询
         token_b = _jwt_access_token(user_b["id"], user_b["username"])
@@ -362,7 +363,7 @@ class TestStatusEndpoint:
             headers={"Authorization": f"Bearer {token_b}"},
         )
         assert r.status_code == 403
-        user_db.delete_user(user_b["id"])
+        grape_account_db.soft_delete_account(user_b["id"])
         _clean_tasks()
 
 

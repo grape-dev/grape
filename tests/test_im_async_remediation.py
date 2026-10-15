@@ -12,6 +12,7 @@ D 组（纯逻辑）见 tests/test_feishu_pure_logic.py；
   其验收用例同步移除。）
 """
 import asyncio
+from src.auth import grape_account_db
 import json
 import os
 import sys
@@ -63,7 +64,7 @@ class TestSyncRepoFeishuMapping:
         from src.session_manager import db, db_lock
         from src.user import db as user_db
         # 预置 user_accounts 用户（set_feishu_open_id 需要真实 user_id 才写入）
-        user_db.get_user_by_username('zhangsan') or user_db.create_user('zhangsan', 'pw')
+        grape_account_db.get_grape_account_by_username('zhangsan') or grape_account_db.create_grape_account('zhangsan', email=None, password='pw')
         with db_lock:
             db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='zhangsan'")
             db.commit()
@@ -111,7 +112,7 @@ class TestSyncRepoFeishuMapping:
         """B5: 匹配时写入 gitcode_nickname（覆盖 B1，此处单独断言昵称）。"""
         from src.session_manager import db, db_lock
         from src.user import db as user_db
-        user_db.get_user_by_username('lisi') or user_db.create_user('lisi', 'pw')
+        grape_account_db.get_grape_account_by_username('lisi') or grape_account_db.create_grape_account('lisi', email=None, password='pw')
         with db_lock:
             db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lisi'")
             db.commit()

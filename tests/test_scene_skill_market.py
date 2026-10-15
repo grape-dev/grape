@@ -17,13 +17,14 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
-from src.user import db as user_db  # noqa: E402
+from src.user import db as user_db
+from src.auth import grape_account_db  # noqa: E402
 from src.session_manager import db, db_lock  # noqa: E402
 
 # JWT access token helper
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -34,9 +35,9 @@ _headers = {}
 
 def setup_module():
     global _uid, _headers
-    _uid = user_db.create_user("test_market", "test123")
+    _uid = grape_account_db.create_grape_account("test_market", email=None, password="test123")
     if not _uid:
-        _uid = user_db.get_user_by_username("test_market")
+        _uid = grape_account_db.get_grape_account_by_username("test_market")
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
 

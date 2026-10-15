@@ -19,8 +19,8 @@ def bot_token(repo_key):
 
 
 def user_token(username, user_id):
-    from src.api.deps import get_user_github_token
-    return get_user_github_token(username) or ""
+    from src.api.deps import get_user_github_token_with_refresh
+    return get_user_github_token_with_refresh(username, user_id=user_id) or ""
 
 
 def _assignee_list(v, neutral, native, ctx):

@@ -1,5 +1,6 @@
 """Grape 场景测试 — 远端 http://203.0.113.2"""
 import sys, os, time
+from src.auth import grape_account_db
 import pytest, requests
 
 # 端到端 UI 场景测试：需真实浏览器 + 远端服务 + 破坏性生产库操作（受 DEVOPS_UI_TEST 安全闸保护）。
@@ -184,9 +185,9 @@ class TestFirstLoginNoRepos:
 
         # 创建一个普通用户（无 GitCode 管理员权限）
         from src.user import db as user_db
-        uid = user_db.create_user("normal_user", "test123")
+        uid = grape_account_db.create_grape_account("normal_user", email=None, password="test123")
         if not uid:
-            uid = user_db.get_user_by_username("normal_user")
+            uid = grape_account_db.get_grape_account_by_username("normal_user")
         r = requests.post(f"{BASE}/api/auth/login",
             json={"username": "normal_user", "password": "test123"}, timeout=10)
         if r.status_code != 200:
@@ -204,7 +205,7 @@ class TestFirstLoginNoRepos:
         print("  [OK] Non-admin correctly rejected with 403")
 
         if uid:
-            user_db.delete_user(uid["id"])
+            grape_account_db.soft_delete_account(uid["id"])
 
 @pytest.fixture(scope="session", autouse=True)
 def _backup_and_restore_managed_repos():

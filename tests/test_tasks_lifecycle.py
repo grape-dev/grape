@@ -11,10 +11,11 @@ from src.api.main import app
 from src.api.routes import tasks as tasks_mod
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -30,12 +31,12 @@ def setup_module():
     init_database()
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='test_lifecycle_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='test_lifecycle_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lifecycle_tester'")
         db.commit()
-    _uid = user_db.create_user("test_lifecycle_user", "test123")
+    _uid = grape_account_db.create_grape_account("test_lifecycle_user", email=None, password="test123")
     if not _uid:
-        _uid = user_db.get_user_by_username("test_lifecycle_user")
+        _uid = grape_account_db.get_grape_account_by_username("test_lifecycle_user")
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     with db_lock:
@@ -49,10 +50,10 @@ def setup_module():
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='test_lifecycle_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='test_lifecycle_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lifecycle_tester'")
         c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:org/lifecycle'")
         db.commit()

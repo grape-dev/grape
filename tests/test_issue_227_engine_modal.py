@@ -18,6 +18,7 @@ from src.session_manager import db, db_lock
 from src.runtime import engine_select as es
 from src.runtime.health import derive_runtime_health
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -28,7 +29,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username="test227"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -73,9 +74,9 @@ def _mk_engine(name, *, credential_id, status="online", healthy=1, installed=1,
 
 def setup_module():
     global _uid, _token, _headers
-    _uid = user_db.create_user("test227", "test123")
+    _uid = grape_account_db.create_grape_account("test227", email=None, password="test123")
     if not _uid:
-        _uid = user_db.get_user_by_username("test227")
+        _uid = grape_account_db.get_grape_account_by_username("test227")
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     with db_lock:
@@ -105,7 +106,7 @@ def setup_module():
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
 
 
 @pytest.fixture(autouse=True)

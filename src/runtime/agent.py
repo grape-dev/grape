@@ -1816,15 +1816,19 @@ async def _execute_task(client, task, engine_name: str = ""):
             _esq_parts.append(f"engine:{engine_name}")
         _esq = "|".join(_esq_parts)
         # chat 任务以用户身份执行（回帖/建 issue 等 GitCode API 操作）——注入用户级 token。
-        # 优先从 task payload 的 user_gitcode_token 字段读取（主控端 enqueue 时注入，
-        # 与 repo_gitcode_token 互斥分离）；为空时回退 DB 查询（worker 本地 SQLite/MySQL）。
+        # Issue #344: 不再从 task payload 读缓存的明文 token，改为实时从 external_identities
+        # 获取（带预刷新），避免缓存过期 token 导致 agent 调 GitCode API 401。
+        # username 从 DB 查询（不依赖 task payload 的 account 字段，防止用户改名后不一致）。
         user_token = ""
         if (task.get("agent_type") or "") == "chat" or (task.get("event_type") or "") == "chat":
-            user_token = task.get("user_gitcode_token") or ""
-            if not user_token:
+            _task_user_id = task.get("user_id") or 0
+            if _task_user_id > 0:
                 try:
-                    from src.user.db import get_user_gitcode_token
-                    user_token = get_user_gitcode_token(task.get("user_id") or 0) or ""
+                    from src.api.deps import get_user_token_with_refresh
+                    from src.auth.grape_account_db import get_grape_account_by_id
+                    _acc = get_grape_account_by_id(_task_user_id)
+                    if _acc:
+                        user_token = get_user_token_with_refresh(_acc["username"], user_id=_task_user_id) or ""
                 except Exception as e:
                     log.warning(f"chat user token resolve failed: {e}")
         # 方案 2：线程化迭代 stream_runtime（worker-event-loop-block-rootcause.md §8.5）——

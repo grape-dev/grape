@@ -11,6 +11,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from src.session_manager import db, db_lock, get_messages, create_conversation, add_message
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 _uid = None
 _conv_id = ""
@@ -23,11 +24,11 @@ def setup_module():
     init_database()
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='tc_sync_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='tc_sync_user'")
         db.commit()
-    u = user_db.create_user("tc_sync_user", "test123")
+    u = grape_account_db.create_grape_account("tc_sync_user", email=None, password="test123")
     if not u:
-        u = user_db.get_user_by_username("tc_sync_user")
+        u = grape_account_db.get_grape_account_by_username("tc_sync_user")
     assert u
     _uid = u["id"]
     _conv_id = create_conversation(_uid, "gitcode:tc_sync/demo", title="Issue #99")

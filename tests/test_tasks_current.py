@@ -15,6 +15,7 @@ from src.api.main import app
 from src.api import auth_token
 from src.api.jwt_utils import create_access_token
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.session_manager import db, db_lock
 
 client = TestClient(app)
@@ -23,7 +24,7 @@ _REPO = "gitcode:o/r"
 
 
 def _mk_user():
-    return user_db.create_user(f"tc_{uuid.uuid4().hex[:6]}", "pw")["id"]
+    return grape_account_db.create_grape_account(f"tc_{uuid.uuid4().hex[:6]}", email=None, password="pw")["id"]
 
 
 def _session_tk(task_id, repo_key=_REPO):

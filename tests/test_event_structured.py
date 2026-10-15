@@ -10,6 +10,7 @@
 - STOP-03 读侧兼容：手工构造 event.json 仍可回退读
 """
 import os, sys, json
+from src.auth import grape_account_db
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
@@ -83,11 +84,11 @@ def _detail(seq):
     from src.api.main import app
     from src.user import db as user_db
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     from unittest.mock import patch
-    uid = user_db.create_user("evstruct_user", "pwd")
+    uid = grape_account_db.create_grape_account("evstruct_user", email=None, password="pwd")
     if not uid:
-        uid = user_db.get_user_by_username("evstruct_user")
+        uid = grape_account_db.get_grape_account_by_username("evstruct_user")
     token = create_access_token(uid["id"], uid["username"], get_token_version(uid["id"]))
     with patch("src.api.deps.check_repo_access", return_value=None):
         return TestClient(app).get(

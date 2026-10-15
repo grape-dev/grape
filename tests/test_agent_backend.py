@@ -1,5 +1,6 @@
 """agent 后端保存路由：选择即写当前 Agent 会话 + Save 全量提交 的回归测试。"""
 import os
+from src.auth import grape_account_db
 import sys
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
@@ -30,7 +31,7 @@ def teardown_function():
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -42,9 +43,9 @@ def test_agents_routes():
 
     _clean()
     # 准备测试用户 + JWT
-    uid = user_db.create_user("test_agents", "test123")
+    uid = grape_account_db.create_grape_account("test_agents", email=None, password="test123")
     if not uid:
-        uid = user_db.get_user_by_username("test_agents")
+        uid = grape_account_db.get_grape_account_by_username("test_agents")
     token = _jwt_access_token(uid["id"], uid["username"])
     headers = {"Authorization": f"Bearer {token}"}
 

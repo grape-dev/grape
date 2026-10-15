@@ -16,10 +16,11 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.session_manager import db, db_lock
 
 from src.api.jwt_utils import create_access_token
-from src.user.db import get_token_version
+from src.auth.grape_account_db import get_token_version
 
 
 def _jwt(user_id, username):
@@ -27,9 +28,9 @@ def _jwt(user_id, username):
 
 
 def _ensure_user(username, password="test123"):
-    uid = user_db.create_user(username, password)
+    uid = grape_account_db.create_grape_account(username, email=None, password=password)
     if not uid:
-        uid = user_db.get_user_by_username(username)
+        uid = grape_account_db.get_grape_account_by_username(username)
     return uid
 
 

@@ -1555,35 +1555,26 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         conv_id = ""
         user_id = 0
         try:
-            from src.user.db import get_user_gitcode_token
-            from src.session_manager import create_conversation, get_conversation_by_im, update_conversation, add_message
+            from src.session_manager import create_conversation, get_conversation_by_im, add_message
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
-            if user_id > 0:
-                user_token = get_user_gitcode_token(user_id) or ""
-                # 用户 token 为空 → 仓库 api token 兜底（get_gitcode_token：repo_gitcode_token
-                # → managed_repos.bot_gitcode_token → 全局 bot token），避免 chat agent 调 GitCode API 401
-                if not user_token:
-                    from src.user.db import get_gitcode_token
-                    user_token = get_gitcode_token(repo_key=repo_key) or ""
-                conv = get_conversation_by_im(chat_id, user_id)
-                if not conv:
-                    cid = create_conversation(user_id, repo_key, im_channel_id=chat_id, user_gitcode_token=user_token)
-                    conv_id = cid
-                    log.info(f"[Chat:{ctx.name}] created chat_conversation {cid} for user={user_id} chat={chat_id[:20]}")
+            # Issue #344: 不再缓存明文 token 到 chat_conversations，agent 端实时获取
+            conv = get_conversation_by_im(chat_id, user_id)
+            if not conv:
+                cid = create_conversation(user_id, repo_key, im_channel_id=chat_id)
+                conv_id = cid
+                log.info(f"[Chat:{ctx.name}] created chat_conversation {cid} for user={user_id} chat={chat_id[:20]}")
+            else:
+                conv_id = conv["id"]
+            if conv_id:
+                # 图片消息：把图片描述追加到用户消息里存入 DB，
+                # 这样追问时 get_messages 历史里自然包含图片描述，不依赖内存缓存。
+                if image_description:
+                    add_message(conv_id, "user", text + "\n\n" + image_description)
                 else:
-                    conv_id = conv["id"]
-                    if user_token and not conv.get("user_gitcode_token"):
-                        update_conversation(conv["id"], user_gitcode_token=user_token)
-                if conv_id:
-                    # 图片消息：把图片描述追加到用户消息里存入 DB，
-                    # 这样追问时 get_messages 历史里自然包含图片描述，不依赖内存缓存。
-                    if image_description:
-                        add_message(conv_id, "user", text + "\n\n" + image_description)
-                    else:
-                        add_message(conv_id, "user", text)
-                    # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
-                    from src.session_manager import mark_task_processing_by_conversation
-                    mark_task_processing_by_conversation(conv_id)
+                    add_message(conv_id, "user", text)
+                # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
+                from src.session_manager import mark_task_processing_by_conversation
+                mark_task_processing_by_conversation(conv_id)
         except Exception as e:
             log.warning(f"[Chat:{ctx.name}] resolve user gitcode token failed: {e}")
 
@@ -1699,7 +1690,6 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         runtime_session_id=oc_sid,
                         event_type="chat",
                         account=exec_account, user_id=uid,
-                        user_gitcode_token=user_token or "",
                         env_extra={"IM_CHAT_ID": chat_id},
                         pool_agent_type="chat",
                     )

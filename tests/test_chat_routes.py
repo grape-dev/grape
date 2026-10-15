@@ -449,25 +449,21 @@ class TestHelpers:
         prompt = build_general_chat_prompt("帮我看看", "org/repo", [{"role": "user", "content": "x"}])
         assert "帮我看看" in prompt
 
-    def test_resolve_token_refreshes_conv(self):
+    def test_resolve_token_returns_user_token(self):
         from src.api.routes.chat import _resolve_gitcode_token
-        conv = {"id": "c1", "user_gitcode_token": "old"}
-        with patch("src.api.routes.chat.update_conversation") as m_upd:
-            assert _resolve_gitcode_token(conv, "c1", "new_tok") == "new_tok"
-        m_upd.assert_called_once_with("c1", user_gitcode_token="new_tok")
-        # 无 user_token → 返回缓存
-        assert _resolve_gitcode_token(conv, "c1", "") == "old"
+        # Issue #344: no conv cache, user_token non-empty → return directly
+        assert _resolve_gitcode_token("new_tok") == "new_tok"
 
     def test_resolve_token_fallback_repo_token(self):
-        # 用户 token 与会话缓存均空 → 仓库 api token 兜底（401 修复）
+        # user_token empty + repo_key → repo bot token fallback
         from src.api.routes.chat import _resolve_gitcode_token
-        conv = {"id": "c1", "user_gitcode_token": ""}
-        with patch("src.user.db.get_gitcode_token", return_value="repo_tok") as m_gt:
-            assert _resolve_gitcode_token(conv, "c1", "", "owner/repo") == "repo_tok"
-        m_gt.assert_called_once_with(repo_key="owner/repo")
-        # 仓库 token 也为空 → 兜底为空串，不抛异常
-        with patch("src.user.db.get_gitcode_token", return_value=""):
-            assert _resolve_gitcode_token(None, "", "", "owner/repo") == ""
+        with patch("src.repo.Repo") as m_repo:
+            m_repo.return_value.bot_token = "repo_tok"
+            assert _resolve_gitcode_token("", "owner/repo") == "repo_tok"
+        # repo token also empty → return empty string, no exception
+        with patch("src.repo.Repo") as m_repo:
+            m_repo.return_value.bot_token = ""
+            assert _resolve_gitcode_token("", "owner/repo") == ""
 
     def test_push_to_feishu_no_channel(self):
         from src.api.routes.chat import _push_reply_to_feishu

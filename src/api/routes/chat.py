@@ -326,28 +326,14 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
         log.warning(f"Chat web->feishu push failed: {e}")
 
 
-def _resolve_gitcode_token(conv: dict | None, conv_id: str, user_token: str, repo_key: str = "") -> str:
-    """解析注入 agent 的 GitCode token：优先用户当前 token（external_identities），
-    并在会话缓存过期/为空时刷新 conversation.user_gitcode_token。
+def _resolve_gitcode_token(user_token: str, repo_key: str = "") -> str:
+    """Resolve GitCode token for agent injection (Issue #344: no session cache).
 
-    修复：会话创建时缓存旧 token（曾 401 Bad credentials），非空缓存永不被回填刷新
-    （chat.py 原逻辑仅空值才覆盖）。见 2026-08-16 修复。
-
-    兜底：用户 token 与会话缓存均为空时，取仓库 api token
-    （get_gitcode_token：devops_agent_session.repo_gitcode_token → managed_repos.bot_gitcode_token
-    → 全局 bot token），避免 chat agent 拿空 USER_GITCODE_TOKEN 调 GitCode API 报 401。
+    Priority: user token (real-time from external_identities with pre-refresh);
+    fallback to repo bot token if user token is empty.
     """
     if user_token:
-        cached = (conv or {}).get("user_gitcode_token", "") if conv else ""
-        if conv_id and cached != user_token:
-            try:
-                update_conversation(conv_id, user_gitcode_token=user_token)
-            except Exception as e:
-                log.warning(f"Chat resolve token refresh failed: {e}")
         return user_token
-    cached = (conv or {}).get("user_gitcode_token", "") if conv else ""
-    if cached:
-        return cached
     if repo_key:
         try:
             from src.repo import Repo
@@ -553,19 +539,13 @@ def _chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
 @router.post("/send", operation_id="chat_send", summary="Send message", description="Sends a chat message and returns the full assistant reply (text/structured).")
 async def send_message(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
-    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
-
+    # Issue #344: 不再缓存明文 token 到 chat_conversations，agent 端实时从 external_identities 获取
     if conv_id:
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
-        if not conv.get("user_gitcode_token") and user_token:
-            update_conversation(conv_id, user_gitcode_token=user_token)
-            conv = get_conversation(conv_id)
     else:
-        conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
+        conv_id = create_conversation(user["id"], body.repo_key)
         conv = get_conversation(conv_id)
 
     add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)))
@@ -612,7 +592,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20) if body.conversation_id else []
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
+    # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    gitcode_token = _resolve_gitcode_token(user_token, repo_key)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -718,19 +701,13 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
 @router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
 async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     conv_id = body.conversation_id
-    # Issue #52: 用带预刷新的 token 获取（token 临近过期时自动刷新）
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
-
+    # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
-        if not conv.get("user_gitcode_token") and user_token:
-            update_conversation(conv_id, user_gitcode_token=user_token)
-            conv = get_conversation(conv_id)
     else:
-        conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
+        conv_id = create_conversation(user["id"], body.repo_key)
     conv = get_conversation(conv_id)
     _auto_title(conv, body.message)
 
@@ -747,7 +724,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
+    # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    gitcode_token = _resolve_gitcode_token(user_token, repo_key)
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
@@ -856,7 +836,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     runtime_session_id=runtime_session_id,
                     event_type="chat",
                     account=user.get("username") or "", user_id=user["id"],
-                    user_gitcode_token=gitcode_token,
+                    user_gitcode_token="",  # Issue #344: no plaintext token in task payload
                     env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
                 )
                 log.info(f"Chat stream enqueued: task={tid} user={user['id']} conv={conv_id}")
@@ -1113,7 +1093,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
         prompt=prompt, cwd=cwd,
         runtime_session_id=session.get("runtime_session_id") or "",
         event_type="chat", account=user.get("username") or "", user_id=user["id"],
-        repo_gitcode_token=gitcode_token,
+        repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
         env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
     )
     _log.info(f"Chat enqueued: task={tid} user={user['id']} conv={conv_id} mode={get_execution_mode()}")
@@ -1458,18 +1438,13 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     from src.api.deps import get_user_token_with_refresh
 
     conv_id = body.conversation_id
-    # Issue #52: 用带预刷新的 token 获取
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
-
+    # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
-        if not conv.get("user_gitcode_token") and user_token:
-            update_conversation(conv_id, user_gitcode_token=user_token)
-            conv = get_conversation(conv_id)
     else:
-        conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
+        conv_id = create_conversation(user["id"], body.repo_key)
     conv = get_conversation(conv_id)
     _auto_title(conv, body.message)
 
@@ -1485,7 +1460,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
+    # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
@@ -1655,7 +1633,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             runtime_session_id=runtime_session_id,
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
-            repo_gitcode_token=gitcode_token,
+            repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
             env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
         )
         log.info(f"Chat submit enqueued: enqueue_tid={enqueue_tid} chat_task_id={chat_task_id}")
@@ -1822,19 +1800,13 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     """send/async 的同步实现（在线程池中执行，不阻塞 event loop）。"""
     import time as _t, uuid as _uuid
     conv_id = body.conversation_id
-    # Issue #52: 用带预刷新的 token 获取
-    from src.api.deps import get_user_token_with_refresh
-    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
-
+    # Issue #344: 不再缓存明文 token 到 chat_conversations
     if conv_id:
         conv = get_conversation(conv_id)
         if not conv or conv["user_id"] != user["id"]:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "对话不存在"})
-        if not conv.get("user_gitcode_token") and user_token:
-            update_conversation(conv_id, user_gitcode_token=user_token)
-            conv = get_conversation(conv_id)
     else:
-        conv_id = create_conversation(user["id"], body.repo_key, user_gitcode_token=user_token)
+        conv_id = create_conversation(user["id"], body.repo_key)
     conv = get_conversation(conv_id)
     _auto_title(conv, body.message)
 
@@ -1850,7 +1822,10 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     acc = _get_acc(user["username"]) or {}
     history = get_messages(conv_id, limit=20)
     repo_key = conv.get("repo_key", "") if conv else body.repo_key
-    gitcode_token = _resolve_gitcode_token(conv, conv_id, user_token, repo_key)
+    # Issue #344: 实时获取用户 token（带预刷新），不再从会话缓存读取
+    from src.api.deps import get_user_token_with_refresh
+    user_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
+    gitcode_token = _resolve_gitcode_token(user_token, repo_key)
 
     runtime_session_id = conv.get("runtime_session_id", "") if conv else ""
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
@@ -1907,7 +1882,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
             runtime_session_id=runtime_session_id,
             event_type="chat",
             account=user.get("username") or "", user_id=user["id"],
-            repo_gitcode_token=gitcode_token,
+            repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
             env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
         )
         with _chat_tasks_lock:
@@ -1963,7 +1938,6 @@ def _execute_chat_task(task_id: str):
         conv_id = task.get("conv_id", "")
         conv = task.get("conv", {})
         user = task.get("user", {})
-        gitcode_token = task.get("gitcode_token", "")
         skill_name = task.get("skill_name", "chat")
         skill_id = task.get("skill_id", 0)
         repo_key = task.get("repo_key", "")
@@ -1982,7 +1956,7 @@ def _execute_chat_task(task_id: str):
                     rid, prompt, cwd=cwd,
                     skill=skill_name, skill_id=skill_id,
                     runtime_session_id=runtime_session_id,
-                    repo_gitcode_token=gitcode_token,
+                    repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
                     repo_key=repo_key,
                 ):
                     if evt_type == "text" or evt_type == "token":
@@ -2025,7 +1999,7 @@ def _execute_chat_task(task_id: str):
                 runtime_session_id=runtime_session_id,
                 event_type="chat",
                 account=user.get("username") or "", user_id=user.get("id", 0),
-                repo_gitcode_token=gitcode_token,
+                repo_gitcode_token="",  # Issue #344: no plaintext token in task payload
                 env_extra={"USER_ID": str(user.get("id", 0)), "CONVERSATION_ID": conv_id},
             )
             # 同步等待任务完成

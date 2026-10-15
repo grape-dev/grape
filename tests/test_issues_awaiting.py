@@ -17,6 +17,7 @@ from src.api.main import app
 from src.api.routes import issues as issues_mod
 from src.session_manager import db, db_lock, get_messages
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -40,12 +41,12 @@ def setup_module():
     init_database()
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='await_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='await_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='await_eric'")
         db.commit()
-    _uid = user_db.create_user("await_user", "pw123")
+    _uid = grape_account_db.create_grape_account("await_user", email=None, password="pw123")
     if not _uid:
-        _uid = user_db.get_user_by_username("await_user")
+        _uid = grape_account_db.get_grape_account_by_username("await_user")
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) "
@@ -58,10 +59,10 @@ def setup_module():
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='await_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='await_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='await_eric'")
         db.commit()
 
@@ -181,8 +182,7 @@ class TestIssuesAwaitingInput:
         asyncio.run(_run_awaiting_notify(None, None, _uid["id"], conv_id, "",
                                          "请提供部署环境清单", "gitcode:org/test", 8, {}))
         msgs = get_messages(conv_id, limit=30)
-        assert any("请提供部署环境清单" in (m.get("content") or "") for m in msgs), \
-            "澄清问题应作为 agent 消息写入任务会话"
+        assert any("请提供部署环境清单" in (m.get("content") or "") for m in msgs),             "澄清问题应作为 agent 消息写入任务会话"
 
     def test_keyword_retired_does_not_change_status(self):
         # 关键词判定已退役：仅显式接口改状态，这里验证 completed 卡片不受影响（对照值）

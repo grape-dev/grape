@@ -20,7 +20,7 @@ def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
-        c.execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
+        c.execute("DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         for _rk in _TD_REPOS:
             c.execute("DELETE FROM devops_agent_session WHERE repo_key=?", (_rk,))
             c.execute("DELETE FROM managed_repos WHERE repo_key=?", (_rk,))

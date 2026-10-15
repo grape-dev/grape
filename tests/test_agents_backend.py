@@ -1,5 +1,6 @@
 """agents 后端直写会话 + Save 全量提交的回归测试。"""
 import os
+from src.auth import grape_account_db
 import sys
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -27,7 +28,7 @@ def teardown_function():
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -37,9 +38,9 @@ def test_backend_onchange_writes_current_session():
     from src.user import db as user_db
 
     _clean()
-    uid = user_db.create_user("test_agents_be", "test123")
+    uid = grape_account_db.create_grape_account("test_agents_be", email=None, password="test123")
     if not uid:
-        uid = user_db.get_user_by_username("test_agents_be")
+        uid = grape_account_db.get_grape_account_by_username("test_agents_be")
     token = _jwt_access_token(uid["id"], uid["username"])
     headers = {"Authorization": f"Bearer {token}"}
 

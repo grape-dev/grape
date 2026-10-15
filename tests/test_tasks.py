@@ -12,10 +12,11 @@ from src.api.main import app
 from src.api.routes import tasks as tasks_mod
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -48,12 +49,12 @@ def setup_module():
     # （unified_user_mapping.user_id 为主键，id 被回收重用会导致 INSERT OR REPLACE 互相覆盖 → 顺序依赖失败）
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user')")
+        c.execute("DELETE FROM grape_accounts WHERE username IN ('test_tasks_user','bob_task_user')")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
         db.commit()
-    _uid = user_db.create_user("test_tasks_user", "test123")
+    _uid = grape_account_db.create_grape_account("test_tasks_user", email=None, password="test123")
     if not _uid:
-        _uid = user_db.get_user_by_username("test_tasks_user")
+        _uid = grape_account_db.get_grape_account_by_username("test_tasks_user")
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     # 清理旧映射并重建 gitcode_user -> user_id 映射
@@ -74,10 +75,10 @@ def setup_module():
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user')")
+        c.execute("DELETE FROM grape_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user')")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user IN ('younger_eric','bob')")
         c.execute("DELETE FROM user_repos WHERE user_id IN (SELECT id FROM user_accounts WHERE username IN ('test_tasks_user','bob_task_user','bob_processing_user'))")
         db.commit()
@@ -150,9 +151,9 @@ class TestNotify:
             db.commit()
             alice_task = c.lastrowid
         # bob 用独立 user_id 注册（unified_user_mapping.user_id 为主键，避免覆盖 younger_eric）
-        bob_uid = user_db.create_user("bob_task_user", "test123")
+        bob_uid = grape_account_db.create_grape_account("bob_task_user", email=None, password="test123")
         if not bob_uid:
-            bob_uid = user_db.get_user_by_username("bob_task_user")
+            bob_uid = grape_account_db.get_grape_account_by_username("bob_task_user")
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='bob'")
@@ -601,9 +602,9 @@ class TestTaskLifecycle:
         """换人不再把需求置 completed（reassign-takeover-no-complete-design.md）"""
         self._clean()
         # bob 用独立 user_id（unified_user_mapping.user_id 为主键，直接复用 _uid["id"] 会覆盖 younger_eric 映射）
-        bob = user_db.create_user("bob_processing_user", "test123")
+        bob = grape_account_db.create_grape_account("bob_processing_user", email=None, password="test123")
         if not bob:
-            bob = user_db.get_user_by_username("bob_processing_user")
+            bob = grape_account_db.get_grape_account_by_username("bob_processing_user")
         try:
             with db_lock:
                 c = db.cursor()
@@ -636,7 +637,7 @@ class TestTaskLifecycle:
             assert row and row[1] is None
         finally:
             if bob:
-                user_db.delete_user(bob["id"])
+                grape_account_db.soft_delete_account(bob["id"])
             with db_lock:
                 db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='bob'")
                 db.commit()
@@ -765,9 +766,9 @@ class TestRepoAllTasks:
     def test_repo_all_non_member_forbidden(self):
         """未托管/未加入该仓库的用户访问「仓库全部」应 403（防 IDOR）"""
         _clean_tasks()
-        outsider = user_db.create_user("outsider_task_user", "test123")
+        outsider = grape_account_db.create_grape_account("outsider_task_user", email=None, password="test123")
         if not outsider:
-            outsider = user_db.get_user_by_username("outsider_task_user")
+            outsider = grape_account_db.get_grape_account_by_username("outsider_task_user")
         try:
             with db_lock:
                 db.cursor().execute("DELETE FROM user_repos WHERE user_id=?", (outsider["id"],))
@@ -776,11 +777,11 @@ class TestRepoAllTasks:
             r = client.get("/api/tasks/repo/org/test", headers={"Authorization": f"Bearer {tok}"})
             assert r.status_code == 403, f"非成员应 403，实际 {r.status_code}"
         finally:
-            user_db.delete_user(outsider["id"])
+            grape_account_db.soft_delete_account(outsider["id"])
             with db_lock:
                 c = db.cursor()
                 c.execute("DELETE FROM user_repos WHERE user_id=?", (outsider["id"],))
-                c.execute("DELETE FROM user_accounts WHERE username='outsider_task_user'")
+                c.execute("DELETE FROM grape_accounts WHERE username='outsider_task_user'")
                 db.commit()
 
     def test_repo_all_assignees_filter(self):

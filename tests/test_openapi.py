@@ -19,6 +19,7 @@ from src.api.main import app
 from src.api import auth_token, openapi
 from src.api.jwt_utils import create_access_token
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -325,8 +326,7 @@ def test_public_ops_have_x_token_scope():
     for path, ops in s["paths"].items():
         for method, op in ops.items():
             scope = op.get("x-token-scope")
-            assert scope in {"user_only", "session_only", "dual"}, \
-                f"缺 x-token-scope: {method} {path} -> {scope!r}"
+            assert scope in {"user_only", "session_only", "dual"},                 f"缺 x-token-scope: {method} {path} -> {scope!r}"
 
 
 def test_x_token_scope_consistency():
@@ -350,15 +350,13 @@ def test_x_token_scope_consistency():
                 or path.startswith(openapi._SESSION_ONLY_PATH_PREFIXES)
             )
             if is_session_rule:
-                assert (method, path) in actual_session_only, \
-                    f"session 规则命中但未标 session_only: {op_id} {method} {path}"
+                assert (method, path) in actual_session_only,                     f"session 规则命中但未标 session_only: {op_id} {method} {path}"
 
     # 2) 所有标为 session_only 的必须命中规则（防漏登记/误标）
     for method, path in actual_session_only:
         op_id = s["paths"][path][method]["operationId"]
         assert (op_id in openapi._SESSION_ONLY_OPERATIONS
-                or path.startswith(openapi._SESSION_ONLY_PATH_PREFIXES)), \
-            f"标了 session_only 但未命中规则: {op_id} {method} {path}"
+                or path.startswith(openapi._SESSION_ONLY_PATH_PREFIXES)),             f"标了 session_only 但未命中规则: {op_id} {method} {path}"
 
     # 3) 抽样：user_only（D 类管理 / 用户操作类）/ dual（开放读）实例
     user_only_samples = {"/api/skills": "get",
@@ -370,8 +368,7 @@ def test_x_token_scope_consistency():
                          # skills agent-stats：仅 Web UI/用户级消费，禁 session
                          "/api/skills/agent-stats": "get", "/api/skills/stats": "get"}
     for path, method in user_only_samples.items():
-        assert s["paths"][path][method]["x-token-scope"] == "user_only", \
-            f"期望 user_only: {method} {path}"
+        assert s["paths"][path][method]["x-token-scope"] == "user_only",             f"期望 user_only: {method} {path}"
 
     dual_samples = {"/api/issues/{owner}/{repo}": "get", "/api/a2a": "post",
                     # skills upload（repo 技能上传会话可用）、详情与子技能（agent 运行时按需加载）为 dual
@@ -381,8 +378,7 @@ def test_x_token_scope_consistency():
                     # Issue 状态只读轮询（CLI wait 用）保持 dual
                     "/api/issues/{issue_id}/status": "get"}
     for path, method in dual_samples.items():
-        assert s["paths"][path][method]["x-token-scope"] == "dual", \
-            f"期望 dual: {method} {path}"
+        assert s["paths"][path][method]["x-token-scope"] == "dual",             f"期望 dual: {method} {path}"
 
     # 4) session_only 样例（需求 §四验收）
     session_samples = {"/api/git-repo/{owner}/{repo}/branches": "get",
@@ -392,13 +388,12 @@ def test_x_token_scope_consistency():
                        "/api/repos/{owner}/{repo}/git-credential": "get",
                        "/api/repos/{owner}/{repo}/workspace": "get"}
     for path, method in session_samples.items():
-        assert (method, path) in actual_session_only, \
-            f"期望 session_only: {method} {path}"
+        assert (method, path) in actual_session_only,             f"期望 session_only: {method} {path}"
 
 
 def _user():
     import uuid
-    u = user_db.create_user(f"openapi_{uuid.uuid4().hex[:6]}", "pw")
+    u = grape_account_db.create_grape_account(f"openapi_{uuid.uuid4().hex[:6]}", email=None, password="pw")
     return u["id"]
 
 
@@ -406,7 +401,7 @@ def test_three_channels_can_call_public_api():
     from src.session_manager import db, db_lock
     with db_lock:  # 清空 token 表，避免残留
         db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
-        db.cursor().execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
+        db.cursor().execute("DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         db.commit()
     uid = _user()
 

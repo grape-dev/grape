@@ -19,6 +19,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.vcs.api_client import VcsApiClient
 
 client = TestClient(app)
@@ -29,7 +30,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username="test209"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -39,11 +40,11 @@ def setup_module():
     init_database()
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='test209_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='test209_user'")
         db.commit()
-    _uid = user_db.create_user("test209_user", "test123")
+    _uid = grape_account_db.create_grape_account("test209_user", email=None, password="test123")
     if not _uid:
-        _uid = user_db.get_user_by_username("test209_user")
+        _uid = grape_account_db.get_grape_account_by_username("test209_user")
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     with db_lock:
@@ -57,10 +58,10 @@ def setup_module():
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='test209_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='test209_user'")
         c.execute("DELETE FROM managed_repos WHERE repo_key='gitcode:org/issue209'")
         c.execute("DELETE FROM managed_repos WHERE repo_key='github:org/issue209'")
         db.commit()
@@ -95,8 +96,7 @@ class TestVcsApiClientCloseIssue:
     def test_close_issue_gitcode(self):
         """GitCode v5：PATCH 前先取 title（必填），body 用 state=close + repo + title"""
         c = VcsApiClient("gitcode", "fake-token", "org", "repo")
-        with patch.object(c, "get_issue", return_value={"title": "hello", "state": "open", "number": 5}), \
-             patch.object(c, "_gitcode_request", return_value={"state": "closed", "number": 5}) as m:
+        with patch.object(c, "get_issue", return_value={"title": "hello", "state": "open", "number": 5}),              patch.object(c, "_gitcode_request", return_value={"state": "closed", "number": 5}) as m:
             resp = c.close_issue(5)
         m.assert_called_once_with(
             "PATCH", "/repos/org/repo/issues/5",
@@ -218,8 +218,7 @@ class TestConfirmDoneCloseIssues:
         tid = _insert_task(status='processing', issue_number=305)
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "closed"
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"), \
-             patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -234,8 +233,7 @@ class TestConfirmDoneCloseIssues:
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "open"
         mock_client.close_issue.return_value = {"state": "closed", "number": 306}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"), \
-             patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -249,8 +247,7 @@ class TestConfirmDoneCloseIssues:
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "open"
         mock_client.close_issue.return_value = {"error": "HTTP 403"}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"), \
-             patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200

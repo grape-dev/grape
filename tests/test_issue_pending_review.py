@@ -17,6 +17,7 @@ from src.api.main import app
 from src.api.routes import issues as issues_mod
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -47,12 +48,12 @@ def setup_module():
     init_database()
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='review_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='review_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='review_eric'")
         db.commit()
-    _uid = user_db.create_user("review_user", "pw123")
+    _uid = grape_account_db.create_grape_account("review_user", email=None, password="pw123")
     if not _uid:
-        _uid = user_db.get_user_by_username("review_user")
+        _uid = grape_account_db.get_grape_account_by_username("review_user")
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id, feishu_name, updated_at) "
@@ -65,10 +66,10 @@ def setup_module():
 
 def teardown_module():
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
     with db_lock:
         c = db.cursor()
-        c.execute("DELETE FROM user_accounts WHERE username='review_user'")
+        c.execute("DELETE FROM grape_accounts WHERE username='review_user'")
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user='review_eric'")
         db.commit()
 

@@ -55,10 +55,10 @@ def _resolve_repo_key(owner_repo: str) -> str:
 @router.get("/credentials", operation_id="settings_credentials_get", summary="Get third-party credential status", description="Returns the status of third-party credentials (gitcode/github/huawei-cloud/codearts) for the current user.")
 def get_credentials(user: dict = Depends(require_no_session_token), repo_key: str = ""):
     # D32: 从 user_credentials 表 + external_identities 读凭据，不查 user_accounts
-    from src.api.deps import get_user_token, get_user_github_token
+    from src.api.deps import get_user_token, get_user_github_token_with_refresh
     from src.auth.grape_account_db import get_user_identities
     gitcode_token = get_user_token(user["username"])
-    github_token = get_user_github_token(user["username"])
+    github_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
     identities = {ident["provider"]: ident for ident in get_user_identities(user["id"])}
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}

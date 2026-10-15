@@ -165,7 +165,7 @@ async def create_from_template(body: CreateTemplateRequest,
         if body.provider == "gitcode":
             api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
         else:
-            api_token = get_user_github_token(user["username"])
+            api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
         provider = body.provider
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"{provider} API Token 未配置，请先绑定 {provider} 平台"})

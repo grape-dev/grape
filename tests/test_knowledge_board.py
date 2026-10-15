@@ -12,10 +12,11 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -29,9 +30,9 @@ def setup_module():
     global _uid, _headers
     from src.api.db_setup import init_database
     init_database()
-    _uid = user_db.create_user("kb_user", "pwd")
+    _uid = grape_account_db.create_grape_account("kb_user", email=None, password="pwd")
     if not _uid:
-        _uid = user_db.get_user_by_username("kb_user")
+        _uid = grape_account_db.get_grape_account_by_username("kb_user")
     _headers = {"Authorization": "Bearer " + _jwt_access_token(_uid["id"], _uid["username"])}
     with db_lock:
         c = db.cursor()
@@ -45,7 +46,7 @@ def setup_module():
 def teardown_module():
     _clean()
     if _uid:
-        user_db.delete_user(_uid["id"])
+        grape_account_db.soft_delete_account(_uid["id"])
 
 
 def _clean():

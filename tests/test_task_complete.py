@@ -19,6 +19,7 @@ from src.api.main import app
 from src.api.jwt_utils import create_access_token
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.api.db_setup import init_database
 
 init_database()
@@ -34,7 +35,7 @@ def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
-        c.execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
+        c.execute("DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         c.execute("DELETE FROM agent_tasks WHERE id=?", (TASK,))
         c.execute("DELETE FROM user_repos WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM managed_repos WHERE repo_key=?", (REPO,))
@@ -43,7 +44,7 @@ def _clean():
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
-        c.execute("DELETE FROM api_tokens WHERE token LIKE 'test_%' OR token LIKE 'tk_test%' OR user_id IN (SELECT id FROM user_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
+        c.execute("DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")
         c.execute("DELETE FROM agent_tasks WHERE id=?", (TASK,))
         c.execute("DELETE FROM user_repos WHERE repo_key=?", (REPO,))
         db.commit()
@@ -101,7 +102,7 @@ def test_t3_repo_mismatch_forbidden():
 
 def test_t4_jwt_user_with_managed_repo_allowed():
     _seed_task("running")
-    u = user_db.create_user(f"tc_{uuid.uuid4().hex[:6]}", "pw")
+    u = grape_account_db.create_grape_account(f"tc_{uuid.uuid4().hex[:6]}", email=None, password="pw")
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
@@ -117,7 +118,7 @@ def test_t4_jwt_user_with_managed_repo_allowed():
 
 def test_t5_jwt_user_without_repo_forbidden():
     _seed_task("running")
-    u = user_db.create_user(f"tc2_{uuid.uuid4().hex[:6]}", "pw")
+    u = grape_account_db.create_grape_account(f"tc2_{uuid.uuid4().hex[:6]}", email=None, password="pw")
     jwt = create_access_token(u["id"], u["username"])
     assert _post_complete(jwt, {"task_id": TASK, "result_text": "x"}).status_code == 403
     assert _task_status() == "running"

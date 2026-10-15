@@ -12,11 +12,12 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -31,9 +32,9 @@ REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 def setup_module():
     global _uid, _headers
-    _uid = user_db.create_user("test_issues", "test123")
+    _uid = grape_account_db.create_grape_account("test_issues", email=None, password="test123")
     if not _uid:
-        _uid = user_db.get_user_by_username("test_issues")
+        _uid = grape_account_db.get_grape_account_by_username("test_issues")
     _token = _jwt_access_token(_uid["id"], _uid["username"])
     _headers = {"Authorization": f"Bearer {_token}"}
     # 确保基础表已建（issue_state/tasks/events）
@@ -219,10 +220,7 @@ class TestCreateIssue:
         from unittest.mock import patch
         _mk_issue_state(20, stage="vod")  # 预置避免走 GitCode API
         # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
-        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
-             patch("src.user.db.get_repo_bot_token", return_value="test_tok"), \
-             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 20}), \
-             patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
+        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.user.db.get_repo_bot_token", return_value="test_tok"),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 20}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_ensure.return_value = 20
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",
@@ -237,9 +235,7 @@ class TestCreateIssue:
         """Issue #202: 同名需求不再被 409 阻断——即使已存在同名 open Issue，仍允许创建新 Issue。"""
         from unittest.mock import patch
         # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
-        with patch("src.user.db.get_repo_bot_token", return_value="test_tok"), \
-             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 21}), \
-             patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
+        with patch("src.user.db.get_repo_bot_token", return_value="test_tok"),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 21}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_ensure.return_value = 21
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",

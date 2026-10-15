@@ -1047,36 +1047,43 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
 
     Issue #343: 分页循环查全部 open issue，不只看前 50 条。
     Issue #343: 查重失败时抛异常而非静默返回 None，防止 token 失效时重复建单。
+    Issue #344: GitCode 分支取消 10 页上限（while True 靠末页不足 50 条终止）。
+    Issue #344: GitHub 分支改用 Search API 精确匹配（in:title + repo:scope）。
     返回 issue number（找到）或 None（真没找到）。token 失效时抛 RuntimeError。
     """
+    import urllib.parse as _ul
     if provider == "github":
+        # Issue #344: 改用 GitHub Search API 精确匹配 title，不再分页遍历
         from src.user.repo_manager import _github_req
-        page = 1
-        while page <= 10:
-            try:
-                data = _github_req("GET",
-                                   f"https://api.github.com/repos/{owner}/{repo}/issues?state=open&per_page=50&page={page}",
-                                   api_token)
-            except Exception as e:
-                raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
-            items = data if isinstance(data, list) else []
-            if not items:
-                break
-            for it in items:
-                if not isinstance(it, dict):
-                    continue
-                if str(it.get("title") or "").strip() == title.strip():
-                    n = it.get("number")
-                    if n:
-                        return int(n)
-            if len(items) < 50:
-                break  # 最后一页
-            page += 1
+        try:
+            _q = _ul.quote(f'{title} in:title repo:{owner}/{repo} is:issue is:open')
+            data = _github_req("GET",
+                               f"https://api.github.com/search/issues?q={_q}&per_page=5",
+                               api_token)
+        except Exception as e:
+            raise RuntimeError(f"幂等查重失败（token 可能失效）: {e}")
+        # GitHub Search API returns {"items": [...]} on success;
+        # error responses like {"message": "rate limit exceeded"} have no "items" key
+        if not isinstance(data, dict) or "items" not in data:
+            _msg = data.get("message", "") if isinstance(data, dict) else str(data)[:200]
+            if _msg:
+                raise RuntimeError(f"幂等查重失败（GitHub API 异常）: {_msg}")
+            return None
+        items = data.get("items") or []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            if str(it.get("title") or "").strip() == title.strip():
+                n = it.get("number")
+                if n:
+                    return int(n)
         return None
-    # GitCode
+    # GitCode — Issue #344: 取消 10 页上限，while True 靠末页终止
+    # 安全阀：最多遍历 1000 页（50000 条），防止 API 异常时无限循环
     from src.user.repo_manager import _req
     page = 1
-    while page <= 10:
+    _max_pages = 1000
+    while page <= _max_pages:
         try:
             data = _req("GET",
                         f"https://gitcode.com/api/v5/repos/{owner}/{repo}/issues?state=open&per_page=50&page={page}",
@@ -1187,7 +1194,11 @@ def create_standard_task(repo_key: str, title: str, description: str,
         return {"ok": False, "code": 400, "message": "bot token 缺失"}
     if not assignee:
         assignee = owner or ""
-    issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
+    # Issue #344: 查重失败时返回明确错误，不抛异常中断 onboarding 流程
+    try:
+        issue_num = _find_open_issue_by_title(bot_token, owner, rname, title.strip())
+    except RuntimeError as e:
+        return {"ok": False, "code": 502, "message": f"查重失败，Bot Token 可能失效: {str(e)[:200]}"}
     created = False
     if issue_num is not None:
         # 已有同标题 open Issue → 直接建档（幂等：不再重复创建 Issue）

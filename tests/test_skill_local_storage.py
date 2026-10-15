@@ -3,6 +3,7 @@
 覆盖：LocalStorage 后端往返、get_skill_storage 选择器、OBS 未启用时 upload/download/detail 本地成功。
 """
 import io
+from src.auth import grape_account_db
 import os
 import sys
 import zipfile
@@ -42,7 +43,7 @@ def _session_token(repo_key=REPO, agent_type="sre"):
 
 def _user_headers():
     from src.api.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     if not _UID:
         return {"Authorization": f"Bearer {_BOT_TOKEN}"}
     tok = create_access_token(_UID, "skill_local_user", get_token_version(_UID))
@@ -55,9 +56,9 @@ _UID = None
 def setup_module():
     global _UID
     from src.user import db as user_db
-    _USER = user_db.create_user("skill_local_user", "pw123")
+    _USER = grape_account_db.create_grape_account("skill_local_user", email=None, password="pw123")
     if not _USER:
-        _USER = user_db.get_user_by_username("skill_local_user")
+        _USER = grape_account_db.get_grape_account_by_username("skill_local_user")
     _UID = _USER["id"] if (_USER or {}).get("id") else 0
     if not _UID:
         _UID = 0

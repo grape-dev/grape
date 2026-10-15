@@ -379,11 +379,15 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     """
     # 平台 VCS token 不再注入（P2）。bot_token/user_token 保留仅作日志脱敏用途，
     # 若确需在此记录是否持有，仅 print 长度摘要即可，值绝不进 env。
+    # Issue #344: 改用带预刷新的 token 获取函数，避免拿到过期 token。
     if kind == "chat":
         if not user_token and user_id > 0:
             try:
-                from src.user.db import get_user_gitcode_token
-                user_token = get_user_gitcode_token(user_id) or ""
+                from src.api.deps import get_user_token_with_refresh
+                from src.auth.grape_account_db import get_grape_account_by_id
+                _acc = get_grape_account_by_id(user_id)
+                if _acc:
+                    user_token = get_user_token_with_refresh(_acc["username"], user_id=user_id) or ""
             except Exception as e:
                 log.warning(f"Fallback resolve user gitcode token failed: {e}")
                 user_token = ""

@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
-from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token, require_no_session_token, require_org_member
+from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token_with_refresh, require_no_session_token, require_org_member
 from src.api.oauth_token import with_oauth_token
 from src.api.org_context import resolve_org_context
 from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username, get_bot_token_by_repo
@@ -44,10 +44,10 @@ def _get_user_provider_and_token(username: str, login_provider: str = "", user_i
         if gitcode_token:
             return "gitcode", gitcode_token
     elif login_provider == "github":
-        github_token = get_user_github_token(username)
+        github_token = get_user_github_token_with_refresh(username, user_id=user_id)
         if github_token:
             return "github", github_token
-    github_token = get_user_github_token(username)
+    github_token = get_user_github_token_with_refresh(username, user_id=user_id)
     if github_token:
         return "github", github_token
     gitcode_token = get_user_token_with_refresh(username, user_id)
@@ -163,10 +163,10 @@ def _probe_stale_repos(api_token: str, user_id: int):
     # 按 provider 分组：GitHub 仓库需要单独的 token
     github_token = ""
     try:
-        from src.api.deps import get_user_github_token
+        from src.api.deps import get_user_github_token_with_refresh
         from src.auth.grape_account_db import get_grape_account_by_id
         acc = get_grape_account_by_id(user_id) or {}
-        github_token = get_user_github_token(acc.get("username", ""))
+        github_token = get_user_github_token_with_refresh(acc.get("username", ""), user_id=user_id)
     except Exception:
         pass
 
@@ -557,7 +557,7 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
     if body.provider:
         provider = body.provider
         if provider == "github":
-            api_token = get_user_github_token(user["username"])
+            api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
         else:
             api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     else:
@@ -730,7 +730,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     # 避免 OAuth token 过期导致 add_collaborator 收到 401 → 托管失败
     if provider:
         if provider == "github":
-            api_token = get_user_github_token(user["username"])
+            api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
         else:
             api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     else:
@@ -952,7 +952,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
     from src.repo_key import parse_repo_key
     _provider, _, _ = parse_repo_key(repo_key)
     if _provider == "github":
-        api_token = get_user_github_token(user["username"])
+        api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
     else:
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     bot_token, bot_username = get_global_bot_credential()
@@ -1082,8 +1082,8 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
             _provider, _, _ = parse_repo_key(repo_key)
             if _provider == "github":
                 from src.user.repo_manager import add_github_collaborator
-                from src.api.deps import get_user_github_token
-                _owner_gh_token = get_user_github_token(user["username"]) or ""
+                from src.api.deps import get_user_github_token_with_refresh
+                _owner_gh_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"]) or ""
                 if _owner_gh_token:
                     add_github_collaborator(_owner_gh_token, owner, repo_name, repo_bot_username, "push")
             else:
@@ -1182,8 +1182,8 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
 
     # token 按 provider 分流
     if repo_provider == "github":
-        from src.api.deps import get_user_github_token
-        api_token = get_user_github_token(user["username"])
+        from src.api.deps import get_user_github_token_with_refresh
+        api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
         if not api_token:
             api_token = get_bot_token(repo_owner=owner, repo_name=repo_name)
         if not api_token:
@@ -1249,8 +1249,8 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
                 global_bot_username = _us[0] if _us else ""
         # owner token 按 provider 分流
         if repo_provider == "github":
-            from src.api.deps import get_user_github_token
-            owner_token = get_user_github_token(user["username"])
+            from src.api.deps import get_user_github_token_with_refresh
+            owner_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
         else:
             owner_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
         if owner_token and global_bot_username:
@@ -1401,12 +1401,12 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 return ""
         def _user():
             try:
-                from src.api.deps import get_user_github_token
+                from src.api.deps import get_user_github_token_with_refresh
                 username = user.get("username") or ""
                 if not username and user.get("id", 0) > 0:
                     from src.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(user["id"]) or {}).get("username", "")
-                return get_user_github_token(username) or ""
+                return get_user_github_token_with_refresh(username, user_id=user_id) or ""
             except Exception:
                 return ""
     else:

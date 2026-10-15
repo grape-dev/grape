@@ -15,6 +15,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from fastapi.testclient import TestClient
 from src.session_manager import db, db_lock
 from src.user import db as user_db
+from src.auth import grape_account_db
 from src.api.jwt_utils import create_access_token
 
 
@@ -34,7 +35,7 @@ def _seed(seq, repo_key, issue, agent, status="completed", structured=None, logs
 
 
 def _jwt(user_id, username):
-    from src.user.db import get_token_version
+    from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -50,9 +51,9 @@ def setup_module():
     from src.api.db_setup import init_database
     init_database()
     _client = TestClient(_a)
-    _uid = user_db.create_user("evapi_user", "pwd")
+    _uid = grape_account_db.create_grape_account("evapi_user", email=None, password="pwd")
     if not _uid:
-        _uid = user_db.get_user_by_username("evapi_user")
+        _uid = grape_account_db.get_grape_account_by_username("evapi_user")
     _headers = {"Authorization": "Bearer " + _jwt(_uid["id"], _uid["username"])}
 
 
