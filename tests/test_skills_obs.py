@@ -36,13 +36,20 @@ _headers = {}
 
 def setup_module():
     global _uid, _headers
-    _uid = user_db.create_user("test_obs", "test123")
+    # D32 适配（同 test_auth_token.py OMIT-4）：鉴权链路（deps.get_current_user）只查
+    # grape_accounts，旧 user_db.create_user 写死表 user_accounts 导致全用例 401。
+    # 改用 create_grape_account；唯一后缀避免跨运行 UNIQUE 冲突。
+    import uuid as _uuid
+    from src.auth.grape_account_db import create_grape_account, get_grape_account_by_username
+    _uname = f"test_obs_{_uuid.uuid4().hex[:8]}"
+    _uid = create_grape_account(_uname, "", "test123") or get_grape_account_by_username(_uname)
     if not _uid:
-        _uid = user_db.get_user_by_username("test_obs")
-    acc = user_db.get_user_account("test_obs") or {}
-    acc["gitcode_api_token"] = "test_obs_token"
-    user_db.save_user_account("test_obs", acc)
-    _token = _jwt_access_token(_uid["id"], _uid["username"])
+        raise RuntimeError(f"create_grape_account({_uname}) failed")
+    # grape_accounts 不再存平台 token（D32：平台字段移 external_identities），
+    # 本文件用例不依赖 gitcode_api_token，无需回写。
+    from src.api.jwt_utils import create_access_token
+    from src.auth.grape_account_db import get_token_version as _get_tv
+    _token = create_access_token(_uid["id"], _uid["username"], _get_tv(_uid["id"]))
     _headers = {"Authorization": f"Bearer {_token}"}
 
 
@@ -132,12 +139,17 @@ def _obs_env(monkeypatch):
     yield fake
 
 
-def _make_skill_zip(skill_name: str, with_script: bool = False, binary_extra: str = "") -> bytes:
-    """构造技能 zip（SKILL.md + references/ + 可选文本脚本 / 二进制文件）。"""
+def _make_skill_zip(skill_name: str, with_script: bool = False, binary_extra: str = "",
+                    version: "str | None" = "1.0.0") -> bytes:
+    """构造技能 zip（SKILL.md + references/ + 可选文本脚本 / 二进制文件）。
+
+    version=None 表示 SKILL.md Front Matter 不写 version 字段（#336：缺失默认 1.0.0）。
+    """
+    version_line = "" if version is None else f"version: {version}\n"
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{skill_name}/SKILL.md",
-                    f"---\nname: {skill_name}\nversion: 1.0.0\ndescription: obs test skill\n---\n\n## 场景\n测试技能")
+                    f"---\nname: {skill_name}\n{version_line}description: obs test skill\n---\n\n## 场景\n测试技能")
         zf.writestr(f"{skill_name}/references/design.md", "# Design\n参考文档")
         if with_script:
             # 模拟用户本地 chmod +x 后打包：zip 内 0755，验证权限贯穿链路
@@ -368,3 +380,58 @@ class TestSkillsObs:
         data = r.json()
         assert data["url"].startswith("https://obs.test/")
         assert data["expires_in"] == 300
+
+    # ===== #336 version 格式放宽：1~3 段数字 + v 前缀均通过，非法仍 400 =====
+    # 注：断言走 API 响应 + app 的 db 句柄（同既有上传用例模式），
+    # 不依赖 _skill_id 的相对路径直连（该路径在整文件运行时受 conftest 删库重建影响）。
+
+    def _upload_user(self, skill_name, version):
+        zip_bytes = _make_skill_zip(skill_name, version=version)
+        return client.post("/api/skills/upload",
+                           files={"file": (f"{skill_name}.zip", zip_bytes)},
+                           data={"agent_type": "chat"}, headers=_headers)
+
+    def test_upload_version_single_segment_user_scope(self, _obs_env):
+        """version: 1（单段数字）user scope 上传成功（#336 核心场景）。"""
+        r = self._upload_user("obs-test-ver-1", "1")
+        assert r.status_code == 200, r.text
+        with db_lock:
+            row = db.execute(
+                "SELECT file_path FROM skill WHERE skill_name='obs-test-ver-1' AND scope='user'").fetchone()
+        assert row and row[0], "DB 记录缺失"
+
+    def test_upload_version_single_segment_repo_scope(self, _obs_env):
+        """version: 1（单段数字）repo scope 上传成功（#336 核心场景）。"""
+        zip_bytes = _make_skill_zip("obs-test-ver-repo", version="1")
+        r = client.post("/api/skills/upload",
+                        files={"file": ("obs-test-ver-repo.zip", zip_bytes)},
+                        data={"agent_type": "chat", "scope": "repo", "repo": "testobs/repo1"},
+                        headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            row = db.execute(
+                "SELECT file_path FROM skill WHERE skill_name='obs-test-ver-repo' AND scope='repo'").fetchone()
+        assert row and row[0], "DB 记录缺失"
+
+    @pytest.mark.parametrize("version", ["1", "1.2", "1.2.3", "v1.2.3", "v1.2", "v1"])
+    def test_upload_version_valid_formats(self, _obs_env, version):
+        """合法格式矩阵：1~3 段数字 + v 前缀均上传成功。"""
+        r = self._upload_user("obs-test-ver-ok", version)
+        assert r.status_code == 200, f"version={version} 应通过: {r.text}"
+
+    def test_upload_version_missing_defaults(self, _obs_env):
+        """缺失 version 字段：不报错（默认 1.0.0 现状保持）。"""
+        r = self._upload_user("obs-test-ver-miss", None)
+        assert r.status_code == 200, r.text
+
+    @pytest.mark.parametrize("version", ["abc", "1.2.3.4", "1.x", "x1", "1..2"])
+    def test_upload_version_invalid_formats_rejected(self, _obs_env, version):
+        """非法格式矩阵：非数字 / 超三段 / 非数字段 / 空段仍 400 且 errors 含明确提示。
+
+        注：不测 "1."——YAML 会将其解析为浮点 1.0（合法），str() 后 "1.0" 通过校验，
+        属 YAML 语义而非校验层缺陷。
+        """
+        r = self._upload_user("obs-test-ver-bad", version)
+        assert r.status_code == 400, f"version={version} 应被拒绝"
+        errs = r.json()["detail"].get("errors") or []
+        assert any("version" in e for e in errs), f"version={version} errors 应含 version 提示: {errs}"

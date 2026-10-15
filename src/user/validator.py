@@ -80,9 +80,9 @@ def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
 
     version = str(fm.get("version", "")).strip()
     # version 为可选字段（官方 Agent Skills 规范未强制，如阿里云技能无 version）：
-    # 缺失时默认 1.0.0 不报错；有则要求语义化版本号（x.y.z，兼容 x.y 与 v 前缀）
-    if version and not re.match(r"^v?\d+\.\d+(\.\d+)?$", version):
-        errors.append("version 字段必须符合语义化版本号格式（x.y.z）")
+    # 缺失时默认 1.0.0 不报错；有则要求 1~3 段数字（x / x.y / x.y.z，兼容 v 前缀，#336 放宽）
+    if version and not re.match(r"^v?\d+(\.\d+){0,2}$", version):
+        errors.append("version 字段必须符合版本号格式（x / x.y / x.y.z，兼容 v 前缀）")
 
     desc = str(fm.get("description", "")).strip()
     if not desc:
