@@ -29,6 +29,7 @@ EVENT_TYPES = frozenset({
     "account_anonymized",          # 账号匿名化（冷静期到期自动执行）
     "set_password",                # 设置密码（无密码用户）
     "dev_verification_code_used",   # 固定验证码使用（需求8/16）
+    "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
 })
 
 
