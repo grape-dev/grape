@@ -1257,6 +1257,26 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         if _owner != _uname:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可修改 scope"})
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=? WHERE id=?", (scope, repo_key or None, cid))
+        # 仓库转个人/个人转仓库：同步删除该凭据名下旧 scope 的引擎行（2026-10-15 build-0005 重复引擎根因）。
+        # 注册键 = (credential_id, name, scope, owner_id)（runtime.py /register 的 upsert 匹配条件）。
+        # 只改凭据 scope 不动引擎行 → worker 下次心跳四元组对不上 → INSERT 一套新引擎，
+        # 旧行从此无人更新/删除 → 永久 offline 僵尸，页面显示重复引擎。
+        # 删除比迁移稳：引擎信息（version/cli_path/local_skills 等）由 worker 心跳全量重报，
+        # 删掉旧行后下一次注册自动按新 scope + 新 owner_id 重建，数据零丢失。
+        # engine_capabilities 随行删除（外键无约束，手动清）；tags_user_set 的自定义标签会丢，
+        # 用户重配成本低（默认 all 标签注册时自动补）。
+        c.execute(
+            "DELETE FROM engine_capabilities WHERE runtime_id IN "
+            "(SELECT id FROM agent_runtimes WHERE credential_id=? AND (scope!=? OR (owner_id IS NOT NULL AND owner_id != '')))",
+            (cid, scope)
+        )
+        c.execute(
+            "DELETE FROM agent_runtimes WHERE credential_id=? AND (scope!=? OR (owner_id IS NOT NULL AND owner_id != ''))",
+            (cid, scope)
+        )
+        # 清凭据行残留的旧 owner_id（repo→user 转换后该字段存的是旧仓库全名，脏数据；
+        # user scope 注册时会按 owner_name 从 grape_accounts 重算，不依赖此字段）
+        c.execute("UPDATE runtime_credentials SET owner_id='' WHERE id=?", (cid,))
         db.commit()
     log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key}")
     return {"scope": scope, "repo_key": repo_key}
