@@ -1000,6 +1000,13 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
     返回 False（保持原 server_url，宁可走已知公网地址也不猜内网）。
     结果按 (rts, task_server_url) 缓存 60s——探测在任务执行路径上，不能每次任务
     都付 1s 超时（不可达时）。缓存同时记录失败，避免不可达 worker 每任务空等。
+
+    2026-10-15 修复（假阳性覆盖）：探测 URL 必须是"CLI 实际调用方式"——裸 /api/health
+    在 nginx/ELB 层就可能 200，但 CLI 的 /api/runtime/* 路由可能不同（鉴权/路由差异），
+    造成"探测通了但 CLI 不通"，把任务里正确的 server_url 覆盖成错地址（0005 liufei
+    worker：worker.grapedev.cn 任务被覆盖成 www.grapedev.cn:3000，2 任务 failed）。
+    改探 /api/runtime/runtimes（CLI 心跳同款端点，不带凭据 401 也算可达——能拿到
+    HTTP 响应即证明路由通，比裸 health 更接近 CLI 真实链路）。
     """
     if not rts or not task_server_url or rts.rstrip("/") == task_server_url.rstrip("/"):
         return False
@@ -1011,12 +1018,18 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
             return hit[1]
     ok = False
     try:
-        probe_url = rts.rstrip("/") + "/api/health"
+        # 探测路径与 CLI 心跳同款路由前缀（/api/runtime/runtimes/0/tags）：不带凭据返回
+        # 401/404 都证明"路由可达"（HTTP 层有响应）；curl 000（超时/拒连/DNS 失败）= 不可达。
+        # 实测：正确地址 401，坏地址 :3000 与不存在域名 000。
+        probe_url = rts.rstrip("/") + "/api/runtime/runtimes/0/tags"
         r = _subprocess.run(
-            ["curl", "-fsS", "--connect-timeout", "1", "--max-time", "2", "-o", "/dev/null", probe_url],
-            capture_output=True, timeout=3,
+            ["curl", "-sS", "--connect-timeout", "1", "--max-time", "2",
+             "-o", "/dev/null", "-w", "%{http_code}", probe_url],
+            capture_output=True, timeout=3, text=True,
         )
-        ok = r.returncode == 0
+        # 任何 HTTP 状态码（含 401/403/404）都算"CLI 路由可达"；curl 失败（超时/拒绝/DNS）= 不可达
+        code = (r.stdout or "").strip()
+        ok = r.returncode == 0 and code.isdigit() and 100 <= int(code) < 600
     except Exception:
         ok = False
     with _worker_url_probe_lock:
@@ -1612,10 +1625,19 @@ async def _execute_task(client, task, engine_name: str = ""):
         # A2A 走 meta.server_base_url 公网地址 NAT 回环不通 → a2a 调用反复超时
         # （实测：内网直连 200/3ms，公网地址 NAT 回环三次 5s 超时全挂）。
         _local_base = _rts.rstrip("/") if _rts else "http://127.0.0.1:3000"
-        # 只有 http:// 才补 :3000（开发默认端口）；https 隐含 443，生产是 ELB→nginx→8000，
-        # 公网 443 上没人监听 3000，补了必然 TCP 超时（2026-10-15 外部 ECS 12122 事故）。
-        if _local_base.startswith("http://") and ":" not in _local_base.split("://", 1)[1]:
-            _local_base = _local_base + ":3000"
+        # 端口拼接规则（2026-10-15 修复）：https:// 走标准 443，绝不补端口——老规则"无端口
+        # 一律补 :3000"是 devops-bot 直连 3000 时代的遗产，会把 https://www.grapedev.cn 拼成
+        # www.grapedev.cn:3000（0005 liufei worker 实测 8 次错误覆盖，2 任务失败）。
+        # 仅 http:// 且明确是本机（127.0.0.1/localhost）才补 3000；http:// 内网 IP 不动
+        # （非 3000 端口的服务端地址本就带端口进 RUNTIME_SERVER_URL）。
+        if _local_base.startswith("https://"):
+            pass  # 443，不补
+        elif _local_base.startswith("http://") and (
+            "localhost" in _local_base or _local_base.split("://", 1)[1].startswith(("127.", "localhost"))
+        ):
+            if ":" not in _local_base.split("://", 1)[1]:
+                _local_base = _local_base + ":3000"
+        # 其他（http:// 内网域名/IP 无端口）：保持原样，不猜端口
         env["GRAPE_SERVER_URL"] = _local_base
         task["server_url"] = _local_base
         log.info(f"local worker: override GRAPE_SERVER_URL/server_url -> {_local_base}")

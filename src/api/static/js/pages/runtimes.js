@@ -1832,13 +1832,30 @@ function _showCreateEnvForm() {
     }
     var repo = app.currentRepo();
     var repoKey = repo ? repo.fullName : '';
-    var grapeServer = window.location.origin;
+    // 2026-10-15：grape_server 优先用服务端权威地址（/api/health 返回 server_base_url），
+    // 拿不到才回退 window.location.origin。用户浏览页面的 origin 不一定等于 CLI 可达地址
+    // （如生产页面 www.grapedev.cn，worker/CLI 实际连 worker.grapedev.cn）。
     var credName = envName.slice(0, 20);
-
-    // Step 0 预检已移除（2026-10-15）：后端 create_environment 不再查询模板规格
-    // （flavor_id/cores/memory 写死），前端无需预检 /devstage/specs——此前模板未发布时
-    // 预检会直接拦截创建。协议未签署等真实错误由 Step 2 创建接口的错误码兜底提示。
-    _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
+    var _startCreate = function(grapeServer) {
+      _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt);
+    };
+    var grapeServer = window.location.origin;
+    try {
+      var cached = JSON.parse(localStorage.getItem('grape_server_base') || 'null');
+      if (cached && cached.url && Date.now() - (cached.ts || 0) < 300000) {
+        grapeServer = cached.url;
+      }
+    } catch (e) {}
+    API.get('/health').then(function(h) {
+      var base = (h && h.server_base_url) || '';
+      if (base) {
+        grapeServer = base;
+        try { localStorage.setItem('grape_server_base', JSON.stringify({url: base, ts: Date.now()})); } catch (e) {}
+      }
+      _startCreate(grapeServer);
+    }).catch(function() {
+      _startCreate(grapeServer);
+    });
   }
 
   function _doCreateEnvWithCred(envName, credName, repoKey, grapeServer, baseName, attempt) {
@@ -1968,7 +1985,22 @@ function _doGenCredForEnv(envId, envName) {
 
   API.post('/settings/runtime-credentials', { name: credName, scope: scope, repo_key: repoKey }).then(function(d) {
     var token = d.token || '';
+    // 2026-10-15：安装命令的 --server 用服务端权威地址（优先 health.server_base_url，
+    // 5 分钟 localStorage 缓存），回退 window.location.origin。CLI 可达地址 ≠ 用户浏览地址。
     var serverUrl = window.location.origin;
+    try {
+      var cached = JSON.parse(localStorage.getItem('grape_server_base') || 'null');
+      if (cached && cached.url && Date.now() - (cached.ts || 0) < 300000) {
+        serverUrl = cached.url;
+      }
+    } catch (e) {}
+    API.get('/health').then(function(h) {
+      var base = (h && h.server_base_url) || '';
+      if (base) {
+        serverUrl = base;
+        try { localStorage.setItem('grape_server_base', JSON.stringify({url: base, ts: Date.now()})); } catch (e) {}
+      }
+    }).catch(function() {});
     var oneCmd = 'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl;
     var box = document.getElementById(modalId);
     if (!box) return;

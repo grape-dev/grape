@@ -214,8 +214,26 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(require_no_sess
         env_vars = None
         init_scripts = None
         if body.grape_server and body.grape_token:
+            # 2026-10-15 修复（devspace 注入错地址）：前端传来的 grape_server 是
+            # window.location.origin（用户浏览页面用的地址，如生产 www.grapedev.cn），
+            # 不等于 CLI 可达的服务端基址（worker 心跳实际用 meta.server_base_url，
+            # 如 https://worker.grapedev.cn）。以服务端权威值为准：前端值仅在与
+            # server_base_url 一致时采纳（dev 环境两者恰好相同），否则一律用
+            # get_server_base_url()——从源头保证 RUNTIME_SERVER_URL 正确。
+            _server_base = ""
+            try:
+                from src.user.db import get_server_base_url
+                _server_base = (get_server_base_url() or "").strip().rstrip("/")
+            except Exception:
+                pass
+            _grape_server = (body.grape_server or "").strip().rstrip("/")
+            if _server_base and _grape_server != _server_base:
+                log.info(
+                    f"devstage: grape_server overridden by server_base_url "
+                    f"(frontend={_grape_server} -> {_server_base})")
+                _grape_server = _server_base
             env_vars = {
-                "GRAPE_DEV_SERVER": body.grape_server,
+                "GRAPE_DEV_SERVER": _grape_server,
                 "GRAPE_DEV_TOKEN": body.grape_token,
                 "AK": ak,
                 "SK": sk,
@@ -225,10 +243,10 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(require_no_sess
             # DevSpace 容器为 root 用户，安装脚本自动检测 systemd 可用性
             # （容器无 systemd 时回退 nohup/setsid，不再强制 --root）。
             init_scripts = [
-                {"command": f"curl -fsSL {body.grape_server}/api/runtime/install -o /tmp/install.sh"},
+                {"command": f"curl -fsSL {_grape_server}/api/runtime/install -o /tmp/install.sh"},
                 {"command": (
                     f"bash /tmp/install.sh --token {body.grape_token}"
-                    f" --server {body.grape_server}"
+                    f" --server {_grape_server}"
                     f" --device {body.name}"
                     f" --root"
                 )},
