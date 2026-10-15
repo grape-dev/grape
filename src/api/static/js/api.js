@@ -182,12 +182,21 @@ const API = (() => {
     });
   }
 
+  // Issue #297: 非 ok 响应可能是 HTML（如 nginx 413/502 错误页），r.json() 会抛
+  // "Unexpected token '<'" 裸异常——先看 content-type，HTML / JSON 解析失败均降级为 null，
+  // 由调用方用 request_failed({status}) 模板渲染用户可读提示
+  function _safeErrJson(r) {
+    var ct = r.headers.get('content-type') || '';
+    if (ct.indexOf('text/html') !== -1) return Promise.resolve(null);
+    return r.json().catch(() => null);
+  }
+
   function handleResp(r, retryFn) {
     if (!r.ok) {
       if (r.status === 401 && retryFn) {
         // 尝试 refresh（refresh_token 在 HttpOnly cookie 里自动带）
         // 但先检查是否是 GitCode OAuth 过期（不需要 JWT refresh，需要重新授权）
-        return r.json().then(err => {
+        return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
             // GitCode OAuth token 过期且 refresh_token 也失效——跳授权页
             _redirectToGitcodeAuth();
@@ -199,7 +208,7 @@ const API = (() => {
       }
       if (r.status === 401) {
         // 没有 retryFn——检查是否 GitCode reauth，否则直接跳登录
-        return r.json().then(err => {
+        return _safeErrJson(r).then(err => {
           if (err?.detail?.action === 'reauth_required') {
             _redirectToGitcodeAuth();
             throw new Error(err.detail.message);
@@ -210,8 +219,10 @@ const API = (() => {
           throw new Error(err?.detail?.message || I18N.t('common.session_expired'));
         });
       }
-      return r.json().then(err => {
-        const detail = err?.detail || {};
+      // Issue #297: HTML 错误页（413/502 等）降级为 request_failed({status})，
+      // 不再让 "Unexpected token '<'" 裸异常进入用户提示
+      return _safeErrJson(r).then(err => {
+        const detail = (err && err.detail) || {};
         const e = new Error(detail.message || I18N.t('common.request_failed', {status: r.status}));
         e.status = r.status;
         e.errors = detail.errors || null;

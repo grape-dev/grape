@@ -723,6 +723,8 @@ function doSend(input, body) {
   body.scrollTop = body.scrollHeight;
 
   const repo = app.currentRepo();
+  // Issue #297: 多图/视频 base64 请求体大（9×5MB→≈45MB+），上传耗时可能超默认 30s——加长到 120s
+  const hasMedia = imgs.length > 0 || !!vid;
   // 1. submit → 立即获取 task_id（视频理解在 agent_fn 内部异步执行，submit 不阻塞）
   API.post('/chat/submit', {
     message: msg || '请帮我分析这些图片',
@@ -730,7 +732,7 @@ function doSend(input, body) {
     conversation_id: _currentConvId,
     image_data: imgs.length > 0 ? JSON.stringify(imgs.map(function(i) { return i.data })) : '',
     video_data: vid || '',
-  }).then(r => {
+  }, hasMedia ? 120000 : undefined).then(r => {
     const convId = r.conversation_id || _currentConvId;
     if (r.status === 'error') {
       const el = document.getElementById(tid);
@@ -745,7 +747,9 @@ function doSend(input, body) {
     streamTask(r.task_id, tid, convId);
   }).catch(e => {
     const el = document.getElementById(tid);
-    if (el) el.innerHTML = I18N.t('common.request_failed') + (e.message || '');
+    // Issue #297: handleResp 已把非 JSON 错误渲染为带状态码文案（如"请求失败 (413)"）；
+    // 兜底分支补传 {status}，杜绝 {{status}} 占位符与裸 parse 异常进入提示
+    if (el) el.innerHTML = renderMarkdown(e.message || I18N.t('common.request_failed', {status: (e && e.status) || ''}));
   });
 }
 
