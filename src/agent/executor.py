@@ -54,7 +54,16 @@ def terminate_active_agents(grace_seconds: int = 5):
             pass
     if procs:
         log.info(f"terminate_active_agents: terminated {len(procs)} running agent subprocess(es)")
-    # 标记 DB 中所有 running/dispatched 任务为 failed（防止重启后悬空）
+    # 标记 DB 中 running/dispatched 任务（防止重启后悬空）。
+    # Issue #404 自杀修复（2026-10-15）：REMOTE 任务（worker 承载引擎，credential_id>0）的
+    # 进程活在远端 worker 上，与主控进程生死无关——主控停机不等于任务死了。停机时把它们
+    # 标 failed 会在部署类任务停主控时自杀（agent 通过 SSH systemctl stop grape-main →
+    # 本函数把任务标 failed → worker 侧进程仍在跑但上报被幂等保护拒绝 → 任务永败）。
+    # REMOTE 任务改为跳过：worker 继续执行并正常上报（complete_task 不受影响）；
+    # 悬空兜底 = worker 侧 recover-orphans（worker 重连时 force_fail）+ scheduler
+    # zombie recovery（引擎离线的 running 任务同步 failed，见 scheduler_loop）。
+    # 只有本机 DIRECT 任务（runtime_id=0 或本机引擎 credential_id=0）的子进程确实被
+    # 上面的 SIGTERM 杀掉了，照旧标 failed。
     try:
         from src.session_manager import db, db_lock
         from src.api.event_store import update_event_status
@@ -63,12 +72,24 @@ def terminate_active_agents(grace_seconds: int = 5):
         _reason = "Task terminated by server shutdown (SIGTERM)"
         with db_lock:
             c = db.cursor()
-            # 查询所有 running/dispatched 任务
+            # 查询所有 running/dispatched 任务 + 引擎归属（credential_id>0 = REMOTE worker 承载）
             c.execute(
-                "SELECT id, event_seq FROM agent_tasks WHERE status IN ('running','dispatched')"
+                "SELECT t.id, t.event_seq, t.runtime_id, "
+                "COALESCE(ar.credential_id, 0) "
+                "FROM agent_tasks t "
+                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
+                "WHERE t.status IN ('running','dispatched')"
             )
             stale_tasks = c.fetchall()
-            for task_id, event_seq in stale_tasks:
+            _remote_skipped = 0
+            for task_id, event_seq, runtime_id, cred_id in stale_tasks:
+                # REMOTE 任务：进程在 worker 上活着，跳过（worker 会继续跑完并上报；
+                # 兜底 = worker recover-orphans + scheduler zombie recovery 引擎离线同步）
+                if runtime_id and cred_id and cred_id > 0:
+                    _remote_skipped += 1
+                    log.info(f"terminate_active_agents: skip REMOTE task {task_id} "
+                             f"(runtime={runtime_id}, worker-owned, will self-report)")
+                    continue
                 try:
                     c.execute(
                         "UPDATE agent_tasks SET status='failed', exit_code=-1, "
@@ -77,10 +98,12 @@ def terminate_active_agents(grace_seconds: int = 5):
                     )
                     if event_seq:
                         update_event_status(event_seq, "failed")
-                    log.info(f"terminate_active_agents: marked stale task {task_id} (seq={event_seq}) as failed")
+                    log.info(f"terminate_active_agents: marked stale DIRECT task {task_id} (seq={event_seq}) as failed")
                 except Exception as e:
                     log.warning(f"terminate_active_agents: failed to mark task {task_id} as failed: {e}")
             db.commit()
+            if _remote_skipped:
+                log.info(f"terminate_active_agents: skipped {_remote_skipped} REMOTE task(s) (worker-owned, left running)")
         if stale_tasks:
             log.info(f"terminate_active_agents: marked {len(stale_tasks)} stale task(s) as failed")
     except Exception as e:

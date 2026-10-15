@@ -811,7 +811,34 @@ async def scheduler_loop():
                     _update_execution_result(_exec_id, "failed",
                         result=_result_text[:5000], error="agent_tasks status=failed")
                     log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed")
-                # running/queued/dispatched -> 跳过，等下一轮
+                # running/queued/dispatched -> 引擎离线才判死，否则跳过，等下一轮。
+                # Issue #404 自杀修复配套（2026-10-15）：主控停机不再把 REMOTE 任务标
+                # failed（terminate_active_agents 跳过 worker 承载任务）。正常路径是
+                # worker 继续跑完 → agent_tasks 变 completed → 上面分支同步 success。
+                # 悬空兜底：agent_task 仍 running/dispatched 且其引擎已离线（status !=
+                # online）→ worker 进程实际已死，永远不会再上报 → 同步 failed 收口。
+                elif _at_status in ("running", "dispatched"):
+                    try:
+                        _rt_row = None
+                        with db_lock:
+                            c3 = db.cursor()
+                            c3.execute(
+                                "SELECT t.runtime_id, ar.status FROM agent_tasks t "
+                                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
+                                "WHERE t.event_seq=? ORDER BY t.created_at DESC LIMIT 1",
+                                (_exec_id,)
+                            )
+                            _rt_row = c3.fetchone()
+                        _rt_id = (_rt_row[0] or 0) if _rt_row else 0
+                        _rt_status = (_rt_row[1] or "") if _rt_row else ""
+                        if _rt_id and _rt_status and _rt_status != "online":
+                            _update_execution_result(_exec_id, "failed",
+                                error=f"worker 引擎离线 (runtime={_rt_id})，任务无法完成")
+                            log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed "
+                                     f"(agent_task {_at_status}, engine {_rt_id} offline)")
+                        # 引擎在线 → 活任务，等下一轮
+                    except Exception as _oe:
+                        log.warning(f"Autopilot zombie recovery offline-check failed for exec {_exec_id}: {_oe}")
         except Exception as _ze:
             log.warning(f"Autopilot zombie recovery error: {_ze}")
 
