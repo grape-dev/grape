@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Grape Admin — 配置中心</title>
+<link rel="icon" type="image/png" href="/static/logo-64.png">
 <style>
 :root{--t:#1d1d1f;--t2:#86868b;--c:#fff;--bg:#f5f6f8;--a:#3168e0;--ah:#2556c2;--g:#1ca44c;--r:#dc2828;--rd:10px;--sh:0 1px 4px rgba(0,0,0,.06)}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -14,7 +15,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 #loginView{position:fixed;inset:0;z-index:200;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);display:flex;align-items:center;justify-content:center}
 #loginView.hid{display:none}
 .lbox{width:400px;text-align:center}
-.lbox .logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:20px;font-weight:800;margin-bottom:18px}
+.lbox .logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:20px;font-weight:800;margin-bottom:18px;overflow:hidden}
+.lbox .logo img{width:100%;height:100%;object-fit:cover}
 .lbox h1{color:#fff;font-size:26px;font-weight:700;letter-spacing:-1px;margin-bottom:6px}
 .lbox .sub{color:#8d97a8;font-size:14px;margin-bottom:28px}
 .ipt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:#fff;font-size:14px;outline:none;margin-bottom:12px}
@@ -30,7 +32,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 .sb{width:220px;background:#0c1222;color:#fff;display:flex;flex-direction:column;flex-shrink:0;position:sticky;top:0;height:100vh}
 .sb-h{padding:18px;border-bottom:1px solid rgba(255,255,255,.06)}
 .sb-h .logo-s{display:flex;align-items:center;gap:9px}
-.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#3168e0,#7b3cf2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:800}
+.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#3168e0,#7b3cf2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;overflow:hidden}
+.sb-h .logo-s .sq img{width:100%;height:100%;object-fit:cover}
 .sb-h h1{font-size:15px;font-weight:700}
 .sb-h .tagline{font-size:10px;color:#8d97a8;text-transform:uppercase;letter-spacing:.8px}
 .sb-nav{flex:1;padding:10px;overflow-y:auto}
@@ -106,7 +109,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <!-- 登录 -->
 <div id="loginView">
   <div class="lbox">
-    <div class="logo">🍇</div>
+    <div class="logo"><img src="/static/img/grape-logo.jpg?v=1" alt="Grape"></div>
     <h1>Grape Admin</h1>
     <p class="sub">系统管理 · 配置中心</p>
     <input class="ipt" id="loginUser" placeholder="管理员账号" autocomplete="username">
@@ -138,7 +141,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 <div id="mainView">
   <div class="sb">
     <div class="sb-h">
-      <div class="logo-s"><span class="sq">🍇</span><h1>Grape Admin</h1></div>
+      <div class="logo-s"><span class="sq"><img src="/static/img/grape-logo.jpg?v=1" alt="A"></span><h1>Grape Admin</h1></div>
       <div class="tagline">Config Center</div>
     </div>
     <div class="sb-nav">
