@@ -43,6 +43,102 @@ class TestConnectionPool:
             db = MySQLCompatDB(host="h")
             assert db._pool_disabled is True
 
+    def test_pool_mode_returns_connection_on_commit(self):
+        """Pool mode: commit() returns the borrowed connection to the pool.
+
+        This verifies the P1-A fix for connection leak — cursor.close() alone
+        does NOT return the PooledConnection; commit() must call
+        PooledConnection.close() to return it.
+        """
+        from src.mysql_compat import MySQLCompatDB
+        db = MySQLCompatDB(host="h")
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_pool.connection.return_value = mock_conn
+        db._pool = mock_pool
+
+        # Borrow a connection via _raw_cursor
+        cur = db._raw_cursor()
+        assert mock_pool.connection.call_count == 1
+
+        # Commit should return the connection to the pool
+        db.commit()
+        mock_conn.commit.assert_called_once()
+        mock_conn.close.assert_called_once()  # PooledConnection.close() → return to pool
+        assert getattr(db._local, "conn", None) is None
+
+    def test_pool_mode_returns_connection_on_rollback(self):
+        """Pool mode: rollback() returns the borrowed connection to the pool."""
+        from src.mysql_compat import MySQLCompatDB
+        db = MySQLCompatDB(host="h")
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_pool.connection.return_value = mock_conn
+        db._pool = mock_pool
+
+        cur = db._raw_cursor()
+        assert mock_pool.connection.call_count == 1
+
+        db.rollback()
+        mock_conn.rollback.assert_called_once()
+        mock_conn.close.assert_called_once()
+        assert getattr(db._local, "conn", None) is None
+
+    def test_pool_mode_multi_write_shares_connection(self):
+        """Pool mode: multiple execute() calls within one transaction share
+        the same underlying connection (transaction atomicity).
+
+        This verifies the P1-A fix for transaction atomicity — the old code
+        borrowed a new connection per cursor, so db.commit() only committed
+        the last connection's transaction.
+        """
+        from src.mysql_compat import MySQLCompatDB
+        db = MySQLCompatDB(host="h")
+        mock_pool = MagicMock()
+        mock_conn = MagicMock()
+        mock_cur1 = MagicMock()
+        mock_cur2 = MagicMock()
+        mock_conn.cursor.side_effect = [mock_cur1, mock_cur2]
+        mock_pool.connection.return_value = mock_conn
+        db._pool = mock_pool
+
+        # First execute borrows the connection
+        cur1 = db._raw_cursor()
+        assert mock_pool.connection.call_count == 1
+
+        # Second execute should reuse the SAME connection (no new borrow)
+        cur2 = db._raw_cursor()
+        assert mock_pool.connection.call_count == 1  # still 1, no new borrow
+
+        # Both cursors come from the same connection
+        assert mock_conn.cursor.call_count == 2
+
+        # Commit returns the single connection
+        db.commit()
+        mock_conn.commit.assert_called_once()
+        mock_conn.close.assert_called_once()
+
+    def test_pool_mode_reborrows_after_commit(self):
+        """Pool mode: after commit returns the connection, a new execute()
+        borrows a fresh connection from the pool."""
+        from src.mysql_compat import MySQLCompatDB
+        db = MySQLCompatDB(host="h")
+        mock_pool = MagicMock()
+        mock_conn1 = MagicMock()
+        mock_conn2 = MagicMock()
+        mock_pool.connection.side_effect = [mock_conn1, mock_conn2]
+        db._pool = mock_pool
+
+        # First transaction
+        db._raw_cursor()
+        assert mock_pool.connection.call_count == 1
+        db.commit()  # returns conn1
+
+        # Second transaction borrows a new connection
+        db._raw_cursor()
+        assert mock_pool.connection.call_count == 2
+        db.commit()  # returns conn2
+
 
 # ====== P1-B: Scene Config Cache ======
 

@@ -1084,7 +1084,7 @@ def runtime_worker_package_public():
         if os.environ.get("GRAPE_WORKER_NGINX_REDIRECT", "").lower() in ("1", "true", "yes"):
             # Convert absolute path to nginx-internal path (configured in nginx.conf)
             # nginx location: location /_internal/ { internal; alias /; }
-            _nginx_path = pkg.lstrip("/")
+            _nginx_path = pkg[1:] if pkg.startswith("/") else pkg
             return Response(
                 headers={
                     "Content-Type": "application/gzip",

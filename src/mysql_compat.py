@@ -651,9 +651,13 @@ class MySQLCompatDB:
     def _raw_cursor(self):
         """Get a raw pymysql cursor.
 
-        Pool mode: borrow a connection from the pool, return its cursor.
-        The connection is returned to the pool when cursor.close() is called
-        (see MySQLCompatCursor.close → _return_connection).
+        Pool mode: borrow a connection from the pool **once per thread** and
+        reuse it for all subsequent cursors until ``commit()``/``rollback()``
+        returns it.  This guarantees that every ``execute()`` within a single
+        transaction (e.g. ``db.execute(INSERT) → db.execute(UPDATE) → db.commit()``)
+        runs on the *same* underlying connection, preserving transaction
+        atomicity.  The connection is returned to the pool on commit/rollback
+        (see ``commit``/``rollback``/``close``).
 
         Fallback mode (DB_POOL_DISABLED): per-thread bare connection (legacy behavior).
         """
@@ -661,9 +665,13 @@ class MySQLCompatDB:
             self._ensure_pool()
 
         if self._pool is not None:
-            # Pool mode: borrow a dedicated connection for this cursor
-            conn = self._pool.connection()
-            self._local.conn = conn  # track for commit/rollback within this thread
+            # Pool mode: reuse thread-local borrowed connection within a transaction.
+            # Borrowing once per thread (not per cursor) ensures multi-statement
+            # transactions (db.execute×N + db.commit) share one connection.
+            conn = getattr(self._local, "conn", None)
+            if conn is None:
+                conn = self._pool.connection()
+                self._local.conn = conn
             return conn.cursor()
 
         # Fallback: per-thread bare connection (legacy)
@@ -714,11 +722,27 @@ class MySQLCompatDB:
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             conn.commit()
+            # Pool mode: return the borrowed connection to the pool after commit.
+            # This prevents connection leaks (each cursor borrowed a new connection
+            # but never returned it). After commit the transaction is complete,
+            # so the connection can be reused by other threads.
+            if self._pool is not None:
+                try:
+                    conn.close()  # PooledDedicatedDBConnection.close() returns to pool
+                except Exception:
+                    pass
+                self._local.conn = None
 
     def rollback(self):
         conn = getattr(self._local, "conn", None)
         if conn is not None:
             conn.rollback()
+            if self._pool is not None:
+                try:
+                    conn.close()  # return to pool
+                except Exception:
+                    pass
+                self._local.conn = None
 
     def close(self):
         conn = getattr(self._local, "conn", None)
