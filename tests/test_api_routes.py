@@ -1949,10 +1949,121 @@ class TestKnowledge:
         assert "name 不能超过" in r.json().get("detail", {}).get("message", "")
 
     def test_create_entry_content_too_large(self):
-        """content 超过 10KB"""
-        r = self._create_entry(content="x" * 10241)
+        """content 超过默认上限 100KB（Issue #358 后上限可配置，默认 100KB）"""
+        r = self._create_entry(content="x" * (100 * 1024 + 1))
         assert r.status_code == 400
         assert "content 不能超过" in r.json().get("detail", {}).get("message", "")
+
+    # ---- Issue #358: 知识正文大小上限可配置（默认 100KB） ----
+
+    def test_create_entry_content_between_10kb_and_100kb(self):
+        """超过旧 10KB 但在默认 100KB 内的知识可成功入库"""
+        r = self._create_entry(content="知" * (60 * 1024 // 3))  # ~60KB UTF-8
+        assert r.status_code == 200, f"create failed: {r.text[:200]}"
+        kid = r.json().get("id")
+        self._cleanup_kid(kid)
+
+    def test_create_entry_content_over_100kb_rejected(self):
+        """超过默认 100KB 上限时返回 400 且报错含实际上限"""
+        r = self._create_entry(content="x" * (100 * 1024 + 1))
+        assert r.status_code == 400
+        msg = r.json().get("detail", {}).get("message", "")
+        assert "content 不能超过 100KB" in msg
+
+    def test_update_entry_content_between_10kb_and_100kb(self):
+        """更新超过旧 10KB 但在默认 100KB 内的知识可成功"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            u = client.put(f"/api/knowledge/{kid}", json={
+                "name": "测试知识-更新", "content": "y" * (80 * 1024),
+            }, headers=_headers)
+            assert u.status_code == 200, f"update failed: {u.text[:200]}"
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_update_entry_content_over_100kb_rejected(self):
+        """更新超过默认 100KB 上限时返回 400 且报错含实际上限"""
+        r = self._create_entry()
+        kid = r.json().get("id")
+        try:
+            u = client.put(f"/api/knowledge/{kid}", json={
+                "name": "测试知识-更新", "content": "z" * (100 * 1024 + 1),
+            }, headers=_headers)
+            assert u.status_code == 400
+            msg = u.json().get("detail", {}).get("message", "")
+            assert "content 不能超过 100KB" in msg
+        finally:
+            self._cleanup_kid(kid)
+
+    def test_stats_returns_content_limit(self):
+        """stats 接口返回 content_limit_bytes 和 content_limit_display"""
+        r = client.get("/api/knowledge/stats?repo=org/test", headers=_headers)
+        assert r.status_code == 200
+        d = r.json()
+        assert d.get("content_limit_bytes") == 100 * 1024
+        assert d.get("content_limit_display") == "100KB"
+
+    def test_max_content_bytes_env_override(self):
+        """环境变量 KNOWLEDGE_MAX_CONTENT_BYTES 覆盖默认上限（子进程读取模块常量）"""
+        import subprocess
+        code = (
+            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "print(MAX_CONTENT_BYTES)"
+        )
+        env = dict(os.environ, KNOWLEDGE_MAX_CONTENT_BYTES="2097152")
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."), env=env,
+        )
+        assert out.returncode == 0, out.stderr[:300]
+        assert out.stdout.strip() == "2097152"
+
+    def test_max_content_bytes_default(self):
+        """未设置环境变量时默认 100KB（子进程读取模块常量）"""
+        import subprocess
+        code = (
+            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "print(MAX_CONTENT_BYTES)"
+        )
+        env = {k: v for k, v in os.environ.items() if k != "KNOWLEDGE_MAX_CONTENT_BYTES"}
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."), env=env,
+        )
+        assert out.returncode == 0, out.stderr[:300]
+        assert out.stdout.strip() == str(100 * 1024)
+
+    def test_max_content_bytes_invalid_falls_back_to_default(self):
+        """环境变量为非数字时回退默认 100KB"""
+        import subprocess
+        code = (
+            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "print(MAX_CONTENT_BYTES)"
+        )
+        env = dict(os.environ, KNOWLEDGE_MAX_CONTENT_BYTES="abc")
+        out = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."), env=env,
+        )
+        assert out.returncode == 0, out.stderr[:300]
+        assert out.stdout.strip() == str(100 * 1024)
+
+    def test_max_content_bytes_nonpositive_clamped_to_min(self):
+        """环境变量为 0/负数时钳制到下限 1024"""
+        import subprocess
+        code = (
+            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "print(MAX_CONTENT_BYTES)"
+        )
+        for bad_value in ("0", "-4096"):
+            env = dict(os.environ, KNOWLEDGE_MAX_CONTENT_BYTES=bad_value)
+            out = subprocess.run(
+                [sys.executable, "-c", code],
+                capture_output=True, text=True, cwd=os.path.join(os.path.dirname(__file__), ".."), env=env,
+            )
+            assert out.returncode == 0, out.stderr[:300]
+            assert out.stdout.strip() == "1024"
 
     def test_create_entry_desc_too_long(self):
         """description 超过 200 字符"""

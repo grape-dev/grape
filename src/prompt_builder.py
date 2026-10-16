@@ -74,6 +74,9 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
 
 _PROJECT_INFO_SUMMARY_CHARS = 400
 
+# Issue #358：知识注入 prompt 时的单条最大字符数，超出截断并提示可用 read tool 读取全文
+_KNOWLEDGE_INJECT_MAX_CHARS = 8000
+
 _CHAT_PROMPT_SUFFIX = "\nAssistant:"  # 触发 LLM 生成回复的关键 token，不可省略
 
 
@@ -948,6 +951,9 @@ def _build_agent_knowledge_section(repo_key: str, agent_type: str = "", issue_nu
             if content:
                 found = True
                 injected_ids.append(kid)
+                # Issue #358：超长知识截断保护，避免 prompt token 爆炸
+                if len(content) > _KNOWLEDGE_INJECT_MAX_CHARS:
+                    content = content[:_KNOWLEDGE_INJECT_MAX_CHARS] + "\n...(已截断，可用 read tool 读取全文)"
                 lines.append(f"[{scope} 级] {content}")
     except Exception:
         # 向后兼容：scene_knowledge_ref 表不存在时回退到 scope 三级注入（只查 agent 知识）
@@ -958,6 +964,8 @@ def _build_agent_knowledge_section(repo_key: str, agent_type: str = "", issue_nu
                 content = k.get(scope)
                 if content:
                     found = True
+                    if len(content) > _KNOWLEDGE_INJECT_MAX_CHARS:
+                        content = content[:_KNOWLEDGE_INJECT_MAX_CHARS] + "\n...(已截断，可用 read tool 读取全文)"
                     lines.append(f"[{scope} 级] {content}")
         except Exception:
             pass

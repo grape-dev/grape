@@ -205,6 +205,8 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
         "agent": stats_row[1] or 0,
         "manual": stats_row[2] or 0,
         "unlinked": stats_row[3] or 0,
+        "content_limit_bytes": MAX_CONTENT_BYTES,
+        "content_limit_display": _format_content_limit(MAX_CONTENT_BYTES),
     }
 
 
@@ -226,7 +228,43 @@ class KnowledgeUpdateBody(BaseModel):
 
 MAX_NAME_LEN = 50
 MAX_DESC_LEN = 200
-MAX_CONTENT_BYTES = 10 * 1024
+# Issue #358：知识正文大小上限从硬编码 10KB 改为环境变量可配置，默认 100KB
+_DEFAULT_MAX_CONTENT_BYTES = 100 * 1024
+_MIN_CONTENT_BYTES = 1024  # 下限 1KB：<=0 之类的值会导致所有 content 被拒，钳制到可用下限
+
+
+def _resolve_max_content_bytes() -> int:
+    """解析 KNOWLEDGE_MAX_CONTENT_BYTES：非数字回退默认值并告警；<=下限钳制到下限并告警。"""
+    raw = os.environ.get("KNOWLEDGE_MAX_CONTENT_BYTES")
+    if raw is None or raw == "":
+        return _DEFAULT_MAX_CONTENT_BYTES
+    try:
+        value = int(raw)
+    except ValueError:
+        log.warning(
+            f"[knowledge] KNOWLEDGE_MAX_CONTENT_BYTES={raw!r} 不是合法整数，"
+            f"回退默认值 {_DEFAULT_MAX_CONTENT_BYTES}"
+        )
+        return _DEFAULT_MAX_CONTENT_BYTES
+    if value < _MIN_CONTENT_BYTES:
+        log.warning(
+            f"[knowledge] KNOWLEDGE_MAX_CONTENT_BYTES={value} 低于下限 {_MIN_CONTENT_BYTES}，"
+            f"已钳制为 {_MIN_CONTENT_BYTES}"
+        )
+        return _MIN_CONTENT_BYTES
+    return value
+
+
+MAX_CONTENT_BYTES = _resolve_max_content_bytes()
+
+
+def _format_content_limit(limit_bytes: int) -> str:
+    """把字节数上限格式化为人类可读的 KB/MB 文案（用于报错信息）。"""
+    if limit_bytes >= 1024 * 1024 and limit_bytes % (1024 * 1024) == 0:
+        return f"{limit_bytes // (1024 * 1024)}MB"
+    return f"{max(1, limit_bytes // 1024)}KB"
+
+
 VALID_AGENT_TYPES = {'vod', 'issue', 'coding', 'qa', 'sre', 'chat'}
 
 # name 是展示名，不强制唯一——用 id 做唯一标识
@@ -400,7 +438,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     if not (body.content or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     if len(body.content.encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 不能超过 10KB"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}"})
     if body.description and len(body.description) > MAX_DESC_LEN:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"description 不能超过 {MAX_DESC_LEN} 字符"})
     if not body.repo:
@@ -593,7 +631,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
     if not (body.content or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     if len(body.content.encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "content 不能超过 10KB"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}"})
     if body.description and len(body.description) > MAX_DESC_LEN:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"description 不能超过 {MAX_DESC_LEN} 字符"})
 

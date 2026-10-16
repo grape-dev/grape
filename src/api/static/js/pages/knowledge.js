@@ -44,6 +44,8 @@ function renderKnowledge() {
         firstLoad: true,
         filter: { refStatus: '', query: '', sortLatest: false },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
+        contentLimitBytes: 102400,  // Issue #358：后端 stats 返回实际上限，默认 100KB 兜底
+        contentLimitDisplay: '100KB',
         activeTab: 'system',
         page: 1,
         pageSize: 20,
@@ -162,6 +164,11 @@ function renderKnowledge() {
           const d = await API.get('/knowledge/stats?repo=' + encodeURIComponent(repo));
           if (window._currentView !== 'knowledge') return;
           this.stats = d || { system: 0, agent: 0, manual: 0, unlinked: 0 };
+          // Issue #358：从 stats 读取后端实际上限
+          if (d && d.content_limit_bytes) {
+            this.contentLimitBytes = d.content_limit_bytes;
+            this.contentLimitDisplay = d.content_limit_display || (Math.round(d.content_limit_bytes / 1024) + 'KB');
+          }
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
         }
@@ -446,8 +453,8 @@ function renderKnowledge() {
       importFile(event, target) {
         const file = event.target.files[0];
         if (!file) return;
-        if (file.size > 10240) {
-          app.showToast(this.t('file_too_large'));
+        if (file.size > this.contentLimitBytes) {
+          app.showToast(this.t('file_too_large').replace('{limit}', this.contentLimitDisplay));
           event.target.value = '';
           return;
         }
@@ -486,7 +493,7 @@ function renderKnowledge() {
         if (this.editForm.name.length > 50) { app.showToast(this.t('name_too_long')); return; }
         if (this.editForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
         if (!this.editForm.content.trim()) { app.showToast(this.t('content_required')); return; }
-        if (new Blob([this.editForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
+        if (new Blob([this.editForm.content]).size > this.contentLimitBytes) { app.showToast(this.t('content_too_large').replace('{limit}', this.contentLimitDisplay)); return; }
         if (this.submitting) return;
         this.submitting = true;
         try {
@@ -637,7 +644,7 @@ function renderKnowledge() {
         if (this.createForm.name.length > 50) { app.showToast(this.t('name_too_long')); return; }
         if (this.createForm.description.length > 200) { app.showToast(this.t('desc_too_long')); return; }
         if (!this.createForm.content.trim()) { app.showToast(this.t('content_required')); return; }
-        if (new Blob([this.createForm.content]).size > 10240) { app.showToast(this.t('content_too_large')); return; }
+        if (new Blob([this.createForm.content]).size > this.contentLimitBytes) { app.showToast(this.t('content_too_large').replace('{limit}', this.contentLimitDisplay)); return; }
         if (this.submitting) return;
         this.submitting = true;
         try {
@@ -674,7 +681,7 @@ function renderKnowledge() {
 
       // 文件过大提示
       isFileTooLarge(k) {
-        return k.scope === 'project' && k.content && k.content.length > 10240;
+        return k.scope === 'project' && k.content && k.content.length > this.contentLimitBytes;
       },
       fileSizeKB(k) {
         return ((k.content || '').length / 1024).toFixed(1);
