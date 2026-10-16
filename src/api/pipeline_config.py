@@ -7,6 +7,8 @@ Backward compatible: if DB table missing/no scenes, falls back to configs/pipeli
 """
 import json
 import os
+import time
+import threading
 from typing import Optional
 
 from src.config import CONFIG_DIR, log
@@ -24,6 +26,89 @@ NODE_COLORS = {
     "sre": "var(--or)",
     "chat": "var(--sk)",
 }
+
+# ====== Process-level cache (P1-B, Issue #357) ======
+# Eliminates N+1: get_pipeline_config called per-card in _query_tasks (348×),
+# each doing SHOW COLUMNS + scene query + market fallback = ~1000 DB round-trips.
+# Cache TTL 60s (scenes are low-frequency config; write paths invalidate immediately).
+
+_SCENE_CACHE_TTL = 60.0  # seconds
+_SCENE_CACHE: dict[tuple, tuple] = {}  # (scene_id, repo_key) → (result_dict|None, expiry_ts)
+_SCENE_CACHE_LOCK = threading.Lock()
+
+# SHOW COLUMNS result cached once per process (table structure only changes on migration)
+_SCENE_COLUMNS_CACHE: set[str] | None = None
+_SCENE_COLUMNS_LOCK = threading.Lock()
+
+
+def _get_scene_columns() -> set[str]:
+    """Return column names of devops_pipeline_scene (cached once per process)."""
+    global _SCENE_COLUMNS_CACHE
+    if _SCENE_COLUMNS_CACHE is not None:
+        return _SCENE_COLUMNS_CACHE
+    with _SCENE_COLUMNS_LOCK:
+        if _SCENE_COLUMNS_CACHE is not None:
+            return _SCENE_COLUMNS_CACHE
+        db, lock = _db()
+        with lock:
+            c = db.cursor()
+            try:
+                try:
+                    c.execute("SHOW COLUMNS FROM devops_pipeline_scene")
+                    cols = {r[0] for r in c.fetchall()}
+                except Exception:
+                    cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
+            except Exception:
+                cols = set()
+        _SCENE_COLUMNS_CACHE = cols
+        return cols
+
+
+def _cache_get(scene_id: str, repo_key: str):
+    """Get cached pipeline config. Returns (result, hit) tuple."""
+    key = (scene_id, repo_key)
+    now = time.time()
+    with _SCENE_CACHE_LOCK:
+        entry = _SCENE_CACHE.get(key)
+        if entry is not None and entry[1] > now:
+            return entry[0], True
+        if entry is not None:
+            del _SCENE_CACHE[key]
+    return None, False
+
+
+def _cache_put(scene_id: str, repo_key: str, result):
+    """Store pipeline config in cache with TTL."""
+    key = (scene_id, repo_key)
+    expiry = time.time() + _SCENE_CACHE_TTL
+    with _SCENE_CACHE_LOCK:
+        _SCENE_CACHE[key] = (result, expiry)
+
+
+def invalidate_scene_cache(scene_id: str = "", repo_key: str = ""):
+    """Invalidate cache entries. Called by write paths (create/update/delete scene).
+
+    - scene_id + repo_key both given: invalidate that specific key.
+    - Only repo_key: invalidate all entries for that repo.
+    - Neither: clear entire cache (safe fallback).
+    """
+    with _SCENE_CACHE_LOCK:
+        if not scene_id and not repo_key:
+            _SCENE_CACHE.clear()
+            return
+        keys_to_del = []
+        for key in _SCENE_CACHE:
+            if scene_id and repo_key:
+                if key == (scene_id, repo_key):
+                    keys_to_del.append(key)
+            elif repo_key:
+                if key[1] == repo_key:
+                    keys_to_del.append(key)
+            elif scene_id:
+                if key[0] == scene_id:
+                    keys_to_del.append(key)
+        for key in keys_to_del:
+            del _SCENE_CACHE[key]
 
 
 def _db():
@@ -197,35 +282,24 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
     """Query a specific repo-scoped scene from DB by scene_id + repo_key.
 
     仅仓库场景；找不到时回退到 scene_market 官方模板（_load_official_scene_from_market）。
+    Uses cached column set (P1-B: SHOW COLUMNS only once per process).
     """
+    _cols = _get_scene_columns()
+    _has_dn = "display_name" in _cols
+    _has_st = "scene_type" in _cols
+    _has_pr_sub = "pr_subscription_enabled" in _cols
+    _has_linked_repos = "linked_repos" in _cols
+    _extra = ", display_name" if _has_dn else ""
+    if _has_st:
+        _extra += ", scene_type"
+    if _has_pr_sub:
+        _extra += ", pr_subscription_enabled"
+    if _has_linked_repos:
+        _extra += ", linked_repos"
     db, lock = _db()
     with lock:
         c = db.cursor()
         try:
-            _has_dn = False
-            _has_st = False
-            _has_pr_sub = False
-            _has_linked_repos = False
-            try:
-                # PRAGMA 在 MySQL 上列不全，用 SHOW COLUMNS 替代
-                try:
-                    c.execute("SHOW COLUMNS FROM devops_pipeline_scene")
-                    _cols = {r[0] for r in c.fetchall()}
-                except Exception:
-                    _cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
-                _has_dn = "display_name" in _cols
-                _has_st = "scene_type" in _cols
-                _has_pr_sub = "pr_subscription_enabled" in _cols
-                _has_linked_repos = "linked_repos" in _cols
-            except Exception:
-                pass
-            _extra = ", display_name" if _has_dn else ""
-            if _has_st:
-                _extra += ", scene_type"
-            if _has_pr_sub:
-                _extra += ", pr_subscription_enabled"
-            if _has_linked_repos:
-                _extra += ", linked_repos"
             c.execute(
                 f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
                 "WHERE is_active=1 AND scene_id=? AND repo_key=? LIMIT 1",
@@ -285,7 +359,16 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
 
     DB-first: query devops_pipeline_scene (repo_key-scoped).
     Fallback: scene_market official template → pipelines.json file → default scene.
+
+    Results are cached at process level (TTL 60s) to eliminate N+1 in _query_tasks
+    (P1-B, Issue #357). Write paths (create/update/delete_custom_scene) invalidate
+    immediately via invalidate_scene_cache().
     """
+    # Check cache first
+    cached, hit = _cache_get(scene_id, repo_key)
+    if hit:
+        return cached
+
     scene = None
     if repo_key:
         scene = _query_scene_by_id(scene_id, repo_key=repo_key)
@@ -298,20 +381,25 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
         file_scene = data.get("scenes", {}).get(scene_id) or data.get("scenes", {}).get("default")
         if file_scene:
             _name = file_scene.get("name", scene_id)
-            return {
+            result = {
                 "name": _name,
                 "display_name": _name,
                 "nodes": file_scene.get("nodes", []),
                 "onboarding": file_scene.get("onboarding", "repo-onboarding"),
             }
+            _cache_put(scene_id, repo_key, result)
+            return result
+        _cache_put(scene_id, repo_key, None)  # cache None to avoid repeated misses
         return None
-    return {
+    result = {
         "name": scene.get("name", scene_id) or scene_id,
         "display_name": scene.get("display_name") or scene.get("name", scene_id) or scene_id,
         "nodes": scene.get("nodes") or [],
         "onboarding": scene.get("onboarding", "repo-onboarding"),
         "scene_type": scene.get("scene_type", "standard"),
     }
+    _cache_put(scene_id, repo_key, result)
+    return result
 
 
 def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 0) -> Optional[dict]:
@@ -406,6 +494,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
             _try_set_pr_sub_enabled(c, existing[0], pr_subscription_enabled)
             _try_set_linked_repos(c, existing[0], linked_repos_json)
             db.commit()
+            invalidate_scene_cache(scene_id, repo_key)
             return existing[0]
         # Insert new record
         c.execute(
@@ -420,6 +509,7 @@ def create_custom_scene(scene_id: str, name: str, description: str,
         _try_set_pr_sub_enabled(c, new_id, pr_subscription_enabled)
         _try_set_linked_repos(c, new_id, linked_repos_json)
         db.commit()
+        invalidate_scene_cache(scene_id, repo_key)
         return new_id
 
 
@@ -507,6 +597,7 @@ def update_custom_scene(scene_id: str, repo_key: str,
             f"UPDATE devops_pipeline_scene SET {','.join(sets)} WHERE scene_id=? AND repo_key=? AND is_active=1",
             tuple(params))
         db.commit()
+    invalidate_scene_cache(scene_id, repo_key)
 
 
 def delete_custom_scene(scene_id: str, repo_key: str):
@@ -518,6 +609,7 @@ def delete_custom_scene(scene_id: str, repo_key: str):
             "DELETE FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=?",
             (scene_id, repo_key))
         db.commit()
+    invalidate_scene_cache(scene_id, repo_key)
 
     # 自检推荐配置：清理指向被删场景的规则/兜底
     try:

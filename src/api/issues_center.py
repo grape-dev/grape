@@ -1876,6 +1876,25 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     _agent_status_map = _batch_fetch_agent_statuses(_keys)
     _pr_issue_keys = _batch_fetch_pr_issue_keys(_keys)
 
+    # P1-B: Pre-resolve scene names in batch (loop-out).
+    # Collect unique (scene_id, repo_key) pairs and resolve once, instead of
+    # calling get_pipeline_config per-card (348× → 2-5× with cache).
+    _scene_name_cache: dict[tuple, str] = {}
+    for idx, r in enumerate(rows):
+        _rk = _keys[idx][0]
+        _st = _stage_map.get((_rk, _keys[idx][1]))
+        _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        _scene_key = (_issue_scene_id, _rk)
+        if _scene_key not in _scene_name_cache:
+            _scene_name = ""
+            try:
+                _cfg = get_pipeline_config(_issue_scene_id, repo_key=_rk)
+                if _cfg:
+                    _scene_name = _cfg.get("display_name") or _cfg.get("name", _issue_scene_id)
+            except Exception:
+                pass
+            _scene_name_cache[_scene_key] = _scene_name
+
     tasks_out = []
     for idx, r in enumerate(rows):
         _rk, _issue_id = _keys[idx]
@@ -1889,13 +1908,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             # 无 Issue 级场景 → 仓库默认场景（原 get_issue_scene 在 scene_id 为空时返回空串，等价）
             _scene_id = ""
             _scene_source = "repo_default"
-        _scene_name = ""
-        try:
-            _cfg = get_pipeline_config(_scene_id, repo_key=_rk)
-            if _cfg:
-                _scene_name = _cfg.get("display_name") or _cfg.get("name", _scene_id)
-        except Exception:
-            pass
+        _scene_name = _scene_name_cache.get((_scene_id, _rk), "")
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)
         item = {
             "id": r[0], "assignee": r[1], "repo_key": r[2], "issue_number": r[3],
