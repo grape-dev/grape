@@ -219,6 +219,33 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
 
+    # P2-C (Issue #357): Large table maintenance — nullify old agent_tasks fields
+    # and delete old task_messages. Runs every 6 hours with distributed lock.
+    try:
+        from src.runtime.task_lock import run_with_distributed_lock
+
+        async def _table_maintenance_worker():
+            import asyncio
+            await asyncio.sleep(600)  # 10 min after startup (avoid migration race)
+            while True:
+                try:
+                    async with run_with_distributed_lock("table_maintenance", ttl=3600):
+                        from src.runtime.table_maintenance import (
+                            cleanup_old_agent_tasks_fields,
+                            cleanup_old_task_messages,
+                        )
+                        cleanup_old_agent_tasks_fields()
+                        cleanup_old_task_messages()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("table maintenance run failed")
+                await asyncio.sleep(6 * 3600)  # every 6 hours
+
+        asyncio.create_task(_table_maintenance_worker(), name="table-maintenance")
+    except Exception as e:
+        log.warning(f"Table maintenance scheduler start failed: {e}")
+
     # Autopilot 定时调度器：每分钟扫描到期任务，创建 Issue 触发流水线
     # 注：调度器在本 lifespan 下方 IM WS 启动段统一以 start_scheduler() 启动（幂等）；
     # 此处历史上的 asyncio.create_task(start_scheduler()) 是双重启动——start_scheduler()

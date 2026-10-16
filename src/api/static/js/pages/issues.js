@@ -163,7 +163,7 @@ function _startScenePoll() {
       clearInterval(_taskPollTimer);
       _taskPollTimer = null;
     }
-  }, 15000);  // 15 秒轮询
+  }, 30000);  // P2-E (Issue #357): 15s → 30s polling interval to reduce server load
 }
 
 function _stopScenePoll() {

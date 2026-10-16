@@ -1062,6 +1062,9 @@ def runtime_worker_package_public():
 
     并发限制：同时下载不超过 PKG_DOWNLOAD_MAX_CONCURRENT（默认 3），
     超出返回 429 让 worker 重试。
+
+    P2-D (Issue #357): When GRAPE_WORKER_NGINX_REDIRECT=1 is set, returns
+    X-Accel-Redirect header so nginx serves the file directly (offloads API process).
     """
     global _pkg_download_count
     with _pkg_download_lock:
@@ -1069,7 +1072,7 @@ def runtime_worker_package_public():
             raise HTTPException(status_code=429, detail={"code": 429, "message": "too many concurrent downloads, retry later"})
         _pkg_download_count += 1
     try:
-        from fastapi.responses import FileResponse
+        from fastapi.responses import FileResponse, Response
         from src.worker_package import build_package
         try:
             pkg = build_package()
@@ -1077,6 +1080,19 @@ def runtime_worker_package_public():
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"build worker package failed: {e}"})
         if not pkg or not os.path.isfile(pkg):
             raise HTTPException(status_code=500, detail={"code": 500, "message": "worker package not found"})
+        # P2-D: nginx X-Accel-Redirect mode — let nginx serve the file directly
+        if os.environ.get("GRAPE_WORKER_NGINX_REDIRECT", "").lower() in ("1", "true", "yes"):
+            # Convert absolute path to nginx-internal path (configured in nginx.conf)
+            # nginx location: location /_internal/ { internal; alias /; }
+            _nginx_path = pkg.lstrip("/")
+            return Response(
+                headers={
+                    "Content-Type": "application/gzip",
+                    "Content-Disposition": f'attachment; filename="grape-worker.tar.gz"',
+                    "X-Accel-Redirect": f"/_internal/{_nginx_path}",
+                },
+                status_code=200,
+            )
         return FileResponse(pkg, media_type="application/gzip", filename="grape-worker.tar.gz")
     finally:
         with _pkg_download_lock:

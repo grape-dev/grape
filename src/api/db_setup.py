@@ -1502,6 +1502,9 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_events_repo_key ON events(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_events_issue_id ON events(issue_id)",
         "CREATE INDEX IF NOT EXISTS idx_events_status ON events(status)",
+        # P2-B (Issue #357): Composite index for OR-pair queries (repo_key=? AND issue_id=?)
+        # Eliminates full table scan in _batch_fetch_agent_statuses / _batch_fetch_pr_issue_keys
+        "CREATE INDEX IF NOT EXISTS idx_events_repo_issue ON events(repo_key, issue_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_sessions_repo ON devops_agent_session(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_event_route_config_repo ON event_route_config(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_bot_seen_messages_app_id ON bot_seen_messages(app_id)",

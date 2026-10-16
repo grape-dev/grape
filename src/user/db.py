@@ -891,10 +891,45 @@ def init_db():
                     SELECT MIN(id) FROM user_accounts GROUP BY username
                 )
             """)
-            # 清理 user_credentials 中指向已删除用户的记录
-            db.execute("""
-                DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM user_accounts)
-            """)
+            # P2-A (Issue #357): Batched DELETE for user_credentials to avoid deadlock.
+            # Original: DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM user_accounts)
+            # This large DELETE locks many rows and deadlocks with business writes.
+            # Fix: use derived table (MySQL 1093) + LIMIT 100 batch loop.
+            from src.mysql_compat import get_db_backend as _get_be
+            _is_mysql = _get_be() == "mysql"
+            while True:
+                if _is_mysql:
+                    # MySQL: use derived table wrapper + LIMIT (translate_sql also handles this,
+                    # but we do it explicitly here for clarity in the migration path)
+                    db.execute("""
+                        DELETE FROM user_credentials WHERE user_id IN (
+                            SELECT user_id FROM (
+                                SELECT uc.user_id FROM user_credentials uc
+                                LEFT JOIN user_accounts ua ON uc.user_id = ua.id
+                                WHERE ua.id IS NULL
+                                LIMIT 100
+                            ) AS __to_delete
+                        )
+                    """)
+                else:
+                    # SQLite: no LIMIT in DELETE subquery, just do it in one shot
+                    db.execute("""
+                        DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM user_accounts)
+                    """)
+                db.commit()
+                # Check if more rows remain (MySQL batch loop)
+                if _is_mysql:
+                    c = db.cursor()
+                    c.execute("""
+                        SELECT COUNT(*) FROM user_credentials uc
+                        LEFT JOIN user_accounts ua ON uc.user_id = ua.id
+                        WHERE ua.id IS NULL
+                    """)
+                    _remaining = c.fetchone()[0]
+                    if _remaining == 0:
+                        break
+                else:
+                    break
             # 修复 managed_repos 中的旧 user_id（通过旧 users 表映射）
             try:
                 db.execute("""
