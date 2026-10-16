@@ -624,7 +624,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         cid = rt.get("credential_id") or 0
         cred = cred_map.get(cid) or {"name": "", "device_name": "", "scope": "global",
                                      "owner_name": "", "owner_id": "", "last_ip": ""}
-        if not _visible_credential(cid, cred["scope"], cred["owner_name"], cred["owner_id"]):
+        if not _visible_credential(cid, cred["scope"], cred["owner_name"], cred["owner_id"], from_repo_key(cred.get("repo_key", ""))):
             continue
         if cid == 0:
             # 本机引擎行可能绑定了已删除用户的 owner_id，需校验用户是否仍存在
@@ -798,7 +798,8 @@ def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = 
     user_repos: 用户可访问的仓库 full_name 集合（无前缀 owner/repo）
     repo_filter: 当前仓库 full_name（无前缀），非空时 repo scope 仅允许该仓库（Issue #277 数据隔离）
     """
-    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str) -> bool:
+    def _visible_credential(cid: int, cscope: str, cowner_name: str, cowner_id: str,
+                            crepo_key: str = "") -> bool:
         if not cid:                      # credential_id=0（历史本机引擎）
             return True
         if cscope == "global":
@@ -806,14 +807,17 @@ def _make_visible_credential_fn(uname: str, user_repos: set, repo_filter: str = 
         if cscope == "user":
             return cowner_name == uname
         if cscope == "repo":
+            # owner_id 为空（历史转换入口没写）时回退用 cred 的 repo_key（防御性，
+            # 2026-10-16：转换后设备对仓库成员不可见的根因）
+            _rk = from_repo_key(cowner_id) or from_repo_key(crepo_key)
             # repo_filter 非空（Issue #277 数据隔离）：仅允许当前仓库的设备/引擎
             if repo_filter:
-                return from_repo_key(cowner_id) == repo_filter
+                return _rk == repo_filter
             if cowner_name == uname:
                 return True
             # repo_key 存储为 gitcode:owner/repo（带前缀），user_repos 无前缀
             # 统一用 from_repo_key 剥前缀后比对（Issue #248）
-            return from_repo_key(cowner_id) in user_repos
+            return _rk in user_repos
         return False
     return _visible_credential
 
@@ -1257,6 +1261,11 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         if _owner != _uname:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可修改 scope"})
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=? WHERE id=?", (scope, repo_key or None, cid))
+        # 转 repo 时同步写 owner_id=repo_key（与 worker 注册路径一致）：
+        # Workers 页对 repo 设备的可见性判断（非 owner 用户）走 from_repo_key(owner_id) in user_repos，
+        # owner_id 为空 → 同仓库其他成员永远看不到该设备（2026-10-16 转换后设备消失根因）
+        if scope == "repo" and repo_key:
+            c.execute("UPDATE runtime_credentials SET owner_id=? WHERE id=?", (repo_key, cid))
         # 仓库转个人/个人转仓库：同步删除该凭据名下旧 scope 的引擎行（2026-10-15 build-0005 重复引擎根因）。
         # 注册键 = (credential_id, name, scope, owner_id)（runtime.py /register 的 upsert 匹配条件）。
         # 只改凭据 scope 不动引擎行 → worker 下次心跳四元组对不上 → INSERT 一套新引擎，

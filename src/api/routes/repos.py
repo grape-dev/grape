@@ -304,12 +304,26 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         _providers = list(_bound_providers)
 
     # Issue #343 修复: _probe_stale_repos 需要 token，走 with_oauth_token 获取
+    # 恢复后台异步（性能回归修复）：with_oauth_token 在请求内同步取 token（含预刷新），
+    # 但 _probe_stale_repos（串行探活 webhook，27 仓 ≈ 6-10s）丢回后台线程，
+    # 接口不等待、页面秒开。token 获取同步做（新架构），探活异步做（旧行为）。
     if "gitcode" in _providers:
         try:
             def _probe(token, _uid=user["id"]):
                 _probe_stale_repos(token, _uid)
                 return []  # 返回空列表，不需要结果
-            with_oauth_token(user, "gitcode", _probe)
+            try:
+                token = with_oauth_token(user, "gitcode", lambda t: t)
+            except Exception as e:
+                log.warning(f"member: stale probe token fetch failed (non-fatal): {e}")
+                token = ""
+            if token:
+                import threading
+                threading.Thread(
+                    target=_probe_stale_repos,
+                    args=(token, user["id"]),
+                    daemon=True,
+                ).start()
         except Exception as e:
             log.warning(f"member: stale probe failed (non-fatal): {e}")
 
@@ -438,7 +452,19 @@ def sync_repos(user: dict = Depends(require_org_member)):
             def _probe(token, _uid=user["id"]):
                 _probe_stale_repos(token, _uid)
                 return []
-            with_oauth_token(user, "gitcode", _probe)
+            # 恢复后台异步（性能回归修复）：同步取 token，探活丢回后台线程（同 /member）
+            try:
+                token = with_oauth_token(user, "gitcode", lambda t: t)
+            except Exception as e:
+                log.warning(f"sync: stale probe token fetch failed (non-fatal): {e}")
+                token = ""
+            if token:
+                import threading
+                threading.Thread(
+                    target=_probe_stale_repos,
+                    args=(token, user["id"]),
+                    daemon=True,
+                ).start()
         except Exception as e:
             log.warning(f"sync: stale probe failed (non-fatal): {e}")
 
