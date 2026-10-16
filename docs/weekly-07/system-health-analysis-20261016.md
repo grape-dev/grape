@@ -1,7 +1,7 @@
 # Grape 平台系统健康分析 — 2026-10-16「整体卡」问题
 
 日期：2026-10-16
-范围：双主 174/79（uvicorn 8000 + webhook 8080）、nginx、MySQL（172.16.11.181 RDS）、前端轮询行为
+范围：双主节点 A/B（uvicorn 8000 + webhook 8080）、nginx、MySQL（RDS 实例）、前端轮询行为
 数据来源：live 系统指标 + api_latency_log（今日 2154 条实测请求延迟） + information_schema + 代码
 
 ## 一、总体结论（一句话）
@@ -16,11 +16,11 @@ experience 请求）都会把队堵死，所有用户一起等。再加上接口
 
 | 检查项 | 实测值 | 评价 |
 |---|---|---|
-| 174 CPU | 8 核，load 1.88，idle 87.4% | ✅ 正常 |
-| 174 内存 | 14G 总 / 7.8G 用 / 5.1G 可用 | ✅ 正常 |
-| 174 磁盘 | / 用 65%（24G/39G），无 >100M 日志 | ✅ 正常 |
-| 79 CPU/负载 | load 0.21，正常 | ✅ 正常 |
-| API 进程 | **两台均为 uvicorn 单 worker**，8000 进程 CPU 瞬时 81%（GIL 单核上限） | ⚠️ 结构性瓶颈 |
+| 节点 A CPU | 8 核，load 1.88，idle 87.4% | ✅ 正常 |
+| 节点 A 内存 | 14G 总 / 7.8G 用 / 5.1G 可用 | ✅ 正常 |
+| 节点 A 磁盘 | / 用 65%（24G/39G），无 >100M 日志 | ✅ 正常 |
+| 节点 B CPU/负载 | load 0.21，正常 | ✅ 正常 |
+| API 进程 | **双主均为 uvicorn 单 worker**，8000 进程 CPU 瞬时 81%（GIL 单核上限） | ⚠️ 结构性瓶颈 |
 | /health、静态资源 | 2~5ms | ✅ 正常 |
 | MySQL 连接 | Threads_connected 63→96 波动，Threads_running 2 | ⚠️ 见连接问题 |
 | MySQL 连接建立 | 20 秒内新建 40 个连接（约 2 个/秒），**历史累计创建 770 万次** | ⚠️ 连接churn严重 |
@@ -28,7 +28,7 @@ experience 请求）都会把队堵死，所有用户一起等。再加上接口
 | MySQL 慢查询 | 476 条（long_query_time=1s），Threads_running 低位 | ✅ DB 本身不慢 |
 | MySQL 死锁 | 10-15 20:53 user_credentials 清理 DELETE 与业务写死锁 | ⚠️ 见死锁问题 |
 | performance_schema | **关闭**（无法做 SQL 级归因，靠慢日志兜底） | ⚠️ 可观测性缺口 |
-| DB 表容量 | task_messages 234 万行/497MB；agent_tasks 6474 行但 **1.58GB**（prompt/result 大字段） | ⚠️ 膨胀 |
+| DB 表容量 | 任务消息表 234 万行/497MB；任务表 6474 行但 **1.58GB**（prompt/result 大字段） | ⚠️ 膨胀 |
 | 大表索引 | events 无 (repo_key, issue_id) 复合索引 | ⚠️ 见索引 |
 
 ### 今日接口延迟实测（api_latency_log，10-16）
@@ -53,7 +53,7 @@ experience 请求）都会把队堵死，所有用户一起等。再加上接口
   db_lock 串行化"；`session_manager.db_lock` 是一把全局 `threading.RLock`，
   全仓 60+ 处 `with db_lock` 包住每条 SQL（含网络往返 2~4ms/条）。
 - uvicorn 以 `python -m uvicorn src.api.main:app` 启动，**没有 --workers**，
-  两台双主各只有一个进程。FastAPI 同步路由靠线程池并发，但线程再多，
+  双主各只有一个进程。FastAPI 同步路由靠线程池并发，但线程再多，
   SQL 仍被全局锁串成一条队。
 - 推论：一个 124 秒的 experience 请求只要在锁内做长查询/多次往返，
   期间所有请求的 DB 操作全部排队——这就是"一个慢请求拖垮整站"的机制，
@@ -75,7 +75,7 @@ experience 请求）都会把队堵死，所有用户一起等。再加上接口
 
 ### 根因 4：DB 侧隐患（当前不致命，正在恶化）
 
-- task_messages 234 万行、agent_tasks 1.58GB 大字段行（prompt/result_text
+- 任务消息表 234 万行、任务表 1.58GB 大字段行（prompt/result_text
   mediumtext 常驻 InnoDB，未归档）；Innodb_row_lock_time 累计 14251 秒。
 - user_credentials 悬空清理 `DELETE ... NOT IN (SELECT ...)`（src/user/db.py:896）
   与业务写并发产生死锁（10-15 实录）；MySQL 1093 派生表改写后仍锁行 96 条。
@@ -92,7 +92,7 @@ issues.js 15 秒轮询 + 心跳 60s：今天 frontend 延迟上报 1723 条，
 
 ### P0（当天可做，不改代码）
 
-1. **MySQL 开 performance_schema**（重启实例生效）：开启 digest 统计后，
+1. **MySQL 开 performance_schema**（重启实例生效，需在维护窗口操作）：开启 digest 统计后，
    慢 SQL 可精确归因，后续优化有依据。
 2. **api_latency_log 已有清理任务**，确认保留阈值 ≤ 7 天（当前 5.4 万行无压力）。
 3. 慢日志阈值 1s → 0.5s，配合归因。
@@ -119,13 +119,13 @@ issues.js 15 秒轮询 + 心跳 60s：今天 frontend 延迟上报 1723 条，
 
 7. **连接池化**（与 P1-4A 合并落地）：消灭 770 万次连接创建；wait_timeout
    28800 偏大，池化后可降到 600。
-8. **大表治理**：agent_tasks 归档策略（completed 超 30 天的 prompt/result_text
+8. **大表治理**：任务表归档策略（completed 超 30 天的 prompt/result_text
    移冷表或置空）；task_messages 按月分区/归档（234 万行持续增长）。
 9. **索引**：`events(repo_key(191), issue_id(191))` 复合索引；
    `task_messages` 按查询模式补索引（结合 P0-1 的 digest 数据）。
 10. **死锁修复**：user_credentials 清理 DELETE 改为低峰定时任务 +
-    LIMIT 分批（DELETE ... LIMIT 100 循环），避开业务高峰；加 `repo_gitcode_token`
-    等敏感列确认不进清理 SELECT。
+    LIMIT 分批（DELETE ... LIMIT 100 循环），避开业务高峰；确认敏感列
+    不进清理 SELECT。
 11. **worker 包下载剥离**：grape-worker.tar.gz 改由 nginx 静态直出，
     不占 API 进程。
 12. **前端轮询降载**：按前份文档方案 3（轻量状态接口 + 变化才全量刷新）。
@@ -160,7 +160,7 @@ issues.js 15 秒轮询 + 心跳 60s：今天 frontend 延迟上报 1723 条，
 
 ### V1 P0 项验证（performance_schema / 慢日志）
 
-- 用例 V1-1：重启后 `SELECT @@performance_schema;` 返回 1。
+- 用例 V1-1：维护窗口重启后 `SELECT @@performance_schema;` 返回 1。
 - 用例 V1-2：执行一条已知 SQL（如 SELECT COUNT(*) FROM events）后，
   `performance_schema.events_statements_summary_by_digest` 中能查到对应 digest 行。
 - 用例 V1-3：`SHOW VARIABLES LIKE 'long_query_time'` = 0.5；构造一条 >0.5s 查询，
@@ -191,8 +191,8 @@ issues.js 15 秒轮询 + 心跳 60s：今天 frontend 延迟上报 1723 条，
 
 - 用例 V3-1 连接池化：V0-3 同法测 churn，验收 < 0.1/s；峰值压测（30 并发 curl）
   期间 `Threads_connected` ≤ 池上限 + 少量余量，无 "too many connections"。
-- 用例 V3-2 agent_tasks 治理：定时清理上线后，`SELECT COUNT(*) FROM agent_tasks
-  WHERE status='completed' AND created_at < NOW()-INTERVAL 7 DAY AND LENGTH(skill_files)>0` = 0；
+- 用例 V3-2 任务表治理：定时清理上线后，验证 completed 超 7 天且含 skill_files
+  的行数为 0；
   表 data_length 月度环比不增长（本次已手工完成一轮：1581MB → 439MB，作为参照基线）。
 - 用例 V3-3 events 复合索引（已建，纳入回归）：EXPLAIN 确认 OR-pair 查询走
   `idx_events_repo_issue`（range，行数 ≤ 个位数）；重跑 `_batch_fetch_agent_statuses`
@@ -224,4 +224,4 @@ issues.js 15 秒轮询 + 心跳 60s：今天 frontend 延迟上报 1723 条，
   这是方案 B 唯一的风险点，上线前必须过一遍定时任务清单。
 - db_lock 池化改造（方案 A）动的是全平台 DB 访问层，必须灰度：
   先读路径、观察一周、再写路径；回滚开关保留旧锁路径。
-- 双主部署：以上代码改动均需 174/79 同步 + 分别重启，重启窗口选低峰。
+- 双主部署：以上代码改动均需双主节点同步 + 分别在维护窗口重启。

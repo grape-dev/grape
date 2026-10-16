@@ -4,7 +4,7 @@
 
 流水线页面本身的数据接口 `/api/pipeline/{owner}/{repo}` 并不慢（p50 约 330-350ms）；慢的是页面加载链路上的另外三个接口：**仓库列表 `/api/repos/member`（缓存过期时同步去 GitCode/GitHub 拉全量仓库+权限，观测到 1.2s~7.4s）、分支列表 `/api/scenes/branches/{owner}/{repo`（串行翻页调 GitCode API，p50 1.4~2.6s）、需求列表 `/api/issues/{owner}/{repo`（p50 1.4~1.7s）**。流水线页与这些接口共享首屏加载链路（进入任何依赖仓库的视图前都要先 `loadRepos()`），所以用户体感是"流水线页面慢"。
 
-## 数据依据（main.log 全量分桶统计，10-12 ~ 10-16，79 主）
+## 数据依据（应用日志全量分桶统计，10-12 ~ 10-16，节点 B）
 
 ### 1. `/api/pipeline/{owner}/{repo}` — 不是瓶颈
 
@@ -48,7 +48,7 @@ grape-dev/grape p50 1411~1692ms（n=60~86/小时）。需求中心与流水线�
 
 ### 外部依赖实测
 
-master 上直接 curl GitCode API：本次手头两个存量 token 均已 401（user_accounts 里的 gitcode_api_token 与 agent_tasks 里的 repo_gitcode_token 都过期/被刷新），无法给出精确单次延迟；但从 main.log 中大量 `GET /api/git-repo/...` 代理请求统计，单次 GitCode 往返普遍 300-800ms（contents 类 p50≈350ms，pulls 类 p50≈800ms）。**每个"翻页/逐仓"循环乘以这个基数就是页面耗时**，这是结构性问题不是网络偶发。
+master 上直接 curl GitCode API：本次手头两个存量 token 均已 401（用户凭证表里的 VCS access token 与任务表里的 repo token 都过期/被刷新），无法给出精确单次延迟；但从应用日志中大量 `GET /api/git-repo/...` 代理请求统计，单次 GitCode 往返普遍 300-800ms（contents 类 p50≈350ms，pulls 类 p50≈800ms）。**每个"翻页/逐仓"循环乘以这个基数就是页面耗时**，这是结构性问题不是网络偶发。
 
 ## 建议方案（按收益排序）
 

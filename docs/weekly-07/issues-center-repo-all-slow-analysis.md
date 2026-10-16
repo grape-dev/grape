@@ -1,7 +1,7 @@
 # 需求中心「仓库全部」响应慢 — 根因分析与优化方案
 
 日期：2026-10-16
-仓库：grape-dev/grape（weekly-06 分支代码，双主 202609252202 运行版本）
+仓库：grape-dev/grape（weekly-06 分支代码，双主节点 202609252202 运行版本）
 现象：需求中心点击「仓库全部」标签页，系统响应很慢（数秒）。
 
 ## 一、结论（一句话）
@@ -29,7 +29,7 @@
 
 | 操作 | 耗时 |
 |---|---|
-| 4 条批量 SQL（issue 主查询 / issue_state / agent_tasks / agent_statuses / pr_keys） | ~0.15s（每条单独实测 4~42ms，均已走索引，无慢 SQL） |
+| 4 条批量 SQL（issue 主查询 / issue_state / 任务表 / agent_statuses / pr_keys） | ~0.15s（每条单独实测 4~42ms，均已走索引，无慢 SQL） |
 | **逐条 `get_pipeline_config(scene_id, repo_key)` × 348** | **~0.80s**（单次实测 ~2.3ms：SHOW COLUMNS FROM devops_pipeline_scene + scene 查询 + scene_market 兜底，scene_id 为空时也要跑满 3 条） |
 
 代码位置：
@@ -119,7 +119,7 @@
   CLI `grape issues` 若消费这些字段需保留（对照 `docs/openapi/11-issues.md` 字段表）。
 - 方案 2 分页：对外 API 行为变化，CLI 与 A2A 调用方需确认未假设全量返回；
   兼容做法：默认仍全量，仅当请求带 `page` 参数时启用分页。
-- 双主部署：改动涉及 174/79 两台，scp 同步 + 分别重启。
+- 双主部署：改动涉及双主节点两台，同步 + 分别在维护窗口重启。
 
 ## 六、验证方式
 
