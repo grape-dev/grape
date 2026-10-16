@@ -93,6 +93,29 @@ class TestExtract:
         assert extract_skill_md(_make_zip("hello"), "other") is None
         assert extract_skill_md(b"", "hello") is None
 
+    def test_extract_fallback_single_mismatched_dir(self):
+        """兜底 1：_template 等内置特殊技能，zip 内仅一个 */SKILL.md 且目录名 != skill_name → 采用该 entry。"""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("my-skill/SKILL.md", "# Template Skill")
+        md = extract_skill_md(buf.getvalue(), "_template")
+        assert md and "# Template Skill" in md
+
+    def test_extract_no_fallback_for_regular_skill_mismatch(self):
+        """兜底 1 不触发：常规技能目录名 != skill_name → 返回 None（保持精确匹配语义，Issue #355 QA）。"""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("hello/SKILL.md", "# Hello")
+        assert extract_skill_md(buf.getvalue(), "other") is None
+
+    def test_extract_fallback_multiple_skill_md_no_mismatch(self):
+        """兜底 1 不触发：zip 内有多个 */SKILL.md → 不误匹配，返回 None。"""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            zf.writestr("skill-a/SKILL.md", "# A")
+            zf.writestr("skill-b/SKILL.md", "# B")
+        assert extract_skill_md(buf.getvalue(), "_template") is None
+
     def test_extract_keeps_exec_bit_metadata(self):
         """zip 内脚本 external_attr 权限位可读（worker 物化时按此恢复）。"""
         zip_bytes = _make_zip("hello", with_exec=True)

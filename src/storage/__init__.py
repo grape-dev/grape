@@ -537,6 +537,12 @@ def skill_md_content(object_key: str, skill_name: str) -> str | None:
     return content
 
 
+# 内置特殊技能：zip 包内目录名与 skill_name 不一致（_template 打包结构为 skills/_template/my-skill/，
+# 见 scripts/sync_skills.sh SKILL_AGENT_DIRS + src/storage/skill_sync.py _pack_skill_zip）。
+# extract_skill_md 对这类技能启用兜底匹配；常规技能（上传/官方同步均规范化为 {skill_name}/）不启用。
+_BUILTIN_SPECIAL_SKILLS = {"_template"}
+
+
 def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
     """从技能 zip 中提取 SKILL.md 文本（按 entry 解压，不全量解压；文件名大小写容错）。"""
     if not zip_bytes:
@@ -550,7 +556,16 @@ def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
                 if len(base) == 2 and base[0] == skill_name and base[1].lower() == "skill.md":
                     candidates.append(n)
             if not candidates:
-                # 兜底：根目录下的 skill.md（任意大小写）
+                # 兜底 1：内置特殊技能（如 _template，zip 内目录名与 skill_name 不一致，
+                # 见 scripts/sync_skills.sh 打包结构）。常规技能保持精确匹配语义，
+                # 目录名不一致即视为包内容错乱 → 返回 None（Issue #355 QA 反馈）。
+                if skill_name in _BUILTIN_SPECIAL_SKILLS:
+                    skill_md_entries = [n for n in names
+                                        if n.lower().endswith("skill.md") and n.count("/") == 1]
+                    if len(skill_md_entries) == 1:
+                        candidates.append(skill_md_entries[0])
+            if not candidates:
+                # 兜底 2：根目录下的 skill.md（任意大小写）
                 for n in names:
                     if n.lower().endswith("skill.md") and n.count("/") == 1 and n.split("/")[0] == skill_name:
                         candidates.append(n)
