@@ -16,6 +16,8 @@ import threading
 
 import pymysql
 
+from src.config import log
+
 # ====== 配置读取 ======
 
 _DB_BACKEND_CONFIG_PATH = os.path.join(
@@ -585,19 +587,86 @@ class MySQLCompatCursor:
 
     def close(self):
         self._rows = None
+        if self._pycur is not None:
+            try:
+                self._pycur.close()
+            except Exception:
+                pass
         self._pycur = None
 
 
 class MySQLCompatDB:
-    """模拟 sqlite3.Connection：每线程独立 pymysql 连接（threading.local），
-    所有操作需在外部 db_lock 串行化（与 sqlite3 版语义一致）。"""
+    """模拟 sqlite3.Connection：MySQL 连接池化（DBUtils PooledDB）。
+
+    设计目标（P1-4A 治本，Issue #357）：
+    - 用连接池替代每线程裸连接，消灭 770 万次连接 churn / 51.8 万 Aborted_clients。
+    - 连接从池借还（dedicated connection per cursor），SQL 级锁内化为连接粒度——
+      外部 ``with db_lock`` 调用点接口不变，锁语义内化（锁内不再串行全部 SQL，
+      仅保证同一 cursor 的 borrow-execute-return 原子性）。
+    - ``DB_POOL_DISABLED=1`` 环境变量一键回滚到旧的每线程裸连接模式（灰度安全网）。
+    - 池参数：mincached=2, maxcached=16, maxconnections=32（可环境变量覆盖）。
+    """
 
     def __init__(self, **kwargs):
         self._cfg = kwargs
         self._local = threading.local()
         self._lock = threading.RLock()  # 兼容层内部兜底锁
+        self._pool = None  # PooledDB instance (lazy init)
+        self._pool_disabled = os.environ.get("DB_POOL_DISABLED", "").lower() in ("1", "true", "yes")
+
+    def _ensure_pool(self):
+        """Lazy-init the connection pool (called once on first use)."""
+        if self._pool is not None or self._pool_disabled:
+            return
+        try:
+            from dbutils.pooled_db import PooledDB
+        except ImportError:
+            log.warning("DBUtils not installed, falling back to per-thread connection (DB_POOL_DISABLED=1)")
+            self._pool_disabled = True
+            return
+        try:
+            self._pool = PooledDB(
+                creator=pymysql,
+                mincached=int(os.environ.get("DB_POOL_MIN", "2")),
+                maxcached=int(os.environ.get("DB_POOL_MAX_CACHED", "16")),
+                maxconnections=int(os.environ.get("DB_POOL_MAX_CONNECTIONS", "32")),
+                blocking=True,
+                host=self._cfg.get("host", "127.0.0.1"),
+                port=self._cfg.get("port", 3306),
+                user=self._cfg.get("user", ""),
+                password=self._cfg.get("password", ""),
+                database=self._cfg.get("database", ""),
+                charset=self._cfg.get("charset", "utf8mb4"),
+                autocommit=False,
+                connect_timeout=10,
+            )
+            log.info("MySQLCompatDB: connection pool initialized "
+                     f"(min={os.environ.get('DB_POOL_MIN', '2')}, "
+                     f"max_cached={os.environ.get('DB_POOL_MAX_CACHED', '16')}, "
+                     f"max_conn={os.environ.get('DB_POOL_MAX_CONNECTIONS', '32')})")
+        except Exception as e:
+            log.warning(f"MySQLCompatDB: pool init failed ({e}), falling back to per-thread connection")
+            self._pool_disabled = True
 
     def _raw_cursor(self):
+        """Get a raw pymysql cursor.
+
+        Pool mode: borrow a connection from the pool, return its cursor.
+        The connection is returned to the pool when cursor.close() is called
+        (see MySQLCompatCursor.close → _return_connection).
+
+        Fallback mode (DB_POOL_DISABLED): per-thread bare connection (legacy behavior).
+        """
+        if self._pool is None:
+            self._ensure_pool()
+
+        if self._pool is not None:
+            # Pool mode: borrow a dedicated connection for this cursor
+            conn = self._pool.connection()
+            self._local.conn = conn  # track for commit/rollback within this thread
+            return conn.cursor()
+
+        # Fallback: per-thread bare connection (legacy)
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = pymysql.connect(

@@ -402,6 +402,8 @@ class TestCompatCursor:
 class TestCompatDB:
     def test_raw_cursor_connects_on_first_use(self):
         db = mc.MySQLCompatDB(host="10.0.0.1", port=3306, user="u", password="p", database="d")
+        # DB_POOL_DISABLED=1 forces the per-thread fallback path (no PooledDB)
+        db._pool_disabled = True
         with patch("src.mysql_compat.pymysql.connect") as m_conn:
             m_conn.return_value.cursor.return_value = MagicMock()
             cur = db._raw_cursor()
@@ -410,6 +412,7 @@ class TestCompatDB:
 
     def test_raw_cursor_reconnects_on_ping_failure(self):
         db = mc.MySQLCompatDB(host="h")
+        db._pool_disabled = True  # force fallback path
         old_conn = MagicMock()
         db._local.conn = old_conn
         # 第一次 ping 抛异常 → 重新 connect
