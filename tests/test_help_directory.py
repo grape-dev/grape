@@ -31,6 +31,7 @@ EXPECTED_USAGE_FILES = [
     "pipeline.md",
     "skills.md",
     "runtimes.md",
+    "ai-shell-devbridge-deploy.md",
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
@@ -91,7 +92,8 @@ class TestUsageFiles:
 
     def test_file_count(self):
         files = [f for f in USAGE_DIR.iterdir() if f.is_file()]
-        assert len(files) == 10, f"Expected 10 files, got {len(files)}"
+        assert len(files) == len(EXPECTED_USAGE_FILES), \
+            f"Expected {len(EXPECTED_USAGE_FILES)} files, got {len(files)}"
 
     @pytest.mark.parametrize("filename", EXPECTED_USAGE_FILES)
     def test_no_residual_html_tags(self, filename):

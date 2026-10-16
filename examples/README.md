@@ -36,6 +36,7 @@ Keeping the templates in their own repo lets them ship and version independently
 | Path | Description |
 |---|---|
 | `hello-*` | Official local templates. The directory name is the template `id` and maps one-to-one with `source: "local"` entries in `project-templates.json` |
+| `jiuwenswarm-develop` | JiuwenSwarm full project template. The directory name is the template `id` (`source: "local"`) |
 | `project-templates.json` | The template registry — every entry (local and git) organized by category; versioned with this repo |
 
 ## Registry Structure
@@ -51,6 +52,7 @@ Keeping the templates in their own repo lets them ship and version independently
 | `cloud-native` | ☁️ Cloud-native development | cloud-native | 110 | Curated cloud-native repos, auto-synced daily |
 | `iac` | 🏗️ IaC development | iac | 22 | Curated IaC repos, auto-synced daily |
 | `skill-dev` | 🔧 Skill development templates | skill-dev | 1 | Local `hello-skill` |
+| `jiuwenswarm-develop` | 🐝 JiuwenSwarm agent swarm templates | jiuwenswarm-develop | 1 | Local `jiuwenswarm-develop` |
 | `ai` | 🤖 AI application templates | agent-dev | 20 | AI application git templates |
 | `content` | 📝 Content creation templates | blog-publish | 3 | Blogging / content git templates |
 
@@ -64,6 +66,7 @@ Keeping the templates in their own repo lets them ship and version independently
 - `hello-blog` — Flask multi-page blog skeleton (hello-world scene)
 - `snake-game` — classic Snake game, converted to a local template (hello-world scene)
 - `hello-skill` — minimal Skill project template (skill-dev scene)
+- `jiuwenswarm-develop` — JiuwenSwarm multi-agent swarm collaboration Agent system (jiuwenswarm-develop scene)
 
 ## Adding a Template
 

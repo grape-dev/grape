@@ -34,6 +34,7 @@ USAGE_ORDER = [
     "pipeline.md",
     "skills.md",
     "runtimes.md",
+    "ai-shell-devbridge-deploy.md",
     "monitoring.md",
     "knowledge-base.md",
     "faq.md",
