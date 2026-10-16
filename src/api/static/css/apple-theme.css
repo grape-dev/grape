@@ -487,7 +487,7 @@
 .fn-body hr{border:none;border-top:1px solid var(--b);margin:16px 0}
 .fn-body img{max-width:100%;border-radius:var(--rd)}
 /* Issue #232: front matter 表格样式 */
-.fn-body table.fm-table{margin:0 0 16px;font-size:13px;border-radius:var(--r2);overflow:hidden}
+.fn-body table.fm-table{margin:0 0 16px;font-size:13px;border-radius:var(--r2);overflow:hidden;width:100%;table-layout:fixed}
 .fn-body table.fm-table th{width:140px;white-space:nowrap;background:var(--bg);color:var(--t2);font-weight:600;font-size:12px;letter-spacing:.02em}
 .fn-body table.fm-table td{color:var(--t);white-space:pre-wrap;word-break:break-word}
 .fn-body table.fm-table + *{margin-top:16px}
