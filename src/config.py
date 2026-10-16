@@ -369,6 +369,17 @@ def _is_login_whitelist_enabled() -> bool:
     return result
 
 
+def invalidate_login_whitelist_cache():
+    """Invalidate the login_whitelist_enabled cache.
+
+    Called by admin/db.py set_login_whitelist_enabled() so that toggling
+    the whitelist takes effect immediately instead of waiting up to 60s.
+    """
+    global _WL_ENABLED_CACHE, _WL_CACHE_TS
+    _WL_ENABLED_CACHE = None
+    _WL_CACHE_TS = 0.0
+
+
 def is_user_allowed(whitelist_column: str, login: str) -> bool:
     """通用白名单判定——需显式启用才校验，未启用时全部放行。
 
@@ -402,7 +413,7 @@ def is_user_allowed(whitelist_column: str, login: str) -> bool:
                 log.warning("login_whitelist_enabled=true but table is empty — allowing all logins")
                 return True
             row = c.execute(
-                f"SELECT 1 FROM login_whitelist WHERE {whitelist_column}=?", (login,)
+                f"SELECT 1 FROM login_whitelist WHERE LOWER({whitelist_column})=LOWER(?)", (login,)
             ).fetchone()
             return row is not None
     except Exception:
@@ -416,7 +427,7 @@ def is_user_allowed(whitelist_column: str, login: str) -> bool:
         wl = data.get("whitelist") if isinstance(data, dict) else None
         if not wl:
             return True
-        return login in wl
+        return login.lower() in [w.lower() for w in wl]
     except Exception:
         return True
 

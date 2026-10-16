@@ -33,7 +33,7 @@ var I18N = (function () {
     'common', 'app', 'settings', 'knowledge', 'skills',
     'chat', 'events', 'agents', 'pipeline', 'runtimes',
     'tasks', 'issues', 'repos', 'dashboard', 'observability', 'templates',
-    'organizations', 'autopilot'
+    'organizations', 'autopilot', 'admin'
   ];
 
   var _currentLang = DEFAULT_LANG;
@@ -172,6 +172,11 @@ var I18N = (function () {
           loading: '加载中...'
         },
         loading: '加载中...'
+      },
+      admin: {
+        title: 'Grape Admin — 配置中心',
+        login: { subtitle: '系统管理 · 配置中心', admin_account: '管理员账号', password: '登录密码', login_btn: '登 录', enter_credentials: '请输入账号和密码', back_to_app: '← 返回用户界面' },
+        nav: { config_center: '配置中心', credentials: '平台凭据', user_management: '用户管理', user_list: '用户列表', whitelist: '注册白名单', change_password: '修改密码', logout: '退出登录' }
       }
     },
     en: {
@@ -302,6 +307,11 @@ var I18N = (function () {
           loading: 'Loading...'
         },
         loading: 'Loading...'
+      },
+      admin: {
+        title: 'Grape Admin — Config Center',
+        login: { subtitle: 'System Admin · Config Center', admin_account: 'Admin account', password: 'Password', login_btn: 'Sign In', enter_credentials: 'Please enter account and password', back_to_app: '← Back to app' },
+        nav: { config_center: 'Config Center', credentials: 'Credentials', user_management: 'User Management', user_list: 'Users', whitelist: 'Signup Whitelist', change_password: 'Change Password', logout: 'Sign Out' }
       }
     }
   };
@@ -459,8 +469,11 @@ var I18N = (function () {
   }
 
   // ── _updateUrlLang(lang): adjust URL prefix without reload ──
+  // Skip URL prefix change on /admin (independent page, no /en/ prefix routing)
   function _updateUrlLang(lang) {
     var path = window.location.pathname || '/';
+    // Admin page uses localStorage + applyI18nToDOM only — no URL prefix
+    if (path === '/admin' || path.indexOf('/admin/') === 0) return;
     var hash = window.location.hash || '';
     var search = window.location.search || '';
 
@@ -546,9 +559,11 @@ var I18N = (function () {
   }
 
   // ── _applyUrlLang(lang): adjust URL prefix and reload ──
-  // zh → strip /en prefix; en → add /en prefix
+  // Skip on /admin (independent page, no /en/ prefix routing)
   function _applyUrlLang(lang) {
     var path = window.location.pathname || '/';
+    // Admin page: no URL prefix change, just reload as-is
+    if (path === '/admin' || path.indexOf('/admin/') === 0) return;
     var hash = window.location.hash || '';
     var search = window.location.search || '';
 

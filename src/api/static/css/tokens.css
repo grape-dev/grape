@@ -1,0 +1,24 @@
+/* tokens.css — Shared design variables for grape admin + main app.
+   Extracted from app.css :root + apple-theme.css [data-theme="apple"].
+   No selector rules — only variable definitions.
+   Consumers: admin.html, index.html
+   Backward compat: only add vars, never delete/rename. Deprecate with /* @deprecated */ comment. */
+:root{
+  --s:#0c1222;--s2:#161e30;--s3:#1e2940;
+  --bg:#f5f6f8;--c:#fff;--b:#e3e6ee;
+  --t:#101724;--t2:#5b667b;--t3:#8d97a8;
+  --a:#3168e0;--ah:#2556c2;--g:#1ca44c;--y:#d49c0f;
+  --r:#dc2828;--pu:#7b3cf2;--or:#ea5a0c;--pk:#d83076;--sk:#0c92d4;
+  --rd:8px;--r2:12px;
+  --sh:0 1px 3px rgba(0,0,0,.04);
+}
+
+[data-theme="apple"]{
+  --s:#f5f5f7;--s2:#fff;--s3:#eaeaec;
+  --bg:#f5f5f7;--c:#fff;--b:#d2d2d7;
+  --t:#1d1d1f;--t2:#6e6e73;--t3:#86868b;
+  --a:#0071e3;--ah:#0077ed;--g:#34c759;--y:#ff9f0a;
+  --r:#ff3b30;--pu:#af52de;--or:#ff9f0a;--pk:#ff2d92;--sk:#5ac8fa;
+  --rd:12px;--r2:18px;
+  --sh:0 2px 8px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.06);
+}

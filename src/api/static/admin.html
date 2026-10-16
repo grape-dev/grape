@@ -3,89 +3,143 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
-<title>Grape Admin — 配置中心</title>
+<title data-i18n-title="admin.title">Grape Admin — Config Center</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
+<script>
+(function(){
+  // P2-6: 主题默认值与主应用对齐——未设置时默认 apple
+  var t = localStorage.getItem('grapeTheme') || 'apple';
+  if (t === 'apple') {
+    document.documentElement.setAttribute('data-theme','apple');
+    var m = localStorage.getItem('grapeThemeMode') || 'light';
+    if (m) document.documentElement.setAttribute('data-theme-mode', m);
+  }
+  var lang = localStorage.getItem('grapeLang') || 'zh';
+  document.documentElement.setAttribute('lang', lang === 'en' ? 'en' : 'zh-CN');
+
+})();
+</script>
+<link rel="stylesheet" href="/static/css/tokens.css?v=20261016-1">
 <style>
-:root{--t:#1d1d1f;--t2:#86868b;--c:#fff;--bg:#f5f6f8;--a:#3168e0;--ah:#2556c2;--g:#1ca44c;--r:#dc2828;--rd:10px;--sh:0 1px 4px rgba(0,0,0,.06)}
+:root{--auth-text:#f5f5f7;--auth-text-secondary:#86868b;--auth-accent:#0071e3;--auth-border:rgba(255,255,255,0.1);--auth-bg-surface:rgba(255,255,255,0.05);--auth-error:#ff3b30}
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg);color:var(--t);min-height:100vh}
+body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans-serif;background:var(--bg,#f5f6f8);color:var(--t,#101724);min-height:100vh}
 ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-thumb{background:#d2d6de;border-radius:3px}
 
-/* ===== 登录 ===== */
-#loginView{position:fixed;inset:0;z-index:200;background:radial-gradient(ellipse at 20% 50%,#162240 0%,#0c1222 60%);display:flex;align-items:center;justify-content:center}
+/* ===== Login ===== */
+#loginView{position:fixed;inset:0;z-index:200;background:linear-gradient(180deg,#1d1d1f 0%,#000000 100%);display:flex;align-items:center;justify-content:center;overflow-y:auto;padding:40px 20px}
 #loginView.hid{display:none}
-.lbox{width:400px;text-align:center}
-.lbox .logo{display:inline-flex;align-items:center;justify-content:center;width:56px;height:56px;border-radius:14px;background:linear-gradient(135deg,#3168e0,#7b3cf2);color:#fff;font-size:20px;font-weight:800;margin-bottom:18px;overflow:hidden}
-.lbox .logo img{width:100%;height:100%;object-fit:cover}
-.lbox h1{color:#fff;font-size:26px;font-weight:700;letter-spacing:-1px;margin-bottom:6px}
-.lbox .sub{color:#8d97a8;font-size:14px;margin-bottom:28px}
-.ipt{width:100%;padding:12px 14px;border-radius:10px;border:1px solid rgba(255,255,255,.14);background:rgba(255,255,255,.08);color:#fff;font-size:14px;outline:none;margin-bottom:12px}
-.ipt::placeholder{color:#8d97a8}
-.ipt:focus{border-color:#6ea2ff}
-.lbtn{width:100%;padding:13px;border-radius:10px;border:none;background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff;font-size:15px;font-weight:600;cursor:pointer;transition:all .2s}
-.lbtn:hover{transform:translateY(-1px);box-shadow:0 8px 24px rgba(49,104,224,.3)}
-.err{color:#ff6b6b;font-size:13px;margin-top:10px;min-height:18px}
+.lbox{width:400px;max-width:100%;text-align:center}
+.lbox .logo{display:inline-block;width:80px;height:80px;border-radius:20px;margin-bottom:20px;object-fit:cover}
+.lbox h1{color:var(--auth-text,#f5f5f7);font-size:24px;font-weight:600;letter-spacing:-0.02em;margin-bottom:4px}
+.lbox .sub{color:var(--auth-text-secondary,#86868b);font-size:14px;font-weight:400;margin-bottom:28px}
+.ipt{width:100%;padding:12px 14px;border-radius:12px;border:1px solid var(--auth-border,rgba(255,255,255,0.1));background:var(--auth-bg-surface,rgba(255,255,255,0.05));color:var(--auth-text,#f5f5f7);font-size:15px;outline:none;margin-bottom:12px;transition:border-color .2s,box-shadow .2s}
+.ipt::placeholder{color:var(--auth-text-secondary,#86868b)}
+.ipt:focus{border-color:var(--auth-accent,#0071e3)}
+.lbtn{width:100%;padding:14px;border-radius:980px;border:none;background:var(--auth-accent,#0071e3);color:#fff;font-size:15px;font-weight:500;cursor:pointer;transition:all .3s cubic-bezier(.25,.1,.25,1);margin-bottom:16px;min-height:44px}
+.lbtn:hover{background:var(--ah,#0077ed)}
+.err{color:var(--auth-error,#ff3b30);font-size:13px;margin-top:10px;min-height:18px}
 
-/* ===== 登录后主框架 ===== */
+/* ===== Language switcher ===== */
+.lang-switch{position:fixed;bottom:16px;right:16px;padding:6px 14px;border-radius:980px;background:rgba(255,255,255,0.08);backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);font-size:12px;font-weight:500;color:var(--auth-text-secondary,#86868b);cursor:pointer;transition:all .2s ease;z-index:210;user-select:none;border:1px solid rgba(255,255,255,0.06)}
+.lang-switch:hover{background:rgba(255,255,255,0.12);color:var(--auth-text,#f5f5f7)}
+/* P1-4: JS 控制 .lang-switch 显隐（原 CSS ~ 选择器因 DOM 顺序无效） */
+#mainView:not(.hid) ~ .lang-switch{display:none}
+.lang-toggle{display:flex;align-items:center;gap:2px;padding:3px;border-radius:7px;border:1px solid rgba(255,255,255,0.08);background:rgba(255,255,255,0.04)}
+.lang-btn{padding:3px 8px;border-radius:5px;font-size:11px;font-weight:500;border:none;cursor:pointer;background:none;color:rgba(255,255,255,0.4);transition:all .2s}
+.lang-btn:hover{color:rgba(255,255,255,0.7)}
+.lang-btn.active{background:var(--a,#3168e0);color:#fff}
+
+/* ===== Main frame ===== */
 #mainView{display:flex;min-height:100vh}
 #mainView.hid{display:none}
-.sb{width:220px;background:#0c1222;color:#fff;display:flex;flex-direction:column;flex-shrink:0;position:sticky;top:0;height:100vh}
+.sb{width:232px;background:#0c1222;color:#fff;display:flex;flex-direction:column;flex-shrink:0;position:sticky;top:0;height:100vh}
 .sb-h{padding:18px;border-bottom:1px solid rgba(255,255,255,.06)}
 .sb-h .logo-s{display:flex;align-items:center;gap:9px}
-.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;background:linear-gradient(135deg,#3168e0,#7b3cf2);display:inline-flex;align-items:center;justify-content:center;font-size:12px;font-weight:800;overflow:hidden}
-.sb-h .logo-s .sq img{width:100%;height:100%;object-fit:cover}
+.sb-h .logo-s .sq{width:26px;height:26px;border-radius:7px;object-fit:cover}
 .sb-h h1{font-size:15px;font-weight:700}
-.sb-h .tagline{font-size:10px;color:#8d97a8;text-transform:uppercase;letter-spacing:.8px}
+.sb-h .tagline{font-size:10px;color:var(--t3,#8d97a8);text-transform:uppercase;letter-spacing:.8px}
 .sb-nav{flex:1;padding:10px;overflow-y:auto}
-.sb-nav a{display:flex;align-items:center;gap:9px;padding:8px 12px;border-radius:8px;color:#c2cad6;text-decoration:none;font-size:13px;cursor:pointer;margin-bottom:2px}
+.sb-nav a{display:flex;align-items:center;gap:9px;padding:7px 10px;border-radius:7px;color:#c2cad6;text-decoration:none;font-size:13px;cursor:pointer;margin-bottom:2px}
 .sb-nav a:hover{background:#161e30;color:#fff}
-.sb-nav a.act{background:#3168e0;color:#fff;font-weight:500}
-.sb-nav .grp{font-size:10px;text-transform:uppercase;letter-spacing:1.1px;color:#7d8fb5;padding:14px 10px 5px;font-weight:600}
+.sb-nav a.act{background:var(--a,#3168e0);color:#fff;font-weight:500}
+.sb-nav .grp{font-size:10px;text-transform:uppercase;letter-spacing:1.1px;color:var(--t3,#8d97a8);padding:14px 10px 5px;font-weight:600}
 .sb-nav a .ic{width:18px;text-align:center}
 .sb-ft{padding:14px;border-top:1px solid rgba(255,255,255,.06);font-size:12px;color:#c2cad6}
-.sb-ft .out{color:#ff6b6b;cursor:pointer;margin-top:6px;display:block}
+.sb-ft .ft-row{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.sb-ft .ft-user{display:flex;align-items:center;gap:6px;color:#c2cad6}
+.sb-ft .ft-user .badge{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:5px;background:rgba(255,255,255,0.1);font-size:10px;font-weight:600;color:#fff}
+.sb-ft .out{color:#ff6b6b;cursor:pointer;display:block;margin-top:10px;padding-top:10px;border-top:1px solid rgba(255,255,255,.04)}
 
 .mn{flex:1;min-width:0;display:flex;flex-direction:column}
-.tb{background:var(--c);border-bottom:1px solid #e3e6ee;padding:0 24px;height:52px;display:flex;align-items:center;gap:10px}
-.tb .bc{font-size:13px;color:var(--t2)}
-.tb .bc b{color:var(--t);font-weight:600}
+.tb{background:var(--c,#fff);border-bottom:1px solid var(--b,#e3e6ee);padding:0 28px;height:52px;display:flex;align-items:center;gap:10px}
+.tb .bc{font-size:13px;color:var(--t2,#5b667b)}
+.tb .bc b{color:var(--t,#101724);font-weight:600}
 .ct{padding:22px 24px;overflow-y:auto;flex:1;max-width:980px}
 
-/* 卡片 */
-.card{background:var(--c);border:1px solid #e3e6ee;border-radius:12px;padding:20px 22px;margin-bottom:14px}
+/* Card */
+.card{background:var(--c,#fff);border:1px solid var(--b,#e3e6ee);border-radius:var(--r2,12px);padding:20px 22px;margin-bottom:14px;box-shadow:0 2px 8px rgba(0,0,0,0.04),0 4px 16px rgba(0,0,0,0.06)}
 .card-h{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
 .card-h h2{font-size:15px;font-weight:600}
-.card-h h2 .tag{font-size:11px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:6px}
+.card-h h2 .tag{font-size:11px;font-weight:400;color:var(--t2,#5b667b);background:var(--bg,#f5f6f8);padding:2px 8px;border-radius:8px;margin-left:6px}
 .f-row{display:flex;align-items:center;gap:10px;margin-bottom:12px}
-.f-row label{width:200px;font-size:13px;color:var(--t2);flex-shrink:0}
-.f-row input{flex:1;padding:9px 12px;border-radius:8px;border:1px solid #d8dce4;font-size:13px;outline:none}
-.f-row input:focus{border-color:var(--a)}
-.f-row .s-btn{padding:8px 14px;border-radius:8px;border:1px solid #d8dce4;background:#f7f8fa;font-size:12px;cursor:pointer;color:var(--t);flex-shrink:0}
+.f-row label{width:200px;font-size:13px;color:var(--t2,#5b667b);flex-shrink:0}
+.f-row input{flex:1;padding:9px 12px;border-radius:var(--rd,8px);border:1px solid var(--b,#e3e6ee);font-size:13px;outline:none}
+.f-row input:focus{border-color:var(--a,#3168e0)}
+.f-row .s-btn{padding:8px 14px;border-radius:var(--rd,8px);border:1px solid var(--b,#e3e6ee);background:var(--bg,#f5f6f8);font-size:12px;cursor:pointer;color:var(--t,#101724);flex-shrink:0}
 .f-row .s-btn:hover{background:#eceef2}
-.f-row .st{font-size:12px;color:var(--g);min-width:90px}
-.f-row .st.off{color:var(--r)}
-.hint{font-size:12px;color:var(--t2);margin:-6px 0 12px 210px}
+.f-row .st{font-size:12px;color:var(--g,#1ca44c);min-width:90px}
+.f-row .st.off{color:var(--r,#dc2828)}
+.hint{font-size:12px;color:var(--t2,#5b667b);margin:-6px 0 12px 210px}
 .save-bar{display:flex;align-items:center;gap:12px;margin-top:8px}
-.btn{padding:11px 22px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer}
-.btn-p{background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff}
+.btn{padding:11px 22px;border-radius:980px;border:none;font-size:14px;font-weight:500;cursor:pointer}
+.btn-p{background:var(--a,#3168e0);color:#fff}
 .btn-p:disabled{opacity:.5;cursor:default}
-.btn-o{background:#f2f3f5;color:var(--t);border:1px solid #d8dce4}
+.btn-o{background:#f2f3f5;color:var(--t,#101724);border:1px solid var(--b,#e3e6ee)}
 .banner{display:flex;align-items:center;gap:10px;padding:12px 16px;border-radius:10px;background:#fff8e6;border:1px solid #f0e0b0;color:#8a6d1c;font-size:13px;margin-bottom:14px}
 
-/* ===== 用户列表 / 白名单页面（浅色背景覆盖） ===== */
-#usersView .ipt,#whitelistView .ipt{background:#fff;color:var(--t);border:1px solid #d8dce4;border-radius:8px;margin-bottom:0}
-#usersView .ipt:focus,#whitelistView .ipt:focus{border-color:var(--a)}
+/* ===== Users / Whitelist ===== */
+#usersView .ipt,#whitelistView .ipt{background:#fff;color:var(--t,#101724);border:1px solid var(--b,#e3e6ee);border-radius:8px;margin-bottom:0}
+#usersView .ipt:focus,#whitelistView .ipt:focus{border-color:var(--a,#3168e0)}
 #usersView .ipt::placeholder,#whitelistView .ipt::placeholder{color:#aaa}
+.search-wrap{position:relative;display:flex;align-items:center}
+.search-wrap .ipt{padding-left:32px !important}
+.search-wrap .search-ic{position:absolute;left:10px;font-size:13px;color:var(--t3,#8d97a8);pointer-events:none}
 .tbl{width:100%;border-collapse:collapse;font-size:13px}
-.tbl th{padding:8px 10px;text-align:left;border-bottom:2px solid #e3e6ee;color:var(--t2);font-weight:600;white-space:nowrap}
-.tbl td{padding:8px 10px;border-bottom:1px solid #f0f1f4;color:var(--t)}
-.tbl tr:hover td{background:#f7f8fa}
+.tbl th{padding:10px 12px;text-align:left;border-bottom:2px solid var(--b,#e3e6ee);color:var(--t2,#5b667b);font-weight:600;white-space:nowrap}
+.tbl td{padding:10px 12px;border-bottom:1px solid #f0f1f4;color:var(--t,#101724)}
+.tbl tr:hover td{background:var(--bg,#f5f6f8)}
+.tbl tr{cursor:pointer;transition:background .15s}
+.user-name{font-weight:500;color:var(--t,#101724)}
+.user-sub{font-size:11px;color:var(--t3,#8d97a8);margin-top:2px}
+.status-dot{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:6px;vertical-align:middle}
+.status-dot.s-on{background:var(--g,#1ca44c)}
+.status-dot.s-off{background:var(--r,#dc2828)}
+.status-dot.s-del{background:var(--t2,#5b667b)}
+.status-dot.s-cool{background:var(--y,#d49c0f)}
+.row-actions{position:relative}
+.row-actions-btn{padding:4px 10px;border:1px solid var(--b,#e3e6ee);border-radius:6px;background:#fff;cursor:pointer;font-size:14px;color:var(--t2,#5b667b);line-height:1}
+.row-actions-btn:hover{background:var(--bg,#f5f6f8);color:var(--t,#101724)}
+.row-menu{position:absolute;right:0;top:100%;margin-top:4px;background:#fff;border:1px solid var(--b,#e3e6ee);border-radius:10px;box-shadow:0 4px 16px rgba(0,0,0,0.08);z-index:10;min-width:140px;display:none;overflow:hidden}
+.row-menu.show{display:block}
+.row-menu button{display:block;width:100%;padding:8px 14px;border:none;background:none;text-align:left;font-size:13px;color:var(--t,#101724);cursor:pointer}
+.row-menu button:hover{background:var(--bg,#f5f6f8)}
+.row-menu button.danger{color:var(--r,#dc2828)}
+.empty-state{text-align:center;padding:48px 20px;color:var(--t3,#8d97a8)}
+.empty-state .empty-ic{font-size:32px;margin-bottom:8px;opacity:.4}
+.empty-state .empty-tx{font-size:14px}
+.pager-bar{margin-top:16px;display:flex;align-items:center;justify-content:space-between;gap:12px}
+.pager-info{font-size:12px;color:var(--t2,#5b667b)}
+.pager-btns{display:flex;gap:6px;align-items:center}
+.pager-btn{padding:5px 12px;border:1px solid var(--b,#e3e6ee);border-radius:7px;background:#fff;font-size:12px;cursor:pointer;color:var(--t2,#5b667b)}
+.pager-btn:hover{background:var(--bg,#f5f6f8);color:var(--t,#101724)}
+.pager-btn:disabled{opacity:.4;cursor:default}
 .tag-s{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#e3f7ec;color:#1a8a3e}
 .tag-d{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#fce8e8;color:#c93030}
 .tag-w{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:#fff3e0;color:#b0651a}
-.f-row select{flex:1;padding:9px 12px;border-radius:8px;border:1px solid #d8dce4;font-size:13px;outline:none;background:#fff;color:var(--t)}
-.f-row select:focus{border-color:var(--a)}
-#whitelistView .f-row label{width:auto;font-size:13px;color:var(--t2);flex-shrink:0}
+.f-row select{flex:1;padding:9px 12px;border-radius:var(--rd,8px);border:1px solid var(--b,#e3e6ee);font-size:13px;outline:none;background:#fff;color:var(--t,#101724)}
+.f-row select:focus{border-color:var(--a,#3168e0)}
+#whitelistView .f-row label{width:auto;font-size:13px;color:var(--t2,#5b667b);flex-shrink:0}
 .banner.warn{background:#fdeaea;border-color:#f3c2c2;color:#9a2b2b}
 .banner button{margin-left:auto;padding:6px 14px;border-radius:8px;border:none;background:#8a6d1c;color:#fff;cursor:pointer;font-size:12px}
 .banner.warn button{background:#9a2b2b}
@@ -93,160 +147,231 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
 /* Modal */
 .modal{position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.35);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center}
 .modal.hid{display:none}
-.mbox{width:420px;max-width:92vw;background:#fff;border-radius:16px;padding:26px}
+.mbox{width:420px;max-width:92vw;background:#fff;border-radius:18px;padding:26px}
 .mbox h3{font-size:17px;font-weight:700;margin-bottom:6px}
-.mbox .msub{font-size:13px;color:var(--t2);margin-bottom:18px;line-height:1.6}
+.mbox .msub{font-size:13px;color:var(--t2,#5b667b);margin-bottom:18px;line-height:1.6}
 .mbox .m-actions{display:flex;gap:10px;justify-content:center;margin-top:18px}
-.mbox .m-actions button{flex:1;padding:11px;border-radius:10px;border:none;font-size:14px;font-weight:600;cursor:pointer}
+.mbox .m-actions button{flex:1;padding:11px;border-radius:980px;border:none;font-size:14px;font-weight:500;cursor:pointer}
 .toast-wrap{position:fixed;top:18px;right:18px;z-index:400;display:flex;flex-direction:column;gap:8px}
 .toast{padding:12px 18px;border-radius:10px;color:#fff;font-size:13px;box-shadow:0 6px 20px rgba(0,0,0,.18);animation:fadeIn .25s}
-.toast.ok{background:#1ca44c}.toast.err{background:#dc2828}
+.toast.ok{background:var(--g,#1ca44c)}.toast.err{background:var(--r,#dc2828)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1}}
 </style>
 </head>
 <body>
 
-<!-- 登录 -->
+<!-- Login -->
 <div id="loginView">
   <div class="lbox">
-    <div class="logo"><img src="/static/img/grape-logo.jpg?v=1" alt="Grape"></div>
+    <img class="logo" src="/static/img/grape-logo.jpg?v=1" alt="Grape Admin">
     <h1>Grape Admin</h1>
-    <p class="sub">系统管理 · 配置中心</p>
-    <input class="ipt" id="loginUser" placeholder="管理员账号" autocomplete="username">
-    <input class="ipt" id="loginPass" type="password" placeholder="登录密码" autocomplete="current-password">
-    <button class="lbtn" id="loginBtn">登 录</button>
+    <p class="sub" data-i18n="admin.login.subtitle">系统管理 · 配置中心</p>
+    <input class="ipt" id="loginUser" data-i18n-placeholder="admin.login.admin_account" placeholder="管理员账号" autocomplete="username">
+    <input class="ipt" id="loginPass" type="password" data-i18n-placeholder="admin.login.password" placeholder="登录密码" autocomplete="current-password">
+    <button class="lbtn" id="loginBtn" data-i18n="admin.login.login_btn">登 录</button>
     <div class="err" id="loginErr"></div>
-    <div style="margin-top:18px;font-size:13px;color:#8d97a8">
-      <a href="/" style="color:#8d97a8;text-decoration:none">← 返回用户界面</a>
+    <div style="margin-top:18px;font-size:13px;color:var(--auth-text-secondary,#86868b)">
+      <a href="/" style="color:var(--auth-text-secondary,#86868b);text-decoration:none" data-i18n="admin.login.back_to_app">← 返回用户界面</a>
     </div>
   </div>
 </div>
-
-<!-- 改密弹窗 -->
+<div class="lang-switch" onclick="_toggleAdminLang()"><span id="adminLangLabel">EN</span></div>
 <div class="modal hid" id="pwdModal">
   <div class="mbox">
-    <h3>设置管理员密码</h3>
-    <div class="msub">您正在使用默认密码。为保障安全建议立即修改，修改后旧会话将失效。</div>
-    <input class="ipt" id="oldPass" type="password" placeholder="原密码" style="background:#f2f3f5;color:#1d1d1f">
-    <input class="ipt" id="newPass" type="password" placeholder="新密码（至少 8 位）" style="background:#f2f3f5;color:#1d1d1f">
-    <input class="ipt" id="confirmPass" type="password" placeholder="确认新密码" style="background:#f2f3f5;color:#1d1d1f">
+    <h3 data-i18n="admin.pwd_modal.title">设置管理员密码</h3>
+    <div class="msub" data-i18n="admin.pwd_modal.desc">您正在使用默认密码。为保障安全建议立即修改，修改后旧会话将失效。</div>
+    <input class="ipt" id="oldPass" type="password" data-i18n-placeholder="admin.pwd_modal.old_password" placeholder="原密码" style="background:#f2f3f5;color:var(--t,#1d1d1f)">
+    <input class="ipt" id="newPass" type="password" data-i18n-placeholder="admin.pwd_modal.new_password" placeholder="新密码（至少 8 位）" style="background:#f2f3f5;color:var(--t,#1d1d1f)">
+    <input class="ipt" id="confirmPass" type="password" data-i18n-placeholder="admin.pwd_modal.confirm_password" placeholder="确认新密码" style="background:#f2f3f5;color:var(--t,#1d1d1f)">
     <div class="m-actions">
-      <button style="background:#f2f3f5;color:#1d1d1f" onclick="closePwdModal()">跳过</button>
-      <button style="background:linear-gradient(135deg,#3168e0,#4f46e5);color:#fff" onclick="changePwd()">确认修改</button>
+      <button style="background:#f2f3f5;color:var(--t,#1d1d1f)" onclick="closePwdModal()" data-i18n="admin.pwd_modal.skip">跳过</button>
+      <button style="background:var(--a,#0071e3);color:#fff;border-radius:980px" onclick="changePwd()" data-i18n="admin.pwd_modal.confirm">确认修改</button>
     </div>
   </div>
 </div>
 
-<!-- 主框架 -->
+<!-- Main frame -->
 <div id="mainView">
   <div class="sb">
     <div class="sb-h">
-      <div class="logo-s"><span class="sq"><img src="/static/img/grape-logo.jpg?v=1" alt="A"></span><h1>Grape Admin</h1></div>
+      <div class="logo-s"><img class="sq" src="/static/img/grape-logo.jpg?v=1" alt="A"><h1>Grape Admin</h1></div>
       <div class="tagline">Config Center</div>
     </div>
     <div class="sb-nav">
-      <div class="grp">配置中心</div>
-      <a class="act" onclick="showCfg()"><span class="ic">⚙</span>平台凭据</a>
-      <div class="grp">用户管理</div>
-      <a onclick="showUsers(1, event)"><span class="ic">👥</span>用户列表</a>
-      <a onclick="showWhitelist(event)"><span class="ic">📋</span>注册白名单</a>
-      <div class="grp">账号</div>
-      <a onclick="openPwdModal('self')"><span class="ic">🔑</span>修改密码</a>
-      <a onclick="logout()"><span class="ic">↪</span>退出登录</a>
+      <div class="grp" data-i18n="admin.nav.config_center">配置中心</div>
+      <a class="act" onclick="showCfg()"><span class="ic">⚙</span><span data-i18n="admin.nav.credentials">平台凭据</span></a>
+      <div class="grp" data-i18n="admin.nav.user_management">用户管理</div>
+      <a onclick="showUsers(1, event)"><span class="ic">👥</span><span data-i18n="admin.nav.user_list">用户列表</span></a>
+      <a onclick="showWhitelist(event)"><span class="ic">📋</span><span data-i18n="admin.nav.whitelist">注册白名单</span></a>
+      <div class="grp">Account</div>
+      <a onclick="openPwdModal('self')"><span class="ic">🔑</span><span data-i18n="admin.nav.change_password">修改密码</span></a>
     </div>
     <div class="sb-ft">
-      <div id="adminUser">admin</div>
-      <a class="out" onclick="logout()">退出登录</a>
+      <div class="ft-row">
+        <div class="ft-user">
+          <span class="badge">A</span>
+          <span id="adminUser">admin</span>
+        </div>
+        <div class="lang-toggle">
+          <button onclick="_setAdminLang('zh')" class="lang-btn" id="adminLangZh">中</button>
+          <button onclick="_setAdminLang('en')" class="lang-btn" id="adminLangEn">EN</button>
+        </div>
+      </div>
+      <a class="out" onclick="logout()" data-i18n="admin.nav.logout">退出登录</a>
     </div>
   </div>
   <div class="mn">
-    <div class="tb"><div class="bc"><b>平台凭据配置</b></div></div>
+    <div class="tb"><div class="bc"><b data-i18n="admin.config.title">平台凭据配置</b></div></div>
     <div class="ct">
       <div class="card">
-        <div class="card-h"><h2>GitCode 配置<span class="tag">github.com 平台操作凭据</span></h2></div>
-        <div class="f-row"><label>gitcode_api_token</label><input id="f_gitcode_api_token" type="password" placeholder="GitCode bot token"><button class="s-btn" onclick="verifyToken('gitcode','f_gitcode_api_token')">校验</button><span class="st" id="s_gitcode_api_token"></span></div>
+        <div class="card-h"><h2><span data-i18n="admin.config.gitcode">GitCode 配置</span><span class="tag" data-i18n="admin.config.gitcode_desc">github.com 平台操作凭据</span></h2></div>
+        <div class="f-row"><label>gitcode_api_token</label><input id="f_gitcode_api_token" type="password" placeholder="GitCode bot token"><button class="s-btn" onclick="verifyToken('gitcode','f_gitcode_api_token')" data-i18n="admin.config.verify">校验</button><span class="st" id="s_gitcode_api_token"></span></div>
         <div class="f-row"><label>oauth_client_id</label><input id="f_gitcode_oauth_client_id" placeholder="GitCode OAuth App Client ID"></div>
         <div class="f-row"><label>oauth_client_secret</label><input id="f_gitcode_oauth_client_secret" type="password" placeholder="GitCode OAuth App Client Secret"></div>
-        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_gitcode_oauth_redirect_uri" placeholder="留空自动推断"></div>
+        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_gitcode_oauth_redirect_uri" data-i18n-placeholder="admin.config.auto_infer" placeholder="留空自动推断"></div>
         <div class="f-row"><label>webhook_url</label><input id="f_webhook_url" placeholder="GitCode webhook callback URL"></div>
         <div class="f-row"><label>gitcode_webhook_token</label><input id="f_gitcode_webhook_token" type="password" placeholder="GitCode webhook secret"><span class="st" id="s_gitcode_webhook_token"></span></div>
       </div>
 
       <div class="card">
-        <div class="card-h"><h2>GitHub 配置<span class="tag">GitHub 平台操作凭据</span></h2></div>
-        <div class="f-row"><label>github_bot_token</label><input id="f_github_bot_token" type="password" placeholder="GitHub bot token"><button class="s-btn" onclick="verifyToken('github','f_github_bot_token')">校验</button><span class="st" id="s_github_bot_token"></span></div>
+        <div class="card-h"><h2><span data-i18n="admin.config.github">GitHub 配置</span><span class="tag" data-i18n="admin.config.github_desc">GitHub 平台操作凭据</span></h2></div>
+        <div class="f-row"><label>github_bot_token</label><input id="f_github_bot_token" type="password" placeholder="GitHub bot token"><button class="s-btn" onclick="verifyToken('github','f_github_bot_token')" data-i18n="admin.config.verify">校验</button><span class="st" id="s_github_bot_token"></span></div>
         <div class="f-row"><label>github_bot_username</label><input id="f_github_bot_username" placeholder="GitHub bot username"></div>
         <div class="f-row"><label>oauth_client_id</label><input id="f_github_oauth_client_id" placeholder="GitHub OAuth App Client ID"></div>
         <div class="f-row"><label>oauth_client_secret</label><input id="f_github_oauth_client_secret" type="password" placeholder="GitHub OAuth App Client Secret"></div>
-        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_github_oauth_redirect_uri" placeholder="留空自动推断"></div>
+        <div class="f-row"><label>oauth_redirect_uri</label><input id="f_github_oauth_redirect_uri" data-i18n-placeholder="admin.config.auto_infer" placeholder="留空自动推断"></div>
       </div>
 
       <div class="card">
-        <div class="card-h"><h2>Bot 账户<span class="tag">self-comment 检测</span></h2></div>
-        <div class="f-row"><label>bot_usernames</label><input id="f_bot_usernames" placeholder="逗号分隔，如 grape_bot, dev-bot"></div>
-        <div class="hint">手动填写或点击上方「校验」后用返回的用户名自动回填</div>
+        <div class="card-h"><h2><span data-i18n="admin.config.bot_account">Bot 账户</span><span class="tag" data-i18n="admin.config.bot_account_desc">self-comment 检测</span></h2></div>
+        <div class="f-row"><label>bot_usernames</label><input id="f_bot_usernames" data-i18n-placeholder="admin.config.bot_usernames_hint" placeholder="逗号分隔，如 grape_bot, dev-bot"></div>
+        <div class="hint" data-i18n="admin.config.bot_usernames_fill_hint">手动填写或点击上方「校验」后用返回的用户名自动回填</div>
+      </div>
+
+      <!-- Bot Token Health (Issue #348) -->
+      <div class="card">
+        <div class="card-h">
+          <h2><span data-i18n="admin.token_health.title">Bot Token 健康状态</span><span class="tag" data-i18n="admin.token_health.desc">后端探活监控</span></h2>
+          <button class="s-btn" onclick="loadTokenHealth()" data-i18n="admin.token_health.refresh">刷新</button>
+        </div>
+        <div class="f-row"><label data-i18n="admin.token_health.status">健康状态</label><span id="tkh_status">…</span></div>
+        <div class="f-row"><label data-i18n="admin.token_health.checked_at">最近探活时间</label><span id="tkh_checked_at" style="font-size:13px">…</span></div>
+        <div id="tkh_platforms"></div>
+        <div class="hint" style="margin-left:0" data-i18n="admin.token_health.hint">后端定时探活 GitCode/GitHub bot token；「暂不可用」表示探活服务尚未部署</div>
       </div>
 
       <div class="save-bar">
-        <button class="btn btn-p" id="saveBtn" onclick="saveConfig()">保存配置</button>
-        <span class="st">保存后写入数据库并即时生效（集群所有实例共享）</span>
+        <button class="btn btn-p" id="saveBtn" onclick="saveConfig()" data-i18n="admin.config.save">保存配置</button>
+        <span class="st" data-i18n="admin.config.save_hint">保存后写入数据库并即时生效（集群所有实例共享）</span>
       </div>
     </div>
     
-    <!-- 用户管理区域 -->
+    <!-- Users -->
     <div id="usersView" style="display:none">
-    <div class="tb"><div class="bc"><b>用户管理</b> <span style="color:var(--t2);font-size:12px;margin-left:8px" id="userCount"></span></div>
+    <div class="tb"><div class="bc"><b data-i18n="admin.users.title">用户管理</b> <span style="color:var(--t2,#5b667b);font-size:12px;margin-left:8px" id="userCount"></span></div>
       <div style="margin-left:auto;display:flex;gap:8px">
-        <input id="userSearch" class="ipt" style="width:200px;padding:6px 10px;font-size:13px" placeholder="搜索用户名/邮箱" onkeyup="if(event.key==='Enter')showUsers(1)">
-        <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="showUsers(1)">搜索</button>
+        <div class="search-wrap">
+          <span class="search-ic">🔍</span>
+          <input id="userSearch" class="ipt" style="width:220px;padding:6px 10px 6px 32px;font-size:13px" data-i18n-placeholder="admin.users.search_ph" placeholder="搜索用户名/邮箱" oninput="AdminApp.searchUsersDebounced()">
+        </div>
+        <button class="btn btn-o" style="padding:6px 14px;font-size:13px" onclick="createUser()" data-i18n="admin.users.create_user">创建用户</button>
       </div>
     </div>
     <div class="ct">
       <table class="tbl" id="usersTable" style="width:100%;border-collapse:collapse;font-size:13px">
-        <thead><tr style="text-align:left;border-bottom:2px solid #e3e6ee">
-          <th style="padding:8px">ID</th><th style="padding:8px">用户名</th><th style="padding:8px">邮箱</th>
-          <th style="padding:8px">状态</th><th style="padding:8px">绑定</th><th style="padding:8px">最近登录</th>
-          <th style="padding:8px">操作</th>
+        <thead><tr style="text-align:left;border-bottom:2px solid var(--b,#e3e6ee)">
+          <th style="padding:10px 12px" data-i18n="admin.users.col_username">用户名</th><th style="padding:10px 12px" data-i18n="admin.users.col_email">邮箱</th>
+          <th style="padding:10px 12px" data-i18n="admin.users.col_status">状态</th><th style="padding:10px 12px" data-i18n="admin.users.col_last_login">最近登录</th>
+          <th style="padding:10px 12px;width:40px"></th>
         </tr></thead>
         <tbody id="usersTbody"></tbody>
       </table>
-      <div id="userPager" style="margin-top:16px;display:flex;gap:8px;align-items:center;justify-content:center"></div>
+      <div id="userEmpty" style="display:none" class="empty-state">
+        <div class="empty-ic">🔍</div>
+        <div class="empty-tx" data-i18n="admin.users.no_results">没有找到匹配的用户</div>
+      </div>
+      <div id="userPager" class="pager-bar"></div>
     </div>
   </div>
 
-  <!-- 白名单管理区域 -->
+  <!-- Whitelist -->
   <div id="whitelistView" style="display:none">
-    <div class="tb"><div class="bc"><b>注册白名单</b></div></div>
+    <div class="tb"><div class="bc"><b data-i18n="admin.whitelist.title">注册白名单</b></div></div>
     <div class="ct">
       <div class="card" style="margin-bottom:16px">
-        <div class="card-h"><h2>添加白名单</h2></div>
+        <div class="card-h"><h2 data-i18n="admin.whitelist.add">添加白名单</h2></div>
         <div class="f-row">
-          <label>类型</label>
-          <select id="wl_type" class="ipt" style="width:120px"><option value="email">邮箱</option><option value="domain">域名</option></select>
-          <label>值</label>
-          <input id="wl_value" class="ipt" style="width:240px" placeholder="user@example.com 或 @company.com">
-          <label>备注</label>
-          <input id="wl_remark" class="ipt" style="width:160px" placeholder="可选">
-          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="addWhitelist()">添加</button>
+          <label data-i18n="admin.whitelist.type">类型</label>
+          <select id="wl_type" class="ipt" style="width:120px"><option value="email" data-i18n="admin.whitelist.type_email">邮箱</option><option value="domain" data-i18n="admin.whitelist.type_domain">域名</option></select>
+          <label data-i18n="admin.whitelist.value">值</label>
+          <input id="wl_value" class="ipt" style="width:240px" data-i18n-placeholder="admin.whitelist.value_ph" placeholder="user@example.com 或 @company.com">
+          <label data-i18n="admin.whitelist.remark">备注</label>
+          <input id="wl_remark" class="ipt" style="width:160px" data-i18n-placeholder="admin.whitelist.remark_ph" placeholder="可选">
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="addWhitelist()" data-i18n="admin.whitelist.add_btn">添加</button>
         </div>
       </div>
       <div class="card">
-        <div class="card-h"><h2>开放注册</h2></div>
+        <div class="card-h"><h2 data-i18n="admin.whitelist.signup_settings">开放注册</h2></div>
         <div class="f-row">
-          <label>开放注册开关</label>
-          <select id="allow_signup" class="ipt" style="width:120px"><option value="0">关闭</option><option value="1">开启</option></select>
-          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="saveAllowSignup()">保存</button>
+          <label data-i18n="admin.whitelist.signup_switch">开放注册开关</label>
+          <select id="allow_signup" class="ipt" style="width:120px"><option value="0" data-i18n="admin.whitelist.signup_off">关闭</option><option value="1" data-i18n="admin.whitelist.signup_on">开启</option></select>
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="saveAllowSignup()" data-i18n="admin.whitelist.save">保存</button>
         </div>
-        <div class="hint">关闭时仅白名单内邮箱可注册；开启时任意邮箱可注册</div>
+        <div class="hint" data-i18n="admin.whitelist.signup_hint">关闭时仅白名单内邮箱可注册；开启时任意邮箱可注册</div>
       </div>
       <div class="card">
-        <div class="card-h"><h2>白名单列表</h2></div>
+        <div class="card-h"><h2 data-i18n="admin.whitelist.list">白名单列表</h2></div>
         <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
-          <thead><tr style="text-align:left;border-bottom:2px solid #e3e6ee">
-            <th style="padding:8px">ID</th><th style="padding:8px">类型</th><th style="padding:8px">值</th>
-            <th style="padding:8px">备注</th><th style="padding:8px">创建时间</th><th style="padding:8px">操作</th>
+          <thead><tr style="text-align:left;border-bottom:2px solid var(--b,#e3e6ee)">
+            <th style="padding:8px">ID</th><th style="padding:8px" data-i18n="admin.whitelist.col_type">类型</th><th style="padding:8px" data-i18n="admin.whitelist.col_value">值</th>
+            <th style="padding:8px" data-i18n="admin.whitelist.col_remark">备注</th><th style="padding:8px" data-i18n="admin.whitelist.col_created">创建时间</th><th style="padding:8px" data-i18n="admin.whitelist.col_actions">操作</th>
           </tr></thead>
           <tbody id="whitelistTbody"></tbody>
+        </table>
+      </div>
+
+      <!-- OAuth Login Whitelist (Issue #332) -->
+      <div class="card">
+        <div class="card-h"><h2><span data-i18n="admin.login_whitelist.title">OAuth 登录白名单</span><span class="tag" data-i18n="admin.login_whitelist.desc">GitCode/GitHub 登录白名单</span></h2></div>
+        <div class="f-row">
+          <label data-i18n="admin.login_whitelist.toggle">白名单开关</label>
+          <select id="loginWlToggle" class="ipt" style="width:120px">
+            <option value="0" data-i18n="admin.login_whitelist.toggle_off">已关闭</option>
+            <option value="1" data-i18n="admin.login_whitelist.toggle_on">已开启</option>
+          </select>
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="toggleLoginWhitelist()" data-i18n="admin.whitelist.save">保存</button>
+        </div>
+        <div class="hint" data-i18n="admin.login_whitelist.toggle_hint">开启时仅白名单内用户可 OAuth 登录；关闭时全部放行</div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2 data-i18n="admin.login_whitelist.add">添加白名单</h2></div>
+        <div class="f-row">
+          <label data-i18n="admin.login_whitelist.provider">平台</label>
+          <select id="lw_provider" class="ipt" style="width:120px">
+            <option value="gitcode" data-i18n="admin.login_whitelist.provider_gitcode">GitCode</option>
+            <option value="github" data-i18n="admin.login_whitelist.provider_github">GitHub</option>
+          </select>
+          <label data-i18n="admin.login_whitelist.username">用户名</label>
+          <input id="lw_username" class="ipt" style="width:200px" data-i18n-placeholder="admin.login_whitelist.username_ph" placeholder="GitHub/GitCode 用户名">
+          <label data-i18n="admin.login_whitelist.remark">备注</label>
+          <input id="lw_remark" class="ipt" style="width:160px" data-i18n-placeholder="admin.login_whitelist.remark_ph" placeholder="可选">
+          <button class="btn btn-p" style="padding:6px 14px;font-size:13px" onclick="addLoginWhitelist()" data-i18n="admin.login_whitelist.add_btn">添加</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-h"><h2 data-i18n="admin.login_whitelist.list">白名单列表</h2></div>
+        <table class="tbl" style="width:100%;border-collapse:collapse;font-size:13px">
+          <thead><tr style="text-align:left;border-bottom:2px solid var(--b,#e3e6ee)">
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_id">ID</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_gitcode">GitCode 用户名</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_github">GitHub 用户名</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_remark">备注</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_created">创建时间</th>
+            <th style="padding:8px" data-i18n="admin.login_whitelist.col_actions">操作</th>
+          </tr></thead>
+          <tbody id="loginWhitelistTbody"></tbody>
         </table>
       </div>
     </div>
@@ -255,6 +380,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
   </div>
 </div>
 
-<script src="/static/js/admin.js?v=20261015-1"></script>
+<script src="/static/js/i18n.js?v=20261016-2"></script>
+<script>I18N.init('20261016-8');</script>
+<script src="/static/js/admin.js?v=20261016-14"></script>
 </body>
 </html>

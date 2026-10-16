@@ -172,7 +172,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                     return row[0]
                 # 2. 二级回退：查 grape_accounts（D32-补丁）+ external_identities
                 c.execute(
-                    "SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1",
+                    "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND id>0 LIMIT 1",
                     (issue_creator,))
                 row = c.fetchone()
                 if row:
@@ -189,7 +189,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                 c.execute(
                     "SELECT ur.user_id FROM user_repos ur "
                     "JOIN grape_accounts ga ON ga.id = ur.user_id "
-                    "WHERE ga.username=? "
+                    "WHERE LOWER(ga.username)=LOWER(?) "
                     "AND (ur.repo_key=? OR ur.repo_key=?) AND ur.is_join=1 "
                     "LIMIT 1",
                     (issue_creator, repo, f"gitcode:{repo}"))
@@ -519,7 +519,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                 uc.execute(
                     "SELECT ur.repo_key FROM user_repos ur "
                     "JOIN grape_accounts ua ON ua.id = ur.user_id "
-                    "WHERE ua.username = ? AND ur.is_join = 1", (username,))
+                    "WHERE LOWER(ua.username)=LOWER(?) AND ur.is_join = 1", (username,))
                 for row in uc.fetchall():
                     user_repos.add(from_repo_key(row[0] or ""))
         except Exception as _e:

@@ -1345,7 +1345,7 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     "  )) ORDER BY t.created_at ASC LIMIT 1"
                 )
             elif scope == "user":
-                c.execute("SELECT id FROM grape_accounts WHERE username=?", (owner_name,))  # D32-补丁
+                c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?)", (owner_name,))  # D32-补丁 #348: case-insensitive
                 uid_row = c.fetchone()
                 uid = uid_row[0] if uid_row else 0
                 params.append(uid)

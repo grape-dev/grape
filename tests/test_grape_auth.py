@@ -442,6 +442,46 @@ class TestSignupPolicy:
                 db.commit()
 
 
+class TestAllowSignupValueConsistency:
+    """回归测试：allow_signup 取值类型一致性。
+
+    确保 meta 表中 allow_signup 无论以 "true"/"1"/"yes" 哪种值写入，
+    read_public_config() 都归一化返回 "1"/"0"，前端 v === '1' 判定正确。
+    """
+
+    def test_meta_true_normalizes_to_1(self):
+        """meta="true" → config 返回 "1"。"""
+        from src.user.db import set_meta_value
+        from src.admin.config_store import read_public_config
+        set_meta_value("allow_signup", "true")
+        cfg = read_public_config()
+        assert cfg["allow_signup"] == "1", f'Expected "1", got "{cfg["allow_signup"]}"'
+
+    def test_meta_1_normalizes_to_1(self):
+        """meta="1" → config 返回 "1"。"""
+        from src.user.db import set_meta_value
+        from src.admin.config_store import read_public_config
+        set_meta_value("allow_signup", "1")
+        cfg = read_public_config()
+        assert cfg["allow_signup"] == "1", f'Expected "1", got "{cfg["allow_signup"]}"'
+
+    def test_meta_empty_normalizes_to_0(self):
+        """meta="" → config 返回 "0"。"""
+        from src.user.db import set_meta_value
+        from src.admin.config_store import read_public_config
+        set_meta_value("allow_signup", "")
+        cfg = read_public_config()
+        assert cfg["allow_signup"] == "0", f'Expected "0", got "{cfg["allow_signup"]}"'
+
+    def test_meta_yes_normalizes_to_1(self):
+        """meta="yes" → config 返回 "1"（兼容旧值）。"""
+        from src.user.db import set_meta_value
+        from src.admin.config_store import read_public_config
+        set_meta_value("allow_signup", "yes")
+        cfg = read_public_config()
+        assert cfg["allow_signup"] == "1", f'Expected "1", got "{cfg["allow_signup"]}"'
+
+
 # ===========================================================================
 # 7. 登录限流
 # ===========================================================================

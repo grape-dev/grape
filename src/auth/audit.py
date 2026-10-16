@@ -28,6 +28,18 @@ EVENT_TYPES = frozenset({
     "account_deleted",             # 账号注销
     "account_anonymized",          # 账号匿名化（冷静期到期自动执行）
     "set_password",                # 设置密码（无密码用户）
+    "admin_user_created",          # admin 手动创建用户
+    "admin_user_edited",           # admin 编辑用户信息
+    "admin_password_reset",        # admin 重置用户密码
+    "admin_whitelist_added",       # admin 添加登录白名单
+    "admin_whitelist_deleted",     # admin 删除登录白名单
+    "admin_whitelist_toggled",     # admin 切换白名单开关
+    "admin_login_failed",          # admin 登录失败
+    "admin_signup_whitelist_added",   # admin 添加注册白名单
+    "admin_signup_whitelist_deleted", # admin 删除注册白名单
+    "admin_allow_signup_toggled",     # admin 切换开放注册开关
+    "admin_password_changed",        # admin 修改自己的密码
+    "admin_config_saved",            # admin 保存平台凭据配置
     "dev_verification_code_used",   # 固定验证码使用（需求8/16）
     "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
 })

@@ -454,7 +454,7 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id, nickname FROM grape_accounts WHERE username=? AND status=1 LIMIT 1", (gitcode_user,))
+            c.execute("SELECT id, nickname FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (gitcode_user,))
             row = c.fetchone()
         if row:
             user_id = row[0]

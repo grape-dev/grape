@@ -84,9 +84,9 @@ def check_signup_allowed(email: str) -> bool:
     if domain in domain_whitelist:
         return True
 
-    # 3. 两个白名单均为空 → 默认允许注册（不限定邮箱范围）
+    # 3. 两个白名单均为空 → 看开放注册开关（设计文档第 3 条）
     if not email_whitelist and not domain_whitelist:
-        return True
+        return _is_allow_signup()
 
     # 4. 白名单非空但未命中 → 拒绝（白名单优先于开关）
     return False

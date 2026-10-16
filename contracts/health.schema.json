@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bot Token Health Response",
+  "type": "object",
+  "required": ["overall", "platforms", "checked_at"],
+  "properties": {
+    "overall": {
+      "type": "string",
+      "enum": ["healthy", "degraded", "unhealthy"]
+    },
+    "platforms": {
+      "type": "object",
+      "patternProperties": {
+        "^(gitcode|github)$": {
+          "type": "object",
+          "required": ["healthy", "degraded", "unhealthy", "consecutive_failures", "error_type", "error"],
+          "properties": {
+            "healthy": {"type": "boolean"},
+            "degraded": {"type": "boolean"},
+            "unhealthy": {"type": "boolean"},
+            "consecutive_failures": {"type": "integer", "minimum": 0},
+            "error_type": {"type": "string", "enum": ["", "auth", "network", "config"]},
+            "error": {"type": "string"}
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "checked_at": {"type": "string"}
+  },
+  "additionalProperties": true
+}

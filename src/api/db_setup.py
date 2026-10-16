@@ -591,6 +591,10 @@ CREATE TABLE IF NOT EXISTS login_whitelist (
     UNIQUE (gitcode_username)
 )
 """
+# github_username 唯一约束不在 DDL 内联定义——SQLite 内联 UNIQUE 不支持
+# WHERE 条件（需要允许空串 '' 共存）。改为在 _ensure_whitelist_columns 中
+# 用 CREATE UNIQUE INDEX ... WHERE github_username != '' 运行时创建部分索引。
+# MySQL 侧在 _ensure_case_insensitive_indexes 中用生成列 LOWER(NULLIF(...)) + 唯一索引。
 
 _API_LATENCY_LOG_DDL = """
 CREATE TABLE IF NOT EXISTS api_latency_log (
@@ -1820,8 +1824,121 @@ def _ensure_whitelist_columns():
                 except Exception as e:
                     log.warning(f"Failed to add whitelist column {col}: {e}")
             db.commit()
+            # Issue #332: ensure github_username has UNIQUE index
+            try:
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_login_whitelist_github ON login_whitelist(github_username) WHERE github_username != ''")
+            except Exception as e:
+                log.warning(f"Create github_username unique index failed: {e}")
     except Exception as e:
         log.warning(f"_ensure_whitelist_columns failed: {e}")
+
+
+def _ensure_case_insensitive_indexes():
+    """Issue #348: 大小写不敏感唯一约束（DB 层纵深防御）。
+
+    SQLite：表达式索引 CREATE UNIQUE INDEX ... ON table(LOWER(col)) WHERE ...
+    MySQL：生成列 + 唯一索引。空串用 NULLIF 转为 NULL 避免多条空串冲突。
+
+    所有创建操作幂等（IF NOT EXISTS / 检查已存在），失败时记 WARNING 不崩溃。
+    """
+    from src.session_manager import db, db_lock
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+
+    if not is_mysql:
+        # SQLite: 表达式索引直接支持
+        _sqlite_indexes = [
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_grape_accounts_username_lower ON grape_accounts(LOWER(username))",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_accounts_username_lower ON admin_accounts(LOWER(username))",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_gitcode_lower ON login_whitelist(LOWER(gitcode_username)) WHERE gitcode_username IS NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_github_lower ON login_whitelist(LOWER(github_username)) WHERE github_username != ''",
+        ]
+        for sql in _sqlite_indexes:
+            try:
+                with db_lock:
+                    db.execute(sql)
+                    db.commit()
+            except Exception as e:
+                log.warning(f"_ensure_case_insensitive_indexes (SQLite): {e}")
+        return
+
+    # MySQL: 生成列 + 唯一索引
+    # NULLIF(col, '') 把空串转为 NULL, NULL 不参与唯一约束 → 多条空串不冲突
+    # gitcode_username DEFAULT NULL → LOWER(NULL) = NULL → 天然不冲突
+    _mysql_targets = [
+        # (table, column, gen_col_name, gen_expr)
+        ("grape_accounts", "username", "username_lower", "LOWER(username)"),
+        ("admin_accounts", "username", "username_lower", "LOWER(username)"),
+        ("login_whitelist", "gitcode_username", "gitcode_username_lower", "LOWER(gitcode_username)"),
+        ("login_whitelist", "github_username", "github_username_lower", "LOWER(NULLIF(github_username, ''))"),
+    ]
+    for table, col, gen_col, gen_expr in _mysql_targets:
+        idx_name = f"uq_{table}_{gen_col}"
+        try:
+            with db_lock:
+                c = db.cursor()
+                # 检查生成列是否已存在
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                    (table, gen_col),
+                )
+                if c.fetchone()[0] == 0:
+                    c.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {gen_col} VARCHAR(128) AS ({gen_expr}) STORED"
+                    )
+                    db.commit()
+                    log.info(f"Added generated column {table}.{gen_col}")
+                # 检查索引是否已存在
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
+                    (table, idx_name),
+                )
+                if c.fetchone()[0] == 0:
+                    c.execute(f"CREATE UNIQUE INDEX {idx_name} ON {table}({gen_col})")
+                    db.commit()
+                    log.info(f"Created case-insensitive index {idx_name}")
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"_ensure_case_insensitive_indexes: {table}.{col} failed: {e}")
+
+
+def _migrate_allow_signup_default():
+    """向前兼容迁移：升级部署时保持原有注册行为。
+
+    基线 signup_policy 空白名单 → return True（允许注册）。
+    v4 改为 return _is_allow_signup()，未配置 allow_signup meta 时返回 False。
+
+    如果 allow_signup meta 未设置且 grape_accounts 表已有数据（升级部署），
+    自动设置 allow_signup='true' 保持原有行为。新部署（grape_accounts 为空）
+    不设置，保持默认关闭。
+
+    注意：不能用 admin_accounts 判断——_seed_admin_accounts 先于此函数执行，
+    新部署也会插入 admin 账号导致 admin_count>0 误判为升级。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        # get_meta_value 在 key 不存在时返回 ""（非 None），用 truthy 检查
+        existing = get_meta_value("allow_signup")
+        if existing:
+            return  # 已设置，不覆盖
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM grape_accounts")
+            user_count = c.fetchone()[0]
+        if user_count > 0:
+            set_meta_value("allow_signup", "1")
+            log.info("_migrate_allow_signup_default: upgrade detected (grape_accounts not empty), set allow_signup=1 for backward compat")
+    except Exception as e:
+        log.warning(f"_migrate_allow_signup_default failed: {e}")
 
 
 def _init_scene_category_data():
@@ -2090,15 +2207,15 @@ def _seed_admin_accounts():
       admin_pwd_initial  = 1（仍为默认密码，前端引导改密；改密后置 0）
     - admin 账号与 user_accounts 完全独立，不影响用户登录
     """
-    import hashlib
     from src.user.db import get_meta_value, set_meta_value
+    from src.auth.password import hash_password as _hash_admin_pw_bcrypt
     _default_pwd = os.environ.get("GRAPE_ADMIN_PASSWORD") or "admin123"
     try:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM admin_accounts")
             if c.fetchone()[0] == 0:
-                _pw_hash = hashlib.sha256(_default_pwd.encode()).hexdigest()
+                _pw_hash = _hash_admin_pw_bcrypt(_default_pwd)
                 c.execute("INSERT INTO admin_accounts (username, password_hash, is_super, token_version) VALUES (?,?,1,0)",
                           ("admin", _pw_hash))
                 db.commit()
@@ -2146,6 +2263,8 @@ def init_database():
                 _cleanup_chat_shared_worker_runtime()
                 _migrate_whitelist_from_file()
                 _ensure_whitelist_columns()
+                _ensure_case_insensitive_indexes()
+                _migrate_allow_signup_default()
                 _cleanup_old_latency_logs()
                 # ===== Issue-11: DevOps 市场数据初始化 =====
                 _init_scene_category_data()
@@ -2181,6 +2300,8 @@ def init_database():
         _cleanup_chat_shared_worker_runtime()
         _migrate_whitelist_from_file()
         _ensure_whitelist_columns()
+        _ensure_case_insensitive_indexes()
+        _migrate_allow_signup_default()
         _cleanup_old_latency_logs()
         # ===== Issue-11: DevOps 市场数据初始化 =====
         _init_scene_category_data()

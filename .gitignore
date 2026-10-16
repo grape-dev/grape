@@ -18,6 +18,7 @@ node_modules/
 configs/global-bot-token.json
 configs/login-whitelist.json
 configs/db-backend.json
+configs/db-backend.json.*
 configs/db-backend.json.bak-*
 configs/server-config.json
 configs/vlm-config.json
@@ -94,6 +95,9 @@ scripts/trigger_*.py
 scripts/upgrade_*.py
 scripts/verify_*.py
 scripts/check-*-*.py
+!scripts/check-i18n-keys.py
+!scripts/check-css-vars.py
+!scripts/check-health-contract.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh

@@ -110,6 +110,9 @@ def read_public_config() -> dict:
         p: bool(get_meta_value(f"oauth_{p}_client_id"))
         for p in list_providers()
     }
+    # allow_signup — 归一化为 "1"/"0"（兼容 meta 中可能存在的 "true"/"yes" 旧值）
+    from src.auth.signup_policy import _is_allow_signup
+    out["allow_signup"] = "1" if _is_allow_signup() else "0"
     return out
 
 

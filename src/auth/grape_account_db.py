@@ -138,7 +138,7 @@ def get_grape_account_by_username(username: str) -> "dict | None":
                 "SELECT id, username, email, password_hash, nickname, avatar_url, "
                 "status, token_version, created_at, updated_at, last_login_at, email_verified, email_source, "
                 "email_is_placeholder, created_by_oauth "
-                "FROM grape_accounts WHERE username=?",
+                "FROM grape_accounts WHERE LOWER(username)=LOWER(?)",
                 (username,),
             )
             row = c.fetchone()

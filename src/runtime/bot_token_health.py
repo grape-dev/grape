@@ -150,6 +150,15 @@ def _update_health_status(result: dict):
     }
     set_meta_value("bot_token_health", json.dumps(status))
 
+    # P2-4: 状态翻转通知——healthy→degraded/unhealthy 时 log.warning（运维可接日志告警）
+    prev_overall = (prev or {}).get("overall", "healthy")
+    if prev_overall == "healthy" and overall != "healthy":
+        degraded_provs = [prov for prov, p in platforms_out.items() if not p["healthy"]]
+        log.warning(f"bot_token_health: STATUS FLIP healthy→{overall} "
+                    f"(platforms: {','.join(degraded_provs)})")
+    elif prev_overall != "healthy" and overall == "healthy":
+        log.info(f"bot_token_health: STATUS RECOVERED {prev_overall}→healthy")
+
     if overall == "healthy":
         log.info("bot_token_health: healthy")
     else:

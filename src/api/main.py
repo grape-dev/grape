@@ -881,6 +881,12 @@ if os.path.isdir(STATIC_DIR):
         if path == "forgot":
             return FileResponse(os.path.join(STATIC_DIR, "forgot.html"),
                                 headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        # Admin 独立页面——/en/admin 兜底返回 admin.html
+        if path == "admin" or path.startswith("admin/"):
+            _admin_html = os.path.join(STATIC_DIR, "admin.html")
+            if os.path.isfile(_admin_html):
+                return FileResponse(_admin_html,
+                                    headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
         return _spa_response()
 
     # 注意：SPA catch-all (/{path:path}) 延迟到文件末尾注册，避免拦截 /health /healthz 等系统端点

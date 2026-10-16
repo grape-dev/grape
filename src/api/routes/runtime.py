@@ -149,7 +149,7 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
         if cred_scope == "user" and cred_row and cred_row[1]:
             # D32-补丁：owner_id 与 grape_accounts.id 对齐（按用户名）
             try:
-                c.execute("SELECT id FROM grape_accounts WHERE username=? LIMIT 1", (cred_row[1],))
+                c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (cred_row[1],))
                 urow = c.fetchone()
                 if urow:
                     owner_id = str(urow[0])
