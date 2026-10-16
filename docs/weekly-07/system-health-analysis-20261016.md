@@ -145,7 +145,79 @@ issues.js 15 秒轮询 + 心跳 60s：今天 frontend 延迟上报 1723 条，
 | DB 连接 churn | 2/s | 2/s | ~0（池化） |
 | /api/issues 列表 | 1.6s avg | < 400ms | < 300ms |
 
-## 六、风险提示
+## 六、验证用例（每项优化落地后的验收标准）
+
+### V0 基线采集（改动前先跑，留对比基准）
+
+- 用例 V0-1 全站延迟基线：
+  `SELECT ROUND(AVG(duration_ms)), ROUND(MAX(duration_ms)) FROM api_latency_log WHERE created_at >= CURDATE();`
+  记录当日均值/最大值/慢请求数（>2s 条数）。
+- 用例 V0-2 并发穿透基线：终端 A 持续 `curl /api/issues/grape-dev/grape`（每秒 1 次 × 60），
+  同时终端 B 发起一次人为慢请求（如 /scenes/market 大 page_size），记录 A 的 p95 变化。
+  当前预期：A 会显著变慢（全站排队证据）。
+- 用例 V0-3 连接churn基线：两次 `SHOW GLOBAL STATUS LIKE 'Threads_created'` 间隔 60s，
+  记录每秒新建数（当前 ~2/s）。
+
+### V1 P0 项验证（performance_schema / 慢日志）
+
+- 用例 V1-1：重启后 `SELECT @@performance_schema;` 返回 1。
+- 用例 V1-2：执行一条已知 SQL（如 SELECT COUNT(*) FROM events）后，
+  `performance_schema.events_statements_summary_by_digest` 中能查到对应 digest 行。
+- 用例 V1-3：`SHOW VARIABLES LIKE 'long_query_time'` = 0.5；构造一条 >0.5s 查询，
+  确认慢日志落盘。
+- 不通过处理：p_s 开启后若 DB CPU 明显上升（>5%），调低 digest consumers 级别。
+
+### V2 P1 项验证（uvicorn --workers / db_lock 池化 / N+1 修复）
+
+- 用例 V2-1 workers 隔离性（方案 B 核心）：重跑 V0-2 场景。验收：B 的慢请求进行中，
+  A 的 p95 上升 ≤ 30%（当前是全站排队）。worker 数确认：`ps aux | grep uvicorn` 每台 4 进程。
+- 用例 V2-2 定时任务不重复执行（方案 B 风险项）：观察 cleanup/latency 清理日志，
+  4 个 worker 各自执行时清理行数不重复、无死锁（`SHOW GLOBAL STATUS LIKE 'Innodb_row_lock_waits'`
+  前后差值 = 0）。清理类任务若改为单 worker 专属，验证其余 3 个无清理日志输出。
+- 用例 V2-3 N+1 修复回归：重跑 issues 列表计时脚本（issues-center-repo-all-slow-analysis.md
+  第六节同款），验收 `_query_tasks` < 0.2s、接口 < 0.4s、响应体 < 200KB。
+  同时回归功能：卡片 scene_name 显示正确、PR 伪卡片在列、切 mine/repo_all 视图正常、
+  CLI `grape issues` 输出字段完整（对照 docs/openapi/11-issues.md 字段表）。
+- 用例 V2-4 场景缓存一致性：管理端编辑场景名后，列表卡片 ≤ 60s 内刷新为新名
+  （或写路径失效缓存后立即生效）；`SHOW COLUMNS FROM devops_pipeline_scene`
+  在进程生命周期内仅执行 1 次（开 SQL 日志或断点确认）。
+- 用例 V2-5 experience 超时保护：mock 一个 >10s 的外部市场响应，验收接口 10s 超时返回、
+  不再出现 124s 占用；期间并发其他接口不受影响。
+- 用例 V2-6 db_lock 池化灰度（方案 A）：观察一周
+  `SHOW GLOBAL STATUS LIKE 'Threads_created'` 增速（V2-7 一并验收）、
+  Aborted_clients 不再增长、双主数据同步正常（两边查同一 issue 列表一致）。
+
+### V3 P2 项验证（连接池 / 大表 / 索引 / 死锁 / 前端轮询）
+
+- 用例 V3-1 连接池化：V0-3 同法测 churn，验收 < 0.1/s；峰值压测（30 并发 curl）
+  期间 `Threads_connected` ≤ 池上限 + 少量余量，无 "too many connections"。
+- 用例 V3-2 agent_tasks 治理：定时清理上线后，`SELECT COUNT(*) FROM agent_tasks
+  WHERE status='completed' AND created_at < NOW()-INTERVAL 7 DAY AND LENGTH(skill_files)>0` = 0；
+  表 data_length 月度环比不增长（本次已手工完成一轮：1581MB → 439MB，作为参照基线）。
+- 用例 V3-3 events 复合索引（已建，纳入回归）：EXPLAIN 确认 OR-pair 查询走
+  `idx_events_repo_issue`（range，行数 ≤ 个位数）；重跑 `_batch_fetch_agent_statuses`
+  计时，单批 < 50ms。新建环境验证：db_setup 建表后 `SHOW INDEX FROM events`
+  含该索引。
+- 用例 V3-4 死锁修复：清理任务改低峰分批后，连续 7 天
+  `SHOW ENGINE INNODB STATUS` 无 LATEST DETECTED DEADLOCK；
+  分批 DELETE 执行期间 user_credentials 业务写入正常（造一个并发写测试）。
+- 用例 V3-5 worker 包剥离：下载 grape-worker.tar.gz 走 nginx（确认响应头 server: nginx
+  且不经 8000 进程），期间 API 接口 p95 无波动；下载速度不低于原路径。
+- 用例 V3-6 前端轮询降载：开着 issues 页（含 processing 任务）10 分钟，
+  Network 面板确认完整 /api/issues 请求 ≤ 2 次（首屏 + 一次变化触发），
+  其余为轻量状态接口；轻量接口响应 < 100ms、体积 < 10KB。
+
+### 验收汇总口径
+
+| 用例组 | 对应优化 | 达标线 | 不达标回滚动作 |
+|---|---|---|---|
+| V1 | P0 | p_s 开启且 DB CPU 增幅 <5% | 关闭 p_s |
+| V2-1/2 | 方案 B | 慢请求隔离 + 定时任务无重复 | 回单 worker |
+| V2-3/4/5 | N+1/缓存/超时 | 见各用例 | 回滚代码（保留回滚开关） |
+| V2-6/V3-1 | 方案 A 池化 | churn <0.1/s，双主一致 | 切回旧锁路径 |
+| V3-2~6 | P2 各项 | 见各用例 | 单项回滚互不影响 |
+
+## 七、风险提示
 
 - uvicorn --workers 改造：多 worker 后进程内定时任务（cleanup.py 兜底回收、
   latency 清理、scene 缓存失效）会多实例并发执行，需逐一确认幂等或加锁，
