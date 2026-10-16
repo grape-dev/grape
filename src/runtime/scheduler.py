@@ -751,22 +751,28 @@ async def _execute_task(task: dict):
 
 
 async def scheduler_loop():
-    """Autopilot 调度主循环——每 60 秒扫描到期任务。"""
+    """Autopilot 调度主循环——每 60 秒扫描到期任务。
+
+    P1-D (Issue #357): Distributed lock ensures only one worker runs the
+    scheduler loop when uvicorn uses --workers N (prevents duplicate task dispatch).
+    """
+    from src.runtime.task_lock import run_with_distributed_lock
     log.info("Autopilot scheduler loop started (60s interval)")
     while True:
         try:
-            tasks = _get_enabled_tasks()
-            for task in tasks:
-                task_id = task["id"]
-                if task_id in _RUNNING_TASKS:
-                    continue
-                with db_lock:
-                    c = db.cursor()
-                    row = c.execute("SELECT last_run_at FROM autopilot_tasks WHERE id=?", (task_id,)).fetchone()
-                    last_run = row[0] if row else ""
-                if _is_cron_due(task["cron"], last_run):
-                    log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")
-                    asyncio.ensure_future(_execute_task(task))
+            async with run_with_distributed_lock("autopilot_scheduler", ttl=120):
+                tasks = _get_enabled_tasks()
+                for task in tasks:
+                    task_id = task["id"]
+                    if task_id in _RUNNING_TASKS:
+                        continue
+                    with db_lock:
+                        c = db.cursor()
+                        row = c.execute("SELECT last_run_at FROM autopilot_tasks WHERE id=?", (task_id,)).fetchone()
+                        last_run = row[0] if row else ""
+                    if _is_cron_due(task["cron"], last_run):
+                        log.info(f"Autopilot: cron due for task {task_id} ('{task['name']}')")
+                        asyncio.ensure_future(_execute_task(task))
         except Exception as e:
             log.warning(f"Autopilot scheduler loop error: {e}")
 

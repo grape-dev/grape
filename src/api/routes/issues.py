@@ -1524,7 +1524,20 @@ def list_repo_issues(owner: str, repo: str,
         it.setdefault("is_subtask_mode", _st.get("is_subtask_mode") or 0)
         evs = group_map.get(str(_num or "")) or []
         it["events_count"] = len(evs)
-        it["latest_event"] = evs[-1] if evs else None
+        # P1-E: Slim latest_event to essential fields (reduce response from ~713KB)
+        _ev = evs[-1] if evs else None
+        if _ev:
+            it["latest_event"] = {
+                "seq": _ev.get("seq"),
+                "status": _ev.get("status"),
+                "title": _ev.get("title"),
+                "created_at": _ev.get("created_at"),
+            }
+        else:
+            it["latest_event"] = None
+        # P1-E: Remove heavy fields not needed in list view (detail page has /issues/{id}/pipeline)
+        it.pop("agent_statuses", None)
+        it.pop("task_description", None)
 
     # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
     pr_items = _query_pr_subscription_events(repo_keys)

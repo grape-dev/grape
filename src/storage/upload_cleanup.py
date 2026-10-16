@@ -167,12 +167,18 @@ def _cleanup_stale_attachments():
 
 
 async def _upload_cleanup_worker(interval: float = _CLEANUP_INTERVAL):
-    """定时清理 worker：启动后等 5 分钟首次执行（避免和启动同步抢资源），之后每 interval 秒。"""
+    """定时清理 worker：启动后等 5 分钟首次执行（避免和启动同步抢资源），之后每 interval 秒。
+
+    P1-D (Issue #357): Distributed lock ensures only one worker executes
+    cleanup when uvicorn runs with --workers N.
+    """
+    from src.runtime.task_lock import run_with_distributed_lock
     await asyncio.sleep(300)  # 启动后 5 分钟首次执行
     while True:
         try:
-            _cleanup_temp_files()
-            _cleanup_stale_attachments()
+            async with run_with_distributed_lock("upload_cleanup", ttl=600):
+                _cleanup_temp_files()
+                _cleanup_stale_attachments()
         except asyncio.CancelledError:
             logger.info("Upload cleanup worker cancelled")
             raise

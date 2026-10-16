@@ -587,7 +587,11 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     4. 创建/复用用户级 devops_pipeline_scene（scope='user', scene_id=custom-{uuid}）
     5. 调 apply_scene 应用场景配置到仓库的 agent_session
     6. 返回 {full_name, scene_id, already_exists, message}
+
+    P1-C (Issue #357): External HTTP calls run in thread pool with 10s timeout
+    to prevent 124s single-request queue blocking. gitcode_login cached 60s.
     """
+    import asyncio
     import uuid
     from src.user.db import get_scene_market_by_id
     from src.session_manager import db, db_lock
@@ -613,6 +617,7 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     # 拿用户的 GitCode login
     # P1-1 返工: 直接调 _req 绕过 get_user_gitcode_login 的 except RuntimeError: return ""，
     # 让原始 401 RuntimeError 穿透到 with_oauth_token 触发刷新重试。
+    # P1-C: Run in thread pool with 10s timeout to avoid blocking event loop.
     from src.user.repo_manager import _req
     def _get_login(token):
         data = _req("GET", "https://gitcode.com/api/v5/user", token)
@@ -620,7 +625,13 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
         if not login:
             raise RuntimeError(f"GitCode API GET /user returned empty login (401): token may be invalid")
         return login
-    gitcode_login = with_oauth_token(user, "gitcode", _get_login)
+    try:
+        gitcode_login = await asyncio.wait_for(
+            asyncio.to_thread(with_oauth_token, user, "gitcode", _get_login),
+            timeout=10,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail={"code": 504, "message": "获取 GitCode 用户身份超时，请重试"})
     if not gitcode_login:
         raise HTTPException(status_code=502, detail={"code": 502, "message": "无法获取当前用户 GitCode 身份"})
 
@@ -657,11 +668,18 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     else:
         # 仓库不存在 → 调 create_from_template（建仓库+推代码+托管）
         # 如果仓库在 GitCode 上存在但 user_repos 未同步，push 可能失败——不视为致命错误
+        # P1-C: Wrap external HTTP call with 30s timeout (create_from_template is async
+        # but internally calls blocking GitCode API; the timeout caps total wait).
         try:
             from src.api.routes.templates import create_from_template, CreateTemplateRequest
-            result = await create_from_template(
-                CreateTemplateRequest(template_id=scene["recommended_template"]), user)
+            result = await asyncio.wait_for(
+                create_from_template(
+                    CreateTemplateRequest(template_id=scene["recommended_template"]), user),
+                timeout=30,
+            )
             full_name = result.get("full_name", full_name)
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=504, detail={"code": 504, "message": "创建模板仓库超时，请重试"})
         except HTTPException as e:
             detail = e.detail if isinstance(e.detail, str) else (e.detail.get("message", "") if isinstance(e.detail, dict) else str(e.detail))
             # 仓库已存在有内容 / 源模板不存在 / push 失败 → 仓库已创建，继续托管+应用场景

@@ -346,10 +346,15 @@ async def _skill_sync_worker(interval: float = 1800.0):
 
     调用 sync_official_skills() 完成完整同步：
     远程下载 → DB 同步 → OBS 同步（每步独立 try/except）。
+
+    P1-D (Issue #357): Distributed lock ensures only one worker executes
+    sync when uvicorn runs with --workers N.
     """
+    from src.runtime.task_lock import run_with_distributed_lock
     while True:
         try:
-            await sync_official_skills()
+            async with run_with_distributed_lock("skill_sync", ttl=1800):
+                await sync_official_skills()
         except asyncio.CancelledError:
             logger.info("skill sync worker cancelled")
             raise

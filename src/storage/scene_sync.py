@@ -518,10 +518,16 @@ async def sync_official_scenes():
 
 
 async def _scene_sync_worker(interval: float = 1800.0):
-    """定时同步 worker：启动即执行，之后每 interval 秒。"""
+    """定时同步 worker：启动即执行，之后每 interval 秒。
+
+    P1-D (Issue #357): Distributed lock ensures only one worker executes
+    sync when uvicorn runs with --workers N.
+    """
+    from src.runtime.task_lock import run_with_distributed_lock
     while True:
         try:
-            await sync_official_scenes()
+            async with run_with_distributed_lock("scene_sync", ttl=1800):
+                await sync_official_scenes()
         except asyncio.CancelledError:
             logger.info("scene sync worker cancelled")
             raise
