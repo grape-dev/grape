@@ -43,16 +43,16 @@ def cleanup_old_agent_tasks_fields() -> int:
                 c.execute(
                     f"SELECT id FROM agent_tasks "
                     f"WHERE status='completed' AND created_at < {time_expr} "
-                    f"AND (prompt IS NOT NULL OR result_text IS NOT NULL OR skill_files IS NOT NULL) "
+                    f"AND (prompt != '' OR result_text != '' OR skill_files IS NOT NULL) "
                     f"LIMIT {_BATCH_SIZE}"
                 )
                 ids = [r[0] for r in c.fetchall()]
                 if not ids:
                     break
-                # Nullify large fields for these IDs
+                # Nullify large fields for these IDs (prompt is NOT NULL, use empty string)
                 placeholders = ",".join("?" * len(ids))
                 c.execute(
-                    f"UPDATE agent_tasks SET prompt=NULL, result_text=NULL, skill_files=NULL "
+                    f"UPDATE agent_tasks SET prompt='', result_text='', skill_files=NULL "
                     f"WHERE id IN ({placeholders})",
                     ids,
                 )
