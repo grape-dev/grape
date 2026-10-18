@@ -758,3 +758,63 @@ class MySQLCompatDB:
             stmt = stmt.strip()
             if stmt:
                 self.execute(stmt)
+
+    def dedicated_connection(self):
+        """建立一条**池外**专用连接（Issue #366/#365 修复：迁移锁专用）。
+
+        不从池借出——池借出对象的 close() 语义是"还池"，持锁连接会以 Sleep 驻留池中，
+        而 MySQL 的 GET_LOCK 是**连接级**锁：连接不断开锁就不释放 → 下次启动排队等满
+        timeout（实测 174/79 每次重启卡住需人工 KILL）。
+
+        调用方用完必须关闭（建议 with）；真断开即释放其上持有的所有连接级状态
+        （命名锁、临时表、用户变量）。接口同 sqlite3.Connection 的最小子集。
+        """
+        return DedicatedConnection(pymysql.connect(**_dedicated_connect_params(self._cfg)))
+
+
+def _dedicated_connect_params(cfg: dict) -> dict:
+    """池外专用连接的参数（与 _raw_cursor 的 per-thread 回退路径保持一致）。"""
+    return {
+        "host": cfg.get("host", "127.0.0.1"),
+        "port": cfg.get("port", 3306),
+        "user": cfg.get("user", ""),
+        "password": cfg.get("password", ""),
+        "database": cfg.get("database", ""),
+        "charset": cfg.get("charset", "utf8mb4"),
+        "autocommit": False,
+        "connect_timeout": 10,
+    }
+
+
+class DedicatedConnection:
+    """池外专用连接：包装一条独立于连接池的裸 pymysql 连接。
+
+    刻意最小：cursor()/close()/closed + 上下文管理器。SQL **不做方言翻译**，
+    调用方必须传 MySQL 原生语句。
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+        self.closed = False
+
+    def cursor(self):
+        if self.closed:
+            raise RuntimeError("DedicatedConnection is closed")
+        return self._conn.cursor()
+
+    def close(self):
+        """真断开（幂等）：连接断开即由 MySQL 释放其上持有的所有命名锁。"""
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self._conn.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close()
+        return False

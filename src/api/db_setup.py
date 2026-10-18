@@ -1832,115 +1832,6 @@ def _ensure_whitelist_columns():
     except Exception as e:
         log.warning(f"_ensure_whitelist_columns failed: {e}")
 
-
-def _ensure_case_insensitive_indexes():
-    """Issue #348: 大小写不敏感唯一约束（DB 层纵深防御）。
-
-    SQLite：表达式索引 CREATE UNIQUE INDEX ... ON table(LOWER(col)) WHERE ...
-    MySQL：生成列 + 唯一索引。空串用 NULLIF 转为 NULL 避免多条空串冲突。
-
-    所有创建操作幂等（IF NOT EXISTS / 检查已存在），失败时记 WARNING 不崩溃。
-    """
-    from src.session_manager import db, db_lock
-    is_mysql = False
-    try:
-        from src.session_manager import _is_mysql_backend
-        is_mysql = _is_mysql_backend()
-    except Exception:
-        pass
-
-    if not is_mysql:
-        # SQLite: 表达式索引直接支持
-        _sqlite_indexes = [
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_grape_accounts_username_lower ON grape_accounts(LOWER(username))",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_accounts_username_lower ON admin_accounts(LOWER(username))",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_gitcode_lower ON login_whitelist(LOWER(gitcode_username)) WHERE gitcode_username IS NOT NULL",
-            "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_github_lower ON login_whitelist(LOWER(github_username)) WHERE github_username != ''",
-        ]
-        for sql in _sqlite_indexes:
-            try:
-                with db_lock:
-                    db.execute(sql)
-                    db.commit()
-            except Exception as e:
-                log.warning(f"_ensure_case_insensitive_indexes (SQLite): {e}")
-        return
-
-    # MySQL: 生成列 + 唯一索引
-    # NULLIF(col, '') 把空串转为 NULL, NULL 不参与唯一约束 → 多条空串不冲突
-    # gitcode_username DEFAULT NULL → LOWER(NULL) = NULL → 天然不冲突
-    _mysql_targets = [
-        # (table, column, gen_col_name, gen_expr)
-        ("grape_accounts", "username", "username_lower", "LOWER(username)"),
-        ("admin_accounts", "username", "username_lower", "LOWER(username)"),
-        ("login_whitelist", "gitcode_username", "gitcode_username_lower", "LOWER(gitcode_username)"),
-        ("login_whitelist", "github_username", "github_username_lower", "LOWER(NULLIF(github_username, ''))"),
-    ]
-    for table, col, gen_col, gen_expr in _mysql_targets:
-        idx_name = f"uq_{table}_{gen_col}"
-        try:
-            with db_lock:
-                c = db.cursor()
-                # 检查生成列是否已存在
-                c.execute(
-                    "SELECT COUNT(*) FROM information_schema.columns "
-                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
-                    (table, gen_col),
-                )
-                if c.fetchone()[0] == 0:
-                    c.execute(
-                        f"ALTER TABLE {table} ADD COLUMN {gen_col} VARCHAR(128) AS ({gen_expr}) STORED"
-                    )
-                    db.commit()
-                    log.info(f"Added generated column {table}.{gen_col}")
-                # 检查索引是否已存在
-                c.execute(
-                    "SELECT COUNT(*) FROM information_schema.statistics "
-                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
-                    (table, idx_name),
-                )
-                if c.fetchone()[0] == 0:
-                    c.execute(f"CREATE UNIQUE INDEX {idx_name} ON {table}({gen_col})")
-                    db.commit()
-                    log.info(f"Created case-insensitive index {idx_name}")
-        except Exception as e:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-            log.warning(f"_ensure_case_insensitive_indexes: {table}.{col} failed: {e}")
-
-
-def _migrate_allow_signup_default():
-    """向前兼容迁移：升级部署时保持原有注册行为。
-
-    基线 signup_policy 空白名单 → return True（允许注册）。
-    v4 改为 return _is_allow_signup()，未配置 allow_signup meta 时返回 False。
-
-    如果 allow_signup meta 未设置且 grape_accounts 表已有数据（升级部署），
-    自动设置 allow_signup='true' 保持原有行为。新部署（grape_accounts 为空）
-    不设置，保持默认关闭。
-
-    注意：不能用 admin_accounts 判断——_seed_admin_accounts 先于此函数执行，
-    新部署也会插入 admin 账号导致 admin_count>0 误判为升级。
-    """
-    try:
-        from src.user.db import get_meta_value, set_meta_value
-        # get_meta_value 在 key 不存在时返回 ""（非 None），用 truthy 检查
-        existing = get_meta_value("allow_signup")
-        if existing:
-            return  # 已设置，不覆盖
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT COUNT(*) FROM grape_accounts")
-            user_count = c.fetchone()[0]
-        if user_count > 0:
-            set_meta_value("allow_signup", "1")
-            log.info("_migrate_allow_signup_default: upgrade detected (grape_accounts not empty), set allow_signup=1 for backward compat")
-    except Exception as e:
-        log.warning(f"_migrate_allow_signup_default failed: {e}")
-
-
 def _init_scene_category_data():
     """初始化 scene_category 表的 6 条分类数据（幂等）。
 
@@ -2207,15 +2098,15 @@ def _seed_admin_accounts():
       admin_pwd_initial  = 1（仍为默认密码，前端引导改密；改密后置 0）
     - admin 账号与 user_accounts 完全独立，不影响用户登录
     """
+    import hashlib
     from src.user.db import get_meta_value, set_meta_value
-    from src.auth.password import hash_password as _hash_admin_pw_bcrypt
     _default_pwd = os.environ.get("GRAPE_ADMIN_PASSWORD") or "admin123"
     try:
         with db_lock:
             c = db.cursor()
             c.execute("SELECT COUNT(*) FROM admin_accounts")
             if c.fetchone()[0] == 0:
-                _pw_hash = _hash_admin_pw_bcrypt(_default_pwd)
+                _pw_hash = hashlib.sha256(_default_pwd.encode()).hexdigest()
                 c.execute("INSERT INTO admin_accounts (username, password_hash, is_super, token_version) VALUES (?,?,1,0)",
                           ("admin", _pw_hash))
                 db.commit()
@@ -2228,6 +2119,242 @@ def _seed_admin_accounts():
         log.warning(f"Seed admin account failed: {e}")
 
 
+# ===== 迁移锁（2026-10-18 修复 + 采纳 MR#516 可取之处）=====
+# GET_LOCK 是 MySQL **连接级**锁：获取与释放必须在同一条物理连接上。
+# 旧路径借的是连接池的连接：SELECT 类语句执行后自动 commit 把连接还池
+# （src/mysql_compat.py 的 _raw_cursor 借还逻辑），持锁连接留在池里 Sleep，
+# 之后 RELEASE_LOCK 落在重借的另一条连接上（返回 0，静默失败）→ 锁泄漏：
+# 下次启动（哪怕另一台主）在 GET_LOCK 上等满 timeout，实测 174/79 每次重启
+# 都卡、需人工 KILL 解围。修复：锁全程绑一条**池外专用连接**
+# （MySQLCompatDB.dedicated_connection），finally 先显式 RELEASE 再 close 兜底
+# ——连接断开即由 MySQL 释放其上所有命名锁，进程崩溃也不泄漏。
+_MIGRATE_LOCK_SLICE = 10                                      # 单次 GET_LOCK 分片（秒）：分片才能中途告警
+_MIGRATE_LOCK_TIMEOUT_ENV = "GRAPE_MIGRATE_LOCK_TIMEOUT"      # 等锁总上限（秒，默认 60）
+_MIGRATE_LOCK_WAIT_WARN_ENV = "GRAPE_MIGRATE_LOCK_WAIT_WARN"  # 等锁告警阈值（秒，默认 min(30, 上限/2)）
+
+
+def _migrate_lock_timeout() -> float:
+    """等锁总上限（秒），env 可配，默认 60（旧行为 300s 太长：被占时白卡 5 分钟）。"""
+    try:
+        v = float(os.environ.get(_MIGRATE_LOCK_TIMEOUT_ENV, "60") or 60)
+        return v if v > 0 else 60.0
+    except (TypeError, ValueError):
+        return 60.0
+
+
+def _migrate_lock_warn_threshold(total: float) -> float:
+    """等锁中途告警阈值（秒）：env 可配，默认 min(30, max(5, 上限/2))。"""
+    try:
+        v = float(os.environ.get(_MIGRATE_LOCK_WAIT_WARN_ENV, "") or 0)
+    except (TypeError, ValueError):
+        v = 0.0
+    if v <= 0:
+        v = min(30.0, max(5.0, total / 2.0))
+    return v
+
+
+def _query_lock_holder_info(dconn, lock_name: str) -> str:
+    """持锁连接的 processlist 信息（performance_schema 可用时；不可用返回空串）。
+
+    ⚠️ 只取 LOCK_STATUS='GRANTED'：等锁方（PENDING 行）也在 metadata_locks 里，
+    不过滤会把"正在等锁的人"误报成"持锁者"（2026-10-18 采纳 MR#516 的做法）。
+    """
+    try:
+        cur = dconn.cursor()
+        cur.execute(
+            "SELECT t.PROCESSLIST_ID, t.PROCESSLIST_HOST, t.PROCESSLIST_USER, "
+            "t.PROCESSLIST_DB, t.PROCESSLIST_TIME, t.PROCESSLIST_STATE "
+            "FROM performance_schema.metadata_locks ml "
+            "JOIN performance_schema.threads t ON ml.OWNER_THREAD_ID = t.THREAD_ID "
+            "WHERE ml.OBJECT_TYPE = 'USER LEVEL LOCK' AND ml.OBJECT_NAME = %s "
+            "AND ml.LOCK_STATUS = 'GRANTED'",
+            (lock_name,),
+        )
+        rows = cur.fetchall() or []
+        return "; ".join(
+            "processlist_id=%s host=%s user=%s db=%s time=%ss state=%s"
+            % (r[0], r[1], r[2], r[3], r[4], r[5]) for r in rows
+        )
+    except Exception:
+        return ""
+
+
+def _acquire_migrate_lock(dconn, name: str):
+    """在专用连接上获取迁移锁：分片等待 + 中途阈值告警（采纳 MR#516）。
+
+    返回 (acquired, waited)。总等待达上限仍未获锁 → (False, waited)，由调用方
+    打 ERROR 后**继续迁移**（迁移幂等），并把持锁者信息留在日志里便于人工解围。
+    """
+    total = _migrate_lock_timeout()
+    threshold = _migrate_lock_warn_threshold(total)
+    waited = 0.0
+    next_warn = threshold
+    while waited < total:
+        slice_s = min(_MIGRATE_LOCK_SLICE, total - waited)
+        cur = dconn.cursor()
+        cur.execute("SELECT GET_LOCK(%s, %s)", (name, int(slice_s)))
+        row = cur.fetchone()
+        acquired = bool(row and row[0] == 1)
+        waited += slice_s
+        if acquired:
+            if waited > _MIGRATE_LOCK_SLICE:      # 有一次以上等待 → 记下等了多久
+                log.info(f"migrate lock acquired: {name}（等待 {waited:.0f}s 后拿到）")
+            else:
+                log.info(f"migrate lock acquired: {name}（专用连接，finally 显式释放）")
+            return True, waited
+        if waited >= next_warn and waited < total:
+            holder = _query_lock_holder_info(dconn, name)
+            extra = f" holder: {holder}" if holder else " (performance_schema 不可用，无持锁者信息)"
+            log.warning(f"migrate lock '{name}' 等待中 {waited:.0f}s（阈值 {threshold:.0f}s）{extra}")
+            next_warn = waited + threshold
+    return False, waited
+
+
+def _run_all_migrations():
+    """init_database 的迁移段（顺序与历史一致；MySQL/SQLite 共用，避免两处清单漂移）。"""
+    _tasks_to_issue_rename_pre_create()
+    _create_tables()
+    _seed_admin_accounts()
+    _migrate_tables()
+    _create_indexes()
+    _seed_from_json()
+    _seed_event_action_filter()
+    _align_agent_enable()
+    _cleanup_stale_meta()
+    _cleanup_chat_shared_worker_runtime()
+    _migrate_whitelist_from_file()
+    _ensure_whitelist_columns()
+    _ensure_case_insensitive_indexes()   # Issue #348: 大小写不敏感唯一约束（dev 侧补充，生产未合）
+    _migrate_allow_signup_default()      # allow_signup 默认值迁移（dev 侧补充，生产未合）
+    _cleanup_old_latency_logs()
+    # ===== Issue-11: DevOps 市场数据初始化 =====
+    _init_scene_category_data()
+    _init_scene_market_data()
+    _init_scene_skill_ref()
+    _init_skill_featured()
+    # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
+    _init_skill_category_data()
+    _backfill_skill_category_id()
+    # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
+    try:
+        _backfill_scene_display_names()
+    except Exception as _e:
+        log.warning(f"Scene display_name backfill failed: {_e}")
+    # ===== 知识库去重 + ref 迁移（每次启动执行，幂等）=====
+    try:
+        _migrate_knowledge_dedup_and_ref()
+    except Exception as _e:
+        log.warning(f"Issue #67 knowledge migration failed: {_e}")
+
+
+def _ensure_case_insensitive_indexes():
+    """Issue #348: 大小写不敏感唯一约束（DB 层纵深防御）。
+
+    SQLite：表达式索引 CREATE UNIQUE INDEX ... ON table(LOWER(col)) WHERE ...
+    MySQL：生成列 + 唯一索引。空串用 NULLIF 转为 NULL 避免多条空串冲突。
+
+    所有创建操作幂等（IF NOT EXISTS / 检查已存在），失败时记 WARNING 不崩溃。
+    """
+    from src.session_manager import db, db_lock
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+
+    if not is_mysql:
+        # SQLite: 表达式索引直接支持
+        _sqlite_indexes = [
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_grape_accounts_username_lower ON grape_accounts(LOWER(username))",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_admin_accounts_username_lower ON admin_accounts(LOWER(username))",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_gitcode_lower ON login_whitelist(LOWER(gitcode_username)) WHERE gitcode_username IS NOT NULL",
+            "CREATE UNIQUE INDEX IF NOT EXISTS uq_login_whitelist_github_lower ON login_whitelist(LOWER(github_username)) WHERE github_username != ''",
+        ]
+        for sql in _sqlite_indexes:
+            try:
+                with db_lock:
+                    db.execute(sql)
+                    db.commit()
+            except Exception as e:
+                log.warning(f"_ensure_case_insensitive_indexes (SQLite): {e}")
+        return
+
+    # MySQL: 生成列 + 唯一索引
+    # NULLIF(col, '') 把空串转为 NULL, NULL 不参与唯一约束 → 多条空串不冲突
+    # gitcode_username DEFAULT NULL → LOWER(NULL) = NULL → 天然不冲突
+    _mysql_targets = [
+        # (table, column, gen_col_name, gen_expr)
+        ("grape_accounts", "username", "username_lower", "LOWER(username)"),
+        ("admin_accounts", "username", "username_lower", "LOWER(username)"),
+        ("login_whitelist", "gitcode_username", "gitcode_username_lower", "LOWER(gitcode_username)"),
+        ("login_whitelist", "github_username", "github_username_lower", "LOWER(NULLIF(github_username, ''))"),
+    ]
+    for table, col, gen_col, gen_expr in _mysql_targets:
+        idx_name = f"uq_{table}_{gen_col}"
+        try:
+            with db_lock:
+                c = db.cursor()
+                # 检查生成列是否已存在
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
+                    (table, gen_col),
+                )
+                if c.fetchone()[0] == 0:
+                    c.execute(
+                        f"ALTER TABLE {table} ADD COLUMN {gen_col} VARCHAR(128) AS ({gen_expr}) STORED"
+                    )
+                    db.commit()
+                    log.info(f"Added generated column {table}.{gen_col}")
+                # 检查索引是否已存在
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND INDEX_NAME=%s",
+                    (table, idx_name),
+                )
+                if c.fetchone()[0] == 0:
+                    c.execute(f"CREATE UNIQUE INDEX {idx_name} ON {table}({gen_col})")
+                    db.commit()
+                    log.info(f"Created case-insensitive index {idx_name}")
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            log.warning(f"_ensure_case_insensitive_indexes: {table}.{col} failed: {e}")
+
+
+def _migrate_allow_signup_default():
+    """向前兼容迁移：升级部署时保持原有注册行为。
+
+    基线 signup_policy 空白名单 → return True（允许注册）。
+    v4 改为 return _is_allow_signup()，未配置 allow_signup meta 时返回 False。
+
+    如果 allow_signup meta 未设置且 grape_accounts 表已有数据（升级部署），
+    自动设置 allow_signup='true' 保持原有行为。新部署（grape_accounts 为空）
+    不设置，保持默认关闭。
+
+    注意：不能用 admin_accounts 判断——_seed_admin_accounts 先于此函数执行，
+    新部署也会插入 admin 账号导致 admin_count>0 误判为升级。
+    """
+    try:
+        from src.user.db import get_meta_value, set_meta_value
+        # get_meta_value 在 key 不存在时返回 ""（非 None），用 truthy 检查
+        existing = get_meta_value("allow_signup")
+        if existing:
+            return  # 已设置，不覆盖
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM grape_accounts")
+            user_count = c.fetchone()[0]
+        if user_count > 0:
+            set_meta_value("allow_signup", "1")
+            log.info("_migrate_allow_signup_default: upgrade detected (grape_accounts not empty), set allow_signup=1 for backward compat")
+    except Exception as e:
+        log.warning(f"_migrate_allow_signup_default failed: {e}")
+
+
 def init_database():
     """初始化所有新表(幂等),启动时调用"""
     # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
@@ -2238,157 +2365,65 @@ def init_database():
     except Exception as _pb:
         log.warning(f"DB backup prune skipped: {_pb}")
 
-    # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
-    # SQLite 不支持 GET_LOCK，跳过（单实例不需要）
-    # ⚠️ 锁名按数据库隔离（2026-10-16 修复）：GET_LOCK 是 MySQL 服务器级全局锁，
-    #    多环境共用同一 MySQL 实例（如 192.168.0.59 上的 dev/test/admin/ljt 多库）
-    #    时，固定的 'grape_migrate' 锁名会让不同环境的实例互相排队——今天实测
-    #    0007 重启等待 210s+、最多 4 个跨环境实例同时挂起在 GET_LOCK 上。
-    #    锁名追加库名后各环境互不干扰；同库多实例（真正的迁移竞争）仍然互斥。
-    #    兼容性：滚动升级期间新旧版本锁名不同，可能同库两个实例同时迁移——
-    #    迁移逻辑本身幂等（_ensure_column/CREATE TABLE IF NOT EXISTS），风险可控。
-    # ⚠️ 锁必须绑在**独立连接**上（2026-10-18 修复）：池化连接在 commit/rollback 时
-    #    会被归还（src/mysql_compat.py 的 _raw_cursor 借还逻辑），之后 RELEASE_LOCK
-    #    会打到另一个物理连接上 → 持锁连接留在池里 Sleep → 锁泄漏：下一次启动
-    #    （哪怕另一台主）在 GET_LOCK 上等满 300s。现在专用连接持锁（迁移体照旧走池），
-    #    finally 先显式 RELEASE、再 close 兜底；进程崩溃/被 kill 时连接一断锁自动释放。
+    # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移；SQLite 单实例不需要锁
     from src.mysql_compat import get_db_backend
     if get_db_backend() == "mysql":
+        # 锁名按数据库隔离（2026-10-16）：GET_LOCK 是 MySQL 服务器级全局锁，多环境共用同一
+        # MySQL 实例时固定锁名会让不同环境互相排队（实测 0007 重启等待 210s+）。追加库名后
+        # 各环境互不干扰，同库多实例（真正的迁移竞争）仍互斥。滚动升级期间新旧锁名不同，
+        # 可能同库两实例同时迁移——迁移幂等，风险可控。
         try:
             from src.mysql_compat import mysql_config
-            _cfg = mysql_config()
-            _lock_name = "grape_migrate_" + (_cfg.get("database") or "default")
+            _lock_name = "grape_migrate_" + (mysql_config().get("database") or "default")
         except Exception:
-            _cfg = None
             _lock_name = "grape_migrate"
-        _lock_conn = None
-        _lock_cur = None
-        _lock_acquired = False
-        try:
-            import pymysql
-            if not _cfg:
-                raise RuntimeError("mysql_config() 不可用（拿不到库连接参数）")
-            _lock_conn = pymysql.connect(
-                host=_cfg.get("host", "127.0.0.1"),
-                port=int(_cfg.get("port", 3306) or 3306),
-                user=_cfg.get("user", ""),
-                password=_cfg.get("password", ""),
-                database=_cfg.get("database", ""),
-                charset=_cfg.get("charset", "utf8mb4"),
-                autocommit=True,
-                connect_timeout=10,
-            )
-            _lock_cur = _lock_conn.cursor()
-            _lock_wait = int(os.environ.get("GRAPE_MIGRATE_LOCK_TIMEOUT", "60") or 60)
-            _lock_cur.execute("SELECT GET_LOCK(%s, %s)", (_lock_name, _lock_wait))
-            _got = _lock_cur.fetchone()
-            _lock_acquired = bool(_got and _got[0] == 1)
-            if _lock_acquired:
-                log.info(f"migrate lock acquired: {_lock_name}（专用连接，finally 显式释放）")
-            else:
-                log.warning(f"migrate lock NOT acquired within {_lock_wait}s: {_lock_name}，继续迁移（幂等）")
-                try:
-                    _lock_cur.execute(
-                        "SELECT p.id, p.host, p.command, p.time FROM performance_schema.metadata_locks l "
-                        "JOIN performance_schema.threads t ON t.thread_id = l.owner_thread_id "
-                        "JOIN information_schema.processlist p ON p.id = t.processlist_id "
-                        "WHERE l.object_type='USER LEVEL LOCK' AND l.object_name=%s",
-                        (_lock_name,),
-                    )
-                    for _h in _lock_cur.fetchall():
-                        log.warning(f"  migrate lock holder: id={_h[0]} host={_h[1]} cmd={_h[2]} "
-                                    f"time={_h[3]}s（可 KILL 该连接解围）")
-                except Exception as _le:
-                    log.debug(f"  migrate lock holder query unavailable: {_le}")
-        except Exception as _lock_err:
-            log.error(f"migrate lock UNAVAILABLE (dedicated conn failed: {_lock_err})；"
-                      f"以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
-        with db_lock:
+        # 锁必须绑**池外专用连接**（2026-10-18）：池化连接会被 commit 还池，锁随之泄漏
+        _dconn = None
+        _factory = getattr(db, "dedicated_connection", None)
+        if _factory is None:
+            log.error("migrate lock UNAVAILABLE (db 后端为 mysql 但无 dedicated_connection 支持)；"
+                      "以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
+        else:
             try:
-                # 迁移逻辑在同一个 with db_lock 块内——同一个连接
-                # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
-                _tasks_to_issue_rename_pre_create()
-                _create_tables()
-                _seed_admin_accounts()
-                _migrate_tables()
-                _create_indexes()
-                _seed_from_json()
-                _seed_event_action_filter()
-                _align_agent_enable()
-                _cleanup_stale_meta()
-                _cleanup_chat_shared_worker_runtime()
-                _migrate_whitelist_from_file()
-                _ensure_whitelist_columns()
-                _ensure_case_insensitive_indexes()
-                _migrate_allow_signup_default()
-                _cleanup_old_latency_logs()
-                # ===== Issue-11: DevOps 市场数据初始化 =====
-                _init_scene_category_data()
-                _init_scene_market_data()
-                _init_scene_skill_ref()
-                _init_skill_featured()
-                # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
-                _init_skill_category_data()
-                _backfill_skill_category_id()
-                # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
+                _dconn = _factory()
+            except Exception as _lock_err:
+                # 专用连接建不起来（DB 闪断等）：接下来同库多实例可能并发迁移，
+                # 属异常态而非正常降级，用 ERROR 让人注意到
+                log.error(f"migrate lock UNAVAILABLE (dedicated conn failed: {_lock_err})；"
+                          f"以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
+        if _dconn is None:
+            with db_lock:
+                _run_all_migrations()
+        else:
+            _acquired = False
+            try:
                 try:
-                    _backfill_scene_display_names()
-                except Exception as _e:
-                    log.warning(f"Scene display_name backfill failed: {_e}")
-                # ===== 知识库去重 + ref 迁移（每次启动执行，幂等）=====
+                    _acquired, _waited = _acquire_migrate_lock(_dconn, _lock_name)
+                except Exception as _ae:
+                    log.error(f"migrate lock acquire failed: {_ae}；以无锁方式继续迁移（迁移幂等）")
+                if not _acquired:
+                    _holder = _query_lock_holder_info(_dconn, _lock_name)
+                    log.error(f"migrate lock NOT acquired: {_lock_name}，继续迁移（迁移幂等）"
+                              + (f"；holder: {_holder}" if _holder else "（无持锁者信息）"))
                 try:
-                    _migrate_knowledge_dedup_and_ref()
-                except Exception as _e:
-                    log.warning(f"Issue #67 knowledge migration failed: {_e}")
-            finally:
-                # 显式释放（让正常路径的日志可读），再 close 兜底：
-                # 连接关掉时 MySQL 会释放该连接持有的所有命名锁，进程崩溃也不例外
-                if _lock_conn is not None:
-                    if _lock_acquired and _lock_cur is not None:
+                    with db_lock:
+                        _run_all_migrations()
+                finally:
+                    # 显式释放（正常路径日志可读），close 兜底：连接一断 MySQL 就放锁
+                    if _acquired:
                         try:
-                            _lock_cur.execute("SELECT RELEASE_LOCK(%s)", (_lock_name,))
-                            log.info(f"migrate lock released: {_lock_name}")
+                            _cur = _dconn.cursor()
+                            _cur.execute("SELECT RELEASE_LOCK(%s)", (_lock_name,))
+                            _r = _cur.fetchone()
+                            log.info(f"migrate lock released: {_lock_name}"
+                                     f"（RELEASE_LOCK={_r[0] if _r else None}）")
                         except Exception as _re:
                             log.warning(f"migrate lock release failed（连接 close 会兜底释放）: {_re}")
-                    try:
-                        _lock_conn.close()
-                    except Exception:
-                        pass
+            finally:
+                _dconn.close()
     else:
         # SQLite——单实例不需要锁
-        _tasks_to_issue_rename_pre_create()
-        _create_tables()
-        _seed_admin_accounts()
-        _migrate_tables()
-        _create_indexes()
-        _seed_from_json()
-        _seed_event_action_filter()
-        _align_agent_enable()
-        _cleanup_stale_meta()
-        _cleanup_chat_shared_worker_runtime()
-        _migrate_whitelist_from_file()
-        _ensure_whitelist_columns()
-        _ensure_case_insensitive_indexes()
-        _migrate_allow_signup_default()
-        _cleanup_old_latency_logs()
-        # ===== Issue-11: DevOps 市场数据初始化 =====
-        _init_scene_category_data()
-        _init_scene_market_data()
-        _init_scene_skill_ref()
-        _init_skill_featured()
-        # ===== Issue #179: skill 分类表初始化 + category_id 回填 =====
-        _init_skill_category_data()
-        _backfill_skill_category_id()
-        # ===== Issue-39: 场景 display_name 回填（market 数据就绪后再回填）=====
-        try:
-            _backfill_scene_display_names()
-        except Exception as _e:
-            log.warning(f"Scene display_name backfill failed: {_e}")
-        # ===== Issue #67: 知识库优化迁移 =====
-        try:
-            _migrate_knowledge_dedup_and_ref()
-        except Exception as _e:
-            log.warning(f"Issue #67 knowledge migration failed: {_e}")
+        _run_all_migrations()
     # MySQL with session_manager
 
 def _migrate_knowledge_dedup_and_ref():
