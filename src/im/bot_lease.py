@@ -25,6 +25,10 @@ def _future(seconds: int):
 
 
 class BotLeaseStore:
+    # 心跳"未来值"容差（秒）：晚于 now+该值的心跳一律不算活（覆盖主机时钟漂移；
+    # 历史 CST 写法落在 UTC 未来 +8h，远超此容差 → 被排除，见 _heartbeat_window）
+    FUTURE_TOLERANCE_SEC = 60.0
+
     def __init__(self, instance_id: str, ttl: int = BOT_LEASE_TTL,
                  renew_interval: int = BOT_LEASE_RENEW_INTERVAL,
                  sweep_interval: int = BOT_LEASE_SWEEP_INTERVAL):
@@ -221,52 +225,81 @@ class BotLeaseStore:
     # ── 实例注册表 / 心跳（cluster-im-lease-stability-design.md §2.1）──
 
     def heartbeat(self, hostname: str = "", ip: str = "") -> None:
-        """上报本实例心跳（UPSERT grape_im_instance），供环 owner 计算与接管判定。"""
+        """上报本实例心跳（UPSERT grape_im_instance），供环 owner 计算与接管判定。
+
+        **时间基准必须与读侧一致**：`list_active_instances` 用 Python 的 UTC 计算 cutoff，
+        所以这里两个后端都写 **UTC**。历史上 MySQL 分支用 `NOW()`（服务器本地时间，CST=UTC+8），
+        导致存进去的值比读侧 cutoff 领先 8 小时 → 所有历史实例行永远"存活" → 一致性哈希环
+        被幽灵实例占满 → 真正在跑的实例永远算不到归属、**bot 永远不连接**（IM 与告警通知全哑）。
+        改回 UTC 后两个后端与读侧统一。
+        """
         try:
+            from datetime import datetime, timezone
+
             from src.session_manager import db, db_lock
+            _ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
             with db_lock:
                 c = db.cursor()
-                # MySQL 后端无 ON CONFLICT（SQLite 方言），等价翻译为
-                # ON DUPLICATE KEY UPDATE（instance_id 唯一键）；excluded.x → VALUES(x)。
-                # 实测 2026-10-12：不翻译时 MySQL 1064，心跳每 10s 刷 warning、
-                # grape_im_instance 永远空表 → lease 环 owner 计算退化为单实例。
                 from src.session_manager import _is_mysql_backend
                 if _is_mysql_backend():
                     c.execute(
-                        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) "
-                        "VALUES (?,?,?,1) "
+                        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled, last_heartbeat) "
+                        "VALUES (?,?,?,1,?) "
                         "ON DUPLICATE KEY UPDATE "
-                        "last_heartbeat=CAST(NOW() AS CHAR), hostname=COALESCE(VALUES(hostname), hostname), "
+                        "last_heartbeat=VALUES(last_heartbeat), hostname=COALESCE(VALUES(hostname), hostname), "
                         "ip=COALESCE(VALUES(ip), ip), im_enabled=1",
-                        (self.instance_id, hostname, ip),
+                        (self.instance_id, hostname, ip, _ts),
                     )
                 else:
                     c.execute(
-                        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled) "
-                        "VALUES (?,?,?,1) "
+                        "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled, last_heartbeat) "
+                        "VALUES (?,?,?,1,?) "
                         "ON CONFLICT(instance_id) DO UPDATE SET "
-                        "last_heartbeat=datetime('now'), hostname=COALESCE(excluded.hostname, hostname), "
+                        "last_heartbeat=excluded.last_heartbeat, hostname=COALESCE(excluded.hostname, hostname), "
                         "ip=COALESCE(excluded.ip, ip), im_enabled=1",
-                        (self.instance_id, hostname, ip),
+                        (self.instance_id, hostname, ip, _ts),
                     )
                 db.commit()
         except Exception as e:
             log.warning(f"[lease] heartbeat error: {e}")
 
+    def _heartbeat_window(self, timeout: float, now_dt=None):
+        """心跳有效窗口 (下界, 上界)，都是 UTC 口径的本地时间串（各后端可字符串比较）。
+
+        下界 = now - timeout（原有语义：多久没心跳算失联）。
+        上界 = now + FUTURE_TOLERANCE_SEC（**2026-10-18 加固**）：历史/未修实例曾用 MySQL 本地时间
+        （CST=UTC+8）写 last_heartbeat，那些值在 UTC 视角下"落在未来"，只判下界会让它们继续被当成
+        活实例占住一致性哈希环（部署后最长残留 ≈8h+timeout；滚动升级期间未修实例仍在写 CST）。
+        60s 容差用于覆盖主机间的正常时钟漂移。
+        """
+        from datetime import datetime, timezone, timedelta
+        now = (now_dt or datetime.now(timezone.utc)).replace(tzinfo=None)
+        low = (now - timedelta(seconds=timeout)).strftime("%Y-%m-%d %H:%M:%S")
+        high = (now + timedelta(seconds=self.FUTURE_TOLERANCE_SEC)).strftime("%Y-%m-%d %H:%M:%S")
+        return low, high
+
     def list_active_instances(self, timeout: float = 45.0, now_dt=None) -> list[str]:
-        """返回心跳存活（last_heartbeat 距今 < timeout）且 im_enabled=1 的实例 id 列表。"""
+        """返回心跳存活（last_heartbeat 距今 < timeout）且 im_enabled=1 的实例 id 列表。
+
+        上下界都要判：下界=失联超时，上界=忽略"未来时间"的心跳（CST 口径脏行/未修实例）。
+        """
         try:
             from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 # 各后端时间函数统一用 python 侧计算阈值（sqlite datetime / mysql datetime 均兼容）
-                from datetime import datetime, timezone, timedelta
-                cutoff = (now_dt or datetime.now(timezone.utc).replace(tzinfo=None)) - timedelta(seconds=timeout)
-                _fmt = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+                _low, _high = self._heartbeat_window(timeout, now_dt)
+                c.execute(
+                    "SELECT COUNT(*) FROM grape_im_instance WHERE im_enabled=1 AND last_heartbeat > ?",
+                    (_high,),
+                )
+                _future = (c.fetchone() or [0])[0]
+                if _future:
+                    log.info(f"[lease] 忽略 {_future} 行\"未来时间\"心跳（未修实例写 CST / 历史脏行）")
                 c.execute(
                     "SELECT instance_id FROM grape_im_instance "
-                    "WHERE im_enabled=1 AND last_heartbeat >= ?",
-                    (_fmt,),
+                    "WHERE im_enabled=1 AND last_heartbeat >= ? AND last_heartbeat <= ?",
+                    (_low, _high),
                 )
                 return [r[0] for r in c.fetchall()]
         except Exception as e:
@@ -297,16 +330,45 @@ class BotLeaseStore:
             return False
         try:
             from src.session_manager import db, db_lock
-            from datetime import datetime, timezone, timedelta
-            cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=timeout)
-            _fmt = cutoff.strftime("%Y-%m-%d %H:%M:%S")
+            _low, _high = self._heartbeat_window(timeout)
             with db_lock:
                 c = db.cursor()
                 c.execute(
-                    "SELECT 1 FROM grape_im_instance WHERE instance_id=? AND im_enabled=1 AND last_heartbeat >= ? LIMIT 1",
-                    (owner, _fmt),
+                    "SELECT 1 FROM grape_im_instance WHERE instance_id=? AND im_enabled=1"
+                    " AND last_heartbeat >= ? AND last_heartbeat <= ? LIMIT 1",
+                    (owner, _low, _high),
                 )
                 return c.fetchone() is not None
         except Exception as e:
             log.warning(f"[lease] is_owner_alive error: {e}")
             return False
+
+
+def purge_stale_instances(older_than_hours: float = 24.0) -> int:
+    """清理长期无心跳的实例行（`grape_im_instance` 只增不减，需周期兜底）。
+
+    - 只删 `last_heartbeat` 早于 `now_utc - older_than_hours` 的行；**不删"未来时间"的行**
+      （那可能是仍在写 CST 的未修实例；它们的行由读侧上界护栏排除，不影响一致性哈希环）
+    - 删除是安全的：写侧是 UPSERT，实例下一次心跳（10s 内）会重建自己
+    - 返回删除行数（便于 sweeper 日志与观察）
+    """
+    from datetime import datetime, timedelta, timezone
+    cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
+              - timedelta(hours=older_than_hours)).strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_im_instance WHERE last_heartbeat < ?", (cutoff,))
+            n = c.rowcount if isinstance(c.rowcount, int) and c.rowcount > 0 else 0
+            db.commit()
+        if n:
+            log.info(f"[lease] purge {n} 行过期实例心跳（早于 {cutoff}）")
+        return n
+    except Exception as e:
+        _msg = str(e)
+        if "no such table" in _msg or "doesn't exist" in _msg:
+            log.debug(f"[lease] purge_stale_instances skipped（无此表）: {_msg}")
+        else:
+            log.warning(f"[lease] purge_stale_instances error: {_msg}")
+        return 0

@@ -48,6 +48,31 @@ def _global_timeout_for(max_exec_seconds: float) -> float:
     return max(_v, float(max_exec_seconds))
 
 
+# 「疑似提前结束」标记：模型输出 text 后静默超过文本静默上限、且累计输出里没有收尾记录
+# （actions/conclusion）时打上。语义 = 任务被放行（exit 0）但工作可能没做完；
+# 平台侧靠这个标记做可见性（src/runtime/service.py::complete_task 会把它落到
+# agent_tasks.errors + 事件 result 前缀），不降 failed、不触发重跑。
+PREMATURE_END_MARKER = "[PREMATURE_END_TURN]"
+
+
+def _text_incomplete_timeout_for() -> float:
+    """text 静默且无收尾记录时的等待上限（默认 300s，与 tool 静默窗口对齐）。
+
+    语义：模型输出 text 后 60s 无事件只说明「暂时没输出」，不代表干完了——可能正在
+    生成一个大 tool call（补丁/大文件），这期间 hermes 不会发任何 ACP 事件。
+    因此：
+      · ≤60s 静默：按原逻辑先查完成证据；
+      · 60s ~ 本上限：无证据也继续等（不再判完成、不再掐会话）；
+      · 超过本上限仍无证据：按「疑似提前结束」收尾（exit 0 + [PREMATURE_END_TURN] 标记）。
+    可用 RUNTIME_TEXT_SILENT_TIMEOUT 覆盖（设成 ≤60 即退回旧的 60s 判完成行为）；解析失败回退 300。
+    """
+    try:
+        _v = float(os.environ.get("RUNTIME_TEXT_SILENT_TIMEOUT", "300"))
+    except Exception:
+        _v = 300.0
+    return max(_v, 0.0)
+
+
 class HermesACPBackend:
     """Hermes ACP 后端 — 不走 build_args/parse_output，直接 stream_execute yield 事件。"""
     name = "hermes"
@@ -420,10 +445,14 @@ class HermesACPBackend:
             # ── 4. 内循环：从队列消费事件 + 等 prompt 完成 ──
             _last_activity = time.time()
             _global_start = time.time()
-            _SILENT_TIMEOUT = 300   # 工具调用后 5分钟无事件 → 超时终止
-            _TEXT_SILENT_TIMEOUT = 60  # text 输出后 60s 无后续 → 超时终止
+            _SILENT_TIMEOUT = 300   # 非 text 事件（tool/reasoning）后 5 分钟无事件 → 超时终止
+            _TEXT_SILENT_TIMEOUT = 60  # text 输出后静默 60s → 先做一次「完成证据」检查
+            _TEXT_INCOMPLETE_TIMEOUT = _text_incomplete_timeout_for()  # 无证据时最多再等到这里 → 按疑似提前结束收尾
             _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
             _last_event_type = ""   # 记录最后一次事件类型
+            _rec_check_n = -1       # 已完成收尾记录检查的 collected_text 长度（避免静默期每 50ms 重复解析）
+            _rec_ok = False         # 是否已检测到收尾记录（actions + conclusion）
+            _silent_wait_logged = False
 
             while True:
                 with queue_lock:
@@ -451,14 +480,34 @@ class HermesACPBackend:
                     error_events.append("hermes process exited before prompt completed")
                     break
 
-                # 分级超时：text 后 60s → 视为完成（PromptResponse 丢失）；
-                #   tool 后 300s → 超时终止
+                # text 后静默：不再直接判完成——静默只决定「还要不要等」，
+                #   「算不算完成」必须由证据决定（见 _has_completion_record / PromptResponse）。
+                #   ① 累计输出里已有收尾记录（actions + conclusion）→ 判完成（response 丢失）；
+                #   ② 无证据 → 继续等到 _TEXT_INCOMPLETE_TIMEOUT（默认 300s，与 tool 静默对齐），
+                #      到点按「疑似提前结束」收尾（exit 0 + 标记，不冒充干净完成）。
+                #   非 text 事件（tool/reasoning）后的静默维持原语义：超时终止（exit -1）。
                 elapsed_silent = time.time() - _last_activity
                 if _last_event_type == "text" and elapsed_silent > _TEXT_SILENT_TIMEOUT:
-                    log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s after text, assuming done (response lost)")
-                    prompt_result["stopReason"] = "end_turn"
-                    break
-                if elapsed_silent > _SILENT_TIMEOUT:
+                    if len(collected_text) != _rec_check_n:
+                        _rec_check_n = len(collected_text)
+                        _rec_ok = _rec_ok or _has_completion_record(collected_text)
+                    if _rec_ok:
+                        log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s after text, "
+                                 f"completion record detected, assuming done")
+                        prompt_result["stopReason"] = "end_turn"
+                        break
+                    if elapsed_silent > _TEXT_INCOMPLETE_TIMEOUT:
+                        log.warning(f"{label}hermes ACP silent {elapsed_silent:.0f}s after text without "
+                                    f"completion record (actions/conclusion), premature end "
+                                    f"(no forced kill; task will report incomplete)")
+                        prompt_result["stopReason"] = "premature_end"
+                        break
+                    if not _silent_wait_logged:
+                        _silent_wait_logged = True
+                        log.info(f"{label}hermes ACP silent {elapsed_silent:.0f}s after text, "
+                                 f"no completion record yet, waiting up to "
+                                 f"{_TEXT_INCOMPLETE_TIMEOUT:.0f}s (model may be generating a large tool call)")
+                elif elapsed_silent > _SILENT_TIMEOUT:
                     log.warning(f"{label}hermes ACP silent {elapsed_silent:.0f}s, timeout")
                     prompt_result["stopReason"] = "timeout"
                     break
@@ -519,6 +568,14 @@ class HermesACPBackend:
             # exit_code 判定
             if stop_reason == "end_turn" and not error_events:
                 exit_code = 0
+            elif stop_reason == "premature_end":
+                # 无收尾记录即静默收尾：按「疑似提前结束」放行（exit 0 + 标记）。
+                # 不判 -1：避免把「模型长停顿被截断」当成引擎故障触发整任务重跑
+                #（重跑需幂等约束，见 docs/weekly-07/hermes-acp-premature-endturn-fix-design.md）。
+                error_events.append(
+                    f"{PREMATURE_END_MARKER} 模型输出后静默超过文本静默上限仍无收尾记录"
+                    "（actions/conclusion），疑似提前结束；工作可能未做完")
+                exit_code = 0
             elif stop_reason == "timeout":
                 exit_code = -1
             elif stop_reason == "error":
@@ -538,6 +595,14 @@ class HermesACPBackend:
                 _fixed = _robust_join_findings(collected_text)
                 if _fixed and _detect_findings_block(_fixed):
                     full_text = _fixed
+            # 疑似提前结束：把标记落到 result_text（events.result 只取前 200 字符，
+            # 平台侧可见性补强见 P1；此处保证工单/任务详情能看到「没走到收尾」）。
+            if stop_reason == "premature_end":
+                full_text = (full_text.rstrip() +
+                             f"\n\n{PREMATURE_END_MARKER} 引擎在模型输出后静默 "
+                             f"{int(_TEXT_INCOMPLETE_TIMEOUT)}s 未检测到收尾记录"
+                             "（actions/conclusion），按疑似提前结束收尾；"
+                             "该任务的工作可能未完成，续做需带幂等约束（不要重做已完成部分）。")
 
             yield ("done", {
                 "exit_code": exit_code,
@@ -584,8 +649,12 @@ class _ACPSimpleClient:
         self.on_message = on_message or (lambda t, c: None)
         self.on_prompt_done = on_prompt_done or (lambda r: None)
         self.on_prompt_error = on_prompt_error or (lambda e: None)
-        self._on_prompt_done = self.on_prompt_done
-        self._on_prompt_error = self.on_prompt_error
+        # 注意：不做 self._on_prompt_done = self.on_prompt_done 别名快照——
+        # 本文件的调用方（HermesACPBackend.stream_execute）是构造后用
+        # `client.on_prompt_done = ...` 赋值的，快照会永久停留在构造时的 no-op，
+        # 导致 ACP PromptResponse / session/update 的 stopReason 完全被丢弃
+        #（生产长期只能靠 60s text 静默兜底收尾；hwcloud_acp.py 已先行修掉同一 bug）。
+        # 调用点直接读公开属性。
 
         self._write_lock = threading.Lock()
         self._next_id = 1
@@ -670,7 +739,7 @@ class _ACPSimpleClient:
                 self._pending_errors[req_id] = err_msg
             # 只有 session/prompt 的 error 才触发 prompt_done
             if is_prompt_response:
-                self._on_prompt_done({"stopReason": "error", "result": raw})
+                self.on_prompt_done({"stopReason": "error", "result": raw})
         else:
             result = raw.get("result")
             with self._lock:
@@ -680,12 +749,12 @@ class _ACPSimpleClient:
                 if isinstance(result, dict):
                     stop_reason = result.get("stopReason", "")
                     if stop_reason:
-                        self._on_prompt_done({"stopReason": stop_reason, "result": result})
+                        self.on_prompt_done({"stopReason": stop_reason, "result": result})
                     else:
                         log.info(f"{self.label}hermes ACP prompt response without stopReason, treating as done (id={req_id})")
-                        self._on_prompt_done({"stopReason": "end_turn", "result": result})
+                        self.on_prompt_done({"stopReason": "end_turn", "result": result})
                 else:
-                    self._on_prompt_done({"stopReason": "end_turn", "result": result or {}})
+                    self.on_prompt_done({"stopReason": "end_turn", "result": result or {}})
 
         evt.set()
 
@@ -783,7 +852,7 @@ class _ACPSimpleClient:
         elif update_type_norm == "turn_end":
             # 提取 stopReason
             stop_reason = update.get("stopReason", "")
-            self._on_prompt_done({"stopReason": stop_reason, "result": update})
+            self.on_prompt_done({"stopReason": stop_reason, "result": update})
 
 
 # ══════════════════════════════════════════════════════════════
@@ -835,6 +904,39 @@ def _extract_session_id(result) -> str:
             if sid:
                 return sid
     return ""
+
+
+def _has_completion_record(chunks: list) -> bool:
+    """累计 text 输出里是否已出现 agent 的收尾记录（actions + conclusion）。
+
+    仅用于 text 静默后的「到底干完没干完」判定：
+      · 能解析出 actions + conclusion 的对象才算完成证据（与 Grape agent 收尾契约一致）；
+      · 不做子串匹配——模型在正文里引用 JSON 字段示例时会误判（_detect_structured_output 的短板）；
+      · chunk 边界可能把 JSON 拆坏（字段名中间插 \\n / 键名尾部插 \\n），
+        先按 _robust_join_json 修一遍再解析，解析后按键名 strip 后比对；
+      · 只看末尾窗口（收尾记录总在最后），避免长文本全文扫描。
+    """
+    if not chunks:
+        return False
+    window = chunks[-40:]
+    for candidate in ("\n".join(window), _robust_join_json(window)):
+        if not candidate:
+            continue
+        m = re.search(r'\{\s*"actions', candidate)
+        if not m:
+            continue
+        try:
+            # strict=False：允许字符串里夹带 flush 边界引入的字面换行
+            # （正常输出解析不用宽松模式，这里只服务"有没有收尾记录"的启发判定）
+            obj, _end = json.JSONDecoder(strict=False).raw_decode(candidate[m.start():])
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            keys = {str(k).strip(): v for k, v in obj.items()}
+            if keys.get("actions") and keys.get("conclusion"):
+                return True
+    return False
+
 
 def _detect_structured_output(text: str) -> bool:
     """检测 agent 累积输出中是否包含结构化 JSON 记录块。

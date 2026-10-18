@@ -2240,14 +2240,70 @@ def init_database():
 
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移
     # SQLite 不支持 GET_LOCK，跳过（单实例不需要）
+    # ⚠️ 锁名按数据库隔离（2026-10-16 修复）：GET_LOCK 是 MySQL 服务器级全局锁，
+    #    多环境共用同一 MySQL 实例（如 192.168.0.59 上的 dev/test/admin/ljt 多库）
+    #    时，固定的 'grape_migrate' 锁名会让不同环境的实例互相排队——今天实测
+    #    0007 重启等待 210s+、最多 4 个跨环境实例同时挂起在 GET_LOCK 上。
+    #    锁名追加库名后各环境互不干扰；同库多实例（真正的迁移竞争）仍然互斥。
+    #    兼容性：滚动升级期间新旧版本锁名不同，可能同库两个实例同时迁移——
+    #    迁移逻辑本身幂等（_ensure_column/CREATE TABLE IF NOT EXISTS），风险可控。
+    # ⚠️ 锁必须绑在**独立连接**上（2026-10-18 修复）：池化连接在 commit/rollback 时
+    #    会被归还（src/mysql_compat.py 的 _raw_cursor 借还逻辑），之后 RELEASE_LOCK
+    #    会打到另一个物理连接上 → 持锁连接留在池里 Sleep → 锁泄漏：下一次启动
+    #    （哪怕另一台主）在 GET_LOCK 上等满 300s。现在专用连接持锁（迁移体照旧走池），
+    #    finally 先显式 RELEASE、再 close 兜底；进程崩溃/被 kill 时连接一断锁自动释放。
     from src.mysql_compat import get_db_backend
     if get_db_backend() == "mysql":
+        try:
+            from src.mysql_compat import mysql_config
+            _cfg = mysql_config()
+            _lock_name = "grape_migrate_" + (_cfg.get("database") or "default")
+        except Exception:
+            _cfg = None
+            _lock_name = "grape_migrate"
+        _lock_conn = None
+        _lock_cur = None
+        _lock_acquired = False
+        try:
+            import pymysql
+            if not _cfg:
+                raise RuntimeError("mysql_config() 不可用（拿不到库连接参数）")
+            _lock_conn = pymysql.connect(
+                host=_cfg.get("host", "127.0.0.1"),
+                port=int(_cfg.get("port", 3306) or 3306),
+                user=_cfg.get("user", ""),
+                password=_cfg.get("password", ""),
+                database=_cfg.get("database", ""),
+                charset=_cfg.get("charset", "utf8mb4"),
+                autocommit=True,
+                connect_timeout=10,
+            )
+            _lock_cur = _lock_conn.cursor()
+            _lock_wait = int(os.environ.get("GRAPE_MIGRATE_LOCK_TIMEOUT", "60") or 60)
+            _lock_cur.execute("SELECT GET_LOCK(%s, %s)", (_lock_name, _lock_wait))
+            _got = _lock_cur.fetchone()
+            _lock_acquired = bool(_got and _got[0] == 1)
+            if _lock_acquired:
+                log.info(f"migrate lock acquired: {_lock_name}（专用连接，finally 显式释放）")
+            else:
+                log.warning(f"migrate lock NOT acquired within {_lock_wait}s: {_lock_name}，继续迁移（幂等）")
+                try:
+                    _lock_cur.execute(
+                        "SELECT p.id, p.host, p.command, p.time FROM performance_schema.metadata_locks l "
+                        "JOIN performance_schema.threads t ON t.thread_id = l.owner_thread_id "
+                        "JOIN information_schema.processlist p ON p.id = t.processlist_id "
+                        "WHERE l.object_type='USER LEVEL LOCK' AND l.object_name=%s",
+                        (_lock_name,),
+                    )
+                    for _h in _lock_cur.fetchall():
+                        log.warning(f"  migrate lock holder: id={_h[0]} host={_h[1]} cmd={_h[2]} "
+                                    f"time={_h[3]}s（可 KILL 该连接解围）")
+                except Exception as _le:
+                    log.debug(f"  migrate lock holder query unavailable: {_le}")
+        except Exception as _lock_err:
+            log.error(f"migrate lock UNAVAILABLE (dedicated conn failed: {_lock_err})；"
+                      f"以无锁方式继续迁移（迁移幂等，但同库多实例可能并发迁移，请关注）")
         with db_lock:
-            c = db.cursor()
-            c.execute("SELECT GET_LOCK('grape_migrate', 300)")
-            lock_acquired = c.fetchone()[0]
-            if not lock_acquired:
-                log.warning("Could not acquire migrate lock, waiting...")
             try:
                 # 迁移逻辑在同一个 with db_lock 块内——同一个连接
                 # db_lock 是 RLock（可重入）——_create_tables() 等内部 with db_lock 不会死锁
@@ -2285,7 +2341,19 @@ def init_database():
                 except Exception as _e:
                     log.warning(f"Issue #67 knowledge migration failed: {_e}")
             finally:
-                c.execute("SELECT RELEASE_LOCK('grape_migrate')")
+                # 显式释放（让正常路径的日志可读），再 close 兜底：
+                # 连接关掉时 MySQL 会释放该连接持有的所有命名锁，进程崩溃也不例外
+                if _lock_conn is not None:
+                    if _lock_acquired and _lock_cur is not None:
+                        try:
+                            _lock_cur.execute("SELECT RELEASE_LOCK(%s)", (_lock_name,))
+                            log.info(f"migrate lock released: {_lock_name}")
+                        except Exception as _re:
+                            log.warning(f"migrate lock release failed（连接 close 会兜底释放）: {_re}")
+                    try:
+                        _lock_conn.close()
+                    except Exception:
+                        pass
     else:
         # SQLite——单实例不需要锁
         _tasks_to_issue_rename_pre_create()

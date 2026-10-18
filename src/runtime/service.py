@@ -1809,9 +1809,28 @@ def _detect_business_failure(agent_type, output, result_text):
     return False
 
 
+def premature_end_marker() -> str:
+    """「疑似提前结束」标记（唯一来源：适配器 src/agent/hermes_acp.py）。
+
+    懒加载转发，避免 runtime.service 与 agent 适配器在导入期互相牵扯；适配器
+    不可用（未安装/裁剪）时回退到字面量，保证标记语义不变。
+    """
+    try:
+        from src.agent.hermes_acp import PREMATURE_END_MARKER as _pm
+        return _pm
+    except Exception:
+        return "[PREMATURE_END_TURN]"
+
+
 def complete_task(task_id, result_text, exit_code=0, usage=None):
     """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
     task = get_task(task_id)
+    # 可见性（P1）：引擎「疑似提前结束」（模型输出后静默、无收尾记录）时任务仍算
+    # completed（exit 0），但把标记显式落到 agent_tasks.errors + 事件 result 前缀，
+    # 让「跑绿了但可能没干完」在任务详情/事件列表里一眼可见。
+    # 只做可见性：不降 failed、不触发重跑（重跑需幂等约束，另行评估）。
+    _pm = premature_end_marker()
+    _premature = bool(_pm) and _pm in (result_text or "")
     # 幂等保护：如果 task 已经是终态（failed/cancelled），不覆盖（防止 worker 终止后残留进程
     # 跑完调 complete 把 failed 状态覆盖成 completed，2026-08-24 seq#2488 实例）。
     # 例外：如果 result_text 包含完整结构化输出（actions+conclusion），说明任务实际已完成，
@@ -1859,10 +1878,14 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             _conclusion = ""
             if output and output.get("conclusion"):
                 _conclusion = output["conclusion"]
+            _result_show = _conclusion or (result_text or "")[:200]
+            if _premature:
+                # 事件列表/详情直接看到「没走到收尾」，不必翻完整 result_text
+                _result_show = f"⚠️ {_pm} 疑似提前结束（未走到收尾）：{_result_show}"
             update_event_complete(task["event_seq"], status, exit_code=exit_code,
                                   duration=duration,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=_conclusion or (result_text or "")[:200],
+                                  result=_result_show,
                                   structured_output=output or None)
             # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
             # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
@@ -1890,9 +1913,14 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     log.warning(f"complete_task: pending_review check failed: {_e}")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
+    # 疑似提前结束：标记落到 agent_tasks.errors（任务详情可见）；状态仍是 completed。
+    # 非疑似场景不传 errors，避免覆盖 fail 路径写下的真实错误信息。
+    _err_kw = ({"errors": json.dumps(
+        [f"{_pm} 未检测到收尾记录（actions/conclusion），疑似提前结束；工作可能未完成"],
+        ensure_ascii=False)} if _premature else {})
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
-                       usage_json=json.dumps(usage or {}))
+                       usage_json=json.dumps(usage or {}), **_err_kw)
     # 新会话续接指针回写——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     # 引擎守卫（B2）：usage.engine 为本次执行引擎（worker done 事件带上），回写时

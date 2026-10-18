@@ -421,7 +421,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             runtime_session_id="",
             event_type="autopilot_event",
             account=repository,
-            user_id=0,
+            user_id=task.get("created_by") or 0,  # Issue #432: 写任务创建者，user scope 引擎才能认领（原硬编码 0 导致个人级引擎绑定的自动化任务永久 queued）
             repo_gitcode_token=repo_token,
             user_gitcode_token="",
             env_extra=env_extra,

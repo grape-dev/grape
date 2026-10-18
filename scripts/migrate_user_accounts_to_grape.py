@@ -11,7 +11,12 @@
 三阶段：
   阶段 1：用户数据 + OAuth 绑定 + 业务凭据
   阶段 2：关联表 user_id 更新（27 张表，含 issue/issue_state/agent_tasks 等）
-  阶段 3：全表孤儿 ID 扫描（迁移后校验，有孤儿则需人工处理）
+           ⚠ 只搬运“旧 id 不在 grape_accounts 中”的行；旧 id 撞上新表用户的
+             只打 WARNING 就跳过（撞号行，见 _scan_collisions）
+  阶段 3：全表孤儿 ID 扫描（迁移后校验，有孤儿则需人工处理）+ 全表撞号扫描
+
+存量撞号行的定向修复（需显式开启，不在启动流程里自动跑）：
+    .venv/bin/python -m scripts.migrate_user_accounts_to_grape --execute --remap-collisions
 
 用法：
     .venv/bin/python -m scripts.migrate_user_accounts_to_grape --dry-run
@@ -501,6 +506,15 @@ def _scan_orphan_ids() -> list[dict]:
         ("binding_tickets", "initiating_user_id"),
         ("binding_tickets", "original_user_id"),
         ("user_credentials", "user_id"),
+        # 历史遗漏列（从未进过阶段 2 清单，孤儿扫描也一直漏扫）：
+        # skill.owner_id / devops_pipeline_scene.user_id 曾长期驻留旧体系 id，
+        # 补进来让孤儿与撞号扫描都能覆盖。列不存在的库由 try/except 兜住。
+        ("skill", "owner_id"),
+        ("devops_pipeline_scene", "user_id"),
+        ("autopilot_subscriptions", "user_id"),
+        ("chat_agent_session", "user_id"),
+        ("uploaded_files", "created_by"),
+        ("event_thread", "created_by"),
     ]
     orphans = []
     for table, column in orphan_tables:
@@ -556,6 +570,268 @@ def _scan_id_collisions() -> list[dict]:
     except Exception as e:
         log.warning(f"  [SCAN] id collision scan failed: {e}")
     return collisions
+
+
+# ── 全表撞号扫描 + 定向重映射（Issue #343 遗留）────────────────────────
+
+# 背景：user_accounts（旧体系）与 grape_accounts（新体系）id 区间大面积重叠
+# （69 个号重叠且全部“同号不同人”）。阶段 2 只搬运“旧 id 不在 grape_accounts
+# 里”的行，撞号的只打 WARNING 跳过 —— 这些行会被新体系读成另一个人，表现为：
+# 定时任务判死（引擎 user scope 校验不通过）、技能/场景/issue 归属错位、
+# 事件按 scene_user_id 路由到别人的场景。
+#
+# 本段做两件事：
+#   1) _scan_collisions()：按 表/列/值 分组报出撞号行（只读，随阶段 3 执行）
+#   2) _remap_collisions()：仅在“证人列”能证明该行确属旧用户时改写成其新 id
+#      （需显式 --remap-collisions，不在服务启动流程里自动跑）
+#
+# 为什么不能无脑重写：撞号行的值 V 有两种可能
+#   (a) V 是旧体系用户 ua(V) 的旧 id   → 应改写为 live(ua(V))
+#   (b) V 就是新体系用户 ga(V) 的新 id  → 本来就正确，改了反而错
+# 只看数字分不出来，必须靠证据：行内“证人列”（同一行的另一个用户列，
+# 存登录名或新体系 user_id 都能识别）。
+
+# 证人列：table -> {column: witness_column}
+# 选用原则：证人列必须与被校验列【同一语义】（都表示“这行属于谁”），
+# 且优先用登录名列——登录名不可能与另一个用户的 id 撞号，证据最硬。
+# 语义不同的列（如 skill.created_by 是“创建者”而 owner_id 是“归属者”，
+# 同一行可以不是同一个人）会给出假证据，故不列为证人。
+_COLLISION_WITNESS = {
+    # issue.user_id 与 scene_user_id 都表示该 issue 归属的用户
+    "issue": {"scene_user_id": "user_id"},
+    # created_by 存登录名，直接指向归属人
+    "devops_pipeline_scene": {"user_id": "created_by"},
+    "scene_market": {"source_user_id": "created_by"},
+}
+
+# 撞号扫描覆盖列 = 阶段 2 清单 + 孤儿清单里的历史遗漏列
+_COLLISION_COLUMNS = [
+    ("user_repos", "user_id"),
+    ("chat_conversations", "user_id"),
+    ("chat_agent_session", "user_id"),
+    ("organization", "owner_id"),
+    ("org_member", "user_id"),
+    ("issue", "user_id"),
+    ("issue", "scene_user_id"),
+    ("issue_state", "scene_user_id"),
+    ("agent_tasks", "user_id"),
+    ("autopilot_tasks", "created_by"),
+    ("autopilot_subscriptions", "user_id"),
+    ("scene_market", "source_user_id"),
+    ("scene_likes", "user_id"),
+    ("skill_likes", "user_id"),
+    ("skill", "owner_id"),
+    ("devops_pipeline_scene", "user_id"),
+    ("session_api_tokens", "user_id"),
+    ("api_tokens", "user_id"),
+    ("user_feedback", "user_id"),
+    ("user_credentials", "user_id"),
+    ("external_identities", "grape_user_id"),
+    ("unified_user_mapping", "user_id"),
+    ("feishu_onboard_task", "user_id"),
+    ("community_posts", "user_id"),
+    ("community_comments", "user_id"),
+    ("community_post_likes", "user_id"),
+    ("uploaded_files", "created_by"),
+    ("event_thread", "created_by"),
+    ("org_invitation", "invitee_user_id"),
+    ("audit_logs", "user_id"),
+    ("exchange_codes", "user_id"),
+]
+
+
+def _live_id_of(username: str) -> int:
+    """旧体系用户名 → 新体系 user_id（不存在返回 0）。"""
+    if not username:
+        return 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM grape_accounts WHERE username=?", (username,))
+        r = c.fetchone()
+    return r[0] if r else 0
+
+
+def _scan_collisions() -> list[dict]:
+    """扫描所有用户归属列的撞号错位行，按 表/列/值 分组。
+
+    返回每组的证据：
+      value/count      撞号值与该值下的行数
+      legacy_user      旧体系该值对应的用户（用户是谁）
+      legacy_id        该用户在【新体系】的 id（=应改写的目标，0=无新账号）
+      live_user        新体系里占着同一个数字的用户（错位后落在谁名下）
+      witness_col      证人列名（空=无证人列，只能人工核对）
+      witness_legacy  证人列指向 legacy_user 的行数
+      witness_live    证人列指向 live_user 的行数
+    """
+    groups = []
+    for table, column in _COLLISION_COLUMNS:
+        w_col = _COLLISION_WITNESS.get(table, {}).get(column, "")
+        if w_col:
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"SELECT {w_col} FROM {table} LIMIT 0")
+            except Exception:
+                w_col = ""
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"SELECT x.{column}, COUNT(*), ua.username, ga.username "
+                    f"FROM {table} x "
+                    f"JOIN user_accounts ua ON ua.id = x.{column} "
+                    f"JOIN grape_accounts ga ON ga.id = x.{column} "
+                    f"WHERE ua.username <> ga.username AND x.{column} <> 0 "
+                    f"GROUP BY x.{column}, ua.username, ga.username"
+                )
+                rows = c.fetchall()
+        except Exception as e:
+            log.warning(f"  [SCAN] {table}.{column}: collision scan failed: {e}")
+            continue
+        for value, count, legacy_user, live_user in rows:
+            target_id = _live_id_of(legacy_user)
+            w_legacy = w_live = 0
+            if w_col:
+                try:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute(
+                            f"SELECT DISTINCT {w_col} FROM {table} WHERE {column} = ?",
+                            (value,),
+                        )
+                        witnesses = [str(r[0]) for r in c.fetchall()
+                                     if r[0] not in (None, "")]
+                    for w in witnesses:
+                        if w == legacy_user or (target_id and w == str(target_id)):
+                            w_legacy += 1
+                        elif w == live_user or w == str(value):
+                            w_live += 1
+                except Exception as e:
+                    log.warning(f"  [SCAN] {table}.{column}: witness read failed: {e}")
+            groups.append({
+                "table": table, "column": column, "value": value, "count": count,
+                "legacy_user": legacy_user, "legacy_id": target_id, "live_user": live_user,
+                "witness_col": w_col, "witness_legacy": w_legacy, "witness_live": w_live,
+            })
+    return groups
+
+
+def _remap_collisions(dry_run: bool = False) -> tuple[int, int]:
+    """把有证人证据的撞号行改写为旧用户在新体系的 id。
+
+    返回 (改写行数, 待人工行数)。只有“证人列指向旧用户、且没有证人指向新用户”
+    的行才改写；其余（无证人列 / 证据冲突 / 旧用户没新账号）只报告，人工核对。
+    """
+    groups = _scan_collisions()
+    if not groups:
+        print("\n[撞号重映射] 0 组撞号行")
+        return 0, 0
+
+    rewritten = pending = 0
+    for g in groups:
+        w_col = g["witness_col"]
+        confirmed = bool(w_col) and g["witness_legacy"] > 0 and g["witness_live"] == 0
+        if not confirmed or not g["legacy_id"]:
+            pending += g["count"]
+            log.warning(
+                f"  [COLLISION-MANUAL] {g['table']}.{g['column']}={g['value']}: "
+                f"{g['count']} 行，应属 {g['legacy_user']}"
+                f"(新体系 id={g['legacy_id'] or '无'})，现落在 {g['live_user']} 名下；"
+                f"无证人列或证据冲突，需人工核对"
+            )
+            continue
+
+        if dry_run:
+            print(f"  [DRY-RUN] {g['table']}.{g['column']}: {g['count']} 行 "
+                  f"{g['value']} → {g['legacy_id']}（{g['legacy_user']}）")
+            rewritten += g["count"]
+            continue
+
+        pk_cols = _get_pk_columns(g["table"]) or []
+        if not pk_cols:
+            pending += g["count"]
+            log.warning(f"  [COLLISION-MANUAL] {g['table']}.{g['column']}: 无主键，跳过")
+            continue
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT {','.join(pk_cols)} FROM {g['table']} "
+                f"WHERE {g['column']} = ? AND ({w_col} = ? OR {w_col} = ?)",
+                (g["value"], g["legacy_user"], str(g["legacy_id"])),
+            )
+            pks = c.fetchall()
+        for pk in pks:
+            where = " AND ".join(f"{col} = ?" for col in pk_cols)
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        f"UPDATE {g['table']} SET {g['column']} = ? WHERE {where}",
+                        (g["legacy_id"], *pk),
+                    )
+                    db.commit()
+                rewritten += 1
+            except Exception as e:
+                db.rollback()
+                pending += 1
+                log.warning(
+                    f"  [COLLISION-MANUAL] {g['table']}.{g['column']} pk={pk} "
+                    f"{g['value']} → {g['legacy_id']} 唯一键冲突跳过: {e}"
+                )
+    print(f"\n[撞号重映射] 改写 {rewritten} 行，待人工 {pending} 行")
+    return rewritten, pending
+
+
+def parse_remap_spec(spec: str) -> list[tuple[str, str, int, int]]:
+    """解析 --remap-spec "table.column=旧值:新值,table2.col2=旧:新" 形式的定向映射。"""
+    pairs = []
+    for item in spec.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        loc, _, mapping = item.partition("=")
+        old, _, new = mapping.partition(":")
+        table, _, column = loc.partition(".")
+        if not (table and column and old and new):
+            raise SystemExit(f"--remap-spec 格式错误: {item!r}（应形如 table.column=旧值:新值）")
+        pairs.append((table.strip(), column.strip(), int(old), int(new)))
+    return pairs
+
+
+def _remap_spec(pairs: list[tuple[str, str, int, int]], dry_run: bool = False) -> tuple[int, int]:
+    """按显式给定的「表.列=旧值:新值」逐行改写（人工确认过的存量定向修复）。
+
+    与 _remap_collisions 的区别：不做证据判定，完全按调用者给出的映射执行。
+    执行前请自行备份：create table backup_<table>_<column>_<yyyymmdd> as select ... 。
+    """
+    rewritten = pending = 0
+    for table, column, old, new in pairs:
+        pk_cols = _get_pk_columns(table) or []
+        if not pk_cols:
+            print(f"  [SPEC] {table}.{column}: 无主键，跳过")
+            continue
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT {','.join(pk_cols)} FROM {table} WHERE {column} = ?", (old,))
+            pks = c.fetchall()
+        if dry_run:
+            print(f"  [DRY-RUN] {table}.{column}: {len(pks)} 行 {old} → {new}")
+            rewritten += len(pks)
+            continue
+        for pk in pks:
+            where = " AND ".join(f"{col} = ?" for col in pk_cols)
+            try:
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(f"UPDATE {table} SET {column} = ? WHERE {where}", (new, *pk))
+                    db.commit()
+                rewritten += 1
+            except Exception as e:
+                db.rollback()
+                pending += 1
+                log.warning(f"  [SPEC] {table}.{column} pk={pk} {old} → {new} 唯一键冲突跳过: {e}")
+    print(f"\n[定向重映射] 改写 {rewritten} 行，冲突 {pending} 行")
+    return rewritten, pending
 
 
 # ── DDL ────────────────────────────────────────────────────────────────
@@ -654,7 +930,8 @@ def _repair_missing_credentials(dry_run: bool) -> None:
 
 # ── 主入口 ────────────────────────────────────────────────────────────
 
-def run_migration(dry_run: bool = False, force: bool = False) -> dict[int, int]:
+def run_migration(dry_run: bool = False, force: bool = False,
+                  remap_collisions: bool = False) -> dict[int, int]:
     """执行迁移，返回 id 映射表。可被 import 调用（服务启动时自动执行）。
 
     幂等机制：
@@ -662,6 +939,9 @@ def run_migration(dry_run: bool = False, force: bool = False) -> dict[int, int]:
     - 只处理 migrated=0 的行，每行全量数据迁完才标记 migrated=1
     - force=True 重置所有行 migrated=0 后重新执行
     - 每个子操作用 NOT EXISTS 幂等检查，重跑不产生重复数据
+
+    remap_collisions=True 时额外执行撞号行的定向重映射（默认关闭：
+    服务启动不做存量数据改写，避免无人监督下改动归属）。
     """
     log.info(f"D32 migration: user_accounts → grape_accounts (dry_run={dry_run}, force={force})")
 
@@ -707,6 +987,30 @@ def run_migration(dry_run: bool = False, force: bool = False) -> dict[int, int]:
         else:
             print(f"[阶段 3] 撞 ID 错位检测: 0 错位")
 
+        # 全表撞号扫描：阶段 2 因“撞号”跳过而留在旧 id 上的行（Issue #343 遗留）
+        coll_groups = _scan_collisions()
+        if coll_groups:
+            coll_rows = sum(g["count"] for g in coll_groups)
+            confirmed = sum(g["count"] for g in coll_groups
+                            if g["witness_col"] and g["witness_legacy"] > 0
+                            and g["witness_live"] == 0)
+            print(f"\n[阶段 3] 撞号扫描: {len(coll_groups)} 组 / {coll_rows} 行"
+                  f"（其中 {confirmed} 行有证人证据，可用 --remap-collisions 定向修复）")
+            for g in sorted(coll_groups, key=lambda x: -x["count"])[:40]:
+                msg = (f"  [COLLISION] {g['table']}.{g['column']}={g['value']} "
+                       f"count={g['count']} 应属 {g['legacy_user']}"
+                       f"(新体系 id={g['legacy_id'] or '无'})  现落在 {g['live_user']} 名下"
+                       f"  证人:{g['witness_col'] or '无'}"
+                       f"(旧{g['witness_legacy']}/新{g['witness_live']})")
+                print(msg)
+                log.warning(msg)
+            print("[阶段 3] 撞号行不会自动改写；确认后用 --execute --remap-collisions 定向修复")
+        else:
+            print(f"[阶段 3] 撞号扫描: 0 组撞号行")
+
+        if remap_collisions:
+            _remap_collisions(dry_run=False)
+
     migrated = sum(1 for v in id_map.values() if v != -1)
     log.info(f"D32 migration: 完成，迁移 {migrated} 个用户")
     return id_map
@@ -720,15 +1024,39 @@ def main():
     mode.add_argument("--dry-run", action="store_true", help="预览，不修改数据")
     mode.add_argument("--execute", action="store_true", help="实际执行")
     parser.add_argument("--force", action="store_true", help="重置 migrated=0 后重新执行")
+    parser.add_argument("--remap-collisions", action="store_true", dest="remap_collisions",
+                        help="额外执行撞号行定向重映射（只改写被证人列证实的行；"
+                             "建议先 --dry-run 预览）")
+    parser.add_argument("--remap-spec", default="", dest="remap_spec",
+                        help="人工确认过的定向修复，形如 \"table.column=旧值:新值,"
+                             "table2.col2=旧:新\"（不做证据判定，先自行备份）")
     args = parser.parse_args()
 
     print("=" * 60)
     print(f"迁移脚本: user_accounts → grape_accounts")
-    print(f"模式: {'DRY-RUN' if args.dry_run else 'EXECUTE'}" + (" [FORCE]" if args.force else ""))
+    print(f"模式: {'DRY-RUN' if args.dry_run else 'EXECUTE'}"
+          + (" [FORCE]" if args.force else "")
+          + (" [REMAP-COLLISIONS]" if args.remap_collisions else ""))
     print(f"时间: {time.strftime('%Y-%m-%d %H:%M:%S')}")
     print("=" * 60)
 
-    id_map = run_migration(dry_run=args.dry_run, force=args.force)
+    if args.remap_collisions and args.dry_run:
+        # DRY-RUN 下只预览撞号重映射，不跑整个迁移流程
+        _remap_collisions(dry_run=True)
+        print("\n这是 DRY-RUN 预览。加 --execute 参数实际执行。")
+        return
+
+    if args.remap_spec:
+        # 显式定向修复（人工确认过的存量行），同样不跑迁移主流程
+        pairs = parse_remap_spec(args.remap_spec)
+        print(f"定向重映射规则: {len(pairs)} 条")
+        _remap_spec(pairs, dry_run=args.dry_run)
+        if args.dry_run:
+            print("\n这是 DRY-RUN 预览。加 --execute 参数实际执行。")
+        return
+
+    id_map = run_migration(dry_run=args.dry_run, force=args.force,
+                           remap_collisions=args.remap_collisions)
 
     if id_map:
         print("\n" + "=" * 60)

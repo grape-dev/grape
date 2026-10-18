@@ -719,7 +719,6 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     except Exception as _mr_e:
         log.warning(f"A2A: managed_repos existence check failed, skip: {_mr_e}")
 
-
     # Issue #329: cross-pipeline handoff — extract carried context fields.
     # When target_scene_id is specified, redirect the A2A to the target scene's
     # target_node (default vod). This enables cross-pipeline continuation without

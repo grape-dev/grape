@@ -874,12 +874,20 @@ def init_db():
             except Exception:
                 pass
         # 修复 user_credentials.user_id 与 user_accounts.id 不匹配（合并后 id 可能变化）
+        # 2026-10-17 修复（账号体系重构遗留）：user_credentials 的 user_id 现在指向
+        # grape_accounts.id（新体系），但下面的重映射/清理曾锚定旧表 user_accounts——
+        # 新体系 id（如 1）不在旧表（id 区间 37+）里，被当"悬空行"每次启动时批量
+        # 删除，导致用户在设置页保存的 AK/SK 反复丢失。三处全部改锚 grape_accounts；
+        # users 中间表已不存在（重映射 UPDATE 自然 no-op，保留幂等兼容）。
         try:
             db.execute("""
                 UPDATE user_credentials
-                SET user_id = (SELECT ua.id FROM user_accounts ua, users u WHERE ua.username = u.username AND u.id = user_credentials.user_id)
-                WHERE EXISTS (SELECT 1 FROM users u WHERE u.id = user_credentials.user_id)
-                  AND EXISTS (SELECT 1 FROM user_accounts ua, users u WHERE ua.username = u.username AND u.id = user_credentials.user_id)
+                SET user_id = (SELECT ga.id FROM grape_accounts ga, user_accounts ua
+                                WHERE ga.username = ua.username AND ua.id = user_credentials.user_id)
+                WHERE EXISTS (SELECT 1 FROM user_accounts ua WHERE ua.id = user_credentials.user_id)
+                  AND NOT EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = user_credentials.user_id)
+                  AND EXISTS (SELECT 1 FROM grape_accounts ga, user_accounts ua
+                              WHERE ga.username = ua.username AND ua.id = user_credentials.user_id)
             """)
             db.commit()
         except Exception:
@@ -892,9 +900,8 @@ def init_db():
                 )
             """)
             # P2-A (Issue #357): Batched DELETE for user_credentials to avoid deadlock.
-            # Original: DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM user_accounts)
-            # This large DELETE locks many rows and deadlocks with business writes.
-            # Fix: use derived table (MySQL 1093) + LIMIT 100 batch loop.
+            # 2026-10-17 修复：白名单从 user_accounts（旧表）改为 grape_accounts（新体系），
+            # 否则新体系 id 的凭据行每次启动被误删（AK/SK 丢失事故根因）。
             from src.mysql_compat import get_db_backend as _get_be
             _is_mysql = _get_be() == "mysql"
             while True:
@@ -905,8 +912,8 @@ def init_db():
                         DELETE FROM user_credentials WHERE user_id IN (
                             SELECT user_id FROM (
                                 SELECT uc.user_id FROM user_credentials uc
-                                LEFT JOIN user_accounts ua ON uc.user_id = ua.id
-                                WHERE ua.id IS NULL
+                                LEFT JOIN grape_accounts ga ON uc.user_id = ga.id
+                                WHERE ga.id IS NULL
                                 LIMIT 100
                             ) AS __to_delete
                         )
@@ -914,7 +921,7 @@ def init_db():
                 else:
                     # SQLite: no LIMIT in DELETE subquery, just do it in one shot
                     db.execute("""
-                        DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM user_accounts)
+                        DELETE FROM user_credentials WHERE user_id NOT IN (SELECT id FROM grape_accounts)
                     """)
                 db.commit()
                 # Check if more rows remain (MySQL batch loop)
@@ -922,8 +929,8 @@ def init_db():
                     c = db.cursor()
                     c.execute("""
                         SELECT COUNT(*) FROM user_credentials uc
-                        LEFT JOIN user_accounts ua ON uc.user_id = ua.id
-                        WHERE ua.id IS NULL
+                        LEFT JOIN grape_accounts ga ON uc.user_id = ga.id
+                        WHERE ga.id IS NULL
                     """)
                     _remaining = c.fetchone()[0]
                     if _remaining == 0:

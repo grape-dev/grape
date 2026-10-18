@@ -500,6 +500,17 @@ def sweep_once() -> int:
                 cleaned += sweep_stuck_agent_tasks_once()
             except Exception as e:
                 log.warning(f"sweeper stuck-task sweep failed: {e}")
+            pass  # （占位：保持上面的收尾结构）
+        # IM 实例心跳表只增不减（每次重启留一行）→ 周期清理 24h 前的行；
+        # 实例靠心跳 UPSERT 自愈（≤10s 重建），见 bot_lease.purge_stale_instances。
+        # 注意：**不能**放在上面 `if _has_db_tables:` 块里 —— 那个判断查的是 SQLite 的
+        # sqlite_master，MySQL 后端恒为 False，钩子会被整块跳过（实测踩过）。
+        try:
+            from src.im.bot_lease import purge_stale_instances
+            cleaned += purge_stale_instances(older_than_hours=24)
+        except Exception as e:
+            log.debug(f"sweeper im-instance purge skipped: {e}")
+
         from src.repo_key import split_owner_repo
         from src.runtime import repogit
         if _has_db_tables:
