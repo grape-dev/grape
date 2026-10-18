@@ -357,13 +357,25 @@ def worker_code_version() -> str:
     _now = time.monotonic()
     if _cached_code_version and (_now - _cached_code_version_ts) < _PACKAGE_VERSION_TTL:
         return _cached_code_version
-    ver = ""
-    # 不依赖 git HEAD：多 master 的 git 状态可能不一致（不同分支/dirty/commit），
-    # 用 manifest 文件内容指纹计算版本，只要文件内容一致 → 版本一致。
-    ver = "h-" + _manifest_version()[:12]
+    ver = _compute_worker_code_version()
     _cached_code_version = ver
     _cached_code_version_ts = _now
     return ver
+
+
+def _compute_worker_code_version() -> str:
+    """无 TTL 缓存、强制重算的代码版本（打包专用）。
+
+    事故复盘（2026-10-15 / 2026-10-18 两次 worker 循环下载打满 master 出口带宽）：
+    双主升级时，旧进程若在 TTL 缓存窗口内触发 build_package()，tar 打入的是
+    磁盘上的新代码，但包内 VERSION 戳的是缓存里的旧版本号 → 产出"新代码+旧戳"
+    的坏包；新进程的 heartbeat 广播新版本号，worker 装多少遍都对不上 → 每 2 分钟
+    重下 28MB 死循环。打包是低频重操作，这里强制重算 manifest 指纹（毫秒级），
+    不走 TTL 缓存，杜绝版本戳与包内代码不一致。
+    """
+    # 不依赖 git HEAD：多 master 的 git 状态可能不一致（不同分支/dirty/commit），
+    # 用 manifest 文件内容指纹计算版本，只要文件内容一致 → 版本一致。
+    return "h-" + _manifest_version()[:12]
 
 
 def normalize_worker_version(ver: str) -> str:
@@ -435,6 +447,26 @@ def ensure_package_ready():
     threading.Thread(target=_build_async, daemon=True, name="worker-pkg-prebuild").start()
 
 
+def _cached_pkg_code_version() -> str:
+    """读取缓存包内实际戳的 VERSION（读失败返回空串）。
+
+    事故复盘（2026-10-15 / 2026-10-18）：升级窗口期旧进程在 TTL 缓存窗口内打包，
+    产出"新代码+旧版本戳"的坏包后，缓存目录 VERSION 记录（package_version 全量指纹）
+    却与磁盘代码一致 → 新进程 build_package() 判定缓存有效永不重建，worker 陷入
+    循环下载。这里把"包内 VERSION 戳"作为第二道防线：与强制重算的代码版本不一致
+    即废弃缓存包重建。
+    """
+    try:
+        import gzip
+        with tarfile.open(PKG_PATH, "r:gz") as tar:
+            member = tar.extractfile("grape-worker/VERSION")
+            if member is None:
+                return ""
+            return member.read().decode("utf-8", errors="replace").strip()
+    except Exception:
+        return ""
+
+
 def build_package() -> str:
     """构建安装包并返回路径。缓存命中直接返回；代码变更后重建（原子替换）。"""
     with _build_lock:
@@ -447,7 +479,16 @@ def build_package() -> str:
         except Exception:
             pass
         if os.path.isfile(PKG_PATH) and cur == ver:
-            return PKG_PATH
+            # 第二道防线：缓存记录虽匹配，但包内 VERSION 戳可能是升级窗口期
+            # 旧进程打出的旧值（见 _cached_pkg_code_version 事故复盘）——不一致即废弃重建
+            _stamp = _cached_pkg_code_version()
+            if _stamp and _stamp != _compute_worker_code_version():
+                log.warning(
+                    f"worker_package: cached package stamp mismatch "
+                    f"(pkg={_stamp}, code={_compute_worker_code_version()}), rebuilding"
+                )
+            else:
+                return PKG_PATH
 
         tmp = PKG_PATH + ".tmp"
         members: list = []  # ("arc", bytes) 小文件 / ("arc", path, "path") 大文件流式
@@ -489,7 +530,8 @@ def build_package() -> str:
                         members.append((f"grape-worker/{arc}", fh.read()))
             # 包内 VERSION 文件写入代码版本（仅 git commit，不含 wheels/python 指纹）
             # worker 端读此文件与主控 heartbeat 中的 latest_version 对比
-            _code_ver = worker_code_version()
+            # 打包路径强制重算（不走 TTL 缓存）：确保版本戳与包内代码一致
+            _code_ver = _compute_worker_code_version()
             vdata = _code_ver.encode("utf-8")
             info = tarfile.TarInfo("grape-worker/VERSION")
             info.size = len(vdata)
