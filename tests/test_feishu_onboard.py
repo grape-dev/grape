@@ -152,6 +152,111 @@ class TestStart:
                 c.execute("DELETE FROM feishu_onboard_task WHERE task_id='concurrent_task'")
                 db.commit()
 
+    def test_start_409_detail_carries_old_task_id(self):
+        """UT-01：并发 409 的 detail 必须携带旧任务 task_id（供前端确认重开作废旧任务）。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status) VALUES (?,?,?,?)",
+                ("ut01_old_task", "chat_bot", _uid["id"], "waiting_confirm"),
+            )
+            db.commit()
+        try:
+            with _patch_register(AsyncMock()) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 409, r.text
+                d = r.json().get("detail", {})
+                assert d.get("task_id") == "ut01_old_task", f"409 detail 应含旧 task_id，got {d}"
+                assert d.get("code") == 409
+                m.assert_not_awaited()
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut01_old_task'")
+                db.commit()
+
+    def test_start_stale_waiting_confirm_auto_expires_and_allows_new(self):
+        """UT-04：旧 waiting_confirm 任务超过 STALE_TTL → 自动置 failed 并放行新任务。"""
+        _clean_tasks()
+        from src.api.routes.feishu_onboard import _STATUS_FAILED, _STATUS_PENDING
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status, qr_url, created_at) "
+                "VALUES (?,?,?,?,?, datetime('now','-1 hour'))",
+                ("ut04_stale_task", "chat_bot", _uid["id"], "waiting_confirm", "qr://test"),
+            )
+            db.commit()
+        try:
+            async def _stub(**kwargs):
+                kwargs.get("on_qr_code")({"url": "qr://new", "expire_in": 300})
+                return _result()
+            with _patch_register(_stub) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                # stale 任务被自动作废 → 不再 409，可启动新任务
+                assert r.status_code == 200, r.text
+                assert r.json().get("status") == "pending"
+                assert r.json().get("task_id")
+                m.assert_awaited()
+            from src.api.routes import feishu_onboard as f
+            stale = f._get_task("ut04_stale_task")
+            assert stale["status"] == _STATUS_FAILED, f"stale 任务应被自动作废为 failed，got {stale['status']}"
+            assert "stale" in stale["error"].lower(), f"error 应标注 stale，got {stale['error']}"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_stale_task' OR task_id IN (SELECT task_id FROM feishu_onboard_task WHERE user_id=? AND status=?)", (_uid["id"], _STATUS_PENDING))
+                db.commit()
+
+    def test_start_recent_waiting_confirm_still_409(self):
+        """UT-04 反向：未过期（最近）的 waiting_confirm 仍应 409（不得误作废）。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status) VALUES (?,?,?,?)",
+                ("ut04_fresh_task", "chat_bot", _uid["id"], "waiting_confirm"),
+            )
+            db.commit()
+        try:
+            with _patch_register(AsyncMock()) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 409, r.text
+                m.assert_not_awaited()
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_fresh_task'")
+                db.commit()
+
+    def test_start_pending_stale_also_expires(self):
+        """UT-04：pending 状态旧任务同样受 STALE_TTL 约束（不止 waiting_confirm）。"""
+        _clean_tasks()
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "INSERT INTO feishu_onboard_task (task_id, bot_type, user_id, status, created_at) "
+                "VALUES (?,?,?,?, datetime('now','-1 hour'))",
+                ("ut04_stale_pending", "chat_bot", _uid["id"], "pending"),
+            )
+            db.commit()
+        try:
+            async def _stub(**kwargs):
+                kwargs.get("on_qr_code")({"url": "qr://p", "expire_in": 300})
+                return _result()
+            with _patch_register(_stub) as m:
+                r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
+                assert r.status_code == 200, r.text
+                m.assert_awaited()
+            from src.api.routes import feishu_onboard as f
+            assert f._get_task("ut04_stale_pending")["status"] == "failed"
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM feishu_onboard_task WHERE task_id='ut04_stale_pending' OR task_id IN (SELECT task_id FROM feishu_onboard_task WHERE user_id=? AND status!='failed')", (_uid["id"],))
+                db.commit()
+
 
 # ===================== B. 扫码回调 / 状态流转 =====================
 class TestStatusFlow:
