@@ -236,10 +236,13 @@ def test_ut_h_recover_orphans_cap_writes_event_diagnostics(setup_db, monkeypatch
     monkeypatch.setattr(rr, "db", setup_db)
     monkeypatch.setattr(rr, "db_lock", __import__("threading").Lock())
     _mk_engine(c, 10907, "codex", cred=63)
+    # Issue #370 年龄闸门适配：任务时间戳须早于宽限期（默认 300s），
+    # 否则刚创建的任务被 skipped_young 挡住，走不到封顶判死路径。
     c.execute(
         "INSERT INTO agent_tasks (id, status, runtime_id, pool_tag, agent_session_id, "
         "issue_session_id, created_at, agent_type, event_seq, attempts) "
-        "VALUES ('t_369h', 'dispatched', 10907, 'coding', 's', 'is', datetime('now'), 'coding', 9407, 2)")
+        "VALUES ('t_369h', 'dispatched', 10907, 'coding', 's', 'is', "
+        "datetime('now', '-600 seconds'), 'coding', 9407, 2)")
     _mk_event(c, 9407)
     setup_db.commit()
 
