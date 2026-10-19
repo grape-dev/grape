@@ -603,8 +603,13 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         rt_org_id = rt.get("org_id") or 0
         if _filter_org_id:
             # 非个人组织：严格 org_id 隔离
+            # Issue #371：repo scope 引擎豁免——切换为仓库级后 org_id 可能对齐到仓库所属组织
+            # （与当前查看组织不同），但仓库级设备对仓库成员可见（#277 仓库隔离口径），
+            # 可见性最终由 _visible_credential 的 repo_key in user_repos 判定收敛，不越权。
             if rt_org_id != _filter_org_id:
-                continue
+                _cred_early = cred_map.get(rt.get("credential_id") or 0) or {}
+                if _cred_early.get("scope") != "repo":
+                    continue
         elif _is_personal_org and rt_org_id and rt_org_id != _org_id:
             # Issue #338：个人归属 worker 引擎（凭据 scope=user 且 owner=当前用户）
             # 不受凭据创建时绑定的 org_id 隔离——归属判断以 _visible_credential 为准
@@ -693,11 +698,16 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
 
     # 设备级视图（共享 helper，Issue #185 审查修复：消除重复代码）
     # org_id 过滤 cred_map 和 cached（与 runtime-devices 端点一致，防止闪现其他组织设备）
+    # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
+    # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
     _devices_cred_map = cred_map
     _devices_cached = cached
     if _filter_org_id:
-        _devices_cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == _filter_org_id}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) == _filter_org_id]
+        _devices_cred_map = {k: v for k, v in cred_map.items()
+                             if (v.get("org_id") or 0) == _filter_org_id
+                             or v.get("scope") == "repo"}
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) == _filter_org_id
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     elif _is_personal_org:
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
@@ -1005,9 +1015,14 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     _is_personal_org = is_org_personal(_org_id) if _org_id else True
     _filter_org_id = 0 if _is_personal_org else _org_id
     if _filter_org_id:
-        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == _filter_org_id]
-        # 过滤 cred_map 只保留 org_id 匹配的凭据
-        cred_map = {k: v for k, v in cred_map.items() if (v.get("org_id") or 0) == _filter_org_id}
+        # Issue #371：非个人组织严格隔离分支为 repo scope 增加豁免（与 #338 个人组织分支同口径），
+        # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
+        _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == _filter_org_id
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
+        # 过滤 cred_map 只保留 org_id 匹配的凭据 + repo scope 凭据（仓库级设备对仓库成员可见）
+        cred_map = {k: v for k, v in cred_map.items()
+                    if (v.get("org_id") or 0) == _filter_org_id
+                    or v.get("scope") == "repo"}
     elif _is_personal_org:
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
@@ -1248,6 +1263,19 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
     if scope == "repo" and not raw_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 scope 需填写 repo_key"})
     repo_key = _resolve_repo_key(raw_key) if raw_key else ""
+    # Issue #371：切换 scope 时同步 org_id，消除「scope 已改但 org_id 仍是旧归属」的脏数据。
+    # - repo scope：org_id 对齐到仓库所属组织（managed_repos.org_id 权威单一来源），无组织归属时置 0；
+    #   这样非个人组织视图按 org_id 过滤时 repo scope 引擎不会被错误滤除。
+    # - user scope：org_id 置 0（个人 worker 跨组织可见性由 _visible_credential 的 owner 判定收敛，
+    #   与 #338 个人组织视图语义一致；保留旧 org_id 会在非个人组织视图被错误隔离）。
+    _new_org_id = 0
+    if scope == "repo" and repo_key:
+        try:
+            from src.user.org_db import get_org_id_by_repo_key
+            _new_org_id = get_org_id_by_repo_key(repo_key)
+        except Exception as _e:
+            log.warning(f"change_credential_scope: resolve org_id for repo_key={repo_key} failed: {_e}")
+            _new_org_id = 0
     with db_lock:
         c = db.cursor()
         c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
@@ -1260,12 +1288,13 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         _uname = user.get("username") or ""
         if _owner != _uname:
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅凭据 owner 可修改 scope"})
-        c.execute("UPDATE runtime_credentials SET scope=?, repo_key=? WHERE id=?", (scope, repo_key or None, cid))
-        # 转 repo 时同步写 owner_id=repo_key（与 worker 注册路径一致）：
-        # Workers 页对 repo 设备的可见性判断（非 owner 用户）走 from_repo_key(owner_id) in user_repos，
-        # owner_id 为空 → 同仓库其他成员永远看不到该设备（2026-10-16 转换后设备消失根因）
-        if scope == "repo" and repo_key:
-            c.execute("UPDATE runtime_credentials SET owner_id=? WHERE id=?", (repo_key, cid))
+        # Issue #371：同步 scope/repo_key/owner_id/org_id 一次性落库。
+        # - repo scope：owner_id=repo_key（与 worker 注册路径一致，Workers 页对 repo 设备的可见性
+        #   判断走 from_repo_key(owner_id) in user_repos，owner_id 为空 → 同仓库其他成员永远看不到）；
+        # - user scope：owner_id 清空（user scope 注册时按 owner_name 从 grape_accounts 重算，不依赖此字段）。
+        _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
+        c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
+                  (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
         # 仓库转个人/个人转仓库：同步删除该凭据名下旧 scope 的引擎行（2026-10-15 build-0005 重复引擎根因）。
         # 注册键 = (credential_id, name, scope, owner_id)（runtime.py /register 的 upsert 匹配条件）。
         # 只改凭据 scope 不动引擎行 → worker 下次心跳四元组对不上 → INSERT 一套新引擎，
@@ -1283,11 +1312,8 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
             "DELETE FROM agent_runtimes WHERE credential_id=? AND (scope!=? OR (owner_id IS NOT NULL AND owner_id != ''))",
             (cid, scope)
         )
-        # 清凭据行残留的旧 owner_id（repo→user 转换后该字段存的是旧仓库全名，脏数据；
-        # user scope 注册时会按 owner_name 从 grape_accounts 重算，不依赖此字段）
-        c.execute("UPDATE runtime_credentials SET owner_id='' WHERE id=?", (cid,))
         db.commit()
-    log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key}")
+    log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key} org_id={_new_org_id}")
     return {"scope": scope, "repo_key": repo_key}
 
 
