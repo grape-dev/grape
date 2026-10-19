@@ -223,7 +223,9 @@ def test_ut_g_terminate_active_agents_writes_event_diagnostics(setup_db):
 
     ev = c.execute("SELECT status, result, exit_code, completed_at FROM events WHERE seq=9406").fetchone()
     assert ev[0] == "failed"
-    assert ev[1] and "shutdown" in ev[1].lower(), f"result 含停机原因: {ev[1]}"
+    # 融合注（weekly-08 merge）：reason 统一取 _SHUTDOWN_EVENT_REASON（#2337 同源文案，
+    # 中文「停机中断」；断言随文案放宽为检查非空 + 非默认 summary 透传）
+    assert ev[1] and "停机" in ev[1], f"result 含停机原因: {ev[1]}"
     assert ev[2] is not None and ev[2] != 0
     assert ev[3], "completed_at 非空"
 
