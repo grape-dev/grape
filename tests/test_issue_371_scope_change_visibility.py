@@ -202,8 +202,8 @@ class TestChangeCredentialScopeSyncsOrgId:
         # 修复后：owner_id=repo_key
         assert row["owner_id"] == _REPO_KEY, "repo scope owner_id 不应被清空"
 
-    def test_scope_change_deletes_old_engine_rows(self):
-        """切换 scope 后旧 scope 引擎行被删除（无孤儿/重复引擎行）。"""
+    def test_scope_change_updates_engine_rows(self):
+        """切换 scope 后引擎行被更新（不删除，保留引擎信息）。"""
         from src.api.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_user_scope_cred()
         # 切换前有 1 条 user scope 引擎行
@@ -213,12 +213,13 @@ class TestChangeCredentialScopeSyncsOrgId:
                 "SELECT COUNT(*) FROM agent_runtimes WHERE credential_id=?", (cid,)).fetchone()[0]
             assert before == 1
         change_credential_scope(cid, CredScopeBody(scope="repo", repo_key=_REPO_FULL), user=_user_in_company())
-        # 切换后旧 user scope 引擎行应被删除（worker 心跳后按新 scope 重建）
+        # 切换后引擎行仍存在，scope 被更新为 repo
         with db_lock:
             c = db.cursor()
             after = c.execute(
-                "SELECT COUNT(*) FROM agent_runtimes WHERE credential_id=?", (cid,)).fetchone()[0]
-            assert after == 0, f"切换后旧引擎行应被删除，实际剩余 {after} 行"
+                "SELECT COUNT(*), scope FROM agent_runtimes WHERE credential_id=? GROUP BY scope", (cid,)).fetchone()
+            assert after[0] == 1, f"切换后引擎行应保留，实际 {after[0]} 行"
+            assert after[1] == "repo", f"引擎 scope 应为 repo，实际 {after[1]}"
 
 
 class TestRepoScopeVisibleInNonPersonalOrg:
