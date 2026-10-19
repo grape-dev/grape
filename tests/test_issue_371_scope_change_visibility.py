@@ -177,18 +177,18 @@ class TestChangeCredentialScopeSyncsOrgId:
         # owner_id 保留 repo_key（不再被无条件清空）
         assert row["owner_id"] == _REPO_KEY, f"repo scope owner_id 应为 repo_key，实际={row['owner_id']}"
 
-    def test_repo_to_user_resets_org_id_to_zero(self):
-        """repo→user 切换：org_id 置 0（个人 worker 跨组织可见性由 _visible_credential 收敛）。"""
+    def test_repo_to_user_syncs_org_id_to_operator_org(self):
+        """repo→user 切换：org_id 对齐到操作者所在组织（设备在操作组织下可见）。"""
         from src.api.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_repo_scope_cred()
         # 切换前：org_id=仓库所属组织
         assert _get_cred_row(cid)["org_id"] == _ORG_REPO_OWNER
-        # 切换为 user scope
+        # 切换为 user scope（在社区博客团队组织下操作）
         change_credential_scope(cid, CredScopeBody(scope="user"), user=_user_in_company())
         row = _get_cred_row(cid)
         assert row["scope"] == "user"
-        # Issue #371：user scope org_id 置 0
-        assert row["org_id"] == 0, f"user scope org_id 应置 0，实际={row['org_id']}"
+        # org_id 对齐到操作者所在组织
+        assert row["org_id"] == _ORG_COMPANY, f"user scope org_id 应对齐到操作组织({_ORG_COMPANY})，实际={row['org_id']}"
         # owner_id 清空（user scope 注册时按 owner_name 重算）
         assert row["owner_id"] == "", f"user scope owner_id 应清空，实际={row['owner_id']}"
 

@@ -1016,7 +1016,6 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # repo scope 设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in user_repos 收敛。
         _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == _filter_org_id
                            or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
-        # 过滤 cred_map 只保留 org_id 匹配的凭据 + repo scope 凭据（仓库级设备对仓库成员可见）
         cred_map = {k: v for k, v in cred_map.items()
                     if (v.get("org_id") or 0) == _filter_org_id
                     or v.get("scope") == "repo"}
@@ -1261,8 +1260,8 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
     # Issue #371：切换 scope 时同步 org_id，消除「scope 已改但 org_id 仍是旧归属」的脏数据。
     # - repo scope：org_id 对齐到仓库所属组织（managed_repos.org_id 权威单一来源），无组织归属时置 0；
     #   这样非个人组织视图按 org_id 过滤时 repo scope 引擎不会被错误滤除。
-    # - user scope：org_id 置 0（个人 worker 跨组织可见性由 _visible_credential 的 owner 判定收敛，
-    #   与 #338 个人组织视图语义一致；保留旧 org_id 会在非个人组织视图被错误隔离）。
+    # - user scope：org_id 对齐到当前操作者所在组织（用户在该组织下操作，设备应在该组织下可见）；
+    #   个人组织操作时 org_id=个人组织 ID，非个人组织操作时 org_id=该组织 ID。
     _new_org_id = 0
     if scope == "repo" and repo_key:
         try:
@@ -1271,6 +1270,8 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         except Exception as _e:
             log.warning(f"change_credential_scope: resolve org_id for repo_key={repo_key} failed: {_e}")
             _new_org_id = 0
+    elif scope == "user":
+        _new_org_id = user.get("org_id") or 0
     with db_lock:
         c = db.cursor()
         c.execute("SELECT owner_name, status FROM runtime_credentials WHERE id=?", (cid,))
