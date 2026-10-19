@@ -109,6 +109,58 @@ class TestLeaseTakeoverProtection:
         assert "imtest-heart" not in store.list_active_instances(timeout=45)
 
 
+class TestHeartbeatFutureGuard:
+    """心跳"未来值"护栏 + 周期清理（2026-10-18 加固，起因 issue #365 的存量 CST 行/滚动升级窗口）。"""
+
+    def _hb_at(self, inst, ts_str):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_im_instance WHERE instance_id=?", (inst,))
+            c.execute(
+                "INSERT INTO grape_im_instance (instance_id, hostname, ip, last_heartbeat) "
+                "VALUES (?, 'h', '', ?)", (inst, ts_str))
+            db.commit()
+
+    def test_future_heartbeat_not_treated_as_alive(self):
+        """CST 口径写入的行（UTC 视角下 +8h）不得算活 —— 否则幽灵实例继续占一致性哈希环。"""
+        from datetime import datetime, timedelta, timezone
+        future = (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(hours=8)) \
+            .strftime("%Y-%m-%d %H:%M:%S")
+        self._hb_at("imtest-future", future)
+        store = bl.BotLeaseStore(instance_id="imtest-me")
+        assert "imtest-future" not in store.list_active_instances(timeout=45)
+        assert store.is_owner_alive("imtest-future", timeout=45) is False
+        _clean()
+
+    def test_small_clock_skew_still_alive(self):
+        """容差内的时钟漂移（未来 30s）仍算活，避免误杀正常实例。"""
+        from datetime import datetime, timedelta, timezone
+        skewed = (datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=30)) \
+            .strftime("%Y-%m-%d %H:%M:%S")
+        self._hb_at("imtest-skew", skewed)
+        store = bl.BotLeaseStore(instance_id="imtest-me")
+        assert "imtest-skew" in store.list_active_instances(timeout=45)
+        assert store.is_owner_alive("imtest-skew", timeout=45) is True
+        _clean()
+
+    def test_purge_stale_instances_keeps_fresh(self):
+        """周期清理：删 24h 前的行、保留新鲜行（实例靠心跳 UPSERT 自愈）。"""
+        from datetime import datetime, timedelta, timezone
+        old = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)) \
+            .strftime("%Y-%m-%d %H:%M:%S")
+        fresh = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=5)) \
+            .strftime("%Y-%m-%d %H:%M:%S")
+        self._hb_at("imtest-old", old)
+        self._hb_at("imtest-fresh", fresh)
+        n = bl.purge_stale_instances(older_than_hours=24)
+        assert n >= 1
+        with db_lock:
+            ids = [r[0] for r in db.cursor().execute(
+                "SELECT instance_id FROM grape_im_instance").fetchall()]
+        assert "imtest-old" not in ids and "imtest-fresh" in ids
+        _clean()
+
+
 class TestNotifyObservability:
     def test_resolve_miss_reasons(self):
         from src.api import issues_center as ic
