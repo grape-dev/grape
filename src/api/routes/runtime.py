@@ -714,10 +714,13 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, attempts, runtime_id FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            "SELECT id, attempts, runtime_id, event_seq FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
-        for tid, attempts, rid in rows:
+        _seq_by_tid = {}
+        for tid, attempts, rid, ev_seq in rows:
+            _seq_by_tid[tid] = ev_seq
+        for tid, attempts, rid, _ev_seq in rows:
             # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
             try:
                 c.execute(
@@ -772,6 +775,22 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                 from src.runtime.service import release_busy_slot
                 release_busy_slot(rid, cursor=c)
         db.commit()
+    # Issue #369：attempts 封顶判死 → 完整回写关联事件诊断字段
+    # （result/exit_code/completed_at，对齐 event_pipeline._fail_event 语义；
+    # update_event_complete 终态保护天然幂等，双主 scp 同步两侧重复回写安全）
+    for tid in force_failed:
+        _seq = _seq_by_tid.get(tid)
+        if not _seq:
+            continue
+        try:
+            from src.api.event_store import update_event_complete
+            update_event_complete(
+                _seq, "failed", exit_code=1,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                result="recover-orphans attempts cap reached "
+                       "(possible self-restart loop), 任务判死")
+        except Exception as e:
+            log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
     if recovered or skipped_active or force_failed:
         log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "
                  f"skipped_active={skipped_active} force_failed={force_failed}")

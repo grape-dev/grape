@@ -102,6 +102,27 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
 
 
 
+def _sync_event_failed(seq, reason: str, exit_code: int = 1, completed_at: str = ""):
+    """任务判死 → 回写关联事件完整终态（Issue #369）。
+
+    对齐 event_pipeline._fail_event 语义：status=failed + result=reason + exit_code +
+    completed_at，事件侧具备完整诊断信息（此前判死路径只调 update_event_status，
+    事件 result/exit_code/completed_at 全空，排障零信息）。
+    幂等：update_event_complete 自带终态保护（terminal→terminal 跳过），
+    双主 scp 同步场景下两侧重复回写不冲突、不覆盖。
+    """
+    if not seq:
+        return
+    try:
+        from src.api.event_store import update_event_complete
+        update_event_complete(
+            seq, "failed", exit_code=exit_code,
+            completed_at=completed_at or datetime.now(timezone.utc).isoformat(),
+            result=(reason or "")[:200])
+    except Exception as _e:
+        log.warning(f"_sync_event_failed failed for seq={seq}: {_e}")
+
+
 def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str = ""):
     """Issue #253 改动2：绑定引擎全部物理不可达 → 任务诚实失败（宁失败，不跑飞）。
 
@@ -133,15 +154,12 @@ def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str
         if c.rowcount:
             db.commit()
             log.warning(f"task {task_id} failed: pool engines {engine_ids} all unreachable (Issue #253)")
-            # 同步事件终态（模式同回收逻辑 937-945：防事件永远 running）
+            # 同步事件终态（模式同回收逻辑：防事件永远 running）；
+            # Issue #369：走 _sync_event_failed 完整回写 result/exit_code/completed_at
             c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
             _es = c.fetchone()
             if _es and _es[0]:
-                try:
-                    from src.api.event_store import update_event_status
-                    update_event_status(_es[0], "failed")
-                except Exception:
-                    pass
+                _sync_event_failed(_es[0], _reason, completed_at=_now)
     except Exception as _e:
         log.warning(f"_fail_task_pool_unreachable failed for task {task_id}: {_e}")
         try:
@@ -184,11 +202,8 @@ def _fail_task_pool_unhealthy(c, task_id: str, engine_ids: list, waited_seconds:
             c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,))
             _es = c.fetchone()
             if _es and _es[0]:
-                try:
-                    from src.api.event_store import update_event_status
-                    update_event_status(_es[0], "failed")
-                except Exception:
-                    pass
+                # Issue #369：完整回写事件诊断字段（result/exit_code/completed_at）
+                _sync_event_failed(_es[0], _reason, completed_at=_now)
     except Exception as _e:
         log.warning(f"_fail_task_pool_unhealthy failed for task {task_id}: {_e}")
         try:
@@ -1038,16 +1053,15 @@ def claim(runtime_id) -> dict | None:
                         (_pool_fill, _pool_fill, _tid))
                     if c.rowcount and _rid:
                         release_busy_slot(_rid, cursor=c)
-                    # 回收置 failed（attempts 超限）→ 同步事件终态，避免事件永远 running
+                    # 回收置 failed（attempts 超限）→ 同步事件终态，避免事件永远 running；
+                    # Issue #369：完整回写事件诊断字段（result/exit_code/completed_at）
                     if c.rowcount and _seq:
                         c.execute("SELECT status FROM agent_tasks WHERE id=?", (_tid,))
                         _after = c.fetchone()
                         if _after and _after[0] == "failed":
-                            try:
-                                from src.api.event_store import update_event_status
-                                update_event_status(_seq, "failed")
-                            except Exception:
-                                pass
+                            _sync_event_failed(
+                                _seq,
+                                "回收超限：dispatched 超时回收 50 次仍无有效认领，任务判死")
                 if _actually_recovered:
                     log.info(f"recover stale dispatched: {len(_actually_recovered)}/{len(_stale_rows)} tasks "
                              f"({len(_stale_rows) - len(_actually_recovered)} skipped: active messages)")
