@@ -42,6 +42,7 @@
   },
   "onboard": {
     "in_progress": "A scan configuration is already in progress. Please wait.",
+    "confirm_restart": "A Feishu bot configuration is already in progress. Abandon it and start over? (The old configuration will not be saved)",
     "start_failed": "Failed to start scan configuration: {{msg}}",
     "modal_title": "🔗 Feishu Scan Configuration",
     "generating_qr": "Generating QR code…",

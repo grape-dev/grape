@@ -956,9 +956,25 @@ function startFeishuOnboard(botType, repoKey) {
     showOnboardModal();
     pollOnboardStatus();
   }).catch(e => {
-    // 409：已有进行中的任务
-    if (e.status === 409) app.showToast(e.message || I18N.t('chat.onboard.in_progress'));
-    else app.showToast(I18N.t('chat.onboard.start_failed', {msg: e.message}));
+    // 409：已有进行中的任务 → 弹确认框供「重新开始配置」；不再只 toast 干等。
+    // docs/weekly-08/feishu-onboard-409-confirm-restart-design.md Step 1.2
+    if (e.status === 409) {
+      const oldTaskId = (e.detail && e.detail.task_id) || '';
+      const msg = I18N.t('chat.onboard.confirm_restart') ||
+        '当前已有飞书机器人正在配置中，是否放弃并重新开始配置？（旧配置不会保存）';
+      app.showConfirm(msg, function() {
+        // 用户确认重开：先作废旧任务，再启动全新扫码流程
+        if (oldTaskId) {
+          API.post('/feishu/onboard/cancel', {task_id: oldTaskId}).finally(function() {
+            startFeishuOnboard(_onboardBotType, _onboardRepoKey);
+          });
+        } else {
+          startFeishuOnboard(_onboardBotType, _onboardRepoKey);
+        }
+      }, {danger: true});
+    } else {
+      app.showToast(I18N.t('chat.onboard.start_failed', {msg: e.message}));
+    }
   });
 }
 
