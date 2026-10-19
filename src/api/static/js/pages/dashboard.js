@@ -508,12 +508,17 @@ function renderSceneDetailLocal(sceneId) {
 
   // 并行加载：dashboard data + pipeline config（首屏必要）
   // pipeline(issues) 延迟加载，不阻塞首屏渲染
-  const dashPromise = (data.agents ? Promise.resolve(data) :
-    API.get('/dashboard/' + owner + '/' + name));
+  // 场景应用后「场景不存在」修复：恒请求权威 dashboard（不再复用 window._dashboardData 快照——
+  // 快照捕获于应用前/其它仓库时 _scenes 陈旧，会误判场景不存在；见 scene-apply-stale-detail-fix-design.md）
+  const dashPromise = API.get('/dashboard/' + owner + '/' + name);
   const pipeCfgPromise = API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name));
 
   Promise.all([dashPromise, pipeCfgPromise]).then(([dashData, scenesData]) => {
-    const scenes = dashData._scenes || (scenesData.scenes || []).map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo'}));
+    // 场景判定「新鲜优先」：本次 /scenes/with-pipeline（与详情同源、无缓存）为准，
+    // dashData._scenes 仅兜底——否则陈旧快照会吞掉刚应用场景（scene-apply-stale-detail-fix-design.md）
+    const scenes = (scenesData.scenes && scenesData.scenes.length
+      ? scenesData.scenes.map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo'}))
+      : (dashData._scenes || []) );
     const scene = scenes.find(s => s.id === sceneId);
     if (!scene) {
       el.innerHTML = '<div class="error">场景不存在</div>';
@@ -1215,13 +1220,14 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   };
 
   // 进入编辑模式即触发 SRE 检查（§3.6）：启用但无可用个人机器 → 自动扫描；
-  // 有在线机器直接补全绑定（老场景没绑/绑定失效的情况），没有则弹引导。
+  // 有在线机器直接补全绑定（老场景没绑/绑定失效的情况）；无机器不弹窗（silent），
+  // 卡片徽章+「重新检测」按钮已足够，用户可能只想直接关掉 SRE。
   (function _sreEnterEditScan() {
     try {
       const sreNode = editNodes.find(n => n.id === 'sre');
       if (!sreNode || !sreNode.enabled) return;
       if (_sreCheckOffline(sreNode, agentEngines)) {
-        _sreWakeUp(sreNode, agentEngines, _sreRerenderEdit);
+        _sreWakeUp(sreNode, agentEngines, _sreRerenderEdit, {silent: true});
       }
     } catch (e) { /* 扫描失败不阻断编辑 */ }
   })();
@@ -1458,6 +1464,17 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   }
 
   window._engCurIds = currentIds.slice();
+  // 打开弹窗即剔除「不可见」引擎的勾选（Issue：绑定的机器被过滤/清理后无法单独取消勾选）：
+  // 弹窗列表只渲染 _visibleEngines，不在列表里的 ID 用户永远点不到，只能「全不选」重来——
+  // 体验差且易误清空。这里默认把不可见的引擎视作取消勾选，保存时自然落库剔除。
+  {
+    const _visibleIds = new Set(_visibleEngines.map(e => e.id));
+    const _dropped = window._engCurIds.filter(id => !_visibleIds.has(id));
+    if (_dropped.length) {
+      window._engCurIds = window._engCurIds.filter(id => _visibleIds.has(id));
+      currentIds = window._engCurIds.slice();
+    }
+  }
   const _availTypes = [...new Set(sorted.map(e => { const n = (e.name || '').toLowerCase(); if (n.includes('hermes')) return 'hermes'; if (n.includes('opencode')) return 'opencode'; if (n.includes('codearts')) return 'codearts'; if (n.includes('codex')) return 'codex'; return ''; }).filter(Boolean))];
   const _availScopes = [...new Set(sorted.map(e => e.scope || 'global'))];
   const _availScenes = [...new Set(sorted.flatMap(e => e.scene_tags || []))].filter(Boolean);
@@ -1630,8 +1647,9 @@ function _enterCreateStandardMode(data, owner, name) {
   const agents = data.agents || [];
   const agentEngines = data.agent_engines || {};
   const allAgentTypes = ['vod','issue','coding','qa','sre'];
-  // 默认全部启用，skill 为空；SRE 例外：默认置灰（sre-personal-machine §3.2，唤醒时才启用）
-  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: at !== 'sre', engine_runtime_ids: [] }));
+  // 默认全部启用，skill 为空；SRE 同样默认启用（不再强制置灰）：
+  // 无可用个人机器时卡片保持亮态，徽章显示「没有可用的个人机器」并提供「重新检测个人机器」按钮
+  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
   window._isCreateMode = true;
   window._dashboardEditing = true;
 
@@ -1814,6 +1832,31 @@ function _enterCreateStandardMode(data, owner, name) {
   window.openEngineModal = function(agentType) {
     _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '');
   };
+
+  // 创建模式 SRE 编辑上下文（与编辑模式 §3.6 同语义）：供「重新检测个人机器」按钮
+  // 操作真实 node/engine 数据并即时重渲染（SRE 现在默认启用，无个人机器时显示检测按钮）
+  var _sreRerenderCreate = function() {
+    var el = document.getElementById('flowCardsContainer');
+    if (el) el.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
+  };
+  window._sreEditCtx = {
+    node: editNodes.find(n => n.id === 'sre') || null,
+    agentEngines: agentEngines,
+    rerender: _sreRerenderCreate
+  };
+
+  // 进创建模式即触发 SRE 检测（与编辑模式 §3.6 同语义）：SRE 默认启用后，
+  // 有在线个人机器 → 自动全选绑定（无需手动「重新检测」）；无机器不弹窗（silent），
+  // 卡片徽章+「重新检测」按钮已足够，用户可能只想直接关掉 SRE。
+  (function _sreEnterCreateScan() {
+    try {
+      var sreNode = editNodes.find(n => n.id === 'sre');
+      if (!sreNode || !sreNode.enabled) return;
+      if (_sreCheckOffline(sreNode, agentEngines)) {
+        _sreWakeUp(sreNode, agentEngines, _sreRerenderCreate, {silent: true});
+      }
+    } catch (e) { /* 扫描失败不阻断创建 */ }
+  })();
 
   window._toggleNewBranchInline = function() {
     var el2 = document.getElementById('newBranchInputInline');
@@ -2306,7 +2349,7 @@ window._openSceneRecommendModal = function(repoParam) {
 
 // 唤醒入口：扫描个人引擎（scope=user，后端 agent_engines['sre'] 已只返回个人级）
 // 有在线 → 自动全选（仅初始值，用户可在引擎弹窗反选）；无 → 弹「无个人机器」引导弹窗。
-function _sreWakeUp(node, agentEngines, onDone) {
+function _sreWakeUp(node, agentEngines, onDone, opts) {
   const engines = (agentEngines && agentEngines.sre) || [];
   const online = engines.filter(e => e.scope === 'user' && e.status === 'online');
   if (online.length > 0) {
@@ -2317,6 +2360,12 @@ function _sreWakeUp(node, agentEngines, onDone) {
     return;
   }
   // 无在线个人机器：区分「一台都没有」与「全部离线」（R4 对策）
+  // silent 模式（进入编辑/创建页自动扫描）：不弹引导窗，仅刷新渲染——
+  // 卡片上已有「没有可用的个人机器」徽章和「重新检测」按钮，用户可能只想直接关掉 SRE。
+  if (opts && opts.silent) {
+    if (onDone) onDone();
+    return;
+  }
   const hasButOffline = engines.length > 0;
   _sreShowNoMachineModal(node, agentEngines, hasButOffline, onDone);
 }
