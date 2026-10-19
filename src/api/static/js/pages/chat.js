@@ -1057,7 +1057,8 @@ function renderOnboardStatus(d) {
           <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
           <div style="color:var(--t);margin-bottom:4px">${I18N.t('chat.onboard.step1_scan')}</div>
           <div style="color:var(--t3);margin-bottom:10px">${I18N.t('chat.onboard.step2_confirm')}</div>
-          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">${I18N.t('chat.onboard.waiting_confirm')}</div>`;
+          <div style="color:var(--pk);font-size:11px;margin-bottom:8px" id="onboardCountdown">${I18N.t('chat.onboard.waiting_confirm')}</div>
+          <div style="color:var(--r);font-size:11px;font-weight:600;border-top:1px solid var(--b);padding-top:8px">${I18N.t('chat.onboard.close_warning')}</div>`;
         new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
         startCountdown();
       }
@@ -1123,6 +1124,18 @@ function restartOnboard() {
 }
 
 function cancelOnboard() {
+  // 场景③（docs/weekly-08/feishu-onboard-409-confirm-restart-design.md）：
+  // 关闭/离开弹窗会取消本次扫码配置（pending/waiting_confirm 置 failed）。
+  // 有进行中任务时先弹二次确认，避免用户手滑关窗丢失配置。
+  if (_onboardTaskId) {
+    const warn = I18N.t('chat.onboard.confirm_close') ||
+      '本次扫码配置尚未完成，关闭将取消配置，确认关闭？';
+    app.showConfirm(warn, function() {
+      if (_onboardTaskId) API.post('/feishu/onboard/cancel', {task_id: _onboardTaskId}).catch(() => {});
+      closeOnboardModal();
+    }, {danger: true});
+    return;
+  }
   if (_onboardTaskId) API.post('/feishu/onboard/cancel', {task_id: _onboardTaskId}).catch(() => {});
   closeOnboardModal();
 }
