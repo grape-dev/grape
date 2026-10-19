@@ -1291,8 +1291,19 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
                   (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
-        # 切换 scope 后同步更新引擎行（不删除，避免 worker 需要重新注册才能恢复引擎显示）
-        # 更新 scope/owner_id/org_id/repo_key 以匹配新凭据状态
+        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）
+        # 先删除 offline 重复行（只保留每个引擎名最新的一行），再 UPDATE 剩余行
+        c.execute(
+            "DELETE FROM engine_capabilities WHERE runtime_id IN ("
+            "SELECT id FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
+            "SELECT MAX(id) FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)))",
+            (cid, cid)
+        )
+        c.execute(
+            "DELETE FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
+            "SELECT max_id FROM (SELECT MAX(id) as max_id FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)) t)",
+            (cid, cid)
+        )
         c.execute(
             "UPDATE agent_runtimes SET scope=?, owner_id=?, org_id=?, repo_key=? WHERE credential_id=?",
             (scope, _new_owner_id, _new_org_id, repo_key or None, cid)
