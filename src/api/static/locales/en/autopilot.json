@@ -185,7 +185,11 @@
     "history_title": "Run History",
     "load_failed": "Failed to load: {{msg}}",
     "engine_detached_hint": "Bound engine(s) ",
-    "engine_detached_rebind": " went offline (8h+) and were removed from the scene by the system. Task binding is kept; adjust or rebind manually."
+    "engine_detached_rebind": " went offline (8h+) and were removed from the scene by the system. Task binding is kept; adjust or rebind manually.",
+    "subscribe": "Subscribe Feishu",
+    "subscribed": "Subscribed",
+    "subscribe_on": "Subscription on",
+    "subscribe_off": "Subscription off"
   },
   "advanced": {
     "save": "Save",

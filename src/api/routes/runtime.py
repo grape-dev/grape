@@ -706,18 +706,46 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
        跳过回炉（真孤儿不会有新消息）。
     2. attempts 封顶：回炉时 attempts+1，attempts>=3 的任务直接置 failed
        （此前 recover_orphans 不维护 attempts，无限回炉无封顶）。
+
+    2026-10-19 Issue #370：任务年龄宽限期闸门（在活跃度检查之前）。
+    刚派发的新任务引擎尚未输出首条 task_messages，活跃度检查必然判 0 消息
+    → 误判孤儿 → 每轮 worker 注册/心跳触发的回收都 attempts+1 → 封顶强制
+    failed（事件 #13485：28 秒判死，同类失败已 10 次）。加年龄闸门：started_at
+    （NULL 兜底 created_at）距 now 不足 RECOVER_GRACE_SECONDS（默认 300s，
+    覆盖队列出队+引擎冷启动上界）直接 skipped，attempts 不变、不回炉。
     """
     RECOVER_ACTIVITY_WINDOW = int(os.environ.get("RECOVER_ACTIVITY_WINDOW", "1200"))
     RECOVER_MAX_ATTEMPTS = int(os.environ.get("RECOVER_MAX_ATTEMPTS", "3"))
-    _active_cutoff = (datetime.now(timezone.utc) - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
-    recovered, skipped_active, force_failed = [], [], []
+    RECOVER_GRACE_SECONDS = int(os.environ.get("RECOVER_GRACE_SECONDS", "300"))
+    _now = datetime.now(timezone.utc)
+    _active_cutoff = (_now - timedelta(seconds=RECOVER_ACTIVITY_WINDOW)).isoformat()
+    _grace_cutoff_dt = _now - timedelta(seconds=RECOVER_GRACE_SECONDS)
+    recovered, skipped_active, force_failed, skipped_young = [], [], [], []
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT id, attempts, runtime_id FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
+            "SELECT id, attempts, runtime_id, event_seq, started_at, created_at "
+            "FROM agent_tasks WHERE runtime_id=? AND status IN ('dispatched','running')",
             (runtime_id,))
         rows = c.fetchall()
-        for tid, attempts, rid in rows:
+        _seq_by_tid = {}
+        for tid, attempts, rid, ev_seq, _sa, _ca in rows:
+            _seq_by_tid[tid] = ev_seq
+        for tid, attempts, rid, _ev_seq, started_at, created_at in rows:
+            # 年龄闸门（Issue #370）：started_at（NULL 兜底 created_at）距 now 不足
+            # 宽限期 → 直接 skipped，防止刚派发的新任务被误判孤儿反复回炉。
+            # 时间戳解析失败保守跳过闸门，继续后续活跃度检查（保持旧行为：回收）。
+            _age_base = started_at or created_at
+            if _age_base:
+                try:
+                    _age_dt = datetime.fromisoformat(_age_base)
+                    if _age_dt.tzinfo is None:
+                        _age_dt = _age_dt.replace(tzinfo=timezone.utc)
+                    if _age_dt > _grace_cutoff_dt:
+                        skipped_young.append(tid)
+                        continue
+                except Exception:
+                    pass
             # 活跃度检查：近期有 task_messages → 任务在跑，不是孤儿
             try:
                 c.execute(
@@ -772,11 +800,28 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                 from src.runtime.service import release_busy_slot
                 release_busy_slot(rid, cursor=c)
         db.commit()
-    if recovered or skipped_active or force_failed:
+    # Issue #369：attempts 封顶判死 → 完整回写关联事件诊断字段
+    # （result/exit_code/completed_at，对齐 event_pipeline._fail_event 语义；
+    # update_event_complete 终态保护天然幂等，双主 scp 同步两侧重复回写安全）
+    for tid in force_failed:
+        _seq = _seq_by_tid.get(tid)
+        if not _seq:
+            continue
+        try:
+            from src.api.event_store import update_event_complete
+            update_event_complete(
+                _seq, "failed", exit_code=1,
+                completed_at=datetime.now(timezone.utc).isoformat(),
+                result="recover-orphans attempts cap reached "
+                       "(possible self-restart loop), 任务判死")
+        except Exception as e:
+            log.warning(f"recover-orphans event writeback failed tid={tid}: {e}")
+    if recovered or skipped_active or force_failed or skipped_young:
         log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "
-                 f"skipped_active={skipped_active} force_failed={force_failed}")
+                 f"skipped_active={skipped_active} skipped_young={skipped_young} force_failed={force_failed}")
     return {"message": "orphans recovered", "recovered": recovered,
-            "skipped_active": skipped_active, "force_failed": force_failed}
+            "skipped_active": skipped_active, "skipped_young": skipped_young,
+            "force_failed": force_failed}
 
 
 # ===== 用户态端点（M2，保留）=====

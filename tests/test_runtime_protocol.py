@@ -118,6 +118,16 @@ class TestClaimViaHttp:
         tid = service.enqueue_task(agent_session_id="s-p3", runtime_id=rid, prompt="p", event_seq=3,
                                    repo_key="test/repo", agent_type="issue", skill="issue")
         service.update_task_status(tid, "running")
+        # Issue #370：recover-orphans 现在跳过 < RECOVER_GRACE_SECONDS（默认 300s）的新任务。
+        # 把 started_at/created_at 回拨到宽限期之外，模拟"超龄无消息的真孤儿"，
+        # 才能验证回炉为 queued 的原有行为。
+        from datetime import datetime, timedelta, timezone
+        _old = (datetime.now(timezone.utc) - timedelta(seconds=400)).isoformat()
+        with db_lock:
+            db.cursor().execute(
+                "UPDATE agent_tasks SET started_at=?, created_at=? WHERE id=?",
+                (_old, _old, tid))
+            db.commit()
         r = client.post(f"/api/runtime/runtimes/{rid}/recover-orphans", headers=headers)
         assert r.status_code == 200
         assert service.get_task(tid)["status"] == "queued"

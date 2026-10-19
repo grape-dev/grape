@@ -75,7 +75,7 @@ def terminate_active_agents(grace_seconds: int = 5):
     # 上面的 SIGTERM 杀掉了，照旧标 failed。
     try:
         from src.session_manager import db, db_lock
-        from src.api.event_store import update_event_status
+        from src.api.event_store import update_event_complete
         import time as _time
         _now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
         with db_lock:
@@ -105,15 +105,13 @@ def terminate_active_agents(grace_seconds: int = 5):
                         (_now, _SHUTDOWN_TASK_REASON, task_id)
                     )
                     if event_seq:
-                        update_event_status(event_seq, "failed")
-                        # Step 1：失败原因写入 events.result —— 否则详情页失败原因会兜底显示
-                        # summary（如 "A2A: → coding"），无意义（#2337）
-                        try:
-                            c.execute(
-                                "UPDATE events SET result=?, exit_code=-1 WHERE seq=?",
-                                (_SHUTDOWN_EVENT_REASON, event_seq))
-                        except Exception as _sr:
-                            log.warning(f"terminate_active_agents: events.result write failed {event_seq}: {_sr}")
+                        # Issue #369：完整回写事件诊断字段（result/exit_code/completed_at），
+                        # 对齐 event_pipeline._fail_event 语义；终态保护天然幂等（双主安全）。
+                        # rebase 融合注：reason 用 _SHUTDOWN_EVENT_REASON（上游 #2337 文案；
+                        # 原 cherry-pick 版引用过未定义的 _reason，此处修正）。
+                        update_event_complete(event_seq, "failed", exit_code=-1,
+                                              completed_at=_now,
+                                              result=_SHUTDOWN_EVENT_REASON[:200])
                     # Step 1：统一释放 busy 槽（不漏槽，防止重启累积卡死队列）
                     if runtime_id:
                         try:

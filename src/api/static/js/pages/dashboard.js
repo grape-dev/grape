@@ -517,7 +517,7 @@ function renderSceneDetailLocal(sceneId) {
     // 场景判定「新鲜优先」：本次 /scenes/with-pipeline（与详情同源、无缓存）为准，
     // dashData._scenes 仅兜底——否则陈旧快照会吞掉刚应用场景（scene-apply-stale-detail-fix-design.md）
     const scenes = (scenesData.scenes && scenesData.scenes.length
-      ? scenesData.scenes.map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo'}))
+      ? scenesData.scenes.map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo', pr_subscription_enabled: s.pr_subscription_enabled}))
       : (dashData._scenes || []) );
     const scene = scenes.find(s => s.id === sceneId);
     if (!scene) {
