@@ -2362,12 +2362,62 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id, repo_gitcode_token)
 
 
+def _task_created_key(value):
+    """created_at 归一键（比较用），返回 (可解析标志, epoch 秒, 原串)。
+
+    历史上 agent_tasks.created_at 有 ISO 带时区（`2026-10-19T09:42:07.12+00:00`）与
+    本地 `YYYY-MM-DD HH:MM:SS` 两种写法，字符串直接比较会在混写时误判。
+    统一成同构三元组：可解析的恒大于不可解析的，同组内按时间戳比较，避免混类型比较。
+    """
+    _v = (value or "").strip()
+    if not _v:
+        return (0, 0.0, "")
+    try:
+        _dt = datetime.fromisoformat(_v.replace(" ", "T"))
+        if _dt.tzinfo is None:
+            _dt = _dt.replace(tzinfo=timezone.utc)
+        return (1, _dt.timestamp(), _v)
+    except Exception:
+        return (0, 0.0, _v)
+
+
 def fail_task(task_id, error, exit_code=-1):
     task = get_task(task_id)
     # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
     if task and task.get("status") == "completed":
         log.info(f"Task {task_id} already completed, skip fail_task (error={error[:60]})")
         return
+    # 幂等保护 2：已 failed 的 task 重复收到 fail（worker 补报重放 / 多进程重复上报）
+    # 直接跳过——否则每次重放都会重跑 finalize_event_archive + update_event_complete，
+    # 把人工 redispatch 已 reset 回 running 的事件再写回 failed + 旧失败原因
+    # （2026-10-19 补报重放事故：重派后 180ms 被旧任务僵尸上报劫持）。
+    if task and task.get("status") == "failed":
+        log.info(f"Task {task_id} already failed, skip fail_task (error={str(error)[:60]})")
+        return
+    # 过期上报丢弃：同一 event_seq 下已存在更晚创建的任务（redispatch / recover_orphans 重跑），
+    # 说明本上报属于被取代的旧执行实例 → 不得回写任务终态，更不得回写事件终态。
+    if task and task.get("event_seq"):
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT id, created_at FROM agent_tasks WHERE event_seq=?",
+                          (task["event_seq"],))
+                _sibs = c.fetchall() or []
+            _mine = task.get("id") or task_id
+            _mykey = _task_created_key(task.get("created_at"))
+            _newer = ""
+            for _sid, _sca in _sibs:
+                if _sid == _mine:
+                    continue
+                if _task_created_key(_sca) > _mykey:
+                    _newer = _sid
+                    break
+            if _newer:
+                log.info(f"Stale fail report discarded: task {task_id} superseded by {_newer} "
+                         f"(event_seq={task['event_seq']}); task/event state left intact")
+                return
+        except Exception as e:
+            log.warning(f"fail_task stale-report check failed: {e}")
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import update_event_complete
