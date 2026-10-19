@@ -857,7 +857,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             cred = cred_map.get(cid)
             if not cred:
                 continue  # cred_map 已被组织过滤 — 不在 map 中的凭据跳过
-            if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", "")):
+            if not visible_credential(cid, cred.get("scope", "global"), cred.get("owner_name", ""), cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
                 continue
             c.execute("SELECT id, name, version, healthy, installed, status, last_seen_at, local_skills, skill_scan_result, worker_version FROM agent_runtimes WHERE credential_id=?", (cid,))
             # AIShell 显示名（2026-10-13 收口补漏）：worker 设备视图的承载引擎列表
