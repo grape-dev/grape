@@ -44,6 +44,8 @@
     "in_progress": "A scan configuration is already in progress. Please wait.",
     "confirm_restart": "A Feishu bot configuration is already in progress. Abandon it and start over? (The old configuration will not be saved)",
     "confirm_rebind": "A Feishu bot is already bound ({{appId}}). Replacing it will make the old configuration invalid and unrecoverable. Continue to scan and rebind?",
+    "close_warning": "Configuration in progress. Please do not close this page; closing will cancel the configuration",
+    "confirm_close": "The scan configuration is not finished yet. Closing will cancel it. Confirm close?",
     "start_failed": "Failed to start scan configuration: {{msg}}",
     "modal_title": "🔗 Feishu Scan Configuration",
     "generating_qr": "Generating QR code…",
