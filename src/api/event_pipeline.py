@@ -254,6 +254,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type="", affinity_runtime_id=0, pool_tag="", pool_engine_ids="",
+            pool_engine_source="",
             status="queued", stream_ended=0, self_reported=0,
             exit_code=None, result_text="", errors="", stderr="",
             usage_json="{}", started_at=now, completed_at=None, created_at=now,
@@ -266,7 +267,10 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             db.commit()
         log.info(f"Direct task created: {task_id} seq={seq} engine={engine_id}({inst_name}) skill={skill_name}")
     except Exception as e:
-        log.warning(f"create_direct_task failed for seq={seq}: {e}")
+        # 排障关键：这里是"任务行没落库"的唯一出口，必须 ERROR 级别带栈（2026-10-19 事故：
+        # 缺 pool_engine_source 列值 → ValueError 被 warning 吞掉 → 排障断链）
+        log.error(f"create_direct_task failed for seq={seq}（任务行未落库，事件将卡 running 被 sweeper 判 failed）: {e}",
+                  exc_info=True)
         return ""
     # 方案 E：direct 任务创建即开跑 → 事件置 running（@skip_event_config 的 autopilot 不写 events 表，跳过）
     if seq and not skip_event_config:
@@ -360,6 +364,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             project_info_files="{}", project_info_meta="{}", knowledge_files="{}",
             project_info_file_urls="{}", knowledge_file_urls="{}", attempts=0,
             pool_agent_type=_pool_tag, affinity_runtime_id=0, pool_tag=_pool_tag, pool_engine_ids="",
+            pool_engine_source="",
             status="failed", stream_ended=1, self_reported=0,
             exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
@@ -372,7 +377,9 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             db.commit()
         log.info(f"Failed task snapshot created: {task_id} seq={seq} agent={agent_type} (engine_unavailable)")
     except Exception as e:
-        log.warning(f"create_failed_task failed for seq={seq}: {e}")
+        # 排障关键：失败快照写不进去 = 重派无参数可复用 + 失败原因不可见（2026-10-19 事故 seq=6573/6557）
+        log.error(f"create_failed_task failed for seq={seq}（失败快照未落库，重派与排障受影响）: {e}",
+                  exc_info=True)
 
 
 def _update_direct_task(seq, status, exit_code=0, result_text=""):
