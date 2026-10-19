@@ -1,6 +1,6 @@
 # Grape 平台日失败统计分析（2026-10-19）
 
-> 统计窗口：2026-10-18 ~ 2026-10-19（`created_at >= date_sub(now(), interval 1 day)`）
+> 统计窗口：2026-10-18 ~ 2026-10-19（`created_at >= date_sub(now(), interval 1 day)`，当日二次巡检刷新版：较当日早前版本新增 11:02 之后产生的失败，事件/任务口径已对齐当前窗口）
 > 数据源：grape_system_db.events / agent_tasks（全量失败明细，未抽样）
 > 目标分支来源：环境变量 `GRAPE_WORK_BRANCH=weekly-07-clean-mys`（scheduler 注入），数字后缀 XX=07
 
@@ -10,48 +10,53 @@
 
 | 状态 | 数量 | 占比（终态） |
 |---|---|---|
-| completed | 136 | 93.8% |
-| failed | 9 | 6.2% |
+| completed | 138 | 93.9% |
+| failed | 9 | 6.1% |
 | running | 6 | （未终态，不计入成功率） |
 
-终态 145，成功率 **93.8%**。
+终态 147，成功率 **93.9%**。
 
 ### 任务级（agent_tasks）
 
 | 状态 | 数量 | 占比（终态） |
 |---|---|---|
-| completed | 116 | 92.8% |
-| failed | 9 | 7.2% |
+| completed | 113 | 91.1% |
+| failed | 11 | 8.9% |
 | running | 7 | （未终态） |
 
-终态 125，成功率 **92.8%**。
+终态 124，成功率 **91.1%**。
 
 ---
 
 ## 二、归类汇总
 
-### 事件级失败（9 条）
+### 事件级失败（9 条，当前窗口）
 
 | 类别 | 数量 | 占比 | 事件 seq |
 |---|---|---|---|
-| C1 场景绑定引擎全部离线（scene=default, agent=sre，派发层判死） | 4 | 44.4% | 13331, 13332, 13333, 13454 |
-| C2 派发层选不到引擎且"裸 failed"无原因落库（a2a → sre） | 2 | 22.2% | 13328, 13455 |
+| C1 场景绑定引擎全部离线（scene=default, agent=sre，派发层判死） | 3 | 33.3% | 13331, 13332, 13333 |
+| C2 派发层选不到引擎且"裸 failed"无原因落库（a2a → sre） | 1 | 11.1% | 13328 |
 | C3 认领时池内引擎全部不可达（hermes 离线），事件侧无回写 | 1 | 11.1% | 13424 |
 | C4 静默超时（SIGTERM 后 grace tail 有输出，exit=-1） | 1 | 11.1% | 13375 |
 | C5 引擎 initialize 超时（100s） | 1 | 11.1% | 13452 |
+| C6 hermes ACP 引擎异常退出（exit=-1，stderr 截断，无头死亡） | 1 | 11.1% | 13472 |
+| C7 服务端中止 + recover-orphans 回炉封顶判死 | 1 | 11.1% | 13485 |
 | **合计** | **9** | **100%** | |
 
-### 任务级失败（9 条）
+（早前版本另含 13454/13455 两条，当前窗口已出窗/状态变更，不计入本次账目。）
+
+### 任务级失败（11 条，当前窗口）
 
 | 类别 | 数量 | task id / 关联 |
 |---|---|---|
 | D1 issue 池绑定引擎（opencode, tag=issue）不可达，Issue #253 四连失败 | 4 | t_0475385ff438, t_7b72e3498c7a, t_a26ead546e36, t_d1b407ae4598（event_seq=468~471） |
 | D2 qa 池 hermes 引擎认领时不可达 | 1 | t_47f5d555f418（event 13424，同 C3） |
+| D7 服务端中止 + recover-orphans 封顶（同 C7） | 1 | t_2e3e891931b7（event 13485） |
 | D3 coding 静默超时 | 1 | t_829dc3daf5d2（event 13375，同 C4） |
 | D4 exit_code=0 却记 failed、无 errors（无效完成自动重跑路径） | 1 | t_61df6931a1ba（event 13433，事件最终 completed） |
-| D5 引擎 exit=-1 异常退出且诊断信息截断（重派后成功） | 1 | t_a5d948666e40（event 13345，事件最终 completed） |
+| D5 引擎 exit=-1 异常退出且诊断信息截断 | 2 | t_a5d948666e40（event 13345，重派后事件 completed）、t_d9321283be2c（event 13472，同 C6） |
 | D6 vod 引擎 initialize 超时 | 1 | t_d3a65c40d26d（event 13452，同 C5） |
-| **合计** | **9** | |
+| **合计** | **11** | |
 
 各类数量之和 = 失败总数，账目对齐。
 
@@ -187,7 +192,7 @@
 3. 正常完成（非空结果）→ 不触发重跑（回归）。
 4. 统计脚本按 errors 前缀可区分"重跑淘汰"与"真实失败"。
 
-### D5（1 条）：引擎 exit=-1 异常退出且诊断信息截断（t_a5d948666e40，event 13345）
+### D5（1 条 + C6 同族 1 条）：引擎 exit=-1 异常退出且诊断信息截断（t_a5d948666e40，event 13345）
 
 **出错的逻辑**：sre 部署任务（huawei-cloud-devbridge-deploy）在 hermes 引擎上跑 35 分钟后 engine exit_code=-1；errors 内嵌的 stderr 仅含 ACP 适配器启动两行日志，且在时间戳 `2026-10-18` 半截处被截断（engine 侧上报即截断），真实死因（OOM/网络/引擎崩溃）不可考。事件随后被重派，新任务 18 分钟部署成功（事件最终 completed）——说明任务本身可执行，是引擎实例异常。
 
@@ -204,22 +209,60 @@
 3. 正常完成 → errors 为空（回归）。
 4. stderr 落文件路径可被下载/读取且与 errors 引用一致。
 
----
+### C6/D5（事件 13472，任务 t_d9321283be2c）：hermes ACP 引擎异常退出（第二例，当天 513s 即死）
 
-## 四、优先级排序（修好即清零、改动小者优先）
+**出错的逻辑**：与 D5（t_a5d948666e40）同族。coding 任务（ops-plan-output，dongzhiri/Grape-ops Issue #4）在 hermes 引擎上启动后仅 513s 即 engine exit_code=-1；errors 仅含 ACP 适配器启动两行 INFO 日志（`acp_adapter.entry: Loaded env... / Starting hermes-agent ACP adapter`）并在半截处被截断，真实死因不可考。与 D5 的 35 分钟死亡不同，本例启动后 ~8.5 分钟死亡，两例叠加说明 hermes ACP 适配器存在不稳定的崩溃模式（疑似与 `/root/.cache/hermes-acp-homes/<hash>` 隔离 home 加载/会话初始化相关）。
+
+**修正后的逻辑**：同 D5 的 stderr 截断策略修复（头尾保留 + 信号/存活时长），另加：hermes ACP 适配器进程退出时强制 dump 最后 10 行日志与退出信号（SIGSEGV/SIGKILL/OOM 区分）；对同引擎短窗口内第二次 exit=-1 自动降低该 runtime 健康分（health_scorer 已有失败计数维度，确认 engine exit=-1 也计入而非仅任务级 failed）。
+
+**影响面评估**：
+- worker 端改动（hermes_acp / acp_adapter），13 台 worker 批量升级。
+- 健康分联动在服务端，双主同步。
+- 无 status 枚举变化。
+
+**测试用例设计**：
+1. 构造适配器启动 60s 后 SIGSEGV → errors 含信号、最后日志行与存活时长。
+2. 同 runtime 30 分钟内两次 exit=-1 → 健康分下降，新任务改派其他引擎。
+3. 正常长跑任务 → 健康分不受影响（回归）。
+4. stderr 超长 → 头尾保留截断策略生效（与 D5 用例共用）。
+
+### C7/D7（事件 13485，任务 t_2e3e891931b7）：服务端中止 + recover-orphans 回炉封顶判死
+
+**出错的逻辑**：`src/runtime/agent.py:1902`（"task terminated by server (aborted during execution)"）+ `src/api/routes/runtime.py:690-750`。coding-cli 任务（grape-dev/grape 自身仓库）运行仅 28s 即被服务端中止；agent_tasks 同条任务 result_text 为 "recover-orphans attempts cap reached (possible self-restart loop)"——即该任务此前已因 master/worker 重启或心跳断触被 recover-orphans 置回 queued，回炉 attempts 达到 `RECOVER_MAX_ATTEMPTS=3` 封顶后 force-fail。runtime.py:680-691 注释描述的自噬循环场景（部署类任务内含"重启 master"）已做活跃度检查，但本例任务 28s 即死说明中止发生在启动早期——活跃度窗口（task_messages 1200s 无新消息即判孤儿）对"刚认领还没来得及发消息"的任务误判为孤儿，回炉计数被快速耗尽。
+
+**修正后的逻辑**：活跃度检查增加"启动宽限"：started_at 距今 < 启动宽限期（如 300s）的任务即使无 task_messages 也跳过回炉（新认领任务尚在初始化，hermes 长命令静默窗口本身就可能 300s 无消息）；force-fail 文案同时写入 events.result（当前事件侧只有 agent.py 的通用 aborted 文案，未带 attempts 回炉上下文）。
+
+**影响面评估**：
+- runtime.py 在服务端，双主 scp 同步。
+- 启动宽限期参数化（环境变量），默认值需小于 RECOVER_ACTIVITY_WINDOW。
+- 风险：真正秒死的孤儿任务会多等一个宽限期才回炉，可接受。
+
+**测试用例设计**：
+1. 任务认领后 60s、无 task_messages、master 重启触发 recover-orphans → 跳过回炉（启动宽限生效）。
+2. 任务认领后 600s、无 task_messages → 照常回炉，attempts+1。
+3. attempts=2 的任务再次回炉 → force-fail，且 events.result 含 "attempts cap" 上下文。
+4. 回归：有 task_messages 的活跃任务永不回炉。
+5. 启动宽限期内任务真死（进程退出）→ 由 sweeper 的 long_running/dead_runtime 规则兜底回收，不悬空。
+
+
 
 | 优先级 | 项 | 预期清零 | 改动量 |
 |---|---|---|---|
-| P0 | C2 裸 failed 改走 `_fail_event`（两行） | 2 条事件级无头失败 | 极小 |
-| P0 | 运维：恢复/更换 sre、issue 标签绑定引擎在线（含解绑离线 opencode） | C1 4 条 + D1 4 条 + C3/D2 1 条 | 无代码 |
-| P1 | C1 scene 绑定路径接入认领层兜底（降级入队） | C1 4 条（与运维叠加） | 中 |
+| P0 | C2 裸 failed 改走 `_fail_event`（两行） | 1 条事件级无头失败 | 极小 |
+| P0 | 运维：恢复/更换 sre、issue 标签绑定引擎在线（含解绑离线 opencode） | C1 3 条 + D1 4 条 + C3/D2 1 条 | 无代码 |
+| P1 | C1 scene 绑定路径接入认领层兜底（降级入队） | C1 3 条（与运维叠加） | 中 |
 | P1 | C3 任务失败回写事件收口 | 1 条 + 未来同类 | 小（双主同步） |
+| P1 | C7 recover-orphans 启动宽限期 + force-fail 事件回写 | 1 条 + 未来同类 | 小（双主同步） |
 | P1 | C5/D6 initialize 超时可配 + 重试 | 1 条 | 小（worker 批量升级） |
 | P2 | D4 重跑淘汰补 errors 原因 | 1 条统计口径 | 小（worker 批量升级） |
 | P2 | C4/D3 静默超时收尾观察期 / 调大 EXTEND_CAP | 1 条 | 中（worker 批量升级） |
-| P3 | D5 stderr 截断策略头尾保留 | 排障能力 | 中 |
+| P2 | C6/D5 hermes ACP 崩溃：stderr 头尾保留 + 健康分联动 | 2 条排障能力 + 自动止损 | 中（worker 批量升级） |
 
 ---
+
+## 附：巡检中发现的独立安全问题（不计入失败账目）
+
+**agent_tasks.env_extra 明文落库敏感凭据**：任务行 env_extra 含华为云 `HUAWEICLOUD_SDK_AK/SK`、`GRAPE_SESSION_TOKEN`、`TOKEN` 等，另有列 `repo_gitcode_token` 明文存储平台 token。任何能读该库/备份的角色（含巡检 SQL 本身）即可获取云凭据。仓库已有 `docs/vcs-env-token-boundary-audit-design.md` 做边界审计，建议将 env_extra 凭据改为加密存储（KMS/CSMS）或按需注入不落库，并轮换已暴露 AK/SK。
 
 ## 设计文档位置
 
