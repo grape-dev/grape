@@ -1247,7 +1247,7 @@ class CredScopeBody(BaseModel):
 
 
 @router.put("/runtime-credentials/{cid}/scope", operation_id="settings_runtime_credential_scope", summary="Change credential scope", description="Switches a credential scope (repo/personal). Owner-only, active-only; global is not allowed.")
-def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(require_no_session_token)):
+def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(require_org_member)):
     """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
     from src.session_manager import db, db_lock
     scope = _normalize_scope(body.scope)
