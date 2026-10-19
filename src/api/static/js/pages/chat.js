@@ -946,20 +946,59 @@ let _onboardQrRendered = false;
 let _onboardBotType = 'chat_bot';
 let _onboardRepoKey = '';
 
-function startFeishuOnboard(botType, repoKey) {
+function startFeishuOnboard(botType, repoKey, skipRebindCheck) {
   _onboardBotType = botType || 'chat_bot';
   _onboardRepoKey = repoKey || '';
-  const body = {bot_type: _onboardBotType};
-  if (_onboardRepoKey) body.repo_key = _onboardRepoKey;
-  API.post('/feishu/onboard/start', body).then(d => {
-    _onboardTaskId = d.task_id;
-    showOnboardModal();
-    pollOnboardStatus();
-  }).catch(e => {
-    // 409：已有进行中的任务
-    if (e.status === 409) app.showToast(e.message || I18N.t('chat.onboard.in_progress'));
-    else app.showToast(I18N.t('chat.onboard.start_failed', {msg: e.message}));
-  });
+  // 场景②（docs/weekly-08/feishu-onboard-409-confirm-restart-design.md Step 1.4，纯前端）：
+  // 已成功配置过机器人（connected）时，再次点「扫码配置」= 换绑，必须先弹确认，
+  // 避免静默覆盖旧绑定（旧配置失效且不可恢复）。确认后递归调用跳过二次确认。
+  if (!skipRebindCheck) {
+    API.get('/chat/config').then(function(cfg) {
+      const existing = (cfg && cfg.im && cfg.im.feishu && cfg.im.feishu.app_id) || '';
+      if (existing) {
+        const rebindMsg = I18N.t('chat.onboard.confirm_rebind', {appId: existing}) ||
+          '当前已绑定飞书机器人（' + existing + '）。更换后将使旧配置失效且不可恢复，确认继续扫码换绑？';
+        app.showConfirm(rebindMsg, function() {
+          startFeishuOnboard(_onboardBotType, _onboardRepoKey, true);
+        }, {danger: true});
+        return;
+      }
+      doStartFeishuOnboard();
+    }).catch(function() {
+      // 查配置失败不阻断（保守：直接走原流程）
+      doStartFeishuOnboard();
+    });
+    return;
+  }
+  doStartFeishuOnboard();
+
+  function doStartFeishuOnboard() {
+    const body = {bot_type: _onboardBotType};
+    if (_onboardRepoKey) body.repo_key = _onboardRepoKey;
+    API.post('/feishu/onboard/start', body).then(d => {
+      _onboardTaskId = d.task_id;
+      showOnboardModal();
+      pollOnboardStatus();
+    }).catch(e => {
+      // 409：已有进行中的任务 → 弹确认框供「重新开始配置」；不再只 toast 干等。
+      if (e.status === 409) {
+        const oldTaskId = (e.detail && e.detail.task_id) || '';
+        const msg = I18N.t('chat.onboard.confirm_restart') ||
+          '当前已有飞书机器人正在配置中，是否放弃并重新开始配置？（旧配置不会保存）';
+        app.showConfirm(msg, function() {
+          if (oldTaskId) {
+            API.post('/feishu/onboard/cancel', {task_id: oldTaskId}).finally(function() {
+              startFeishuOnboard(_onboardBotType, _onboardRepoKey, true);
+            });
+          } else {
+            startFeishuOnboard(_onboardBotType, _onboardRepoKey, true);
+          }
+        }, {danger: true});
+      } else {
+        app.showToast(I18N.t('chat.onboard.start_failed', {msg: e.message}));
+      }
+    });
+  }
 }
 
 function showOnboardModal() {
@@ -1018,7 +1057,8 @@ function renderOnboardStatus(d) {
           <div style="background:#fff;border:1px solid var(--b);border-radius:8px;padding:12px;display:inline-block;margin-bottom:10px" id="onboardQr"></div>
           <div style="color:var(--t);margin-bottom:4px">${I18N.t('chat.onboard.step1_scan')}</div>
           <div style="color:var(--t3);margin-bottom:10px">${I18N.t('chat.onboard.step2_confirm')}</div>
-          <div style="color:var(--pk);font-size:11px" id="onboardCountdown">${I18N.t('chat.onboard.waiting_confirm')}</div>`;
+          <div style="color:var(--pk);font-size:11px;margin-bottom:8px" id="onboardCountdown">${I18N.t('chat.onboard.waiting_confirm')}</div>
+          <div style="color:var(--r);font-size:11px;font-weight:600;border-top:1px solid var(--b);padding-top:8px">${I18N.t('chat.onboard.close_warning')}</div>`;
         new QRCode(document.getElementById('onboardQr'), {text: d.qr_url, width: 200, height: 200});
         startCountdown();
       }
@@ -1084,6 +1124,18 @@ function restartOnboard() {
 }
 
 function cancelOnboard() {
+  // 场景③（docs/weekly-08/feishu-onboard-409-confirm-restart-design.md）：
+  // 关闭/离开弹窗会取消本次扫码配置（pending/waiting_confirm 置 failed）。
+  // 有进行中任务时先弹二次确认，避免用户手滑关窗丢失配置。
+  if (_onboardTaskId) {
+    const warn = I18N.t('chat.onboard.confirm_close') ||
+      '本次扫码配置尚未完成，关闭将取消配置，确认关闭？';
+    app.showConfirm(warn, function() {
+      if (_onboardTaskId) API.post('/feishu/onboard/cancel', {task_id: _onboardTaskId}).catch(() => {});
+      closeOnboardModal();
+    }, {danger: true});
+    return;
+  }
   if (_onboardTaskId) API.post('/feishu/onboard/cancel', {task_id: _onboardTaskId}).catch(() => {});
   closeOnboardModal();
 }

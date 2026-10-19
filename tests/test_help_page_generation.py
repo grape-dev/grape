@@ -71,9 +71,11 @@ class TestShell:
 
     def test_routes_present(self, page_text):
         assert "#/usage" in page_text and "#/api" in page_text
+        assert "#/developer" in page_text, "Issue #373: developer section route missing"
 
     def test_section_scoping_labels(self, page_text):
         assert "使用指南" in page_text and "API 参考" in page_text
+        assert "开发者文档" in page_text, "Issue #373: developer section label missing"
 
     def test_openapi_download_link_fixed(self, page_text):
         """契约下载 URL 固定为 /static/openapi.json（生成物，启动期落盘）。"""
@@ -85,9 +87,11 @@ class TestShell:
             f"expected {len(gen.USAGE_ORDER)} usage docs, got {len(data['usage'])}"
         assert len(data["api"]) == len(API_FILES), \
             f"expected {len(API_FILES)} api docs, got {len(data['api'])}"
+        assert len(data.get("developer", [])) == len(gen.DEVELOPER_ORDER), \
+            f"expected {len(gen.DEVELOPER_ORDER)} developer docs, got {len(data.get('developer', []))}"
 
     def test_every_doc_has_fields(self, data):
-        for section in ("usage", "api"):
+        for section in ("usage", "api", "developer"):
             for d in data[section]:
                 assert d["id"] and d["title"], f"bad id/title in {d}"
                 assert isinstance(d["html"], str) and len(d["html"]) > 50
@@ -107,9 +111,15 @@ class TestContent:
         html_all = "".join(d["html"] for d in data["api"])
         assert title in html_all, f"H1 '{title}' of {filename} missing"
 
+    @pytest.mark.parametrize("filename", gen.DEVELOPER_ORDER)
+    def test_developer_first_h1_present(self, filename, data):
+        title = _first_h1(gen.DEVELOPER_DIR / filename)
+        html_all = "".join(d["html"] for d in data["developer"])
+        assert title in html_all, f"H1 '{title}' of {filename} missing"
+
     def test_heading_ids_unique_across_docs(self, data):
         ids = []
-        for section in ("usage", "api"):
+        for section in ("usage", "api", "developer"):
             for d in data[section]:
                 ids += re.findall(r'id="([^"]+)"', d["html"])
         assert ids, "no heading ids found"
@@ -152,7 +162,8 @@ class TestRenderedStructure:
 class TestGenerate:
     def test_source_count(self):
         n = gen.generate()
-        assert n == len(gen.USAGE_ORDER) + len(API_FILES)
+        expected = len(gen.USAGE_ORDER) + len(API_FILES) + len(gen.REFERENCE_ORDER) + len(gen.DEVELOPER_ORDER)
+        assert n == expected, f"expected {expected} source docs, got {n}"
 
     def test_repeatable_bytes(self):
         gen.generate()

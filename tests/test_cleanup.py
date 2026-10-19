@@ -8,6 +8,35 @@ from src.session_manager import db, db_lock
 from src.runtime import cleanup
 
 
+def test_sweep_once_purges_stale_im_instances():
+    """sweep_once 必须清理 24h 前的 IM 实例心跳行（bot_lease.purge_stale_instances）。
+
+    回归背景：该钩子最初被放进 `if _has_db_tables:` 块里，而那个判断查的是 SQLite 的
+    `sqlite_master` —— MySQL 后端恒为 False → 整块被跳过，清理永不执行（实测发现）。
+    """
+    _old = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=48)).strftime("%Y-%m-%d %H:%M:%S")
+    _fresh = (datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(seconds=5)).strftime("%Y-%m-%d %H:%M:%S")
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM grape_im_instance WHERE instance_id LIKE 'sweeptest-%'")
+        c.execute("INSERT INTO grape_im_instance (instance_id, hostname, ip, last_heartbeat) "
+                  "VALUES ('sweeptest-old','h','',?)", (_old,))
+        c.execute("INSERT INTO grape_im_instance (instance_id, hostname, ip, last_heartbeat) "
+                  "VALUES ('sweeptest-fresh','h','',?)", (_fresh,))
+        db.commit()
+    try:
+        cleanup.sweep_once()
+        with db_lock:
+            ids = [r[0] for r in db.cursor().execute(
+                "SELECT instance_id FROM grape_im_instance").fetchall()]
+        assert "sweeptest-old" not in ids, "sweep_once 没有清理过期的 IM 实例心跳行"
+        assert "sweeptest-fresh" in ids, "sweep_once 误删了新鲜心跳行"
+    finally:
+        with db_lock:
+            db.cursor().execute("DELETE FROM grape_im_instance WHERE instance_id LIKE 'sweeptest-%'")
+            db.commit()
+
+
 @pytest.fixture(autouse=True)
 def _cleanup_env(tmp_path, monkeypatch):
     monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path / "ws"))
@@ -269,7 +298,7 @@ class TestStuckAgentTasks:
 
     def test_dual_signal_stuck_recycled_even_fresh(self):
         # 双信号齐（stream_ended+self_reported）但任务仍非终态 → 收敛失败残留，无年龄要求直接回收
-        # 实例：#214（issue #10）QA 任务 t_1a1a9c440f9a：事件 2219 已 completed、output 齐全，任务恒 running
+        # 实例：#214（issue #10）QA 任务 t_<task>：事件 2219 已 completed、output 齐全，任务恒 running
         self._mk_task("t-dual", "running", runtime_id=0, started_at=None,
                       created_at=datetime.now(timezone.utc).isoformat(),
                       stream_ended=1, self_reported=1)

@@ -224,6 +224,11 @@ CREATE TABLE IF NOT EXISTS global_im_bot_config (
 )
 """
 
+# ⚠️ 时间口径警告（2026-10-18 加固）：这两个 DEFAULT 在 MySQL 上经 mysql_compat 翻译后等价于
+# 服务器本地时间（CST=UTC+8），而读侧（bot_lease._heartbeat_window / list_active_instances）
+# 一律按 **UTC** 比较 last_heartbeat。因此**写入方必须显式传 last_heartbeat（UTC 值）**，
+# 不要依赖默认值——历史上就是 MySQL 分支用 CAST(NOW() AS CHAR) 写 CST，导致幽灵实例占满一致性
+# 哈希环、bot 永不连接（issue #365 / commit f7f9951005）。默认值保留仅为兼容旧插入路径。
 _IM_INSTANCE_DDL = """
 CREATE TABLE IF NOT EXISTS grape_im_instance (
     instance_id      VARCHAR(64) PRIMARY KEY,

@@ -428,3 +428,32 @@ class TestReadLocalWorkerVersion:
         with patch("builtins.open", side_effect=FileNotFoundError):
             result = ra._read_local_worker_version()
             assert result == ""
+
+    def test_falls_back_to_package_version_when_stamp_missing(self, tmp_path):
+        """戳文件缺失时退回包内 VERSION。
+
+        没有这个兜底，本地版本恒为 ""，心跳每个检查周期都比对失败 →
+        反复触发升级（下载整包 + 重启 worker），表现为"升级循环"。
+        """
+        (tmp_path / "VERSION").write_text("h-abc123\n", encoding="utf-8")
+        _real_open = open
+
+        def _fake_open(path, *a, **k):
+            if str(path).endswith("worker.version"):
+                raise FileNotFoundError(path)
+            return _real_open(path, *a, **k)
+
+        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("builtins.open", side_effect=_fake_open), \
+             patch("src.runtime.agent.os.getcwd", return_value=str(tmp_path)):
+            assert ra._read_local_worker_version() == "h-abc123"
+
+    def test_stamp_takes_priority_over_package_version(self, tmp_path):
+        """戳文件在位时以戳为准（包内 VERSION 只是兜底，不参与正常路径）。"""
+        (tmp_path / "VERSION").write_text("h-abc123\n", encoding="utf-8")
+        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("src.runtime.agent.os.path.expanduser", return_value=str(tmp_path)), \
+             patch("src.runtime.agent.os.getcwd", return_value="/nowhere"):
+            (tmp_path / ".grape").mkdir()
+            (tmp_path / ".grape" / "worker.version").write_text("h-realstamp\n", encoding="utf-8")
+            assert ra._read_local_worker_version() == "h-realstamp"

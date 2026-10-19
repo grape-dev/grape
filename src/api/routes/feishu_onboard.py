@@ -9,6 +9,7 @@
 对应设计文档：docs/new-version2/feishu-qr-app-onboarding-plan.md
 """
 import asyncio
+import time
 import uuid
 from datetime import datetime
 
@@ -24,6 +25,11 @@ _STATUS_PENDING = "pending"
 _STATUS_WAITING = "waiting_confirm"
 _STATUS_CONNECTED = "connected"
 _STATUS_FAILED = "failed"
+
+# 进行中任务最大存活秒数：超过即视为 stale（用户可能已离开/二维码过期/进程重启丢协程），
+# start 时自动作废并放行新任务，杜绝「waiting_confirm 永久滞留阻塞再扫码」。
+# （docs/weekly-08/feishu-onboard-409-confirm-restart-design.md §1.3）
+STALE_TTL = 600  # 10 分钟
 
 # 后台任务注册表（进程内；跨进程状态以 DB 行为准，cancel 仅在同进程生效）
 _TASKS: dict[str, asyncio.Task] = {}
@@ -283,16 +289,44 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
     if body.bot_type == "vod_bot" and not body.repo_key:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "vod_bot 需要 repo_key"})
 
-    # 并发限制：同用户同时只允许一个进行中的扫码任务
+    # 并发限制：同用户同时只允许一个进行中的扫码任务。
+    # 2026-10-19（428）：
+    # - 409 时 detail 附带旧 task_id，供前端「确认重开」直接作废旧任务（不再只能干等）。
+    # - STALE_TTL 兜底：进行中任务超过存活时间（如进程重启丢协程/二维码过期未确认）自动置
+    #   failed 并放行新任务，杜绝 waiting_confirm 永久滞留阻塞再扫码（docs/weekly-08 方案 §1.3）。
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
+        # created_at 为 SQLite datetime('now')（UTC 字符串），用带 -STALE_TTL 修饰的比较即可
         c.execute(
-            "SELECT COUNT(*) FROM feishu_onboard_task WHERE user_id=? AND status IN ('pending','waiting_confirm')",
+            "SELECT task_id, created_at FROM feishu_onboard_task "
+            "WHERE user_id=? AND status IN ('pending','waiting_confirm') "
+            "ORDER BY created_at ASC LIMIT 1",
             (user["id"],),
         )
-        if c.fetchone()[0] > 0:
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "已有扫码配置正在进行，请稍候"})
+        active = c.fetchone()
+        if active:
+            old_task_id, old_created = active[0], active[1]
+            stale = False
+            try:
+                # stale = created_at < (now - STALE_TTL)：SQLite datetime('now','-600 seconds') 字符串可字典序比较
+                c.execute("SELECT datetime('now', ?)", (f"-{STALE_TTL} seconds",))
+                _cutoff = c.fetchone()[0]
+                stale = bool(old_created) and old_created < _cutoff
+            except Exception:
+                stale = False  # 解析失败保守不当 stale（避免误作废进行中任务）
+            if not stale:
+                raise HTTPException(status_code=409, detail={
+                    "code": 409,
+                    "message": "已有扫码配置正在进行，请稍候",
+                    "task_id": old_task_id,  # 供前端确认重开（docs/weekly-08 方案）
+                })
+            # stale：自动作废旧任务（置 failed），让新任务得以启动
+            _update_task(old_task_id, status=_STATUS_FAILED,
+                         error="stale onboard expired (auto-closed)",
+                         finished_at=datetime.now().isoformat())
+            log.info(f"Feishu onboard start: auto-closed stale task {old_task_id} "
+                     f"(created_at={old_created}, >STALE_TTL={STALE_TTL}s)")
 
     task_id = uuid.uuid4().hex
     _create_task(task_id, body.bot_type, body.repo_key, user["id"])

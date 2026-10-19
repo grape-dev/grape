@@ -1120,7 +1120,9 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
                      repo_key: str = "", user_id: str | int = "") -> int:
     """按 skill_name 匹配 skill 表拿主键 id。
 
-    查询顺序：official → repo scope（按 repo_key）→ user scope（按 user_id）。
+    查询顺序（Issue #367 个人优先）：user scope（按 user_id，owner_id 强匹配）
+    → repo scope（按 repo_key）→ official。
+    user_id 缺失时按 repo → official 降级（等同旧无用户上下文行为）。
     owner_id 参数兼容旧调用（非空时等价于 repo_key=owner_id）。
     """
     if not skill_name:
@@ -1133,20 +1135,22 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1", (skill_name,))
-            row = c.fetchone()
-            if row:
-                return row[0]
-            if repo_key:
-                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
-                row = c.fetchone()
-                if row:
-                    return row[0]
             if user_id:
                 c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='user' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, user_id))
                 row = c.fetchone()
                 if row:
+                    log.info(f"resolve_skill_id: '{skill_name}' hit user scope (owner={user_id})")
                     return row[0]
+            if repo_key:
+                c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='repo' AND owner_id=? AND is_active=1 LIMIT 1", (skill_name, repo_key))
+                row = c.fetchone()
+                if row:
+                    log.info(f"resolve_skill_id: '{skill_name}' hit repo scope (owner={repo_key})")
+                    return row[0]
+            c.execute("SELECT id FROM skill WHERE skill_name=? AND scope='official' AND is_active=1 LIMIT 1", (skill_name,))
+            row = c.fetchone()
+            if row:
+                return row[0]
     except Exception as e:
         log.warning(f"resolve_skill_id failed: {e}")
     return 0

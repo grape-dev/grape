@@ -196,6 +196,16 @@
 | 出参 | 同 `agent-runtimes/refresh` |
 | 返回 | 200；503 |
 
+### GET /api/settings/agent-runtimes/{rid} — 单引擎详情
+
+> scope：user_only
+
+> 按 id 返回单个引擎详情（含 health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner 等弹窗字段）。可见性校验复用引擎列表口径（credential scope + 组织隔离 + repo 过滤），不存在或不可见返回 404（Issue #364）。
+
+| Path | `{rid}` int |
+| 出参 | 引擎详情对象（字段同 `agent-runtimes` 列表项） |
+| 返回 | 200；404 不存在或不可见 |
+
 ### GET /api/settings/agent-runtimes/{rid}/tags — 引擎标签列表
 
 > scope：user_only

@@ -830,8 +830,20 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
     _sn = skill_name or (skills[0] if skills else "")
     if _sn or skill_id:
         # 官方技能 → {{SKILL_DIR}}/<skill>/SKILL.md 占位指引（worker/direct 由 executor 解析，§2.1）；
-        # skill_id 明确指定（custom/repo scope 用户技能）→ 解析真实绝对路径。
-        if skill_id and not resolve_official_skill_path(_sn):
+        # skill_id 指向 user/repo scope（个人/仓库技能）→ 按 skill_id 解析真实绝对路径，
+        # 即使与 official 同名也不回退官方占位（Issue #367）。
+        # skill 记录查不到（scope 未知）时保留旧回退：官方不存在同名才按 skill_id 解析。
+        _skill_scope = ""
+        if skill_id:
+            try:
+                from src.user.db import get_skill_by_id
+                _ski = get_skill_by_id(skill_id)
+                if _ski:
+                    _skill_scope = _ski.get("scope") or ""
+            except Exception:
+                _skill_scope = ""
+        if skill_id and (_skill_scope in ("user", "repo")
+                         or (not _skill_scope and not resolve_official_skill_path(_sn))):
             from src.user.db import get_skill_path
             _abs = get_skill_path(skill_id)
             skill_path = _abs or os.path.join(SKILLS_DIR, _sn, "SKILL.md")

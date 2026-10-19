@@ -1182,6 +1182,92 @@ class TestSettings:
             ids_p2 = {rt["id"] for rt in d3["runtimes"]}
             assert not (ids_p1 & ids_p2), "分页结果不应有重复项"
 
+    def test_agent_runtime_detail(self):
+        """Issue #364: 单引擎详情端点——可见引擎返回完整弹窗字段"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM agent_runtimes WHERE name=?", ("test-detail-eng",))
+            for row in c.fetchall():
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+            c.execute("DELETE FROM agent_runtimes WHERE name=?", ("test-detail-eng",))
+            c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-detail",))
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                "VALUES (?,?,?,?,?,?, 'active')",
+                ("hcred-detail", "cred-detail", "dev-detail", "global", "", "tester"))
+            cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id, alias) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                ("test-detail-eng", "test-detail-eng", cid, "online", 1, 1, _fresh, "global", "", "detail-alias"))
+            rid = c.lastrowid
+            db.commit()
+        try:
+            r = client.get(f"/api/settings/agent-runtimes/{rid}", headers=_headers)
+            assert r.status_code == 200
+            d = r.json()
+            assert d["id"] == rid
+            assert d["name"] == "test-detail-eng"
+            assert d["alias"] == "detail-alias"
+            # 弹窗所需完整字段（Issue #364 验收）
+            for k in ("health", "instance_name", "worker_name", "worker_ip",
+                      "scope", "owner", "health_score", "tags", "local_skills"):
+                assert k in d, f"详情端点缺少字段 {k}"
+            # 不存在的 id → 404
+            r404 = client.get("/api/settings/agent-runtimes/999999999", headers=_headers)
+            assert r404.status_code == 404
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-detail",))
+                db.commit()
+
+    def test_agent_runtime_detail_invisible_user_scope(self):
+        """Issue #364: user scope 他人引擎对非 owner 不可见 → 404（可见性校验复用列表口径）"""
+        import datetime as _dt
+        from src.session_manager import db, db_lock
+        _tz = _dt.timezone.utc
+        _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM agent_runtimes WHERE name=?", ("test-invis-eng",))
+            for row in c.fetchall():
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (row[0],))
+            c.execute("DELETE FROM agent_runtimes WHERE name=?", ("test-invis-eng",))
+            c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-invis",))
+            # scope=user 且 owner_name 为他人（非当前测试用户）
+            c.execute(
+                "INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_id, owner_name, status) "
+                "VALUES (?,?,?,?,?,?, 'active')",
+                ("hcred-invis", "cred-invis", "dev-invis", "user", "", "someone-else"))
+            cid = c.lastrowid
+            c.execute(
+                "INSERT INTO agent_runtimes (name, display_name, credential_id, status, healthy, installed, last_seen_at, scope, owner_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)",
+                ("test-invis-eng", "test-invis-eng", cid, "online", 1, 1, _fresh, "user", ""))
+            rid = c.lastrowid
+            db.commit()
+        try:
+            # 列表中也不可见（对照断言）
+            r_list = client.get("/api/settings/agent-runtimes?page=1&page_size=0", headers=_headers)
+            assert rid not in {rt["id"] for rt in r_list.json()["runtimes"]}
+            # 详情端点同样 404
+            r = client.get(f"/api/settings/agent-runtimes/{rid}", headers=_headers)
+            assert r.status_code == 404
+        finally:
+            with db_lock:
+                c = db.cursor()
+                c.execute("DELETE FROM engine_capabilities WHERE runtime_id=?", (rid,))
+                c.execute("DELETE FROM agent_runtimes WHERE id=?", (rid,))
+                c.execute("DELETE FROM runtime_credentials WHERE name=?", ("cred-invis",))
+                db.commit()
+
     def test_runtime_devices_endpoint(self):
         """Issue #185: runtime-devices 分页端点验证"""
         r = client.get("/api/settings/runtime-devices?page=1&page_size=10", headers=_headers)
