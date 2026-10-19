@@ -294,7 +294,7 @@ def detect_clean_intent(text: str) -> bool:
     return False
 
 
-def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "") -> str:
+def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "", user_id: int = 0) -> str:
     # 1. 自然语言绑定检测
     bind_repo = detect_bind_intent(text)
     if bind_repo:
@@ -307,6 +307,18 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "")
     bound = _current_bound_repo(chat_id, account, db)
     if bound:
         return bound
+    # 4. 会话兜底：群未绑定但当前已加入有 repo 的会话（含任务/普通）→ 以会话仓库放行。
+    #    feishu-task-session-unbound-chat-fix-design.md：
+    #    用户既已进入会话即具备仓库上下文，不应被「群绑定为空」拦截。
+    #    get_conversation_by_im 已按 user_id 归属过滤（越权会话查不到 → 仍返回空）。
+    if user_id:
+        try:
+            from src.session_manager import get_conversation_by_im
+            conv = get_conversation_by_im(chat_id, user_id)
+            if conv and conv.get("repo_key"):
+                return conv["repo_key"]
+        except Exception as e:
+            log.warning(f"resolve_repo: conversation fallback failed for chat={chat_id[:20]}: {e}")
     return ""
 
 
@@ -1461,12 +1473,13 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                 await _handle_selection(ctx, api, chat_id, msg_id, text.strip(), pending)
                 return
 
-        repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account)
+        _chat_uid = get_user_id_by_app_id(account) or 0
+        repo_key = resolve_repo(text, chat_id, parsed.get("sender_id", ""), db, account, user_id=_chat_uid)
         if not repo_key:
             # 未绑定仓库：自动触发 /repo 卡片（候选=该用户名下已托管仓库，当前 bot 属主）。
-            # 修复 2026-08-17 误用全局 meta.ws_feishu_app_id 把 Jason7602 的仓库发给其它用户
+            # 修复 2026-08-17 误用全局 meta.ws_feishu_app_id 把其他用户仓库发给当前用户
             #（feishu-web-chat-unified-design.md §10）。
-            uid = get_user_id_by_app_id(account) or 0
+            uid = _chat_uid or (get_user_id_by_app_id(account) or 0)
             try:
                 if uid:
                     if await _send_repo_card(ctx, api, chat_id, msg_id, uid, account, 1, unbound_hint=True):
