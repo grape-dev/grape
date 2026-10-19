@@ -86,7 +86,7 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
                 elif _scope == "user" and task_user_id > 0 and _owner_name:
                     # user scope：引擎 owner_name 对应的 user_id 必须匹配 task.user_id
                     try:
-                        c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (_owner_name,))
+                        c.execute("SELECT id FROM grape_accounts WHERE username=? AND id>0 LIMIT 1", (_owner_name,))
                         _ur = c.fetchone()
                         _engine_uid = _ur[0] if _ur else 0
                         if _engine_uid != task_user_id:

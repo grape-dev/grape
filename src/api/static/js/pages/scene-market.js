@@ -631,13 +631,9 @@ function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFi
       // 跳应用后的场景详情页；仓库未切换时先切仓库（apply 可能落在非当前仓库）
       var curFull = _currentRepoFullName();
       if (curFull !== repoFull) {
-        // 跨仓库：先 await 切仓库（避免详情页用旧 currentRepo/旧 _scenes 误判「场景不存在」），再进详情
-        _selectRepoAndNav(repoFull, decodeURIComponent(owner), decodeURIComponent(repoName)).then(function() {
-          app.nav('scene-detail-local', sceneIdLocal);
-        });
-      } else {
-        app.nav('scene-detail-local', sceneIdLocal);
+        _selectRepoAndNav(repoFull, decodeURIComponent(owner), decodeURIComponent(repoName));
       }
+      app.nav('scene-detail-local', sceneIdLocal);
     };
     if (!sceneIdLocal) {
       if (app && app.showToast) app.showToast(r.message || I18N.t('skills.toast.apply_success')||'场景已应用');
@@ -813,7 +809,7 @@ function _doExperienceScene(sceneId) {
 
 function _selectRepoAndNav(fullName, owner, name) {
   // 先刷新侧边栏仓库列表（新仓库可能刚托管还没进下拉），完成后再切换仓库
-  return API.get('/repos/managed').then(function(d) {
+  API.get('/repos/managed').then(function(d) {
     var repos = d.repos || [];
     var sel = document.getElementById('repoSelect');
     if (sel) {
