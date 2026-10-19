@@ -43,6 +43,7 @@
   "onboard": {
     "in_progress": "已有扫码配置正在进行，请稍候",
     "confirm_restart": "当前已有飞书机器人正在配置中，是否放弃并重新开始配置？（旧配置不会保存）",
+    "confirm_rebind": "当前已绑定飞书机器人（{{appId}}）。更换后将使旧配置失效且不可恢复，确认继续扫码换绑？",
     "start_failed": "启动扫码配置失败: {{msg}}",
     "modal_title": "🔗 飞书扫码配置",
     "generating_qr": "正在生成二维码…",

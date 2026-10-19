@@ -54,7 +54,15 @@ function buildSandbox(opts) {
     document: docStub,
     location: {hash: ''},
     history: {back: function(){}, pushState: function(){}, replaceState: function(){}},
-    I18N: {t: function(k) { return k; }, getLang: function() { return 'zh'; }},
+    I18N: {
+      t: function(k) {
+        // 让 i18n 对测试 key 返回真实中文文案（模拟查表；其余返回 key 名）
+        if (k === 'chat.onboard.confirm_restart') return '当前已有飞书机器人正在配置中，是否放弃并重新开始配置？（旧配置不会保存）';
+        if (k === 'chat.onboard.confirm_rebind') return '当前已绑定飞书机器人（{{appId}}）。更换后将使旧配置失效且不可恢复，确认继续扫码换绑？';
+        return k;
+      },
+      getLang: function() { return 'zh'; },
+    },
     app: {
       nav: function(){},
       showToast: function(){ state.toastCount++; },
@@ -64,7 +72,13 @@ function buildSandbox(opts) {
       showConfirm: function(message, onConfirm, o) { state.confirmCalls.push({message: message, onConfirm: onConfirm, danger: !!(o && o.danger)}); },
     },
     API: {
-      get: function(){ return Promise.resolve({}); },
+      get: function(url){
+        // 换绑确认（Step 1.4）依赖 /chat/config 返回 im.feishu.app_id
+        if (String(url).indexOf('/chat/config') !== -1) {
+          return Promise.resolve(opts.chatConfig || {im: {feishu: {app_id: ''}}});
+        }
+        return Promise.resolve({});
+      },
       post: function(url, body){
         state.posts.push({url: url, body: body});
         // 可注入 post 行为（正常 resolve / 409 reject / 其它失败）
@@ -179,4 +193,88 @@ test('UT-02b: 非 409 错误仍 toast（回归）', async () => {
   const st = sb._getState();
   assert.strictEqual(st.confirmCalls.length, 0, '非 409 不弹确认框');
   assert.strictEqual(st.toastCount, 1, '非 409 仍 toast');
+});
+// ===================== 场景②：已配置(connected) 换绑确认（Step 1.4，纯前端）=====================
+
+test('UT-06a: 已配置 app_id → 入口弹换绑确认（不直接 start）', async () => {
+  const sb = buildSandbox({chatConfig: {im: {feishu: {app_id: 'cli_existing_123'}}}});
+  let starts = 0;
+  const origPost = sb.API.post;
+  sb.API.post = function(url, body){
+    if (url === '/feishu/onboard/start') starts++;
+    return origPost(url, body);
+  };
+  sb.startFeishuOnboard('chat_bot', '');
+  await wait(20);
+  const st = sb._getState();
+  assert.strictEqual(st.confirmCalls.length, 1, '已配置时应弹换绑确认框');
+  const msg = String(st.confirmCalls[0].message);
+  assert.ok(msg.indexOf('换绑') !== -1 || msg.indexOf('更换') !== -1, '文案应含「换绑/更换」');
+  assert.ok(msg.indexOf('不可恢复') !== -1 || msg.indexOf('失效') !== -1, '文案应提示不可恢复/失效');
+  assert.strictEqual(st.confirmCalls[0].danger, true, '换绑确认应为危险样式');
+  assert.strictEqual(starts, 0, '确认前不应发起 start');
+});
+
+test('UT-06b: 换绑确认 onConfirm → 继续 start（新二维码）', async () => {
+  const sb = buildSandbox({chatConfig: {im: {feishu: {app_id: 'cli_existing_123'}}}});
+  let starts = 0;
+  const origPost = sb.API.post;
+  sb.API.post = function(url, body){
+    if (url === '/feishu/onboard/start') starts++;
+    return origPost(url, body);
+  };
+  sb.startFeishuOnboard('chat_bot', '');
+  await wait(20);
+  const st0 = sb._getState();
+  assert.strictEqual(st0.confirmCalls.length, 1, '应弹确认');
+  st0.confirmCalls[0].onConfirm();  // 用户点「确认换绑」
+  await wait(20);
+  assert.strictEqual(starts, 1, '确认后应发起 start');
+});
+
+test('UT-06c: 换绑确认取消 → 不动作（无 start）', async () => {
+  const sb = buildSandbox({chatConfig: {im: {feishu: {app_id: 'cli_existing_123'}}}});
+  let starts = 0;
+  const origPost = sb.API.post;
+  sb.API.post = function(url, body){
+    if (url === '/feishu/onboard/start') starts++;
+    return origPost(url, body);
+  };
+  sb.startFeishuOnboard('chat_bot', '');
+  await wait(20);
+  const st = sb._getState();
+  assert.strictEqual(st.confirmCalls.length, 1, '应弹确认框');
+  // 用户「取消」= 不调用 onConfirm；等待确认无 start
+  await wait(20);
+  assert.strictEqual(starts, 0, '取消（未确认）后不应发起 start');
+});
+
+test('UT-06d: skipRebindCheck=true（确认后递归）→ 不重复确认、直接 start', async () => {
+  const sb = buildSandbox({chatConfig: {im: {feishu: {app_id: 'cli_existing_123'}}}});
+  let starts = 0;
+  const origPost = sb.API.post;
+  sb.API.post = function(url, body){
+    if (url === '/feishu/onboard/start') starts++;
+    return origPost(url, body);
+  };
+  sb.startFeishuOnboard('chat_bot', '', true);  // 换绑确认/409重开后的递归调用
+  await wait(20);
+  const st = sb._getState();
+  assert.strictEqual(st.confirmCalls.length, 0, 'skipRebindCheck 时不应再弹换绑确认');
+  assert.strictEqual(starts, 1, '应直接发起 start');
+});
+
+test('UT-06e: 未配置（app_id 空）→ 直接 start 无确认', async () => {
+  const sb = buildSandbox({chatConfig: {im: {feishu: {app_id: ''}}}});
+  let starts = 0;
+  const origPost = sb.API.post;
+  sb.API.post = function(url, body){
+    if (url === '/feishu/onboard/start') starts++;
+    return origPost(url, body);
+  };
+  sb.startFeishuOnboard('chat_bot', '');
+  await wait(20);
+  const st = sb._getState();
+  assert.strictEqual(st.confirmCalls.length, 0, '未配置时不弹确认');
+  assert.strictEqual(starts, 1, '未配置应直接 start');
 });
