@@ -6,7 +6,7 @@
   - 纯逻辑（bind/clean 意图、repo 解析、用户归属）内联本模块，无同步 HTTP；
     IO 型命令（/bind、/refresh 的群成员↔协作者映射同步）走 await api 异步方法。
 """
-import re, os, asyncio, time, json
+import re, os, asyncio, time, json, uuid
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -16,6 +16,7 @@ from src.prompt_builder import build_chat_prompt
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
+from src.api.chat_session_env import chat_session_env_extra
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -23,6 +24,15 @@ if TYPE_CHECKING:
 # p2p 首次消息待确认绑定：{app_id: {username: {"open_id", "gitcode_nickname", "expires"}}}
 # 用户确认后才写入 unified_user_mapping，防止错误绑定。
 _pending_binds: dict[str, dict] = {}
+
+# 飞书「打字机」动态卡片（Step 3）默认关闭（2026-10-18 收敛）：
+# 关闭原因：① 过程行含 opencode session id / token 计数直投飞书；② 占位卡「⏳ 正在思考...」终态后未撤回，
+# 造成「还有后续回复」错觉。需要临时恢复时置 env FEISHU_CHAT_DYNAMIC_CARD=1。
+_FEISHU_DYNAMIC_CARD_ENV = "FEISHU_CHAT_DYNAMIC_CARD"
+
+
+def _feishu_dynamic_card_enabled() -> bool:
+    return os.environ.get(_FEISHU_DYNAMIC_CARD_ENV, "0") == "1"
 
 # 卡片命令编号选择 pending 态（feishu-repo-navigation-commands-design.md §3.2）：
 #   chat_id -> {action: repo|chat|task, repo_key, page, page_size, items, expires}
@@ -56,6 +66,12 @@ def _clear_pending_selection(chat_id: str):
 # 导致 opencode 以"非 DevOps 话题"拒绝回答图片相关问题。
 _PENDING_IMAGE_TTL = 1800.0  # 30 分钟（持久化到 DB 后内存缓存仅做近期加速）
 _pending_image_desc: dict[str, dict] = {}
+
+# feishu-chat-stream-unified-design.md Step 3：飞书动态卡片的节流阈值
+# - 更新间隔：≥0.8s 节流一次 update_message（防飞书 QPS 限流）
+# - 增量上限：累积 chars 超限转终态卡片（飞书单卡片 ~2000，留余量）
+_MAX_INLINE_LEN = 1500
+_UPDATE_MIN_INTERVAL = 0.8
 
 
 def _set_pending_image(chat_id: str, desc: str):
@@ -189,10 +205,12 @@ async def _send_card_reply(ctx, api, msg_id, card):
         return False
 
 async def _send_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, msg_id: str,
-                          uid: int, account: str, page: int = 1) -> bool:
+                          uid: int, account: str, page: int = 1, unbound_hint: bool = False) -> bool:
     """生成并发送 `/repo` 卡片（候选仓库显示为可点击按钮），设置 pending。
 
     供 `/repo` 命令与"未绑定仓库"兜底共用（自动触发卡片，feishu-repo-navigation-commands-design.md）。
+    unbound_hint=True：普通消息未绑定仓库时调用，卡片头部标「未绑定仓库」+ 正文引导，
+    让用户明确当前未绑定、需从列表选择（feishu-task-session-repo-alignment-design.md 补充）。
     无候选返回 False（调用方给引导文案）。
     """
     from src.user.db import get_managed_repos
@@ -211,8 +229,15 @@ async def _send_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, m
         items.append(f"{full}（{role}）{marker}")
     _set_pending_selection(chat_id, {"action": "repo", "repo_key": bound, "items": repos, "page": page})
 
-    # 文字列表 + 纯数字按钮
+    if unbound_hint:
+        _hint = ("**⚠️ 未绑定仓库** 当前聊天尚未绑定任何仓库，请从以下选择其一绑定；"
+                 "之后普通消息将直接在该仓库上下文中回复。\n\n")
+    else:
+        _hint = ""
+    # 文字列表 + 纯数字按钮（提示行作为卡片顶部引导，不占编号；编号 1..N 对应真实仓库）
     text = _candidate_card("📁", f"已托管仓库列表（共 {len(repos)} 个）", items, page, total_pages, "/repo")
+    if _hint:
+        text = _hint + text
     elements = [{"tag": "div", "text": {"tag": "lark_md", "content": text}}]
     for i in range(0, len(items), 3):
         row_btns = [{"tag": "button", "text": {"tag": "plain_text", "content": str(j+1)},
@@ -222,7 +247,9 @@ async def _send_repo_card(ctx: "BotContext", api: "FeishuAsync", chat_id: str, m
         {"tag": "button", "text": {"tag": "plain_text", "content": "❓ 帮助"}, "value": {"cmd": "/help"}}]})
 
     ok = await _send_card_reply(ctx, api, msg_id, {
-        "header": {"title": {"tag": "plain_text", "content": "📁 选择仓库"}, "template": "blue"},
+        "header": {"title": {"tag": "plain_text",
+                              "content": "⚠️ 未绑定仓库 · 选择仓库" if unbound_hint else "📁 选择仓库"},
+                   "template": "red" if unbound_hint else "blue"},
         "elements": elements,
     })
     return ok
@@ -281,6 +308,53 @@ def resolve_repo(text: str, chat_id: str, sender_id: str, db, account: str = "")
     if bound:
         return bound
     return ""
+
+
+def _resolve_task_conversation(chat_id: str, user_id: int) -> dict | None:
+    """当前群已通过 /task-open 加入的 task 会话（若有）。
+
+    feishu-task-session-repo-alignment-design.md 方案 1：
+    /task-open 仅把群粘到 task 会话（chat_conversations.im_channel_id），不改群绑定；
+    若该群当前挂在 task 会话上且有 repo_key，执行仓库应以会话仓库为准。
+    返回会话 dict（含 repo_key/conv_type），非 task 或未加入返回 None。
+    """
+    if not chat_id or not user_id:
+        return None
+    from src.session_manager import get_conversation_by_im
+    try:
+        conv = get_conversation_by_im(chat_id, user_id)
+    except Exception as e:
+        log.warning(f"_resolve_task_conversation: query failed for chat={chat_id[:20]}: {e}")
+        return None
+    if conv and conv.get("conv_type") == "task" and conv.get("repo_key"):
+        return conv
+    return None
+
+
+def _resolve_feishu_exec_repo(repo_key: str, chat_id: str, user_id: int) -> str:
+    """解析飞书 chat 实际执行仓库（方案 1-A 核心）。
+
+    普通消息 resolve_repo 取群绑定仓库（如 devops-bot），但若该群已通过 /task-open
+    进入某个 task 会话（会话仓库 = hello-calculator-11），执行仍走群绑定会落到错误仓库的
+    空 cwd → opencode 静默无输出、消息无答复。此处校验：task 会话已激活且有 repo_key 时，
+    执行仓库以会话仓库为准（幂等，一般群绑定则不覆盖）。
+    返回带前缀的 repo_key。
+    """
+    from src.repo_key import from_repo_key
+    try:
+        # 仅当外层 resolve_repo 已给出某仓库（群绑定/命中）且本群已 join task 会话时对齐；
+        # 否则回落原 repo_key（覆盖场景由外层保证非空）。
+        conv = _resolve_task_conversation(chat_id, user_id)
+        if conv and repo_key:
+            target = conv.get("repo_key") or ""
+            if target and from_repo_key(target) != from_repo_key(repo_key):
+                log.info(f"[feishu-exec-repo] task-session alignment: "
+                         f"group-bound {from_repo_key(repo_key)} -> conversation {from_repo_key(target)} "
+                         f"(conv={str(conv.get('id') or '')[:16] or ''})")
+                return target
+    except Exception as e:
+        log.warning(f"_resolve_feishu_exec_repo failed: {e} (keep {repo_key})")
+    return repo_key
 
 
 def get_user_id_by_app_id(app_id: str) -> int | None:
@@ -659,7 +733,10 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
         from src.session_manager import get_conversation_by_im
         bound = _current_bound_repo(chat_id, account, db)
         conv = get_conversation_by_im(chat_id, uid) if uid else None
-        lines = ["**📍 当前位置**", f"仓库：{bound or '未绑定'}"]
+        from src.repo_key import from_repo_key
+        # 展示统一去前缀（repo_key.py 约定：外部/前端一律无前缀）
+        shown_bound = from_repo_key(bound) if bound else ""
+        lines = ["**📍 当前位置**", f"仓库：{shown_bound or '未绑定'}"]
         if conv:
             tag = "任务" if conv.get("conv_type") == "task" else "一般"
             title = conv.get("title") or "新对话"
@@ -667,10 +744,12 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                 title += f"（Issue #{conv['issue_number']}）"
             lines.append(f"会话：[{tag}] {title}")
             # 对账：群绑定仓库 ≠ 当前会话所属仓库 → 提示不一致（2026-08-16 发散 bug 兜底提示）
+            # 两侧统一 from_repo_key 归一去前缀，避免 DB 中 bound=gitcode:x 与 conv=x 同仓库被误判不一致
+            #（2026-10-18 生产：bound=gitcode:Jason7602/hello-calculator-11 与 conv 同仓库仍报不一致）
             try:
-                from src.repo_key import from_repo_key
-                if bound and conv.get("repo_key") and from_repo_key(bound) != conv["repo_key"]:
-                    lines.append(f"⚠️ 群绑定 `{from_repo_key(bound)}` 与当前会话仓库 `{conv['repo_key']}` 不一致，建议 `/repo` 重绑或 `/new` 新建。")
+                cur_repo = from_repo_key(conv.get("repo_key") or "")
+                if bound and cur_repo and from_repo_key(bound) != cur_repo:
+                    lines.append(f"⚠️ 群绑定 `{shown_bound}` 与当前会话仓库 `{cur_repo}` 不一致，建议 `/repo` 重绑或 `/new` 新建。")
             except Exception:
                 pass
         else:
@@ -1390,7 +1469,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             uid = get_user_id_by_app_id(account) or 0
             try:
                 if uid:
-                    if await _send_repo_card(ctx, api, chat_id, msg_id, uid, account, 1):
+                    if await _send_repo_card(ctx, api, chat_id, msg_id, uid, account, 1, unbound_hint=True):
                         return
                     reply_parts = [
                         "当前未绑定任何仓库至本聊天。",
@@ -1438,16 +1517,20 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
 
         from src.repo_key import to_repo_key, from_repo_key, parse_repo_key
         repo_key = to_repo_key(repo_key)
+        # 方案 1-A：已通过 /task-open 进入 task 会话的群，执行仓库以会话仓库为准
+        #（否则 resolve_repo 取群绑定 devops-bot 会在错误仓库空 cwd 跑 opencode → 无答复）
+        try:
+            _uid = get_user_id_by_app_id(account) or 0
+            if _uid:
+                repo_key = to_repo_key(_resolve_feishu_exec_repo(repo_key, chat_id, _uid))
+        except Exception as _re:
+            log.warning(f"[Chat:{ctx.name}] exec repo alignment failed: {_re} (keep {repo_key})")
         _provider, _owner, _repo = parse_repo_key(repo_key)
         source = _provider
         repository = _repo or from_repo_key(repo_key)
 
-        # 先发 ⏳ 确认消息收到——用户不可接受"没反应"（即使 AI 耗时 20 秒）
-        if msg_id and msg_id.startswith("om_"):
-            asyncio.create_task(
-                api.reply_text(ctx, msg_id, "⏳"),
-                name=f"ack-{ctx.name}",
-            )
+        # 受理确认收敛（2026-10-18）：移除独立「⏳」气泡，仅由 _process_chat_inner_async 的
+        # add_reaction("OK") 表情作为唯一受理反馈——避免 ⏳ 气泡 + OK 表情双冗余、且 ⏳ 终态后残留。
 
         sess, history, oc_sid, cc_sid, is_new = get_or_create_session(repo_key, source, repository)
 
@@ -1554,6 +1637,10 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         user_token = ""
         conv_id = ""
         user_id = 0
+        # Step 1：飞书触发的会话与 Web 对话框统一流式（feishu-chat-stream-unified-design.md）
+        # 生成 chat task_id 并写入 user 消息（task_id + generate_status=1），
+        # 使 Web ChatAgent 对话框对飞书会话同样能探测到运行中任务 → SSE 订阅（chat.js:496）。
+        chat_task_id = "chat_" + uuid.uuid4().hex[:12]
         try:
             from src.session_manager import create_conversation, get_conversation_by_im, add_message
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
@@ -1569,9 +1656,11 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 # 图片消息：把图片描述追加到用户消息里存入 DB，
                 # 这样追问时 get_messages 历史里自然包含图片描述，不依赖内存缓存。
                 if image_description:
-                    add_message(conv_id, "user", text + "\n\n" + image_description)
+                    add_message(conv_id, "user", text + "\n\n" + image_description,
+                                task_id=chat_task_id, generate_status=1)
                 else:
-                    add_message(conv_id, "user", text)
+                    add_message(conv_id, "user", text,
+                                task_id=chat_task_id, generate_status=1)
                 # 任务会话收到真实用户消息 → active→processing（task-status-processing-trigger-fix.md §3.1）
                 from src.session_manager import mark_task_processing_by_conversation
                 mark_task_processing_by_conversation(conv_id)
@@ -1690,7 +1779,10 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         runtime_session_id=oc_sid,
                         event_type="chat",
                         account=exec_account, user_id=uid,
-                        env_extra={"IM_CHAT_ID": chat_id},
+                        # 会话凭据（chat_session_env.py，与 direct/Web 同语义）+ IM 上下文一并下发；
+                        # enqueue_task 内部会再以 task_id 为 session_key 补签/覆盖 GRAPE_SESSION_TOKEN
+                        env_extra={**chat_session_env_extra(uid, conv_id or "", repo_key or ""),
+                                   "IM_CHAT_ID": chat_id},
                         pool_agent_type="chat",
                     )
                     log.info(f"[Chat:{ctx.name}] enqueued task={tid} mode={kind}")
@@ -1709,25 +1801,98 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                     exit_code = -1
             else:
                 # direct 模式（本机 opencode 子进程）——持有 repo_lock 防止 cwd/session 冲突
-                async def _direct_exec():
-                    nonlocal final_text, exit_code, new_oc_session_id
-                    async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
-                                                                       backend_name=backend, account=exec_account,
-                                                                       user_token=user_token, user_id=user_id,
-                                                                       agent_name="Chat Agent",
-                                                                       agent_label=f"[Agent:chat|repo:{repository}]"):
-                        if event_type == "done":
-                            d = data
-                            final_text = d["text"]
-                            exit_code = d.get("exit_code", 0)
-                            if exit_code == 0 and d.get("oc_session_id"):
-                                new_oc_session_id = d["oc_session_id"]
-                            log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
-                if repo_lock:
-                    async with repo_lock:
-                        await _direct_exec()
-                else:
-                    await _direct_exec()
+                # feishu-chat-stream-unified-design.md Step 2/3：
+                # 保持 handler 原生 async 迭代（同步等终态回复飞书），同时
+                # ① 每事件 publish 进 ChatTask 缓冲 → Web 对话框 SSE 可见（ChatTaskManager.register_idle）
+                # ② text/步骤 事件节流 update_message → 飞书端「打字机」动态卡片
+                from src.api.chat_task_manager import ChatTaskManager as _CTM
+                _CTM.register_idle(chat_task_id, conv_id or "", user_id, "")
+                # Step 3 动态卡片默认关闭：不发送占位卡（_first_msg_id 留空 → 下方增量段自然跳过），
+                # 正式回复只经终态 send_card_to_chat 落一条；env FEISHU_CHAT_DYNAMIC_CARD=1 临时恢复。
+                _first_msg_id = ""
+                if _feishu_dynamic_card_enabled():
+                    _first_msg_id = (await api.send_card_to_user(
+                        ctx, open_id, "⏳ 正在思考...")) or ""
+                _step_last_update = 0.0
+                _inline_buf = ""
+                _inline_capped = False
+                _stream_final = ""
+                _stream_exit = -1
+                _direct_acked = False
+                # 会话凭据注入（feishu-task-chat-direct-session-token-injection-design.md）：
+                # 任务会话（真实仓库）与 Web chat 同语义签发 tk_ → GRAPE_SESSION_TOKEN + GRAPE_CLI_MODE=WORKER，
+                # 否则 agent 无会话凭据，`grape issues comment` 回写 Issue 会失败（生产事故 Issue #6）。
+                _direct_env = chat_session_env_extra(user_id, conv_id or "", repo_key or "")
+                _direct_env["IM_CHAT_ID"] = chat_id
+                try:
+                    async def _direct_consume():
+                        nonlocal _stream_final, _stream_exit, _direct_acked, final_text, exit_code, new_oc_session_id
+                        nonlocal _inline_buf, _inline_capped, _step_last_update
+                        async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
+                                                                           backend_name=backend, account=exec_account,
+                                                                           user_token=user_token, user_id=user_id,
+                                                                           agent_name="Chat Agent",
+                                                                           agent_label=f"[Agent:chat|repo:{repository}]",
+                                                                           env_extra=_direct_env):
+                            # 同步写回 ChatTask（缓冲重放 + 订阅者实时，线程安全）
+                            try:
+                                if event_type == "done":
+                                    _d2 = data
+                                    _stream_final = _d2["text"]
+                                    _stream_exit = _d2.get("exit_code", 0)
+                                    if _stream_exit == 0 and _d2.get("oc_session_id"):
+                                        new_oc_session_id = _d2["oc_session_id"]
+                                    _direct_acked = True
+                                    _CTM.finish_external(
+                                        chat_task_id, final_text=_stream_final,
+                                        error="" if _stream_exit == 0 else "exit=" + str(_stream_exit))
+                                else:
+                                    _CTM.publish(chat_task_id, event_type, data)
+                            except Exception as _ce:
+                                log.warning(f"[Chat:{ctx.name}] publish chat task event failed: {_ce}")
+                            # 飞书动态卡片（Step 3）：text/步骤 累积，节流更新同一条卡片
+                            if _first_msg_id and not _direct_acked and not _inline_capped:
+                                _seg = ""
+                                if event_type == "text":
+                                    _seg = data if isinstance(data, str) else (data.get("text", "") if isinstance(data, dict) else str(data))
+                                elif event_type in ("step_start", "step_finish", "reasoning"):
+                                    _seg = data if isinstance(data, str) else (data.get("text", "") if isinstance(data, dict) else str(data))
+                                if _seg:
+                                    # 步骤行前加标记（与 Web 端 chat.js:810-815 同口径）
+                                    if event_type == "step_start":
+                                        _seg = "▸ " + _seg
+                                    elif event_type == "step_finish":
+                                        _seg = "✓ " + _seg
+                                    _inline_buf += _seg + "\n"
+                                _now = time.monotonic()
+                                if _inline_buf and (_now - _step_last_update >= _UPDATE_MIN_INTERVAL
+                                                    or len(_inline_buf) >= _MAX_INLINE_LEN):
+                                    # 节流刷新同一条卡片；达上限截断后不再增量（终态由 send_card_to_chat 落）
+                                    try:
+                                        _ok = await api.update_message(
+                                            ctx, _first_msg_id, _inline_buf[:_MAX_INLINE_LEN])
+                                        if _ok:
+                                            _step_last_update = _now
+                                    except Exception as _ue:
+                                        log.warning(f"[Chat:{ctx.name}] update_message failed: {_ue}")
+                                    if len(_inline_buf) >= _MAX_INLINE_LEN:
+                                        _inline_capped = True
+                            # done：写回终态
+                            if event_type == "done":
+                                final_text = _stream_final
+                                exit_code = _stream_exit
+                                log.info(f"  ✅ Done: exit={exit_code}, text_len={len(final_text)}")
+                    if repo_lock:
+                        async with repo_lock:
+                            await _direct_consume()
+                    else:
+                        await _direct_consume()
+                except Exception as _de2:
+                    log.warning(f"[Chat:{ctx.name}] direct exec error: {_de2}")
+                    try:
+                        _CTM.finish_external(chat_task_id, error=str(_de2))
+                    except Exception:
+                        pass
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),
@@ -1758,10 +1923,14 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
             await api.send_card_to_chat(ctx, chat_id, output[:2000], fallback_open_id=open_id)
             # 共享消息存储：agent 答复回写当前 conversation，Web Chat Agent 页可见
             #（feishu-web-chat-unified-design.md §3.2）
+            # Step 1：带 chat_task_id + 终态 generate_status（2=成功 / 3=失败），
+            # 使 Web 对话框 `chat_task_stream` DB 兜底能定位到该飞书会话的终态回复（chat.py:1703）。
             if conv_id:
                 try:
                     from src.session_manager import add_message
-                    add_message(conv_id, "agent", output)
+                    add_message(conv_id, "agent", output,
+                                task_id=chat_task_id,
+                                generate_status=2 if exit_code == 0 else 3)
                 except Exception as _we:
                     log.warning(f"[Chat:{ctx.name}] write agent message failed: {_we}")
 

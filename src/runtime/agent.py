@@ -1961,6 +1961,34 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
     return None
 
 
+_report_queue_obj = None
+
+
+def _report_queue():
+    """懒加载 worker 补报队列（Step 4，graceful-shutdown-requeue-design.md）。"""
+    global _report_queue_obj
+    if _report_queue_obj is None:
+        from src.runtime.worker_report_queue import WorkerReportQueue
+        _report_queue_obj = WorkerReportQueue()
+    return _report_queue_obj
+
+
+async def _report_replay_loop(client):
+    """补报队列重放循环（Step 4）：周期重放 pending 补报（master 幂等+run_token 守卫）。"""
+    _interval = float(os.environ.get("GRAPE_WORKER_REPORT_REPLAY_INTERVAL", "10"))
+    while True:
+        try:
+            from src.runtime.worker_report_queue import replay_pending_reports
+            q = _report_queue()
+            if q.size():
+                await replay_pending_reports(client, q)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            log.warning(f"worker_report_queue: replay loop error: {e}")
+        await asyncio.sleep(_interval)
+
+
 async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_concurrent,
                     engine_by_rid: dict | None = None, installed=None, device_name="",
                     _test_execute=None, _test_active=None, _test_active_tasks=None,
@@ -1983,6 +2011,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
     # 启动 worker 引擎探测线程（每 10 分钟对本机引擎发起 CLI 测试对话）
     _start_worker_probe()
+    # Step 4：补报队列重放后台任务（master 停机窗口完成/失败未上报，重连后自动补报）
+    try:
+        asyncio.create_task(_report_replay_loop(client), name="worker-report-replay")
+    except Exception as e:
+        log.warning(f"start report replay loop failed: {e}")
     heartbeat_fail_streak = 0
     HEARTBEAT_FAIL_THRESHOLD = 3
     RE_REGISTER_INTERVAL = float(os.environ.get("RUNTIME_REREGISTER_INTERVAL", "300"))
@@ -2147,13 +2180,33 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     _credential_revoked.set()
                     return
                 # 在 timeout 外处理 complete/fail（网络重试不触发 timeout 覆盖完成状态）
+                # Step 4：完成/失败先入补报队列（ms master 停机窗口不丢），ack 后出队
+                _run_token = (t or {}).get("started_at") or ""
+
+                async def _do_report(kind: str, text: str, exit_code: int, **kw):
+                    q = _report_queue()
+                    q.add({"task_id": _tid, "status": kind, "result_text": text,
+                           "exit_code": exit_code, "run_token": _run_token,
+                           "session_id": kw.get("session_id", ""),
+                           "work_dir": kw.get("work_dir", ""),
+                           "engine": kw.get("engine", e)})
+                    try:
+                        if kind == "failed":
+                            resp = await client.fail(_tid, text, exit_code=exit_code, run_token=_run_token)
+                        else:
+                            resp = await client.complete(_tid, text, exit_code, run_token=_run_token, **kw)
+                    except Exception:
+                        return  # 保留补报队列，重连后由 replay 重放
+                    if resp is not None:
+                        q.remove(_tid)
+
                 if _test_execute is None:
                     try:
                         if isinstance(_result, dict) and _result.get("_error"):
-                            await client.fail(_tid, _result["_error"], exit_code=-1)
+                            await _do_report("failed", _result["_error"], -1)
                         elif _result is None:
                             # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发
-                            await client.fail(_tid, f"task timed out after {task_timeout}s", exit_code=-1)
+                            await _do_report("failed", f"task timed out after {task_timeout}s", -1)
                         elif isinstance(_result, dict) and "exit_code" in _result:
                             _exit = _result.get("exit_code", 0)
                             _text = _result.get("text", "")
@@ -2163,7 +2216,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                             # exit_code!=0 + 无文本 → 失败（崩溃/超时/启动失败）
                             # exit_code!=0 + 有文本 → 交服务端 complete_task 判断（有结构化输出覆盖逻辑）
                             if _exit == 0 and not _text and _errs:
-                                await client.fail(_tid, f"engine errors: {'; '.join(_errs[:3])}", exit_code=_exit)
+                                await _do_report("failed", f"engine errors: {'; '.join(_errs[:3])}", _exit)
                             elif _exit != 0 and not _text:
                                 # seq#559 排障盲点：errors 空时 fail 消息只剩空壳
                                 # （"engine exit_code=-1, errors: "），真实原因不可见。
@@ -2175,13 +2228,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                     _msg += f" | stderr: {_stderr_hint}"
                                 elif not _errs:
                                     _msg += " (engine reported no error details; check worker logs)"
-                                await client.fail(_tid, _msg, exit_code=_exit)
+                                await _do_report("failed", _msg, _exit)
                             else:
-                                await client.complete(_tid, _text, _exit,
-                                                      session_id=_result.get("oc_session_id", ""),
-                                                      work_dir=t.get("cwd") or ".", engine=e)
+                                await _do_report("completed", _text, _exit,
+                                                 session_id=_result.get("oc_session_id", ""),
+                                                 work_dir=t.get("cwd") or ".", engine=e)
                         else:
-                            await client.fail(_tid, "no done event")
+                            await _do_report("failed", "no done event", -1)
                     except Exception as _ce:
                         log.warning(f"task {_tid} complete/fail callback error: {_ce}")
                     # tmp cleanup handled by TaskResourceStack.dispose() in _execute_task

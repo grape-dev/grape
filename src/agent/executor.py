@@ -43,7 +43,16 @@ def terminate_active_agents(grace_seconds: int = 5):
 
     同时将 DB 中所有 running/dispatched 状态的 agent_tasks 和对应 events 标记为 failed，
     防止服务重启后留下悬空任务（status=running 但实际进程已终止）。
+
+    graceful-shutdown-requeue-design.md Step 1：
+    - 失败原因细化并**同步写进 events.result**（否则事件详情页「失败原因」会兜底显示
+      summary，如 "A2A: → coding" 无意义，见 #2337）；
+    - 对被 force-fail 的本机任务**统一释放 busy 槽**（release_busy_slot），杜绝每次重启漏槽；
+    - REMOTE 任务（worker 承载）继续跳过。
     """
+    _SHUTDOWN_EVENT_REASON = "任务被系统重启/停机中断，可能未完成，请重派"
+    _SHUTDOWN_TASK_REASON = ("任务被系统重启/停机中断（server shutdown/restart）；"
+                             "可能未完成或有部分产出，请人工确认后重派（redispatch）")
     with _active_procs_lock:
         procs = list(_active_procs)
         _active_procs.clear()
@@ -69,7 +78,6 @@ def terminate_active_agents(grace_seconds: int = 5):
         from src.api.event_store import update_event_status
         import time as _time
         _now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
-        _reason = "Task terminated by server shutdown (SIGTERM)"
         with db_lock:
             c = db.cursor()
             # 查询所有 running/dispatched 任务 + 引擎归属（credential_id>0 = REMOTE worker 承载）
@@ -94,10 +102,25 @@ def terminate_active_agents(grace_seconds: int = 5):
                     c.execute(
                         "UPDATE agent_tasks SET status='failed', exit_code=-1, "
                         "completed_at=?, stream_ended=1, self_reported=1, errors=? WHERE id=?",
-                        (_now, _reason, task_id)
+                        (_now, _SHUTDOWN_TASK_REASON, task_id)
                     )
                     if event_seq:
                         update_event_status(event_seq, "failed")
+                        # Step 1：失败原因写入 events.result —— 否则详情页失败原因会兜底显示
+                        # summary（如 "A2A: → coding"），无意义（#2337）
+                        try:
+                            c.execute(
+                                "UPDATE events SET result=?, exit_code=-1 WHERE seq=?",
+                                (_SHUTDOWN_EVENT_REASON, event_seq))
+                        except Exception as _sr:
+                            log.warning(f"terminate_active_agents: events.result write failed {event_seq}: {_sr}")
+                    # Step 1：统一释放 busy 槽（不漏槽，防止重启累积卡死队列）
+                    if runtime_id:
+                        try:
+                            from src.runtime.service import release_busy_slot
+                            release_busy_slot(runtime_id, cursor=c)
+                        except Exception as _rb:
+                            log.warning(f"terminate_active_agents: release_busy_slot failed {runtime_id}: {_rb}")
                     log.info(f"terminate_active_agents: marked stale DIRECT task {task_id} (seq={event_seq}) as failed")
                 except Exception as e:
                     log.warning(f"terminate_active_agents: failed to mark task {task_id} as failed: {e}")

@@ -141,13 +141,28 @@ class TestLocalClaimer:
         assert cur.fetchone()[0] == 1
 
     def test_ut03_busy_skip(self, claimer_env):
-        """UT-03 满载不抢：busy_slots >= max_concurrent 时 _engine_busy 返回 True。"""
+        """UT-03 满载不抢：真实 running 数 >= max_concurrent 时 _engine_busy 返回 True。
+
+        方案 D（2026-10-18）：以 agent_tasks 真实 running/dispatched COUNT 为事实源，
+        busy_slots 列降级为展示快照——先把列写满也不判别为忙，真实数才决定。
+        """
         from src.runtime import local_claimer as lc
         cur = claimer_env.cursor()
+        # busy_slots 列残留 20（僵尸），但真实 active=0 → 不忙
         cur.execute("UPDATE agent_runtimes SET busy_slots=20, max_concurrent=20 WHERE id=246")
         claimer_env.commit()
+        assert lc._engine_busy(246) is False
+        # 真实占满 20 个槽（running）→ 忙（即使 busy_slots 列故意清 0）
+        for i in range(20):
+            cur.execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, pool_tag, status, prompt, cwd) "
+                "VALUES (?, 'sess1', 246, 'vod', 'running', 'p', 'w')",
+                (f"t_busy_{i}",))
+        cur.execute("UPDATE agent_runtimes SET busy_slots=0 WHERE id=246")
+        claimer_env.commit()
         assert lc._engine_busy(246) is True
-        cur.execute("UPDATE agent_runtimes SET busy_slots=1, max_concurrent=20 WHERE id=246")
+        # 终态一个 → 真实 19 < 20 → 不忙
+        cur.execute("UPDATE agent_tasks SET status='completed' WHERE id='t_busy_0'")
         claimer_env.commit()
         assert lc._engine_busy(246) is False
 

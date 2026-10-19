@@ -448,7 +448,8 @@ class TestHeartbeatCheck:
         with patch.object(health_scorer, '_db') as mock_db, \
              patch.object(health_scorer, '_lock') as mock_lock:
             mock_cursor = MagicMock()
-            mock_cursor.fetchone.return_value = (None,)
+            # (credential_id, status, last_seen_at)：远端引擎 last_seen NULL → 失联
+            mock_cursor.fetchone.return_value = (99, "online", None)
             mock_db.return_value.cursor.return_value = mock_cursor
             mock_lock.return_value.__enter__ = MagicMock()
             mock_lock.return_value.__exit__ = MagicMock(return_value=False)
@@ -456,13 +457,13 @@ class TestHeartbeatCheck:
         assert result is False
 
     def test_fetch_heartbeat_fresh(self):
-        """_fetch_heartbeat: last_seen_at 新鲜 → True。"""
+        """_fetch_heartbeat: 远端引擎 last_seen_at 新鲜 → True。"""
         from datetime import datetime, timezone
         fresh = datetime.now(timezone.utc).isoformat()
         with patch.object(health_scorer, '_db') as mock_db, \
              patch.object(health_scorer, '_lock') as mock_lock:
             mock_cursor = MagicMock()
-            mock_cursor.fetchone.return_value = (fresh,)
+            mock_cursor.fetchone.return_value = (99, "online", fresh)
             mock_db.return_value.cursor.return_value = mock_cursor
             mock_lock.return_value.__enter__ = MagicMock()
             mock_lock.return_value.__exit__ = MagicMock(return_value=False)
@@ -470,17 +471,42 @@ class TestHeartbeatCheck:
         assert result is True
 
     def test_fetch_heartbeat_stale(self):
-        """_fetch_heartbeat: last_seen_at 超时 → False。"""
+        """_fetch_heartbeat: 远端引擎 last_seen_at 超时 → False。"""
         from datetime import datetime, timezone, timedelta
         stale = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
         with patch.object(health_scorer, '_db') as mock_db, \
              patch.object(health_scorer, '_lock') as mock_lock:
             mock_cursor = MagicMock()
-            mock_cursor.fetchone.return_value = (stale,)
+            mock_cursor.fetchone.return_value = (99, "online", stale)
             mock_db.return_value.cursor.return_value = mock_cursor
             mock_lock.return_value.__enter__ = MagicMock()
             mock_lock.return_value.__exit__ = MagicMock(return_value=False)
             result = health_scorer._fetch_heartbeat(910008)
+        assert result is False
+
+    def test_fetch_heartbeat_local_engine_online_true(self):
+        """_fetch_heartbeat: 本机 direct（credential_id=0）+ online → True（方案 A：probe 判定）。"""
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            # 本机引擎 last_seen 很旧（仅 local probe 600s 写一次）仍应在线
+            mock_cursor.fetchone.return_value = (0, "online", "2020-01-01T00:00:00+00:00")
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer._fetch_heartbeat(910010)
+        assert result is True
+
+    def test_fetch_heartbeat_local_engine_offline_false(self):
+        """_fetch_heartbeat: 本机 direct + offline → False。"""
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (0, "offline", None)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer._fetch_heartbeat(910011)
         assert result is False
 
     def test_fetch_heartbeat_engine_not_exist(self):

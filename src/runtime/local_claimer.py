@@ -75,15 +75,24 @@ def _engine_tags(runtime_id: int) -> list[str]:
 
 
 def _engine_busy(runtime_id: int) -> bool:
-    """引擎满载检查（busy_slots >= max_concurrent → 跳过，满载不抢）。"""
+    """引擎满载检查（真实 running 数 >= max_concurrent → 跳过，满载不抢）。
+
+    方案 D（local-engine-busy-slots-zombie-fix-design.md §十）：以 agent_tasks 真实
+    running/dispatched 数（covering 索引 idx_agent_tasks_runtime_status 支撑）为唯一事实源，
+    不再读 busy_slots 列——busy_slots 为展示快照，残留僵尸值不阻塞认领。
+    """
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?", (runtime_id,))
+            c.execute(
+                "SELECT COUNT(*) FROM agent_tasks "
+                "WHERE runtime_id=? AND status IN ('running','dispatched')", (runtime_id,))
             r = c.fetchone()
-        if r and r[1] and (r[0] or 0) >= (r[1] or 0):
-            return True
+            c.execute("SELECT max_concurrent FROM agent_runtimes WHERE id=?", (runtime_id,))
+            m = c.fetchone()
+        if m and m[0]:
+            return (r[0] or 0) >= (m[0] or 0)
         return False
     except Exception:
         return True  # 查询失败保守视为忙（不抢）

@@ -202,7 +202,7 @@ def test_user_a_creates_task_assignee_is_a():
     # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
     with patch("src.user.repo_manager._req", side_effect=_req_fake), \
          patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake), \
-         patch("src.user.db.get_repo_bot_token", return_value="bot_token_178"):
+         patch("src.api.deps.get_user_token_with_refresh", return_value="bot_token_178"):
         r = client.post("/api/issues/test_ab/demo", headers=_headers_a,
                         json={"repo_key": "test_ab/demo", "title": "用户A的任务", "description": "desc"})
     assert r.status_code == 200, r.text
@@ -222,7 +222,7 @@ def test_user_b_creates_task_assignee_is_b():
     client = TestClient(app)
     with patch("src.user.repo_manager._req", side_effect=_req_fake), \
          patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake), \
-         patch("src.user.db.get_repo_bot_token", return_value="bot_token_179"):
+         patch("src.api.deps.get_user_token_with_refresh", return_value="bot_token_179"):
         r = client.post("/api/issues/test_ab/demo", headers=_headers_b,
                         json={"repo_key": "test_ab/demo", "title": "用户B的任务", "description": "desc"})
     assert r.status_code == 200, r.text

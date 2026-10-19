@@ -107,12 +107,14 @@ class CompleteBody(BaseModel):
     session_id: str = ""
     work_dir: str = ""
     engine: str = ""
+    run_token: str = ""  # Step 4：认领时刻 started_at，补报守卫
 
 
 class FailBody(BaseModel):
     error: str = ""
     failure_reason: str = ""
     exit_code: int = -1
+    run_token: str = ""  # Step 4：认领时刻 started_at，补报守卫
 
 
 # ===== 认证中间件 =====
@@ -646,6 +648,15 @@ def runtime_task_complete(task_id: str, body: CompleteBody, credential_id: int =
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
+    # Step 4：补报守卫（回炉/重跑后旧实例不得误 complete 新执行）
+    if not body.run_token:
+        # client 旧版未带 run_token：仅在任务活动态放行，已终态幂等，其它状态保守拒绝
+        pass
+    else:
+        _guard = service.validate_run_token(task, body.run_token)
+        if _guard == "stale":
+            raise HTTPException(status_code=409, detail={"code": 409,
+                                                         "message": "stale report (run_token mismatch), task likely requeued or rerun"})
     _usage = {"session_id": body.session_id, "work_dir": body.work_dir, "engine": body.engine}
     service.set_task_signal(task_id, "stream_ended")
     service.finalize_by_stream_end(task_id, body.result_text or "", body.exit_code, usage=_usage)
@@ -657,6 +668,12 @@ def runtime_task_fail(task_id: str, body: FailBody, credential_id: int = Depends
     task = service.get_task(task_id)
     if not task:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "task not found"})
+    # Step 4：补报守卫
+    if body.run_token:
+        _guard = service.validate_run_token(task, body.run_token)
+        if _guard == "stale":
+            raise HTTPException(status_code=409, detail={"code": 409,
+                                                         "message": "stale report (run_token mismatch), task likely requeued or rerun"})
     # 透传 worker 上报的真实 exit_code（旧硬编码 1 → 死 session 检测的"连续3次负数"
     # 永不触发，坏指针清不掉）；旧 worker 不传则默认 -1，与 fail_task 签名一致。
     service.fail_task(task_id, body.error or body.failure_reason or "unknown error", exit_code=body.exit_code)
@@ -752,9 +769,8 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
             # 旧代码两分支都不减 busy_slots → 每次回炉净漏 1 槽、force-fail 永久泄漏；
             # claim_by_tag 满载即拒领（busy>=max → None），漏 4 槽后引擎哑死。
             if rid and rid > 0:
-                c.execute(
-                    "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
-                    (rid,))
+                from src.runtime.service import release_busy_slot
+                release_busy_slot(rid, cursor=c)
         db.commit()
     if recovered or skipped_active or force_failed:
         log.info(f"recover-orphans runtime={runtime_id}: recovered={recovered} "

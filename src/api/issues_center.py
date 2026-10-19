@@ -60,14 +60,24 @@ def _get_user_id_by_gitcode(gitcode_user: str) -> int | None:
     """按 GitCode 用户名查平台 user_id（unified_user_mapping.user_id）。
 
     查找失败（未注册或异常）时记录 warning 日志，便于追溯（Issue #178）。
+    优先返回「登录账号（grape_accounts）id」——unified_user_mapping 可能存在新旧双 id 映射
+    （低 id 遗留 + grape_accounts id），若取到非登录 id 会导致 issue.user_id 与请求用户不符、
+    「我的需求」按 user_id 过滤为空（issue-244 关联事故）。无登录账号时回退任意映射。
     """
     if not gitcode_user:
         return None
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1", (gitcode_user,))
-            row = c.fetchone()
+            row = c.execute(
+                "SELECT um.user_id FROM unified_user_mapping um "
+                "WHERE um.gitcode_user=? AND um.user_id>0 "
+                "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.username=um.gitcode_user) "
+                "LIMIT 1", (gitcode_user,)).fetchone()
+            if not row:
+                row = c.execute(
+                    "SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1",
+                    (gitcode_user,)).fetchone()
             if row:
                 return row[0]
             log.warning(f"_get_user_id_by_gitcode: gitcode_user='{gitcode_user}' not found in unified_user_mapping (user_id will be 0)")
@@ -207,6 +217,21 @@ def _ensure_task_conversation(user_id: int, repo_key: str, issue_number: int,
     return conv_id
 
 
+def _resolve_issue_org_id(repo_key: str, explicit_org: int = 0) -> int:
+    """解析需求归属组织（issue-244-org-attribution-fix-design.md 方案 B）。
+
+    - repo 关联需求（repo_key 非空）：org = `managed_repos.org_id`（仓库权威，单一来源），
+      忽略调用方/请求上下文 org——requests 的 user.org_id 只作「查看过滤」，绝不作写库归属。
+    - 组织级需求（未来，repo_key 为空且有 explicit_org）：org = 显式选定的组织，
+      须由调用方先完成归属性校验（org_member/创建权限），本函数不代校验。
+    - 无托管记录 / 无显式 org → 0（个人视图豁免 org 过滤，创建者仍可见）。
+    """
+    if repo_key:
+        from src.user.org_db import get_org_id_by_repo_key
+        return get_org_id_by_repo_key(repo_key) or 0
+    return explicit_org or 0
+
+
 def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       description: str = "", assignee: str = "",
                       event_type: str = "",
@@ -252,20 +277,15 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
-    # org_id 未显式传入时，从 managed_repos 表推断仓库关联的组织
-    if not org_id:
-        try:
-            from src.session_manager import db as _org_db, db_lock as _org_db_lock
-            with _org_db_lock:
-                _oc = _org_db.cursor()
-                _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
-                _or = _oc.fetchone()
-                if _or and _or[0]:
-                    org_id = _or[0]
-                else:
-                    log.info(f"ensure_issue_task: managed_repos has no org_id for repo_key={repo_key}, org_id stays 0")
-        except Exception as _e:
-            log.warning(f"ensure_issue_task: failed to infer org_id from managed_repos for {repo_key}: {_e}")
+    # org 归属 = 仓库托管组织（repo 关联需求的唯一权威，issue-244-org-attribution-fix-design.md 方案 B）。
+    # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
+    # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
+    from src.user.org_db import get_org_id_by_repo_key
+    _repo_org = get_org_id_by_repo_key(repo_key) or 0
+    if org_id and org_id != _repo_org:
+        log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
+                    f"passed_org={org_id} → repo_org={_repo_org}")
+    org_id = _repo_org
     with db_lock:
         c = db.cursor()
         # 幂等去重：同一平台 issue 唯一一张卡，任何状态都复用（2026-10-06 修复：
@@ -279,9 +299,12 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             task_id = row[0]
             linked = row[1]
             _cur_st = row[2] or ""
-            # 复用路径：如果已有行 org_id=0 但推断出 org_id>0，则回补（session_store 先建行的 org_id 为 0）
+            # 复用路径：已有行 org 与仓库托管 org 不一致（0/缺失/旧错误值）一律校准为仓库 org
+            #（issue-244-org-attribution-fix-design.md：org 唯一权威 = managed_repos.org_id）
             if org_id:
-                c.execute("UPDATE issue SET org_id=? WHERE id=? AND (org_id=0 OR org_id IS NULL)", (org_id, task_id))
+                c.execute(
+                    "UPDATE issue SET org_id=? WHERE id=? AND (org_id IS NULL OR org_id != ?)",
+                    (org_id, task_id, org_id))
             if _cur_st not in ("active", "processing"):
                 # 复用终态/待澄清卡：重新武装为 active（继续在任务中心处理，避免另建新卡）
                 c.execute("UPDATE issue SET status='active', completed_reason=NULL, completed_at=NULL WHERE id=?",
@@ -1228,6 +1251,21 @@ def create_standard_task(repo_key: str, title: str, description: str,
             "message": "任务已创建（Issue 已同步）" if created else "任务已创建（复用已有 Issue）"}
 
 
+def _refresh_user_gitcode_token(user: dict) -> str:
+    """用户自己的 GitCode token 401 时主动刷新一次（带锁，防并发）。
+
+    返回刷新后的新 token；无 refresh_token / 刷新失败返回空串（不抛异常，
+    由调用方决定最后提示「重新绑定/登录 GitCode」）。
+    """
+    try:
+        from src.api.deps import try_refresh_gitcode_token
+        return try_refresh_gitcode_token(user.get("id") or 0) or ""
+    except Exception as _e:
+        from src.config import log as _log
+        _log.warning(f"create_task: refresh user gitcode token failed: {_e}")
+        return ""
+
+
 async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_current_user_or_api_key)):
     """Task Center 新建任务：同步在 GitCode 仓库创建 Issue，并按既有流程建档。
 
@@ -1260,11 +1298,18 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
     else:
-        # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
-        from src.user.db import get_repo_bot_token
-        api_token = get_repo_bot_token(repo_key=repo_key)
+        # 用户建单必须用用户自己的 GitCode token：assign 需用户身份（bot token 无 assign 权限，
+        # GitCode 403）。token 缺失/失效 ≠ 回落 bot——明确引导用户重新绑定/登录 GitCode。
+        from src.api.deps import get_user_token_with_refresh
+        api_token = get_user_token_with_refresh(user["username"], user_id=user["id"])
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 Bot Token 未配置，请在仓库设置中配置 GitCode Bot Token"})
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": "GitCode Token 未配置或已失效，请重新绑定/登录 GitCode 后重试",
+            })
+    # 是否使用「用户自己的 GitCode token」：用于 401 时区分「用户登录失效」（引导重新绑定）
+    # 与「仓库 bot token 失效」（提示检查仓库 Bot Token 配置）两套文案。
+    _using_user_token = (not _preauth_token) and (not _is_github)
     # Issue #343: assignee 优先用 GitCode/GitHub 登录名（external_login），
     # 而非 grape 平台 username——GitCode 侧 assignee 必须是平台登录名
     if body.assignee and body.assignee.strip():
@@ -1286,14 +1331,34 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     try:
         issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
                                               provider="github" if _is_github else "gitcode")
-    except RuntimeError as e:
-        # Issue #345: 先判断是否 401 认证失败，非 401 走通用错误
-        from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG
-        if is_auth_error_exc(e):
+    except RuntimeError as _dedup_err:
+        from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
+        if is_auth_error_exc(_dedup_err) and _using_user_token:
+            # 用户自己的 GitCode token 401 → 主动刷新一次并重试；仍失败给「重新登录」引导
+            _renewed = _refresh_user_gitcode_token(user)
+            if _renewed:
+                api_token = _renewed
+                try:
+                    issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
+                                                          provider="gitcode")
+                except RuntimeError as _dedup_err2:
+                    _dedup_err = _dedup_err2
+                else:
+                    _dedup_err = None
+            if _dedup_err is not None:
+                # 用户自己的 GitCode token 确认失效（刷新失败或重试仍 401）
+                # → 401 + reauth_required：前端 handleResp 收到后自动跳 GitCode OAuth 授权页，强制重新授权
+                raise HTTPException(status_code=401, detail={
+                    "code": 401,
+                    "message": f"查重失败，{GITCODE_USER_TOKEN_INVALID_MSG}",
+                    "action": "reauth_required",
+                })
+        elif is_auth_error_exc(_dedup_err):
             raise HTTPException(status_code=502, detail={"code": 502,
-                                                         "message": f"查重失败，{BOT_TOKEN_INVALID_MSG}: {str(e)[:200]}"})
-        raise HTTPException(status_code=502, detail={"code": 502,
-                                                     "message": f"查重失败: {str(e)[:200]}"})
+                                                         "message": f"查重失败，{BOT_TOKEN_INVALID_MSG}: {str(_dedup_err)[:200]}"})
+        else:
+            raise HTTPException(status_code=502, detail={"code": 502,
+                                                         "message": f"查重失败: {str(_dedup_err)[:200]}"})
     created = False
     if issue_num is not None:
         raise HTTPException(status_code=409, detail={"code": 409,
@@ -1319,7 +1384,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 resp = _post_github_issue(api_token, owner, rname, body.title.strip(),
                                           _desc_with_attach, assignee=assignee)
             else:
-                # Issue #343: GitCode 写操作走 bot token，直接调用不需要 refresh 包装
+                # Issue #343: GitCode 写操作 token（用户建单恒为用户 token）
                 resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
                                            _desc_with_attach, assignee=assignee)
         except Exception as _create_err:
@@ -1328,27 +1393,55 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             import re as _re
             _codes = _re.findall(r'\((\d{3})\)', _err_msg)
             _http_code = int(_codes[0]) if _codes else 0
-            if _http_code == 403:
+            if _http_code == 401 and _using_user_token:
+                # 用户自己的 GitCode token 401 → 刷新一次再重试；仍失败走下方 401 分支给「重新登录」引导
+                _renewed = _refresh_user_gitcode_token(user)
+                if _renewed:
+                    api_token = _renewed
+                    try:
+                        resp = _post_gitcode_issue(api_token, owner, rname, body.title.strip(),
+                                                   _desc_with_attach, assignee=assignee)
+                    except Exception as _create_err2:
+                        _create_err = _create_err2
+                        _err_msg = str(_create_err2)
+                        _codes = _re.findall(r'\((\d{3})\)', _err_msg)
+                        _http_code = int(_codes[0]) if _codes else 0
+                    else:
+                        # 刷新重试成功：交由下方统一「响应无 issue number」校验提取 number
+                        _create_err = None
+            if _create_err is None:
+                pass  # 刷新重试成功，跳过异常分支
+            elif _http_code == 403:
                 raise HTTPException(status_code=403, detail={
                     "code": 403,
                     "message": f"创建 Issue 失败：处理人无效或无权限（assignee={assignee}），请检查 assignee 是否为有效的 {('GitHub' if _is_github else 'GitCode')} 用户名"
                 })
-            if _http_code == 422:
+            elif _http_code == 422:
                 raise HTTPException(status_code=422, detail={
                     "code": 422,
                     "message": f"创建 Issue 失败：参数错误: {_err_msg[:200]}"
                 })
-            if _http_code == 401:
-                # Issue #345: 引用公共常量
+            elif _http_code == 401:
+                # Issue #345: 区分用户 token / bot token 两套 401 提示
+                if _using_user_token:
+                    # 用户自己的 GitCode token 401 且刷新失败 → 401 + reauth_required，
+                    # 前端自动跳 GitCode OAuth 授权页强制重新授权（用户登录凭据已失效）
+                    from src.vcs.token_error import GITCODE_USER_TOKEN_INVALID_MSG
+                    raise HTTPException(status_code=401, detail={
+                        "code": 401,
+                        "message": f"创建 Issue 失败：{GITCODE_USER_TOKEN_INVALID_MSG}",
+                        "action": "reauth_required",
+                    })
                 from src.vcs.token_error import BOT_TOKEN_INVALID_MSG
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
-                    "message": f"创建 Issue 失败：{BOT_TOKEN_INVALID_MSG}"
+                    "message": f"创建 Issue 失败：{BOT_TOKEN_INVALID_MSG}",
                 })
-            raise HTTPException(status_code=502, detail={
-                "code": 502,
-                "message": f"创建 Issue 失败: {_err_msg[:200]}"
-            })
+            else:
+                raise HTTPException(status_code=502, detail={
+                    "code": 502,
+                    "message": f"创建 Issue 失败: {_err_msg[:200]}"
+                })
         n = None
         if isinstance(resp, dict):
             n = resp.get("number") or resp.get("iid") or resp.get("id")
@@ -1411,10 +1504,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             from src.config import log as _log
             _log.warning(f"Auto multi-task detection failed: {_e}")
 
-    # 4) 按既有流程幂等建档（同 issue 任务 id 复用）
-    _org_id = user.get("org_id", 0)
+    # 4) 按既有流程幂等建档（同 issue 任务 id 复用）；org 归属由 ensure_issue_task 统一以仓库为准
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
-                                subtask_mode=_auto_subtask_mode, org_id=_org_id)
+                                subtask_mode=_auto_subtask_mode)
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
@@ -1716,7 +1808,13 @@ def _batch_fetch_issue_state(keys: list) -> dict:
 
 
 def _batch_running_agent_tasks(keys: list) -> set:
-    """批量查运行中的 agent_tasks，返回 {(repo_key, issue_id)}（防 N+1，Issue #85 雷达动画依据）。"""
+    """批量查"正在运行"的 agent_tasks，返回 {(repo_key, issue_id)}（防 N+1，Issue #85 雷达动画依据）。
+
+    口径（local-engine-busy-slots-zombie-fix-design.md §8）：与流水线点亮一致——只认
+    `status='running'`（任务真正被认领执行；事件此刻同步 running）。`queued`（排队未认领/
+    事件 pending）与 `dispatched`（历史 pull 语义、事件未同步 running）都不算，避免
+    "任务仅排队中但需求中心雷达已在扫描、流水线未点亮" 的不一致。
+    """
     out: set = set()
     if not keys:
         return out
@@ -1729,7 +1827,7 @@ def _batch_running_agent_tasks(keys: list) -> set:
                 c = db.cursor()
                 c.execute(
                     "SELECT repo_key, issue_id FROM agent_tasks "
-                    "WHERE status IN ('queued','dispatched','running') AND (" + _ors + ")", _flat)
+                    "WHERE status = 'running' AND (" + _ors + ")", _flat)
                 out.update((row[0], row[1]) for row in c.fetchall())
         except Exception as e:
             log.warning(f"batch agent_tasks fetch failed: {e}")

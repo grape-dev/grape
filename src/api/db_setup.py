@@ -1517,6 +1517,7 @@ def _create_indexes():
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_repo_issue ON issue(repo_key, issue_number)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_status ON agent_tasks(status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_runtime ON agent_tasks(runtime_id)",
+        "CREATE INDEX IF NOT EXISTS idx_agent_tasks_runtime_status ON agent_tasks(runtime_id, status)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_session ON agent_tasks(agent_session_id)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_event ON agent_tasks(event_seq)",
         "CREATE INDEX IF NOT EXISTS idx_agent_tasks_issue_session ON agent_tasks(issue_session_id)",
@@ -2245,6 +2246,16 @@ def _run_all_migrations():
         _migrate_knowledge_dedup_and_ref()
     except Exception as _e:
         log.warning(f"Issue #67 knowledge migration failed: {_e}")
+    # ===== Event 状态语义迁移（seq#2310：入队 pending，认领才 running）=====（lyz 补）
+    try:
+        _migrate_event_status_pending()
+    except Exception as _e:
+        log.warning(f"Event status-pending migration failed: {_e}")
+    # ===== Chat 配置重复行清理（解绑失效根因）=====（lyz 补）
+    try:
+        _cleanup_dup_chat_config_rows()
+    except Exception as _e:
+        log.warning(f"Chat config dedup migration failed: {_e}")
 
 
 def _ensure_case_insensitive_indexes():
@@ -2425,6 +2436,59 @@ def init_database():
         # SQLite——单实例不需要锁
         _run_all_migrations()
     # MySQL with session_manager
+
+def _migrate_event_status_pending():
+    """事件状态语义迁移（docs/weekly-07/seq-2310-health-gate-stuck-design.md §6.5.4）。
+
+    存量 events：status='running' 但关联任务仍 queued / 无任务 → 置 pending，
+    与「入队 pending、认领才 running」新语义对齐。幂等（每次启动可重跑无副作用）。
+    """
+    try:
+        from src.mysql_compat import get_db_backend
+        with db_lock:
+            c = db.cursor()
+            # ① running 且关联任务 queued → pending
+            c.execute(
+                "UPDATE events SET status='pending' "
+                "WHERE status='running' AND EXISTS ("
+                "  SELECT 1 FROM agent_tasks t WHERE t.event_seq = events.seq AND t.status='queued')")
+            _n1 = c.rowcount
+            # ② running 且 started_at 空且无任何关联任务 → pending（疑似入队后从未被认领/创建任务失败）
+            c.execute(
+                "UPDATE events SET status='pending' "
+                "WHERE status='running' AND (started_at IS NULL OR started_at='') "
+                "AND NOT EXISTS (SELECT 1 FROM agent_tasks t WHERE t.event_seq = events.seq)")
+            _n2 = c.rowcount
+            db.commit()
+        if _n1 or _n2:
+            log.info(f"Event status-pending migration: {_n1} running+queued -> pending, "
+                     f"{_n2} running+untasked -> pending")
+    except Exception as e:
+        log.warning(f"Event status-pending migration failed: {e}")
+
+
+def _cleanup_dup_chat_config_rows():
+    """幂等迁移：清理 chat_agent_session 中同一 user 的重复 repo_key='' 配置行。
+
+    背景（chat-config-duplicate-row-unbind-fix-design.md）：账号迁移残留第二条 repo_key='' 行，
+    get_chat_config 无序 LIMIT 1 命中空行 → 解绑/配置读写落错行、真绑定行永不清。
+    只保留每 user 的 id=MIN(id) 一行（通常 sess-cfg-{user_id}）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "DELETE FROM chat_agent_session "
+                "WHERE repo_key='' AND id NOT IN ("
+                "  SELECT MIN(id) FROM chat_agent_session WHERE repo_key='' GROUP BY user_id"
+                ")")
+            _n = c.rowcount
+            db.commit()
+        if _n:
+            log.info(f"Chat config dedup migration: removed {_n} duplicate repo_key='' row(s)")
+    except Exception as e:
+        log.warning(f"Cleanup dup chat config rows failed: {e}")
+
 
 def _migrate_knowledge_dedup_and_ref():
     """知识库 source 回填 + name/description 回填 + 重复记录去重 + scene_knowledge_ref 数据迁移 + MySQL 原生 DDL。

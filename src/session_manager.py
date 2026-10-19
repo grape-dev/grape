@@ -774,7 +774,12 @@ def get_chat_config(user_id: int) -> dict:
     """
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) LIMIT 1", (user_id,))
+        # 同一 user 可能残留多条 repo_key='' 行（账号迁移遗留）：确定性取「已配置行」优先，
+        # 其次 id 升序，避免无序 LIMIT 1 命中空行导致解绑/读写错行（chat-config-duplicate-row-unbind-fix-design.md）。
+        c.execute(
+            "SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider "
+            "FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
+            "ORDER BY (im_app_id IS NOT NULL AND im_app_id != '') DESC, id ASC LIMIT 1", (user_id,))
         row = c.fetchone()
         if not row:
             # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
@@ -857,6 +862,9 @@ def _write_chat_config_row(user_id: int, runtime_id: int = 0, skill: str = "", s
     sid = f"sess-cfg-{user_id}"
     with db_lock:
         c = db.cursor()
+        # 写前收敛重复：同 user 的 repo_key='' 行只保留本 sid（账号迁移残留行一并清理）
+        c.execute("DELETE FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) AND id!=?",
+                  (user_id, sid))
         c.execute(
             "INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider, created_at, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,datetime('now'),datetime('now'))",
             (sid, user_id, "", runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider)

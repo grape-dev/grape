@@ -1037,9 +1037,7 @@ def claim(runtime_id) -> dict | None:
                         "WHERE id=? AND status='dispatched'",
                         (_pool_fill, _pool_fill, _tid))
                     if c.rowcount and _rid:
-                        c.execute(
-                            "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
-                            (_rid,))
+                        release_busy_slot(_rid, cursor=c)
                     # 回收置 failed（attempts 超限）→ 同步事件终态，避免事件永远 running
                     if c.rowcount and _seq:
                         c.execute("SELECT status FROM agent_tasks WHERE id=?", (_tid,))
@@ -1194,26 +1192,18 @@ def claim(runtime_id) -> dict | None:
                 (runtime_id, datetime.now(timezone.utc).isoformat(), task_id))
             claimed = c.rowcount > 0
             if claimed:
-                # busy_slots 对账（2026-08-21 修复）：手动终止/kill -9/超时等场景
-                # busy_slots 不递减 → 只增不减 → 溢出 max_concurrent。claim 时如果
-                # busy_slots 远超实际活跃任务数（差值>2），重置为实际值。
-                # 安全：有心跳的 worker 会在心跳中重新上报；正在执行的任务不受影响。
+                # 方案 D：展示快照重算（真实 active）；决策点已改读 _real_active_count，本段旧对账/递增不再承担正确性。
+                refresh_busy_snapshot(runtime_id, cursor=c)
+                # 方案 E：真正被引擎认领才把事件置 running（入队时是 pending）
                 try:
-                    c.execute(
-                        "SELECT COUNT(*) FROM agent_tasks "
-                        "WHERE runtime_id=? AND status IN ('dispatched','running')", (runtime_id,))
-                    _actual_active = c.fetchone()[0] or 0
-                    c.execute("SELECT busy_slots FROM agent_runtimes WHERE id=?", (runtime_id,))
-                    _current_busy = c.fetchone()[0] or 0
-                    if _current_busy > _actual_active + 2:
-                        log.info(f"busy_slots reconcile: runtime={runtime_id} "
-                                 f"busy={_current_busy} actual_active={_actual_active} -> reset to {_actual_active}")
-                        c.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?",
-                                  (_actual_active, runtime_id))
-                except Exception as _re:
-                    log.warning(f"busy_slots reconcile failed: {_re}")
-                # 槽位 +1（观测/池调度排序用；不硬限流，边端 RUNTIME_MAX_CONCURRENT_TASKS 仍控制执行并发）
-                c.execute("UPDATE agent_runtimes SET busy_slots=busy_slots+1 WHERE id=?", (runtime_id,))
+                    _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    if _evt_seq and _evt_seq[0]:
+                        c.execute(
+                            "UPDATE events SET status='running', completed_at='' "
+                            "WHERE seq=? AND status IN ('pending','running')",
+                            (_evt_seq[0],))
+                except Exception as _ee:
+                    log.warning(f"claim: sync event running failed for task {task_id}: {_ee}")
             db.commit()
         except Exception as e:
             log.warning(f"claim failed: {e}")
@@ -1317,13 +1307,15 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
 
             # 2. 引擎级并发槽检查（方案一：标签只做路由，并发纯引擎级）
             # 废弃 engine_capabilities.max_concurrent，统一走 agent_runtimes.max_concurrent
+            # 方案 D（2026-10-18）：满载判定以真实 running/dispatched COUNT 为事实源（covering 索引），
+            # 不再读 busy_slots 列——busy_slots 仅为展示快照，僵尸残留不阻塞认领。
             c.execute(
-                "SELECT busy_slots, max_concurrent FROM agent_runtimes WHERE id=?",
+                "SELECT max_concurrent FROM agent_runtimes WHERE id=?",
                 (runtime_id,)
             )
             rt_row = c.fetchone()
-            if rt_row and rt_row[0] >= rt_row[1]:
-                return None  # 引擎已满载
+            if rt_row and rt_row[0] and _real_active_count(c, runtime_id) >= rt_row[0]:
+                return None  # 引擎已满载（真实 active >= max_concurrent）
 
             # 3. 构建任务查询（加 scope 过滤）
             # tag="all" → 匹配任意 pool_tag（广播）；其他 tag → 精确匹配 pool_tag
@@ -1416,6 +1408,21 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     except Exception:
                         pass
                 if not _skip:
+                    # === 健康分检查（Plugin 模式增强层，Issue #134 扩展）===
+                    # 引擎健康分过低或连续失败过多时拒绝认领，避免低质量引擎抢任务后失败。
+                    # Issue #259/seq#2310：force_refresh=True 现算，避免读 5min 前持久化的 0 分
+                    # 快照长期阻塞本机在线引擎；不健康 → 跳过当前任务尝试下一个（防队首阻塞）。
+                    # 健康检查异常时保守跳过本轮认领，不放行低分引擎。
+                    try:
+                        from src.runtime.health_scorer import is_healthy as _is_engine_healthy
+                        if not _is_engine_healthy(runtime_id, force_refresh=True):
+                            from src.runtime.instances import runtime_instance_name as _rin2
+                            log.info(f"claim_by_tag: engine {runtime_id}({_rin2(runtime_id)}) unhealthy (low score/consecutive failures), skip claiming task {task_id}")
+                            _skip = True
+                    except Exception as _he:
+                        log.warning(f"claim_by_tag: health check failed for engine {runtime_id}: {_he}, reject this round")
+                        _skip = True
+                if not _skip:
                     break  # 当前任务可认领
 
                 # 跳过当前任务，尝试下一个
@@ -1464,17 +1471,6 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 if len(_tried_ids) >= _max_tries:
                     return None  # 防止无限循环
 
-            # === 健康分检查（Plugin 模式增强层，Issue #134 扩展）===
-            # 引擎健康分过低或连续失败过多时拒绝认领，避免低质量引擎抢任务后失败
-            try:
-                from src.runtime.health_scorer import is_healthy as _is_engine_healthy
-                if not _is_engine_healthy(runtime_id):
-                    from src.runtime.instances import runtime_instance_name as _rin2
-                    log.info(f"claim_by_tag: engine {runtime_id}({_rin2(runtime_id)}) unhealthy (low score/consecutive failures), skip claiming task {task_id}")
-                    return None
-            except Exception as _he:
-                log.warning(f"claim_by_tag: health check failed: {_he}, skip check")
-
             # 标记 running（原 dispatched：worker 认领即开始执行，UI 长时间显示 dispatched
             # 是因为 worker 侧 task_start 回调丢失/批量消息延迟，靠 auto-fix 兜底才转 running。
             # 认领即 running 语义更准确，防 UI 卡 dispatched 窗口）
@@ -1484,7 +1480,18 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             )
             claimed = c.rowcount > 0
             if claimed:
-                c.execute("UPDATE agent_runtimes SET busy_slots=busy_slots+1 WHERE id=?", (runtime_id,))
+                # 方案 D：busy_slots 降级为展示快照，这里重算为真实 active 数（决策已用 _real_active_count）
+                refresh_busy_snapshot(runtime_id, cursor=c)
+                # 方案 E：真正被引擎认领才把事件置 running（入队时是 pending）
+                try:
+                    _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                    if _evt_seq and _evt_seq[0]:
+                        c.execute(
+                            "UPDATE events SET status='running', completed_at='' "
+                            "WHERE seq=? AND status IN ('pending','running')",
+                            (_evt_seq[0],))
+                except Exception as _ee:
+                    log.warning(f"claim_by_tag: sync event running failed for task {task_id}: {_ee}")
             db.commit()
         except Exception as e:
             log.warning(f"claim_by_tag failed: {e}")
@@ -1532,6 +1539,86 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
     return task
 
 
+_BUSY_SLOT_DECREMENT_SQL = (
+    "UPDATE agent_runtimes SET busy_slots = "
+    "CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?"
+)
+
+
+def _real_active_count(cursor, runtime_id: int) -> int:
+    """该引擎当前真实 running/dispatched 任务数（方案 D 唯一事实源）。
+
+    local-engine-busy-slots-zombie-fix-design.md §十：决策点一律以 agent_tasks 真实计数为准，
+    依赖 covering 索引 idx_agent_tasks_runtime_status 走纯索引扫描（COVERING INDEX），
+    成本与当前 running 数同量级，与历史行数解耦。
+    """
+    cursor.execute(
+        "SELECT COUNT(*) FROM agent_tasks "
+        "WHERE runtime_id=? AND status IN ('running','dispatched')", (runtime_id,))
+    r = cursor.fetchone()
+    return r[0] if r else 0
+
+
+def refresh_busy_snapshot(runtime_id: int, cursor=None):
+    """把 busy_slots 列重算为真实 active 数（展示快照，不参与调度决策）。
+
+    方案 D：busy_slots 降级为展示快照，由调度周期 / claim 路径调用本函数刷新；
+    任一递增/递减路径漏调都不影响决策正确性（决策读 _real_active_count）。
+    """
+    if not runtime_id:
+        return
+    if cursor is not None:
+        _n = _real_active_count(cursor, runtime_id)
+        cursor.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
+        return
+    from src.session_manager import db as _db, db_lock as _dl
+    with _dl:
+        _n = _real_active_count(_db.cursor(), runtime_id)
+        _db.cursor().execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
+        _db.commit()
+
+
+def release_busy_slot(runtime_id, cursor=None):
+    """统一释放调度槽（唯一递减入口，防越界 clamp >=0）。
+
+    - cursor 为空：自行获取 db_lock + commit（独立事务）；
+    - 传入 cursor：复用调用方事务（与任务状态更新同事务，避免嵌套锁）。
+    所有「任务不再占用某引擎槽位」的路径都必须经此收敛
+    （complete/fail/cancel/requeue/redispatch/孤儿回收），
+    避免僵尸 busy_slots 让 local_claimer/claim_by_tag 误判满载（#256）。
+    """
+    if not runtime_id:
+        return
+    if cursor is not None:
+        cursor.execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
+        return
+    from src.session_manager import db as _db, db_lock as _dl
+    with _dl:
+        _db.cursor().execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
+        _db.commit()
+
+
+def validate_run_token(task: dict | None, run_token: str = "") -> str:
+    """校验补报实例（run_token = 认领时刻 started_at，Step 4）。
+
+    返回值：
+    - "ok"   ：可继续处理（任务处于 running/dispatched，且 started_at 匹配）
+    - "noop" ：已终态（幂等，调用方照旧走终态保护即可）
+    - "stale"：旧执行实例补报（started_at 不匹配，或任务已回炉/未处于活动态）
+      → 调用方应拒绝，防止 recover_orphans 回炉重跑后旧实例误 complete 新执行。
+    """
+    if not task or not run_token:
+        return "ok"
+    if task.get("started_at") != run_token:
+        return "stale"
+    _st = task.get("status")
+    if _st in ("completed", "failed", "cancelled"):
+        return "noop"
+    if _st not in ("running", "dispatched"):
+        return "stale"  # queued（回炉未认领）/ 其它 → 旧实例
+    return "ok"
+
+
 def update_task_status(task_id, status, **kw):
     """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2)."""
     with db_lock:
@@ -1555,11 +1642,20 @@ def update_task_status(task_id, status, **kw):
                 sets.append(f"{col}=?")
                 params.append(kw[col])
         c.execute(f"UPDATE agent_tasks SET {', '.join(sets)} WHERE id=?", params + [task_id])
+        # 方案 E：任务真正开始执行（running）→ 事件 pending→running（与 claim 认领语义一致）
+        if status == "running":
+            try:
+                _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                if _evt_seq and _evt_seq[0]:
+                    c.execute(
+                        "UPDATE events SET status='running', completed_at='' "
+                        "WHERE seq=? AND status IN ('pending','running')",
+                        (_evt_seq[0],))
+            except Exception as _e:
+                log.warning(f"update_task_status: sync event running failed for task {task_id}: {_e}")
         # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态，且任务已绑定引擎 → busy_slots-1
         if status in ("completed", "failed", "cancelled") and row[1] and row[1] > 0:
-            c.execute(
-                "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
-                (row[1],))
+            release_busy_slot(row[1], cursor=c)
         db.commit()
     # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
     if status in ("completed", "failed", "cancelled"):
@@ -1595,9 +1691,17 @@ def requeue_task(task_id):
                   (task_id,))
         ret = c.rowcount > 0
         if ret and row and row[0]:
-            c.execute(
-                "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
-                (row[0],))
+            release_busy_slot(row[0], cursor=c)
+        # 方案 E：任务回落 queued → 事件同步回 pending（语义：尚未被认领）
+        if ret:
+            try:
+                _evt_seq = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                if _evt_seq and _evt_seq[0]:
+                    c.execute(
+                        "UPDATE events SET status='pending' WHERE seq=? AND status IN ('running','pending')",
+                        (_evt_seq[0],))
+            except Exception as _e:
+                log.warning(f"requeue_task: sync event pending failed for task {task_id}: {_e}")
         db.commit()
         return ret
 
@@ -2444,12 +2548,9 @@ def batch_recover_stale_tasks(timeout_seconds: int = 300) -> dict:
                     (task_id,)
                 )
                 if c.rowcount > 0:
-                    # Decrement busy_slots
+                    # Decrement busy_slots（统一收口 release_busy_slot）
                     if rid:
-                        c.execute(
-                            "UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?",
-                            (rid,)
-                        )
+                        release_busy_slot(rid, cursor=c)
                     recovered.append({"task_id": task_id, "runtime_id": rid, "seq": seq})
             db.commit()
         except Exception as e:

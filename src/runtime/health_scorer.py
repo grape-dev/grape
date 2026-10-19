@@ -180,10 +180,12 @@ def _fetch_task_stats(runtime_id: int) -> dict:
 def _fetch_heartbeat(runtime_id: int) -> bool:
     """查询 agent_runtimes 表的心跳状态（Issue #135）。
 
-    判定逻辑（与 health.py derive_runtime_health 对齐）：
-    - last_seen_at 为 NULL / 引擎从未上线 → False（失联）
-    - last_seen_at 超过 _HEARTBEAT_STALE_SECONDS → False（失联）
-    - 心跳新鲜 → True
+    本机直连引擎（credential_id=0）与远端 worker（credential_id>0）判定口径不同：
+    - 本机 direct 引擎：其 last_seen_at 只由 local probe 每 600s 刷新一次，若按心跳超时
+      阈值（_HEARTBEAT_STALE_SECONDS，默认 100s）判定会长期误判失联 → 健康分强制 0 →
+      claim_by_tag 永不认领本机引擎（seq#2310 队列停摆根因）。改为按 status=online +
+      probe 结果判定：online 即视为活跃（probe 线程每 10min 真实探测 --version 并刷新 healthy）。
+    - 远端 worker：维持原语义——last_seen_at 为 NULL / 超阈值 → 失联。
 
     返回 True 表示心跳正常，False 表示失联。
     """
@@ -192,12 +194,18 @@ def _fetch_heartbeat(runtime_id: int) -> bool:
         with _lock():
             c = _db().cursor()
             c.execute(
-                "SELECT last_seen_at FROM agent_runtimes WHERE id=?",
+                "SELECT credential_id, status, last_seen_at FROM agent_runtimes WHERE id=?",
                 (runtime_id,))
             row = c.fetchone()
         if not row:
             return False  # 引擎不存在 → 失联
-        last_seen_at = row[0]
+        credential_id = row[0] or 0
+        status = (row[1] or "") if row[1] is not None else ""
+        last_seen_at = row[2]
+        if credential_id == 0:
+            # 本机直连引擎：last_seen_at 写节奏慢（local probe 600s），不按心跳超时判失联。
+            # 只要 status=online 即视为活跃（online 状态由 local probe 维护，probe 失败会转 offline）。
+            return status == "online"
         if not last_seen_at:
             return False  # NULL / 空 → 从未上线 → 失联
         ts = parse_dt(last_seen_at)

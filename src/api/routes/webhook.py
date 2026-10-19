@@ -438,7 +438,7 @@ def _cross_pipeline_handoff(
             c = db.cursor()
             c.execute(
                 "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
-                "AND event_type='a2a_event' AND status IN ('running','dispatched') "
+                "AND event_type='a2a_event' AND status IN ('pending','running','dispatched') "
                 "AND scene_id=? ORDER BY seq DESC LIMIT 1",
                 (repo_key, f"#{issue_number}", target_scene_id))
             _existing = c.fetchone()
@@ -584,7 +584,7 @@ def _cross_pipeline_handoff(
                 "carried_context": _cc,
                 "engine_config": engine_config,
             },
-            status="running",
+            status="pending",
             scene_id=target_scene_id,
         )
         log.info(f"A2A #329: cross-pipeline a2a_event created seq={seq}")
@@ -990,7 +990,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 with db_lock:
                     c = db.cursor()
                     c.execute(
-                        "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? AND event_type='a2a_event' AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 1",
+                        "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? AND event_type='a2a_event' AND status IN ('pending','running','dispatched') ORDER BY seq DESC LIMIT 1",
                         (repo_key, f"#{issue_number}", agent_name))
                     _existing = c.fetchone()
                     if _existing:
@@ -1041,7 +1041,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             actor="",
             summary=f"A2A: → {agent_name}",
             payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None},
-            status="running",
+            status="pending",
         )
         if not seq:
             log.error(f"A2A: append_event returned 0, cannot create event for agent={agent_name}, issue=#{issue_number}")

@@ -294,7 +294,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     from src.api.deps import check_repo_access
     check_repo_access(user, row[1] or "")
 
-    if evt_status not in ('running', 'dispatched'):
+    if evt_status not in ('pending', 'running', 'dispatched'):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"事件状态为 {evt_status}，无法终止"})
 
     # 查关联 task_id（agent_tasks 表按 event_seq 关联）
@@ -596,11 +596,12 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 c2.execute("UPDATE agent_tasks SET status='queued', started_at=NULL WHERE id=? AND status IN ('dispatched','running')", (task_id,))
                 _requeued = c2.rowcount > 0
                 if _requeued:
-                    # Release busy slot on old runtime
+                    # Release busy slot on old runtime（统一收口 release_busy_slot）
                     c2.execute("SELECT runtime_id FROM agent_tasks WHERE id=?", (task_id,))
                     _old_rid_row = c2.fetchone()
                     if _old_rid_row and _old_rid_row[0]:
-                        c2.execute("UPDATE agent_runtimes SET busy_slots = CASE WHEN busy_slots > 0 THEN busy_slots - 1 ELSE 0 END WHERE id=?", (_old_rid_row[0],))
+                        from src.runtime.service import release_busy_slot
+                        release_busy_slot(_old_rid_row[0], cursor=c2)
                     # Reassign to an online engine with the right tag + scope isolation
                     # Prefer remote (credential_id > 0) so workers can claim; fall back to local direct
                     # pool_engine_ids 非空 → 限定场景绑定的引擎列表（与首次派发一致）

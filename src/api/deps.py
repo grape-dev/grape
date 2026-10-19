@@ -264,6 +264,48 @@ def require_org_admin(user: dict = Depends(require_org_member)) -> dict:
     return user
 
 
+def _get_gitcode_credential_by_gitcode_id(username: str) -> dict:
+    """按登录账号的 gitcode_id 在 user_credentials 全局匹配 GitCode OAuth 凭据。
+
+    双 id / 凭据错位兜底（grape 账号体系迁移后）：OAuth 凭据可能历史绑定在旧 user_id
+    （如旧世代 id 7），而登录账号是另一 id（如 2），身份(external_identities) token 可能
+    缺失或失效。gitcode_id 是账号唯一身份，跨 user_id 匹配到有效纯文本凭据最可靠。
+    """
+    import json as _json
+    try:
+        from src.auth.grape_account_db import get_grape_account_by_username
+        from src.session_manager import db, db_lock
+        acc = get_grape_account_by_username(username)
+        if not acc:
+            return {}
+        gid = ""
+        with db_lock:
+            row = db.cursor().execute(
+                "SELECT external_id FROM external_identities "
+                "WHERE grape_user_id=? AND provider='gitcode' AND status=1 LIMIT 1",
+                (acc["id"],)).fetchone()
+        if row and row[0]:
+            gid = str(row[0])
+        if not gid:
+            return {}
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT config_json, updated_at FROM user_credentials "
+                "WHERE provider='gitcode_oauth' ORDER BY updated_at DESC, rowid DESC").fetchall()
+        for raw, _uat in rows:
+            try:
+                cfg = _json.loads(raw or "{}")
+            except Exception:
+                continue
+            if not isinstance(cfg, dict) or not cfg.get("gitcode_id"):
+                continue
+            if str(cfg.get("gitcode_id") or "") == gid and cfg.get("access_token"):
+                return cfg
+    except Exception as e:
+        log.warning(f"_get_gitcode_credential_by_gitcode_id({username}): {e}")
+    return {}
+
+
 def _get_oauth_token_from_identity(username: str, provider: str) -> str:
     """从 external_identities 表读取用户的 OAuth access_token。
 
@@ -373,14 +415,22 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
     在 external_identities 列中存为 TEXT 格式（如 "2026-10-15 12:00:00"）。
     本函数从 user_credentials 读，值为 int，直接做数值比较。
     如从 external_identities 读 TEXT 格式，用 _parse_token_expires_at 统一转 epoch int。
+
+    双 id / 凭据错位兜底（grape 账号体系迁移后，OAuth 凭据可能历史绑定在旧 user_id 上）：
+    优先按「登录账号的 gitcode_id」在 user_credentials 全局匹配纯文本 token，
+    避免登录 user_id 下无/无效凭据导致建单等写操作 401/403。
     """
     import time as _time
-    # 1. 优先从 external_identities 读
-    token = _get_oauth_token_from_identity(username, "gitcode")
+    # ① 按 gitcode_id 精确匹配（跨 user_id，双 id 最可靠）
+    _cred = _get_gitcode_credential_by_gitcode_id(username)
+    token = (_cred or {}).get("access_token", "") or ""
+    if not token:
+        # ② 走 identity 绑定（external_identities 解密）
+        token = _get_oauth_token_from_identity(username, "gitcode")
 
     if token and user_id > 0:
         # 检查 token 是否临近过期
-        cred = user_db.get_credential(user_id, "gitcode_oauth")
+        cred = _cred or user_db.get_credential(user_id, "gitcode_oauth")
         if cred:
             now = int(_time.time())
             need_refresh = False
@@ -393,11 +443,8 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
                 except (ValueError, OSError):
                     token_expires_at = 0
             if token_expires_at:
-                # 有过期时间：距过期不足 10 分钟（600 秒）则预刷新
                 need_refresh = (token_expires_at - now) < 600
             else:
-                # 降级：无过期时间（历史数据），用 fetched_at + 30 分钟
-                # Issue #343: 实测最短 15 分钟，30 分钟降级比 60 分钟更安全
                 fetched_at = cred.get("fetched_at", 0)
                 age = now - fetched_at if fetched_at else 0
                 need_refresh = age > 1800
@@ -405,6 +452,12 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
                 new_token = try_refresh_gitcode_token(user_id)
                 return new_token or token
         return token
+
+    # D32: 删除老表 fallback，直接尝试刷新
+    if user_id > 0 and not token:
+        return try_refresh_gitcode_token(user_id) or ""
+
+    return token
 
     # D32: 删除老表 fallback，直接尝试刷新
     if user_id > 0 and not token:

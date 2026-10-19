@@ -2,7 +2,8 @@
 
 任务会话（绑定真实仓库）的 Chat Agent 在 direct 执行时须注入 GRAPE_SESSION_TOKEN，
 否则无法调用仓库作用域内部端点（如 git-repo issue comment 回写澄清结论）。queue 模式已由
-enqueue_task 注入；本文件覆盖 `_chat_session_env_extra` helper 与三条 direct 调用点透传。
+enqueue_task 注入；本文件覆盖公共 helper `chat_session_env_extra`（Web 侧迁移后）与三条
+direct 调用点透传（chat.py 经公共 helper 注入，见 feishu-task-chat-direct-session-token-injection-design.md）。
 """
 import pytest
 from unittest.mock import patch
@@ -52,9 +53,9 @@ def client():
 class TestChatSessionEnvExtra:
     def test_real_repo_injects_session_token(self):
         """真仓库 → 注入 tk_ 会话 token + GRAPE_CLI_MODE=WORKER，且作用域校验通过。"""
-        from src.api.routes.chat import _chat_session_env_extra
+        from src.api.chat_session_env import chat_session_env_extra
         from src.api.auth_token import verify_session_token, verify_session_token_for_repo
-        env = _chat_session_env_extra(99902, "test-conv", "gitcode:owner/repo")
+        env = chat_session_env_extra(99902, "test-conv", "gitcode:owner/repo")
         assert env["USER_ID"] == "99902"
         assert env["CONVERSATION_ID"] == "test-conv"
         tok = env["GRAPE_SESSION_TOKEN"]
@@ -67,9 +68,9 @@ class TestChatSessionEnvExtra:
 
     def test_pseudo_or_empty_repo_no_token(self):
         """伪仓库 / 空仓库 → 不注入 token 与 WORKER（一般对话行为不变）。"""
-        from src.api.routes.chat import _chat_session_env_extra
+        from src.api.chat_session_env import chat_session_env_extra
         for repo_key in ("", "chat:99902"):
-            env = _chat_session_env_extra(99902, "conv-x", repo_key)
+            env = chat_session_env_extra(99902, "conv-x", repo_key)
             assert "GRAPE_SESSION_TOKEN" not in env
             assert "GRAPE_CLI_MODE" not in env
             assert env["USER_ID"] == "99902" and env["CONVERSATION_ID"] == "conv-x"

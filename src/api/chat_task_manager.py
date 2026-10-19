@@ -116,6 +116,58 @@ class ChatTaskManager:
             log.info(f"ChatTaskManager cleanup {len(stale)} stale tasks")
 
     @classmethod
+    def register_idle(cls, task_id: str, conv_id: str, user_id: int, username: str) -> ChatTask:
+        """登记一个由外部驱动的事件缓冲任务（不启动后台线程）。
+
+        feishu-chat-stream-unified-design.md Step 2：
+        handler 自身异步迭代 consume_stream_async（原生 await 语义），直接把每个事件
+        `publish` 进这里登记的 ChatTask，Web 端 `chat_task_stream` 即可通过
+        `subscribe` 重放缓冲 + 实时追加（与 ChatTaskManager.submit 同构）。
+        """
+        cls._ensure_cleanup()
+        with cls._lock:
+            task = cls._tasks.get(task_id)
+            if task:
+                return task
+            task = ChatTask(task_id, conv_id, user_id, username)
+            cls._tasks[task_id] = task
+        return task
+
+    @classmethod
+    def publish(cls, task_id: str, evt_type: str, data: Any):
+        """外部驱动的任务事件写入（缓冲 + flush subscribers）。
+
+        与 submit 后台线程的 push_event 语义一致：Web 端 chat_task_stream
+        subscribe 后实时收到该事件；无订阅者时仅进缓冲供后续重放。
+        """
+        with cls._lock:
+            task = cls._tasks.get(task_id)
+        if not task:
+            return
+        task.push_event(evt_type, data)
+
+    @classmethod
+    def finish_external(cls, task_id: str, final_text: str = "", error: str = ""):
+        """外部驱动结束时写终态 + 通知 subscribers（对齐 _run 的收尾逻辑）。"""
+        with cls._lock:
+            task = cls._tasks.get(task_id)
+        if not task:
+            return
+        task.final_text = final_text or task.final_text
+        if error:
+            task.error = error
+        if final_text:
+            task.status = "done"
+        elif error:
+            task.status = "error"
+        else:
+            task.status = "done"
+        task.finished_at = time.time()
+        task.notify_done()
+        log.info(f"[ChatTaskManager] external task finished task={task_id} status={task.status} "
+                 f"text_len={len(task.final_text)}")
+
+    @classmethod
     def submit(cls, task_id: str, conv_id: str, user_id: int, username: str,
                agent_fn: Callable[[], Generator]) -> ChatTask:
         """启动后台 agent 线程，立即返回 ChatTask。

@@ -80,16 +80,24 @@ def test_claim_by_tag_uses_engine_level_max_concurrent(test_env):
 
 
 def test_claim_by_tag_rejected_when_busy_slots_full(test_env):
-    """busy_slots >= max_concurrent 时拒绝 claim。"""
+    """真实 running 数 >= max_concurrent 时拒绝 claim（方案 D：以真实 COUNT 为事实源，
+    busy_slots 列仅为展示快照，不再参与决策）。
+    """
     from src.session_manager import db, db_lock
+    now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE agent_runtimes SET busy_slots=4 WHERE id=999")
+        # 真实占用 4 个槽（running），max_concurrent=4 → 满载
+        for i in range(1, 5):
+            c.execute(
+                "INSERT OR REPLACE INTO agent_tasks (id, runtime_id, status, pool_tag, agent_session_id, issue_session_id, started_at, prompt) "
+                "VALUES (?, 999, 'running', 'coding', ?, ?, ?, 'test')",
+                (9000 + i, f"full-sess-{i}", f"full-issue-{i}", now))
         db.commit()
 
     from src.runtime.service import claim_by_tag
     result = claim_by_tag(tag='coding', runtime_id=999)
-    assert result is None, "busy_slots=4 >= max_concurrent=4，应拒绝 claim"
+    assert result is None, "真实 running=4 >= max_concurrent=4，应拒绝 claim（即使 busy_slots 列残留任意值）"
 
 
 def test_claim_by_tag_ignores_engine_capabilities_max_concurrent(test_env):

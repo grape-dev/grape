@@ -508,12 +508,17 @@ function renderSceneDetailLocal(sceneId) {
 
   // 并行加载：dashboard data + pipeline config（首屏必要）
   // pipeline(issues) 延迟加载，不阻塞首屏渲染
-  const dashPromise = (data.agents ? Promise.resolve(data) :
-    API.get('/dashboard/' + owner + '/' + name));
+  // 场景应用后「场景不存在」修复：恒请求权威 dashboard（不再复用 window._dashboardData 快照——
+  // 快照捕获于应用前/其它仓库时 _scenes 陈旧，会误判场景不存在；见 scene-apply-stale-detail-fix-design.md）
+  const dashPromise = API.get('/dashboard/' + owner + '/' + name);
   const pipeCfgPromise = API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name));
 
   Promise.all([dashPromise, pipeCfgPromise]).then(([dashData, scenesData]) => {
-    const scenes = dashData._scenes || (scenesData.scenes || []).map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo'}));
+    // 场景判定「新鲜优先」：本次 /scenes/with-pipeline（与详情同源、无缓存）为准，
+    // dashData._scenes 仅兜底——否则陈旧快照会吞掉刚应用场景（scene-apply-stale-detail-fix-design.md）
+    const scenes = (scenesData.scenes && scenesData.scenes.length
+      ? scenesData.scenes.map(s => ({id: s.id, name: s.name, display_name: s.display_name, scope: 'repo'}))
+      : (dashData._scenes || []) );
     const scene = scenes.find(s => s.id === sceneId);
     if (!scene) {
       el.innerHTML = '<div class="error">场景不存在</div>';

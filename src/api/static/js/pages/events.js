@@ -148,8 +148,11 @@ function _evDurationText(data) {
 // failed / running>10min / 关联 task 卡在 dispatched
 function _evRedispatchVisible(data) {
   const _ts = data.started_at ? new Date(data.started_at).getTime() : 0;
+  const _created = data.created_at ? new Date(data.created_at).getTime() : 0;
   return data.status === 'failed' ||
-    (data.status === 'running' && _ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
+    ((data.status === 'running' || data.status === 'pending') &&
+      ((_ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
+       (!_ts && _created && (Date.now() - _created) > 10 * 60 * 1000))) ||
     (data.task && data.task.task_status === 'dispatched');
 }
 
@@ -160,12 +163,19 @@ function _evStatusText(data) {
   const _a2aRedoVisible =
     data.status === 'completed' &&
     data.issue_id && !String(data.issue_id).startsWith('#pr_');
-  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : 'ty'}">${data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : I18N.t('events.status_running_prefix') + data.status}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${data.status === 'running' ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
+  const _statusLabel = data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : (data.status === 'pending' ? (I18N.t('events.status_pending') || '排队中') : I18N.t('events.status_running_prefix') + data.status);
+  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : data.status === 'pending' ? '' : 'ty'}">${_statusLabel}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${(data.status === 'running' || data.status === 'pending') ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
 }
 
 function _evFailReasonText(data) {
-  const result = _evResultOf(data);
-  return (data.status === 'failed' && result) ? `<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason')||'失败原因'}：</b>${String(result).substring(0, 500)}</div>` : '';
+  const txt = (data.result || '').toString().trim();
+  // Step 1：失败原因只取 result，不再 fallback 事件标题/摘要
+  // ——否则停机失败事件（result 为空）会显示"失败原因：A2A: → coding"等无意义文案（#2337）。
+  return (data.status === 'failed' && txt)
+    ? `<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason')||'失败原因'}：</b>${String(txt).substring(0, 500)}</div>`
+    : (data.status === 'failed'
+      ? `<div style="margin-top:6px;font-size:11px;color:var(--t3,#86868b)">${I18N.t('events.no_fail_reason')||'暂无失败原因'}</div>`
+      : '');
 }
 
 function _evLogRowText(data) {

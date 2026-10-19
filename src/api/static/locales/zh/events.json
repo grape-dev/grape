@@ -10,6 +10,7 @@
   "status_success": "✅ 成功",
   "status_failed": "❌ 失败",
   "status_running_prefix": "⏳ ",
+  "status_pending": "⏳ 排队中",
   "fail_reason": "失败原因",
   "btn_redispatch": "🔄 重新派发",
   "btn_a2a_redo": "🤝 A2A 重新派发",

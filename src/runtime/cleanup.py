@@ -285,13 +285,14 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
         stale_cut = (now_utc - timedelta(minutes=stale_minutes)).isoformat()
         with db_lock:
             c = db.cursor()
+            # 方案 E：入队为 pending，功能上等同旧的"未开始 running"——超时无活跃任务同样回收
             c.execute(
-                "SELECT seq FROM events WHERE status='running' AND "
+                "SELECT seq FROM events WHERE status IN ('pending','running') AND "
                 "(started_at IS NULL OR started_at='') AND created_at < ?",
                 (no_start_cut,))
             seqs = [r[0] for r in c.fetchall()]
             c.execute(
-                "SELECT seq FROM events WHERE status='running' AND started_at != '' "
+                "SELECT seq FROM events WHERE status IN ('pending','running') AND started_at != '' "
                 "AND started_at IS NOT NULL AND started_at < ?",
                 (stale_cut,))
             seqs += [r[0] for r in c.fetchall()]
@@ -422,7 +423,7 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
         log.warning(f"sweeper agent_tasks runtime scan failed: {e}")
         return 0
 
-    dead: list = []  # (task_id, event_seq, result_text)
+    dead: list = []  # (task_id, event_seq, result_text, runtime_id)
     try:
         with db_lock:
             c = db.cursor()
@@ -431,18 +432,18 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
                       "FROM agent_tasks WHERE status IN ('queued','dispatched','running')")
             for tid, event_seq, rid, created_at, started_at, status, stream_ended, self_reported in c.fetchall():
                 if stream_ended == 1 and self_reported == 1:
-                    dead.append((tid, event_seq, _DUAL_SIGNAL_TXT))
+                    dead.append((tid, event_seq, _DUAL_SIGNAL_TXT, rid))
                 elif status == "queued":
                     age = _dt_age_minutes(created_at, now)
                     if age is not None and age >= q_stale:
-                        dead.append((tid, event_seq, _QUEUED_STALE_TXT))
+                        dead.append((tid, event_seq, _QUEUED_STALE_TXT, rid))
                 elif status in ("dispatched", "running"):
                     age = _dt_age_minutes(started_at, now)
                     if age is not None and age >= l_stale:
-                        dead.append((tid, event_seq, _LONG_RUNNING_TXT))
+                        dead.append((tid, event_seq, _LONG_RUNNING_TXT, rid))
                     elif (rid and rid != 0 and rid not in online
                           and age is not None and age >= d_stale):
-                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT))
+                        dead.append((tid, event_seq, _DEAD_RUNTIME_TXT, rid))
     except Exception as e:
         log.warning(f"sweeper agent_tasks scan failed: {e}")
         return 0
@@ -454,15 +455,24 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     try:
         with db_lock:
             c = db.cursor()
-            for tid, event_seq, txt in dead:
+            for tid, event_seq, txt, rid in dead:
                 try:
                     if event_seq:
                         c.execute("UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? "
-                                  "WHERE seq=? AND status='running'", (now_iso, txt, event_seq))
+                                  "WHERE seq=? AND status IN ('pending','running')", (now_iso, txt, event_seq))
                     c.execute("UPDATE agent_tasks SET status='failed', exit_code=1, completed_at=?, "
                               "errors=?, result_text=? WHERE id=? "
                               "AND status IN ('queued','dispatched','running')",
                               (now_iso, txt, txt, tid))
+                    # L2（2026-10-17）：回收时若任务原占用引擎槽（running/dispatched 且有 runtime_id），
+                    # 同步释放 busy_slots，防僵尸计数（local-engine-busy-slots-zombie-fix-design.md §九）。
+                    # queued（runtime_id=0）任务未占槽，不释放。
+                    if c.rowcount > 0 and rid and rid != 0:
+                        try:
+                            from src.runtime.service import release_busy_slot
+                            release_busy_slot(rid, cursor=c)
+                        except Exception as _le:
+                            log.warning(f"sweeper agent_tasks release busy slot {tid} failed: {_le}")
                     fixed += c.rowcount
                 except Exception as e:
                     log.warning(f"sweeper agent_tasks recycle {tid} failed: {e}")
@@ -470,7 +480,7 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     except Exception as e:
         log.warning(f"sweeper agent_tasks recycle commit failed: {e}")
     if fixed:
-        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): {[t for t, _, _ in dead]}")
+        log.info(f"sweeper: recycled {fixed} stuck agent_task(s): {[t for t, _, _, _ in dead]}")
     return fixed
 
 

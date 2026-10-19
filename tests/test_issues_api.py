@@ -219,8 +219,8 @@ class TestCreateIssue:
     def test_create_ok(self):
         from unittest.mock import patch
         _mk_issue_state(20, stage="vod")  # 预置避免走 GitCode API
-        # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
-        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.user.db.get_repo_bot_token", return_value="test_tok"),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 20}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
+        # Issue #343 改为：用户建单用用户自己的 GitCode token + _post_gitcode_issue
+        with patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 20}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_ensure.return_value = 20
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",
@@ -234,8 +234,9 @@ class TestCreateIssue:
     def test_create_duplicate_title_not_blocked(self):
         """Issue #202: 同名需求不再被 409 阻断——即使已存在同名 open Issue，仍允许创建新 Issue。"""
         from unittest.mock import patch
-        # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
-        with patch("src.user.db.get_repo_bot_token", return_value="test_tok"),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 21}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
+        # Issue #343 改为：用户建单用用户自己的 GitCode token + _post_gitcode_issue
+        # 幂等查重 mock 为「无同名 open Issue」，避免打到真实 GitCode API
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"),              patch("src.api.issues_center._find_open_issue_by_title", return_value=None),              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 21}),              patch("src.api.issues_center.ensure_issue_task") as _mock_ensure:
             _mock_ensure.return_value = 21
             resp = client.post(
                 f"/api/issues/{OWNER}/{REPO}",
@@ -245,3 +246,119 @@ class TestCreateIssue:
         data = resp.json()
         assert data.get("issue_number") == 21
         assert data.get("created") is True
+
+    # ====== Issue #345: 建单 401 走 reauth_required 协议（按 token 归属区分）======
+    # 前端 api.js handleResp 收到 HTTP 401 + detail.action='reauth_required' 会自动跳 GitCode OAuth 授权页，
+    # 强制用户重新授权（用户自己的 GitCode 凭据失效自愈）；bot/github 路径保持 502「检查仓库 Bot Token 配置」。
+
+    def test_create_dedup_401_user_token_refresh_fail_reauth(self):
+        """用户 token 查重 401 且刷新失败 → 返回 401 + reauth_required，引导重新授权 GitCode
+        （生产事故：hello-calculator-11 建单失败，但当时 502 纯文案不触发前端强制跳授权页）。"""
+        from unittest.mock import patch
+        def _raise_401(*a, **k):
+            raise RuntimeError("GitCode API GET https://gitcode.com/api/v5/repos/o/r/issues?state=open failed (401): UNAUTHORIZED")
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+             patch("src.api.issues_center._find_open_issue_by_title", side_effect=_raise_401), \
+             patch("src.api.issues_center._refresh_user_gitcode_token", return_value=""):
+            resp = client.post(f"/api/issues/{OWNER}/{REPO}",
+                               json={"title": "t_401", "description": "d", "repo_key": REPO_KEY},
+                               headers=_headers)
+        assert resp.status_code == 401, resp.text
+        detail = resp.json()["detail"]
+        assert detail.get("action") == "reauth_required", detail
+        assert "登录已失效" in detail["message"], detail
+        assert "重新授权" in detail["message"] or "重新绑定" in detail["message"], detail
+        assert "Bot Token" not in detail["message"], detail
+
+    def test_create_dedup_401_user_token_refresh_ok_proceeds(self):
+        """用户 token 401 → 刷新成功并用新 token 重试查重 → 正常创建，不跳授权。"""
+        from unittest.mock import patch
+        calls = {"n": 0}
+        def _dedup(*a, **k):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("GitCode API GET ... failed (401): UNAUTHORIZED")
+            return None  # 刷新后重试成功：无同名 open issue
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+             patch("src.api.issues_center._find_open_issue_by_title", side_effect=_dedup), \
+             patch("src.api.issues_center._refresh_user_gitcode_token", return_value="new_tok"), \
+             patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 23}), \
+             patch("src.api.issues_center.ensure_issue_task", return_value=23):
+            resp = client.post(f"/api/issues/{OWNER}/{REPO}",
+                               json={"title": "t_401b", "description": "d", "repo_key": REPO_KEY},
+                               headers=_headers)
+        assert resp.status_code == 200, resp.text
+        assert calls["n"] == 2
+        assert resp.json()["issue_number"] == 23
+
+    def test_create_dedup_401_user_token_retry_still_fails_reauth(self):
+        """刷新成功但重试查重仍 401 → refresh_token 也失效 → 401 + reauth_required。"""
+        from unittest.mock import patch
+        def _raise_401(*a, **k):
+            raise RuntimeError("GitCode API GET ... failed (401): UNAUTHORIZED")
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+             patch("src.api.issues_center._find_open_issue_by_title", side_effect=_raise_401), \
+             patch("src.api.issues_center._refresh_user_gitcode_token", return_value="new_tok"):
+            resp = client.post(f"/api/issues/{OWNER}/{REPO}",
+                               json={"title": "t_401c", "description": "d", "repo_key": REPO_KEY},
+                               headers=_headers)
+        assert resp.status_code == 401, resp.text
+        detail = resp.json()["detail"]
+        assert detail.get("action") == "reauth_required", detail
+        assert "登录已失效" in detail["message"], detail
+
+    def test_create_post_401_user_token_reauth(self):
+        """建 Issue POST 401（刷新失败）→ 401 + reauth_required，前端强制跳 GitCode 授权页。"""
+        from unittest.mock import patch
+        def _raise_401(*a, **k):
+            raise RuntimeError("GitCode API POST issues failed (401): UNAUTHORIZED")
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+             patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._post_gitcode_issue", side_effect=_raise_401), \
+             patch("src.api.issues_center._refresh_user_gitcode_token", return_value=""):
+            resp = client.post(f"/api/issues/{OWNER}/{REPO}",
+                               json={"title": "t_post401", "description": "d", "repo_key": REPO_KEY},
+                               headers=_headers)
+        assert resp.status_code == 401, resp.text
+        detail = resp.json()["detail"]
+        assert detail.get("action") == "reauth_required", detail
+        assert "登录已失效" in detail["message"], detail
+        assert "Bot Token" not in detail["message"], detail
+
+    def test_create_post_401_user_token_refresh_ok_proceeds(self):
+        """建 Issue POST 401 → 刷新成功重试 POST 成功 → 正常建单，不跳授权。"""
+        from unittest.mock import patch
+        calls = {"post": 0}
+        def _post(*a, **k):
+            calls["post"] += 1
+            if calls["post"] == 1:
+                raise RuntimeError("GitCode API POST issues failed (401): UNAUTHORIZED")
+            return {"number": 24}
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="dead_tok"), \
+             patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._post_gitcode_issue", side_effect=_post), \
+             patch("src.api.issues_center._refresh_user_gitcode_token", return_value="new_tok"), \
+             patch("src.api.issues_center.ensure_issue_task", return_value=24):
+            resp = client.post(f"/api/issues/{OWNER}/{REPO}",
+                               json={"title": "t_post401b", "description": "d", "repo_key": REPO_KEY},
+                               headers=_headers)
+        assert resp.status_code == 200, resp.text
+        assert calls["post"] == 2
+        assert resp.json()["issue_number"] == 24
+
+    def test_create_dedup_401_github_bot_token_message(self):
+        """GitHub 建单走仓库 bot token → 401 仍返回 502 提示检查「仓库 Bot Token 配置」，不带 reauth_required
+        （bot token 失效不需要用户重新授权 GitCode）。"""
+        from unittest.mock import patch
+        def _raise_401(*a, **k):
+            raise RuntimeError("GitHub API GET ... failed (401): unauthorized")
+        with patch("src.user.db.get_github_token", return_value="gh_bot_tok"), \
+             patch("src.user.repo_manager._github_req", side_effect=_raise_401):
+            resp = client.post("/api/issues/gh_owner/gh_repo",
+                               json={"title": "t_gh", "description": "d",
+                                     "repo_key": "github:gh_owner/gh_repo"},
+                               headers=_headers)
+        assert resp.status_code == 502, resp.text
+        detail = resp.json()["detail"]
+        assert "Bot Token" in detail["message"], detail
+        assert "action" not in detail, detail

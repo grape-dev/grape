@@ -494,12 +494,14 @@ function switchConversation(convId) {
     // ★ v31: 检查最后一条消息是否有运行中任务（学习 Admin AI reconnectActiveTask）
     const lastMsg = msgs[msgs.length - 1];
     if (lastMsg && lastMsg.role === 'user' && lastMsg.task_id) {
+      // 该 user 消息是否已有 agent 回复行（历史已完成 / 兜底写入）
+      const hasAgentReply = msgs.some(m => m.role === 'agent' && m.task_id === lastMsg.task_id);
       // 有 task_id → 查后端 status（内存优先，DB 兜底）
       fetch('/api/chat/task/' + lastMsg.task_id + '/status', {
         headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
       }).then(r => r.json()).then(st => {
-        if (st.status === 'running') {
-          // 任务仍在执行 → 追加 3 点动画占位 + SSE 重连
+        if (st.status === 'running' && !hasAgentReply) {
+          // 任务仍在执行且 DB/列表尚无 agent 行 → 追加 3 点动画占位 + SSE 重连
           const elId = 't' + Date.now();
           body.innerHTML += '<div class="msg l" id="' + elId + '">'
             + '<span class="chat-dots"><span></span><span></span><span></span></span>'
@@ -508,17 +510,18 @@ function switchConversation(convId) {
           _setTask(convId, {task_id: lastMsg.task_id, conv_id: convId, el_id: elId, status: 'running'});
           // SSE 重连（后端重放缓冲 + 实时追加）
           streamTask(lastMsg.task_id, elId, convId);
-        } else if (st.status === 'done' || st.status === 'error') {
-          // 任务已完成 → 检查 DB 中 agent 消息是否已显示
-          const hasAgentReply = msgs.some(m => m.role === 'agent' && m.task_id === lastMsg.task_id);
-          if (!hasAgentReply) {
-            // agent 消息不在列表中 → 重新拉取（刚写入 DB）
+        } else if (st.status === 'done' || st.status === 'error' || hasAgentReply) {
+          // 任务已完成，或列表已有 agent 行 → 不需追加占位。
+          // 若无 agent 行（done 但 DB 兜底未回写）→ 重新拉取一次补齐
+          if (hasAgentReply) {
+            _clearTask(convId);
+          } else {
             API.get('/chat/messages/' + convId).then(d2 => {
               renderChatMessages(d2.messages || []);
               loadConversations();
             });
+            _clearTask(convId);
           }
-          _clearTask(convId);
         } else {
           // not_found → 任务状态未知，不显示中断提示（可能是跨机器延迟）
           _clearTask(convId);
@@ -843,20 +846,44 @@ function resumeChatTask() {
       headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
     }).then(r => r.json()).then(st => {
       if (st.status === 'running') {
-        // 仍在执行 → 确保 3 点动画占位 + SSE 重连
+        // 仍在执行 → 确保 3 点动画占位 + SSE 重连（仅当 DB 尚无该 task 的 agent 行；
+        // 若已完成/已写库则不追加，避免与历史消息渲染出重复气泡）
         const body = document.getElementById('chatBody');
         if (!body) return;
-        // 检查是否已有占位符
-        let el = document.getElementById(task.el_id);
-        if (!el) {
-          const elId = 't' + Date.now();
-          task.el_id = elId;
-          body.innerHTML += '<div class="msg l" id="' + elId + '">'
-            + '<span class="chat-dots"><span></span><span></span><span></span></span>'
-            + '</div>';
-          body.scrollTop = body.scrollHeight;
-        }
-        streamTask(task.task_id, task.el_id, _currentConvId);
+        API.get('/chat/messages/' + _currentConvId).then(d2 => {
+          const msgs2 = d2.messages || [];
+          const hasAgent = msgs2.some(m => m.role === 'agent' && m.task_id === task.task_id);
+          if (hasAgent) {
+            // 已有 agent 行 → 任务实际已完成（状态残留），清理任务态并刷新即可
+            _clearTask(_currentConvId);
+            renderChatMessages(msgs2);
+            loadConversations();
+            return;
+          }
+          // 检查是否已有占位符
+          let el = document.getElementById(task.el_id);
+          if (!el || !document.getElementById('chatBody').contains(el)) {
+            const elId = 't' + Date.now();
+            task.el_id = elId;
+            body.innerHTML += '<div class="msg l" id="' + elId + '">'
+              + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+              + '</div>';
+            body.scrollTop = body.scrollHeight;
+          }
+          streamTask(task.task_id, task.el_id, _currentConvId);
+        }).catch(() => {
+          // 查询失败保守处理：沿用旧行为（有占位复用，无则追加）
+          let el = document.getElementById(task.el_id);
+          if (!el) {
+            const elId = 't' + Date.now();
+            task.el_id = elId;
+            body.innerHTML += '<div class="msg l" id="' + elId + '">'
+              + '<span class="chat-dots"><span></span><span></span><span></span></span>'
+              + '</div>';
+            body.scrollTop = body.scrollHeight;
+          }
+          streamTask(task.task_id, task.el_id, _currentConvId);
+        });
       } else {
         // done/error/not_found → 刷新消息
         _clearTask(_currentConvId);
@@ -1069,8 +1096,13 @@ function closeOnboardModal(refresh) {
   const m = document.getElementById('onboardModal');
   if (m) m.remove();
   if (refresh) {
-    // VOD onboard → 刷新 VOD Agent 页的 App ID/Secret（agents.js）；chat_bot → 刷新 Chat 页配置
-    if (_onboardBotType === 'vod_bot' && typeof window.refreshVodOnboard === 'function') {
+    // 按当前所处页面重载对应数据源，让 App ID/Secret 立即注入，无需手动切换页面。
+    // - im-channel（IM 渠道页）：重拉 /chat/config 并重渲染（im_channel.js loadImChannelConfig）
+    // - vod_bot → 刷新 VOD Agent 页（agents.js refreshVodOnboard）
+    // - 其它（chat_bot 等）→ 刷新 Chat 页配置（loadChatConfigPanel）
+    if (window._currentView === 'im-channel' && typeof loadImChannelConfig === 'function') {
+      loadImChannelConfig();
+    } else if (_onboardBotType === 'vod_bot' && typeof window.refreshVodOnboard === 'function') {
       window.refreshVodOnboard();
     } else {
       loadChatConfigPanel();

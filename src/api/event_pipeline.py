@@ -268,6 +268,13 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     except Exception as e:
         log.warning(f"create_direct_task failed for seq={seq}: {e}")
         return ""
+    # 方案 E：direct 任务创建即开跑 → 事件置 running（@skip_event_config 的 autopilot 不写 events 表，跳过）
+    if seq and not skip_event_config:
+        try:
+            from src.api.event_store import update_event_status
+            update_event_status(seq, "running")
+        except Exception as _ee:
+            log.warning(f"create_direct_task: set event {seq} running failed: {_ee}")
     return task_id
 
 
@@ -787,7 +794,7 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             title=_title, issue_id=_pseudo_id, source="a2a",
             agent_type="qa", actor=evt.get("actor", ""),
             summary=f"PR 订阅并行: scene={scene_id} → qa",
-            payload=evt.get("payload", {}), status="running",
+            payload=evt.get("payload", {}), status="pending",
             scene_id=scene_id,
             entity_type="pull_request",
         )
@@ -1040,7 +1047,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             title=_sub_title, issue_id=issue_id, source="a2a",
             agent_type=agent_type, actor=evt.get("actor", ""),
             summary=f"订阅触发: {event_type} → {agent_type}（主路由: {main_agent}）",
-            payload=evt.get("payload", {}), status="running",
+            payload=evt.get("payload", {}), status="pending",
             entity_type=_sub_entity_type,
         )
         log.info(f"Pipeline subscription: event created seq={seq} agent={agent_type}")
@@ -1801,7 +1808,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _dc.execute(
                     "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (repo_key, issue_id or "#0", event_type, source, agent_type, title, actor, summary,
-                     json.dumps(payload or {}), "running", "", _scene_id_for_event, _entity_type)
+                     json.dumps(payload or {}), "pending", "", _scene_id_for_event, _entity_type)
                 )
                 db.commit()
                 _seq = _dc.lastrowid or 0
@@ -1839,7 +1846,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             actor=actor,
             summary=summary,
             payload=payload,
-            status="running",
+            status="pending",
             scene_id=_scene_id_for_event,
             entity_type=_entity_type,
         )
@@ -3856,7 +3863,7 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         summary=f"智能推荐完成 → VOD ({vod_skill})",
         payload={"repository": evt.get("repository", ""), "issue_number": _issue_num,
                  "context": "智能推荐完成，重派 VOD 执行完整工作流"},
-        status="running",
+        status="pending",
         entity_type="issue",
     )
     log.info(f"智能推荐重派: event created, seq={seq}")

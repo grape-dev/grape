@@ -14,6 +14,11 @@ import re
 # 统一提示文案——建单/评论/关单三处引用同一常量
 BOT_TOKEN_INVALID_MSG = "Bot Token 可能失效，请检查仓库 Bot Token 配置"
 
+# 用户自己的 GitCode token 失效文案（create_task_via_issue 用户建单路径 401 用；
+# 与 BOT_TOKEN_INVALID_MSG 区分——用户建单已不回落 bot token（Issue #345 修正），
+# 401 说明是用户登录凭据过期，应引导重新绑定/登录 GitCode 而非检查仓库 Bot Token 配置）
+GITCODE_USER_TOKEN_INVALID_MSG = "您的 GitCode 登录已失效，请重新绑定/登录 GitCode 后重试"
+
 
 def extract_http_status_from_exc(exc: Exception) -> int | None:
     """从 RuntimeError 消息提取 HTTP status code。

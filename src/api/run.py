@@ -30,9 +30,19 @@ if __name__ == "__main__":
     p1.start()
     p2.start()
 
+    # Step 2（graceful-shutdown-requeue-design.md）：父进程 SIGTERM 后等待子进程完成优雅收尾
+    # （子进程 uvicorn lifespan shutdown 内会执行 terminate_active_agents 等），再退出，
+    # 避免孤儿 / systemd 二次起服窗口。
+    _STOP_TIMEOUT = float(os.environ.get("GRAPE_STOP_TIMEOUT", "20"))
+
     def _shutdown(*_):
         p1.terminate()
         p2.terminate()
+        for _p in (p1, p2):
+            try:
+                _p.join(timeout=_STOP_TIMEOUT)
+            except Exception:
+                pass
         sys.exit(0)
 
     signal.signal(signal.SIGINT, _shutdown)

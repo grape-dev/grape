@@ -459,16 +459,18 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
 def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_text: str):
     """执行完成后更新 agent_tasks + autopilot_executions + 解析 findings。"""
     # 更新 agent_tasks 状态（用 task_id 精确更新）
+    # L1（2026-10-17）：改为统一终态入口 update_task_status，其内部完成
+    #   release_busy_slot（防 busy_slots 泄漏 → 本机引擎误判满载）＋ events 状态同步。
+    # 直接 UPDATE agent_tasks 会绕过统一递减（见 local-engine-busy-slots-zombie-fix-design.md §九）。
     try:
-        from src.session_manager import db as _tdb, db_lock as _tdl
-        with _tdl:
-            _tc = _tdb.cursor()
-            _tc.execute(
-                "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, completed_at=? WHERE id=?",
-                ("completed" if exit_code == 0 else "failed", exit_code,
-                 final_text[:5000], datetime.now(timezone.utc).isoformat(), task_id)
-            )
-            _tdb.commit()
+        from src.runtime.service import update_task_status
+        update_task_status(
+            task_id,
+            "completed" if exit_code == 0 else "failed",
+            exit_code=exit_code,
+            result_text=final_text[:5000],
+            completed_at=datetime.now(timezone.utc).isoformat(),
+        )
     except Exception as e:
         log.warning(f"Autopilot exec {exec_id}: update agent_tasks failed: {e}")
 
