@@ -84,7 +84,7 @@ def pack_backend(ts):
     scripts_dir = os.path.join(ROOT, "scripts")
     if os.path.isdir(scripts_dir):
         items.append((scripts_dir, "scripts"))
-    # help/ 帮助文档源目录（usage + api + reference markdown）
+    # help/ 帮助文档源目录（usage + api + reference + developer markdown）
     # ⚠️ 必须打入：服务重启时 src/help_page_gen.py 依据 help/ 渲染 src/api/static/help.html；
     #    缺失则升级后文档无法再生成（一直用渲染旧内容的 help.html，升级总缺新文档的根因，
     #    2026-10-12 修复）。openapi.json 生成物已被 _tar_filter 过滤。

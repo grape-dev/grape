@@ -1104,6 +1104,21 @@ def user_db_get_backend_agents_alias():
     return user_db.get_backend_agents()
 
 
+@router.get("/agent-runtimes/{rid}", operation_id="settings_agent_runtime_detail", summary="Get agent runtime detail", description="Returns a single agent runtime by id with full engine-modal fields (health/health_score/tags/local_skills/alias/worker_name/worker_ip/scope/owner). Visibility check reuses the agent-runtimes list logic (credential scope + org isolation + repo filter); invisible or missing ids return 404. Issue #364: frontend fallback for engines visible in the Workers device view but not in the Engines list page.")
+def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
+    """单引擎详情（Issue #364）：按 agent_runtimes.id 精确返回。
+
+    复用 get_agent_runtimes 的全量可见性过滤与字段派生（page_size=0 全量口径），
+    保证详情与 Engines 列表可见性 100% 一致（credential scope + org 隔离 +
+    repo 过滤 + 已删除用户/已吊销凭据过滤），未命中/不可见统一 404。
+    """
+    result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
+    for rt in result.get("runtimes", []):
+        if rt.get("id") == rid:
+            return rt
+    raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+
+
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")
 def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     """手动刷新：发现本地引擎 + 子进程检测 + 写入 DB（探测统一走 local_probe，方案 C）
