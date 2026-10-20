@@ -1191,9 +1191,11 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
         from src.runtime.instances import instance_name
         _uname = user.get("username") or ""
         for atype in all_types:
-            # SRE 专属逻辑：只能使用个人级（user scope）引擎（docs/weekly-06/sre-personal-machine-design.md §3.1）
+            # SRE 专属（sre-repo-worker-relax §1.3）：user + repo 两档
+            # （global 池不放行：SRE 执行部署/运维命令，广播责任边界不清）
             if atype == "sre":
-                engines = query_engines(repo_key, "user", agent_type="sre", username=_uname)
+                engines = (query_engines(repo_key, "user", agent_type="sre", username=_uname)
+                           + query_engines(repo_key, "repo", agent_type="sre"))
             else:
                 engines = (query_engines(repo_key, "global", agent_type=atype)
                            + query_engines(repo_key, "user", agent_type=atype, username=_uname)
