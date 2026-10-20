@@ -101,7 +101,25 @@ function _accountSaveProfile() {
 }
 
 // ===== Security tab (密码 + 邮箱 + 第三方账号) =====
+// R7.9: _emailConfigured 初始 false（无邮箱模式默认），避免邮箱卡片先显示再隐藏闪动
+var _emailConfigured = false;
+
 function _accountLoadSecurity() {
+  // R7: 先获取 email_configured 状态，再渲染安全 tab
+  API.get('/auth/providers').then(function(providersData) {
+    window._emailConfigured = !!(providersData && providersData.email_configured);
+    _accountProvidersData = providersData;
+    _accountRenderSecurity();
+  }).catch(function() {
+    window._emailConfigured = true; // 获取失败默认显示邮箱卡片
+    _accountProvidersData = { providers: [] };
+    _accountRenderSecurity();
+  });
+}
+
+var _accountProvidersData = null;
+
+function _accountRenderSecurity() {
   API.get('/auth/me').then(function(d) {
     _accountProfile = d;
     var el = document.getElementById('accountTabContent');
@@ -121,20 +139,29 @@ function _accountLoadSecurity() {
     }
     html += '</div>';
 
-    // 卡片2: 邮箱管理
-    html += '<div class="cd"><div class="cd-h"><h2>' + (I18N.t('app.account.email_label')) + '</h2></div>';
-    if (d.email) {
-      html += '<p class="tx t2" style="margin-bottom:12px">' + _accountEsc(d.email) + '</p>';
-      html += '<button class="bt bt-o" onclick="_accountShowChangeEmail()">' + (I18N.t('app.account.change_email_btn')) + '</button>';
-    } else {
-      html += '<p class="tx t2" style="margin-bottom:12px">' + (I18N.t('app.account.email_not_set')) + '</p>';
-      html += '<button class="bt bt-o" onclick="_accountShowChangeEmail()">' + (I18N.t('app.account.set_email')) + '</button>';
+    // 卡片2: 邮箱管理（R7: 无邮箱配置时不显示）
+    // email_configured 通过 /auth/providers 获取，此处用 window._emailConfigured 缓存
+    if (window._emailConfigured !== false) {
+      html += '<div class="cd" id="accEmailCard"><div class="cd-h"><h2>' + (I18N.t('app.account.email_label')) + '</h2></div>';
+      if (d.email) {
+        html += '<p class="tx t2" style="margin-bottom:12px">' + _accountEsc(d.email) + '</p>';
+        html += '<button class="bt bt-o" onclick="_accountShowChangeEmail()">' + (I18N.t('app.account.change_email_btn')) + '</button>';
+      } else {
+        html += '<p class="tx t2" style="margin-bottom:12px">' + (I18N.t('app.account.email_not_set')) + '</p>';
+        html += '<button class="bt bt-o" onclick="_accountShowChangeEmail()">' + (I18N.t('app.account.set_email')) + '</button>';
+      }
+      html += '</div>';
     }
-    html += '</div>';
 
     // 卡片3: 第三方账号（UX-1 修复：从 /auth/providers 动态渲染，不硬编码平台）
     var bindings = d.bindings || [];
     var identities = d.identities || [];
+    var expiredProviders = d.token_expired_providers || [];
+    var _expiredMap = {};
+    expiredProviders.forEach(function(ep) {
+      if (typeof ep === 'object') { _expiredMap[ep.provider] = ep; }
+      else { _expiredMap[ep] = { provider: ep, error_code: 'TOKEN_EXPIRED' }; }
+    });
     html += '<div class="cd"><div class="cd-h"><h2>' + (I18N.t('app.account.third_party_accounts')) + '</h2></div>';
     html += '<div id="accProvidersList"><div class="loading">' + (I18N.t('app.account.loading')) + '</div></div>';
     html += '</div>';
@@ -146,9 +173,10 @@ function _accountLoadSecurity() {
 
     el.innerHTML = html;
 
-    // 异步加载 provider 列表后渲染
-    API.get('/auth/providers').then(function(providersData) {
-      var providers = (providersData.providers || []).filter(function(p) { return p.configured; });
+    // 异步加载 provider 列表后渲染（R7: 已在 _accountLoadSecurity 中预获取）
+    var providersData = _accountProvidersData || { providers: [] };
+    window._emailConfigured = !!(providersData && providersData.email_configured);
+    var providers = providersData.providers || [];  // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
       var listEl = document.getElementById('accProvidersList');
       if (!listEl) return;
       if (providers.length === 0) {
@@ -158,13 +186,10 @@ function _accountLoadSecurity() {
       var providersHtml = providers.map(function(p) {
         var bound = bindings.indexOf(p.provider) >= 0;
         var identity = identities.find(function(i) { return i.provider === p.provider; });
-        return _accountRenderProviderRow(p.name, p.provider, bound, identity);
+        var expired = !!_expiredMap[p.provider];
+        return _accountRenderProviderRow(p.name, p.provider, bound, identity, expired);
       }).join('');
       listEl.innerHTML = providersHtml;
-    }).catch(function() {
-      var listEl = document.getElementById('accProvidersList');
-      if (listEl) listEl.innerHTML = '<p class="tx t2">' + (I18N.t('app.account.load_failed')) + '</p>';
-    });
   }).catch(function(e) {
     var el = document.getElementById('accountTabContent');
     if (el) el.innerHTML = '<div class="error">' + _accountEsc(e.message || I18N.t('app.account.load_failed')) + '</div>';
@@ -211,10 +236,25 @@ function _accountLoadCredentials() {
   });
 }
 
-function _accountRenderProviderRow(label, provider, bound, identity) {
+function _accountRenderProviderRow(label, provider, bound, identity, expired) {
   var isZh = _accountIsZh();
   var icon = (typeof platformIcon === 'function') ? platformIcon(provider, 20) : '';
   var pName = provider === 'github' ? 'GitHub' : 'GitCode';
+
+  // R10: token 过期时显示过期提示 + 重新绑定按钮
+  if (bound && expired) {
+    return '<div style="display:flex;align-items:center;gap:14px;padding:14px 16px;border:1px solid var(--r);border-radius:12px;background:var(--c);margin-bottom:10px">'
+      + '<div style="flex:1">'
+        + '<div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">'
+          + icon
+          + '<span style="font-size:14px;font-weight:600;color:var(--t)">' + _accountEsc(pName) + '</span>'
+          + '<span class="tg" style="font-size:10px;background:var(--r);color:#fff;padding:2px 6px;border-radius:4px">' + (I18N.t('app.account.token_expired') || 'Token Expired') + '</span>'
+        + '</div>'
+        + '<div style="font-size:12px;color:var(--r);margin-bottom:8px">' + (I18N.t('app.account.token_expired_hint') || 'Your token has expired or been revoked. Please re-bind your token.') + '</div>'
+      + '</div>'
+      + '<button class="bt bt-s bt-p" style="font-size:11px" onclick="_accountBindProvider(\'' + provider + '\')">' + (I18N.t('app.account.re_bind') || 'Re-bind') + '</button>'
+      + '</div>';
+  }
 
   if (bound) {
     // 已绑定——卡片式布局展示完整信息
@@ -462,26 +502,39 @@ function _accountBindProvider(provider) {
     ? I18N.t('app.account.update_platform_token', {platform: pName})
     : I18N.t('app.account.link_platform', {platform: pName});
 
+  // R7.4: 检查 OAuth App 是否已配置——未配时只显示手动令牌输入，不显示 OAuth tab
+  var _providersData = _accountProvidersData || { providers: [] };
+  var _providerInfo = (_providersData.providers || []).find(function(p) { return p.provider === provider; });
+  var _oauthConfigured = !!(_providerInfo && _providerInfo.configured);
+
   var html = '<h3 style="display:flex;align-items:center;gap:8px">' + icon + ' ' + titleText + '</h3>';
 
-  // 选项卡
-  html += '<div class="stabs" style="margin-bottom:16px">';
-  html += '<a class="ac" id="bindTabOauth" onclick="_accountSwitchBindTab(\'oauth\')">' + (I18N.t('app.account.oauth_auth')) + '</a>';
-  html += '<a id="bindTabToken" onclick="_accountSwitchBindTab(\'token\')">' + (I18N.t('app.account.manual_token')) + '</a>';
-  html += '</div>';
+  if (_oauthConfigured) {
+    // OAuth App 已配——显示 OAuth tab + 手动令牌 tab
+    // 选项卡
+    html += '<div class="stabs" style="margin-bottom:16px">';
+    html += '<a class="ac" id="bindTabOauth" onclick="_accountSwitchBindTab(\'oauth\')">' + (I18N.t('app.account.oauth_auth')) + '</a>';
+    html += '<a id="bindTabToken" onclick="_accountSwitchBindTab(\'token\')">' + (I18N.t('app.account.manual_token')) + '</a>';
+    html += '</div>';
 
-  // OAuth panel (默认选中)
-  var oauthBtnText = alreadyBound ? (I18N.t('app.account.re_authorize')) : (I18N.t('app.account.authorize'));
-  html += '<div id="bindPanelOauth">';
-  var hintKey = alreadyBound ? 'app.account.oauth_rebind_hint' : 'app.account.oauth_redirect_hint';
-  html += '<p class="tx t2" style="margin-bottom:16px">' + I18N.t(hintKey, {platform: pName}) + '</p>';
-  html += '<button class="bt bt-p" style="width:100%" onclick="_accountDoOauthBind(\'' + provider + '\')">' + oauthBtnText + '</button>';
-  html += '</div>';
+    // OAuth panel (默认选中)
+    var oauthBtnText = alreadyBound ? (I18N.t('app.account.re_authorize')) : (I18N.t('app.account.authorize'));
+    html += '<div id="bindPanelOauth">';
+    var hintKey = alreadyBound ? 'app.account.oauth_rebind_hint' : 'app.account.oauth_redirect_hint';
+    html += '<p class="tx t2" style="margin-bottom:16px">' + I18N.t(hintKey, {platform: pName}) + '</p>';
+    html += '<button class="bt bt-p" style="width:100%" onclick="_accountDoOauthBind(\'' + provider + '\')">' + oauthBtnText + '</button>';
+    html += '</div>';
 
-  // Token panel (隐藏)
-  html += '<div id="bindPanelToken" style="display:none">';
-  html += _accountManualBindForm(provider, isZh, pName);
-  html += '</div>';
+    // Token panel (隐藏)
+    html += '<div id="bindPanelToken" style="display:none">';
+    html += _accountManualBindForm(provider, isZh, pName, true);
+    html += '</div>';
+  } else {
+    // R7.4: OAuth App 未配——只显示手动令牌输入，不显示 tab 切换
+    html += '<div id="bindPanelToken">';
+    html += _accountManualBindForm(provider, isZh, pName, false);
+    html += '</div>';
+  }
 
   _accountShowModal(html);
 }
@@ -505,12 +558,21 @@ function _accountSwitchBindTab(tab) {
   }
 }
 
-function _accountManualBindForm(provider, isZh, pName) {
+function _accountManualBindForm(provider, isZh, pName, oauthConfigured) {
   var helpSteps = provider === 'github'
     ? (I18N.t('app.account.github_token_help'))
     : (I18N.t('app.account.gitcode_token_help'));
 
-  return '<div class="srow"><label>' + (I18N.t('app.account.access_token')) + '</label>'
+  var html = '';
+  // R13.3: 未配 OAuth App 时提示 PAT 不会自动续期
+  if (!oauthConfigured) {
+    html += '<div style="background:var(--bg);border:1px solid var(--b);border-radius:10px;padding:12px 14px;margin-bottom:12px;display:flex;gap:8px;align-items:flex-start">'
+      + '<span style="font-size:14px;flex-shrink:0">ℹ️</span>'
+      + '<div style="font-size:12px;color:var(--t2);line-height:1.6">'
+      + (I18N.t('app.account.pat_no_refresh_hint'))
+      + '</div></div>';
+  }
+  html += '<div class="srow"><label>' + (I18N.t('app.account.access_token')) + '</label>'
     + '<input type="password" id="manualTokenInput" class="kb-input" placeholder="' + (I18N.t('app.account.paste_token')) + '">'
     + '</div>'
     + '<div id="manualBindError" style="display:none;color:var(--r);font-size:12px;padding:4px 0"></div>'
@@ -518,6 +580,7 @@ function _accountManualBindForm(provider, isZh, pName) {
     + '<div style="font-size:12px;color:var(--t2);padding:8px 0;line-height:1.6">' + helpSteps + '</div></details>'
     + '<button class="bt bt-p" style="width:100%" id="manualBindBtn" onclick="_accountDoManualBind(\'' + provider + '\')">'
     + (I18N.t('app.account.confirm_bind')) + '</button>';
+  return html;
 }
 
 function _oauthOpenCenteredPopup(url) {
@@ -754,10 +817,9 @@ function _accountNavigateToRepos() {
     if (typeof app !== 'undefined' && app.goToRepos) {
       app.goToRepos();
     }
-    // 后台强制同步仓库列表（不走缓存）
-    if (typeof app._forceSyncRepos === 'function') {
-      app._forceSyncRepos();
-    }
+    // Issue #372 §40: 不再并发调 _forceSyncRepos——goToRepos 内部
+    // GET /repos/member 在缓存过期时会自动调 VCS API 刷新缓存，
+    // 效果与 /repos/sync 一致。并发两个请求会产生 abort 竞态。
   }, 800);
 }
 

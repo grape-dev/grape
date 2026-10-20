@@ -100,5 +100,7 @@
   "knowledge_modal_close": "关闭",
   "scope_agent_solo": "Agent 独享",
   "nav_forbidden": "无权限访问事件 #{{seq}}，可能属于其他仓库",
-  "engine_undispatched": "未派发/无执行引擎"
+  "engine_undispatched": "未派发/无执行引擎",
+  "terminate_confirm_ok": "确认终止",
+  "terminate_confirm_msg": "终止当前运行中的 Agent 任务？<br>此操作不可撤销。进行中的工作将丢失，任务需重新派发。"
 }

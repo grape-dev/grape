@@ -729,19 +729,21 @@ class FeishuAsync:
         repo_key = to_repo_key(repo_key)
         provider, _, _ = parse_repo_key(repo_key)
 
-        # 按 provider 分流获取 token
-        if provider == "github":
-            from src.user.db import get_github_token
-            api_token = get_github_token(repo_key=repo_key) or ""
-        else:
-            from src.user.db import get_bot_token_by_repo
-            api_token = get_bot_token_by_repo(owner, repo)
-            if not api_token:
-                # Issue #345: 改用统一入口
-                from src.user.db import get_global_gitcode_bot_token
-                api_token = get_global_gitcode_bot_token()
+        # R20.7.3: 统一走 TokenResolver（GitHub 侧也走 Repo.bot_token → TokenResolver）
+        from src.token_service import get_repo_bot_token
+        api_token = get_repo_bot_token(repo_key) or ""
         if not api_token:
             log.warning(f"[{ctx.name}] sync mapping: no bot token for {repo_key}, skipping")
+            # R20.9.1: token 过期时跳过 sync + 飞书群发通知卡片
+            try:
+                _error_code = ""
+                from src.token_service import detect_and_mark_expired
+                _error_code = detect_and_mark_expired(repo_key) or ""
+                if _error_code:
+                    _msg = f"⚠️ 仓库 {repo_key} 的 Token 已过期，协作者映射同步已跳过，请重新绑定 Token"
+                    await self.send_card_to_chat(ctx, chat_id, _msg, title="Token 过期通知")
+            except Exception as _te:
+                log.warning(f"[{ctx.name}] sync mapping: token expired notification failed: {_te}")
             return 0
 
         try:

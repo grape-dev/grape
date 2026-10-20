@@ -6,6 +6,7 @@ from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.token_service import is_auth_401_error
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -332,10 +333,11 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                         from datetime import datetime, timezone
                         from src.api.event_store import update_event_complete
                         from src.api.event_archive import finalize_event_archive
+                        from src.user.db import get_task_token as _get_task_token
                         finalize_event_archive(
                             _task.get("repo_key", ""), _task["event_seq"], "cancelled",
                             exit_code=-1,
-                            tokens=[_task.get("repo_gitcode_token") or ""],
+                            tokens=[_get_task_token(_task)],
                             issue_num_hint=_task.get("issue_id") or "",
                         )
                         update_event_complete(
@@ -971,8 +973,11 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                         pass
                     import urllib.request as _url_req
                     _a2a_body = _json.dumps({"agent": evt.get("agent_type", ""), "payload": _payload}).encode()
+                    # Issue #372 §15.2: A2A re-dispatch URL 从 get_server_base_url 获取
+                    from src.user.db import get_server_base_url as _gsb
+                    _a2a_base = _gsb() or "http://localhost:8000"
                     _a2a_req = _url_req.Request(
-                        f"http://localhost:8000/api/a2a",
+                        f"{_a2a_base}/api/a2a",
                         data=_a2a_body,
                         headers={"Content-Type": "application/json", "X-Bot-Token": _bot_token},
                         method="POST"
@@ -1733,6 +1738,22 @@ def _execute_conv_task(task_id: str, loop):
 
     try:
         evt = _load_event(seq)
+        # R20.15.4: 更新 devops_agent_session.last_active_at → 让 check_running_task
+        # session 兜底查询能命中（event dialogue 不创建 agent_tasks 行，
+        # 自循环检测条件4依赖 session 兜底覆盖 event dialogue 执行窗口）。
+        try:
+            from src.session_manager import db as _sdb, db_lock as _sdbl
+            from datetime import datetime, timezone
+            with _sdbl:
+                c = _sdb.cursor()
+                c.execute(
+                    "UPDATE devops_agent_session SET last_active_at=?, status='active' "
+                    "WHERE repo_key=? AND agent_type=?",
+                    (datetime.now(timezone.utc).isoformat(), repo_key, agent_type),
+                )
+                _sdb.commit()
+        except Exception:
+            pass
         # 直接用同步 stream_devops_agent（在线程中运行，不阻塞主 loop）
         from src.runtime.executor import stream_devops_agent
         _worker_final_text = ""
@@ -1769,6 +1790,8 @@ def _execute_conv_task(task_id: str, loop):
         from src.repo import Repo
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
+        _worker_final_text = ""
+        _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(
             prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
@@ -1783,17 +1806,38 @@ def _execute_conv_task(task_id: str, loop):
             elif evt_type == "done" or evt_type == "complete":
                 if isinstance(data, dict):
                     _worker_final_text = data.get("text", "") or _worker_final_text
+                    # R20.8b.1: 保存 errors/stderr 用于 401 标记
+                    _d_errs = data.get("errors") or []
+                    _d_stderr = data.get("stderr") or ""
+                    if _d_errs:
+                        _conv_error_detail = " ".join(str(e) for e in _d_errs) + " " + str(_d_stderr)
+                    elif _d_stderr:
+                        _conv_error_detail = str(_d_stderr)
                 elif data:
                     _worker_final_text = data if isinstance(data, str) else str(data)
                 break
             elif evt_type == "error":
+                _conv_error_detail = str(data)[:500]
                 loop.call_soon_threadsafe(_push_conv_event, task_id, "error", str(data)[:500])
                 break
     except Exception as e:
         _worker_final_text = f"（对话执行失败：{e}）"
+        _conv_error_detail = str(e)[:500]
         loop.call_soon_threadsafe(_push_conv_event, task_id, "error", _worker_final_text)
 
     # finally 写 DB（带 task_id + generate_status）
+    # R20.8b.1: 401 标记——防止 token 过期后用户重发 event dialogue 死循环
+    if repo_key and _conv_error_detail:
+        _err_lower = _conv_error_detail.lower()
+        _is_401 = is_auth_401_error(_err_lower)
+        if _is_401:
+            try:
+                from src.token_service import detect_and_mark_expired
+                _conv_error_code = detect_and_mark_expired(repo_key) or ""
+                if _conv_error_code:
+                    log.warning(f"Event dialogue: token expired (error_code={_conv_error_code}), repo={repo_key}")
+            except Exception as _ve:
+                log.warning(f"Event dialogue: 401 detect failed: {_ve}")
     if _worker_final_text:
         _add_thread_message(seq, repo_key, issue_id, agent_type, "agent", _worker_final_text, agent_type,
                             task_id=task_id, generate_status=2)
@@ -1814,6 +1858,20 @@ def _execute_conv_task(task_id: str, loop):
             t["result"] = _worker_final_text
             t["finished_at"] = _conv_time.time()
             t["events"].append({"type": "done", "data": _worker_final_text})
+    # R20.15.5: event dialogue 完成后将 session 置 idle → check_running_task
+    # session 兜底不再命中 → 用户后续评论可正常触发流水线（R21.7.1）。
+    try:
+        from src.session_manager import db as _sdb, db_lock as _sdbl
+        with _sdbl:
+            c = _sdb.cursor()
+            c.execute(
+                "UPDATE devops_agent_session SET status='idle' "
+                "WHERE repo_key=? AND agent_type=?",
+                (repo_key, agent_type),
+            )
+            _sdb.commit()
+    except Exception:
+        pass
     loop.call_soon_threadsafe(_push_conv_event, task_id, "done", _worker_final_text)
 
 

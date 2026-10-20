@@ -10,6 +10,7 @@ from src.config import log, WORKSPACE_DIR, SKILLS_DIR, resolve_official_skill_pa
 from src.session_manager import db, db_lock
 from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+from src.token_service import is_auth_401_error
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -248,13 +249,16 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             skill_path = get_skill_path(agent_session.get("skill_id"))
         except Exception:
             pass
-    repo_token = agent_session.get("repo_gitcode_token", "") or ""
+    # R20.17.1: 不从 session 读旧 token，改为调 TokenResolver.resolve() 获取最新 token
+    # R20.17.2: session 中的 repo_gitcode_token 仍保留（兼容 A2A 鉴权），但 VOD handler 不直接使用
+    from src.token_service import resolve_repo_token
+    _token_result = resolve_repo_token(repo_key)
+    repo_token = _token_result.token
     if not repo_token:
-        try:
-            from src.repo import Repo
-            repo_token = Repo(repo_key).bot_token
-        except Exception:
-            pass
+        # R20.17.3: token 过期短路时 VOD handler 获取空 token → 不启动 agent
+        log.warning(f"VOD handler: no token for {repo_key} (expired or not configured), agent will not start")
+        # R20.9.2: 返回提示（调用方负责飞书卡片通知）
+        return f"⚠️ 仓库 {repo_key} 的 Token 已过期，VOD Agent 无法启动，请在设置页重新绑定 Token"
 
     prompt = _build_vod_prompt(evt, skill, skill_path)
     from src.repo_key import workspace_repo_dir, parse_repo_key, from_repo_key
@@ -265,6 +269,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
     final_text = ""
     new_oc_sid = runtime_session_id
     exit_code = -1
+    _error_detail = ""  # R20.9.5: 保存 error 信息用于 401 标记
     start_time = time.time()
     # engine-selection-design.md v2：按引擎集合/会话主引擎选引擎；无引擎 → 明确不可用，不隐式 opencode
     from src.runtime.engine_select import pick_engine, engine_name
@@ -279,6 +284,12 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         from src.runtime.service import enqueue_task, wait_task_terminal
         runtime_id = engine_id
         if runtime_id:
+            # R20.28.4: 路径 B 仓库时 repo_gitcode_token 留空（与 pipeline 一致）
+            # user_token 不落 task 行（#344: no plaintext token in task payload），
+            # worker 侧 agent.py 实时从 user_id 获取 user_token
+            _queue_repo_token = repo_token or ""
+            if _token_result.level == "user":
+                _queue_repo_token = ""  # 路径 B: repo_gitcode_token 留空，与 pipeline 一致
             tid = enqueue_task(
                 agent_session_id=f"vod:{repo_key}",
                 runtime_id=runtime_id,
@@ -288,7 +299,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 runtime_session_id=runtime_session_id,
                 event_type=evt.get("type", "vod_signal"),
                 account=repo_key, user_id=0,
-                repo_gitcode_token=repo_token or "",
+                repo_gitcode_token=_queue_repo_token,
                 skill_path=skill_path or "",
                 skill_id=agent_session.get("skill_id", 0) or 0,
             )
@@ -314,9 +325,14 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         _ws_know = os.path.join(wsd, ".knowledge")
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _ws_proj)
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", _ws_know)
+        # R20.28.2: 路径 B 仓库时，显式获取 user_token 注入 agent
+        _user_token = ""
+        if _token_result.level == "user":
+            _user_token = _token_result.token
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
                                                             backend_name=_be, account=repo_key,
-                                                           bot_token=repo_token, agent_name="VOD Agent",
+                                                           bot_token=repo_token, user_token=_user_token,
+                                                           agent_name="VOD Agent",
                                                            agent_label=f"[Agent:vod|repo:{repo_key}]"):
             if event_type == "done":
                 final_text = data.get("text", "")
@@ -324,9 +340,17 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
                 new_sid = data.get("oc_session_id") or data.get("runtime_session_id")
                 if exit_code == 0 and new_sid:
                     new_oc_sid = new_sid
+                # R20.9.5: 保存 error 信息用于 401 标记
+                _done_errors = data.get("errors") or []
+                _done_stderr = data.get("stderr") or ""
+                if _done_errors:
+                    _error_detail = " ".join(str(e) for e in _done_errors) + " " + str(_done_stderr)
+                else:
+                    _error_detail = str(_done_stderr)
                 log.info(f"[VOD agent|repo:{repo_key}] done: exit={exit_code}, text_len={len(final_text)}")
             elif event_type == "error":
                 log.warning(f"[VOD agent|repo:{repo_key}] error: {data}")
+                _error_detail = str(data)
             elif event_type == "step_start":
                 log.info(f"[VOD agent|repo:{repo_key}] {data}")
             elif event_type == "text":
@@ -370,6 +394,22 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             db.commit()
     except Exception:
         pass
+
+    # R20.9.5: direct 模式 agent 执行后 401 标记
+    # 核心目的不是提示，而是标记——不标记会导致下次 VOD agent 启动时
+    # TokenResolver 不短路 → 继续用过期 token → 401 → 不标记 → 死循环
+    # 基于 error 事件数据和 done 事件的 errors/stderr 字段判断，不扫 final_text
+    if exit_code != 0 and repo_key and _error_detail:
+        _err_lower = _error_detail.lower()
+        _is_401 = is_auth_401_error(_err_lower)
+        if _is_401:
+            try:
+                from src.token_service import detect_and_mark_expired
+                _vod_error_code = detect_and_mark_expired(repo_key) or ""
+                if _vod_error_code:
+                    log.warning(f"VOD handler: token expired during direct exec (error_code={_vod_error_code}), repo={repo_key}")
+            except Exception as _ve:
+                log.warning(f"VOD handler: post-exec 401 detect failed: {_ve}")
 
     return final_text.strip() if final_text else "处理完成，但未生成回复"
 

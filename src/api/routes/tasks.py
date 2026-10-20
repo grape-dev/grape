@@ -407,14 +407,29 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
     if user.get("repo_key") != _repo:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问该任务（仓库作用域不匹配）"})
 
+    # R16.2.2: errors 解析 + error_code 本地化文案映射
+    import json as _json
+    _raw_errors = row[8] or ""
+    _parsed_errors = []
+    try:
+        if _raw_errors:
+            _parsed_errors = _json.loads(_raw_errors)
+            if not isinstance(_parsed_errors, list):
+                _parsed_errors = [str(_parsed_errors)]
+    except (ValueError, TypeError):
+        _parsed_errors = [_raw_errors]
+
     task = {
         "id": row[0], "status": row[6], "agent_type": row[2] or "",
         "skill": row[3] or "", "event_seq": row[4],
-        "result_text": row[7] or "", "errors": row[8] or "",
+        "result_text": row[7] or "", "errors": _parsed_errors[:5],
         "exit_code": row[9],
         "started_at": row[10], "completed_at": row[11], "created_at": row[12],
         "repo_key": _repo,
     }
+    # R16.2.2: 映射 error_code 到本地化文案
+    from src.api.routes.dashboard import _resolve_error_messages
+    task["errors"] = _resolve_error_messages(task["errors"])
 
     # 关联需求（repo_key + issue_id 去 '#'）
     import re as _re

@@ -52,6 +52,7 @@
     "back_gitcode": "← 返回 GitCode 登录",
     "failed": "登录失败",
     "oauth_not_configured": "OAuth未配置，请在管理界面配置",
+    "oauth_not_configured_hint": "请使用用户名+密码注册登录，然后在设置页绑定 Token",
     "empty_input": "请输入用户名和密码",
     "register": "注册账号",
     "forgot_password": "忘记密码",
@@ -297,7 +298,8 @@
     "whitelist_title": "账号尚未开通内测权限",
     "whitelist_desc": "您的{{platform}}账号{{username}}尚未获得内测权限。",
     "whitelist_apply_hint": "请先申请内测，审核通过后即可登录。",
-    "whitelist_apply_btn": "申请内测"
+    "whitelist_apply_btn": "申请内测",
+    "forgot_email_not_configured": "邮箱服务未配置，请联系管理员重置密码"
   },
   "repo": {
     "select": "选择仓库...",
@@ -523,6 +525,7 @@
     "paste_token": "粘贴令牌",
     "how_to_get_token": "如何获取令牌？",
     "confirm_bind": "确认绑定",
+    "pat_no_refresh_hint": "当前使用 Personal Access Token (PAT) 绑定。PAT 不会自动续期，被撤销或设置过期时间后需要手动重新绑定。如需自动续期，请联系管理员配置 OAuth App。",
     "please_enter_token": "请输入令牌",
     "verifying": "验证中...",
     "manage_repos_from_platform": "现在可以在项目页管理该平台的仓库",
@@ -603,6 +606,25 @@
     "reset_password": "重置密码",
     "reset_password_hint": "通过邮箱验证码重置密码，重置后其他设备将自动下线。",
     "verify_with_oauth": "用第三方平台重新授权",
-    "set_password_needs_email": "设置密码需要邮箱验证，请先设置邮箱"
+    "set_password_needs_email": "设置密码需要邮箱验证，请先设置邮箱",
+    "token_expired": "Token 已过期",
+    "token_expired_hint": "您的 Token 已过期或被撤销，请重新绑定 Token。",
+    "re_bind": "重新绑定"
+  },
+  "error": {
+    "TOKEN_EXPIRED": "您的 Token 已过期或被撤销，请在设置页重新绑定 Token。",
+    "TOKEN_INVALID": "Token 无效或已过期，请检查并在设置页重新绑定 Token。",
+    "TOKEN_NOT_BOUND": "未绑定 Token，请先在设置页绑定 GitCode/GitHub Token。",
+    "WEBHOOK_URL_NOT_CONFIGURED": "webhook_url 未配置，请在系统设置中配置 webhook 地址。",
+    "PERMISSION_DENIED": "权限不足，您没有该仓库的访问权限。",
+    "EMAIL_NOT_CONFIGURED": "邮箱服务未配置。",
+    "GLOBAL_TOKEN_EXPIRED": "全局 Bot Token 已过期，请联系管理员重新配置。",
+    "REPO_TOKEN_EXPIRED": "仓库 Bot Token 已过期，请联系有权限的成员重新配置。",
+    "NO_TOKEN_AVAILABLE": "无可用 Token，请检查 Token 配置。",
+    "HOST_TOKEN_EXPIRED": "托管用户 Token 已过期，请重新绑定后再配置 Bot Token。",
+    "WEBHOOK_REBUILD_FAILED": "Webhook 重建失败，请检查 Bot Token 权限后重试，或使用 repair_host 恢复。",
+    "WEBHOOK_PERMISSION_DENIED": "需要仓库 admin 权限创建 webhook，请联系管理员托管或获取 admin 权限。",
+    "NOT_REPO_OWNER": "只有仓库托管人或管理员可配置 Bot Token。",
+    "UNKNOWN": "操作失败，请稍后重试。"
   }
 }

@@ -238,6 +238,11 @@ def register_send_code(body: RegisterSendCodeBody, request: Request):
     email = body.email.lower().strip()
     ip = _get_client_ip(request)
 
+    # R7: 无邮箱配置降级——跳过验证码发送，提示前端直接注册
+    from src.auth.email_service import is_email_configured
+    if not is_email_configured():
+        return {"error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please register with username and password directly"}
+
     # 用户名校验
     username_err = _validate_username(body.username)
     if username_err:
@@ -290,6 +295,10 @@ def register_verify(body: RegisterVerifyBody, request: Request, response: Respon
     email = body.email.lower().strip()
     ip = _get_client_ip(request)
 
+    # R7: 无邮箱配置降级——跳过验证码校验，email 允许为空，直接创建账号
+    from src.auth.email_service import is_email_configured
+    email_configured = is_email_configured()
+
     # 再次校验用户名和密码
     username_err = _validate_username(body.username)
     if username_err:
@@ -300,13 +309,15 @@ def register_verify(body: RegisterVerifyBody, request: Request, response: Respon
     if pwd_err:
         raise HTTPException(status_code=400, detail={"code": 400, "message": pwd_err})
 
-    # 校验验证码
-    result = auth_verification.verify_code(email, "register", body.code)
-    if not result["ok"]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": result["message"]})
+    # 校验验证码（无邮箱配置时跳过）
+    if email_configured:
+        result = auth_verification.verify_code(email, "register", body.code)
+        if not result["ok"]:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": result["message"]})
 
-    # 创建账号
-    account = create_grape_account(body.username, email, body.password)
+    # 创建账号（R7: 无邮箱配置时 email_verified=False）
+    account = create_grape_account(body.username, email, body.password,
+                                   email_verified=email_configured)
     if not account:
         # D8 修复：并发注册竞态——数据库 UNIQUE 兜底，检查具体冲突原因
         if is_email_registered(email):
@@ -418,6 +429,11 @@ def forgot_password_send_code(body: ForgotPasswordSendCodeBody, request: Request
     安全：统一返回 200 "验证码已发送"，不管邮箱是否已注册。
     邮箱不存在时不实际发送邮件，但返回相同响应，防用户枚举。
     """
+    # R7: 无邮箱配置降级——返回 503，提示联系管理员
+    from src.auth.email_service import is_email_configured
+    if not is_email_configured():
+        raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator to reset password"})
+
     email = body.email.lower().strip()
     ip = _get_client_ip(request)
 
@@ -949,10 +965,12 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     ip = _get_client_ip(request) if request else ""
 
     # 需求17: 解绑前检查该平台下是否有正在使用的仓库（已建立 webhook 的托管仓库）
+    # R19.3.1: 检查路径 B 仓库依赖（host_user_id 指向该用户的仓库）
     # managed_repos 无 user_id 列，通过 user_repos 关联查询
     if not confirm:
         from src.session_manager import db as _sm_db, db_lock as _sm_dl
         affected_warehouses = []
+        path_b_warehouses = []
         with _sm_dl:
             _c = _sm_db.cursor()
             _c.execute(
@@ -964,11 +982,24 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             )
             rows = _c.fetchall()
             affected_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in rows]
-        if affected_warehouses:
+            # R19.3.1: 查路径 B 仓库（host_user_id == user.id）
+            try:
+                _c.execute(
+                    "SELECT repo_key FROM managed_repos "
+                    "WHERE host_user_id=? AND repo_key LIKE ?",
+                    (user["id"], f"{provider}:%")
+                )
+                path_b_rows = _c.fetchall()
+                path_b_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in path_b_rows]
+            except Exception:
+                pass  # host_user_id 列可能不存在
+        if affected_warehouses or path_b_warehouses:
+            _all_affected = list(set(affected_warehouses + path_b_warehouses))
             raise HTTPException(status_code=409, detail={
                 "code": 409,
                 "message": "该平台下有正在使用的仓库，确认解绑将影响以下仓库",
-                "warehouses": affected_warehouses,
+                "warehouses": _all_affected,
+                "path_b_warehouses": path_b_warehouses,
                 "need_confirm": True,
             })
 
@@ -1048,7 +1079,7 @@ def get_identities(user: dict = Depends(require_no_session_token)):
 
 @router.get("/me", operation_id="grape_auth_me")
 def get_me(user: dict = Depends(require_no_session_token)):
-    """获取当前 Grape 账号信息（含绑定状态、是否有密码）。"""
+    """获取当前 Grape 账号信息（含绑定状态、是否有密码、token 是否过期）。"""
     account = get_grape_account_by_id(user["id"])
     if not account:
         # D32: 不 fallback 旧表
@@ -1056,6 +1087,20 @@ def get_me(user: dict = Depends(require_no_session_token)):
 
     identities = get_user_identities(user["id"])
     bindings = [ident["provider"] for ident in identities]
+    # Issue #372 R10: 检查 token 过期状态（status=4），返回结构化 error_code 供前端映射
+    expired_providers = []
+    try:
+        from src.auth.grape_account_db import is_identity_expired
+        for _p in ("gitcode", "github"):
+            if is_identity_expired(user["id"], _p):
+                expired_providers.append({
+                    "provider": _p,
+                    "error_code": "TOKEN_EXPIRED",
+                    "message": "user token expired or revoked",
+                    "rebind_url": "/#account",
+                })
+    except Exception:
+        pass
     return {
         "username": account["username"],
         "email": account["email"],
@@ -1064,6 +1109,7 @@ def get_me(user: dict = Depends(require_no_session_token)):
         "has_password": has_password(user["id"]),
         "identities": identities,
         "bindings": bindings,
+        "token_expired_providers": expired_providers,
     }
 
 
@@ -2164,7 +2210,9 @@ def list_oauth_providers():
             "configured": bool(client_id),
             "brand_color": cfg.get("brand_color", ""),
         })
-    return {"providers": result}
+    # R7: 返回 email_configured 供前端判断无邮箱配置降级
+    from src.auth.email_service import is_email_configured
+    return {"providers": result, "email_configured": is_email_configured()}
 
 
 # ===========================================================================

@@ -31,14 +31,14 @@ class Repo:
 
     @property
     def bot_token(self) -> str:
-        """按 provider 分发获取仓库 bot token（含三级兜底）。
+        """委托 service 层获取 token（R20.11）。
 
-        github → get_github_token（managed_repos.bot_github_token → user_accounts → 全局）
-        其他   → get_gitcode_token（devops_agent_session → managed_repos.bot_gitcode_token → 全局）
+        R20.11.1: 改为调 src/token_service.py 的 get_repo_bot_token()，
+        内部委托 TokenResolver.get_token()——所有调 Repo.bot_token 的场景
+        自动继承短路/过期检测。
+
+        R20.11.5: 不直接 import TokenResolver，避免循环依赖。
+        签名不变（str → str），向后兼容。
         """
-        if self.provider == "github":
-            from src.user.db import get_github_token
-            return get_github_token(repo_key=self.repo_key) or ""
-        else:
-            from src.user.db import get_gitcode_token
-            return get_gitcode_token(repo_key=self.repo_key) or ""
+        from src.token_service import get_repo_bot_token
+        return get_repo_bot_token(self.repo_key)

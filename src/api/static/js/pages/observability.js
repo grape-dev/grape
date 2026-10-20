@@ -1572,7 +1572,18 @@ function renderTaskLogMessages(container, msgs, errorInfo) {
       if (errorInfo.exit_code != null) html += `<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">Exit Code</span> <span style="color:${errorInfo.exit_code !== 0 ? '#dc2828' : '#1ca44c'}">${errorInfo.exit_code}</span></div>`;
       if (errorInfo.errors && errorInfo.errors.length) {
         html += '<div style="padding:8px 14px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#d49c0f">' + I18N.t('observability.error_messages') + '</span></div>';
-        errorInfo.errors.forEach(e => { html += `<div style="padding:4px 14px 4px 28px;color:#dc2828">${e}</div>`; });
+        errorInfo.errors.forEach(e => {
+          let _errHtml = '';
+          if (typeof e === 'object' && e !== null) {
+            // R16.2.2: error 对象含 error_code + localized_message + message
+            const _msg = e.localized_message || e.message || '';
+            const _code = e.error_code ? ` <span style="color:#8b9bb4;font-size:11px">[${e.error_code}]</span>` : '';
+            _errHtml = `${_msg}${_code}`;
+          } else {
+            _errHtml = String(e);
+          }
+          html += `<div style="padding:4px 14px 4px 28px;color:#dc2828">${_errHtml}</div>`;
+        });
       }
     }
     html += '</div>';

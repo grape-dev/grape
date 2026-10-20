@@ -38,7 +38,7 @@ var Auth = (function () {
   function initI18n() {
     // I18N.init() 同步应用 inline 包（95 个 login key，零闪烁）+ 异步加载全量包
     if (typeof I18N !== 'undefined' && I18N.init) {
-      I18N.init('25');
+      I18N.init('34');
       _updateLangSwitch();
       return;
     }
@@ -219,14 +219,20 @@ var Auth = (function () {
     if (!sb) return;
     var remaining = 60;
     var suffix = opts.suffix || 's';
+    // 保护原始 data-i18n 属性和文案，倒计时结束后恢复（语言切换时 I18N.apply 能正确更新）
+    var _origI18n = sb.getAttribute('data-i18n') || '';
+    var _origText = sb.textContent || '';
     sb.disabled = true;
+    sb.removeAttribute('data-i18n');  // 倒计时期间移除，避免 I18N.apply 覆盖倒计时数字
     sb.textContent = remaining + suffix;
     var timer = setInterval(function () {
       remaining--;
       if (remaining <= 0) {
         clearInterval(timer);
         sb.disabled = false;
-        sb.textContent = t('app.login.toast_code_resent');
+        // 恢复原始 data-i18n + 文案（resend_code "重新发送"）
+        if (_origI18n) sb.setAttribute('data-i18n', _origI18n);
+        sb.textContent = t(_origI18n || 'app.login.resend_code') || _origText;
       } else {
         sb.textContent = remaining + suffix;
       }

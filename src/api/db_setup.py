@@ -3218,6 +3218,13 @@ def _migrate_global_bot_token_to_db():
         # 标记迁移完成（独立标记 key，不依赖 token 值的 truthiness）
         set_meta_value("global_bot_token_migrated", "1")
         log.info("Issue #345: Global bot token migrated from file to DB meta")
+        # R21.2.9: 旧 global_bot_token_status key 拆分为 per-provider key
+        _old_status = get_meta_value("global_bot_token_status") or ""
+        if _old_status:
+            set_meta_value("global_gitcode_bot_token_status", _old_status)
+            set_meta_value("global_github_bot_token_status", _old_status)
+            set_meta_value("global_bot_token_status", "")  # 清除旧 key
+            log.info(f"R21.2.9: migrated global_bot_token_status='{_old_status}' to per-provider keys")
     finally:
         release_lock("migrate_global_bot_token")
 
@@ -3289,6 +3296,9 @@ def _migrate_tables():
         "ALTER TABLE chat_conversations ADD COLUMN agent_session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN backend_session_id TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
+        # R16.5.3: devops_agent_session 新增 token_status + repo_github_token 列
+        "ALTER TABLE devops_agent_session ADD COLUMN token_status TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN repo_github_token TEXT DEFAULT ''",
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",

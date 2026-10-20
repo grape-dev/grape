@@ -17,6 +17,7 @@ from src.runtime.executor import consume_stream_async
 from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
 from src.api.event_store import acquire_repo_lock as _acquire_repo_lock
 from src.api.chat_session_env import chat_session_env_extra
+from src.token_service import is_auth_401_error
 
 if TYPE_CHECKING:
     from src.im.feishu_async import BotContext, FeishuAsync
@@ -1657,6 +1658,21 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         try:
             from src.session_manager import create_conversation, get_conversation_by_im, add_message
             user_id = get_user_id_by_app_id(ctx.app_id) or 0
+            # R20.28.1: 飞书 Chat direct 模式获取用户 token
+            # 路径 B 仓库需要 user_token 注入 USER_*_TOKEN env → GIT_ASKPASS fallback
+            if user_id > 0 and repo_key:
+                try:
+                    from src.auth.grape_account_db import get_grape_account_by_id
+                    _feishu_acc = get_grape_account_by_id(user_id)
+                    if _feishu_acc and _feishu_acc.get("username"):
+                        if repo_key.startswith("github:"):
+                            from src.api.deps import get_user_github_token_with_refresh
+                            user_token = get_user_github_token_with_refresh(_feishu_acc["username"], user_id) or ""
+                        else:
+                            from src.api.deps import get_user_token_with_refresh
+                            user_token = get_user_token_with_refresh(_feishu_acc["username"], user_id) or ""
+                except Exception as _te:
+                    log.warning(f"[Chat:{ctx.name}] get user token for direct mode failed: {_te}")
             # Issue #344: 不再缓存明文 token 到 chat_conversations，agent 端实时获取
             conv = get_conversation_by_im(chat_id, user_id)
             if not conv:
@@ -1719,6 +1735,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         final_text = ""
         exit_code = 0
         backend = ""
+        _feishu_error_detail = ""  # R20.8.5: 保存 error 信息用于 401 标记
         # 引擎类型已在上方提前解析（_rid, _engine_name）；此处复用
         if not _rid:
             log.warning(f"[Chat:{ctx.name}] no available engine for user, task skipped")
@@ -1783,6 +1800,8 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         uid = get_user_id_by_app_id(ctx.app_id) or 0
                     except Exception:
                         pass
+                    # R20.28.4: user_token 不落 task 行（#344: no plaintext token in task payload）
+                    # worker 侧 agent.py 实时从 user_id 获取 user_token
                     tid = enqueue_task(
                         agent_session_id=sess,
                         runtime_id=runtime_id,
@@ -1840,7 +1859,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 try:
                     async def _direct_consume():
                         nonlocal _stream_final, _stream_exit, _direct_acked, final_text, exit_code, new_oc_session_id
-                        nonlocal _inline_buf, _inline_capped, _step_last_update
+                        nonlocal _inline_buf, _inline_capped, _step_last_update, _feishu_error_detail
                         async for event_type, data in consume_stream_async(prompt, wsd, oc_sid, "chat",
                                                                            backend_name=backend, account=exec_account,
                                                                            user_token=user_token, user_id=user_id,
@@ -1853,6 +1872,13 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                     _d2 = data
                                     _stream_final = _d2["text"]
                                     _stream_exit = _d2.get("exit_code", 0)
+                                    # R20.8.5: 保存 errors/stderr 用于 401 标记
+                                    _d2_errs = _d2.get("errors") or []
+                                    _d2_stderr = _d2.get("stderr") or ""
+                                    if _d2_errs:
+                                        _feishu_error_detail = " ".join(str(e) for e in _d2_errs) + " " + str(_d2_stderr)
+                                    elif _d2_stderr:
+                                        _feishu_error_detail = str(_d2_stderr)
                                     if _stream_exit == 0 and _d2.get("oc_session_id"):
                                         new_oc_session_id = _d2["oc_session_id"]
                                     _direct_acked = True
@@ -1930,6 +1956,21 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 log.warning(f"[Chat:{ctx.name}] write conv runtime_session_id failed: {_we}")
 
         output = final_text.strip()
+        # R20.8.5: agent 执行后 401 检测——飞书 Chat 场景
+        # 基于 error 事件数据和 done 事件的 errors/stderr 字段判断，不扫 output 文本
+        if exit_code != 0 and repo_key and _feishu_error_detail:
+            _err_lower = _feishu_error_detail.lower()
+            _is_401 = is_auth_401_error(_err_lower)
+            if _is_401:
+                try:
+                    from src.token_service import detect_and_mark_expired
+                    _feishu_error_code = detect_and_mark_expired(repo_key) or ""
+                    if _feishu_error_code:
+                        _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
+                        output = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
+                except Exception as _fe:
+                    log.warning(f"[Chat:{ctx.name}] post-exec 401 detect failed: {_fe}")
+
         if output == "SKIP":
             log.info("Agent decided to SKIP (no reply needed)")
         elif output:

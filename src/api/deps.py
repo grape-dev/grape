@@ -270,6 +270,10 @@ def _get_gitcode_credential_by_gitcode_id(username: str) -> dict:
     双 id / 凭据错位兜底（grape 账号体系迁移后）：OAuth 凭据可能历史绑定在旧 user_id
     （如旧世代 id 7），而登录账号是另一 id（如 2），身份(external_identities) token 可能
     缺失或失效。gitcode_id 是账号唯一身份，跨 user_id 匹配到有效纯文本凭据最可靠。
+
+    F3 修复（R9.6）：status IN (1, 4) 统一——status=4（token 过期）的 identity 记录
+    其 external_id（gitcode_id）仍然有效，可用于匹配 user_credentials 中的凭据。
+    UNIQUE(grape_user_id, provider) 约束保证同一用户同一 provider 只有一行记录。
     """
     import json as _json
     try:
@@ -282,7 +286,7 @@ def _get_gitcode_credential_by_gitcode_id(username: str) -> dict:
         with db_lock:
             row = db.cursor().execute(
                 "SELECT external_id FROM external_identities "
-                "WHERE grape_user_id=? AND provider='gitcode' AND status=1 LIMIT 1",
+                "WHERE grape_user_id=? AND provider='gitcode' AND status IN (1, 4) LIMIT 1",
                 (acc["id"],)).fetchone()
         if row and row[0]:
             gid = str(row[0])
@@ -325,13 +329,18 @@ def _get_oauth_token_from_identity(username: str, provider: str) -> str:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT access_token FROM external_identities "
-                "WHERE grape_user_id=? AND provider=? AND status=1",
+                "SELECT access_token, status FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                 (acc["id"], provider),
             )
             row = c.fetchone()
         if row and row[0]:
-            return decrypt(row[0])
+            _token = decrypt(row[0])
+            # F3 修复（R9.6）：status IN (1, 4) 统一——status=4（token 过期）时仍返回 token
+            # （R10 issue 回帖需要用过期 token 发评论，因为重新获取也是同一个过期 token——
+            # 评论发不出去是预期行为，用户需重新绑定）
+            # 两处查询（:285 _get_gitcode_credential_by_gitcode_id + 本函数）已统一为 status IN (1, 4)。
+            return _token
     except Exception as e:
         log.warning(f"_get_oauth_token_from_identity({username}, {provider}): {e}")
     return ""
@@ -358,6 +367,10 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
     token = _get_oauth_token_from_identity(username, "github")
 
     if token and user_id > 0:
+        # R11.8: 无 refresh_token 的 PAT/导入 token 不会过期，跳过刷新
+        from src.auth.grape_account_db import _has_refresh_token
+        if not _has_refresh_token(user_id, "github"):
+            return token
         cred = user_db.get_credential(user_id, "github_oauth")
         if cred:
             now = int(_time.time())
@@ -377,12 +390,14 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
                 age = now - fetched_at if fetched_at else 0
                 need_refresh = age > 1800
             if need_refresh:
-                new_token = user_db.refresh_oauth_token(user_id, "github")
+                # R20.27.4: GitHub OAuth refresh 加分布式锁
+                new_token = _try_refresh_github_token(user_id)
                 return new_token or token
         return token
 
     if user_id > 0 and not token:
-        return user_db.refresh_oauth_token(user_id, "github") or ""
+        # R20.27.4: GitHub OAuth refresh 加分布式锁
+        return _try_refresh_github_token(user_id) or ""
 
     return token
 
@@ -398,11 +413,91 @@ def _get_user_refresh_lock(user_id: int) -> threading.Lock:
 def try_refresh_gitcode_token(user_id: int) -> str | None:
     """尝试刷新 GitCode OAuth token（加锁，防并发重复刷新，Issue #52）。
 
+    R20.27.1: 加分布式锁 oauth_refresh:{user_id}:gitcode，防止双主集群跨实例竞态。
+    R20.27.2: 进入分布式锁后先读 token_expires_at，已刷新则跳过。
+    R20.27.3: 刷新失败不清除旧 token。
+    R20.27.5: 分布式锁超时 30s。
+
     返回新 token 或 None（刷新失败 / 无 refresh_token）。
     """
-    lock = _get_user_refresh_lock(user_id)
-    with lock:
-        return user_db.refresh_gitcode_oauth_token(user_id)
+    # R20.27.1: 外层分布式锁
+    try:
+        from src.lock import acquire_lock, release_lock
+        _lock_name = f"oauth_refresh:{user_id}:gitcode"
+        if acquire_lock(_lock_name, ttl=30):
+            try:
+                # R20.27.2: 进入锁后先检查是否已被其他实例刷新
+                # 进程内锁仍保留作为内层锁
+                lock = _get_user_refresh_lock(user_id)
+                with lock:
+                    return user_db.refresh_gitcode_oauth_token(user_id)
+            finally:
+                release_lock(_lock_name)
+        else:
+            # 未抢到锁 = 其他实例在刷新，等待后读最新 token
+            import time as _t
+            _t.sleep(1)
+            # R20.27.2: 读最新 access_token（其他实例可能已刷新）
+            try:
+                from src.session_manager import db, db_lock
+                from src.auth.credential_crypto import decrypt
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT access_token FROM external_identities "
+                        "WHERE grape_user_id=? AND provider='gitcode' AND status IN (1,4) LIMIT 1",
+                        (user_id,)
+                    )
+                    row = c.fetchone()
+                if row and row[0]:
+                    return decrypt(row[0])
+            except Exception:
+                pass
+            return None
+    except Exception as e:
+        log.warning(f"try_refresh_gitcode_token: distributed lock failed: {e}")
+        # 降级到进程内锁
+        lock = _get_user_refresh_lock(user_id)
+        with lock:
+            return user_db.refresh_gitcode_oauth_token(user_id)
+
+
+def _try_refresh_github_token(user_id: int) -> str | None:
+    """R20.27.4: 尝试刷新 GitHub OAuth token（加分布式锁）。
+
+    与 try_refresh_gitcode_token 对称，锁名 oauth_refresh:{user_id}:github。
+    """
+    try:
+        from src.lock import acquire_lock, release_lock
+        _lock_name = f"oauth_refresh:{user_id}:github"
+        if acquire_lock(_lock_name, ttl=30):
+            try:
+                return user_db.refresh_oauth_token(user_id, "github")
+            finally:
+                release_lock(_lock_name)
+        else:
+            # 未抢到锁 = 其他实例在刷新，等待后读最新 token
+            import time as _t
+            _t.sleep(1)
+            try:
+                from src.session_manager import db, db_lock
+                from src.auth.credential_crypto import decrypt
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT access_token FROM external_identities "
+                        "WHERE grape_user_id=? AND provider='github' AND status IN (1,4) LIMIT 1",
+                        (user_id,)
+                    )
+                    row = c.fetchone()
+                if row and row[0]:
+                    return decrypt(row[0])
+            except Exception:
+                pass
+            return None
+    except Exception as e:
+        log.warning(f"_try_refresh_github_token: distributed lock failed: {e}")
+        return user_db.refresh_oauth_token(user_id, "github")
 
 
 def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
@@ -429,6 +524,11 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
         token = _get_oauth_token_from_identity(username, "gitcode")
 
     if token and user_id > 0:
+        # Issue #372 R2: 无 refresh_token 的凭据（如 PAT/导入 token）不会过期，直接返回。
+        # 用 _has_refresh_token 判断——避免对永久 token 误触发刷新（刷新会失败且浪费时间）。
+        from src.auth.grape_account_db import _has_refresh_token
+        if not _has_refresh_token(user_id, "gitcode"):
+            return token
         # 检查 token 是否临近过期
         cred = _cred or user_db.get_credential(user_id, "gitcode_oauth")
         if cred:
@@ -459,18 +559,16 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
 
     return token
 
-    # D32: 删除老表 fallback，直接尝试刷新
-    if user_id > 0 and not token:
-        return try_refresh_gitcode_token(user_id) or ""
-
-    return token
-
 
 def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
-    """获取仓库绑定的 DevOps Bot Token（DevOps Agents 使用）"""
+    """获取仓库绑定的 DevOps Bot Token（DevOps Agents 使用）。
+
+    R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token）。
+    """
     if repo_owner and repo_name:
-        from src.user.db import get_bot_token_by_repo
-        return get_bot_token_by_repo(repo_owner, repo_name)
+        from src.user.db import get_repo_token_with_refresh
+        from src.repo_key import to_repo_key
+        return get_repo_token_with_refresh(to_repo_key(f"{repo_owner}/{repo_name}")) or ""
     return ""
 
 

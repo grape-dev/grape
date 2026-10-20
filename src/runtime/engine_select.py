@@ -163,10 +163,11 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
             c = db.cursor()
             if issue_creator:
                 # 1. 优先查 unified_user_mapping（Issue #76 修复，OAuth 登录用户）
+                # Issue #372 §36: 加 OR github_login=? 支持 GitHub actor 匹配
                 c.execute(
                     "SELECT user_id FROM unified_user_mapping "
-                    "WHERE gitcode_user=? AND user_id>0 LIMIT 1",
-                    (issue_creator,))
+                    "WHERE (gitcode_user=? OR github_login=?) AND user_id>0 LIMIT 1",
+                    (issue_creator, issue_creator))
                 row = c.fetchone()
                 if row:
                     return row[0]

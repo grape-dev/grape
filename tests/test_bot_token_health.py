@@ -151,8 +151,8 @@ class TestUpdateHealthStatus:
         assert status["platforms"]["gitcode"]["consecutive_failures"] == 0
         assert status["platforms"]["github"]["consecutive_failures"] == 0
 
-    def test_first_failure_degraded(self):
-        """One platform fails first time → overall=degraded, failures=1."""
+    def test_first_failure_unhealthy(self):
+        """One platform auth-fails first time → failures=1 → unhealthy (R17: FAILURE_THRESHOLD=1)."""
         result = {"platforms": {
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
@@ -162,10 +162,12 @@ class TestUpdateHealthStatus:
             from src.runtime.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
+        # R17: auth 401 首次失败 → failures=1 → github unhealthy
+        # 但 gitcode healthy → overall=degraded（不是 unhealthy，因为不是所有平台都 unhealthy）
         assert status["overall"] == "degraded"
         assert status["platforms"]["github"]["consecutive_failures"] == 1
-        assert status["platforms"]["github"]["degraded"] is True
-        assert status["platforms"]["github"]["unhealthy"] is False
+        assert status["platforms"]["github"]["unhealthy"] is True
+        assert status["platforms"]["github"]["degraded"] is False
         assert status["platforms"]["gitcode"]["healthy"] is True
 
     def test_third_failure_unhealthy(self):
@@ -191,15 +193,15 @@ class TestUpdateHealthStatus:
         assert status["overall"] == "degraded"
 
     def test_both_platforms_unhealthy(self):
-        """Both platforms reach unhealthy threshold → overall=unhealthy."""
+        """Both platforms auth-fail → both unhealthy → overall=unhealthy."""
         prev = {"overall": "degraded", "platforms": {
-            "gitcode": {"healthy": False, "consecutive_failures": 2, "degraded": True, "unhealthy": False,
-                        "error_type": "network", "error": "timeout"},
-            "github": {"healthy": False, "consecutive_failures": 2, "degraded": True, "unhealthy": False,
+            "gitcode": {"healthy": False, "consecutive_failures": 2, "degraded": False, "unhealthy": True,
+                        "error_type": "auth", "error": "401"},
+            "github": {"healthy": False, "consecutive_failures": 2, "degraded": False, "unhealthy": True,
                        "error_type": "auth", "error": "401"},
         }}
         result = {"platforms": {
-            "gitcode": {"healthy": False, "error": "timeout", "error_type": "network"},
+            "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
         with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
@@ -207,6 +209,7 @@ class TestUpdateHealthStatus:
             from src.runtime.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
+        # R17: auth 失败递增 failures，两个平台都 → failures=3 → unhealthy
         assert status["platforms"]["gitcode"]["consecutive_failures"] == 3
         assert status["platforms"]["gitcode"]["unhealthy"] is True
         assert status["platforms"]["github"]["consecutive_failures"] == 3
@@ -271,7 +274,7 @@ class TestUpdateHealthStatus:
         assert status["overall"] == "healthy"
 
     def test_config_platform_skipped_other_fails(self):
-        """GitHub not configured, GitCode fails → only GitCode counted, overall=degraded."""
+        """GitHub not configured, GitCode auth-fails → only GitCode counted, overall=unhealthy (R17: 1次401即unhealthy)."""
         result = {"platforms": {
             "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "GitHub token not configured", "error_type": "config"},
@@ -283,7 +286,8 @@ class TestUpdateHealthStatus:
             status = json.loads(mock_set.call_args[0][1])
         assert "github" not in status["platforms"]
         assert status["platforms"]["gitcode"]["consecutive_failures"] == 1
-        assert status["overall"] == "degraded"
+        # R17: auth 首次失败 → failures=1 → unhealthy（不是 degraded）
+        assert status["overall"] == "unhealthy"
 
     def test_config_platform_skipped_other_reaches_unhealthy(self):
         """GitHub not configured, GitCode fails 3 times → overall=unhealthy (only configured platform failed)."""
@@ -321,15 +325,15 @@ class TestUpdateHealthStatus:
         assert status["overall"] == "healthy"
 
     def test_independent_failure_counters(self):
-        """GitCode fails 2nd time, GitHub fails 1st time → independent counters."""
-        prev = {"overall": "degraded", "platforms": {
-            "gitcode": {"healthy": False, "consecutive_failures": 1, "degraded": True, "unhealthy": False,
-                        "error_type": "network", "error": "timeout"},
+        """GitCode fails 2nd time (auth), GitHub fails 1st time (auth) → independent counters."""
+        prev = {"overall": "unhealthy", "platforms": {
+            "gitcode": {"healthy": False, "consecutive_failures": 1, "degraded": False, "unhealthy": True,
+                        "error_type": "auth", "error": "401"},
             "github": {"healthy": True, "consecutive_failures": 0, "degraded": False, "unhealthy": False,
                        "error_type": "", "error": ""},
         }}
         result = {"platforms": {
-            "gitcode": {"healthy": False, "error": "timeout", "error_type": "network"},
+            "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
         with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
@@ -337,11 +341,13 @@ class TestUpdateHealthStatus:
             from src.runtime.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
+        # R17: auth 失败递增 failures — gitcode 1→2, github 0→1
         assert status["platforms"]["gitcode"]["consecutive_failures"] == 2
         assert status["platforms"]["github"]["consecutive_failures"] == 1
-        assert status["platforms"]["gitcode"]["degraded"] is True
-        assert status["platforms"]["github"]["degraded"] is True
-        assert status["overall"] == "degraded"
+        # 两个都是 auth 失败且 failures >= 1 → 都 unhealthy → overall=unhealthy
+        assert status["platforms"]["gitcode"]["unhealthy"] is True
+        assert status["platforms"]["github"]["unhealthy"] is True
+        assert status["overall"] == "unhealthy"
 
     def test_mixed_error_types_per_platform(self):
         """Each platform keeps its own error_type."""
@@ -381,8 +387,9 @@ class TestHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await bot_token_health_loop()
 
-        mock_acquire.assert_called_once_with("bot_token_health", ttl=240)
-        mock_release.assert_called_once_with("bot_token_health")
+        # R17: 锁名改为 token_health_check，ttl=3000
+        mock_acquire.assert_called_once_with("token_health_check", ttl=3000)
+        mock_release.assert_called_once_with("token_health_check")
         mock_update.assert_called_once_with(verify_result)
 
     @pytest.mark.asyncio
@@ -417,7 +424,8 @@ class TestHealthLoop:
             with pytest.raises(asyncio.CancelledError):
                 await bot_token_health_loop()
 
-        mock_release.assert_called_once_with("bot_token_health")
+        # R17: 锁名改为 token_health_check
+        mock_release.assert_called_once_with("token_health_check")
 
 
 class TestStartBotTokenHealth:

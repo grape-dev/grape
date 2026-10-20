@@ -355,18 +355,25 @@ def admin_allow_signup(body: AllowSignupBody, admin: dict = Depends(require_admi
 def get_bot_token_health(admin: dict = Depends(require_admin)):
     """Issue #345: 查询全局 bot token 健康状态。
 
+    R16.2.3: 返回 per-provider 过期标记（global_*_bot_token_status）+ 仓库级 token 状态。
     从 DB meta 表读取最近一次探活结果（集群共享）。
     """
     import json
     from src.user.db import get_meta_value
     raw = get_meta_value("bot_token_health")
+    result = {}
     if raw:
         try:
-            return json.loads(raw)
+            result = json.loads(raw)
         except Exception:
-            pass
-    return {"overall": "healthy", "platforms": {},
-            "checked_at": "", "note": "Health check not yet executed"}
+            result = {}
+    if not result:
+        result = {"overall": "healthy", "platforms": {},
+                  "checked_at": "", "note": "Health check not yet executed"}
+    # R16.2.3: 补充 per-provider 过期标记
+    result["global_gitcode_bot_token_status"] = get_meta_value("global_gitcode_bot_token_status") or ""
+    result["global_github_bot_token_status"] = get_meta_value("global_github_bot_token_status") or ""
+    return result
 
 
 # ===== OAuth Login Whitelist Management (Issue #332) =====

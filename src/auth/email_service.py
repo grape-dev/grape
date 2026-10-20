@@ -126,6 +126,20 @@ def _dev_verification_code() -> str:
     return _cfg("dev_verification_code") or os.environ.get("GRAPE_DEV_VERIFICATION_CODE", "").strip()
 
 
+def is_email_configured() -> bool:
+    """判断邮件服务是否已配置（SMTP 或 Resend）。
+
+    R7: 用于无邮箱配置场景的降级判断。
+    - 返回 True 如果 _smtp_host() 非空 或 _resend_api_key() 非空
+    - 返回 False 其他情况（包括 LOG_ONLY 模式和生产环境无配置）
+
+    注意：dev_verification_code 不算"邮箱已配置"——它是开发环境固定验证码，
+    不是邮件服务。即非生产环境仅有 dev_verification_code 而无 SMTP/Resend 时，
+    此函数返回 False。
+    """
+    return bool(_smtp_host() or _resend_api_key())
+
+
 # ---------------------------------------------------------------------------
 # 邮件服务
 # ---------------------------------------------------------------------------

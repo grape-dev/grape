@@ -50,7 +50,7 @@ def _resolve_feishu_name(gitcode_user: str) -> str:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT feishu_name FROM unified_user_mapping WHERE gitcode_user=? AND feishu_name!='' LIMIT 1", (gitcode_user,))
+            c.execute("SELECT feishu_name FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND feishu_name!='' LIMIT 1", (gitcode_user, gitcode_user))
             row = c.fetchone()
             return row[0] if row else gitcode_user
         except Exception:

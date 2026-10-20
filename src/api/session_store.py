@@ -123,10 +123,10 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
                 c.execute(
                     "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
                     "SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m "
-                    "                 WHERE m.gitcode_user = ? AND m.user_id > 0 LIMIT 1), 0), "
+                    "                 WHERE (m.gitcode_user = ? OR m.github_login = ?) AND m.user_id > 0 LIMIT 1), 0), "
                     "?, ?, ?, 'active' WHERE NOT EXISTS "
                     "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (assignee, assignee, repo_key, _num, repo_key, _num))
+                    (assignee, assignee, assignee, repo_key, _num, repo_key, _num))
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             else:
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
@@ -526,10 +526,17 @@ def ensure_default_agent_sessions(repo_key: str):
     if not _mapping:
         return
 
-    from src.repo_key import split_owner_repo
-    _owner, _rname = split_owner_repo(repo_key)
-    from src.user.db import get_bot_token_by_repo
-    _token = get_bot_token_by_repo(_owner, _rname)
+    # R12.13: 改用 read_stored_token（R20.18.1: 写入原始值，不过期检查、不刷新）
+    # R25.8: 路径 B 仓库（level=user）不在 session 行写入用户 token——
+    # ① 避免过期/换绑后 session 残留旧值（守卫漏一处就吃旧 token）
+    # ② 避免 agents API 原样外发用户 OAuth 凭据（安全）
+    # 执行链实时取已足够（claim 注入 + _get_task_token）
+    _token = ""
+    if repo_key:
+        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        _resolve = TokenResolver(create_provider_from_repo_key(repo_key)).resolve_config_level(repo_key)
+        if _resolve.level != "user":  # 非 path B 才写入 session token
+            _token = _resolve.token
 
     with db_lock:
         c = db.cursor()

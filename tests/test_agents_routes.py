@@ -102,7 +102,7 @@ class TestDetail:
         assert data["agent_type"] == "issue"
         assert data["status"] == "idle"
         assert data["metrics"]["total_events"] == 1
-        assert data["repo_gitcode_token"] == "tok"
+        assert data["repo_gitcode_token_exists"] == True
         assert data["highlight_issue_id"] == ""
 
     def test_detail_with_issue_number_highlight(self, _client):

@@ -228,6 +228,8 @@ def _load_accounts():
     """
     try:
         def _detect_server_base():
+            # Issue #372 §15.4: 端口从 GRAPE_PORT 环境变量读取，默认 3000（非 8080）
+            _port = os.environ.get("GRAPE_PORT", "3000")
             methods = [
                 "https://api.ipify.org?format=json",
                 "http://api.ipify.org?format=json",
@@ -239,15 +241,23 @@ def _load_accounts():
                     data = json.loads(resp.read())
                     ip = data.get("ip", "")
                     if ip:
-                        return f"http://{ip}:8080"
-                except:
-                    pass
+                        return f"http://{ip}:{_port}"
+                except Exception as e:
+                    log.warning(f"_detect_server_base: {url} failed: {e}")
             try:
                 hostname = socket.gethostname()
                 ip = socket.gethostbyname(hostname)
                 if ip and not ip.startswith("127.") and not ip.startswith("192.168."):
-                    return f"http://{ip}:8080"
-            except:
+                    return f"http://{ip}:{_port}"
+                log.warning(f"_detect_server_base: hostname '{hostname}' resolves to {ip} (loopback/private, skipped)")
+            except Exception as e:
+                log.warning(f"_detect_server_base: hostname resolution failed: {e}")
+            # Issue #372 §14.2.1: 全部失败 → 写标记供设置页展示
+            try:
+                from src.user.db import set_meta_value
+                set_meta_value("webhook_url_detect_failed", "1")
+                log.warning("_detect_server_base: all detection methods failed, webhook_url will be empty until configured or detected from Host header")
+            except Exception:
                 pass
             return ""
         try:

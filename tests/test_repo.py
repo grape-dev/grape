@@ -89,12 +89,12 @@ class TestRepoBotToken:
         def _fake_github_token(repo_key=""):
             called["fn"] = "github"
             return "gh-token-123"
-        def _fake_gitcode_token(repo_key="", user_id=0):
+        def _fake_repo_token(repo_key):
             called["fn"] = "gitcode"
             called["repo_key"] = repo_key
             return "gc-token-456"
         monkeypatch.setattr("src.user.db.get_github_token", _fake_github_token)
-        monkeypatch.setattr("src.user.db.get_gitcode_token", _fake_gitcode_token)
+        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", _fake_repo_token)
         token = Repo("gitcode:owner/repo").bot_token
         assert token == "gc-token-456"
         assert called["fn"] == "gitcode"
@@ -103,20 +103,20 @@ class TestRepoBotToken:
     def test_no_prefix_calls_get_gitcode_token(self, monkeypatch):
         from src.repo import Repo
         called = {"fn": ""}
-        def _fake_gitcode_token(repo_key="", user_id=0):
+        def _fake_repo_token(repo_key):
             called["fn"] = "gitcode"
             return "gc-token"
-        monkeypatch.setattr("src.user.db.get_gitcode_token", _fake_gitcode_token)
+        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", _fake_repo_token)
         token = Repo("owner/repo").bot_token
         assert token == "gc-token"
         assert called["fn"] == "gitcode"
 
     def test_empty_token_returns_empty_string(self, monkeypatch):
         from src.repo import Repo
-        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="", user_id=0: "")
+        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda repo_key: "")
         assert Repo("gitcode:owner/repo").bot_token == ""
 
     def test_none_token_returns_empty_string(self, monkeypatch):
         from src.repo import Repo
-        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="", user_id=0: None)
+        monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda repo_key: "")
         assert Repo("gitcode:owner/repo").bot_token == ""

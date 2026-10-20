@@ -81,9 +81,20 @@
 <!-- 主链接 -->
 <div class="auth-links">
   <a href="/register" data-i18n="app.login.register">注册账号</a>
-  <span class="dot">·</span>
-  <a href="/forgot" data-i18n="app.login.forgot_password">忘记密码</a>
+  <span class="dot" id="forgotDot" style="display:none">·</span>
+  <a href="/forgot" id="forgotLink" data-i18n="app.login.forgot_password" style="display:none">忘记密码</a>
 </div>
+<script>
+// R7.8: 无邮箱配置时隐藏"忘记密码"链接。初始已 display:none，有邮箱时才显示（避免闪动）
+(function(){
+  fetch('/api/auth/providers').then(function(r){return r.json();}).then(function(d){
+    if(d&&d.email_configured){
+      var l=document.getElementById('forgotLink');var dot=document.getElementById('forgotDot');
+      if(l)l.style.display='';if(dot)dot.style.display='';
+    }
+  }).catch(function(){});
+})();
+</script>
 <!-- OAuth 分隔线 + 按钮（预渲染，避免 API 延时导致布局抖动） -->
 <div id="oauthSection" style="margin-top:20px">
   <div style="margin:0 0 16px;text-align:center;position:relative">
@@ -164,7 +175,6 @@
 <div class="av" id="userAvatar" onclick="app._toggleUserMenu()" style="cursor:pointer">U</div>
 <div class="by" onclick="app._toggleUserMenu()" style="cursor:pointer"><span id="userName">User</span><span id="userRole" style="font-size:10px;color:var(--t3)">Maintainer</span></div>
 <div style="margin-left:auto;display:flex;gap:6px;align-items:center">
-<a onclick="app.openHelp()" class="help-btn" data-i18n-title="app.help.button_title" title="使用帮助"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></a>
 </div>
 <div id="sbUserMenu" style="display:none;position:absolute;bottom:calc(100% + 6px);left:12px;right:12px;background:var(--c);border:1px solid var(--b);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
 </div>
@@ -175,8 +185,6 @@
 <div class="bc"><b id="pageTitle"></b> <span id="repoTitle" style="color:var(--a);font-weight:500"></span></div>
 <div class="sp"></div>
 <a id="tbBackHome" onclick="app.goToRepos()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer" data-i18n="app.back_home">← 返回仓库大厅</a>
-<a id="tbFeedback" onclick="openFeedbackDialog()" style="color:var(--t3);font-size:13px;text-decoration:none;cursor:pointer;display:inline-flex;align-items:center;gap:4px" title="问题反馈" data-i18n-title="app.feedback.title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> <span data-i18n="app.feedback.link_text">反馈</span></a>
-<a href="/static/help.html" target="_blank" style="color:var(--t3);font-size:13px;text-decoration:none" data-i18n="app.help.link_text">📖 帮助</a>
 <div class="lang-toggle" id="tbLangToggle" style="display:flex;align-items:center;gap:2px;padding:3px;border-radius:8px;border:1px solid var(--b);background:var(--c)">
 <button onclick="_setAppLang('zh')" class="lang-btn" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">中</button>
 <button onclick="_setAppLang('en')" class="lang-btn" style="padding:3px 10px;border-radius:6px;font-size:12px;font-weight:500;border:none;cursor:pointer;background:none;color:var(--t3)">EN</button>
@@ -187,16 +195,22 @@
   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><polyline points="6 9 12 15 18 9"/></svg>
 </a>
 <div id="tbOrgMenu" style="display:none;position:fixed;top:52px;right:0;min-width:260px;max-height:480px;overflow-y:auto;background:var(--c);border:0.5px solid var(--b);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
+<a id="tbUserBtn" onclick="app._toggleTbUserMenu()" style="display:flex;align-items:center;gap:6px;padding:5px 12px;border:0.5px solid var(--b);border-radius:10px;background:var(--c);color:var(--t1);font-size:13px;font-weight:500;cursor:pointer;white-space:nowrap;max-width:180px" title="用户设置">
+  <span id="tbUserAvatar" style="width:20px;height:20px;border-radius:50%;background:var(--a);color:#fff;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;flex-shrink:0">U</span>
+  <span id="tbUserName" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">User</span>
+  <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><polyline points="6 9 12 15 18 9"/></svg>
+</a>
+<div id="tbUserMenu" style="display:none;position:fixed;top:52px;right:0;min-width:240px;max-height:480px;overflow-y:auto;background:var(--c);border:0.5px solid var(--b);border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.12);z-index:10001;padding:4px"></div>
 </div>
 <div class="ct" id="pageContent">
 <div class="loading" data-i18n="app.loading">加载中...</div>
 </div>
 </div>
-<script src="/static/js/i18n.js?v=20261016-2"></script>
+<script src="/static/js/i18n.js?v=20261020-1"></script>
 <script>
 // Delay init until DOM is fully parsed — ensures all [data-i18n] elements exist
 document.addEventListener('DOMContentLoaded', function(){
-  I18N.init('31');
+  I18N.init('34');
   _updateLoginLangLabel();
   _updateAppLangLabel();
 });
@@ -297,7 +311,7 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/vendor/select2.min.js?v=1"></script>
-<script src="/static/js/api.js?v=28"></script>
+<script src="/static/js/api.js?v=29"></script>
 <script src="/static/js/pages/dashboard.js?v=97"></script>
 <script src="/static/js/pages/pipeline.js?v=44"></script>
 <script src="/static/js/pages/agents.js?v=27"></script>
@@ -307,19 +321,19 @@ function _toggleAppLang(){
 <script src="/static/js/pages/repos.js?v=59"></script>
 <script src="/static/js/pages/templates.js?v=36"></script>
 <script src="/static/js/pages/issues.js?v=114"></script>
-<script src="/static/js/pages/settings.js?v=28"></script>
-<script src="/static/js/pages/account.js?v=33"></script>
+<script src="/static/js/pages/settings.js?v=30"></script>
+<script src="/static/js/pages/account.js?v=40"></script>
 <script src="/static/js/pages/scene-market.js?v=44"></script>
 <script src="/static/js/pages/skills.js?v=45"></script>
 <script src="/static/js/pages/knowledge.js?v=149"></script>
 <script src="/static/js/pages/runtimes.js?v=59"></script>
 <script src="/static/js/pages/observability.js?v=66"></script>
-<script src="/static/js/pages/organizations.js?v=14"></script>
+<script src="/static/js/pages/organizations.js?v=16"></script>
 <script src="/static/js/pages/feedback.js?v=7"></script>
 <script src="/static/js/pages/my_feedback.js?v=5"></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=3"></script>
 <script src="/static/js/pages/autopilot.js?v=65"></script>
-<script src="/static/js/app.js?v=171"></script>
+<script src="/static/js/app.js?v=179"></script>
 <script src="/static/js/auto-recovery.js?v=2"></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

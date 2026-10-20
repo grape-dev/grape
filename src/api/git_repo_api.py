@@ -301,7 +301,11 @@ def list_issues(owner: str, repo: str, state: str = Query("open"),
 @router.post("/{owner}/{repo}/issues", operation_id="gitrepo_issues_create", summary="Create issue", description="Creates an issue (title/body/assignee).")
 def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
-    neutral = {"title": body.title, "body": body.body, "assignee": body.assignee}
+    # Issue #372 §30: issue body 追加 grape-auto-comment 标记
+    _body = body.body or ""
+    if _body and "<!-- grape-auto-comment -->" not in _body:
+        _body = _body + "\n<!-- grape-auto-comment -->"
+    neutral = {"title": body.title, "body": _body, "assignee": body.assignee}
     payload = translate_inbound(p, "issues", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
     return _vcs_req(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
 
@@ -315,12 +319,17 @@ def get_issue(owner: str, repo: str, number: int, user: dict = Depends(get_curre
 @router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body).")
 def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
+    # 路径 B 场景 actor=用户 → webhook 事件 → 自循环检测标记层需能拦截
+    _body = body.body or ""
+    if _body and "<!-- grape-auto-comment -->" not in _body:
+        _body = _body + "\n<!-- grape-auto-comment -->"
     neutral = {
         "labels": body.labels,
         "assignee": body.assignee,
         "milestone_id": body.milestone_id or None,
         "state": body.state,
-        "body": body.body,
+        "body": _body,
     }
     payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
     return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
@@ -352,8 +361,13 @@ def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends
 @router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
 def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #372 R4.1: agent 通过 grape API 发评论时自动追加 grape-auto-comment 标记，
+    # 确保路径 B 场景（actor=用户名）自循环检测第 1 层（标记检测）能拦截。
+    _body = body.body or ""
+    if "<!-- grape-auto-comment -->" not in _body:
+        _body = _body + "\n<!-- grape-auto-comment -->"
     return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
-                    _repo_token(owner, repo, user, p), {"body": body.body})
+                    _repo_token(owner, repo, user, p), {"body": _body})
 
 
 # ===================== Pull Requests =====================
@@ -370,12 +384,16 @@ def list_pulls(owner: str, repo: str, state: str = Query("open"),
 @router.post("/{owner}/{repo}/pulls", operation_id="gitrepo_pulls_create", summary="Create pull request", description="Creates a pull request (title/head/base). Provider-adapted: gitcode inner_issue_nums; github Closes #N body.")
 def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(get_current_user_or_api_key),
                 p: str = Depends(_provider)):
+    # Issue #372 §30: PR body 追加 grape-auto-comment 标记（与 create_issue_comment 一致）
+    _body = body.body or ""
+    if _body and "<!-- grape-auto-comment -->" not in _body:
+        _body = _body + "\n<!-- grape-auto-comment -->"
     related = list(body.related_issue_nums or [])
     neutral = {
         "title": body.title,
         "head": body.head,
         "base": body.base,
-        "body": body.body,
+        "body": _body,
         "related_issue_nums": related,
         "auto_close_issues": body.auto_close_issues,
     }
@@ -392,7 +410,11 @@ def get_pull(owner: str, repo: str, number: int, user: dict = Depends(get_curren
 @router.patch("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_update", summary="Update pull request", description="Updates a pull request (title/body/labels).")
 def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
                 user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    payload = {k: v for k, v in {"title": body.title, "body": body.body, "labels": body.labels}.items() if v != ""}
+    # Issue #372 §30: PR body 追加 grape-auto-comment 标记
+    _body = body.body or ""
+    if _body and "<!-- grape-auto-comment -->" not in _body:
+        _body = _body + "\n<!-- grape-auto-comment -->"
+    payload = {k: v for k, v in {"title": body.title, "body": _body, "labels": body.labels}.items() if v != ""}
     return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
 
@@ -414,8 +436,12 @@ def list_pull_comments(owner: str, repo: str, number: int, user: dict = Depends(
 @router.post("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_create", summary="Create PR comment", description="Creates a PR comment (body required).")
 def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #372 R4.1: PR 评论同样追加标记
+    _body = body.body or ""
+    if "<!-- grape-auto-comment -->" not in _body:
+        _body = _body + "\n<!-- grape-auto-comment -->"
     return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
-                    _repo_token(owner, repo, user, p), {"body": body.body})
+                    _repo_token(owner, repo, user, p), {"body": _body})
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files", description="Lists files changed in a pull request.")

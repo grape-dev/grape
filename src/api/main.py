@@ -705,13 +705,41 @@ async def request_id_and_log_middleware(request: Request, call_next):
     _auth = request.headers.get("Authorization", "")
     if _auth.startswith("Bearer "):
         try:
-            from src.user.db import validate_token
-            _uid_val = validate_token(_auth[7:])
-            if _uid_val:
-                _uid = str(_uid_val)
+            # Issue #372 §14.2.2a: 优先用 JWT 解析 user_id（与依赖层 get_current_user 一致）
+            # 注册/登录返回 JWT token，不走 create_session_token → validate_token 内存缓存查不到
+            from src.api.jwt_utils import verify_access_token
+            _payload = verify_access_token(_auth[7:])
+            if _payload and _payload.get("sub"):
+                _uid = str(_payload["sub"])
+            else:
+                # fallback: 旧 session token（create_session_token 写入 _user_tokens）
+                from src.user.db import validate_token
+                _uid_val = validate_token(_auth[7:])
+                if _uid_val:
+                    _uid = str(_uid_val)
         except Exception:
             pass
     token_uid = user_var.set(_uid)
+
+    # Issue #372 §14.2.2: 已认证请求到达时从 Host 头推导 webhook_url
+    # 零管理员部署场景：外网 IP 探测失败时，用户通过浏览器访问 Web UI 的 Host 头是最可靠的发现信号
+    # nginx 代理场景：优先 X-Forwarded-Host（含端口），X-Forwarded-Proto（https）
+    if _uid:
+        try:
+            from src.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
+            if not get_meta_value("webhook_url"):
+                _host = request.headers.get("host", "")
+                _fwd_host = request.headers.get("x-forwarded-host", "")
+                _fwd_proto = request.headers.get("x-forwarded-proto", "")
+                _candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
+                if _candidate:
+                    set_meta_value("webhook_url", _candidate)
+                    # 清除启动时探测失败标记
+                    if get_meta_value("webhook_url_detect_failed"):
+                        set_meta_value("webhook_url_detect_failed", "")
+                    _log.info(f"webhook_url auto-detected from Host header: {_candidate}")
+        except Exception:
+            pass
 
     skip_log = path in _LOG_SKIP_PATHS or path.startswith(_LOG_SKIP_PREFIXES)
     start = _time.time()

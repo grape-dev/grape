@@ -541,6 +541,19 @@ var I18N = (function () {
       }
     }
 
+    // For repos/lobby page, use cached data to re-render without API request
+    // 引导页/项目列表页大量文案是 JS 动态拼接（I18N.t），applyI18nToDOM 无法更新
+    // 用缓存数据重新调 renderRepoSelection，不发 API 请求、不闪烁 loading 遮罩
+    if (view === 'repos' && typeof app !== 'undefined' && app._rerenderReposView) {
+      try {
+        app._rerenderReposView();
+        return true;
+      } catch (e) {
+        console.warn('[i18n] _rerenderCurrentPage _rerenderReposView failed:', e.message);
+        return false;
+      }
+    }
+
     try { app.nav(view, param); return true; }
     catch (e) {
       console.warn('[i18n] _rerenderCurrentPage app.nav failed:', e.message);

@@ -52,6 +52,7 @@
     "back_gitcode": "← Back to GitCode login",
     "failed": "Login failed",
     "oauth_not_configured": "OAuth not configured, please configure it in the admin console",
+    "oauth_not_configured_hint": "Please register with username + password, then bind your token in Settings",
     "empty_input": "Please enter username and password",
     "register": "Register",
     "forgot_password": "Forgot Password",
@@ -297,7 +298,8 @@
     "whitelist_title": "Beta Access Required",
     "whitelist_desc": "Your {{platform}} account{{username}} does not have beta access yet.",
     "whitelist_apply_hint": "Please apply for beta access first. You can log in after approval.",
-    "whitelist_apply_btn": "Apply for Beta"
+    "whitelist_apply_btn": "Apply for Beta",
+    "forgot_email_not_configured": "Email service not configured. Please contact administrator to reset password."
   },
   "repo": {
     "select": "Select repository...",
@@ -523,6 +525,7 @@
     "paste_token": "Paste token",
     "how_to_get_token": "How to get a token?",
     "confirm_bind": "Confirm Bind",
+    "pat_no_refresh_hint": "You are binding with a Personal Access Token (PAT). PATs do not auto-renew — if revoked or expired, you will need to re-bind manually. To enable auto-renewal, ask your administrator to configure OAuth App.",
     "please_enter_token": "Please enter token",
     "verifying": "Verifying...",
     "manage_repos_from_platform": "Manage repos from this platform",
@@ -603,6 +606,25 @@
     "reset_password": "Reset Password",
     "reset_password_hint": "Reset password via email verification code. Other devices will be logged out.",
     "verify_with_oauth": "Re-authorize via third-party",
-    "set_password_needs_email": "Setting a password requires email verification. Please set up an email first."
+    "set_password_needs_email": "Setting a password requires email verification. Please set up an email first.",
+    "token_expired": "Token Expired",
+    "token_expired_hint": "Your token has expired or been revoked. Please re-bind your token.",
+    "re_bind": "Re-bind"
+  },
+  "error": {
+    "TOKEN_EXPIRED": "Your token has expired or been revoked. Please re-bind your token in Settings.",
+    "TOKEN_INVALID": "Token is invalid or expired. Please check and re-bind your token in Settings.",
+    "TOKEN_NOT_BOUND": "No token bound. Please bind your GitCode/GitHub token in Settings first.",
+    "WEBHOOK_URL_NOT_CONFIGURED": "Webhook URL is not configured. Please configure it in System Settings.",
+    "PERMISSION_DENIED": "Permission denied. You do not have access to this repository.",
+    "EMAIL_NOT_CONFIGURED": "Email service is not configured.",
+    "GLOBAL_TOKEN_EXPIRED": "Global bot token expired. Please contact admin to reconfigure.",
+    "REPO_TOKEN_EXPIRED": "Repo bot token expired. Please contact an authorized member to reconfigure.",
+    "NO_TOKEN_AVAILABLE": "No token available. Please check token configuration.",
+    "HOST_TOKEN_EXPIRED": "Host user token expired. Please rebind before configuring bot token.",
+    "WEBHOOK_REBUILD_FAILED": "Webhook rebuild failed. Check bot token permissions or use repair_host to recover.",
+    "WEBHOOK_PERMISSION_DENIED": "Admin permission required to create webhook. Contact admin or obtain admin permission.",
+    "NOT_REPO_OWNER": "Only the repo owner or admin can configure bot token.",
+    "UNKNOWN": "An error occurred. Please try again."
   }
 }
