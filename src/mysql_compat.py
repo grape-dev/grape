@@ -234,8 +234,10 @@ def _translate_create_table(sql: str) -> str:
 
 # INSERT ... ON CONFLICT(<pk>) DO UPDATE SET <col>=<expr(excluded.col)> ... → MySQL ON DUPLICATE KEY UPDATE
 # 匹配到 DO UPDATE SET 子句末尾（到语句尾；不跨多语句）。
+# 列清单可以是**复合**的（如 UNIQUE(resolution, bucket_start, metric, dim_key)）——
+# MySQL 的 ON DUPLICATE KEY UPDATE 不需要列清单，翻译时整段丢弃即可。
 _CONFLICT_UPSERT_RE = re.compile(
-    r"(?is)\bON\s+CONFLICT\s*\(([`\"\w]+)\)\s+DO\s+UPDATE\s+SET\s+"
+    r"(?is)\bON\s+CONFLICT\s*\(([^)]+)\)\s+DO\s+UPDATE\s+SET\s+"
     r"(.+?)(?=(?:\bON\s+CONFLICT\b)|$)")
 
 def _mysql_upsert_repl(m):
@@ -341,13 +343,30 @@ def translate_sql(sql: str) -> str:
     return sql
 
 
+# 已有的 MySQL 原生占位符（少数模块直接写 %s / %(name)s）——不能逃逸，否则会被双重转义
+_NATIVE_PLACEHOLDER_RE = re.compile(r"%(?:\([^)]+\))?s")
+
+
 def _replace_qmarks(sql: str) -> str:
-    """把 SQL 中的 ? 占位符替换为 %s，跳过字符串字面量内的 ?。"""
+    """把 SQL 中的 ? 占位符替换为 %s，跳过字符串字面量内的 ?。
+
+    同时把**字面 `%` 逃逸成 `%%`**：pymysql 在带参数执行时会做一次 Python `%` 格式化
+    （`query % args`），SQL 里任何字面 `%`（最常见是 `LIKE 'xxx:%'`）都会被当成格式符，
+    抛 `unsupported format character` / `not enough arguments for format string`。
+    真机事故：用户面统一事件视图的告警来源查询静默失败、事件全丢（见 alerts.list_events）。
+
+    只逃逸"非占位符"的 `%`：先保护已有的 `%s` / `%(name)s`（少数模块直接写 MySQL 原生
+    占位符），其余转成 `%%`（pymysql 格式化后会还原成单个 `%`）。
+    残余边界：`?` 式语句里若出现字面 `%s`（如 `LIKE '%s%'`）不会被逃逸——用 `substr/instr`
+    替代即可，勿在 SQL 里写字面 `%`。
+    """
     out, in_str, i = [], None, 0
     while i < len(sql):
         ch = sql[i]
         if in_str:
-            out.append(ch)
+            # 字符串字面量里的 % 一律逃逸（pymysql 对**整条语句**做格式化；
+            # 这里出现的 %s 也是字面量文本，`%%s` 格式化后正好还原成 `%s`）
+            out.append("%%" if ch == "%" else ch)
             if ch == in_str and sql[i - 1:i] != "\\":
                 in_str = None
         elif ch in "'\"":
@@ -355,6 +374,14 @@ def _replace_qmarks(sql: str) -> str:
             out.append(ch)
         elif ch == "?":
             out.append("%s")
+        elif ch == "%":
+            # 字面量之外的 %s / %(name)s 是原生占位符，必须原样保留
+            m = _NATIVE_PLACEHOLDER_RE.match(sql, i)
+            if m:
+                out.append(m.group(0))
+                i += len(m.group(0))
+                continue
+            out.append("%%")
         else:
             out.append(ch)
         i += 1

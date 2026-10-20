@@ -46,18 +46,21 @@ from .base import AgentRuntime
 class CodexRuntime(AgentRuntime):
     name = "codex"
     binary = "codex"
-    prompt_via_stdin = False
+    # issue #351: prompt 经 stdin 传入（codex exec 以 "-" 为位置参数时从 stdin 读取），
+    # 规避 Windows .cmd 壳把 argv 中的换行符当作命令分隔符截断多行提示词。
+    prompt_via_stdin = True
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         """构建 codex exec 参数。
 
-        codex exec --json --sandbox danger-full-access <prompt>
+        codex exec --json --sandbox danger-full-access -
         --sandbox danger-full-access: 允许读写工作区 + 网络访问（对齐 opencode 自动执行模式）
+        "-": prompt 从 stdin 读取（issue #351，规避 argv 多行截断）
         session_id 暂不启用——codex resume 与 opencode --session 形态不同，首期不做。
         """
         args = ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check"]
         if prompt:
-            args.append(prompt)
+            args.append("-")  # stdin 占位标记
         return args
 
     def parse_output(self, line: str) -> dict | None:
@@ -88,7 +91,15 @@ class CodexRuntime(AgentRuntime):
             usage = event.get("usage", {}) or {}
             total = (usage.get("input_tokens", 0) + usage.get("output_tokens", 0)
                      + usage.get("reasoning_output_tokens", 0))
-            return {"type": "step_finish", "tokens": total}
+            # 可观察性：除 total（前端沿用）外，把 token 拆分一并带出，供 LLM 用量台账采集
+            # （codex 没有落盘账本，只能从事件流拿）。见 observability-llm-usage-design.md §3.1
+            split = {
+                "input": int(usage.get("input_tokens", 0) or 0),
+                "output": int(usage.get("output_tokens", 0) or 0),
+                "reasoning": int(usage.get("reasoning_output_tokens", 0) or 0),
+                "cache_read": int(usage.get("cached_input_tokens", 0) or 0),
+            }
+            return {"type": "step_finish", "tokens": total, "usage": split}
 
         if et == "turn.failed":
             err = event.get("error", {}).get("message", str(event))

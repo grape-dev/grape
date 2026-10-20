@@ -1731,6 +1731,7 @@ def _execute_conv_task(task_id: str, loop):
         username = task["username"]
         message = task["message"]
 
+    _mu = None          # 采集器占位：_load_event 等前置步骤失败时收尾也要安全（见下方 finish）
     try:
         evt = _load_event(seq)
         # 直接用同步 stream_devops_agent（在线程中运行，不阻塞主 loop）
@@ -1769,6 +1770,11 @@ def _execute_conv_task(task_id: str, loop):
         from src.repo import Repo
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
+        # 用量采集（审计 2026-10-17）：本机直跑的事件对话以前不记 token
+        from src.observability.master_usage import for_task as _master_for_task
+        _mu = _master_for_task(task_id, "hermes", cwd=ws, session_id=oc_session_id,
+                               seq=anchor_seq, repo_key=repo_key, agent_type=agent_type)
+        _mu.start()
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(
             prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
@@ -1776,6 +1782,7 @@ def _execute_conv_task(task_id: str, loop):
             agent_name="Event Dialogue Agent",
             agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
         ):
+            _mu.feed(evt_type, data)
             if evt_type == "text" or evt_type == "token":
                 t = data if isinstance(data, str) else str(data)
                 _worker_final_text += t
@@ -1815,6 +1822,10 @@ def _execute_conv_task(task_id: str, loop):
             t["finished_at"] = _conv_time.time()
             t["events"].append({"type": "done", "data": _worker_final_text})
     loop.call_soon_threadsafe(_push_conv_event, task_id, "done", _worker_final_text)
+    # 用量落台账：放在**最后**（客户端已收到 done、DB 已写），1s 短重试不拖慢任何用户可见动作。
+    # `_mu` 可能因前置步骤失败而未创建 → 判空 + 吞异常。
+    if _mu is not None:
+        _mu.finish(session_id=oc_session_id)
 
 
 async def _collect_conv_events(gen, task_id: str, loop):

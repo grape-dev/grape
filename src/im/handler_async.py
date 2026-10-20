@@ -1837,6 +1837,14 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                 # 否则 agent 无会话凭据，`grape issues comment` 回写 Issue 会失败（生产事故 Issue #6）。
                 _direct_env = chat_session_env_extra(user_id, conv_id or "", repo_key or "")
                 _direct_env["IM_CHAT_ID"] = chat_id
+                # 用量采集（合并保留双方功能）：审计 2026-10-17 起 IM 直连也要记 token（P2-1 口径 B）
+                from src.observability.master_usage import MasterRun, new_run_id
+                _mu = MasterRun("im", new_run_id("im"), engine=backend, cwd=wsd,
+                                session_id=oc_sid,
+                                attr={"repo_key": repo_key, "scene_id": chat_id or "",
+                                      "agent_type": "chat", "user_id": int(user_id or 0),
+                                      "engine_id": int(_rid or 0)})
+                _mu.start()
                 try:
                     async def _direct_consume():
                         nonlocal _stream_final, _stream_exit, _direct_acked, final_text, exit_code, new_oc_session_id
@@ -1847,6 +1855,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                                                                            agent_name="Chat Agent",
                                                                            agent_label=f"[Agent:chat|repo:{repository}]",
                                                                            env_extra=_direct_env):
+                            _mu.feed(event_type, data)   # 用量采集（合并保留双方功能）
                             # 同步写回 ChatTask（缓冲重放 + 订阅者实时，线程安全）
                             try:
                                 if event_type == "done":
@@ -1906,6 +1915,9 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
                         _CTM.finish_external(chat_task_id, error=str(_de2))
                     except Exception:
                         pass
+                finally:
+                    # 用量收尾：**已释放并发额度**（拿回复不占坑），异常路径也不漏
+                    _mu.finish(session_id=new_oc_session_id)
 
         record = {
             "type": "chat", "time": datetime.utcnow().isoformat(),

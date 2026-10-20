@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community
+from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability
 
 
 bot_manager = None
@@ -486,6 +486,141 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Health refresh scheduler start failed: {e}")
 
+    # 可观测性告警中心：种子规则 + 每 30s 求值（设计文档 §9.2）
+    # 平台级规则（DB/主机/全局引擎）与用户面规则一起求值，但用户面 API 只出 level='user'
+    _obs_alert_loop_task = None
+    try:
+        from src.observability import alerts as _obs_alerts
+        from src.observability import slo as _obs_slo
+        from src.observability import loops as _obs_loops
+
+        _obs_seeded = _obs_alerts.seed_rules()
+        _obs_slo_seeded = _obs_slo.seed_defaults()      # P2-1：三条默认 SLO（幂等）
+
+        async def _obs_alert_loop():
+            _tick = 0
+            while True:
+                await asyncio.sleep(30)
+                _tick += 1
+                try:
+                    _r = await asyncio.to_thread(_obs_alerts.evaluate_rules)
+                    if _r.get("fired") or _r.get("resolved"):
+                        log.info(f"Observability alerts: "
+                                 f"{ {k: v for k, v in _r.items() if k != 'new_events'} }")
+                    # 通知在主事件循环里发（求值跑在线程中，IM 客户端是 async 的）
+                    _new = _r.get("new_events") or []
+                    if _new:
+                        _n = await _obs_alerts.notify_fired_events(_new)
+                        log.info(f"Observability alert notifications: {_n}")
+                    # 聚合汇总：窗口结束的合并通知（P1-1）
+                    _a = await _obs_alerts.flush_aggregates()
+                    if _a.get("summaries"):
+                        log.info(f"Observability alert aggregates: {_a}")
+                    # 事件留存（90 天，只清已恢复的）：约每小时一次
+                    if _tick % 120 == 0:
+                        _n2 = await asyncio.to_thread(_obs_alerts.cleanup_events)
+                        if _n2:
+                            log.info(f"Observability alert events cleaned: {_n2} rows")
+                        _obs_loops.beat("obs_alert_retention")
+                    # SLO / 错误预算（P2-1）：算三类 SLI → 落小时快照 → 同步违约事件
+                    # （违约写 source='slo' 进统一事件视图，复用告警的静默/通知渠道）
+                    try:
+                        _s = await asyncio.to_thread(_obs_slo.evaluate_all)
+                        if _s.get("firing") or _s.get("resolved"):
+                            log.info(f"Observability SLO: {_s}")
+                        if _tick % 120 == 0 and _s.get("cleaned"):
+                            log.info(f"Observability SLO snapshots cleaned: {_s['cleaned']} rows")
+                        _obs_loops.beat("obs_slo")
+                    except Exception as e:
+                        log.warning(f"Observability SLO loop failed: {e}")
+                    _obs_loops.beat("obs_alert")     # gap 探测在 evaluate_rules 内部
+                except Exception as e:
+                    _obs_loops.fail("obs_alert", e)
+                    log.warning(f"Observability alert evaluation failed: {e}")
+
+        _obs_alert_loop_task = asyncio.create_task(_obs_alert_loop())
+        log.info(f"Observability alert evaluator started (30s, seeded={_obs_seeded})")
+    except Exception as e:
+        log.warning(f"Observability alert evaluator start failed: {e}")
+
+    # 业务指标聚合（P1-2）：60s 追赶式补齐分钟/小时桶；每小时顺带清一次留存
+    _obs_rollup_task = None
+    try:
+        from src.observability import metric_rollup as _obs_mrollup
+        from src.observability import llm_usage as _obs_llm_usage
+        from src.observability import loops as _obs_loops
+
+        async def _obs_rollup_loop():
+            _tick = 0
+            while True:
+                await asyncio.sleep(60)
+                _tick += 1
+                try:
+                    _s = await asyncio.to_thread(_obs_mrollup.catch_up)
+                    if _s.get("minute_done") or _s.get("hour_done"):
+                        log.info(f"Observability metric rollup: {_s}")
+                    if _tick % 60 == 0:      # 约每小时清一次留存
+                        await asyncio.to_thread(_obs_mrollup.cleanup)
+                    if _tick % 1440 == 0:    # 约每天一次：台账年度归档（>365 天搬到归档表）
+                        _ar = await asyncio.to_thread(_obs_llm_usage.archive_old_usage)
+                        if _ar.get("archived"):
+                            log.info(f"Observability usage archive: {_ar}")
+                        _obs_loops.beat("obs_usage_archive")
+                    _obs_loops.beat("obs_rollup")
+                except Exception as e:
+                    _obs_loops.fail("obs_rollup", e)
+                    log.warning(f"Observability metric rollup failed: {e}")
+
+        _obs_rollup_task = asyncio.create_task(_obs_rollup_loop())
+        log.info("Observability metric rollup started (60s, minute 7d / hour 30d)")
+    except Exception as e:
+        log.warning(f"Observability metric rollup start failed: {e}")
+
+    # 设备资源采样：每 60s 留一份历史（资源曲线用），顺带清理过期采样
+    _obs_sample_task = None
+    try:
+        from src.observability import rollup as _obs_rollup
+        from src.observability import logs as _obs_logs_mod
+        from src.observability import loops as _obs_loops
+
+        async def _obs_sample_loop():
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
+                    if r.get("inserted"):
+                        log.debug(f"Observability runtime samples: {r}")
+                    # 日志留存：顺带按小时限流清理（14 天）
+                    _nc = await asyncio.to_thread(_obs_logs_mod.maybe_cleanup)
+                    if _nc:
+                        log.info(f"Observability logs cleaned: {_nc} rows")
+                        _obs_loops.beat("obs_log_cleanup")
+                    _obs_loops.beat("obs_sample")
+                except Exception as e:
+                    _obs_loops.fail("obs_sample", e)
+                    log.warning(f"Observability runtime sampling failed: {e}")
+
+        _obs_sample_task = asyncio.create_task(_obs_sample_loop())
+        log.info("Observability runtime sampler started (60s)")
+    except Exception as e:
+        log.warning(f"Observability runtime sampler start failed: {e}")
+
+    # 可观测性日志落库：主控 WARNING/ERROR → obs_log（有界队列 + 后台批量，env OBS_LOG_DB=0 关闭）
+    try:
+        from src.observability import logs as _obs_logs_install
+        _st = _obs_logs_install.install_master_logging()
+        log.info(f"Observability log sink: {_st}")
+    except Exception as e:
+        log.warning(f"Observability log sink start failed: {e}")
+
+    # 追踪（§6.4）：给历史任务补 trace id（确定性生成，一次即可；新任务由查询时惰性补齐）
+    try:
+        from src.observability import trace as _obs_trace
+        _nstamped = await asyncio.to_thread(_obs_trace.stamp_missing)
+        log.info(f"Observability trace stamp: {_nstamped} legacy task(s) backfilled")
+    except Exception as e:
+        log.warning(f"Observability trace stamp failed: {e}")
+
     # 用户活跃状态追踪：每 30 秒批量更新 last_active_at
     _active_tracker_task = None
     try:
@@ -550,6 +685,16 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # 可观测性后台循环（告警求值 / 指标聚合 / 设备采样）：**必须一起收掉**。
+    # 之前漏了这三个 cancel —— 任何在本进程里启动过 app 的场景（含 pytest 里的 TestClient）
+    # 都会把这些循环留在后台，继续对同一个库读写 → 后续用例成片假失败（真实踩到）。
+    for _t in (_obs_alert_loop_task, _obs_rollup_task, _obs_sample_task):
+        if _t:
+            _t.cancel()
+            try:
+                await asyncio.wait_for(_t, timeout=5)
+            except (asyncio.CancelledError, asyncio.TimeoutError):
+                pass
     # knowledge_migrate：shutdown 时尝试等待完成（不 cancel，因为迁移中断不如跑完）
     _migrate_task = getattr(app.state, "knowledge_migrate_task", None)
     if _migrate_task and not _migrate_task.done():
@@ -812,6 +957,7 @@ app.include_router(feedback.router)
 app.include_router(autopilot.router)
 app.include_router(orgs.router)
 app.include_router(community.router)
+app.include_router(observability.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi

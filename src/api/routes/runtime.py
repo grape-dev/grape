@@ -94,11 +94,23 @@ class MessagesBody(BaseModel):
 
 
 class UsageBody(BaseModel):
+    """LLM 用量上报。
+
+    字段语义(设计文档 §3.2):一个任务可多轮、多模型 → 每次上报是一条记录,
+    **追加**落 obs_llm_usage,不再覆盖 agent_tasks.usage_json(会话续接指针)。
+    """
     provider: str = ""
     model: str = ""
     input: int = 0
     output: int = 0
-    cache: int = 0
+    cache: int = 0            # 遗留字段,等同 cache_read(历史无调用方,保留仅为兼容)
+    cache_read: int = 0
+    cache_write: int = 0
+    reasoning: int = 0        # codex 的 reasoning_output_tokens
+    turn: int = 0             # 同一任务第几轮(多轮累加的基础)
+    cost_usd: float | None = None
+    cost_status: str = ""
+    source: str = ""          # 采集来源:report/codex/opencode/hermes/hwcloud(:辅助任务)
 
 
 class CompleteBody(BaseModel):
@@ -337,6 +349,19 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                     "worker_name": _wname,
                 }
                 _wf_fp.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+        # 同时落 obs_log（跨机可见、按仓库过滤的用户面日志）——
+        # worker 侧无需改动：它本来就在心跳里上报最近 WARNING+ 日志行。
+        # task_id / repo_key 由 logs.ingest 从正文里抽取（形如
+        # `[task t_xxx] [seq=N|issue:#M|agent:x|repo:gitcode:o/r] ...`），抽不到的行
+        # 因没有仓库维度而不会出现在用户面（平台/进程类日志归 L2/L3）。
+        try:
+            from src.observability import logs as _obs_logs
+            _recs = [{"ts": (ll.ts or now), "level": ll.level, "component": "worker",
+                      "msg": ll.message, "source": _wname or f"worker-{credential_id}",
+                      "runtime_id": 0} for ll in body.log_lines]
+            _obs_logs.ingest(_recs, default_source=_wname or f"worker-{credential_id}")
+        except Exception as _ole:
+            log.warning(f"obs_log worker ingest failed: {_ole}")
 
     # 返回 worker 代码版本（仅 git commit，不含 wheels/python 指纹）
     # worker 端对比此版本号决定是否自动升级
@@ -623,15 +648,32 @@ def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int =
 
 @router.post("/tasks/{task_id}/usage")
 def runtime_task_usage(task_id: str, body: UsageBody, credential_id: int = Depends(_require_credential)):
-    with db_lock:
-        c = db.cursor()
-        c.execute("UPDATE agent_tasks SET usage_json=? WHERE id=?",
-                  (json.dumps(body.model_dump()), task_id))
-        db.commit()
-    # 可观察性埋点：LLM token 用量
+    """LLM 用量上报(追加台账)。
+
+    历史实现是 `UPDATE agent_tasks SET usage_json=?` —— 那是**破坏性**的:
+    usage_json 存的是会话续接指针 {session_id, work_dir, engine}(由 /complete →
+    complete_task 写,被 routes/events.py / im/handler_async.py / routes/chat.py 消费),
+    一旦真有引擎上报用量就会冲掉指针、破坏多轮续接与 B2 引擎守卫。
+    现改为追加落 obs_llm_usage,按 (task_id, seq) 幂等去重,不碰 usage_json。
+    见 docs/weekly-07/observability-llm-usage-design.md §3.2/§4.2。
+    """
+    usage = {
+        "provider": body.provider, "model": body.model,
+        "input": body.input, "output": body.output,
+        "cache_read": body.cache_read or body.cache,   # 遗留 cache ≡ cache_read
+        "cache_write": body.cache_write, "reasoning": body.reasoning,
+        "turn": body.turn, "cost_usd": body.cost_usd, "cost_status": body.cost_status,
+    }
+    try:
+        from src.observability.llm_usage import record_usage
+        record_usage(task_id, [usage], source=body.source or "report")
+    except Exception as e:      # 用量采集绝不能拖垮任务主链路
+        log.warning(f"record usage ledger failed task={task_id}: {e}")
+    # Prometheus 埋点(与台账同源,保留供外部 Prometheus 抓取)
     try:
         from src.observability import record_llm_usage
-        record_llm_usage(body.provider, body.model, body.input, body.output, body.cache)
+        record_llm_usage(body.provider, body.model, body.input, body.output,
+                         body.cache_read or body.cache)
     except Exception:
         pass
     return {"status": "ok"}
