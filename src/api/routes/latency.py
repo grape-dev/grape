@@ -37,10 +37,16 @@ def _maybe_cleanup():
             )
             c.execute(f"DELETE FROM api_latency_log WHERE created_at < {time_expr}")
             # 2. 数据量超限时删除最旧记录
+            #    ⚠️ 子查询用派生表包裹（Issue #376）：MySQL 1093 禁止 DELETE 目标表
+            #    直接出现在子查询 FROM 中；包裹成 (SELECT ... FROM (SELECT ...) t)
+            #    后目标表仅出现在派生表内部，SQLite/MySQL 双兼容。
             count = c.execute("SELECT COUNT(*) FROM api_latency_log").fetchone()[0]
             if count > _MAX_ROWS:
                 excess = count - _MAX_ROWS
-                c.execute(f"DELETE FROM api_latency_log WHERE id IN (SELECT id FROM api_latency_log ORDER BY id ASC LIMIT {excess})")
+                c.execute(
+                    f"DELETE FROM api_latency_log WHERE id IN "
+                    f"(SELECT id FROM (SELECT id FROM api_latency_log ORDER BY id ASC LIMIT {excess}) t)"
+                )
                 log.info(f"Latency log trimmed: {excess} oldest records removed (count was {count})")
             db.commit()
     except Exception as e:
