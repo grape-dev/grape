@@ -354,20 +354,25 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
             engine_ids = []
     else:
         engine_ids = []
-    # SRE 派发层约束（sre-personal-machine §3.7 Q3）：只允许 user scope；空 = 无引擎不回退
-    if _sre_personal_only(agent_type):
+    # SRE 派发层约束（sre-repo-worker-relax §1.1）：允许 user+repo 两档（user 优先，
+    # 个人机器环境有登录态优先复用，repo 档作协作兜底）；空 = 无引擎不回退不广播
+    if _sre_no_broadcast(agent_type):
         if not engine_ids:
             return None
         members = _engines_by_ids(engine_ids, repo, cfg)
         members = _filter_by_tags(members, agent_type)
-        members = [m for m in members if m.get("scope") == "user"]
-        cand = _apply_filters(members, cfg)
-        cand = _filter_by_health(cand)
-        if not cand:
-            return None
-        if cfg.get("rule") == "order":
-            return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-        return random.choice(cand)["runtime_id"]
+        members = [m for m in members if m.get("scope") in ("user", "repo")]
+        for _scope in ("user", "repo"):
+            cand = _apply_filters([m for m in members if m.get("scope") == _scope], cfg)
+            if not cand:
+                continue
+            cand = _filter_by_health(cand)
+            if not cand:
+                continue
+            if cfg.get("rule") == "order":
+                return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+            return random.choice(cand)["runtime_id"]
+        return None
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
         members = _engines_by_ids(engine_ids, repo, cfg)
@@ -399,10 +404,12 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     return None
 
 
-def _sre_personal_only(agent_type: str) -> bool:
-    """SRE Agent 是否强制个人级引擎（sre-personal-machine-design §3.7 Q2/Q3）。
+def _sre_no_broadcast(agent_type: str) -> bool:
+    """SRE Agent 是否禁止广播（sre-repo-worker-relax-design §1.1）。
 
-    派发层约束：SRE 任务只允许 user scope 引擎；空列表 = 无引擎（不广播、不回退）。
+    派发层约束：SRE 任务只允许 user/repo 两档引擎（user 优先，repo 作协作兜底）；
+    空列表 = 无引擎（不广播、不回退）。global 池不放行：SRE 执行部署/运维命令，
+    广播到任意用户贡献的机器责任边界不清（sre-repo-worker-relax 安全边界）。
     """
     return str(agent_type or "").strip().lower() == "sre"
 
@@ -415,7 +422,7 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     离线（status!=online）或心跳超时（last_seen_at 距今 > _RUNTIME_STALE_SECONDS，默认 100s）
     的引擎不写入 pool。
 
-    SRE 专属（sre-personal-machine §3.7）：只保留 user scope 引擎；
+    SRE 专属（sre-repo-worker-relax §1.1）：只保留 user/repo 两档引擎；
     场景没配 SRE 引擎 → None（空 = 无引擎，不广播，调用方报错）。
 
     返回值（三方语义，调用方必须用 is None 显式区分 None 与 ""）：
@@ -431,17 +438,17 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
             from src.api.pipeline_config import get_scene_engine_ids
             ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
             # SRE 空 = 无引擎：不广播，直接全灭语义（Q2 裁定，区别于其他 agent 的 "" 广播）
-            if _sre_personal_only(agent_type) and not ids:
+            if _sre_no_broadcast(agent_type) and not ids:
                 return None
             if ids:
                 # Issue #259：写入 pool 前按健康过滤（与 legacy pick_engine 的 _health_ok 同一把尺子）
                 members = _engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection())
-                # SRE 派发层约束（Q3 裁定）：只允许 user scope（配置后引擎 scope 被改也不放行）
-                if _sre_personal_only(agent_type):
+                # SRE 派发层约束（Q3 裁定）：只允许 user/repo 档（配置后引擎 scope 被改也不放行 global）
+                if _sre_no_broadcast(agent_type):
                     _before = len(members)
-                    members = [m for m in members if m.get("scope") == "user"]
+                    members = [m for m in members if m.get("scope") in ("user", "repo")]
                     if len(members) < _before:
-                        log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人级引擎")
+                        log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
                 healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
                 if healthy_ids:
                     return json.dumps(healthy_ids)

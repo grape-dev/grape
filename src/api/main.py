@@ -15,23 +15,27 @@ bot_manager = None
 
 
 def _startup_security_check():
-    """生产环境启动安全门禁。
+    """启动安全门禁（fail-closed）。
 
-    校验 JWT 密钥安全性、密钥轮换配置、邮件服务配置。
-    开发环境跳过所有检查。
+    JWT 密钥校验无条件执行（生产必须强密钥；开发/测试允许进程内随机兜底）；
+    其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
     from src.config import log
     from src.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
-    if not is_production():
-        return  # 开发环境跳过
-
     errors = []
 
-    # 1. JWT 密钥黑名单校验
+    # 1. JWT 密钥校验——无条件执行（开发/测试随机兜底态放行，其余不安全一律拒绝）
     from src.api.jwt_utils import validate_jwt_secret
     if not validate_jwt_secret():
-        errors.append("JWT_SECRET 不安全：命中黑名单，请设置自定义密钥")
+        errors.append("JWT_SECRET 不安全：未配置强密钥（生产必须设置 JWT_SECRET 或密钥轮换池）")
+
+    if not is_production():
+        if errors:
+            for e in errors:
+                log.error(f"[SECURITY] {e}")
+            raise SystemExit(f"安全门禁失败：{'; '.join(errors)}")
+        return  # 开发环境其余检查跳过
 
     # 2. JWT 密钥轮换配置校验
     if not get_jwt_kid_current():

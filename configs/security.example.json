@@ -1,8 +1,8 @@
 {
-  "_comment": "安全配置 — 复制为 configs/security.json 并填入真实值。不创建此文件 = 开发模式（全部用默认值）。",
+  "_comment": "安全配置 — 复制为 configs/security.json 并填入真实值。配置目录无 security.json 文件时一律按 development（开发/测试）处理（见 security_config.get_env）。",
 
   "env": "development",
-  "_env_help": "development = 开发模式（跳过门禁，允许默认密钥/固定验证码/日志降级）| production = 生产模式（强制安全检查）",
+  "_env_help": "development = 开发/测试模式（跳过生产门禁，允许随机兜底密钥/固定验证码）| production = 生产模式（强制 JWT 强密钥 + 密钥轮换池 + 邮件/凭据加密等安全检查）。注意：判定只看此字段是否为字面 'production'，写其他任何值（prod/test/空）都会按 development 处理。",
 
   "jwt": {
     "_help": "JWT 密钥轮换配置。不配则 fallback 到 JWT_SECRET 环境变量（无 kid 轮换）。",
