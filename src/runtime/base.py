@@ -6,7 +6,7 @@ class AgentRuntime:
     """Agent Runtime 基类，所有执行引擎实现需继承此类。"""
     name = ""
     binary = ""
-    prompt_via_stdin = False
+    prompt_via_stdin = True  # issue #351: 默认 stdin 传 prompt，规避 argv 经 cmd 壳截断多行提示词
     _serve_port = 0  # codearts 方案E2: serve 端口（pre_exec 设置，build_args 读取）
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:

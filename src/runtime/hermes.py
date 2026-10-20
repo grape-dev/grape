@@ -33,6 +33,9 @@ from .base import AgentRuntime
 class HermesRuntime(AgentRuntime):
     name = "hermes"
     binary = "hermes"
+    # issue #351: hermes 为真 exe（不经 cmd 壳），显式保持 argv 传 prompt，
+    # 不随基类 prompt_via_stdin=True 默认值变化（chat -q/-z 的 prompt 为位置参数）。
+    prompt_via_stdin = False
 
     def __init__(self):
         super().__init__()

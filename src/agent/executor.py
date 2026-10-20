@@ -1,5 +1,5 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
-import os, subprocess, json, shutil, time, signal
+import os, subprocess, json, time, signal
 from typing import Generator, AsyncGenerator
 from src.config import log
 from .base import AgentBackend
@@ -594,10 +594,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     # codearts 方案E2: serve 启动移到 _run_once 内部（每次执行启动自己的 serve，避免单例并发串号）
     # pre_exec/post_exec 由 _run_once 内部调用，serve 信息用局部变量
 
-    agent_cmd = shutil.which(backend.binary) or shutil.which(backend.binary + ".cmd")
-    if not agent_cmd:
-        from src.runtime.os_adapter import find_cli
-        agent_cmd = find_cli(backend.binary)
+    # issue #351: 统一走 os_adapter.find_cli（Windows exe 优先），
+    # 移除 shutil.which(binary + ".cmd") 主动查找（cmd 壳会截断多行提示词）。
+    from src.runtime.os_adapter import find_cli, is_shell_wrapper
+    agent_cmd = find_cli(backend.binary)
     if not agent_cmd:
         log.error(f"{label}{backend.name} CLI not found in PATH")
         yield ("done", {
@@ -605,6 +605,15 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             "errors": [f"{backend.name} not found"], "stderr": ""
         })
         return
+    # issue #351: cmd/bat 壳兜底降级为 WARN——Windows 上 .cmd/.bat 隐式经
+    # cmd.exe 执行，argv 中的换行符被视为命令分隔符，多行提示词会被截断成第一行。
+    if is_shell_wrapper(agent_cmd):
+        log.warning(
+            f"{label}{backend.name} CLI resolved to shell wrapper '{agent_cmd}' "
+            f"(.cmd/.bat): multi-line prompts may be truncated on Windows "
+            f"(issue #351); prompt_via_stdin={backend.prompt_via_stdin}; "
+            f"prefer installing the engine's .exe"
+        )
 
     # 单次进程执行：返回 (full_text, new_session_id, exit_code, stderr, error_events)
     def _run_once(use_session_id: str):
@@ -715,9 +724,11 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             cwd=cwd, env=_proc_env, bufsize=0, **_popen_kwargs
         )
         _track_proc(proc)
-        if backend.prompt_via_stdin:
-            proc.stdin.write(prompt.encode("utf-8"))
-            proc.stdin.close()
+        # issue #351: prompt 经 stdin 传输（不进 argv，规避 cmd 壳多行截断）
+        _stdin = getattr(proc, "stdin", None)
+        if backend.prompt_via_stdin and _stdin is not None:
+            _stdin.write(prompt.encode("utf-8"))
+            _stdin.close()
 
         collected_text = []
         new_session_id = use_session_id
