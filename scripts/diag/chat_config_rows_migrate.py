@@ -30,7 +30,7 @@
 ----
     # 只读预演（本地/云端都可）
     .venv/bin/python scripts/diag/chat_config_rows_migrate.py \
-        --host <dbhost> --port 3306 --user <u> --password <p> --db grape_system_db
+        --host <dbhost> --port 3306 --user <u> --password <p> --db <db>
 
     # 真跑（会先备份）
     .venv/bin/python scripts/diag/chat_config_rows_migrate.py ... --apply --yes
