@@ -47,9 +47,13 @@ def generate_code() -> str:
 
 
 def _hash_code(code: str) -> str:
-    """验证码哈希（P2-8: HMAC-SHA256，用应用密钥做 key，防彩虹表）。"""
-    import os as _os
-    key = (_os.environ.get("JWT_SECRET") or "grape-dev").encode("utf-8")
+    """验证码哈希（P2-8: HMAC-SHA256，用应用密钥做 key，防彩虹表）。
+
+    密钥复用 JWT 有效签名密钥（强 JWT_SECRET 或密钥轮换池；开发/测试回退到
+    进程内随机兜底密钥）——不保留任何硬编码默认值（沿用 JWT 门禁语义）。
+    """
+    from src.api.jwt_utils import _get_signing_secret
+    key = _get_signing_secret()[0].encode("utf-8")
     return hmac.new(key, code.encode("utf-8"), hashlib.sha256).hexdigest()
 
 

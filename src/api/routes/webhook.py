@@ -241,17 +241,23 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
         log.warning(f"GitHub Webhook rejected: unmanaged repo={repo}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
-    # GitHub webhook 验证：X-Hub-Signature-256 HMAC
+    # GitHub webhook 验证（安全加固）：至少提供一种凭据且校验通过才放行。
+    # - X-Hub-Signature-256 存在 → 校验 HMAC-SHA256（失败 403）
+    # - 否则 X-GitHub-Token 必须存在且与仓库密钥一致（失败 403）
+    # - 两者皆缺 → 401 拒绝，绝不进入流水线调度
     import hashlib, hmac
     signature = headers.get("X-Hub-Signature-256", "")
+    token_header = headers.get("X-GitHub-Token", "")
+    if not signature and not token_header:
+        log.warning(f"GitHub Webhook rejected: missing signature & token for repo={repo}")
+        return JSONResponse(status_code=401, content={"code": 401, "message": "missing signature or token"})
     if signature:
         computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(f"sha256={computed}", signature):
             log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, expected_sha256=sha256={computed[:20]}..., got_sha256={signature[:25]}..., body_size={len(body)}, token_prefix={expected[:10]}...")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
-        token_header = headers.get("X-GitHub-Token", "")
-        if token_header and token_header != expected:
+        if token_header != expected:
             log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
