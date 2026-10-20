@@ -930,11 +930,8 @@ window._engineBadgeHtml = function(engineIds, agentEngines, agentType) {
   const st = _engineBadgeState(engineIds, agentEngines, agentType);
   if (!st.total) {
     if (agentType === 'sre') {
-      const hasPersonal = (agentEngines && agentEngines.sre && agentEngines.sre.length > 0);
-      const label = hasPersonal
-        ? (I18N.t('dashboard.sre_select_machine') || '请选择个人机器作为部署机器')
-        : (I18N.t('dashboard.sre_no_engine') || '没有可用的个人机器');
-      return `<span style="display:inline-flex;align-items:center;gap:4px;background:#86868b14;color:#86868b;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${label}</span>`;
+      // sre-repo-worker-relax §2.2：未选引擎 → 灰色「未选择引擎」徽章（不显示绿色"广播"误导）
+      return `<span style="display:inline-flex;align-items:center;gap:4px;background:#86868b14;color:#86868b;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.sre_engine_required')}</span>`;
     }
     return `<span style="display:inline-flex;align-items:center;gap:4px;background:#34c75914;color:#34c759;font-size:11px;font-weight:600;padding:4px 12px;border-radius:999px">${I18N.t('dashboard.broadcast')||'广播'}</span>`;
   }
@@ -1192,45 +1189,12 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   window.toggleAgentInScene = function(agentType) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
-    // SRE 唤醒拦截（sre-personal-machine §3.3）：启用时扫描个人机器并自动全选，无则弹引导
-    if (agentType === 'sre' && !node.enabled) {
-      _sreWakeUp(node, agentEngines, function() {
-        const cardsContainer = document.getElementById('flowCardsContainer');
-        if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
-      });
-      return;
-    }
     node.enabled = !node.enabled;
     if (!node.enabled) { node.skill = ''; node.engine_runtime_ids = []; }
     if (cardsContainer) {
       cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
     }
   };
-
-  // SRE 编辑上下文（sre-personal-machine §3.6）：把真实 node/数据/重渲染函数挂到全局，
-  // 供「重新检测」与托管 watch 写入真实数据并即时刷新页面（不再操作哑元）。
-  var _sreRerenderEdit = function() {
-    const cardsContainer2 = document.getElementById('flowCardsContainer');
-    if (cardsContainer2) cardsContainer2.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
-  };
-  window._sreEditCtx = {
-    node: editNodes.find(n => n.id === 'sre') || null,
-    agentEngines: agentEngines,
-    rerender: _sreRerenderEdit
-  };
-
-  // 进入编辑模式即触发 SRE 检查（§3.6）：启用但无可用个人机器 → 自动扫描；
-  // 有在线机器直接补全绑定（老场景没绑/绑定失效的情况）；无机器不弹窗（silent），
-  // 卡片徽章+「重新检测」按钮已足够，用户可能只想直接关掉 SRE。
-  (function _sreEnterEditScan() {
-    try {
-      const sreNode = editNodes.find(n => n.id === 'sre');
-      if (!sreNode || !sreNode.enabled) return;
-      if (_sreCheckOffline(sreNode, agentEngines)) {
-        _sreWakeUp(sreNode, agentEngines, _sreRerenderEdit, {silent: true});
-      }
-    } catch (e) { /* 扫描失败不阻断编辑 */ }
-  })();
 
   window.selectAgentSkill = function(agentType, skillName) {
     const node = editNodes.find(n => n.id === agentType);
@@ -1247,6 +1211,12 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     if (emptyAgents.length) {
       const names = emptyAgents.map(n => { const meta = _AGENT_TYPES[n.id] || {}; return meta.display_name || n.id; }).join('、');
       app.showToast(I18N.t('dashboard.skill_empty_warning', {agents: names}));
+      return;
+    }
+    // SRE 必选引擎前端拦截（sre-repo-worker-relax §2.2，后端 400 兜底）
+    const sreNoEngine = editNodes.find(n => n.id === 'sre' && n.enabled && !(n.engine_runtime_ids || []).length);
+    if (sreNoEngine) {
+      app.showToast(I18N.t('dashboard.sre_engine_personal_only'));
       return;
     }
     const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
@@ -1355,17 +1325,16 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     }
 
     // Engine 区域 — 药丸标签在上，按钮在下
-    // SRE 专属（sre-personal-machine §3.6）：启用但引擎全灭/为空 → 加「重新检测个人机器」按钮；
-    // 完全没有个人机器时不再显示「选择引擎」（空列表没有可选的东西，避免误导）
-    const _sreOffline = (tag === 'sre' && enabled && _sreCheckOffline(node, agentEngines));
-    const _sreNoPersonal = (_sreOffline && !((agentEngines.sre) || []).length);
+    // SRE 专属（sre-repo-worker-relax §2.2）：启用但未选引擎 → 红色必选提示徽章；
+    // 取消「重新检测个人机器」按钮（唤醒体系已退役），统一走「选择引擎」
+    const _sreMissing = (tag === 'sre' && enabled && !((node.engine_runtime_ids) || []).length);
     let engineHtml;
     if (enabled) {
       engineHtml = `<div style="display:flex;flex-direction:column;align-items:center;gap:6px;width:100%">
         ${badgeHtml}
+        ${_sreMissing ? `<div style="font-size:10px;color:#ff3b30;border:1px solid rgba(255,59,48,.3);border-radius:999px;padding:2px 10px;font-weight:500">${I18N.t('dashboard.sre_engine_required')}</div>` : ''}
         <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">
-          ${_sreNoPersonal ? '' : `<button onclick="openEngineModal('${tag}')" style="font-size:10px;padding:4px 12px;border:1px solid #e8e8ed;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#e8e8ed';this.style.color='#6e6e73'">${I18N.t('dashboard.select_engine')||'选择引擎'}</button>`}
-          ${_sreOffline ? `<button onclick="window._sreRetryWake()" style="font-size:10px;padding:4px 12px;border:1px solid rgba(255,59,48,.3);border-radius:8px;background:transparent;color:#ff3b30;cursor:pointer;transition:all .15s" onmouseover="this.style.background='#ff3b30';this.style.color='#fff';this.style.borderColor='#ff3b30'" onmouseout="this.style.background='transparent';this.style.color='#ff3b30';this.style.borderColor='rgba(255,59,48,.3)'">${I18N.t('dashboard.sre_retry_wake')||'重新检测个人机器'}</button>` : ''}
+          <button onclick="openEngineModal('${tag}')" style="font-size:10px;padding:4px 12px;border:1px solid #e8e8ed;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#e8e8ed';this.style.color='#6e6e73'">${I18N.t('dashboard.select_engine')||'选择引擎'}</button>
         </div>
       </div>`;
     } else {
@@ -1420,9 +1389,9 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   const meta = _AGENT_TYPES[agentType] || {};
   const title = meta.display_name || agentType;
   const sorted = allEngines.slice().sort((a,b) => (_SCOPE_ORDER[a.scope]||9) - (_SCOPE_ORDER[b.scope]||9));
-  // SRE 专属（sre-personal-machine §3.1）：引擎列表只显示个人级
+  // SRE 专属（sre-repo-worker-relax §2.1）：引擎列表只显示个人+仓库两档
   const _sreOnly = (agentType === 'sre');
-  const _visibleEngines = _sreOnly ? sorted.filter(e => e.scope === 'user') : sorted;
+  const _visibleEngines = _sreOnly ? sorted.filter(e => e.scope === 'user' || e.scope === 'repo') : sorted;
   let _engFilterType = '';
   let _engFilterScope = '';
   let _engFilterScene = [];  // 场景多选筛选（Issue #198）
@@ -1446,11 +1415,15 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
     const _SCOPE_ORDER2 = ['user','repo','global','local'];
     let html = '';
     if (filtered.length === 0) return `<div style="padding:20px 0;text-align:center;color:#86868b;font-size:13px">${_sreOnly
-      ? (I18N.t('dashboard.sre_engine_personal_only')||'SRE Agent 只能使用个人级机器，请先连接个人机器')
+      ? I18N.t('dashboard.sre_engine_empty_hint')
       : (I18N.t('dashboard.no_engine_broadcast')||'暂无可用引擎，将使用广播模式')}</div>`;
     _SCOPE_ORDER2.forEach(s => {
       if (!groups[s]) return;
-      html += `<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">${_SCOPE_LABELS[s]||s} (${groups[s].length})</div>`;
+      // 个人档组标注（sre-repo-worker-relax §2.1，所有 agent 通用）：
+      // 提示个人级引擎的协作排他性，引导多人协作场景优先选仓库级
+      const _personalHint = (s === 'user')
+        ? `<span style="font-size:10px;color:#86868b;font-weight:400;margin-left:6px;letter-spacing:0;text-transform:none">${I18N.t('dashboard.engine_personal_scope_hint')}</span>` : '';
+      html += `<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#86868b;text-transform:uppercase;letter-spacing:.5px">${_SCOPE_LABELS[s]||s} (${groups[s].length})${_personalHint}</div>`;
       html += groups[s].map(e => {
         const checked = currentIds.includes(e.id);
         return `<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:pointer;background:${checked ? 'rgba(0,113,227,.06)' : '#f5f5f7'};transition:all .2s ease;box-shadow:0 1px 2px rgba(0,0,0,.03)">
@@ -1810,14 +1783,6 @@ function _enterCreateStandardMode(data, owner, name) {
   window.toggleAgentInScene = function(agentType) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
-    // SRE 唤醒拦截（sre-personal-machine §3.3）：启用时扫描个人机器并自动全选，无则弹引导
-    if (agentType === 'sre' && !node.enabled) {
-      _sreWakeUp(node, agentEngines, function() {
-        const cardsContainer = document.getElementById('flowCardsContainer');
-        if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
-      });
-      return;
-    }
     node.enabled = !node.enabled;
     if (!node.enabled) { node.skill = ''; node.engine_runtime_ids = []; }
     const cardsContainer = document.getElementById('flowCardsContainer');
@@ -1832,31 +1797,6 @@ function _enterCreateStandardMode(data, owner, name) {
   window.openEngineModal = function(agentType) {
     _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '');
   };
-
-  // 创建模式 SRE 编辑上下文（与编辑模式 §3.6 同语义）：供「重新检测个人机器」按钮
-  // 操作真实 node/engine 数据并即时重渲染（SRE 现在默认启用，无个人机器时显示检测按钮）
-  var _sreRerenderCreate = function() {
-    var el = document.getElementById('flowCardsContainer');
-    if (el) el.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
-  };
-  window._sreEditCtx = {
-    node: editNodes.find(n => n.id === 'sre') || null,
-    agentEngines: agentEngines,
-    rerender: _sreRerenderCreate
-  };
-
-  // 进创建模式即触发 SRE 检测（与编辑模式 §3.6 同语义）：SRE 默认启用后，
-  // 有在线个人机器 → 自动全选绑定（无需手动「重新检测」）；无机器不弹窗（silent），
-  // 卡片徽章+「重新检测」按钮已足够，用户可能只想直接关掉 SRE。
-  (function _sreEnterCreateScan() {
-    try {
-      var sreNode = editNodes.find(n => n.id === 'sre');
-      if (!sreNode || !sreNode.enabled) return;
-      if (_sreCheckOffline(sreNode, agentEngines)) {
-        _sreWakeUp(sreNode, agentEngines, _sreRerenderCreate, {silent: true});
-      }
-    } catch (e) { /* 扫描失败不阻断创建 */ }
-  })();
 
   window._toggleNewBranchInline = function() {
     var el2 = document.getElementById('newBranchInputInline');
@@ -1917,6 +1857,12 @@ function _enterCreateStandardMode(data, owner, name) {
     if (emptyAgents.length) {
       const names = emptyAgents.map(n => { const meta = _AGENT_TYPES[n.id] || {}; return meta.display_name || n.id; }).join('、');
       app.showToast(I18N.t('dashboard.skill_empty_warning', {agents: names}));
+      return;
+    }
+    // SRE 必选引擎前端拦截（sre-repo-worker-relax §2.2，后端 400 兜底）
+    const sreNoEngine = editNodes.find(n => n.id === 'sre' && n.enabled && !(n.engine_runtime_ids || []).length);
+    if (sreNoEngine) {
+      app.showToast(I18N.t('dashboard.sre_engine_personal_only'));
       return;
     }
     const nodesPayload = editNodes.filter(n => n.enabled).map((n, i, arr) => {
@@ -2340,258 +2286,4 @@ window._openSceneRecommendModal = function(repoParam) {
       })
       .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
   };
-};
-
-
-// ════════ SRE 个人机器唤醒逻辑（sre-personal-machine-design.md §3.3–3.6）════════
-// 独立区块：只被 toggleAgentInScene('sre') 与详情页离线检查调用，其余 agent 不经过这里。
-// 依赖：window._engineBadgeHtml（本文件）、openSreAddDeviceModal（runtimes.js）、API.get/put。
-
-// 唤醒入口：扫描个人引擎（scope=user，后端 agent_engines['sre'] 已只返回个人级）
-// 有在线 → 自动全选（仅初始值，用户可在引擎弹窗反选）；无 → 弹「无个人机器」引导弹窗。
-function _sreWakeUp(node, agentEngines, onDone, opts) {
-  const engines = (agentEngines && agentEngines.sre) || [];
-  const online = engines.filter(e => e.scope === 'user' && e.status === 'online');
-  if (online.length > 0) {
-    node.enabled = true;
-    node.engine_runtime_ids = online.map(e => e.id);
-    app.showToast && app.showToast(I18N.t('dashboard.sre_wake_selected', {count: online.length}));
-    if (onDone) onDone();
-    return;
-  }
-  // 无在线个人机器：区分「一台都没有」与「全部离线」（R4 对策）
-  // silent 模式（进入编辑/创建页自动扫描）：不弹引导窗，仅刷新渲染——
-  // 卡片上已有「没有可用的个人机器」徽章和「重新检测」按钮，用户可能只想直接关掉 SRE。
-  if (opts && opts.silent) {
-    if (onDone) onDone();
-    return;
-  }
-  const hasButOffline = engines.length > 0;
-  _sreShowNoMachineModal(node, agentEngines, hasButOffline, onDone);
-}
-
-// 「无个人机器」引导弹窗：华为云 AK/SK 路径 / 直接托管路径
-function _sreShowNoMachineModal(node, agentEngines, hasButOffline, onDone) {
-  _sreCloseNoMachineModal();
-  var overlay = document.createElement('div');
-  overlay.id = 'sreNoMachineOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .25s ease';
-  overlay.onclick = function(e) { if (e.target === overlay) _sreCloseNoMachineModal(); };
-
-  var modal = document.createElement('div');
-  modal.id = 'sreNoMachineModal';
-  modal.style.cssText = 'width:420px;max-width:92vw;background:var(--c);border-radius:18px;box-shadow:0 12px 48px rgba(0,0,0,.18);transform:scale(.96);opacity:0;transition:transform .25s ease,opacity .25s ease;padding:28px';
-
-  modal.innerHTML =
-    '<div style="display:flex;align-items:center;gap:12px;margin-bottom:10px">' +
-      '<div style="width:40px;height:40px;border-radius:10px;background:rgba(184,155,106,.15);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:20px">⚠️</div>' +
-      '<div style="font-size:17px;font-weight:700;color:var(--t1)">' + I18N.t('dashboard.sre_no_machine_title') + '</div>' +
-    '</div>' +
-    '<p style="font-size:13px;color:var(--t3);line-height:1.6;margin:0 0 20px">' +
-      (hasButOffline ? I18N.t('dashboard.sre_no_machine_offline_desc') : I18N.t('dashboard.sre_no_machine_desc')) +
-    '</p>' +
-    '<div style="display:flex;flex-direction:column;gap:10px">' +
-      // 按钮 A：华为云 AK/SK（统一按钮规范：透明底+浅蓝边框蓝字，hover 实心蓝底白字）
-      '<button id="sreBtnHuawei" style="display:flex;align-items:center;gap:12px;padding:14px 18px;border:1px solid rgba(0,113,227,.3);border-radius:12px;background:transparent;cursor:pointer;transition:all .2s;text-align:left" onmouseover="this.style.background=\'#0071e3\';this.style.borderColor=\'#0071e3\';this.style.color=\'#fff\'" onmouseout="this.style.background=\'transparent\';this.style.borderColor=\'rgba(0,113,227,.3)\';this.style.color=\'\'">' +
-        '<span style="font-size:20px;flex-shrink:0">☁️</span>' +
-        '<span style="flex:1;min-width:0"><span style="display:block;font-size:14px;font-weight:600;color:inherit">' + I18N.t('dashboard.sre_btn_huawei') + '</span></span>' +
-      '</button>' +
-      // 按钮 B：直接托管（同款样式，与按钮 A 完全一致）
-      '<button id="sreBtnHost" style="display:flex;align-items:center;gap:12px;padding:14px 18px;border:1px solid rgba(0,113,227,.3);border-radius:12px;background:transparent;cursor:pointer;transition:all .2s;text-align:left" onmouseover="this.style.background=\'#0071e3\';this.style.borderColor=\'#0071e3\';this.style.color=\'#fff\'" onmouseout="this.style.background=\'transparent\';this.style.borderColor=\'rgba(0,113,227,.3)\';this.style.color=\'\'">' +
-        '<span style="font-size:20px;flex-shrink:0">🔑</span>' +
-        '<span style="flex:1;min-width:0"><span style="display:block;font-size:14px;font-weight:600;color:inherit">' + I18N.t('dashboard.sre_btn_host') + '</span></span>' +
-      '</button>' +
-    '</div>';
-
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-  setTimeout(function() {
-    overlay.style.opacity = '1';
-    modal.style.transform = 'scale(1)';
-    modal.style.opacity = '1';
-  }, 10);
-
-  // 按钮 A：先查 AK/SK（已配置则跳过输入直接进 Devspace）
-  modal.querySelector('#sreBtnHuawei').onclick = function() {
-    _sreCloseNoMachineModal();
-    API.get('/devstage/config').then(function(cfg) {
-      if (cfg && cfg.ak_exists && cfg.sk_exists) {
-        openSreAddDeviceModal('dev');
-        _sreWatchDeviceModal(node, agentEngines, onDone);
-      } else {
-        _sreShowAkSkModal(function() {
-          openSreAddDeviceModal('dev');
-          _sreWatchDeviceModal(node, agentEngines, onDone);
-        });
-      }
-    }).catch(function() {
-      // 查询失败也允许手动输入（输入后与通用设置走同一存储，天然同步）
-      _sreShowAkSkModal(function() {
-        openSreAddDeviceModal('dev');
-        _sreWatchDeviceModal(node, agentEngines, onDone);
-      });
-    });
-  };
-  // 按钮 B：直接托管 → 凭据生成
-  modal.querySelector('#sreBtnHost').onclick = function() {
-    _sreCloseNoMachineModal();
-    openSreAddDeviceModal('cred');
-    _sreWatchDeviceModal(node, agentEngines, onDone);
-  };
-}
-
-// AK/SK 输入弹窗：提交走 /api/devstage/config（与通用设置同一存储，天然同步；引导链接到华为云控制台）
-function _sreShowAkSkModal(onSaved) {
-  _sreCloseAkSkModal();
-  var overlay = document.createElement('div');
-  overlay.id = 'sreAkSkOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:10002;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .25s ease';
-  overlay.onclick = function(e) { if (e.target === overlay) _sreCloseAkSkModal(); };
-
-  var modal = document.createElement('div');
-  modal.id = 'sreAkSkModal';
-  modal.style.cssText = 'width:420px;max-width:92vw;background:var(--c);border-radius:18px;box-shadow:0 12px 48px rgba(0,0,0,.18);transform:scale(.96);opacity:0;transition:transform .25s ease,opacity .25s ease;padding:28px';
-
-  modal.innerHTML =
-    '<div style="font-size:17px;font-weight:700;color:var(--t1);margin-bottom:4px">' + I18N.t('dashboard.sre_aksk_title') + '</div>' +
-    '<a href="https://console.huaweicloud.com/iam/?locale=zh-cn#/mine/accessKey" target="_blank" style="display:inline-block;font-size:12px;color:#0071e3;margin-bottom:18px">' + I18N.t('dashboard.sre_aksk_guide') + ' ↗</a>' +
-    '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Access Key</label>' +
-    '<input id="sreAkInput" type="password" autocomplete="new-password" placeholder="AK" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1);margin-bottom:12px;outline:none" onfocus="this.style.borderColor=\'#0071e3\'" onblur="this.style.borderColor=\'var(--b)\'">' +
-    '<label style="display:block;font-size:11px;font-weight:600;color:var(--t3);margin-bottom:5px;text-transform:uppercase;letter-spacing:.4px">Secret Key</label>' +
-    '<input id="sreSkInput" type="password" autocomplete="new-password" placeholder="SK" style="width:100%;box-sizing:border-box;padding:9px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t1);margin-bottom:20px;outline:none" onfocus="this.style.borderColor=\'#0071e3\'" onblur="this.style.borderColor=\'var(--b)\'">' +
-    '<button id="sreAkSkSubmit" style="width:100%;padding:10px;border:none;border-radius:10px;background:#0071e3;color:#fff;font-size:13px;font-weight:600;cursor:pointer;transition:background .2s" onmouseover="this.style.background=\'#0062cc\'" onmouseout="this.style.background=\'#0071e3\'">' + I18N.t('dashboard.sre_aksk_submit') + '</button>';
-
-  overlay.appendChild(modal);
-  document.body.appendChild(overlay);
-  setTimeout(function() {
-    overlay.style.opacity = '1';
-    modal.style.transform = 'scale(1)';
-    modal.style.opacity = '1';
-  }, 10);
-
-  modal.querySelector('#sreAkSkSubmit').onclick = function() {
-    var ak = (document.getElementById('sreAkInput') || {}).value || '';
-    var sk = (document.getElementById('sreSkInput') || {}).value || '';
-    if (!ak.trim() || !sk.trim()) { app.showToast && app.showToast(I18N.t('dashboard.sre_aksk_required')); return; }
-    // 与通用设置同一存储（/api/devstage/config → huawei_cloud_ak/sk），改这里通用设置同步生效
-    API.put('/devstage/config', { ak: ak.trim(), sk: sk.trim() }).then(function() {
-      _sreCloseAkSkModal();
-      app.showToast && app.showToast(I18N.t('dashboard.sre_aksk_saved'));
-      if (onSaved) onSaved();
-    }).catch(function(e) {
-      app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败');
-    });
-  };
-}
-
-// 弹窗关闭后重拉引擎数据（R1 对策：不依赖页面级旧缓存），再走一遍唤醒判断
-// 注意：worker 注册/心跳可能有几秒延迟（register→health 派生），因此关闭后轮询重试最多 ~30s；
-// 机器 tags 含 'all' 也算 SRE 可用（新机器默认 all，与 _filter_by_tags 同语义）。
-function _sreWatchDeviceModal(node, agentEngines, onDone) {
-  var attempts = 0;
-  var timer = setInterval(function() {
-    if (isSreAddDeviceModalOpen()) return; // 弹窗还开着：等用户操作完成
-    attempts++;
-    var cur = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-    var qs = cur && cur.fullName ? '?repo=' + encodeURIComponent(cur.fullName) : '';
-    API.get('/settings/agent-runtimes' + qs).then(function(d) {
-      var personal = ((d && d.runtimes) || []).filter(function(r) {
-        var tags = r.agent_tags || [];
-        return r.scope === 'user' && (tags.indexOf('sre') !== -1 || tags.indexOf('all') !== -1);
-      });
-      var onlineIds = personal.filter(function(r) { return r.health === 'online' || r.healthy; }).map(function(r) { return r.id; });
-      if (onlineIds.length > 0) {
-        clearInterval(timer);
-        node.enabled = true;
-        node.engine_runtime_ids = onlineIds.slice();
-        // 同步刷新本地 agentEngines 缓存，让徽章/引擎弹窗立即用上新数据（不只是 toast）
-        if (agentEngines) {
-          agentEngines.sre = personal.map(function(r) {
-            return { id: r.id, name: r.instance_name || r.name, device: r.worker_name || '',
-                     status: (r.health === 'online' || r.healthy) ? 'online' : 'offline',
-                     tags: r.agent_tags || [], scene_tags: r.scene_tags || ['default'],
-                     scope: 'user', scope_label: '个人', alias: r.alias || '' };
-          });
-        }
-        app.showToast && app.showToast(I18N.t('dashboard.sre_wake_selected', {count: onlineIds.length}));
-        if (onDone) onDone();
-      } else if (attempts >= 20) {
-        // ~30s 后放弃：保持置灰（用户可再次点击 ✓ 重新唤醒）
-        clearInterval(timer);
-      }
-    }).catch(function() { if (attempts >= 20) clearInterval(timer); });
-  }, 1500);
-  // 兜底：10 分钟后停止轮询（页面关闭/用户离开）
-  setTimeout(function() { clearInterval(timer); }, 600000);
-}
-
-// 详情页/编辑页离线检查（sre-personal-machine §3.6）：SRE 启用且引擎全灭/为空 → 点击徽章重新触发唤醒
-// 由场景详情渲染处调用：_sreCheckOffline(sceneNode, agentEngines)
-function _sreCheckOffline(sceneNode, agentEngines) {
-  if (!sceneNode || sceneNode.tag !== 'sre' || sceneNode.enabled === false) return false;
-  const ids = sceneNode.engine_runtime_ids || [];
-  if (!ids.length) return true; // 空 = 未绑定（Q2：SRE 空 ≠ 广播）
-  const engines = (agentEngines && agentEngines.sre) || [];
-  if (!engines.length) return true; // 无引擎数据（后端已只返回个人级）
-  const onlineMap = {};
-  engines.forEach(e => { if (e.status === 'online' || e.status === 'recently_lost') onlineMap[e.id] = true; });
-  return ids.every(id => !onlineMap[id]);
-}
-
-function _sreCloseNoMachineModal() {
-  var overlay = document.getElementById('sreNoMachineOverlay');
-  if (!overlay) return;
-  overlay.style.opacity = '0';
-  setTimeout(function() { var el = document.getElementById('sreNoMachineOverlay'); if (el) el.remove(); }, 250);
-}
-
-function _sreCloseAkSkModal() {
-  var overlay = document.getElementById('sreAkSkOverlay');
-  if (!overlay) return;
-  overlay.style.opacity = '0';
-  setTimeout(function() { var el = document.getElementById('sreAkSkOverlay'); if (el) el.remove(); }, 250);
-}
-
-// 编辑模式 SRE 卡片的「重新检测个人机器」按钮（sre-personal-machine §3.6）
-// 点击后重拉引擎数据：操作真实编辑上下文（window._sreEditCtx），托管成功即时写入
-// editNodes 并重渲染——不再是"提示用户自己去选"，与新建场景的唤醒逻辑同语义。
-window._sreRetryWake = function() {
-  var cur = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
-  var qs = cur && cur.fullName ? '?repo=' + encodeURIComponent(cur.fullName) : '';
-  API.get('/settings/agent-runtimes' + qs).then(function(d) {
-    var personal = ((d && d.runtimes) || []).filter(function(r) {
-      var tags = r.agent_tags || [];
-      return r.scope === 'user' && (tags.indexOf('sre') !== -1 || tags.indexOf('all') !== -1);
-    });
-    var online = personal.filter(function(r) { return r.health === 'online' || r.healthy; });
-    var ctx = window._sreEditCtx || {};
-    var node = ctx.node;
-    var agentEngines = ctx.agentEngines;
-    // 同步刷新编辑上下文里的引擎缓存（徽章/引擎弹窗立即用上新数据）
-    if (agentEngines) {
-      agentEngines.sre = personal.map(function(r) {
-        return { id: r.id, name: r.instance_name || r.name, device: r.worker_name || '',
-                 status: (r.health === 'online' || r.healthy) ? 'online' : 'offline',
-                 tags: r.agent_tags || [], scene_tags: r.scene_tags || ['default'],
-                 scope: 'user', scope_label: '个人', alias: r.alias || '' };
-      });
-    }
-    if (online.length > 0 && node) {
-      // 有在线个人机器：自动全选写入真实 node（等价于新建场景的唤醒），用户保存时落库
-      node.enabled = true;
-      node.engine_runtime_ids = online.map(function(r) { return r.id; });
-      app.showToast && app.showToast(I18N.t('dashboard.sre_wake_selected', {count: online.length}) + '，' + (I18N.t('dashboard.sre_save_to_apply') || '保存场景后生效'));
-      if (ctx.rerender) ctx.rerender();
-    } else {
-      // 无在线机器：弹引导弹窗；托管 watch 走真实上下文（ctx.rerender 由 onDone 触发）
-      _sreShowNoMachineModal(
-        node || { enabled: false, engine_runtime_ids: [] },
-        agentEngines || { sre: personal.map(function(r) { return { id: r.id, scope: 'user', status: 'offline' }; }) },
-        online.length > 0,
-        ctx.rerender || null
-      );
-    }
-  }).catch(function() {
-    app.showToast && app.showToast('引擎数据获取失败，请稍后重试');
-  });
 };
