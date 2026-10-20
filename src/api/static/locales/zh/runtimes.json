@@ -8,7 +8,11 @@
     "online": "在线",
     "recently_lost": "刚失联",
     "offline": "离线",
-    "about_to_gc": "待回收"
+    "about_to_gc": "待回收",
+    "reset_confirm": "确认重置该引擎的健康分？重置后健康分将基于重置点之后的任务数据重新统计。",
+    "reset_success": "健康分已重置",
+    "reset_failed": "重置健康分失败",
+    "reset_global_denied": "全局引擎不支持重置健康分"
   },
   "tab": {
     "engines": "Engines 引擎",
@@ -30,7 +34,8 @@
     "generate": "生成",
     "copy_one_cmd": "📋 复制一键命令",
     "copy_win_cmd": "📋 复制 Windows 命令",
-    "copy_token": "📋 复制 token"
+    "copy_token": "📋 复制 token",
+    "reset_health": "重置健康分"
   },
   "label": {
     "local_direct": "本机直连",
