@@ -1254,6 +1254,15 @@ function _renderTaskActionsInline(t) {
   if (_status !== 'completed' && _status !== 'cancelled') {
     html += `<button class="tsk-btn tsk-btn-primary" onclick="confirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600">✓ ${I18N.t('tasks.confirm_done')}</button>`;
   }
+  // Issue #393: 仓库 admin 专用「管理员确认完成」终审入口——
+  // 角色数据源 /repos/member 缓存（role==='Admin'）；非 admin 置灰 + 提示。
+  // 服务端 403 为最终权威，前端置灰仅体验层。
+  if (_status !== 'completed' && _status !== 'cancelled') {
+    const _isAdmin = _isRepoAdmin393(t.repo_key);
+    html += _isAdmin
+      ? `<button class="tsk-btn tsk-btn-primary" onclick="adminConfirmTaskDone(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600;background:#34c759">🛡 ${I18N.t('tasks.admin_confirm_done')}</button>`
+      : `<button class="tsk-btn tsk-btn-ghost" disabled title="${I18N.t('tasks.admin_only_hint')}" style="padding:8px 14px;border-radius:10px;font-size:12px;font-weight:600;opacity:.45;cursor:not-allowed">🛡 ${I18N.t('tasks.admin_confirm_done')}</button>`;
+  }
   // 取消任务
   if (_status !== 'completed' && _status !== 'cancelled') {
     html += `<button class="tsk-btn tsk-btn-ghost" onclick="cancelTask(${t.id},event)" style="padding:8px 14px;border-radius:10px;font-size:12px;color:#d32f2f">✕ ${I18N.t('tasks.cancel_task')}</button>`;
@@ -1264,6 +1273,37 @@ function _renderTaskActionsInline(t) {
   }
   return html;
 }
+
+// Issue #393: 从 /repos/member 的 localStorage 缓存判断当前用户在 repo_key 的角色。
+// repo_key 形如 gitcode:owner/repo；缓存条目 repo_key/full_name 均匹配（前端 URL 无前缀）。
+function _isRepoAdmin393(repoKey) {
+  try {
+    const cached = JSON.parse(localStorage.getItem('repo_member_cache') || 'null');
+    const repos = (cached && cached.repos) || [];
+    const rk = String(repoKey || '');
+    const bare = rk.replace(/^(github|gitcode):/, '');
+    const hit = repos.find(function(r) {
+      return r.repo_key === rk || r.repo_key === bare || r.full_name === bare;
+    });
+    return !!(hit && (hit.role === 'Admin' || hit.can_host));
+  } catch (e) { return false; }
+}
+
+window.adminConfirmTaskDone = function(taskId, event) {
+  _grapeConfirm({
+    title: I18N.t('tasks.admin_confirm_done'),
+    message: I18N.t('tasks.admin_confirm_done_message'),
+    confirmText: I18N.t('tasks.admin_confirm_done'),
+    onConfirm: function() {
+      _withTaskLoading(
+        taskId,
+        function() { return API.post('/issues/' + taskId + '/admin-confirm-done'); },
+        I18N.t('tasks.task_done_toast'),
+        function(e) { return I18N.t('tasks.operation_failed', {msg: (e.detail?.message || e.message)}); }
+      );
+    }
+  }, event);
+};
 
 function _renderTaskActionsBar(t) {
   // 已废弃——按钮合并到 _detailHtml 底部行

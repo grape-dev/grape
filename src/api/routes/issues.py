@@ -676,6 +676,125 @@ async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict 
             "issue_closed": _issue_closed}
 
 
+def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
+    """Issue #393: admin 确认完成时，同步关联流水线到终态。
+
+    - agent_tasks 中该需求未终态（queued/dispatched/running）的任务 → cancelled
+    - events 中该需求 running 的事件 → completed（管理员终审视为正常收口，非失败）
+
+    与 cancel_issue 不同：不做运行时 kill（管理员确认发生在流水线已收尾的场景，
+    残留 running 属于脏状态，直接收敛，避免误杀仍在写回的引擎）。
+    返回收敛的任务数。
+    """
+    from src.session_manager import db, db_lock
+    _issue_id = f"#{issue_id_num}" if issue_id_num else ""
+    if not _issue_id:
+        return 0
+    _synced = 0
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "UPDATE agent_tasks SET status='cancelled', completed_at=COALESCE(completed_at, datetime('now')) "
+                "WHERE repo_key=? AND issue_id=? AND status IN ('queued','dispatched','running')",
+                (repo_key, _issue_id))
+            _synced += c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        except Exception as _e:
+            log.warning(f"admin-confirm: sync agent_tasks failed: {_e}")
+        try:
+            c.execute(
+                "UPDATE events SET status='completed' "
+                "WHERE repo_key=? AND issue_id=? AND status='running'",
+                (repo_key, _issue_id))
+        except Exception as _e:
+            log.warning(f"admin-confirm: sync events failed: {_e}")
+        db.commit()
+    return _synced
+
+
+@router.post("/{issue_id}/admin-confirm-done", operation_id="issues_admin_confirm_done",
+             summary="Admin confirms issue done (final review)",
+             description="Repository admin confirms the requirement is done: validates the caller's real repo role "
+                         "(owner/admin via VCS permission API, cf. #377), then status -> completed, stage -> done, "
+                         "syncs related pipeline tasks to terminal state, writes an audit log, and closes the VCS "
+                         "issue (degraded, non-blocking). Idempotent in terminal state; non-admin -> 403.")
+async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """Issue #393: 仓库 admin 成员确认需求完成（人工终审）。
+
+    与开发者 confirm-done 的区别：
+    - 不限归属（admin 可确认仓库内任何需求，含他人创建），但强制**仓库真实角色校验**；
+    - 审计留痕（issue_admin_confirmed：操作人/时间/目标需求）；
+    - 同步关联流水线任务到终态。
+
+    幂等：completed → already_done:true（不重复关 VCS、不重复审计）；cancelled → 400。
+    """
+    from src.api.session_store import set_issue_stage
+    from src.auth.repo_roles import get_repo_admin_identity
+    from src.session_manager import db, db_lock
+
+    # 1) 定位需求（admin 可跨归属确认，仅要求仓库访问权）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?", (issue_id,))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    _repo_key, _issue_num, _status = row[0], row[1], row[2]
+
+    # 2) 仓库访问校验（managed_repos 归属，与其他 repo 维度端点一致）
+    from src.api.deps import check_repo_access
+    check_repo_access(user, _repo_key)
+
+    # 3) 仓库真实角色校验（fail-closed：未绑定/查询失败均视为非 admin）
+    _admin_ident = get_repo_admin_identity(user, _repo_key)
+    if not _admin_ident:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": "需要仓库管理员权限：仅仓库 Owner/Admin 成员可确认需求完成"})
+
+    # 4) 状态机
+    if _status == 'completed' or _status == 'done':
+        return {"ok": True, "already_done": True, "confirmed_by": "admin",
+                "issue_closed": {"gitcode": "skipped", "github": "skipped"}}
+    if _status == 'cancelled':
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "已取消需求不可确认完成"})
+
+    # 5) 终态落库 + 流水线收敛（同一 db_lock 串行，防并发双写）
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE issue SET status='completed', completed_reason='admin_confirmed', "
+            "completed_at=datetime('now') WHERE id=?", (issue_id,))
+        if _issue_num:
+            set_issue_stage(_repo_key, f"#{_issue_num}", "done", "admin")
+        db.commit()
+    _synced_tasks = _sync_issue_pipeline_terminal(_repo_key, _issue_num)
+
+    # 6) 审计留痕（操作人/时间/目标需求；log_audit 自带 created_at + operator_id）
+    try:
+        from src.auth.audit import log_audit
+        log_audit("issue_admin_confirmed", operator_id=user.get("id", 0) or 0,
+                  detail={
+                      "repo_key": _repo_key,
+                      "issue_id": issue_id,
+                      "issue_number": _issue_num,
+                      "username": _admin_ident.get("username", ""),
+                      "role_source": _admin_ident.get("source", ""),
+                      "synced_tasks": _synced_tasks,
+                  })
+    except Exception as _e:
+        log.warning(f"admin-confirm: audit log failed (issue={issue_id}): {_e}")
+
+    log.info(f"Issue #{issue_id} admin-confirmed done by {_admin_ident.get('username', '')} "
+             f"(repo={_repo_key}, synced_tasks={_synced_tasks})")
+
+    # 7) VCS Issue 同步关闭（降级不阻断，与 confirm-done 同策略）
+    _issue_closed = _close_vcs_issues(_repo_key, _issue_num, user)
+    return {"ok": True, "issue_id": issue_id, "status": "completed", "stage": "done",
+            "confirmed_by": "admin", "synced_tasks": _synced_tasks,
+            "issue_closed": _issue_closed}
+
+
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
