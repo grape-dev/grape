@@ -17,7 +17,10 @@
     "events": "Events",
     "repos": "Repos",
     "tasks": "Issues Center",
-    "observability": "Device Monitor",
+    "observability": "Observability",
+    "obs_overview": "Overview",
+    "obs_devices": "Devices & Engines",
+    "obs_inspect": "Tasks & Logs",
     "event_detail": "Event Detail",
     "skill_detail": "Skill Detail",
     "sub_skill_detail": "Sub Skill Detail",
@@ -27,7 +30,8 @@
     "scene_market": "Scene Market",
     "skill_market": "Skill Market",
     "organizations": "Organizations",
-    "autopilot": "Automation"
+    "autopilot": "Automation",
+    "obs_cockpit": "Operations Cockpit"
   },
   "sidebar": {
     "workspace": "Workspace",
@@ -36,6 +40,7 @@
     "knowledge": "Knowledge",
     "account": "User Settings",
     "device_center": "Device Center",
+    "observability": "Observability",
     "settings": "Settings",
     "toggle": "Collapse/Expand Sidebar",
     "organizations": "Organization"

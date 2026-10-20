@@ -1455,7 +1455,8 @@ function loadAgentTypes() {
       _loadRuntimesData();
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
-      if (typeof renderObservability === 'function') renderObservability();
+      // param = 分区（overview/devices/inspect），由侧栏子项写入 URL，可深链
+      if (typeof renderObservability === 'function') renderObservability(param);
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.current_project');
       goToRepos();

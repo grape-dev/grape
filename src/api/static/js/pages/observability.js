@@ -1,8 +1,23 @@
-// ====== 系统监控（Settings ▸ 系统监控）======
-// 仿 multica Dashboard 布局：4 Tab（概览/任务/Runtime/数据库）
-// 每个 Tab 顶部 KPI 卡片行（grid 4 列），下方详情表格/图
+// ====== 可观测性（一级分类，与「设备中心」平级）======
+// 侧栏 3 个分区：总览 / 设备与引擎 / 任务与日志（见 observability-redesign-design.md §5.1）
+// 分区由侧栏选中并写入 URL（#observability/<section>），页面内不再重复分区 Tab；
+// 每个分区内部保留各自的子 Tab。原「设备监控」的内容归入「设备与引擎」「任务与日志」。
 // 数据来源：/api/dashboard/ops/overview + /health/realtime + /metrics
 
+// 分区 → 子 Tab 映射（总览暂无子 Tab，slice 2 填 KPI/图表）
+// 异常任务是任务列表的一个视图（运行超时 + 失败），归「任务与日志」而不是设备分区
+// 可观测性合并为一页（运行驾驶舱）后的**页内三个视图**：顺序即大 Tab 的顺序。
+// 注意：`_OBS_SECTIONS` 仍是"视图注册表"（每个视图自己的子 Tab 定义），
+// 侧栏不再按它分区，改由 `_OBS_VIEWS` 渲染页内大 Tab。
+const _OBS_VIEWS = ['overview', 'devices', 'inspect'];
+
+const _OBS_SECTIONS = {
+  overview: { subs: [] },
+  devices:  { subs: ['overview'] },
+  inspect:  { subs: ['tasks', 'events', 'errorlogs'] },   // 异常任务并入任务 Tab 的过滤 chip（2026-10-18 拍板）
+};
+
+let _obsSection = 'overview';
 let _obsTab = 'overview';
 let _obsTimer = null;
 let _obsData = { ops: null, realtime: null, metrics: null };
@@ -17,30 +32,938 @@ let _runtimePageSize = 10;     // Runtime 每页条数
 let _timelinePage = 0;         // 任务列表当前页（0 基）
 let _timelinePageSize = 10;    // 任务列表每页条数
 
-function renderObservability() {
+// 页内大 Tab（2026-10-18：三页并一，明显/大一点，不用老的 .stabs 小字条）
+function _obsBigTabsHtml() {
+  const ic = { overview: '📊', devices: '💻', inspect: '▶' };
+  return `<div style="display:flex;gap:10px;padding:14px 20px;border-bottom:1px solid var(--b)">` +
+    _OBS_VIEWS.map(v => {
+      const on = (_obsSection === v);
+      return `<a onclick="switchObsView('${v}')" style="flex:1;cursor:pointer;text-align:center;padding:12px 10px;border-radius:10px;`
+        + `border:1px solid ${on ? 'var(--a)' : 'var(--b)'};background:${on ? 'var(--a)' : 'transparent'};`
+        + `color:${on ? '#fff' : 'inherit'};transition:opacity .15s" `
+        + `onmouseover="this.style.opacity=0.88" onmouseout="this.style.opacity=1">`
+        + `<div style="font-size:20px;line-height:1.1">${ic[v] || '•'}</div>`
+        + `<div style="font-size:15px;font-weight:600;margin-top:5px">${I18N.t('observability.section.' + v)}</div>`
+        + `<div style="font-size:11px;opacity:.75;margin-top:3px">${I18N.t('observability.view_hint.' + v)}</div>`
+        + `</a>`;
+    }).join('') + `</div>`;
+}
+
+function switchObsView(v) {
+  // 复用 renderObservability 的"换分区"逻辑（重置子 Tab/分页/骨架），保持深链与轮询行为不变
+  if (v === _obsSection) return;
+  renderObservability(v);
+}
+
+function renderObservability(section) {
   const pc = document.getElementById('pageContent');
   if (!pc) return;
+  const _sec = (section && _OBS_SECTIONS[section]) ? section : _obsSection;
+  if (_sec !== _obsSection) {
+    // 换分区：重置到该分区默认子 Tab 与分页，强制重建骨架
+    _obsSection = _sec;
+    _obsTab = (_OBS_SECTIONS[_sec].subs[0] || '');
+    _obsRendered = false;
+    _obsRenderedTab = null;
+    _workerPage = 0; _runtimePage = 0; _timelinePage = 0;
+  }
+  const _cfg = _OBS_SECTIONS[_obsSection];
+  // 只有一个子视图的分区（设备与引擎）不再画单条 Tab —— 分区本身就是该视图
+  const _showTabs = _cfg.subs.length > 1;
+  const _tabsHtml = _showTabs ? _cfg.subs.map(t =>
+    `<a class="${_obsTab === t ? 'ac' : ''}" onclick="switchObsTab('${t}',event)">${I18N.t('observability.tab.' + t)}</a>`
+  ).join('') : '';
   pc.innerHTML = `
     <div class="cd" style="padding:0;overflow:hidden">
       <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 20px;border-bottom:1px solid var(--b)">
-        <h2 style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px">${I18N.t('observability.title')}</h2>
-        <div style="display:flex;align-items:center;gap:10px">
+        <h2 style="font-size:14px;font-weight:600;display:flex;align-items:center;gap:7px">${I18N.t('observability.title')}
+          <span class="ts t3" style="font-weight:400">/ ${I18N.t('observability.section.' + _obsSection)}</span>
+        </h2>
+        ${_obsSection !== 'overview' ? `<div style="display:flex;align-items:center;gap:10px">
           <span class="ts t3" id="obsLastUpdate">-</span>
           <button class="bt bt-o bt-s" onclick="refreshObs()">${I18N.t('observability.refresh')}</button>
           <label class="ts t3" style="display:flex;align-items:center;gap:4px"><input type="checkbox" id="obsAuto" onchange="toggleObsAuto()" checked style="margin:0">${I18N.t('observability.auto_refresh')}</label>
-        </div>
+        </div>` : `<div style="display:flex;align-items:center;gap:10px">
+          <span class="ts t3" id="obsLastUpdate">-</span>
+          <span class="stabs" id="obsOvBar" style="border:none;padding:0">${['1h', '6h', '24h', '7d'].map(r =>
+            `<a class="${_obsOvRange === r ? 'ac' : ''}" onclick="switchObsRange('${r}',event)">${r}</a>`).join('')}</span>
+          <button class="bt bt-o bt-s" onclick="_obsOvSkeleton();loadObsOverview()">${I18N.t('observability.refresh')}</button>
+        </div>`}
       </div>
-      <div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">
-        <a class="${_obsTab==='overview'?'ac':''}" onclick="switchObsTab('overview',event)">${I18N.t('observability.tab.overview')}</a>
-        <a class="${_obsTab==='tasks'?'ac':''}" onclick="switchObsTab('tasks',event)">${I18N.t('observability.tab.tasks')}</a>
-        <a class="${_obsTab==='anomaly'?'ac':''}" onclick="switchObsTab('anomaly',event)">${I18N.t('observability.tab.anomaly')}</a>
-        <a class="${_obsTab==='errorlogs'?'ac':''}" onclick="switchObsTab('errorlogs',event)">${I18N.t('observability.tab.errorlogs')}</a>
-      </div>
+      ${_obsBigTabsHtml()}
+      ${_showTabs ? `<div class="stabs" style="padding:0 20px;border-bottom:1px solid var(--b)">${_tabsHtml}</div>` : ''}
       <div id="obsContent" style="padding:20px"><div class="loading">${I18N.t('observability.loading')}</div></div>
+      ${_obsSection === 'devices' ? `<div style="padding:0 20px 20px">
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;border-top:1px solid var(--b);padding-top:14px">
+          <div class="ts t3">${I18N.t('observability.res.title')}</div>
+          <div style="display:flex;align-items:center;gap:10px">
+            <select id="obsResRt" class="ip ip-s" style="max-width:220px" onchange="obsResPick(this.value)"></select>
+            <span class="stabs" id="obsResBar" style="border:none;padding:0">${['1h', '6h', '24h', '7d'].map(r =>
+              `<a class="${_obsResRange === r ? 'ac' : ''}" onclick="switchObsResRange('${r}',event)">${r}</a>`).join('')}</span>
+          </div>
+        </div>
+        <div id="obsResChart" style="height:200px;margin-top:6px"></div>
+      </div>` : ''}
     </div>
   `;
+  if (_obsSection === 'overview') {
+    // 总览：KPI + 图表，独立取数（不参与设备分区的 10s 轮询）
+    stopObsAuto();
+    _obsOvSkeleton();
+    loadObsOverview();
+    return;
+  }
   refreshObs();
   startObsAuto();
+  if (_obsSection === 'devices') {
+    // 资源曲线独立取数（60s 窗口的数据，不跟着 10s 刷新重绘，避免图表闪烁）
+    loadObsRuntimeHistory();
+  }
+}
+
+// ===== 设备分区：资源趋势（采样表 → 折线图）=====
+let _obsResRange = '6h';
+let _obsResRt = '';        // '' = 全部（平均）
+let _obsResData = null;
+
+function switchObsResRange(r, ev) {
+  _obsResRange = r;
+  document.querySelectorAll('#obsResBar a').forEach(a => a.classList.remove('ac'));
+  if (ev && ev.target) ev.target.classList.add('ac');
+  loadObsRuntimeHistory();
+}
+
+function obsResPick(rtId) {
+  _obsResRt = String(rtId || '');
+  _renderObsResChart();
+}
+
+function loadObsRuntimeHistory() {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const qp = ['range=' + encodeURIComponent(_obsResRange)];
+  if (repo && repo.fullName) qp.push('repo=' + encodeURIComponent(repo.fullName));
+  API.get('/obs/runtimes/history?' + qp.join('&')).then(d => {
+    if (window._currentView !== 'observability' || _obsSection !== 'devices') return;
+    _obsResData = d || null;
+    _fillObsResSelect();
+    _renderObsResChart();
+  }).catch(e => {
+    const el = document.getElementById('obsResChart');
+    if (el) el.innerHTML = '<div class="ts t3" style="padding:14px 0">' + I18N.t('observability.load_failed', { msg: (e && e.message) || e }) + '</div>';
+  });
+}
+
+function _fillObsResSelect() {
+  const sel = document.getElementById('obsResRt');
+  if (!sel) return;
+  const d = _obsResData || {};
+  const rts = d.runtimes || [];
+  const opts = ['<option value="">' + I18N.t('observability.res.all') + '</option>']
+    .concat(rts.map(r => `<option value="${r.id}">${(r.device_name || r.name || ('#' + r.id))}</option>`));
+  sel.innerHTML = opts.join('');
+  sel.value = rts.some(r => String(r.id) === String(_obsResRt)) ? _obsResRt : '';
+  if (!rts.some(r => String(r.id) === String(_obsResRt))) _obsResRt = '';
+}
+
+function _obsResSeries(key) {
+  // 全部 → 各引擎求平均（忽略空桶）；指定引擎 → 取该引擎
+  const d = _obsResData || {};
+  const series = d.series || {};
+  const ids = Object.keys(series);
+  if (!ids.length) return [];
+  if (_obsResRt) return (series[_obsResRt] || {})[key] || [];
+  const n = ((series[ids[0]] || {})[key] || []).length;
+  const out = new Array(n).fill(null);
+  for (let i = 0; i < n; i++) {
+    let sum = 0, cnt = 0;
+    for (const id of ids) {
+      const v = ((series[id] || {})[key] || [])[i];
+      if (v !== null && v !== undefined) { sum += Number(v); cnt++; }
+    }
+    out[i] = cnt ? Math.round(sum / cnt * 10) / 10 : null;
+  }
+  return out;
+}
+
+function _renderObsResChart() {
+  const d = _obsResData || {};
+  const labels = (d.buckets || []).map(iso => {
+    const dt = new Date(iso);
+    if (isNaN(dt.getTime())) return '';
+    const hm = String(dt.getHours()).padStart(2, '0') + ':' + String(dt.getMinutes()).padStart(2, '0');
+    return _obsResRange === '7d' ? (dt.getMonth() + 1) + '/' + dt.getDate() + ' ' + hm : hm;
+  });
+  const has = _obsResSeries('cpu').some(v => v !== null && v !== undefined);
+  if (!has) {
+    const el = document.getElementById('obsResChart');
+    if (el) el.innerHTML = '<div class="ts t3" style="padding:20px 0;text-align:center">' + I18N.t('observability.res.empty') + '</div>';
+    return;
+  }
+  const mk = (name, key, color) => ({
+    name: name, type: 'line', smooth: true, showSymbol: false, connectNulls: true,
+    itemStyle: { color: color }, lineStyle: { width: 2 }, data: _obsResSeries(key),
+  });
+  _obsChart('obsResChart', {
+    tooltip: { trigger: 'axis' },
+    legend: { top: 0, right: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } },
+    grid: { left: 40, right: 16, top: 26, bottom: 22 },
+    xAxis: { type: 'category', boundaryGap: false, data: labels, axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'value', min: 0, max: 100, axisLabel: { fontSize: 10, formatter: '{value}%' } },
+    series: [
+      mk(I18N.t('observability.res.cpu'), 'cpu', '#4a7fd1'),
+      mk(I18N.t('observability.res.mem'), 'mem', '#22a06b'),
+      mk(I18N.t('observability.res.disk'), 'disk', '#8b8b8b'),
+    ],
+  });
+}
+
+// ===== 总览分区：真实数据（/api/obs/overview）=====
+// 图表用 vendored ECharts（static/vendor/echarts.min.js，不走 CDN）；
+// 库缺失时降级为只显示 KPI 数值，不留白屏。
+let _obsOvRange = '24h';
+let _obsOvCharts = {};
+
+function _disposeObsCharts() {
+  Object.keys(_obsOvCharts).forEach(k => {
+    try { _obsOvCharts[k] && _obsOvCharts[k].dispose(); } catch (e) { /* ignore */ }
+  });
+  _obsOvCharts = {};
+}
+
+function _obsOvSkeleton() {
+  const box = document.getElementById('obsContent');
+  if (!box) return;
+  _disposeObsCharts();
+  if (!_obsOvBound) {
+    _obsOvBound = true;
+    window.addEventListener('resize', () => {
+      Object.keys(_obsOvCharts).forEach(k => {
+        try { _obsOvCharts[k] && _obsOvCharts[k].resize(); } catch (e) { /* ignore */ }
+      });
+    });
+  }
+  // SLO 健康结论卡片容器（P2-1）：**总览分区用 _renderObsOverview，不是 renderOverview**
+  // （后者是「设备与引擎」用的）——所以容器必须挂在这里，而不是那里面（实测：挂错了位置 → 总览页空）
+  box.innerHTML = `<div id="obsSloCard"></div>`
+    + `<div id="obsOvBody"><div class="loading">${I18N.t('observability.loading')}</div></div>`;
+}
+let _obsOvBound = false;
+
+function switchObsRange(r, ev) {
+  _obsOvRange = r;
+  document.querySelectorAll('#obsOvBar a').forEach(a => a.classList.remove('ac'));
+  if (ev && ev.target) ev.target.classList.add('ac');
+  _obsOvSkeleton();
+  loadObsOverview();
+}
+
+function loadObsOverview() {
+  const body = document.getElementById('obsOvBody');
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const qp = [];
+  if (repo && repo.fullName) qp.push('repo=' + encodeURIComponent(repo.fullName));
+  qp.push('range=' + encodeURIComponent(_obsOvRange));
+  const qs = qp.join('&');
+  // 总览数据与告警横幅并行取（横幅属"活数据"，与 KPI 同批刷新；趋势图不重绘）
+  Promise.all([
+    API.get('/obs/overview?' + qs).catch(e => { console.warn('obs/overview failed:', e); return null; }),
+    API.get('/obs/alerts?' + qs).catch(e => { console.warn('obs/alerts failed:', e); return null; }),
+  ]).then(([d, a]) => {
+    if (window._currentView !== 'observability' || _obsSection !== 'overview') return;  // 已切走
+    _obsAlerts = a || null;
+    _renderObsOverview(d || {}, a || null);
+    _fillObsSloCard();     // 用缓存回填（shell 重建后立刻有内容）
+    loadObsSlo();          // 缓存过期（60s）才真的打接口
+    const lu = document.getElementById('obsLastUpdate');
+    if (lu) lu.textContent = new Date().toLocaleTimeString('zh-CN');
+  }).catch(e => {
+    if (body) body.innerHTML = '<div class="error">' + I18N.t('observability.load_failed', { msg: (e && e.message) || e }) + '</div>';
+  });
+}
+
+// ===== 告警横幅 + 告警面板（告警不进侧栏：横幅进总览，面板从横幅进）=====
+let _obsAlerts = null;
+let _obsAlertPanelView = 'events';
+
+function _shortRepo(repoKey) {
+  const s = String(repoKey || '');
+  const i = s.indexOf(':');
+  return i >= 0 ? s.slice(i + 1) : s;
+}
+
+function _obsMetricVal(ev) {
+  const m = String((ev && ev.metric) || '');
+  const v = (ev && ev.value);
+  if (v === null || v === undefined) return '—';
+  // 数据缺失（P1-3）：value 是"多少秒没有数据"，直接说人话
+  if (m.indexOf('gap_') === 0) {
+    const s = Number(v);
+    if (!isFinite(s)) return '—';
+    if (s < 3600) return Math.round(s / 60) + I18N.t('observability.dur_min');
+    if (s < 86400) return (Math.round(s / 360) / 10) + I18N.t('observability.dur_hour');
+    return (Math.round(s / 8640) / 10) + I18N.t('observability.dur_day');
+  }
+  if (m.indexOf('_mutation') >= 0) {
+    const n2 = Math.round(Number(v) * 1000) / 10;
+    return (n2 > 0 ? '+' : '') + n2 + 'pp';
+  }
+  if (m.indexOf('rate') >= 0 || m.indexOf('usage') >= 0) return Math.round(Number(v) * 1000) / 10 + '%';
+  return Number(v).toLocaleString();
+}
+
+// 事件来源标签（§6.9 统一事件视图：monitor / gap / mutation）
+function _obsSourceLabel(ev) {
+  const s = String((ev && ev.source) || 'monitor');
+  return I18N.t('observability.source.' + s, {}) || s;
+}
+
+// 无仓库维度的事件（设备静默）用 dim_key 里的设备号做"对象"列
+function _obsEventTarget(ev) {
+  const dim = String((ev && ev.dim_key) || '');
+  if (dim.indexOf('runtime:') === 0) return I18N.t('observability.device_short') + dim.slice(8);
+  return '';
+}
+
+function _obsBannerHtml(a) {
+  const s = (a && a.summary) || {};
+  const n = s.firing || 0;
+  if (!n) {
+    return `<div class="cd" style="padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:8px;border-left:3px solid #22a06b">
+      <span style="color:#22a06b;font-weight:600">✔</span>
+      <span class="ts t2">${I18N.t('observability.banner.ok')}</span></div>`;
+  }
+  const crit = s.critical || 0;
+  const color = crit ? '#d64545' : '#e0a02a';
+  const lt = s.latest || {};
+  const detail = lt.rule_name
+    ? `${I18N.t('observability.rule.' + lt.rule_name, {})} · ${_shortRepo(lt.repo_key)} · ${_obsMetricVal(lt)}`
+    : '';
+  return `<div class="cd" style="padding:10px 14px;margin-bottom:12px;display:flex;align-items:center;gap:10px;border-left:3px solid ${color}">
+    <span style="color:${color};font-weight:600;white-space:nowrap">⚠ ${I18N.t('observability.banner.firing', { n: n })}</span>
+    <span class="ts t2" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${detail}</span>
+    <button class="bt bt-o bt-s" style="margin-left:auto;white-space:nowrap;padding:4px 12px" onclick="openObsAlertPanel()">${I18N.t('observability.banner.view')}</button>
+  </div>`;
+}
+
+function openObsAlertPanel(view) {
+  const old = document.getElementById('obsAlertModal');
+  if (old) old.remove();
+  _obsAlertPanelView = view || 'events';
+  const modal = document.createElement('div');
+  modal.id = 'obsAlertModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = '<div class="cd" style="width:820px;max-width:94vw;max-height:82vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
+    '<h3 style="font-size:14px;font-weight:600">' + I18N.t('observability.alert_panel') + '</h3>' +
+    '<div style="display:flex;align-items:center;gap:10px">' +
+    '<span id="obsAlertNotifyResult" class="ts t3"></span>' +
+    '<button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="obsAlertTestNotify()">' + I18N.t('observability.test_notify') + '</button>' +
+    '<button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="document.getElementById(\'obsAlertModal\').remove()">' + I18N.t('observability.close') + '</button>' +
+    '</div>' +
+    '</div>' +
+    '<div class="stabs" style="padding:0 18px;border-bottom:1px solid var(--b)">' +
+      ['events', 'rules', 'silences'].map(v => '<a class="' + (_obsAlertPanelView === v ? 'ac' : '') + '" onclick="switchObsAlertPanel(\'' + v + '\',event)">' + I18N.t('observability.alert_tab.' + v) + '</a>').join('') +
+    '</div>' +
+    '<div id="obsAlertPanelBody" style="overflow-y:auto;flex:1;padding:14px 18px"></div>' +
+    '</div>';
+  document.body.appendChild(modal);
+  _renderObsAlertPanel();
+  refreshObsAlerts();
+}
+
+function switchObsAlertPanel(view, ev) {
+  _obsAlertPanelView = view;
+  document.querySelectorAll('#obsAlertModal .stabs a').forEach(a => a.classList.remove('ac'));
+  if (ev && ev.target) ev.target.classList.add('ac');
+  _renderObsAlertPanel();
+}
+
+function refreshObsAlerts() {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const qp = [];
+  if (repo && repo.fullName) qp.push('repo=' + encodeURIComponent(repo.fullName));
+  API.get('/obs/alerts' + (qp.length ? '?' + qp.join('&') : '')).then(a => {
+    _obsAlerts = a || null;
+    _renderObsAlertPanel();
+    return null;
+  }).catch(() => null);
+}
+
+function _obsAlertTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? String(iso) : d.toLocaleString('zh-CN', { hour12: false });
+}
+
+// 级别单元格：只读展示级别（P1-1：策略定义在管理台，用户面只看级别）
+// 规则行额外标注"聚合/升级"标记，让用户理解为什么会收到合并/升级通知
+function _obsSeverityCell(r) {
+  const sev = String((r && r.severity) || 'warning');
+  const label = I18N.t('observability.sev.' + sev, {}) || sev;
+  const tags = [];
+  if (r && r.aggregate_mode && r.aggregate_mode !== 'none') tags.push(I18N.t('observability.tag_aggregate'));
+  if (r && r.escalate_json) tags.push(I18N.t('observability.tag_escalate'));
+  if (r && r.escalated_at) tags.push(I18N.t('observability.tag_escalated'));
+  if (r && Number(r.notify_deferred) === 1) tags.push(I18N.t('observability.tag_deferred'));
+  const mark = tags.filter(Boolean).map(t => '<span class="ts t3">·' + t + '</span>').join(' ');
+  return label + (mark ? ' ' + mark : '');
+}
+
+// ===== 统一事件视图（P1-4 / §6.9）：多来源事件流 + 下钻 =====
+let _obsEventsData = null;
+let _obsEventSource = '';
+let _obsEventState = '';
+let _obsEventQ = '';            // 关键字（服务端检索，S1）
+let _obsEventCursor = null;     // 游标分页（S1 next_cursor）
+let _obsEventMore = false;
+let _obsEventNew = [];          // 自动刷新攒下的"新事件"（等用户点开才前插，不打断阅读）
+let _obsEventLastSoft = 0;      // 上次前插检查时间（30s 一次，页面 10s 轮询不重复打）
+// 异常任务：2026-10-18 起改为「任务 Tab 里的按钮 + 弹窗」（不再内联替换 Tab 内容）
+
+function _durHuman(sec) {
+  const s = Number(sec);
+  if (!isFinite(s) || s <= 0) return '—';
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.round(s / 60) + I18N.t('observability.dur_unit_min');
+  if (s < 86400) return (Math.round(s / 360) / 10) + I18N.t('observability.dur_unit_hour');
+  return (Math.round(s / 8640) / 10) + I18N.t('observability.dur_unit_day');
+}
+
+function _obsIssueUrl(e) {
+  const num = String(e.issue_id || '').replace(/^#/, '');
+  const path = String(e.repo_key || '').split(':').pop();
+  return (path && num) ? 'https://gitcode.com/' + path + '/issues/' + num : '';
+}
+
+// 注意：真实 I18N.t 在**缺键时返回 key 本身**（不是 undefined），所以 `t(k) || 兜底` 永远
+// 不会走兜底分支——曾经因此把 `observability.rule.failed` 这种原始 key 直接显示给用户。
+// 这里统一用「值 === key 视为未命中」的判定，缺键时回退到后端给的原值。
+function _obsTOr(key, fallback) {
+  const v = I18N.t(key, {});
+  return (typeof v === 'string' && v !== key) ? v : fallback;
+}
+
+function _obsEventTitle(e) {
+  if (e.source === 'change') {
+    return (e.title || '') || I18N.t('observability.kind.change');
+  }
+  if (e.source === 'audit') return e.title || e.kind;
+  if (e.source === 'task') {
+    return _obsTOr('observability.task_state.' + e.kind, e.kind || '');
+  }
+  return _obsTOr('observability.rule.' + e.kind, e.kind || '');
+}
+
+// S1 起后端给结构化 target {repo_key,issue_id,device_id} → 前端不再自己拆 dim_key 字符串
+function _obsEventDeviceId(e) {
+  const tg = e.target || {};
+  if (tg.device_id) return String(tg.device_id);
+  return (String(e.dim_key || '').indexOf('runtime:') === 0) ? String(e.dim_key).slice(8) : '';
+}
+
+function _obsEventTargetLabel(e) {
+  const tg = e.target || {};
+  const dev = _obsEventDeviceId(e);
+  if (dev) return I18N.t('observability.device_short') + dev;
+  const r = _shortRepo(tg.repo_key || e.repo_key) || '';
+  const num = String(tg.issue_id || e.issue_id || '').replace(/^#/, '');
+  return (r + (num ? ' #' + num : '')) || '—';
+}
+
+// 状态/结果徽标：状态文案由后端 `state_label_key` 给（前端不猜词表），
+// 结果码（任务/变更）与告警级别**分列**显示（S1 契约）
+function _obsEventStateLabel(e) {
+  const key = e.state_label_key || ('observability.state.' + e.state);
+  return _obsTOr(key, _obsTOr('observability.ev_state.' + e.state, e.state || '—'));
+}
+
+function _obsEventBadge(e) {
+  if (e.outcome) {
+    const label = _obsTOr('observability.outcome.' + e.outcome, e.outcome);
+    const bad = (e.outcome === 'failed' || e.outcome === 'stuck');
+    const bg = bad ? 'rgba(220,38,38,.12)' : 'rgba(37,99,235,.12)';
+    const fg = bad ? '#dc2626' : '#2563eb';
+    return `<span style="padding:1px 6px;border-radius:4px;font-size:11px;background:${bg};color:${fg}">${label}</span>`;
+  }
+  return '<span class="ts t2">' + _obsSeverityCell({ severity: e.level }) + '</span>';
+}
+
+// 下钻动作由后端 `next_step` **数组**驱动（S1：只给键上真有的目标；前端只管渲染）
+function _obsEventActions(e) {
+  const steps = Array.isArray(e.next_step) ? e.next_step : (e.next_step ? [e.next_step] : []);
+  const tid = e.task_id || '';
+  const dev = _obsEventDeviceId(e);
+  const url = _obsIssueUrl(e);
+  const btns = [];
+  steps.forEach(s => {
+    if (s === 'timeline' && tid) {
+      btns.push(`<a style="cursor:pointer;color:var(--a)" onclick="openObsTimeline('${tid}')">${I18N.t('observability.timeline')}</a>`);
+    } else if (s === 'logs' && tid) {
+      btns.push(`<a style="cursor:pointer;color:var(--a)" onclick="jumpObsLogsForTask('${tid}')">${I18N.t('observability.logs_short')}</a>`);
+    } else if (s === 'issue' && url) {
+      btns.push(`<a style="cursor:pointer;color:var(--a)" href="${url}" target="_blank" rel="noopener">${I18N.t('observability.issue_short')}</a>`);
+    } else if (s === 'device' && dev) {
+      btns.push(`<a style="cursor:pointer;color:var(--a)" onclick="obsShowRuntimeTasks(${dev})">${I18N.t('observability.device_short')}${dev}</a>`);
+    }
+  });
+  if (!btns.length && url) {
+    btns.push(`<a style="cursor:pointer;color:var(--a)" href="${url}" target="_blank" rel="noopener">${I18N.t('observability.issue_short')}</a>`);
+  }
+  return btns.join(' · ') || '—';
+}
+
+function obsShowRuntimeTasks(rtId) {
+  const name = I18N.t('observability.device_short') + rtId;
+  openRuntimeTaskModal(rtId, name);
+}
+
+function obsEventFilter(source) {
+  _obsEventSource = (_obsEventSource === source) ? '' : source;
+  obsEventReload();
+}
+
+function obsEventStateFilter(state) {
+  _obsEventState = (_obsEventState === state) ? '' : state;
+  obsEventReload();
+}
+
+// 关键字：**服务端检索**（S1 的 q 参数；不是前端过滤已加载页）——回车或点「检索」触发
+function obsEventSearch() {
+  const el = document.getElementById('obsEventQ');
+  _obsEventQ = el ? String(el.value || '').trim() : '';
+  obsEventReload();
+}
+
+function obsEventReload() {
+  _obsEventCursor = null;
+  _obsEventMore = false;
+  _obsEventNew = [];
+  loadObsEvents(document.getElementById('obsContent'), false);
+}
+
+function _obsEventQStr() {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  return (repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '')
+    + (_obsEventSource ? '&sources=' + encodeURIComponent(_obsEventSource) : '')
+    + (_obsEventState ? '&state=' + encodeURIComponent(_obsEventState) : '')
+    + (_obsEventQ ? '&q=' + encodeURIComponent(_obsEventQ) : '');
+}
+
+// 过滤区合并成一行（来源 chips | 状态 chips | 关键字 | 计数）：少一层视觉层级
+function _obsEventShellHtml() {
+  const chip = (on, label, fn) => `<a style="cursor:pointer;padding:2px 8px;border-radius:10px;font-size:12px;${on ? 'background:var(--a);color:#fff' : 'color:var(--a)'}" onclick="${fn}">${label}</a>`;
+  const sources = [['', I18N.t('observability.ev_all')], ['monitor', I18N.t('observability.source.monitor')],
+    ['gap', I18N.t('observability.source.gap')], ['mutation', I18N.t('observability.source.mutation')],
+    ['task', I18N.t('observability.source.task')], ['change', I18N.t('observability.source.change')]];
+  // 状态全集（S1）：firing/resolved 之外补齐 failed/stuck/done
+  const states = [['', I18N.t('observability.ev_all_state')], ['firing', I18N.t('observability.state.firing')],
+    ['resolved', I18N.t('observability.state.resolved')], ['failed', I18N.t('observability.state.failed')],
+    ['stuck', I18N.t('observability.state.stuck')], ['done', I18N.t('observability.state.done')]];
+  const srcChips = sources.map(([k, l]) => chip(_obsEventSource === k, l, `obsEventFilter('${k}')`)).join(' ');
+  const stChips = states.map(([k, l]) => chip(_obsEventState === k, l, `obsEventStateFilter('${k}')`)).join(' ');
+  return `<div class="cd" style="padding:12px 14px">
+    <div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">
+      <span style="font-weight:600">${I18N.t('observability.events_title')}</span>
+      ${srcChips}<span class="ts t3">|</span>${stChips}
+      <input id="obsEventQ" type="text" value="${_obsEventQ.replace(/"/g, '&quot;')}"
+        placeholder="${I18N.t('observability.ev_filter_keyword')}"
+        onkeydown="if(event.key==='Enter')obsEventSearch()"
+        style="flex:1;min-width:180px;padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">
+      <button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="obsEventSearch()">${I18N.t('observability.ev_search')}</button>
+      <span class="ts t3" id="obsEventCount"></span>
+    </div>
+    <div id="obsEventNew" style="display:none;margin-top:8px"></div>
+    <div id="obsEventTrunc" class="ts t3" style="margin-top:6px"></div>
+    <div id="obsEventBody" style="margin-top:8px"><div class="loading">${I18N.t('observability.loading')}</div></div>
+    <div id="obsEventMore" style="text-align:center;margin-top:10px"></div>
+  </div>`;
+}
+
+// 一条事件 = 两段式行 + 行内展开（替代原 8 列表格）
+function _obsEventRowHtml(e) {
+  const point = (e.ts_kind === 'point');            // 瞬时事件（变更/审计）不显示时长
+  const dur = point ? '' : (_durHuman(e.duration_sec) + (e.ongoing ? ' <span class="ts t3">…</span>' : ''));
+  const did = String(e.key || '').replace(/[^A-Za-z0-9_-]/g, '_');
+  const esc = s => String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/'/g, '&#39;').replace(/"/g, '&quot;');
+  return `<div class="cd" style="padding:8px 10px;margin-bottom:6px;border:1px solid var(--b);border-radius:6px">
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;cursor:pointer" onclick="obsEventToggle('${esc(e.key)}')">
+      <span class="ts t3" style="min-width:92px">${_obsAlertTime(e.started_at)}</span>
+      <span class="ts t3">${_obsSourceLabel(e)}</span>
+      ${_obsEventBadge(e)}
+      <span style="flex:1">${_obsEventTitle(e)}</span>
+      <span class="ts t2">${_obsEventStateLabel(e)}</span>
+      <span class="ts t3" style="min-width:60px;text-align:right">${dur}</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:4px">
+      <span class="ts t2">${_obsEventTargetLabel(e)}</span>
+      <span style="flex:1"></span>
+      <span class="ts t2">${_obsEventActions(e)}</span>
+    </div>
+    <div id="obsev-d-${did}" style="display:none;margin-top:6px;border-top:1px dashed var(--b);padding-top:6px"></div>
+  </div>`;
+}
+
+function _obsEventByKey(key) {
+  const list = ((_obsEventsData || {}).events) || [];
+  for (const e of list) if (e.key === key) return e;
+  return null;
+}
+
+function _obsEventDetailHtml(e) {
+  if (!e) return '';
+  const rows = [];
+  const add = (label, val) => { if (val !== '' && val !== null && val !== undefined && val !== '—') rows.push(`<span class="ts t2" style="display:inline-block;min-width:80px">${label}</span><span class="ts t2">${val}</span>`); };
+  add(I18N.t('observability.ev_metric'), e.metric ? e.metric : '');
+  add(I18N.t('observability.ev_value'), (e.value === null || e.value === undefined) ? '' : e.value);
+  add(I18N.t('observability.ev_threshold'), (e.threshold === null || e.threshold === undefined) ? '' : e.threshold);
+  add(I18N.t('observability.ev_detail'), e.detail ? String(e.detail) : '');
+  add(I18N.t('observability.event_view_col.started'), e.started_at ? _obsAlertTime(e.started_at) : '');
+  add(I18N.t('observability.event_view_col.duration'), _durHuman(e.duration_sec));
+  return rows.length ? `<div style="display:grid;grid-template-columns:auto 1fr;gap:2px 10px">${rows.join('')}</div>`
+    : `<div class="ts t3">${I18N.t('observability.no_data')}</div>`;
+}
+
+function obsEventToggle(key) {
+  const did = String(key || '').replace(/[^A-Za-z0-9_-]/g, '_');
+  const el = document.getElementById('obsev-d-' + did);
+  if (!el) return;
+  if (el.style.display === 'none') {
+    el.innerHTML = _obsEventDetailHtml(_obsEventByKey(key));
+    el.style.display = 'block';
+  } else {
+    el.style.display = 'none';
+  }
+}
+
+function obsEventLoadMore() {
+  if (!_obsEventMore) return;
+  loadObsEvents(document.getElementById('obsContent'), true);
+}
+
+// 自动刷新（30s）：只把"首页里没有的新事件"攒起来 + 顶端提示，**不强制前插/不打断阅读**
+function _obsEventSoftRefresh() {
+  const now = Date.now();
+  if (now - _obsEventLastSoft < 30000) return;
+  _obsEventLastSoft = now;
+  API.get('/obs/events?limit=50' + _obsEventQStr()).then(d => {
+    const known = ((_obsEventsData || {}).events) || [];
+    const seen = {};
+    known.forEach(x => { seen[x.key] = 1; });
+    const fresh = (((d || {}).events) || []).filter(x => !seen[x.key]);
+    _obsEventNew = fresh;
+    const box = document.getElementById('obsEventNew');
+    if (!box) return;
+    if (fresh.length) {
+      box.style.display = 'block';
+      box.innerHTML = `<a style="cursor:pointer;color:var(--a);font-size:12px" onclick="obsEventApplyNew()">${I18N.t('observability.ev_new_events', { n: fresh.length })}</a>`;
+    } else {
+      box.style.display = 'none';
+      box.innerHTML = '';
+    }
+  }).catch(() => {});
+}
+
+function obsEventApplyNew() {
+  const list = _obsEventNew || [];
+  if (!list.length) return;
+  _obsEventsData = _obsEventsData || {};
+  _obsEventsData.events = list.concat(_obsEventsData.events || []);   // 顶部前插（用户主动触发）
+  _obsEventNew = [];
+  _renderObsEventFlow();
+  const box = document.getElementById('obsEventNew');
+  if (box) { box.style.display = 'none'; box.innerHTML = ''; }
+}
+
+function _renderObsEventFlow() {
+  const b = document.getElementById('obsEventBody');
+  if (!b) return;
+  const d = _obsEventsData || {};
+  const list = d.events || [];
+  const n = document.getElementById('obsEventCount');
+  if (n) n.textContent = I18N.t('observability.ev_count', { n: list.length });
+  const tr = document.getElementById('obsEventTrunc');
+  if (tr) {
+    const ts = d.truncated_sources || [];
+    tr.textContent = ts.length
+      ? I18N.t('observability.ev_truncated', { sources: ts.map(s => I18N.t('observability.source.' + s)).join(I18N.t('observability.list_sep')) })
+      : '';
+  }
+  const more = document.getElementById('obsEventMore');
+  if (more) {
+    more.innerHTML = _obsEventMore
+      ? `<button class="bt bt-o bt-s" style="padding:4px 14px" onclick="obsEventLoadMore()">${I18N.t('observability.ev_load_more')}</button>`
+      : '';
+  }
+  b.innerHTML = list.length ? list.map(e => _obsEventRowHtml(e)).join('')
+    : '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_events') + '</div>';
+}
+
+function loadObsEvents(c, append) {
+  if (!c) return;
+  const qs = _obsEventQStr();
+  const curQ = (append && _obsEventCursor) ? '&before=' + encodeURIComponent(_obsEventCursor) : '';
+  if (!append) c.innerHTML = _obsEventShellHtml();
+  const more = document.getElementById('obsEventMore');
+  if (more) more.innerHTML = I18N.t('observability.loading');
+  API.get('/obs/events?limit=50' + qs + curQ)
+    .then(d => {
+      d = d || {};
+      if (append) {
+        const cur = ((_obsEventsData || {}).events) || [];
+        _obsEventsData = d;
+        _obsEventsData.events = cur.concat(d.events || []);
+      } else {
+        _obsEventsData = d;
+      }
+      _obsEventCursor = d.next_cursor || null;
+      _obsEventMore = !!d.next_cursor;
+      _renderObsEventFlow();
+    })
+    .catch(e => {
+      const b = document.getElementById('obsEventBody');
+      if (b) b.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">'
+        + I18N.t('observability.load_failed', { msg: e.message }) + '</div>';
+      if (more) more.innerHTML = '';
+    });
+}
+
+function _renderObsAlertPanel() {
+  const box = document.getElementById('obsAlertPanelBody');
+  if (!box) return;
+  const a = _obsAlerts || {};
+  const events = a.events || [];
+  const rules = a.rules || [];
+  const now = Date.now();
+
+  if (_obsAlertPanelView === 'rules') {
+    if (!rules.length) { box.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_data') + '</div>'; return; }
+    box.innerHTML = '<table class="tw"><thead><tr>' +
+      ['name', 'metric', 'threshold', 'for_sec', 'severity', 'enabled', 'notify'].map(k => '<th>' + I18N.t('observability.rule_col.' + k) + '</th>').join('') +
+      '</tr></thead><tbody>' + rules.map(r =>
+        '<tr>' +
+        '<td>' + I18N.t('observability.rule.' + r.name, {}) + '</td>' +
+        '<td class="ts t2">' + (r.metric || '') + '</td>' +
+        '<td>' + r.threshold + ' <a style="cursor:pointer;color:var(--a)" onclick="obsAlertSetThreshold(' + r.id + ',' + r.threshold + ')">' + I18N.t('observability.edit') + '</a></td>' +
+        '<td class="ts t2">' + r.for_sec + 's</td>' +
+        '<td class="ts t2">' + _obsSeverityCell(r) + '</td>' +
+        '<td><a style="cursor:pointer;color:var(--a)" onclick="obsAlertToggleRule(' + r.id + ',' + (Number(r.enabled) ? 'false' : 'true') + ')">' +
+          (Number(r.enabled) ? I18N.t('observability.on') : I18N.t('observability.off')) + '</a></td>' +
+        '<td>' + _obsChanLabel(r.notify_channels) +
+          ' <a style="cursor:pointer;color:var(--a)" onclick="obsAlertSetNotify(' + r.id + ',\'' + String(r.notify_channels || '') + '\')">' + I18N.t('observability.edit') + '</a></td>' +
+        '</tr>').join('') + '</tbody></table>' +
+      '<div class="ts t3" style="margin-top:10px">' + I18N.t('observability.alert_rules_hint') + '</div>';
+    return;
+  }
+
+  if (_obsAlertPanelView === 'silences') {
+    const sil = events.filter(e => e.silenced_until && new Date(e.silenced_until).getTime() > now);
+    if (!sil.length) { box.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_silence') + '</div>'; return; }
+    box.innerHTML = '<table class="tw"><thead><tr>' +
+      ['rule', 'repo', 'until'].map(k => '<th>' + I18N.t('observability.silence_col.' + k) + '</th>').join('') +
+      '</tr></thead><tbody>' + sil.map(e =>
+        '<tr><td>' + I18N.t('observability.rule.' + e.rule_name, {}) + '</td>' +
+        '<td class="ts t2">' + _shortRepo(e.repo_key) + '</td>' +
+        '<td class="ts t2">' + _obsAlertTime(e.silenced_until) + '</td></tr>').join('') + '</tbody></table>';
+    return;
+  }
+
+  // 触发记录
+  if (!events.length) {
+    box.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_alerts') + '</div>';
+    return;
+  }
+  box.innerHTML = '<table class="tw"><thead><tr>' +
+    ['rule', 'severity', 'source', 'repo', 'value', 'status', 'last_seen', 'op'].map(k => '<th>' + I18N.t('observability.event_col.' + k) + '</th>').join('') +
+    '</tr></thead><tbody>' + events.map(e => {
+      const firing = e.status === 'firing';
+      const silenced = e.silenced_until && new Date(e.silenced_until).getTime() > now;
+      return '<tr>' +
+        '<td>' + I18N.t('observability.rule.' + e.rule_name, {}) +
+          (silenced ? ' <span class="ts t3">(' + I18N.t('observability.silenced') + ')</span>' : '') + '</td>' +
+        '<td class="ts t2">' + _obsSeverityCell(e) + '</td>' +
+        '<td class="ts t3">' + _obsSourceLabel(e) + '</td>' +
+        '<td class="ts t2">' + (_shortRepo(e.repo_key) || _obsEventTarget(e)) + '</td>' +
+        '<td>' + _obsMetricVal(e) + (String(e.metric || '').indexOf('gap_') === 0 ? '' : ' <span class="ts t3">/ ' + e.threshold + '</span>') + '</td>' +
+        '<td class="ts t2">' + I18N.t('observability.status.' + (e.status || ''), {}) + '</td>' +
+        '<td class="ts t2">' + _obsAlertTime(e.last_seen_at) + '</td>' +
+        '<td>' + (firing ? '<a style="cursor:pointer;color:var(--a)" onclick="obsAlertSilence(' + e.id + ')">' + I18N.t('observability.silence') + '</a>' : '—') + '</td>' +
+        '</tr>';
+    }).join('') + '</tbody></table>';
+}
+
+function obsAlertSilence(eventId) {
+  const m = window.prompt(I18N.t('observability.silence_prompt'), '60');
+  if (m === null) return;
+  const minutes = parseInt(m, 10);
+  if (!minutes || minutes < 1) return;
+  API.post('/obs/alerts/' + eventId + '/silence?minutes=' + minutes, {}).then(() => refreshObsAlerts()).catch(() => null);
+}
+
+function obsAlertToggleRule(ruleId, enabled) {
+  API.post('/obs/alerts/rules/' + ruleId + '/toggle?enabled=' + (enabled ? 'true' : 'false'), {}).then(() => refreshObsAlerts()).catch(() => null);
+}
+
+function obsAlertSetThreshold(ruleId, cur) {
+  const v = window.prompt(I18N.t('observability.threshold_prompt'), String(cur));
+  if (v === null) return;
+  const f = parseFloat(v);
+  if (isNaN(f)) return;
+  API.post('/obs/alerts/rules/' + ruleId + '/threshold?threshold=' + encodeURIComponent(String(f)), {}).then(() => refreshObsAlerts()).catch(() => null);
+}
+
+function _obsChanLabel(chans) {
+  const s = String(chans || '').trim();
+  if (!s) return '<span class="ts t3">' + I18N.t('observability.notify_none') + '</span>';
+  const parts = s.split(',').map(c => {
+    const k = c.trim();
+    return k === 'feishu' ? I18N.t('observability.notify_feishu')
+      : (k === 'webhook' ? I18N.t('observability.notify_webhook') : k);
+  });
+  return parts.join(' + ');
+}
+
+// 通知渠道编辑：选择 0=不推送 1=飞书 2=飞书+webhook
+function obsAlertSetNotify(ruleId, cur) {
+  const now = String(cur || '').trim();
+  const curIdx = now === 'feishu' ? '1' : (now.indexOf('webhook') >= 0 ? '2' : '0');
+  const v = window.prompt(I18N.t('observability.notify_prompt'), curIdx);
+  if (v === null) return;
+  const map = { '0': '', '1': 'feishu', '2': 'feishu,webhook' };
+  if (map[v] === undefined) return;
+  API.post('/obs/alerts/rules/' + ruleId + '/notify?channels=' + encodeURIComponent(map[v]), {})
+    .then(() => refreshObsAlerts()).catch(() => null);
+}
+
+// 测试飞书通知：给自己发一条，结果就地显示（不依赖全局 toast）
+function obsAlertTestNotify() {
+  const el = document.getElementById('obsAlertNotifyResult');
+  if (el) el.textContent = I18N.t('observability.test_notify_sending');
+  API.post('/obs/alerts/test-notify', {}).then(r => {
+    const ok = r && r.ok;
+    if (el) {
+      el.textContent = ok ? I18N.t('observability.test_notify_ok',
+        { id: (r && r.message_id) || '' }) : ((r && r.message) || I18N.t('observability.test_notify_fail'));
+      el.style.color = ok ? '#22a06b' : '#d64545';
+    }
+  }).catch(e => {
+    if (el) { el.textContent = I18N.t('observability.test_notify_fail') + ': ' + ((e && e.message) || e); el.style.color = '#d64545'; }
+  });
+}
+
+function _obsFmtAxis(iso) {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0');
+  return _obsOvRange === '7d' ? (d.getMonth() + 1) + '/' + d.getDate() + ' ' + hm : hm;
+}
+
+function _obsChart(id, option) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  if (typeof echarts === 'undefined') {
+    el.innerHTML = '<div class="ts t3" style="padding:20px 0">' + I18N.t('observability.ov.charts_unavailable') + '</div>';
+    return;
+  }
+  try {
+    if (_obsOvCharts[id]) _obsOvCharts[id].dispose();
+    const ch = echarts.init(el);
+    ch.setOption(option);
+    _obsOvCharts[id] = ch;
+  } catch (e) {
+    el.innerHTML = '<div class="ts t3" style="padding:20px 0">' + I18N.t('observability.ov.chart_failed') + '</div>';
+  }
+}
+
+function _renderObsOverview(d, alertData) {
+  const body = document.getElementById('obsOvBody');
+  if (!body) return;
+  const k = d.kpis || {};
+  const ov = I18N.t.bind(I18N);
+  const kpi = (label, value, sub) => `
+    <div class="cd" style="padding:12px 14px">
+      <div class="ts t3">${label}</div>
+      <div style="font-size:22px;font-weight:600;line-height:1.3">${value}</div>
+      ${sub ? `<div class="ts t3">${sub}</div>` : ''}
+    </div>`;
+  const succ = (k.success_rate === null || k.success_rate === undefined) ? '—' : k.success_rate + '%';
+  const p95 = (k.p95_duration_s === null || k.p95_duration_s === undefined) ? '—'
+    : (k.p95_duration_s >= 60 ? Math.floor(k.p95_duration_s / 60) + 'm' + Math.round(k.p95_duration_s % 60) + 's'
+      : Math.round(k.p95_duration_s) + 's');
+  const eng = (k.engines_total ? (k.engines_online + ' / ' + k.engines_total) : '—');
+  const tokens = (k.tokens || 0).toLocaleString();
+
+  body.innerHTML = `
+    ${_obsBannerHtml(alertData)}
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px">
+      ${kpi(ov('observability.ov.kpi_queue'), k.queue_depth || 0)}
+      ${kpi(ov('observability.ov.kpi_success'), succ)}
+      ${kpi(ov('observability.ov.kpi_p95'), p95)}
+      ${kpi(ov('observability.ov.kpi_engines'), eng)}
+      ${kpi(ov('observability.ov.kpi_tokens'), tokens, ov('observability.ov.scope') + (d.scope ? d.scope.repos : 0))}
+    </div>
+    <div style="display:grid;grid-template-columns:2fr 1fr;gap:12px;margin-top:12px">
+      <div class="cd" style="padding:12px 14px">
+        <div class="ts t3" style="margin-bottom:4px">${ov('observability.ov.chart_outcome')}</div>
+        <div id="obsChart-outcome" style="height:240px"></div>
+      </div>
+      <div class="cd" style="padding:12px 14px">
+        <div class="ts t3" style="margin-bottom:4px">${ov('observability.ov.chart_model')}</div>
+        <div id="obsChart-model" style="height:240px"></div>
+      </div>
+    </div>
+    <div class="cd" style="padding:12px 14px;margin-top:12px">
+      <div class="ts t3" style="margin-bottom:4px">${ov('observability.ov.chart_token')}</div>
+      <div id="obsChart-token" style="height:220px"></div>
+    </div>`;
+
+  const C = d.charts || {};
+  const to = C.task_outcome || {};
+  const labels = (to.buckets || []).map(_obsFmtAxis);
+  const axis = { axisLabel: { fontSize: 10 }, axisLine: { lineStyle: { color: '#888' } } };
+  const grid = { left: 42, right: 46, top: 28, bottom: 24 };
+  const legend = { top: 0, right: 0, itemWidth: 10, itemHeight: 8, textStyle: { fontSize: 11 } };
+
+  _obsChart('obsChart-outcome', {
+    tooltip: { trigger: 'axis' },
+    legend: Object.assign({ data: [ov('observability.ov.s_completed'), ov('observability.ov.s_failed'),
+      ov('observability.ov.s_cancelled'), ov('observability.ov.s_rate')] }, legend),
+    grid: grid,
+    xAxis: Object.assign({ type: 'category', data: labels }, axis),
+    yAxis: [{ type: 'value', minInterval: 1, axisLabel: { fontSize: 10 } },
+            { type: 'value', min: 0, max: 100, splitLine: { show: false }, axisLabel: { fontSize: 10, formatter: '{value}%' } }],
+    series: [
+      { name: ov('observability.ov.s_completed'), type: 'bar', stack: 'o', barMaxWidth: 18, itemStyle: { color: '#22a06b' }, data: to.completed || [] },
+      { name: ov('observability.ov.s_failed'), type: 'bar', stack: 'o', barMaxWidth: 18, itemStyle: { color: '#d64545' }, data: to.failed || [] },
+      { name: ov('observability.ov.s_cancelled'), type: 'bar', stack: 'o', barMaxWidth: 18, itemStyle: { color: '#e0a02a' }, data: to.cancelled || [] },
+      { name: ov('observability.ov.s_rate'), type: 'line', yAxisIndex: 1, connectNulls: true, symbolSize: 5,
+        itemStyle: { color: '#4a7fd1' }, lineStyle: { width: 2 }, data: to.rate || [] }
+    ]
+  });
+
+  const tt = C.token_trend || {};
+  _obsChart('obsChart-token', {
+    tooltip: { trigger: 'axis' },
+    legend: Object.assign({ data: [ov('observability.ov.s_input'), ov('observability.ov.s_output'), ov('observability.ov.s_cache')] }, legend),
+    grid: Object.assign({}, grid, { top: 26 }),
+    xAxis: Object.assign({ type: 'category', data: (tt.buckets || []).map(_obsFmtAxis) }, axis),
+    yAxis: [{ type: 'value', axisLabel: { fontSize: 10 } }],
+    series: [
+      { name: ov('observability.ov.s_input'), type: 'bar', stack: 't', barMaxWidth: 18, itemStyle: { color: '#4a7fd1' }, data: tt.input || [] },
+      { name: ov('observability.ov.s_output'), type: 'bar', stack: 't', barMaxWidth: 18, itemStyle: { color: '#22a06b' }, data: tt.output || [] },
+      { name: ov('observability.ov.s_cache'), type: 'bar', stack: 't', barMaxWidth: 18, itemStyle: { color: '#8b8b8b' }, data: tt.cache || [] }
+    ]
+  });
+
+  const ms = (C.model_share || []).slice().reverse();   // 横向条：ECharts y 轴自下而上
+  _obsChart('obsChart-model', {
+    tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' },
+      formatter: p => { const it = p[0]; const m = ms[it.dataIndex] || {}; return `${m.model || ''}<br/>${(m.tokens || 0).toLocaleString()} tokens · ${m.share || 0}%`; } },
+    grid: { left: 90, right: 24, top: 10, bottom: 20 },
+    xAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+    yAxis: { type: 'category', data: ms.map(m => m.model), axisLabel: { fontSize: 10, width: 84, overflow: 'truncate' } },
+    series: [{ type: 'bar', barMaxWidth: 16, itemStyle: { color: '#4a7fd1' }, data: ms.map(m => m.tokens) }]
+  });
 }
 
 function switchObsTab(tab, ev) {
@@ -185,6 +1108,44 @@ function _obsHealthScoreHTML(rt) {
   return `<span style="color:${c};font-weight:600">${s}</span>${cf}<span style="font-size:9px;opacity:.7">${hb}</span>`;
 }
 
+// ===== Token 消耗：表格内嵌列（引擎表 / session 列表）=====
+// 同一套 engine_id = agent_runtimes.id（与引擎表同源）；tasks 按 task_id 匹配。
+let _obsTokEngines = {};
+let _obsTokTasks = {};
+let _obsTokColAt = 0;
+
+function _obsTokColNum(v) {
+  const n = Number(v || 0);
+  if (!isFinite(n) || n <= 0) return '—';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+function _obsTokFor(engineId) {
+  return _obsTokColNum(_obsTokEngines[String(engineId)]);
+}
+function _obsTokTaskFor(taskId) {
+  return _obsTokColNum(_obsTokTasks[String(taskId)]);
+}
+function loadObsTokenColumns(force) {
+  const now = Date.now();
+  if (!force && (now - _obsTokColAt) < 60000) return;
+  _obsTokColAt = now;
+  const full = (typeof _obsSloRepoFull === 'function') ? _obsSloRepoFull() : '';
+  const repoQ = full ? '&repo=' + encodeURIComponent(full) : '';
+  API.get('/obs/tokens/engines?range=24h' + repoQ).then(d => {
+    const m = {};
+    ((d || {}).engines || []).forEach(e => { m[String(e.engine_id)] = e.total; });
+    _obsTokEngines = m;
+    if (typeof _rerenderRuntimeTable === 'function') _rerenderRuntimeTable();
+  }).catch(() => {});
+  API.get('/obs/tokens/tasks?range=7d&limit=500' + repoQ).then(d => {
+    const m = {};
+    ((d || {}).tasks || []).forEach(t => { m[String(t.task_id)] = t.total; });
+    _obsTokTasks = m;
+  }).catch(() => {});
+}
+
 function _runtimeRowHTML(rti) {
   const rid = rti.id;
   const dot = _OBS_HEALTH_DOT[rti.health] || '⚫';
@@ -210,6 +1171,7 @@ function _runtimeRowHTML(rti) {
     <td><span id="rt-${rid}-score" class="ts t3">${_obsHealthScoreHTML(rti)}</span></td>
     <td><span id="rt-${rid}-load" style="color:${loadColor}">${running}/${maxC}</span></td>
     <td><span id="rt-${rid}-dur" style="color:${avgDurColor}">${avgDur ? avgDurStr : '-'}</span></td>
+    <td><span id="rt-${rid}-tok" class="ts t2">${_obsTokFor(rid)}</span></td>
     <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
     <td>${modeTag}</td>
     <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
@@ -252,7 +1214,7 @@ function _rerenderRuntimeTable() {
   if (rowsEl) {
     let html = '';
     if (pageRuntimes.length) {
-      html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>健康分</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+      html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>健康分</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_token') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
       html += pageRuntimes.map(_runtimeRowHTML).join('');
       html += '</tbody></table></div>';
     } else {
@@ -279,10 +1241,10 @@ function renderObsContent(isAutoRefresh) {
     if (!isAutoRefresh) loadErrorLogs(c);
     return;
   }
-  // 异常任务 Tab: 数据量小，整体替换可接受
-  if (_obsTab === 'anomaly') {
-    renderAnomalyTab(c, realOps);
-    _obsRendered = false;  // anomaly 不走局部更新，每次重建
+  // 统一事件视图 Tab: 独立异步加载；自动刷新只检查"有没有新事件"（30s，顶部提示不强制前插）
+  if (_obsTab === 'events') {
+    if (isAutoRefresh) _obsEventSoftRefresh();
+    else obsEventReload();
     return;
   }
 
@@ -302,6 +1264,7 @@ function renderObsContent(isAutoRefresh) {
       _obsRendered = true;
       _obsRenderedTab = _obsTab;
     }
+    if (_obsSection === 'devices') loadObsTokenColumns();
   }
   else if (_obsTab === 'tasks') {
     if (canPartialUpdate) {
@@ -315,7 +1278,54 @@ function renderObsContent(isAutoRefresh) {
       _obsRendered = true;
       _obsRenderedTab = _obsTab;
     }
+    loadObsTokenColumns();
   }
+}
+
+// 异常任务入口（任务 Tab 内的按钮）：点击弹窗看卡住/失败明细。
+// 注意：**随渲染字符串一起返回**，不要用 insertBefore 事后挂——那会在每次 10s 局部刷新时又插一根，
+// 页面上就出现"每隔几秒多一行"（2026-10-18 修）。
+function _obsTaskAnomalyBarHtml() {
+  return `<div id="obsTaskAnomalyBar" style="display:flex;align-items:center;gap:8px;margin-bottom:10px">
+    <button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="openObsAnomalyModal()">${I18N.t('observability.tab.anomaly')}</button>
+    <span class="ts t3">${I18N.t('observability.anomaly_open_hint')}</span>
+  </div>`;
+}
+
+// 弹窗内的重渲染（分页/每页条数用它，而不是 refreshObs——后者会重画整页、弹窗内容不动）
+function _obsAnomalyRerender() {
+  if (typeof document.getElementById !== 'function') return;
+  const body = document.getElementById('obsAnomalyModalBody');
+  if (!body) return;
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  const repoParam = repo && repo.fullName ? '?repo=' + encodeURIComponent(repo.fullName) : '';
+  API.get('/dashboard/ops/overview' + repoParam).then(ops => {
+    const b = document.getElementById('obsAnomalyModalBody');
+    if (b) renderAnomalyTab(b, ops || {}, '_obsAnomalyRerender()');
+  }).catch(e => {
+    const b = document.getElementById('obsAnomalyModalBody');
+    if (b) b.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">'
+      + I18N.t('observability.load_failed', { msg: e.message }) + '</div>';
+  });
+}
+
+function openObsAnomalyModal() {
+  const old = (typeof document.getElementById === 'function')
+    ? document.getElementById('obsAnomalyModal') : null;
+  if (old && typeof old.remove === 'function') old.remove();
+  const modal = document.createElement('div');
+  modal.id = 'obsAnomalyModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.onclick = (e) => { if (e.target === modal && typeof modal.remove === 'function') modal.remove(); };
+  modal.innerHTML = `<div class="cd" style="width:960px;max-width:94vw;max-height:84vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
+      <h3 style="font-size:14px;font-weight:600">${I18N.t('observability.tab.anomaly')}</h3>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('obsAnomalyModal').remove()">${I18N.t('observability.close')}</button>
+    </div>
+    <div id="obsAnomalyModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">${I18N.t('observability.loading_task')}</div></div>
+  </div>`;
+  document.body.appendChild(modal);
+  _obsAnomalyRerender();
 }
 
 // ===== KPI 卡片行（仿 multica KpiCard grid）=====
@@ -368,6 +1378,223 @@ function _barHTML(label, pct, color, idPrefix, suffix) {
   </div>`;
 }
 
+// ===== SLO / 错误预算卡片（P2-1，§6.7）=====
+// 总览顶部「健康结论」：N 条 SLO 的达成态 + 预算剩余；点卡片看燃尽曲线（实际 vs 理想）。
+let _obsSlo = null;
+let _obsSloAt = 0;
+let _obsSloRepo = null;   // 缓存对应的仓库选择：切仓必须立刻重算（不能被 60s 节流挡住）
+
+// 页面上的仓库选择器 → 查询串（与总览页其它 KPI/趋势图同一口径）
+function _obsSloRepoFull() {
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  return (repo && repo.fullName) ? String(repo.fullName) : '';
+}
+
+function loadObsSlo(force) {
+  const now = Date.now();
+  const full = _obsSloRepoFull();
+  if (!force && _obsSlo && full === _obsSloRepo && (now - _obsSloAt) < 60000) return;  // 60s 节流
+  _obsSloAt = now;
+  _obsSloRepo = full;
+  API.get('/obs/slo' + (full ? '?repo=' + encodeURIComponent(full) : '')).then(d => {
+    _obsSlo = d || { slos: [] };
+    _fillObsSloCard();
+  }).catch(() => { /* 卡片静默失败：不打扰总览其它内容 */ });
+}
+
+function _fillObsSloCard() {
+  const box = document.getElementById('obsSloCard');
+  if (box) box.innerHTML = _obsSloCardHtml(_obsSlo);
+}
+
+function _obsSloStateLabel(state) {
+  return _obsTOr('observability.slo_state.' + state, state || '—');
+}
+
+function _obsSloCardHtml(d) {
+  const list = (d || {}).slos || [];
+  const cards = list.map(s => {
+    const st = String(s.state || '');
+    const color = st === 'breached' ? 'var(--r)'
+      : (st === 'warning' ? '#d97706' : (st === 'no_data' ? 'var(--t3)' : 'var(--g)'));
+    const show = (v, suffix) => (v === null || v === undefined) ? '—'
+      : (Math.round(Number(v) * 10) / 10) + suffix;
+    return `<div style="cursor:pointer;min-width:210px;flex:1;border-left:3px solid ${color};padding:4px 10px"
+      onclick="openObsSloBurn(${s.slo_id})">
+      <div class="ts t3">${_obsTOr('observability.slo_name.' + s.name, s.name)}</div>
+      <div style="font-size:18px;font-weight:600;color:${color}">${show(s.value === null || s.value === undefined ? null : s.value * 100, '%')}
+        <span class="ts t3" style="font-size:11px">/ ${I18N.t('observability.slo_target')} ${show((s.target || 0) * 100, '%')}</span></div>
+      <div class="ts t2">${_obsSloStateLabel(st)} · ${I18N.t('observability.slo_budget_left')} ${show(s.budget_remaining_pct, '%')}</div>
+    </div>`;
+  }).join('');
+  if (!cards) return '';
+  return `<div class="cd" style="padding:10px 14px;margin-bottom:12px">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
+      <span style="font-weight:600">${I18N.t('observability.slo_title')}</span>
+      <span class="ts t3">${I18N.t('observability.slo_hint')}</span>
+    </div>
+    <div style="display:flex;gap:10px;flex-wrap:wrap">${cards}</div>
+  </div>`;
+}
+
+function openObsSloBurn(sloId) {
+  const old = (typeof document.getElementById === 'function') ? document.getElementById('obsSloModal') : null;
+  if (old && typeof old.remove === 'function') old.remove();
+  const modal = document.createElement('div');
+  modal.id = 'obsSloModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.onclick = (e) => { if (e.target === modal && typeof modal.remove === 'function') modal.remove(); };
+  modal.innerHTML = `<div class="cd" style="width:880px;max-width:94vw;max-height:84vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
+      <h3 style="font-size:14px;font-weight:600">${I18N.t('observability.slo_burn_title')}</h3>
+      <button class="bt bt-o bt-s" onclick="document.getElementById('obsSloModal').remove()">${I18N.t('observability.close')}</button>
+    </div>
+    <div id="obsSloModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">${I18N.t('observability.loading')}</div></div>
+  </div>`;
+  document.body.appendChild(modal);
+  const _full = _obsSloRepoFull();
+  API.get('/obs/slo/' + sloId + (_full ? '?repo=' + encodeURIComponent(_full) : '')).then(d => {
+    d = d || {};
+    const b = document.getElementById('obsSloModalBody');
+    if (!b) return;
+    const burn = d.burn || [];
+    const _v = (v, suf) => (v === null || v === undefined) ? '—' : (Math.round(Number(v) * 10) / 10) + suf;
+    // 标题下常驻"口径 + 状态 + 目标 + 预算"：避免把"桶少"误读成"数据丢了"
+    const head = `<div class="ts t2" style="margin-bottom:4px">${I18N.t('observability.slo_window', {
+      start: String(d.window_start || '').substring(0, 10),
+      end: String(d.window_end || '').substring(0, 10), n: d.buckets || 0 })}</div>
+      <div class="ts t2" style="margin-bottom:8px">${I18N.t('observability.slo_bucket_hint', { n: d.buckets || 0 })}
+        · ${_obsSloStateLabel(String(d.state || ''))}
+        · ${I18N.t('observability.slo_target')} ${_v((d.target || 0) * 100, '%')}
+        · ${I18N.t('observability.slo_budget_left')} ${_v(d.budget_remaining_pct, '%')}</div>`;
+    if (!burn.length) {
+      // 空燃尽：给明确说明，不给白框（引擎可用率这类"数据源刚启用"就会这样）
+      b.innerHTML = head + `<div class="ts t2" style="padding:22px;text-align:center;`
+        + `border:1px dashed var(--b);border-radius:6px">${I18N.t('observability.slo_burn_empty')}</div>`;
+      return;
+    }
+    // 桶太少时折线看不见（symbol:'none' 下一个点不画任何东西）→ 少于 3 个桶时把点画出来
+    const _few = burn.length < 3;
+    b.innerHTML = head + `<div id="obsSloBurnChart" style="width:100%;height:280px"></div>`;
+    _obsChart('obsSloBurnChart', {
+      tooltip: { trigger: 'axis' },
+      legend: { data: [I18N.t('observability.slo_ideal'), I18N.t('observability.slo_used')],
+        textStyle: { fontSize: 11 } },
+      grid: { left: 44, right: 20, top: 30, bottom: 28 },
+      xAxis: { type: 'category', data: burn.map(p => String(p.bucket || '').substring(5, 16)),
+        axisLabel: { fontSize: 10 } },
+      yAxis: { type: 'value', max: 100, axisLabel: { formatter: '{value}%', fontSize: 10 } },
+      series: [
+        { name: I18N.t('observability.slo_ideal'), type: 'line', smooth: true,
+          symbol: _few ? 'circle' : 'none', symbolSize: _few ? 7 : 0,
+          data: burn.map(p => p.ideal_pct) },
+        { name: I18N.t('observability.slo_used'), type: 'line', smooth: true,
+          symbol: _few ? 'circle' : 'none', symbolSize: _few ? 7 : 0,
+          data: burn.map(p => p.used_pct) },
+      ],
+    });
+  }).catch(e => {
+    const b = document.getElementById('obsSloModalBody');
+    if (b) b.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">'
+      + I18N.t('observability.load_failed', { msg: e.message }) + '</div>';
+  });
+}
+
+// ===== Token 消耗卡片（引擎 / 任务 / 阶段事件 三级；P2 归因后端 /obs/tokens/*）=====
+// 设备与引擎视图 → 按引擎；任务与日志视图 → 按任务 / 按阶段（一个 issue 走 vod→issue 就是两行）
+let _obsTok = { key: '', at: 0, mode: 'engines', data: null };
+
+function _obsTokScopeKey() {
+  return (_obsSection === 'devices' ? 'devices' : 'tasks') + '|' + _obsSloRepoFull();
+}
+
+function obsTokMode(m) {
+  _obsTok.mode = m;
+  _obsTok.data = null;
+  loadObsTokens(true);
+}
+
+function loadObsTokens(force) {
+  const now = Date.now();
+  const key = _obsTokScopeKey();
+  if (!force && _obsTok.data && key === _obsTok.key && (now - _obsTok.at) < 60000) return;
+  _obsTok.key = key;
+  _obsTok.at = now;
+  const full = _obsSloRepoFull();
+  const repoQ = full ? '&repo=' + encodeURIComponent(full) : '';
+  const mode = (_obsSection === 'devices') ? 'engines'
+    : (_obsTok.mode === 'engines' ? 'tasks' : _obsTok.mode);
+  _obsTok.mode = mode;   // 归一化：任务视图下不留残留的 engines 模式
+  const url = mode === 'engines' ? '/obs/tokens/engines?range=24h' + repoQ
+    : (mode === 'stages' ? '/obs/tokens/stages?range=24h' + repoQ
+      : '/obs/tokens/tasks?range=24h&limit=20' + repoQ);
+  API.get(url).then(d => {
+    _obsTok.data = { mode: mode, payload: d || {} };
+    _fillObsTokCard();
+  }).catch(() => { /* 静默：不打扰视图其它内容 */ });
+}
+
+function _fillObsTokCard() {
+  const box = document.getElementById('obsTokCard');
+  if (box) box.innerHTML = _obsTokCardHtml();
+}
+
+function _obsTokNum(v) {
+  const n = Number(v || 0);
+  if (!isFinite(n)) return '—';
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'k';
+  return String(Math.round(n));
+}
+
+function _obsTokCardHtml() {
+  const d = _obsTok.data;
+  if (!d) return '';
+  const p = d.payload || {};
+  const t = p.total || {};
+  const inDev = (_obsSection === 'devices');
+  const btn = (m, label) => `<a onclick="obsTokMode('${m}')" style="cursor:pointer;padding:2px 10px;border-radius:10px;font-size:12px;${_obsTok.mode === m && !inDev ? 'background:var(--a);color:#fff' : 'color:var(--a)'}">${label}</a>`;
+  const head = `<div style="display:flex;align-items:center;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <span style="font-weight:600">${I18N.t('observability.tok_title')}</span>
+      <span class="ts t3">${I18N.t('observability.tok_hint', { n: _obsTokNum(t.total) })}</span>
+      <span style="flex:1"></span>
+      ${inDev ? '' : btn('tasks', I18N.t('observability.tok_mode_tasks')) + btn('stages', I18N.t('observability.tok_mode_stages'))}
+    </div>`;
+  const th = (cols) => '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+  const row = (cells) => '<tr>' + cells.map((c, i) => `<td class="${i === 0 ? '' : 'ts t2'}">${c}</td>`).join('') + '</tr>';
+  let body = '';
+  if (d.mode === 'engines') {
+    const list = p.engines || [];
+    body = `<table class="tw"><thead>${th([I18N.t('observability.tok_col_engine'), '入', '出', '缓存读',
+      I18N.t('observability.tok_col_total'), I18N.t('observability.tok_col_tasks')])}</thead><tbody>`
+      + (list.length ? list.map(e => row([`${e.name || ('engine #' + e.engine_id)}`,
+        _obsTokNum(e.input), _obsTokNum(e.output), _obsTokNum(e.cache_read),
+        `<b>${_obsTokNum(e.total)}</b>`, e.tasks || 0])).join('')
+        : `<tr><td colspan="6" class="ts t2" style="text-align:center;padding:14px">${I18N.t('observability.tok_empty')}</td></tr>`)
+      + '</tbody></table>';
+  } else if (d.mode === 'stages') {
+    const list = p.stages || [];
+    body = `<table class="tw"><thead>${th([I18N.t('observability.tok_col_issue'),
+      I18N.t('observability.tok_col_stage'), I18N.t('observability.tok_col_total'),
+      I18N.t('observability.tok_col_tasks')])}</thead><tbody>`
+      + (list.length ? list.slice(0, 30).map(s => row([s.issue_id || I18N.t('observability.tok_no_issue'),
+        _obsTOr('observability.agent_type.' + s.stage, s.stage || '—'),
+        `<b>${_obsTokNum(s.total)}</b>`, s.tasks || 0])).join('')
+        : `<tr><td colspan="4" class="ts t2" style="text-align:center;padding:14px">${I18N.t('observability.tok_empty')}</td></tr>`)
+      + '</tbody></table>';
+  } else {
+    const list = p.tasks || [];
+    body = `<table class="tw"><thead>${th([I18N.t('observability.tok_col_task'),
+      I18N.t('observability.tok_col_stage'), I18N.t('observability.tok_col_total')])}</thead><tbody>`
+      + (list.length ? list.map(x => row([`<a style="cursor:pointer;color:var(--a)" onclick="openObsTimeline('${x.task_id}')">${x.task_id}</a>`
+        + (x.issue_id ? ' <span class="ts t3">' + x.issue_id + '</span>' : ''),
+        _obsTOr('observability.agent_type.' + x.stage, x.stage || '—'), `<b>${_obsTokNum(x.total)}</b>`])).join('')
+        : `<tr><td colspan="3" class="ts t2" style="text-align:center;padding:14px">${I18N.t('observability.tok_empty')}</td></tr>`)
+      + '</tbody></table>';
+  }
+  return `<div class="cd" style="padding:10px 14px;margin-bottom:12px">${head}${body}</div>`;
+}
+
 function renderOverview(ops, rt) {
   const r = ops.runtimes || {};
   const w = ops.workers || {};
@@ -405,7 +1632,7 @@ function renderOverview(ops, rt) {
     runtimeTable = _filterBar;
     runtimeTable += '<div id="obs-runtime-rows">';
     if (_pageRuntimes.length) {
-      runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>健康分</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
+      runtimeTable += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_version') + '</th><th>' + I18N.t('observability.col_health') + '</th><th>健康分</th><th>' + I18N.t('observability.col_busy') + '</th><th>' + I18N.t('observability.col_avg_duration') + '</th><th>' + I18N.t('observability.col_token') + '</th><th>' + I18N.t('observability.col_probe') + '</th><th>' + I18N.t('observability.col_mode') + '</th><th>' + I18N.t('observability.col_device') + '</th></tr></thead><tbody>';
       runtimeTable += _pageRuntimes.map(_runtimeRowHTML).join('');
       runtimeTable += '</tbody></table></div>';
     } else {
@@ -416,6 +1643,7 @@ function renderOverview(ops, rt) {
   }
 
   return `
+
     ${section(I18N.t('observability.worker_monitor'), I18N.t('observability.online_count', {count: (w.online || 0) + '/' + (w.total || 0)}))}
     ${_kpiRowHTML([
       { label: I18N.t('observability.worker_total'), value: w.total || 0, color: 'var(--a)', id: 'kpi-w-total' },
@@ -589,7 +1817,10 @@ function loadA2aHealth() {
 let _anomalyPage = 0;
 let anomalyPageSize = 10;
 
-function renderAnomalyTab(container, ops) {
+function renderAnomalyTab(container, ops, rerender) {
+  // `rerender`：分页/每页条数的重渲染表达式。页面内用 refreshObs()；**弹窗内必须传
+  // `_obsAnomalyRerender()`**，否则点分页会重画整页而弹窗内容不动（2026-10-18）。
+  rerender = rerender || 'refreshObs()';
   const stuck = (ops.tasks || {}).stuck_tasks || [];
   const failed = (ops.tasks || {}).failed_tasks || [];
   if (!stuck.length && !failed.length) {
@@ -643,11 +1874,11 @@ function renderAnomalyTab(container, ops) {
 
     // 分页栏（含每页条数选择器）
     html += `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0;flex-wrap:wrap">
-      ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;refreshObs()">${I18N.t('observability.prev_page')}</button>` : ''}
+      ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${_anomalyPage === 0 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage--;${rerender}" >${I18N.t('observability.prev_page')}</button>` : ''}
       <span class="ts t3">${_anomalyPage+1} / ${totalPages}</span>
-      ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;refreshObs()">${I18N.t('observability.next_page')}</button>` : ''}
+      ${totalPages > 1 ? `<button class="bt bt-o bt-s" ${_anomalyPage >= totalPages-1 ? 'disabled style="opacity:.4"' : ''} onclick="_anomalyPage++;${rerender}">${I18N.t('observability.next_page')}</button>` : ''}
       <label class="ts t3" style="display:flex;align-items:center;gap:4px;margin-left:8px">${I18N.t('observability.rows_per_page')}
-        <select onchange="anomalyPageSize=parseInt(this.value)||10;_anomalyPage=0;refreshObs()" style="padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">
+        <select onchange="anomalyPageSize=parseInt(this.value)||10;_anomalyPage=0;${rerender}" style="padding:4px 8px;border:1px solid var(--b);border-radius:6px;font-size:12px;background:var(--c)">
           <option value="10"${anomalyPageSize===10?' selected':''}>10</option>
           <option value="20"${anomalyPageSize===20?' selected':''}>20</option>
           <option value="50"${anomalyPageSize===50?' selected':''}>50</option>
@@ -664,7 +1895,7 @@ function loadErrorLogs(container) {
   let currentLevel = _errorLogLevel || '';
   let currentSource = _errorLogSource || '';
   container.innerHTML = `
-    <div style="display:flex;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:8px;flex-wrap:wrap">
       <div style="display:flex;gap:0">
         <button class="bt bt-s ${currentLevel===''?'bt-p':'bt-o'}" onclick="_errorLogLevel='';loadErrorLogs(document.getElementById('obsContent'))">${I18N.t('observability.log_all')}</button>
         <button class="bt bt-s ${currentLevel==='ERROR'?'bt-p':'bt-o'}" onclick="_errorLogLevel='ERROR';loadErrorLogs(document.getElementById('obsContent'))">${I18N.t('observability.log_only_error')}</button>
@@ -673,23 +1904,78 @@ function loadErrorLogs(container) {
       <select id="errorLogSource" class="bt bt-s bt-o" style="padding:4px 8px" onchange="_errorLogSource=this.value;loadErrorLogs(document.getElementById('obsContent'))">
         <option value="">${I18N.t('observability.log_all_sources')}</option>
       </select>
+      <input id="errorLogQ" class="ip ip-s" style="max-width:200px;padding:4px 8px" placeholder="${I18N.t('observability.log_search_placeholder')}"
+             onkeydown="if(event.key==='Enter'){_errorLogQ=this.value;loadErrorLogs(document.getElementById('obsContent'))}">
+      <button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="_errorLogQ=(document.getElementById('errorLogQ')||{}).value||'';loadErrorLogs(document.getElementById('obsContent'))">${I18N.t('observability.search')}</button>
       <span class="ts t3" id="errorLogCount"></span>
+      ${_errorLogTask ? `<span class="ts t2" style="background:rgba(74,127,209,.12);padding:2px 8px;border-radius:10px">${I18N.t('observability.log_task_filter')}: ${_errorLogTask} <a style="cursor:pointer;color:var(--a)" onclick="_errorLogTask='';loadErrorLogs(document.getElementById('obsContent'))">✕</a></span>` : ''}
     </div>
+    <div class="ts t3" style="margin-bottom:10px">${I18N.t('observability.log_scope_hint')}</div>
     <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
-  // 加载来源列表
-  fetch('/api/dashboard/ops/error-logs/sources', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
+  // 来源列表从 obs_log 取（跨机聚合后的实际来源）
+  fetch('/api/obs/logs/sources', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
     const sel = document.getElementById('errorLogSource');
     if (sel) {
       (d.sources || []).forEach(s => {
         const opt = document.createElement('option');
-        opt.value = s.source;
-        opt.textContent = s.source;
-        if (currentSource === s.source) opt.selected = true;
+        opt.value = s; opt.textContent = s;
+        if (currentSource === s) opt.selected = true;
         sel.appendChild(opt);
       });
     }
   }).catch(() => {});
+  const q = _errorLogQ || '';
+  const qp = ['limit=200'];
+  if (currentLevel) qp.push('level=' + currentLevel);
+  if (currentSource) qp.push('source=' + encodeURIComponent(currentSource));
+  if (q) qp.push('q=' + encodeURIComponent(q));
+  if (_errorLogTask) qp.push('task_id=' + encodeURIComponent(_errorLogTask));
+  const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+  if (repo && repo.fullName) qp.push('repo=' + encodeURIComponent(repo.fullName));
+  // 主数据源：主控 MySQL obs_log（跨机、按可见范围过滤）
+  // 降级：查不到/失败时回落到文件扫描（§6.3：文件日志作为兜底归档）
+  API.get('/obs/logs?' + qp.join('&')).then(d => {
+    const items = d.items || [];
+    const countEl = document.getElementById('errorLogCount');
+    if (countEl) countEl.textContent = I18N.t('observability.log_count_db', {count: items.length, total: d.total || 0});
+    const bodyEl = document.getElementById('errorLogBody');
+    if (!bodyEl) return;
+    if (!items.length) {
+      bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_matching_log') + '</div>';
+      return;
+    }
+    bodyEl.innerHTML = _errorLogHtmlDb(items);
+  }).catch(() => {
+    // 降级到文件扫描（旧实现）
+    _loadErrorLogsFileFallback(currentLevel, currentSource);
+  });
+}
+
+// obs_log 渲染：短 ts + 来源 + 组件 + 仓库/任务上下文 + 级别 + 正文
+function _errorLogHtmlDb(items) {
+  let html = '<div style="background:#0c1222;color:#e0e6f0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;line-height:1.5;border-radius:8px;overflow:hidden;max-height:70vh;overflow-y:auto">';
+  items.forEach(e => {
+    const level = e.level || '';
+    const color = level === 'ERROR' || level === 'CRITICAL' ? '#dc2828' : '#d49c0f';
+    const time = String(e.ts || '').replace('T', ' ').substring(0, 19);
+    const srcTag = e.source ? '<span style="color:#5b9eff">[' + e.source + ']</span> ' : '';
+    const comp = e.component ? '<span style="color:#8d97a8">' + e.component + '</span> ' : '';
+    // 仓库/任务用短名（不显示 raw 前缀），点击可按该仓库过滤（用户偏好：入口放详情页内）
+    const rk = e.repo_key ? String(e.repo_key).split(':').slice(1).join(':') : '';
+    const ctx = (rk ? '<span style="color:#7f8ea3" title="' + e.repo_key + '">' + rk + '</span> ' : '')
+      + (e.task_id ? '<span style="color:#7f8ea3">' + e.task_id + '</span> ' : '');
+    html += '<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">' + time + '</span> ' + srcTag + comp + ctx + '<span style="color:' + color + '"><b>' + level + '</b></span> <span style="color:#e0e6f0">' + _escHtml(e.msg || '') + '</span></div>';
+  });
+  return html + '</div>';
+}
+
+function _escHtml(s) {
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// 文件扫描降级（保留旧实现，obs_log 不可用时仍能排障）
+function _loadErrorLogsFileFallback(currentLevel, currentSource) {
   const levelParam = currentLevel ? '&level=' + currentLevel : '';
   const sourceParam = currentSource ? '&source=' + encodeURIComponent(currentSource) : '';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
@@ -698,7 +1984,7 @@ function loadErrorLogs(container) {
     const entries = d.entries || [];
     const countEl = document.getElementById('errorLogCount');
     const bodyEl = document.getElementById('errorLogBody');
-    if (countEl) countEl.textContent = I18N.t('observability.log_count', {count: entries.length, files: (d.files ? d.files.length : 1)});
+    if (countEl) countEl.textContent = I18N.t('observability.log_count', {count: entries.length, files: (d.files ? d.files.length : 1)}) + ' ' + I18N.t('observability.log_file_fallback');
     if (!entries.length) {
       if (bodyEl) bodyEl.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_matching_log') + '</div>';
       return;
@@ -712,7 +1998,7 @@ function loadErrorLogs(container) {
       const srcTag = src !== I18N.t('observability.source_master') ? '<span style="color:#5b9eff">[' + src + ']</span> ' : '';
       const rid = e.request_id && e.request_id !== '-' ? ' [' + e.request_id + ']' : '';
       const extra = e.method ? ' ' + e.method + ' ' + (e.path||'') + ' ' + (e.status||'') + ' ' + (e.duration_ms||0) + 'ms' : '';
-      html += '<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">' + time + '</span>' + srcTag + rid + ' <span style="color:' + color + '"><b>' + level + '</b></span> <span style="color:#e0e6f0">' + (e.message||'').substring(0,300) + '</span><span style="color:#8d97a8">' + extra + '</span></div>';
+      html += '<div style="padding:4px 12px;border-bottom:1px solid rgba(255,255,255,.06)"><span style="color:#5b667b">' + time + '</span>' + srcTag + rid + ' <span style="color:' + color + '"><b>' + level + '</b></span> <span style="color:#e0e6f0">' + _escHtml((e.message||'').substring(0,300)) + '</span><span style="color:#8d97a8">' + extra + '</span></div>';
     });
     html += '</div>';
     if (bodyEl) bodyEl.innerHTML = html;
@@ -721,14 +2007,128 @@ function loadErrorLogs(container) {
     if (bodyEl) bodyEl.innerHTML = '<div class="error">' + I18N.t('observability.load_failed', {msg: e.message}) + '</div>';
   });
 }
+// ===== 追踪时间线（§6.4）：横向时间轴 + 可展开步骤 + 失败高亮 + 与日志互跳 =====
+function openObsTimeline(traceOrTaskId) {
+  const old = document.getElementById('obsTraceModal');
+  if (old) old.remove();
+  const modal = document.createElement('div');
+  modal.id = 'obsTraceModal';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1001';
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+  modal.innerHTML = '<div class="cd" style="width:900px;max-width:95vw;max-height:88vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
+    '<h3 style="font-size:13px;font-weight:600">' + I18N.t('observability.timeline_title') + '</h3>' +
+    '<div style="display:flex;align-items:center;gap:8px"><span id="obsTraceMeta" class="ts t3"></span>' +
+    '<button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="document.getElementById(\'obsTraceModal\').remove()">' + I18N.t('observability.close') + '</button></div>' +
+    '</div>' +
+    '<div id="obsTraceBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">' + I18N.t('observability.loading') + '</div></div>' +
+    '</div>';
+  document.body.appendChild(modal);
+  API.get('/obs/trace/' + encodeURIComponent(traceOrTaskId)).then(d => {
+    _renderObsTrace(d || {});
+  }).catch(e => {
+    const b = document.getElementById('obsTraceBody');
+    if (b) b.innerHTML = '<div class="error">' + I18N.t('observability.load_failed', { msg: (e && e.message) || e }) + '</div>';
+  });
+}
+
+function _fmtDur(v) {
+  if (v === null || v === undefined) return '—';
+  return v >= 60 ? (Math.floor(v / 60) + 'm' + Math.round(v % 60) + 's') : (Math.round(v * 10) / 10 + 's');
+}
+
+function _renderObsTrace(d) {
+  const body = document.getElementById('obsTraceBody');
+  if (!body) return;
+  const tasks = d.tasks || [];
+  const meta = document.getElementById('obsTraceMeta');
+  if (meta) {
+    const rk = d.repo_key ? String(d.repo_key).split(':').slice(1).join(':') : '';
+    meta.textContent = [rk, d.issue_id, (d.kind === 'pipeline' ? I18N.t('observability.timeline_pipeline') : '')]
+      .filter(Boolean).join(' · ');
+  }
+  if (!tasks.length) {
+    body.innerHTML = '<div class="ts t2" style="padding:24px;text-align:center">' + I18N.t('observability.timeline_empty') + '</div>';
+    return;
+  }
+  let html = '';
+  tasks.forEach(t => {
+    const bad = t.status === 'failed' || t.status === 'cancelled';
+    const color = bad ? '#d64545' : (t.status === 'completed' ? '#22a06b' : '#e0a02a');
+    const tk = t.tokens || {};
+    html += '<div class="cd" style="padding:12px 14px;margin-bottom:12px;border-left:3px solid ' + color + '">';
+    // 头部：agent 类型 + 引擎 + 状态 + 时间
+    html += '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap">' +
+      '<b style="font-size:13px">' + (t.agent_type || '-') + '</b>' +
+      '<span class="ts t3">' + (t.engine || ('#' + t.runtime_id)) + '</span>' +
+      '<span class="ts" style="color:' + color + '">' + (t.status || '') + '</span>' +
+      '<span class="ts t3">' + I18N.t('observability.timeline_queue_wait') + ' ' + _fmtDur(t.queue_wait_s) +
+      ' · ' + I18N.t('observability.timeline_duration') + ' ' + _fmtDur(t.duration_s) + '</span>' +
+      (tk.total ? '<span class="ts t3">tokens ' + (tk.total).toLocaleString() + '</span>' : '') +
+      '<a style="cursor:pointer;color:var(--a);margin-left:auto;white-space:nowrap" onclick="openTaskLogModal(\'' + t.id + '\',\'\')">' + I18N.t('observability.view_logs') + '</a>' +
+      '</div>';
+    // 轨道：enqueue → dispatch → terminal
+    html += '<div class="ts t3" style="margin:6px 0">' +
+      (t.enqueue_at || '').replace('T', ' ').substring(0, 19) + ' → ' +
+      (t.dispatch_at || '').replace('T', ' ').substring(0, 19) + ' → ' +
+      (t.terminal_at || '…').replace('T', ' ').substring(0, 19) +
+      '</div>';
+    if (bad && t.failure_reason) {
+      html += '<div style="color:#d64545;font-size:12px;margin-bottom:6px">' + I18N.t('observability.timeline_failed') + ': ' + _escHtml(t.failure_reason) + '</div>';
+    }
+    // 步骤
+    const steps = t.steps || [];
+    if (!steps.length) {
+      html += '<div class="ts t3">' + I18N.t('observability.timeline_no_steps') + '</div>';
+    } else {
+      html += '<details style="margin-top:4px"><summary style="cursor:pointer;font-size:12px" class="ts t2">' +
+        I18N.t('observability.timeline_steps') + ' (' + steps.length + ')</summary>' +
+        '<div style="margin-top:6px;background:#0c1222;color:#e0e6f0;border-radius:6px;padding:6px 0;font-family:Menlo,Monaco,Consolas,monospace;font-size:11px;max-height:260px;overflow-y:auto">';
+      steps.forEach(s => {
+        const c = s.type === 'error' ? '#dc2828' : (s.type === 'tool_use' ? '#5b9eff' : '#8d97a8');
+        const extra = s.tool ? ' ' + s.tool : '';
+        const io = (s.input ? ' ▸ ' + _escHtml(s.input) : '') + (s.output ? ' ⟵ ' + _escHtml(s.output) : '');
+        html += '<div style="padding:3px 10px"><span style="color:#5b667b">#' + s.seq + '</span> ' +
+          '<span style="color:' + c + '">' + s.type + extra + '</span> ' +
+          '<span style="color:#c8d0dc">' + _escHtml(s.content || s.output || '') + '</span>' +
+          '<span style="color:#6b7686">' + io + '</span></div>';
+      });
+      html += '</div></details>';
+    }
+    // 内联日志命中
+    const hits = t.log_hits || [];
+    if (hits.length) {
+      html += '<div style="margin-top:6px">';
+      hits.forEach(h => {
+        html += '<div class="ts t3" style="color:' + (h.level === 'ERROR' ? '#d64545' : '#e0a02a') + '">' +
+          (h.ts || '').substring(0, 19) + ' [' + (h.level || '') + '] ' + _escHtml((h.msg || '').substring(0, 160)) + '</div>';
+      });
+      html += '</div>';
+    }
+    html += '</div>';
+  });
+  body.innerHTML = html;
+}
+
+// 从时间线跳到日志 tab（按任务过滤；§6.4「与日志互跳」）
+function jumpObsLogsForTask(taskId) {
+  _errorLogTask = taskId;
+  const m = document.getElementById('obsTraceModal');
+  if (m) m.remove();
+  renderObservability('inspect');   // 先渲染分区（会把默认子 Tab 重置为 tasks）
+  switchObsTab('errorlogs');        // 再切到日志子 Tab（清缓存重渲染，带上任务过滤）
+}
+
 let _errorLogLevel = '';
 let _errorLogSource = '';
+let _errorLogQ = '';
+let _errorLogTask = '';
 
 // ===== Tab: 任务 =====
 function renderTasksTab(ops, rt) {
   const t = ops.tasks || {};
   const sc = t.status_counts || {};
-  let html = '';
+  let html = _obsTaskAnomalyBarHtml();   // 异常任务入口（按钮→弹窗）
   html += section(I18N.t('observability.task_status_dist'));
   const _is = t.issue_stats || {};
   html += _kpiRowHTML([
@@ -1025,12 +2425,12 @@ function _filterTimelineIssues() {
     html += '</div>';
     html += '<div id="tl-diagram-' + iss.issueId + '" class="tl-mmd" data-iid="' + iss.issueId + '" style="overflow-x:auto;' + (_issueViewMode[iss.issueId] === 'events' ? 'display:none' : '') + '"></div>';
     html += '<div id="tl-events-' + iss.issueId + '" style="' + (_issueViewMode[iss.issueId] !== 'events' ? 'display:none' : '') + '">';
-    html += '<table style="width:100%;font-size:11px"><thead><tr><th>' + I18N.t('observability.col_seq') + '</th><th>' + I18N.t('observability.col_event') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_skill') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
+    html += '<table style="width:100%;font-size:11px"><thead><tr><th>' + I18N.t('observability.col_seq') + '</th><th>' + I18N.t('observability.col_event') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_engine') + '</th><th>' + I18N.t('observability.col_skill') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_token') + '</th><th>' + I18N.t('observability.col_time') + '</th></tr></thead><tbody>';
     html += iss.events.map(ev => {
       const enc = ev.taskId ? encodeURIComponent(JSON.stringify({issue:iss.issueId, seq:ev.seq, created:ev.createdAt||''})) : '';
       const clickable = ev.taskId ? 'cursor:pointer' : '';
       const onclick = ev.taskId ? " onclick=\"openTaskLogModal('" + ev.taskId + "','" + enc + "')\"" : '';
-      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t3">' + fmtLocalTime(ev.createdAt||'').substring(0,19) + '</td></tr>';
+      return '<tr style="' + clickable + '"' + onclick + '><td class="ts">' + ev.seq + '</td><td>' + _actionText(ev.eventType) + '</td><td><b>' + (ev.agentType||'-') + '</b></td><td class="ts t3">' + _engineWithIp(ev.engine) + '</td><td class="ts t3">' + (ev.skill||'-') + '</td><td style="color:' + (ev.status==='failed'?'var(--r)':ev.status==='completed'?'var(--g)':'var(--t3)') + '">' + (ev.status||'-') + '</td><td class="ts t3">' + (ev.duration||'-') + 's</td><td class="ts t2" title="' + (ev.agentType||'') + '">' + _obsTokTaskFor(ev.taskId) + '</td><td class="ts t3">' + fmtLocalTime(ev.createdAt||'').substring(0,19) + '</td></tr>';
     }).join('');
     html += '</tbody></table></div>';
     html += '</div></div>';
@@ -1240,7 +2640,7 @@ function renderSessionList(container, sessions, rtName) {
     });
     allTasks.sort((a, b) => (b.event_seq || 0) - (a.event_seq || 0));
     if (!allTasks.length) return '<div class="ts t3" style="padding:8px">' + I18N.t('observability.no_completed_tasks') + '</div>';
-    let html = '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_exit') + '</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
+    let html = '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_duration') + '</th><th>' + I18N.t('observability.col_complete_time') + '</th></tr></thead><tbody>';
     allTasks.forEach(t => {
       const is = (t.issue_id && t.event_seq) ? t.issue_id + ' #' + t.event_seq : (t.event_seq ? '#' + t.event_seq : t.id.substring(0,12));
       const enc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:'', created:t.completed_at||''}));
@@ -1259,7 +2659,7 @@ function renderSessionList(container, sessions, rtName) {
         '<td><b>' + (t.agent_type||'-') + '</b></td>' +
         '<td><span style="color:' + (taskStatusColor[t.status]||'var(--t3)') + '">' + (taskStatusIcon[t.status]||'') + ' ' + t.status + '</span></td>' +
         '<td><span style="color:' + durColor + '">' + durStr + '</span></td>' +
-        '<td>' + (t.exit_code != null ? t.exit_code : '-') + '</td>' +
+        '<td class="ts t2">' + _obsTokTaskFor(t.id) + '</td>' +
         '<td class="ts t3">' + fmtLocalTime(t.completed_at||'').substring(0,16) + '</td>' +
         '</tr>';
     });
@@ -1398,7 +2798,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
   const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
   const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
   let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${I18N.t('observability.task_list_hint', {name: rtName, count: tasks.length})}</div>`;
-  html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent_skill') + '</th><th>' + I18N.t('observability.col_repo') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_exit') + '</th><th>' + I18N.t('observability.col_created') + '</th></tr></thead><tbody>';
+  html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent_skill') + '</th><th>' + I18N.t('observability.col_repo') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_token') + '</th><th>' + I18N.t('observability.col_created') + '</th></tr></thead><tbody>';
   tasks.forEach(t => {
     const issueSeq = (t.issue_id && t.event_seq) ? `${t.issue_id} #${t.event_seq}` : (t.event_seq ? `#${t.event_seq}` : t.id.substring(0,12));
     const infoEnc = encodeURIComponent(JSON.stringify({issue:t.issue_id||'', seq:t.event_seq||0, repo:(t.repo_key||'').replace('gitcode:',''), created:t.created_at||''}));
@@ -1407,7 +2807,7 @@ function renderRuntimeTaskList(container, tasks, rtName) {
       <td><b>${t.agent_type || '-'}</b><br><span class="ts t3">${t.skill || '-'}</span></td>
       <td class="ts t3">${(t.repo_key || '').replace('gitcode:','').substring(0,20)}</td>
       <td><span style="color:${statusColor[t.status] || 'var(--t3)'}">${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</span></td>
-      <td>${t.exit_code ?? '-'}</td>
+      <td class="ts t2">${_obsTokTaskFor(t.id)}</td>
       <td class="ts t3">${fmtLocalTime(t.created_at || '').substring(0,16)}</td>
     </tr>`;
   });
@@ -1444,7 +2844,7 @@ function openTaskLogModal(taskId, infoEnc) {
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
     '<h3 style="font-size:13px;font-weight:600">' + titleHtml + '</h3>' +
-    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">' + I18N.t('observability.live') + '</span><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">' + I18N.t('observability.close') + '</button></div>' +
+    '<div style="display:flex;align-items:center;gap:8px"><span id="rtLogLiveTag" style="font-size:10px;color:var(--g);display:none">' + I18N.t('observability.live') + '</span><button class="bt bt-o bt-s" style="white-space:nowrap;padding:4px 12px" onclick="openObsTimeline(\'' + taskId + '\')">' + I18N.t('observability.timeline') + '</button><button class="bt bt-o bt-s" onclick="closeTaskLogModal()">' + I18N.t('observability.close') + '</button></div>' +
     '</div>' +
     '<div id="rtLogTimeline" style="padding:10px 18px;border-bottom:1px solid var(--b);display:none"></div>' +
     '<div id="rtLogModalBody" style="overflow-y:auto;flex:1;padding:14px 18px"><div class="loading">' + I18N.t('observability.loading_logs') + '</div></div>' +
