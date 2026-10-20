@@ -1,0 +1,46 @@
+== chat_agent_session 迁移预演（rename 版） @ <db> ==
+
+待执行用户 18 ｜ 跳过（待裁决）18
+
+  [A] user    1  保留 sess-cfg-1（opencode）  删除 1 行: sess-cfg-37
+        ↳ 先把 sess-cfg-37 的独有非空字段并进 canonical: im_app_id=cli_aa0f66ae9378dcbb, im_app_secret=***, im_provider=feishu, runtime=opencode
+  [B1] user    5  改名 sess-cfg-41 → sess-cfg-5（零数据搬移）
+  [B1] user    8  改名 sess-cfg-117 → sess-cfg-8（零数据搬移）
+  [B1] user    9  改名 sess-cfg-118 → sess-cfg-9（零数据搬移）
+  [B1] user   11  改名 sess-cfg-120 → sess-cfg-11（零数据搬移）
+  [B1] user   13  改名 sess-cfg-49 → sess-cfg-13（零数据搬移）
+  [B1] user   15  改名 sess-cfg-51 → sess-cfg-15（零数据搬移）
+  [B1] user   17  改名 sess-cfg-53 → sess-cfg-17（零数据搬移）
+  [B1] user   21  改名 sess-cfg-130 → sess-cfg-21（零数据搬移）
+  [B1] user   22  改名 sess-cfg-58 → sess-cfg-22（零数据搬移）
+  [B1] user   24  改名 sess-cfg-96 → sess-cfg-24（零数据搬移）
+  [B1] user   26  改名 sess-cfg-98 → sess-cfg-26（零数据搬移）
+  [B1] user   27  改名 sess-cfg-99 → sess-cfg-27（零数据搬移）
+  [B1] user   31  改名 sess-cfg-104 → sess-cfg-31（零数据搬移）
+  [B1] user   32  改名 sess-cfg-68 → sess-cfg-32（零数据搬移）
+  [B1] user   34  改名 sess-cfg-70 → sess-cfg-34（零数据搬移）
+  [B1] user   36  改名 sess-cfg-72 → sess-cfg-36（零数据搬移）
+  [A] user   38  保留 sess-cfg-38（hermes）  删除 1 行: sess-cfg-111
+        ↳ 先把 sess-cfg-111 的独有非空字段并进 canonical: runtime=opencode
+
+-- 跳过（保持原样，等人工裁决）--
+  user    3  读到=sess-cfg-112  行数=3  原因=多行且 canonical 缺失  行: sess-cfg-112, sess-cfg-39, sess-cfg-75
+  user    4  读到=sess-cfg-113  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-113, sess-cfg-40
+  user    6  读到=sess-cfg-115  行数=3  原因=多行且 canonical 缺失  行: sess-cfg-115, sess-cfg-78, sess-cfg-42
+  user    7  读到=sess-cfg-116  行数=3  原因=多行且 canonical 缺失  行: sess-cfg-116, sess-cfg-79, sess-cfg-43
+  user   10  读到=sess-cfg-119  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-119, sess-cfg-46
+  user   12  读到=sess-cfg-121  行数=3  原因=多行且 canonical 缺失  行: sess-cfg-121, sess-cfg-84, sess-cfg-48
+  user   14  读到=sess-cfg-123  行数=3  原因=多行且 canonical 缺失  行: sess-cfg-123, sess-cfg-86, sess-cfg-50
+  user   16  读到=sess-cfg-125  行数=3  原因=多行且 canonical 缺失  行: sess-cfg-125, sess-cfg-52, sess-cfg-88
+  user   19  读到=sess-cfg-128  行数=2  原因=canonical 名字的行属于别人（跨空间占用）或引擎不可用  行: sess-cfg-19, sess-cfg-128
+  user   20  读到=sess-cfg-129  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-129, sess-cfg-56
+  user   23  读到=sess-cfg-95  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-95, sess-cfg-59
+  user   28  读到=sess-cfg-100  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-100, sess-cfg-64
+  user   29  读到=sess-cfg-102  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-102, sess-cfg-65
+  user   33  读到=sess-cfg-69  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-69, sess-cfg-106
+  user   37  读到=sess-cfg-73  行数=1  原因=canonical 名字的行属于别人（跨空间占用）或引擎不可用  行: sess-cfg-73
+  user   53  读到=sess-cfg-89  行数=1  原因=canonical 名字的行属于别人（跨空间占用）或引擎不可用  行: sess-cfg-89
+  user   54  读到=sess-cfg-127  行数=2  原因=多行且 canonical 缺失  行: sess-cfg-127, sess-cfg-90
+  user   58  读到=sess-cfg-131  行数=1  原因=canonical 名字的行属于别人（跨空间占用）或引擎不可用  行: sess-cfg-131
+
+（预演结束，未修改任何数据；加 --apply --yes 执行）
