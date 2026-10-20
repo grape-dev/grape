@@ -1325,14 +1325,11 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
     }
 
     // Engine 区域 — 药丸标签在上，按钮在下
-    // SRE 专属（sre-repo-worker-relax §2.2）：启用但未选引擎 → 红色必选提示徽章；
-    // 取消「重新检测个人机器」按钮（唤醒体系已退役），统一走「选择引擎」
-    const _sreMissing = (tag === 'sre' && enabled && !((node.engine_runtime_ids) || []).length);
+    // SRE 未选引擎时徽章由 _engineBadgeHtml 统一显示灰色「未选择引擎 · 不支持广播」
     let engineHtml;
     if (enabled) {
       engineHtml = `<div style="display:flex;flex-direction:column;align-items:center;gap:6px;width:100%">
         ${badgeHtml}
-        ${_sreMissing ? `<div style="font-size:10px;color:#ff3b30;border:1px solid rgba(255,59,48,.3);border-radius:999px;padding:2px 10px;font-weight:500">${I18N.t('dashboard.sre_engine_required')}</div>` : ''}
         <div style="display:flex;gap:6px;justify-content:center;flex-wrap:wrap">
           <button onclick="openEngineModal('${tag}')" style="font-size:10px;padding:4px 12px;border:1px solid #e8e8ed;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#e8e8ed';this.style.color='#6e6e73'">${I18N.t('dashboard.select_engine')||'选择引擎'}</button>
         </div>
