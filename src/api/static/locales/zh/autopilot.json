@@ -185,7 +185,11 @@
     "last_run": "上次运行: {{time}}",
     "advanced_title": "高级选项",
     "history_title": "执行历史",
-    "load_failed": "加载失败: {{msg}}"
+    "load_failed": "加载失败: {{msg}}",
+    "subscribe": "订阅飞书通知",
+    "subscribed": "已订阅",
+    "subscribe_on": "已开启订阅",
+    "subscribe_off": "已取消订阅"
   },
   "advanced": {
     "save": "保存",

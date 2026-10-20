@@ -251,14 +251,17 @@ class RuntimeClient:
 
     async def complete(self, task_id: str, result_text: str, exit_code: int, session_id: str = "",
                        work_dir: str = "", engine: str = "", run_token: str = ""):
-        await self._request("POST", f"/api/runtime/tasks/{task_id}/complete",
-                            {"result_text": result_text, "exit_code": exit_code,
-                             "session_id": session_id, "work_dir": work_dir,
-                             "engine": engine, "run_token": run_token}, retries=4)
+        # 必须 return：补报队列以 "resp is not None" 作为 ack 判据（漏 return 会导致条目
+        # 永不出队、每 10s 无限重放，2026-10-19 补报重放事故根因）。
+        return await self._request("POST", f"/api/runtime/tasks/{task_id}/complete",
+                                   {"result_text": result_text, "exit_code": exit_code,
+                                    "session_id": session_id, "work_dir": work_dir,
+                                    "engine": engine, "run_token": run_token}, retries=4)
 
     async def fail(self, task_id: str, error: str, exit_code: int = -1, run_token: str = ""):
-        await self._request("POST", f"/api/runtime/tasks/{task_id}/fail",
-                            {"error": error, "exit_code": exit_code, "run_token": run_token}, retries=4)
+        # 同上：fail 是补报队列最常用分支，漏 return 必现「无限重放 + 旧失败原因污染重派后事件」。
+        return await self._request("POST", f"/api/runtime/tasks/{task_id}/fail",
+                                   {"error": error, "exit_code": exit_code, "run_token": run_token}, retries=4)
 
     async def requeue(self, task_id: str):
         """回滚 dispatched/running 任务为 queued（客户端 claim 冲突跳过时调用）。

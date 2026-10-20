@@ -20,6 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HELP_DIR = REPO_ROOT / "help"
 USAGE_DIR = HELP_DIR / "usage"
 API_DIR = HELP_DIR / "api"
+DEVELOPER_DIR = HELP_DIR / "developer"
 OPENAPI_DIR = REPO_ROOT / "docs" / "openapi"
 HELP_HTML = REPO_ROOT / "src" / "api" / "static" / "help.html"
 
@@ -39,6 +40,17 @@ EXPECTED_USAGE_FILES = [
 
 EXPECTED_REFERENCE_FILES = [
     "event-mapping.md",
+]
+
+# Issue #373: 开发者文档（自建/私有化部署配置指南，00~06 七篇）
+EXPECTED_DEVELOPER_FILES = [
+    "00-overview.md",
+    "01-gitcode-integration.md",
+    "02-github-integration.md",
+    "03-im-bot.md",
+    "04-storage-and-email.md",
+    "05-database-and-sync.md",
+    "06-security-and-engine.md",
 ]
 
 EXPECTED_API_FILES = [
@@ -162,6 +174,54 @@ class TestApiFiles:
         assert dst.exists(), f"Destination {dst} not found"
         content = dst.read_text(encoding="utf-8").strip()
         assert len(content) > 200, f"{filename} help 版为空或过短（面向用户不可用）"
+
+
+class TestDeveloperFiles:
+    """Issue #373: Verify help/developer/ markdown files."""
+
+    def test_all_expected_files_exist(self):
+        files = {f.name for f in DEVELOPER_DIR.iterdir() if f.is_file()}
+        for name in EXPECTED_DEVELOPER_FILES:
+            assert name in files, f"Missing {name} in help/developer/"
+
+    def test_file_count(self):
+        files = [f for f in DEVELOPER_DIR.iterdir() if f.is_file()]
+        assert len(files) == len(EXPECTED_DEVELOPER_FILES), \
+            f"Expected {len(EXPECTED_DEVELOPER_FILES)} files, got {len(files)}"
+
+    @pytest.mark.parametrize("filename", EXPECTED_DEVELOPER_FILES)
+    def test_no_residual_html_tags(self, filename):
+        content = (DEVELOPER_DIR / filename).read_text(encoding="utf-8")
+        cleaned = re.sub(r"```.*?```", "", content, flags=re.DOTALL)
+        cleaned = re.sub(r"`[^`]*`", "", cleaned)
+        tags = re.findall(r"<(?!/)[a-zA-Z][^>]*>", cleaned)
+        assert not tags, f"{filename} contains residual HTML tags: {tags[:5]}"
+
+    @pytest.mark.parametrize("filename", EXPECTED_DEVELOPER_FILES)
+    def test_files_are_nonempty(self, filename):
+        content = (DEVELOPER_DIR / filename).read_text(encoding="utf-8").strip()
+        assert len(content) > 50, f"{filename} is suspiciously short ({len(content)} chars)"
+
+    def test_naming_lowercase_hyphens(self):
+        for name in EXPECTED_DEVELOPER_FILES:
+            stem = name.replace(".md", "")
+            assert stem == stem.lower(), f"{name} not lowercase"
+            assert " " not in name, f"{name} contains spaces"
+            assert re.match(r"^[a-z0-9-]+\.md$", name), f"{name} violates naming convention"
+
+    @pytest.mark.parametrize("filename", EXPECTED_DEVELOPER_FILES)
+    def test_triple_structure_where_example_verify(self, filename):
+        """Issue #373 验收：每篇含「在哪配→示例→验证」三件套标记。"""
+        content = (DEVELOPER_DIR / filename).read_text(encoding="utf-8")
+        assert "在哪配" in content, f"{filename} missing 在哪配"
+        assert "配置示例" in content or "**配置示例**" in content or "配置示例：" in content, \
+            f"{filename} missing 配置示例"
+        assert "如何验证" in content, f"{filename} missing 如何验证"
+
+    def test_im_bot_contains_lease_log_keyword(self):
+        """Issue #373 验收：03-im-bot.md 必须含 connected after acquiring lease 验证项。"""
+        content = (DEVELOPER_DIR / "03-im-bot.md").read_text(encoding="utf-8")
+        assert "connected after acquiring lease" in content
 
 
 class TestHelpHtmlMigration:

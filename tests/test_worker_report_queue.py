@@ -86,6 +86,56 @@ class TestWorkerReportQueue:
         assert q.size() == 1, "上报失败应保留，重连后再补报"
 
 
+class TestRuntimeClientAck:
+    """回归：RuntimeClient.complete/fail 必须把响应体 return 出去。
+
+    2026-10-19 补报重放事故：两者漏 return → 恒为 None → 补报队列的
+    `if resp is not None: queue.remove()` 永不成立 → 条目永不出队、每 10s 无限重放，
+    把人工 redispatch 后的事件反复写回 failed + 旧失败原因。
+    """
+
+    @staticmethod
+    def _client(monkeypatch, resp):
+        from src.runtime.client import RuntimeClient
+        c = RuntimeClient.__new__(RuntimeClient)  # 绕过构造/网络
+        calls = []
+
+        async def _fake_request(method, path, body=None, retries=4):
+            calls.append((method, path, body))
+            return resp
+
+        c._request = _fake_request
+        return c, calls
+
+    def test_complete_returns_response(self, monkeypatch):
+        c, calls = self._client(monkeypatch, {"status": "completed"})
+        out = asyncio.run(c.complete("t1", "txt", 0, run_token="tok"))
+        assert out == {"status": "completed"}, "complete 必须返回响应体（补报出队判据）"
+        assert calls and calls[0][1].endswith("/complete")
+
+    def test_fail_returns_response(self, monkeypatch):
+        c, calls = self._client(monkeypatch, {"status": "failed"})
+        out = asyncio.run(c.fail("t1", "boom", exit_code=-1, run_token="tok"))
+        assert out == {"status": "failed"}, "fail 必须返回响应体（补报出队判据）"
+        assert calls and calls[0][1].endswith("/fail")
+
+    def test_replay_with_real_client_dequeues(self, q_path, monkeypatch):
+        """真 client + 假 _request(200)：ack 后必须出队（旧代码恒 None → 永不出队）。"""
+        c, _ = self._client(monkeypatch, {"status": "failed"})
+        q = wrq.WorkerReportQueue(path=q_path)
+        q.add(_entry("t_real", "failed", "tok-real"))
+        asyncio.run(wrq.replay_pending_reports(c, q))
+        assert q.size() == 0, "服务端 200 后条目必须出队，否则会每 10s 无限重放"
+
+    def test_replay_keeps_entry_when_server_unreachable(self, q_path, monkeypatch):
+        """对端不可达（_request 返回 None）时条目必须保留，等重连补报。"""
+        c, _ = self._client(monkeypatch, None)
+        q = wrq.WorkerReportQueue(path=q_path)
+        q.add(_entry("t_unreach", "failed", "tok-x"))
+        asyncio.run(wrq.replay_pending_reports(c, q))
+        assert q.size() == 1, "未 ack 的条目应保留"
+
+
 class TestValidateRunToken:
     def test_ok_active(self):
         task = {"status": "running", "started_at": "2026-10-16T12:00:00+00:00"}

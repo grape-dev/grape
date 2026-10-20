@@ -1,8 +1,8 @@
-"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference 的 markdown 渲染为 src/api/static/help.html。
+"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference + help/developer 的 markdown 渲染为 src/api/static/help.html。
 
 v2 设计（见 docs/weekly-02/help-page-prototype.md）：
-- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / Git事件统一模型 / API 文档 三个独立区块
-- 目录按区块隔离：使用页=仅使用指南；Git事件统一模型=参考文档；API 页=仅 API；同一级小节同缩进（不互为父子）
+- help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / Git事件统一模型 / API 文档 / 开发者文档 四个独立区块
+- 目录按区块隔离：使用页=仅使用指南；Git事件统一模型=参考文档；API 页=仅 API；开发者文档=自建/私有化部署配置指南；同一级小节同缩进（不互为父子）
 - 点击目录子项左目录常驻，仅右侧内容区替换渲染对应 markdown
 - 右侧单文档渲染，H2/H3 轻量标题，仅提示/代码块带框；当前章节/小节高亮 + scrollspy
 - 主题切换(🌓 localStorage) + 移动端抽屉目录 + 侧栏搜索
@@ -45,6 +45,26 @@ REFERENCE_DIR = HELP_DIR / "reference"
 REFERENCE_ORDER = [
     "event-mapping.md",
 ]
+
+# 开发者文档（Issue #373）：自建/私有化部署运维配置指南（在哪配→示例→验证 三件套）
+DEVELOPER_DIR = HELP_DIR / "developer"
+DEVELOPER_ORDER = [
+    "00-overview.md",
+    "01-gitcode-integration.md",
+    "02-github-integration.md",
+    "03-im-bot.md",
+    "04-storage-and-email.md",
+    "05-database-and-sync.md",
+    "06-security-and-engine.md",
+]
+
+# 区块中文标题（sideList / 首页卡片 / 顶栏统一取此表）
+_SECTION_TITLES = {
+    "usage": "使用指南",
+    "reference": "参考文档",
+    "api": "API 参考",
+    "developer": "开发者文档",
+}
 _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
 # OpenAPI 契约下载：固定 URL（内容随 API 版本刷新，路径不变）
@@ -149,7 +169,7 @@ th{background:var(--c);font-weight:600}
 """
 
 _MIGRATION_COMMENT = """<!--
-  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api + help/reference 渲染。
+  ⚠️ 迁移说明：本文件为生成产物（v2 SPA 壳），内容由 src/help_page_gen.py 依据 help/usage + help/api + help/reference + help/developer 渲染。
   如需更新任何内容，请编辑 help/ 目录下对应 markdown 文件后重启服务（help.html 自动重新生成）。
 -->"""
 
@@ -173,8 +193,8 @@ _JS_APP = r"""
     return out + '</div>';
   }
   function sideList(sec, cur) {
-    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : 'API 参考') + '</div>';
-    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : 'API 文档') + '..."></div>';
+    var out = '<div class="side-group">' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : sec === 'developer' ? '开发者文档' : 'API 参考') + '</div>';
+    out += '<div class="search"><input id="sbox" type="text" placeholder="搜索' + esc(sec === 'usage' ? '使用指南' : sec === 'reference' ? '参考文档' : sec === 'developer' ? '开发者文档' : 'API 文档') + '..."></div>';
     var h1id = (cur && (cur.html.match(/<h1\b[^>]*id="([^"]+)"/) || [])[1]) || '';
     var d, i, has;
     for (i = 0; i < docs(sec).length; i++) {
@@ -193,6 +213,7 @@ _JS_APP = r"""
       + '<a class="link' + (sec === 'usage' ? ' active' : '') + '" href="#/usage">使用文档</a>'
       + '<a class="link' + (sec === 'reference' ? ' active' : '') + '" href="#/reference">Git事件统一模型</a>'
       + '<a class="link' + (sec === 'api' ? ' active' : '') + '" href="#/api">API 文档</a>'
+      + '<a class="link' + (sec === 'developer' ? ' active' : '') + '" href="#/developer">开发者文档</a>'
       + '<span class="spacer"></span>'
       + '<button class="btn theme-toggle" type="button" title="切换主题">\u2600\ufe0f/\ud83c\udf19</button>'
       + '<button class="btn burger" type="button" title="目录">\u2630</button></div>';
@@ -205,6 +226,7 @@ _JS_APP = r"""
       + '<a class="card" href="#/usage"><div class="big">\ud83d\udcd6 使用文档</div><div>快速上手 · Agent 详解 · 流水线 · 技能 · FAQ</div><div class="go">进入使用文档 \u2192</div></a>'
       + '<a class="card" href="#/reference"><div class="big">\ud83d\udd04 Git事件统一模型</div><div>GitCode/GitHub Webhook → Grape 内部事件类型映射参考</div><div class="go">进入 Git事件统一模型 \u2192</div></a>'
       + '<a class="card" href="#/api"><div class="big">\u26ed API 文档</div><div>认证与通用约定 · 任务/仓库/技能 等接口参考</div><div class="go">进入 API 文档 \u2192</div></a>'
+      + '<a class="card" href="#/developer"><div class="big">\ud83d\udee0\ufe0f 开发者文档</div><div>自建/私有化部署配置指南 · 集成 · 存储 · 数据库 · 安全</div><div class="go">进入开发者文档 \u2192</div></a>'
       + '</div></div>';
   }
   function initSpy(cur) {
@@ -319,7 +341,7 @@ _JS_APP = r"""
     if (hashIdx >= 0) { frag = raw.slice(hashIdx + 1); raw = raw.slice(0, hashIdx); }
     var parts = raw.split('/').filter(Boolean);
     var sec = parts[0];
-    if (sec !== 'usage' && sec !== 'api' && sec !== 'reference') { renderHome(); return; }
+    if (sec !== 'usage' && sec !== 'api' && sec !== 'reference' && sec !== 'developer') { renderHome(); return; }
     var cur = docOf(sec, parts[1]);
     renderSection(sec, cur);
     if (frag) {
@@ -450,7 +472,12 @@ def _rewrite_md_hrefs(body: str, section: str) -> str:
         path, _, frag = href.partition("#")
         if not path.endswith(".md"):
             return m.group(0)
-        route = f"#/{section}/{path[:-3]}"
+        # 跨区块相对链接（如 ../usage/overview.md）→ 目标区块 SPA 路由（#/usage/overview）
+        xm = re.match(r"(?:\.\./)+(usage|api|reference|developer)/(.+)", path)
+        route_section = xm.group(1) if xm else section
+        if xm:
+            path = xm.group(2)
+        route = f"#/{route_section}/{path[:-3]}"
         if frag:
             route += f"#{frag}"
         return f'{prefix} href="{route}"'
@@ -502,8 +529,31 @@ def _reference_data() -> list[dict]:
     return items
 
 
+def _developer_data() -> list[dict]:
+    """开发者文档（Issue #373）：自建/私有化部署配置指南，复用 reference 渲染管线。"""
+    items = []
+    for fname in DEVELOPER_ORDER:
+        path = DEVELOPER_DIR / fname
+        if not path.is_file():
+            continue
+        body, tokens = _render_file(path)
+        prefix = re.sub(r"[^0-9a-zA-Z]", "-", path.stem).strip("-") + "-"
+        body = _prefix_heading_ids(body, tokens, prefix)
+        body = _adorn_blockquotes(body)
+        body = _rewrite_md_hrefs(body, "developer")
+        title = next((t.get("name", "") for t in tokens if t.get("level") == 1), path.stem)
+        items.append({"id": path.stem, "title": title, "html": body, "toc": _collect_toc(tokens, prefix)})
+    mark_overview(items, "developer")
+    return items
+
+
 def build_data() -> dict:
-    return {"usage": _section_data(True), "api": _section_data(False), "reference": _reference_data()}
+    return {
+        "usage": _section_data(True),
+        "api": _section_data(False),
+        "reference": _reference_data(),
+        "developer": _developer_data(),
+    }
 
 
 def build_help_html(data: dict | None = None) -> str:
@@ -530,7 +580,7 @@ def generate() -> int:
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = build_data()
     OUT_PATH.write_text(build_help_html(data), encoding="utf-8")
-    return len(data["usage"]) + len(data["api"]) + len(data.get("reference", []))
+    return len(data["usage"]) + len(data["api"]) + len(data.get("reference", [])) + len(data.get("developer", []))
 
 
 def write_openapi_contract(schema: dict, help_path: Path | None = None, static_path: Path | None = None) -> int:

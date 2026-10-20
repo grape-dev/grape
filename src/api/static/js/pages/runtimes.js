@@ -19,6 +19,9 @@ let _rtFilterScene = [];
 let _rtFilterTag = [];
 let __runtimeData = null;
 let __runtimeDevices = null;
+// Issue #364: 引擎多源查找索引（id → engine），Engines 分页缓存 ∪ Workers 设备承载引擎，
+// 供 openEngineDetail 在 Engines 列表未命中时查找（设备来源条目标记 _partial，字段部分）
+let _rtEngineIndex = {};
 let _skillScanDirty = false;  // skills 扫描成功后标记，关闭弹窗时刷新引擎列表
 let _engineSkillQuery = '';   // Issue #335: 详情弹窗 skills 搜索关键词
 let _engineSkillCache = {};   // Issue #335: runtimeId → {skills:[名称...], details:[{name,description,...}...]}
@@ -282,10 +285,34 @@ function _renderRuntimesSkeleton(data) {
   }
 }
 
+// Issue #364: 重建引擎多源索引（Engines 列表缓存 ∪ Workers 设备承载引擎）
+// 设备来源条目用设备级字段补齐 worker/scope/owner（缺 health_score 等派生字段，标记 _partial）
+function _rebuildRtEngineIndex() {
+  _rtEngineIndex = {};
+  (((__runtimeData && __runtimeData.runtimes) || [])).forEach(function(rt) {
+    if (rt && rt.id !== undefined) _rtEngineIndex[rt.id] = rt;
+  });
+  (((__runtimeData && __runtimeData.devices) || [])).forEach(function(d) {
+    (d.runtimes || []).forEach(function(rt) {
+      if (!rt || rt.id === undefined || _rtEngineIndex[rt.id]) return;
+      _rtEngineIndex[rt.id] = Object.assign({}, rt, {
+        credential_id: d.credential_id,
+        worker_name: d.name || d.device_name || '',
+        worker_ip: d.worker_ip || '',
+        scope: d.scope || 'global',
+        owner: d.owner || '',
+        is_local: d.credential_id === 0,
+        _partial: true
+      });
+    });
+  });
+}
+
 function renderRuntimes(data) {
   const el = document.getElementById('pageContent');
   if (!el) return;
   __runtimeData = data;
+  _rebuildRtEngineIndex();
   // Issue #185: 更新分页 total（服务端返回）
   if (data.total !== undefined) _rtTotal = data.total;
   // 场景标签缓存未加载时先异步拉取，拿到后再渲染（避免卡片显示原始 name 而非 display_name）
@@ -1005,11 +1032,69 @@ function _engineSkillFilteredCount() {
 
 function renderRuntimesLegacy(data) { renderRuntimes(data); }
 
+// Issue #364: 多数据源查找 + 单引擎详情端点回退。
+// 数据源优先级：Engines 分页缓存（__runtimeData.runtimes）→ 设备引擎索引（_rtEngineIndex）
+// → 异步拉取 GET /settings/agent-runtimes/{rid}（loading 弹窗 + 失败 toast）。
+// _partial（设备来源）条目同步渲染保证即时响应，随后后台拉详情整弹窗补全（含健康分）。
 function openEngineDetail(runtimeId) {
   const allRuntimes = (__runtimeData && __runtimeData.runtimes) || [];
-  const rt = allRuntimes.find(r => r.id === runtimeId);
-  if (!rt) return;
+  let rt = allRuntimes.find(r => r.id === runtimeId);
+  if (!rt) rt = _rtEngineIndex[runtimeId];
+  if (rt) {
+    _renderEngineDetail(rt);
+    if (rt._partial) _upgradeEngineDetail(runtimeId);
+    return;
+  }
+  _openEngineDetailAsync(runtimeId);
+}
 
+// Issue #364: 当前仓库 repo 参数（与列表/设备加载一致，repo scope 隔离）
+function _rtRepoQs() {
+  var qs = '';
+  var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
+  if (_repo) qs = '?repo=' + encodeURIComponent(_repo);
+  return qs;
+}
+
+// Issue #364: 索引未命中 → 异步拉取单引擎详情（loading 弹窗，失败 toast 反馈）
+function _openEngineDetailAsync(runtimeId) {
+  closeEngineDetail();
+  const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
+    <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:48px;display:flex;flex-direction:column;align-items:center;gap:14px" onclick="event.stopPropagation()">
+      <div style="width:26px;height:26px;border:2.5px solid rgba(59,130,246,.2);border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite"></div>
+      <div style="font-size:13px;color:var(--t3)">${I18N.t('common.loading') || '加载中...'}</div>
+    </div>
+    <style>@keyframes spin{to{transform:rotate(360deg)}}</style>
+  </div>`;
+  document.body.insertAdjacentHTML('beforeend', html);
+  API.get('/settings/agent-runtimes/' + runtimeId + _rtRepoQs()).then(function(d) {
+    if (!d || d.id === undefined) throw new Error('empty detail');
+    _rtEngineIndex[runtimeId] = d;
+    closeEngineDetail();
+    _renderEngineDetail(d);
+  }).catch(function(e) {
+    closeEngineDetail();
+    app.showToast((I18N.t('common.load_failed') || '加载失败') + (e && e.message ? ': ' + e.message : ''));
+  });
+}
+
+// Issue #364: 设备来源的部分字段条目 → 后台拉详情补全（健康分等），弹窗仍开着且是同一引擎时整弹窗替换
+function _upgradeEngineDetail(runtimeId) {
+  API.get('/settings/agent-runtimes/' + runtimeId + _rtRepoQs()).then(function(d) {
+    if (!d || d.id === undefined) return;
+    delete d._partial;
+    _rtEngineIndex[runtimeId] = d;
+    var overlay = document.getElementById('engineDetailOverlay');
+    var listEl = document.getElementById('engineSkillList');
+    if (overlay && listEl && Number(listEl.getAttribute('data-runtime-id')) === Number(runtimeId)) {
+      overlay.remove();
+      _renderEngineDetail(d);
+    }
+  }).catch(function() { /* 补全失败保留设备数据渲染，不打断用户 */ });
+}
+
+function _renderEngineDetail(rt) {
+  const runtimeId = rt.id;
   const skills = rt.local_skills || [];
   const skillDetails = rt.skill_scan_result || [];
   const isLocal = rt.credential_id === 0 || rt.is_local;

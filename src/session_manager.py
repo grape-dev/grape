@@ -765,23 +765,100 @@ def delete_conversation(conv_id: str):
 
 # ====== chat_config CRUD（合并进 chat_agent_session）======
 
+def _chat_config_candidate_rows(c, user_id: int):
+    """按优先级返回该用户的全局 Chat 配置候选行。
+
+    优先级：① 写路径那一行（`id='sess-cfg-{user_id}'`）② 历史遗留行（`user_id` 匹配但 id 错位，
+    按 `last_active_at DESC, id DESC` 明确排序）。
+
+    背景：本表语义上"一人一行"，但历史上移除过 `UNIQUE(repo_key)`，且经历过多次迁移
+    （id 是字符串，不随 user_id 重映射变化），因此同一用户可能有多行并存；写路径只写 ①，
+    而原先的读路径是 `... WHERE user_id=? ... LIMIT 1`（**无 ORDER BY**）→ 读到哪行由存储顺序
+    决定，出现"界面改了配置读不回来"（读路径按写入的主键行取，避免同一用户多行时读到旧行）。
+
+    返回 [(row_id, (runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider)), ...]
+    """
+    _cols = "id, runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider"
+    seen, out = set(), []
+    # 必须**同时**校验 user_id：云端存在 id 与 user_id 跨空间错位的行（如 id='sess-cfg-37' 却属于 user_id=1），
+    # 只按 id 取会把**别人的配置（含飞书 app_id/secret）**当成自己的（实测 user 37 读到 user 1 的行）。
+    c.execute(f"SELECT {_cols} FROM chat_agent_session WHERE id=? AND user_id=?"
+              " AND (repo_key='' OR repo_key IS NULL)", (f"sess-cfg-{user_id}", user_id))
+    for r in c.fetchall():
+        if r[0] not in seen:
+            seen.add(r[0])
+            out.append((r[0], tuple(r[1:])))
+    c.execute(f"SELECT {_cols} FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL)"
+              " ORDER BY last_active_at DESC, id DESC", (user_id,))
+    for r in c.fetchall():
+        if r[0] not in seen:
+            seen.add(r[0])
+            out.append((r[0], tuple(r[1:])))
+    return out
+
+
+def _chat_config_row_engine(c, runtime_id: int):
+    """解析配置行指向的引擎，返回 (backend_name, usable)。
+
+    usable=False 覆盖既有的两种"按未配置处理"情形：引擎行已不存在、引擎名不是已知引擎。
+    """
+    if not runtime_id:
+        return "", True
+    c.execute("SELECT name FROM agent_runtimes WHERE id=?", (runtime_id,))
+    brow = c.fetchone()
+    if not brow or not brow[0]:
+        # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
+        log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
+        return "", False
+    from src.user.db import is_known_engine_name
+    _n = (brow[0] or "").strip().lower()
+    if not is_known_engine_name(_n):
+        # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
+        log.warning(f"get_chat_config: runtime_id={runtime_id} 指向未知引擎 '{brow[0]}'，按未配置处理")
+        return "", False
+    return brow[0], True
+
+
+def _pick_chat_config_row(c, user_id: int):
+    """按"写路径优先 + 不降级可用配置"挑出该用户的生效配置行。
+
+    返回 (row_id, row, backend_name)：
+      · 有候选且其中一行引擎可用 → 该行（`_chat_config_candidate_rows` 的顺序 = 写路径行优先）
+      · 候选全不可用           → 首个候选，runtime_id 置零（保持既有"按未配置处理"的兜底语义）
+      · 无候选                 → (None, None, "")
+
+    单独抽出来是为了让**诊断脚本/离线核查**能复用同一份逻辑（避免口径漂移）。
+    """
+    cands = _chat_config_candidate_rows(c, user_id)
+    if not cands:
+        return None, None, ""
+    for rid, cand in cands:
+        name, usable = _chat_config_row_engine(c, cand[0])
+        if usable:
+            return rid, cand, name
+    rid, cand = cands[0]
+    return rid, (0,) + cand[1:], ""
+
+
 def get_chat_config(user_id: int) -> dict:
     """获取用户全局 Chat 配置（repo_key='' 表示全局配置行）。
 
     engine-selection-design.md v2：不再写死 backend='opencode' 默认。
     无配置/未知引擎时，backend 从已注册引擎派生——优先本机直连（resolve_local_engine），
     无任何引擎则 backend=''（前端/执行侧显示"无 engine，不可用"，绝不隐式跑 opencode）。
+
+    多行并存时（见 _chat_config_candidate_rows）：**优先读写路径那一行**，保证"写进去的配置一定
+    读得回来"；该行引擎不可用时**不把可用配置降级**，退回最近活跃的遗留行；全部不可用才走兜底。
     """
     with db_lock:
         c = db.cursor()
-        # 同一 user 可能残留多条 repo_key='' 行（账号迁移遗留）：确定性取「已配置行」优先，
-        # 其次 id 升序，避免无序 LIMIT 1 命中空行导致解绑/读写错行（chat-config-duplicate-row-unbind-fix-design.md）。
-        c.execute(
-            "SELECT runtime_id, skill, skill_id, im_app_id, im_app_secret, im_provider "
-            "FROM chat_agent_session WHERE user_id=? AND (repo_key='' OR repo_key IS NULL) "
-            "ORDER BY (im_app_id IS NOT NULL AND im_app_id != '') DESC, id ASC LIMIT 1", (user_id,))
-        row = c.fetchone()
-        if not row:
+        # 读侧止血（本仓 功能分支 保留的实现，见 ba7faf3e1e）：先精确取写路径那行
+        # id='sess-cfg-{user_id}'（并校验 user_id，云端存在跨 id 空间错位行），取不到才退化。
+        # 备注：weekly-08 线上另有一套等价实现（「已配置行优先 + id ASC」，见
+        # chat-config-duplicate-row-unbind-fix-design.md）——同一问题的两种解法，本分支沿用下面这套
+        # （canonical-first + 不降级；有 test_chat_config_row_selection.py 5 项钉住）。
+        picked_id, row, backend_name = _pick_chat_config_row(c, user_id)
+        if row is None:
             # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
             cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
             if cfg.get("runtime_id"):
@@ -790,22 +867,10 @@ def get_chat_config(user_id: int) -> dict:
                 except Exception as e:
                     log.warning(f"get_chat_config materialize default failed: {e}")
             return cfg
-        backend_name = ""
-        if row[0]:
-            c.execute("SELECT name FROM agent_runtimes WHERE id=?", (row[0],))
-            brow = c.fetchone()
-            if brow and brow[0]:
-                from src.user.db import is_known_engine_name
-                _n = (brow[0] or "").strip().lower()
-                if is_known_engine_name(_n):
-                    backend_name = brow[0]
-                else:
-                    # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
-                    log.warning(f"get_chat_config: runtime_id={row[0]} 指向未知引擎 '{brow[0]}'，按未配置处理")
-            else:
-                # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
-                log.warning(f"get_chat_config: runtime_id={row[0]} 不存在（引擎行已删除），按未配置处理")
-                row = (0,) + row[1:]  # runtime_id 置零，使 _chat_config_with_local_backend 走兜底
+        if picked_id != f"sess-cfg-{user_id}" and backend_name:
+            # 命中历史遗留行（写路径碰不到它）——仍需迁移合并，见诊断报告第三步
+            log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
+                     f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
                                                row[3] or "", row[4] or "", row[5] or "", "")
 

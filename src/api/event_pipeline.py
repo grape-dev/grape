@@ -806,9 +806,8 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
         _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
         if _engine_id is None:
-            log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, skip")
-            from src.api.event_store import update_event_status
-            update_event_status(seq, "failed")
+            log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, mark failed")
+            _fail_event(seq, f"PR 订阅派发失败：无可用引擎（scene={scene_id}, agent=qa），请检查引擎在线状态")
             return
         _be = engine_name(_engine_id) or ""
         _is_broadcast = (_engine_id == 0 and is_plugin_mode()
@@ -1056,9 +1055,8 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
         if not engine_id:
-            log.info(f"Pipeline subscription: no engine for agent={agent_type}, skip")
-            from src.api.event_store import update_event_status
-            update_event_status(seq, "failed")
+            log.info(f"Pipeline subscription: no engine for agent={agent_type}, mark failed")
+            _fail_event(seq, f"订阅派发失败：无可用引擎（agent={agent_type}），请检查引擎在线状态")
             return
         _be = engine_name(engine_id) or backend
         kind = runtime_execution_kind(engine_id)
