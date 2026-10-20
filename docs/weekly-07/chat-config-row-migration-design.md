@@ -69,10 +69,10 @@ user_accounts          94 行，id    37..131   —— 账号表，与 mapping *
 
 | 行 | 行内 user_id → 该 id 对应的人 | 行内 app 真正属于 | 密钥 | 两侧活跃度（会话/任务） |
 |---|---|---|---|---|
-| sess-cfg-112 | 3 → songspace/吕军涛 | 陈金昆（mapping 39/75） | 32 位 | 154/954 **vs** 1/5 |
-| sess-cfg-78 | 6 → Sinkear/单佳豪 | 孟令闯（mapping 42） | 32 位 | 88/478 **vs** —/2 |
-| sess-cfg-119 | 10 → younger_eric/吴扬 | 赵伟俊（mapping 46） | 32 位 | 10/67 **vs** —/0 |
-| sess-cfg-129 | 20 → lccode/汪亮初 | 朱金婷（mapping 56/92） | 32 位 | 28/231 **vs** 3/14 |
+| sess-cfg-112 | 3 → user-3 | mapping 39/75 | 32 位 | 154/954 **vs** 1/5 |
+| sess-cfg-78 | 6 → user-6 | mapping 42 | 32 位 | 88/478 **vs** —/2 |
+| sess-cfg-119 | 10 → user-10 | mapping 46 | 32 位 | 10/67 **vs** —/0 |
+| sess-cfg-129 | 20 → user-20 | mapping 56/92 | 32 位 | 28/231 **vs** 3/14 |
 
 两种解释都无法用数据排除（"app 字段被写错" vs "user_id 被写错"），**必须人工逐行裁定**：
 候选人在各自界面上自查"我现在用的飞书 bot 是不是我自己的"即可判定。**脚本禁止自行猜测**。
@@ -131,12 +131,12 @@ SELECT (SELECT COUNT(*) FROM chat_agent_session WHERE repo_key='' OR repo_key IS
 
 | user_id | 身份 | 各行引擎 | 现在读到 | 建议 |
 |---|---|---|---|---|
-| 1 | gcw_3FZApeLT/liufei_cloud（本人） | `sess-cfg-1`=opencode(13030) · `sess-cfg-37`=hermes(1202, 8-31 僵尸) | opencode | 保留 `sess-cfg-1`（今天刚用） |
-| 3 | songspace/吕军涛 | `112`=opencode · `39`=opencode · `75`=hermes(9-15) | opencode | 保留 `112`（最近活跃） |
-| 6 | Sinkear/单佳豪 | `115`=hermes · `42`=hermes · `78`=opencode(9-17) | hermes | 需人工：hermes 最近用，但 opencode 是他 9-17 主动换的 |
-| 16 | miumiu_020523/弥生一梦 | `125`=hermes · `52`=**幽灵引擎(6102)** · `88`=hermes | hermes | 保留 `125`；`52` 直接丢弃（引擎已删） |
-| 19 | chenjingjie/陈晶杰 | `128`=hermes · `19`=**幽灵引擎(13388)** | hermes | 保留 `128`；`19` 丢弃 |
-| 33 | lming112/明亮 | `106`=hermes(10-01) · `69`=opencode(10-11) | opencode | 保留 `69`（更近） |
+| 1 | user-1（本人） | `sess-cfg-1`=opencode(13030) · `sess-cfg-37`=hermes(1202, 8-31 僵尸) | opencode | 保留 `sess-cfg-1`（今天刚用） |
+| 3 | user-3 | `112`=opencode · `39`=opencode · `75`=hermes(9-15) | opencode | 保留 `112`（最近活跃） |
+| 6 | user-6 | `115`=hermes · `42`=hermes · `78`=opencode(9-17) | hermes | 需人工：hermes 最近用，但 opencode 是他 9-17 主动换的 |
+| 16 | user-16 | `125`=hermes · `52`=**幽灵引擎(6102)** · `88`=hermes | hermes | 保留 `125`；`52` 直接丢弃（引擎已删） |
+| 19 | user-19 | `128`=hermes · `19`=**幽灵引擎(13388)** | hermes | 保留 `128`；`19` 丢弃 |
+| 33 | user-33 | `106`=hermes(10-01) · `69`=opencode(10-11) | opencode | 保留 `69`（更近） |
 
 **引擎相同、可自动合并的 11 人**：4、7、10、12、14、20、23、28、29、38、54（保留"现在读到"那条，其余清理）。
 
@@ -300,7 +300,7 @@ INSERT INTO chat_agent_session SELECT * FROM bak_chat_agent_session_20261018
 ### 12.2 删除会丢什么（实测）
 
 ```
-引擎会变（当前读到 ≠ 默认 1202）的用户：仅 2 个  →  user 3 吕军涛、user 33 明亮（都是 opencode→hermes）
+引擎会变（当前读到 ≠ 默认 1202）的用户：仅 2 个  →  user 3、user 33（都是 opencode→hermes）
 会丢技能的行：3 行（sess-cfg-106/user33 skill=chat/2598、sess-cfg-39/user3 skill=chat/2598、sess-cfg-69/user33 skill=im-notify/2597）
 会丢 IM 绑定的行：7 行（sess-cfg-37/1、40/4、41/5、51/15、69/33、73/37、98/26）
         —— 这 7 行的 app 经 im_app_id 反查都是**本人自己的** app（不是别人的）→ 删掉后本人重绑即可

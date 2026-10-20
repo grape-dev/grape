@@ -361,35 +361,35 @@ unified_user_mapping      106 行，user_id 从 1 起（旧 id 空间）→ gitc
 | 跨空间行（`id == 'sess-cfg-{user_id+36}'`） | 25 行 |
 | runtime_id 指向已不存在引擎 | 2 行（user 16 的 `sess-cfg-52`=6102、user 19 的 `sess-cfg-19`=13388） |
 | **修复后写读错位** | **0**（写路径行存在时必被读到；缺失的 若干用户在下一次写配置时自动建行并对齐） |
-| **修复后生效引擎变化** | **若干用户**：user 33 明亮（hermes -> opencode，取"最近活跃"行） |
+| **修复后生效引擎变化** | **若干用户**：user 33（hermes -> opencode，取"最近活跃"行） |
 | **归属冲突行（安全相关）** | **4 行**携带他人的飞书 app_id + 32 位密钥（`sess-cfg-112/78/119/129`）→ 详见 §9.5，**迁移前必须人工裁决** |
 
 ### 9.3 工作表（17 个多行用户，含身份与修复前后对照）
 
 | user_id | 身份（gitcode/昵称 · 飞书 · 新id） | 行数 | canonical | 现在读到（修复后） | 修复前读到 | 各行明细（id · 引擎 · 最后活跃 · im_app_id） |
 |---|---|---|---|---|---|---|
-| 1 | gcw_3FZApeLT/liufei_cloud · 飞书刘菲 · 新id 37 | 2 | 有 | sess-cfg-1 · opencode(13030) | sess-cfg-1 | sess-cfg-1 · opencode · 2026-10-18 11:43 · —<br>sess-cfg-37 · hermes · 2026-08-31 13:47 · cli_aa0f66ae9378dcbb |
-| 3 | songspace/吕军涛 · 飞书吕军涛 · 新id 39 | 3 | **缺** | sess-cfg-112 · opencode(1203) | sess-cfg-112 | sess-cfg-112 · opencode · 2026-10-09 15:40 · cli_aa422650ef785d23<br>sess-cfg-39 · opencode · 2026-09-22 19:58 · —<br>sess-cfg-75 · hermes · 2026-09-15 10:43 · — |
-| 4 | mm6667/mm6667 · 飞书孟令闯 · 新id 40 | 2 | **缺** | sess-cfg-113 · hermes(1202) | sess-cfg-113 | sess-cfg-113 · hermes · 2026-10-09 15:33 · —<br>sess-cfg-40 · hermes · 2026-09-02 21:07 · cli_aa0874e7d2389bc3 |
-| 6 | Sinkear/单佳豪 · 飞书— · 新id 42 | 3 | **缺** | sess-cfg-115 · hermes(1202) | sess-cfg-115 | sess-cfg-115 · hermes · 2026-10-09 11:05 · —<br>sess-cfg-42 · hermes · 2026-08-31 11:26 · —<br>sess-cfg-78 · opencode · 2026-09-17 09:35 · cli_aa2d729227b85bcb |
-| 7 | wdmike/Xiahouyi · 飞书— · 新id 43 | 3 | **缺** | sess-cfg-116 · hermes(1202) | sess-cfg-116 | sess-cfg-116 · hermes · 2026-10-12 16:31 · —<br>sess-cfg-43 · hermes · 2026-08-31 18:52 · —<br>sess-cfg-79 · hermes · 2026-09-15 11:36 · — |
-| 10 | younger_eric/吴扬 · 飞书— · 新id 46 | 2 | **缺** | sess-cfg-119 · hermes(1202) | sess-cfg-119 | sess-cfg-119 · hermes · 2026-10-13 09:11 · cli_aa473954d4b81cbc<br>sess-cfg-46 · hermes · 2026-09-01 21:45 · — |
-| 12 | shuangzhangj/张爽 · 飞书— · 新id 48 | 3 | **缺** | sess-cfg-121 · hermes(1202) | sess-cfg-121 | sess-cfg-121 · hermes · 2026-10-14 09:43 · —<br>sess-cfg-48 · hermes · 2026-09-02 09:37 · —<br>sess-cfg-84 · hermes · 2026-09-17 17:02 · — |
-| 14 | essie_km/essie_km · 飞书— · 新id 50 | 3 | **缺** | sess-cfg-123 · hermes(1202) | sess-cfg-123 | sess-cfg-123 · hermes · 2026-10-13 15:13 · —<br>sess-cfg-50 · hermes · 2026-09-02 15:09 · —<br>sess-cfg-86 · hermes · 2026-09-18 11:02 · — |
-| 16 | miumiu_020523/弥生一梦 · 飞书— · 新id 52 | 3 | **缺** | sess-cfg-125 · hermes(1202) | sess-cfg-125 | sess-cfg-125 · hermes · 2026-10-13 20:26 · —<br>sess-cfg-52 · (引擎行不存在) · 2026-09-23 10:30 · —<br>sess-cfg-88 · hermes · 2026-09-18 11:24 · — |
-| 19 | chenjingjie/陈晶杰 · 飞书陈晶杰 · 新id 55 | 2 | 有 | sess-cfg-128 · hermes(1202) | sess-cfg-128 | sess-cfg-128 · hermes · 2026-10-14 11:40 · —<br>sess-cfg-19 · (引擎行不存在) · 2026-10-16 16:34 · — |
-| 20 | lccode/汪亮初 · 飞书— · 新id 56 | 2 | **缺** | sess-cfg-129 · hermes(1202) | sess-cfg-129 | sess-cfg-129 · hermes · 2026-10-14 15:46 · cli_aa458d0aa6e2dbfe<br>sess-cfg-56 · hermes · 2026-09-02 09:29 · — |
-| 23 | cs_HWStaff/程曙 · 飞书— · 新id 59 | 2 | **缺** | sess-cfg-95 · hermes(1202) | sess-cfg-59 | sess-cfg-59 · hermes · 2026-09-02 15:20 · —<br>sess-cfg-95 · hermes · 2026-09-22 23:02 · — |
-| 28 | Evan0603/褚蕴威 · 飞书— · 新id 64 | 2 | **缺** | sess-cfg-100 · hermes(1202) | sess-cfg-100 | sess-cfg-100 · hermes · 2026-09-24 15:26 · —<br>sess-cfg-64 · hermes · 2026-09-04 10:13 · — |
-| 29 | yuanbeyond/孙思源 · 飞书— · 新id 65 | 2 | **缺** | sess-cfg-102 · hermes(1202) | sess-cfg-102 | sess-cfg-102 · hermes · 2026-09-24 18:03 · —<br>sess-cfg-65 · hermes · 2026-09-08 19:43 · — |
-| 33 | lming112/明亮 · 飞书明亮 · 新id 69 | 2 | **缺** | sess-cfg-69 · opencode(1203) | sess-cfg-106 | sess-cfg-106 · hermes · 2026-10-01 14:59 · —<br>sess-cfg-69 · opencode · 2026-10-11 17:41 · cli_aa428753ba38dbda |
-| 38 | liudewei_david/刘德伟 · 飞书刘德伟 · 新id 74 | 2 | 有 | sess-cfg-38 · hermes(1202) | sess-cfg-111 | sess-cfg-111 · hermes · 2026-10-08 15:05 · —<br>sess-cfg-38 · hermes · 2026-10-15 10:45 · cli_aa5a824ae3f8dc06 |
-| 54 | SteveSLX/SteveSLX · 飞书— · 新id — | 2 | **缺** | sess-cfg-127 · hermes(1202) | sess-cfg-127 | sess-cfg-127 · hermes · 2026-10-14 10:10 · —<br>sess-cfg-90 · hermes · 2026-09-21 10:53 · — |
+| 1 | user-1 · 新id 37 | 2 | 有 | sess-cfg-1 · opencode(13030) | sess-cfg-1 | sess-cfg-1 · opencode · 2026-10-18 11:43 · —<br>sess-cfg-37 · hermes · 2026-08-31 13:47 · cli_aa**** |
+| 3 | user-3 · 新id 39 | 3 | **缺** | sess-cfg-112 · opencode(1203) | sess-cfg-112 | sess-cfg-112 · opencode · 2026-10-09 15:40 · cli_aa****<br>sess-cfg-39 · opencode · 2026-09-22 19:58 · —<br>sess-cfg-75 · hermes · 2026-09-15 10:43 · — |
+| 4 | user-4 · 新id 40 | 2 | **缺** | sess-cfg-113 · hermes(1202) | sess-cfg-113 | sess-cfg-113 · hermes · 2026-10-09 15:33 · —<br>sess-cfg-40 · hermes · 2026-09-02 21:07 · cli_aa**** |
+| 6 | user-6 · 新id 42 | 3 | **缺** | sess-cfg-115 · hermes(1202) | sess-cfg-115 | sess-cfg-115 · hermes · 2026-10-09 11:05 · —<br>sess-cfg-42 · hermes · 2026-08-31 11:26 · —<br>sess-cfg-78 · opencode · 2026-09-17 09:35 · cli_aa**** |
+| 7 | user-7 · 新id 43 | 3 | **缺** | sess-cfg-116 · hermes(1202) | sess-cfg-116 | sess-cfg-116 · hermes · 2026-10-12 16:31 · —<br>sess-cfg-43 · hermes · 2026-08-31 18:52 · —<br>sess-cfg-79 · hermes · 2026-09-15 11:36 · — |
+| 10 | user-10 · 新id 46 | 2 | **缺** | sess-cfg-119 · hermes(1202) | sess-cfg-119 | sess-cfg-119 · hermes · 2026-10-13 09:11 · cli_aa****<br>sess-cfg-46 · hermes · 2026-09-01 21:45 · — |
+| 12 | user-12 · 新id 48 | 3 | **缺** | sess-cfg-121 · hermes(1202) | sess-cfg-121 | sess-cfg-121 · hermes · 2026-10-14 09:43 · —<br>sess-cfg-48 · hermes · 2026-09-02 09:37 · —<br>sess-cfg-84 · hermes · 2026-09-17 17:02 · — |
+| 14 | user-14 · 新id 50 | 3 | **缺** | sess-cfg-123 · hermes(1202) | sess-cfg-123 | sess-cfg-123 · hermes · 2026-10-13 15:13 · —<br>sess-cfg-50 · hermes · 2026-09-02 15:09 · —<br>sess-cfg-86 · hermes · 2026-09-18 11:02 · — |
+| 16 | user-16 · 新id 52 | 3 | **缺** | sess-cfg-125 · hermes(1202) | sess-cfg-125 | sess-cfg-125 · hermes · 2026-10-13 20:26 · —<br>sess-cfg-52 · (引擎行不存在) · 2026-09-23 10:30 · —<br>sess-cfg-88 · hermes · 2026-09-18 11:24 · — |
+| 19 | user-19 · 新id 55 | 2 | 有 | sess-cfg-128 · hermes(1202) | sess-cfg-128 | sess-cfg-128 · hermes · 2026-10-14 11:40 · —<br>sess-cfg-19 · (引擎行不存在) · 2026-10-16 16:34 · — |
+| 20 | user-20 · 新id 56 | 2 | **缺** | sess-cfg-129 · hermes(1202) | sess-cfg-129 | sess-cfg-129 · hermes · 2026-10-14 15:46 · cli_aa****<br>sess-cfg-56 · hermes · 2026-09-02 09:29 · — |
+| 23 | user-23 · 新id 59 | 2 | **缺** | sess-cfg-95 · hermes(1202) | sess-cfg-59 | sess-cfg-59 · hermes · 2026-09-02 15:20 · —<br>sess-cfg-95 · hermes · 2026-09-22 23:02 · — |
+| 28 | user-28 · 新id 64 | 2 | **缺** | sess-cfg-100 · hermes(1202) | sess-cfg-100 | sess-cfg-100 · hermes · 2026-09-24 15:26 · —<br>sess-cfg-64 · hermes · 2026-09-04 10:13 · — |
+| 29 | user-29 · 新id 65 | 2 | **缺** | sess-cfg-102 · hermes(1202) | sess-cfg-102 | sess-cfg-102 · hermes · 2026-09-24 18:03 · —<br>sess-cfg-65 · hermes · 2026-09-08 19:43 · — |
+| 33 | user-33 · 新id 69 | 2 | **缺** | sess-cfg-69 · opencode(1203) | sess-cfg-106 | sess-cfg-106 · hermes · 2026-10-01 14:59 · —<br>sess-cfg-69 · opencode · 2026-10-11 17:41 · cli_aa**** |
+| 38 | user-38 · 新id 74 | 2 | 有 | sess-cfg-38 · hermes(1202) | sess-cfg-111 | sess-cfg-111 · hermes · 2026-10-08 15:05 · —<br>sess-cfg-38 · hermes · 2026-10-15 10:45 · cli_aa**** |
+| 54 | user-54 · 新id — | 2 | **缺** | sess-cfg-127 · hermes(1202) | sess-cfg-127 | sess-cfg-127 · hermes · 2026-10-14 10:10 · —<br>sess-cfg-90 · hermes · 2026-09-21 10:53 · — |
 
 > "现在读到"= 第二步修复后的真实逻辑（直接调用 `_pick_chat_config_row`，非预测）；
 > "修复前读到"= 旧逻辑（`WHERE user_id=? LIMIT 1` 无 ORDER BY，实际命中主键字符串序最小者）。
 > 合并时"保留哪一条"= 业务判定：一般取**现在读到**的那条（用户实际在用的），其余行作僵尸清理；
-> 但 user 19（陈晶杰）要留意：他的 canonical 行 `sess-cfg-19` 指向**已删除的引擎 13388**，
+> 但 user 19 要留意：他的 canonical 行 `sess-cfg-19` 指向**已删除的引擎 13388**，
 > 现在被"不可用不降级"规则跳过、读到 `sess-cfg-128`（hermes）——合并时应保留后者。
 
 ### 9.4 第三步的新增约束（由 id 空间问题引出）
@@ -413,10 +413,10 @@ unified_user_mapping      106 行，user_id 从 1 起（旧 id 空间）→ gitc
 
 | 行 | 行内 user_id → 该 id 对应的人 | 行内 app 真正属于 | 密钥长度 | 两侧活跃度（会话/任务） |
 |---|---|---|---|---|
-| `sess-cfg-112` | 3 → songspace/吕军涛 | 陈金昆（mapping 39/75） | 32 | 154/954 **vs** 1/5 |
-| `sess-cfg-78` | 6 → Sinkear/单佳豪 | 孟令闯（mapping 42） | 32 | 88/478 **vs** —/2 |
-| `sess-cfg-119` | 10 → younger_eric/吴扬 | 赵伟俊（mapping 46） | 32 | 10/67 **vs** —/0 |
-| `sess-cfg-129` | 20 → lccode/汪亮初 | 朱金婷（mapping 56/92） | 32 | 28/231 **vs** 3/14 |
+| `sess-cfg-112` | 3 → user-3 | mapping 39/75 | 32 | 154/954 **vs** 1/5 |
+| `sess-cfg-78` | 6 → user-6 | mapping 42 | 32 | 88/478 **vs** —/2 |
+| `sess-cfg-119` | 10 → user-10 | mapping 46 | 32 | 10/67 **vs** —/0 |
+| `sess-cfg-129` | 20 → user-20 | mapping 56/92 | 32 | 28/231 **vs** 3/14 |
 
 两种解释都无法用数据排除 —— "app 字段被写错"（则这些人**正在用别人的 bot 发消息**）
 与 "user_id 被写错"（则这些人自己的配置被别人继承）—— **必须人工逐行裁定**；
@@ -429,8 +429,8 @@ unified_user_mapping      106 行，user_id 从 1 起（旧 id 空间）→ gitc
 处置   4 行的 im_app_id='' + im_app_secret=''（user_id/runtime_id/skill_id/im_provider 均未动）
 校验   受影响行数=4；读回 app_id 为空、密钥长度 0；"仍持有这 4 个 app 的配置行数"=0
 副作用 这 4 个 app 从此不在任何配置行里（user_accounts 里也没有副本，实测 0 行）
-      → 行名义主人（3 吕军涛 / 6 单佳豪 / 10 吴扬 / 20 汪亮初）需重新绑**自己的**飞书 app；
-        app 真主（陈金昆 / 孟令闯 / 赵伟俊 / 朱金婷）若此前被借用该绑定，同样需要重新绑
+      → 行名义主人（3 / 6 / 10 / 20）需重新绑**自己的**飞书 app；
+        app 真主（mapping 39/75、42、46、56/92）若此前被借用该绑定，同样需要重新绑
 未动   引擎/技能配置不变（runtime_id 仍为 1202/1203，skill_id 仍为 0）→ 聊天功能不受影响
 快照   置空前完整内容见 `chat-config-conflict-rows-cleared-20261018.txt`（**密钥已脱敏，未保留明文**；
        重启绑定由当事人从飞书后台取自己的 secret）

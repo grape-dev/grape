@@ -17,7 +17,7 @@
            runtime: opencode
              skill: 
        im_provider: feishu
-         im_app_id: cli_aa422650ef785d23
+         im_app_id: cli_aa****
      im_app_secret: <已置空，未保留明文>
      event_history: NULL
         created_at: 2026-10-09 15:40:07
@@ -35,7 +35,7 @@ runtime_session_id: NULL
            runtime: opencode
              skill: 
        im_provider: feishu
-         im_app_id: cli_aa473954d4b81cbc
+         im_app_id: cli_aa****
      im_app_secret: <已置空，未保留明文>
      event_history: NULL
         created_at: 2026-10-13 09:11:49
@@ -53,7 +53,7 @@ runtime_session_id: NULL
            runtime: opencode
              skill: 
        im_provider: feishu
-         im_app_id: cli_aa458d0aa6e2dbfe
+         im_app_id: cli_aa****
      im_app_secret: <已置空，未保留明文>
      event_history: NULL
         created_at: 2026-10-14 15:46:08
@@ -71,7 +71,7 @@ runtime_session_id: NULL
            runtime: opencode
              skill: 
        im_provider: feishu
-         im_app_id: cli_aa2d729227b85bcb
+         im_app_id: cli_aa****
      im_app_secret: <已置空，未保留明文>
      event_history: NULL
         created_at: 2026-09-17 09:35:26
@@ -87,10 +87,10 @@ runtime_session_id: NULL
 +--------------+---------+----------------------+------------------------+
 | id           | user_id | im_app_id            | IFNULL(im_provider,'') |
 +--------------+---------+----------------------+------------------------+
-| sess-cfg-112 |       3 | cli_aa422650ef785d23 | feishu                 |
-| sess-cfg-119 |      10 | cli_aa473954d4b81cbc | feishu                 |
-| sess-cfg-129 |      20 | cli_aa458d0aa6e2dbfe | feishu                 |
-| sess-cfg-78  |       6 | cli_aa2d729227b85bcb | feishu                 |
+| sess-cfg-112 |       3 | cli_aa**** | feishu                 |
+| sess-cfg-119 |      10 | cli_aa**** | feishu                 |
+| sess-cfg-129 |      20 | cli_aa**** | feishu                 |
+| sess-cfg-78  |       6 | cli_aa**** | feishu                 |
 +--------------+---------+----------------------+------------------------+
 +-----------------------------------------+
 | 用户账号表里持有该app的行数             |
@@ -105,8 +105,8 @@ runtime_session_id: NULL
 +--------------+----------+----------------------+--------------+
 | id           | provider | app_id               | 密钥长度     |
 +--------------+----------+----------------------+--------------+
-| sess-cfg-112 | feishu   | cli_aa422650ef785d23 |           32 |
-| sess-cfg-119 | feishu   | cli_aa473954d4b81cbc |           32 |
-| sess-cfg-129 | feishu   | cli_aa458d0aa6e2dbfe |           32 |
-| sess-cfg-78  | feishu   | cli_aa2d729227b85bcb |           32 |
+| sess-cfg-112 | feishu   | cli_aa**** |           32 |
+| sess-cfg-119 | feishu   | cli_aa**** |           32 |
+| sess-cfg-129 | feishu   | cli_aa**** |           32 |
+| sess-cfg-78  | feishu   | cli_aa**** |           32 |
 +--------------+----------+----------------------+--------------+

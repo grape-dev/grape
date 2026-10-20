@@ -3,7 +3,7 @@
 待执行用户 18 ｜ 跳过（待裁决）18
 
   [A] user    1  保留 sess-cfg-1（opencode）  删除 1 行: sess-cfg-37
-        ↳ 先把 sess-cfg-37 的独有非空字段并进 canonical: im_app_id=cli_aa0f66ae9378dcbb, im_app_secret=***, im_provider=feishu, runtime=opencode
+        ↳ 先把 sess-cfg-37 的独有非空字段并进 canonical: im_app_id=cli_aa****, im_app_secret=***, im_provider=feishu, runtime=opencode
   [B1] user    5  改名 sess-cfg-41 → sess-cfg-5（零数据搬移）
   [B1] user    8  改名 sess-cfg-117 → sess-cfg-8（零数据搬移）
   [B1] user    9  改名 sess-cfg-118 → sess-cfg-9（零数据搬移）
