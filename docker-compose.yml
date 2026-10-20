@@ -7,6 +7,7 @@ services:
       - "8080:3000"
     environment:
       - TZ=Asia/Shanghai
+      - JWT_SECRET=${JWT_SECRET:?required: JWT_SECRET must be set (run: python3 -c "import secrets;print(secrets.token_urlsafe(48))")}
     volumes:
       - grape-data:/app/data
       - ./configs:/app/configs   # 挂载整个 configs 目录（运行时可改配置）

@@ -27,16 +27,23 @@ Refresh Token：
 """
 import os
 import time
+import logging
+import secrets
 from jose import jwt, JWTError
 
-# JWT_SECRET 从环境变量获取——所有实例必须配同一个值
-_DEFAULT_SECRET = "grape-dev-secret-change-in-production"
-JWT_SECRET = os.environ.get("JWT_SECRET", _DEFAULT_SECRET)
+# JWT_SECRET 从环境变量获取——不提供任何已知默认值（防 token 伪造，fail-closed）。
+# 显式配置必须以环境变量 JWT_SECRET 或密钥轮换池（security.json）提供。
+JWT_SECRET = os.environ.get("JWT_SECRET", "")
 JWT_ALGORITHM = "HS256"
+
+# 兼容常量：历史默认文件名，现为空串，不再提供任何可预测回退密钥
+_DEFAULT_SECRET = ""
 
 # 密钥轮换（kid）配置
 # 从 configs/security.json 读取（通过 security_config 模块）
-from src.auth.security_config import get_jwt_secret_keys, get_jwt_kid_current
+from src.auth.security_config import get_jwt_secret_keys, get_jwt_kid_current, is_production
+
+_log = logging.getLogger("devops-bot")
 _SECRET_KEYS_RAW = get_jwt_secret_keys()
 JWT_KID_CURRENT = get_jwt_kid_current()
 
@@ -67,31 +74,57 @@ ACCESS_TOKEN_TTL = 15 * 60       # 15 分钟
 REFRESH_TOKEN_TTL = 7 * 24 * 3600  # 7 天（滚动续期）
 REFRESH_MAX_LIFETIME = 30 * 24 * 3600  # 30 天（绝对上限——防 token 永久存活）
 
-# 已知不安全的默认值——生产环境拒绝启动
-_INSECURE_SECRETS = {"", _DEFAULT_SECRET, "change-me-in-production"}
+# 已知不安全的默认值——生产环境拒绝启动（历史默认/常见占位，显式配置也一并拦截）
+_INSECURE_SECRETS = {"", "grape-dev-secret-change-in-production", "change-me-in-production", "grape-dev"}
+
+# 开发/测试模式进程内随机兜底密钥（无 JWT_SECRET/密钥池 时生成，不可预测）
+_DEV_EPHEMERAL_SECRET = ""
+
+
+def _is_strong_secret(secret: str) -> bool:
+    """HS256 强密钥判定：非空、非黑名单、长度 >= 32 字节。"""
+    return bool(secret) and secret not in _INSECURE_SECRETS and len(secret) >= 32
+
+
+def _ensure_dev_ephemeral_secret() -> str:
+    """开发/测试模式兜底：进程内一次性生成随机密钥。
+
+    每次进程启动生成不同值（重启后旧 token 失效，可接受）；不落盘、不可预测。
+    """
+    global _DEV_EPHEMERAL_SECRET
+    if not _DEV_EPHEMERAL_SECRET:
+        _DEV_EPHEMERAL_SECRET = secrets.token_urlsafe(48)
+        _log.warning("JWT_SECRET 未配置：使用进程内随机密钥（仅开发/测试；生产环境必须配置 JWT_SECRET 或密钥池）")
+    return _DEV_EPHEMERAL_SECRET
 
 
 def validate_jwt_secret() -> bool:
-    """校验 JWT_SECRET 是否安全。生产环境必须返回 True。
+    """校验签名密钥安全性。生产环境必须返回 True。
 
-    D46 P0-4: 除了黑名单检查，还校验最小长度（HS256 要求 >= 32 字节）。
+    返回 False 当且仅当「无有效密钥且非开发/测试随机兜底态」：
+    - 密钥轮换池已配置（kid_current + secret_keys）→ True
+    - JWT_SECRET 为强密钥 → True
+    - 未配置任何密钥：生产 → False（拒绝启动）；开发/测试 → True（进程内随机兜底）
     """
-    if JWT_SECRET in _INSECURE_SECRETS:
-        return False
-    if len(JWT_SECRET) < 32:
-        return False
-    return True
+    if _SIGNING_SECRET and _SIGNING_KID:
+        return True
+    if _is_strong_secret(JWT_SECRET):
+        return True
+    return not is_production()
 
 
 def _get_signing_secret() -> tuple[str, str]:
     """获取签发密钥和对应的 kid。
 
     返回 (secret, kid)。
-    优先使用 kid 密钥池中的密钥；未配置则 fallback 到 JWT_SECRET。
+    优先使用 kid 密钥池中的密钥；未配置则依次回退：强 JWT_SECRET → 开发随机兜底密钥。
     """
     if _SIGNING_SECRET and _SIGNING_KID:
         return _SIGNING_SECRET, _SIGNING_KID
-    return JWT_SECRET, ""
+    if _is_strong_secret(JWT_SECRET):
+        return JWT_SECRET, ""
+    # 无 kid、无强 JWT_SECRET：开发/测试进程内随机兜底（生产启动门禁已拒绝）
+    return _ensure_dev_ephemeral_secret(), ""
 
 
 def _get_verify_secret(kid: str) -> str | None:
@@ -100,12 +133,14 @@ def _get_verify_secret(kid: str) -> str | None:
     D46 P1-5: 区分"有 kid 但未知"和"无 kid"两种情况。
     - 有 kid 且在密钥池中 → 返回对应 secret
     - 有 kid 但不在密钥池中 → 返回 None（拒绝验签，旧 kid 已被移除）
-    - 无 kid（旧 token）→ fallback 到 JWT_SECRET（兼容期）
+    - 无 kid（旧 token）→ 依次回退：强 JWT_SECRET → 开发随机兜底密钥
     """
     if kid:
         return _SECRET_KEYS.get(kid)  # 有 kid：从池查，找不到返回 None
-    # 无 kid → fallback 到 JWT_SECRET（兼容旧 token）
-    return JWT_SECRET
+    # 无 kid → fallback 到 JWT_SECRET（兼容旧 token）；无非空强值则用开发随机兜底
+    if _is_strong_secret(JWT_SECRET):
+        return JWT_SECRET
+    return _ensure_dev_ephemeral_secret()
 
 
 def create_access_token(user_id: int, username: str, token_version: int = 0,

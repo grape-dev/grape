@@ -47,7 +47,13 @@ def reload():
 
 
 def get_env() -> str:
-    """生产环境标识。security.json env 字段 > 默认 development。"""
+    """生产环境标识。security.json env 字段 > 默认 development。
+
+    判定依据仅两个来源，均为 security.json：
+    - 文件不存在（或空 {}）→ "development"（开发/测试）；
+    - 文件存在且 env 字段为字面 "production" → "production"。
+    其他写法（prod/test/`PRODUCTION`/空字符串）都不算生产。
+    """
     cfg = _load()
     val = cfg.get("env", "").strip().lower()
     if val:
