@@ -987,12 +987,12 @@ def claim(runtime_id) -> dict | None:
                 # 不依赖 worker 端的兜底（真死任务 10 分钟内恢复重排）。
                 _stale = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
                 c.execute(
-                    "SELECT id, runtime_id, event_seq FROM agent_tasks "
+                    "SELECT id, runtime_id, event_seq, attempts FROM agent_tasks "
                     "WHERE status='dispatched' AND started_at < ? AND started_at IS NOT NULL",
                     (_stale,))
                 _stale_rows = c.fetchall()
                 _actually_recovered = []
-                for _tid, _rid, _seq in _stale_rows:
+                for _tid, _rid, _seq, _attempts in _stale_rows:
                     # 活跃度检查（2026-08-21 修复）：task_start 失败时 status 留在 dispatched
                     # 但 agent 实际在跑（有 task_messages 产出）。查最近 600s 是否有消息，
                     # 有则跳过回收——agent 活跃说明只是 task_start 回调丢了，不该重跑。
@@ -1039,18 +1039,30 @@ def claim(runtime_id) -> dict | None:
                             _pool_fill = _row[0]
                     except Exception:
                         pass
+                    # 2026-10-20 MySQL attempts 语义修复（与 runtime.py recover-orphans
+                    # 同款病根）：原写法 SET attempts=attempts+1 且 CASE 里 attempts+1
+                    # —— MySQL 后赋值读新值（等效 +2），SQLite 读旧值，两库分叉导致
+                    # 封顶轮数不一致。此处判死后有 SELECT status 复核（1058-1061 行）
+                    # 所以事件不会悬空，但语义仍需统一。参数化传 _att 强制一致。
+                    _att = (_attempts or 0) + 1
+                    _STALE_RECOVER_MAX_ATTEMPTS = 50
                     c.execute(
-                        "UPDATE agent_tasks SET attempts=attempts+1, "
-                        "status=CASE WHEN attempts+1 >= 50 THEN 'failed' ELSE 'queued' END, "
-                        "runtime_id=CASE WHEN attempts+1 >= 50 THEN runtime_id ELSE 0 END, "
-                        "pool_tag=CASE WHEN attempts+1 < 50 AND pool_tag='' "
+                        "UPDATE agent_tasks SET attempts=?, "
+                        "status=CASE WHEN ? >= ? THEN 'failed' ELSE 'queued' END, "
+                        "runtime_id=CASE WHEN ? >= ? THEN runtime_id ELSE 0 END, "
+                        "pool_tag=CASE WHEN ? < ? AND pool_tag='' "
                         "THEN ? ELSE pool_tag END, "
-                        "pool_agent_type=CASE WHEN attempts+1 < 50 AND pool_agent_type='' "
+                        "pool_agent_type=CASE WHEN ? < ? AND pool_agent_type='' "
                         "THEN ? ELSE pool_agent_type END, "
                         "started_at=NULL, "
-                        "result_text=CASE WHEN attempts+1 >= 50 THEN '回收超限(dispatched 超时 50 次)' ELSE result_text END "
+                        "result_text=CASE WHEN ? >= ? THEN '回收超限(dispatched 超时 50 次)' ELSE result_text END "
                         "WHERE id=? AND status='dispatched'",
-                        (_pool_fill, _pool_fill, _tid))
+                        (_att,
+                         _att, _STALE_RECOVER_MAX_ATTEMPTS,
+                         _att, _STALE_RECOVER_MAX_ATTEMPTS,
+                         _att, _STALE_RECOVER_MAX_ATTEMPTS, _pool_fill,
+                         _att, _STALE_RECOVER_MAX_ATTEMPTS, _pool_fill,
+                         _att, _STALE_RECOVER_MAX_ATTEMPTS, _tid))
                     if c.rowcount and _rid:
                         release_busy_slot(_rid, cursor=c)
                     # 回收置 failed（attempts 超限）→ 同步事件终态，避免事件永远 running；

@@ -1459,7 +1459,9 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
     1. 引擎 ID 必须存在（失效 ID 优雅降级——跳过而非报错，Issue #250）
     2. scope=repo 的引擎 owner_id 必须匹配当前仓库
     3. 引擎必须有对应节点 tag 的能力（engine_capabilities.tag 或 'all'）
-    4. SRE 节点：引擎必须为个人级（scope=user）且 owner_id==当前用户（sre-personal-machine §3.7 Q2/Q3）
+    4. SRE 节点：引擎必须为个人级或仓库级（scope=user 且 owner_id==当前用户，或
+       scope=repo 且归属当前仓库——repo 归属由下方通用校验覆盖）
+       （sre-repo-worker-relax §1.2，取代 sre-personal-machine §3.7 Q2/Q3）
     5. SRE 节点 enabled 且 engine_runtime_ids 为空 → 400（SRE 空 ≠ 广播，= 无引擎无法派发）
 
     校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
@@ -1472,11 +1474,11 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
         eids = node.get("engine_runtime_ids") or []
         if not tag:
             continue
-        # SRE 空 = 无引擎：启用状态下不允许保存（Q2 裁定）
+        # SRE 空 = 无引擎：启用状态下不允许保存（Q2/Q5 裁定）
         if tag == "sre" and node.get("enabled") is not False and not eids:
             raise HTTPException(status_code=400, detail={
                 "code": 400,
-                "message": "SRE Agent 只能使用个人级机器，请先选择个人机器（引擎列表不能为空）"})
+                "message": "SRE Agent 不支持广播模式，请选择个人或仓库级机器（引擎列表不能为空）"})
         if not eids:
             continue
         for eid in eids:
@@ -1497,13 +1499,14 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
                 log.warning(f"_validate_scene_engine_ids: 节点 {tag} 的引擎 ID {_eid} 不存在（已跳过）")
                 continue
             _cred_id, _scope, _owner_id = row[0] or 0, row[1] or "global", row[2] or ""
-            # SRE 专属：引擎必须为个人级且属于当前用户（scope=user, owner_id=username）
+            # SRE 专属（sre-repo-worker-relax §1.2）：引擎必须为 user 档（且属于当前用户）
+            # 或 repo 档（归属校验由下方通用 repo 检查覆盖）；global/local 不放行
             if tag == "sre":
-                if _scope != "user":
+                if _scope not in ("user", "repo"):
                     raise HTTPException(status_code=400, detail={
                         "code": 400,
-                        "message": f"SRE Agent 只能使用个人级机器，引擎 {_eid} 不是个人级（scope={_scope}）"})
-                if _owner_id and username and _owner_id != username:
+                        "message": f"SRE Agent 只能使用个人或仓库级机器，引擎 {_eid} 不是个人/仓库级（scope={_scope}）"})
+                if _scope == "user" and _owner_id and username and _owner_id != username:
                     raise HTTPException(status_code=400, detail={
                         "code": 400,
                         "message": f"SRE Agent 只能使用当前用户自己的个人机器，引擎 {_eid} 属于 {_owner_id}"})

@@ -772,23 +772,32 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
                     _pool_fill = _pr[0]
             except Exception:
                 pass
+            # 2026-10-20 MySQL attempts 语义修复：原写法 SET attempts=attempts+1 且
+            # CASE 里再写 attempts+1 —— MySQL 同一 UPDATE 后面的赋值读的是刚更新的
+            # 新值（等效一次 +2），SQLite 读旧值（+1），两库语义分叉：MySQL 提前一轮
+            # 判死而 Python 侧 _att 仍按旧值算 → 误入 recovered 分支 → 事件终态回写
+            # 被跳过 → 事件永远 running（生产 34 条悬空）。改为 attempts 与全部判死
+            # 条件均参数化传 _att，两种数据库读到同一个值，语义强制一致。
             c.execute(
-                "UPDATE agent_tasks SET attempts=attempts+1, "
-                "status=CASE WHEN attempts+1 >= ? THEN 'failed' ELSE 'queued' END, "
-                "started_at=CASE WHEN attempts+1 >= ? THEN started_at ELSE NULL END, "
-                "result_text=CASE WHEN attempts+1 >= ? "
+                "UPDATE agent_tasks SET attempts=?, "
+                "status=CASE WHEN ? >= ? THEN 'failed' ELSE 'queued' END, "
+                "started_at=CASE WHEN ? >= ? THEN started_at ELSE NULL END, "
+                "result_text=CASE WHEN ? >= ? "
                 "THEN 'recover-orphans attempts cap reached (possible self-restart loop)' "
                 "ELSE result_text END, "
-                "runtime_id=CASE WHEN attempts+1 >= ? THEN runtime_id ELSE 0 END, "
-                "pool_tag=CASE WHEN attempts+1 < ? AND pool_tag='' "
+                "runtime_id=CASE WHEN ? >= ? THEN runtime_id ELSE 0 END, "
+                "pool_tag=CASE WHEN ? < ? AND pool_tag='' "
                 "THEN ? ELSE pool_tag END, "
-                "pool_agent_type=CASE WHEN attempts+1 < ? AND pool_agent_type='' "
+                "pool_agent_type=CASE WHEN ? < ? AND pool_agent_type='' "
                 "THEN ? ELSE pool_agent_type END "
                 "WHERE id=?",
-                (RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS, RECOVER_MAX_ATTEMPTS,
-                 RECOVER_MAX_ATTEMPTS,
-                 RECOVER_MAX_ATTEMPTS, _pool_fill,
-                 RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
+                (_att,
+                 _att, RECOVER_MAX_ATTEMPTS,
+                 _att, RECOVER_MAX_ATTEMPTS,
+                 _att, RECOVER_MAX_ATTEMPTS,
+                 _att, RECOVER_MAX_ATTEMPTS,
+                 _att, RECOVER_MAX_ATTEMPTS, _pool_fill,
+                 _att, RECOVER_MAX_ATTEMPTS, _pool_fill, tid))
             if _att >= RECOVER_MAX_ATTEMPTS:
                 force_failed.append(tid)
             else:
