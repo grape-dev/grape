@@ -3295,8 +3295,29 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         from src.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
         evt["issue_id"] = issue_id
-        prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
-                              skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
+        # 智能推荐等入队时已构建 prompt 的任务（local_claimer 认领的广播任务）：
+        # 优先复用任务行已落库的 prompt，禁止重建——重建会用 skill_name→agent_type
+        # fallback 拼出技能 prompt（{{SKILL_DIR}}），把推荐器 prompt 替换掉，
+        # 导致 agent 按技能剧本跑而非输出 scene_id JSON，且后置「智能推荐器」
+        # prompt 识别条件永远失配（scene_id 落库/VOD 重派全断，2026-10-21 实锤）。
+        # 与 worker 执行路径对齐（worker 直接用任务行 prompt）。
+        _reused_prompt = ""
+        if task_id:
+            try:
+                from src.session_manager import db as _pdb, db_lock as _pdl
+                with _pdl:
+                    c = _pdb.cursor()
+                    c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
+                    _pr = c.fetchone()
+                    _reused_prompt = (_pr[0] or "").strip() if _pr else ""
+            except Exception as _pe:
+                log.warning(f"Exec agent: read task prompt failed: {_pe}")
+        if _reused_prompt:
+            prompt = _reused_prompt
+            log.info(f"Exec agent: reuse enqueued task prompt ({len(prompt)} chars, task={task_id}), skip rebuild")
+        else:
+            prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
+                                  skill_path=evt.get("_skill_path", ""), runtime_id=runtime_id, agent_type=agent_type)
         # 直接模式（direct）：组件4 统一物化 project-info / skill / knowledge 到 ws 内
         # （替代旧的「占位符替换为服务端绝对路径：仓库级 project-info 原件 / 全局 SKILLS_DIR」），
         # 使 direct 端与 worker 端 cwd 布局一致，后续 bwrap 锁只需挂 ws。
