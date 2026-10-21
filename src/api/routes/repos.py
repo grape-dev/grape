@@ -1061,8 +1061,24 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管，请联系管理员"})
     except HTTPException:
         raise
+    except RuntimeError as e:
+        # Issue #383/#395: 上游 RuntimeError 分流——含内部 API URL 的原文不得透出给用户。
+        # _req 报文格式固定：GitCode API {method} {url} failed ({code}): {text}
+        import re as _re
+        _m = _re.search(r'failed \((\d{3})\)', str(e))
+        _code = int(_m.group(1)) if _m else 0
+        log.warning(f"host_repo upstream failed: {e}")
+        if _code == 404:
+            # 仓库不存在/无权访问（业务语义 404，而非网关故障 502）
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库不存在或无权访问"})
+        if _code in (401, 403):
+            # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限托管，请联系管理员"})
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "托管服务暂时不可用，请稍后重试"})
     except Exception as e:
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"权限验证失败: {e}"})
+        # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
+        log.warning(f"host_repo upstream failed: {e}")
+        raise HTTPException(status_code=502, detail={"code": 502, "message": "托管服务暂时不可用，请稍后重试"})
 
     try:
         from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, _RateLimitedError

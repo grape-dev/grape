@@ -679,7 +679,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # ── A2A 入口有效性校验（a2a-input-validation-fix）：内容错误必须同步 400 拒绝，
     # 不做"存在性检查"式的放通——否则 agent 拿到 ok 后直接结束任务，错误在异步派发
     # 内部爆发，任务死机（2026-10-14 实际事故）。
-    repository_early = str(payload.get("repository") or "")
+    # Issue #382/#395: repository 必须是字符串——str() 字符串化会让 dict 绕过格式校验，
+    # 下游 repository.startswith 对 dict 抛 AttributeError → 500。
+    if not isinstance(payload.get("repository"), str):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid repository: must be a string in 'owner/repo' format"})
+    repository_early = payload.get("repository") or ""
     issue_number_early = str(payload.get("issue_number") or "")
     # 1. agent 名必须在平台白名单内（agent 写错目标名时立刻暴露）
     if agent_name not in ("vod", "issue", "coding", "qa", "sre"):
@@ -691,7 +695,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     if repository_early.count("/") != 1 or not all(p.strip() for p in repository_early.split("/")):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"invalid repository '{repository_early[:100]}': must be full 'owner/repo' format, bare repo name is not accepted"})
 
-    repository = payload.get("repository", "")
+    repository = repository_early  # Issue #382/#395: 已校验为 str，直接复用，不再取原始对象
     account = payload.get("account", "") or repository
     context = payload.get("context", "")
     issue_number = payload.get("issue_number", "")

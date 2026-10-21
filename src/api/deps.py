@@ -257,6 +257,34 @@ def require_org_member(request: Request, user: dict = Depends(get_current_user_o
     return {**user, "org_id": org_id, "org_role": role}
 
 
+def require_path_org_member(user_id: int, org_id: int) -> str:
+    """路径型组织接口鉴权（Issue #381 / #395）：鉴权对象必须是路径里的 org_id。
+
+    与 require_org_member（上下文型）解耦：
+    - 组织不存在 → 404
+    - 非成员 → 403
+    返回成员角色（member/admin/owner）。
+
+    修复前缺陷：PUT/DELETE /api/orgs/{org_id} 用 resolve_org_context 回退个人组织
+    鉴权（读 403、写 200 语义矛盾，且可越权写任意组织）。
+    """
+    from src.user.org_db import get_org, get_member_role
+    if get_org(org_id) is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "组织不存在"})
+    role = get_member_role(user_id, org_id)
+    if not role:
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "不是该组织的成员"})
+    return role
+
+
+def require_path_org_admin(user_id: int, org_id: int) -> str:
+    """路径型组织接口管理员鉴权（Issue #381 / #395）：先成员校验，再校验 owner/admin。"""
+    role = require_path_org_member(user_id, org_id)
+    if role not in ("owner", "admin"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "需要组织管理员权限"})
+    return role
+
+
 def require_org_admin(user: dict = Depends(require_org_member)) -> dict:
     """组织管理员校验（owner/admin）。"""
     if user.get("org_role") not in ("owner", "admin"):

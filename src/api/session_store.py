@@ -333,8 +333,13 @@ def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,
-                                 backend: str = "") -> dict:
-    """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立（backend 无字面默认，见 engine-selection-design.md v2）"""
+                                 backend: str = "", runtime_id: int = 0) -> dict:
+    """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立（backend 无字面默认，见 engine-selection-design.md v2）。
+
+    Issue #400：显式传入 runtime_id（会话引擎指针）时，新建会话直接采用该指针，
+    不再走 pick_engine / 按名解析——保证"会话引擎指针 == 实际执行引擎"
+    （与 guard_issue_session_pointer 的指针语义对齐）。未传（0）时保持既有行为。
+    """
     with db_lock:
         c = db.cursor()
         try:
@@ -360,8 +365,8 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
 
         sid = str(uuid.uuid4())
         now = datetime.now().isoformat()
-        runtime_id = 0
-        if backend:
+        runtime_id = int(runtime_id or 0)
+        if not runtime_id and backend:
             # 引擎集合优先（engine-selection-design.md v2）；无集合回退按类型名解析（legacy）
             from src.runtime.engine_select import pick_engine
             runtime_id = pick_engine(repo_key, agent_type, fallback_runtime_id=0) or 0

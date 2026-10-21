@@ -316,6 +316,12 @@ SLOW_REQUEST_THRESHOLD_MS = int(os.environ.get("SLOW_REQUEST_THRESHOLD_MS", "500
 # server-config.json（gitignored）：server_base_url / webhook_url 显式配置，见 DEPLOYMENT-REMOTE.md §4
 SERVER_CONFIG_PATH = os.path.join(CONFIG_DIR, "server-config.json")
 
+# ===== Chat 流式响应超时（Issue #399） =====
+# CHAT_STREAM_TIMEOUT：chat agent SSE 流式响应总超时（秒）——DB 轮询/SSE 等待 agent 输出的最长时间
+CHAT_STREAM_TIMEOUT = int(os.environ.get("CHAT_STREAM_TIMEOUT", "300"))
+# CHAT_STREAM_HEARTBEAT_INTERVAL：等待期间「思考中」心跳反馈间隔（秒）
+CHAT_STREAM_HEARTBEAT_INTERVAL = int(os.environ.get("CHAT_STREAM_HEARTBEAT_INTERVAL", "15"))
+
 
 def read_server_config() -> dict:
     """读取 configs/server-config.json（gitignored，动态读，改后无需重启）。
@@ -330,6 +336,23 @@ def read_server_config() -> dict:
     except Exception:
         pass
     return {}
+
+
+def get_chat_stream_timeout() -> int:
+    """chat agent SSE 流式响应总超时（秒，Issue #399）。
+
+    优先读 server-config.json 的 chat_stream_timeout（动态，改后无需重启），
+    缺失/非法时回退环境变量常量 CHAT_STREAM_TIMEOUT（默认 300）。
+    """
+    try:
+        raw = read_server_config().get("chat_stream_timeout")
+        if raw not in (None, ""):
+            val = int(raw)
+            if val > 0:
+                return val
+    except Exception:
+        pass
+    return CHAT_STREAM_TIMEOUT
 
 
 _WL_ENABLED_CACHE = None

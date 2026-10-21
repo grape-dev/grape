@@ -1079,9 +1079,11 @@ _load_accounts()
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
     from src.config import log
-    log.warning(f"API error: {exc}")
+    # Issue #380/#395: 异常原文（含 DB/SQL 错误细节）不回显给客户端——原文仅落服务端日志，
+    # 响应体返回通用文案 + request_id（便于关联排障）
+    log.warning(f"API error ({request.url.path}): {exc}")
     rid = request.scope.get("request_id", "-")
-    return JSONResponse(status_code=500, content={"code": 500, "message": str(exc), "request_id": rid})
+    return JSONResponse(status_code=500, content={"code": 500, "message": "服务器内部错误，请稍后重试", "request_id": rid})
 
 
 # ===== 三层健康检查（参考 multica health.go）=====

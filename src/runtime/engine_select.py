@@ -135,6 +135,56 @@ def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
             if not is_known_engine_name(m.get("name") or ""):
                 continue
         out.append(m)
+    # 单选约束：同一引擎身份（唯一键）只保留一个候选，防止同名/同实例重复计入
+    # （Issue #400：接入个人机器后 user/repo 双档或多行重复导致“多个引擎同时选中”）
+    if len(out) > 1:
+        deduped = dedupe_engines(out)
+        if len(deduped) != len(out):
+            log.info(f"_apply_filters: dedupe engines by unique key, merged {len(out) - len(deduped)} duplicate(s)")
+        return deduped
+    return out
+
+
+def engine_unique_key(m: dict) -> str:
+    """引擎候选的唯一键（Issue #400 单选约束 / 候选去重）。
+
+    以**引擎身份**派生归一键，而非 owner 字符串/display 名（对齐 <canonical_account_id> canonical
+    account identity 思路）：同一实例（同一 name+device+credential）只会有一个键，
+    历史重复行、user/repo 双档同实例被归一为单条候选。
+
+    - 本机直连（credential_id=0）：`local:{engine_type}`（本机引擎以类型名为键）
+    - 个人/远端：`{scope}:{instance_name}`（instance_name 与 src/runtime/instances.py 同源）
+    """
+    cid = m.get("credential_id") or 0
+    scope = (m.get("scope") or "global").strip().lower()
+    name = (m.get("name") or "").strip()
+    if cid == 0:
+        return f"local:{name.lower()}"
+    try:
+        from src.runtime.instances import instance_name
+        ins = instance_name(name, m.get("device_name") or "", cid)
+    except Exception:
+        ins = f"{name.lower()}-cred{cid}"
+    return f"{scope}:{ins.lower()}"
+
+
+def dedupe_engines(members: list[dict]) -> list[dict]:
+    """按唯一键去重（保留首个出现项，即查询/排序中的权威行）。
+
+    输入顺序即权威顺序（如 query_engines 按 id 排序、_engines_by_ids 按给定 id 列表），
+    首个出现的行保留，后续同名/同实例行合并。不改变成员的字段结构。
+    """
+    seen: set = set()
+    out: list[dict] = []
+    for m in members:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        key = engine_unique_key(m)
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(m)
     return out
 
 
@@ -360,7 +410,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     if _sre_no_broadcast(agent_type):
         if not engine_ids:
             return None
-        members = _engines_by_ids(engine_ids, repo, cfg)
+        members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
         members = _filter_by_tags(members, agent_type)
         members = [m for m in members if m.get("scope") in ("user", "repo")]
         for _scope in ("user", "repo"):
@@ -376,7 +426,7 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
         return None
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
-        members = _engines_by_ids(engine_ids, repo, cfg)
+        members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
         members = _filter_by_tags(members, agent_type)
         if members:
             for scope in cfg.get("scopes") or ["repo", "global", "local"]:
@@ -443,7 +493,7 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                 return None
             if ids:
                 # Issue #259：写入 pool 前按健康过滤（与 legacy pick_engine 的 _health_ok 同一把尺子）
-                members = _engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection())
+                members = dedupe_engines(_engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection()))
                 # SRE 派发层约束（Q3 裁定）：只允许 user/repo 档（配置后引擎 scope 被改也不放行 global）
                 if _sre_no_broadcast(agent_type):
                     _before = len(members)
