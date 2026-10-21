@@ -1129,6 +1129,17 @@
   letter-spacing: -0.01em !important;
 }
 
+[data-theme="apple"] .chat-engine-badge {
+  background: rgba(0,0,0,0.05);
+  border: 1px solid rgba(0,0,0,0.06);
+  color: var(--t2);
+  font-size: 12px;
+  padding: 3px 12px;
+  border-radius: 14px;
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+}
+
 /* Level 2: Subsection titles → 14px, weight 600 */
 [data-theme="apple"] .cd h3,
 [data-theme="apple"] .lobby-card h3,

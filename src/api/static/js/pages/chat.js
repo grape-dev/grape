@@ -63,7 +63,7 @@ function renderChat(openConvId) {
   el.innerHTML = `<div class="chat-wrap" style="height:calc(100vh - 96px)">
     <div class="chat-convlist" id="convList"></div>
     <div class="chat-main">
-      <div class="chat-hdr"><h2>${I18N.t('chat.header.title')}</h2></div>
+      <div class="chat-hdr"><h2>${I18N.t('chat.header.title')}</h2><span id="chatEngineBadge" class="chat-engine-badge" style="display:none"></span></div>
       <div class="chat-body" id="chatBody">
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
@@ -100,8 +100,9 @@ function loadChatConfigData() {
   API.get('/chat/config' + _qs).then(d => {
     _chatConfigData = d;
     _chatSkillScope = (d.skill_scope === 'repo') ? 'repo' : (d.skill_scope === 'user') ? 'user' : 'official';
-    // 更新按钮标签
+    // 更新按钮标签 + 顶栏实际引擎回显（Issue #400）
     _updateModelBtnLabel(d);
+    _updateEngineBadge(d);
     _updateSkillBtnLabel(d);
     // 加载技能选项到隐藏 select
     _loadChatSkillOptions();
@@ -110,6 +111,22 @@ function loadChatConfigData() {
 
 function _updateModelBtnLabel(d) {
   // 按钮已简化为纯图标，无需更新文字
+}
+
+function _updateEngineBadge(d) {
+  // Issue #400：顶栏回显当前会话实际使用引擎（selectedEngine 由后端按 runtime_id 指针解析，权威唯一）
+  const badge = document.getElementById('chatEngineBadge');
+  if (!badge) return;
+  const sel = (d && d.selectedEngine) || {};
+  const name = sel.display_name || sel.name || '';
+  if (!name) {
+    badge.style.display = 'none';
+    badge.textContent = '';
+    return;
+  }
+  const icon = sel.scope === 'local' ? '🖥' : '☁';
+  badge.textContent = icon + ' ' + name;
+  badge.style.display = 'inline-flex';
 }
 
 function _updateSkillBtnLabel(d) {
@@ -193,17 +210,23 @@ function _buildModelPicker() {
   const backend = d.backend || {};
   const backends = d._backends || [];
   const curType = (backend.type || '').toLowerCase();
+  // Issue #400：单选语义——以后端 selectedEngine.runtime_id（会话引擎指针）为权威，
+  // 无指针时精确匹配 backend 类型名；删除 startsWith 前缀匹配，杜绝本机直连
+  // "codex" 与个人实例 "codex-xxx" 同时选中（多选显示根因）。
+  const sel = d.selectedEngine || {};
+  const selRid = parseInt(sel.runtime_id || 0, 10);
   let items;
   if (backends.length === 0) {
     items = `<div style="padding:16px;text-align:center;color:var(--t3);font-size:12px">${I18N.t('common.loading')}</div>`;
   } else {
     items = backends.map(b => {
-      const isActive = b.name === curType || b.name.startsWith(curType + '-') || curType === b.name.toLowerCase();
+      const rid = parseInt(b.runtime_id || 0, 10);
+      const isActive = (selRid > 0 && rid === selRid) || (selRid <= 0 && b.name.toLowerCase() === curType);
       const icon = b.scope === 'local' ? '🖥' : '☁';
       return `<div class="chat-picker-item${isActive ? ' active' : ''}" data-value="${b.name}" data-rid="${b.runtime_id || ''}" style="padding:10px 14px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .15s;border-radius:8px${isActive ? ';background:var(--a)11' : ''}">
         <span style="font-size:14px">${icon}</span>
         <span style="flex:1;font-size:12px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${b.display_name || b.name}</span>
-        ${isActive ? '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}
+        <span style="display:flex;align-items:center;gap:6px">${isActive ? '<span style="font-size:10px;color:var(--a)">' + I18N.t('chat.current_engine') + '</span><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="var(--a)" stroke-width="3"><polyline points="20 6 9 17 4 12"/></svg>' : ''}</span>
       </div>`;
     }).join('');
   }
@@ -288,10 +311,9 @@ function _saveModelConfig(backend, rid) {
   if (rid) _body.runtime_id = parseInt(rid, 10);
   API.put('/chat/config' + _qs, _body).then(() => {
     app.showToast(I18N.t('chat.config.saved'));
-    if (_chatConfigData) {
-      _chatConfigData.backend = {type: backend};
-      _updateModelBtnLabel(_chatConfigData);
-    }
+    // Issue #400：切换引擎后重新拉取权威 selectedEngine（后端按 runtime_id 指针解析），
+    // 避免本地名称推断与后端指针分叉显示（多选/错选）
+    loadChatConfigData();
   }).catch(e => app.showToast(I18N.t('chat.config.save_failed', {msg: e.message})));
 }
 

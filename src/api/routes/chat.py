@@ -864,7 +864,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
         from src.runtime.service import enqueue_task, wait_task_terminal
         from src.api.session_store import get_or_create_agent_session
 
-        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name, runtime_id=rid)
         runtime_id = rid  # 已由本机直连兜底解析（§8.2）；远端引擎才走队列
 
         async def event_stream():
@@ -1117,12 +1117,11 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     import os as _os
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
-    # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
-    session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
     # 无引擎 → 明确不可用（engine-selection-design.md v2），不隐式跑 opencode
     if not backend_name:
         return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
-    # 优先用用户配置的 runtime_id（chat_agent_session），未配置按本机直连兜底（engine-selection-design.md §8.2）
+    # 优先用用户配置的 runtime_id（chat_agent_session，会话引擎指针），未配置按本机直连兜底
+    #（engine-selection-design.md §8.2）；Issue #400：解析出的唯一引擎同时落 devops_agent_session 指针
     runtime_id = cfg.get("runtime_id") or 0
     if not runtime_id:
         try:
@@ -1132,6 +1131,8 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
             runtime_id = 0
     if not runtime_id:
         return {"reply": "⚠️ 无可用 runtime，请先在 Agent Runtimes 页刷新", "conversation_id": conv_id}
+    # chat 会话：user_id + repo_key 绑定（chat_agent_session 是 chat 专用；此处用 devops_agent_session 保证 D9 串行）
+    session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name, runtime_id=runtime_id)
     # 本机直连（credential_id=0）无 claim 方：队列任务端点不能投递到本机，需走 direct 会话
     from src.runtime.service import runtime_credential_id
     if (runtime_credential_id(runtime_id) or 0) == 0 and backend_name:
@@ -1225,6 +1226,78 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
 
 # ====== Config ======
 
+def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
+    """按引擎唯一键去重（Issue #400）：个人机器 user/repo 双档或历史重复行合并为单条。
+
+    键语义与 src/runtime/engine_select.engine_unique_key 对齐（本机直连以类型名为键、
+    个人/远端以实例名为键）；保留首个出现项（查询 id 排序下的权威行）。
+    """
+    seen: set = set()
+    out: list[dict] = []
+    for b in backends:
+        scope = (b.get("scope") or "").strip().lower()
+        nm = (b.get("name") or "").strip()
+        if not nm:
+            out.append(b)
+            continue
+        key = f"local:{nm.lower()}" if scope == "local" else f"{scope}:{nm.lower()}"
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(b)
+    return out
+
+
+def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
+    """解析唯一选中引擎（Issue #400 单选语义）。
+
+    以会话引擎指针（cfg.runtime_id）为权威：
+    1. 指针命中候选列表（含个人实例）→ 返回该候选；
+    2. 指针指向列表外引擎（已配置的远端/其它仓库引擎）→ 按 runtime_id 反查 agent_runtimes；
+    3. 指针缺失/失效 → 按 backend 名精确匹配（本机直连类型名/user 实例名），
+       不做前缀匹配（杜绝多个候选同时命中 —— 多选显示根因）。
+
+    返回单一 dict（与 _backends 项同构）或 None；绝不返回数组。
+    """
+    rid = int(cfg.get("runtime_id") or 0)
+    backend = (cfg.get("backend") or "").strip()
+    if rid:
+        for b in backends:
+            if int(b.get("runtime_id") or 0) == rid:
+                return b
+        try:
+            from src.runtime.instances import instance_name
+            from src.session_manager import db as _db, db_lock as _dl
+            with _dl:
+                c = _db.cursor()
+                c.execute(
+                    "SELECT ar.name, ar.version, rc.device_name, rc.owner_name, ar.credential_id, rc.scope "
+                    "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                    "WHERE ar.id=?", (rid,))
+                row = c.fetchone()
+            if row and row[0]:
+                ename, ver, dev, owner, cid, rscope = row
+                cid = cid or 0
+                rscope = (rscope or "global") if cid else "local"
+                if cid:
+                    ins = instance_name(ename, dev or "", cid)
+                    return {"name": ins, "display_name": f"{ins} · {ename} v{ver or ''}",
+                            "scope": rscope, "owner": owner or "", "runtime_id": rid}
+                return {"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）",
+                        "scope": "local", "owner": "", "runtime_id": rid}
+        except Exception:
+            pass
+    if not backend:
+        return None
+    for b in backends:
+        if b.get("name") == backend:
+            return b
+    for b in backends:
+        if b.get("scope") == "local" and b.get("name") and b["name"].lower() == backend.lower():
+            return b
+    return None
+
+
 @router.get("/config", operation_id="chat_config_get", summary="Get chat config", description="Returns chat config (backend/settings/personal engines).")
 def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = ""):
     cfg = _get_chat_config(user["id"])
@@ -1300,10 +1373,14 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         except Exception:
             pass
 
+    backends = _chat_dedupe_backends(backends)
+    selected_engine = _chat_selected_engine(cfg, backends)
+
     return {
         "backend": {
             "type": cfg.get("backend", ""),
         },
+        "selectedEngine": selected_engine,
         "skill": cfg.get("skill", ""),
         "skill_id": cfg.get("skill_id", 0) or 0,
         "skill_scope": skill_scope,
@@ -1741,7 +1818,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         # 远端引擎：入队 + ChatTaskManager 轮询 task_messages
         from src.runtime.service import enqueue_task
         from src.api.session_store import get_or_create_agent_session
-        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name, runtime_id=rid)
         enqueue_tid = enqueue_task(
             agent_session_id=session.get("id") or "",
             runtime_id=rid,
@@ -1809,16 +1886,19 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
     q, task = ChatTaskManager.subscribe(task_id, loop)
 
     # 内存无任务 → 可能是跨机器 submit，DB 有 user 消息但 agent 还在执行
-    # 轮询 DB 等待 agent 回复（最多 120s），而不是立刻报「查询已中断」
+    # 轮询 DB 等待 agent 回复（总超时 = CHAT_STREAM_TIMEOUT，可配置，Issue #399），而不是立刻报「查询已中断」
     if not q:
         from src.session_manager import db as _msg_db, db_lock as _msg_lock
+        from src.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
 
         async def _poll_db_stream():
             import time as _t
             conv_id = ""
+            timeout_s = get_chat_stream_timeout()
             # 先发思考中占位
             yield f"data: {json.dumps({'type': '思考中', 'text': ''})}\n\n"
-            deadline = _t.time() + 120
+            deadline = _t.time() + timeout_s
+            last_heartbeat = _t.time()
             while _t.time() < deadline:
                 with _msg_lock:
                     c = _msg_db.cursor()
@@ -1840,9 +1920,13 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
                             return
                 # 有 user 无 agent → agent 仍在执行（可能在另一台机器），继续等
                 conv_id = rows[0][3] if rows else ""
+                # 等待期间周期性推送「思考中」心跳（Issue #399）
+                if _t.time() - last_heartbeat >= _hb_interval:
+                    yield f"data: {json.dumps({'type': '思考中', 'text': '仍在处理，请稍候…'})}\n\n"
+                    last_heartbeat = _t.time()
                 await asyncio.sleep(1)
-            # 超时
-            yield f"data: {json.dumps({'type': 'error', 'text': '查询超时（120s），请重试', 'conversation_id': conv_id, 'task_id': task_id})}\n\n"
+            # 超时（时长动态取配置）
+            yield f"data: {json.dumps({'type': 'error', 'text': f'查询超时（{timeout_s}s），请重试', 'conversation_id': conv_id, 'task_id': task_id})}\n\n"
 
         return StreamingResponse(
             _poll_db_stream(),
@@ -1853,17 +1937,26 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
 
     # 内存有任务 → SSE 流
     async def event_stream():
+        import time as _t
+        from src.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
+        timeout_s = get_chat_stream_timeout()
+        deadline = _t.time() + timeout_s
         # 先发一个思考中占位（如果缓冲为空）
         if not task.events:
             yield f"data: {json.dumps({'type': '思考中', 'text': ''})}\n\n"
         # 消费 queue（重放缓冲 + 实时事件）
         while True:
-            try:
-                item = await asyncio.wait_for(q.get(), timeout=120)
-            except asyncio.TimeoutError:
-                yield f"data: {json.dumps({'type': 'error', 'text': '超时（120s 无输出）'})}\n\n"
+            remaining = deadline - _t.time()
+            if remaining <= 0:
+                yield f"data: {json.dumps({'type': 'error', 'text': f'超时（{timeout_s}s 无输出）'})}\n\n"
                 ChatTaskManager.unsubscribe(task_id, q)
                 return
+            try:
+                # 短超时心跳 + 总超时：每 _hb_interval 无输出推一次「思考中」，累计 timeout_s 才报超时（Issue #399）
+                item = await asyncio.wait_for(q.get(), timeout=max(min(_hb_interval, remaining), 0.1))
+            except asyncio.TimeoutError:
+                yield f"data: {json.dumps({'type': '思考中', 'text': '仍在处理，请稍候…'})}\n\n"
+                continue
             if item is None:  # 结束信号
                 break
             yield f"data: {item}\n\n"
@@ -1990,7 +2083,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     try:
         from src.runtime.service import enqueue_task
         from src.api.session_store import get_or_create_agent_session
-        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name)
+        session = get_or_create_agent_session(f"chat:{user['id']}", "chat", backend_name, runtime_id=rid)
         tid = enqueue_task(
             agent_session_id=session.get("id") or "",
             runtime_id=rid,
@@ -2117,7 +2210,7 @@ def _execute_chat_task(task_id: str):
             # 远端引擎：enqueue + wait
             from src.runtime.service import enqueue_task, wait_task_terminal_sync
             from src.api.session_store import get_or_create_agent_session
-            session = get_or_create_agent_session(f"chat:{user.get('id', 0)}", "chat", backend_name)
+            session = get_or_create_agent_session(f"chat:{user.get('id', 0)}", "chat", backend_name, runtime_id=rid)
             tid = enqueue_task(
                 agent_session_id=session.get("id") or "",
                 runtime_id=rid,
