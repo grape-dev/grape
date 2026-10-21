@@ -1606,6 +1606,7 @@ function openTaskCreateModal() {
   _taskCreateModal = ov;
 
   // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
+  // 需求中心事前拦截：all_offline 场景标 ⚠️ 且默认选中时显示警告条提示换绑
   API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
     const sel = document.getElementById('tcCreateScene');
     if (!sel) return;
@@ -1614,10 +1615,39 @@ function openTaskCreateModal() {
       const opt = document.createElement('option');
       opt.value = s.id;
       const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
-      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
+      const offlineTag = s.all_offline ? ' ⚠️' : '';
+      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '') + offlineTag;
+      if (s.all_offline) opt.style.color = '#b45309';
+      opt._offline_nodes = s.offline_nodes || [];
+      opt._all_offline = !!s.all_offline;
       sel.appendChild(opt);
     });
+    // 初始选中「VOD 自动识别」时无警告；用户选中带 ⚠️ 的场景时联动提示
+    sel.onchange = function() {
+      _updateSceneOfflineWarning(sel);
+    };
   }).catch(function(){});
+
+  // 场景引擎全灭警告条：选中 all_offline 场景时显示，附「去换绑」入口
+  function _updateSceneOfflineWarning(sel) {
+    var old = document.getElementById('tcSceneOfflineWarn');
+    if (old) old.remove();
+    var opt = sel && sel.options && sel.options[sel.selectedIndex];
+    if (!opt || !opt._all_offline) return;
+    var nodes = (opt._offline_nodes || []).join('、');
+    var warn = document.createElement('div');
+    warn.id = 'tcSceneOfflineWarn';
+    warn.style.cssText = 'margin-top:4px;padding:8px 12px;border-radius:8px;' +
+      'background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);' +
+      'font-size:12px;color:#b45309;line-height:1.6;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+    warn.innerHTML = '⚠️ ' +
+      '该场景绑定的引擎当前全部离线' + (nodes ? '（离线节点：' + nodes + '）' : '') +
+      '，创建后任务将无法派发。' +
+      '<a style="color:#0071e3;text-decoration:none;cursor:pointer;font-weight:600;white-space:nowrap" ' +
+      'onclick="document.getElementById(\'taskCreateOverlay\').remove();app.nav(\'scene-detail-local\',\'' + sel.value + '\')">去换绑 →</a>';
+    var label = sel.closest('label');
+    (label || sel.parentElement || document.getElementById('tcCreateScene').parentElement).appendChild(warn);
+  }
 
   // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭
 }
