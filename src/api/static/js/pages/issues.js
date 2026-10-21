@@ -1619,6 +1619,7 @@ function openTaskCreateModal() {
       opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '') + offlineTag;
       if (s.all_offline) opt.style.color = '#b45309';
       opt._offline_nodes = s.offline_nodes || [];
+      opt._sre_unbound = !!s.sre_unbound;
       opt._all_offline = !!s.all_offline;
       sel.appendChild(opt);
     });
@@ -1628,21 +1629,23 @@ function openTaskCreateModal() {
     };
   }).catch(function(){});
 
-  // 场景引擎全灭警告条：选中 all_offline 场景时显示，附「去换绑」入口
+  // 场景引擎全灭警告条：选中 all_offline 场景时显示，附「去换绑」入口。
+  // 两种话术：SRE 未选机器（sre_unbound）/ 引擎全部离线（offline_nodes）。
   function _updateSceneOfflineWarning(sel) {
     var old = document.getElementById('tcSceneOfflineWarn');
     if (old) old.remove();
     var opt = sel && sel.options && sel.options[sel.selectedIndex];
     if (!opt || !opt._all_offline) return;
     var nodes = (opt._offline_nodes || []).join('、');
+    var reason = opt._sre_unbound
+      ? 'SRE 节点未选择机器（SRE 不支持广播模式），部署任务无法执行。请为 SRE 节点绑定个人或仓库级机器。'
+      : '该场景绑定的引擎当前全部离线' + (nodes ? '（离线节点：' + nodes + '）' : '') + '，创建后任务将无法派发。';
     var warn = document.createElement('div');
     warn.id = 'tcSceneOfflineWarn';
     warn.style.cssText = 'margin-top:4px;padding:8px 12px;border-radius:8px;' +
       'background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);' +
       'font-size:12px;color:#b45309;line-height:1.6;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-    warn.innerHTML = '⚠️ ' +
-      '该场景绑定的引擎当前全部离线' + (nodes ? '（离线节点：' + nodes + '）' : '') +
-      '，创建后任务将无法派发。' +
+    warn.innerHTML = '⚠️ ' + reason +
       '<a style="color:#0071e3;text-decoration:none;cursor:pointer;font-weight:600;white-space:nowrap" ' +
       'onclick="document.getElementById(\'taskCreateOverlay\').remove();app.nav(\'scene-detail-local\',\'' + sel.value + '\')">去换绑 →</a>';
     var label = sel.closest('label');

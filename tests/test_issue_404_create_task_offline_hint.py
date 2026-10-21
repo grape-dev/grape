@@ -120,6 +120,29 @@ def test_disabled_node_skipped(monkeypatch):
     assert s["all_offline"] is False
 
 
+def test_sre_unbound_flagged(monkeypatch):
+    """SRE 节点未选机器（无 engine_runtime_ids）→ sre_unbound=True、all_offline=True。"""
+    scene_list = [{
+        "id": "scene_sre", "name": "sre", "display_name": "sre",
+        "description": "", "work_branch": "main", "created_by": "",
+        "scene_type": "standard", "pr_subscription_enabled": 0, "linked_repos": [],
+        "nodes": [
+            # SRE 空绑定：无 engine_runtime_ids（SRE 不支持广播 → 无引擎）
+            {"tag": "sre", "skill": "s3"},
+            # coding 正常
+            {"tag": "coding", "skill": "s1", "engine_runtime_ids": [1]},
+        ],
+    }]
+    _patch_scenes_module(monkeypatch, scene_list,
+                         {("scene_sre", "coding"): "[1]"})
+    import src.api.routes.scenes as scenes_mod
+    res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
+    s = res["scenes"][0]
+    assert s["sre_unbound"] is True
+    assert s["all_offline"] is True
+    assert s["offline_nodes"] == []  # coding 健康，不在离线列表
+
+
 def test_pool_check_exception_degrades(monkeypatch):
     """判定函数抛异常 → 降级为不标记，不挡创建入口。"""
     scene_list = [{
