@@ -17,7 +17,10 @@
     "events": "事件",
     "repos": "仓库",
     "tasks": "需求中心",
-    "observability": "设备监控",
+    "observability": "可观测性",
+    "obs_overview": "总览",
+    "obs_devices": "设备与引擎",
+    "obs_inspect": "任务与日志",
     "event_detail": "事件详情",
     "skill_detail": "技能详情",
     "sub_skill_detail": "子技能详情",
@@ -27,7 +30,8 @@
     "scene_market": "场景市场",
     "skill_market": "技能市场",
     "organizations": "组织管理",
-    "autopilot": "自动化"
+    "autopilot": "自动化",
+    "obs_cockpit": "运行驾驶舱"
   },
   "sidebar": {
     "workspace": "工作区",
@@ -36,6 +40,7 @@
     "knowledge": "知识库",
     "account": "用户设置",
     "device_center": "设备中心",
+    "observability": "可观测性",
     "settings": "设置",
     "toggle": "收起/展开侧边栏",
     "organizations": "组织"

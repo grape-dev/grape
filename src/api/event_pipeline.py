@@ -3457,6 +3457,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     except Exception as e:
         log.warning(f"Exec agent: issue session token failed: {e}")
 
+    # 用量采集（审计 2026-10-17）：DIRECT 模式跑在主控进程里，以前一条 token 都不记；
+    # 有 agent_tasks 行 → run_kind='task'，归属自动反查，幂等键与 worker 侧一致。
+    from src.observability.master_usage import for_task as _master_for_task
+    _mu = _master_for_task(task_id, backend, cwd=ws, session_id=oc_session_id, seq=seq,
+                           repo_key=repo_key, agent_type=agent_type,
+                           engine_id=int(runtime_id or 0))
+    _mu.start()
+
     try:
         for evt_type, data in stream_devops_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
@@ -3476,6 +3484,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": _msg})
             # 实时推送：direct 模式复用 worker 的 report_messages（落库 task_messages + fanout SSE）
             # 让前端「实时日志」面板在 hermes 执行期间就能看到逐步输出，不用等执行完成
+            _mu.feed(evt_type, data)
             if task_id and evt_type != "done":
                 try:
                     from src.runtime.service import report_messages
@@ -3558,6 +3567,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.info(f"[agent {agent_type}|repo:{repo_name}] {evt_type}: {str(data)[:160]}")
     except Exception as e:
         log.warning(f"Exec agent failed: [Agent:{agent_type}|repo:{repo_name}] {e}")
+
+    # 用量落台账（流结束后）：放 here 是因为引擎进程已退出、账本已落盘；
+    # finish 自身幂等 + 吞异常，绝不影响下面的终态/会话回写。
+    try:
+        _mu.finish(session_id=new_oc_session_id)
+    except Exception as _ue:      # 用量是观测数据，任何异常都不该影响任务终态
+        log.warning(f"Exec agent: usage finish failed (task={task_id}): {_ue}")
 
     # 更新 oc_session_id（持久化对话上下文）——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。

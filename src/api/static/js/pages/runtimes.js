@@ -1093,6 +1093,28 @@ function _upgradeEngineDetail(runtimeId) {
   }).catch(function() { /* 补全失败保留设备数据渲染，不打断用户 */ });
 }
 
+// Issue #394: 是否允许重置健康分（仅仓库级/个人级 worker 设备引擎；全局引擎不开放）
+function _healthCanReset(rt) {
+  return !!(rt && (rt.scope === 'user' || rt.scope === 'repo'));
+}
+
+// Issue #394: 重置引擎健康分（写入 health_reset_at 赦免点，健康分按新窗口重算）
+function resetEngineHealth(runtimeId) {
+  if (!confirm(I18N.t('runtimes.health.reset_confirm'))) return;
+  var qs = _rtRepoQs();
+  API.post('/settings/agent-runtimes/' + runtimeId + '/health-reset' + qs).then(function() {
+    app.showToast(I18N.t('runtimes.health.reset_success'));
+    closeEngineDetail();
+    _rtResetPageAndReload();
+  }).catch(function(e) {
+    var msg = (e && e.message) || I18N.t('runtimes.health.reset_failed');
+    if (msg === '仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放') {
+      msg = I18N.t('runtimes.health.reset_global_denied');
+    }
+    app.showToast(msg);
+  });
+}
+
 function _renderEngineDetail(rt) {
   const runtimeId = rt.id;
   const skills = rt.local_skills || [];
@@ -1123,7 +1145,7 @@ function _renderEngineDetail(rt) {
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.scope_label')}</span> ${_scopeLabel(rt.scope)}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.installed')}</span> ${rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no')}</div>
-        <div><span style="color:var(--t3);display:inline-block;min-width:70px">健康分</span> ${_healthScoreBadge(rt) || '—'}</div>
+        <div style="display:flex;align-items:center;gap:8px"><span style="color:var(--t3);display:inline-block;min-width:70px">健康分</span> ${_healthScoreBadge(rt) || '—'}${_healthCanReset(rt) ? `<button class="bt bt-o" title="${I18N.t('runtimes.action.reset_health')}" style="font-size:11px;padding:3px 10px;border-radius:4px;margin-left:4px" onclick="event.stopPropagation();resetEngineHealth(${rt.id})">${I18N.t('runtimes.action.reset_health')}</button>` : ''}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">

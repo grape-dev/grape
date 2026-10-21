@@ -1736,6 +1736,7 @@ def _execute_conv_task(task_id: str, loop):
         username = task["username"]
         message = task["message"]
 
+    _mu = None          # 采集器占位：_load_event 等前置步骤失败时收尾也要安全（见下方 finish）
     try:
         evt = _load_event(seq)
         # R20.15.4: 更新 devops_agent_session.last_active_at → 让 check_running_task
@@ -1792,6 +1793,11 @@ def _execute_conv_task(task_id: str, loop):
         repository = from_repo_key(repo_key)
         _worker_final_text = ""
         _conv_error_detail = ""  # R20.8b.1: 保存 error 信息用于 401 标记
+        # 用量采集（审计 2026-10-17）：本机直跑的事件对话以前不记 token
+        from src.observability.master_usage import for_task as _master_for_task
+        _mu = _master_for_task(task_id, "hermes", cwd=ws, session_id=oc_session_id,
+                               seq=anchor_seq, repo_key=repo_key, agent_type=agent_type)
+        _mu.start()
         # 用 hermes 引擎（对齐 Chat Agent）
         for evt_type, data in stream_devops_agent(
             prompt, cwd=ws, session_id=oc_session_id, event_type="event_dialogue",
@@ -1799,6 +1805,7 @@ def _execute_conv_task(task_id: str, loop):
             agent_name="Event Dialogue Agent",
             agent_label=f"[event-conv|repo:{repo_key}|seq:{anchor_seq}]",
         ):
+            _mu.feed(evt_type, data)
             if evt_type == "text" or evt_type == "token":
                 t = data if isinstance(data, str) else str(data)
                 _worker_final_text += t
@@ -1873,6 +1880,10 @@ def _execute_conv_task(task_id: str, loop):
     except Exception:
         pass
     loop.call_soon_threadsafe(_push_conv_event, task_id, "done", _worker_final_text)
+    # 用量落台账：放在**最后**（客户端已收到 done、DB 已写），1s 短重试不拖慢任何用户可见动作。
+    # `_mu` 可能因前置步骤失败而未创建 → 判空 + 吞异常。
+    if _mu is not None:
+        _mu.finish(session_id=oc_session_id)
 
 
 async def _collect_conv_events(gen, task_id: str, loop):
@@ -1998,9 +2009,10 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
     if not (body.content or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     # Issue #358：agent 写入路径也加大小校验，与 member 手动创建/更新对齐
-    from src.api.routes.knowledge import MAX_CONTENT_BYTES, _format_content_limit
+    # Issue #372：报错文案追加配置方法提示，与 member 创建/更新口径一致
+    from src.api.routes.knowledge import MAX_CONTENT_BYTES, _format_content_limit, _CONTENT_LIMIT_CONFIG_HINT
     if len((body.content or "").encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}{_CONTENT_LIMIT_CONFIG_HINT}"})
     from src.api.knowledge import write_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
     task_id = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,

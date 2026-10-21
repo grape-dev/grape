@@ -228,9 +228,11 @@ class KnowledgeUpdateBody(BaseModel):
 
 MAX_NAME_LEN = 50
 MAX_DESC_LEN = 200
-# Issue #358：知识正文大小上限从硬编码 10KB 改为环境变量可配置，默认 100KB
-_DEFAULT_MAX_CONTENT_BYTES = 100 * 1024
+# Issue #358：知识正文大小上限从硬编码 10KB 改为环境变量可配置；Issue #372：默认值提升至 5MB
+_DEFAULT_MAX_CONTENT_BYTES = 5 * 1024 * 1024
 _MIN_CONTENT_BYTES = 1024  # 下限 1KB：<=0 之类的值会导致所有 content 被拒，钳制到可用下限
+# Issue #372：超限报错追加配置方法提示
+_CONTENT_LIMIT_CONFIG_HINT = "，可通过环境变量 KNOWLEDGE_MAX_CONTENT_BYTES 调整"
 
 
 def _resolve_max_content_bytes() -> int:
@@ -438,7 +440,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     if not (body.content or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     if len(body.content.encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}{_CONTENT_LIMIT_CONFIG_HINT}"})
     if body.description and len(body.description) > MAX_DESC_LEN:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"description 不能超过 {MAX_DESC_LEN} 字符"})
     if not body.repo:
@@ -631,7 +633,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
     if not (body.content or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     if len(body.content.encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}{_CONTENT_LIMIT_CONFIG_HINT}"})
     if body.description and len(body.description) > MAX_DESC_LEN:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"description 不能超过 {MAX_DESC_LEN} 字符"})
 

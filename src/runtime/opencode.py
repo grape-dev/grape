@@ -7,12 +7,15 @@ from .base import AgentRuntime
 class OpencodeRuntime(AgentRuntime):
     name = "opencode"
     binary = "opencode"
+    # issue #351: prompt 经 stdin 传入（opencode run 无消息参数时从 stdin 读取），
+    # 规避 Windows .cmd 壳把 argv 中的换行符当作命令分隔符截断多行提示词。
+    prompt_via_stdin = True
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         args = ["run", "--format", "json", "--dangerously-skip-permissions"]
         if session_id:
             args.extend(["--session", session_id])
-        args.append(prompt)
+        # prompt 不作为位置参数传递（stdin 传输，见 prompt_via_stdin）
         return args
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:

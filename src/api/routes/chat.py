@@ -634,7 +634,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
         return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-    kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
+    _rid = int(cfg.get("runtime_id") or 0)      # 本路由的引擎 id（send 路径没有 rid 这个变量）
+    kind = runtime_execution_kind(_rid)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
         return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data)
@@ -647,53 +648,67 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
 
     def run_agent():
         nonlocal new_runtime_session_id, _send_error
-        with _CHAT_AGENT_SEMAPHORE:
-            for evt_type, data in stream_chat_agent(
-                prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
-                backend_name=backend_name, user_id=user["id"],
-                account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
-                agent_label=f"[Agent:chat|user:{user['username']}]",
-                repo_key=repo_key,
-                env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
-            ):
-                # 日志输出
-                if evt_type == "step_start":
-                    log.info(f"  ▶ {data}")
-                elif evt_type == "text":
-                    log.info(f"  💬 {data[:120]}")
-                elif evt_type == "reasoning":
-                    log.info(f"  🤔 {data[:120]}")
-                elif evt_type == "tool_use":
-                    log.info(f"  🔧 {str(data)[:150]}")
-                elif evt_type == "step_finish":
-                    log.info(f"  ✅ {data}")
-                elif evt_type == "done":
-                    log.info(f"  ✅ Done: exit={data.get('exit_code')}, text_len={len(data.get('text',''))}")
-                    # R20.8.1: 保存 done 事件的 errors/stderr 用于 401 标记
-                    if isinstance(data, dict):
-                        _done_errs = data.get("errors") or []
-                        _done_stderr = data.get("stderr") or ""
-                        if _done_errs:
-                            _send_error = " ".join(str(e) for e in _done_errs) + " " + str(_done_stderr)
-                        elif _done_stderr:
-                            _send_error = str(_done_stderr)
+        from src.observability.master_usage import MasterRun, new_run_id
+        # 用量采集（审计 2026-10-17 + P2-1 口径 B）：本机直连 chat 引擎以前不记 token
+        _mu = MasterRun("chat", new_run_id("chat"), engine=backend_name,
+                        cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
+                        session_id=runtime_session_id,
+                        attr={"repo_key": repo_key, "scene_id": conv_id,
+                              "agent_type": "chat", "user_id": user["id"],
+                              "engine_id": _rid})
+        _mu.start()
+        try:
+            with _CHAT_AGENT_SEMAPHORE:
+                for evt_type, data in stream_chat_agent(
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
+                    backend_name=backend_name, user_id=user["id"],
+                    account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
+                    agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
+                    env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
+                ):
+                    _mu.feed(evt_type, data)   # 用量采集
+                    # 日志输出
+                    if evt_type == "step_start":
+                        log.info(f"  ▶ {data}")
+                    elif evt_type == "text":
+                        log.info(f"  💬 {data[:120]}")
+                    elif evt_type == "reasoning":
+                        log.info(f"  🤔 {data[:120]}")
+                    elif evt_type == "tool_use":
+                        log.info(f"  🔧 {str(data)[:150]}")
+                    elif evt_type == "step_finish":
+                        log.info(f"  ✅ {data}")
+                    elif evt_type == "done":
+                        log.info(f"  ✅ Done: exit={data.get('exit_code')}, text_len={len(data.get('text',''))}")
+                        # R20.8.1: 保存 done 事件的 errors/stderr 用于 401 标记
+                        if isinstance(data, dict):
+                            _done_errs = data.get("errors") or []
+                            _done_stderr = data.get("stderr") or ""
+                            if _done_errs:
+                                _send_error = " ".join(str(e) for e in _done_errs) + " " + str(_done_stderr)
+                            elif _done_stderr:
+                                _send_error = str(_done_stderr)
 
-                if evt_type == "text":
-                    text = data.get("text", "") if isinstance(data, dict) else str(data)
-                    if text:
-                        collected.append(text)
-                elif evt_type == "done":
-                    if isinstance(data, dict):
-                        nsid = data.get("oc_session_id", "")
-                        if nsid:
-                            new_runtime_session_id = nsid
-                        if not collected:
-                            done_text = data.get("text", "")
-                            if done_text:
-                                collected.append(done_text)
-                elif evt_type in ("error"):
-                    _send_error = str(data)[:500]
-                    break
+                    if evt_type == "text":
+                        text = data.get("text", "") if isinstance(data, dict) else str(data)
+                        if text:
+                            collected.append(text)
+                    elif evt_type == "done":
+                        if isinstance(data, dict):
+                            nsid = data.get("oc_session_id", "")
+                            if nsid:
+                                new_runtime_session_id = nsid
+                            if not collected:
+                                done_text = data.get("text", "")
+                                if done_text:
+                                    collected.append(done_text)
+                    elif evt_type in ("error"):
+                        _send_error = str(data)[:500]
+                        break
+        finally:
+            # 收尾写用量：**已释放并发额度**（拿回复不占坑），异常路径也不漏
+            _mu.finish(session_id=new_runtime_session_id)
         return "".join(collected)
 
     reply = await loop.run_in_executor(None, run_agent)
@@ -917,6 +932,15 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                 return
             collected = []
             worker_error = ""
+            from src.observability.master_usage import MasterRun
+            # 用量采集（审计 2026-10-17）：SSE 本机直连路径同样漏记 token
+            _mu = MasterRun("chat", chat_task_id, engine=backend_name,
+                            cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
+                            session_id=runtime_session_id,
+                            attr={"repo_key": repo_key, "scene_id": conv_id,
+                                  "agent_type": "chat", "user_id": user["id"],
+                                  "engine_id": int(rid or 0)})
+            _mu.start()
             try:
                 for evt_type, data in stream_chat_agent(
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
@@ -926,6 +950,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     repo_key=repo_key,
                     env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
+                    _mu.feed(evt_type, data)
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
                         log.info(f"  ▶ {data}")
@@ -1014,8 +1039,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                         touch_conversation(conv_id)
                     except Exception as _de:
                         log.warning(f"[Agent:chat|user:{user['username']}] DB save (empty) in finally failed: {_de}")
+                # 客户端先拿到流结束信号、并发额度先释放，用量收尾（可能含 1s 重试）放最后
                 loop.call_soon_threadsafe(q.put_nowait, None)
                 _CHAT_AGENT_SEMAPHORE.release()
+                _mu.finish(session_id=captured_session)
 
         # 保持 Future 引用（防止 GC 回收导致 agent_worker 不执行）
         _agent_future = loop.run_in_executor(None, agent_worker)
@@ -1595,10 +1622,19 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
             from src.runtime.executor import stream_chat_agent
+            from src.observability.master_usage import MasterRun
             _final_text = ""
             _new_sid = ""
             _ctm_error_detail = ""  # R20.8.7: 保存 error 信息用于 401 标记
             _last_error = ""
+            # 用量采集（审计 2026-10-17）：本机直连的 chat 引擎以前**一条 token 都不记**。
+            # 归属口径 B：无 agent_tasks 行 → task_id 空、主体 run_id=chat_task_id；
+            # 采集/写库失败只打日志，绝不影响对话主链路。
+            _mu = MasterRun("chat", chat_task_id, engine=backend_name, cwd=cwd,
+                            attr={"repo_key": repo_key, "scene_id": conv_id,
+                                  "agent_type": "chat", "user_id": user["id"],
+                                  "engine_id": int(rid or 0)})
+            _mu.start()
             # 视频理解在 agent_fn 内部异步执行（避免 submit 同步阻塞导致前端 timeout）
             if _video_data:
                 yield ("step_start", "正在分析视频，可能需要 30-60 秒...")
@@ -1620,6 +1656,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     repo_key=repo_key,
                     env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
+                    _mu.feed(evt_type, data)
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (
                             data.get("text", "") if isinstance(data, dict) else str(data))
@@ -1683,6 +1720,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                         touch_conversation(conv_id)
                     except Exception as _de:
                         log.warning(f"[Chat submit] DB save (empty) failed: {_de}")
+                # 用量落台账：**放在最后**——累计型账本那次 1s 短重试不该拖慢"回复落库/推送"（用户可见）
+                _mu.finish(session_id=_new_sid)
                 # 飞书推送（投递到主事件循环；后台线程不能跨 loop 复用共享 aiohttp session）
                 if _final_text:
                     try:

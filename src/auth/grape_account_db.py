@@ -862,16 +862,20 @@ def transfer_business_data(from_user_id: int, to_user_id: int) -> bool:
             # 用 UPDATE ... WHERE 条件转移，冲突时跳过（INSERT OR IGNORE 补充）
             if table == "user_repos":
                 # 先 UPDATE 已有记录的归属（目标用户无同 repo_key 的记录）
+                # ⚠️ 子查询用派生表包裹（Issue #376）：MySQL 1093 禁止 UPDATE 目标表
+                # 直接出现在子查询 FROM 中；包裹成 (SELECT ... FROM (SELECT ...) t)
+                # 后目标表仅出现在派生表内部，SQLite/MySQL 双兼容。
                 c.execute(
                     f"UPDATE {table} SET {col}=? "
                     f"WHERE {col}=? AND repo_key NOT IN "
-                    f"(SELECT repo_key FROM {table} WHERE {col}=?)",
+                    f"(SELECT repo_key FROM (SELECT repo_key FROM {table} WHERE {col}=?) t)",
                     (to_user_id, from_user_id, to_user_id),
                 )
                 # 目标用户已有同 repo_key 的记录 → 删除源用户的老记录（避免重复）
+                # ⚠️ 同上：派生表包裹消除同表子查询（MySQL 1093）。
                 c.execute(
                     f"DELETE FROM {table} WHERE {col}=? AND repo_key IN "
-                    f"(SELECT repo_key FROM {table} WHERE {col}=?)",
+                    f"(SELECT repo_key FROM (SELECT repo_key FROM {table} WHERE {col}=?) t)",
                     (from_user_id, to_user_id),
                 )
             else:
@@ -1428,13 +1432,18 @@ def save_binding_ticket(
         return None
 
 
-def validate_binding_ticket(ticket: str, initiating_user_id: int) -> dict | None:
-    """校验并消费 binding_ticket（查 + 删），返回数据或 None。
+def validate_binding_ticket(ticket: str, initiating_user_id: int, consume: bool = True) -> dict | None:
+    """校验 binding_ticket，返回数据或 None。默认消费（查 + 删），consume=False 只校验不删。
 
     校验：票据存在、未过期、initiating_user_id 与当前会话用户一致。
     安全：不返回 access_token/refresh_token（票据不存这些）。
+
+    Issue #376：transfer-bind 端点改为「先校验（consume=False）→ 业务事务成功后
+    再消费（consume_binding_ticket）」。业务失败（500 回滚）时票据不被连带作废，
+    用户在剩余有效期内重试不再必然 410。
     """
     import time as _t
+    row = None
     try:
         with db_lock:
             c = db.cursor()
@@ -1446,7 +1455,7 @@ def validate_binding_ticket(ticket: str, initiating_user_id: int) -> dict | None
                 (ticket,),
             )
             row = c.fetchone()
-            if row:
+            if row and consume:
                 c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
                 db.commit()
         if not row:
@@ -1465,6 +1474,24 @@ def validate_binding_ticket(ticket: str, initiating_user_id: int) -> dict | None
     except Exception as e:
         log.warning(f"validate_binding_ticket failed: {e}")
         return None
+
+
+def consume_binding_ticket(ticket: str) -> bool:
+    """消费（删除）binding_ticket。
+
+    Issue #376：由 transfer-bind 端点在业务事务 commit 成功后调用——
+    票据一次性消费语义保留（成功转移后不可重放），但失败路径不再连带作废票据。
+    删除幂等：票据不存在返回 False（如已被并发请求消费）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"consume_binding_ticket failed: {e}")
+        return False
 
 
 def get_pending_transfer_context(initiating_user_id: int) -> dict | None:

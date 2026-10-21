@@ -5,8 +5,11 @@
 - 配置中心：GitCode/GitHub bot token + OAuth client_id/secret + bot_usernames
   保存到 DB meta 表（Issue #345: DB 是唯一权威源）
 """
+from typing import List
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel
+from typing import Optional
 from src.admin import db as admin_db
 from src.api.deps import require_admin
 from src.config import log
@@ -531,3 +534,251 @@ def admin_reset_password(user_id: int, body: ResetPasswordBody, admin: dict = De
 # ===== Whitelist status (signup + login combined) =====
 # Note: GET /whitelist-status was removed — frontend now uses GET /whitelist
 # which returns {whitelist, enabled} in a single call.
+
+
+# ===== 可观测性 · 告警策略（L2 平台面，P1-1 / D1）=====
+# 设计：docs/weekly-07/observability-redesign-design.md §5.4（策略定义属平台运营动作）
+#       与 grape-admin/docs/observability-admin-tasks.md T-A1/T-A2。
+# 边界：这里给**管理台**用（require_admin，全局不过滤仓库）；用户面只有启停/阈值/自助静默。
+
+#: 管理台全局视角的伪用户（`org_id=0` → ops_overview 不做组织过滤；不参与可见性过滤）
+_GLOBAL_SCOPE_USER = {"id": 0, "username": "", "org_id": 0, "org_role": "owner"}
+
+class AlertPolicyBody(BaseModel):
+    """策略字段（局部更新：只传要改的字段）。"""
+    severity: str | None = None              # critical/severe/important/warning/info
+    repeat_sec: int | None = None            # 0=只通知一次；>0=未恢复时每 N 秒复推
+    aggregate_mode: str | None = None        # none/rule/period
+    aggregate_window_sec: int | None = None  # 聚合窗口（mode!=none 且为 0 → 按 300）
+    notify_window_json: str | None = None    # 通知时段；空=全天
+    escalate_json: str | None = None         # 升级规则；空=不升级
+    notify_channels: str | None = None       # feishu/webhook，空=只记录
+    threshold: float | None = None           # 阈值；kind=gap 时表示"静默多少秒算缺失"
+    enabled: bool | None = None
+
+
+@router.get("/obs/alerts/rules", operation_id="admin_obs_alert_rules",
+            summary="List alert rules (global, incl. platform-level)")
+def admin_obs_alert_rules(admin: dict = Depends(require_admin)):
+    """全部告警规则（含 `level='platform'` 的平台级规则）+ 策略字段。
+
+    全局视图：**不按仓库过滤**（平台运营视角）。用户面只有 `level='user'` 的一部分。
+    """
+    from src.observability import alerts as alerts_mod
+    from src.observability import alert_policy as policy
+    try:
+        rules = alerts_mod.list_rules()
+    except Exception as e:
+        log.warning(f"admin obs alert rules failed: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "load rules failed"})
+    return {"rules": rules, "count": len(rules),
+            "severities": list(policy.SEVERITIES),
+            "aggregate_modes": list(policy.AGG_MODES),
+            "global": True}
+
+
+@router.put("/obs/alerts/rules/{rule_id}/policy", operation_id="admin_obs_alert_policy_put",
+            summary="Update alert rule policy (level/repeat/aggregate/notify window/escalation)")
+def admin_obs_alert_policy_put(rule_id: int, body: AlertPolicyBody,
+                              admin: dict = Depends(require_admin)):
+    """写策略字段。**校验不通过不写库**（400），规则不存在 404。
+
+    这是管理台 T-A1/T-A2 的唯一写入口——校验口径只在这里（不在管理台重复实现）。
+    """
+    from src.observability import alerts as alerts_mod
+    payload = {k: v for k, v in body.model_dump().items() if v is not None}
+    if not payload:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "no policy field"})
+    res = alerts_mod.set_rule_policy(rule_id, payload)
+    if not res.get("ok"):
+        not_found = res.get("errors") == ["rule not found"]
+        raise HTTPException(status_code=404 if not_found else 400,
+                            detail={"code": 404 if not_found else 400,
+                                    "error_code": "RULE_NOT_FOUND" if not_found else "INVALID_POLICY",
+                                    "message": "; ".join(res.get("errors") or ["invalid policy"])})
+    from src.auth.audit import log_audit
+    log_audit("admin_obs_alert_policy_updated", operator_id=admin["id"],
+              detail={"rule_id": int(rule_id), "applied": res.get("applied") or {}})
+    return {"ok": True, "rule_id": int(rule_id), "applied": res.get("applied") or {}}
+
+
+@router.get("/obs/loops", operation_id="admin_obs_loops",
+            summary="Observability background loop health (self-monitoring)",
+            description="每个后台循环的运行/失败/连续失败/上次成功时间与上次错误（进程内快照）。"
+                        "审计（2026-10-17）：循环失败不能只写日志，要能被 /metrics 与管理台看到。")
+def admin_obs_loops(_: dict = Depends(require_admin)):
+    from src.observability import loops as obs_loops
+    rows = obs_loops.snapshot()
+    return {"loops": rows,
+            "unhealthy": [r["loop"] for r in rows if not r.get("healthy")],
+            "count": len(rows)}
+
+
+@router.get("/obs/gaps", operation_id="admin_obs_gaps",
+            summary="Data-gap silent list (global: devices/repos that stopped reporting)")
+def admin_obs_gaps(include_retired: bool = True, admin: dict = Depends(require_admin)):
+    """全局静默名单（P1-3，T-A5 用）：哪些设备/仓库"该报数却没报"。
+
+    - **全局不过滤仓库**（平台运营视角）
+    - `include_retired=true`（默认）**含已超过 7 天退役窗口的设备**：它们不再产生事件，
+      但仍是死凭证，需要运维清理；列表里用 `beyond_retire_window` 标出
+    - `never_reported=true` 表示从未上报过（没装成），不算缺失——列出仅供排查
+    """
+    from src.observability import gap as gap_mod
+    try:
+        data = gap_mod.silent_targets(include_retired=bool(include_retired))
+    except Exception as e:
+        log.warning(f"admin obs gaps failed: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "gaps failed"})
+    data["global"] = True
+    return data
+
+
+@router.get("/obs/events", operation_id="admin_obs_events",
+            summary="Unified event view (global, incl. audit)")
+def admin_obs_events(sources: str = "", state: str = "", repo: str = "", limit: int = 200,
+                     q: str = "", before: str = "",
+                     admin: dict = Depends(require_admin)):
+    """统一事件视图（管理台，P1-4 / T-A4）：**全局不过滤仓库**，额外含 `audit` 来源。
+
+    与用户面共用同一套聚合口径（`src/observability/events_view.py`），保证两端数字一致；
+    差别只有三点：① 全局（不按可见范围过滤）② 含 `audit`（平台动作）③ 不返回平台级告警之外的
+    平台指标事件（那些走 admin 健康中心）。
+    """
+    from src.observability import events_view
+    _limit = max(1, min(int(limit or 200), 1000))
+    want = [s.strip() for s in str(sources or "").split(",") if s.strip()]
+    try:
+        data = events_view.unified_events(_GLOBAL_SCOPE_USER, sources=want, state=state,
+                                          repo=repo, limit=_limit, allow_audit=True,
+                                          global_scope=True, q=q, before=before)
+    except Exception as e:
+        log.warning(f"admin obs events failed: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "events failed"})
+    data["global"] = True
+    return data
+
+
+@router.get("/obs/metrics/series", operation_id="admin_obs_metrics_series",
+            summary="Business metric time series (global or per repo)")
+def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_failed",
+                             scope: str = "global", repo: str = "", hours: int = 24,
+                             resolution: str = "minute", admin: dict = Depends(require_admin)):
+    """业务指标序列（管理台）：`scope=global` 平台汇总，`scope=repo&repo=o/r` 单仓，`scope=all` 全部仓库。
+
+    与用户面共用 `metric_rollup.series`，保证两端同一口径；差别是这里**全局**（含 `global` 维度）。
+    """
+    from datetime import datetime, timedelta, timezone
+    from src.observability import metric_rollup
+    res = (resolution or "minute").strip().lower()
+    if res not in (metric_rollup.RES_MINUTE, metric_rollup.RES_HOUR):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "resolution must be minute|hour"})
+    mets = [m.strip() for m in str(metric or "").split(",") if m.strip()]
+    bad = [m for m in mets if m not in metric_rollup.ALL_METRICS]
+    if not mets or bad:
+        raise HTTPException(status_code=400, detail={"code": 400,
+                                                     "message": f"unknown metric: {bad or 'empty'}"})
+    sc = (scope or "global").strip().lower()
+    dims: List[str] = []
+    if sc == "global":
+        dims = [metric_rollup.DIM_GLOBAL]
+    elif sc == "repo":
+        if not repo:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "repo required"})
+        from src.repo_key import to_repo_key
+        dims = [f"repo:{to_repo_key(repo)}", f"repo:{to_repo_key(repo, 'github')}"]
+    elif sc == "all":
+        dims = _all_rollup_dims()
+    else:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "scope must be global|repo|all"})
+    span = max(1, min(int(hours or 24), 24 * 40))
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(hours=span)
+    data = metric_rollup.series(mets, dims, start, now, res)
+    return {"resolution": res, "hours": span, "scope": sc, "dim_keys": dims, "series": data,
+            "global": True}
+
+
+def _all_rollup_dims() -> List[str]:
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT DISTINCT dim_key FROM obs_metric_rollup WHERE dim_key != ?",
+                      ("global",))
+            return [r[0] for r in c.fetchall()]
+    except Exception as e:
+        log.warning(f"admin obs metrics: all dims failed: {e}")
+        return []
+
+
+# ===== SLO / 错误预算（P2-1，§6.7）=====
+
+@router.get("/obs/slo", operation_id="admin_obs_slo",
+            summary="SLO / error budget (platform, incl. engine availability)")
+def admin_obs_slo(repo: str = "", admin: dict = Depends(require_admin)):
+    """SLO 列表（管理台）：平台视角、含引擎可用率；`repo` 给了就只看该仓（不校验可见性）。"""
+    from src.observability import slo as slo_mod
+    try:
+        return {"slos": slo_mod.list_summaries(global_scope=True, repo=repo),
+                "global": True, "repo": str(repo or "")}
+    except Exception as e:
+        log.warning(f"admin obs slo failed: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "slo failed"})
+
+
+@router.get("/obs/slo/{slo_id}", operation_id="admin_obs_slo_detail",
+            summary="One SLO with burn-down series (platform)")
+def admin_obs_slo_detail(slo_id: int, repo: str = "", admin: dict = Depends(require_admin)):
+    from src.observability import slo as slo_mod
+    data = slo_mod.detail(int(slo_id), global_scope=True, repo=repo)
+    if not data:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
+    return data
+
+
+class SloUpdateBody(BaseModel):
+    target: Optional[float] = None
+    window_days: Optional[int] = None
+    threshold_json: Optional[str] = None
+    enabled: Optional[bool] = None
+
+
+@router.post("/obs/slo/{slo_id}", operation_id="admin_obs_slo_update",
+             summary="Set SLO target / window / enabled (admin)")
+def admin_obs_slo_update(slo_id: int, body: SloUpdateBody,
+                         admin: dict = Depends(require_admin)):
+    """目标值由管理台统一设定（§6.7）。"""
+    from src.observability import slo as slo_mod
+    try:
+        ok = slo_mod.update_slo(int(slo_id),
+                                target=body.target, window_days=body.window_days,
+                                threshold_json=body.threshold_json, enabled=body.enabled)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
+    if not ok:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "slo not found"})
+    return {"ok": True, "slo": slo_mod.get_slo(int(slo_id))}
+
+
+class SloCreateBody(BaseModel):
+    name: str
+    sli_type: str
+    scope_type: str = "global"
+    scope_key: str = ""
+    target: float = 0.99
+    window_days: int = 30
+    threshold_json: str = "{}"
+
+
+@router.post("/obs/slo", operation_id="admin_obs_slo_create", summary="Create an SLO (admin)")
+def admin_obs_slo_create(body: SloCreateBody, admin: dict = Depends(require_admin)):
+    from src.observability import slo as slo_mod
+    try:
+        sid = slo_mod.create_slo(body.name, body.sli_type, scope_type=body.scope_type,
+                                 scope_key=body.scope_key, target=body.target,
+                                 window_days=body.window_days, threshold_json=body.threshold_json,
+                                 created_by=str((admin or {}).get("username") or ""))
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
+    return {"ok": True, "id": sid, "slo": slo_mod.get_slo(sid)}

@@ -8,7 +8,11 @@
     "online": "Online",
     "recently_lost": "Recently Lost",
     "offline": "Offline",
-    "about_to_gc": "Pending GC"
+    "about_to_gc": "Pending GC",
+    "reset_confirm": "Reset this engine's health score? After reset, the score is recalculated from the reset point onwards.",
+    "reset_success": "Health score reset",
+    "reset_failed": "Failed to reset health score",
+    "reset_global_denied": "Global engines cannot reset health score"
   },
   "tab": {
     "engines": "Engines",
@@ -30,7 +34,8 @@
     "generate": "Generate",
     "copy_one_cmd": "📋 Copy Install Command",
     "copy_win_cmd": "📋 Copy Windows Command",
-    "copy_token": "📋 Copy Token"
+    "copy_token": "📋 Copy Token",
+    "reset_health": "Reset Health"
   },
   "label": {
     "local_direct": "Local Direct",

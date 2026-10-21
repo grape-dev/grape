@@ -186,7 +186,7 @@ class TestTranslateSql:
     def test_delete_not_in_same_table_wrapped(self):
         sql = "DELETE FROM issue WHERE id NOT IN (SELECT id FROM issue WHERE status='active')"
         out = mc.translate_sql(sql)
-        assert "DELETE FROM `tasks`" in out
+        assert "DELETE FROM `issue`" in out
         assert "AS __derived" in out
 
     # ---- ON CONFLICT DO UPDATE（UPSERT）→ ON DUPLICATE KEY UPDATE（cluster-seq-11130 heartbeat 根因）----
@@ -207,6 +207,48 @@ class TestTranslateSql:
         assert "VALUES(hostname)" in out and "VALUES(ip)" in out
         assert "CAST(NOW() AS CHAR)" in out
         assert "%s" in out and "?" not in out.replace("VALUES", "")
+
+    def test_literal_percent_is_escaped_for_pymysql(self):
+        """SQL 里的**字面 `%`** 必须逃逸成 `%%`。
+
+        真机事故：pymysql 带参执行时会做一次 Python `%` 格式化（`query % args`），
+        SQL 里任何字面 `%`（最常见 `LIKE 'runtime:%'`）都会被当格式符 → 抛
+        `unsupported format character` / `not enough arguments for format string`；
+        调用方若把它 try 吞掉，就是**静默丢数据**（用户面事件视图曾丢掉全部告警类事件）。
+        """
+        sql = "SELECT id FROM t WHERE k LIKE 'a:%' AND x=?"
+        t = mc.translate_sql(sql)
+        assert "'a:%%'" in t, t
+        assert t.count("%s") == 1, t          # 占位符恰好一个
+        assert t.endswith("x=%s"), t
+        # 模拟 pymysql 的格式化：逃逸正确的话这里不抛，且还原出单个 %
+        out = t % (5,)
+        assert "'a:%'" in out, out
+        assert "x=5" in out, out
+
+    def test_native_percent_s_placeholder_untouched(self):
+        """少数模块直接写 MySQL 原生 `%s`，逃逸不能把它们变成 `%%s`。"""
+        sql = "SELECT item_id FROM cfg WHERE type = %s ORDER BY sort_order ASC"
+        assert mc.translate_sql(sql) == sql
+        sql2 = "SELECT 1 WHERE d < DATE_SUB(NOW(), INTERVAL %s DAY)"
+        assert mc.translate_sql(sql2) == sql2
+
+    def test_literal_percent_without_params_is_equivalent_like(self):
+        """无参语句也会被逃逸（兼容层统一处理）；`LIKE 'a:%%'` 与 `'a:%'` 在 SQL 里等价。"""
+        t = mc.translate_sql("SELECT id FROM t WHERE k NOT LIKE 'github:%'")
+        assert "'github:%%'" in t, t
+
+    def test_conflict_upsert_composite_keys(self):
+        """复合 UNIQUE 的 UPSERT 也要翻译（obs_metric_rollup 的真实用法）。"""
+        sql = ("INSERT INTO obs_metric_rollup (resolution, bucket_start, metric, dim_key,"
+               " value, cnt) VALUES (?,?,?,?,?,?)"
+               " ON CONFLICT(resolution, bucket_start, metric, dim_key) DO UPDATE SET"
+               " value=excluded.value, cnt=excluded.cnt")
+        out = mc.translate_sql(sql)
+        assert "ON DUPLICATE KEY UPDATE" in out, out
+        assert "ON CONFLICT" not in out
+        assert "excluded." not in out
+        assert "VALUES(value)" in out and "VALUES(cnt)" in out
 
     def test_conflict_upsert_backtick_excluded_cols(self):
         sql = ("INSERT INTO t (k,v) VALUES (?,?) ON CONFLICT(k) DO UPDATE SET "

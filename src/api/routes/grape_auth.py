@@ -34,7 +34,8 @@ from src.auth.grape_account_db import (
     # D22: 软删除/恢复绑定支持
     get_unbound_identity, restore_external_identity,
     # 绑定转移支持
-    save_binding_ticket, validate_binding_ticket, transfer_external_identity,
+    save_binding_ticket, validate_binding_ticket, consume_binding_ticket,
+    transfer_external_identity,
     transfer_external_identity_in_tx, transfer_business_data,
 )
 from src.auth.cookie_utils import (
@@ -2262,7 +2263,7 @@ def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only)
     用户确认后携带票据调用此接口完成转移。
 
     流程：
-    1. 校验 binding_ticket（一次性消费，校验 initiating_user_id == 当前用户）
+    1. 校验 binding_ticket（校验 initiating_user_id == 当前用户；票据在业务事务成功后才消费）
     2. 用户未确认 → 400
     3. 检查原账号是否还有其他登录方式（密码或其他第三方绑定）
     4. 原账号无其他登录方式 → 400（防止原账号无法访问）
@@ -2271,8 +2272,9 @@ def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only)
     """
     ip = _get_client_ip(request) if request else ""
 
-    # 1. 校验并消费票据
-    ticket_data = validate_binding_ticket(body.binding_ticket, user["id"])
+    # 1. 校验票据（Issue #376：只校验不消费——消费移到业务事务成功后，
+    #    失败重试不再连带作废票据导致必然 410）
+    ticket_data = validate_binding_ticket(body.binding_ticket, user["id"], consume=False)
     if not ticket_data:
         raise HTTPException(status_code=410, detail={
             "code": 410,
@@ -2360,6 +2362,10 @@ def transfer_bind(body: TransferBindBody, user: dict = Depends(require_jwt_only)
                     (f"merged_{original_user_id}", now, original_user_id),
                 )
             _ga_db.commit()
+        # 5. 消费票据（Issue #376）：业务事务 commit 成功后才删——
+        #    失败路径（上方任一 raise/rollback）票据保留剩余有效期，重试不再 410。
+        #    并发窗口内同一票据二次提交时，validate 阶段 user/origin 校验仍生效。
+        consume_binding_ticket(body.binding_ticket)
     except HTTPException:
         raise
     except Exception as e:

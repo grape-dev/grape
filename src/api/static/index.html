@@ -166,7 +166,8 @@
 <a id="nav-my-feedback" style="display:none"><span class="ic">💬</span><span data-i18n="app.feedback.my_feedback">我的反馈</span></a>
 <div class="grp" data-i18n="app.sidebar.device_center">设备中心</div>
 <a id="nav-runtimes" onclick="app.nav('runtimes')"><span class="ic">⚡</span><span data-i18n="app.nav.runtimes">Agent 运行时</span></a>
-<a id="nav-observability" onclick="app.nav('observability')"><span class="ic">📊</span><span data-i18n="app.nav.observability">设备监控</span></a>
+<div class="grp" data-i18n="app.sidebar.observability">可观测性</div>
+<a id="nav-obs-cockpit" onclick="app.nav('observability')"><span class="ic">🧭</span><span data-i18n="app.nav.obs_cockpit">运行驾驶舱</span></a>
 <div class="grp" data-i18n="app.sidebar.settings">设置</div>
 <a id="nav-settings-gitcode" onclick="app.nav('settings','gitcode')"><span class="ic">⎘</span><span data-i18n="app.nav.gitcode_repo">仓库设置</span></a>
 <a id="nav-organizations" onclick="app.nav('organizations')" style="display:none"><span class="ic">🏢</span><span data-i18n="app.nav.organizations">组织管理</span></a>
@@ -311,6 +312,7 @@ function _toggleAppLang(){
 <script src="/static/js/vendor/marked.min.js?v=1"></script>
 <script src="/static/js/vendor/qrcode.min.js?v=1"></script>
 <script src="/static/js/vendor/select2.min.js?v=1"></script>
+<script src="/static/vendor/echarts.min.js?v=1"></script><!-- 可观测性图表（vendored，不走 CDN） -->
 <script src="/static/js/api.js?v=29"></script>
 <script src="/static/js/pages/dashboard.js?v=97"></script>
 <script src="/static/js/pages/pipeline.js?v=44"></script>
