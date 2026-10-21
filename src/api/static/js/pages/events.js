@@ -275,6 +275,7 @@ function renderEventDetail(data) {
         <button class="bt bt-o bt-s" onclick="navEvent(${data.prev_seq || 0})" title="${I18N.t('events.prev_event_title', {name: agentName})}" ${!data.prev_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>‹</button>
         <span class="ts t3" style="font-size:12px;font-weight:600">Event #${data.seq || '—'}</span>
         <button class="bt bt-o bt-s" onclick="navEvent(${data.next_seq || 0})" title="${I18N.t('events.next_event_title', {name: agentName})}" ${!data.next_seq ? 'disabled style="opacity:.4;cursor:not-allowed"' : ''}>›</button>
+        ${data.status === 'failed' ? `<button class="bt bt-o bt-s" style="margin-left:auto" onclick="openFeedbackDialog({event_seq:${data.seq}})" title="${I18N.t('events.btn_feedback_title') || '针对该失败事件提交问题反馈（自动携带仓库/任务/引擎上下文）'}">${I18N.t('events.btn_feedback') || '反馈'}</button>` : ''}
       </div>
       <!-- 区块1：Event Context & Info（可折叠，默认展开） -->
       <div class="ev-section" style="flex-shrink:0;margin-bottom:8px">

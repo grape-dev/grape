@@ -102,5 +102,7 @@
   "nav_forbidden": "无权限访问事件 #{{seq}}，可能属于其他仓库",
   "engine_undispatched": "未派发/无执行引擎",
   "terminate_confirm_ok": "确认终止",
-  "terminate_confirm_msg": "终止当前运行中的 Agent 任务？<br>此操作不可撤销。进行中的工作将丢失，任务需重新派发。"
+  "terminate_confirm_msg": "终止当前运行中的 Agent 任务？<br>此操作不可撤销。进行中的工作将丢失，任务需重新派发。",
+  "btn_feedback": "反馈",
+  "btn_feedback_title": "针对该失败事件提交问题反馈（自动携带仓库/任务/引擎上下文）"
 }
