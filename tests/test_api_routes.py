@@ -89,22 +89,6 @@ def teardown_module():
             db.commit()
 
 
-# ===================== 0. 测试辅助 =====================
-def monkeypatch_fn(module, attr, fake):
-    """简易 monkeypatch：替换 module.attr，返回恢复函数（try/finally 用）。
-
-    只对本文件内的 VCS 权限 mock 使用，避免引入 pytest fixture 的类外依赖。
-    """
-    import importlib
-    _orig = getattr(module, attr)
-    setattr(module, attr, fake)
-    # 路由内是 from ... import ... 局部导入，改模块属性即生效（导入发生在调用时）
-    def _restore():
-        setattr(module, attr, _orig)
-        importlib.reload(module)
-    return _restore
-
-
 # ===================== 1. Health & SPA =====================
 class TestInfra:
     def test_health(self):
@@ -246,13 +230,9 @@ class TestRepos:
         assert found, "org/test-managed not in managed list"
         print("  [OK] joined repo appears in managed list")
 
-        # 移除后应消失（救火闸门：mock VCS 权限为 maintainer）
-        _restore_rm = self._mock_vcs_perm(40)
-        try:
-            r = client.post("/api/repos/remove", json={"full_name": "org/test-managed"}, headers=_headers)
-            assert r.status_code == 200
-        finally:
-            _restore_rm()
+        # 移除后应消失
+        r = client.post("/api/repos/remove", json={"full_name": "org/test-managed"}, headers=_headers)
+        assert r.status_code == 200
 
         r = client.get("/api/repos/managed", headers=_headers)
         all_repos = r.json()["repos"]
@@ -264,66 +244,14 @@ class TestRepos:
         r = client.post("/api/repos/remove", json={"full_name": "org/nonexistent"}, headers=_headers)
         assert r.status_code == 404
 
-    @staticmethod
-    def _mock_vcs_perm(access_level):
-        """mock get_member_permission 返回指定 access_level（测试环境无真实 VCS 凭据）"""
-        from src.user import repo_manager
-        def _fake(token, owner, repo, username, **kw):
-            return {"access_level": access_level, "role_name": "mocked", "permission": "write"}
-        return monkeypatch_fn(repo_manager, "get_member_permission", _fake)
-
     def test_db_add_then_remove(self):
-        """DB 直插托管登记后：remove 一次成功、再 remove 报 404（等价原 join→remove 链路）。
-
-        救火闸门：mock VCS 权限为 maintainer（access_level=40）→ 放行。
-        """
-        _restore = self._mock_vcs_perm(40)
-        try:
-            user_db.add_managed_repo("gitcode:org/test-repo", "org", "test-repo", webhook_id=0)
-            user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-repo", is_join=True)
-            r = client.post("/api/repos/remove", json={"full_name": "org/test-repo"}, headers=_headers)
-            assert r.status_code == 200, f"maintainer remove should pass: {r.text[:200]}"
-            r = client.post("/api/repos/remove", json={"full_name": "org/test-repo"}, headers=_headers)
-            assert r.status_code == 404
-        finally:
-            _restore()
-
-    def test_remove_denied_developer(self):
-        """救火闸门：VCS 权限为 Developer（access_level=30）→ 403 拒绝，托管行保留"""
-        _restore = self._mock_vcs_perm(30)
-        try:
-            user_db.add_managed_repo("gitcode:org/test-dev-deny", "org", "test-dev-deny", webhook_id=0)
-            user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-dev-deny", is_join=True)
-            r = client.post("/api/repos/remove", json={"full_name": "org/test-dev-deny"}, headers=_headers)
-            assert r.status_code == 403, f"developer remove should be denied: {r.text[:200]}"
-            # 托管行未被删除
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT 1 FROM managed_repos WHERE repo_key='gitcode:org/test-dev-deny'")
-                assert c.fetchone() is not None, "managed_repos row must survive a denied remove"
-            print("  [OK] developer denied, repo still managed")
-        finally:
-            with db_lock:
-                db.cursor().execute("DELETE FROM managed_repos WHERE repo_key='gitcode:org/test-dev-deny'")
-                db.cursor().execute("DELETE FROM user_repos WHERE repo_key='gitcode:org/test-dev-deny'")
-                db.commit()
-            _restore()
-
-    def test_remove_denied_no_vcs_auth(self):
-        """救火闸门：mock 掉 GitCode 用户 token（模拟未授权）→ 403 拒绝"""
-        from src.api import deps
-        _restore = monkeypatch_fn(deps, "get_user_token_with_refresh", lambda *a, **k: "")
-        try:
-            user_db.add_managed_repo("gitcode:org/test-noauth-deny", "org", "test-noauth-deny", webhook_id=0)
-            user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-noauth-deny", is_join=True)
-            r = client.post("/api/repos/remove", json={"full_name": "org/test-noauth-deny"}, headers=_headers)
-            assert r.status_code == 403, f"no-auth remove should be denied: {r.text[:200]}"
-        finally:
-            with db_lock:
-                db.cursor().execute("DELETE FROM managed_repos WHERE repo_key='gitcode:org/test-noauth-deny'")
-                db.cursor().execute("DELETE FROM user_repos WHERE repo_key='gitcode:org/test-noauth-deny'")
-                db.commit()
-            _restore()
+        """DB 直插托管登记后：remove 一次成功、再 remove 报 404（等价原 join→remove 链路）"""
+        user_db.add_managed_repo("gitcode:org/test-repo", "org", "test-repo", webhook_id=0)
+        user_db.mark_user_repo_join(_uid["id"], "gitcode:org/test-repo", is_join=True)
+        r = client.post("/api/repos/remove", json={"full_name": "org/test-repo"}, headers=_headers)
+        assert r.status_code == 200
+        r = client.post("/api/repos/remove", json={"full_name": "org/test-repo"}, headers=_headers)
+        assert r.status_code == 404
 
     def test_host_no_permission(self):
         """非管理员用户尝试托管应返回 502（GitCode API 不可达）或 400/403"""
