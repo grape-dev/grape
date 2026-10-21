@@ -209,6 +209,14 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     - 否则从 issue 表回退读 scene_id/scene_user_id
     - 都没有 → ("", 0)，由调用方决定走智能推荐
     """
+    # PR 订阅伪 issue_id（#pr_<PR号>_<scene_id>，event_pipeline L~1706 构造）：
+    # issue 表查不到 → 原先回退 managed_repos.dev_scene（仓库默认场景），
+    # 导致 PR 订阅任务的场景 custom_fields（如 BUILD0007_PASSWORD）不注入。
+    # 场景 ID 就编码在伪 id 里，直接解析返回（2026-10-21）。
+    import re as _re
+    _m = _re.match(r"^#?pr_\d+_(.+)$", str(issue_id or ""))
+    if _m:
+        return _m.group(1), 0
     st = get_issue_stage(repo_key, issue_id)
     if st and st.get("scene_id"):
         return st["scene_id"], st.get("scene_user_id", 0) or 0
