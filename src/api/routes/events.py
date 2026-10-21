@@ -618,11 +618,11 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _scope_extra = (
                                 " AND (ar.credential_id = 0"
                                 " OR rc.scope = 'global'"
-                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
+                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
                                 " OR (rc.scope = 'user' AND rc.owner_name ="
                                 " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
                             )
-                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", _task_uid]
+                            _scope_params = [_repo_bare, f"gitcode:{_repo_bare}", f"github:{_repo_bare}", _task_uid]
                         # Query 1: prefer remote (credential_id > 0)
                         c2.execute(
                             "SELECT ar.id, ar.credential_id FROM agent_runtimes ar "
@@ -821,11 +821,11 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             _scope_extra2 = (
                                 " AND (ar.credential_id = 0"
                                 " OR rc.scope = 'global'"
-                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ?))"
+                                " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
                                 " OR (rc.scope = 'user' AND rc.owner_name ="
                                 " (SELECT username FROM grape_accounts WHERE id=?)))"  # D32-补丁
                             )
-                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", _old_uid]
+                            _scope_params2 = [_repo_bare2, f"gitcode:{_repo_bare2}", f"github:{_repo_bare2}", _old_uid]
                         with db_lock:
                             c3 = db.cursor()
                             c3.execute(

@@ -536,7 +536,8 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         c = db.cursor()
         try:
             if scope == "repo":
-                # 按当前仓库过滤：owner_id 可能带 gitcode: 前缀也可能不带，两种都匹配
+                # 按当前仓库过滤：owner_id 可能带平台前缀（gitcode:/github:）也可能不带，三种都匹配
+                # （跨平台候选与 runtime.py list_runtime_tasks / deps.py check_repo_access 同款）
                 if repo:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
@@ -545,8 +546,8 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         " COALESCE(r.alias,''), COALESCE(r.scene_tags,''), COALESCE(r.org_id,0)"
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' "
-                        "AND (rc.owner_id=? OR rc.owner_id=?) ORDER BY r.id",
-                        (repo, f"gitcode:{repo}"))
+                        "AND (rc.owner_id=? OR rc.owner_id=? OR rc.owner_id=?) ORDER BY r.id",
+                        (repo, f"gitcode:{repo}", f"github:{repo}"))
                 else:
                     c.execute(
                         "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "

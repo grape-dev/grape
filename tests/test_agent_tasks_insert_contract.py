@@ -112,23 +112,24 @@ def test_create_direct_task_no_bindings_error_in_db():
 
     seq = 9003
     now = datetime.now(timezone.utc).isoformat()
-    # 模拟函数内组装的完整 row
-    kw = {
-        "id": "t_ct_contract", "agent_session_id": "s_any", "runtime_id": 0,
-        "event_seq": seq, "issue_id": "#3", "repo_key": REPO,
-        "agent_type": "vod", "skill": "vod", "skill_id": 0,
-        "prompt": "", "cwd": "", "runtime_session_id": "", "event_type": "issue_opened",
-        "account": "owner/test-agenttasks-insert", "user_id": 0,
-        "repo_gitcode_token": "", "user_gitcode_token": "", "env_extra": "{}", "skill_files": "{}",
-        "server_url": "", "issue_session_id": "", "project_info_files": "{}",
-        "project_info_meta": "{}", "knowledge_files": "{}",
-        "project_info_file_urls": "{}", "knowledge_file_urls": "{}", "attempts": 0,
-        "pool_agent_type": "", "affinity_runtime_id": 0, "pool_tag": "", "pool_engine_ids": "",
-        "pool_engine_source": "",
-        "status": "queued", "stream_ended": 0, "self_reported": 0,
-        "exit_code": None, "result_text": "", "errors": "", "stderr": "",
-        "usage_json": "{}", "started_at": now, "completed_at": None, "created_at": now,
-    }
+    # 由列清单驱动构造（避免手抄清单再次漂移——2026-10-19 缺 pool_engine_source 就是手抄漏列）
+    defaults = {"skill_id": 0, "runtime_id": 0, "user_id": 0, "attempts": 0,
+                "affinity_runtime_id": 0, "event_seq": seq, "exit_code": None,
+                "completed_at": None}
+    kw = {c: defaults.get(c, "") for c in _TASK_COLUMNS_LIST}
+    kw.update({
+        "id": "t_ct_contract", "agent_session_id": "s_any",
+        "issue_id": "#3", "repo_key": REPO,
+        "agent_type": "vod", "skill": "vod",
+        "event_type": "issue_opened",
+        "account": "owner/test-agenttasks-insert",
+        "env_extra": "{}", "skill_files": "{}",
+        "project_info_files": "{}", "project_info_meta": "{}", "knowledge_files": "{}",
+        "project_info_file_urls": "{}", "knowledge_file_urls": "{}",
+        "pool_agent_type": "", "pool_tag": "", "pool_engine_ids": "", "pool_engine_source": "",
+        "status": "queued", "result_text": "", "errors": "", "stderr": "",
+        "usage_json": "{}", "started_at": now, "created_at": now,
+    })
     row = ep._task_insert_row(_TASK_COLUMNS_LIST, **kw)
     assert len(row) == len(_TASK_COLUMNS_LIST), "列数必须一致"
     with db_lock:
@@ -138,3 +139,40 @@ def test_create_direct_task_no_bindings_error_in_db():
             f"({','.join(['?'] * len(_TASK_COLUMNS_LIST))})", row)
         db.commit()
     assert _row(seq) is not None
+
+# ---------- 静态防复发：INSERT 调用点必须覆盖全部列 ----------
+
+def test_insert_call_sites_cover_all_columns_statically():
+    """两个 INSERT 调用点的源码必须显式覆盖 _TASK_COLUMNS_LIST 的每一列。
+
+    2026-10-19 事故：_TASK_COLUMNS_LIST 新增 `pool_engine_source`（local-claimer 设计）时，
+    `_create_direct_task` / `_create_failed_task` 未同步该列 → `_task_insert_row` 抛
+    ValueError 被 except 吞掉 → 任务行/失败快照都不落库（排障断链）。
+    本用例是**静态守卫**：以后任何新列进清单，只要这两个调用点没跟上，立刻红。
+    """
+    import inspect
+    import re as _re
+
+    def _missing(fn):
+        src = inspect.getsource(fn)
+        return [c for c in _TASK_COLUMNS_LIST
+                if not _re.search(rf"(^|[\s,(]){_re.escape(c)}\s*=", src, _re.M)]
+
+    assert not _missing(ep._create_direct_task), (
+        f"_create_direct_task 未覆盖列: {_missing(ep._create_direct_task)}")
+    assert not _missing(ep._create_failed_task), (
+        f"_create_failed_task 未覆盖列: {_missing(ep._create_failed_task)}")
+
+
+def test_failed_snapshot_records_pool_engine_source_column():
+    """失败快照必须能写 pool_engine_source（本次事故的直接回归）。"""
+    seq = 9004
+    ep._create_failed_task(REPO, seq, "sre", "opencode", "sre", skill_path="", skill_id=0,
+                           evt={"type": "issue_opened", "issue_id": "#4"}, issue_id="#4", runtime_id=0)
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT status, pool_engine_source FROM agent_tasks WHERE repo_key=? AND event_seq=?",
+            (REPO, seq)).fetchone()
+    assert row, "失败快照应落库（缺列时会整条丢弃）"
+    assert row[0] == "failed" and (row[1] or "") == ""

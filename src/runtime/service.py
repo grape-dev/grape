@@ -1397,12 +1397,14 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             _tag_match_noprefix = "(pool_tag!='' AND runtime_id=0)" if tag == "all" else "(pool_tag=? AND runtime_id=0)"
             params = [] if tag == "all" else [tag]
             if scope == "repo":
-                # repo_key 可能带前缀（gitcode:owner/repo）也可能不带，两种都要匹配
+                # repo_key 可能带平台前缀（gitcode:/github:）也可能不带，三种都要匹配
+                # （跨平台候选与 runtime.py list_runtime_tasks 同款）
                 params.append(owner_id)
                 params.append(f"gitcode:{owner_id}")
+                params.append(f"github:{owner_id}")
                 sql = (
                     "SELECT t.id FROM agent_tasks t "
-                    f"WHERE { _tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
+                    f"WHERE { _tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=? OR t.repo_key=?) "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
