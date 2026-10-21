@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title data-i18n="app.login.title_forgot">重置密码 — Grape</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=75">
+<link rel="stylesheet" href="/static/css/app.css?v=84">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
 <link rel="stylesheet" href="/static/css/auth.css?v=6">
 <script>
@@ -17,7 +17,7 @@
 [data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
 </style>
 <script src="/static/js/i18n.js?v=13"></script>
-<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('25');});</script>
+<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('34');});</script>
 </head>
 <body>
 
@@ -36,8 +36,8 @@
   <div class="step-item" id="dot3"><div class="step-item-circle">3</div><span data-i18n="app.login.step_label_done">完成</span></div>
 </div>
 
-<!-- Step 1 -->
-<div id="forgotStep1" class="auth-panel" style="display:block">
+<!-- Step 1（R7.8: 初始隐藏，有邮箱配置时才显示，避免无邮箱场景闪动） -->
+<div id="forgotStep1" class="auth-panel" style="display:none">
 <form onsubmit="event.preventDefault();sendForgotCode()">
   <div class="field-group">
     <label class="field-label" for="forgotEmail" data-i18n="app.login.email">邮箱</label>
@@ -144,8 +144,8 @@
 </div>
 </div>
 
-<script src="/static/js/api.js?v=27"></script>
-<script src="/static/js/auth.js?v=5"></script>
+<script src="/static/js/api.js?v=29"></script>
+<script src="/static/js/auth.js?v=6"></script>
 <script>
 Auth.initI18n();
 function $(id){return document.getElementById(id)}
@@ -241,7 +241,33 @@ function _onLangChange(){
   // 此处可补充非 data-i18n 的动态内容
 }
 
-document.addEventListener('DOMContentLoaded',function(){$('forgotEmail').focus();});
+// R7.8: 检测邮箱配置——无邮箱时显示提示而非表单（避免闪动）
+document.addEventListener('DOMContentLoaded',function(){
+  API.get('/auth/providers').then(function(d){
+    if(d&&d.email_configured){
+      $('forgotStep1').style.display='block';
+      $('stepIndicator').style.display='';
+      $('forgotEmail').focus();
+    } else {
+      // 无邮箱配置：显示提示
+      var pc=document.querySelector('.auth-card');
+      if(pc){
+        var msg=document.createElement('div');
+        msg.className='auth-panel';
+        msg.style.textAlign='center';
+        msg.style.padding='40px 20px';
+        msg.innerHTML='<p style="color:var(--t2);font-size:14px;line-height:1.6">'+(Auth.t('app.login.forgot_email_not_configured')||'邮箱服务未配置，请联系管理员重置密码')+'</p>';
+        pc.appendChild(msg);
+      }
+      $('stepIndicator').style.display='none';
+    }
+  }).catch(function(){
+    // API 失败：默认显示表单（向后兼容）
+    $('forgotStep1').style.display='block';
+    $('stepIndicator').style.display='';
+    $('forgotEmail').focus();
+  });
+});
 </script>
 </body>
 </html>

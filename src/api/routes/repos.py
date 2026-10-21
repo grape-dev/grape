@@ -620,39 +620,76 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         from src.user.db import get_webhook_url
         webhook_url = get_webhook_url()
         if not webhook_url:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "webhook_url 未配置，无法托管"})
+            # Issue #372: webhook_url 未配置时不阻断创建，只跳过托管
+            try:
+                _fetch_and_cache(user["id"], api_token, provider)
+            except Exception:
+                pass
+            return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": "仓库已创建，但 webhook_url 未配置，请稍后手动托管"}
         # GitHub 仓库用 /webhook/github 路由
         if provider == "github":
             webhook_url = webhook_url.replace("/webhook/gitcode", "/webhook/github")
+        # Issue #372: 路径 B 支持——无全局 bot token 时用用户 token + 随机密钥
+        import secrets as _secrets
         if provider == "github":
             from src.user.repo_manager import find_existing_github_webhook, setup_github_webhook
-            _create_global_bot_token = ""
+            from src.user.db import get_global_github_bot_token
+            _create_global_bot_token = get_global_github_bot_token()
+            _use_path_b = not _create_global_bot_token  # P2-7: 与 host_repo 一致，有全局 GitHub bot token 时走路径 A
+            _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
         else:
-            _create_global_bot_token = ""
-            # Issue #345: 改用统一入口
             from src.user.db import get_global_gitcode_bot_token
             _create_global_bot_token = get_global_gitcode_bot_token()
+            _use_path_b = not _create_global_bot_token
+            _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
         try:
             if provider == "github":
-                existing_id = find_existing_github_webhook(api_token, owner, repo_name, webhook_url)
+                _wh_token = _create_global_bot_token or api_token  # P2-7: 路径 A 用 bot token，路径 B 用用户 token
+                existing_id = find_existing_github_webhook(_wh_token, owner, repo_name, webhook_url)
                 repo_key = to_repo_key(full_name, provider="github")
                 wh_col = "github_webhook_token"
-                webhook_token_for_db = api_token
+                _bot_token_col = "bot_github_token"
             else:
-                # 方案 C：GitCode webhook 统一用全局 bot token 查/建
-                webhook_token_for_db = _create_global_bot_token or api_token
-                existing_id = find_existing_webhook(webhook_token_for_db, owner, repo_name, webhook_url)
+                _wh_token = _create_global_bot_token or api_token
+                from src.user.repo_manager import find_existing_webhook
+                existing_id = find_existing_webhook(_wh_token, owner, repo_name, webhook_url)
                 repo_key = to_repo_key(full_name)
                 wh_col = "gitcode_webhook_token"
+                _bot_token_col = "bot_gitcode_token"
             if existing_id:
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, **{wh_col: webhook_token_for_db, "bot_gitcode_token": _create_global_bot_token})
+                # Issue #372 R6.2: 路径 B 复用已有 webhook 时密钥不匹配 → 删旧重建
+                if _use_path_b:
+                    try:
+                        if provider == "github":
+                            from src.user.repo_manager import remove_github_webhook
+                            remove_github_webhook(_wh_token, owner, repo_name, existing_id)
+                        else:
+                            from src.user.repo_manager import remove_webhook
+                            remove_webhook(_wh_token, owner, repo_name, existing_id)
+                        existing_id = None
+                    except Exception as _re:
+                        log.warning(f"create_new_repo: remove old webhook failed (will reuse): {_re}")
+                        _webhook_secret = ""  # P1-1: 删失败时不写新密钥
+                        _wh_token = ""  # §31: 也不写用户 token（刷新后 stale），让验证 loud fail
+            if existing_id:
+                # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+                _db_wh_token = "" if _use_path_b else _wh_token
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
+                    **{wh_col: _db_wh_token, _bot_token_col: (_create_global_bot_token if not _use_path_b else "")},
+                    host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             else:
+                from src.user.repo_manager import setup_webhook, setup_github_webhook
                 if provider == "github":
-                    hook_id = setup_github_webhook(api_token, owner, repo_name, webhook_url)
+                    hook_id = setup_github_webhook(_wh_token, owner, repo_name, webhook_url, webhook_secret=_webhook_secret)
                 else:
-                    hook_id = setup_webhook(webhook_token_for_db, owner, repo_name, webhook_url, webhook_password=webhook_token_for_db)
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, **{wh_col: webhook_token_for_db, "bot_gitcode_token": _create_global_bot_token})
+                    _wh_password = _webhook_secret if _use_path_b else _wh_token
+                    hook_id = setup_webhook(_wh_token, owner, repo_name, webhook_url, webhook_password=_wh_password)
+                # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+                _db_wh_token = "" if _use_path_b else _wh_token
+                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
+                    **{wh_col: _db_wh_token, _bot_token_col: (_create_global_bot_token if not _use_path_b else "")},
+                    host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
                 user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
@@ -677,52 +714,53 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
     2. 权限够（maintain/admin/push）→ 直接返回 ok
     3. 权限不够但已是 collaborator（有 pull）→ 用用户 token PUT 升级为 maintain（无需邀请）
     4. 不是 collaborator → 用用户 token 邀请 → bot token accept → 再查权限
+
+    Issue #372 §16.3: 整个函数体包 try/except，bot_token 无效时不抛异常，
+    返回 {"bot_status": "error"} 供调用方降级到路径 B。
     """
     if not bot_token or not bot_username:
         return {"bot_collaborator_needed": True, "bot_username": "", "bot_status": "not_configured"}
 
-    from src.user.repo_manager import add_github_collaborator, accept_github_invite, get_github_repo_permissions
+    try:
+        from src.user.repo_manager import add_github_collaborator, accept_github_invite, get_github_repo_permissions
 
-    # 0. 用 bot token 查自己对该仓库的权限
-    perms = get_github_repo_permissions(bot_token, owner, repo)
-    if perms and (perms.get("admin") or perms.get("maintain") or perms.get("push")):
-        log.info(f"GitHub bot {bot_username} has sufficient permissions in {owner}/{repo}: {perms}")
-        return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
+        # 0. 用 bot token 查自己对该仓库的权限
+        perms = get_github_repo_permissions(bot_token, owner, repo)
+        if perms and (perms.get("admin") or perms.get("maintain") or perms.get("push")):
+            log.info(f"GitHub bot {bot_username} has sufficient permissions in {owner}/{repo}: {perms}")
+            return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
 
-    # 权限不够或不是 collaborator → 尝试用用户 token 升级/邀请
-    # PUT /repos/{owner}/{repo}/collaborators/{username}：
-    #   - 已是 collaborator → 直接更新权限（无需 accept）
-    #   - 不是 collaborator → 发送邀请（需 bot accept）
-    if user_token:
-        added = add_github_collaborator(user_token, owner, repo, bot_username, "push")
-        if added:
-            # PUT 成功 → 查 bot 权限是否已生效（已是 collaborator 的情况直接生效）
-            perms_after = get_github_repo_permissions(bot_token, owner, repo)
-            if perms_after and (perms_after.get("admin") or perms_after.get("maintain") or perms_after.get("push")):
-                log.info(f"GitHub bot {bot_username} permissions upgraded to {perms_after}")
-                return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
-
-            # 权限还没生效 → 可能是新邀请需要 accept
-            accepted = accept_github_invite(bot_token, owner, repo)
-            if accepted:
-                perms_final = get_github_repo_permissions(bot_token, owner, repo)
-                if perms_final and (perms_final.get("admin") or perms_final.get("maintain") or perms_final.get("push")):
-                    log.info(f"GitHub bot {bot_username} permissions after accept: {perms_final}")
+        # 权限不够或不是 collaborator → 尝试用用户 token 升级/邀请
+        if user_token:
+            added = add_github_collaborator(user_token, owner, repo, bot_username, "push")
+            if added:
+                perms_after = get_github_repo_permissions(bot_token, owner, repo)
+                if perms_after and (perms_after.get("admin") or perms_after.get("maintain") or perms_after.get("push")):
+                    log.info(f"GitHub bot {bot_username} permissions upgraded to {perms_after}")
                     return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
-            # accept 失败或权限未生效 → 提示用户手动操作
-            log.info(f"GitHub bot {bot_username} invite sent but accept/perm not effective (accepted={accepted})")
-            return {"bot_collaborator_needed": True, "bot_username": bot_username,
-                    "bot_status": "invite_pending",
-                    "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
+
+                accepted = accept_github_invite(bot_token, owner, repo)
+                if accepted:
+                    perms_final = get_github_repo_permissions(bot_token, owner, repo)
+                    if perms_final and (perms_final.get("admin") or perms_final.get("maintain") or perms_final.get("push")):
+                        log.info(f"GitHub bot {bot_username} permissions after accept: {perms_final}")
+                        return {"bot_collaborator_needed": False, "bot_username": bot_username, "bot_status": "ok"}
+
+                log.info(f"GitHub bot {bot_username} invite sent but accept/perm not effective (accepted={accepted})")
+                return {"bot_collaborator_needed": True, "bot_username": bot_username,
+                        "bot_status": "invite_pending",
+                        "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
+            else:
+                return {"bot_collaborator_needed": True, "bot_username": bot_username,
+                        "bot_status": "add_failed",
+                        "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
         else:
             return {"bot_collaborator_needed": True, "bot_username": bot_username,
-                    "bot_status": "add_failed",
+                    "bot_status": "insufficient_permission" if (perms and perms.get("pull")) else "not_configured",
                     "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
-    else:
-        # 无用户 token → 无法自动操作
-        return {"bot_collaborator_needed": True, "bot_username": bot_username,
-                "bot_status": "insufficient_permission" if (perms and perms.get("pull")) else "not_configured",
-                "bot_invite_url": f"https://github.com/{owner}/{repo}/settings/access"}
+    except Exception as e:
+        log.warning(f"_try_github_bot_collaborator: error (bot_token may be invalid): {e}")
+        return {"bot_collaborator_needed": True, "bot_username": bot_username, "bot_status": "error"}
 
 
 @router.post("/host", operation_id="repos_host", summary="Host repository", description="Registers an existing repository for hosting: creates the webhook and sets up the repo bot.")
@@ -758,14 +796,33 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
     from src.user.db import get_webhook_url
     webhook_url = get_webhook_url()
+    if not webhook_url:
+        # Issue #372 §14.2.3: 报错带结构化 guidance，指导用户自服务而非指向管理员
+        from src.user.db import get_meta_value as _gmv
+        _detect_failed = _gmv("webhook_url_detect_failed") or ""
+        _tried = ["server-config.json (not found)"]
+        if _detect_failed:
+            _tried.append("auto-detect (egress blocked or hostname loopback)")
+        else:
+            _tried.append("auto-detect (not yet attempted — access Web UI via public IP to trigger)")
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "WEBHOOK_URL_NOT_CONFIGURED",
+            "message": "webhook_url not configured",
+            "guidance": {
+                "tried": _tried,
+                "action": "Access this Web UI via public IP (auto-detect will trigger on login), or set webhook_url in Settings",
+                "example": "http://<public-ip>/webhook/gitcode"
+            }
+        })
     # GitHub 仓库用 /webhook/github 路由
     if provider == "github":
         webhook_url = webhook_url.replace("/webhook/gitcode", "/webhook/github")
 
     if not api_token:
         if provider == "github":
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "GitHub API Token 未配置，请重新绑定 GitHub 账号"})
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "GitCode Token 已过期且无法自动刷新，请重新登录"})
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "GitHub API Token 未配置，请重新绑定 GitHub 账号"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "GitCode Token 已过期且无法自动刷新，请重新登录"})
 
     # ===== GitHub 仓库托管 =====
     if provider == "github":
@@ -782,45 +839,107 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         from src.user.db import get_global_github_bot_username
         gh_bot_username = get_global_github_bot_username()
 
+        # Issue #372: GitHub 路径 B——无全局 GitHub bot token 时跳过 bot 协作者
+        _gh_use_path_b = not gh_bot_token
+        import secrets as _secrets
+        _gh_webhook_secret = _secrets.token_urlsafe(32) if _gh_use_path_b else ""
+
         try:
             def _find_gh_hook(token, _owner=owner, _repo=repo_name, _url=webhook_url):
                 return find_existing_github_webhook(token, _owner, _repo, _url)
             existing_id = with_oauth_token(user, "github", _find_gh_hook)
             if existing_id:
-                user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
-                                         github_webhook_token=api_token,
-                                         bot_github_token=gh_bot_token, bot_username=gh_bot_username, org_id=_org_id)
-                user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
-                ensure_default_agent_sessions(repo_key)
-                _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
-                return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id, **_bot_result}
+                # Issue #372 R6.2: 路径 B 复用已有 webhook 时密钥不匹配 → 删旧重建
+                if _gh_use_path_b:
+                    try:
+                        from src.user.repo_manager import remove_github_webhook
+                        remove_github_webhook(api_token, owner, repo_name, existing_id)
+                        existing_id = None
+                    except Exception as _re:
+                        log.warning(f"host_repo GitHub: remove old webhook failed (will reuse): {_re}")
+                        _gh_webhook_secret = ""  # P1-1: 删失败时不写新密钥
+                        api_token = ""  # §31: 也不写用户 token（刷新后 stale），让验证 loud fail
+            if existing_id:
+                # Issue #372 §16.3a: 先检查 bot 协作者状态，error 时降级到路径 B（再写 DB）
+                _bot_result = {"bot_collaborator_needed": False}
+                if not _gh_use_path_b:
+                    _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
+                    # R12.3: invite_pending/add_failed 也降级到路径 B
+                    if _bot_result.get("bot_status") in ("error", "invite_pending", "add_failed"):
+                        log.warning(f"host_repo GitHub: bot status={_bot_result.get('bot_status')}, falling back to path B")
+                        _gh_use_path_b = True
+                        _gh_webhook_secret = _secrets.token_urlsafe(32)
+                        # R25.2: A→B 降级时删除旧 webhook（路径 A 创建时无 secret），
+                        # 强制用新 secret 重建。删失败时保留旧 existing_id + 旧 secret
+                        # 不新建（避免双 webhook 收重复事件）。
+                        if existing_id:
+                            try:
+                                from src.user.repo_manager import remove_github_webhook
+                                remove_github_webhook(api_token, owner, repo_name, existing_id)
+                                existing_id = None
+                                log.info("host_repo GitHub A→B: removed old webhook for rebuild")
+                            except Exception as _re:
+                                log.warning(f"host_repo GitHub A→B: remove old webhook failed: {_re}")
+                                # 删失败：保留旧 existing_id，回退到路径 A 语义
+                                _gh_use_path_b = False
+                                _gh_webhook_secret = ""
+                if existing_id:
+                    # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+                    _gh_db_wh_token = "" if _gh_use_path_b else api_token
+                    user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id,
+                                             github_webhook_token=_gh_db_wh_token,
+                                             bot_github_token=("" if _gh_use_path_b else gh_bot_token), bot_username=(gh_bot_username if not _gh_use_path_b else ""), org_id=_org_id,
+                                             host_user_id=(user["id"] if _gh_use_path_b else 0), webhook_secret=_gh_webhook_secret)
+                    user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
+                    ensure_default_agent_sessions(repo_key)
+                    return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id, **_bot_result}
 
-            hook_id = setup_github_webhook(api_token, owner, repo_name, webhook_url)
+            # Issue #372 §16.3a: 先检查 bot 协作者状态再建 webhook + 写 DB
+            _bot_result = {"bot_collaborator_needed": False}
+            if not _gh_use_path_b:
+                _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
+                # R12.3: invite_pending/add_failed 也降级到路径 B
+                if _bot_result.get("bot_status") in ("error", "invite_pending", "add_failed"):
+                    log.warning(f"host_repo GitHub: bot status={_bot_result.get('bot_status')}, falling back to path B")
+                    _gh_use_path_b = True
+                    _gh_webhook_secret = _secrets.token_urlsafe(32)
+            hook_id = setup_github_webhook(api_token, owner, repo_name, webhook_url, webhook_secret=(_gh_webhook_secret if _gh_use_path_b else ""))
             from src.api.onboarding import cleanup_stale_repo_data
             cleanup_stale_repo_data(repo_key)
+            # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+            _gh_db_wh_token = "" if _gh_use_path_b else api_token
             user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id,
-                                     github_webhook_token=api_token,
-                                     bot_github_token=gh_bot_token, bot_username=gh_bot_username, org_id=_org_id)
+                                     github_webhook_token=_gh_db_wh_token,
+                                     bot_github_token=("" if _gh_use_path_b else gh_bot_token), bot_username=(gh_bot_username if not _gh_use_path_b else ""), org_id=_org_id,
+                                     host_user_id=(user["id"] if _gh_use_path_b else 0), webhook_secret=_gh_webhook_secret)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             ensure_default_agent_sessions(repo_key)
-            _bot_result = _try_github_bot_collaborator(api_token, gh_bot_token, gh_bot_username, owner, repo_name)
             return {"message": "仓库托管成功", "webhook_id": hook_id, **_bot_result}
         except HTTPException:
             raise
         except Exception as e:
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
 
-    # ===== GitCode 仓库托管（原有逻辑）=====
+    # ===== GitCode 仓库托管 =====
     # Issue #345: 改用统一入口读取全局 bot 配置
     from src.user.db import get_global_gitcode_bot_token, get_global_bot_usernames
     global_bot_token = get_global_gitcode_bot_token()
     _us = get_global_bot_usernames()
     global_bot_username = _us[0] if _us else ""
 
-    # webhook 统一用全局 bot token 创建/查（方案 C：webhook 归 bot 管辖，个人 token 避免限流）
-    if not global_bot_token:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "全局 Bot Token 未配置，无法创建 webhook（请联系管理员在配置中心检查 Bot Token 配置）"})
-    webhook_token = global_bot_token
+    # Issue #372: 全局 Bot Token 优先（路径 A），无则降级到用户 Token（路径 B）
+    _use_path_b = not global_bot_token
+
+    if _use_path_b:
+        # 路径 B：无全局 Bot Token，用用户 Token 建 webhook
+        webhook_token = api_token
+        # 生成随机 webhook 验证密钥（与 token 解耦，避免 token 刷新导致 webhook 验证失败）
+        import secrets as _secrets
+        _webhook_secret = _secrets.token_urlsafe(32)
+    else:
+        # 路径 A：webhook 统一用全局 bot token 创建/查（方案 C）
+        webhook_token = global_bot_token
+        _webhook_secret = ""
 
     from src.user.repo_manager import _check_collaborator_admin, _req
     try:
@@ -854,7 +973,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             is_admin = with_oauth_token(user, "gitcode", _check_admin)
 
         if not is_admin:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限托管，请联系管理员"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管，请联系管理员"})
     except HTTPException:
         raise
     except Exception as e:
@@ -872,8 +991,11 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                 log.warning(f"host_repo: set host_status={status} failed: {_e}")
 
         # 1) 邀请 bot 为维护者（owner token 必需）→ 2) bot 接受 → 3) bot 自查权限
-        # 原则：凡能查/能建一律 bot token；owner token 仅 L363 身份确认 + 本步邀请
-        if api_token and global_bot_username and global_bot_token:
+        # 原则：凡能查/能建一律 bot token；owner token 仅身份确认 + 本步邀请
+        # Issue #372: 路径 B（无全局 bot token）跳过 bot 协作者流程
+        # Issue #372 §16.1: 路径 A bot 协作者失败时降级到路径 B（不 raise 502）
+        import secrets as _secrets
+        if not _use_path_b and api_token and global_bot_username and global_bot_token:
             _mark("partial")
             ok, add_err = add_collaborator(api_token, owner, repo_name, global_bot_username, "maintainer")
             if not ok:
@@ -885,44 +1007,83 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
                     log.warning(f"host: perm check rate-limited (non-fatal), mark bot_missing: {_rl}")
                     _mark("bot_missing")
                     raise HTTPException(status_code=503, detail={"code": 503, "message": "托管暂时失败：GitCode API 调用过于频繁，请稍后重试"})
-                if access_level >= 40:
-                    log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer (access_level={access_level}) in {owner}/{repo_name}, continue")
+                except Exception:
+                    # §16.1: 非限流异常（401/404）→ 降级到路径 B
+                    log.warning(f"host: path A get_member_permission failed, falling back to path B")
+                    _use_path_b = True
+                    webhook_token = api_token
+                    _webhook_secret = _secrets.token_urlsafe(32)
+                    _mark("path_b_fallback")
                 else:
-                    _mark("bot_missing")
-                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {add_err}"})
+                    if access_level >= 40:
+                        log.info(f"host: add_collaborator failed but bot {global_bot_username} already maintainer (access_level={access_level}) in {owner}/{repo_name}, continue")
+                    else:
+                        # §16.1: bot 权限不足 → 降级到路径 B（原 raise 502）
+                        log.warning(f"host: bot access_level={access_level} < 40, falling back to path B")
+                        _use_path_b = True
+                        webhook_token = api_token
+                        _webhook_secret = _secrets.token_urlsafe(32)
+                        _mark("path_b_fallback")
 
-            # bot 接受邀请
-            if not accept_invite_for_repo(global_bot_token, owner, repo_name):
-                log.warning(f"host: no invite to accept for {owner}/{repo_name}, bot may already be member")
+            if not _use_path_b:
+                # bot 接受邀请
+                if not accept_invite_for_repo(global_bot_token, owner, repo_name):
+                    log.warning(f"host: no invite to accept for {owner}/{repo_name}, bot may already be member")
 
-            # 校验 bot 已是维护者（access_level>=40）——用 bot token；限流/失败允许降级继续（方案 B）
-            try:
-                bot_perm = get_member_permission(global_bot_token, owner, repo_name, global_bot_username)
-                access_level = (bot_perm or {}).get("access_level", 0) or 0
-                if access_level < 40:
-                    role_name = (bot_perm or {}).get("role_name", "")
-                    _mark("bot_missing")
-                    log.warning(f"host: bot perm check inconclusive (level={access_level}), invite path succeeded, mark bot_missing")
-                    raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管部分完成: 全局 Bot（{global_bot_username}）权限={role_name or f'level {access_level}'}，未成为仓库维护者（Maintainer）。请在 GitCode 仓库成员中将 {global_bot_username} 权限设为维护者，或点击页面提示的「重检」自动修复"})
-            except _RateLimitedError as _rl:
-                # 限流：权限未判定，继续 webhook（不阻塞），host_status 待 dashboard 复查
-                log.warning(f"host: perm check rate-limited (continue): {_rl}")
+                # 校验 bot 已是维护者（access_level>=40）——用 bot token；限流/失败允许降级继续（方案 B）
+                try:
+                    bot_perm = get_member_permission(global_bot_token, owner, repo_name, global_bot_username)
+                    access_level = (bot_perm or {}).get("access_level", 0) or 0
+                    if access_level < 40:
+                        # §16.1: 权限不足 → 降级到路径 B（原 raise 502）
+                        log.warning(f"host: bot perm check inconclusive (level={access_level}), falling back to path B")
+                        _use_path_b = True
+                        webhook_token = api_token
+                        _webhook_secret = _secrets.token_urlsafe(32)
+                        _mark("path_b_fallback")
+                except _RateLimitedError as _rl:
+                    # 限流：权限未判定，继续 webhook（不阻塞），host_status 待 dashboard 复查
+                    log.warning(f"host: perm check rate-limited (continue): {_rl}")
+                except Exception:
+                    # §16.1: 非限流异常 → 降级到路径 B
+                    log.warning(f"host: path A perm check failed, falling back to path B")
+                    _use_path_b = True
+                    webhook_token = api_token
+                    _webhook_secret = _secrets.token_urlsafe(32)
+                    _mark("path_b_fallback")
 
-        # 4) webhook：统一用 bot token 查/建（方案 C）
+        # 4) webhook：路径 A 用 bot token 查/建；路径 B 用用户 token + 随机密钥
         existing_id = find_existing_webhook(webhook_token, owner, repo_name, webhook_url)
         if existing_id:
-            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username, org_id=_org_id)
+            # Issue #372 R6.2: 路径 B 复用已有 webhook 时密钥不匹配 → 删旧重建
+            if _use_path_b:
+                try:
+                    from src.user.repo_manager import remove_webhook
+                    remove_webhook(webhook_token, owner, repo_name, existing_id)
+                    existing_id = None
+                except Exception as _re:
+                    log.warning(f"host_repo GitCode: remove old webhook failed (will reuse): {_re}")
+                    _webhook_secret = ""  # P1-1: 删失败时不写新密钥
+                    webhook_token = ""  # §31: 也不写用户 token（刷新后 stale），让验证 loud fail
+        if existing_id:
+            # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+            _db_webhook_token = "" if _use_path_b else webhook_token
+            user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=existing_id, gitcode_webhook_token=_db_webhook_token, bot_gitcode_token=(global_bot_token if not _use_path_b else ""), bot_username=(global_bot_username if not _use_path_b else ""), org_id=_org_id, host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
             user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
             _mark("")
             return {"message": "仓库已托管（复用已有 webhook）", "webhook_id": existing_id}
 
-        hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=webhook_token)
+        # 路径 B: webhook_password 用随机密钥；路径 A: 用 bot token
+        _wh_password = _webhook_secret if _use_path_b else webhook_token
+        hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=_wh_password)
         # 清理同名旧仓库残留的 DB 数据（同上）
         from src.api.onboarding import cleanup_stale_repo_data
         cleanup_stale_repo_data(repo_key)
-        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=webhook_token, bot_gitcode_token=global_bot_token, bot_username=global_bot_username, org_id=_org_id)
+        # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+        _db_webhook_token = "" if _use_path_b else webhook_token
+        user_db.add_managed_repo(repo_key, owner, repo_name, webhook_id=hook_id, gitcode_webhook_token=_db_webhook_token, bot_gitcode_token=(global_bot_token if not _use_path_b else ""), bot_username=(global_bot_username if not _use_path_b else ""), org_id=_org_id, host_user_id=(user["id"] if _use_path_b else 0), webhook_secret=_webhook_secret)
         user_db.mark_user_repo_join(user["id"], repo_key, is_join=True, is_admin=True)
         from src.api.session_store import ensure_default_agent_sessions
         ensure_default_agent_sessions(repo_key)
@@ -946,71 +1107,191 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 
     流程：需要 owner token 邀请 + bot token 建 webhook；判定 bot 已是维护者则跳过邀请；
     返回修复后的 host_status。
+
+    Issue #372: 按 provider 统一分流（get_hosting_provider_config），路径 B 支持无全局 bot token。
     """
-    from src.repo_key import to_repo_key
-    from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, find_existing_webhook, setup_webhook, _RateLimitedError
-    from src.user.db import get_global_bot_credential, get_webhook_url, set_host_status
+    from src.repo_key import to_repo_key, parse_repo_key
+    from src.user.repo_manager import get_hosting_provider_config, _RateLimitedError
+    from src.user.db import get_webhook_url, set_host_status
+    from src.api.deps import get_user_token_with_refresh, get_user_github_token_with_refresh
 
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
-    # 按 repo_key 前缀分流 owner token
-    from src.repo_key import parse_repo_key
+
     _provider, _, _ = parse_repo_key(repo_key)
+    _cfg = get_hosting_provider_config(_provider)
+    bot_token = _cfg["bot_token"]
+    bot_username = _cfg["bot_username"]
+
+    # owner token 按 provider 分流
     if _provider == "github":
         api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
     else:
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-    bot_token, bot_username = get_global_bot_credential()
-    if not api_token or not bot_token:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "缺少 API Token，无法自愈"})
+    if not api_token:
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "缺少用户 API Token，请重新登录"})
+
+    # Issue #372: 路径 B——无全局 bot token 时用用户 token 修复 webhook
+    _use_path_b = not bot_token
+    import secrets as _secrets
+    _webhook_secret = _secrets.token_urlsafe(32) if _use_path_b else ""
+
+    # webhook_url 按 provider 替换路由后缀
     webhook_url = get_webhook_url()
+    if not webhook_url:
+        # Issue #372 §14.2.3: 报错带结构化 guidance
+        from src.user.db import get_meta_value as _gmv
+        _detect_failed = _gmv("webhook_url_detect_failed") or ""
+        _tried = ["server-config.json (not found)"]
+        if _detect_failed:
+            _tried.append("auto-detect (egress blocked or hostname loopback)")
+        else:
+            _tried.append("auto-detect (not yet attempted — access Web UI via public IP to trigger)")
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "error_code": "WEBHOOK_URL_NOT_CONFIGURED",
+            "message": "webhook_url not configured",
+            "guidance": {
+                "tried": _tried,
+                "action": "Access this Web UI via public IP (auto-detect will trigger on login), or set webhook_url in Settings",
+                "example": "http://<public-ip>/webhook/gitcode"
+            }
+        })
+    if _cfg["webhook_url_suffix"] not in webhook_url:
+        webhook_url = webhook_url.replace("/webhook/gitcode", _cfg["webhook_url_suffix"])
 
-    # 1) bot 是否已是维护者（bot token 自查）
-    bot_ok = False
-    try:
-        perm = get_member_permission(bot_token, owner, repo, bot_username)
-        bot_ok = bool(perm and (perm.get("access_level") or 0) >= 40)
-    except _RateLimitedError:
-        raise HTTPException(status_code=503, detail={"code": 503, "message": "GitCode API 调用过于频繁，请稍后重试"})
+    # 1) bot 是否已是维护者（路径 A only；路径 B 跳过）
+    bot_ok = True if _use_path_b else False
+    if not _use_path_b:
+        from src.user.repo_manager import get_github_repo_permissions, get_member_permission
+        if _provider == "github":
+            try:
+                _perm = get_github_repo_permissions(bot_token, owner, repo)
+                bot_ok = bool(_perm and (_perm.get("admin") or _perm.get("maintain") or _perm.get("push")))
+            except Exception:
+                bot_ok = False
+        else:
+            # GitCode: 用 get_member_permission 检查
+            try:
+                perm = get_member_permission(bot_token, owner, repo, bot_username)
+                bot_ok = bool(perm and (perm.get("access_level") or 0) >= 40)
+            except _RateLimitedError:
+                raise HTTPException(status_code=503, detail={"code": 503, "message": "GitCode API 调用过于频繁，请稍后重试"})
 
-    if not bot_ok:
-        # 邀请 + 接受（owner token）
-        add_collaborator(api_token, owner, repo, bot_username, "maintainer")[0]
-        accept_invite_for_repo(bot_token, owner, repo)
-        try:
-            perm2 = get_member_permission(bot_token, owner, repo, bot_username)
-            bot_ok = bool(perm2 and (perm2.get("access_level") or 0) >= 40)
-        except _RateLimitedError:
-            bot_ok = False
+        # P1-5: bot 权限不足时邀请+重试（GitHub 和 GitCode 共用，提到 if/else 同级）
         if not bot_ok:
-            set_host_status(repo_key, "bot_missing")
-            return {"status": "error", "host_status": "bot_missing",
-                    "message": f"未能自动将 {bot_username} 加入为维护者，请手动在仓库成员中添加"}
+            if _provider == "github":
+                # R12.6: GitHub 需要显式 accept（原注释"GitHub 自动处理"是错误的）
+                from src.user.repo_manager import add_github_collaborator, accept_github_invite
+                try:
+                    add_github_collaborator(api_token, owner, repo, bot_username, "push")
+                    accept_github_invite(bot_token, owner, repo)
+                    # 重新检查权限
+                    try:
+                        _perm2 = get_github_repo_permissions(bot_token, owner, repo)
+                        bot_ok = bool(_perm2 and (_perm2.get("admin") or _perm2.get("maintain") or _perm2.get("push")))
+                    except Exception:
+                        bot_ok = False
+                except Exception as _ge:
+                    log.warning(f"repair_host GitHub: add collaborator failed: {_ge}")
+                    bot_ok = False
+            else:
+                # GitCode: add_collaborator + accept_invite + retry
+                # Issue #372 §16.2: 包 try/except，失败时降级到路径 B
+                from src.user.repo_manager import add_collaborator, accept_invite_for_repo
+                try:
+                    add_collaborator(api_token, owner, repo, bot_username, "maintainer")[0]
+                    accept_invite_for_repo(bot_token, owner, repo)
+                except Exception as _ie:
+                    log.warning(f"repair_host GitCode: bot invite failed: {_ie}")
+                    bot_ok = False
+                else:
+                    try:
+                        perm2 = get_member_permission(bot_token, owner, repo, bot_username)
+                        bot_ok = bool(perm2 and (perm2.get("access_level") or 0) >= 40)
+                    except _RateLimitedError:
+                        bot_ok = False
+                    except Exception:
+                        bot_ok = False
+            if not bot_ok:
+                # Issue #372 §16.2: 降级到路径 B（原 return error）
+                log.warning(f"repair_host: path A bot failed, falling back to path B for {owner}/{repo}")
+                _use_path_b = True
+                _wh_token = api_token
+                _webhook_secret = _secrets.token_urlsafe(32)
+                # 继续走 webhook 流程，不 return error
 
-    # 2) webhook 是否存在，缺失则补建（bot token）
+    # 2) webhook 是否存在，缺失则补建
+    # 路径 A: bot token 查/建；路径 B: 用户 token 查/建 + 随机密钥
+    _wh_token = api_token if _use_path_b else bot_token
+    if _provider == "github":
+        _wh_password = _webhook_secret  # GitHub setup_github_webhook 用 webhook_secret 参数
+    else:
+        _wh_password = _webhook_secret if _use_path_b else bot_token  # GitCode setup_webhook 用 webhook_password 参数
+
+    _find_fn = _cfg["find_webhook"]
+    _setup_fn = _cfg["setup_webhook"]
+    _remove_fn = _cfg["remove_webhook"]
+
     hid = None
     try:
-        hid = find_existing_webhook(bot_token, owner, repo, webhook_url)
+        hid = _find_fn(_wh_token, owner, repo, webhook_url)
     except Exception:
         hid = None
+    if hid:
+        # Issue #372 R6.2: 路径 B 场景找到已有 webhook 时，旧 webhook 可能用旧密钥。
+        # 删除旧 webhook 再用新密钥重建，确保 DB _webhook_secret 与 webhook 实际密钥一致。
+        if _use_path_b:
+            # R12.7: 路径 B 删旧重建
+            _force_rebuild = True
+        else:
+            # R12.7: 路径 A 检查是否刚从 B 升级（webhook_secret 残留非空）
+            # 升级后 GitCode 上 webhook 密码仍是旧 secret，DB 已清空 → 不匹配 → 强制重建
+            from src.user.db import get_webhook_secret
+            _stale_secret = get_webhook_secret(repo_key)
+            _force_rebuild = bool(_stale_secret)
+            if _force_rebuild:
+                log.info(f"repair_host: detected stale webhook_secret after B→A upgrade, forcing rebuild for {owner}/{repo}")
+        if _force_rebuild:
+            try:
+                _remove_fn(_wh_token, owner, repo, hid)
+                log.info(f"repair_host: removed old webhook {hid} for re-creation with new secret")
+                hid = None
+            except Exception as _re:
+                log.warning(f"repair_host: remove old webhook failed (will reuse): {_re}")
+                _webhook_secret = ""  # P1-1: 删失败时不写新密钥
+                _wh_token = ""  # §31: 也不写用户 token（刷新后 stale），让验证 loud fail
+                _wh_password = _webhook_secret
     if not hid:
-        hid = setup_webhook(bot_token, owner, repo, webhook_url, webhook_password=bot_token)
+        if _provider == "github":
+            hid = _setup_fn(_wh_token, owner, repo, webhook_url, webhook_secret=_wh_password)
+        else:
+            hid = _setup_fn(_wh_token, owner, repo, webhook_url, webhook_password=_wh_password)
     if not hid:
         set_host_status(repo_key, "webhook_missing")
         return {"status": "error", "host_status": "webhook_missing",
-                "message": "未能创建 webhook，请检查 bot 权限后重试"}
+                "message": "未能创建 webhook，请检查权限后重试"}
 
-    # 3) 完成 → 回写 webhook_id（避免方案 X 下 webhook_id=0 反复误报）→ 清状态
+    # 3) 完成 → 回写 webhook_id → 清状态
     try:
         from src.user.db import add_managed_repo
-        add_managed_repo(repo_key, owner, repo, webhook_id=hid,
-                         gitcode_webhook_token=bot_token, bot_gitcode_token=bot_token, bot_username=bot_username)
+        # P1-2: 路径 B 成功时写空串（不写 stale 用户 token），webhook 验证依赖 webhook_secret
+        _db_wh_token = "" if _use_path_b else _wh_token
+        _db_kwargs = {
+            "webhook_id": hid,
+            "bot_username": (bot_username if not _use_path_b else ""),
+            "host_user_id": (user["id"] if _use_path_b else 0),
+            "webhook_secret": _webhook_secret,
+            _cfg["db_token_field"]: _db_wh_token,
+            _cfg["db_bot_token_field"]: (bot_token if not _use_path_b else ""),
+        }
+        add_managed_repo(repo_key, owner, repo, **_db_kwargs)
     except Exception as _e:
         log.warning(f"repair_host: write back webhook_id failed: {_e}")
     set_host_status(repo_key, "")
     return {"status": "ok", "host_status": "", "webhook_id": hid,
-            "message": "托管已修复（bot 已加入成员，webhook 已就绪）"}
+            "message": "托管已修复（webhook 已就绪）" if _use_path_b else "托管已修复（bot 已加入成员，webhook 已就绪）"}
 
 
 @router.get("/managed", operation_id="repos_managed", summary="List managed repositories", description="Lists repositories hosted by the platform for the current user.")
@@ -1051,55 +1332,227 @@ def get_repo_bot_token(owner: str, repo_name: str, user: dict = Depends(require_
 
 @router.put("/bot-token", operation_id="repos_bot_token_set", summary="Set repository bot token", description="Sets the repository DevOps bot token and automatically adds the repo bot as a maintainer.")
 def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_session_token)):
-    """设置仓库绑定的 DevOps Bot Token；自动将 repo bot 加入维护者"""
-    from src.repo_key import to_repo_key
+    """设置仓库绑定的 DevOps Bot Token。
+
+    R15 七步流程：
+    1. 检查仓库存在（不存在 → 404）
+    2. 验证 token 有效性（无效 → 400 TOKEN_INVALID）
+    3. 获取 bot username
+    4. 邀 bot 为协作者（用用户 token / host 用户 token，失败记日志继续）
+    5. 重建 webhook（删旧 + 建新，部分失败保护）
+    6. 写 DB（bot_token + 清 host_user_id + 清 webhook_secret + 写 webhook_id + 清 bot_token_status）
+    7. 返回 200 + bot_username
+
+    R15.5: 传空串 bot_token 时清除仓库级 bot token（不重建 webhook，清除 bot_token_status）。
+    """
+    from src.repo_key import to_repo_key, parse_repo_key, split_owner_repo
+    from src.api.deps import check_repo_access
+    from src.session_manager import db, db_lock
+
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
     repo_key = to_repo_key(body.full_name)
-    from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
-    ok = update_managed_repo_bot_token(repo_key, body.bot_token)
-    if not ok:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
 
-    # 用新 token 获取 VCS 真实登录名，更新 bot_username
-    repo_bot_username = ""
+    # R21.8.2: 只有托管人或 admin 可配置仓库级 bot token（防水平越权）
+    # check_repo_access 已检查托管人权限，这里补充 admin 检查
+    _is_admin = (user.get("role") == "admin" or user.get("auth_type") in ("session_token", "api_key"))
+    if not _is_admin:
+        # 非 admin 用户只能配置自己托管的仓库（check_repo_access 已验证）
+        # 额外检查：如果是路径 B 仓库，必须是 host_user 本人
+        from src.user.db import get_host_user_id
+        _host_uid = get_host_user_id(repo_key)
+        if _host_uid > 0 and _host_uid != user.get("id", 0):
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "error_code": "NOT_REPO_OWNER",
+                "message": "只有仓库托管人或管理员可配置 Bot Token"
+            })
+
+    # 确定 provider
+    _provider_str, _, _ = parse_repo_key(repo_key)
+    _is_github = (_provider_str == "github")
+
+    # R15.5: 传空串时清除仓库级 bot token
+    if not body.bot_token:
+        try:
+            with db_lock:
+                c = db.cursor()
+                if _is_github:
+                    c.execute(
+                        "UPDATE managed_repos SET bot_github_token='', bot_token_status='' "
+                        "WHERE repo_key=?",
+                        (repo_key,),
+                    )
+                else:
+                    c.execute(
+                        "UPDATE managed_repos SET bot_gitcode_token='', bot_token_status='' "
+                        "WHERE repo_key=?",
+                        (repo_key,),
+                    )
+                if c.rowcount == 0:
+                    raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+                db.commit()
+        except HTTPException:
+            raise
+        except Exception as e:
+            log.warning(f"set_repo_bot_token: clear bot_token failed: {e}")
+            raise HTTPException(status_code=500, detail={"code": 500, "message": "清除 Bot Token 失败"})
+        # R15.5.5: best-effort 移除旧 bot 协作者身份
+        _remove_old_bot_collaborator(repo_key, owner, repo_name, _is_github, user)
+        return {"message": "Bot Token 已清除", "bot_username": ""}
+
+    # === R15 七步流程 ===
+
+    # 步骤 1: 检查仓库存在
     try:
-        from src.repo_key import parse_repo_key
-        _provider, _, _ = parse_repo_key(repo_key)
-        if _provider == "github":
-            from src.user.repo_manager import _github_req
-            user_data = _github_req("GET", "https://api.github.com/user", body.bot_token)
-        else:
-            from src.user.repo_manager import _req
-            user_data = _req("GET", "https://gitcode.com/api/v5/user", body.bot_token)
-        repo_bot_username = user_data.get("login", "") or ""
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            if not c.fetchone():
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"set_repo_bot_token: check existence failed: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "仓库查询失败"})
+
+    # 步骤 2: 验证 token 有效性（通过 VCSProvider 接口）
+    from src.token_resolver import create_provider_from_repo_key
+    _vcs_provider = create_provider_from_repo_key(repo_key)
+    try:
+        user_data = _vcs_provider.verify_token(body.bot_token)
+    except Exception:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "TOKEN_INVALID",
+            "message": "Bot Token 无效，请检查后重试"
+        })
+
+    # 步骤 3: 获取 bot username
+    repo_bot_username = (user_data.get("login") or "") if isinstance(user_data, dict) else ""
+    if not repo_bot_username:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "error_code": "TOKEN_INVALID",
+            "message": "Token 验证成功但未返回用户名，请检查 Token 有效性"
+        })
+
+    # 步骤 4: 邀 bot 为协作者
+    # 路径 B 仓库用 host 用户 token 邀请；路径 A 仓库如果新 bot 与旧 bot_username 不同也需邀请
+    _old_bot_username = ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            _row = c.fetchone()
+            if _row and _row[0]:
+                _old_bot_username = _row[0]
     except Exception:
         pass
+
+    # 判断是否需要邀请（新 bot 与旧 bot 不同，或无旧 bot）
+    _need_invite = (repo_bot_username != _old_bot_username)
+    if _need_invite:
+        # 获取邀请用 token：路径 B 用 host 用户 token，路径 A 用当前用户 token
+        _invite_token = ""
+        from src.user.db import get_host_user_id
+        _host_uid = get_host_user_id(repo_key)
+        if _host_uid > 0:
+            # 路径 B: 用 host 用户 token 邀请
+            try:
+                from src.auth.grape_account_db import get_grape_account_by_id
+                _host_acc = get_grape_account_by_id(_host_uid)
+                if _host_acc and _host_acc.get("username"):
+                    if _is_github:
+                        from src.api.deps import get_user_github_token_with_refresh
+                        _invite_token = get_user_github_token_with_refresh(_host_acc["username"], _host_uid) or ""
+                    else:
+                        from src.api.deps import get_user_token_with_refresh
+                        _invite_token = get_user_token_with_refresh(_host_acc["username"], _host_uid) or ""
+            except Exception:
+                pass
+            if not _invite_token:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400, "error_code": "HOST_TOKEN_EXPIRED",
+                    "message": "托管用户 Token 已过期，请重新绑定后再配置 Bot Token"
+                })
+        else:
+            # 路径 A: 用当前用户 token 邀请
+            if _is_github:
+                from src.api.deps import get_user_github_token_with_refresh
+                _invite_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"]) or ""
+            else:
+                from src.api.deps import get_user_token_with_refresh
+                _invite_token = get_user_token_with_refresh(user["username"], user.get("id", 0)) or ""
+
+        if _invite_token:
+            try:
+                _permission = "push" if _is_github else "maintainer"
+                _vcs_provider.add_collaborator(_invite_token, owner, repo_name, repo_bot_username, _permission)
+            except Exception as _ae:
+                # R15.2.3: 邀请失败记日志继续（邀请幂等，bot 可能已是协作者）
+                log.warning(f"set_repo_bot_token: add_collaborator failed (continuing): {_ae}")
+
+    # R15.6: best-effort 移除旧 bot 协作者身份（如果有旧 bot 且与新 bot 不同）
+    if _old_bot_username and _old_bot_username != repo_bot_username:
+        _remove_old_bot_collaborator(repo_key, owner, repo_name, _is_github, user, _old_bot_username)
+
+    # 步骤 5-6: 重建 webhook + 写 DB（委托 update_managed_repo_bot_token）
+    ok = update_managed_repo_bot_token(repo_key, body.bot_token)
+    if not ok:
+        raise HTTPException(status_code=500, detail={
+            "code": 500, "error_code": "WEBHOOK_REBUILD_FAILED",
+            "message": "Webhook 重建失败，请检查 Bot Token 权限后重试，或使用 repair_host 恢复"
+        })
+
+    # 更新 bot_username
     if repo_bot_username:
         update_managed_repo_bot_username(repo_key, repo_bot_username)
 
-    # 将 repo bot 加入仓库维护者（用 owner token，失败仅记日志，不影响托管）
-    if body.bot_token and repo_bot_username:
+    # R17.1.3: PAT 无续期提示
+    return {
+        "message": "Bot Token 已更新",
+        "bot_username": repo_bot_username,
+        "pat_no_refresh_hint": "此 Token 为 PAT 类型，不会自动续期，过期后需手动重新配置",
+    }
+
+
+def _remove_old_bot_collaborator(repo_key: str, owner: str, repo_name: str,
+                                  is_github: bool, user: dict, old_bot_username: str = ""):
+    """R15.6: best-effort 移除旧 bot 协作者身份。
+
+    只移除该仓库的旧 bot 协作者（R15.6.1），不移除其他仓库的旧 bot（R15.6.2）。
+    移除失败不影响新 token 写入（R15.6.3 best-effort）。
+    """
+    if not old_bot_username:
+        # 查 DB 获取旧 bot_username
         try:
-            from src.repo_key import parse_repo_key
-            _provider, _, _ = parse_repo_key(repo_key)
-            if _provider == "github":
-                from src.user.repo_manager import add_github_collaborator
-                from src.api.deps import get_user_github_token_with_refresh
-                _owner_gh_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"]) or ""
-                if _owner_gh_token:
-                    add_github_collaborator(_owner_gh_token, owner, repo_name, repo_bot_username, "push")
-            else:
-                from src.user.repo_manager import add_collaborator
-                owner_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-                if owner_token:
-                    add_collaborator(owner_token, owner, repo_name, repo_bot_username, "maintainer")[0]
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+                _row = c.fetchone()
+                if _row and _row[0]:
+                    old_bot_username = _row[0]
         except Exception:
-            pass
-    return {"message": "Bot Token 已更新", "bot_username": repo_bot_username}
+            return
+    if not old_bot_username:
+        return
+    try:
+        from src.token_resolver import create_provider_from_repo_key
+        _provider = create_provider_from_repo_key(repo_key)
+        # 移除旧 bot 需要用 owner token（有仓库管理权限的 token）
+        _remove_token = ""
+        if is_github:
+            from src.api.deps import get_user_github_token_with_refresh
+            _remove_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"]) or ""
+        else:
+            from src.api.deps import get_user_token_with_refresh
+            _remove_token = get_user_token_with_refresh(user["username"], user.get("id", 0)) or ""
+        if _remove_token:
+            _provider.remove_collaborator(_remove_token, owner, repo_name, old_bot_username)
+    except Exception as _re:
+        log.warning(f"_remove_old_bot_collaborator: failed (best-effort): {_re}")
 
 
 class DeployUrlBody(BaseModel):
@@ -1318,31 +1771,35 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
             owner_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
         else:
             owner_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
-        if owner_token and global_bot_username:
-            try:
-                if repo_provider == "github":
-                    from src.user.repo_manager import remove_github_collaborator
-                    _rm_ok = remove_github_collaborator(owner_token, owner, repo_name, global_bot_username)
-                else:
-                    from src.user.repo_manager import remove_collaborator
-                    _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
-                if not _rm_ok:
-                    log.warning(f"Remove global bot collaborator failed (perm?): {global_bot_username} @ {owner}/{repo_name}")
-            except Exception as e:
-                log.warning(f"Remove global bot collaborator error: {e}")
-        # repo bot（若配置且非全局 bot）
-        if owner_token and repo_bot_username and repo_bot_username != global_bot_username:
-            try:
-                if repo_provider == "github":
-                    from src.user.repo_manager import remove_github_collaborator
-                    _rm_ok2 = remove_github_collaborator(owner_token, owner, repo_name, repo_bot_username)
-                else:
-                    from src.user.repo_manager import remove_collaborator
-                    _rm_ok2 = remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
-                if not _rm_ok2:
-                    log.warning(f"Remove repo bot collaborator failed (perm?): {repo_bot_username} @ {owner}/{repo_name}")
-            except Exception as e:
-                log.warning(f"Remove repo bot collaborator error: {e}")
+        # Issue #372: 路径 B 仓库（无 bot token）跳过 bot 协作者移除——托管时未邀请 bot
+        from src.user.db import get_host_user_id
+        _is_path_b = (not repo_bot_token and not global_bot_username and get_host_user_id(repo_key) > 0)
+        if not _is_path_b:
+            if owner_token and global_bot_username:
+                try:
+                    if repo_provider == "github":
+                        from src.user.repo_manager import remove_github_collaborator
+                        _rm_ok = remove_github_collaborator(owner_token, owner, repo_name, global_bot_username)
+                    else:
+                        from src.user.repo_manager import remove_collaborator
+                        _rm_ok = remove_collaborator(owner_token, owner, repo_name, global_bot_username)
+                    if not _rm_ok:
+                        log.warning(f"Remove global bot collaborator failed (perm?): {global_bot_username} @ {owner}/{repo_name}")
+                except Exception as e:
+                    log.warning(f"Remove global bot collaborator error: {e}")
+            # repo bot（若配置且非全局 bot）
+            if owner_token and repo_bot_username and repo_bot_username != global_bot_username:
+                try:
+                    if repo_provider == "github":
+                        from src.user.repo_manager import remove_github_collaborator
+                        _rm_ok2 = remove_github_collaborator(owner_token, owner, repo_name, repo_bot_username)
+                    else:
+                        from src.user.repo_manager import remove_collaborator
+                        _rm_ok2 = remove_collaborator(owner_token, owner, repo_name, repo_bot_username)
+                    if not _rm_ok2:
+                        log.warning(f"Remove repo bot collaborator failed (perm?): {repo_bot_username} @ {owner}/{repo_name}")
+                except Exception as e:
+                    log.warning(f"Remove repo bot collaborator error: {e}")
     except Exception:
         pass
 

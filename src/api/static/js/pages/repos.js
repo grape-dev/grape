@@ -782,14 +782,17 @@ function submitCreateRepo(e) {
             app.showToast(I18N.t('repos.create.success', {name: (r.full_name || name)}));
           }
           closeCreateRepoModal();
-          if (typeof _projectsRepos !== 'undefined') {
-            API.get('/repos/member').then(d => {
-              const repos = d.repos || [];
-              renderRepoSelection(repos);
-            }).catch(() => renderRepos());
-          } else {
-            renderRepos();
-          }
+          // R13.1: 局部刷新项目列表——强制同步仓库后直接渲染列表，不跳转、不整页刷新
+          API.post('/repos/sync').then(function(d) {
+            var repos = (d && d.repos) || [];
+            try { localStorage.setItem('repo_member_cache', JSON.stringify({repos: repos, ts: Date.now()})); } catch(e) {}
+            renderRepoSelection(repos);
+          }).catch(function() {
+            // 同步失败降级为普通加载
+            API.get('/repos/member').then(function(d) {
+              renderRepoSelection((d && d.repos) || []);
+            }).catch(function() { renderRepos(); });
+          });
         })
         .catch(err => {
           app.showToast(I18N.t('repos.create.err_create_failed', {msg: (err.message || err)}));

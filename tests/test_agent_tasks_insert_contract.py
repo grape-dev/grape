@@ -37,7 +37,8 @@ def _row(seq):
     with db_lock:
         c = db.cursor()
         return c.execute(
-            "SELECT id, event_seq, status, runtime_id, skill, pool_tag, pool_engine_ids "
+            "SELECT id, event_seq, status, runtime_id, skill, pool_tag, pool_engine_ids, "
+            "pool_engine_source "
             "FROM agent_tasks WHERE repo_key=? AND event_seq=?",
             (REPO, seq),
         ).fetchone()
@@ -85,6 +86,7 @@ def test_create_direct_task_inserts_row():
     assert row[1] == seq and row[2] == "queued"
     assert row[4] == "vod"
     assert row[5] == "" and row[6] == ""  # pool_tag / pool_engine_ids 占位非 None
+    assert row[7] == ""  # pool_engine_source — Issue #372 §18: direct 模式非广播，空字符串
 
 
 def test_create_failed_task_inserts_failed_snapshot():
@@ -96,6 +98,7 @@ def test_create_failed_task_inserts_failed_snapshot():
     row = _row(seq)
     assert row, "agent_tasks 应有 failed 快照行"
     assert row[1] == seq and row[2] == "failed"
+    assert row[7] == ""  # pool_engine_source — Issue #372 §18: failed 快照也需落库
     with db_lock:
         c = db.cursor()
         errs = c.execute("SELECT errors FROM agent_tasks WHERE repo_key=? AND event_seq=?",

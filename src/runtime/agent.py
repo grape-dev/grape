@@ -67,6 +67,10 @@ _worker_probe_thread = None
 _worker_probe_started = False
 
 
+# R11.4: _get_task_token 抽取到 src/user/db.py，统一调用
+from src.user.db import get_task_token as _get_task_token
+
+
 def _probe_hermes_acp(cli_path: str) -> dict:
     """hermes ACP 模式探活：initialize + 轻量 prompt，端到端验证引擎可用性。
 
@@ -1384,7 +1388,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         if _num and task.get("issue_session_id"):
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
-                _num, token=task.get("repo_gitcode_token") or "")
+                _num, token=_get_task_token(task))
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             _ag = task.get("agent_type") or ""
             if _ag == "coding":
@@ -1399,7 +1403,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
                             if _lrk:
                                 repogit.remove_issue_worktree_if_pushed(
                                     _lrk, "coding", _num,
-                                    token=task.get("repo_gitcode_token") or "")
+                                    token=_get_task_token(task))
                     except Exception as _le:
                         log.warning(f"linked worktree cleanup failed: {_le}")
     except Exception as e:
@@ -1436,7 +1440,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
     if not _wts or not isinstance(_wts, list):
         return
 
-    _token = task.get("repo_gitcode_token") or ""
+    _token = _get_task_token(task)
     _issue_num = ""
     try:
         from src.runtime import repogit
@@ -1662,7 +1666,7 @@ async def _execute_task(client, task, engine_name: str = ""):
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=task.get("repo_gitcode_token") or "",
+                                          _num, token=_get_task_token(task),
                                           work_branch=_wb)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
@@ -1677,7 +1681,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=task.get("repo_gitcode_token") or "")
+                    token=_get_task_token(task))
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -1871,7 +1875,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             event_type=task.get("event_type") or "",
             backend_name=_backend_for_engine(engine_name),
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
-            env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
+            env_extra=env, bot_token=_get_task_token(task),
             user_token=user_token,
             agent_label=_agent_label,
             repo_key=task.get("repo_key") or "",

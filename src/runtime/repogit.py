@@ -155,9 +155,12 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
 def ensure_repo_base_multi(linked_repos: list, token: str = "") -> dict:
     """批量初始化多个关联仓库的 bare mirror（Issue #242）。
 
+    R20.26.1/R20.26.2: 每个关联仓库用各自的 Repo.bot_token 独立获取 token，
+    不复用主仓库 token。跨平台关联仓库（主 gitcode + 关联 github）自动分流。
+
     Args:
         linked_repos: [{repo_key, branch}] 列表
-        token: git token（共用主仓库 token；关联仓库可能需要不同 token）
+        token: 主仓库 token（向后兼容，关联仓库独立获取时忽略此参数）
     Returns:
         {repo_key: base_dir_or_None} 映射
     """
@@ -168,7 +171,19 @@ def ensure_repo_base_multi(linked_repos: list, token: str = "") -> dict:
         rk = lr.get("repo_key") or ""
         if not rk:
             continue
-        base = ensure_repo_base(rk, token=token)
+        # R20.26.1: 关联仓库独立获取 token
+        _repo_token = ""
+        try:
+            from src.repo import Repo
+            _repo_token = Repo(rk).bot_token
+        except Exception as e:
+            log.warning(f"ensure_repo_base_multi: get token for {rk} failed: {e}")
+        # R20.26.4: token 短路时跳过该仓库
+        if not _repo_token:
+            log.warning(f"ensure_repo_base_multi: no token for linked repo {rk}, skipping")
+            result[rk] = None
+            continue
+        base = ensure_repo_base(rk, token=_repo_token)
         result[rk] = base
     return result
 
@@ -179,6 +194,8 @@ def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
 
     遍历 linked_repos，为每个 repo_key 调用 ensure_issue_worktree。
     每个仓库使用各自的 branch 配置（linked_repos 中的 branch 字段）。
+
+    R20.26.1: 每个关联仓库用各自的 Repo.bot_token 独立获取 token。
 
     Returns:
         [{repo_key, branch, worktree_dir}] 成功创建的 worktree 列表
@@ -193,7 +210,17 @@ def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
         branch = lr.get("branch") or ""
         if not rk:
             continue
-        wt = ensure_issue_worktree(rk, agent_type, issue_num, token=token, work_branch=branch)
+        # R20.26.1: 关联仓库独立获取 token
+        _repo_token = ""
+        try:
+            from src.repo import Repo
+            _repo_token = Repo(rk).bot_token
+        except Exception as e:
+            log.warning(f"ensure_linked_repo_worktrees: get token for {rk} failed: {e}")
+        if not _repo_token:
+            log.warning(f"ensure_linked_repo_worktrees: no token for {rk}, skipping")
+            continue
+        wt = ensure_issue_worktree(rk, agent_type, issue_num, token=_repo_token, work_branch=branch)
         if wt:
             worktrees.append({"repo_key": rk, "branch": branch, "worktree_dir": wt})
         else:
@@ -270,19 +297,22 @@ def _default_base_branch(base: str, token: str = "", repo_key: str = "", env_wor
 def _write_askpass(issue_dir: str, repo_key: str = "") -> str:
     """写 GIT_ASKPASS 辅助脚本：从环境变量读 token，token 不落盘。
 
-    根据 repo_key 前缀选择正确的 token 环境变量：
-    - github: 优先 BOT_GITHUB_TOKEN，兜底 BOT_GITCODE_TOKEN
-    - gitcode: BOT_GITCODE_TOKEN
-    - 通用：BOT_TOKEN（executor.py 注入的别名）
+    根据 repo_key 前缀选择正确的 token 环境变量 fallback 链：
+    - github: BOT_GITHUB_TOKEN → USER_GITHUB_TOKEN → BOT_TOKEN → BOT_GITCODE_TOKEN
+    - gitcode: BOT_GITCODE_TOKEN → USER_GITCODE_TOKEN → BOT_TOKEN → BOT_GITHUB_TOKEN
+
+    R20.24.3: 路径 B 仓库 BOT_*_TOKEN 为空时 fallback 到 USER_*_TOKEN（用户 token），
+    保证 git clone/push 在路径 B 仓库可用。
+    R20.24.4: agent 同时收到 bot_token + user_token 两参数，分别注入 BOT_*_TOKEN / USER_*_TOKEN。
 
     chmod 后检查执行权限，失败则用 sh wrapper 兜底（不依赖 +x）。
     返回实际可执行的脚本路径（原脚本或 wrapper）。
     """
-    # 按 provider 选择 token 环境变量，fallback 链保证兼容
+    # R20.24.3: fallback 链加入 USER_*_TOKEN（路径 B 仓库用户 token）
     if repo_key.startswith("github:"):
-        token_var = "${BOT_GITHUB_TOKEN:-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}"
+        token_var = "${BOT_GITHUB_TOKEN:-${USER_GITHUB_TOKEN:-${BOT_TOKEN:-$BOT_GITCODE_TOKEN}}}"
     else:
-        token_var = "${BOT_GITCODE_TOKEN:-${BOT_TOKEN:-$BOT_GITHUB_TOKEN}}"
+        token_var = "${BOT_GITCODE_TOKEN:-${USER_GITCODE_TOKEN:-${BOT_TOKEN:-$BOT_GITHUB_TOKEN}}}"
     script = os.path.join(issue_dir, ".git-askpass.sh")
     try:
         with open(script, "w", encoding="utf-8") as f:

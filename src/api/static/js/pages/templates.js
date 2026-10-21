@@ -728,6 +728,8 @@ function doCreateFromTemplate(templateId) {
       }
       var parts = (r.full_name || '').split('/');
       var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
+      // R13.1: 强制同步仓库列表，确保返回项目大厅时新仓库在列表中
+      if (typeof app !== 'undefined' && app._forceSyncRepos) app._forceSyncRepos();
       setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
     }).catch(function(e) {
       clearInterval(_timer);
@@ -823,6 +825,8 @@ function forkTemplate(templateId) {
     }
     var parts = (r.full_name || '').split('/');
     var _rk = r.repo_key || ((r.provider === 'github' ? 'github:' : 'gitcode:') + r.full_name);
+    // R13.1: 强制同步仓库列表，确保返回项目大厅时新仓库在列表中
+    if (typeof app !== 'undefined' && app._forceSyncRepos) app._forceSyncRepos();
     setTimeout(function() { selectRepo(r.full_name, parts[0], parts[1], _rk); }, 900);
   }).catch(function(e) {
     clearInterval(_timer);

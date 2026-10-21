@@ -259,10 +259,10 @@ def test_host_repo_global_bot_not_maintainer_rejects():
             assert "维护者" in e.detail["message"]
         mock_udb.add_managed_repo.assert_not_called()
 
-# ===================== set_repo_bot_token：自动更新 bot_username + 添加 repo bot =====================
+# ===================== set_repo_bot_token：R15 七步流程 =====================
 
 def test_set_repo_bot_token_updates_username():
-    """配置 repo bot token 后，自动更新 bot_username 并添加维护者"""
+    """R15: 配置 repo bot token 后，验证 token → 获取 username → 邀 bot → 重建 webhook → 写 DB"""
     import src.api.routes.repos as repos_mod
 
     class FakeBody:
@@ -271,18 +271,87 @@ def test_set_repo_bot_token_updates_username():
 
     fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
 
+    # R15: mock DB（仓库存在 + 旧 bot_username 查询）+ VCSProvider + 邀请
+    _fake_cursor = MagicMock()
+    _fake_cursor.fetchone.side_effect = [
+        (1,),            # 步骤 1: 仓库存在检查
+        (None,),         # 步骤 4: 旧 bot_username 查询（无旧 bot）
+    ]
+
     with patch.object(repos_mod, "update_managed_repo_bot_token", return_value=True) as mock_upd, \
-         patch("src.user.repo_manager._req", return_value={"login": "repo-bot-login"}), \
-         patch.object(repos_mod, "get_user_token", return_value="owner_tok"), \
          patch.object(repos_mod, "update_managed_repo_bot_username") as mock_upd_username, \
-         patch("src.user.repo_manager.add_collaborator", return_value=True) as mock_add:
+         patch("src.session_manager.db") as mock_db, \
+         patch("src.session_manager.db_lock"), \
+         patch("src.token_resolver.GitCodeProvider.verify_token", return_value={"login": "repo-bot-login"}), \
+         patch("src.token_resolver.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
+         patch("src.user.db.get_host_user_id", return_value=0), \
+         patch("src.api.deps.get_user_token_with_refresh", return_value="owner_tok"), \
+         patch("src.api.deps.check_repo_access"):
+        mock_db.cursor.return_value = _fake_cursor
         _run(repos_mod.set_repo_bot_token(FakeBody(), fake_user))
         mock_upd.assert_called_once()
         mock_upd_username.assert_called_once()
+        # R15 步骤 4: 邀 bot 为协作者
         args = mock_add.call_args[0]
-        # 用 owner token 添加 repo bot 为维护者
-        assert args[0] == "owner_tok"
-        assert args[3] == "repo-bot-login"
+        # add_collaborator(api_token, owner, repo, username, permission)
+        assert args[0] == "owner_tok"  # 用 owner token
+        assert args[3] == "repo-bot-login"  # 邀请 bot username
+
+
+def test_set_repo_bot_token_invalid_token_returns_400():
+    """R15.1.2: token 无效时返回 400 + TOKEN_INVALID，不写 DB"""
+    import src.api.routes.repos as repos_mod
+    from fastapi import HTTPException
+
+    class FakeBody:
+        full_name = "owner/repo"
+        bot_token = "invalid_tok"
+
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
+
+    _fake_cursor = MagicMock()
+    _fake_cursor.fetchone.return_value = (1,)  # 仓库存在
+
+    with patch("src.session_manager.db") as mock_db, \
+         patch("src.session_manager.db_lock"), \
+         patch("src.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("401")), \
+         patch("src.user.db.get_host_user_id", return_value=0), \
+         patch("src.api.deps.check_repo_access"), \
+         patch.object(repos_mod, "update_managed_repo_bot_token") as mock_upd:
+        mock_db.cursor.return_value = _fake_cursor
+        try:
+            _run(repos_mod.set_repo_bot_token(FakeBody(), fake_user))
+            assert False, "Should raise HTTPException 400"
+        except HTTPException as e:
+            assert e.status_code == 400
+            assert e.detail.get("error_code") == "TOKEN_INVALID"
+        mock_upd.assert_not_called()  # 不写 DB
+
+
+def test_set_repo_bot_token_clear_empty():
+    """R15.5: 传空串清除仓库级 bot token + 清除 bot_token_status"""
+    import src.api.routes.repos as repos_mod
+
+    class FakeBody:
+        full_name = "owner/repo"
+        bot_token = ""
+
+    fake_user = {"id": 1, "username": "tester", "auth_type": "session_token"}
+
+    _fake_cursor = MagicMock()
+    _fake_cursor.rowcount = 1  # UPDATE 成功
+
+    with patch("src.session_manager.db") as mock_db, \
+         patch("src.session_manager.db_lock"), \
+         patch("src.api.deps.check_repo_access"), \
+         patch.object(repos_mod, "_remove_old_bot_collaborator"):
+        mock_db.cursor.return_value = _fake_cursor
+        result = _run(repos_mod.set_repo_bot_token(FakeBody(), fake_user))
+        assert result["message"] == "Bot Token 已清除"
+        assert result["bot_username"] == ""
+        # 验证 UPDATE SQL 包含 bot_token_status=''
+        _sql = _fake_cursor.execute.call_args[0][0]
+        assert "bot_token_status=''" in _sql
 
 
 # ===================== remove_managed_repo：移除 bot 协作者 =====================

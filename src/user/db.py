@@ -585,6 +585,8 @@ CREATE TABLE IF NOT EXISTS managed_repos (
     bot_gitcode_token TEXT DEFAULT '',
     gitcode_webhook_token TEXT DEFAULT '',
     bot_username TEXT DEFAULT '',
+    host_user_id INTEGER DEFAULT 0,       -- Issue #372: 路径 B 托管用户 ID（无全局 bot token 时）
+    webhook_secret TEXT DEFAULT '',       -- Issue #372: webhook 验证密钥（与 token 解耦）
     created_at TEXT DEFAULT (datetime('now'))
 )
 """
@@ -965,6 +967,25 @@ def init_db():
             db.execute("ALTER TABLE managed_repos ADD COLUMN bot_username TEXT DEFAULT ''")
         except Exception:
             pass
+        # Issue #372: 用户 Token 降级支持
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN host_user_id INTEGER DEFAULT 0")
+        except Exception:
+            pass
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN webhook_secret TEXT DEFAULT ''")
+        except Exception:
+            pass
+        # R16.5.1: managed_repos.bot_token_status（过期标记，空=正常，expired=过期）
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN bot_token_status TEXT DEFAULT ''")
+        except Exception:
+            pass
+        # R16.5.5: managed_repos.host_vcs_username（托管用户的 VCS 平台用户名，路径 B 自循环检测用）
+        try:
+            db.execute("ALTER TABLE managed_repos ADD COLUMN host_vcs_username TEXT DEFAULT ''")
+        except Exception:
+            pass
         # 迁移 user_accounts 废弃字段 → 正确位置（须在 DROP COLUMN 之前执行）
         try:
             c = db.cursor()
@@ -1330,10 +1351,12 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
                      bot_gitcode_token: str = "", gitcode_webhook_token: str = "",
                      bot_username: str = "", dev_scene: str = "",
                      github_webhook_token: str = "", bot_github_token: str = "",
-                     org_id: int = 0) -> bool:
+                     org_id: int = 0, host_user_id: int = 0, webhook_secret: str = "") -> bool:
     """写入仓库级托管配置（repo_key 带平台前缀，一仓库一行 upsert）。
 
     org_id > 0 时绑定到指定组织；org_id=0 时为全局（兼容旧逻辑）。
+    host_user_id: Issue #372 路径 B 托管时写入当前用户 ID（无全局 bot token 场景）。
+    webhook_secret: Issue #372 路径 B webhook 验证密钥（随机生成，与 token 解耦）。
     """
     from src.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1341,26 +1364,61 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
     try:
         with db_lock:
             c = db.cursor()
-            # 先尝试含 org_id + bot_github_token 的完整插入
-            try:
-                c.execute(
-                    "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id))
-            except Exception:
-                # 列不存在时降级（兼容未迁移的库）
+            # Issue #372: 先查是否已有记录——有则 UPDATE（保留已有 host_user_id 不被覆盖），
+            # 无则 INSERT。避免 INSERT OR REPLACE 覆盖路径 B 已有的 host_user_id。
+            # R14.12: 同时查出 webhook_secret / bot_gitcode_token / bot_github_token，
+            # 调用方传空串时保留已有值（防止 B→A 升级后二次调用覆盖 bot token / webhook 密钥）。
+            c.execute(
+                "SELECT host_user_id, webhook_secret, bot_gitcode_token, bot_github_token "
+                "FROM managed_repos WHERE repo_key=?", (repo_key,))
+            existing = c.fetchone()
+            if existing:
+                # 已有记录——UPDATE（不覆盖 host_user_id/webhook_secret/bot_token，除非调用方显式传非空值）
+                _existing_host = existing[0] or 0
+                # R14.15: 路径 A 成功时（调用方传 bot_token 非空 + host_user_id=0）显式清零，
+                # 防止旧的 host_user_id 残留导致读取层继续走用户 token 降级。
+                # 路径 B rebind 时（调用方传 host_user_id=0 + bot_token 空）保留已有值。
+                if host_user_id > 0:
+                    _final_host = host_user_id
+                elif bot_gitcode_token or bot_github_token:
+                    # 路径 A：显式传了 bot token → 清零 host_user_id
+                    _final_host = 0
+                else:
+                    # 未传 bot token → 保留已有 host_user_id（路径 B rebind / scene 变更等）
+                    _final_host = _existing_host
+                # R14.12: webhook_secret 空串时保留已有值（防覆盖路径 B 密钥）
+                _final_secret = webhook_secret if webhook_secret else (existing[1] or "")
+                # R14.12: bot_token 空串时保留已有值（防 B→A 升级后覆盖 bot token）
+                _final_bot_gc = bot_gitcode_token if bot_gitcode_token else (existing[2] or "")
+                _final_bot_gh = bot_github_token if bot_github_token else (existing[3] or "")
                 try:
                     c.execute(
-                        "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, org_id))
+                        "UPDATE managed_repos SET repo_owner=?, repo_name=?, full_name=?, webhook_id=?, dev_scene=?, "
+                        "bot_gitcode_token=?, gitcode_webhook_token=?, bot_username=?, github_webhook_token=?, "
+                        "bot_github_token=?, org_id=?, host_user_id=?, webhook_secret=? WHERE repo_key=?",
+                        (repo_owner, repo_name, full_name, webhook_id, dev_scene or "",
+                         _final_bot_gc, gitcode_webhook_token, bot_username, github_webhook_token,
+                         _final_bot_gh, org_id, _final_host, _final_secret, repo_key))
                 except Exception:
-                    try:
-                        c.execute(
-                            "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, org_id) VALUES (?,?,?,?,?,?,?,?,?,?)",
-                            (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, org_id))
-                    except Exception:
-                        c.execute(
-                            "INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username) VALUES (?,?,?,?,?,?,?,?,?)",
-                            (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username))
+                    # 列不存在时降级（兼容未迁移的库）
+                    c.execute(
+                        "UPDATE managed_repos SET repo_owner=?, repo_name=?, full_name=?, webhook_id=?, dev_scene=?, "
+                        "bot_gitcode_token=?, gitcode_webhook_token=?, bot_username=?, github_webhook_token=?, "
+                        "bot_github_token=?, org_id=? WHERE repo_key=?",
+                        (repo_owner, repo_name, full_name, webhook_id, dev_scene or "",
+                         bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token,
+                         bot_github_token, org_id, repo_key))
+            else:
+                # 无记录——INSERT
+                try:
+                    c.execute(
+                        "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id, host_user_id, webhook_secret))
+                except Exception:
+                    # 列不存在时降级
+                    c.execute(
+                        "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene, bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        (repo_key, repo_owner, repo_name, full_name, webhook_id, dev_scene or "", bot_gitcode_token, gitcode_webhook_token, bot_username, github_webhook_token, bot_github_token, org_id))
             db.commit()
             return True
     except Exception as e:
@@ -1599,16 +1657,88 @@ def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bo
         return False
 
 
+def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str) -> str:
+    """R14.16: 统一 webhook 重建逻辑——删旧 webhook + 用 bot token 建新 webhook。
+
+    被 update_managed_repo_bot_token（手动设置入口）和 auto_upgrade_path_b_repos
+    （自动升级入口）共用，确保所有写 bot token 的路径都重建 webhook。
+
+    返回新 webhook_id（字符串），失败返回空串。
+    """
+    from src.repo_key import to_repo_key, split_owner_repo
+    repo_key = to_repo_key(repo_key)
+    _wh_url = get_webhook_url()
+    if not _wh_url:
+        log.warning(f"_rebuild_webhook_with_bot_token: webhook_url not configured for {repo_key}")
+        return ""
+    if provider == "github":
+        _wh_url = _wh_url.replace("/webhook/gitcode", "/webhook/github")
+    try:
+        owner, repo_name = split_owner_repo(repo_key)
+    except Exception:
+        log.warning(f"_rebuild_webhook_with_bot_token: cannot split repo_key {repo_key}")
+        return ""
+    # 删旧 webhook
+    _old_hook_id = _get_managed_webhook_id(repo_key)
+    if _old_hook_id:
+        try:
+            if provider == "github":
+                from src.user.repo_manager import remove_github_webhook
+                remove_github_webhook(bot_token, owner, repo_name, _old_hook_id)
+            else:
+                from src.user.repo_manager import remove_webhook
+                remove_webhook(bot_token, owner, repo_name, _old_hook_id)
+        except Exception as _re:
+            log.warning(f"_rebuild_webhook_with_bot_token: remove old webhook failed for {repo_key}: {_re}")
+            # 删旧失败 → 不继续建新（旧 webhook 仍在，新建会创建第二个）
+            # 返回空串：调用方会清 webhook_secret 并写 bot token，
+            # 旧 webhook 的实际密码（旧 secret/token）与 DB 新值不匹配 → webhook 403
+            # 这是 loud fail（有日志），用户可 repair_host 恢复
+            return ""
+    # 用 bot token 建新 webhook
+    try:
+        if provider == "github":
+            from src.user.repo_manager import setup_github_webhook
+            return str(setup_github_webhook(bot_token, owner, repo_name, _wh_url, webhook_secret=""))
+        else:
+            from src.user.repo_manager import setup_webhook
+            return str(setup_webhook(bot_token, owner, repo_name, _wh_url, webhook_password=bot_token))
+    except Exception as _se:
+        log.error(f"_rebuild_webhook_with_bot_token: setup new webhook FAILED for {repo_key}: {_se}")
+        return ""
+
+
 def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> bool:
+    """写入仓库级 bot token（管理员手动设置 bot token 用）。
+
+    R14.14: 同时清 host_user_id=0 + webhook_secret=''。
+    R14.14: 按 repo_key 前缀分列写入。
+    R14.16: 统一走 _update_repo_bot_token + _rebuild_webhook_with_bot_token，
+    确保手动设置 token 后 webhook 也用 bot token 重建（同 auto_upgrade 入口）。
+    R14.19: 先检查仓库存在再重建 webhook，返回 rowcount 语义（404 检测不失效）。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    # 先检查仓库是否存在于 managed_repos（不存在返回 False，调用方走 404）
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("UPDATE managed_repos SET bot_gitcode_token=? WHERE repo_key=?", (bot_token, repo_key))
-            db.commit()
-            return c.rowcount > 0
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            if not c.fetchone():
+                return False
     except Exception as e:
-        log.warning(f"Update managed repo bot token failed: {e}")
+        log.warning(f"update_managed_repo_bot_token: check existence failed: {e}")
         return False
+    provider = "github" if repo_key.startswith("github:") else "gitcode"
+    # 重建 webhook（删旧 + 建新），失败时仍写 DB（webhook_id 为空，用户可手动 repair）
+    _new_hook_id = _rebuild_webhook_with_bot_token(repo_key, bot_token, provider)
+    if not _new_hook_id:
+        log.warning(f"update_managed_repo_bot_token: webhook rebuild failed for {repo_key}, "
+                    f"DB written but webhook may be stale — user should run repair_host")
+    # 统一入口：写 token + 清 host_user_id + 清 webhook_secret + 写 webhook_id
+    _update_repo_bot_token(repo_key, bot_token, provider,
+                           webhook_token=bot_token, webhook_id=_new_hook_id)
+    return True
 
 
 def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
@@ -1624,9 +1754,17 @@ def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
 
 
 def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
-    """按 owner/repo 查仓库 bot token（内部按带前缀 repo_key 命中）"""
+    """按 owner/repo 查仓库 bot token（内部按带前缀 repo_key 命中）。
+
+    R12.12: 路径 B 仓库（host_user_id > 0）守卫下沉到此处——
+    所有调用方（scenes/feishu_async/chat/agents/session_store/settings 等 12 处）
+    自动继承路径 B 跳过逻辑，与 get_repo_token_with_refresh / get_repo_bot_token 对齐。
+    """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(f"{repo_owner}/{repo_name}")
+    # R12.12: 路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
+    if get_host_user_id(repo_key) > 0:
+        return ""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT bot_gitcode_token FROM managed_repos WHERE repo_key=? AND bot_gitcode_token!='' LIMIT 1", (repo_key,))
@@ -1641,25 +1779,20 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
 
     用于服务端内部端点（A2A/tasks）鉴权——对齐 webhook token 思路但用 bot token，
     避免全局兜底导致未托管仓库也拿到 token。
+
+    Issue #372: 路径 B 仓库（无 bot token，有 host_user_id）降级返回 host 用户 token，
+    确保 A2A bot token 通道在路径 B 场景下仍可用（远程 worker 无 session token 时）。
+
+    R20.13.1: 改为调 TokenResolver.read_stored_token()——走统一策略链。
+    R25.1: 跳过第 3 级 GlobalBotToken 策略，保持"no_global"语义。
+    read_stored_token 契约：不检查过期、不触发 refresh、走缓存层。
     """
-    from src.repo_key import split_owner_repo
-    try:
-        owner, rname = split_owner_repo(repo_key)
-        _tok = get_bot_token_by_repo(owner, rname) or ""
-        if _tok:
-            return _tok
-    except Exception:
-        pass
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT repo_gitcode_token FROM devops_agent_session WHERE repo_key=? AND repo_gitcode_token IS NOT NULL AND repo_gitcode_token!='' LIMIT 1", (repo_key,))
-            row = c.fetchone()
-            if row:
-                return row[0]
-    except Exception:
-        pass
-    return ""
+    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    provider = create_provider_from_repo_key(repo_key)
+    resolver = TokenResolver(provider)
+    # R25.1: 跳过第 3 级 GlobalBotToken（保持"no_global"语义）
+    resolver.strategies = [s for s in resolver.strategies if s.level != "global_bot"]
+    return resolver.read_stored_token(repo_key)
 
 
 # Issue #345: 全局 bot token 内存缓存——TTL 60 秒
@@ -1783,32 +1916,14 @@ def _get_global_bot_token() -> str:
 def get_gitcode_token(repo_key: str = "", user_id: int = 0) -> str:
     """统一获取 GitCode API Token。
 
-    - repo_key 非空 → bot token：devops_agent_session.repo_gitcode_token
-      → managed_repos.bot_gitcode_token（get_bot_token_by_repo）→ 全局 bot token
+    Issue #372: 内部改为调 get_repo_token_with_refresh（统一入口），
+    保留 user_id 参数兼容原有调用方。
+
+    - repo_key 非空 → get_repo_token_with_refresh（四级 fallback + 用户 token 降级）
     - user_id > 0 → user token（通过 get_user_gitcode_token 从 external_identities 读）
     """
-    from src.repo_key import to_repo_key
-    repo_key = to_repo_key(repo_key)
     if repo_key:
-        # 1. devops_agent_session.repo_gitcode_token（agent 专属配置）
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT repo_gitcode_token FROM devops_agent_session WHERE repo_key=? AND repo_gitcode_token IS NOT NULL AND repo_gitcode_token!='' LIMIT 1", (repo_key,))
-                row = c.fetchone()
-                if row:
-                    return row[0]
-        except Exception as e:
-            log.warning(f"get_gitcode_token: query devops_agent_session failed: {e}")
-        # 2. managed_repos.bot_gitcode_token（仓库级配置）
-        if "/" in repo_key:
-            from src.repo_key import split_owner_repo
-            owner, repo = split_owner_repo(repo_key)
-            tok = get_bot_token_by_repo(owner, repo)
-            if tok:
-                return tok
-        # 3. 全局 bot token
-        return _get_global_bot_token()
+        return get_repo_token_with_refresh(repo_key)
     if user_id > 0:
         return get_user_gitcode_token(user_id)
     return ""
@@ -1820,61 +1935,526 @@ def get_repo_bot_token(repo_key: str = "") -> str:
     Issue #343: 建单/关单/评论等用户交互写操作用此函数，不用 get_gitcode_token——
     后者第一优先级是 devops_agent_session.repo_gitcode_token（agent 专属，scope 可能受限）。
     本函数跳过 agent session，直接用 managed_repos.bot_gitcode_token → 全局 bot token。
+
+    Issue #372: 末尾加用户 token 降级（路径 B 托管场景）。
+    **不委托 get_repo_token_with_refresh**（后者包含 devops_agent_session 层，会破坏 #343 语义）。
+
+    R18: 内部委托 TokenResolver，跳过第 1 级（DevopsAgentSessionToken）。
+    """
+    if not repo_key:
+        return ""
+    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    provider = create_provider_from_repo_key(repo_key)
+    resolver = TokenResolver(provider)
+    resolver.strategies = resolver.strategies[1:]  # 跳过第 1 级 session token
+    return resolver.get_token(repo_key)
+
+
+def get_task_token(task: dict) -> str:
+    """Issue #372 R11.4: 获取 task 的 GitCode/GitHub token（公共函数）。
+
+    优先读 task 行的 repo_gitcode_token（路径 A 存入的 bot token）。
+    为空时（路径 B 托管）通过实时获取（带自动刷新）。
+    按 repo_key 前缀分流：github: → get_github_token，其他 → get_repo_token_with_refresh。
+    """
+    tok = task.get("repo_gitcode_token") or ""
+    if tok:
+        return tok
+    repo_key = task.get("repo_key") or ""
+    if repo_key:
+        try:
+            if repo_key.startswith("github:"):
+                from src.user.db import get_github_token
+                return get_github_token(repo_key=repo_key) or ""
+            else:
+                from src.user.db import get_repo_token_with_refresh
+                return get_repo_token_with_refresh(repo_key) or ""
+        except Exception:
+            pass
+    return ""
+
+
+def get_host_user_id(repo_key: str) -> int:
+    """Issue #372: 查 managed_repos.host_user_id（路径 B 托管用户 ID）。
+
+    返回 host_user_id（>0 表示用户托管），0 表示未配置或仓库不存在。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return 0
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT host_user_id FROM managed_repos WHERE repo_key=? LIMIT 1",
+                (repo_key,),
+            )
+            row = c.fetchone()
+            if row and row[0]:
+                return int(row[0])
+    except Exception as e:
+        log.warning(f"get_host_user_id: query managed_repos failed: {e}")
+    return 0
+
+
+def get_webhook_secret(repo_key: str) -> str:
+    """Issue #372: 查 managed_repos.webhook_secret（webhook 验证密钥，与 token 解耦）。
+
+    返回 webhook_secret 字符串，空字符串表示未配置。
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key:
         return ""
-    # 1. managed_repos.bot_gitcode_token（仓库级配置）
-    if "/" in repo_key:
-        from src.repo_key import split_owner_repo
-        owner, repo = split_owner_repo(repo_key)
-        tok = get_bot_token_by_repo(owner, repo)
-        if tok:
-            return tok
-    # 2. 全局 bot token
-    return _get_global_bot_token()
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT webhook_secret FROM managed_repos WHERE repo_key=? LIMIT 1",
+                (repo_key,),
+            )
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        log.warning(f"get_webhook_secret: query managed_repos failed: {e}")
+    return ""
+
+
+def get_webhook_verify_token(repo_key: str) -> str:
+    """R20.12.1: 获取 webhook 验证用的 token/password。不走 TokenResolver，独立查询。
+
+    R20.12.2: 验证优先级 webhook_secret → webhook_token_field → get_repo_bot_token_no_global（兼容旧数据）。
+    R20.12.3: 短路机制不影响 webhook 验证——即使 bot token 过期短路，webhook 验证仍用 webhook_secret / webhook_token。
+    R20.12.4: 路径 B 仓库 webhook 验证用 webhook_secret（随机密钥），与 token 过期状态无关。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return ""
+    # 1. 查 webhook_secret（路径 B 随机密钥，优先）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT webhook_secret FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        log.warning(f"get_webhook_verify_token: query webhook_secret failed: {e}")
+    # 2. 查 webhook_token_field（路径 A bot token 写入的 webhook password）
+    _is_github = repo_key.startswith("github:")
+    _wt_field = "github_webhook_token" if _is_github else "gitcode_webhook_token"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT {_wt_field} FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        log.warning(f"get_webhook_verify_token: query {_wt_field} failed: {e}")
+    # 3. fallback：兼容旧数据（未迁移的仓库）
+    return get_repo_bot_token_no_global(repo_key) or ""
+
+
+def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
+    """R20.1.3/R20.1.4: 获取路径 B 仓库的 host 用户 VCS 平台用户名。
+
+    优先从 managed_repos.host_vcs_username 列读取（R16.5.5），
+    为空时 fallback 到 external_identities 查询 host_user_id 对应的 provider username。
+
+    R20.1.7: 查询失败时降级为返回空串（不阻断 pipeline）。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return ""
+    # 1. 查 managed_repos.host_vcs_username
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT host_vcs_username FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if row and row[0]:
+                return row[0]
+    except Exception as e:
+        log.warning(f"get_host_vcs_username: query managed_repos failed: {e}")
+    # 2. fallback: 从 external_identities 查
+    if not provider:
+        provider = "github" if repo_key.startswith("github:") else "gitcode"
+    host_user_id = get_host_user_id(repo_key)
+    if host_user_id > 0:
+        try:
+            c2 = db.cursor()
+            c2.execute(
+                "SELECT external_login FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1",
+                (host_user_id, provider),
+            )
+            row = c2.fetchone()
+            if row and row[0]:
+                return row[0]
+        except Exception as e:
+            log.warning(f"get_host_vcs_username: query external_identities failed: {e}")
+    return ""
+
+
+def sync_host_vcs_username(repo_key: str, login: str):
+    """R20.1.5: 同步 host_vcs_username 到 managed_repos（verify_token 返回 login 变更时调用）。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key or not login:
+        return
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE managed_repos SET host_vcs_username=? WHERE repo_key=? AND host_user_id>0",
+                      (login, repo_key))
+            db.commit()
+    except Exception as e:
+        log.warning(f"sync_host_vcs_username: update failed: {e}")
+
+
+def get_repo_token_with_refresh(repo_key: str) -> str:
+    """Issue #372 R2: 仓库级 token 获取（含用户 token 降级 + 刷新）。
+
+    R18: 内部委托 TokenResolver 策略链。保留原签名向后兼容。
+
+    优先级（保留原 get_gitcode_token 全部三级 + 用户 token 降级）：
+      A. devops_agent_session.repo_gitcode_token（agent 专属配置）→ 直接返回，不刷新
+      B. managed_repos.bot_gitcode_token（仓库级 Bot Token）→ 直接返回，不刷新
+      C. _get_global_bot_token()（全局 Bot Token）→ 直接返回，不刷新
+      D. managed_repos.host_user_id → get_user_token_with_refresh(username, host_user_id)
+         （用户 OAuth token，支持过期刷新）
+
+    路径 A/B/C 是 bot token（长期有效，无需刷新）；路径 D 是用户 token（OAuth，
+    可能过期，由 get_user_token_with_refresh 内部判断刷新）。
+
+    R16.4: 过期短路——标记过期的 token 短路返回空串（用户 token status=4 除外，best-effort）。
+    """
+    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    provider = create_provider_from_repo_key(repo_key)
+    return TokenResolver(provider).get_token(repo_key)
+
+
+def _is_user_token_repo(repo_key: str) -> bool:
+    """Issue #372 R2.4: 判断仓库是否走路径 D（用户 token 降级）。
+
+    前三级（devops_agent_session / managed_repos.bot_gitcode_token / 全局 bot）
+    全为空且 host_user_id > 0 → True。用于 task 创建时区分 token 来源——
+    用户 OAuth token 会过期，不应写入 task 行，应由运行时实时获取。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return False
+    # R22.2.5: 路径 B 仓库（host_user_id > 0）跳过 session token 查询——
+    # 与 DevopsAgentSessionToken._fetch 的 host_user_id 守卫对齐（R22.2.4）。
+    # 防止路径 A→B 降级后 session token 残留导致 _is_user_token_repo 误返回 False。
+    _hid = get_host_user_id(repo_key)
+    if _hid > 0:
+        # 路径 B 仓库：session token 层无关，直接跳到 bot_gitcode_token 检查
+        pass
+    else:
+        # 路径 A: devops_agent_session.repo_gitcode_token
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT repo_gitcode_token FROM devops_agent_session "
+                    "WHERE repo_key=? AND repo_gitcode_token IS NOT NULL "
+                    "AND repo_gitcode_token!='' LIMIT 1",
+                    (repo_key,),
+                )
+                if c.fetchone():
+                    return False
+        except Exception:
+            pass
+    # 路径 B: managed_repos.bot_gitcode_token
+    # R14.13: 路径 B 仓库（host_user_id > 0）跳过此层——与 get_repo_token_with_refresh 守卫对齐，
+    # 防止脏写入的 bot_gitcode_token 导致判断不一致
+    if _hid == 0:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT bot_gitcode_token FROM managed_repos "
+                    "WHERE repo_key=? AND bot_gitcode_token IS NOT NULL "
+                    "AND bot_gitcode_token!='' LIMIT 1",
+                    (repo_key,),
+                )
+                if c.fetchone():
+                    return False
+        except Exception:
+            pass
+    # 路径 C: 全局 Bot Token
+    # R12.11: 路径 B 仓库（host_user_id > 0）跳过全局 bot token 层（与主函数一致）
+    # R14.13: 复用上方 _hid 避免重复 DB 查询
+    if _hid == 0:
+        if _get_global_bot_token():
+            return False
+    # 路径 D: host_user_id > 0 → 用户 token
+    return _hid > 0
+
+
+def _is_github_user_token_repo(repo_key: str) -> bool:
+    """Issue #372 R2.4: 判断 GitHub 仓库是否走用户 token 降级路径。
+
+    GitHub get_github_token fallback：managed_repos.bot_github_token →
+    owner external_identities → 全局 → host_user_id 用户 token。
+    前三级全为空且 host_user_id > 0 → True。
+    """
+    from src.repo_key import to_repo_key, parse_repo_key
+    repo_key = to_repo_key(repo_key, provider="github")
+    if not repo_key:
+        return False
+    provider, _, _ = parse_repo_key(repo_key)
+    if provider != "github":
+        return False
+    # 1. managed_repos.bot_github_token
+    # R14.13: 路径 B 仓库（host_user_id > 0）跳过此层——与 get_github_token 守卫对齐
+    _hid = get_host_user_id(repo_key)
+    if _hid == 0:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT bot_github_token FROM managed_repos "
+                    "WHERE repo_key=? AND bot_github_token!='' LIMIT 1",
+                    (repo_key,),
+                )
+                if c.fetchone():
+                    return False
+        except Exception:
+            pass
+    # 2. owner external_identities（owner 有 GitHub 绑定 token → 非 user token 降级）
+    # R14.13: 路径 B 仓库跳过此层（与 get_github_token 一致）
+    if _hid == 0:
+        try:
+            from src.repo_key import parse_repo_key as _prk
+            from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities_with_tokens
+            _prov, owner, _name = _prk(repo_key)
+            if owner:
+                acc = get_grape_account_by_username(owner)
+                if acc:
+                    for i in get_user_identities_with_tokens(acc["id"]):
+                        if i.get("provider") == "github" and i.get("access_token"):
+                            return False
+        except Exception:
+            pass
+    # 3. 全局 GitHub bot token
+    # R12.11: 路径 B 仓库（host_user_id > 0）跳过全局 bot token 层（与主函数一致）
+    # R14.13: 复用上方 _hid 避免重复 DB 查询
+    if _hid == 0:
+        if get_global_github_bot_token():
+            return False
+    # 4. host_user_id > 0 → 用户 token
+    return _hid > 0
 
 
 def get_github_token(repo_key: str = "") -> str:
     """统一获取 GitHub API Token（对应 get_gitcode_token 的 GitHub 版）。
 
-    - repo_key 非空 → bot token：managed_repos.bot_github_token → 仓库 owner 的 external_identities → 全局
+    R18: 内部委托 TokenResolver（GitHubProvider），保留 D32-补丁 fallback。
+    D32-补丁：TokenResolver 返回空时查仓库 owner 的 GitHub identity（标准策略链不含此层）。
+
+    - repo_key 非空 → bot token：managed_repos.bot_github_token → 全局 → 用户 token 降级
     - 无 repo_key → 空（用户级 token 走 get_user_github_token）
     """
-    from src.repo_key import to_repo_key, parse_repo_key
-    repo_key = to_repo_key(repo_key, provider="github")
-    if not repo_key:
-        return ""
-    # 仅处理 GitHub 仓库
-    provider, _, _ = parse_repo_key(repo_key)
-    if provider != "github":
-        return ""
-    # 1. managed_repos.bot_github_token（仓库级配置）
+    from src.token_resolver import TokenResolver, create_provider
+    token = TokenResolver(create_provider("github")).get_token(repo_key)
+    if token:
+        return token
+    # D32-补丁：TokenResolver 返回空时，查仓库 owner 的 GitHub identity
     try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT bot_github_token FROM managed_repos WHERE repo_key=? AND bot_github_token!='' LIMIT 1", (repo_key,))
-            row = c.fetchone()
-            if row and row[0]:
-                return row[0]
-    except Exception as e:
-        log.warning(f"get_github_token: query managed_repos failed: {e}")
-    # 2. 仓库 owner 的 GitHub token（D32-补丁：从 external_identities 读，需含 access_token）
-    try:
-        from src.repo_key import parse_repo_key
-        from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities_with_tokens
+        from src.repo_key import parse_repo_key, to_repo_key
+        repo_key = to_repo_key(repo_key, provider="github")
+        if not repo_key:
+            return ""
         _prov, owner, _name = parse_repo_key(repo_key)
         if owner:
+            from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities_with_tokens
             acc = get_grape_account_by_username(owner)
             if acc:
                 for i in get_user_identities_with_tokens(acc["id"]):
                     if i.get("provider") == "github" and i.get("access_token"):
                         return i["access_token"]
     except Exception as e:
-        log.warning(f"get_github_token: query external_identities failed: {e}")
-    # 3. 全局 github bot token（Issue #345: DB 优先 → 文件 fallback）
-    return get_global_github_bot_token()
+        log.warning(f"get_github_token: D32-patch fallback failed: {e}")
+    return ""
+
+
+def _query_path_b_repos(provider: str = "gitcode") -> list[dict]:
+    """Issue #372 §13.2: 查询路径 B 仓库（bot_gitcode_token 空 + host_user_id > 0）。
+
+    用于自动升级——管理员配置全局 bot token 时遍历这些仓库，
+    best-effort 邀 bot 为协作者 + 写入 bot_gitcode_token。
+
+    provider: "gitcode" 查 GitCode 路径 B 仓库，"github" 查 GitHub 路径 B 仓库。
+    返回 [{repo_key, repo_owner, repo_name, host_user_id}, ...]
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            if provider == "github":
+                c.execute(
+                    "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
+                    "WHERE (bot_github_token IS NULL OR bot_github_token='') "
+                    "AND host_user_id > 0 AND repo_key LIKE 'github:%'"
+                )
+            else:
+                c.execute(
+                    "SELECT repo_key, repo_owner, repo_name, host_user_id FROM managed_repos "
+                    "WHERE (bot_gitcode_token IS NULL OR bot_gitcode_token='') "
+                    "AND host_user_id > 0 AND repo_key NOT LIKE 'github:%'"
+                )
+            rows = c.fetchall()
+        return [
+            {"repo_key": r[0], "repo_owner": r[1], "repo_name": r[2], "host_user_id": r[3]}
+            for r in (rows or [])
+        ]
+    except Exception as e:
+        log.warning(f"_query_path_b_repos: query failed: {e}")
+        return []
+
+
+def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitcode",
+                           webhook_token: str = "", webhook_id: str = ""):
+    """Issue #372 §13.2: 写入 managed_repos 的 bot token 字段（路径 B → A 升级用）。
+
+    写入后 get_repo_token_with_refresh 第 2 步自动命中，pipeline 切路径 A。
+    Issue #372 §25: 同时清 host_user_id=0，消除语义混合状态。
+    R14.1: 同时写入 webhook_token + webhook_id + 清 webhook_secret，
+    确保升级后 webhook 验证用 bot token（而非已被清空的旧随机密钥）。
+    R16.3.3: 同时清除 bot_token_status 过期标记（新 token 写入时短路自动解除）。
+    """
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    try:
+        with db_lock:
+            c = db.cursor()
+            if provider == "github":
+                # R14.1: 同步写入 github_webhook_token=bot_token, webhook_id, 清 webhook_secret
+                # R16.3.3: 清 bot_token_status
+                c.execute(
+                    "UPDATE managed_repos SET bot_github_token=?, host_user_id=0, webhook_secret='', "
+                    "bot_token_status='', github_webhook_token=?, webhook_id=? WHERE repo_key=?",
+                    (bot_token, webhook_token or bot_token, str(webhook_id) if webhook_id else "", repo_key),
+                )
+            else:
+                # R14.1: 同步写入 gitcode_webhook_token=bot_token, webhook_id, 清 webhook_secret
+                # R16.3.3: 清 bot_token_status
+                c.execute(
+                    "UPDATE managed_repos SET bot_gitcode_token=?, host_user_id=0, webhook_secret='', "
+                    "bot_token_status='', gitcode_webhook_token=?, webhook_id=? WHERE repo_key=?",
+                    (bot_token, webhook_token or bot_token, str(webhook_id) if webhook_id else "", repo_key),
+                )
+            db.commit()
+    except Exception as e:
+        log.warning(f"_update_repo_bot_token: update failed: {e}")
+
+
+def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
+    """Issue #372 §13.2: 异步升级路径 B 仓库——邀 bot + 写 bot_gitcode_token。
+
+    best-effort：失败的仓库跳过（兼容修复 §13.1 保证仍走用户 token 正常工作）。
+    此函数应在后台线程中调用，不阻塞 save_config 响应。
+
+    provider: "gitcode" 或 "github"
+    bot_token: 全局 bot token（刚配置的）
+    bot_username: 全局 bot 用户名
+    """
+    import time
+    log.info(f"auto_upgrade_path_b_repos: starting for provider={provider}, repos to check")
+    repos = _query_path_b_repos(provider)
+    if not repos:
+        log.info(f"auto_upgrade_path_b_repos: no path B repos to upgrade for {provider}")
+        return
+    log.info(f"auto_upgrade_path_b_repos: {len(repos)} path B repos to upgrade for {provider}")
+    upgraded = 0
+    skipped = 0
+    for repo in repos:
+        try:
+            # 获取 host 用户的 token（用于邀请 bot 为协作者）
+            host_user_id = repo["host_user_id"]
+            host_token = ""
+            if provider == "github":
+                from src.api.deps import get_user_github_token_with_refresh
+                from src.auth.grape_account_db import get_grape_account_by_id
+                acc = get_grape_account_by_id(host_user_id)
+                if acc and acc.get("username"):
+                    host_token = get_user_github_token_with_refresh(acc["username"], host_user_id) or ""
+            else:
+                from src.api.deps import get_user_token_with_refresh
+                from src.auth.grape_account_db import get_grape_account_by_id
+                acc = get_grape_account_by_id(host_user_id)
+                if acc and acc.get("username"):
+                    host_token = get_user_token_with_refresh(acc["username"], host_user_id) or ""
+            if not host_token:
+                skipped += 1
+                continue  # host user token 过期，跳过
+
+            # 邀请 bot 为协作者
+            owner = repo["repo_owner"]
+            repo_name = repo["repo_name"]
+            if provider == "github":
+                # R12.2: GitHub 需要显式 accept（原注释"不需显式 accept"是错误的）
+                from src.user.repo_manager import add_github_collaborator, accept_github_invite
+                _gh_ok = add_github_collaborator(host_token, owner, repo_name, bot_username, "push")
+                if not _gh_ok:
+                    skipped += 1
+                    log.warning(f"auto_upgrade: add_github_collaborator failed for {repo['repo_key']}, skipping")
+                    continue
+                if not accept_github_invite(bot_token, owner, repo_name):
+                    skipped += 1
+                    log.warning(f"auto_upgrade: accept_github_invite failed for {repo['repo_key']}, skipping")
+                    continue
+            else:
+                from src.user.repo_manager import add_collaborator, accept_invite_for_repo
+                _ok, _err = add_collaborator(host_token, owner, repo_name, bot_username, "maintainer")
+                if not _ok:
+                    skipped += 1
+                    log.warning(f"auto_upgrade: add_collaborator failed for {repo['repo_key']}: {_err}, skipping")
+                    continue
+                # R12.8: 校验 accept 返回值，失败则 skip 不写 token
+                if not accept_invite_for_repo(bot_token, owner, repo_name):
+                    skipped += 1
+                    log.warning(f"auto_upgrade: accept_invite_for_repo failed for {repo['repo_key']}, skipping")
+                    continue
+
+            # R14.16: 统一走 _rebuild_webhook_with_bot_token（与手动设置入口共用）
+            # 部分失败处理：删旧失败 → 不建新（返回空），旧 webhook 保留；
+            # 建新失败 → 返回空，DB 写空 webhook_id，用户可 repair_host
+            _rk = repo["repo_key"]
+            _new_hook_id = _rebuild_webhook_with_bot_token(_rk, bot_token, provider)
+            if not _new_hook_id:
+                log.warning(f"auto_upgrade: webhook rebuild failed for {_rk}, "
+                            f"DB token written but webhook may need manual repair")
+                # webhook 重建失败：token 写入但 webhook 可能不工作
+                # 仍计为 upgraded（bot 协作者已邀请成功），但标记 webhook 重建失败
+                _update_repo_bot_token(_rk, bot_token, provider,
+                                       webhook_token=bot_token, webhook_id="")
+                upgraded += 1
+                _webhook_rebuild_failed = getattr(auto_upgrade_path_b_repos, '_webhook_rebuild_failed', 0) + 1
+                setattr(auto_upgrade_path_b_repos, '_webhook_rebuild_failed', _webhook_rebuild_failed)
+            else:
+                _update_repo_bot_token(_rk, bot_token, provider,
+                                       webhook_token=bot_token, webhook_id=_new_hook_id)
+                upgraded += 1
+            # 限流保护：每次邀请间隔 1 秒
+            time.sleep(1)
+        except Exception as e:
+            skipped += 1
+            log.warning(f"auto_upgrade_path_b_repos: upgrade failed for {repo.get('repo_key')}: {e}")
+            continue
+    _wbf = getattr(auto_upgrade_path_b_repos, '_webhook_rebuild_failed', 0)
+    if _wbf:
+        log.info(f"auto_upgrade_path_b_repos: done for {provider}: upgraded={upgraded}, skipped={skipped}, webhook_rebuild_failed={_wbf}")
+        setattr(auto_upgrade_path_b_repos, '_webhook_rebuild_failed', 0)  # reset for next call
+    else:
+        log.info(f"auto_upgrade_path_b_repos: done for {provider}: upgraded={upgraded}, skipped={skipped}")
 
 
 def get_agent_bot_token(repo_key: str) -> str:
@@ -1940,26 +2520,48 @@ def refresh_gitcode_oauth_token(user_id: int) -> str | None:
 
 
 def get_webhook_token_by_repo(full_name: str) -> str:
-    """根据 full_name（owner/repo）查找 repo 的预期 webhook token（按 provider 分流）。"""
+    """根据 full_name（owner/repo）查找 repo 的预期 webhook token（按 provider 分流）。
+
+    Issue #372: 优先返回 webhook_secret（路径 B 随机密钥，与 token 解耦），
+    为空时 fallback 到 gitcode_webhook_token / github_webhook_token（路径 A 兼容）。
+    """
     from src.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
         # 同时查 gitcode: 和 github: 前缀
         gc_key = to_repo_key(full_name)  # 默认 gitcode:
         gh_key = to_repo_key(full_name, provider="github")
-        c.execute(
-            "SELECT gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-            (gc_key, gh_key)
-        )
-        row = c.fetchone()
+        try:
+            c.execute(
+                "SELECT webhook_secret, gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) ORDER BY webhook_secret DESC LIMIT 1",
+                (gc_key, gh_key)
+            )
+            row = c.fetchone()
+        except Exception:
+            # 列不存在时降级（兼容未迁移的库）
+            c.execute(
+                "SELECT gitcode_webhook_token, github_webhook_token FROM managed_repos WHERE repo_key IN (?, ?) ORDER BY gitcode_webhook_token DESC LIMIT 1",
+                (gc_key, gh_key)
+            )
+            row = c.fetchone()
+            if not row:
+                return ""
+            return row[1] or row[0] or ""
         if not row:
             return ""
-        # 优先返回非空的 token（GitHub 仓库有 github_webhook_token，GitCode 有 gitcode_webhook_token）
-        return row[1] or row[0] or ""
+        # 优先 webhook_secret（路径 B），fallback 到 webhook_token（路径 A）
+        webhook_secret = row[0] or ""
+        if webhook_secret:
+            return webhook_secret
+        # GitHub 仓库有 github_webhook_token，GitCode 有 gitcode_webhook_token
+        return row[2] or row[1] or ""
 
 
 def remove_managed_repo(repo_key: str) -> dict | None:
-    """删除仓库级托管行，返回被删除的记录（含 webhook_id）或 None；同时复位所有用户 is_join。"""
+    """删除仓库级托管行，返回被删除的记录（含 webhook_id）或 None；同时复位所有用户 is_join。
+
+    R19.3.4: 删除仓库时清理 devops_agent_session 中的 token 字段。
+    """
     from src.repo_key import from_repo_key
     try:
         with db_lock:
@@ -1970,6 +2572,13 @@ def remove_managed_repo(repo_key: str) -> dict | None:
                 return None
             c.execute("DELETE FROM managed_repos WHERE repo_key=?", (repo_key,))
             c.execute("UPDATE user_repos SET is_join=0 WHERE repo_key=?", (repo_key,))
+            # R19.3.4: 清理 devops_agent_session 中的 token 字段
+            try:
+                c.execute(
+                    "UPDATE devops_agent_session SET repo_gitcode_token='', repo_github_token='', token_status='' "
+                    "WHERE repo_key=?", (repo_key,))
+            except Exception:
+                pass  # 列可能不存在（未 ALTER），忽略
             db.commit()
             return {"full_name": from_repo_key(repo_key), "webhook_id": row[1]}
     except Exception as e:
@@ -2111,7 +2720,7 @@ def get_server_base_url() -> str:
     """返回服务端 API 基址（A2A/tasks 等协议端点用，不含 /webhook/gitcode 后缀）。
 
     优先取 configs/server-config.json 显式配置；无则 meta.server_base_url；
-    再兜底从 webhook_url 剥掉 /webhook/gitcode 后缀；最后 http://localhost:8080。
+    再兜底从 webhook_url 剥掉 /webhook/gitcode 后缀；最后 http://localhost:{GRAPE_PORT}（默认 3000）。
     """
     try:
         from src.config import read_server_config
@@ -2133,7 +2742,9 @@ def get_server_base_url() -> str:
             return base
     except Exception:
         pass
-    return "http://localhost:8080"
+    # Issue #372 §15.5: fallback 端口从 GRAPE_PORT 读取，默认 3000（非硬编码 8080）
+    _port = os.environ.get("GRAPE_PORT", "3000")
+    return f"http://localhost:{_port}"
 
 
 def get_webhook_url() -> str:
@@ -2153,6 +2764,56 @@ def get_webhook_url() -> str:
         return (get_meta_value("webhook_url") or "").strip()
     except Exception:
         return ""
+
+
+def detect_webhook_from_host(host: str, forwarded_host: str = "", forwarded_proto: str = "") -> str:
+    """Issue #372 §14.2.2: 从入站请求头推导 webhook_url。
+
+    支持nginx 代理场景：
+    - 优先用 forwarded_host（X-Forwarded-Host，nginx 配 $http_host 时含端口）
+    - fallback 到 host（Host 头，直连场景含端口）
+    - forwarded_proto（X-Forwarded-Proto）判断 https
+
+    安全约束：
+    - 排除 localhost / 127.0.0.1 / 0.0.0.0（本地开发不自动发现）
+    - 只在调用方确认请求已认证后才调用此函数
+    - Issue #372 §32: TRUSTED_HOSTS 白名单校验（如果配置了），防止伪造 Host 头
+
+    返回推导的 webhook_url（含 /webhook/gitcode 后缀），无效 host 返回空串。
+    """
+    # R11.1: 未设 TRUSTED_HOSTS 时不读 X-Forwarded-Host（防伪造）
+    _trusted = os.environ.get("TRUSTED_HOSTS", "").strip()
+    if _trusted:
+        # 已设白名单 → 可以信任 X-Forwarded-Host（经 nginx 设置）
+        raw = (forwarded_host or host or "").strip()
+    else:
+        # 未设白名单 → 仅读 Host header（不读 X-Forwarded-Host，防伪造）
+        raw = (host or "").strip()
+    if not raw:
+        return ""
+    raw = raw.lower()
+    # 排除本地开发地址
+    _local = ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+    for _lh in _local:
+        if raw == _lh or raw.startswith(_lh + ":"):
+            return ""
+    # Issue #372 §32: TRUSTED_HOSTS 白名单校验
+    # _trusted 已在上方读取（R11.1）
+    if _trusted:
+        _trusted_list = [h.strip().lower() for h in _trusted.split(",") if h.strip()]
+        _host_no_port = raw.split(":")[0]
+        _host_with_port = raw
+        _matched = any(_host_no_port == t or _host_with_port == t or
+                       _host_no_port.endswith("." + t) for t in _trusted_list)
+        if not _matched:
+            log.warning(f"detect_webhook_from_host: host '{raw}' not in TRUSTED_HOSTS, rejected")
+            return ""
+    # 协议：X-Forwarded-Proto 优先，无则默认 http
+    proto = (forwarded_proto or "").strip().lower()
+    if proto not in ("http", "https"):
+        proto = "http"
+    # host 可能含端口（如 1.2.3.4:3000），保留端口
+    return f"{proto}://{raw}/webhook/gitcode"
 
 
 def migrate_oauth_providers():
@@ -2427,7 +3088,30 @@ def refresh_oauth_token(user_id: int, provider: str) -> str | None:
         token_data = _json.loads(resp.read())
     except Exception as e:
         log.warning(f"refresh_oauth: refresh failed for user={user_id}, provider={provider}: {e}")
-        return None
+        # R21.4.2: refresh 失败时重读 external_identities 获取最新 refresh_token 重试一次
+        # 场景：双主集群下另一实例已刷新了 token，本实例持有的旧 refresh_token 已失效
+        _new_rt = _read_refresh_token_from_identity(user_id, provider)
+        if _new_rt and _new_rt != rt:
+            log.info(f"refresh_oauth: retrying with updated refresh_token for user={user_id}, provider={provider}")
+            try:
+                req2 = urllib.request.Request(
+                    token_url,
+                    data=urllib.parse.urlencode({
+                        "grant_type": "refresh_token",
+                        "refresh_token": _new_rt,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
+                    }).encode(),
+                    headers={"Content-Type": "application/x-www-form-urlencoded"},
+                    method="POST"
+                )
+                resp2 = urllib.request.urlopen(req2, timeout=10)
+                token_data = _json.loads(resp2.read())
+            except Exception as e2:
+                log.warning(f"refresh_oauth: retry also failed for user={user_id}, provider={provider}: {e2}")
+                return None
+        else:
+            return None
 
     new_access = token_data.get("access_token", "")
     new_refresh = token_data.get("refresh_token", "")

@@ -53,3 +53,17 @@ def _ensure_help_page_generated():
 
     _gen_help_page()
     yield
+
+
+@pytest.fixture(scope="function", autouse=True)
+def _reset_db_path():
+    """每个测试前重置 DEVOPS_DB_PATH。
+
+    防止其他测试模块 import 时改 env 导致后续测试拿到错误路径。
+    注意：不重绑 session_manager.db 连接——73 个模块在 module level 导入了 db，
+    重绑 session_manager.db 不会更新它们的引用，反而导致写读不一致。
+    依赖 _ensure_test_db session fixture 在 session 开始时用正确 env 初始化表。
+    """
+    _test_db = os.path.join(ROOT, "data", "test_sessions.db")
+    os.environ["DEVOPS_DB_PATH"] = _test_db
+    yield

@@ -84,6 +84,38 @@ class TestGetGitcodeCredByGitcodeId:
             db.commit()
 
 
+    def test_cred_matched_by_gitcode_id_when_token_expired(self):
+        """F3 修复（R9.6）：status=4（token 过期）的 identity 记录其 external_id 仍然有效，
+        应能跨 user_id 匹配到 user_credentials 中的凭据。"""
+        import json as _json
+        _clean()
+        gid = "000-guid-f3-test"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='F3User'")
+            c.execute("INSERT INTO grape_accounts (id, username, password_hash, token_version) VALUES (2,'F3User','x',0)")
+            c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
+            # status=4: token 过期，但 external_id（gitcode_id）仍然有效
+            c.execute("INSERT INTO external_identities (grape_user_id, provider, external_id, external_login, status) "
+                      "VALUES (2,'gitcode',?,'F3User',4)", (gid,))
+            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN (2,7)")
+            c.execute("INSERT INTO user_credentials (user_id, provider, config_json) VALUES (7,'gitcode_oauth',?)",
+                      (_json.dumps({"gitcode_id": gid, "access_token": "EXPIRED-IDENTITY-LIVE-CRED", "token_expires_at": 0}),))
+            db.commit()
+        from src.api import deps
+        # 修复前（status=1）：查不到 external_id → 返回 {} → 兜底失效
+        # 修复后（status IN (1,4)）：查到 external_id → 匹配 user_credentials → 返回凭据
+        cred = deps._get_gitcode_credential_by_gitcode_id("F3User")
+        assert cred.get("access_token") == "EXPIRED-IDENTITY-LIVE-CRED", \
+            "status=4 的 identity 记录 external_id 仍有效，应能匹配 user_credentials 凭据"
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM external_identities WHERE grape_user_id=2 AND provider='gitcode'")
+            c.execute("DELETE FROM grape_accounts WHERE id=2 OR username='F3User'")
+            c.execute("DELETE FROM user_credentials WHERE provider='gitcode_oauth' AND user_id IN (2,7)")
+            db.commit()
+
+
 class TestResolveIssueOrgId:
     def test_repo_authority_over_explicit(self):
         _seed_repo(REPO, org=7)

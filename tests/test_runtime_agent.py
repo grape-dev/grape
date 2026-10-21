@@ -251,7 +251,8 @@ class TestExecuteTaskTokenInjection:
         client = AsyncMock()
         fake, holder = self._fake_stream()
         with patch("src.runtime.agent._stream_runtime_async", new=fake), \
-             patch("src.user.db.get_user_gitcode_token", return_value="USER_TOKEN_ABC") as m_ut:
+             patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN_ABC") as m_ut, \
+             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser", "id": 7}):
             await ra._execute_task(client, task, "hermes-worker-1")
         return holder["last_kwargs"], m_ut
 
@@ -260,7 +261,7 @@ class TestExecuteTaskTokenInjection:
         assert kwargs["user_token"] == "USER_TOKEN_ABC"
         # bot token 语义保留（repo 级）
         assert kwargs["bot_token"] == "BOT_REPO_TOKEN"
-        m_ut.assert_called_once_with(7)
+        m_ut.assert_called_once()
 
     def test_non_chat_task_no_user_token(self):
         t = self._chat_task(agent_type="coding", event_type="issue")

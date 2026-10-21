@@ -5,7 +5,7 @@ from pydantic import BaseModel
 from src.api.deps import require_no_session_token, require_org_member
 from src.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
-from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token
+from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token, get_user_github_token_with_refresh
 
 router = APIRouter(prefix="/api/project-templates", tags=["project-templates"])
 

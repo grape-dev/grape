@@ -9,9 +9,10 @@ _DEPLOY_ROOT = os.path.dirname(os.path.dirname(DB_PATH))
 def _local_port() -> str:
     """本机服务端口，优先读环境变量，默认 3000（兼容老 devops-bot）。
 
-    grape-main 部署时在 systemd Environment 中设 GRAPE_MAIN_PORT=8000 覆盖。
+    Issue #372 §24: 优先读 GRAPE_PORT（与 config.py / db.py 统一），
+    fallback GRAPE_MAIN_PORT（向后兼容已设此变量的部署），默认 3000。
     """
-    return os.environ.get("GRAPE_MAIN_PORT", "3000")
+    return os.environ.get("GRAPE_PORT") or os.environ.get("GRAPE_MAIN_PORT") or "3000"
 
 
 def _is_github_repo(repo_key: str) -> bool:
@@ -69,7 +70,8 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
         return public_url
     except Exception:
         pass
-    return "http://localhost:8080"
+    # Issue #372 §15.5: 异常 fallback 用 _local_port()，非硬编码 8080
+    return f"http://localhost:{_local_port()}"
 
 
 _PROJECT_INFO_SUMMARY_CHARS = 400
@@ -322,7 +324,8 @@ curl -sL -X POST \\
 ### Save User Mapping (INSERT into unified_user_mapping)
 Use Python to save discovered mappings in the bot's sessions.db:
   import sqlite3; db = sqlite3.connect('{DB_PATH}')
-  db.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id,gitcode_user,feishu_open_id,feishu_name,updated_at) VALUES (?,?,?,?,datetime('now'))", (USER_ID, GITCODE_USER, OPEN_ID, NAME))
+  db.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id,gitcode_user,updated_at) VALUES (?,?,datetime('now'))", (USER_ID, GITCODE_USER))
+  db.execute("UPDATE unified_user_mapping SET gitcode_user=?, feishu_open_id=?, feishu_name=?, updated_at=datetime('now') WHERE user_id=?", (GITCODE_USER, OPEN_ID, NAME, USER_ID))
   db.commit(); db.close()
   # 若不知道 user_id，可用 0 占位，后续由 sync_repo_feishu_mapping 回填
 

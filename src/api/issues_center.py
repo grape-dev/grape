@@ -71,13 +71,13 @@ def _get_user_id_by_gitcode(gitcode_user: str) -> int | None:
         try:
             row = c.execute(
                 "SELECT um.user_id FROM unified_user_mapping um "
-                "WHERE um.gitcode_user=? AND um.user_id>0 "
-                "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.username=um.gitcode_user) "
-                "LIMIT 1", (gitcode_user,)).fetchone()
+                "WHERE (um.gitcode_user=? OR um.github_login=?) AND um.user_id>0 "
+                "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND (ga.username=um.gitcode_user OR ga.username=um.github_login)) "
+                "LIMIT 1", (gitcode_user, gitcode_user)).fetchone()
             if not row:
                 row = c.execute(
-                    "SELECT user_id FROM unified_user_mapping WHERE gitcode_user=? AND user_id>0 LIMIT 1",
-                    (gitcode_user,)).fetchone()
+                    "SELECT user_id FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND user_id>0 LIMIT 1",
+                    (gitcode_user, gitcode_user)).fetchone()
             if row:
                 return row[0]
             log.warning(f"_get_user_id_by_gitcode: gitcode_user='{gitcode_user}' not found in unified_user_mapping (user_id will be 0)")
@@ -92,7 +92,7 @@ def _get_feishu_open_id(gitcode_user: str) -> str:
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? AND feishu_open_id!='' LIMIT 1", (gitcode_user,))
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND feishu_open_id!='' LIMIT 1", (gitcode_user, gitcode_user))
             row = c.fetchone()
             return row[0] if row else ""
         except Exception:

@@ -555,10 +555,15 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
 
 def setup_webhook(api_token: str, owner: str, repo: str, webhook_url: str, webhook_password: str = "",
                   _retries: int = 3) -> int:
-    """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id（429/5xx 退避重试）。"""
+    """在指定仓库上创建 DevOps Bot webhook，返回 webhook_id（429/5xx 退避重试）。
+
+    R20.16.2: webhook_password 为空时不再 fallback 到 get_repo_token_with_refresh，
+    改为用 api_token（调用方传入的 token）做 password。
+    R20.16.1: 调用方应显式传 webhook_password（路径 A 传 bot token，路径 B 传随机密钥）。
+    """
     if not webhook_password:
-        from src.user.db import get_bot_token_by_repo
-        webhook_password = get_bot_token_by_repo(owner, repo) or api_token
+        # R20.16.2: 不再 fallback 到 get_repo_token_with_refresh，用 api_token 做 password
+        webhook_password = api_token
     import time
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     body = {
@@ -616,6 +621,49 @@ def remove_webhook(api_token: str, owner: str, repo: str, webhook_id: int) -> bo
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks/{webhook_id}"
     _req("DELETE", url, api_token)
     return True
+
+
+# ====== Provider 统一配置（Issue #372: 消除散落的 if github else gitcode）======
+
+def get_hosting_provider_config(provider: str) -> dict:
+    """返回指定 provider 的托管配置（bot token / bot username / webhook 函数集 / webhook_url 后缀）。
+
+    统一入口，host_repo 和 repair_host 都调此函数，消除散落的 provider 分流逻辑。
+    返回 dict:
+      - bot_token: 全局 bot token（路径 A 用）
+      - bot_username: 全局 bot 用户名
+      - find_webhook: 查找已有 webhook 的函数
+      - setup_webhook: 创建 webhook 的函数
+      - remove_webhook: 删除 webhook 的函数
+      - webhook_url_suffix: webhook 路由后缀（"/webhook/github" 或 "/webhook/gitcode"）
+      - db_token_field: managed_repos 中存 webhook token 的列名
+      - db_bot_token_field: managed_repos 中存 bot token 的列名
+    """
+    if provider == "github":
+        from src.user.db import get_global_github_bot_token, get_global_github_bot_username
+        return {
+            "bot_token": get_global_github_bot_token(),
+            "bot_username": get_global_github_bot_username(),
+            "find_webhook": find_existing_github_webhook,
+            "setup_webhook": setup_github_webhook,
+            "remove_webhook": remove_github_webhook,
+            "webhook_url_suffix": "/webhook/github",
+            "db_token_field": "github_webhook_token",
+            "db_bot_token_field": "bot_github_token",
+        }
+    else:
+        from src.user.db import get_global_gitcode_bot_token, get_global_bot_usernames
+        _us = get_global_bot_usernames()
+        return {
+            "bot_token": get_global_gitcode_bot_token(),
+            "bot_username": _us[0] if _us else "",
+            "find_webhook": find_existing_webhook,
+            "setup_webhook": setup_webhook,
+            "remove_webhook": remove_webhook,
+            "webhook_url_suffix": "/webhook/gitcode",
+            "db_token_field": "gitcode_webhook_token",
+            "db_bot_token_field": "bot_gitcode_token",
+        }
 
 
 # ====== GitHub 仓库管理 ======

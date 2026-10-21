@@ -1,13 +1,19 @@
-"""Bot Token 健康探活（Issue #345 方向 1）。
+"""Bot Token 健康探活（Issue #345 方向 1 + R17/R21.3 改造）。
 
-集群部署下，定时探活全局 bot token 有效性，结果写入 DB meta 表供所有实例共享。
+集群部署下，定时探活全局/仓库级 bot token 有效性，结果写入 DB meta 表供所有实例共享。
 
-设计要点：
-- 分布式锁：用 src/lock.py 的 distributed_locks 表（有真正 TTL，实例崩溃自动释放）
-  确保集群中只有一个实例执行探活
-- 健康状态存 DB：不存内存（集群下每次探活可能是不同实例）
-- 连续 3 次失败才标记 unhealthy，期间 degraded（防网络抖动误判）
-- 只发现不干预：探活只标记状态，不停用 token，写操作的 401 由方向 3 处理
+R17 改造要点：
+- CHECK_INTERVAL 300→3600（1 小时），FAILURE_THRESHOLD 3→1（1 次 401 即标记）
+- _verify_bot_token 改为通过 VCSProvider.verify_token() 调用（R18.5.8）
+- 新增仓库级 token 遍历检查（R17.2.4/R17.2.11）
+- 401 → 标记 per-provider 过期 key（R21.2）；200 → 清除过期标记
+- 仓库级检查分批执行（每 10 个一批，间隔 1 秒，R17.2.10）
+- 分布式锁确保多实例只有一个执行（R17.2.9）
+
+R21.3 超时误标记修复：
+- 401 → 标记过期（token 确实无效）
+- 超时/5xx → 不标记，记 warning，等下次健康检查重试
+- FAILURE_THRESHOLD=1 只对 401 生效
 """
 import asyncio
 import json
@@ -17,67 +23,212 @@ import time
 from src.config import log
 
 
-CHECK_INTERVAL = 300  # 5 分钟
-LOCK_TTL = 240        # 锁过期 < 探活间隔，确保下次探活前锁已释放
-FAILURE_THRESHOLD = 3  # 连续失败 3 次才标记 unhealthy
+# R17.2.1: CHECK_INTERVAL 300→3600（1 小时），FAILURE_THRESHOLD 3→1
+CHECK_INTERVAL = 3600  # 1 小时
+LOCK_TTL = 3000        # 锁过期 < 探活间隔，确保下次探活前锁已释放
+FAILURE_THRESHOLD = 1  # R21.3.4: 1 次 401 即标记（只对 401，超时/5xx 不计）
+
+# R17.2.10: 仓库级检查分批
+REPO_BATCH_SIZE = 10
+REPO_BATCH_INTERVAL = 1  # 秒
 
 
 def _verify_bot_token(provider: str) -> dict:
-    """验证指定平台的 bot token 有效性。
+    """验证指定平台的全局 bot token 有效性。
+
+    R18.5.8: 通过 VCSProvider.verify_token() 调用，不直接调 _req / _github_req。
+    R21.3: 区分 401（真过期）和超时/5xx（网络问题），只对 401 返回 auth 错误。
 
     Args:
         provider: "gitcode" 或 "github"
 
     Returns:
         {"healthy": bool, "error": str, "error_type": str}
-        error_type: "auth" (401) / "network" (timeout, connection) / "config" (no token) / "" (healthy)
+        error_type: "auth" (401) / "network" (timeout, 5xx) / "config" (no token) / "" (healthy)
     """
+    from src.token_resolver import create_provider
+    _vcs = create_provider(provider)
+
     if provider == "github":
         from src.user.db import get_global_github_bot_token
         token = get_global_github_bot_token()
-        api_url = "https://api.github.com/user"
-        platform_label = "GitHub"
     else:
         from src.user.db import get_global_gitcode_bot_token
         token = get_global_gitcode_bot_token()
-        api_url = "https://gitcode.com/api/v5/user"
-        platform_label = "GitCode"
+
+    # R25.4: platform_label 用映射表，不依赖 capitalize()（"gitcode".capitalize()="Gitcode" ≠ "GitCode"）
+    _PLATFORM_LABELS = {"gitcode": "GitCode", "github": "GitHub"}
+    platform_label = _PLATFORM_LABELS.get(provider, provider.capitalize())
 
     if not token:
         return {"healthy": False, "error": f"{platform_label} token not configured", "error_type": "config"}
     try:
-        if provider == "github":
-            from src.user.repo_manager import _github_req
-            _github_req("GET", api_url, token)
-        else:
-            from src.user.repo_manager import _req
-            _req("GET", api_url, token)
+        _vcs.verify_token(token)
         return {"healthy": True, "error": "", "error_type": ""}
     except Exception as e:
         err_msg = str(e)[:200]
         from src.vcs.token_error import extract_http_status_from_exc
         http_code = extract_http_status_from_exc(e)
         if http_code == 401:
+            # R21.3.1: 401 → token 确实无效
             return {"healthy": False, "error": err_msg, "error_type": "auth"}
+        # R21.3.2: 超时/5xx → 网络问题，不标记过期
         return {"healthy": False, "error": err_msg, "error_type": "network"}
 
 
 def _verify_global_bot_token() -> dict:
-    """探活所有平台的 bot token，返回分平台明细。
+    """探活所有平台的全局 bot token，返回分平台明细。
 
-    返回格式:
-        {"platforms": {"gitcode": {healthy, error, error_type}, "github": {...}}}
-
-    config 类错误（token 未配置）的平台仍返回结果，由 _update_health_status 跳过。
+    R17.2.2/R21.2: 401 → 标记 per-provider `global_*_bot_token_status=expired`
+    R17.2.3: 200 → 清除过期标记
     """
     gc = _verify_bot_token("gitcode")
     gh = _verify_bot_token("github")
+
+    # R17.2.2/R21.2: 标记/清除 per-provider 过期 key
+    _update_global_token_status("gitcode", gc)
+    _update_global_token_status("github", gh)
+
     return {
         "platforms": {
             "gitcode": gc,
             "github": gh,
         }
     }
+
+
+def _update_global_token_status(provider: str, result: dict):
+    """R17.2.2/R17.2.3: 根据 health 检查结果标记/清除 per-provider 过期状态。
+
+    401 (auth) → 标记 global_{provider}_bot_token_status=expired
+    200 (healthy) → 清除过期标记
+    超时/5xx (network) → 不改变标记状态（等下次检查）
+    config (no token) → 不改变标记状态
+    """
+    from src.user.db import set_meta_value, _invalidate_global_bot_cache
+    status_key = f"global_{provider}_bot_token_status"
+
+    if result["healthy"]:
+        # R17.2.3: 200 → 清除过期标记
+        set_meta_value(status_key, "")
+        _invalidate_global_bot_cache()
+    elif result.get("error_type") == "auth":
+        # R17.2.2: 401 → 标记过期
+        set_meta_value(status_key, "expired")
+        _invalidate_global_bot_cache()
+    # network/config → 不改变
+
+
+def _verify_repo_bot_tokens():
+    """R17.2.4/R17.2.11: 遍历有仓库级 bot token 的仓库，按 provider 验证。
+
+    R17.2.5: 401 → 标记 managed_repos.bot_token_status=expired
+    R17.2.6: 200 → 清除过期标记
+    R17.2.10: 分批执行（每 10 个一批，间隔 1 秒）
+    R21.3.7: 超时/5xx 不标记
+    """
+    from src.session_manager import db, db_lock
+    from src.token_resolver import create_provider
+    from src.user.db import set_meta_value, _invalidate_global_bot_cache
+
+    # 查询有 bot token 的仓库
+    repos_to_check = []
+    try:
+        with db_lock:
+            c = db.cursor()
+            # GitCode 仓库级 token
+            c.execute(
+                "SELECT repo_key FROM managed_repos "
+                "WHERE bot_gitcode_token IS NOT NULL AND bot_gitcode_token!='' "
+                "AND repo_key NOT LIKE 'github:%'"
+            )
+            for row in c.fetchall():
+                repos_to_check.append((row[0], "gitcode"))
+            # GitHub 仓库级 token
+            c.execute(
+                "SELECT repo_key FROM managed_repos "
+                "WHERE bot_github_token IS NOT NULL AND bot_github_token!='' "
+                "AND repo_key LIKE 'github:%'"
+            )
+            for row in c.fetchall():
+                repos_to_check.append((row[0], "github"))
+    except Exception as e:
+        log.warning(f"_verify_repo_bot_tokens: query failed: {e}")
+        return
+
+    if not repos_to_check:
+        return
+
+    log.info(f"bot_token_health: checking {len(repos_to_check)} repo-level tokens")
+
+    # R17.2.10: 分批执行
+    for i in range(0, len(repos_to_check), REPO_BATCH_SIZE):
+        batch = repos_to_check[i:i + REPO_BATCH_SIZE]
+        for repo_key, provider in batch:
+            try:
+                _verify_single_repo_token(repo_key, provider)
+            except Exception as e:
+                log.warning(f"bot_token_health: repo token check failed for {repo_key}: {e}")
+        # 批间间隔
+        if i + REPO_BATCH_SIZE < len(repos_to_check):
+            time.sleep(REPO_BATCH_INTERVAL)
+
+
+def _verify_single_repo_token(repo_key: str, provider: str):
+    """验证单个仓库级 bot token。
+
+    R17.2.5: 401 → 标记 managed_repos.bot_token_status=expired
+    R17.2.6: 200 → 清除过期标记
+    R21.3.7: 超时/5xx 不标记
+    """
+    from src.session_manager import db, db_lock
+    from src.token_resolver import create_provider
+
+    # 读取仓库级 token
+    field = "bot_github_token" if provider == "github" else "bot_gitcode_token"
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT {field} FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            row = c.fetchone()
+            if not row or not row[0]:
+                return  # token 已被清除
+            token = row[0]
+    except Exception as e:
+        log.warning(f"_verify_single_repo_token: read token failed for {repo_key}: {e}")
+        return
+
+    # 验证 token
+    _vcs = create_provider(provider)
+    try:
+        _vcs.verify_token(token)
+        # R17.2.6: 200 → 清除过期标记
+        _set_repo_bot_token_status(repo_key, "")
+    except Exception as e:
+        from src.vcs.token_error import extract_http_status_from_exc
+        http_code = extract_http_status_from_exc(e)
+        if http_code == 401:
+            # R17.2.5: 401 → 标记过期
+            _set_repo_bot_token_status(repo_key, "expired")
+            log.warning(f"bot_token_health: repo {repo_key} bot token expired (401)")
+        else:
+            # R21.3.7: 超时/5xx → 不标记
+            log.warning(f"bot_token_health: repo {repo_key} verify error (non-401, skipped): {str(e)[:100]}")
+
+
+def _set_repo_bot_token_status(repo_key: str, status: str):
+    """更新 managed_repos.bot_token_status。"""
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE managed_repos SET bot_token_status=? WHERE repo_key=?",
+                (status, repo_key),
+            )
+            db.commit()
+    except Exception as e:
+        log.warning(f"_set_repo_bot_token_status: update failed for {repo_key}: {e}")
 
 
 def _get_health_status() -> dict | None:
@@ -93,19 +244,9 @@ def _get_health_status() -> dict | None:
 
 
 def _update_health_status(result: dict):
-    """更新健康状态到 DB meta 表。
+    """更新健康状态到 DB meta 表（admin 页展示用，保留三级状态）。
 
-    按平台独立失败计数（集群下每次探活可能是不同实例）。
-    config 类错误（token 未配置）的平台跳过——不探活、不计数、不纳入聚合。
-    error_type 记录最近一次失败的类型（auth/network/config），admin 据此区分处置路径：
-    - auth (401): token 被吊销，去对应平台重新生成
-    - network: 网络问题，排查网络/代理/防火墙
-    - config: token 未配置（不纳入聚合，仅记录）
-
-    聚合规则（WorstOf）:
-    - overall = healthy: 所有已配平台都健康
-    - overall = degraded: 部分已配平台故障
-    - overall = unhealthy: 全部已配平台都达到 unhealthy 阈值
+    R21.3.4: FAILURE_THRESHOLD=1 只对 401（auth）生效，超时/5xx（network）不计入。
     """
     from src.user.db import set_meta_value
 
@@ -122,8 +263,12 @@ def _update_health_status(result: dict):
         prev_failures = prev_p.get("consecutive_failures", 0) if not prev_p.get("healthy") else 0
         if pr["healthy"]:
             failures = 0
-        else:
+        elif pr.get("error_type") == "auth":
+            # R21.3.4: 401 直接计入 FAILURE_THRESHOLD
             failures = prev_failures + 1
+        else:
+            # R21.3.4: 超时/5xx 不计入 FAILURE_THRESHOLD
+            failures = prev_failures
         platforms_out[prov] = {
             "healthy": pr["healthy"],
             "degraded": not pr["healthy"] and failures < FAILURE_THRESHOLD,
@@ -139,9 +284,9 @@ def _update_health_status(result: dict):
     elif all(p["healthy"] for p in platforms_out.values()):
         overall = "healthy"
     elif all(p["unhealthy"] for p in platforms_out.values()):
-        overall = "unhealthy"  # 全部已配平台都达到 unhealthy 阈值
+        overall = "unhealthy"
     else:
-        overall = "degraded"  # 部分平台故障（含 healthy+unhealthy 混合）
+        overall = "degraded"
 
     status = {
         "overall": overall,
@@ -150,7 +295,7 @@ def _update_health_status(result: dict):
     }
     set_meta_value("bot_token_health", json.dumps(status))
 
-    # P2-4: 状态翻转通知——healthy→degraded/unhealthy 时 log.warning（运维可接日志告警）
+    # 状态翻转通知
     prev_overall = (prev or {}).get("overall", "healthy")
     if prev_overall == "healthy" and overall != "healthy":
         degraded_provs = [prov for prov, p in platforms_out.items() if not p["healthy"]]
@@ -172,24 +317,27 @@ def _update_health_status(result: dict):
 
 
 async def bot_token_health_loop():
-    """每 5 分钟探活全局 bot token，集群下只一个实例执行。"""
-    log.info("Bot token health loop started (5min interval)")
+    """R17.2: 每小时探活全局 + 仓库级 bot token，集群下只一个实例执行。"""
+    log.info(f"Bot token health loop started ({CHECK_INTERVAL}s interval)")
     while True:
         try:
             from src.lock import acquire_lock, release_lock
-            if acquire_lock("bot_token_health", ttl=LOCK_TTL):
+            if acquire_lock("token_health_check", ttl=LOCK_TTL):
                 try:
+                    # R17.2.1: 全局 bot token 检查
                     result = _verify_global_bot_token()
                     _update_health_status(result)
+                    # R17.2.4: 仓库级 bot token 检查
+                    _verify_repo_bot_tokens()
                 finally:
-                    release_lock("bot_token_health")
+                    release_lock("token_health_check")
             # 未抢到锁 = 其他实例在探活，跳过
         except asyncio.CancelledError:
             log.info("Bot token health loop cancelled")
             raise
         except Exception as e:
             log.warning(f"bot_token_health loop error: {e}")
-        await asyncio.sleep(CHECK_INTERVAL + random.uniform(0, 30))
+        await asyncio.sleep(CHECK_INTERVAL + random.uniform(0, 60))
 
 
 def start_bot_token_health():

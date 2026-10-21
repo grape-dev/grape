@@ -63,7 +63,8 @@ def _mock_email_service():
     with patch("src.auth.email_service.EmailService.send_verification_code", return_value=True), \
          patch("src.auth.email_service.EmailService.send_notification", return_value=True), \
          patch("src.auth.email_service.EmailService._send_smtp", return_value=True), \
-         patch("src.auth.email_service.EmailService._send_resend", return_value=True):
+         patch("src.auth.email_service.EmailService._send_resend", return_value=True), \
+         patch("src.auth.email_service.is_email_configured", return_value=True):
         yield
 
 

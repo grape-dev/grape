@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title data-i18n="app.login.title_register">注册 — Grape</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=75">
+<link rel="stylesheet" href="/static/css/app.css?v=84">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
 <link rel="stylesheet" href="/static/css/auth.css?v=6">
 <script>
@@ -17,7 +17,7 @@
 [data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
 </style>
 <script src="/static/js/i18n.js?v=13"></script>
-<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('25');});</script>
+<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('34');});</script>
 </head>
 <body>
 
@@ -28,8 +28,8 @@
 <h1 id="pageTitle" data-i18n="app.login.register_title">注册 Grape 账号</h1>
 <p class="subtitle" id="pageSub" data-i18n="app.login.register_sub">Multi-Agent DevOps</p>
 
-<!-- 步骤指示器 -->
-<div class="step-items" id="stepIndicator">
+<!-- 步骤指示器（R7.7: 初始隐藏，有邮箱配置时才显示，避免无邮箱场景闪动） -->
+<div class="step-items" id="stepIndicator" style="display:none">
   <div class="step-item active" id="dot1"><div class="step-item-circle">1</div><span data-i18n="app.login.step_label_info">填写信息</span></div>
   <div class="step-line" id="stepLine"></div>
   <div class="step-item" id="dot2"><div class="step-item-circle">2</div><span data-i18n="app.login.step_label_verify">验证码</span></div>
@@ -60,7 +60,7 @@
     <p class="field-error" id="regUsernameErr" role="alert" aria-live="polite"></p>
   </div>
 
-  <div class="field-group" id="emailField">
+  <div class="field-group" id="emailField" style="display:none">
     <label class="field-label" for="regEmail" data-i18n="app.login.email">邮箱</label>
     <div class="field-input-wrap">
       <input class="field-input" id="regEmail" type="email"
@@ -137,7 +137,7 @@
 
   <div id="regStep1Btn">
     <button class="auth-btn" type="submit" id="regSubmitBtn">
-      <span data-i18n="app.login.send_code">发送验证码</span>
+      <span data-i18n="app.login.register_btn">注册</span>
     </button>
   </div>
 </form>
@@ -193,14 +193,17 @@
 </div>
 </div>
 
-<script src="/static/js/api.js?v=27"></script>
-<script src="/static/js/auth.js?v=5"></script>
+<script src="/static/js/api.js?v=29"></script>
+<script src="/static/js/auth.js?v=6"></script>
 <script>
 Auth.initI18n();
 function $(id){return document.getElementById(id)}
 
 // OAuth 模式
 var oauthMode=false,oauthState='',oauthProvider='',oauthExternalLogin='';
+// R7: 邮箱是否已配置（从 /auth/providers 获取）
+var emailConfigured=true;
+
 (function initOAuthMode(){
   var params=new URLSearchParams(location.search);
   if(params.get('oauth_associate')==='1'){
@@ -215,6 +218,41 @@ var oauthMode=false,oauthState='',oauthProvider='',oauthExternalLogin='';
     $('emailField').style.display='none';
     $('stepIndicator').style.display='none';
   }
+})();
+
+// R7.7: 获取邮箱配置状态，初始为无邮箱模式（隐藏），有邮箱时才显示（避免闪动）
+(function checkEmailConfigured(){
+  if(oauthMode)return;
+  API.get('/auth/providers').then(function(d){
+    emailConfigured=!!(d&&d.email_configured);
+    if(emailConfigured){
+      // 有邮箱配置：显示邮箱字段、步骤指示器、验证码区域，按钮改为"发送验证码"
+      $('emailField').style.display='';
+      $('stepIndicator').style.display='';
+      $('regCodeArea').style.display='';  // 验证码区域（提交后才显示，这里恢复默认）
+      // 按钮：注册 → 发送验证码
+      var btn=$('regSubmitBtn');
+      if(btn){
+        var span=btn.querySelector('span');
+        if(span){
+          span.setAttribute('data-i18n','app.login.send_code');
+          span.textContent=Auth.t('app.login.send_code');
+        }
+      }
+      // 表单提交：走 goToStep2（发送验证码流程）
+      $('registerPanel').setAttribute('onsubmit','event.preventDefault();goToStep2()');
+    } else {
+      // 无邮箱配置：保持初始隐藏状态（邮箱字段、步骤指示器已 display:none）
+      // 验证码区域也隐藏
+      $('regCodeArea').style.display='none';
+      // 按钮保持"注册"，表单提交走 registerVerify（直接注册）
+      $('registerPanel').setAttribute('onsubmit','event.preventDefault();registerVerify()');
+    }
+  }).catch(function(){
+    // API 失败：保持初始无邮箱模式（无闪动）
+    $('regCodeArea').style.display='none';
+    $('registerPanel').setAttribute('onsubmit','event.preventDefault();registerVerify()');
+  });
 })();
 
 function switchTab(tab){
@@ -277,7 +315,7 @@ function goToStep2(){
   // P-UX: submit 时统一验证所有必填字段（空字段也报错）
   var valid=true;
   if(!Auth.submitValidate('regUsername',RULES.regUsername))valid=false;
-  if(!oauthMode){if(!Auth.submitValidate('regEmail',RULES.regEmail))valid=false;}
+  if(!oauthMode&&emailConfigured){if(!Auth.submitValidate('regEmail',RULES.regEmail))valid=false;}
   if(!Auth.submitValidate('regPassword',RULES.regPassword))valid=false;
   if(!Auth.submitValidate('regPasswordConfirm',RULES.regPasswordConfirm))valid=false;
   if(!valid)return;
@@ -336,11 +374,18 @@ function registerVerify(){
   var u=$('regUsername').value.trim(),e=$('regEmail').value.trim();
   var p=$('regPassword').value.trim(),pc=$('regPasswordConfirm').value.trim(),c=$('regCode').value.trim();
   Auth.clearFieldError('regCode');
-  if(!c){Auth.showFieldError('regCode',Auth.t('app.login.err_code_required'));$('regCode').focus();return;}
-  if(c.length!==6){Auth.showFieldError('regCode',Auth.t('app.login.err_code_format'));return;}
+  // R7: 无邮箱配置时跳过验证码校验
+  if(emailConfigured){
+    if(!c){Auth.showFieldError('regCode',Auth.t('app.login.err_code_required'));$('regCode').focus();return;}
+    if(c.length!==6){Auth.showFieldError('regCode',Auth.t('app.login.err_code_format'));return;}
+  }
   if(p!==pc){Auth.showToast(Auth.t('app.login.err_confirm_mismatch'));return;}
 
   var btn=$('regVerifyBtn');
+  // R7: 无邮箱配置时从 regSubmitBtn 获取 loading 状态
+  if(!btn||btn.style.display==='none'||!emailConfigured){
+    btn=$('regSubmitBtn');
+  }
   Auth.setBtnLoading(btn,true);
   API.post('/auth/register/verify',{username:u,email:e,password:p,code:c,lang:I18N.getLang()}).then(function(d){
     Auth.setBtnLoading(btn,false);
@@ -353,7 +398,7 @@ function registerVerify(){
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
     var msg=err.message||Auth.t('app.login.toast_register_failed');
-    if(msg.indexOf('验证码')>=0||msg.indexOf('code')>=0){Auth.showFieldError('regCode',msg);$('regCode').focus();}
+    if(emailConfigured&&(msg.indexOf('验证码')>=0||msg.indexOf('code')>=0)){Auth.showFieldError('regCode',msg);$('regCode').focus();}
     else Auth.showToast(msg);
   });
 }

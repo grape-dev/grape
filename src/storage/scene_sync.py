@@ -307,17 +307,15 @@ async def sync_official_scenes():
     tmp_dir = None
     try:
         bot_token = _get_sync_token()
-        if not bot_token:
-            log.warning("Scene sync: no GitCode token configured (GRAPE_DEV_TOKEN env / configs/scene-sync.json), skip remote sync")
-            _init_featured_scenes_if_empty()
-            return
-
+        # R25.6: 公开仓库匿名即可下载，token 非硬前提。空 token 仍发起下载（headers 为空），
+        # 下载返回 401/403 时才降级到 _init_featured_scenes_if_empty() 兜底。
         async with httpx.AsyncClient(timeout=60.0) as client:
             # 1. 下载 ZIP 归档并解压
             try:
                 repo_root = await _download_repo_zip(client, bot_token)
             except Exception as e:
                 log.warning(f"Scene sync: download repo zip failed: {e}")
+                _init_featured_scenes_if_empty()
                 return
 
         # 2. 定位 scenes/ 目录

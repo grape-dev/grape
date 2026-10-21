@@ -871,14 +871,10 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_se
         return {"branches": branches}
 
     # GitCode（原逻辑）
-    from src.user.db import get_bot_token_by_repo
-
-    # 仓库 bot token → 全局 bot token
-    # Issue #345: 改用统一入口
-    from src.user.db import get_global_gitcode_bot_token
-    token = get_bot_token_by_repo(owner, repo)
-    if not token:
-        token = get_global_gitcode_bot_token()
+    # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
+    from src.user.db import get_repo_token_with_refresh
+    from src.repo_key import to_repo_key
+    token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
     if not token:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
 
@@ -963,14 +959,10 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"创建分支失败: {e}"})
 
     # GitCode（原逻辑）
-    from src.user.db import get_bot_token_by_repo
-
-    # 仓库 bot token → 全局 bot token
-    # Issue #345: 改用统一入口
-    from src.user.db import get_global_gitcode_bot_token
-    token = get_bot_token_by_repo(owner, repo)
-    if not token:
-        token = get_global_gitcode_bot_token()
+    # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
+    from src.user.db import get_repo_token_with_refresh
+    from src.repo_key import to_repo_key
+    token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
     if not token:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法创建分支"})
 
@@ -1673,7 +1665,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.api.pipeline_config import get_pipeline_config, _query_scene_by_id
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
-    from src.user.db import get_bot_token_by_repo
+    from src.user.db import get_repo_token_with_refresh
     from src.api.session_store import upsert_agent_session
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
@@ -1685,7 +1677,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     if not nodes:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "场景无 Agent 节点配置"})
 
-    repo_token = get_bot_token_by_repo(owner, repo)
+    repo_token = get_repo_token_with_refresh(repo_key) or ""
     updated = 0
     with db_lock:
         c = db.cursor()

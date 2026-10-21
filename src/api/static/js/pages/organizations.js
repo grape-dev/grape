@@ -2,10 +2,15 @@
 function renderOrganizations() {
   var pc = document.getElementById('pageContent');
   if (!pc) return;
+  var _u = JSON.parse(localStorage.getItem('user') || '{}');
+  var _name = (_u.nickname || _u.username || 'User').split('@')[0];
+  var _avatar = (_name || 'U')[0].toUpperCase();
   pc.innerHTML = '<div style="padding:20px"><div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">' +
     '<h2 style="margin:0;font-size:18px">' + I18N.t("organizations.title") + '</h2>' +
+    '<div style="display:flex;align-items:center;gap:12px">' +
     '<button onclick="_showCreateOrgDialog()" style="padding:8px 16px;border:none;border-radius:8px;background:var(--a);color:#fff;cursor:pointer;font-size:13px">' + I18N.t("organizations.create_org") + '</button>' +
-    '</div><div id="orgList" style="display:flex;flex-direction:column;gap:12px"></div></div>';
+    '</div></div>' +
+    '<div id="orgList" style="display:flex;flex-direction:column;gap:12px"></div></div>';
   _loadOrgs();
 }
 

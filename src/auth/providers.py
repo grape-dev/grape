@@ -412,25 +412,40 @@ def get_redirect_uri(request, provider: str = "") -> str:
 
 
 def _get_trusted_host(request) -> str:
-    """获取可信 Host（BUG-1 修复）。
+    """获取可信 Host（BUG-1 修复 + Issue #372 §15.3 X-Forwarded-Host 支持）。
 
     优先级：
-    1. TRUSTED_HOSTS 环境变量白名单校验
-    2. 回退到 Host header（开发环境兼容）
-    """
-    raw_host = request.headers.get("Host", "localhost:80")
+    1. X-Forwarded-Host header（nginx 代理场景，含用户真实地址+端口）
+    2. Host header（直连场景，开发环境兼容）
+    → TRUSTED_HOSTS 环境变量白名单校验最终值
 
-    # 校验 Host header 是否在可信白名单中
+    Issue #372: 排除 localhost / 127.0.0.1（nginx 代理场景下 Host 是内网地址，
+    X-Forwarded-Host 才是用户真实地址）。
+    """
+    # R11.1: 未设 TRUSTED_HOSTS 时不读 X-Forwarded-Host（防伪造）
     trusted_hosts = os.environ.get("TRUSTED_HOSTS", "").strip()
+    fwd_host = request.headers.get("X-Forwarded-Host", "").strip() if trusted_hosts else ""
+    raw_host = request.headers.get("Host", "")
+
+    # 选择非 localhost 的那个（nginx 代理场景 Host 是 127.0.0.1:3000）
+    _local = ("localhost", "127.0.0.1", "0.0.0.0", "::1")
+    candidate = ""
+    if fwd_host and not any(fwd_host.lower() == lh or fwd_host.lower().startswith(lh + ":") for lh in _local):
+        candidate = fwd_host
+    elif raw_host and not any(raw_host.lower() == lh or raw_host.lower().startswith(lh + ":") for lh in _local):
+        candidate = raw_host
+    else:
+        candidate = raw_host  # 都是 localhost，保持原行为（开发环境）
+
+    # 校验 Host 是否在可信白名单中（trusted_hosts 已在上方读取）
     if trusted_hosts:
         hosts = [h.strip().lower() for h in trusted_hosts.split(",") if h.strip()]
-        if raw_host.lower() in hosts:
-            return raw_host
+        if candidate.lower() in hosts:
+            return candidate
         # 不在白名单 → 回退到第一个可信 Host（防止开放重定向）
-        # P2-12: 过滤换行符防日志注入
-        safe_host = raw_host.replace("\n", "").replace("\r", "")
-        log.warning(f"Host header '{safe_host}' not in TRUSTED_HOSTS, using fallback '{hosts[0]}'")
+        safe_host = candidate.replace("\n", "").replace("\r", "")
+        log.warning(f"Host '{safe_host}' not in TRUSTED_HOSTS, using fallback '{hosts[0]}'")
         return hosts[0]
 
-    # 未设置 TRUSTED_HOSTS → 保持原有行为（开发环境兼容）
-    return raw_host
+    # 未设置 TRUSTED_HOSTS → 返回候选值（开发环境兼容）
+    return candidate
