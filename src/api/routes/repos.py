@@ -1607,6 +1607,66 @@ def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_s
     return {"deploy_url": (row[0] if row else "") or ""}
 
 
+def _check_unmanage_vcs_permission(user: dict, owner: str, repo_name: str, repo_provider: str) -> None:
+    """解除托管救火闸门：校验发起人在 VCS 侧的仓库权限，maintainer 及以上才放行。
+
+    背景（docs/weekly-08/unmanage-permission-guard-design.md 救火项）：
+    agent 曾按「解除所有托管」指令遍历 /repos/remove，把共同参与甚至从未工作过的
+    仓库也解除了。读权限（能看到）≠ 写权限（能解除），本闸门在 VCS 侧独立复核。
+
+    规则（与托管侧 _check_collaborator_admin 同口径）：
+    - GitCode：access_level>=40（Maintainer/Admin）或单数 permission=="admin"
+    - GitHub：role_name 为 admin / maintain
+    - 仓库所有者（username==owner）天然通过
+    失败不兜底：token 缺失 / API 不可达 / 无法判定 → 一律 403 拒绝，绝不放行。
+    """
+    username = (user.get("username") or "").strip()
+    if not username:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "message": "无法确定当前用户身份，拒绝解除托管（maintainer 及以上权限方可操作）"})
+    # 仓库所有者天然有完全权限
+    if username == owner:
+        return
+    if repo_provider == "github":
+        from src.api.deps import get_user_github_token_with_refresh
+        gh_token = get_user_github_token_with_refresh(username, user_id=user.get("id", 0))
+        if not gh_token:
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": "未绑定 GitHub 授权，无法校验仓库权限，拒绝解除托管"})
+        from src.user.repo_manager import get_github_collaborator_permission
+        role = (get_github_collaborator_permission(gh_token, owner, repo_name, username) or "").lower()
+        if role not in ("admin", "maintain"):
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": f"解除托管需要 GitHub maintainer 及以上权限（当前角色：{role or '未知'}）"})
+        return
+    # GitCode（默认）
+    from src.api.deps import get_user_token_with_refresh
+    gc_token = get_user_token_with_refresh(username, user.get("id", 0))
+    if not gc_token:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "message": "未绑定 GitCode 授权，无法校验仓库权限，拒绝解除托管"})
+    from src.user.repo_manager import get_member_permission, _RateLimitedError
+    try:
+        data = get_member_permission(gc_token, owner, repo_name, username) or {}
+    except _RateLimitedError:
+        raise HTTPException(status_code=429, detail={
+            "code": 429, "message": "GitCode 权限校验被限流，请稍后重试（未解除任何托管）"})
+    if not data:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "message": "无法校验 GitCode 仓库权限（非协作者或 API 失败），拒绝解除托管"})
+    try:
+        access_level = int(data.get("access_level", 0) or 0)
+    except (TypeError, ValueError):
+        access_level = 0
+    if access_level >= 40:  # Maintainer(40) / Admin(>=50)
+        return
+    if str(data.get("permission", "") or "").lower() == "admin":
+        return
+    role_name = str(data.get("role_name", "") or "") or "未知"
+    raise HTTPException(status_code=403, detail={
+        "code": 403, "message": f"解除托管需要 GitCode maintainer 及以上权限（当前角色：{role_name}，access_level={access_level}）"})
+
+
 def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     """解除托管时的同步清理：关联数据表 + 仓库 skill 目录 + workspace 目录。
 
@@ -1644,6 +1704,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     # 判断实际存在的 repo_key（直接查 managed_repos 表）
     repo_key = gc_key
     repo_provider = "gitcode"
+    _repo_exists = False
     try:
         from src.session_manager import db, db_lock
         with db_lock:
@@ -1653,8 +1714,18 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
             if row0 and row0[0].startswith("github:"):
                 repo_key = gh_key
                 repo_provider = "github"
+            _repo_exists = row0 is not None
     except Exception:
         pass  # 测试环境（mock）走默认 gitcode:
+
+    # 不存在的仓库直接 404（避免对未托管仓库做无意义的 VCS 权限调用）
+    if not _repo_exists:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
+
+    # 救火闸门（docs/weekly-08/unmanage-permission-guard-design.md）：
+    # 解除托管前校验发起人在 VCS 侧的仓库权限，maintainer 及以上才放行。
+    # 必须放在 token 分流/删 webhook 等任何副作用之前。
+    _check_unmanage_vcs_permission(user, owner, repo_name, repo_provider)
 
     # token 按 provider 分流
     if repo_provider == "github":
