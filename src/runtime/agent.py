@@ -33,6 +33,10 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.config import log, CHAT_CWD_BASE
 from src.runtime.client import CredentialRevokedError
+# R11.4: _get_task_token 抽取到 src/user/db.py，统一调用。
+# （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
+#   丢失路径 B 托管仓库的实时获取+自动刷新回退，6/29 近期任务 token 为空会受影响。）
+from src.user.db import get_task_token as _get_task_token
 
 # 凭据吊销信号（全局）：_wrap 独立 task 中感知 401 时置位，主循环检查后退出进程。
 # create_task 的异常不穿透主循环，用 Event 跨 task 传递退出信号。
@@ -1393,7 +1397,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         if _num and task.get("issue_session_id"):
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
-                _num, token=task.get("repo_gitcode_token") or "")
+                _num, token=_get_task_token(task))
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             _ag = task.get("agent_type") or ""
             if _ag == "coding":
@@ -1408,7 +1412,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
                             if _lrk:
                                 repogit.remove_issue_worktree_if_pushed(
                                     _lrk, "coding", _num,
-                                    token=task.get("repo_gitcode_token") or "")
+                                    token=_get_task_token(task))
                     except Exception as _le:
                         log.warning(f"linked worktree cleanup failed: {_le}")
     except Exception as e:
@@ -1445,7 +1449,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
     if not _wts or not isinstance(_wts, list):
         return
 
-    _token = task.get("repo_gitcode_token") or ""
+    _token = _get_task_token(task)
     _issue_num = ""
     try:
         from src.runtime import repogit
@@ -1682,7 +1686,7 @@ async def _execute_task(client, task, engine_name: str = ""):
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=task.get("repo_gitcode_token") or "",
+                                          _num, token=_get_task_token(task),
                                           work_branch=_wb)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
@@ -1697,7 +1701,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=task.get("repo_gitcode_token") or "")
+                    token=_get_task_token(task))
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -1891,7 +1895,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             event_type=task.get("event_type") or "",
             backend_name=_backend_for_engine(engine_name),
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
-            env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
+            env_extra=env, bot_token=_get_task_token(task),
             user_token=user_token,
             agent_label=_agent_label,
             repo_key=task.get("repo_key") or "",
@@ -2578,6 +2582,11 @@ def _read_local_worker_version() -> str:
     - root 模式（uid=0 或 RUNTIME_ROOT_MODE=1）：/etc/grape/worker.version
     - 非 root 模式：$HOME/.grape/worker.version
     - Windows：$HOME/.grape/worker.version（Windows 无 root 模式）
+
+    兜底：戳文件缺失（手工部署 / 写戳失败）时退回读安装包自带的 VERSION。
+    没有兜底的话本地版本恒为 ""，心跳每次都比对失败 → 每个检查周期都触发一次升级，
+    表现为"升级循环"（下载 35MB 包 + 重启 worker）。戳文件在位时行为不变。
+    （2026-10-21 恢复：fbc499c4a 误删，67b11da14 为 2026-10-18 worker 升级死循环事故加的防线。）
     """
     from src.runtime.os_adapter import is_windows, version_file
     if is_windows():
@@ -2588,9 +2597,22 @@ def _read_local_worker_version() -> str:
         vp = os.path.join(os.path.expanduser("~"), ".grape", "worker.version")
     try:
         with open(vp, "r", encoding="utf-8") as f:
-            return f.read().strip()
+            got = f.read().strip()
+        if got:
+            return got
     except Exception:
-        return ""
+        pass
+    # 兜底：包内 VERSION（worker 以安装目录为 cwd 运行）
+    for cand in (os.path.join(os.getcwd(), "VERSION"),):
+        try:
+            with open(cand, "r", encoding="utf-8") as f:
+                got = f.read().strip()
+            if got:
+                log.warning(f"worker.version missing/empty, falling back to {cand}: {got}")
+                return got
+        except Exception:
+            continue
+    return ""
 
 
 def _normalize_worker_version(ver: str) -> str:
