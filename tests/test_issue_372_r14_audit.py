@@ -626,9 +626,9 @@ class TestR14_19UpdateManagedRepoBotToken404:
         # 应有 SELECT 1 FROM managed_repos 检查
         assert 'SELECT 1 FROM managed_repos' in func_body, \
             "should check repo existence with SELECT 1"
-        # 不存在时返回 False
-        assert 'return False' in func_body, \
-            "should return False when repo not found"
+        # 不存在时返回 {"ok": False, ...}（FR-20.11: 返回类型从 bool 改为 dict）
+        assert '"ok": False' in func_body or "'ok': False" in func_body, \
+            "should return ok=False when repo not found"
 
     def test_rebuild_after_existence_check(self):
         """仓库存在时才调 _rebuild_webhook_with_bot_token。"""

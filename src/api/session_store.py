@@ -117,17 +117,18 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
             c = db.cursor()
             if ensure_row:
                 # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
-                # 防空 assignee 命中任意空登录用户（issue-card-owner-attribution-fix-design.md）：
-                # assignee 为空 → 直接 user_id=0；非空 → 严格映射（非空 + 账号守卫 + ORDER）。
+                # FR-17.1/FR-18.2: 按 repo_key provider 分查对应列，不 OR 扫两列。
+                # assignee 为空 → 直接 user_id=0；非空 → 按 provider 查 gitcode_user / github_login。
                 _assignee = assignee or (fields.get("assignee") or "")
                 if _assignee:
-                    _usr_expr = ("COALESCE((SELECT m.user_id FROM unified_user_mapping m "
-                                 "WHERE (m.gitcode_user = ? OR m.github_login = ?) "
-                                 "AND m.gitcode_user != '' AND m.github_login != '' AND m.user_id > 0 "
-                                 "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id "
-                                 "            AND (ga.username = m.gitcode_user OR ga.username = m.github_login)) "
-                                 "ORDER BY m.user_id LIMIT 1), 0)")
-                    _usr_pre = (_assignee, _assignee)
+                    # FR-CQ-1: 提取为 um_column_for_repo 工具函数
+                    from src.repo_key import um_column_for_repo
+                    _col = um_column_for_repo(repo_key)
+                    _usr_expr = (f"COALESCE((SELECT m.user_id FROM unified_user_mapping m "
+                                 f"WHERE m.{_col} = ? AND m.user_id > 0 "
+                                 f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id AND ga.status = 1) "
+                                 f"ORDER BY m.user_id LIMIT 1), 0)")
+                    _usr_pre = (_assignee,)
                 else:
                     _usr_expr = "0"
                     _usr_pre = ()
@@ -554,11 +555,19 @@ def ensure_default_agent_sessions(repo_key: str):
     # ② 避免 agents API 原样外发用户 OAuth 凭据（安全）
     # 执行链实时取已足够（claim 注入 + _get_task_token）
     _token = ""
+    _provider_name = "gitcode"
     if repo_key:
         from src.token_resolver import TokenResolver, create_provider_from_repo_key
-        _resolve = TokenResolver(create_provider_from_repo_key(repo_key)).resolve_config_level(repo_key)
+        from src.repo_key import parse_repo_key
+        _provider_name, _, _ = parse_repo_key(repo_key)
+        _resolver = TokenResolver(create_provider_from_repo_key(repo_key))
+        _resolve = _resolver.resolve_config_level(repo_key)
         if _resolve.level != "user":  # 非 path B 才写入 session token
-            _token = _resolve.token
+            # FR-20.10: 过期 token 不写 session——检查 _is_expired 后决定
+            if _resolve.token and not _resolve.expired:
+                _token = _resolve.token
+            else:
+                _token = ""  # 过期或空 → 写空串，agents API 返回 exists=false
 
     with db_lock:
         c = db.cursor()
@@ -579,6 +588,11 @@ def ensure_default_agent_sessions(repo_key: str):
                     enable=None, subscribe_events=None,
                     im_app_id=None, im_app_secret=None, im_provider=None,
                 )
+                # FR-21.8: GitHub 仓库追加写入 repo_github_token 列
+                if _token and _provider_name == "github":
+                    c2 = db.cursor()
+                    c2.execute("UPDATE devops_agent_session SET repo_github_token=? WHERE repo_key=? AND agent_type=?",
+                               (_token, repo_key, _at))
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")
         db.commit()

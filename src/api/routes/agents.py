@@ -194,8 +194,14 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     with db_lock:
         c = db.cursor()
         try:
+            # FR-21.9: 按 repo_key 前缀选 token 列——GitHub 仓查 repo_github_token
+            from src.repo_key import parse_repo_key
+            _provider = "gitcode"
+            if _repo_keys:
+                _provider, _, _ = parse_repo_key(_repo_keys[0])
+            _token_col = "repo_github_token" if _provider == "github" else "repo_gitcode_token"
             c.execute(
-                "SELECT id, runtime_id, skill, skill_id, repo_gitcode_token, runtime_session_id, status, last_active_at, im_app_id, enable, subscribe_events FROM devops_agent_session WHERE repo_key IN ({}) AND agent_type=?".format(_rk_placeholders),
+                f"SELECT id, runtime_id, skill, skill_id, {_token_col}, runtime_session_id, status, last_active_at, im_app_id, enable, subscribe_events FROM devops_agent_session WHERE repo_key IN ({_rk_placeholders}) AND agent_type=?",
                 (*_repo_keys, name)
             )
             row = c.fetchone()
@@ -220,7 +226,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 except Exception:
                     _sub_evts = []
                 # R25.8: token 脱敏——不原样外发，只返回存在性布尔（前端无引用，grep 确认零消费）
-                session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token_exists": bool(row[4]), "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
+                session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_token_exists": bool(row[4]), "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or "",
                                "instance_name": instance_name_val,
                                "enable": bool(row[9]) if row[9] is not None else True,
@@ -364,7 +370,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
-        "repo_gitcode_token_exists": bool(session_data.get("repo_gitcode_token_exists", False)),
+        "repo_token_exists": bool(session_data.get("repo_token_exists", False)),
         "subscribe_events": session_data.get("subscribe_events", []),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),

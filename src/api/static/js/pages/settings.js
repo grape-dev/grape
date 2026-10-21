@@ -54,7 +54,11 @@ function saveGitcodeRepoConfig() {
   const body = {};
   const botVal = botEl && botEl.value ? botEl.value.trim() : '';
   if (botVal && !_isCredPlaceholder(botVal)) body.bot_token = botVal;
-  API.put('/settings/gitcode-repo/' + repo.owner + '/' + repo.name, body).then(r => app.showToast(I18N.t('settings.credentials.repo_config_updated'))).catch(e => app.showToast(I18N.t('settings.common.update_failed')));
+  API.put('/settings/gitcode-repo/' + repo.owner + '/' + repo.name, body).then(r => {
+    app.showToast(I18N.t('settings.credentials.repo_config_updated'));
+    if (r.warning) app.showToast(r.warning, 'warning');
+    if (r.scope_warnings && r.scope_warnings.length) r.scope_warnings.forEach(w => app.showToast(w, 'warning'));
+  }).catch(e => app.showToast(I18N.t('settings.common.update_failed')));
 }
 
 function unhostFromSettings(fullName) {

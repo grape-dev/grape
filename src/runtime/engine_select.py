@@ -212,38 +212,56 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
         try:
             c = db.cursor()
             if issue_creator:
+                if not issue_creator.strip():
+                    return 0
                 # 1. 优先查 unified_user_mapping（Issue #76 修复，OAuth 登录用户）
-                # Issue #372 §36: 加 OR github_login=? 支持 GitHub actor 匹配
+                # FR-CQ-1: 提取为 um_column_for_repo，消除 if/else 分支
+                from src.repo_key import parse_repo_key, um_column_for_repo
+                _provider, _, _ = parse_repo_key(repo_key)
+                _col = um_column_for_repo(repo_key)
                 c.execute(
-                    "SELECT user_id FROM unified_user_mapping "
-                    "WHERE (gitcode_user=? OR github_login=?) AND user_id>0 LIMIT 1",
-                    (issue_creator, issue_creator))
-                row = c.fetchone()
-                if row:
-                    return row[0]
-                # 2. 二级回退：查 grape_accounts（D32-补丁）+ external_identities
-                c.execute(
-                    "SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND id>0 LIMIT 1",
+                    f"SELECT user_id FROM unified_user_mapping "
+                    f"WHERE {_col}=? AND {_col}!='' AND user_id>0 LIMIT 1",
                     (issue_creator,))
                 row = c.fetchone()
                 if row:
                     return row[0]
-                # 按 external_id 查（issue_creator 可能是 gitcode_id）
+                # 2. 二级回退：查 grape_accounts（D32-补丁）
+                # FR-18.3/FR-25.2: EXISTS 用 external_identities 验证平台 login，
+                # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
+                c.execute(
+                    "SELECT ga.id FROM grape_accounts ga "
+                    "WHERE ga.id>0 AND ga.status=1 "
+                    "AND EXISTS (SELECT 1 FROM external_identities ei "
+                    "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
+                    "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
+                    "LIMIT 1",
+                    (_provider, issue_creator))
+                row = c.fetchone()
+                if row:
+                    return row[0]
+                # 按 external_id 查（issue_creator 可能是平台数字 ID）
+                # FR-18.3: 按 provider 动态查（原硬编码 gitcode）
                 c.execute(
                     "SELECT ei.grape_user_id FROM external_identities ei "
-                    "WHERE ei.provider='gitcode' AND ei.external_id=? LIMIT 1",
-                    (issue_creator,))
+                    "WHERE ei.provider=? AND ei.status=1 AND ei.external_id=? LIMIT 1",
+                    (_provider, issue_creator))
                 row = c.fetchone()
                 if row:
                     return row[0]
                 # 3. user_repos 回退：按创建者过滤（JOIN grape_accounts）
+                # FR-18.3/FR-25.2: EXISTS 用 external_identities 验证平台 login，
+                # 不再用 ga.username 匹配注册名（注册名≠平台 login 时会误杀）
                 c.execute(
                     "SELECT ur.user_id FROM user_repos ur "
                     "JOIN grape_accounts ga ON ga.id = ur.user_id "
-                    "WHERE LOWER(ga.username)=LOWER(?) "
+                    "WHERE ga.status=1 "
+                    "AND EXISTS (SELECT 1 FROM external_identities ei "
+                    "WHERE ei.grape_user_id=ga.id AND ei.provider=? AND ei.status=1 "
+                    "AND LOWER(ei.external_login)=LOWER(?) AND ei.external_login!='') "
                     "AND (ur.repo_key=? OR ur.repo_key=?) AND ur.is_join=1 "
                     "LIMIT 1",
-                    (issue_creator, repo, f"gitcode:{repo}"))
+                    (_provider, issue_creator, repo, f"{_provider}:{repo}"))
                 row = c.fetchone()
                 return row[0] if row else 0
             # issue_creator 为空：保留原逻辑（取第一个 join 用户）

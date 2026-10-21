@@ -288,7 +288,7 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     _scene_uid = 0
     try:
         from src.api.routes.tasks import _get_user_id_by_gitcode
-        _scene_uid = _get_user_id_by_gitcode(owner) or 0
+        _scene_uid = _get_user_id_by_gitcode(owner, repo_key) or 0
     except Exception:
         pass
     ok_count = 0

@@ -299,7 +299,8 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
             return
         from src.session_manager import db, db_lock
         from src.api.issues_center import _get_feishu_open_id
-        open_id = _get_feishu_open_id(user.get("username", ""))
+        _repo_key = (conv or {}).get("repo_key", "")
+        open_id = _get_feishu_open_id(user.get("username", ""), _repo_key)
         if not open_id and im_channel_id.startswith("ou_"):
             open_id = im_channel_id
         if not open_id:
@@ -1422,8 +1423,11 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> 
                 c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
                           (_now, old_app_id))
             elif gitcode_user:
-                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE (gitcode_user=? OR github_login=?)",
-                          (_now, gitcode_user, gitcode_user))
+                # FR-21.10: 按 user_id 精确清当前用户的飞书映射——不按用户名扫列
+                # 原代码 WHERE gitcode_user=? 用注册名扫列，存量 um 行可能存注册名也可能存平台真 login
+                # 用 OR github_login=? 会误清同名 GitHub 用户；用 user_id 精确匹配无歧义
+                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE user_id=?",
+                          (_now, user_id))
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
             # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
             # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
@@ -1558,8 +1562,9 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
     _new_app = kwargs.get("im_app_id") or ""
     if _new_app and old_app_id and old_app_id != _new_app:
         try:
-            from src.session_manager import update_unified_user_info
-            update_unified_user_info(user.get("username", ""), open_id="", app_id=_new_app)
+            # FR-18.7: 注册名语境——用 bind_feishu_identity 只清飞书三列，不碰平台列
+            from src.session_manager import bind_feishu_identity
+            bind_feishu_identity(user["id"], open_id="", app_id=_new_app)
             log.info(f"Chat IM: app changed {old_app_id[:30]} -> {_new_app[:30]}, reconciled unified_user_mapping (open_id cleared)")
         except Exception as e:
             log.warning(f"Chat IM: reconcile unified_user_mapping failed: {e}")

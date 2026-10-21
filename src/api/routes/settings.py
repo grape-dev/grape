@@ -396,6 +396,48 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
         except Exception as e:
             log.warning(f"update_credentials: clear user_repos failed: {e}")
 
+    # FR-4/FR-10.1: PAT 保存后追加权限探测提示（不阻断保存）
+    _scope_warnings = []
+    for _provider, _token_field in [("gitcode", "gitcode_token"), ("github", "github_token")]:
+        if _token_field in explicit:
+            _tok = (explicit[_token_field] or "").strip()
+            if _tok and not _is_placeholder(_tok):
+                try:
+                    import requests as _req
+                    if _provider == "gitcode":
+                        _hooks_resp = _req.get(
+                            f"https://gitcode.com/api/v5/user/repos?per_page=1",
+                            params={"access_token": _tok}, timeout=10)
+                    else:
+                        _hooks_resp = _req.get(
+                            f"https://api.github.com/user/repos?per_page=1",
+                            headers={"Authorization": f"Bearer {_tok}", "Accept": "application/vnd.github+json"},
+                            timeout=10)
+                    if _hooks_resp.status_code == 403:
+                        _scope_warnings.append(f"{_provider}: Token 缺少 repo 读权限，仓库状态探活/托管校验将不可用")
+                    elif _hooks_resp.status_code == 200:
+                        _hooks_data = _hooks_resp.json()
+                        if isinstance(_hooks_data, list) and not _hooks_data:
+                            _scope_warnings.append(f"{_provider}: Token 可能缺少 repo 读权限（返回空列表），探活可能不可用")
+                except Exception:
+                    pass  # 探测失败不阻断保存
+                # FR-10.1: 检测该用户名下 path B 仓库（host_user_id>0），提示 issue 写权限影响
+                try:
+                    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+                    with _sm_dl:
+                        _c = _sm_db.cursor()
+                        _c.execute("SELECT repo_key FROM managed_repos WHERE host_user_id=? AND host_user_id>0 LIMIT 5",
+                                   (user["id"],))
+                        _path_b_repos = [r[0] for r in _c.fetchall()]
+                    if _path_b_repos:
+                        _scope_warnings.append(
+                            f"{_provider}: 你是 {len(_path_b_repos)} 个仓库的 host（路径 B），"
+                            f"此 Token 将驱动 agent 回帖/建单，缺 issue 写权限将导致回复静默失败")
+                except Exception:
+                    pass
+
+    if _scope_warnings:
+        return {"message": "凭据已更新", "scope_warnings": _scope_warnings}
     return {"message": "凭据已更新"}
 
 
@@ -536,9 +578,13 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
     _has_repo_bot_token = False
     try:
         from src.session_manager import db, db_lock
+        # FR-21.4: 按 repo_key 前缀选列——GitHub 仓查 bot_github_token
+        from src.repo_key import parse_repo_key
+        _provider_name, _, _ = parse_repo_key(_rk)
+        _token_col = "bot_github_token" if _provider_name == "github" else "bot_gitcode_token"
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT bot_token_status, bot_gitcode_token FROM managed_repos WHERE repo_key=? LIMIT 1", (_rk,))
+            c.execute(f"SELECT bot_token_status, {_token_col} FROM managed_repos WHERE repo_key=? LIMIT 1", (_rk,))
             _row = c.fetchone()
             if _row:
                 _bot_token_status = _row[0] or ""
@@ -566,12 +612,80 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(require_no_session_token)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
+    from src.config import log as _log
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
+    # FR-20.5: 托管人/admin 权限校验——托管人(host_user_id)或 user_repos.is_admin 或 grape_accounts.role=admin
+    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+    _is_authorized = False
+    if user.get("role", "") == "admin":
+        _is_authorized = True
+    else:
+        try:
+            with _sm_dl:
+                _c = _sm_db.cursor()
+                # 检查是否为该仓库的托管人
+                _c.execute("SELECT host_user_id FROM managed_repos WHERE repo_key=? AND host_user_id=?",
+                           (repo_key, user["id"]))
+                if _c.fetchone():
+                    _is_authorized = True
+                else:
+                    # 检查 user_repos.is_admin
+                    _c.execute("SELECT is_admin FROM user_repos WHERE user_id=? AND repo_key=? AND is_admin=1",
+                               (user["id"], repo_key))
+                    if _c.fetchone():
+                        _is_authorized = True
+        except Exception:
+            pass
+    if not _is_authorized:
+        raise HTTPException(status_code=403, detail={
+            "code": 403, "error_code": "PERMISSION_DENIED",
+            "message": "无权限操作，请联系托管人或管理员"
+        })
     if body.bot_token and not _is_placeholder(body.bot_token):
-        update_managed_repo_bot_token(repo_key, body.bot_token.strip())
+        token = body.bot_token.strip()
+        # FR-9.1: verify token 有效性（与 R15 同口径）
+        from src.token_resolver import create_provider_from_repo_key
+        _vcs_provider = create_provider_from_repo_key(repo_key)
+        try:
+            _vcs_provider.verify_token(token)
+        except Exception:
+            raise HTTPException(status_code=400, detail={
+                "code": 400, "error_code": "TOKEN_INVALID",
+                "message": "Bot Token 无效，请检查后重试"
+            })
+        _result = update_managed_repo_bot_token(repo_key, token)
+        if not _result.get("ok"):
+            raise HTTPException(status_code=404, detail={
+                "code": 404, "error_code": "REPO_NOT_FOUND",
+                "message": "仓库不存在或写入失败"
+            })
+        _log.info(f"settings: bot token updated for {repo_key} by user {user.get('id')}")
+    else:
+        _result = {"ok": True, "warning": "", "related_repos": []}
     if body.bot_username:
+        # FR-12.3: bot 用户名与真人账号冲突检查
+        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        try:
+            with _sm_dl:
+                _c = _sm_db.cursor()
+                _c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (body.bot_username,))
+                if _c.fetchone():
+                    raise HTTPException(status_code=400, detail={
+                        "code": 400, "error_code": "BOT_USERNAME_CONFLICT",
+                        "message": f"Bot 用户名 '{body.bot_username}' 与真人账号冲突，该用户的操作将被自循环过滤静默忽略"
+                    })
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # 查询失败不阻断
         update_managed_repo_bot_username(repo_key, body.bot_username)
-    return {"message": "GitCode Repo 配置已更新"}
+    # FR-20.11: 返回 warning + related_repos
+    _response = {"message": "GitCode Repo 配置已更新"}
+    if _result.get("warning"):
+        _response["warning"] = _result["warning"]
+    if _result.get("related_repos"):
+        _response["scope_warnings"] = [f"该 Token 变更将影响 {len(_result['related_repos'])} 个关联仓库的跨仓信任域"]
+    return _response
 
 
 # ====== OAuth 凭据（管理员配置）======

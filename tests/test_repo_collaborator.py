@@ -278,7 +278,7 @@ def test_set_repo_bot_token_updates_username():
         (None,),         # 步骤 4: 旧 bot_username 查询（无旧 bot）
     ]
 
-    with patch.object(repos_mod, "update_managed_repo_bot_token", return_value=True) as mock_upd, \
+    with patch.object(repos_mod, "update_managed_repo_bot_token", return_value={"ok": True, "warning": "", "related_repos": []}) as mock_upd, \
          patch.object(repos_mod, "update_managed_repo_bot_username") as mock_upd_username, \
          patch("src.session_manager.db") as mock_db, \
          patch("src.session_manager.db_lock"), \

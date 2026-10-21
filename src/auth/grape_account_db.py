@@ -1414,17 +1414,36 @@ def save_binding_ticket(
             c = db.cursor()
             # 懒清理过期票据
             c.execute("DELETE FROM binding_tickets WHERE expires < ?", (_t.time(),))
-            c.execute(
-                "INSERT OR REPLACE INTO binding_tickets "
-                "(ticket, initiating_user_id, provider, external_id, "
-                "external_login, external_name, external_avatar, "
-                "original_user_id, created_at, expires) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (ticket, initiating_user_id, provider, external_id,
-                 external_login, external_name, external_avatar,
-                 original_user_id,
-                 _t.time(), _t.time() + _TICKET_TTL),
-            )
+            # FR-14.2: INSERT + 冲突重试（不覆盖未消费旧票）
+            try:
+                c.execute(
+                    "INSERT INTO binding_tickets "
+                    "(ticket, initiating_user_id, provider, external_id, "
+                    "external_login, external_name, external_avatar, "
+                    "original_user_id, created_at, expires) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (ticket, initiating_user_id, provider, external_id,
+                     external_login, external_name, external_avatar,
+                     original_user_id,
+                     _t.time(), _t.time() + _TICKET_TTL),
+                )
+            except Exception as _exc:
+                # FR-CQ-5: 约束冲突时删旧票重试（提取为 _is_constraint_error）
+                from src.session_manager import _is_constraint_error
+                if not _is_constraint_error(_exc):
+                    raise
+                c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
+                c.execute(
+                    "INSERT INTO binding_tickets "
+                    "(ticket, initiating_user_id, provider, external_id, "
+                    "external_login, external_name, external_avatar, "
+                    "original_user_id, created_at, expires) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (ticket, initiating_user_id, provider, external_id,
+                     external_login, external_name, external_avatar,
+                     original_user_id,
+                     _t.time(), _t.time() + _TICKET_TTL),
+                )
             db.commit()
         return ticket
     except Exception as e:

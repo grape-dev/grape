@@ -262,9 +262,10 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
             except Exception as e:
                 log.warning(f"Feishu onboard: get feishu_name failed: {e}")
             try:
-                from src.session_manager import update_unified_user_info
-                update_unified_user_info(username, open_id, feishu_name=feishu_name,
-                                         gitcode_nickname=username, app_id=app_id)
+                from src.session_manager import bind_feishu_identity
+                # FR-18.7: 注册名语境——走 bind_feishu_identity 只写飞书三列，不碰平台列
+                bind_feishu_identity(user_id, open_id, feishu_name=feishu_name,
+                                     app_id=app_id)
                 log.info(f"Feishu onboard: bound open_id for {username} (task={task_id[:8]})")
             except Exception as e:
                 log.warning(f"Feishu onboard: bind open_id failed: {e}")

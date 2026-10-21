@@ -44,6 +44,30 @@ from src.auth.cookie_utils import (
     app_base as _app_base,
 )
 
+
+def _escape_like_pattern(value: str) -> str:
+    """FR-15: 转义 LIKE 模式中的特殊字符（%、_、\\）。"""
+    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _sync_um_platform_col(grape_user_id: int, provider: str, external_login: str):
+    """FR-18.6: OAuth/PAT 绑定成功后补写 um 平台列（消除空窗）。"""
+    if not grape_user_id or not external_login:
+        return
+    try:
+        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        with _sm_dl:
+            _c = _sm_db.cursor()
+            _c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (grape_user_id,))
+            # FR-CQ-1: 提取为 um_column_for_provider 工具函数
+            from src.repo_key import um_column_for_provider
+            _col = um_column_for_provider(provider)
+            _c.execute(f"UPDATE unified_user_mapping SET {_col}=?, updated_at=datetime('now') WHERE user_id=?",
+                       (external_login, grape_user_id))
+            _sm_db.commit()
+    except Exception as _e:
+        log.warning(f"_sync_um_platform_col: failed for user {grape_user_id} provider {provider}: {_e}")
+
 router = APIRouter(prefix="/api/auth", tags=["grape-auth"])
 
 
@@ -860,11 +884,14 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
     # D43: 清理关联数据——注销后这些缓存/映射不应残留
     # 1. user_repos 缓存
     _clear_user_repos_cache(user["id"])
-    # 2. unified_user_mapping（飞书用户映射）
+    # 2. unified_user_mapping（飞书用户映射）——清列保行不 DELETE
+    # 铁律 1：DELETE 整行后下次重启 backfill 按 user_id 重灌伪身份；
+    # 清列保行后 INSERT OR IGNORE 命中已有行不重灌
     from src.session_manager import db as _sm_db, db_lock as _sm_dl
     with _sm_dl:
         _c = _sm_db.cursor()
-        _c.execute("DELETE FROM unified_user_mapping WHERE user_id=?", (user["id"],))
+        _c.execute("UPDATE unified_user_mapping SET gitcode_user='', github_login='', feishu_open_id='', feishu_name='', app_id='' WHERE user_id=?",
+                   (user["id"],))
         _c.execute("DELETE FROM org_member WHERE user_id=?", (user["id"],))
         _sm_db.commit()
 
@@ -977,9 +1004,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             _c.execute(
                 "SELECT m.repo_key FROM managed_repos m "
                 "INNER JOIN user_repos u ON m.repo_key = u.repo_key "
-                "WHERE u.user_id=? AND m.repo_key LIKE ? "
+                "WHERE u.user_id=? AND m.repo_key LIKE ? ESCAPE '\\' "
                 "AND m.webhook_id != '' AND m.webhook_id IS NOT NULL",
-                (user["id"], f"{provider}:%")
+                (user["id"], _escape_like_pattern(f"{provider}:%"))
             )
             rows = _c.fetchall()
             affected_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in rows]
@@ -987,8 +1014,8 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             try:
                 _c.execute(
                     "SELECT repo_key FROM managed_repos "
-                    "WHERE host_user_id=? AND repo_key LIKE ?",
-                    (user["id"], f"{provider}:%")
+                    "WHERE host_user_id=? AND repo_key LIKE ? ESCAPE '\\'",
+                    (user["id"], _escape_like_pattern(f"{provider}:%"))
                 )
                 path_b_rows = _c.fetchall()
                 path_b_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in path_b_rows]
@@ -1024,8 +1051,16 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     from src.auth.grape_account_db import clear_placeholder_email
     clear_placeholder_email(user["id"], provider)
 
-    # R30: 先计算受影响仓库数量（在删除 user_repos 之前）
+    # FR-21.7: 清 um 平台列——解绑后 um.gitcode_user/github_login 残留会导致飞书反查命中旧身份
+    from src.repo_key import um_column_for_provider
+    _um_col = um_column_for_provider(provider)
     from src.session_manager import db as _sm_db, db_lock as _sm_dl
+    with _sm_dl:
+        _c = _sm_db.cursor()
+        _c.execute(f"UPDATE unified_user_mapping SET {_um_col}='' WHERE user_id=?", (user["id"],))
+        _sm_db.commit()
+
+    # R30: 先计算受影响仓库数量（在删除 user_repos 之前）
     affected_count = 0
     try:
         with _sm_dl:
@@ -1033,9 +1068,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             _c2.execute(
                 "SELECT COUNT(*) FROM managed_repos m "
                 "INNER JOIN user_repos u ON m.repo_key = u.repo_key "
-                "WHERE u.user_id=? AND m.repo_key LIKE ? "
+                "WHERE u.user_id=? AND m.repo_key LIKE ? ESCAPE '\\' "
                 "AND m.webhook_id != '' AND m.webhook_id IS NOT NULL",
-                (user["id"], f"{provider}:%")
+                (user["id"], _escape_like_pattern(f"{provider}:%"))
             )
             row = _c2.fetchone()
             affected_count = row[0] if row else 0
@@ -1053,8 +1088,8 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     # D42: 清理 user_repos 中该平台的仓库缓存
     with _sm_dl:
         _c = _sm_db.cursor()
-        _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ?",
-                   (user["id"], f"{provider}:%"))
+        _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ? ESCAPE '\\'",
+                   (user["id"], _escape_like_pattern(f"{provider}:%")))
         _sm_db.commit()
 
     auth_audit.log_audit("unbind", user_id=user["id"], ip=ip,
@@ -1559,6 +1594,9 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
     if not bind_ok:
         return _bind_error_redirect(request, "bind_failed", popup=popup)
 
+    # FR-18.6: 补写 um 平台列
+    _sync_um_platform_col(binding_user_id, provider, user_info.get("external_login", ""))
+
     auth_audit.log_audit("bind", user_id=binding_user_id,
                          ip=_get_client_ip(request),
                          detail={"provider": provider, "external_id": external_id})
@@ -1723,6 +1761,8 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         log.warning(f"OAuth auto-create: bind failed for user {account['id']}, provider={provider}, rolling back")
         soft_delete_account(account["id"])
         return _oauth_error_redirect(request, "bind_failed", popup=popup)
+    # FR-18.6: 补写 um 平台列
+    _sync_um_platform_col(account["id"], provider, external_login)
     _clear_user_repos_cache(account["id"])
     _oauth_lang = (state_data or {}).get("lang", "") if isinstance(state_data, dict) else ""
     _ensure_personal_org(account["id"], account["username"], _get_request_lang(request, _oauth_lang))
@@ -2053,6 +2093,9 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
     if not associate_ok:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "关联失败，请重试"})
 
+    # FR-18.6: 补写 um 平台列
+    _sync_um_platform_col(account["id"], provider, state_data.get("external_login", ""))
+
     # D43: 绑定成功后清理 user_repos 缓存
     _clear_user_repos_cache(account["id"])
 
@@ -2170,6 +2213,9 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
         log.warning(f"OAuth register: create_external_identity failed for user {account['id']}, rolling back")
         soft_delete_account(account["id"])
         raise HTTPException(status_code=409, detail={"code": 409, "message": "该平台账号已被绑定"})
+
+    # FR-18.6: 补写 um 平台列
+    _sync_um_platform_col(account["id"], provider, state_data.get("external_login", ""))
 
     # 创建个人组织（slug 冲突时加后缀，登录时幂等补建兜底）
     _ensure_personal_org(account["id"], body.username, _get_request_lang(request, body.lang))

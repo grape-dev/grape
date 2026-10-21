@@ -5,6 +5,19 @@ from fastapi import Header, HTTPException, Request, Depends
 from src.user import db as user_db
 from src.config import log
 
+
+def _parse_utc_timestamp(s: str) -> int:
+    """FR-13: 将 TEXT 格式的时间戳按 UTC 解释为 epoch int。
+
+    grape_account_db 写入 gmtime UTC 字符串，读侧必须按 UTC 解释。
+    解析失败返回 0（触发 30 分钟 fallback 刷新逻辑）。
+    """
+    from datetime import datetime as _dt, timezone as _tz
+    try:
+        return int(_dt.strptime(s, "%Y-%m-%d %H:%M:%S").replace(tzinfo=_tz.utc).timestamp())
+    except (ValueError, OSError):
+        return 0
+
 TOKEN_TYPE_DEVOPS = "devops_bot"
 TOKEN_TYPE_USER = "user"
 TOKEN_TYPE_WEBHOOK = "webhook"
@@ -404,13 +417,9 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
             now = int(_time.time())
             need_refresh = False
             token_expires_at = cred.get("token_expires_at", 0)
-            # 兼容 int 和 TEXT 两种格式
+            # 兼容 int 和 TEXT 两种格式（FR-13: TEXT 按 UTC 解释，不依赖服务器时区）
             if isinstance(token_expires_at, str):
-                from datetime import datetime as _dt
-                try:
-                    token_expires_at = int(_dt.strptime(token_expires_at, "%Y-%m-%d %H:%M:%S").timestamp())
-                except (ValueError, OSError):
-                    token_expires_at = 0
+                token_expires_at = _parse_utc_timestamp(token_expires_at)
             if token_expires_at:
                 need_refresh = (token_expires_at - now) < 600
             else:
@@ -420,6 +429,13 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
             if need_refresh:
                 # R20.27.4: GitHub OAuth refresh 加分布式锁
                 new_token = _try_refresh_github_token(user_id)
+                if not new_token:
+                    # FR-7.1: 刷新失败标记 expired（对齐 R25.3 status=4 范式）
+                    from src.auth.grape_account_db import mark_identity_expired
+                    try:
+                        mark_identity_expired(user_id, "github")
+                    except Exception:
+                        pass
                 return new_token or token
         return token
 
@@ -563,13 +579,9 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
             now = int(_time.time())
             need_refresh = False
             token_expires_at = cred.get("token_expires_at", 0)
-            # 统一转 epoch int（兼容 int 和 TEXT 两种格式）
+            # 统一转 epoch int（兼容 int 和 TEXT 两种格式，FR-13: TEXT 按 UTC 解释）
             if isinstance(token_expires_at, str):
-                from datetime import datetime as _dt
-                try:
-                    token_expires_at = int(_dt.strptime(token_expires_at, "%Y-%m-%d %H:%M:%S").timestamp())
-                except (ValueError, OSError):
-                    token_expires_at = 0
+                token_expires_at = _parse_utc_timestamp(token_expires_at)
             if token_expires_at:
                 need_refresh = (token_expires_at - now) < 600
             else:
@@ -578,6 +590,13 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
                 need_refresh = age > 1800
             if need_refresh:
                 new_token = try_refresh_gitcode_token(user_id)
+                if not new_token:
+                    # FR-7.1: 刷新失败标记 expired（对齐 R25.3 status=4 范式）
+                    from src.auth.grape_account_db import mark_identity_expired
+                    try:
+                        mark_identity_expired(user_id, "gitcode")
+                    except Exception:
+                        pass
                 return new_token or token
         return token
 

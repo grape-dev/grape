@@ -68,6 +68,23 @@ def knowledge_obs_prefix(repo_key: str) -> str:
     return f"knowledge/{provider or 'gitcode'}/{owner}/{repo}"
 
 
+def um_column_for_provider(provider: str) -> str:
+    """根据 provider 字符串返回 unified_user_mapping 对应列名。
+
+    gitcode → "gitcode_user"；github → "github_login"。
+    """
+    return "github_login" if provider == "github" else "gitcode_user"
+
+
+def um_column_for_repo(repo_key: str) -> str:
+    """根据 repo_key 的 provider 返回 unified_user_mapping 对应列名。
+
+    repo_key 为空时默认 gitcode_user（向后兼容，调用方从 grape_accounts.username 取值）。
+    """
+    provider, _, _ = parse_repo_key(repo_key)
+    return um_column_for_provider(provider)
+
+
 # baseline 知识文件名 → 中文名/描述映射（统一常量，避免多处硬编码不一致）
 BASELINE_NAME_MAP = {
     "project-graph.md": "项目结构图谱",

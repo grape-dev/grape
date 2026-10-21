@@ -1208,7 +1208,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
              f"changed={changed} (agent={session_agent}, questions={questions[:60]})")
     if changed:
         from src.api.issues_center import _get_feishu_open_id_by_user_id
-        open_id = _get_feishu_open_id_by_user_id(user_id) or _get_feishu_open_id(assignee)
+        open_id = _get_feishu_open_id_by_user_id(user_id) or _get_feishu_open_id(assignee, repo_key)
         from src.api import main as api_main
         bm = api_main.bot_manager
         ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
@@ -1289,7 +1289,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
             from src.api.issues_center import (_get_feishu_open_id, _get_feishu_open_id_by_user_id,
                                                _resolve_user_chat_bot, _run_pending_review_notify)
             from src.session_manager import get_chat_config
-            _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"])
+            _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"], it.get("repo_key", ""))
             from src.api import main as api_main
             bm = api_main.bot_manager
             _ctx = _resolve_user_chat_bot(bm, it["user_id"]) if bm else None

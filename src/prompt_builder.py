@@ -324,10 +324,14 @@ curl -sL -X POST \\
 ### Save User Mapping (INSERT into unified_user_mapping)
 Use Python to save discovered mappings in the bot's sessions.db:
   import sqlite3; db = sqlite3.connect('{DB_PATH}')
-  db.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id,gitcode_user,updated_at) VALUES (?,?,datetime('now'))", (USER_ID, GITCODE_USER))
-  db.execute("UPDATE unified_user_mapping SET gitcode_user=?, feishu_open_id=?, feishu_name=?, updated_at=datetime('now') WHERE user_id=?", (GITCODE_USER, OPEN_ID, NAME, USER_ID))
+  # FR-18.4: 约束——USER_ID 必须>0（禁止 0 占位行）；GITCODE_USER 为空时不 UPDATE 该列
+  if USER_ID and USER_ID > 0:
+    db.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (USER_ID,))
+    if GITCODE_USER:
+      db.execute("UPDATE unified_user_mapping SET gitcode_user=?, feishu_open_id=?, feishu_name=?, updated_at=datetime('now') WHERE user_id=? AND user_id>0", (GITCODE_USER, OPEN_ID, NAME, USER_ID))
+    else:
+      db.execute("UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, updated_at=datetime('now') WHERE user_id=? AND user_id>0", (OPEN_ID, NAME, USER_ID))
   db.commit(); db.close()
-  # 若不知道 user_id，可用 0 占位，后续由 sync_repo_feishu_mapping 回填
 
 ### Name Resolution Workflow
 1. Determine target user (vcs_login, e.g. "Jason7602")

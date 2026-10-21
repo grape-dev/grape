@@ -531,18 +531,26 @@ def _git_has_changes(workdir: str) -> bool:
 
 def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: str,
                           _retries: int = 3) -> int | None:
-    """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id（429/5xx 退避重试）。"""
+    """检查仓库是否已有指向 webhook_url 的 webhook，有则返回 webhook_id（429/5xx 退避重试）。
+
+    FR-5.1: 空列表返回 None（不确定），调用方走新建分支；非空但无匹配也返回 None。
+    """
     if not webhook_url:
         return None
     import time
+    from src.config import log as _log
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     for i in range(_retries):
         try:
             hooks = _req("GET", url, api_token)
             if isinstance(hooks, list):
+                if not hooks:
+                    _log.info(f"find_existing_webhook: empty hooks list for {owner}/{repo} (token may lack hooks scope)")
+                    return None  # 空列表=不确定
                 for h in hooks:
                     if h.get("url") == webhook_url:
                         return h.get("id")
+                return None  # 有 hooks 但无匹配
             return None
         except RuntimeError as e:
             code = _extract_http_code(e) or 0
@@ -769,13 +777,20 @@ def fetch_github_repos_with_role(api_token: str) -> list[dict]:
 
 
 def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_url: str) -> int | None:
-    """检查 GitHub 仓库是否已有指向 webhook_url 的 webhook。"""
+    """检查 GitHub 仓库是否已有指向 webhook_url 的 webhook。
+
+    FR-5.1: 空列表返回 None（不确定），加 log 可观测。
+    """
     if not webhook_url:
         return None
+    from src.config import log as _log
     url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     try:
         hooks = _github_req("GET", url, api_token)
         if isinstance(hooks, list):
+            if not hooks:
+                _log.info(f"find_existing_github_webhook: empty hooks list for {owner}/{repo} (token may lack hooks scope)")
+                return None
             for h in hooks:
                 if h.get("config", {}).get("url") == webhook_url:
                     return h.get("id")

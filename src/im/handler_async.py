@@ -836,6 +836,11 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
                 if not _iss.isdigit():
                     await api.reply_card(ctx, msg_id, f"**❌ 无效任务号 {_iss}**")
                     return ""
+                # FR-12.4: uid 无效时不新建 task 会话（防同 Issue 双会话）
+                if not uid or uid == 0:
+                    log.warning(f"handler_async: skip task conversation creation for {_rk} #{_iss} (uid={uid} invalid, actor resolution failed)")
+                    await api.reply_card(ctx, msg_id, f"**⚠️ 无法确定任务归属人，请稍后重试或联系管理员**")
+                    return ""
                 cid = create_conversation(uid, _rk, title=_title, conv_type="task", issue_number=int(_iss))
         # 观测：目标会话归属 + 点卡 open_id 反查（awaiting-notify-card-join-fail-analysis.md §5.1）
         _conv_user = ""
@@ -1084,12 +1089,11 @@ async def _send_bind_success_card(ctx, api, msg_id, repo_key):
 
 async def _bind_repo(ctx, api, chat_id, msg_id, repo_key, uid_str):
     """绑定仓库到当前聊天"""
-    from src.session_manager import db_lock
+    from src.session_manager import db_lock, upsert_repo_im_binding
     uid = get_user_id_by_app_id(ctx.app_id) or 0
     with db_lock:
+        upsert_repo_im_binding(chat_id, repo_key, "gitcode", str(uid), ctx.app_id)
         c = db.cursor()
-        c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
-                  (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
         c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
         db.commit()
     _invalidate_repo_bind_cache(chat_id, ctx.app_id)
@@ -1164,11 +1168,10 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
         if action == "repo":
             repo = items[idx]
             repo_key = repo["repo_key"] if isinstance(repo, dict) else repo
-            from src.session_manager import db_lock
+            from src.session_manager import db_lock, upsert_repo_im_binding
             with db_lock:
+                upsert_repo_im_binding(chat_id, repo_key, "gitcode", str(uid), ctx.app_id)
                 c = db.cursor()
-                c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
-                          (chat_id, repo_key, "gitcode", str(uid), ctx.app_id))
                 # 绑定即重置会话位置：清掉旧会话指针，下次消息在新仓库下新建会话
                 #（修复 2026-08-16 "群绑定仓库 ≠ 会话所属仓库" 发散 bug）
                 c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
@@ -1208,6 +1211,14 @@ async def _handle_selection(ctx: "BotContext", api: "FeishuAsync", chat_id: str,
                         cid = r2[0]
             if not cid:
                 from src.session_manager import create_conversation
+                # FR-12.4: uid 无效时不新建 task 会话（防同 Issue 双会话）
+                if not uid or uid == 0:
+                    log.warning(f"handler_async: skip task conversation for {pending.get('repo_key', '')} #{issue_number} (uid={uid} invalid)")
+                    await _send_card_reply(ctx, api, msg_id, {
+                        "header": {"title": {"tag": "plain_text", "content": "⚠️ 无法确定归属"}, "template": "yellow"},
+                        "elements": [{"tag": "div", "text": {"tag": "lark_md", "content": f"**⚠️ 无法确定任务归属人**\nIssue #{issue_number} · {title or ''}\n请稍后重试或联系管理员"}}],
+                    })
+                    return ""
                 cid = create_conversation(uid, pending.get("repo_key", ""), title=f"Issue #{issue_number}",
                                           conv_type="task", issue_number=issue_number)
             from src.session_manager import join_feishu_chat
@@ -1394,7 +1405,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
         if sender_open_id and chat_type == "p2p":
             try:
                 from src.user import db as user_db
-                from src.session_manager import update_unified_user_info, get_feishu_open_id
+                from src.session_manager import bind_feishu_identity, get_feishu_open_id
                 uid = get_user_id_by_app_id(ctx.app_id)
                 if uid:
                     # D32: 从 grape_accounts 读 username + nickname
@@ -1429,8 +1440,9 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                                             feishu_name = _n
                                     except Exception:
                                         pass
-                                    update_unified_user_info(username, bind_open_id, feishu_name=feishu_name,
-                                                             gitcode_nickname=nickname, app_id=ctx.app_id)
+                                    # FR-18.7: 注册名语境——走 bind_feishu_identity 只写飞书三列，不碰平台列
+                                    bind_feishu_identity(uid, bind_open_id, feishu_name=feishu_name,
+                                                          app_id=ctx.app_id)
                                     _pending_binds.pop(key, None)
                                     await api.reply_text(ctx, msg_id, f"✅ 已确认，你的 GitCode 账号「{username}」已绑定当前飞书账号。")
                                     log.info(f"Chat: confirmed feishu mapping for {username} (app={ctx.app_id[:20]})")
@@ -1517,9 +1529,9 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
             from src.repo_key import to_repo_key
             repo_key = to_repo_key(bind_repo)
             try:
+                from src.session_manager import upsert_repo_im_binding
+                upsert_repo_im_binding(chat_id, repo_key, "gitcode", parsed.get("sender_id", ""), account)
                 c = db.cursor()
-                c.execute("INSERT OR REPLACE INTO repo_im_group_binding (im_chat_id, repo_key, source, bind_by, im_app_id) VALUES (?,?,?,?,?)",
-                          (chat_id, repo_key, "gitcode", parsed.get("sender_id", ""), account))
                 # 绑定即重置会话位置（修复 2026-08-16 绑定/会话发散 bug）
                 c.execute("UPDATE chat_conversations SET im_channel_id='' WHERE im_channel_id=?", (chat_id,))
                 db.commit()
