@@ -34,6 +34,8 @@ MANIFEST = [
     "src/prompt_builder.py",
     "src/session_manager.py",
     "src/mysql_compat.py",
+    "src/token_service.py",
+    "src/token_resolver.py",
     "src/user/__init__.py",
     "src/user/db.py",
     "src/auth/",
