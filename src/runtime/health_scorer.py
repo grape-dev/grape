@@ -401,6 +401,37 @@ def invalidate_cache(runtime_id: int = 0):
             _cache.clear()
 
 
+def reset_health(runtime_id: int) -> dict | None:
+    """重置单个引擎的健康分（Issue #394）。
+
+    管理员/仓库成员/个人设备 owner 通过 health-reset 管理接口调用：
+    写入 agent_runtimes.health_reset_at = 当前 UTC 时间作为赦免点，
+    随后清缓存并强制重算——统计窗口从重置点重新开始（见 _effective_window_start），
+    此前误降级/历史故障导致的低分被赦免，引擎可恢复参与调度。
+
+    返回重置后的健康度数据 dict；runtime_id 非法（0）时返回 None，不做写入。
+    """
+    if not runtime_id:
+        return None
+    reset_at = _utcnow().isoformat()
+    try:
+        with _lock():
+            c = _db().cursor()
+            c.execute(
+                "UPDATE agent_runtimes SET health_reset_at=? WHERE id=?",
+                (reset_at, runtime_id))
+            _db().commit()
+    except Exception as e:
+        log.warning(f"health_scorer: reset_health failed for runtime={runtime_id}: {e}")
+        return None
+    invalidate_cache(runtime_id)
+    log.info(f"health_scorer: health reset for runtime={runtime_id} reset_at={reset_at}")
+    data = get_health_score(runtime_id, force_refresh=True)
+    if data:
+        data["health_reset_at"] = reset_at
+    return data
+
+
 def _empty_score(runtime_id: int) -> dict:
     """空健康度数据（runtime_id=0 或无效时）。"""
     return {

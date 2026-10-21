@@ -520,3 +520,113 @@ class TestHeartbeatCheck:
             mock_lock.return_value.__exit__ = MagicMock(return_value=False)
             result = health_scorer._fetch_heartbeat(910009)
         assert result is False
+
+
+# ===== Issue #394: 健康分重置（health_reset_at 赦免点 + reset_health）=====
+
+class TestHealthReset:
+    """测试 `_effective_window_start` 的重置赦免语义与 `reset_health` 写入口。
+
+    Issue #394：为仓库级/个人级 worker 设备的 runtime 引擎提供重置健康分功能。
+    消费侧（_effective_window_start）读取 agent_runtimes.health_reset_at：
+    - 重置点晚于 7 天窗口起点 → 统计窗口从重置点开始（赦免重置前失败）
+    - 重置点早于窗口起点（已滚出窗口）→ 恢复普通 7 天窗口
+    - 从未重置 / 非法时间戳 → 普通 7 天窗口
+    """
+
+    def test_effective_window_start_no_reset(self):
+        """无重置记录 → 普通 7 天窗口起点。"""
+        fixed = "2026-10-13T00:00:00+00:00"
+        with patch.object(health_scorer, '_window_start', return_value=fixed), \
+             patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = ("",)   # health_reset_at 为空
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            start = health_scorer._effective_window_start(920001)
+        assert start == fixed
+
+    def test_effective_window_start_recent_reset(self):
+        """重置点晚于 7 天前 → 窗口从重置点开始（赦免）。"""
+        from datetime import datetime, timezone, timedelta
+        reset_ts = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        fixed = "2026-10-13T00:00:00+00:00"
+        with patch.object(health_scorer, '_window_start', return_value=fixed), \
+             patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (reset_ts,)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            start = health_scorer._effective_window_start(920002)
+        assert start > fixed
+
+    def test_effective_window_start_old_reset(self):
+        """重置点早于 7 天前（已滚出窗口）→ 回到普通 7 天窗口。"""
+        old_ts = "2020-01-01T00:00:00+00:00"
+        fixed = "2026-10-13T00:00:00+00:00"
+        with patch.object(health_scorer, '_window_start', return_value=fixed), \
+             patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = (old_ts,)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            start = health_scorer._effective_window_start(920003)
+        assert start == fixed
+
+    def test_effective_window_start_invalid_timestamp(self):
+        """非法时间戳 → 回到普通 7 天窗口（不抛异常）。"""
+        fixed = "2026-10-13T00:00:00+00:00"
+        with patch.object(health_scorer, '_window_start', return_value=fixed), \
+             patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock:
+            mock_cursor = MagicMock()
+            mock_cursor.fetchone.return_value = ("not-a-date",)
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            start = health_scorer._effective_window_start(920004)
+        assert start == fixed
+
+    def test_reset_health_writes_reset_at_and_refreshes(self):
+        """reset_health 写入 health_reset_at 并强制重算返回新健康分。"""
+        test_rid = 920010
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock, \
+             patch.object(health_scorer, 'invalidate_cache') as mock_inv, \
+             patch.object(health_scorer, 'get_health_score') as mock_get:
+            mock_cursor = MagicMock()
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            mock_get.return_value = {"runtime_id": test_rid, "health_score": 100,
+                                     "consecutive_failures": 0, "heartbeat_alive": True}
+            result = health_scorer.reset_health(test_rid)
+        # 写入 health_reset_at（UPDATE agent_runtimes ... health_reset_at=...）
+        assert mock_cursor.execute.called
+        updates = [c for c in mock_cursor.execute.call_args_list
+                   if "UPDATE agent_runtimes" in str(c.args[0])]
+        assert updates, "reset_health 应执行 UPDATE agent_runtimes"
+        assert "health_reset_at" in updates[0].args[0]
+        # 清缓存 + 强制重算
+        mock_inv.assert_called_once_with(test_rid)
+        mock_get.assert_called_once_with(test_rid, force_refresh=True)
+        assert result["health_score"] == 100
+
+    def test_reset_health_returns_none_for_invalid_rid(self):
+        """runtime_id=0 时 reset_health 返回 None（不做无意义写入）。"""
+        with patch.object(health_scorer, '_db') as mock_db, \
+             patch.object(health_scorer, '_lock') as mock_lock, \
+             patch.object(health_scorer, 'get_health_score') as mock_get:
+            mock_cursor = MagicMock()
+            mock_db.return_value.cursor.return_value = mock_cursor
+            mock_lock.return_value.__enter__ = MagicMock()
+            mock_lock.return_value.__exit__ = MagicMock(return_value=False)
+            result = health_scorer.reset_health(0)
+        assert result is None
+        mock_get.assert_not_called()

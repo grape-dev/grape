@@ -200,15 +200,18 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
                 elif _resp.status_code == 401:
+                    # Issue #386: 被校验的第三方 token 无效是客户端输入问题（400），
+                    # 不能与调用方 JWT 鉴权失败的 401 同构——否则前端全局 401 拦截器
+                    # 会误判登录失效并踢出会话。
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+                        detail={"code": 400, "message": "GitHub token 校验失败，请检查 token 有效性"},
                     )
                 else:
                     log.warning(f"GitHub token validation failed: {_resp.status_code}")
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+                        detail={"code": 400, "message": "GitHub token 校验失败，请检查 token 有效性"},
                     )
             except HTTPException:
                 raise
@@ -294,15 +297,17 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitCode token saved for user={user['username']}, gitcode_login={gc_login}")
                 elif _resp.status_code == 401:
+                    # Issue #386: 同 GitHub 分支——第三方 token 无效返回 400，
+                    # 与调用方鉴权 401 区分，避免前端误判登录失效。
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+                        detail={"code": 400, "message": "GitCode token 校验失败，请检查 token 有效性"},
                     )
                 else:
                     log.warning(f"GitCode token validation failed: {_resp.status_code}")
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+                        detail={"code": 400, "message": "GitCode token 校验失败，请检查 token 有效性"},
                     )
             except HTTPException:
                 raise
@@ -1117,6 +1122,38 @@ def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member),
         if rt.get("id") == rid:
             return rt
     raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+
+
+@router.post("/agent-runtimes/{rid}/health-reset", operation_id="settings_agent_runtime_health_reset", summary="Reset runtime health score", description="Resets a single runtime engine's health score (Issue #394). Writes agent_runtimes.health_reset_at as the pardon point so the health-score window restarts from the reset moment; previously accumulated failures are pardoned. Only repo-scope (repo members) and personal-scope (owner) worker engines are resettable; global engines return 403. Invisible or missing ids return 404.")
+def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
+    """重置单个引擎的健康分（Issue #394）。
+
+    权限：
+    - 复用 get_agent_runtimes 的全量可见性过滤（与详情端点同口径），引擎不可见 → 404；
+    - 仅仓库级（scope=repo）与个人级（scope=user）worker 设备引擎开放重置，
+      全局引擎（scope=global）不开放 → 403。
+    操作：写入 health_reset_at 赦免点 → 清缓存 → 强制重算（health_scorer.reset_health），
+    返回重置后的健康分数据；log 审计留痕（operator / rid / 重置点 / 新健康分）。
+    """
+    result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
+    rt = None
+    for item in result.get("runtimes", []):
+        if item.get("id") == rid:
+            rt = item
+            break
+    if rt is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+    if (rt.get("scope") or "global") not in ("user", "repo"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放"})
+    from src.runtime.health_scorer import reset_health
+    data = reset_health(rid)
+    if data is None:
+        log.warning(f"health-reset failed for runtime={rid} operator={user.get('username') or user.get('id')}")
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "重置健康分失败，请稍后重试"})
+    log.info(f"health-reset ok runtime={rid} operator={user.get('username') or user.get('id')} "
+             f"health_reset_at={data.get('updated_at')} health_score={data.get('health_score')}")
+    return {"runtime_id": rid, "health_reset_at": data.get("health_reset_at"),
+            "health_score": data.get("health_score")}
 
 
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")

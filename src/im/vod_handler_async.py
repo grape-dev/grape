@@ -274,6 +274,7 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         return "⚠️ 无可用引擎（该仓库 VOD Agent 未配置本机直连或远端引擎），请先在 Agent 配置中设置引擎。"
     _be = engine_name(engine_id) or backend
     kind = runtime_execution_kind(engine_id)
+    _mu = None          # 采集器占位：只有 DIRECT 分支才创建（worker 分支由 worker 侧采集）
     if kind != EXEC_MODE_DIRECT:
         # 入队 + 轮询：任务由远端 RuntimeAgent claim 执行（见 multi-runtime-instance-design）
         from src.runtime.service import enqueue_task, wait_task_terminal
@@ -314,10 +315,21 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
         _ws_know = os.path.join(wsd, ".knowledge")
         prompt = prompt.replace("{{PROJECT_INFO_DIR}}", _ws_proj)
         prompt = prompt.replace("{{KNOWLEDGE_DIR}}", _ws_know)
+        # 用量采集（审计 2026-10-17）：VOD Bot 的 DIRECT 运行以前不记 token
+        from src.observability.master_usage import MasterRun, new_run_id
+        _mu = MasterRun("vod", new_run_id("vod"), engine=_be, cwd=wsd,
+                        session_id=runtime_session_id,
+                        attr={"repo_key": repo_key,
+                              "scene_id": evt.get("payload", {}).get("im_chat_id", "") or "",
+                              "agent_type": "vod",
+                              "user_id": int(agent_session.get("user_id") or 0),
+                              "engine_id": int(engine_id or 0)})
+        _mu.start()
         async for event_type, data in consume_stream_async(prompt, wsd, runtime_session_id, skill,
                                                             backend_name=_be, account=repo_key,
                                                            bot_token=repo_token, agent_name="VOD Agent",
                                                            agent_label=f"[Agent:vod|repo:{repo_key}]"):
+            _mu.feed(event_type, data)
             if event_type == "done":
                 final_text = data.get("text", "")
                 exit_code = data.get("exit_code", -1)
@@ -360,6 +372,14 @@ async def _execute_vod_agent(repo_key: str, agent_session: dict, conv: dict, evt
             update_event_complete(event_seq, "completed", exit_code=exit_code,
                                   duration=duration, completed_at=datetime.utcnow().isoformat(),
                                   result=result_text)
+
+    # 用量落台账：放在最后（引擎已退出），失败只打日志。
+    # `_mu` 只在 DIRECT 分支创建（worker 分支的用量由 worker 侧采集）→ 判空。
+    if _mu is not None:
+        try:
+            _mu.finish(session_id=new_oc_sid)
+        except Exception as _ue:
+            log.warning(f"[VOD agent|repo:{repo_key}] usage finish failed: {_ue}")
 
     chat_id = evt.get("payload", {}).get("im_chat_id", "")
     try:

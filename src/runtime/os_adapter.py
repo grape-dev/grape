@@ -131,27 +131,51 @@ def which(cli: str) -> str:
     """跨平台 CLI 查找。
 
     Unix: shutil.which(cli)
-    Windows: 先查 cli，再查 cli.cmd / cli.exe / cli.bat
-    （npm 全局包在 Windows 上生成 .cmd 包装器）
+    Windows: exe 优先——先查 cli.exe（真实可执行文件，不经 cmd.exe 壳），
+    再查裸名（PATHEXT），最后 .cmd / .bat 兜底（npm 全局包的 cmd 包装器）。
+
+    issue #351: .cmd/.bat 壳在 Windows 上隐式经 cmd.exe 执行，argv 中的
+    换行符会被当作命令分隔符，多行提示词被截断为第一行——必须 exe 优先，
+    cmd/bat 仅作兼容兜底（调用方负责 WARN 告警）。
     """
+    if _IS_WINDOWS:
+        path = shutil.which(cli + ".exe")
+        if path:
+            return path
     path = shutil.which(cli)
     if path:
         return path
     if _IS_WINDOWS:
-        for ext in (".cmd", ".exe", ".bat"):
+        for ext in (".cmd", ".bat"):
             path = shutil.which(cli + ext)
             if path:
                 return path
     return ""
 
 
+def is_shell_wrapper(cli_path: str) -> bool:
+    """cli_path 是否为 cmd/bat 壳包装器（issue #351）。
+
+    Windows 上 .cmd/.bat 隐式经 cmd.exe 执行，argv 中的换行符会被视为
+    命令分隔符导致多行提示词截断；调用方在启动前检测并输出 WARN。
+    """
+    return bool(cli_path) and cli_path.lower().endswith((".cmd", ".bat"))
+
+
 _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
+    # issue #351: exe 候选排在 cmd 之前（cmd 壳会截断多行提示词），
+    # cmd 保留作旧环境兼容兜底（调用方 WARN 告警）。
     "opencode": [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm", "opencode.exe"),
+        os.path.join(os.environ.get("APPDATA", ""), "npm", "opencode.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES", ""), "nodejs", "opencode.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm", "opencode.cmd"),
         os.path.join(os.environ.get("APPDATA", ""), "npm", "opencode.cmd"),
         os.path.join(os.environ.get("PROGRAMFILES", ""), "nodejs", "opencode.cmd"),
     ],
     "codearts": [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "codearts", "codearts.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES", ""), "codearts", "codearts.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "codearts", "codearts.cmd"),
         os.path.join(os.environ.get("PROGRAMFILES", ""), "codearts", "codearts.cmd"),
     ],
@@ -160,10 +184,13 @@ _ENGINE_WINDOWS_PATHS: dict[str, list[str]] = {
         os.path.join(os.environ.get("USERPROFILE", ""), ".local", "bin", "hermes.exe"),
     ],
     "codex": [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm", "codex.exe"),
+        os.path.join(os.environ.get("APPDATA", ""), "npm", "codex.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "npm", "codex.cmd"),
         os.path.join(os.environ.get("APPDATA", ""), "npm", "codex.cmd"),
     ],
     "cursor": [
+        os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Programs", "cursor", "cursor.cmd"),
     ],
 }

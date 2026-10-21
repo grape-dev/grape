@@ -141,22 +141,31 @@ def _obs_env(monkeypatch):
 
 
 def _make_skill_zip(skill_name: str, with_script: bool = False, binary_extra: str = "",
-                    version: "str | None" = "1.0.0") -> bytes:
+                    version: "str | None" = "1.0.0", mjs_script: bool = False,
+                    description: "str | None" = None) -> bytes:
     """构造技能 zip（SKILL.md + references/ + 可选文本脚本 / 二进制文件）。
 
     version=None 表示 SKILL.md Front Matter 不写 version 字段（#336：缺失默认 1.0.0）。
+    mjs_script=True 追加 scripts/analyze.mjs（#392：.mjs 放行用例）。
+    description 非 None 时覆盖默认描述（#392：description 边界用例）。
     """
     version_line = "" if version is None else f"version: {version}\n"
+    desc = description if description is not None else "obs test skill"
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         zf.writestr(f"{skill_name}/SKILL.md",
-                    f"---\nname: {skill_name}\n{version_line}description: obs test skill\n---\n\n## 场景\n测试技能")
+                    f"---\nname: {skill_name}\n{version_line}description: {desc}\n---\n\n## 场景\n测试技能")
         zf.writestr(f"{skill_name}/references/design.md", "# Design\n参考文档")
         if with_script:
             # 模拟用户本地 chmod +x 后打包：zip 内 0755，验证权限贯穿链路
             _info = zipfile.ZipInfo(f"{skill_name}/scripts/run_code.py")
             _info.external_attr = 0o755 << 16
             zf.writestr(_info, "#!/usr/bin/env python3\nprint('ok')\n")
+        if mjs_script:
+            # #392：.mjs（Node ES Module 文本脚本）与 .js 同类放行
+            _info = zipfile.ZipInfo(f"{skill_name}/scripts/analyze.mjs")
+            _info.external_attr = 0o755 << 16
+            zf.writestr(_info, "import fs from 'node:fs';\nexport default () => {};\n")
         if binary_extra:
             zf.writestr(f"{skill_name}/{binary_extra}", b"\x7fELF\x02\x01\x01\x00evil")
     return buf.getvalue()
@@ -436,3 +445,54 @@ class TestSkillsObs:
         assert r.status_code == 400, f"version={version} 应被拒绝"
         errs = r.json()["detail"].get("errors") or []
         assert any("version" in e for e in errs), f"version={version} errors 应含 version 提示: {errs}"
+
+    # ===== #392 技能上传校验放宽：.mjs 放行 + description 上限 500→2048 =====
+
+    def test_upload_obs_allows_mjs_script(self, _obs_env):
+        """.mjs（Node ES Module 文本脚本）放行 → 上传成功 + zip 内保留该文件。
+
+        安全边界不变：.mjs 为纯文本 ES Module，与 .js 同类，非二进制可执行；
+        FORBIDDEN_EXTS（.so/.exe 等）仍拒绝（回归用例 test_upload_obs_rejects_binary_executables）。
+        """
+        zip_bytes = _make_skill_zip("obs-mjs-ok", mjs_script=True)
+        r = client.post("/api/skills/upload",
+                        files={"file": ("obs-mjs-ok.zip", zip_bytes)},
+                        data={"agent_type": "chat"}, headers=_headers)
+        assert r.status_code == 200, r.text
+        with db_lock:
+            row = db.execute(
+                "SELECT file_path FROM skill WHERE skill_name='obs-mjs-ok' AND scope='user'").fetchone()
+        assert row and row[0], "DB 记录缺失"
+        # zip 内 .mjs 脚本存在（权限位由打包链路保留）
+        from src.storage import get_skill_zip_bytes
+        import io as _io, zipfile as _zf
+        zdata = get_skill_zip_bytes(row[0])
+        with _zf.ZipFile(_io.BytesIO(zdata)) as zf:
+            names = zf.namelist()
+        assert any("scripts/analyze.mjs" in n for n in names), names
+        # 权限位贯穿链路：上传 zip 0755 → 服务端解压恢复 → OBS 重打包保留 0755
+        with _zf.ZipFile(_io.BytesIO(zdata)) as zf2:
+            target = next(i for i in zf2.infolist() if "analyze.mjs" in i.filename)
+            assert (target.external_attr >> 16) == 0o755, oct(target.external_attr >> 16)
+
+    @pytest.mark.parametrize("desc_len", [500, 2048])
+    def test_upload_description_within_limit(self, _obs_env, desc_len):
+        """description 长度 ≤2048（含原 500 临界值）上传成功（#392 上限放宽）。"""
+        # 用 ASCII 填充避免多字节字符长度歧义；desc_len 恰好等于上限
+        desc = "a" * desc_len
+        zip_bytes = _make_skill_zip(f"obs-desc-{desc_len}", description=desc)
+        r = client.post("/api/skills/upload",
+                        files={"file": (f"obs-desc-{desc_len}.zip", zip_bytes)},
+                        data={"agent_type": "chat"}, headers=_headers)
+        assert r.status_code == 200, f"desc_len={desc_len} 应通过: {r.text}"
+
+    def test_upload_description_exceeds_limit(self, _obs_env):
+        """description 长度 2049 > 2048 报错，且提示文案同步为 2048（#392）。"""
+        desc = "a" * 2049
+        zip_bytes = _make_skill_zip("obs-desc-over", description=desc)
+        r = client.post("/api/skills/upload",
+                        files={"file": ("obs-desc-over.zip", zip_bytes)},
+                        data={"agent_type": "chat"}, headers=_headers)
+        assert r.status_code == 400, r.text
+        errs = r.json()["detail"].get("errors") or []
+        assert any("2048" in e for e in errs), f"errors 应含 2048 提示: {errs}"

@@ -12,7 +12,15 @@
 3. **归属由主控反查**——repo_key/scene_id/agent_type/user_id/engine_id 取自 agent_tasks,
    不接受上报方传值,避免用量归属被写错或伪造。
 
-幂等:(task_id, seq) 联合唯一。seq 由 stable_seq() 按 (source, model, turn) 确定性生成,
+4. **运行主体分两类(2026-10-17 决定)**:
+   - `run_kind='task'`（默认,worker 任务）:`task_id` 是 agent_tasks.id,`run_id` 同值;
+     幂等键沿用**老格式** `{task_id}:{seq}` —— 升级后 worker 重报仍命中同一行,不会翻倍。
+   - 其它 `run_kind`（`chat`/`devops`/`im`/`wiki` 等**主控机内直接跑的引擎**）:
+     **没有 agent_tasks 行** → `task_id` 写空串,主体放 `run_id`(如 `chat:<conv_id>:<msg_id>`),
+     幂等键用 `{run_kind}:{run_id}:{seq}`;归属(repo/scene/agent_type/user/engine)由调用方
+     通过 `attr=` 传入——这类调用只允许**内部代码**发起,不走 HTTP 上报口(归属不接受外部传值)。
+
+幂等:(运行主体, seq) 唯一。seq 由 stable_seq() 按 (source, model, turn) 确定性生成,
 重报命中同一行走 UPSERT 覆盖——worker 重试不会把用量翻倍。
 
 语义差异(实测结论,见设计文档 §3.1):
@@ -26,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
@@ -150,10 +159,10 @@ def _scene_of(repo_key: str, issue_id: str) -> str:
 _INSERT_SQL = (
     "INSERT INTO obs_llm_usage ("
     "dedup_key, task_id, seq, turn, source, repo_key, scene_id, agent_type, engine_id, user_id,"
-    " provider_raw, model_raw, model_key,"
+    " provider_raw, model_raw, model_key, run_id, run_kind,"
     " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens,"
     " cost_usd, cost_status, updated_at"
-    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
+    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))"
     " ON CONFLICT(dedup_key) DO UPDATE SET "
     "task_id=excluded.task_id, seq=excluded.seq, turn=excluded.turn, source=excluded.source,"
     " provider_raw=excluded.provider_raw, model_raw=excluded.model_raw, model_key=excluded.model_key,"
@@ -164,14 +173,113 @@ _INSERT_SQL = (
     " updated_at=datetime('now')"
 )
 
+# run_kind 取值（其它值也接受，只是排不进 KNOWN 分类）
+RUN_KINDS = ("task", "chat", "devops", "im", "wiki")
 
-def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "report") -> int:
+
+def dedup_key_for(run_kind: str, task_id: str, run_id: str, seq: int) -> str:
+    """幂等键：**worker 任务沿用老格式** `{task_id}:{seq}`（升级后重报仍命中老行，不翻倍）；
+    其它运行类型用 `{run_kind}:{run_id}:{seq}`。
+    """
+    if (run_kind or "task") == "task":
+        return f"{task_id}:{seq}"
+    return f"{run_kind}:{run_id}:{seq}"
+
+
+# ---------------------------------------------------------------- 年度归档
+
+ARCHIVE_KEEP_DAYS = 365     # 台账保留近一年；更早的行搬到 obs_llm_usage_archive
+
+
+def archive_old_usage(keep_days: int = ARCHIVE_KEEP_DAYS, batch: int = 2000) -> Dict[str, int]:
+    """把超过保留期的台账行**搬**到 `obs_llm_usage_archive`（审计决定 2026-10-17：年度归档）。
+
+    为什么不是简单 DELETE：台账是计费/报表依据，删掉就再也算不出来了；归档表结构镜像台账，
+    报表需要跨年对账时可 UNION 两张表（或只查归档表）。
+
+    实现要点：
+    - `created_at` 是 **数据库本地时间串**（`datetime('now')` 默认值，不是 ISO！审计踩过）——
+      因此粗筛同时给「本地格式」与「ISO 格式」两个边界（OR，两条都能用上 created_at 索引），
+      再用 `normalize_event_time` 精确判定，两种存法都不会漏/误搬。
+    - 列集合用 `PRAGMA table_info` 取两张表的**交集**（不含 id）→ 以后给台账加列，归档自动跟上，
+      不会因为列数不一致而失败。
+    - 分批（默认 2000 行/次），单次失败不影响主循环；返回 {archived, checked}。
+    """
+    from src.session_manager import db, db_lock
+    out = {"archived": 0, "checked": 0}
+    try:
+        now = datetime.now(timezone.utc)
+        cut = now - timedelta(days=keep_days)
+        cut_iso = cut.isoformat()
+        # 本地格式边界：库侧 datetime('now') 写的是数据库本地时间（生产为 CST）
+        try:
+            from src.api.time_utils import normalize_event_time as _nzt
+        except Exception:
+            _nzt = None
+        cut_local = (cut + timedelta(hours=8)).strftime("%Y-%m-%d %H:%M:%S")
+        with db_lock:
+            c = db.cursor()
+            live_cols = [r[1] for r in c.execute("PRAGMA table_info(obs_llm_usage)").fetchall()]
+            arc_cols = [r[1] for r in c.execute("PRAGMA table_info(obs_llm_usage_archive)").fetchall()]
+            cols = [x for x in live_cols if x in arc_cols and x != "id"]
+            if not cols:
+                log.warning("llm_usage archive: no shared columns, skip")
+                return out
+            c.execute("SELECT id, created_at FROM obs_llm_usage"
+                      " WHERE created_at IS NOT NULL AND created_at != ''"
+                      "   AND (created_at < ? OR created_at < ?)"
+                      " ORDER BY created_at ASC LIMIT ?",
+                      (cut_iso, cut_local, int(batch)))
+            rows = c.fetchall()
+            out["checked"] = len(rows)
+            ids: List[int] = []
+            for rid, ts in rows:
+                _t = str(ts)
+                if _nzt is not None:
+                    try:
+                        _n = _nzt(_t)
+                        if isinstance(_n, str) and _n:
+                            _t = _n
+                    except Exception:
+                        pass
+                if _t < cut_iso:                  # 归一后统一 ISO 比较
+                    ids.append(int(rid))
+            if not ids:
+                return out
+            ph = ",".join("?" * len(ids))
+            collist = ", ".join(cols)
+            c.execute(f"INSERT INTO obs_llm_usage_archive ({collist})"
+                      f" SELECT {collist} FROM obs_llm_usage WHERE id IN ({ph})", tuple(ids))
+            moved = int(c.rowcount or 0)
+            c.execute(f"DELETE FROM obs_llm_usage WHERE id IN ({ph})", tuple(ids))
+            db.commit()
+            out["archived"] = moved
+            if moved:
+                log.info(f"llm_usage archive: moved {moved} rows older than {keep_days}d")
+    except Exception as e:
+        log.warning(f"llm_usage archive failed: {e}")
+    return out
+
+
+def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "report",
+                 run_kind: str = "task", run_id: str = "",
+                 attr: Optional[Dict[str, Any]] = None) -> int:
     """写台账。usages 为记录列表(每条可含 provider/model/cost_status + 任意别名 token 字段)。
+
+    - `run_kind='task'`（默认）:worker 任务的用量上报,`task_id` 必填,归属从 agent_tasks 反查。
+    - 其它 `run_kind`（chat/devops/im/wiki）:主控机内直接跑的引擎,**没有 agent_tasks 行** →
+      `task_id` 落空串、主体用 `run_id`（如 `chat:<conv_id>:<msg_id>`），归属由 `attr=` 传入
+      （只允许内部代码调用；HTTP 上报口不接受外部传值,避免归属被伪造成本口径)。
+      `attr` 支持 repo_key / scene_id / agent_type / engine_id / user_id。
 
     返回实际写入/更新的行数。任何异常都不向上抛——用量采集绝不能拖垮任务主链路。
     """
+    kind = (run_kind or "task").strip() or "task"
+    subject = task_id if kind == "task" else (run_id or task_id)
     items: List[Dict[str, Any]] = [u for u in (usages or []) if isinstance(u, dict)]
-    if not task_id or not items:
+    if not subject or not items:
+        return 0
+    if kind == "task" and not task_id:
         return 0
     try:
         from src.session_manager import db, db_lock
@@ -183,7 +291,16 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
     try:
         with db_lock:
             c = db.cursor()
-            attr = _attribution(task_id, c)
+            _given = dict(attr or {})       # 调用方（内部代码）提供的归属，仅作兜底
+            if kind == "task":
+                # 归属以 agent_tasks 反查为准；调用方给的只做**补空**——
+                # 例如 task 行的 runtime_id 为空时，用调用方知道的引擎 id 兜住。
+                attr = _attribution(task_id, c)
+                for _k, _v in _given.items():
+                    if not attr.get(_k) and _v:
+                        attr[_k] = _v
+            else:
+                attr = _given
             for u in items:
                 model_raw = str(u.get("model") or u.get("model_raw") or "")
                 model_key = normalize_model(model_raw) or "unknown"
@@ -198,11 +315,13 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
                 except (TypeError, ValueError):
                     cost = None
                 c.execute(_INSERT_SQL, (
-                    f"{task_id}:{seq}", task_id, seq, turn, source,
+                    dedup_key_for(kind, task_id, subject, seq),
+                    task_id if kind == "task" else "",
+                    seq, turn, source,
                     attr.get("repo_key", ""), attr.get("scene_id", ""),
                     attr.get("agent_type", ""), attr.get("engine_id", 0), attr.get("user_id", 0),
                     normalize_provider(u.get("provider") or u.get("provider_raw") or ""),
-                    model_raw, model_key,
+                    model_raw, model_key, subject, kind,
                     tok["input_tokens"], tok["output_tokens"],
                     tok["cache_read_tokens"], tok["cache_write_tokens"],
                     tok["reasoning_tokens"],
@@ -218,7 +337,7 @@ def record_usage(task_id: str, usages: Iterable[Dict[str, Any]], source: str = "
         except Exception:
             pass
         return 0
-    log.info(f"llm_usage: task={task_id} source={source} rows={written}")
+    log.info(f"llm_usage: run_kind={kind} subject={subject} source={source} rows={written}")
     return written
 
 
@@ -236,26 +355,64 @@ def _dict_rows(cursor) -> List[Dict[str, Any]]:
     return [{k: _plain(v) for k, v in zip(cols, r)} for r in cursor.fetchall()]
 
 
+_USAGE_COLS = ("model_key, model_raw, source, turn,"
+               " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
+               " reasoning_tokens, cost_usd, cost_status")
+
+
+def _query_usage(where: str = "", params: Sequence[Any] = (), order: str = " ORDER BY model_key, turn",
+                 limit: int = 0) -> List[Dict[str, Any]]:
+    """用量明细的共用读法（L1/L2/详情页都用同一份列投影）。"""
+    try:
+        from src.session_manager import db, db_lock
+        sql = f"SELECT {_USAGE_COLS} FROM obs_llm_usage" + where + order
+        ps: List[Any] = list(params)
+        if limit:
+            sql += " LIMIT ?"
+            ps.append(int(limit))
+        with db_lock:
+            c = db.cursor()
+            c.execute(sql, tuple(ps))
+            return _dict_rows(c)
+    except Exception as e:
+        log.warning(f"llm_usage: read failed ({where.strip()[:40]}): {e}")
+        return []
+
+
 def task_usage(task_id: str) -> List[Dict[str, Any]]:
-    """单个任务的用量行(P1 任务详情用)。"""
+    """单个**任务**的用量行（P1 任务详情用）。只出 run_kind='task' 的行。"""
+    return _query_usage(" WHERE task_id=? AND run_kind='task'", (str(task_id),))
+
+
+def run_usage(run_kind: str, run_id: str) -> List[Dict[str, Any]]:
+    """某个**非任务运行**（chat/devops/im/wiki）的用量明细。"""
+    return _query_usage(" WHERE run_kind=? AND run_id=?", (str(run_kind), str(run_id)))
+
+
+def usage_by_kind(since: Optional[str] = None) -> List[Dict[str, Any]]:
+    """按运行类型聚合（报表/对账用）：每类多少行、多少 token。"""
+    sql = ("SELECT run_kind, COUNT(*) AS rows_cnt, SUM(input_tokens) AS input_tokens,"
+           " SUM(output_tokens) AS output_tokens, SUM(cache_read_tokens) AS cache_read_tokens,"
+           " SUM(reasoning_tokens) AS reasoning_tokens FROM obs_llm_usage")
+    params: List[Any] = []
+    if since:
+        sql += " WHERE created_at >= ?"
+        params.append(since)
+    sql += " GROUP BY run_kind ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC"
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "SELECT model_key, model_raw, source, turn,"
-                " input_tokens, output_tokens, cache_read_tokens, cache_write_tokens,"
-                " reasoning_tokens, cost_usd, cost_status FROM obs_llm_usage"
-                " WHERE task_id=? ORDER BY model_key, turn", (task_id,))
+            c.execute(sql, tuple(params))
             return _dict_rows(c)
     except Exception as e:
-        log.warning(f"llm_usage: read failed task={task_id}: {e}")
+        log.warning(f"llm_usage: usage_by_kind failed: {e}")
         return []
 
 
 def summarize(repo_key: Optional[str] = None, since: Optional[str] = None,
-              limit: int = 50) -> List[Dict[str, Any]]:
-    """按模型聚合(P1 总览 ⑨ 图用)。"""
+              limit: int = 50, run_kind: Optional[str] = None) -> List[Dict[str, Any]]:
+    """按模型聚合(P1 总览 ⑨ 图用)。`run_kind` 非空时只算该类型（task/chat/...）。"""
     sql = (
         "SELECT model_key, COUNT(*) AS calls,"
         " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens,"
@@ -270,6 +427,9 @@ def summarize(repo_key: Optional[str] = None, since: Optional[str] = None,
     if since:
         sql += " AND created_at >= ?"
         params.append(since)
+    if run_kind:
+        sql += " AND run_kind=?"
+        params.append(str(run_kind))
     sql += " GROUP BY model_key ORDER BY (SUM(input_tokens)+SUM(output_tokens)) DESC LIMIT ?"
     params.append(int(limit))
     try:

@@ -11,7 +11,8 @@ import re, os, yaml
 # 二进制可执行/平台原生 —— 禁止上传（防原生代码注入）
 FORBIDDEN_EXTS = {".exe", ".bat", ".jar", ".class", ".so", ".dll", ".bin", ".msi", ".apk"}
 # 文本脚本（官方规范 scripts/ 目录支持，zip 化保留权限位 + worker 物化恢复）
-SCRIPT_EXTS = {".py", ".sh", ".js", ".ts", ".pl", ".rb", ".go", ".rs"}
+# .mjs：Node ES Module 脚本，与 .js 同类文本脚本（#392 技能 scripts 常用格式）
+SCRIPT_EXTS = {".py", ".sh", ".js", ".mjs", ".ts", ".pl", ".rb", ".go", ".rs"}
 ALLOWED_REF_EXTS = {".md", ".txt", ".json", ".yaml", ".yml"}
 REQUIRED_SECTIONS = ["## 场景", "## 知识", "## 步骤"]
 PROJECT_SKILLS = {"pr", "issue", "implementation", "build-debug", "deploy-guard",
@@ -87,8 +88,8 @@ def validate_skill(upload_dir: str, skill_name: str) -> list[str]:
     desc = str(fm.get("description", "")).strip()
     if not desc:
         errors.append("description 字段不能为空")
-    elif len(desc) > 500:
-        errors.append("description 字段不超过 500 字")
+    elif len(desc) > 2048:
+        errors.append("description 字段不超过 2048 字")
 
     if name_val in PROJECT_SKILLS:
         errors.append(f"技能名「{name_val}」与项目级技能冲突，请换一个名称")
