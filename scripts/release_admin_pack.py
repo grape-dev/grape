@@ -320,8 +320,8 @@ def main():
     r = subprocess.run([
         "obsutil", "cp", pkg_path,
         f"obs://obs-grape-release/{PREFIX}/{pkg_name}", "-f",
-        "-i=HPUAR0IGNKV5MR2M7J2D",
-        "-k=rAb4k1mHBTV0V4TD4KC8zehanhqvKv9vdFoZVvBn",
+        "-i=HPUANGX7DYEGYUHW7QPJ",
+        "-k=R210fvisl2nkPTStZKGSv4ZzbRBrZbeCuyk88N4F",
         "-e=obs.cn-north-4.myhuaweicloud.com",
     ], capture_output=True, text=True, timeout=300)
     if r.returncode == 0:
