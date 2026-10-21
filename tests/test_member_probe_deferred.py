@@ -165,3 +165,46 @@ class TestProbeThrottle:
             client.get("/api/repos/member", headers=_headers)
         # 修复前每次 cache-miss 都探活 → >=2；修复后节流应只有 1 次
         assert len(self.calls) <= 1, f"probe should be throttled, got {len(self.calls)}"
+
+
+class TestCacheTimezoneCompat:
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, monkeypatch):
+        uid = _seed_user_and_cache()
+        self.uid = uid
+        monkeypatch.setattr("src.api.routes.repos._probe_stale_repos",
+                            lambda *a, **k: None)
+        monkeypatch.setattr("src.api.routes.repos._fetch_and_cache",
+                            lambda uid, tok, p: [
+                                {"repo_key": "gitcode:ownorg/probe-a", "full_name": "ownorg/probe-a",
+                                 "owner": "ownorg", "name": "probe-a", "is_admin": True, "role": "Admin"}])
+        yield
+        _clear_member_cache()
+
+    def test_ut08_synced_at_utc_not_expired(self):
+        """synced_at 存 UTC（比 now 早约 8h，如 SQLite datetime('now')）不应误判过期。"""
+        from datetime import datetime as _dt
+        from src.auth.grape_account_db import get_grape_account_by_username as _g
+        acc = _g("probe_ttl_user")
+        # 写 UTC 时间（本地 -8h）
+        utc_now = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
+        with db_lock:
+            db.execute("UPDATE user_repos SET synced_at=? WHERE user_id=?", (utc_now, acc["id"]))
+            db.commit()
+        r = client.get("/api/repos/member", headers=_headers)
+        assert r.status_code == 200
+        assert r.json().get("_cached") is True, "UTC-valued synced_at should NOT be treated as expired"
+
+    def test_ut09_synced_at_local_not_expired(self):
+        """synced_at 存本地时间（CST）且 30 分钟内 → 缓存命中。"""
+        from datetime import datetime as _dt
+        from src.auth.grape_account_db import get_grape_account_by_username as _g
+        acc = _g("probe_ttl_user")
+        local_now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
+        with db_lock:
+            db.execute("UPDATE user_repos SET synced_at=? WHERE user_id=?", (local_now, acc["id"]))
+            db.commit()
+        r = client.get("/api/repos/member", headers=_headers)
+        assert r.status_code == 200
+        assert r.json().get("_cached") is True, "local synced_at within TTL should be cached"

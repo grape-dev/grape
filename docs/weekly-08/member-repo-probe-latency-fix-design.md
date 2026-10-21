@@ -76,6 +76,7 @@
 | `src/api/routes/repos.py` | `list_member_repos`：探活触发改为「缓存过期后再异步启动」；新增 `_start_stale_probe_async`（节流 + fire-and-forget）；缓存命中不再启动探活取 token | ✅ 已实施 |
 | `src/api/routes/repos.py` `_probe_stale_repos` | 保留后台线程并发探测（`as_completed` 已在后台线程内，请求栈不含）；范围收敛（仅 `webhook_id` 托管仓）延续；探测日志 `info→debug` 降噪；`REPO_PROBE_INTERVAL` 节流 | ✅ 已实施 |
 | `src/api/routes/repos.py` 常量区 | `REPO_PROBE_INTERVAL`（env 可配，默认 `<300>`s）+ 模块级节流守卫 | ✅ 已实施 |
+| `src/api/routes/repos.py` `list_member_repos._is_expired` | **附加修复**：`synced_at` 时区双兼容（MySQL 存 UTC / 本地 CST 都正确判定缓存是否过期；修复 SQLite 场景下 `datetime('now')`=UTC 被 `datetime.now()`=CST 判恒过期的 bug） | ✅ 已实施 |
 | `src/api/static/index.html` | 若改前端无必要（纯后端），可不改；此轮不涉及前端 | — |
 | `tests/test_member_probe_deferred.py` | 新增 4 用例（UT-01/02/03/05，TDD 红→绿） | ✅ 已实施 |
 | `main` 分支 | 后续同步（可选） | ⬜ 待实施 |
@@ -119,10 +120,13 @@
 | UT-05 | 节流生效 | 连续两次 `/member` | 两次请求只触发一次全量探测（`REPO_PROBE_INTERVAL` 内） |
 | UT-06 | 范围收敛 | 托管仓库含「无 webhook_id」记录 | 探测文件仅覆盖有 `webhook_id` 的托管仓库 |
 | UT-07 | 环境变量可配 | 设置 `REPO_PROBE_INTERVAL` 非常用值 | 节流阈值按环境值生效 |
+| UT-08 | `synced_at` 存 UTC 不误判过期 | SQLite `datetime('now')`=UTC（比本地早约 8h） | `_cached=True`（不因时区差被认过期） |
+| UT-09 | `synced_at` 存本地时间不误判过期 | CST 本地时间、TTL 内 | `_cached=True` |
 | PERF-01 | 规模化回归（环境 2） | 部署后实测 | 缓存命中 `/member` 耗时应显著下降（目标到亚秒~1s 级） |
 
-> **红阶段**（修复前）：UT-01/02/05 失败（缓存命中仍启动探活/取 token、无节流）；UT-03 通过（缓存过期触发探活）。
-> **绿阶段**（修复后）：`tests/test_member_probe_deferred.py` 4/4 通过（UT-01/02/03/05）。
+> **红阶段**（修复前）：UT-01/02/05 失败（缓存命中仍启动探活/取 token、无节流）；UT-08 失败（UTC 存储被误判过期→缓存恒 miss→全量拉取）；UT-03 通过。
+> **绿阶段**（修复后）：`tests/test_member_probe_deferred.py` 6/6 通过（UT-01/02/03/05/08/09）。
+> 环境 2 实测：修复探活后**缓存仍恒 miss**——根因正是 UT-08 时空区 bug（`datetime('now')`=UTC vs `datetime.now()`=CST 差 8h），补修后缓存命中生效。
 > 回归：`tests/test_lobby_managed_repos.py` 通过；`tests/test_api_routes.py` TestRepos 除 `test_host_no_permission`（pre-existing 401 测试凭据问题）外全过；`tests/test_token_scope_guard.py` 4 例失败为改动前既有（stash 对比确认）；TestKnowledge 16 例为 pre-existing baseline。
 
 ---

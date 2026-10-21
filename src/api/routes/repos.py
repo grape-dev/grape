@@ -405,10 +405,17 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         if not synced_at:
             return True
         try:
-            # D42: synced_at 存的是 MySQL 本地时间（CST=UTC+8），用本地时间比较
-            # 之前用 timezone.utc 解析导致 age 为负数，缓存永远不过期
+            # D42 兼容两种存储：
+            # - MySQL 存默认 datetime('now') = UTC；本地解析会显得早 8h → age 恒巨大 → 永远过期
+            # - 历史/迁移可能存本地时间（CST=UTC+8）
+            # 判定法：直接用「距今秒数」，若 |age| 过大则按 UTC+8 折算回本地再判。
             t = datetime.strptime(synced_at, "%Y-%m-%d %H:%M:%S")
-            age = (datetime.now() - t).total_seconds()
+            now = datetime.now()
+            age = (now - t).total_seconds()
+            # 值看起来「未来」或「非常旧」：说明基准是 UTC（与本地差约 8h）
+            if abs(age) > 6 * 3600:
+                # 存储值是 UTC → 用 UTC now 比（消除本地偏移）
+                age = (datetime.utcnow() - t).total_seconds()
             return age > REPOS_CACHE_TTL
         except Exception:
             return True
