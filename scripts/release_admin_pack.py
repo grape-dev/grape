@@ -317,11 +317,19 @@ def main():
         print("[pack] --skip-upload, 跳过上传"); return
 
     print(f"[pack] 上传到 obs://obs-grape-release/{PREFIX}/{pkg_name}...")
+    # 凭据不在代码里（2026-10-21 起）：读环境变量或非入库配置，见 scripts/obs_credentials.py
+    # 与守卫 scripts/check-secrets.py（禁止把 AK/SK 明文写回本文件）。
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    try:
+        from obs_credentials import release_obs_credentials
+        _ak, _sk = release_obs_credentials()
+    except RuntimeError as e:
+        print(f"[pack] 上传凭据缺失，终止：\n{e}"); sys.exit(1)
     r = subprocess.run([
         "obsutil", "cp", pkg_path,
         f"obs://obs-grape-release/{PREFIX}/{pkg_name}", "-f",
-        "-i=HPUAR0IGNKV5MR2M7J2D",
-        "-k=rAb4k1mHBTV0V4TD4KC8zehanhqvKv9vdFoZVvBn",
+        f"-i={_ak}",
+        f"-k={_sk}",
         "-e=obs.cn-north-4.myhuaweicloud.com",
     ], capture_output=True, text=True, timeout=300)
     if r.returncode == 0:

@@ -17,9 +17,12 @@ import zipfile
 os.environ["OBS_ENABLED"] = "true"
 os.environ["OBS_BUCKET"] = "obs-grape-dev-file"
 os.environ["OBS_ENDPOINT"] = "https://obs.cn-north-4.myhuaweicloud.com"
-os.environ["OBS_ACCESS_KEY"] = "HPUA1RGZONSTYDPQLPZR"
-os.environ["OBS_SECRET_KEY"] = "0Y86GEdGPeOOgV3UhdfzCJMOlFG9cbjVWYu4FF0W"
 os.environ["OBS_PREFIX"] = "grape/test"
+# OBS 运行桶凭据不在代码里（2026-10-21 起）：读环境变量或 /etc/grape/grape.env。
+# 见 scripts/obs_credentials.py 与守卫 scripts/check-secrets.py。
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__))))
+from obs_credentials import apply_runtime_obs_env  # noqa: E402
+apply_runtime_obs_env()  # 注入 OBS_ACCESS_KEY / OBS_SECRET_KEY（缺失则明确报错）
 sys.path.insert(0, "/home/yangaiwu/grape")
 
 from src.storage import get_storage, reset_storage, skill_key, skill_md_content, get_skill_zip_bytes  # noqa: E402
