@@ -93,14 +93,60 @@ def _effective_window_start(runtime_id: int) -> str:
         return window
     if not reset_at:
         return window
+    # 与 7 天窗口起点按「时间」比较（不再按字符串比较：精度/格式差异会误判，
+    # 例如 '...:42+00:00' vs '...:42.916425+00:00' 的字典序会把同秒判反）
     try:
         ts = datetime.fromisoformat(reset_at)
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        reset_iso = ts.isoformat()
-        return reset_iso if reset_iso > window else window
+        win_dt = datetime.fromisoformat(window)
+        if win_dt.tzinfo is None:
+            win_dt = win_dt.replace(tzinfo=timezone.utc)
+        return ts.isoformat() if ts > win_dt else window
     except Exception:
         return window
+
+
+_SQL_DT_FMT = "%Y-%m-%d %H:%M:%S"
+
+
+def _to_sql_utc(ts) -> str:
+    """把时间戳规范成 MySQL DATETIME 字面量（UTC、秒精度，'YYYY-MM-DD HH:MM:SS'）。
+
+    为什么必须规范（2026-10-21 dev 实测）：agent_tasks.created_at 由 UTC_TIMESTAMP()
+    写入（纯 UTC datetime），而赦免窗口起点曾是带时区偏移的 ISO 串（...T07:49:24+00:00）。
+    MySQL 把该 ISO 串按「会话时区」解释，实测被抬高 8 小时
+    （CAST('2026-10-21T07:49:24.519516+00:00' AS DATETIME) = 2026-10-21 15:49:25）→
+    窗口起点落到未来，重置后 8 小时内的新失败全部落在窗口之外 → 健康分不降
+    （赦免期退化成"免疫期"）。7 天窗口写法同一隐患，只是被量级掩盖。
+
+    性能：只在每次统计前转换一次（两次查询共用一个常量参数），
+    **不在 SQL 里对列做任何函数运算** → idx_tasks_runtime_status(runtime_id,status)
+    照旧可用；快路径是纯字符串切片，无 datetime 解析开销。
+
+    精度语义：agent_tasks.created_at 是秒精度，故窗口也取秒精度；与重置点同一秒内
+    产生的失败按"发生在重置之后"计入（保守方向——宁可计失败，也不制造免疫期）。
+    """
+    if isinstance(ts, datetime):
+        dt = ts
+    else:
+        s = (ts or "").strip()
+        if not s:
+            return ""
+        body = s
+        if body.endswith("Z"):
+            body = body[:-1]
+        elif body.endswith(("+00:00", "-00:00")):
+            body = body[:-6]
+        # 快路径：'YYYY-MM-DDTHH:MM:SS' 或带小数秒（偏移已剥掉）→ 直接切片
+        if len(body) >= 19 and body[10] == "T":
+            tail = body[19:]
+            if tail == "" or tail.startswith("."):
+                return body[:10] + " " + body[11:19]
+        dt = datetime.fromisoformat(s)
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime(_SQL_DT_FMT)
 
 
 # ===== 核心计算 =====
@@ -127,8 +173,10 @@ def _fetch_task_stats(runtime_id: int) -> dict:
 
     返回 {total, failed, completed, consecutive_failures, last_status}
     Issue-P2: 窗口起点走 _effective_window_start（含健康分重置赦免，交集语义）。
+    2026-10-21 修复：窗口起点先经 _to_sql_utc 规范成纯 UTC datetime 字面量再参与比较
+    （带时区偏移的 ISO 串会被 MySQL 按会话时区误解释、抬高 8 小时，见 _to_sql_utc 注释）。
     """
-    window = _effective_window_start(runtime_id)
+    window = _to_sql_utc(_effective_window_start(runtime_id))
     result = {"total": 0, "failed": 0, "completed": 0,
               "consecutive_failures": 0, "last_status": ""}
     try:
