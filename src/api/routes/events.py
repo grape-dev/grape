@@ -272,6 +272,80 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     return result
 
 
+@router.get("/redispatchable", operation_id="events_redispatchable",
+            summary="List redispatchable events (engines recovered)",
+            description="Issue #404: 列出因'场景绑定的引擎全部离线'失败、且其场景绑定引擎已恢复 online 的事件，"
+                        "供用户一键重派。实际重派走 POST /events/{seq}/redispatch（内部已重读 pool 校验）。"
+                        "支持按 scene_id / agent_type / repo_key 过滤；limit 默认 50。")
+def list_redispatchable_events(scene_id: str = "",
+                               agent_type: str = "",
+                               repo_key: str = "",
+                               limit: int = Query(50, ge=1, le=200),
+                               user: dict = Depends(get_current_user_or_api_key)):
+    """Issue #404：列出可重派事件——failed 且 result 含场景引擎全灭原因，且场景 pool 已恢复。
+
+    匹配 _fail_scene_all_offline 的两种 reason 变体（有/无引擎名）+ 直派路径的 failed：
+    - "绑定的 N 台引擎（...）全部离线，任务无法派发（scene=...）"
+    - "场景绑定的引擎全部离线，任务无法派发（scene=...）"
+    - "场景绑定的引擎全部离线（scene=...），请检查引擎在线状态"
+    公共子串 = "全部离线" + "scene=" → LIKE '%全部离线%scene=%'。
+    逐条调 get_scene_pool_engine_ids 校验：返回 None（仍全灭）→ 不在列表；
+    返回 JSON 串（有健康引擎）→ 在列表；"" = 空场景（不产生此类失败事件，跳过）。
+    """
+    from src.session_manager import db, db_lock
+    from src.runtime.engine_select import get_scene_pool_engine_ids
+
+    _where = ["status='failed'", "result LIKE '%全部离线%scene=%'"]
+    _params: list = []
+    if scene_id:
+        _where.append("scene_id=?")
+        _params.append(scene_id)
+    if agent_type:
+        _where.append("agent_type=?")
+        _params.append(agent_type)
+    if repo_key:
+        _where.append("repo_key=?")
+        _params.append(repo_key)
+    _sql = ("SELECT seq, scene_id, repo_key, issue_id, agent_type, status, created_at, "
+            "completed_at, result FROM events WHERE " + " AND ".join(_where) +
+            " ORDER BY seq DESC LIMIT ?")
+    _params.append(int(limit))
+
+    items: list[dict] = []
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(_sql, tuple(_params))
+            rows = c.fetchall()
+    except Exception as e:
+        log.warning(f"redispatchable list failed: {e}")
+        return {"items": [], "total": 0}
+
+    for _seq, _sid, _rk, _iid, _at, _st, _ca, _comp, _res in rows:
+        # 逐条校验场景 pool 是否已恢复
+        _pool = ""
+        try:
+            _pool = get_scene_pool_engine_ids(_sid or "", _at or "", repo_key=_rk or "")
+        except Exception:
+            _pool = ""
+        # None = 仍全灭 → 不可重派；"" = 空场景（理论上不会产生此类失败事件，跳过）；
+        # JSON 串 = 有健康引擎 → 可重派
+        if _pool is None or _pool == "":
+            continue
+        items.append({
+            "seq": int(_seq or 0),
+            "scene_id": _sid or "",
+            "repo_key": _rk or "",
+            "issue_id": _iid or "",
+            "agent_type": _at or "",
+            "status": _st or "",
+            "created_at": _ca or "",
+            "completed_at": _comp or "",
+            "result": _res or "",
+        })
+    return {"items": items, "total": len(items)}
+
+
 @router.post("/{seq}/terminate", operation_id="events_terminate", summary="Terminate event", description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")
 def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     """强行终止正在运行的事件任务。

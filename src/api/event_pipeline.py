@@ -18,6 +18,12 @@ _DIRECT_POOL = ThreadPoolExecutor(
 _DIRECT_FUTURES: dict[int, Future] = {}
 _DIRECT_FUTURES_LOCK = threading.Lock()
 
+# Issue #404：场景引擎全灭告警侧链——进程内 TTL 字典去重（spec 设计决策允许内存降级，
+# 本仓未引入 Redis；重启丢失可接受，重启后首次离线会重新告警一次）。
+_SCENE_OFFLINE_ALERT_TTL = 3600  # 1h 静默期（对齐验收标准第 3 条）
+_scene_offline_alert_sent: dict[str, float] = {}  # scene_id -> 上次告警时间戳
+_scene_offline_alert_lock = threading.Lock()
+
 
 def _get_task_repo_token(repo_key: str) -> str:
     """Issue #372 R2.4: 获取 task 行 repo_gitcode_token，区分 token 来源。
@@ -175,6 +181,94 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
     else:
         _reason = f"场景绑定的引擎全部离线，任务无法派发（scene={scene_id}, agent={agent_type}）"
     _fail_event(seq, _reason)
+    # Issue #404：离线即告警（1h 静默去重，走现有告警发送器）
+    _emit_scene_offline_alert(scene_id, agent_type, _reason, repo_key=repo_key)
+
+
+def _emit_scene_offline_alert(scene_id: str, agent_type: str, reason: str, repo_key: str = "") -> bool:
+    """Issue #404：场景引擎全灭告警侧链——1h TTL 去重后走现有告警发送器。
+
+    设计：
+    - 去重存储 = 进程内字典 + TTL（spec 设计决策表已允许内存降级，本仓未引入 Redis）。
+    - 通道 = 复用 `src.observability.alerts._notify_webhook`（OBS_ALERT_WEBHOOK_URL），
+      以及异步飞书投递（`_send_event_text`，无运行中事件循环时降级为 webhook-only）。
+    - 告警侧链永不影响主流程：全部异常吞掉只 log。
+
+    返回 True = 本次发出告警；False = 静默期内被去重 / 发送异常已 log。
+    """
+    if not scene_id:
+        return False
+    now_ts = time.time()
+    with _scene_offline_alert_lock:
+        _last = _scene_offline_alert_sent.get(scene_id)
+        if _last and (now_ts - _last) < _SCENE_OFFLINE_ALERT_TTL:
+            log.info(f"scene_offline_alert: scene={scene_id} 静默期内（剩 {int(_SCENE_OFFLINE_ALERT_TTL - (now_ts - _last))}s），跳过")
+            return False
+        _scene_offline_alert_sent[scene_id] = now_ts
+    # 构造合成 rule/event，走现有告警发送器（_notify_webhook + 飞书 recipients）
+    _rule = {
+        "name": "scene_engines_all_offline",
+        "notify_channels": "feishu,webhook",
+        "description": f"场景绑定的引擎全部离线（scene={scene_id}, agent={agent_type}）",
+    }
+    _ev = {
+        "rule_name": "scene_engines_all_offline",
+        "level": "platform",
+        "severity": "critical",
+        "metric": "scene_engines_offline",
+        "value": 1,
+        "threshold": 0,
+        "dim_key": f"scene:{scene_id}",
+        "repo_key": repo_key or "",
+        "scene_id": scene_id,
+        "agent_type": agent_type,
+        "first_fired_at": datetime.now(timezone.utc).isoformat(),
+    }
+    _text = (f"[Grape 告警·critical] scene_engines_all_offline @ scene={scene_id}\n"
+             f"agent={agent_type or '(unknown)'}\n{reason}")
+    # 1. webhook（同步，未配置时 _notify_webhook 内部只 log）
+    try:
+        from src.observability.alerts import _notify_webhook
+        _notify_webhook(_rule, _ev, text=_text)
+    except Exception as _e:
+        log.warning(f"scene_offline_alert: webhook send failed: {_e}")
+    # 2. 飞书 recipients（异步，避免阻塞 pipeline 主线程；无运行中循环则降级跳过）
+    try:
+        import asyncio as _aio
+        from src.observability.alerts import _send_event_text
+        try:
+            _loop = _aio.get_event_loop()
+            if _loop.is_running():
+                _aio.ensure_future(_send_event_text(_rule, _ev, _text, {"sent": 0, "failed": 0, "skipped": 0, "no_recipient": 0, "deferred": 0, "aggregated": 0}))
+            else:
+                _aio.run(_send_event_text(_rule, _ev, _text, {"sent": 0, "failed": 0, "skipped": 0, "no_recipient": 0, "deferred": 0, "aggregated": 0}))
+        except RuntimeError:
+            # 无事件循环（同步上下文）→ 降级为 webhook-only，不阻塞主流程
+            log.info(f"scene_offline_alert: no running event loop, feishu skipped (webhook-only)")
+    except Exception as _e:
+        log.warning(f"scene_offline_alert: feishu send failed: {_e}")
+    log.info(f"scene_offline_alert: emitted scene={scene_id} agent={agent_type}")
+    return True
+
+
+def _reset_scene_offline_alert_dedup(scene_id: str = "") -> None:
+    """Issue #404：清除告警去重标记（测试 / 引擎恢复后重新告警可用）。
+
+    传入空 scene_id 清全部（仅供测试）；正常路径按 scene_id 精确清。
+    引擎恢复时不主动清——1h 静默窗口是"同场景连续离线只告警一次"的语义，
+    恢复后若再次离线仍受 1h 窗口约束（避免抖动场景刷屏）。
+    """
+    with _scene_offline_alert_lock:
+        if scene_id:
+            _scene_offline_alert_sent.pop(scene_id, None)
+        else:
+            _scene_offline_alert_sent.clear()
+
+
+def _scene_offline_alert_dedup_state() -> dict[str, float]:
+    """Issue #404：测试观测用——返回当前去重字典快照（只读视图）。"""
+    with _scene_offline_alert_lock:
+        return dict(_scene_offline_alert_sent)
 
 def _filter_pr_sub_matches(matches: list, issue_scene_id: str, issue_qa_skill: str = "") -> list:
     """PR 订阅匹配结果三步过滤：

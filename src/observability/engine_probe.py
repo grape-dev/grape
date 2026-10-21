@@ -202,11 +202,21 @@ def _probe_loop():
                         }
                     continue
                 log.info(f"engine probe: testing {eng['name']}...")
+                # Issue #404：记录探测前状态，用于 fail→ok 转换检测
+                _prev_status = ""
+                with _probe_lock:
+                    _prev_status = (_probe_results.get(eng["name"], {}) or {}).get("status", "")
                 result = _probe_engine(eng["name"], eng.get("cli_path", ""))
                 result["last_probe"] = datetime.now(timezone.utc).isoformat()
                 with _probe_lock:
                     _probe_results[eng["name"]] = result
                 log.info(f"engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
+                # Issue #404：fail→ok 转换 → 触发场景恢复钩子（标记可重派事件）
+                if _prev_status == "fail" and result.get("status") == "ok":
+                    try:
+                        _on_engine_recovery(eng["name"])
+                    except Exception as _re:
+                        log.warning(f"engine probe recovery hook failed: {_re}")
             _last_probe_time = time.time()
         except Exception as e:
             log.warning(f"engine probe loop error: {e}")
@@ -269,16 +279,105 @@ def probe_all_now():
                         "error": "not installed",
                     }
                 continue
+            # Issue #404：记录探测前状态，用于 fail→ok 转换检测
+            _prev_status = ""
+            with _probe_lock:
+                _prev_status = (_probe_results.get(eng["name"], {}) or {}).get("status", "")
             log.info(f"engine probe (manual): testing {eng['name']}...")
             result = _probe_engine(eng["name"], eng.get("cli_path", ""))
             result["last_probe"] = datetime.now(timezone.utc).isoformat()
             with _probe_lock:
                 _probe_results[eng["name"]] = result
             log.info(f"engine probe (manual): {eng['name']} -> {result['status']} ({result['latency']}s)")
+            # Issue #404：fail→ok 转换 → 触发场景恢复钩子
+            if _prev_status == "fail" and result.get("status") == "ok":
+                try:
+                    _on_engine_recovery(eng["name"])
+                except Exception as _re:
+                    log.warning(f"engine probe (manual) recovery hook failed: {_re}")
         _last_probe_time = time.time()
     finally:
         with _probe_lock:
             _probing = False
+
+
+def _on_engine_recovery(engine_name: str) -> None:
+    """Issue #404：引擎恢复 online 钩子——标记场景下可重派事件（不自动批量重派）。
+
+    触发时机：`_probe_loop` / `probe_all_now` 探测到某引擎 fail→ok 转换时调用。
+    作用：
+    1. 反查绑定该引擎的场景（扫 devops_pipeline_scene.nodes_json）；
+    2. 对每个命中场景，调 get_scene_pool_engine_ids 判定 pool 是否非 None（=引擎已恢复）；
+    3. 统计该场景下 failed 且 result 含"场景绑定的引擎全部离线"的事件数，log 提示可重派。
+
+    纯主控侧、不改 worker、无 schema 变更；实际重派由用户手动调
+    `POST /events/{seq}/redispatch`（events.py 已重读 pool 校验）。
+
+    性能：devops_pipeline_scene 行数有限（场景表通常 <1000 行），仅探测恢复时触发，
+    非热路径。异常吞掉只 log（钩子永不影响探测主循环）。
+    """
+    if not engine_name:
+        return
+    try:
+        from src.session_manager import db, db_lock
+        from src.runtime.engine_select import get_scene_pool_engine_ids
+        # 1. 反查绑定该引擎名的 runtime_id（按 name 匹配 agent_runtimes）
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT id FROM agent_runtimes WHERE name=?", (engine_name,))
+            _rid_rows = [int(r[0]) for r in c.fetchall() if r and r[0]]
+        if not _rid_rows:
+            log.info(f"engine_recovery: {engine_name} 无对应 runtime 行，跳过场景反查")
+            return
+        _rid_set = set(_rid_rows)
+        # 2. 扫场景表，找 nodes_json 中 engine_runtime_ids 含该 runtime_id 的场景
+        _hit_scenes: list[tuple[str, str, str, str]] = []  # (scene_id, repo_key, agent_tag, skill)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT scene_id, repo_key, nodes_json, is_active FROM devops_pipeline_scene")
+            for _sid, _rk, _nj, _ia in c.fetchall():
+                if not _nj:
+                    continue
+                try:
+                    import json as _json
+                    _nodes = _json.loads(_nj) or []
+                except Exception:
+                    continue
+                for _n in _nodes:
+                    _eids = _n.get("engine_runtime_ids") or []
+                    if any(int(e) in _rid_set for e in _eids if e):
+                        _tag = _n.get("tag") or _n.get("id") or ""
+                        _hit_scenes.append((_sid or "", _rk or "", _tag, _n.get("skill", "")))
+                        break  # 一个场景只记一次
+        if not _hit_scenes:
+            log.info(f"engine_recovery: {engine_name} 无场景绑定，跳过")
+            return
+        # 3. 逐场景判定 pool 是否恢复（非 None = 引擎已在线）
+        _recovered: list[tuple[str, str, str, int]] = []  # (scene_id, repo_key, agent, redispatchable_count)
+        for _sid, _rk, _tag, _skill in _hit_scenes:
+            try:
+                _pool = get_scene_pool_engine_ids(_sid, _tag, repo_key=_rk)
+                if _pool is None:
+                    continue  # 仍全灭
+                # pool 恢复 → 统计可重派事件数
+                with db_lock:
+                    c = db.cursor()
+                    c.execute(
+                        "SELECT COUNT(*) FROM events WHERE status='failed'"
+                        " AND result LIKE '%场景绑定的引擎全部离线%'"
+                        " AND (agent_type=? OR 1=1)", (_tag,))
+                    _cnt = int(c.fetchone()[0] or 0)
+                _recovered.append((_sid, _rk, _tag, _cnt))
+            except Exception as _e:
+                log.warning(f"engine_recovery: scene={_sid} agent={_tag} check failed: {_e}")
+        if _recovered:
+            _summary = "; ".join(
+                f"scene={s} agent={a} redispatchable={n}" for s, _, a, n in _recovered)
+            log.info(f"engine_recovery: {engine_name} 恢复，可重派事件：{_summary}")
+        else:
+            log.info(f"engine_recovery: {engine_name} 恢复，但无场景 pool 恢复或无可重派事件")
+    except Exception as _e:
+        log.warning(f"engine_recovery: {engine_name} hook failed: {_e}")
 
 
 def _cleanup_hermes_probe_session(stdout: str = "", stderr: str = ""):

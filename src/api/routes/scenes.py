@@ -1621,14 +1621,40 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 
     # body.nodes 为空时不覆盖已有 nodes（只更新 pr_subscription_enabled 等字段）
     _update_nodes = nodes_json if body.nodes else existing.get("nodes", [])
+
+    # Issue #404：场景配置离线校验——保存前查询绑定引擎离线情况，仅 warning 不阻断保存。
+    # 遍历 nodes，对每个有 engine_runtime_ids 的节点调 get_scene_pool_engine_ids：
+    # 返回 None = 绑定引擎全部离线 → 收集 warning 提示更换绑定。
+    _scene_warnings: list[str] = []
+    try:
+        from src.runtime.engine_select import get_scene_pool_engine_ids as _gspei
+        for _node in (_update_nodes or []):
+            _tag = (_node.get("tag") or _node.get("id") or "") if isinstance(_node, dict) else ""
+            _eids = (_node.get("engine_runtime_ids") or []) if isinstance(_node, dict) else []
+            if not _tag or not _eids:
+                continue
+            # 跳过 enabled=false 的节点（未启用的不告警）
+            _enabled = (_node.get("enabled") if isinstance(_node, dict) else True)
+            if _enabled is False:
+                continue
+            try:
+                _pool_check = _gspei(scene_id, _tag, repo_key=repo_key)
+                if _pool_check is None:
+                    _scene_warnings.append(
+                        f"节点 {_tag} 绑定的引擎当前全部离线，建议检查引擎在线状态或更换绑定")
+            except Exception as _w:
+                log.warning(f"update_scene: 节点 {_tag} 离线校验失败: {_w}")
+    except Exception as _we:
+        log.warning(f"update_scene: 场景离线校验整体失败（降级不阻断）: {_we}")
+
     update_custom_scene(
         scene_id=scene_id, repo_key=repo_key, nodes=_update_nodes,
         name=body.name, description=body.description, icon=body.icon,
         pr_subscription_enabled=1 if _pr_sub_on else 0 if _pr_sub_on is not None else None,
         linked_repos=body.linked_repos)
 
-    log.info(f"Scene updated: id={scene_id} by user={user.get('id')}")
-    return {"message": "场景更新成功"}
+    log.info(f"Scene updated: id={scene_id} by user={user.get('id')} warnings={len(_scene_warnings)}")
+    return {"message": "场景更新成功", "warnings": _scene_warnings}
 
 
 @router.delete("/{scene_id}", operation_id="scenes_delete", summary="Delete scene", description="Deletes a custom scene (soft delete; official undeletable).")
