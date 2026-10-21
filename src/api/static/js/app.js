@@ -235,6 +235,9 @@ function loadAgentTypes() {
       const _managed = d.managed_repos || [];
       const _isAnyRepoAdmin = _managed.some(function(r) { return r.is_admin; });
       $('userRole').textContent = _isAnyRepoAdmin ? I18N.t('dashboard.admin') : I18N.t('dashboard.member');
+      // 同步 toolbar 用户下拉的头像和名称
+      var _tbAvatar = $('tbUserAvatar'); if (_tbAvatar) _tbAvatar.textContent = (displayName || 'U')[0].toUpperCase();
+      var _tbName = $('tbUserName'); if (_tbName) _tbName.textContent = displayName;
       localStorage.setItem('user', JSON.stringify(d));
       // 如果当前在仓库选择页，更新 Welcome 消息
       const welcomeEl = document.getElementById('welcomeUser');
@@ -571,18 +574,37 @@ function loadAgentTypes() {
     }
   }
 
+  function _buildUserMenuItems(includeSecurity) {
+    // 统一用户菜单项（所有页面复用）
+    // 顺序：用户设置 → 账号安全（可选）→ 反馈 → 帮助 → 退出登录
+    // 反馈/帮助统一在此入口，toolbar 不再放独立按钮（避免重复）
+    var itemStyle = 'cursor:pointer;padding:8px 12px;border-radius:8px;font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px';
+    var hoverScript = ' onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'"';
+    var html = '';
+    // 用户设置
+    html += '<div onclick="app.nav(\'account\',\'profile\')" style="' + itemStyle + ';color:var(--t)"' + hoverScript + '>'
+      + '<span>👤</span><span>' + I18N.t('app.account.center_title') + '</span></div>';
+    // 账号安全
+    if (includeSecurity) {
+      html += '<div onclick="app.nav(\'account\',\'security\')" style="' + itemStyle + ';color:var(--a)"' + hoverScript + '>'
+        + '<span>🔒</span><span>' + I18N.t('app.login.account_security_menu') + '</span></div>';
+    }
+    // 反馈
+    html += '<div onclick="openFeedbackDialog()" style="' + itemStyle + ';color:var(--t)"' + hoverScript + '>'
+      + '<span>💬</span><span>' + (I18N.t('app.feedback.link_text') || '反馈') + '</span></div>';
+    // 帮助
+    html += '<div onclick="app.openHelp()" style="' + itemStyle + ';color:var(--t)"' + hoverScript + '>'
+      + '<span>📖</span><span>' + (I18N.t('app.help.link_text') || '帮助').replace('📖 ', '') + '</span></div>';
+    // 退出登录
+    html += '<div onclick="app.logout()" style="' + itemStyle + ';color:var(--r)"' + hoverScript + '>'
+      + '<span>↩</span><span>' + (I18N.t('app.logout') || '退出登录') + '</span></div>';
+    return html;
+  }
+
   function _loadUserMenu() {
     var menu = document.getElementById('sbUserMenu');
     if (!menu) return;
-    var isZh = I18N.getLang() === 'zh';
-    var html = '';
-    html += '<div onclick="app.nav(\'account\',\'profile\')" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--t);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
-      + '<span>👤</span><span>' + I18N.t('app.account.center_title') + '</span></div>';
-    html += '<div onclick="app.nav(\'account\',\'security\')" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--a);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
-      + '<span>🔒</span><span>' + I18N.t('app.login.account_security_menu') + '</span></div>';
-    html += '<div onclick="app.logout()" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--r);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
-      + '<span>↩</span><span>' + (I18N.t("app.logout") || "退出登录") + '</span></div>';
-    menu.innerHTML = html;
+    menu.innerHTML = _buildUserMenuItems(true);
   }
   function _closeLobbyUserMenuOnOutside(e) {
     var dropdown = document.getElementById('lobbyUserDropdown');
@@ -595,15 +617,36 @@ function loadAgentTypes() {
   function _loadLobbyUserMenu() {
     var menu = document.getElementById('lobbyUserMenu');
     if (!menu) return;
-    var isZh = I18N.getLang() === 'zh';
-    var html = '';
-    // 用户设置
-    html += '<div onclick="app.nav(\'account\',\'profile\')" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--t);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
-      + '<span>👤</span><span>' + I18N.t('app.account.center_title') + '</span></div>';
-    // 退出
-    html += '<div onclick="app.logout()" style="cursor:pointer;padding:8px 12px;border-radius:8px;color:var(--r);font-size:13px;font-weight:500;display:flex;align-items:center;gap:6px;margin:2px 4px" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">'
-      + '<span>↩</span><span>' + (I18N.t("app.logout") || "退出登录") + '</span></div>';
-    menu.innerHTML = html;
+    menu.innerHTML = _buildUserMenuItems(true);
+  }
+
+  // Toolbar 用户下拉（工作区顶部，与侧边栏菜单内容一致）
+  function _toggleTbUserMenu() {
+    var menu = document.getElementById('tbUserMenu');
+    if (!menu) return;
+    if (menu.style.display === 'none' || !menu.style.display) {
+      _loadTbUserMenu();
+      menu.style.display = 'block';
+      setTimeout(function() {
+        document.addEventListener('click', _closeTbUserMenuOnOutside);
+      }, 0);
+    } else {
+      menu.style.display = 'none';
+      document.removeEventListener('click', _closeTbUserMenuOnOutside);
+    }
+  }
+  function _loadTbUserMenu() {
+    var menu = document.getElementById('tbUserMenu');
+    if (!menu) return;
+    menu.innerHTML = _buildUserMenuItems(true);
+  }
+  function _closeTbUserMenuOnOutside(e) {
+    var btn = document.getElementById('tbUserBtn');
+    var menu = document.getElementById('tbUserMenu');
+    if (btn && !btn.contains(e.target)) {
+      if (menu) menu.style.display = 'none';
+      document.removeEventListener('click', _closeTbUserMenuOnOutside);
+    }
   }
 
   function switchOrg(orgId) {
@@ -898,9 +941,9 @@ function loadAgentTypes() {
     var name = (_u.nickname || _u.username || 'User').split('@')[0];
     var avatar = (name || 'U')[0].toUpperCase();
 
-    // Fetch configured providers to only show available platforms
+    // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
     API.get('/auth/providers').then(function(d) {
-      var providers = (d.providers || []).filter(function(p) { return p.configured; });
+      var providers = d.providers || [];
       _renderOnboardingShell(providers, isZh, name, avatar);
     }).catch(function() {
       // Fallback: show both platforms
@@ -1034,6 +1077,8 @@ function loadAgentTypes() {
     // 已绑定 → 调 /repos/member 加载仓库列表
     API.get('/repos/member').then(d => {
       if (window._currentView !== 'repos') return;  // stale guard
+      // 缓存数据供语言切换时轻量重渲染使用（不发 API 请求）
+      _cachedReposData = d;
       // 数据就绪，一次性切换 UI
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
@@ -1050,6 +1095,7 @@ function loadAgentTypes() {
       _updateLobbyOrgName();
     }).catch(e => {
       if (window._currentView !== 'repos') return;  // stale guard
+      if (e.silent) return;  // Issue #372 §40: 外部 abort 静默，不显示错误
       if (ov) ov.remove();
       $('sidebar').style.display = 'none';
       $('tb').style.display = 'none';
@@ -1065,13 +1111,37 @@ function loadAgentTypes() {
         return;
       }
       const pc = $('pageContent');
-      if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div></div>';
+      if (pc) pc.innerHTML = '<div style="max-width:900px;margin:0 auto;padding:40px 0"><div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div></div>';
     });
   }
 
   let _refreshTimer = null;
   let _currentParam = null;
   let _hiddenSince = 0;
+  // 语言切换时缓存 /repos/member 数据，轻量重渲染不发 API 请求
+  let _cachedReposData = null;
+
+  // _rerenderReposView: 语言切换时轻量重渲染项目列表页/引导页
+  // 不发 API 请求、不闪烁 loading 遮罩——用缓存数据重新执行 HTML 拼接渲染
+  function _rerenderReposView() {
+    var _user = JSON.parse(localStorage.getItem('user') || '{}');
+    var _bindings = _user.bindings || [];
+    if (_bindings.length === 0) {
+      // 未绑定 → 重新渲染引导页（引导页内部调 /auth/providers，是轻量请求）
+      _renderBindingGuide();
+      return;
+    }
+    // 已绑定 → 用缓存数据重新渲染仓库列表（不发 /repos/member）
+    if (_cachedReposData) {
+      $('pageTitle').textContent = I18N.t('app.current_project');
+      renderRepoSelection(_cachedReposData.repos || []);
+      _updateTbOrgName();
+      _updateLobbyOrgName();
+    } else {
+      // 无缓存数据（首次加载失败等）→ fallback 到完整 goToRepos
+      goToRepos();
+    }
+  }
   // 页面从后台回到前台时，若隐藏超过 30 秒才刷新（避免短时间切换标签页频繁刷新）
   document.addEventListener('visibilitychange', function() {
     if (document.visibilityState === 'hidden') {
@@ -1361,6 +1431,8 @@ function loadAgentTypes() {
         if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
+        // R14.17: dashboard 成功加载时清除 403 去重列表，权限恢复后可切回之前 403 的仓库
+        window._tried403Repos = null;
         dashData._scenes = scenesData.scenes || [];
         dashData._owner = repo.owner;
         dashData._name = repo.name;
@@ -1372,20 +1444,45 @@ function loadAgentTypes() {
         if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
         if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中出错只 toast 不覆盖 UI；非编辑中清 loading 显示错误
-        if (window._dashboardEditing) { app.showToast && app.showToast('刷新失败: ' + e.message); return; }
-        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>';
+        if (window._dashboardEditing) { app.showToast && app.showToast(I18N.t('common.load_failed') + ': ' + errMsg(e)); return; }
+        // R13.6: dashboard 403 = 当前仓库无权限，自动切换到下一个有权限仓库
+        if (e.status === 403) {
+          sessionStorage.removeItem('currentRepo');
+          // P0-3: 已尝试仓库去重，避免遍历多个 403 仓库
+          if (!window._tried403Repos) window._tried403Repos = [];
+          window._tried403Repos.push(repo.fullName);
+          // 从侧边栏仓库列表找下一个未尝试过的有权限仓库
+          var _sel = $('repoSelect');
+          if (_sel && _sel.options.length > 1) {
+            // 跳过第一个 "__add__" 选项，选第一个未尝试过的真实仓库
+            for (var i = 0; i < _sel.options.length; i++) {
+              var v = _sel.options[i].value;
+              if (v && v !== '__add__' && v !== repo.fullName && window._tried403Repos.indexOf(v) < 0) {
+                _sel.value = v;
+                switchRepo(v);
+                return;
+              }
+            }
+          }
+          // 所有仓库都试过 403 → 跳到项目大厅页并提示
+          window._tried403Repos = null;
+          app.showToast && app.showToast(I18N.t('common.load_failed'), I18N.t('app.error.forbidden') || 'No accessible repository');
+          goToRepos();
+          return;
+        }
+        pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
       });
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
-      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       var _agentQs = param ? '?issue_number=' + encodeURIComponent(param) : '';
-      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/agents/' + view + '/' + repo.owner + '/' + repo.name + _agentQs).then(d => { if (window._currentView !== view) return; renderAgent(view, d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== view) return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
     } else if (view === 'event') {
       // 路由入口清理：非 _jumpToNodeEvent 触发的进入（如全局搜索 / 直接路由）清除残留来源标志，
       // 防止上次任务详情遗留的 _eventFromTask 导致事件页错误显示「返回需求详情」按钮。
@@ -1395,7 +1492,7 @@ function loadAgentTypes() {
       // 消费瞬态标志（仅本次跳转有效，后续任何再进入都需重新标记）
       window._eventNavFromTask = false;
       title.textContent = I18N.t('app.current_project');
-      API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/events/detail/' + param).then(d => { if (window._currentView !== 'event') return; renderEventDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'event') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
       // 切换回事件详情时恢复活跃对话查询
       if (typeof resumeConvTask === 'function') setTimeout(resumeConvTask, 500);
     } else if (view === 'chat') {
@@ -1416,6 +1513,8 @@ function loadAgentTypes() {
       renderSettings(param || 'gitcode');
     } else if (view === 'account') {
       title.textContent = I18N.t('app.account.center_title');
+      // R13.2: 用户设置页不展示仓库信息——清空顶栏仓库名
+      repoTitle.textContent = '';
       // 用户设置：只隐藏侧边栏，保留顶栏，mainView 保持正常布局
       var _accSb = $('sidebar'); if (_accSb) _accSb.style.display = 'none';
       renderAccount(param || 'profile');
@@ -1462,7 +1561,8 @@ function loadAgentTypes() {
       _loadRuntimesData();
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
-      if (typeof renderObservability === 'function') renderObservability();
+      // param = 分区（overview/devices/inspect），由侧栏子项写入 URL，可深链
+      if (typeof renderObservability === 'function') renderObservability(param);
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.current_project');
       goToRepos();
@@ -1470,11 +1570,11 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       const _cr = currentRepo();
       const _qs = _cr && _cr.fullName ? '?repo=' + encodeURIComponent(_cr.fullName) : '';
-      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(d => { if (window._currentView !== 'skill') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/skills/by-id/' + encodeURIComponent(param) + _qs).then(d => { if (window._currentView !== 'skill') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
     } else if (view === 'skill-sub') {
       // 技能包子技能详情（如 "38/huawei-ecs"）
       title.textContent = I18N.t('app.current_project');
-      API.get('/skills/package-sub/' + param).then(d => { if (window._currentView !== 'skill-sub') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill-sub') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + e.message + '</div>'; });
+      API.get('/skills/package-sub/' + param).then(d => { if (window._currentView !== 'skill-sub') return; renderSkillDetail(d); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'skill-sub') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
     } else if (view === 'scene-market') {
       title.textContent = I18N.t('app.current_project');
       renderSceneMarket();
@@ -1544,7 +1644,8 @@ function loadAgentTypes() {
     API.get('/auth/login/' + provider + '?lang=' + I18N.getLang()).then(function(d) {
       if (d.redirect_url) window.location.href = d.redirect_url;
     }).catch(function() {
-      showToast(I18N.t('app.login.oauth_not_configured') || 'OAuth未配置');
+      // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册后绑定 token
+      showToast(I18N.t('app.login.oauth_not_configured_hint') || I18N.t('app.login.oauth_not_configured') || 'OAuth未配置');
     });
   }
 
@@ -1567,9 +1668,9 @@ function loadAgentTypes() {
     if (!container) return;
     API.get('/auth/providers').then(function(d) {
       var providers = d.providers || [];
-      var configured = providers.filter(function(p){return p.configured});
-      if (configured.length === 0) {
-        if (section) section.style.display = 'none';
+      // R7.5: 所有平台始终显示（不过滤 configured），未配 OAuth App 时点击弹提示
+      if (providers.length === 0) {
+        if (section) section.style.display = '';  // 确保可见
         return;
       }
       // 预渲染按钮已在 HTML 中，只在平台列表不一致时才重新渲染
@@ -1577,15 +1678,15 @@ function loadAgentTypes() {
       var existingNames = Array.prototype.map.call(existingBtns, function(b) {
         return b.getAttribute('onclick') || '';
       });
-      var needsRender = configured.length !== existingBtns.length;
+      var needsRender = providers.length !== existingBtns.length;
       if (!needsRender) {
-        for (var i = 0; i < configured.length; i++) {
-          var key = "app.oauthLogin('" + configured[i].provider + "')";
+        for (var i = 0; i < providers.length; i++) {
+          var key = "app.oauthLogin('" + providers[i].provider + "')";
           if (existingNames[i].indexOf(key) === -1) { needsRender = true; break; }
         }
       }
       if (needsRender) {
-        container.innerHTML = configured.map(function(p) {
+        container.innerHTML = providers.map(function(p) {
           var icon = _oauthIcon(p.provider, p.name);
           var i18nKey = 'app.login.' + p.provider + '_login';
           // 品牌色前端覆盖——后端返回的原始色值不适配 Apple 设计风格
@@ -1953,7 +2054,7 @@ function openBetaApply() {
         document.getElementById('betaApplyModal').remove();
       }
     }).catch(function(e) {
-      showToast(I18N.t('app.login.beta_submit_failed_prefix') + (e.message || e));
+      showToast(I18N.t('app.login.beta_submit_failed_prefix') + (errMsg(e) || e));
       btn.disabled = false; btn.textContent = I18N.t('app.login.beta_submit');
     });
   }
@@ -2073,7 +2174,7 @@ function openBetaApply() {
       } else if (msg.includes('白名单')) {
         _showWhitelistGuidance('gitcode', u);
       } else {
-        showToast(I18N.t('app.login.failed') + ': ' + msg);
+        showToast(I18N.t('app.login.failed') + ': ' + errMsg(e));
       }
     });
   }
@@ -2083,7 +2184,7 @@ function openBetaApply() {
     var nick = $('accNickname') ? $('accNickname').value.trim() : '';
     API.put('/auth/profile', {nickname: nick}).then(function() {
       showToast(I18N.t('app.login.save_success'));
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function showChangePassword() {
@@ -2107,7 +2208,7 @@ function openBetaApply() {
       if (d.token) { localStorage.setItem('token', d.token); API.setToken(d.token); }
       closeConfirm();
       showToast(I18N.t('app.login.password_changed'));
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function showSetPassword() {
@@ -2131,7 +2232,7 @@ function openBetaApply() {
       if (step2) step2.style.display = 'flex';
       var sendBtn = document.getElementById('spSendBtn');
       if (sendBtn) sendBtn.disabled = true;
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function doSetPassword() {
@@ -2142,7 +2243,7 @@ function openBetaApply() {
       closeConfirm();
       showToast(I18N.t('app.login.password_set'));
       renderSettings('account');
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function showChangeEmail() {
@@ -2170,7 +2271,7 @@ function openBetaApply() {
       var step2 = document.getElementById('ceStep2');
       if (step1) step1.style.display = 'none';
       if (step2) step2.style.display = 'flex';
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function doChangeEmail() {
@@ -2181,7 +2282,7 @@ function openBetaApply() {
       closeConfirm();
       showToast(I18N.t('app.login.email_changed'));
       renderSettings('account');
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function bindProvider(provider) {
@@ -2192,7 +2293,7 @@ function openBetaApply() {
       // 兜底：account.js 未加载时直接 OAuth 跳转
       API.get('/auth/bind/' + provider).then(function(d) {
         if (d.redirect_url) window.location.href = d.redirect_url;
-      }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+      }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
     }
   }
 
@@ -2231,7 +2332,7 @@ function openBetaApply() {
   function sendDeleteAccountCode() {
     API.post('/auth/delete-account/send-code').then(function() {
       showToast(I18N.t('app.login.code_sent'));
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function doDeleteAccount() {
@@ -2244,7 +2345,7 @@ function openBetaApply() {
       closeConfirm();
       showLogin();
       showToast(I18N.t('app.login.account_deleted'));
-    }).catch(function(e) { showToast(e.message || I18N.t('app.account.error_failed')); });
+    }).catch(function(e) { showToast(errMsg(e) || I18N.t('app.account.error_failed')); });
   }
 
   function _showWhitelistGuidance(platform, username) {
@@ -2293,6 +2394,20 @@ function openBetaApply() {
     API.scheduleProactiveRefresh();  // Issue #86: token 已清——clearTimeout + return
     // refresh_token cookie 由服务端 logout 清除
     showLogin();
+  }
+
+  // Issue #372: error_code → i18n mapping; raw message goes to console only
+  function errMsg(e) {
+    var code = (e && e.error_code) || '';
+    if (code) {
+      var localized = I18N.t('app.error.' + code);
+      if (localized && localized !== ('app.error.' + code)) return localized;
+    }
+    if (e && e.message) {
+      console.error('[app] raw error:', e.message, 'code:', code || 'NONE');
+      return e.message;
+    }
+    return I18N.t('common.request_failed', {status: (e && e.status) || 0}) || 'Request failed';
   }
 
   function showToast(msg, desc, duration) {
@@ -2561,7 +2676,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
+  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

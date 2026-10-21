@@ -321,6 +321,16 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
             if _session_bot_token and _session_bot_token == _expected:
                 log.info(f"A2A: trust domain (same bot token) session_repo={_session_repo} → target_repo={repo_key}")
                 return None
+            # Issue #372: 检查 1b: 两仓 host_user_id 相同（路径 B 用户 token 托管场景）
+            try:
+                from src.user.db import get_host_user_id
+                _session_host = get_host_user_id(_session_repo)
+                _target_host = get_host_user_id(repo_key)
+                if _session_host > 0 and _session_host == _target_host:
+                    log.info(f"A2A: trust domain (same host_user_id={_session_host}) session_repo={_session_repo} → target_repo={repo_key}")
+                    return None
+            except Exception:
+                pass
             # 检查 2: 目标仓库是会话仓库的关联仓库（查场景 linked_repos）
             try:
                 from src.session_manager import db, db_lock

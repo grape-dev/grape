@@ -33,7 +33,9 @@ _ALLOW_PERMS = [
 class CodeArtsRuntime(AgentRuntime):
     name = "codearts"
     binary = "codearts"
-    prompt_via_stdin = False        # 命令行参数传 prompt（stdin 触发沙箱网络封锁）
+    prompt_via_stdin = False        # 命令行参数传 prompt（stdin 触发沙箱网络封锁）。
+                                    # issue #351: Windows .cmd 壳截断风险由 exe 优先解析
+                                    # + executor 启动前 WARN 兜底，不改 stdin（避免网络回归）。
 
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         """构建 codearts run 参数。

@@ -428,9 +428,9 @@ def get_feishu_open_id(gitcode_user, app_id=""):
     with db_lock:
         c = db.cursor()
         if app_id:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? AND app_id=?", (gitcode_user, app_id))
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND app_id=?", (gitcode_user, gitcode_user, app_id))
         else:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? OR github_login=?", (gitcode_user, gitcode_user))
         row = c.fetchone()
         return row[0] if row else None
 
@@ -466,8 +466,8 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
     with db_lock:
         c = db.cursor()
         stored = c.execute(
-            "SELECT user_id, feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=?",
-            (gitcode_user,)).fetchone()
+            "SELECT user_id, feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=? OR github_login=?",
+            (gitcode_user, gitcode_user)).fetchone()
         stored_open = stored[1] or "" if stored else ""
         stored_name = stored[2] or "" if stored else ""
         stored_app = stored[3] or "" if stored else ""
@@ -488,9 +488,14 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
             final_app = stored_app
         if user_id:
             # 有真实 user_id：直接以 user_id 为主键写入/覆盖
+            # Issue #372 §37: INSERT OR IGNORE + UPDATE（不用 REPLACE，避免覆盖 github_login）
             c.execute(
-                "INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname, feishu_open_id, feishu_name, app_id, updated_at) VALUES (?,?,?,?,?,?,?)",
-                (user_id, gitcode_user, gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat())
+                "INSERT OR IGNORE INTO unified_user_mapping (user_id, updated_at) VALUES (?, datetime('now'))",
+                (user_id,)
+            )
+            c.execute(
+                "UPDATE unified_user_mapping SET gitcode_user=?, gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? WHERE user_id=?",
+                (gitcode_user, gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), user_id)
             )
         else:
             row = stored
@@ -517,8 +522,8 @@ def get_feishu_mapping(repo_key):
     """获取所有已知映射 {gitcode_user: {open_id, name, gitcode_nickname}}"""
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT gitcode_user, feishu_open_id, feishu_name, gitcode_nickname FROM unified_user_mapping WHERE gitcode_user!=''")
-        return {row[0]: {"open_id": row[1], "name": row[2], "gitcode_nickname": row[3] or ""} for row in c.fetchall()}
+        c.execute("SELECT gitcode_user, github_login, feishu_open_id, feishu_name, gitcode_nickname FROM unified_user_mapping WHERE gitcode_user!='' OR github_login!=''")
+        return {row[0] or row[1]: {"open_id": row[2], "name": row[3], "gitcode_nickname": row[4] or ""} for row in c.fetchall()}
 
 
 def get_feishu_group_name_map(repo_key):

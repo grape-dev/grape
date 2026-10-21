@@ -4,6 +4,7 @@ import json, asyncio, tempfile, os, threading, time
 from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
 from src.prompt_builder import build_general_chat_prompt
 from src.auth.grape_account_db import get_grape_account_by_username as _get_acc
+from src.token_service import is_auth_401_error
 
 def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响。
@@ -329,20 +330,26 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
 def _resolve_gitcode_token(user_token: str, repo_key: str = "") -> str:
     """Resolve GitCode token for agent injection (Issue #344: no session cache).
 
-    Priority: user token (real-time from external_identities with pre-refresh);
-    fallback to repo bot token if user token is empty.
+    R18.6.14: 改为调 TokenResolver.resolve()，统一走策略链。
+    - 有 user_token 时直接用（Chat 场景传入的当前用户 token）
+    - 无 user_token 时调 resolve_repo_token() 走 TokenResolver 策略链获取
+    R20.8.4: token 过期时不重试（TokenResolver 短路返回空串，agent 不注入 token）。
     """
     if user_token:
         return user_token
     if repo_key:
         try:
-            from src.repo import Repo
-            repo_tok = Repo(repo_key).bot_token
-            if repo_tok:
-                log.warning(f"Chat resolve token: user token empty, fallback to repo token (repo={repo_key})")
-                return repo_tok
+            from src.token_service import resolve_repo_token
+            _result = resolve_repo_token(repo_key)
+            if _result.token:
+                return _result.token
+            # R20.8.1: token 过期或未配置 → 检测并标记
+            from src.token_service import detect_and_mark_expired
+            _error_code = detect_and_mark_expired(repo_key)
+            if _error_code:
+                log.warning(f"Chat resolve token: token expired (error_code={_error_code}), repo={repo_key}")
         except Exception as e:
-            log.warning(f"Chat resolve token fallback failed: {e}")
+            log.warning(f"Chat resolve token failed: {e}")
     return ""
 
 
@@ -598,6 +605,19 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     from src.config import log
     log.info(f"Chat send: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
+    # R20.8.1: token 过期/未配置时处理
+    # 仅对 task 会话阻断（回帖 Issue 需要 token）；普通对话不阻断（agent 可做纯聊天/非 VCS 操作）
+    if not gitcode_token and repo_key:
+        _is_task_conv = conv and conv.get("conv_type") == "task"
+        if _is_task_conv:
+            # task 会话需要 token 回帖 Issue → 阻断
+            _warn = "⚠️ Token 已过期或未配置，请在设置页重新绑定 Token 后重试"
+            add_message(conv_id, "agent", _warn)
+            return {"reply": _warn, "conversation_id": conv_id, "error_code": "TOKEN_EXPIRED"}
+        else:
+            # 普通对话不阻断，降级为 warning（agent 可做纯聊天）
+            log.warning(f"Chat send: no token for repo={repo_key}, but non-task conv — agent will start without VCS token")
+
     # 图片理解注入
     if body.image_data:
         prompt += "\n\n" + _understand_image(body.image_data)
@@ -614,7 +634,8 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
         return {"reply": "⚠️ 无可用引擎，请先在 Agent Runtimes 页刷新或配置引擎", "conversation_id": conv_id}
 
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
-    kind = runtime_execution_kind(cfg.get("runtime_id") or 0)
+    _rid = int(cfg.get("runtime_id") or 0)      # 本路由的引擎 id（send 路径没有 rid 这个变量）
+    kind = runtime_execution_kind(_rid)
     if kind != EXEC_MODE_DIRECT:
         # M2 D5：入队 + 前端轮询任务状态（打字机效果降级）
         return _enqueue_chat(user, conv_id, body.message, repo_key, skill_name, skill_id, gitcode_token, body.image_data, body.video_data)
@@ -623,52 +644,92 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     loop = asyncio.get_event_loop()
     collected = []
     new_runtime_session_id = ""
+    _send_error = ""  # R20.8.1: 保存 error 信息用于 401 标记
 
     def run_agent():
-        nonlocal new_runtime_session_id
-        with _CHAT_AGENT_SEMAPHORE:
-            for evt_type, data in stream_chat_agent(
-                prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
-                backend_name=backend_name, user_id=user["id"],
-                account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
-                agent_label=f"[Agent:chat|user:{user['username']}]",
-                repo_key=repo_key,
-                env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
-            ):
-                # 日志输出
-                if evt_type == "step_start":
-                    log.info(f"  ▶ {data}")
-                elif evt_type == "text":
-                    log.info(f"  💬 {data[:120]}")
-                elif evt_type == "reasoning":
-                    log.info(f"  🤔 {data[:120]}")
-                elif evt_type == "tool_use":
-                    log.info(f"  🔧 {str(data)[:150]}")
-                elif evt_type == "step_finish":
-                    log.info(f"  ✅ {data}")
-                elif evt_type == "done":
-                    log.info(f"  ✅ Done: exit={data.get('exit_code')}, text_len={len(data.get('text',''))}")
+        nonlocal new_runtime_session_id, _send_error
+        from src.observability.master_usage import MasterRun, new_run_id
+        # 用量采集（审计 2026-10-17 + P2-1 口径 B）：本机直连 chat 引擎以前不记 token
+        _mu = MasterRun("chat", new_run_id("chat"), engine=backend_name,
+                        cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
+                        session_id=runtime_session_id,
+                        attr={"repo_key": repo_key, "scene_id": conv_id,
+                              "agent_type": "chat", "user_id": user["id"],
+                              "engine_id": _rid})
+        _mu.start()
+        try:
+            with _CHAT_AGENT_SEMAPHORE:
+                for evt_type, data in stream_chat_agent(
+                    prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
+                    backend_name=backend_name, user_id=user["id"],
+                    account=user["username"], user_token=gitcode_token, agent_name="Chat Agent",
+                    agent_label=f"[Agent:chat|user:{user['username']}]",
+                    repo_key=repo_key,
+                    env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
+                ):
+                    _mu.feed(evt_type, data)   # 用量采集
+                    # 日志输出
+                    if evt_type == "step_start":
+                        log.info(f"  ▶ {data}")
+                    elif evt_type == "text":
+                        log.info(f"  💬 {data[:120]}")
+                    elif evt_type == "reasoning":
+                        log.info(f"  🤔 {data[:120]}")
+                    elif evt_type == "tool_use":
+                        log.info(f"  🔧 {str(data)[:150]}")
+                    elif evt_type == "step_finish":
+                        log.info(f"  ✅ {data}")
+                    elif evt_type == "done":
+                        log.info(f"  ✅ Done: exit={data.get('exit_code')}, text_len={len(data.get('text',''))}")
+                        # R20.8.1: 保存 done 事件的 errors/stderr 用于 401 标记
+                        if isinstance(data, dict):
+                            _done_errs = data.get("errors") or []
+                            _done_stderr = data.get("stderr") or ""
+                            if _done_errs:
+                                _send_error = " ".join(str(e) for e in _done_errs) + " " + str(_done_stderr)
+                            elif _done_stderr:
+                                _send_error = str(_done_stderr)
 
-                if evt_type == "text":
-                    text = data.get("text", "") if isinstance(data, dict) else str(data)
-                    if text:
-                        collected.append(text)
-                elif evt_type == "done":
-                    if isinstance(data, dict):
-                        nsid = data.get("oc_session_id", "")
-                        if nsid:
-                            new_runtime_session_id = nsid
-                        if not collected:
-                            done_text = data.get("text", "")
-                            if done_text:
-                                collected.append(done_text)
-                elif evt_type in ("error"):
-                    break
+                    if evt_type == "text":
+                        text = data.get("text", "") if isinstance(data, dict) else str(data)
+                        if text:
+                            collected.append(text)
+                    elif evt_type == "done":
+                        if isinstance(data, dict):
+                            nsid = data.get("oc_session_id", "")
+                            if nsid:
+                                new_runtime_session_id = nsid
+                            if not collected:
+                                done_text = data.get("text", "")
+                                if done_text:
+                                    collected.append(done_text)
+                    elif evt_type in ("error"):
+                        _send_error = str(data)[:500]
+                        break
+        finally:
+            # 收尾写用量：**已释放并发额度**（拿回复不占坑），异常路径也不漏
+            _mu.finish(session_id=new_runtime_session_id)
         return "".join(collected)
 
     reply = await loop.run_in_executor(None, run_agent)
     if not reply:
         reply = f"收到您的消息：「{body.message}」\n\n当前使用 {backend_name} 后端处理。"
+
+    # R20.8.1: agent 执行后 401 检测——agent 执行中 token 可能过期
+    # 基于 error 事件数据和 done 事件的 errors/stderr 字段判断，不扫 reply 文本
+    _error_code = ""
+    if repo_key and _send_error:
+        _err_lower = _send_error.lower()
+        _is_401 = is_auth_401_error(_err_lower)
+        if _is_401:
+            try:
+                from src.token_service import detect_and_mark_expired
+                _error_code = detect_and_mark_expired(repo_key) or ""
+            except Exception as _e:
+                log.warning(f"Chat post-exec 401 detect failed: {_e}")
+            if _error_code:
+                _pName = "GitHub" if repo_key.startswith("github:") else "GitCode"
+                reply = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
 
     add_message(conv_id, "agent", reply)
     touch_conversation(conv_id)
@@ -678,7 +739,10 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     # （旧值可能已过期（opencode 静默 EOF），必须用本次成功的新 session 覆盖）
     if new_runtime_session_id:
         update_conversation(conv_id, runtime_session_id=new_runtime_session_id)
-    return {"reply": reply, "conversation_id": conv_id}
+    _result = {"reply": reply, "conversation_id": conv_id}
+    if _error_code:
+        _result["error_code"] = _error_code
+    return _result
 
 
 @router.post("/send/stream", operation_id="chat_send_stream", summary="Send message (SSE stream)", description="Sends a chat message over SSE: data:{delta} ... then data:{done}.")
@@ -861,12 +925,22 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
         def agent_worker():
             nonlocal captured_session
             _worker_final_text = ""
+            _stream_error_detail = ""  # R20.8.6: 保存 error 信息用于 401 标记
             log.info(f"[Agent:chat|user:{user['username']}] agent_worker starting (backend={backend_name})")
             if not _CHAT_AGENT_SEMAPHORE.acquire(blocking=True):
                 log.warning(f"[Agent:chat|user:{user['username']}] semaphore NOT acquired (exhausted)")
                 return
             collected = []
             worker_error = ""
+            from src.observability.master_usage import MasterRun
+            # 用量采集（审计 2026-10-17）：SSE 本机直连路径同样漏记 token
+            _mu = MasterRun("chat", chat_task_id, engine=backend_name,
+                            cwd=_get_chat_cwd(user["id"], repo_key, conv_id),
+                            session_id=runtime_session_id,
+                            attr={"repo_key": repo_key, "scene_id": conv_id,
+                                  "agent_type": "chat", "user_id": user["id"],
+                                  "engine_id": int(rid or 0)})
+            _mu.start()
             try:
                 for evt_type, data in stream_chat_agent(
                     prompt=prompt, cwd=_get_chat_cwd(user["id"], repo_key, conv_id), session_id=runtime_session_id,
@@ -876,6 +950,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     repo_key=repo_key,
                     env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
+                    _mu.feed(evt_type, data)
                     # 日志输出（对齐 master 分支 im/handler.py）
                     if evt_type == "step_start":
                         log.info(f"  ▶ {data}")
@@ -900,6 +975,13 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                         done_text = data.get("text", "")
                         if done_text:
                             _worker_final_text = done_text
+                        # R20.8.6: 保存 done 事件的 errors/stderr 用于 401 标记
+                        _d_errs = data.get("errors") or []
+                        _d_stderr = data.get("stderr") or ""
+                        if _d_errs:
+                            _stream_error_detail = " ".join(str(e) for e in _d_errs) + " " + str(_d_stderr)
+                        elif _d_stderr:
+                            _stream_error_detail = str(_d_stderr)
                     elif evt_type == "text":
                         text_val = data.get("text", "") if isinstance(data, dict) else str(data)
                         if text_val:
@@ -910,6 +992,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                 import traceback as _tb
                 log.warning(f"[Agent:chat|user:{user['username']}] agent_worker EXC: {e}")
                 _tb.print_exc()
+                _stream_error_detail = str(e)[:500]
                 loop.call_soon_threadsafe(q.put_nowait, ("error", str(e)))
             finally:
                 # 汇总回复并落库 + 回写 session——不依赖 event_stream 是否被客户端取消，
@@ -927,6 +1010,19 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                             update_conversation(conv_id, runtime_session_id=captured_session)
                 except Exception as e:
                     log.warning(f"[Agent:chat|user:{user['username']}] persist reply failed: {e}")
+                # R20.8.6: 401 标记——防止 token 过期后用户重发 send_stream 死循环
+                # 基于 done 事件的 errors/stderr 和 exception 信息判断，不扫 final_text
+                if repo_key and _stream_error_detail:
+                    _err_lower = _stream_error_detail.lower()
+                    _is_401 = is_auth_401_error(_err_lower)
+                    if _is_401:
+                        try:
+                            from src.token_service import detect_and_mark_expired
+                            _stream_error_code = detect_and_mark_expired(repo_key) or ""
+                            if _stream_error_code:
+                                log.warning(f"[Agent:chat|user:{user['username']}] token expired during stream (error_code={_stream_error_code}), repo={repo_key}")
+                        except Exception as _se:
+                            log.warning(f"[Agent:chat|user:{user['username']}] stream post-exec 401 detect failed: {_se}")
                 log.info(f"[Agent:chat|user:{user['username']}] agent_worker finished")
                 # 连接断开后 event_stream 的 yield 会抛异常，add_message 不会被执行
                 # 在 finally 中直接写 DB（带 task_id + generate_status，跨机器可见）
@@ -943,8 +1039,10 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                         touch_conversation(conv_id)
                     except Exception as _de:
                         log.warning(f"[Agent:chat|user:{user['username']}] DB save (empty) in finally failed: {_de}")
+                # 客户端先拿到流结束信号、并发额度先释放，用量收尾（可能含 1s 重试）放最后
                 loop.call_soon_threadsafe(q.put_nowait, None)
                 _CHAT_AGENT_SEMAPHORE.release()
+                _mu.finish(session_id=captured_session)
 
         # 保持 Future 引用（防止 GC 回收导致 agent_worker 不执行）
         _agent_future = loop.run_in_executor(None, agent_worker)
@@ -1113,10 +1211,9 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
         }
     }
 
-    from src.user.db import get_bot_token_by_repo
-    from src.repo_key import split_owner_repo
-    _owner, _repo = split_owner_repo(repo_key)
-    bot_token = get_bot_token_by_repo(_owner, _repo) if _owner and _repo else ""
+    # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token）
+    from src.user.db import get_repo_token_with_refresh
+    bot_token = get_repo_token_with_refresh(repo_key) if repo_key else ""
 
     return {
         "message": "反馈已提交（⚠️ 已废弃：请改用 Event 对话 POST /api/events/{seq}/chat）",
@@ -1248,8 +1345,8 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> 
                 c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE app_id=?",
                           (_now, old_app_id))
             elif gitcode_user:
-                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE gitcode_user=?",
-                          (_now, gitcode_user))
+                c.execute("UPDATE unified_user_mapping SET feishu_open_id='', feishu_name='', app_id='', updated_at=? WHERE (gitcode_user=? OR github_login=?)",
+                          (_now, gitcode_user, gitcode_user))
             c.execute("DELETE FROM chat_conversations WHERE im_channel_id=?", (old_app_id,))
             # 解绑干净：该 bot 名下的群绑定（repo_im_group_binding）一并清空，避免残留脏数据
             # 导致后续 resolve_repo 仍命中旧仓库（chat-config-duplicate-row-unbind-fix-design.md）
@@ -1525,9 +1622,19 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         def agent_fn():
             """agent generator — yield 事件 + finally 写 DB"""
             from src.runtime.executor import stream_chat_agent
+            from src.observability.master_usage import MasterRun
             _final_text = ""
             _new_sid = ""
+            _ctm_error_detail = ""  # R20.8.7: 保存 error 信息用于 401 标记
             _last_error = ""
+            # 用量采集（审计 2026-10-17）：本机直连的 chat 引擎以前**一条 token 都不记**。
+            # 归属口径 B：无 agent_tasks 行 → task_id 空、主体 run_id=chat_task_id；
+            # 采集/写库失败只打日志，绝不影响对话主链路。
+            _mu = MasterRun("chat", chat_task_id, engine=backend_name, cwd=cwd,
+                            attr={"repo_key": repo_key, "scene_id": conv_id,
+                                  "agent_type": "chat", "user_id": user["id"],
+                                  "engine_id": int(rid or 0)})
+            _mu.start()
             # 视频理解在 agent_fn 内部异步执行（避免 submit 同步阻塞导致前端 timeout）
             if _video_data:
                 yield ("step_start", "正在分析视频，可能需要 30-60 秒...")
@@ -1549,6 +1656,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     repo_key=repo_key,
                     env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
+                    _mu.feed(evt_type, data)
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (
                             data.get("text", "") if isinstance(data, dict) else str(data))
@@ -1563,6 +1671,13 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                             nsid = data.get("oc_session_id", "")
                             if nsid:
                                 _new_sid = nsid
+                            # R20.8.7: 保存 errors/stderr 用于 401 标记
+                            _d_errs = data.get("errors") or []
+                            _d_stderr = data.get("stderr") or ""
+                            if _d_errs:
+                                _ctm_error_detail = " ".join(str(e) for e in _d_errs) + " " + str(_d_stderr)
+                            elif _d_stderr:
+                                _ctm_error_detail = str(_d_stderr)
                         # session 重试后仍无文本 → 用 error 信息作为回复
                         if not _final_text and _last_error:
                             _final_text = _last_error
@@ -1572,11 +1687,24 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                         # (_stale_fail 检测 + _run_once("") 重跑) 有机会执行。
                         # 记住 error，仅在 done 无有效文本时才作为最终结果。
                         _last_error = str(data)
+                        _ctm_error_detail = str(data)[:500]
                         yield ("error", str(data))
                     else:
                         yield (evt_type, data)
             finally:
                 # DB 写入（finally 保证，连接断开也不丢）
+                # R20.8.7: 401 标记——防止 token 过期后用户重发死循环
+                if repo_key and _ctm_error_detail:
+                    _err_lower = _ctm_error_detail.lower()
+                    _is_401 = is_auth_401_error(_err_lower)
+                    if _is_401:
+                        try:
+                            from src.token_service import detect_and_mark_expired
+                            _ctm_error_code = detect_and_mark_expired(repo_key) or ""
+                            if _ctm_error_code:
+                                log.warning(f"[Chat submit] token expired (error_code={_ctm_error_code}), repo={repo_key}")
+                        except Exception as _ce:
+                            log.warning(f"[Chat submit] 401 detect failed: {_ce}")
                 if _final_text:
                     try:
                         add_message(conv_id, "agent", _final_text,
@@ -1592,6 +1720,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                         touch_conversation(conv_id)
                     except Exception as _de:
                         log.warning(f"[Chat submit] DB save (empty) failed: {_de}")
+                # 用量落台账：**放在最后**——累计型账本那次 1s 短重试不该拖慢"回复落库/推送"（用户可见）
+                _mu.finish(session_id=_new_sid)
                 # 飞书推送（投递到主事件循环；后台线程不能跨 loop 复用共享 aiohttp session）
                 if _final_text:
                     try:
@@ -1936,6 +2066,7 @@ def _execute_chat_task(task_id: str):
 
         from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
         kind = runtime_execution_kind(rid)
+        _exec_error = ""  # R20.8.1: 保存 error 信息用于 401 标记（direct 模式填充）
 
         if kind == EXEC_MODE_DIRECT:
             # 本机直连：stream_agent（同步 generator，不需要 event loop）
@@ -1958,10 +2089,19 @@ def _execute_chat_task(task_id: str):
                                 t["events"].append({"type": "token", "data": text})
                                 t["result"] = final_text
                     elif evt_type == "done" or evt_type == "complete":
+                        # R20.8.1: 保存 done 事件的 errors/stderr 用于 401 标记
+                        if isinstance(data, dict):
+                            _exec_errors = data.get("errors") or []
+                            _exec_stderr = data.get("stderr") or ""
+                            if _exec_errors:
+                                _exec_error = " ".join(str(e) for e in _exec_errors) + " " + str(_exec_stderr)
+                            elif _exec_stderr:
+                                _exec_error = str(_exec_stderr)
                         if data:
-                            final_text = data if isinstance(data, str) else str(data)
+                            final_text = data if isinstance(data, str) else (data.get("text", "") if isinstance(data, dict) else str(data))
                         break
                     elif evt_type == "error":
+                        _exec_error = str(data)[:500]
                         with _chat_tasks_lock:
                             t = _chat_tasks.get(task_id)
                             if t:
@@ -2009,6 +2149,24 @@ def _execute_chat_task(task_id: str):
         # 写入结果
         if not final_text:
             final_text = f"收到您的消息：「{task.get('body_message', '')}」\n\n当前使用 {backend_name} 后端处理。"
+
+        # R20.8.1: direct 模式 agent 执行后 401 标记（防 token 过期死循环）
+        # 基于 error 事件数据和 done 事件的 errors/stderr 字段判断，不扫 final_text
+        _task_repo_key = task.get("repo_key", "")
+        if _task_repo_key and not _task_repo_key.startswith("chat:") and _exec_error:
+            _err_lower = _exec_error.lower()
+            _is_401 = is_auth_401_error(_err_lower)
+            if _is_401:
+                try:
+                    from src.token_service import detect_and_mark_expired
+                    _task_error_code = detect_and_mark_expired(_task_repo_key) or ""
+                    if _task_error_code:
+                        _pName = "GitHub" if _task_repo_key.startswith("github:") else "GitCode"
+                        final_text = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
+                except Exception as _te:
+                    from src.config import log as _cte_log
+                    _cte_log.warning(f"Chat task post-exec 401 detect failed: {_te}")
+
         add_message(conv_id, "agent", final_text)
         touch_conversation(conv_id)
         # 推送到飞书（投递主 loop，避免跨 loop 复用共享 aiohttp session）

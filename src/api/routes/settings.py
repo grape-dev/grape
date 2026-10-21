@@ -62,16 +62,40 @@ def get_credentials(user: dict = Depends(require_no_session_token), repo_key: st
     identities = {ident["provider"]: ident for ident in get_user_identities(user["id"])}
     hw_cred = user_db.get_credential(user["id"], "huawei_cloud") or {}
     codearts_cred = user_db.get_credential(user["id"], "codearts") or {}
+
+    # R16.2.3: 返回 token 状态（是否过期）
+    _gitcode_identity = identities.get("gitcode", {})
+    _github_identity = identities.get("github", {})
+    _gitcode_status = _gitcode_identity.get("status", 0)
+    _github_status = _github_identity.get("status", 0)
+    # status: 1=active, 4=expired
+    _gitcode_expired = (_gitcode_status == 4)
+    _github_expired = (_github_status == 4)
+
+    # R16.2.3: 全局/仓库级 bot token 状态
+    _global_token_status = {}
+    try:
+        from src.user.db import get_meta_value
+        _global_token_status = {
+            "gitcode_expired": get_meta_value("global_gitcode_bot_token_status") == "expired",
+            "github_expired": get_meta_value("global_github_bot_token_status") == "expired",
+        }
+    except Exception:
+        _global_token_status = {"gitcode_expired": False, "github_expired": False}
+
     return {
         "gitcode": {
             "api_token_exists": bool(gitcode_token),
             "account": user["username"],
             "auto_filled": True,
+            "token_expired": _gitcode_expired,
         },
         "github": {
             "token_exists": bool(github_token),
             "login": identities.get("github", {}).get("external_login", ""),
+            "token_expired": _github_expired,
         },
+        "global_bot_token_status": _global_token_status,
         "huawei_cloud": {
             "ak_exists": bool(hw_cred.get("ak")),
             "sk_exists": bool(hw_cred.get("sk")),
@@ -199,16 +223,37 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                         if not _ok:
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitHub token saved for user={user['username']}, github_login={gh_login}")
+                    # Issue #372 §12.8: 同步写入 unified_user_mapping.github_login
+                    # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 gitcode_user 等其他平台字段）
+                    try:
+                        from src.session_manager import db as _um_db, db_lock as _um_dl
+                        with _um_dl:
+                            _um_c = _um_db.cursor()
+                            _um_c.execute(
+                                "INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)",
+                                (user["id"],)
+                            )
+                            _um_c.execute(
+                                "UPDATE unified_user_mapping SET github_login=?, updated_at=datetime('now') WHERE user_id=?",
+                                (gh_login, user["id"])
+                            )
+                            _um_db.commit()
+                        log.info(f"unified_user_mapping synced: user_id={user['id']}, github_login={gh_login}")
+                    except Exception as _um_e:
+                        log.warning(f"update_credentials: sync unified_user_mapping (github) failed: {_um_e}")
                 elif _resp.status_code == 401:
+                    # Issue #386: 被校验的第三方 token 无效是客户端输入问题（400），
+                    # 不能与调用方 JWT 鉴权失败的 401 同构——否则前端全局 401 拦截器
+                    # 会误判登录失效并踢出会话。
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校验失败，请检查 token 有效性"},
                     )
                 else:
                     log.warning(f"GitHub token validation failed: {_resp.status_code}")
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校验失败，请检查 token 有效性"},
                     )
             except HTTPException:
                 raise
@@ -293,16 +338,38 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                             log.error(f"GitCode bind FAILED: create_external_identity returned False for user={user['id']}, gc_id={gc_id}, gc_login={gc_login}")
                             raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据保存失败"})
                     log.info(f"GitCode token saved for user={user['username']}, gitcode_login={gc_login}")
+                    # Issue #372 §12.8: 同步写入 unified_user_mapping
+                    # PAT 绑定的用户 username ≠ GitCode login，启动时回填写入的是 username 而非 gc_login
+                    # pipeline 用 actor（gc_login）查 unified_user_mapping → 必须写 gc_login 作为 gitcode_user
+                    # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 github_login 等其他平台字段）
+                    try:
+                        from src.session_manager import db as _um_db, db_lock as _um_dl
+                        with _um_dl:
+                            _um_c = _um_db.cursor()
+                            _um_c.execute(
+                                "INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)",
+                                (user["id"],)
+                            )
+                            _um_c.execute(
+                                "UPDATE unified_user_mapping SET gitcode_user=?, gitcode_nickname=?, updated_at=datetime('now') WHERE user_id=?",
+                                (gc_login, _gc_user.get("name", ""), user["id"])
+                            )
+                            _um_db.commit()
+                        log.info(f"unified_user_mapping synced: user_id={user['id']}, gitcode_user={gc_login}")
+                    except Exception as _um_e:
+                        log.warning(f"update_credentials: sync unified_user_mapping failed: {_um_e}")
                 elif _resp.status_code == 401:
+                    # Issue #386: 同 GitHub 分支——第三方 token 无效返回 400，
+                    # 与调用方鉴权 401 区分，避免前端误判登录失效。
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token 校验失败，请检查 token 有效性"},
                     )
                 else:
                     log.warning(f"GitCode token validation failed: {_resp.status_code}")
                     raise HTTPException(
-                        status_code=401,
-                        detail={"code": 401, "message": "令牌无效或已过期"},
+                        status_code=400,
+detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token 校验失败，请检查 token 有效性"},
                     )
             except HTTPException:
                 raise
@@ -448,9 +515,14 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
-    from src.user.db import get_bot_token_by_repo
+    # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
+    from src.token_resolver import TokenResolver, create_provider_from_repo_key
     from src.repo_key import to_repo_key
-    bot_token = get_bot_token_by_repo(owner, repo)
+    _rk = to_repo_key(f"{owner}/{repo}")
+    _provider = create_provider_from_repo_key(_rk)
+    _resolve_result = TokenResolver(_provider).resolve(_rk)
+    bot_token = _resolve_result.token
+    _resolved_level = _resolve_result.level  # "session"/"repo_bot"/"global_bot"/"user"/""
     bot_username = "devops-bot"
     target_key = _resolve_repo_key(f"{owner}/{repo}")
     repos = user_db.get_managed_repos(user["id"])
@@ -459,9 +531,27 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
             bot_username = r.get("bot_username", "") or "devops-bot"
             break
 
+    # R16.2.3: 返回仓库级 bot token 状态
+    _bot_token_status = ""
+    _has_repo_bot_token = False
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_token_status, bot_gitcode_token FROM managed_repos WHERE repo_key=? LIMIT 1", (_rk,))
+            _row = c.fetchone()
+            if _row:
+                _bot_token_status = _row[0] or ""
+                _has_repo_bot_token = bool(_row[1])
+    except Exception:
+        pass
+
     return {
         "devops_bot_token_exists": bool(bot_token),
-        "webhook_url": user_db.get_webhook_url() or "http://localhost:8080/webhook/gitcode",
+        "has_repo_bot_token": _has_repo_bot_token,
+        "resolved_token_level": _resolved_level,
+        "bot_token_status": _bot_token_status,
+        "webhook_url": user_db.get_webhook_url() or "",
         "bot_username": bot_username,
     }
 
@@ -1117,6 +1207,38 @@ def get_agent_runtime_detail(rid: int, user: dict = Depends(require_org_member),
         if rt.get("id") == rid:
             return rt
     raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+
+
+@router.post("/agent-runtimes/{rid}/health-reset", operation_id="settings_agent_runtime_health_reset", summary="Reset runtime health score", description="Resets a single runtime engine's health score (Issue #394). Writes agent_runtimes.health_reset_at as the pardon point so the health-score window restarts from the reset moment; previously accumulated failures are pardoned. Only repo-scope (repo members) and personal-scope (owner) worker engines are resettable; global engines return 403. Invisible or missing ids return 404.")
+def reset_agent_runtime_health(rid: int, user: dict = Depends(require_org_member), repo: str = ""):
+    """重置单个引擎的健康分（Issue #394）。
+
+    权限：
+    - 复用 get_agent_runtimes 的全量可见性过滤（与详情端点同口径），引擎不可见 → 404；
+    - 仅仓库级（scope=repo）与个人级（scope=user）worker 设备引擎开放重置，
+      全局引擎（scope=global）不开放 → 403。
+    操作：写入 health_reset_at 赦免点 → 清缓存 → 强制重算（health_scorer.reset_health），
+    返回重置后的健康分数据；log 审计留痕（operator / rid / 重置点 / 新健康分）。
+    """
+    result = get_agent_runtimes(user=user, page=1, page_size=0, scope="", repo=repo)
+    rt = None
+    for item in result.get("runtimes", []):
+        if item.get("id") == rid:
+            rt = item
+            break
+    if rt is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "引擎不存在或不可见"})
+    if (rt.get("scope") or "global") not in ("user", "repo"):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放"})
+    from src.runtime.health_scorer import reset_health
+    data = reset_health(rid)
+    if data is None:
+        log.warning(f"health-reset failed for runtime={rid} operator={user.get('username') or user.get('id')}")
+        raise HTTPException(status_code=503, detail={"code": 503, "message": "重置健康分失败，请稍后重试"})
+    log.info(f"health-reset ok runtime={rid} operator={user.get('username') or user.get('id')} "
+             f"health_reset_at={data.get('updated_at')} health_score={data.get('health_score')}")
+    return {"runtime_id": rid, "health_reset_at": data.get("health_reset_at"),
+            "health_score": data.get("health_score")}
 
 
 @router.post("/agent-runtimes/refresh", operation_id="settings_agent_runtimes_refresh", summary="Refresh agent runtimes", description="Manually refreshes executors: discovers local engines, child-process probe, and persists to DB.")

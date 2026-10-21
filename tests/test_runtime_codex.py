@@ -40,9 +40,10 @@ class TestCodexRuntimeRegistration:
         assert b.name == "codex"
         assert b.binary == "codex"
 
-    def test_prompt_via_stdin_false(self):
+    def test_prompt_via_stdin_true(self):
+        """issue #351: codex prompt 经 stdin 传输，规避 argv 多行截断。"""
         b = CodexRuntime()
-        assert b.prompt_via_stdin is False
+        assert b.prompt_via_stdin is True
 
 
 class TestDiscoverBackends:
@@ -75,9 +76,11 @@ class TestIsKnownEngineName:
 
 class TestBuildArgs:
     def test_basic_args(self):
+        """issue #351: prompt 不进 argv，以 '-' 占位从 stdin 读取。"""
         b = CodexRuntime()
         args = b.build_args("hello world")
-        assert args == ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello world"]
+        assert args == ["exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "-"]
+        assert "hello world" not in args
 
     def test_args_contain_required_flags(self):
         b = CodexRuntime()
@@ -87,7 +90,8 @@ class TestBuildArgs:
         assert "--sandbox" in args
         idx = args.index("--sandbox")
         assert args[idx + 1] == "danger-full-access"
-        assert "test prompt" in args
+        assert args[-1] == "-"
+        assert "test prompt" not in args
 
     def test_empty_prompt_no_positional(self):
         b = CodexRuntime()

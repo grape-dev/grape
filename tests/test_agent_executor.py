@@ -20,12 +20,14 @@ class TestOpencodeRuntime:
         self.backend = OpencodeRuntime()
 
     def test_build_args_basic(self):
+        """issue #351: prompt 不进 argv（stdin 传输），规避 cmd 壳多行截断。"""
         args = self.backend.build_args("hello world")
         assert "run" in args
         assert "--format" in args
         assert "json" in args
         assert "--dangerously-skip-permissions" in args
-        assert "hello world" in args
+        assert "hello world" not in args
+        assert self.backend.prompt_via_stdin is True
 
     def test_build_args_with_session(self):
         args = self.backend.build_args("test prompt", "sess_abc")

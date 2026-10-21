@@ -34,12 +34,14 @@ def create_grape_account(
     password: str,
     nickname: str = "",
     avatar_url: str = "",
+    email_verified: bool = True,
 ) -> "dict | None":
     """创建 Grape 账号（邮箱验证码注册）。
 
     返回 {"id": int, "username": str, "email": str} 或 None（冲突）。
     D12: email 空字符串转为 NULL 存储。
     P0-4: 邮箱验证码注册的账号 email_verified=1（邮箱已通过验证码验证）。
+    Issue #372 R7: 无邮箱配置时 email_verified=False（无邮箱验证码验证，不应标记已验证）。
     email_source: 'user' 表示用户自己绑定的真实邮箱。
     """
     email = (email or "").lower().strip() or None
@@ -50,8 +52,8 @@ def create_grape_account(
             c.execute(
                 "INSERT INTO grape_accounts "
                 "(username, email, email_source, password_hash, nickname, avatar_url, status, token_version, email_verified) "
-                "VALUES (?,?, 'user',?,?,?,1,0,1)",
-                (username, email, pw_hash, nickname, avatar_url),
+                "VALUES (?,?, 'user',?,?,?,1,0,?)",
+                (username, email, pw_hash, nickname, avatar_url, 1 if email_verified else 0),
             )
             db.commit()
             uid = c.lastrowid
@@ -154,7 +156,7 @@ def get_grape_account_by_email(email: str) -> "dict | None":
     """按邮箱查询 Grape 账号。
 
     BUG-4 修复：注释更正——不过滤 status，调用方根据 status 判断。
-    status 值：0=禁用，1=活跃，2=已注销（硬删除保留记录），3=冷静期（软删除30天内可恢复）。
+    status 值：0=禁用，1=活跃，2=已注销（硬删除保留记录），3=冷静期（软删除30天内可恢复），4=merged（占位账号合并后标记）。token 过期仅存在于 external_identities 表（status=4）。
     """
     email = email.lower().strip()
     try:
@@ -529,13 +531,14 @@ def get_external_identity_any_status(provider: str, external_id: str) -> "dict |
 def get_user_identities(grape_user_id: int) -> list[dict]:
     """获取用户的所有第三方活跃绑定（不含 access_token，防止 token 泄露到前端）。
     D22: 只查 status=1 的活跃绑定。
+    Issue #372 R10: 也返回 status=4（token 过期）的绑定，前端显示过期提示。
     """
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
-                "SELECT provider, external_login, external_name, external_avatar, created_at "
-                "FROM external_identities WHERE grape_user_id=? AND status=1",
+                "SELECT provider, external_login, external_name, external_avatar, created_at, status "
+                "FROM external_identities WHERE grape_user_id=? AND status IN (1, 4)",
                 (grape_user_id,),
             )
             rows = c.fetchall()
@@ -544,7 +547,7 @@ def get_user_identities(grape_user_id: int) -> list[dict]:
         return []
     return [
         {"provider": r[0], "external_login": r[1], "external_name": r[2],
-         "external_avatar": r[3], "created_at": r[4]}
+         "external_avatar": r[3], "created_at": r[4], "status": r[5]}
         for r in rows
     ]
 
@@ -554,14 +557,18 @@ def get_user_identities_with_tokens(grape_user_id: int) -> list[dict]:
 
     仅供后端内部使用（get_credentials 等），不暴露到前端。
     与 get_user_identities 的区别：此函数查询并解密 access_token/refresh_token。
+
+    Issue #372 §19: 查询条件与 get_user_identities 对齐，status IN (1, 4)——
+    status=4（token 过期）的绑定也返回，调用方使用 token 时 API 会返回 401，
+    由 R10 fail_task 检测逻辑处理，不影响安全。
     """
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
                 "SELECT provider, external_login, external_name, external_avatar, "
-                "access_token, refresh_token, created_at "
-                "FROM external_identities WHERE grape_user_id=? AND status=1",
+                "access_token, refresh_token, created_at, status "
+                "FROM external_identities WHERE grape_user_id=? AND status IN (1, 4)",
                 (grape_user_id,),
             )
             rows = c.fetchall()
@@ -571,9 +578,34 @@ def get_user_identities_with_tokens(grape_user_id: int) -> list[dict]:
     return [
         {"provider": r[0], "external_login": r[1], "external_name": r[2],
          "external_avatar": r[3], "access_token": _safe_decrypt(r[4] or ""),
-         "refresh_token": _safe_decrypt(r[5] or ""), "created_at": r[6]}
+         "refresh_token": _safe_decrypt(r[5] or ""), "created_at": r[6], "status": r[7]}
         for r in rows
     ]
+
+
+def _has_refresh_token(user_id: int, provider: str) -> bool:
+    """Issue #372 R2: 判断用户在指定平台是否有 refresh_token。
+
+    从 external_identities 读 refresh_token（解密后），非空返回 True。
+    用于 get_user_token_with_refresh 跳过无 refresh_token 的凭据（如 PAT/导入 token）——
+    这类 token 不会过期，无需刷新。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT refresh_token FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? AND status IN (1, 4) LIMIT 1",
+                (user_id, provider),
+            )
+            row = c.fetchone()
+    except Exception as e:
+        log.warning(f"_has_refresh_token: query failed: {e}")
+        return False
+    if not row:
+        return False
+    rt = _safe_decrypt(row[0] or "")
+    return bool(rt)
 
 
 def create_external_identity(
@@ -622,10 +654,10 @@ def create_external_identity(
                 )
                 db.commit()
                 return True
-            # 再查是否存在解绑记录（status=0）
+            # 再查是否存在解绑记录（status=0）或过期记录（status=4, Issue #372 R10）
             c.execute(
                 "SELECT id FROM external_identities "
-                "WHERE provider=? AND external_id=? AND status=0",
+                "WHERE provider=? AND external_id=? AND status IN (0, 4)",
                 (provider, external_id),
             )
             existing = c.fetchone()
@@ -646,10 +678,10 @@ def create_external_identity(
                 db.commit()
                 return True
             # 无解绑记录，正常 INSERT
-            # 但先清理目标用户同 provider 的旧解绑记录（status=0），
+            # 但先清理目标用户同 provider 的旧记录（status=0 解绑 / status=4 过期），
             # 否则 UNIQUE(grape_user_id, provider) 约束会冲突
             c.execute(
-                "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status=0",
+                "DELETE FROM external_identities WHERE grape_user_id=? AND provider=? AND status IN (0, 4)",
                 (grape_user_id, provider),
             )
             c.execute(
@@ -830,16 +862,20 @@ def transfer_business_data(from_user_id: int, to_user_id: int) -> bool:
             # 用 UPDATE ... WHERE 条件转移，冲突时跳过（INSERT OR IGNORE 补充）
             if table == "user_repos":
                 # 先 UPDATE 已有记录的归属（目标用户无同 repo_key 的记录）
+                # ⚠️ 子查询用派生表包裹（Issue #376）：MySQL 1093 禁止 UPDATE 目标表
+                # 直接出现在子查询 FROM 中；包裹成 (SELECT ... FROM (SELECT ...) t)
+                # 后目标表仅出现在派生表内部，SQLite/MySQL 双兼容。
                 c.execute(
                     f"UPDATE {table} SET {col}=? "
                     f"WHERE {col}=? AND repo_key NOT IN "
-                    f"(SELECT repo_key FROM {table} WHERE {col}=?)",
+                    f"(SELECT repo_key FROM (SELECT repo_key FROM {table} WHERE {col}=?) t)",
                     (to_user_id, from_user_id, to_user_id),
                 )
                 # 目标用户已有同 repo_key 的记录 → 删除源用户的老记录（避免重复）
+                # ⚠️ 同上：派生表包裹消除同表子查询（MySQL 1093）。
                 c.execute(
                     f"DELETE FROM {table} WHERE {col}=? AND repo_key IN "
-                    f"(SELECT repo_key FROM {table} WHERE {col}=?)",
+                    f"(SELECT repo_key FROM (SELECT repo_key FROM {table} WHERE {col}=?) t)",
                     (from_user_id, to_user_id),
                 )
             else:
@@ -1133,7 +1169,11 @@ def update_external_identity_tokens(
     external_name: str = "",
     external_avatar: str = "",
 ) -> bool:
-    """更新第三方绑定的 token 和用户信息（每次 OAuth 登录刷新）。D10: token 加密存储。"""
+    """更新第三方绑定的 token 和用户信息（每次 OAuth 登录刷新）。D10: token 加密存储。
+
+    Issue #372 R10: 更新时无条件设置 status=1，会将 status=4（token 过期）的记录恢复为活跃。
+    这是设计意图——token 刷新成功即代表凭据重新有效，应清除过期状态。
+    """
     from src.auth.credential_crypto import encrypt
     try:
         with db_lock:
@@ -1161,15 +1201,62 @@ def update_external_identity_tokens(
             if not sets:
                 return True
             params.extend([grape_user_id, provider])
+            # Issue #372 R10: 也更新 status=4（过期）的记录并恢复 status=1
+            sets.append("status=1")
             c.execute(
                 f"UPDATE external_identities SET {', '.join(sets)} "
-                f"WHERE grape_user_id=? AND provider=? AND status=1",
+                f"WHERE grape_user_id=? AND provider=? AND status IN (1, 4)",
                 params,
             )
             db.commit()
             return c.rowcount > 0
     except Exception as e:
         log.warning(f"Update external identity tokens failed: {e}")
+        return False
+
+
+def mark_identity_expired(grape_user_id: int, provider: str) -> bool:
+    """Issue #372 R10: 标记用户 token 过期（status=4）。
+
+    PAT 被撤销/过期后 pipeline 检测到 401 时调用。不清空 access_token/
+    refresh_token（保留凭据数据供用户查看之前绑了哪个账号），仅改 status。
+    用户重新绑定 token 时 create_external_identity/update_external_identity_tokens
+    会恢复 status=1。
+
+    与 status=0（解绑）区别：解绑清空 token 数据，过期保留（用户可能在
+    GitCode 重新生成 PAT 后用同一个账号绑定）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE external_identities SET status=4 "
+                "WHERE grape_user_id=? AND provider=? AND status=1",
+                (grape_user_id, provider),
+            )
+            db.commit()
+            if c.rowcount > 0:
+                log.info(f"mark_identity_expired: {provider} token expired for user={grape_user_id}")
+                return True
+            return False
+    except Exception as e:
+        log.warning(f"mark_identity_expired failed: {e}")
+        return False
+
+
+def is_identity_expired(grape_user_id: int, provider: str) -> bool:
+    """Issue #372 R10: 检查用户 token 是否已过期（status=4）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT status FROM external_identities "
+                "WHERE grape_user_id=? AND provider=? LIMIT 1",
+                (grape_user_id, provider),
+            )
+            row = c.fetchone()
+            return bool(row and row[0] == 4)
+    except Exception:
         return False
 
 
@@ -1345,13 +1432,18 @@ def save_binding_ticket(
         return None
 
 
-def validate_binding_ticket(ticket: str, initiating_user_id: int) -> dict | None:
-    """校验并消费 binding_ticket（查 + 删），返回数据或 None。
+def validate_binding_ticket(ticket: str, initiating_user_id: int, consume: bool = True) -> dict | None:
+    """校验 binding_ticket，返回数据或 None。默认消费（查 + 删），consume=False 只校验不删。
 
     校验：票据存在、未过期、initiating_user_id 与当前会话用户一致。
     安全：不返回 access_token/refresh_token（票据不存这些）。
+
+    Issue #376：transfer-bind 端点改为「先校验（consume=False）→ 业务事务成功后
+    再消费（consume_binding_ticket）」。业务失败（500 回滚）时票据不被连带作废，
+    用户在剩余有效期内重试不再必然 410。
     """
     import time as _t
+    row = None
     try:
         with db_lock:
             c = db.cursor()
@@ -1363,7 +1455,7 @@ def validate_binding_ticket(ticket: str, initiating_user_id: int) -> dict | None
                 (ticket,),
             )
             row = c.fetchone()
-            if row:
+            if row and consume:
                 c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
                 db.commit()
         if not row:
@@ -1382,6 +1474,24 @@ def validate_binding_ticket(ticket: str, initiating_user_id: int) -> dict | None
     except Exception as e:
         log.warning(f"validate_binding_ticket failed: {e}")
         return None
+
+
+def consume_binding_ticket(ticket: str) -> bool:
+    """消费（删除）binding_ticket。
+
+    Issue #376：由 transfer-bind 端点在业务事务 commit 成功后调用——
+    票据一次性消费语义保留（成功转移后不可重放），但失败路径不再连带作废票据。
+    删除幂等：票据不存在返回 False（如已被并发请求消费）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))
+            db.commit()
+            return c.rowcount > 0
+    except Exception as e:
+        log.warning(f"consume_binding_ticket failed: {e}")
+        return False
 
 
 def get_pending_transfer_context(initiating_user_id: int) -> dict | None:

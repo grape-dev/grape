@@ -1203,6 +1203,256 @@ _NEW_TABLES.extend([
     ("community_post_likes", _COMMUNITY_LIKES_DDL),
 ])
 
+# ===== 可观测性:LLM token 用量台账 =====
+# 设计文档:docs/weekly-07/observability-llm-usage-design.md
+# 关键约束:绝不复用 agent_tasks.usage_json —— 该列是"会话续接指针"(session_id/work_dir/
+# engine),被 routes/events.py、im/handler_async.py 等消费,归 complete_task 独占。
+_OBS_LLM_USAGE_DDL = """
+CREATE TABLE IF NOT EXISTS obs_llm_usage (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_key          TEXT NOT NULL UNIQUE,        -- '{task_id}:{seq}' 幂等键(单列,兼容方言翻译)
+    task_id            TEXT NOT NULL,               -- agent_tasks.id
+    seq                INTEGER NOT NULL DEFAULT 0,  -- 确定性序号,见 llm_usage.stable_seq
+    turn               INTEGER NOT NULL DEFAULT 0,  -- 轮次(引擎分轮上报时用)
+    source             TEXT DEFAULT '',             -- report/codex/opencode/hermes/hwcloud
+    repo_key           TEXT DEFAULT '',
+    scene_id           TEXT DEFAULT '',
+    agent_type         TEXT DEFAULT '',
+    engine_id          INTEGER DEFAULT 0,
+    user_id            INTEGER DEFAULT 0,
+    provider_raw       TEXT DEFAULT '',             -- 引擎上报的原始 provider
+    model_raw          TEXT DEFAULT '',             -- 引擎上报的原始模型名
+    model_key          TEXT DEFAULT '',             -- 抽样归一化后的模型名(聚合用)
+    run_id             TEXT DEFAULT '',             -- 运行主体:task→同 task_id;其它→chat:<conv>:<msg> 等
+    run_kind           TEXT DEFAULT 'task',         -- task/chat/devops/im/wiki(主控机内跑的引擎算后者)
+    input_tokens       INTEGER NOT NULL DEFAULT 0,
+    output_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
+    cost_usd           REAL DEFAULT NULL,           -- 引擎侧成本(可空,与自算成本交叉校验)
+    cost_status        TEXT DEFAULT '',             -- ok/unknown/none
+    created_at         TEXT DEFAULT (datetime('now')),
+    updated_at         TEXT DEFAULT (datetime('now'))
+)
+"""
+
+# 台账年度归档（审计决定 2026-10-17）：超过保留期的用量行搬到本表，台账只留近一年。
+# 结构镜像 obs_llm_usage，但 **dedup_key 不唯一**（归档是"搬走"，不承担幂等职责）
+# 且不带原 id（避免与台账自增 id 撞车；追溯靠 task_id/dedup_key/created_at）。
+_OBS_LLM_USAGE_ARCHIVE_DDL = """
+CREATE TABLE IF NOT EXISTS obs_llm_usage_archive (
+    id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_key          TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    seq                INTEGER NOT NULL DEFAULT 0,
+    turn               INTEGER NOT NULL DEFAULT 0,
+    source             TEXT DEFAULT '',
+    repo_key           TEXT DEFAULT '',
+    scene_id           TEXT DEFAULT '',
+    agent_type         TEXT DEFAULT '',
+    engine_id          INTEGER DEFAULT 0,
+    user_id            INTEGER DEFAULT 0,
+    provider_raw       TEXT DEFAULT '',
+    model_raw          TEXT DEFAULT '',
+    model_key          TEXT DEFAULT '',
+    run_id             TEXT DEFAULT '',
+    run_kind           TEXT DEFAULT 'task',
+    input_tokens       INTEGER NOT NULL DEFAULT 0,
+    output_tokens      INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+    reasoning_tokens   INTEGER NOT NULL DEFAULT 0,
+    cost_usd           REAL DEFAULT NULL,
+    cost_status        TEXT DEFAULT '',
+    created_at         TEXT DEFAULT '',
+    updated_at         TEXT DEFAULT '',
+    archived_at        TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_NEW_TABLES.extend([
+    ("obs_llm_usage", _OBS_LLM_USAGE_DDL),
+    ("obs_llm_usage_archive", _OBS_LLM_USAGE_ARCHIVE_DDL),
+])
+
+
+# ===== 可观测性告警中心（文档 §9.1）=====
+# 规则全局共享（平台配置），事件按维度（dim_key）记录；用户面只看 level='user' 且
+# 落在自己可见仓库范围内的事件 —— 平台级规则/事件不进用户面（§5.3 三层边界）。
+_OBS_ALERT_DDL = """
+CREATE TABLE IF NOT EXISTS obs_alert_rules (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    name            TEXT NOT NULL UNIQUE,
+    kind            TEXT NOT NULL DEFAULT 'metric',  -- metric(阈值求值)/gap(数据缺失探测)
+    level           TEXT NOT NULL DEFAULT 'user',   -- user(用户面) / platform(仅 L2/L3)
+    metric          TEXT NOT NULL,                  -- kind=metric:指标名; kind=gap:gap_runtime/gap_repo
+    comparator      TEXT NOT NULL DEFAULT 'gt',      -- gt/lt/gte/lte
+    threshold       REAL NOT NULL DEFAULT 0,
+    window_sec      INTEGER NOT NULL DEFAULT 300,    -- 指标统计窗口
+    for_sec         INTEGER NOT NULL DEFAULT 300,    -- 持续满足多久才触发（抑制抖动）
+    severity        TEXT NOT NULL DEFAULT 'warning',  -- critical/severe/important/warning/info
+    dim_filter      TEXT DEFAULT '',                 -- 预留: repo=o/r
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    notify_channels TEXT DEFAULT '',                 -- 空=只记录不推送；feishu/im/email
+    -- 策略层（P1-1）：通知节流 / 聚合 / 时段 / 升级
+    repeat_sec            INTEGER NOT NULL DEFAULT 0,  -- 0=只通知一次；>0=未恢复时每 N 秒复推
+    aggregate_mode        TEXT NOT NULL DEFAULT 'none',-- none/rule(窗口内合并)/period(周期汇总)
+    aggregate_window_sec  INTEGER NOT NULL DEFAULT 0,  -- 聚合窗口；mode!=none 且为 0 时按 300
+    notify_window_json    TEXT NOT NULL DEFAULT '',    -- 空=全天；{"days":[1..7],"start":"09:00","end":"19:00"}
+    escalate_json         TEXT NOT NULL DEFAULT '',    -- 空=不升级；{"after_sec":1800,"severity":"critical"}
+    description     TEXT DEFAULT '',
+    seed_source     TEXT DEFAULT '',                 -- 来源: deploy/alerts.yml 的 alert 名
+    created_at      TEXT DEFAULT (datetime('now')),
+    updated_at      TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_OBS_ALERT_EVENTS_DDL = """
+CREATE TABLE IF NOT EXISTS obs_alert_events (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    rule_id        INTEGER NOT NULL,
+    rule_name      TEXT NOT NULL,
+    level          TEXT NOT NULL DEFAULT 'user',
+    severity       TEXT NOT NULL DEFAULT 'warning',
+    status         TEXT NOT NULL DEFAULT 'firing',   -- firing/resolved
+    source         TEXT NOT NULL DEFAULT 'monitor',  -- monitor(指标)/gap(数据缺失)/mutation(突变)/slo
+    metric         TEXT DEFAULT '',
+    value          REAL DEFAULT 0,
+    threshold      REAL DEFAULT 0,
+    dim_key        TEXT DEFAULT '',                  -- repo:<repo_key> / global
+    repo_key       TEXT DEFAULT '',                  -- 冗余，便于按仓库过滤
+    first_fired_at TEXT DEFAULT '',
+    last_seen_at   TEXT DEFAULT '',
+    resolved_at    TEXT DEFAULT '',
+    silenced_until TEXT DEFAULT '',                  -- 非空且未过期 => 静默（不推送，仍记录）
+    link_task_id   TEXT DEFAULT '',
+    -- 策略层状态（P1-1）：通知节流 / 时段延后 / 升级
+    notify_count     INTEGER NOT NULL DEFAULT 0,     -- 已通知次数（0=只记录未推）
+    last_notified_at TEXT DEFAULT '',                -- 上次成功通知时间（重复抑制用）
+    escalated_at     TEXT DEFAULT '',                -- 升级通知时间（非空=已升级过）
+    notify_deferred  INTEGER NOT NULL DEFAULT 0,     -- 1=因通知时段只记录（窗口内恢复后补推一次）
+    created_at     TEXT DEFAULT (datetime('now')),
+    updated_at     TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_NEW_TABLES.extend([
+    ("obs_alert_rules", _OBS_ALERT_DDL),
+    ("obs_alert_events", _OBS_ALERT_EVENTS_DDL),
+])
+
+# ===== 设备资源采样（资源曲线用；runtime_credentials 只有当前值，没有历史）=====
+_OBS_RUNTIME_SAMPLES_DDL = """
+CREATE TABLE IF NOT EXISTS obs_runtime_samples (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    runtime_id        INTEGER NOT NULL,             -- agent_runtimes.id / runtime_credentials.id
+    device_name       TEXT DEFAULT '',
+    sampled_at        TEXT NOT NULL,
+    -- 在线信号（P2-1 SLO 用）：采样时刻该引擎心跳是否新鲜（last_seen_at 在 ONLINE_WINDOW 内）。
+    -- 注意 health_score 来自 runtime_health_scores，是"近 N 天任务健康度"**不是在线**，
+    -- 且 dev 库实测 7454 行全为 0 —— 所以可用率必须另立此列，不能拿 health_score 顶。
+    online            INTEGER NOT NULL DEFAULT 0,
+    cpu_percent       REAL DEFAULT 0,
+    memory_percent    REAL DEFAULT 0,
+    disk_percent      REAL DEFAULT 0,
+    bandwidth_percent REAL DEFAULT 0,
+    health_score      INTEGER DEFAULT 0,
+    status            TEXT DEFAULT ''
+)
+"""
+
+# ===== 业务指标分钟/小时聚合（P1-2，§6.2）=====
+# 写入方：main.py 的 rollup 循环（60s，追赶式补齐）；读取方：总览趋势 / 指标序列 API / 后续 SLO。
+# 维度：repo:<repo_key> 与 global（global 只在 L2 暴露）。设备资源仍走 obs_runtime_samples。
+_OBS_METRIC_ROLLUP_DDL = """
+CREATE TABLE IF NOT EXISTS obs_metric_rollup (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    resolution   TEXT NOT NULL DEFAULT 'minute', -- minute(7天) / hour(30天)
+    bucket_start TEXT NOT NULL,                  -- 桶起点（ISO UTC，对齐分钟/小时）
+    metric       TEXT NOT NULL,                  -- task_done / task_success_rate / token_total ...
+    dim_key      TEXT NOT NULL DEFAULT '',       -- repo:<repo_key> / global
+    repo_key     TEXT NOT NULL DEFAULT '',       -- 冗余：用户面按可见仓库过滤
+    value        REAL NOT NULL DEFAULT 0,        -- 聚合值（计数/比率/均值/p95/求和）
+    cnt          INTEGER NOT NULL DEFAULT 0,     -- 样本数（比率类=分母，供加权平均）
+    updated_at   TEXT DEFAULT (datetime('now')),
+    UNIQUE (resolution, bucket_start, metric, dim_key)
+)
+"""
+
+_NEW_TABLES.extend([
+    ("obs_runtime_samples", _OBS_RUNTIME_SAMPLES_DDL),
+    ("obs_metric_rollup", _OBS_METRIC_ROLLUP_DDL),
+])
+
+# ===== SLO / 错误预算（P2-1，§6.7）=====
+# 配置表：三类 SLI（任务成功率 / 排队时延 / 引擎可用率）；目标值由管理台统一设定（L2 写、L1 读）。
+# 快照表：按小时落一行（唯一 (slo_id, bucket_start)），供燃尽曲线与历史回溯。
+_OBS_SLO_DDL = """
+CREATE TABLE IF NOT EXISTS obs_slo (
+    id             INTEGER PRIMARY KEY AUTOINCREMENT,
+    name           TEXT NOT NULL UNIQUE,            -- 稳定标识（前端/事件按它取文案）
+    sli_type       TEXT NOT NULL,                   -- task_success_rate / task_queue_wait_p95 / engine_availability
+    scope_type     TEXT NOT NULL DEFAULT 'global',  -- repo / global / engine
+    scope_key      TEXT NOT NULL DEFAULT '',        -- scope_type=repo 时的仓库短名；global/engine 留空
+    target         REAL NOT NULL DEFAULT 0.99,      -- 目标（比例；时延类=达标时间占比）
+    window_days    INTEGER NOT NULL DEFAULT 30,     -- 考核窗口（天）
+    threshold_json TEXT NOT NULL DEFAULT '{}',      -- 时延类的 {"max_p95_sec": 300} 等
+    enabled        INTEGER NOT NULL DEFAULT 1,
+    created_by     TEXT NOT NULL DEFAULT '',
+    created_at     TEXT DEFAULT (datetime('now')),
+    updated_at     TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_OBS_SLO_SNAPSHOTS_DDL = """
+CREATE TABLE IF NOT EXISTS obs_slo_snapshots (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    slo_id           INTEGER NOT NULL,
+    bucket_start     TEXT NOT NULL,                 -- 小时桶（ISO UTC）
+    window_start     TEXT NOT NULL DEFAULT '',      -- 该次计算覆盖的窗口
+    window_end       TEXT NOT NULL DEFAULT '',
+    good             REAL NOT NULL DEFAULT 0,       -- 窗口内达标量（成功数 / 达标桶数 / 在线采样数）
+    total            REAL NOT NULL DEFAULT 0,       -- 窗口内总量（分母）
+    value            REAL NOT NULL DEFAULT 0,       -- SLI 值（比例）
+    budget_total     REAL NOT NULL DEFAULT 0,       -- 错误预算总量 =(1-target)*有数据桶数
+    budget_consumed  REAL NOT NULL DEFAULT 0,       -- 已消耗（坏桶数）
+    state            TEXT NOT NULL DEFAULT 'ok',    -- ok / warning / breached / no_data
+    computed_at      TEXT DEFAULT (datetime('now')),
+    UNIQUE (slo_id, bucket_start)
+)
+"""
+
+_NEW_TABLES.extend([
+    ("obs_slo", _OBS_SLO_DDL),
+    ("obs_slo_snapshots", _OBS_SLO_SNAPSHOTS_DDL),
+])
+
+# ===== 可观测性日志（热数据落库，§6.3）=====
+# 只落 WARNING/ERROR（INFO 走文件）；14 天留存。dedup_key 防 worker 批量重试重复落行
+# （设计 DDL 无该列，本仓实现多加一列并记入文档：批量上报天然会重试）。
+_OBS_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS obs_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_key   TEXT NOT NULL UNIQUE,
+    ts          TEXT NOT NULL,
+    level       TEXT NOT NULL DEFAULT 'WARNING',
+    component   TEXT DEFAULT '',
+    source      TEXT DEFAULT '',
+    trace_id    TEXT DEFAULT '',
+    task_id     TEXT DEFAULT '',
+    repo_key    TEXT DEFAULT '',
+    runtime_id  INTEGER DEFAULT 0,
+    msg         TEXT DEFAULT '',
+    extra_json  TEXT DEFAULT '',
+    created_at  TEXT DEFAULT (datetime('now'))
+)
+"""
+
+_NEW_TABLES.extend([
+    ("obs_log", _OBS_LOG_DDL),
+])
+
 # 需要 org_id 列的核心表
 _ORG_ID_TABLES = [
     "managed_repos",
@@ -1435,6 +1685,32 @@ def _create_tables():
         "ON audit_logs(seq)",
         # grape_accounts email 唯一索引（D12: NULL + 普通唯一索引，SQLite + MySQL 统一）
         _GRAPE_ACCOUNTS_INDEX_SQLITE,
+        # obs_llm_usage 查询索引（任务/时间/模型/仓库四个下钻维度）
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_task ON obs_llm_usage(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_time ON obs_llm_usage(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_model ON obs_llm_usage(model_key, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_repo ON obs_llm_usage(repo_key, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_run ON obs_llm_usage(run_kind, run_id)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_arc_time ON obs_llm_usage_archive(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_llm_arc_task ON obs_llm_usage_archive(task_id)",
+        # obs_alert_events：开放事件按 (规则,维度) 查找 + 用户面按仓库/时间列表
+        "CREATE INDEX IF NOT EXISTS idx_obs_alert_open ON obs_alert_events(rule_id, dim_key, status)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_alert_repo ON obs_alert_events(repo_key, last_seen_at)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_alert_status ON obs_alert_events(status, last_seen_at)",
+        # obs_runtime_samples：资源曲线按 (引擎, 时间) 取；SLO 可用率按时间扫 online
+        "CREATE INDEX IF NOT EXISTS idx_obs_sample_rt ON obs_runtime_samples(runtime_id, sampled_at)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_sample_time ON obs_runtime_samples(sampled_at)",
+        # obs_slo / obs_slo_snapshots：燃尽曲线按 (SLO, 桶) 取
+        "CREATE INDEX IF NOT EXISTS idx_obs_slo_enabled ON obs_slo(enabled, scope_type)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_slo_snap ON obs_slo_snapshots(slo_id, bucket_start)",
+        # obs_metric_rollup：序列查询按 (指标, 分辨率, 桶) + 用户面按仓库过滤
+        "CREATE INDEX IF NOT EXISTS idx_obs_rollup_metric ON obs_metric_rollup(metric, resolution, bucket_start)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_rollup_repo ON obs_metric_rollup(repo_key, bucket_start)",
+        # obs_log：检索维度（时间/级别/来源/任务/仓库）
+        "CREATE INDEX IF NOT EXISTS idx_obs_log_ts ON obs_log(ts)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_log_level_ts ON obs_log(level, ts)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_log_task ON obs_log(task_id)",
+        "CREATE INDEX IF NOT EXISTS idx_obs_log_repo_ts ON obs_log(repo_key, ts)",
     ]
 
     for idx_sql in _index_sqls:
@@ -3218,6 +3494,13 @@ def _migrate_global_bot_token_to_db():
         # 标记迁移完成（独立标记 key，不依赖 token 值的 truthiness）
         set_meta_value("global_bot_token_migrated", "1")
         log.info("Issue #345: Global bot token migrated from file to DB meta")
+        # R21.2.9: 旧 global_bot_token_status key 拆分为 per-provider key
+        _old_status = get_meta_value("global_bot_token_status") or ""
+        if _old_status:
+            set_meta_value("global_gitcode_bot_token_status", _old_status)
+            set_meta_value("global_github_bot_token_status", _old_status)
+            set_meta_value("global_bot_token_status", "")  # 清除旧 key
+            log.info(f"R21.2.9: migrated global_bot_token_status='{_old_status}' to per-provider keys")
     finally:
         release_lock("migrate_global_bot_token")
 
@@ -3289,6 +3572,9 @@ def _migrate_tables():
         "ALTER TABLE chat_conversations ADD COLUMN agent_session_id TEXT DEFAULT ''",
         "ALTER TABLE chat_conversations ADD COLUMN backend_session_id TEXT DEFAULT ''",
         "ALTER TABLE devops_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
+        # R16.5.3: devops_agent_session 新增 token_status + repo_github_token 列
+        "ALTER TABLE devops_agent_session ADD COLUMN token_status TEXT DEFAULT ''",
+        "ALTER TABLE devops_agent_session ADD COLUMN repo_github_token TEXT DEFAULT ''",
         "ALTER TABLE agent_type ADD COLUMN default_backend_id INTEGER DEFAULT 0",
         "ALTER TABLE chat_agent_session ADD COLUMN backend_id INTEGER DEFAULT 0",
         "ALTER TABLE events ADD COLUMN result TEXT DEFAULT ''",
@@ -4036,6 +4322,36 @@ def _migrate_tables():
             _ensure_column(c, "agent_tasks", "attempts", "INTEGER NOT NULL DEFAULT 0")
             _ensure_column(c, "agent_tasks", "pool_agent_type", "TEXT DEFAULT ''")
             _ensure_column(c, "agent_tasks", "affinity_runtime_id", "INTEGER DEFAULT 0")
+            # §6.4 追踪：trace_id（任务级轨迹）+ pipeline_trace_id（同一 issue 流程共享）
+            _ensure_column(c, "agent_tasks", "trace_id", "TEXT DEFAULT ''")
+            _ensure_column(c, "agent_tasks", "pipeline_trace_id", "TEXT DEFAULT ''")
+            # 告警策略层（P1-1）：规则侧节流/聚合/时段/升级 + 事件侧通知状态
+            # P2-1 SLO：采样表补"在线"列（老库迁移；历史行只能为 0 = 数据不足）
+            _ensure_column(c, "obs_runtime_samples", "online", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(c, "obs_alert_rules", "repeat_sec", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(c, "obs_alert_rules", "aggregate_mode", "TEXT NOT NULL DEFAULT 'none'")
+            _ensure_column(c, "obs_alert_rules", "aggregate_window_sec", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(c, "obs_alert_rules", "notify_window_json", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "obs_alert_rules", "escalate_json", "TEXT NOT NULL DEFAULT ''")
+            _ensure_column(c, "obs_alert_events", "notify_count", "INTEGER NOT NULL DEFAULT 0")
+            _ensure_column(c, "obs_alert_events", "last_notified_at", "TEXT DEFAULT ''")
+            _ensure_column(c, "obs_alert_events", "escalated_at", "TEXT DEFAULT ''")
+            _ensure_column(c, "obs_alert_events", "notify_deferred", "INTEGER NOT NULL DEFAULT 0")
+            # P1-3：数据缺失/突变 来源标记 + 规则类型
+            _ensure_column(c, "obs_alert_rules", "kind", "TEXT NOT NULL DEFAULT 'metric'")
+            _ensure_column(c, "obs_alert_events", "source", "TEXT NOT NULL DEFAULT 'monitor'")
+            # 用量台账按"运行主体"分类型（2026-10-17 决定）：worker 任务 run_kind='task'
+            # （task_id 有值、run_id 同值）；主控机内直接跑的引擎（chat/devops/im/wiki）
+            # 没有 agent_tasks 行 → task_id 空串、主体放 run_id。两表都补（归档表要能接住）。
+            for _t in ("obs_llm_usage", "obs_llm_usage_archive"):
+                _ensure_column(c, _t, "run_id", "TEXT DEFAULT ''")
+                _ensure_column(c, _t, "run_kind", "TEXT DEFAULT 'task'")
+            # 索引必须建在**加列之后**：初始化里那批 CREATE INDEX 跑在列迁移之前，
+            # 老库上会因为列还不存在而失败（实测：新列有了、idx_obs_llm_run 没建成）。
+            try:
+                c.execute("CREATE INDEX IF NOT EXISTS idx_obs_llm_run ON obs_llm_usage(run_kind, run_id)")
+            except Exception as _ie:
+                log.warning(f"db_setup: create idx_obs_llm_run failed: {_ie}")
             db.commit()
             log.info("Added cluster columns: agent_runtimes.busy_slots/max_concurrent, agent_tasks.attempts/pool_agent_type/affinity_runtime_id")
     except Exception as e:

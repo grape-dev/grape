@@ -95,10 +95,13 @@ def cleanup_old_task_messages() -> int:
                     )
                 else:
                     # SQLite: use subquery with LIMIT
+                    # ⚠️ 子查询用派生表包裹（Issue #376 同类排查）：虽然此分支仅 SQLite
+                    #    后端执行，但保持写法统一可避免后续维护误复制到双后端路径；
+                    #    派生表包裹 SQLite 3.x 同样支持，语义不变。
                     c.execute(
                         f"DELETE FROM task_messages WHERE id IN ("
-                        f"SELECT id FROM task_messages WHERE created_at < {time_expr} "
-                        f"LIMIT {_BATCH_SIZE})"
+                        f"SELECT id FROM (SELECT id FROM task_messages WHERE created_at < {time_expr} "
+                        f"LIMIT {_BATCH_SIZE}) t)"
                     )
                 deleted = c.rowcount
                 db.commit()

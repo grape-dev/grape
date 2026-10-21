@@ -41,14 +41,17 @@ groups:
           description: "No runtimes (local or remote) are online. New tasks cannot execute."
 
       # MySQL 连接池使用率 > 80%
+      # 分母必须是**配置上限** max_connections（grape_db_max_connections），
+      # 不能用 Max_used_connections —— 那是历史峰值（高水位），分母用错会让比值长期贴近 1
+      # 造成永久误报（实测：74/78=93.6% 报警，真实上限 8000，占用 0.93%）。
       - alert: GrapeDBPoolUsageHigh
-        expr: grape_db_threads_connected / clamp_min(grape_db_max_used_connections, 1) > 0.8
+        expr: grape_db_threads_connected / clamp_min(grape_db_max_connections, 1) > 0.8
         for: 5m
         labels:
           severity: warning
         annotations:
           summary: "MySQL connection pool usage > 80%"
-          description: "{{ $value | humanizePercentage }} of max used connections are active."
+          description: "{{ $value | humanizePercentage }} of the configured max_connections are in use."
 
       # MySQL 连接中止
       - alert: GrapeDBAbortedConnects

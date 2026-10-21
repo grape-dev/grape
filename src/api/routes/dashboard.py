@@ -13,6 +13,55 @@ router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 _BW_SNAPSHOT = {"ts": 0.0, "bytes": 0}
 
 
+# R16.2.2: error_code → 本地化文案映射
+# 从 i18n locales 文件加载，dashboard API 返回时映射到前端可读文案
+_ERROR_CODE_I18N_CACHE: dict | None = None
+
+
+def _load_error_code_i18n() -> dict:
+    """加载 error_code 的 i18n 映射（zh/en 双语）。"""
+    global _ERROR_CODE_I18N_CACHE
+    if _ERROR_CODE_I18N_CACHE is not None:
+        return _ERROR_CODE_I18N_CACHE
+    import json as _json, os
+    _result = {}
+    _locales_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "static", "locales")
+    for _lang in ("zh", "en"):
+        _path = os.path.join(_locales_dir, _lang, "app.json")
+        try:
+            with open(_path, "r", encoding="utf-8") as _f:
+                _data = _json.loads(_f.read())
+                _errors = _data.get("errors", {})
+                if isinstance(_errors, dict):
+                    _result[_lang] = _errors
+        except Exception:
+            _result[_lang] = {}
+    _ERROR_CODE_I18N_CACHE = _result
+    return _result
+
+
+def _resolve_error_messages(errors: list, lang: str = "zh") -> list:
+    """R16.2.2: 遍历 errors 数组，将 error_code 映射为本地化文案。
+
+    每个 error 对象如果含 error_code 字段，附加 localized_message（按 lang 查 i18n 映射）。
+    保留原始 message 字段（英文，供 console/debug 用）。
+    """
+    if not errors:
+        return errors
+    _i18n = _load_error_code_i18n()
+    _lang_map = _i18n.get(lang, {})
+    _result = []
+    for _e in errors:
+        if isinstance(_e, dict):
+            _code = _e.get("error_code", "")
+            if _code and _code in _lang_map:
+                _e["localized_message"] = _lang_map[_code]
+            _result.append(_e)
+        else:
+            _result.append(_e)
+    return _result
+
+
 def _local_bandwidth() -> tuple:
     """psutil.net_io_counters() 汇总非 loopback 网卡吞吐，两次调用差分算速率。
     返回 (percent, mbps)：percent 基于 RUNTIME_BANDWIDTH_THRESHOLD_MBPS（默认 10）。
@@ -173,13 +222,15 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                     _errors = _json.loads(r[10]) if r[10] else []
                 except Exception:
                     _errors = [r[10]] if r[10] else []
+                # R16.2.2: error_code 映射本地化文案
+                _errors = _resolve_error_messages(_errors[:3])
                 failed_tasks.append({
                     "id": r[0], "agent_type": r[1] or "", "runtime_id": r[2],
                     "started_at": normalize_event_time(r[3]), "completed_at": normalize_event_time(r[4]),
                     "repo_key": r[5] or "", "issue_id": r[6] or "", "event_seq": r[7] or 0,
                     "result_text": (r[8] or "")[:200],
                     "exit_code": r[9],
-                    "errors": _errors[:3],
+                    "errors": _errors,
                 })
         except Exception:
             pass

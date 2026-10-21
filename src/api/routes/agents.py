@@ -219,7 +219,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                     _sub_evts = json.loads(row[10] or "[]") if row[10] else []
                 except Exception:
                     _sub_evts = []
-                session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token": row[4] or "", "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
+                # R25.8: token 脱敏——不原样外发，只返回存在性布尔（前端无引用，grep 确认零消费）
+                session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_gitcode_token_exists": bool(row[4]), "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or "",
                                "instance_name": instance_name_val,
                                "enable": bool(row[9]) if row[9] is not None else True,
@@ -363,7 +364,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
         "skill_scope": skill_scope,
-        "repo_gitcode_token": session_data.get("repo_gitcode_token", ""),
+        "repo_gitcode_token_exists": bool(session_data.get("repo_gitcode_token_exists", False)),
         "subscribe_events": session_data.get("subscribe_events", []),
         "status": session_data.get("status", "idle"),
         "last_active": session_data.get("last_active_at", ""),
@@ -435,8 +436,12 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     check_repo_access(user, repo_key)
 
     app_secret = ""
-    from src.user.db import get_bot_token_by_repo
-    repo_token = get_bot_token_by_repo(owner, repo)
+    # R12.13: 改用 read_stored_token（R20.18.1: 写入原始值，不过期检查、不刷新）
+    # R20.18.2: 短路仅在运行时 get_token 生效——write 用 read_stored_token
+    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.repo_key import to_repo_key
+    _rk = to_repo_key(f"{owner}/{repo}")
+    repo_token = TokenResolver(create_provider_from_repo_key(_rk)).read_stored_token(_rk) if _rk else ""
 
     from src.session_manager import db, db_lock
 

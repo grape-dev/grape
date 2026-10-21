@@ -326,6 +326,13 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
     exit_code = -1
     final_text = ""
 
+    # 用量采集（审计 2026-10-17）：autopilot DIRECT 模式跑在主控进程里，以前不记 token
+    from src.observability.master_usage import for_task as _master_for_task
+    _mu = _master_for_task(task_id, backend, cwd=ws, session_id="", seq=exec_id,
+                           repo_key=repo_key, agent_type=agent_type,
+                           engine_id=int(engine_id or 0))
+    _mu.start()
+
     try:
         from src.agent.executor import stream_devops_agent
         for evt_type, data in stream_devops_agent(
@@ -337,6 +344,7 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
             env_extra=env_extra,
             repo_key=repo_key,
         ):
+            _mu.feed(evt_type, data)
             if evt_type == "done":
                 d = data
                 exit_code = d.get("exit_code", -1)
@@ -349,6 +357,11 @@ def _execute_autopilot_direct(repo_key, task, exec_id, agent_type, skill_name,
 
     # 更新 agent_tasks 状态（用 task_id 精确更新）
     _finalize_autopilot_task(task_id, exec_id, exit_code, final_text)
+    # 用量落台账：放在任务终态之后（引擎已退出、账本已落盘），失败只打日志
+    try:
+        _mu.finish(session_id="")
+    except Exception as _ue:
+        log.warning(f"Autopilot exec {exec_id}: usage finish failed: {_ue}")
 
 
 def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,

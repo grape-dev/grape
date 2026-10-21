@@ -227,6 +227,7 @@ const API = (() => {
         e.status = r.status;
         e.errors = detail.errors || null;
         e.detail = detail;
+        e.error_code = detail.error_code || '';  // Issue #372: error_code for i18n mapping
         throw e;
       });
     }

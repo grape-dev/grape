@@ -1360,14 +1360,14 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
         from src.repo_key import to_repo_key
         api_token = get_github_token(repo_key=to_repo_key(repo_key, provider="github"))
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 GitHub Bot Token 未配置"})
     else:
         # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
         from src.user.db import get_repo_bot_token
         from src.repo_key import to_repo_key
         api_token = get_repo_bot_token(repo_key=to_repo_key(repo_key))
         if not api_token:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 Bot Token 未配置"})
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 Bot Token 未配置"})
     from src.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"

@@ -9,6 +9,20 @@ from datetime import datetime, timezone, timedelta
 from src.session_manager import db, db_lock
 from src.config import log
 from src.api.time_utils import normalize_event_time
+from src.token_service import is_auth_401_error
+
+
+# R11.4: _get_task_token 抽取到 src/user/db.py，统一调用
+from src.user.db import get_task_token as _get_task_token
+
+# R16.2.1: 统一 error_code → message 映射（task errors / dashboard 展示用）
+_R16_ERROR_MESSAGES = {
+    "TOKEN_EXPIRED": "user token expired or revoked",
+    "GLOBAL_TOKEN_EXPIRED": "global bot token expired or revoked",
+    "REPO_TOKEN_EXPIRED": "repo bot token expired or revoked",
+    "SESSION_TOKEN_EXPIRED": "devops agent session token expired or revoked",
+    "NO_TOKEN_AVAILABLE": "no token available for this repo",
+}
 
 # ===== 执行模式开关（engine-selection-design.md v2）=====
 # auto（按绑定引擎宿主自动推导，见 execution-mode-auto-routing-design.md §3）
@@ -1277,6 +1291,39 @@ def claim(runtime_id) -> dict | None:
                     log.warning(f"claim backfill event runtime failed: {e}")
         from src.runtime.instances import runtime_instance_name
         log.info(f"claim: runtime_id={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
+        # R21.12.1: 路径 A task 排队期间 token 过期窗口——claim 时检查过期标记
+        # task 行 token 非空时检查 DB 过期标记（不调 VCS API，只查 DB）
+        if task and (task.get("repo_gitcode_token") or ""):
+            try:
+                _rk = task.get("repo_key") or ""
+                if _rk:
+                    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+                    _provider = create_provider_from_repo_key(_rk)
+                    _resolver = TokenResolver(_provider)
+                    # R21.12.6: 只查 DB 过期标记，不调 VCS API
+                    for _strategy in _resolver.strategies:
+                        if _strategy._fetch(_rk) and _strategy._is_expired(_rk):
+                            # R21.12.2: 已过期 → 重新调 get_token → 短路返回空则注入空串
+                            _fresh_token = _resolver.get_token(_rk)
+                            task["repo_gitcode_token"] = _fresh_token
+                            if not _fresh_token:
+                                log.warning(f"claim: task {task_id} token expired and short-circuited → empty token injected")
+                            else:
+                                log.info(f"claim: task {task_id} token expired, re-fetched from fallback strategy")
+                            break
+            except Exception as _te:
+                log.warning(f"claim: token freshness check failed for task {task_id}: {_te}")
+        # P0-1: 路径 D × 远程 worker token 注入
+        # 路径 B/D 场景 task 行 repo_gitcode_token 刻意写空（防过期 token 落库）。
+        # 本地引擎运行时 _get_task_token 会实时查主控 DB 取 token——但远程 worker
+        # 用的是自己的本地 sessions.db（空库），查不到 token → git worktree 全链路断裂。
+        # 修复：claim 响应中服务端现取 token 注入 task dict（不落库），worker 拿到的是
+        # 新鲜 token，直接用 task["repo_gitcode_token"] 即可，无需查本地 DB。
+        if task and not (task.get("repo_gitcode_token") or ""):
+            try:
+                task["repo_gitcode_token"] = _get_task_token(task)
+            except Exception as _te:
+                log.warning(f"claim: inject token failed for task {task_id}: {_te}")
         # 可观察性埋点：任务被 claim/dispatched
         try:
             from src.observability import record_task_dispatched
@@ -1350,12 +1397,14 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             _tag_match_noprefix = "(pool_tag!='' AND runtime_id=0)" if tag == "all" else "(pool_tag=? AND runtime_id=0)"
             params = [] if tag == "all" else [tag]
             if scope == "repo":
-                # repo_key 可能带前缀（gitcode:owner/repo）也可能不带，两种都要匹配
+                # repo_key 可能带平台前缀（gitcode:/github:）也可能不带，三种都要匹配
+                # （跨平台候选与 runtime.py list_runtime_tasks 同款）
                 params.append(owner_id)
                 params.append(f"gitcode:{owner_id}")
+                params.append(f"github:{owner_id}")
                 sql = (
                     "SELECT t.id FROM agent_tasks t "
-                    f"WHERE { _tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
+                    f"WHERE { _tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=? OR t.repo_key=?) "
                     "AND NOT EXISTS ("
                     "  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
                     "    (t.issue_session_id != '' AND a2.issue_session_id = t.issue_session_id)"
@@ -1562,6 +1611,15 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 pass
     from src.runtime.instances import runtime_instance_name
     log.info(f"claim_by_tag: tag={tag} runtime={runtime_id}({runtime_instance_name(runtime_id)}) task={task_id}")
+    # Issue #372 §29: 路径 D × 远程 worker token 注入（与 claim() L1284-1286 一致）
+    # 路径 B/D 场景 task 行 repo_gitcode_token 刻意写空（防过期 token 落库）。
+    # 远程 worker 用本地空库查不到 token → git clone/push 失败。
+    # 修复：claim_by_tag 返回前服务端现取 token 注入 task dict（不落库）。
+    if task and not (task.get("repo_gitcode_token") or ""):
+        try:
+            task["repo_gitcode_token"] = _get_task_token(task)
+        except Exception as _te:
+            log.warning(f"claim_by_tag: inject token failed for task {task_id}: {_te}")
     return task
 
 
@@ -1760,7 +1818,7 @@ def report_messages(task_id, messages):
     if task.get("event_seq"):
         try:
             from src.api.event_archive import append_event_archive_log
-            tokens = [task.get("repo_gitcode_token") or ""]
+            tokens = [_get_task_token(task)]
             hint = task.get("issue_id") or ""
             for m in messages or []:
                 if isinstance(m, dict):
@@ -2003,7 +2061,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 pass
             finalize_event_archive(task["repo_key"], task["event_seq"], status,
                                    exit_code, duration, output,
-                                   tokens=[task.get("repo_gitcode_token") or ""],
+                                   tokens=[_get_task_token(task)],
                                    issue_num_hint=task.get("issue_id") or "")
             _conclusion = ""
             if output and output.get("conclusion"):
@@ -2079,7 +2137,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             _issue_id = task["issue_id"]
             _issue_num = _issue_num_from(_issue_id)
             _repo = from_repo_key(task["repo_key"]) or task.get("account") or ""
-            _token = task.get("repo_gitcode_token") or ""
+            _token = _get_task_token(task)
             _agent_type = task.get("agent_type") or ""
             _repo_key = task["repo_key"]
             _result_text = result_text or ""
@@ -2092,9 +2150,27 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                         log.info(f"Multi-task mode: parent issue {_issue_id} stage=done (subtasks will trigger independently)")
                 except Exception as _se:
                     log.warning(f"complete_task multi-task stage=done failed: {_se}")
-            # 1. 系统回帖（含 grape-auto-comment 标记）
-            if _issue_num and _repo and _token:
-                _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type)
+            # 1. 系统回帖（R18.6.10: 走 handler.post_issue_comment()）
+            if _issue_num and _repo_key:
+                try:
+                    from src.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
+                    _p = create_provider_from_repo_key(_repo_key)
+                    # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
+                    _r = TokenResolver(_p).resolve_config_level(_repo_key)
+                    _r.issue_id = _issue_id
+                    _h = create_action_handler(_r)
+                    if _h:
+                        _h.post_issue_comment(_repo_key, _issue_num, _result_text or f"任务已完成（{_agent_type} agent）。", _r)
+                    elif _token:
+                        # 无 handler（无 token 配置）→ fallback 直接调 _post_result_to_issue
+                        from src.api.event_pipeline import _post_result_to_issue
+                        _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type)
+                except Exception as _pe:
+                    log.warning(f"complete_task: handler.post_issue_comment failed: {_pe}")
+                    # fallback 到直接调用
+                    if _token:
+                        from src.api.event_pipeline import _post_result_to_issue
+                        _post_result_to_issue(_repo, _issue_num, _result_text, _token, _agent_type)
             # 2. 子任务 SRE 完成 → 登记到父 Issue
             if _agent_type == "sre" and _issue_num and _token:
                 try:
@@ -2374,6 +2450,35 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id, repo_gitcode_token)
 
 
+def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) -> list:
+    """查询 issue 已有评论列表（按 provider 分流）。
+
+    Issue #372 R10 P2-1: fail_task 发"Token 已过期"回帖前去重用。
+    GitHub: GET /repos/{owner}/{repo}/issues/{num}/comments
+    GitCode: GET /api/v5/repos/{repo}/issues/{num}/comments
+    返回评论 dict 列表（每项含 body 字段），失败返回空列表。
+    """
+    try:
+        if repo_key.startswith("github:"):
+            from src.repo_key import split_owner_repo
+            from src.user.repo_manager import _github_req
+            _o, _r = split_owner_repo(repo_key)
+            _result = _github_req(
+                "GET",
+                f"https://api.github.com/repos/{_o}/{_r}/issues/{issue_num}/comments",
+                token,
+            )
+            return _result if isinstance(_result, list) else []
+        else:
+            import urllib.request, json as _json
+            _url = f"https://gitcode.com/api/v5/repos/{repo}/issues/{issue_num}/comments?per_page=100"
+            _req = urllib.request.Request(_url, headers={"Authorization": f"Bearer {token}"})
+            _resp = urllib.request.urlopen(_req, timeout=15)
+            return _json.loads(_resp.read())
+    except Exception:
+        return []
+
+
 def _task_created_key(value):
     """created_at 归一键（比较用），返回 (可解析标志, epoch 秒, 原串)。
 
@@ -2436,7 +2541,7 @@ def fail_task(task_id, error, exit_code=-1):
             from src.api.event_archive import finalize_event_archive
             finalize_event_archive(task["repo_key"], task["event_seq"], "failed",
                                    exit_code, None, None,
-                                   tokens=[task.get("repo_gitcode_token") or ""],
+                                   tokens=[_get_task_token(task)],
                                    issue_num_hint=task.get("issue_id") or "")
             update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
@@ -2445,6 +2550,246 @@ def fail_task(task_id, error, exit_code=-1):
             log.warning(f"fail_task finalize failed: {e}")
     update_task_status(task_id, "failed", exit_code=exit_code,
                        errors=json.dumps([str(error)] if error else []))
+    # Issue #372 R10/R16.1: 统一 token 过期检测（fail_task 统一入口）
+    # task failed 时检查 error 是否含 401/auth 错误
+    # R16.1: 按 token 来源统一分流（用户 / 全局 / 仓库级 / session），不再只针对路径 B
+    # R18: 委托 TokenResolver.detect_and_mark_expired 验证 + 标记 + 返回 error_code
+    # P2-2: 加 exit_code < 0 前置条件 + 按词匹配（避免 issue 号 401、耗时 401s 误报）
+    _is_401 = False  # R16.6: 初始化供后续无 token 检测使用
+    try:
+        _err_str = str(error or "")
+        # R20.19.2: 空 token 检测在 401 关键词检测之前执行（短路优先）
+        # R20.19.1: task 获取 token 为空时直接写 NO_TOKEN_AVAILABLE
+        _task_token = _get_task_token(task) if task else ""
+        if not _task_token and task:
+            _rk = task.get("repo_key") or ""
+            if _rk:
+                try:
+                    with db_lock:
+                        c = db.cursor()
+                        c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                        _row = c.fetchone()
+                        _existing_errors = []
+                        if _row and _row[0]:
+                            try:
+                                _existing_errors = json.loads(_row[0])
+                                if not isinstance(_existing_errors, list):
+                                    _existing_errors = [str(_existing_errors)]
+                            except (json.JSONDecodeError, TypeError):
+                                _existing_errors = [str(_row[0])]
+                        _already_has_code = any(
+                            isinstance(e, dict) and e.get("error_code") == "NO_TOKEN_AVAILABLE"
+                            for e in _existing_errors
+                        )
+                        if not _already_has_code:
+                            _existing_errors.append({
+                                "error_code": "NO_TOKEN_AVAILABLE",
+                                "message": _R16_ERROR_MESSAGES["NO_TOKEN_AVAILABLE"],
+                                "rebind_url": "/#settings",
+                            })
+                            _existing_errors = _existing_errors[-5:]
+                            c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_existing_errors), task_id))
+                            db.commit()
+                except Exception:
+                    pass
+        # P2-2: 收紧 401 匹配——去掉单独 "unauthorized" 关键词（太宽泛，权限不足 403 也可能含此词）
+        # R20.19.4: 扩展关键词列表——git clone/push 失败的 error 可能不含 "401 unauthorized"
+        _is_401 = exit_code < 0 and is_auth_401_error(_err_str)
+        if _is_401 and task:
+            _rk = task.get("repo_key") or ""
+            if _rk:
+                # R18: 委托 TokenResolver 统一检测 + 标记
+                from src.token_resolver import TokenResolver, create_provider_from_repo_key
+                _provider = create_provider_from_repo_key(_rk)
+                _resolver = TokenResolver(_provider)
+                _error_code = _resolver.detect_and_mark_expired(_rk)
+
+                if _error_code:
+                    _expired_provider = _provider.provider_name  # "gitcode" / "github"
+                    _issue_id = task.get("issue_id") or ""
+                    _comment_token = ""
+
+                    # R18.6.9: 评论 token 通过 handler.get_comment_token() 获取
+                    # handler 内部按级别差异化选择评论 token（含 fallback）
+                    try:
+                        from src.token_resolver import create_action_handler
+                        # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
+                        _resolve_result = _resolver.resolve_config_level(_rk)
+                        _resolve_result.issue_id = _issue_id
+                        _handler = create_action_handler(_resolve_result)
+                        if _handler:
+                            _comment_token = _handler.get_comment_token(_resolve_result) or ""
+                        else:
+                            # 无 handler → fallback 到全局 bot token
+                            if _rk.startswith("github:"):
+                                from src.user.db import get_global_github_bot_token
+                                _comment_token = get_global_github_bot_token() or ""
+                            else:
+                                from src.user.db import _get_global_bot_token
+                                _comment_token = _get_global_bot_token() or ""
+                    except Exception as _cte:
+                        log.warning(f"fail_task: handler.get_comment_token failed: {_cte}")
+                        # fallback 到原有逻辑
+                        if _rk.startswith("github:"):
+                            from src.user.db import get_global_github_bot_token
+                            _comment_token = get_global_github_bot_token() or ""
+                        else:
+                            from src.user.db import _get_global_bot_token
+                            _comment_token = _get_global_bot_token() or ""
+                        if not _comment_token:
+                            _comment_token = _get_task_token(task) or ""
+
+                    # R14.18: task errors 改为 append 模式——读取已有 errors → append error_code → 写回
+                    # 保留原始错误详情（如 401 响应体），dashboard 同时显示原始错误和过期提示
+                    _token_expired_err = {
+                        "error_code": _error_code,
+                        "message": _R16_ERROR_MESSAGES.get(_error_code, "token expired or revoked"),
+                        "provider": _expired_provider,
+                        "rebind_url": "/#account",
+                    }
+                    try:
+                        with db_lock:
+                            c = db.cursor()
+                            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                            _row = c.fetchone()
+                            _existing_errors = []
+                            if _row and _row[0]:
+                                try:
+                                    _existing_errors = json.loads(_row[0])
+                                    if not isinstance(_existing_errors, list):
+                                        _existing_errors = [str(_existing_errors)]
+                                except (json.JSONDecodeError, TypeError):
+                                    _existing_errors = [str(_row[0])]
+                            # R16.1.6 幂等：已存在相同 error_code 则不重复 append
+                            _already_has_code = any(
+                                isinstance(e, dict) and e.get("error_code") == _error_code
+                                for e in _existing_errors
+                            )
+                            if not _already_has_code:
+                                _existing_errors.append(_token_expired_err)
+                                # 限制 errors 列表长度（dashboard _errors[:3] 切片，保留最近 5 条）
+                                _existing_errors = _existing_errors[-5:]
+                                _err_obj = json.dumps(_existing_errors)
+                                c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (_err_obj, task_id))
+                                db.commit()
+                    except Exception:
+                        pass
+                    # issue 回帖提示用户重新绑定
+                    # P2-1 去重：同一 issue 多个 task 401 失败时，只发一条"Token 已过期"评论
+                    if _issue_id and _comment_token:
+                        from src.api.event_pipeline import _post_result_to_issue, _issue_num_from
+                        from src.repo_key import from_repo_key
+                        _issue_num = _issue_num_from(_issue_id)
+                        _repo = from_repo_key(_rk) or task.get("account") or ""
+                        if _issue_num and _repo:
+                            _pName = "GitHub" if _expired_provider == "github" else "GitCode"
+                            _msg = (
+                                f"<!-- grape-auto-comment -->\n"
+                                f"⚠️ {_pName} Token 已过期或被撤销，本次任务未能完成。"
+                                f"请在设置页重新绑定 {_pName} Token 后重试。"
+                            )
+                            # 去重：查 issue 已有评论，若已含"Token 已过期"则跳过（避免重复刷屏）
+                            _already_notified = False
+                            try:
+                                _comments = _fetch_issue_comments(
+                                    _rk, _repo, _issue_num, _comment_token
+                                )
+                                _already_notified = any(
+                                    "Token 已过期" in (_c.get("body") or "")
+                                    for _c in (_comments or [])
+                                    if isinstance(_c, dict)
+                                )
+                            except Exception:
+                                pass  # 查询失败不阻断发帖（降级为原行为：可能重复发帖）
+                            if not _already_notified:
+                                try:
+                                    # R18.6.10: 走 handler.post_issue_comment()
+                                    from src.token_resolver import create_action_handler
+                                    # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
+                                    _resolve_r = _resolver.resolve_config_level(_rk)
+                                    _resolve_r.issue_id = _issue_id
+                                    _h = create_action_handler(_resolve_r)
+                                    if _h:
+                                        _ok = _h.post_issue_comment(_rk, _issue_num, _msg, _resolve_r)
+                                        if not _ok:
+                                            raise RuntimeError("handler.post_issue_comment returned False")
+                                    else:
+                                        _post_result_to_issue(
+                                            _repo, _issue_num, _msg, _comment_token,
+                                            task.get("agent_type") or "", _rk,
+                                        )
+                                except Exception as _pe:
+                                    log.warning(f"fail_task: R10 issue comment post failed: {_pe}")
+                                    # R20.2.1: 回帖失败不静默——append COMMENT_POST_FAILED
+                                    try:
+                                        with db_lock:
+                                            c = db.cursor()
+                                            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                                            _row2 = c.fetchone()
+                                            _errs2 = []
+                                            if _row2 and _row2[0]:
+                                                try:
+                                                    _errs2 = json.loads(_row2[0])
+                                                    if not isinstance(_errs2, list):
+                                                        _errs2 = [str(_errs2)]
+                                                except (json.JSONDecodeError, TypeError):
+                                                    _errs2 = [str(_row2[0])]
+                                            _has_cpf = any(isinstance(e, dict) and e.get("error_code") == "COMMENT_POST_FAILED" for e in _errs2)
+                                            if not _has_cpf:
+                                                _errs2.append({
+                                                    "error_code": "COMMENT_POST_FAILED",
+                                                    "message": "failed to post comment to issue (token expired or no permission)",
+                                                })
+                                                _errs2 = _errs2[-5:]
+                                                c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs2), task_id))
+                                                db.commit()
+                                    except Exception:
+                                        pass
+    except Exception as _e:
+        log.warning(f"fail_task: R10/R16 token expiry check failed: {_e}")
+    # R16.6: 无 token 检测——task 失败且无 401 时，检查是否因无 token 导致
+    # 所有策略返回空（token 被短路或未配置）→ 写 NO_TOKEN_AVAILABLE error_code
+    if task and not _is_401:
+        try:
+            _rk = task.get("repo_key") or ""
+            if _rk:
+                from src.token_resolver import TokenResolver, create_provider_from_repo_key
+                _provider = create_provider_from_repo_key(_rk)
+                _resolver = TokenResolver(_provider)
+                _has_token = _resolver.get_token(_rk)
+                if not _has_token:
+                    _no_token_err = {
+                        "error_code": "NO_TOKEN_AVAILABLE",
+                        "message": _R16_ERROR_MESSAGES["NO_TOKEN_AVAILABLE"],
+                        "rebind_url": "/#settings",
+                    }
+                    try:
+                        with db_lock:
+                            c = db.cursor()
+                            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+                            _row = c.fetchone()
+                            _existing_errors = []
+                            if _row and _row[0]:
+                                try:
+                                    _existing_errors = json.loads(_row[0])
+                                    if not isinstance(_existing_errors, list):
+                                        _existing_errors = [str(_existing_errors)]
+                                except (json.JSONDecodeError, TypeError):
+                                    _existing_errors = [str(_row[0])]
+                            _already_has_code = any(
+                                isinstance(e, dict) and e.get("error_code") == "NO_TOKEN_AVAILABLE"
+                                for e in _existing_errors
+                            )
+                            if not _already_has_code:
+                                _existing_errors.append(_no_token_err)
+                                _existing_errors = _existing_errors[-5:]
+                                _err_obj = json.dumps(_existing_errors)
+                                c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (_err_obj, task_id))
+                                db.commit()
+                    except Exception:
+                        pass
+        except Exception as _e:
+            log.warning(f"fail_task: R16.6 no-token check failed: {_e}")
     # 死 session 检测（smart-session-recovery-design.md §2.3）：
     # 同一 issue_agent_session 下连续 ≥3 次 exit_code < 0（-15/-1/timeout）→ 清空 runtime_session_id
     # exit_code 由 worker fail 上报透传（超时/-1、引擎崩溃码）；不传时默认 -1；

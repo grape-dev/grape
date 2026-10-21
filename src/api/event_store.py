@@ -167,16 +167,28 @@ def release_event_guard(repo_key: str, issue_id: str, agent_type: str, seq: int)
         log.warning(f"release_event_guard failed seq={seq}: {e}")
 
 
-def purge_stale_event_guards(max_age_seconds: int = 21600) -> int:
-    """TTL 兜底清理守卫行（进程崩溃来不及终态释放时的自愈；默认 6h）。
+def purge_stale_event_guards(max_age_seconds: int = 1800) -> int:
+    """TTL 兜底清理守卫行（进程崩溃来不及终态释放时的自愈；默认 30min）。
 
     守卫作用域仅为"活跃/近窗"，超时删除后允许同 (issue,agent) 重新建事件。
+    Issue #372 §12.7: 从 6h 缩短到 30min——活跃 guard 不应存活这么久，
+    异常退出后 30min 内自动恢复，不影响用户重试。
+    Issue #372 §33: 跳过有运行中 task 的 guard——长任务不应被 TTL 误清理导致重复派发。
     """
     try:
         _cutoff = _utc_now_str(-max_age_seconds)
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM event_active_guard WHERE created_at < ?", (_cutoff,))
+            # §33: 只清理没有运行中 task 的 guard（防长任务被误清理后重复派发）
+            c.execute(
+                "DELETE FROM event_active_guard WHERE created_at < ? "
+                "AND NOT EXISTS ("
+                "  SELECT 1 FROM agent_tasks t "
+                "  WHERE t.status IN ('dispatched','running') "
+                "  AND t.event_seq = event_active_guard.seq"
+                ")",
+                (_cutoff,)
+            )
             db.commit()
             return c.rowcount
     except Exception as e:

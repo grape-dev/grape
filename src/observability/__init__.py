@@ -132,6 +132,7 @@ def _route_pattern(request) -> str:
 def metrics_endpoint():
     """返回 Prometheus exposition 格式的指标数据。"""
     from fastapi.responses import Response
+    on_metrics_scrape()   # DB/业务度量是"拉取时采样"，必须先刷新再导出（否则恒为 0）
     return Response(
         content=generate_latest(registry),
         media_type=CONTENT_TYPE_LATEST,
@@ -160,6 +161,7 @@ def start_metrics_server():
     class _MetricsHandler(BaseHTTPRequestHandler):
         def do_GET(self):
             if self.path == "/metrics":
+                on_metrics_scrape()   # 刷新 DB/业务采样（拉取时采样，否则恒为 0）
                 body = generate_latest(registry)
                 self.send_response(200)
                 self.send_header("Content-Type", CONTENT_TYPE_LATEST)
@@ -388,7 +390,16 @@ DB_THREADS_CACHED = Gauge(
 
 DB_MAX_USED_CONNECTIONS = Gauge(
     "grape_db_max_used_connections",
-    "MySQL Max_used_connections: max simultaneous connections since server start.",
+    "MySQL Max_used_connections: HISTORICAL PEAK of simultaneous connections since server "
+    "start. NOT the configured limit — do not use it as an alert denominator (see "
+    "grape_db_max_connections).",
+    registry=registry,
+)
+
+DB_MAX_CONNECTIONS = Gauge(
+    "grape_db_max_connections",
+    "MySQL max_connections: the configured connection ceiling (SHOW VARIABLES). "
+    "Use this as the denominator for pool-usage alerts.",
     registry=registry,
 )
 
@@ -427,6 +438,14 @@ def collect_mysql_metrics():
                     DB_MAX_USED_CONNECTIONS.set(value)
                 elif name == "Aborted_connects":
                     DB_ABORTED_CONNECTS.inc(value)
+            # 配置上限（分母）：SHOW VARIABLES，不是 STATUS —— 别和 Max_used_connections（历史峰值）混用
+            try:
+                c.execute("SHOW VARIABLES WHERE Variable_name='max_connections'")
+                _r = c.fetchone()
+                if _r and _r[1] is not None:
+                    DB_MAX_CONNECTIONS.set(int(_r[1]))
+            except Exception:
+                pass
     except Exception:
         pass  # 采集失败不影响 /metrics
 
