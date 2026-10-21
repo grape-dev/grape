@@ -742,7 +742,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _tool_count = 0      # 本次执行 tool_use 事件数（假完成判定用，issue-P5）
         # 静默超时窗口：首个无输出窗口。与 hermes ACP _SILENT_TIMEOUT=300s 对齐，
         # 可用 AGENT_SILENT_WINDOW 环境变量覆盖（模型流挂死 5 分钟即感知，不再干等 20min）。
-        _silent_window = float(os.environ.get("AGENT_SILENT_WINDOW", str(min(300, max_exec_seconds))))
+        # Issue #378: 优先读任务级 env dict（含 env_extra，由 _execute_task 按 agent_type 注入
+        # coding/qa=1200s），os.environ 次之（手动调参/测试），默认 min(300, max_exec_seconds)。
+        _silent_window = float(env.get("AGENT_SILENT_WINDOW",
+            os.environ.get("AGENT_SILENT_WINDOW", str(min(300, max_exec_seconds)))))
         # 进程存活但无输出的累计延长上限（防长命令/长思考无上限；超硬上限仍强杀，见 #501 修复）
         # 可用 AGENT_SILENT_EXTEND_CAP 调整（旧变量 AGENT_SILENT_LIMIT 亦兼容，语义=续期额度上限）。
         _silent_extend_total = 0.0

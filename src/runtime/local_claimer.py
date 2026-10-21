@@ -28,6 +28,15 @@ from src.config import log
 
 CLAIMER_ENABLED = os.environ.get("GRAPE_LOCAL_CLAIMER", "1").strip().lower() in ("1", "true", "yes", "on")
 CLAIM_INTERVAL = 3.0  # 与 worker 的 RUNTIME_POLL_INTERVAL 默认值一致
+# 本机直连兜底延迟（local-claimer-backstop-design）：任务入队后先给远端 worker 一个
+# 专属认领窗口（worker 3s 轮询 + 0~0.9s jitter，15s ≈ 4-5 轮机会），窗口内本机不抢；
+# 超时后本机作为兜底认领。例外：任务白名单内的远端引擎已全部物理不可达（离线/心跳
+# 过期/无 tag/scope 不符）时跳过等待立即兜底（空等无意义）。
+# GRAPE_LOCAL_CLAIMER_DELAY=0 可关闭延迟（恢复立即抢的旧行为）。
+try:
+    CLAIM_BACKSTOP_DELAY = float(os.environ.get("GRAPE_LOCAL_CLAIMER_DELAY", "15"))
+except ValueError:
+    CLAIM_BACKSTOP_DELAY = 15.0
 
 
 def _claimer_enabled() -> bool:
@@ -72,6 +81,98 @@ def _engine_tags(runtime_id: int) -> list[str]:
     except Exception as e:
         log.warning(f"local_claimer: tags query failed for {runtime_id}: {e}")
         return []
+
+
+def _task_age_seconds(task: dict) -> float:
+    """任务已排队时长（秒）。created_at 为 UTC ISO 格式；解析失败返回大值（视为已超龄，不阻塞兜底）。"""
+    created = (task.get("created_at") or "").strip()
+    if not created:
+        return CLAIM_BACKSTOP_DELAY + 1.0
+    try:
+        from src.runtime.health import parse_dt
+        ts = parse_dt(created)
+        if ts is not None:
+            import time as _time
+            return max(0.0, _time.time() - ts)
+    except Exception:
+        pass
+    return CLAIM_BACKSTOP_DELAY + 1.0
+
+
+def _remote_claimants_reachable(task: dict) -> bool:
+    """该任务还有没有物理可达的远端认领方。
+
+    - pool_engine_ids 非空 → 检查名单内（含本机直连之外的）引擎是否有任一可达
+      （复用 claim_by_tag 同款尺子 _check_pool_engines_reachable：在线+心跳新鲜+
+      healthy+probe 正常+有 tag 能力+scope 匹配）。全不可达 → False（本机可跳过
+      兜底延迟立即认领——空等无意义）。
+    - pool_engine_ids 为空（全广播）→ 查全站是否有任一在线的远端 worker 引擎
+      （credential_id>0 且心跳新鲜）。有 → 本机继续等待让远端先领；无 → False。
+    查询异常保守返回 True（继续等待，宁可慢不可抢跑）。
+    """
+    import json as _json
+    from src.session_manager import db, db_lock
+    _tag = (task.get("pool_tag") or task.get("agent_type") or "").strip()
+    _repo = task.get("repo_key") or ""
+    _uid = task.get("user_id") or 0
+    _pe = (task.get("pool_engine_ids") or "").strip()
+    try:
+        with db_lock:
+            c = db.cursor()
+            if _pe:
+                try:
+                    allowed = _json.loads(_pe)
+                except Exception:
+                    return True
+                # 名单里只剩本机直连引擎 → 远端已无候选
+                remote_ids = [e for e in allowed if e and int(e) not in _local_direct_engine_ids()]
+                if not remote_ids:
+                    return False
+                from src.runtime.service import _check_pool_engines_reachable
+                # 只需远端中任一可达；本机自身可达与否不影响"是否等待"的判断
+                return bool(_check_pool_engines_reachable(remote_ids, _tag, _repo, task_user_id=int(_uid)))
+            # 全广播：全站有没有在线远端 worker（心跳新鲜）
+            c.execute(
+                "SELECT COUNT(*) FROM agent_runtimes ar "
+                "LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                "WHERE ar.credential_id>0 AND ar.status='online' AND ar.healthy=1 "
+                "AND ar.last_seen_at IS NOT NULL AND ar.last_seen_at!=''")
+            n = c.fetchone()
+            if n and (n[0] or 0) > 0:
+                # 有在线远端，但心跳新鲜度逐行判断（SQL 表达复杂，逐行复用 parse_dt）
+                c.execute(
+                    "SELECT ar.id, ar.last_seen_at FROM agent_runtimes ar "
+                    "LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
+                    "WHERE ar.credential_id>0 AND ar.status='online' AND ar.healthy=1 "
+                    "AND ar.last_seen_at IS NOT NULL AND ar.last_seen_at!='' LIMIT 20")
+                import time as _time
+                from src.runtime.health import parse_dt
+                from src.runtime.service import _RUNTIME_STALE_SECONDS
+                for r in c.fetchall():
+                    ts = parse_dt(r[1] or "")
+                    if ts is None or _time.time() - ts <= _RUNTIME_STALE_SECONDS:
+                        return True
+                return False
+            return False
+    except Exception as e:
+        log.warning(f"local_claimer: remote reachability check failed: {e}")
+        return True
+
+
+def _backstop_should_yield(task: dict) -> bool:
+    """兜底守卫判定：本机这次认领是否应当让位给远端 worker。
+
+    返回 True = 让位（回滚任务为 queued，本轮不执行）。条件：
+    1. 延迟开关未关（CLAIM_BACKSTOP_DELAY > 0）；
+    2. 任务年龄仍在窗口期内；
+    3. 仍有物理可达的远端认领方（全广播看全站远端，白名单模式看名单内远端）。
+    例外放行：远端引擎已全部判死/无权限 → 不空等，立即由本机兜底执行。
+    """
+    if CLAIM_BACKSTOP_DELAY <= 0:
+        return False
+    if _task_age_seconds(task) >= CLAIM_BACKSTOP_DELAY:
+        return False
+    return _remote_claimants_reachable(task)
 
 
 def _engine_busy(runtime_id: int) -> bool:
@@ -191,6 +292,34 @@ async def local_claimer_loop():
                         claimed = task
                         break
                 if claimed:
+                    # 兜底守卫（local-claimer-backstop-design）：窗口期内且仍有可达的
+                    # 远端认领方 → 放弃本次认领，让远端 worker 先拿。
+                    # 放弃方式：把任务状态回滚 queued（claim 已把它置为 running 并占用本机
+                    # runtime_id），恢复为无主池任务，等下一轮再评估。
+                    if _backstop_should_yield(claimed):
+                        try:
+                            from src.session_manager import db, db_lock
+                            _yid = claimed.get("id") or ""
+                            _yseq = claimed.get("event_seq") or 0
+                            with db_lock:
+                                c = db.cursor()
+                                # 回滚任务为无主池任务（claim 已置 running + 占用本机 runtime_id）
+                                c.execute(
+                                    "UPDATE agent_tasks SET status='queued', runtime_id=0, started_at=NULL "
+                                    "WHERE id=? AND status='running'", (_yid,))
+                                # 还原 claim 的副作用：事件回 pending、runtime 清空（留给真正认领方回写）
+                                if _yseq:
+                                    c.execute(
+                                        "UPDATE events SET status='pending', runtime='' "
+                                        "WHERE seq=? AND status='running'", (_yseq,))
+                                # busy_slots 是展示快照，方案 D 有 recalc/兜底，无需精确还原
+                                db.commit()
+                            log.info(f"local_claimer: backstop yielded task={_yid} "
+                                     f"(age={_task_age_seconds(claimed):.0f}s < {CLAIM_BACKSTOP_DELAY:.0f}s, "
+                                     f"remote claimant reachable)")
+                        except Exception as _ye:
+                            log.warning(f"local_claimer: backstop yield failed: {_ye}")
+                        continue
                     await _execute_claimed_locally(claimed, rid)
                     break  # 本轮已领到任务，下轮再继续（与 worker 单任务循环节奏一致）
         except asyncio.CancelledError:

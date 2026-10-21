@@ -3332,7 +3332,21 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                          a.get("version", ""), 1 if a.get("healthy") else 0,
                          a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
                     )
-                    # 不再自动写入默认 "all" 标签——新引擎默认无标签，由用户在控制台手动配置。
+                    rid = c.lastrowid or 0
+                    # 新本机直连引擎默认写入 "all" 标签（与远端 worker 注册行为对齐）：
+                    # 全广播模式下无 worker 时任务由本机直连认领，缺标签会导致任务永久卡 queued。
+                    # 已有 capabilities 行（用户手动配置过）则不覆盖。
+                    c.execute(
+                        "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
+                    if not c.fetchone():
+                        from datetime import datetime as _dt, timezone as _tz
+                        _now_ec = _dt.now(_tz.utc).isoformat()
+                        c.execute(
+                            "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
+                            "VALUES (?, 'all', 1, 50, 1, ?, ?)",
+                            (rid, _now_ec, _now_ec))
+                        from src.api.routes.settings import _sync_agent_tags
+                        _sync_agent_tags(rid, c)
             # 清理本次 scope 中已不在列表里的 runtime（忽略大小写）。
             # 仅清理未绑定凭据的本机行（credential_id=0）；凭据绑定的远端/边端注册行一律保留
             #（见 multi-runtime-instance-design §5.1 防误删）。
