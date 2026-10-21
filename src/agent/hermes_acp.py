@@ -299,23 +299,17 @@ class HermesACPBackend:
         def _reader():
             nonlocal _read_buf
             try:
-                if _sys.platform == "win32":
-                    # Windows: 直接用 Popen.stdout.readline() 阻塞读
-                    # reader 在独立线程，阻塞不影响主线程
-                    while True:
-                        line = proc.stdout.readline()
-                        if not line:
-                            break
-                        line_str = line.decode("utf-8", errors="replace").strip()
-                        if not line_str:
-                            continue
+                while True:
+                    if _sys.platform == "win32":
+                        # Windows 无 fcntl/O_NONBLOCK：bufsize=0 时 proc.stdout 是 FileIO，
+                        # 用 read(4096) 读「已 flush 的字节」（读多少算多少、不要求完整行），
+                        # 避免 readline 在 hermes 输出不带换行的尾行时阻塞挂死。
                         try:
-                            client.handle_line(line_str)
-                        except Exception as e:
-                            log.warning(f"{label}hermes ACP handle_line error: {e}")
-                else:
-                    # Linux: select 轮询 + 非阻塞 read 批量读
-                    while True:
+                            chunk = proc.stdout.read(4096)
+                        except OSError:
+                            continue
+                    else:
+                        # Linux: select 轮询 + 非阻塞 read 批量读
                         readable, _, _ = _select.select([_fd], [], [], 0.5)
                         if not readable:
                             if proc.poll() is not None:
@@ -325,18 +319,20 @@ class HermesACPBackend:
                             chunk = proc.stdout.read(4096)
                         except (BlockingIOError, OSError):
                             continue
-                        if not chunk:
+                    if not chunk:
+                        if proc.poll() is not None:
                             break
-                        _read_buf += chunk
-                        while b"\n" in _read_buf:
-                            line, _read_buf = _read_buf.split(b"\n", 1)
-                            line_str = line.decode("utf-8", errors="replace").strip()
-                            if not line_str:
-                                continue
-                            try:
-                                client.handle_line(line_str)
-                            except Exception as e:
-                                log.warning(f"{label}hermes ACP handle_line error: {e}")
+                        continue
+                    _read_buf += chunk
+                    while b"\n" in _read_buf:
+                        line, _read_buf = _read_buf.split(b"\n", 1)
+                        line_str = line.decode("utf-8", errors="replace").strip()
+                        if not line_str:
+                            continue
+                        try:
+                            client.handle_line(line_str)
+                        except Exception as e:
+                            log.warning(f"{label}hermes ACP handle_line error: {e}")
             except Exception as e:
                 log.warning(f"{label}hermes ACP reader exception: {e}")
             finally:
