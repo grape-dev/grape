@@ -42,6 +42,7 @@ EVENT_TYPES = frozenset({
     "admin_config_saved",            # admin 保存平台凭据配置
     "dev_verification_code_used",   # 固定验证码使用（需求8/16）
     "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
+    "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
 })
 
 

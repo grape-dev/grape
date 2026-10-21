@@ -117,16 +117,25 @@ def _sync_issue_fields(repo_key: str, issue_id: str, fields: dict, touch_updated
             c = db.cursor()
             if ensure_row:
                 # 建档最小行（幂等：仅当无该卡片行时 INSERT；后再 UPDATE 收编字段）。
-                # SQLite 与 MySQL 均支持 INSERT..SELECT..WHERE NOT EXISTS。
-                # user_id 按 assignee 解析（unified_user_mapping 可映射则落真实 id，否则 0），
-                # 避免 stage/scene 先行建档把归属错存为 0（issues-mine-user-id-zero-fix-design.md）。
+                # 防空 assignee 命中任意空登录用户（issue-card-owner-attribution-fix-design.md）：
+                # assignee 为空 → 直接 user_id=0；非空 → 严格映射（非空 + 账号守卫 + ORDER）。
+                _assignee = assignee or (fields.get("assignee") or "")
+                if _assignee:
+                    _usr_expr = ("COALESCE((SELECT m.user_id FROM unified_user_mapping m "
+                                 "WHERE (m.gitcode_user = ? OR m.github_login = ?) "
+                                 "AND m.gitcode_user != '' AND m.github_login != '' AND m.user_id > 0 "
+                                 "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id = m.user_id "
+                                 "            AND (ga.username = m.gitcode_user OR ga.username = m.github_login)) "
+                                 "ORDER BY m.user_id LIMIT 1), 0)")
+                    _usr_pre = (_assignee, _assignee)
+                else:
+                    _usr_expr = "0"
+                    _usr_pre = ()
                 c.execute(
                     "INSERT INTO issue (user_id, assignee, repo_key, issue_number, status) "
-                    "SELECT COALESCE((SELECT m.user_id FROM unified_user_mapping m "
-                    "                 WHERE (m.gitcode_user = ? OR m.github_login = ?) AND m.user_id > 0 LIMIT 1), 0), "
-                    "?, ?, ?, 'active' WHERE NOT EXISTS "
+                    "SELECT " + _usr_expr + ", ?, ?, ?, 'active' WHERE NOT EXISTS "
                     "(SELECT 1 FROM issue WHERE repo_key=? AND issue_number=?)",
-                    (assignee, assignee, assignee, repo_key, _num, repo_key, _num))
+                    (*_usr_pre, _assignee, repo_key, _num, repo_key, _num))
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)
             else:
                 c.execute(f"UPDATE issue SET {sets} WHERE repo_key=? AND issue_number=?", params)

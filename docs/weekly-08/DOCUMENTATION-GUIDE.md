@@ -50,7 +50,7 @@
 - [ ] No IP pattern anywhere: `(12[0-9]|1[01][0-9]|2[0-4][0-9]|25[0-5])\.` , `10\.`, `192\.168\.`, `172\.(1[6-9]|2[0-9]|3[01])\.`
 - [ ] No `@` email; no `password`/`passwd`/`secret` adjacent to a real value
 - [ ] No `token=` / `key=` / `Authorization: Bearer` followed by a real string
-- [ ] No real domain suffix; no real port enumeration (`:8080` / `:3306` / `:3000`)
+- [ ] No real domain suffix; no concrete port enumeration（一律用 `<port>` 占位，禁止写具体端口）
 - [ ] Uniform `<xxx>` placeholder style
 - [ ] Branch/commit references may use hashes or branch names (not sensitive); never environment-specific secrets
 

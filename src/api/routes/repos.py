@@ -15,6 +15,13 @@ router = APIRouter(prefix="/api/repos", tags=["repos"])
 # 仓库列表缓存有效期（秒）：超过后自动从 GitCode 重新拉取
 REPOS_CACHE_TTL = 1800  # 30 分钟（避免频繁触发 GitCode N+1 权限查询）
 
+# 失效托管探活的最小间隔（秒）：同用户短时间不重复全量探活（0 = 不节流）
+REPO_PROBE_INTERVAL = int(os.environ.get("REPO_PROBE_INTERVAL", "300") or 0)
+
+# 探活节流守卫（进程内；多实例各自节流，可接受）
+_probe_guard = __import__("threading").Lock()
+_last_probe_ts: dict[int, float] = {}
+
 
 class RepoAction(BaseModel):
     full_name: str
@@ -53,6 +60,49 @@ def _get_user_provider_and_token(username: str, login_provider: str = "", user_i
     gitcode_token = get_user_token_with_refresh(username, user_id)
     if gitcode_token:
         return "gitcode", gitcode_token
+    return "", ""
+
+
+def _provider_from_hint(full_name: str) -> str:
+    """按「仓库来源」提示判断 provider：full_name 前缀或 managed_repos 已登记前缀。
+    返回 'github' / 'gitcode' / ''（无来源线索）。这是托管路由的主要信息来源，
+    避免再被「登录平台」短路误判（host-repo-provider-routing-fix-design.md）。
+    """
+    f = (full_name or "").strip()
+    if f.startswith("github:"):
+        return "github"
+    if f.startswith("gitcode:"):
+        return "gitcode"
+    base = f.split(":", 1)[-1]  # 兼容已有前缀写法
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            rows = db.cursor().execute(
+                "SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                ("github:" + base, "gitcode:" + base)).fetchall()
+        for r in rows:
+            if r[0].startswith("github:"):
+                return "github"
+            if r[0].startswith("gitcode:"):
+                return "gitcode"
+    except Exception:
+        pass
+    return ""
+
+
+def _provider_from_token(user: dict) -> tuple[str, str]:
+    """托管兜底：按「平台 token 是否可用」选择 provider（github 优先），
+    不按登录平台短路（登录平台 ≠ 仓库平台，见 host-repo-provider-routing-fix-design.md）。"""
+    gh = None
+    try:
+        gh = get_user_github_token_with_refresh(user["username"], user_id=user.get("id", 0))
+    except Exception:
+        gh = None
+    if gh:
+        return "github", gh
+    gc = get_user_token_with_refresh(user["username"], user.get("id", 0))
+    if gc:
+        return "gitcode", gc
     return "", ""
 
 
@@ -253,7 +303,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
             hook_ids = {h.get("id") for h in hooks if isinstance(h, dict)} if isinstance(hooks, list) else set()
             if expected_wh not in hook_ids:
                 stale_keys.append((repo_key, owner, repo_name))
-                log.info(f"managed repos: webhook {expected_wh} not found for {repo_key}, marking stale")
+                log.debug(f"managed repos: webhook {expected_wh} not found for {repo_key}, marking stale")
         except urllib.error.HTTPError as e:
             # 403 = 非 owner 无权限查 hooks，跳过（不误判）
             # 404 = 仓库在此刻被删了（刚才 200 现在变 404），算 stale
@@ -273,6 +323,44 @@ def _probe_stale_repos(api_token: str, user_id: int):
             log.warning(f"managed repos: cascade cleanup {repo_key} failed (rolled back): {e}")
             continue  # 保留 managed 记录，下次探活重试
         user_db.remove_managed_repo(repo_key)
+
+
+def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
+    """异步启动失效托管探活（fire-and-forget + 节流）。
+
+    - 节流：同用户在 REPO_PROBE_INTERVAL 内不重复全量探测；
+    - 异步：token 获取与 _probe_stale_repos 全部在后台线程完成，
+      请求路径不参与 as_completed / 不 join，不因探活阻塞接口返回。
+    """
+    import time as _time
+    if "gitcode" not in providers:
+        return  # 探活目前只走 gitcode token（GitHub 仓在函数内部按需解析）
+    uid = user.get("id", 0) or 0
+    if not uid:
+        return
+    interval = REPO_PROBE_INTERVAL
+    with _probe_guard:
+        last = _last_probe_ts.get(uid, 0.0)
+        now = _time.time()
+        if interval > 0 and (now - last) < interval:
+            return  # 节流：短时间不重复
+        _last_probe_ts[uid] = now
+
+    def _run():
+        try:
+            token = with_oauth_token(user, "gitcode", lambda t: t)
+        except Exception as e:
+            log.warning(f"member: stale probe token fetch failed (non-fatal): {e}")
+            return
+        if not token:
+            return
+        try:
+            _probe_stale_repos(token, uid)
+        except Exception as e:
+            log.warning(f"member: stale probe failed (non-fatal): {e}")
+
+    import threading
+    threading.Thread(target=_run, daemon=True).start()
 
 
 @router.get("/member", operation_id="repos_member", summary="List repos I can operate", description="Lists repositories the current user can operate. Reads the user_repos cache, auto-refreshing from VCS when empty or stale; prunes managed repos removed upstream. Supports ?provider=gitcode|github to filter by platform (需求 17 项目页按平台切换).")
@@ -303,30 +391,6 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     else:
         _providers = list(_bound_providers)
 
-    # Issue #343 修复: _probe_stale_repos 需要 token，走 with_oauth_token 获取
-    # 恢复后台异步（性能回归修复）：with_oauth_token 在请求内同步取 token（含预刷新），
-    # 但 _probe_stale_repos（串行探活 webhook，27 仓 ≈ 6-10s）丢回后台线程，
-    # 接口不等待、页面秒开。token 获取同步做（新架构），探活异步做（旧行为）。
-    if "gitcode" in _providers:
-        try:
-            def _probe(token, _uid=user["id"]):
-                _probe_stale_repos(token, _uid)
-                return []  # 返回空列表，不需要结果
-            try:
-                token = with_oauth_token(user, "gitcode", lambda t: t)
-            except Exception as e:
-                log.warning(f"member: stale probe token fetch failed (non-fatal): {e}")
-                token = ""
-            if token:
-                import threading
-                threading.Thread(
-                    target=_probe_stale_repos,
-                    args=(token, user["id"]),
-                    daemon=True,
-                ).start()
-        except Exception as e:
-            log.warning(f"member: stale probe failed (non-fatal): {e}")
-
     # 优先读取 DB 缓存（未过期）——按组织过滤
     org_id = user.get("org_id", 0)
     _is_personal_org = False
@@ -341,10 +405,17 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         if not synced_at:
             return True
         try:
-            # D42: synced_at 存的是 MySQL 本地时间（CST=UTC+8），用本地时间比较
-            # 之前用 timezone.utc 解析导致 age 为负数，缓存永远不过期
+            # D42 兼容两种存储：
+            # - MySQL 存默认 datetime('now') = UTC；本地解析会显得早 8h → age 恒巨大 → 永远过期
+            # - 历史/迁移可能存本地时间（CST=UTC+8）
+            # 判定法：直接用「距今秒数」，若 |age| 过大则按 UTC+8 折算回本地再判。
             t = datetime.strptime(synced_at, "%Y-%m-%d %H:%M:%S")
-            age = (datetime.now() - t).total_seconds()
+            now = datetime.now()
+            age = (now - t).total_seconds()
+            # 值看起来「未来」或「非常旧」：说明基准是 UTC（与本地差约 8h）
+            if abs(age) > 6 * 3600:
+                # 存储值是 UTC → 用 UTC now 比（消除本地偏移）
+                age = (datetime.utcnow() - t).total_seconds()
             return age > REPOS_CACHE_TTL
         except Exception:
             return True
@@ -442,6 +513,12 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
     # 合并后一次性写入缓存（save_user_repos 会先删再写，不能分平台各写一次）
     user_db.save_user_repos(user["id"], repos)
 
+    # 缓存过期/重建路径：异步 + 节流地启动失效托管探活（请求不等它）
+    try:
+        _start_stale_probe_async(user, _providers)
+    except Exception as e:
+        log.warning(f"member: stale probe start failed (non-fatal): {e}")
+
     # 部分平台失败时附加提示
     result = {"repos": _filter_repos(user["id"], _filter_by_provider(repos), org_id=_filter_org_id), "_cached": False}
     if failed_providers:
@@ -465,25 +542,11 @@ def sync_repos(user: dict = Depends(require_org_member)):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "API Token 未配置"})
 
     if "gitcode" in _providers:
+        # 异步 + 节流启动失效托管探活（请求不等它，短时间不重复）
         try:
-            def _probe(token, _uid=user["id"]):
-                _probe_stale_repos(token, _uid)
-                return []
-            # 恢复后台异步（性能回归修复）：同步取 token，探活丢回后台线程（同 /member）
-            try:
-                token = with_oauth_token(user, "gitcode", lambda t: t)
-            except Exception as e:
-                log.warning(f"sync: stale probe token fetch failed (non-fatal): {e}")
-                token = ""
-            if token:
-                import threading
-                threading.Thread(
-                    target=_probe_stale_repos,
-                    args=(token, user["id"]),
-                    daemon=True,
-                ).start()
+            _start_stale_probe_async(user, _providers)
         except Exception as e:
-            log.warning(f"sync: stale probe failed (non-fatal): {e}")
+            log.warning(f"sync: stale probe start failed (non-fatal): {e}")
 
     # 每个平台独立 try/catch
     all_repos = []
@@ -796,21 +859,26 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             _org_id = resolve_org_context(request, user["id"])
         except Exception:
             _org_id = 0
-    parts = body.full_name.split("/", 1)
+    # ===== provider 判定：仓库来源优先于登录平台（host-repo-provider-routing-fix-design.md）=====
+    if not provider:
+        provider = _provider_from_hint(body.full_name)
+    # 剥离 provider 前缀（"github:owner/repo" / "gitcode:owner/repo"），下游统一用纯 owner/repo
+    _raw = body.full_name
+    if ":" in _raw and _raw.split(":", 1)[0] in ("github", "gitcode"):
+        _raw = _raw.split(":", 1)[1]
+        body.full_name = _raw
+    parts = _raw.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
     owner, repo_name = parts
 
-    # D44: 优先用调用方传入的 provider；未传时自动选择（向后兼容）
-    # Issue #334: GitCode 路径用 get_user_token_with_refresh 预刷新过期 token，
-    # 避免 OAuth token 过期导致 add_collaborator 收到 401 → 托管失败
-    if provider:
-        if provider == "github":
-            api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
-        else:
-            api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
+    # D44: 显式 provider > 仓库来源提示；仍无 → 按平台 token 可用性自动选择（github 优先，不以登录平台短路）
+    if provider == "github":
+        api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
+    elif provider == "gitcode":
+        api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     else:
-        provider, api_token = _get_user_provider_and_token(user["username"], user.get("login_provider", ""), user.get("id", 0))
+        provider, api_token = _provider_from_token(user)
     from src.user.db import get_webhook_url
     webhook_url = get_webhook_url()
     if not webhook_url:
@@ -1094,7 +1162,21 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
 
         # 路径 B: webhook_password 用随机密钥；路径 A: 用 bot token
         _wh_password = _webhook_secret if _use_path_b else webhook_token
-        hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=_wh_password)
+        try:
+            hook_id = setup_webhook(webhook_token, owner, repo_name, webhook_url, webhook_password=_wh_password)
+        except RuntimeError as _wh_err:
+            # 区分 token 失效(401) / 仓库不存在于本平台(404)，给出可操作文案（host-repo-provider-routing-fix-design.md）
+            import re as _re
+            _msg = str(_wh_err)
+            _codes = _re.findall(r"\((\d{3})\)", _msg)
+            _code = int(_codes[0]) if _codes else 0
+            if _code == 401:
+                raise HTTPException(status_code=502, detail={"code": 502,
+                                                             "message": "GitCode 登录已失效，请重新绑定/登录 GitCode 后重试"})
+            if _code == 404:
+                raise HTTPException(status_code=502, detail={"code": 502,
+                                                             "message": f"仓库 {owner}/{repo_name} 不存在于 GitCode，请确认仓库所属平台与托管账号平台一致"})
+            raise
         # 清理同名旧仓库残留的 DB 数据（同上）
         from src.api.onboarding import cleanup_stale_repo_data
         cleanup_stale_repo_data(repo_key)

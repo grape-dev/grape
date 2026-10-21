@@ -230,7 +230,11 @@ function loadAgentTypes() {
       const displayName = d.nickname || d.username || 'User';
       $('userName').textContent = displayName;
       $('userAvatar').textContent = (displayName || 'U')[0].toUpperCase();
-      $('userRole').textContent = (d.managed_repos && d.managed_repos.length > 0) ? I18N.t('dashboard.admin') : I18N.t('dashboard.member');
+      // 角色：仅当任一所托管仓库真实是 admin（managed_repos[].is_admin）才显示"管理员"，
+      // 修复：原逻辑用 managed_repos.length>0（"是否托管过仓库"）误判为管理员。
+      const _managed = d.managed_repos || [];
+      const _isAnyRepoAdmin = _managed.some(function(r) { return r.is_admin; });
+      $('userRole').textContent = _isAnyRepoAdmin ? I18N.t('dashboard.admin') : I18N.t('dashboard.member');
       // 同步 toolbar 用户下拉的头像和名称
       var _tbAvatar = $('tbUserAvatar'); if (_tbAvatar) _tbAvatar.textContent = (displayName || 'U')[0].toUpperCase();
       var _tbName = $('tbUserName'); if (_tbName) _tbName.textContent = displayName;
@@ -1433,6 +1437,9 @@ function loadAgentTypes() {
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
+        // 同步侧边栏角色为「当前选中仓库」的真实角色（随仓库切换刷新）
+        const _curRole = dashData.role || 'Member';
+        $('userRole').textContent = _curRole === 'Maintainer' ? I18N.t('dashboard.admin') : I18N.t('dashboard.member');
       }).catch(e => {
         if (e.name === 'AbortError' && e.silent) return;  // Issue #63: abort 静默
         if (window._currentView !== 'dash') return;  // stale guard

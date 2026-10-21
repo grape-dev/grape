@@ -502,8 +502,12 @@ function refreshRepos(btn) {
 }
 
 function hostAndSelect(fullName, owner, name, repoKey, event) {
+  // 按仓库来源平台透传 provider，避免后端按登录平台误判（host-repo-provider-routing-fix-design.md）
+  var _provider = (String(repoKey || '').indexOf('github:') === 0) ? 'github' :
+                  (String(repoKey || '').indexOf('gitcode:') === 0) ? 'gitcode' : '';
+  var _url = '/repos/host' + (_provider ? '?provider=' + _provider : '');
   var doHost = function() {
-    API.post('/repos/host', {full_name: fullName}).then(r => {
+    API.post(_url, {full_name: fullName}).then(r => {
       // GitHub 仓库托管后检查 bot collaborator 状态
       if (r.bot_collaborator_needed) {
         _showBotCollaboratorPrompt(r, fullName, owner, name, repoKey);

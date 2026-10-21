@@ -84,7 +84,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
                       sender: str = "",
-                      org_id: int = 0) -> int | None:
+                      org_id: int = 0,
+                      owner_user_id: int = 0) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id
@@ -120,7 +121,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             if owner:
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
-    user_id = _get_user_id_by_gitcode(target) if target else 0
+    # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
+    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
@@ -158,13 +160,20 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             # 如果传入的 assignee 与现有不同，更新 assignee 并关闭旧 assignee 的任务
             # （#15 修复：复用已有任务时同步 assignee，防止 assignee 与新建 Issue 不匹配）
             _existing_assignee = ""
+            _existing_user_id = 0
             try:
-                c.execute("SELECT assignee FROM issue WHERE id=?", (task_id,))
+                c.execute("SELECT assignee, user_id FROM issue WHERE id=?", (task_id,))
                 _r2 = c.fetchone()
                 if _r2:
                     _existing_assignee = _r2[0] or ""
+                    _existing_user_id = _r2[1] or 0
             except Exception:
                 pass
+            # 归属校准：现有值为 0 或「默认/承载账号」且与解析值不一致 → 校准（issue-card-owner-attribution-fix-design.md）
+            _DEFAULT_OWNER_UID = 1
+            if (user_id > 0 and _existing_user_id in (0, _DEFAULT_OWNER_UID)
+                    and _existing_user_id != user_id):
+                c.execute("UPDATE issue SET user_id=? WHERE id=?", (user_id, task_id))
             if target and target != _existing_assignee:
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
                 try:
