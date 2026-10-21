@@ -73,6 +73,21 @@ def _text_incomplete_timeout_for() -> float:
     return max(_v, 0.0)
 
 
+def _silent_timeout_for(env: dict | None = None) -> float:
+    """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）。
+
+    与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
+    （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
+    env 优先（任务级），os.environ 次之（手动调参/测试），默认 300s。
+    """
+    _silent_src = (env or {}).get("HERMES_SILENT_TIMEOUT") or \
+        os.environ.get("HERMES_SILENT_TIMEOUT", "300")
+    try:
+        return max(float(_silent_src), 0.0)
+    except Exception:
+        return 300.0
+
+
 class HermesACPBackend:
     """Hermes ACP 后端 — 不走 build_args/parse_output，直接 stream_execute yield 事件。"""
     name = "hermes"
@@ -445,7 +460,10 @@ class HermesACPBackend:
             # ── 4. 内循环：从队列消费事件 + 等 prompt 完成 ──
             _last_activity = time.time()
             _global_start = time.time()
-            _SILENT_TIMEOUT = 300   # 非 text 事件（tool/reasoning）后 5 分钟无事件 → 超时终止
+            # 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）：
+            # 与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
+            # （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
+            _SILENT_TIMEOUT = _silent_timeout_for(env)
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后静默 60s → 先做一次「完成证据」检查
             _TEXT_INCOMPLETE_TIMEOUT = _text_incomplete_timeout_for()  # 无证据时最多再等到这里 → 按疑似提前结束收尾
             _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)

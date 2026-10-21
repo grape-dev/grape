@@ -59,16 +59,21 @@ _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
 _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长时间）
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
+# Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
+# 在 _execute_task 中以 setdefault 语义注入 env，底层各 backend 读 env 生效：
+#   - executor.py       _silent_window  读 AGENT_SILENT_WINDOW
+#   - hermes_acp.py     _SILENT_TIMEOUT 读 HERMES_SILENT_TIMEOUT
+#   - hwcloud_acp.py    _SILENT_TIMEOUT 读 RUNTIME_TOOL_SILENT_TIMEOUT（已支持）
+# coding/QA 长任务（编译/构建/PR 审查）常长时间无流式输出，300s 会在正常进行中误杀。
+_AGENT_SILENT_TIMEOUTS = {"coding": 1200, "qa": 1200}
+_DEFAULT_SILENT_WINDOW = 300
+
 _worker_url_probe_cache: dict = {}  # {(rts, task_server_url): (ts, reachable)}
 _worker_url_probe_lock = _threading.Lock()
 _worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, error}}
 _worker_probe_lock = _threading.Lock()
 _worker_probe_thread = None
 _worker_probe_started = False
-
-
-# R11.4: _get_task_token 抽取到 src/user/db.py，统一调用
-from src.user.db import get_task_token as _get_task_token
 
 
 def _probe_hermes_acp(cli_path: str) -> dict:
@@ -1388,7 +1393,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         if _num and task.get("issue_session_id"):
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
-                _num, token=_get_task_token(task))
+                _num, token=task.get("repo_gitcode_token") or "")
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             _ag = task.get("agent_type") or ""
             if _ag == "coding":
@@ -1403,7 +1408,7 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
                             if _lrk:
                                 repogit.remove_issue_worktree_if_pushed(
                                     _lrk, "coding", _num,
-                                    token=_get_task_token(task))
+                                    token=task.get("repo_gitcode_token") or "")
                     except Exception as _le:
                         log.warning(f"linked worktree cleanup failed: {_le}")
     except Exception as e:
@@ -1440,7 +1445,7 @@ def _submit_linked_repo_prs(task: dict, env: dict):
     if not _wts or not isinstance(_wts, list):
         return
 
-    _token = _get_task_token(task)
+    _token = task.get("repo_gitcode_token") or ""
     _issue_num = ""
     try:
         from src.runtime import repogit
@@ -1567,16 +1572,6 @@ async def _execute_task(client, task, engine_name: str = ""):
     task["cwd"] = cwd
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
 
-    # LLM 用量采集（可观测性）：必须在引擎启动前记基线——hermes 的账本是累计值、
-    # hwcloud 日志是 append-only，两者都要靠基线才能算出"本次任务"的增量。
-    # 用本地 cwd（与各引擎 ACP 隔离目录的 cwd-hash 算法同源），失败静默降级。
-    from src.runtime.usage_collect import UsageCollector
-    _usage_col = UsageCollector(_backend_for_engine(engine_name), cwd=cwd)
-    try:
-        _usage_col.start()
-    except Exception as _ue:
-        log.warning(f"usage collector start failed task={tid}: {_ue}")
-
     # TaskResourceStack: unified resource lifecycle for this task
     from src.runtime.resource_stack import TaskResourceStack
     _res = TaskResourceStack(task_id=tid, cwd=cwd)
@@ -1623,6 +1618,15 @@ async def _execute_task(client, task, engine_name: str = ""):
             env.update(_fresh_env)
     except Exception:
         pass
+    # Issue #378: 按 agent_type 注入差异化静默超时 env（coding/qa=1200s，其余默认 300s）。
+    # setdefault 语义：上层 env_extra / fresh_env 已显式设置（手动调参）时不覆盖。
+    # 注入到局部 env dict（并发安全，不写 os.environ 避免 async 交错竞态，见 L1774 注释），
+    # 经 env_extra → stream_agent env.update(env_extra) → 各 backend 读 env 生效。
+    _ag_silent = _AGENT_SILENT_TIMEOUTS.get((task.get("agent_type") or "").lower())
+    if _ag_silent:
+        env.setdefault("AGENT_SILENT_WINDOW", str(_ag_silent))
+        env.setdefault("HERMES_SILENT_TIMEOUT", str(_ag_silent))
+        env.setdefault("RUNTIME_TOOL_SILENT_TIMEOUT", str(_ag_silent))
     # 本机 worker 修正对外服务地址：任务入队时 plugin 广播 runtime_id=0，server_url 被写成
     # 公网 server_base_url（如 http://123.249.19.227）。本机 worker 抢到任务后，agent 内部
     # A2A/tasks 等调用若走公网会 NAT 回环不通（超时）；必须覆盖为 localhost 直连。
@@ -1666,7 +1670,7 @@ async def _execute_task(client, task, engine_name: str = ""):
         if repogit.is_git_agent(task.get("agent_type") or "") and _num and task.get("issue_session_id"):
             _wb = env.get("GRAPE_WORK_BRANCH", "")
             repogit.ensure_issue_worktree(task.get("repo_key") or "", task.get("agent_type") or "",
-                                          _num, token=_get_task_token(task),
+                                          _num, token=task.get("repo_gitcode_token") or "",
                                           work_branch=_wb)
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
@@ -1681,7 +1685,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=_get_task_token(task))
+                    token=task.get("repo_gitcode_token") or "")
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -1875,7 +1879,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             event_type=task.get("event_type") or "",
             backend_name=_backend_for_engine(engine_name),
             account=task.get("account") or "", user_id=task.get("user_id") or 0,
-            env_extra=env, bot_token=_get_task_token(task),
+            env_extra=env, bot_token=task.get("repo_gitcode_token") or "",
             user_token=user_token,
             agent_label=_agent_label,
             repo_key=task.get("repo_key") or "",
@@ -1883,8 +1887,6 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
-            # 流式引擎的用量(目前只有 codex)随事件带出，喂给采集器
-            _usage_col.feed(evt_type, data)
             # 引擎确已开始执行（opencode 已 Popen 并产出首个执行事件）→ 才置 running。
             # 此前任务保持 dispatched（引擎启动失败/未执行不误标 running，见 event-redispatch-design.md §2.2）
             if not started and evt_type in ("step_start", "text", "tool_use"):
@@ -1932,8 +1934,6 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _submit_linked_repo_prs(task, env)
             except Exception as _e:
                 log.warning(f"linked PR submission failed for task {tid}: {_e}")
-        # 可观测性：采集并上报 LLM 用量（引擎已退出，账本已落盘）
-        await _report_llm_usage(client, tid, _usage_col, done)
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         _res.dispose()
         _cleanup_task_workdir(task, env)
@@ -1949,75 +1949,12 @@ async def _execute_task(client, task, engine_name: str = ""):
         raise
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
-        try:      # 失败路径也尽力采一次（部分引擎失败前已产生真实消耗）
-            await _report_llm_usage(client, tid, _usage_col, done)
-        except Exception:
-            pass
         _res.dispose()
         _cleanup_task_workdir(task, env)
         return {"_error": str(e), "_started": started}
 
 
-def _usage_payload(u: dict, engine: str = "") -> dict:
-    """把采集器的记录拍成 /tasks/{id}/usage 的请求体。
-
-    source 记录"这条用量是怎么来的"（引擎账本 or 引擎直报），排查时能区分：
-    codex/opencode/hermes/hwcloud；hermes 的辅助调用(如 title_generation)记成
-    `hermes:title_generation`，因为它们是真实开销但需要与主任务区分。
-    """
-    def _n(v):
-        try:
-            return int(v or 0)
-        except (TypeError, ValueError):
-            return 0
-    suffix = str(u.get("_source_suffix") or "").strip()
-    eng = (engine or "").strip().lower()
-    if eng and suffix:
-        src = f"{eng}:{suffix}"
-    else:
-        src = eng
-    return {
-        "provider": str(u.get("provider") or ""),
-        "model": str(u.get("model") or ""),
-        "input": _n(u.get("input")),
-        "output": _n(u.get("output")),
-        "cache_read": _n(u.get("cache_read")),
-        "cache_write": _n(u.get("cache_write")),
-        "reasoning": _n(u.get("reasoning")),
-        "turn": _n(u.get("turn")),
-        "cost_usd": u.get("cost_usd"),
-        "cost_status": str(u.get("cost_status") or ""),
-        "source": src,
-    }
-
-
-async def _report_llm_usage(client, tid: str, collector, done) -> None:
-    """任务终态时采集并上报 LLM 用量台账（obs_llm_usage）。
-
-    用量是观测数据、不是任务产物：采集失败/上报失败都只记日志，绝不影响任务终态。
-    hermes 的 token 账本由后台合批线程异步落盘（空闲 30s 排干 + 进程退出 atexit 排干），
-    理论上进程已退出即已落盘；仍留一次短重试兜住竞态，避免稳定少计。
-    """
-    try:
-        sid = done.get("oc_session_id") if isinstance(done, dict) else ""
-        usages = collector.finish(session_id=sid or "")
-        if not usages and collector.engine in ("hermes", "hwcloud", "aishell"):
-            await asyncio.sleep(1.5)
-            usages = collector.finish(session_id=sid or "")
-        if not usages:
-            return
-        sent = 0
-        for u in usages:
-            await client.report_usage(tid, _usage_payload(u, collector.engine))
-            sent += 1
-        log.info(f"llm usage collected task={tid} engine={collector.engine} "
-                 f"records={len(usages)} sent={sent}")
-    except Exception as e:
-        log.warning(f"llm usage collect/report failed task={tid}: {e}")
-
-
-async def _reregister(client, installed, device_name, cli_version: str = "",
-                     engine_by_rid: dict | None = None) -> list[int] | None:
+async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
 
     凭据被吊销（401 → CredentialRevokedError）时直接上抛——调用方退出进程，
@@ -2562,10 +2499,6 @@ def _read_local_worker_version() -> str:
     - root 模式（uid=0 或 RUNTIME_ROOT_MODE=1）：/etc/grape/worker.version
     - 非 root 模式：$HOME/.grape/worker.version
     - Windows：$HOME/.grape/worker.version（Windows 无 root 模式）
-
-    兜底：戳文件缺失（手工部署 / 写戳失败）时退回读安装包自带的 VERSION。
-    没有兜底的话本地版本恒为 ""，心跳每次都比对失败 → 每个检查周期都触发一次升级，
-    表现为"升级循环"（下载 35MB 包 + 重启 worker）。戳文件在位时行为不变。
     """
     from src.runtime.os_adapter import is_windows, version_file
     if is_windows():
@@ -2576,22 +2509,9 @@ def _read_local_worker_version() -> str:
         vp = os.path.join(os.path.expanduser("~"), ".grape", "worker.version")
     try:
         with open(vp, "r", encoding="utf-8") as f:
-            got = f.read().strip()
-        if got:
-            return got
+            return f.read().strip()
     except Exception:
-        pass
-    # 兜底：包内 VERSION（worker 以安装目录为 cwd 运行）
-    for cand in (os.path.join(os.getcwd(), "VERSION"),):
-        try:
-            with open(cand, "r", encoding="utf-8") as f:
-                got = f.read().strip()
-            if got:
-                log.warning(f"worker.version missing/empty, falling back to {cand}: {got}")
-                return got
-        except Exception:
-            continue
-    return ""
+        return ""
 
 
 def _normalize_worker_version(ver: str) -> str:
