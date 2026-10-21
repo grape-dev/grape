@@ -1572,6 +1572,18 @@ async def _execute_task(client, task, engine_name: str = ""):
     task["cwd"] = cwd
     _engine_tag = f"|engine:{engine_name}" if engine_name else ""
 
+    # LLM 用量采集（可观测性）：必须在引擎启动前记基线——hermes 的账本是累计值、
+    # hwcloud 日志是 append-only，两者都要靠基线才能算出"本次任务"的增量。
+    # 用本地 cwd（与各引擎 ACP 隔离目录的 cwd-hash 算法同源），失败静默降级。
+    # （2026-10-21 恢复：fbc499c4a 重构 #378 看门狗时误删本块，导致 worker 侧
+    #   用量上报断流——snake-game01 一仓 9 任务仅 1 条记录的根因，见 issue 记录。）
+    from src.runtime.usage_collect import UsageCollector
+    _usage_col = UsageCollector(_backend_for_engine(engine_name), cwd=cwd)
+    try:
+        _usage_col.start()
+    except Exception as _ue:
+        log.warning(f"usage collector start failed task={tid}: {_ue}")
+
     # TaskResourceStack: unified resource lifecycle for this task
     from src.runtime.resource_stack import TaskResourceStack
     _res = TaskResourceStack(task_id=tid, cwd=cwd)
@@ -1887,6 +1899,8 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
+            # 流式引擎的用量(目前只有 codex)随事件带出，喂给采集器
+            _usage_col.feed(evt_type, data)
             # 引擎确已开始执行（opencode 已 Popen 并产出首个执行事件）→ 才置 running。
             # 此前任务保持 dispatched（引擎启动失败/未执行不误标 running，见 event-redispatch-design.md §2.2）
             if not started and evt_type in ("step_start", "text", "tool_use"):
@@ -1934,6 +1948,8 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _submit_linked_repo_prs(task, env)
             except Exception as _e:
                 log.warning(f"linked PR submission failed for task {tid}: {_e}")
+        # 可观测性：采集并上报 LLM 用量（引擎已退出，账本已落盘）
+        await _report_llm_usage(client, tid, _usage_col, done)
         # done/complete/fail 由调用方（_wrap）在 timeout 外处理，防止网络重试超时覆盖完成状态
         _res.dispose()
         _cleanup_task_workdir(task, env)
@@ -1949,9 +1965,72 @@ async def _execute_task(client, task, engine_name: str = ""):
         raise
     except Exception as e:
         log.warning(f"task {tid} stream failed: {e}")
+        try:      # 失败路径也尽力采一次（部分引擎失败前已产生真实消耗）
+            await _report_llm_usage(client, tid, _usage_col, done)
+        except Exception:
+            pass
         _res.dispose()
         _cleanup_task_workdir(task, env)
         return {"_error": str(e), "_started": started}
+
+
+def _usage_payload(u: dict, engine: str = "") -> dict:
+    """把采集器的记录拍成 /tasks/{id}/usage 的请求体。
+
+    source 记录"这条用量是怎么来的"（引擎账本 or 引擎直报），排查时能区分：
+    codex/opencode/hermes/hwcloud；hermes 的辅助调用(如 title_generation)记成
+    `hermes:title_generation`，因为它们是真实开销但需要与主任务区分。
+    """
+    def _n(v):
+        try:
+            return int(v or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    suffix = str(u.get("_source_suffix") or "").strip()
+    eng = (engine or "").strip().lower()
+    if eng and suffix:
+        src = f"{eng}:{suffix}"
+    else:
+        src = eng
+    return {
+        "provider": str(u.get("provider") or ""),
+        "model": str(u.get("model") or ""),
+        "input": _n(u.get("input")),
+        "output": _n(u.get("output")),
+        "cache_read": _n(u.get("cache_read")),
+        "cache_write": _n(u.get("cache_write")),
+        "reasoning": _n(u.get("reasoning")),
+        "turn": _n(u.get("turn")),
+        "cost_usd": u.get("cost_usd"),
+        "cost_status": str(u.get("cost_status") or ""),
+        "source": src,
+    }
+
+
+async def _report_llm_usage(client, tid: str, collector, done) -> None:
+    """任务终态时采集并上报 LLM 用量台账（obs_llm_usage）。
+
+    用量是观测数据、不是任务产物：采集失败/上报失败都只记日志，绝不影响任务终态。
+    hermes 的 token 账本由后台合批线程异步落盘（空闲 30s 排干 + 进程退出 atexit 排干），
+    理论上进程已退出即已落盘；仍留一次短重试兜住竞态，避免稳定少计。
+    """
+    try:
+        sid = done.get("oc_session_id") if isinstance(done, dict) else ""
+        usages = collector.finish(session_id=sid or "")
+        if not usages and collector.engine in ("hermes", "hwcloud", "aishell"):
+            await asyncio.sleep(1.5)
+            usages = collector.finish(session_id=sid or "")
+        if not usages:
+            return
+        sent = 0
+        for u in usages:
+            await client.report_usage(tid, _usage_payload(u, collector.engine))
+            sent += 1
+        log.info(f"llm usage collected task={tid} engine={collector.engine} "
+                 f"records={len(usages)} sent={sent}")
+    except Exception as e:
+        log.warning(f"llm usage collect/report failed task={tid}: {e}")
 
 
 async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
