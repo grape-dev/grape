@@ -453,11 +453,28 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
             log.warning(f"Fetch repos for {p} failed (user={user['username']}): {e}")
             failed_providers.append(p)
 
-    # P1-6 软失败: 有结果但某平台需要重新授权 → 返回部分结果 + reauth 标记
+    # P1-6 软失败: 有结果但某平台需要重新授权 → 合并旧缓存落库后，返回部分结果 + reauth 标记
+    # (修复: 此前直接 return 跳过 save_user_repos，导致 GitCode 新增仓库不落库，
+    #  工作台 check_repo_access 只认 user_repos 表 → 大厅可见但 403，缓存永不自愈)
     if _reauth_provider and all_repos:
-        # 去重后返回已有结果，附加 reauth 提示
         _seen = set()
-        _deduped = [r for r in all_repos if r.get("repo_key","") not in _seen and not _seen.add(r.get("repo_key",""))]
+        _deduped = []
+        for r in all_repos:
+            rk = r.get("repo_key", "")
+            if rk not in _seen:
+                _seen.add(rk)
+                _deduped.append(r)
+        # 失败平台(含 reauth 401 的平台)用旧缓存补齐，避免把缓存覆盖成不完整数据
+        if failed_providers and cached:
+            for r in cached:
+                rk = r.get("repo_key", "")
+                for fp in failed_providers:
+                    if rk.startswith(fp + ":") and rk not in _seen:
+                        _seen.add(rk)
+                        _deduped.append(r)
+                        break
+        # 部分成功也落库，让 user_repos 缓存与实时结果同步
+        user_db.save_user_repos(user["id"], _deduped)
         return {"repos": _filter_repos(user["id"], _filter_by_provider(_deduped), org_id=_filter_org_id),
                 "_partial": True, "_reauth_provider": _reauth_provider}
     # 有平台需要重新授权且无任何结果 → 抛 401 让前端提示

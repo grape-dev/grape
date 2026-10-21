@@ -68,8 +68,10 @@ def fanout(task_id: str, messages: list):
 
 
 def _to_payload(m: dict) -> dict | None:
-    """worker 消息 {type, data} → 前端 SSE payload（seq 由 DB 权威生成，此处不带）。
+    """worker 消息 {type, data, seq?} → 前端 SSE payload。
 
+    seq 由 report_messages 落库后传入（DB 权威 MAX+1），透传给前端做断线重连
+    去重（events.js: evt.seq <= _taskLog.seq 跳过）。兼容旧调用：无 seq 字段则不带。
     返回 None 表示无需推送（done 等终态事件由事件轮询兜底）。
     created_at 取服务端接收时刻（UTC ISO）：worker 消息不带时间戳，落库与 fanout
     同在 report_messages 内执行，与 task_messages.created_at 同源（时间本地化见
@@ -81,6 +83,10 @@ def _to_payload(m: dict) -> dict | None:
     from datetime import datetime, timezone
     _now = datetime.now(timezone.utc).isoformat()
     d = m.get("data")
+    payload: dict = {"type": t}
+    seq = m.get("seq")
+    if isinstance(seq, int):
+        payload["seq"] = seq
     if isinstance(d, dict):
         tool = str(d.get("tool") or "")
         if t == "tool_use":
@@ -88,10 +94,13 @@ def _to_payload(m: dict) -> dict | None:
                 inp = json.loads(d.get("input") or "{}") if isinstance(d.get("input"), str) else (d.get("input") or {})
             except Exception:
                 inp = {}
-            return {"type": t, "tool": tool, "content": "", "input": inp, "output": "", "created_at": _now}
+            payload.update({"tool": tool, "content": "", "input": inp, "output": "", "created_at": _now})
+            return payload
         content = str(d.get("text") or d.get("content") or "")
-        return {"type": t, "tool": tool, "content": content, "input": {}, "output": "", "created_at": _now}
-    return {"type": t, "tool": "", "content": str(d or ""), "input": {}, "output": "", "created_at": _now}
+        payload.update({"tool": tool, "content": content, "input": {}, "output": "", "created_at": _now})
+        return payload
+    payload.update({"tool": "", "content": str(d or ""), "input": {}, "output": "", "created_at": _now})
+    return payload
 
 
 def sse_frame(payload: dict) -> str:
