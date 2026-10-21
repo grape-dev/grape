@@ -8,8 +8,10 @@
 - DB 持久化 + 内存缓存
 """
 import os
+import re
 import time
 import json
+from datetime import datetime, timedelta, timezone
 import pytest
 from unittest.mock import patch, MagicMock
 
@@ -630,3 +632,68 @@ class TestHealthReset:
             result = health_scorer.reset_health(0)
         assert result is None
         mock_get.assert_not_called()
+
+
+# ===== 健康分重置：赦免窗口的时区语义回归（2026-10-21 实测修复） =====
+
+class TestResetWindowTimezone:
+    """health-reset 的赦免窗口必须按纯 UTC 字面量与 agent_tasks.created_at 比较。
+
+    背景（2026-10-21 dev 实测）：health_reset_at 写入的是带偏移的 ISO 串
+    （...T07:48:42.916425+00:00），而 created_at 由 UTC_TIMESTAMP() 写入（纯 UTC datetime）。
+    MySQL 会把该 ISO 串按会话时区解释 → 实测被抬高 8 小时
+    （CAST('2026-10-21T07:49:24+00:00' AS DATETIME) = 15:49:25）→ 重置后 8 小时内的
+    新失败全部落在窗口之外，健康分不降（赦免期变成"免疫期"）。
+    """
+
+    RID = 99998
+    TID = "t_healthreset_tz_regression"
+
+    def _cleanup(self):
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM agent_tasks WHERE id=?", (self.TID,))
+            c.execute("DELETE FROM runtime_health_scores WHERE runtime_id=?", (self.RID,))
+            c.execute("DELETE FROM agent_runtimes WHERE id=?", (self.RID,))
+            db.commit()
+
+    def setup_method(self):
+        self._cleanup()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
+                      (self.RID, "healthreset-tz", 0, 4))
+            # created_at 用 Python 计算的 UTC 'YYYY-MM-DD HH:MM:SS'（与 MySQL DATETIME 存储格式一致，
+            # 且 sqlite 后端下同一字面量语义一致）——不依赖 DB 方言函数
+            _now_lit = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, attempts, status, created_at, prompt) "
+                      "VALUES (?,?,?,?,?,?,?)", (self.TID, self.TID, self.RID, 0, "failed", _now_lit, ""))
+            db.commit()
+
+    def teardown_method(self):
+        self._cleanup()
+
+    def _set_reset(self, seconds_ago):
+        reset_at = (datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)).isoformat()
+        with db_lock:
+            db.cursor().execute("UPDATE agent_runtimes SET health_reset_at=? WHERE id=?", (reset_at, self.RID))
+            db.commit()
+        return reset_at
+
+    def test_reset_window_counts_failure_after_reset(self):
+        """重置点之后产生的失败必须被统计（修复前在 MySQL 上 total=0）。"""
+        self._set_reset(2)
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["total"] == 1, (
+            "窗口起点被 MySQL 按会话时区误解释（ISO 带 +00:00 被抬高 8 小时）→ "
+            "重置后的失败任务落在窗口外，健康分不会下降"
+        )
+        assert stats["failed"] == 1
+
+    def test_window_literal_is_plain_utc_datetime(self):
+        """传给 SQL 的窗口起点必须是 'YYYY-MM-DD HH:MM:SS' 纯 UTC 字面量，且不在未来。"""
+        self._set_reset(5)
+        literal = health_scorer._to_sql_utc(health_scorer._effective_window_start(self.RID))
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", literal), literal
+        now_literal = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        assert literal <= now_literal, "窗口起点不应落在未来: %s > %s（时区误解释的典型症状）" % (literal, now_literal)
