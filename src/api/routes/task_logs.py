@@ -6,6 +6,7 @@
 鉴权：登录用户（Bearer token）。前端用 fetch + ReadableStream 消费（同 chat SSE 模式）。
 """
 import asyncio
+import os
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
@@ -18,6 +19,10 @@ router = APIRouter(prefix="/api/task-logs", tags=["task-logs"])
 
 # 无消息时的心跳间隔：防代理/浏览器超时断连
 _HEARTBEAT_S = 15
+# DB 增量尾随周期：跨 master 场景下，worker 上报落在另一台 master（fanout 不互通），
+# 本进程 SSE 每 _TAIL_POLL_S 秒查一次 task_messages（共享 DB）补发增量。
+# 延迟 = 尾随周期 + ingestion 批处理（~0.2s），1.5s 可接受；环境变量可调。
+_TAIL_POLL_S = float(os.getenv("TASK_LOG_TAIL_POLL_S", "1.5"))
 
 
 def _require_task_exists(task_id: str):
@@ -95,28 +100,59 @@ def get_task_messages(task_id: str, user: dict = Depends(require_no_session_toke
 async def stream_task_messages(task_id: str, request: Request,
                                user: dict = Depends(require_no_session_token),
                                since: int = Query(0, ge=0)):
-    """SSE 实时流：先发 since 之后存量 → 阻塞读订阅队列 → 心跳保活。"""
+    """SSE 实时流：先发 since 之后存量 → 阻塞读订阅队列 → 心跳保活。
+
+    跨 master 增量尾随：live 循环在订阅队列等待上加短超时 _TAIL_POLL_S，
+    超时则查 task_messages（共享 DB）补发 since=last_seq 之后的增量——
+    解决双主 fanout 不互通导致远端 worker 事件面板不刷新（#379）。
+    """
     _require_task_exists(task_id)
     from src.runtime.task_log_stream import subscribe, unsubscribe, sse_frame
 
     async def gen():
         # 1) 存量（断线/新开页 catch-up，seq 去重由前端 merge 保证）
+        last_seq = since
         try:
-            for m in list_task_messages(task_id, since=since):
+            initial = list_task_messages(task_id, since=since)
+            for m in initial:
                 yield sse_frame(m)
+            if initial:
+                last_seq = initial[-1].get("seq", last_seq)
         except Exception as e:
             log.warning(f"task-log stream: catch-up failed: {e}")
-        # 2) 实时订阅
+        # 2) 实时订阅 + DB 增量尾随（跨 master 补发）
         q = await subscribe(task_id)
+        idle = 0.0  # 累计无消息时间，达 _HEARTBEAT_S 发 keepalive
         try:
             while True:
                 if await request.is_disconnected():
                     break
                 try:
-                    payload = await asyncio.wait_for(q.get(), timeout=_HEARTBEAT_S)
+                    payload = await asyncio.wait_for(q.get(), timeout=_TAIL_POLL_S)
                     yield sse_frame(payload)
+                    _sq = payload.get("seq")
+                    if isinstance(_sq, int) and _sq > last_seq:
+                        last_seq = _sq
+                    idle = 0.0
                 except asyncio.TimeoutError:
-                    yield ": keepalive\n\n"
+                    # 尾随查询：补发另一台 master 落库的增量（共享 DB）
+                    try:
+                        tailed = list_task_messages(task_id, since=last_seq)
+                        for m in tailed:
+                            yield sse_frame(m)
+                            _sq = m.get("seq")
+                            if isinstance(_sq, int) and _sq > last_seq:
+                                last_seq = _sq
+                        if tailed:
+                            idle = 0.0
+                        else:
+                            idle += _TAIL_POLL_S
+                    except Exception as e:
+                        log.warning(f"task-log stream: tail query failed: {e}")
+                        idle += _TAIL_POLL_S
+                    if idle >= _HEARTBEAT_S:
+                        yield ": keepalive\n\n"
+                        idle = 0.0
         finally:
             await unsubscribe(task_id, q)
 

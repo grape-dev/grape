@@ -1855,6 +1855,8 @@ def report_messages(task_id, messages):
         except Exception as e:
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
+    # 收集落库后的 (原始消息, seq) 对，供 fanout 透传 seq（前端按 seq 去重，跨主 DB 尾随双通道不重复渲染）
+    _seq_messages: list[dict] = []
     try:
         with db_lock:
             c = db.cursor()
@@ -1872,14 +1874,17 @@ def report_messages(task_id, messages):
                     "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
                     (task_id, seq, _t, tool, content, input_json, output,
                      datetime.now(timezone.utc).isoformat()))
+                # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
+                _seq_messages.append({**m, "seq": seq})
                 seq += 1
             db.commit()
     except Exception as e:
         log.warning(f"report_messages task_messages insert failed: {e}")
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
+    # 传带 seq 的消息：前端按 seq 去重，queue 快路径与 SSE DB 尾随双通道不重复渲染
     try:
         from src.runtime.task_log_stream import fanout
-        fanout(task_id, messages or [])
+        fanout(task_id, _seq_messages if _seq_messages else (messages or []))
     except Exception as e:
         log.warning(f"report_messages fanout failed: {e}")
 
