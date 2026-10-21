@@ -1951,9 +1951,10 @@ def add_knowledge(seq: int, body: KnowledgeBody, request: Request):
     if not (body.content or "").strip():
         raise HTTPException(status_code=400, detail={"code": 400, "message": "content 必填"})
     # Issue #358：agent 写入路径也加大小校验，与 member 手动创建/更新对齐
-    from src.api.routes.knowledge import MAX_CONTENT_BYTES, _format_content_limit
+    # Issue #372：报错文案追加配置方法提示，与 member 创建/更新口径一致
+    from src.api.routes.knowledge import MAX_CONTENT_BYTES, _format_content_limit, _CONTENT_LIMIT_CONFIG_HINT
     if len((body.content or "").encode("utf-8")) > MAX_CONTENT_BYTES:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"content 不能超过 {_format_content_limit(MAX_CONTENT_BYTES)}{_CONTENT_LIMIT_CONFIG_HINT}"})
     from src.api.knowledge import write_knowledge, _issue_num_from
     issue_num = _issue_num_from(evt["issue_id"])
     task_id = write_knowledge(repo_key=evt["repo_key"], scope=body.scope, content=body.content,

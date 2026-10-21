@@ -44,8 +44,8 @@ function renderKnowledge() {
         firstLoad: true,
         filter: { refStatus: '', query: '', sortLatest: false },
         stats: { system: 0, agent: 0, manual: 0, unlinked: 0 },
-        contentLimitBytes: 102400,  // Issue #358：后端 stats 返回实际上限，默认 100KB 兜底
-        contentLimitDisplay: '100KB',
+        contentLimitBytes: 5242880,  // Issue #372：后端 stats 返回实际上限，默认 5MB 兜底
+        contentLimitDisplay: '5MB',
         activeTab: 'system',
         page: 1,
         pageSize: 20,
