@@ -102,5 +102,7 @@
   "engine_undispatched": "Undispatched / No execution engine",
   "fail_reason": "Failure reason",
   "btn_a2a_redo": "🤝 A2A Redispatch",
-  "status_pending": "⏳ Queued"
+  "status_pending": "⏳ Queued",
+  "btn_feedback": "Feedback",
+  "btn_feedback_title": "Report an issue for this failed event (auto-attaches repo/task/engine context)"
 }

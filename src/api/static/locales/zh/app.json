@@ -395,7 +395,13 @@
     "delete_confirm_msg": "确定要删除这条反馈吗？删除后不可恢复。",
     "delete_failed": "删除失败: {msg}",
     "delete_success": "反馈已删除",
-    "view_my_feedback": "查看我的反馈 →"
+    "view_my_feedback": "查看我的反馈 →",
+    "context_title": "任务上下文（自动搜集，只读）",
+    "context_loading": "正在获取任务上下文...",
+    "context_failed": "任务上下文获取失败，可直接填写提交（提交时服务端会再次尝试获取）",
+    "context_fail_summary": "失败摘要",
+    "context_expand": "展开",
+    "context_collapse": "收起"
   },
   "back_home": "← 返回仓库大厅",
   "pipeline": {

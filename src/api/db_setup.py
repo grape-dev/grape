@@ -3668,6 +3668,15 @@ def _migrate_tables():
         "ALTER TABLE event_skipped ADD COLUMN issue_id TEXT DEFAULT ''",
         # ===== Issue #177: user_feedback 软删除标记 =====
         "ALTER TABLE user_feedback ADD COLUMN is_deleted INTEGER NOT NULL DEFAULT 0",
+        # ===== feedback-task-context: 反馈自动携带任务上下文（weekly-08） =====
+        # event_seq/issue_id/agent_type 结构化列；issue_number 为 GitCode 展示号
+        "ALTER TABLE user_feedback ADD COLUMN event_seq INTEGER DEFAULT NULL",
+        "ALTER TABLE user_feedback ADD COLUMN task_id VARCHAR(191) DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN issue_id INTEGER DEFAULT NULL",
+        "ALTER TABLE user_feedback ADD COLUMN issue_number VARCHAR(32) DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN agent_type VARCHAR(32) DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN engine_info TEXT DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN fail_summary TEXT DEFAULT ''",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [

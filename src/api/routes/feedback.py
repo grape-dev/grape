@@ -22,25 +22,187 @@ class FeedbackBody(BaseModel):
     repo_key: str = ''
     attachment_url: str = ''
     attachment_name: str = ''
+    event_seq: int = 0
+
+
+def _collect_feedback_context(event_seq: int, user: dict):
+    """按 event_seq 服务端现查任务上下文（feedback-task-context-design.md §4.1）。
+
+    权威信息全部取自 DB（events/agent_tasks/agent_runtimes），不信任前端拼装：
+    - 仓库/issue/agent → events 表
+    - 任务 → agent_tasks（event_seq 关联最新一条）
+    - 引擎 → 与 events 详情同源的多级归因（runtime_id → 场景 → session）
+    返回 dict（含 repo_key/task/issue/engine/fail_summary），失败返回 None。
+    """
+    import re as _re
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, repo_key, issue_id, agent_type, status, runtime, result "
+                "FROM events WHERE seq=?",
+                (event_seq,))
+            row = c.fetchone()
+        if not row:
+            return None
+        repo_key = row[1] or ''
+        # 权限：与 events 详情一致（无权访问该仓库的事件不能带上下文）
+        from src.api.deps import check_repo_access
+        try:
+            check_repo_access(user, repo_key)
+        except Exception:
+            return None
+        # issue_id 形如 "379" 或 "#pr_12_3"：拆内部 id 与展示号
+        raw_issue = str(row[2] or '')
+        issue_number = ''
+        m = _re.search(r"(\d+)", raw_issue)
+        if m:
+            issue_number = m.group(1)
+        # 内部整型 card id（grape issue 表主键）
+        issue_id_int = None
+        try:
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute("SELECT id FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                           (repo_key, issue_number))
+                ir = c2.fetchone()
+                if ir:
+                    issue_id_int = ir[0]
+        except Exception:
+            pass
+        # 关联任务（最新一条）
+        task = None
+        engine = None
+        task_result_text = ''
+        try:
+            with db_lock:
+                c3 = db.cursor()
+                c3.execute(
+                    "SELECT id, status, runtime_id, exit_code, started_at, completed_at, result_text "
+                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                    (event_seq,))
+                tr = c3.fetchone()
+            if tr:
+                task = {
+                    "task_id": tr[0], "task_status": tr[1] or '', "runtime_id": tr[2] or 0,
+                    "exit_code": tr[3], "started_at": tr[4] or '', "completed_at": tr[5] or '',
+                }
+                task_result_text = str(tr[6] or '')
+        except Exception:
+            task = None
+        # 引擎归因（与 events 详情同源：runtime_id → 场景 → session 绑定）
+        runtime_id = (task or {}).get("runtime_id") or 0
+        if not runtime_id:
+            try:
+                with db_lock:
+                    c4 = db.cursor()
+                    c4.execute(
+                        "SELECT runtime_id FROM devops_agent_session "
+                        "WHERE repo_key=? AND agent_type=? AND runtime_id>0 LIMIT 1",
+                        (repo_key, row[3] or ''))
+                    sr = c4.fetchone()
+                if sr:
+                    runtime_id = sr[0]
+            except Exception:
+                pass
+        if runtime_id:
+            try:
+                with db_lock:
+                    c5 = db.cursor()
+                    c5.execute(
+                        "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), "
+                        "COALESCE(rc.last_ip,''), COALESCE(ar.provider,'') "
+                        "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc "
+                        "ON rc.id=ar.credential_id WHERE ar.id=?",
+                        (runtime_id,))
+                    ar = c5.fetchone()
+                if ar:
+                    from src.runtime.instances import instance_name
+                    engine = {
+                        "runtime": row[5] or ar[4] or '',
+                        "engine_instance": instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0),
+                        "engine_device": ar[2] or '',
+                        "engine_ip": ar[3] or '',
+                        "runtime_id": runtime_id,
+                    }
+            except Exception:
+                engine = None
+        if engine and runtime_id:
+            try:
+                from src.runtime.health_scorer import get_health_score
+                hd = get_health_score(runtime_id)
+                engine["health_score"] = hd.get("health_score")
+            except Exception:
+                pass
+        # 失败摘要：result_text 优先，回退 events.result
+        summary_src = task_result_text
+        if not summary_src:
+            summary_src = str(row[6] or '')
+        fail_summary = (summary_src or '')[:500]
+        return {
+            "event_seq": event_seq,
+            "repo_key": repo_key,
+            "issue_id": issue_id_int,
+            "issue_number": issue_number,
+            "agent_type": row[3] or '',
+            "event_status": row[4] or '',
+            "task": task,
+            "engine": engine,
+            "fail_summary": fail_summary,
+        }
+    except Exception as e:
+        log.warning(f"feedback context collect failed: {e}")
+        return None
+
+
+@router.get('/feedback/context/{event_seq}')
+def get_feedback_context(event_seq: int, user: dict = Depends(get_current_user)):
+    """任务失败反馈上下文（服务端权威搜集，前端只传 seq）。"""
+    ctx = _collect_feedback_context(event_seq, user)
+    if ctx is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "事件未找到或无权限"})
+    return ctx
 
 
 @router.post('/feedback')
 def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user)):
-    """提交问题反馈（写入 grape_db user_feedback 表）。"""
+    """提交问题反馈（写入 grape_db user_feedback 表）。
+
+    feedback-task-context：带 event_seq 时服务端现查任务上下文落库
+    （仓库/任务ID/issue/agent/引擎），前端传回的 repo_key 仅在无 seq 时生效。
+    """
+    ctx = _collect_feedback_context(body.event_seq, user) if body.event_seq else None
+    repo_key = (ctx and ctx.get("repo_key")) or (body.repo_key or '')
+    task_id = (ctx and (ctx.get("task") or {}).get("task_id")) or ''
+    issue_number = (ctx and ctx.get("issue_number")) or ''
+    issue_id = (ctx and ctx.get("issue_id"))
+    agent_type = (ctx and ctx.get("agent_type")) or ''
+    fail_summary = (ctx and ctx.get("fail_summary")) or ''
+    engine_info = ''
+    if ctx and ctx.get("engine"):
+        import json as _json
+        try:
+            engine_info = _json.dumps(ctx["engine"], ensure_ascii=False)
+        except Exception:
+            engine_info = ''
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
                 "INSERT INTO user_feedback "
-                "(user_id, username, category, title, description, page_url, repo_key, attachment_url, attachment_name, status) "
-                "VALUES (?,?,?,?,?,?,?,?,?, 'open')",
+                "(user_id, username, category, title, description, page_url, repo_key, "
+                "attachment_url, attachment_name, status, event_seq, task_id, issue_id, "
+                "issue_number, agent_type, engine_info, fail_summary) "
+                "VALUES (?,?,?,?,?,?,?,?,?, 'open', ?,?,?,?,?,?,?)",
                 (user.get('id') or 0, user.get('username') or '',
                  body.category, body.title, body.description,
-                 body.page_url or '', body.repo_key or '',
-                 body.attachment_url or '', body.attachment_name or ''))
+                 body.page_url or '', repo_key,
+                 body.attachment_url or '', body.attachment_name or '',
+                 body.event_seq or None, task_id, issue_id, issue_number, agent_type, engine_info,
+                 fail_summary))
             db.commit()
             fid = c.lastrowid
-        log.info(f"feedback: submitted id={fid} by user={user.get('username')} category={body.category}")
+        log.info(f"feedback: submitted id={fid} by user={user.get('username')} category={body.category} event_seq={body.event_seq or 0}")
         return {"id": fid, "status": "open", "message": "反馈已提交"}
     except Exception as e:
         log.warning(f"feedback submit failed: {e}")

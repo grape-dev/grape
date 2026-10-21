@@ -96,11 +96,40 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
         if nodes is not None:
             cfg = {"name": s["name"], "nodes": nodes, "onboarding": s.get("onboarding") or "repo-onboarding"}
         else:
-            cfg = get_pipeline_config(s["id"], repo_key=repo_key)
+            cfg = get_pipeline_config(s["id"], repo_key=repo_key) or {}
         # 给每个 node 补 skill_display_name
         for n in (cfg.get("nodes") or []):
             _sk = n.get("skill", "")
             n["skill_display_name"] = skill_display_map.get(_sk, _sk) if _sk else ""
+        # 需求中心事前拦截（用户思路）：创建需求前就知道场景引擎全灭。
+        # 对每个有 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids：
+        # 返回 None = 该节点绑定引擎全部离线。批量算好随场景返回，弹窗直接用。
+        # 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）。
+        # SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
+        # 与「配了引擎但全灭」区分开——前端提示换成「未选择机器」话术。
+        offline_nodes: list[str] = []
+        sre_unbound: bool = False
+        try:
+            from src.runtime.engine_select import get_scene_pool_engine_ids as _gspei
+            for n in (cfg.get("nodes") or []):
+                if not isinstance(n, dict):
+                    continue
+                _tag = n.get("tag") or n.get("id") or ""
+                _eids = n.get("engine_runtime_ids") or []
+                if not _tag or not _eids:
+                    # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
+                    if _tag and str(_tag).lower() == "sre":
+                        sre_unbound = True
+                    continue
+                if n.get("enabled") is False:
+                    continue
+                try:
+                    if _gspei(s["id"], _tag, repo_key=repo_key) is None:
+                        offline_nodes.append(str(_tag))
+                except Exception:
+                    pass
+        except Exception:
+            pass
         result.append({"id": s["id"], "name": s["name"],
                        "display_name": s.get("display_name") or s["name"],
                        "description": s.get("description") or "",
@@ -109,6 +138,9 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
                        "scene_type": s.get("scene_type") or "standard",
                        "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
                        "linked_repos": s.get("linked_repos") or [],
+                       "offline_nodes": offline_nodes,
+                       "sre_unbound": sre_unbound,
+                       "all_offline": bool(offline_nodes) or sre_unbound,
                        "pipeline": cfg})
     return {"scenes": result}
 

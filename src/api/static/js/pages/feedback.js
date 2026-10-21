@@ -1,6 +1,7 @@
 /**
  * feedback.js — 问题反馈弹窗
- * 全局函数 openFeedbackDialog()，由顶栏 tbFeedback 按钮调用。
+ * 全局函数 openFeedbackDialog(opts)，由顶栏 tbFeedback 按钮调用（无参，原行为）；
+ * events 页失败事件行带 {event_seq} 调用 → 自动拉取任务上下文（feedback-task-context-design.md）。
  * 弹窗样式参考 _grapeConfirm（overlay + dialog，圆角，苹果风格）。
  */
 (function () {
@@ -9,6 +10,7 @@
   var _selectedCategory = 'bug';
   var _attachmentUrl = '';
   var _attachmentName = '';
+  var _contextSeq = 0; // 任务上下文关联的事件 seq（0=手动反馈，无上下文）
 
   // i18n 辅助
   function t(key) {
@@ -19,7 +21,58 @@
     }
   }
 
-  window.openFeedbackDialog = function () {
+  // 任务上下文卡片 HTML（只读，浅灰底圆角，样式对齐弹窗 iOS 风格）
+  function _contextCardHtml(ctx, state) {
+    if (state === 'loading') {
+      return '<div id="fbContext" style="background:rgba(0,0,0,.04);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:var(--t3,#86868b);">📋 ' + (t('context_loading') || '正在获取任务上下文...') + '</div>';
+    }
+    if (state === 'error') {
+      return '<div id="fbContext" style="background:rgba(255,59,48,.06);border-radius:10px;padding:10px 14px;margin-bottom:16px;font-size:12px;color:#d32f2f;">⚠️ ' + (t('context_failed') || '任务上下文获取失败，可直接填写提交（提交时服务端会再次尝试获取）') + '</div>';
+    }
+    if (!ctx) return '';
+    var task = ctx.task || null;
+    var engine = ctx.engine || null;
+    var rowStyle = 'display:flex;gap:8px;line-height:1.7;';
+    var labelStyle = 'color:var(--t3,#86868b);flex:0 0 48px;font-size:12px;';
+    var valStyle = 'color:var(--t1,#1d1d1f);font-size:12px;word-break:break-all;';
+    // 失败摘要：默认折叠（点击展开/收起）
+    var summary = ctx.fail_summary || '';
+    var summaryShort = summary ? summary.substring(0, 200) : '';
+    var summaryHtml = summary
+      ? '<div style="margin-top:6px;padding-top:6px;border-top:1px dashed rgba(0,0,0,.1);font-size:12px;color:var(--t2,#3a3a3c);line-height:1.6;">' +
+        '<b>' + (t('context_fail_summary') || '失败摘要') + '：</b>' +
+        '<span id="fbSummaryShort" style="color:var(--t2,#3a3a3c);">' + _esc(summaryShort) + (summary.length > 200 ? '… ' : '') + '</span>' +
+        (summary.length > 200 ? '<a id="fbSummaryToggle" style="color:#0071e3;text-decoration:none;cursor:pointer;font-weight:500;white-space:nowrap;"> ' + (t('context_expand') || '展开') + '</a>' : '') +
+        '<div id="fbSummaryFull" style="display:none;white-space:pre-wrap;">' + _esc(summary) + '</div>' +
+        '</div>'
+      : '';
+    var taskLine = task
+      ? (task.task_id || '—') + (task.task_status ? '（' + _esc(task.task_status) + (task.exit_code !== null && task.exit_code !== undefined ? '，exit ' + task.exit_code : '') + '）' : '')
+      : '未派发';
+    var engineLine = engine
+      ? '<b>' + _esc(engine.runtime || '—') + '</b>' +
+        (engine.engine_instance ? ' · ' + _esc(engine.engine_instance) : '') +
+        (engine.engine_ip ? ' · ' + _esc(engine.engine_ip) : '') +
+        (engine.health_score !== null && engine.health_score !== undefined ? ' · 健康分 ' + engine.health_score : '')
+      : '未派发';
+    return '<div id="fbContext" style="background:rgba(0,0,0,.04);border-radius:10px;padding:10px 14px;margin-bottom:16px;">' +
+      '<div style="font-size:12px;font-weight:600;color:var(--t2,#3a3a3c);margin-bottom:4px;">📋 ' + (t('context_title') || '任务上下文（自动搜集，只读）') + '</div>' +
+      '<div style="' + rowStyle + '"><span style="' + labelStyle + '">仓库</span><span style="' + valStyle + '">' + _esc(ctx.repo_key || '—') + '</span></div>' +
+      (ctx.issue_number ? '<div style="' + rowStyle + '"><span style="' + labelStyle + '">Issue</span><span style="' + valStyle + '">#' + _esc(String(ctx.issue_number)) + '</span></div>' : '') +
+      (ctx.agent_type ? '<div style="' + rowStyle + '"><span style="' + labelStyle + '">Agent</span><span style="' + valStyle + '">' + _esc(ctx.agent_type) + '</span></div>' : '') +
+      '<div style="' + rowStyle + '"><span style="' + labelStyle + '">任务</span><span style="' + valStyle + '">' + _esc(taskLine) + '</span></div>' +
+      '<div style="' + rowStyle + '"><span style="' + labelStyle + '">引擎</span><span style="' + valStyle + '">' + engineLine + '</span></div>' +
+      summaryHtml +
+      '</div>';
+  }
+
+  function _esc(s) {
+    return String(s == null ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  window.openFeedbackDialog = function (opts) {
     // 移除已有弹窗
     var existing = document.getElementById('feedbackOverlay');
     if (existing) {
@@ -27,6 +80,8 @@
       return;
     }
 
+    opts = opts || {};
+    _contextSeq = opts.event_seq || 0;
     _selectedCategory = 'bug';
     _attachmentUrl = '';
     _attachmentName = '';
@@ -74,6 +129,8 @@
       '<div style="font-size:17px;font-weight:600;color:var(--t1,#1d1d1f);margin-bottom:16px;">' +
       (t('title') || '问题反馈') +
       '</div>' +
+      // 任务上下文卡片（feedback-task-context：失败事件触发时自动搜集）
+      (_contextSeq ? _contextCardHtml(null, 'loading') : '') +
       // 类型选择
       '<div style="display:flex;gap:8px;margin-bottom:16px;">' + catBtnsHtml + '</div>' +
       // 标题输入
@@ -171,6 +228,39 @@
       catBtns[0].style.color = '#0071e3';
     }
 
+    // 任务上下文加载（feedback-task-context：服务端权威现查）
+    if (_contextSeq) {
+      var _ctxEl = function () { return document.getElementById('fbContext'); };
+      API.get('/feedback/context/' + _contextSeq)
+        .then(function (ctx) {
+          var el = _ctxEl();
+          if (el && ctx) {
+            el.outerHTML = _contextCardHtml(ctx, 'ok');
+            // 摘要折叠/展开
+            var tg = document.getElementById('fbSummaryToggle');
+            if (tg) {
+              tg.onclick = function (ev) {
+                ev.preventDefault();
+                var full = document.getElementById('fbSummaryFull');
+                var short = document.getElementById('fbSummaryShort');
+                var expanded = full && full.style.display !== 'none';
+                if (full && short) {
+                  full.style.display = expanded ? 'none' : '';
+                  short.style.display = expanded ? '' : 'none';
+                  tg.textContent = expanded ? (' ' + (t('context_expand') || '展开')) : (' ' + (t('context_collapse') || '收起'));
+                }
+              };
+            }
+          } else if (el) {
+            el.outerHTML = _contextCardHtml(null, 'error');
+          }
+        })
+        .catch(function () {
+          var el = _ctxEl();
+          if (el) el.outerHTML = _contextCardHtml(null, 'error');
+        });
+    }
+
     // 附件上传
     var fileInput = document.getElementById('fbFile');
     var fileBtn = document.getElementById('fbFileBtn');
@@ -256,6 +346,7 @@
         repo_key: repoKey,
         attachment_url: _attachmentUrl || '',
         attachment_name: _attachmentName || '',
+        event_seq: _contextSeq || 0,
       })
         .then(function (resp) {
           if (resp && resp.error) {
