@@ -237,7 +237,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       event_type: str = "",
                       subtask_mode: int = -1,
                       sender: str = "",
-                      org_id: int = 0) -> int | None:
+                      org_id: int = 0,
+                      owner_user_id: int = 0) -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id
@@ -273,7 +274,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             if owner:
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
-    user_id = _get_user_id_by_gitcode(target) if target else 0
+    # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
+    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
@@ -325,12 +327,16 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                     _existing_user_id = _r2[1] or 0
             except Exception:
                 pass
-            # 归属回补：历史/先行建档行 user_id=0 且 assignee 现可映射 → 修正（issues-mine-user-id-zero-fix-design.md）
-            if not _existing_user_id and target:
-                _uid_now = _get_user_id_by_gitcode(target) or 0
-                if _uid_now:
-                    c.execute("UPDATE issue SET user_id=? WHERE id=?", (_uid_now, task_id))
-            if target and _existing_assignee and target != _existing_assignee:
+            # 归属校准：现有值为 0 或「默认/承载账号」且与解析值不一致 → 校准为解析值
+            # （issue-card-owner-attribution-fix-design.md：只修 0 修不掉非 0 错误归属）
+            _DEFAULT_OWNER_UID = 1  # 默认/承载账号 id（可调；与历史「空 assignee 命中默认账号」现场一致）
+            if (user_id > 0 and _existing_user_id not in (None,)
+                    and _existing_user_id in (0, _DEFAULT_OWNER_UID)
+                    and _existing_user_id != user_id):
+                c.execute("UPDATE issue SET user_id=? WHERE id=?", (user_id, task_id))
+                log.info(f"ensure_issue_task: ownership calibrated issue #{issue_number} "
+                         f"user_id {_existing_user_id}->{user_id}")
+            if target and target != _existing_assignee:
                 c.execute("UPDATE issue SET assignee=?, user_id=? WHERE id=?", (target, user_id, task_id))
                 try:
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
@@ -1506,7 +1512,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
 
     # 4) 按既有流程幂等建档（同 issue 任务 id 复用）；org 归属由 ensure_issue_task 统一以仓库为准
     task_id = ensure_issue_task(repo_key, issue_num, body.title.strip(), body.description or "", assignee=assignee,
-                                subtask_mode=_auto_subtask_mode)
+                                subtask_mode=_auto_subtask_mode,
+                                owner_user_id=int(user.get("id") or 0))
     if not task_id:
         raise HTTPException(status_code=500, detail={"code": 500, "message": "任务建档失败"})
     # 5) 多任务模式（自动检测）→ Issue body 追加标记 + issue_state 标记
