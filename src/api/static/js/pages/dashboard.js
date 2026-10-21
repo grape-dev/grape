@@ -1153,6 +1153,8 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
       return {
         id: at, tag: at,
         skill: node.skill || ag.skill || ag.skill_display_name || '',
+        // Issue #406：editNodes 携带 skill_display_name，避免编辑模式首次打开或重渲染时显示退化为内部 id
+        skill_display_name: node.skill_display_name || ag.skill_display_name || '',
         mode: node.mode || 'emit',
         next: node.next || 'done',
         handoff: node.handoff || 'a2a',
@@ -1164,7 +1166,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     // 场景中不存在的 agent（被删除的）→ 置灰显示
     return {
       id: at, tag: at,
-      skill: '', mode: 'emit', next: 'done', handoff: 'a2a',
+      skill: '', skill_display_name: '', mode: 'emit', next: 'done', handoff: 'a2a',
       skip: [], enabled: false, engine_runtime_ids: [],
     };
   });
@@ -1190,7 +1192,8 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     node.enabled = !node.enabled;
-    if (!node.enabled) { node.skill = ''; node.engine_runtime_ids = []; }
+    // Issue #406：禁用 agent 时 skill_display_name 与 skill 同清，避免重渲染时残留显示名
+    if (!node.enabled) { node.skill = ''; node.skill_display_name = ''; node.engine_runtime_ids = []; }
     if (cardsContainer) {
       cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
     }
@@ -1198,7 +1201,13 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
 
   window.selectAgentSkill = function(agentType, skillName) {
     const node = editNodes.find(n => n.id === agentType);
-    if (node) node.skill = skillName;
+    if (!node) return;
+    // Issue #406：选中时同步写 skill_display_name（取自 _openSkillDropdown 缓存的 display_name），
+    // 避免禁用其他角色触发 _renderEditFlowCards 重渲染时显示退化为内部 id（如 vod-cli）。
+    // skillName 为空（清除选择）时同步清空 skill_display_name，保持字段一致。
+    node.skill = skillName || '';
+    var cache = (window._skillPickCache || {})[agentType] || {};
+    node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
   };
 
   window.openEngineModal = function(agentType) {
@@ -1619,7 +1628,7 @@ function _enterCreateStandardMode(data, owner, name) {
   const allAgentTypes = ['vod','issue','coding','qa','sre'];
   // 默认全部启用，skill 为空；SRE 同样默认启用（不再强制置灰）：
   // 无可用个人机器时卡片保持亮态，徽章显示「没有可用的个人机器」并提供「重新检测个人机器」按钮
-  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
+  let editNodes = allAgentTypes.map(at => ({ id: at, tag: at, skill: '', skill_display_name: '', mode: 'emit', next: 'done', handoff: 'a2a', skip: [], enabled: true, engine_runtime_ids: [] }));
   window._isCreateMode = true;
   window._dashboardEditing = true;
 
@@ -1781,14 +1790,21 @@ function _enterCreateStandardMode(data, owner, name) {
     const node = editNodes.find(n => n.id === agentType);
     if (!node) return;
     node.enabled = !node.enabled;
-    if (!node.enabled) { node.skill = ''; node.engine_runtime_ids = []; }
+    // Issue #406：禁用 agent 时 skill_display_name 与 skill 同清，避免重渲染时残留显示名
+    if (!node.enabled) { node.skill = ''; node.skill_display_name = ''; node.engine_runtime_ids = []; }
     const cardsContainer = document.getElementById('flowCardsContainer');
     if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
   };
 
   window.selectAgentSkill = function(agentType, skillName) {
     const node = editNodes.find(n => n.id === agentType);
-    if (node) node.skill = skillName;
+    if (!node) return;
+    // Issue #406：选中时同步写 skill_display_name（取自 _openSkillDropdown 缓存的 display_name），
+    // 避免禁用其他角色触发 _renderEditFlowCards 重渲染时显示退化为内部 id（如 vod-cli）。
+    // skillName 为空（清除选择）时同步清空 skill_display_name，保持字段一致。
+    node.skill = skillName || '';
+    var cache = (window._skillPickCache || {})[agentType] || {};
+    node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
   };
 
   window.openEngineModal = function(agentType) {
