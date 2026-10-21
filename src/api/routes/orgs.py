@@ -114,24 +114,37 @@ def get_organization(org_id: int, user: dict = Depends(require_no_session_token)
 
 @router.put("/{org_id}", operation_id="orgs_update", summary="更新组织信息")
 def update_organization(org_id: int, body: UpdateOrgBody,
-                        user: dict = Depends(require_org_admin)):
+                        user: dict = Depends(require_no_session_token)):
+    # Issue #381/#395: 写接口鉴权绑定路径 org_id（组织不存在→404；非成员→403；非管理员→403），
+    # 不再用 require_org_admin（resolve_org_context 回退个人组织的上下文型鉴权，与路径脱钩可越权）
+    from src.api.deps import require_path_org_admin
+    require_path_org_admin(user["id"], org_id)
     # 个人组织（默认工作空间）不支持编辑成员上限/Worker 上限，忽略这两个字段
     from src.user.org_db import is_org_personal as _is_p
     if _is_p(org_id):
         body.max_members = 0
         body.max_workers = 0
-    update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url,
-               max_members=body.max_members, max_workers=body.max_workers)
+    ok = update_org(org_id, name=body.name, description=body.description, avatar_url=body.avatar_url,
+                    max_members=body.max_members, max_workers=body.max_workers)
+    if not ok:
+        # update_org 影响行数为 0（组织不存在）→ 不得报成功
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "组织不存在"})
     return {"ok": True}
 
 
 @router.delete("/{org_id}", operation_id="orgs_delete", summary="删除组织（个人组织不可删）")
-def delete_organization(org_id: int, user: dict = Depends(require_org_admin)):
-    if user.get("org_role") != "owner":
+def delete_organization(org_id: int, user: dict = Depends(require_no_session_token)):
+    # Issue #381/#395: 删除接口鉴权同样绑定路径 org_id（404/403 语义与 PUT 一致）
+    from src.api.deps import require_path_org_admin
+    role = require_path_org_admin(user["id"], org_id)
+    if role != "owner":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅 owner 可删除组织"})
     ok = delete_org(org_id)
     if not ok:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "组织不存在或为个人组织不可删除"})
+        org = get_org(org_id)
+        if org is None:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "组织不存在"})
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "个人组织不可删除"})
     return {"ok": True}
 
 
@@ -172,7 +185,10 @@ def list_members(org_id: int, user: dict = Depends(require_no_session_token)):
 
 
 @router.post("/{org_id}/members", operation_id="orgs_members_add", summary="添加成员")
-def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_org_admin)):
+def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_no_session_token)):
+    # Issue #381/#395: 同因越权修复——路径 org_id 绑定鉴权（非成员/非管理员无法对他人组织加人）
+    from src.api.deps import require_path_org_admin
+    require_path_org_admin(user["id"], org_id)
     # 个人组织（默认工作空间）暂不支持添加成员——成员即用户本人，多人协作请创建团队组织
     from src.user.org_db import is_org_personal as _is_p
     if _is_p(org_id):
@@ -200,8 +216,11 @@ def add_member(org_id: int, body: AddMemberBody, user: dict = Depends(require_or
 
 @router.patch("/{org_id}/members/{user_id}", operation_id="orgs_members_update", summary="修改成员角色")
 def update_member(org_id: int, user_id: int, body: UpdateMemberBody,
-                  user: dict = Depends(require_org_admin)):
-    if user.get("org_role") != "owner":
+                  user: dict = Depends(require_no_session_token)):
+    # Issue #381/#395: 同因越权修复——路径 org_id 绑定鉴权
+    from src.api.deps import require_path_org_admin
+    role = require_path_org_admin(user["id"], org_id)
+    if role != "owner":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅 owner 可修改成员角色"})
     ok = update_member_role(org_id, user_id, body.role)
     if not ok:
@@ -210,7 +229,10 @@ def update_member(org_id: int, user_id: int, body: UpdateMemberBody,
 
 
 @router.delete("/{org_id}/members/{user_id}", operation_id="orgs_members_remove", summary="移除成员")
-def remove_member(org_id: int, user_id: int, user: dict = Depends(require_org_admin)):
+def remove_member(org_id: int, user_id: int, user: dict = Depends(require_no_session_token)):
+    # Issue #381/#395: 同因越权修复——路径 org_id 绑定鉴权
+    from src.api.deps import require_path_org_admin
+    require_path_org_admin(user["id"], org_id)
     ok = remove_org_member(org_id, user_id)
     if not ok:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "成员不存在或为 owner 不可移除"})

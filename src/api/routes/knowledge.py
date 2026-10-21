@@ -84,8 +84,8 @@ def _check_repo_member(user: dict, repo_key: str):
 def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
                          repo: str = Query("", description="repo_key"),
                          source: str = Query("", description="按来源筛选：system/agent/manual"),
-                         page: int = Query(1, description="页码，从1开始"),
-                         page_size: int = Query(50, description="每页条数，默认50"),
+                         page: int = Query(1, ge=1, description="页码，从1开始"),
+                         page_size: int = Query(50, ge=1, le=200, description="每页条数，默认50，1-200"),
                          sort: str = Query("", description="排序：latest=按更新时间倒序"),
                          q: str = Query("", description="搜索关键词（匹配 name/description）")):
     """统一知识列表——只查 DB 返回分页列表（不含统计，统计走独立接口）。"""
