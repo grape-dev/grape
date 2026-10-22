@@ -370,7 +370,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     """REMOTE / 广播模式：入队让远端 worker 认领执行。"""
     from src.runtime.service import enqueue_task
     from src.api.event_pipeline import get_agent_workdir as _gaw
-    from src.api.session_store import get_or_create_agent_session
+    from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
     from src.prompt_builder import _resolve_server_url
 
     # 获取会话
@@ -380,6 +380,27 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
         log.warning(f"Autopilot exec {exec_id}: no agent_session_id for {repo_key}/{agent_type}")
         _update_execution_result(exec_id, "failed", error="无 agent 会话")
         return
+
+    # Autopilot 独立串行槽：合成 issue_id（autopilot-<任务id>，同一任务每次触发相同），
+    # 复用 issue_agent_session 机制。同任务运行中时 D9 串行锁自动拦截二次触发（防误触）；
+    # 不同 autopilot 任务各持独立会话，互不排队。每次触发前清空续接指针 → 全新上下文开始。
+    # 注意：清空必须走直接 UPDATE（update_issue_session 的空指针不覆盖），且只影响合成会话行，
+    # 不触碰真实 issue 的会话（主流程不受影响）。
+    _synthetic_issue = f"autopilot-{task.get('id') or ''}"
+    _isess = get_or_create_issue_session(repo_key, agent_type, _synthetic_issue)
+    _autopilot_issue_session_id = _isess.get("id") or ""
+    if _autopilot_issue_session_id:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "UPDATE issue_agent_session SET runtime_session_id='' "
+                    "WHERE id=? AND issue_id=?",
+                    (_autopilot_issue_session_id, _synthetic_issue)
+                )
+                db.commit()
+        except Exception as _ce:
+            log.warning(f"Autopilot exec {exec_id}: clear synthetic session pointer failed: {_ce}")
 
     # 广播模式设 pool_tag
     _pool_tag = agent_type if engine_id == 0 else ""
@@ -439,14 +460,15 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
             user_gitcode_token="",
             env_extra=env_extra,
             event_seq=exec_id,
-            issue_id="",
+            issue_id="",  # 保持空：issue_id 会驱动场景/成员知识/工作目录按 issue 号解析，
+                          # 合成 id 含数字会被 _issue_num 误挂到真实 issue；串行锁只看 issue_session_id
             repo_key=repo_key,
             agent_type=agent_type,
             skill=skill_name,
             skill_path="",
             skill_id=_skill_id,
             server_url=_resolve_server_url(engine_id),
-            issue_session_id="",
+            issue_session_id=_autopilot_issue_session_id,
             pool_agent_type=_pool_tag,
             pool_tag=_pool_tag,
             pool_engine_ids=_pool_engine_ids,

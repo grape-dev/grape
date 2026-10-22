@@ -163,7 +163,8 @@ def _fail_task_pool_unreachable(c, task_id: str, engine_ids: list, pool_tag: str
     try:
         c.execute(
             "UPDATE agent_tasks SET status='failed', result_text='', errors=?, "
-            "completed_at=?, stream_ended=1 WHERE id=? AND status='queued'",
+            "completed_at=?, stream_ended=1, exit_code=COALESCE(exit_code, 1) "
+            "WHERE id=? AND status='queued'",
             (_reason, _now, task_id))
         if c.rowcount:
             db.commit()
@@ -207,7 +208,8 @@ def _fail_task_pool_unhealthy(c, task_id: str, engine_ids: list, waited_seconds:
     try:
         c.execute(
             "UPDATE agent_tasks SET status='failed', result_text='', errors=?, "
-            "completed_at=?, stream_ended=1 WHERE id=? AND status='queued'",
+            "completed_at=?, stream_ended=1, exit_code=COALESCE(exit_code, 1) "
+            "WHERE id=? AND status='queued'",
             (_reason, _now, task_id))
         if c.rowcount:
             db.commit()

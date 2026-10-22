@@ -2416,19 +2416,25 @@ def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str
     return os.path.join(_base, f"{agent_type}-agent")
 
 
-def _fail_event(seq: int, reason: str):
+def _fail_event(seq: int, reason: str, exit_code: int = 1):
     """事件入队/启动失败 → 立即置 failed 终态（防卡 running 僵尸）。
 
     事件在 append_event 时即为 running，若后续入队/启动失败而不更新，
     事件将永远 running（无任务支撑、无详细记录）。所有失败路径统一走这里收口。
     同步更新 agent_tasks 表 status=failed（防止 events 已 failed 但 agent_tasks 仍 running）。
+
+    Issue #418：补 exit_code 形参（默认 1，兼容既有调用点），webhook.py A2A
+    早退分支统一走本入口，回写 result/exit_code/completed_at 三字段。
+    幂等：update_event_complete 自带终态保护（terminal→terminal 跳过），
+    agent_tasks 更新限定 status IN ('running','queued','dispatched')，
+    重复触发同一 seq 早退不覆盖已写入的终态诊断字段（双主安全）。
     """
     if not seq:
         return
     try:
         from datetime import datetime, timezone
         from src.api.event_store import update_event_complete
-        update_event_complete(seq, "failed", exit_code=1,
+        update_event_complete(seq, "failed", exit_code=exit_code,
                               completed_at=datetime.now(timezone.utc).isoformat(),
                               result=reason)
         # 同步更新 agent_tasks 表（如果有关联的 task）
@@ -2437,10 +2443,11 @@ def _fail_event(seq: int, reason: str):
             c = db.cursor()
             c.execute(
                 "UPDATE agent_tasks SET status='failed', completed_at=?, "
-                "exit_code=COALESCE(exit_code, 1), "
+                "exit_code=COALESCE(exit_code, ?), "
                 "errors=COALESCE(errors, ?) "
                 "WHERE event_seq=? AND status IN ('running','queued','dispatched')",
                 (datetime.now(timezone.utc).isoformat(),
+                 exit_code,
                  json.dumps([reason][:500]) if reason else None, seq)
             )
             db.commit()
