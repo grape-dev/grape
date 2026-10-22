@@ -166,6 +166,31 @@ def _cleanup_stale_attachments():
         release_lock("attach_cleanup")
 
 
+def _sweep_leaked_tmp_dirs():
+    """P45 伴生清扫：删除崩溃/断电遗留的同步临时目录（>24h）。
+
+    范围纪律（需求 §2.4）：只扫 scene_sync_zip_*（sync 模块自有前缀），
+    不碰其他模块的临时目录（如 executor 的 hermes-iso-*，归各自模块管）。
+    >24h 年龄守卫防止误删正在运行周期的目录（同步周期最长分钟级）。
+    """
+    import glob
+    import shutil
+    import tempfile
+    import time
+    patterns = [os.path.join(tempfile.gettempdir(), "scene_sync_zip_*")]
+    swept = 0
+    for pattern in patterns:
+        for d in glob.glob(pattern):
+            try:
+                if time.time() - os.path.getmtime(d) > _MAX_TEMP_AGE_HOURS * 3600:
+                    shutil.rmtree(d, ignore_errors=True)
+                    swept += 1
+            except OSError:
+                pass
+    if swept:
+        log.info(f"Upload cleanup: swept {swept} leaked sync temp dirs (>24h)")
+
+
 async def _upload_cleanup_worker(interval: float = _CLEANUP_INTERVAL):
     """定时清理 worker：启动后等 5 分钟首次执行（避免和启动同步抢资源），之后每 interval 秒。
 
@@ -179,6 +204,7 @@ async def _upload_cleanup_worker(interval: float = _CLEANUP_INTERVAL):
             async with run_with_distributed_lock("upload_cleanup", ttl=600):
                 _cleanup_temp_files()
                 _cleanup_stale_attachments()
+                _sweep_leaked_tmp_dirs()
         except asyncio.CancelledError:
             logger.info("Upload cleanup worker cancelled")
             raise
