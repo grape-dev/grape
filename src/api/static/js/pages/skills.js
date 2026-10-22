@@ -957,9 +957,9 @@ function convertSkill(skillName, sourceScope) {
 }
 
 function downloadSkillZip(id) {
-  const token = localStorage.getItem('token') || '';
-  fetch('/api/skills/by-id/' + encodeURIComponent(id) + '/download', {headers: {'Authorization': 'Bearer ' + token}})
+  API.getRaw('/skills/by-id/' + encodeURIComponent(id) + '/download')
     .then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
       const ct = r.headers.get('content-type') || '';
       if (ct.includes('application/json')) {
         return r.json().then(d => { if (d && d.url) { window.open(d.url, '_blank'); return; } throw new Error('no url'); });
@@ -970,7 +970,7 @@ function downloadSkillZip(id) {
         document.body.appendChild(a); a.click(); a.remove();
         setTimeout(() => URL.revokeObjectURL(a.href), 5000);
       });
-    }).catch(() => { if (app && app.showToast) app.showToast(I18N.t('skills.toast.download_failed')||'下载失败'); });
+    }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (app && app.showToast) app.showToast(I18N.t('skills.toast.download_failed')||'下载失败'); });
 }
 
 // ══════════════════════════════════════════

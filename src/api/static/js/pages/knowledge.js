@@ -153,6 +153,7 @@ function renderKnowledge() {
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
           if (window._currentView !== 'knowledge') return;
+          app.showToast(I18N.t('common.load_failed') || '加载失败');
         } finally {
           if (window._currentView === 'knowledge') this.loading = false;
         }
@@ -171,6 +172,7 @@ function renderKnowledge() {
           }
         } catch (e) {
           if (e.name === 'AbortError' && e.silent) return;
+          app.showToast(I18N.t('common.load_failed') || '加载失败');
         }
       },
       switchTab(tab) {

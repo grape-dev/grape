@@ -104,7 +104,8 @@ def check_throttle(identifier: str, ip: str) -> dict:
             return {
                 "allowed": False,
                 "ip_locked": True,
-                "message": f"您的 IP 请求过于频繁，请 {remaining // 60 + 1} 分钟后再试",
+                "error_code": "TOO_MANY_ATTEMPTS",
+                "message": f"操作过于频繁，请 {remaining // 60 + 1} 分钟后再试",
                 "retry_after": remaining,
             }
 
@@ -115,13 +116,25 @@ def check_throttle(identifier: str, ip: str) -> dict:
         lock_until = _get_lock_until(identifier, is_ip=False)
         if lock_until and time.time() < lock_until:
             remaining = int(lock_until - time.time())
+            # P41: 动态判断邮箱配置，未配置时不提"邮箱验证码解锁"
+            try:
+                from src.auth.email_service import is_email_configured
+                email_ok = is_email_configured()
+            except Exception:
+                email_ok = False
+            # P43: 用剩余时间（remaining // 60 + 1）而非固定锁定总时长
+            # 用户在锁定 10 分钟后尝试登录时应看到"请 5 分钟后重试"而非"请 15 分钟后重试"
+            lock_minutes = remaining // 60 + 1
+            if email_ok:
+                msg = f"出于安全保护，账号已临时锁定。请 {lock_minutes} 分钟后重试，或通过邮箱验证码立即解锁。"
+            else:
+                msg = f"出于安全保护，账号已临时锁定。请 {lock_minutes} 分钟后重试。"
             return {
                 "allowed": False,
                 "locked": True,
-                "message": (
-                    f"连续登录失败 {ACCOUNT_LOCK_THRESHOLD} 次，账号已临时锁定 {ACCOUNT_LOCK_DURATION // 60} 分钟。"
-                    "可通过邮箱验证码立即解锁。"
-                ),
+                "error_code": "ACCOUNT_LOCKED",
+                "email_configured": email_ok,
+                "message": msg,
                 "retry_after": remaining,
             }
 

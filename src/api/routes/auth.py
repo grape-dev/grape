@@ -36,28 +36,28 @@ def refresh_token(request: Request, response: Response):
     # refresh_token 从 HttpOnly cookie 读
     refresh = get_refresh_token(request)
     if not refresh:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "缺少 refresh_token"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "MISSING_REFRESH_TOKEN", "message": "缺少 refresh_token"})
     from src.api.jwt_utils import verify_refresh_token, create_access_token, create_refresh_token
     payload = verify_refresh_token(refresh)
     if not payload:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "refresh_token 过期或无效"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "REFRESH_TOKEN_INVALID", "message": "refresh_token 过期或无效"})
     uid = int(payload.get("sub", 0))
     username = payload.get("username", "")
     token_ver = int(payload.get("ver", 0))
     if not uid:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "用户不存在"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "USER_NOT_FOUND", "message": "用户不存在"})
 
     # D3 修复：复用 deps.py 缓存校验 token_version + status
     from src.api.deps import get_user_status_cached, invalidate_user_cache
     db_ver, status, _ = get_user_status_cached(uid)
     if token_ver != db_ver:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "会话已失效"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "会话已失效"})
     if status != 1:
         invalidate_user_cache(uid)
         # BUG-7 修复：区分冷静期(status=3)和禁用(status=0)，需求20要求冷静期返回不同提示
         if status == 3:
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已注销，处于冷静期"})
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
+            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "ACCOUNT_DEACTIVATING", "message": "该账号正在注销中，暂时无法登录"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "ACCOUNT_DEACTIVATED", "message": "该账号已被停用，请联系管理员"})
 
     # 滚动续期
     old_max_exp = int(payload.get("max_exp", 0))

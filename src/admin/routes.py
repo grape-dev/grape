@@ -142,8 +142,11 @@ def admin_change_password(body: AdminChangePasswordBody, response: Response,
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "ACCOUNT_NOT_FOUND", "message": "Account not found"})
     # P1-1: 用 verify_password 兼容旧 SHA-256 和新 bcrypt
     from src.auth.password import verify_password
+    # R11-1: Return 400 (not 401) for wrong old password — credential error, not session expiry.
+    # Aligns with user-side /auth/change-password (grape_auth.py returns 400). Prevents admin.js
+    # from triggering unnecessary refresh + retry cycle on every wrong password attempt.
     if not verify_password(body.old_password, _admin["password_hash"]):
-        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "OLD_PASSWORD_INCORRECT", "message": "Old password incorrect"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OLD_PASSWORD_INCORRECT", "message": "Old password incorrect"})
     if not body.new_password or len(body.new_password) < 8:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "PASSWORD_TOO_SHORT", "message": "New password must be at least 8 characters"})
     # P1-3: 接入密码强度校验（与注册流程对齐）

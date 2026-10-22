@@ -2166,15 +2166,18 @@ function openBetaApply() {
     }).catch(e => {
       _setLoginBtnLoading(btn, false);
       var msg = e.message || 'Failed';
-      // 限流反馈
-      if (msg.includes('锁定') || msg.includes('lock') || msg.includes('IP')) {
-        showToast(msg);
+      var code = e.error_code || '';
+      // 限流反馈 — use error_code or message keyword matching (backward compat)
+      if (code === 'ACCOUNT_LOCKED' || msg.includes('锁定') || msg.includes('lock')) {
+        showToast(_loginErrMsg(e));
+      } else if (code === 'TOO_MANY_ATTEMPTS' || msg.includes('IP') || msg.includes('频繁')) {
+        showToast(_loginErrMsg(e));
       } else if (msg.includes('验证码') || msg.includes('captcha') || msg.includes('人机')) {
         showToast(msg);
       } else if (msg.includes('白名单')) {
         _showWhitelistGuidance('gitcode', u);
       } else {
-        showToast(I18N.t('app.login.failed') + ': ' + errMsg(e));
+        showToast(_loginErrMsg(e));   // R3: no "登录失败:" prefix; R4: error_code i18n
       }
     });
   }
@@ -2396,7 +2399,41 @@ function openBetaApply() {
     showLogin();
   }
 
-  // Issue #372: error_code → i18n mapping; raw message goes to console only
+  // R4: Map error_code to localized login error message.
+  // Falls back to errMsg(e) if error_code is absent or unrecognized.
+  function _loginErrMsg(e) {
+    var code = (e && e.error_code) || '';
+    // P41: ACCOUNT_LOCKED uses different key based on email_configured
+    var key;
+    if (code === 'ACCOUNT_LOCKED') {
+      var emailOk = (e && e.detail && e.detail.email_configured) || (e && e.email_configured);
+      key = emailOk ? 'app.login.account_locked' : 'app.login.account_locked_no_email';
+    } else {
+      key = {
+        'CREDENTIAL_INCORRECT': 'app.login.credential_incorrect',
+        'ACCOUNT_DEACTIVATED': 'app.login.account_deactivated',
+        'ACCOUNT_DEACTIVATING': 'app.login.account_deactivating',
+        'TOO_MANY_ATTEMPTS': 'app.login.too_many_attempts',
+      }[code];
+    }
+    if (key) {
+      var msg = I18N.t(key);
+      if (msg.indexOf('{{minutes}}') >= 0) {
+        var minutes = _extractMinutes(e.message || '');
+        msg = msg.replace('{{minutes}}', minutes);
+      }
+      return msg;
+    }
+    return errMsg(e);  // fallback: use generic error_code mapping or raw message
+  }
+
+  // R4: Extract minutes number from backend message string.
+  function _extractMinutes(msg) {
+    var m = msg.match(/(\d+)\s*分钟/);
+    return m ? m[1] : '15';  // default fallback
+  }
+
+// Issue #372: error_code → i18n mapping; raw message goes to console only
   function errMsg(e) {
     var code = (e && e.error_code) || '';
     if (code) {
@@ -2554,16 +2591,27 @@ function openBetaApply() {
         window.history.replaceState(null, '', prefix0 + '/');
       }
       // POST /auth/exchange 换 JWT
+      // R5: Parse error response body to surface backend-specific message
       fetch('/api/auth/exchange', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({code: exchangeCode}),
       }).then(r => {
-        if (!r.ok) throw new Error('exchange failed');
+        if (!r.ok) {
+          // R5: Parse error body to surface backend-specific message
+          return r.json().catch(() => null).then(errBody => {
+            var detail = (errBody && errBody.detail) || {};
+            var msg = detail.message || detail.error_code || (I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry');
+            var e = new Error(msg);
+            e.error_code = detail.error_code || '';
+            e.status = r.status;
+            throw e;
+          });
+        }
         return r.json();
       }).then(d => {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '43');
+        localStorage.setItem('app_cache_ver', '45');
         localStorage.removeItem(REPO_CACHE_KEY);
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');
@@ -2591,7 +2639,7 @@ function openBetaApply() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '43');
+      localStorage.setItem('app_cache_ver', '45');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择+组织上下文——防止切换账号后看到旧数据或 403
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -2620,13 +2668,13 @@ function openBetaApply() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '43') {
+    if (localStorage.getItem('app_cache_ver') !== '45') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '43');
+      localStorage.setItem('app_cache_ver', '45');
     }
 
     const token = localStorage.getItem('token');

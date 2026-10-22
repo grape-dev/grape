@@ -272,7 +272,9 @@ class TestLogin:
                 "identifier": username, "password": "WrongPass123!"
             })
             assert r.status_code == 401
-            assert "密码错误" in r.json()["detail"]["message"]
+            detail = r.json()["detail"]
+            assert detail["error_code"] == "CREDENTIAL_INCORRECT"
+            assert "账号或密码不正确" in detail["message"]
         finally:
             _cleanup_user(account["id"])
 
@@ -289,7 +291,9 @@ class TestLogin:
             "identifier": "nonexistent_user_xyz", "password": "anypassword"
         })
         assert r.status_code == 401
-        assert "密码错误" in r.json()["detail"]["message"]
+        detail = r.json()["detail"]
+        assert detail["error_code"] == "CREDENTIAL_INCORRECT"
+        assert "账号或密码不正确" in detail["message"]
 
 
 # ===========================================================================

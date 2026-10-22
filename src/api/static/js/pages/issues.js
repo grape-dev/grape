@@ -1162,13 +1162,10 @@ function _onTaskAttachSelect(fileInput, taskId) {
   formData.append('file', fileInput.files[0]);
   var list = document.getElementById('_taskAttachmentsList');
   if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">上传中...</div>';
-  fetch('/api/issues/' + taskId + '/attachments', {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
-    body: formData
-  }).then(function(r) { return r.json(); }).then(function() {
+  API.upload('/issues/' + taskId + '/attachments', formData).then(function() {
     _loadTaskAttachments(taskId);
   }).catch(function(e) {
+    if (e && e.name === 'AbortError' && e.silent) return;
     if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">上传失败: ' + e.message + '</div>';
     _loadTaskAttachments(taskId);
   });
@@ -1201,18 +1198,15 @@ function _onCreateAttachSelect(fileInput) {
   loading.style.cssText = 'font-size:11px;color:#888;padding:4px 8px;background:rgba(0,113,227,.06);border-radius:6px';
   loading.textContent = '上传中...';
   container.appendChild(loading);
-  fetch('/api/issues/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), {
-    method: 'POST',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') },
-    body: formData
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  API.upload('/issues/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), formData).then(function(d) {
     loading.remove();
-    if (d.error) { alert('上传失败: ' + d.error); return; }
+    if (d.error) { app.showToast('上传失败: ' + d.error, null, 6000); return; }
     _createAttachments.push({filename: d.filename, safe_name: d.safe_name, size: d.size, url: d.url});
     _renderCreateAttachments();
   }).catch(function(e) {
     loading.remove();
-    alert('上传失败: ' + e.message);
+    if (e && e.name === 'AbortError' && e.silent) return;
+    app.showToast('上传失败: ' + e.message, null, 6000);
   });
   fileInput.value = '';
 }
@@ -1235,10 +1229,7 @@ function _removeCreateAttach(idx) {
   if (!a) return;
   var repo = app.currentRepo();
   var repoKey = repo ? (repo.repoKey || repo.fullName || '') : '';
-  fetch('/api/issues/attachments/pre-upload/' + a.safe_name + '?repo_key=' + encodeURIComponent(repoKey), {
-    method: 'DELETE',
-    headers: { 'Authorization': 'Bearer ' + localStorage.getItem('token') }
-  }).then(function() {
+  API.del('/issues/attachments/pre-upload/' + a.safe_name + '?repo_key=' + encodeURIComponent(repoKey)).then(function() {
     _createAttachments.splice(idx, 1);
     _renderCreateAttachments();
   }).catch(function() {

@@ -304,7 +304,13 @@
     "whitelist_desc": "Your {{platform}} account{{username}} does not have beta access yet.",
     "whitelist_apply_hint": "Please apply for beta access first. You can log in after approval.",
     "whitelist_apply_btn": "Apply for Beta",
-    "forgot_email_not_configured": "Email service not configured. Please contact administrator to reset password."
+    "forgot_email_not_configured": "Email service not configured. Please contact administrator to reset password.",
+    "credential_incorrect": "The account or password is incorrect. Please try again.",
+    "account_deactivated": "This account has been deactivated. Please contact the administrator.",
+    "account_deactivating": "This account is being deactivated and cannot be accessed at this time.",
+    "account_locked": "For security reasons, this account has been temporarily locked. Please try again in {{minutes}} minutes, or use email verification to unlock immediately.",
+    "too_many_attempts": "Too many attempts. Please try again in {{minutes}} minutes.",
+    "account_locked_no_email": "For security reasons, this account has been temporarily locked. Please try again in {{minutes}} minutes."
   },
   "repo": {
     "select": "Select repository...",
@@ -636,6 +642,16 @@
     "WEBHOOK_REBUILD_FAILED": "Webhook rebuild failed. Check bot token permissions or use repair_host to recover.",
     "WEBHOOK_PERMISSION_DENIED": "Admin permission required to create webhook. Contact admin or obtain admin permission.",
     "NOT_REPO_OWNER": "Only the repo owner or admin can configure bot token.",
-    "UNKNOWN": "An error occurred. Please try again."
+    "UNKNOWN": "An error occurred. Please try again.",
+    "NOT_LOGGED_IN": "Please sign in first.",
+    "SESSION_EXPIRED": "Your session has expired. Please sign in again.",
+    "USER_NOT_FOUND": "User not found.",
+    "SESSION_REVOKED": "Your password was changed on another device. Please sign in again.",
+    "SESSION_INVALID": "Session invalid. Please sign in again.",
+    "ACCOUNT_DISABLED": "This account has been deactivated. Please contact the administrator.",
+    "MISSING_REFRESH_TOKEN": "Your session has expired. Please sign in again.",
+    "REFRESH_TOKEN_INVALID": "Your session has expired. Please sign in again.",
+    "SESSION_TOKEN_INVALID": "Invalid or expired session token.",
+    "API_KEY_INVALID": "Invalid or revoked API Key."
   }
 }
