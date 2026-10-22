@@ -349,7 +349,14 @@ def _probe_stale_repos(api_token: str, user_id: int):
                 log.debug(f"managed repos: webhook {expected_wh} not found for {repo_key}, marking pending-repair")
         except urllib.error.HTTPError as e:
             # 403 = 非 owner 无权限查 hooks，跳过（不误判）
-            # 404 = 仓库在此刻被删了（刚才 200 现在变 404），算 stale
+            # GitHub 404 = "token 有效但无 admin 权限"（GitHub 惯例：不可见即 404）。
+            # 本分支能进来说明第一步刚用同一 token 查仓库本体是 200——仓库存在、
+            # 紧接着 hooks 才 404，只可能是权限问题而非仓库消失，直接跳过不判 stale。
+            # （GitCode 对无权限回 403，走上面的注释路径，不受影响。）
+            if e.code == 404 and provider == "github":
+                log.debug(f"probe: {repo_key} hooks 404 with non-admin user token (repo exists), skip (permission issue)")
+                continue
+            # GitCode 404 = 仓库在此刻被删了（刚才 200 现在变 404），算 stale
             if e.code == 404:
                 stale_keys.append((repo_key, owner, repo_name))
             # 其他错误跳过
@@ -386,9 +393,9 @@ def _probe_stale_repos(api_token: str, user_id: int):
                 except Exception:
                     pass  # 不判定
             else:
-                # 无 bot token，无法二次验证，保留原判定但标记 unverified
-                verified_deletes.append((repo_key, owner, repo_name))
-                log.warning(f"probe: {repo_key} 404 unverified (no bot token for cross-check)")
+                # 无 bot token，无法二次验证——不确定不能删：降级为待修复状态而非级联清理
+                webhook_lost_keys.append((repo_key, owner, repo_name))
+                log.warning(f"probe: {repo_key} 404 unverified (no bot token for cross-check), downgrade to pending-repair")
         stale_keys = verified_deletes
 
     # FR-2.3: 单轮清理上限——stale > 2 时整轮放弃（保险丝，防"一夜清库"）
