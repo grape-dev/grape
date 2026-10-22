@@ -6,9 +6,79 @@
 参见 docs/weekly-02/issue-49-multi-vcs-extension-design.md §3.8
 """
 import json
+import re
 import urllib.request
 import urllib.error
 from src.config import log
+
+
+# Issue #315: GitCode 编辑器上传图片（raw.gitcode.com/user-images/...）链接识别与鉴权下载。
+# 该类资源匿名拉取 403，需带 token；提取为纯函数便于单测。
+_USER_IMAGE_URL_RE = re.compile(r"https://raw\.gitcode\.com/user-images/[^\s\)\"'<>]+")
+_USER_IMAGE_URL_PREFIX = "https://raw.gitcode.com/user-images/"
+USER_IMAGE_MAX_SIZE = 20 * 1024 * 1024   # 单图 20MB 上限
+USER_IMAGE_TIMEOUT = 15                  # 单图下载 15s 超时
+USER_IMAGE_MAX_COUNT = 8                 # 单 Issue 最多采集 8 张（超出降级说明）
+
+
+def extract_gitcode_user_image_urls(text: "str | None") -> list[str]:
+    """从 Markdown / HTML / 裸链文本中提取 raw.gitcode.com/user-images 图片 URL。
+
+    覆盖形态：![alt](url)、<img src="url">、裸 URL。
+    去重保序（首个出现顺序）。纯函数，无 IO；text 为 None/空返回 []。
+    """
+    if not text:
+        return []
+    urls = _USER_IMAGE_URL_RE.findall(text)
+    return list(dict.fromkeys(urls))
+
+
+def _download_user_image(url: str, token: str, max_size: int = USER_IMAGE_MAX_SIZE,
+                         timeout: int = USER_IMAGE_TIMEOUT) -> dict:
+    """带 token 下载单张 user-images 图片（内部实现，供 VcsApiClient 复用）。
+
+    返回 {"content": bytes, "content_type": str, "size": int} 或 {"error": str}。
+    token 仅构造 Authorization 请求头，绝不写入日志或返回值。
+    """
+    if not url.startswith(_USER_IMAGE_URL_PREFIX):
+        return {"error": "url not allowed (only raw.gitcode.com/user-images)"}
+    req = urllib.request.Request(url, method="GET", headers={
+        "Authorization": f"Bearer {token}",
+        "Accept": "image/*",
+    })
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            ctype = (resp.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+            if not ctype.startswith("image/"):
+                # 非图片（如 403 返回 JSON 的场景已被 HTTPError 分支拦截，这里防御其他 200 非图）
+                return {"error": f"non-image content-type: {ctype or 'unknown'}"}
+            chunks = []
+            total = 0
+            while True:
+                chunk = resp.read(64 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_size:
+                    return {"error": f"image exceeds size limit ({max_size} bytes)"}
+                chunks.append(chunk)
+            if total == 0:
+                return {"error": "empty image content"}
+            content = b"".join(chunks)
+            return {"content": content, "content_type": ctype, "size": total}
+    except urllib.error.HTTPError as e:
+        log.warning(f"user-image download failed: {url} -> HTTP {e.code}")
+        return {"error": f"HTTP {e.code}"}
+    except urllib.error.URLError as e:
+        _reason = getattr(e, "reason", e)
+        if "timed out" in str(_reason).lower() or "timeout" in str(_reason).lower():
+            log.warning(f"user-image download failed: {url} -> timeout ({timeout}s)")
+            return {"error": "timeout"}
+        log.warning(f"user-image download failed: {url} -> {_reason}")
+        return {"error": str(_reason)}
+    except Exception as e:
+        log.warning(f"user-image download failed: {url} -> {e}")
+        return {"error": str(e)}
 
 
 class VcsApiClient:
@@ -167,6 +237,17 @@ class VcsApiClient:
         if isinstance(info, dict) and str(info.get("error", "")).strip() == "HTTP 404":
             return False
         return True
+
+    # === Issue #315：user-images 图片鉴权下载 ===
+
+    def download_user_image(self, url: str, max_size: int = USER_IMAGE_MAX_SIZE,
+                            timeout: int = USER_IMAGE_TIMEOUT) -> dict:
+        """携带平台 token 下载 GitCode 编辑器上传图片（raw.gitcode.com/user-images/...）。
+
+        匿名拉取该类资源返回 403；带 Bearer token 实测可 200 拉取。
+        token 仅用于请求头，不进入日志与返回值。
+        """
+        return _download_user_image(url, self.token, max_size=max_size, timeout=timeout)
 
     # === 平台内部实现 ===
 

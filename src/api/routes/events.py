@@ -496,13 +496,16 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             _cwd = old.get("cwd") or ""
         _is_local_direct = (_cid == 0)
         # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
+        # Issue #427：PR 订阅事件的 scene_id 列即订阅场景，作为 override 传入防止
+        # 重派 env 被重新解析回 Issue 场景；普通事件 scene_id 与 issue_id 解析同值
         from src.api.event_pipeline import build_task_env as _bte
         _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
                             agent_type=old.get("agent_type") or "",
                             issue_id=old.get("issue_id") or "",
                             runtime_id=_orig_rid,
                             account=old.get("account") or "",
-                            issue_number=old.get("issue_id") or "")
+                            issue_number=old.get("issue_id") or "",
+                            scene_id_override=evt.get("scene_id") or "")
         _new_task_id = enqueue_task(
             agent_session_id=old.get("agent_session_id") or "",
             runtime_id=_orig_rid,
@@ -863,13 +866,16 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
 
                 # Always enqueue (stores full prompt + env), then trigger direct if local
                 # 重派丢 env 修复（2026-10-10 事故）：复用正常入队的 env 组装，不再传空 env_extra
+                # Issue #427：PR 订阅事件的 scene_id 列即订阅场景，作为 override 传入防止
+                # 重派 env 被重新解析回 Issue 场景；普通事件 scene_id 与 issue_id 解析同值
                 from src.api.event_pipeline import build_task_env as _bte
                 _rebuild_env = _bte(repo_key=old.get("repo_key") or "",
                                     agent_type=old.get("agent_type") or "",
                                     issue_id=old.get("issue_id") or "",
                                     runtime_id=_rid,
                                     account=old.get("account") or "",
-                                    issue_number=old.get("issue_id") or "")
+                                    issue_number=old.get("issue_id") or "",
+                                    scene_id_override=evt.get("scene_id") or "")
                 _new_task_id = enqueue_task(
                     agent_session_id=old.get("agent_session_id") or "",
                     runtime_id=_rid,

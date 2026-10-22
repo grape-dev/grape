@@ -88,6 +88,34 @@ def _silent_timeout_for(env: dict | None = None) -> float:
         return 300.0
 
 
+def _init_timeout_for(env: dict | None = None) -> float:
+    """hermes ACP initialize 握手超时（HERMES_INIT_TIMEOUT env 可调，默认 100s）。
+
+    issue #416（T6）：引擎冷启动慢导致 initialize 100s 固定超时直接失败、不可重试。
+    env 优先（任务级），os.environ 次之，默认 100s；解析失败回退 100。
+    """
+    _src = (env or {}).get("HERMES_INIT_TIMEOUT") or \
+        os.environ.get("HERMES_INIT_TIMEOUT", "100")
+    try:
+        return max(float(_src), 1.0)
+    except Exception:
+        return 100.0
+
+
+def _init_retries_for(env: dict | None = None) -> int:
+    """initialize 超时后的重试次数（HERMES_INIT_RETRIES env 可调，默认 1，≥0）。
+
+    issue #416：冷启动慢可自愈——超时后按配置重发 initialize（进程存活时），
+    默认重试 1 次；设 0 关闭重试。
+    """
+    _src = (env or {}).get("HERMES_INIT_RETRIES") or \
+        os.environ.get("HERMES_INIT_RETRIES", "1")
+    try:
+        return max(int(float(_src)), 0)
+    except Exception:
+        return 1
+
+
 class HermesACPBackend:
     """Hermes ACP 后端 — 不走 build_args/parse_output，直接 stream_execute yield 事件。"""
     name = "hermes"
@@ -187,6 +215,17 @@ class HermesACPBackend:
         except ImportError:
             _track_proc = _untrack_proc = lambda p: None
             _terminate_proc = lambda p, l: None
+
+        # issue #416：stderr 尾采环形缓冲（崩溃栈在末尾，仅保留末尾 ≥2000 字节）
+        try:
+            from src.agent.executor import _StderrTailBuffer, _stderr_tail_bytes_for
+        except ImportError:
+            _StderrTailBuffer = None  # type: ignore[assignment]
+            _stderr_tail_bytes_for = None  # type: ignore[assignment]
+        if _StderrTailBuffer is not None:
+            _stderr_tail = _StderrTailBuffer(_stderr_tail_bytes_for(env))
+        else:
+            _stderr_tail = None
 
         # TaskResourceStack: unified resource lifecycle (effect/dispose pattern)
         from src.runtime.resource_stack import TaskResourceStack
@@ -360,29 +399,55 @@ class HermesACPBackend:
         # stderr reader 线程：持续排空 stderr 管道，防止管道缓冲区满导致死锁
         # Windows 管道缓冲区约 4KB，hermes ACP 启动时输出大量 stderr 日志
         # 不排空会导致 hermes 进程阻塞在 stderr 写入上，stdout 不再输出 → 管道死锁
-        _stderr_chunks = []
+        # issue #416：采集改尾采（末尾 ≥2000B，崩溃栈在末尾），不再只保前 200/500B
         def _stderr_reader():
             try:
                 while True:
                     line = proc.stderr.readline()
                     if not line:
                         break
-                    _stderr_chunks.append(line.decode("utf-8", errors="replace"))
+                    if _stderr_tail is not None:
+                        _stderr_tail.append(line.decode("utf-8", errors="replace"))
             except Exception:
                 pass
         stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
         stderr_thread.start()
 
+        def _stderr_text() -> str:
+            return _stderr_tail.text() if _stderr_tail is not None else ""
+
         try:
-            # ── 1. initialize 握手 ──
-            init_result, init_err = client.request("initialize", {
-                "protocolVersion": 1,
-                "clientInfo": {"name": "grape-agent", "version": "0.1.0"},
-                "clientCapabilities": {},
-            }, timeout=100)
+            # ── 1. initialize 握手（issue #416/T6：超时 HERMES_INIT_TIMEOUT 可配置
+            #    + 超时/失败按 HERMES_INIT_RETRIES 重试，冷启动慢可自愈）──
+            _INIT_TIMEOUT = _init_timeout_for(env)
+            _INIT_RETRIES = _init_retries_for(env)
+            init_result, init_err = None, None
+            for _init_attempt in range(_INIT_RETRIES + 1):
+                init_result, init_err = client.request("initialize", {
+                    "protocolVersion": 1,
+                    "clientInfo": {"name": "grape-agent", "version": "0.1.0"},
+                    "clientCapabilities": {},
+                }, timeout=_INIT_TIMEOUT)
+                if not init_err:
+                    break
+                _proc_rc = proc.poll()
+                if _proc_rc is not None:
+                    # 进程已死：重试无意义，带退出码 + stderr 尾巴直接失败（E7 可诊断）
+                    init_err = (f"initialize failed: {init_err} "
+                                f"(hermes exited rc={_proc_rc})")
+                    break
+                if _init_attempt < _INIT_RETRIES:
+                    log.warning(f"{label}hermes ACP initialize attempt "
+                                f"{_init_attempt + 1}/{_INIT_RETRIES + 1} failed: "
+                                f"{init_err}, retrying (timeout={_INIT_TIMEOUT:.0f}s)")
             if init_err:
-                error_events.append(f"initialize failed: {init_err}")
-                yield ("done", _done_result(-1, "", session_id, error_events, ""))
+                error_events.append(init_err)
+                # 等 stderr 尾巴读尽（进程已 EOF 时立即返回；活着则最多 2s）
+                try:
+                    stderr_thread.join(timeout=2)
+                except Exception:
+                    pass
+                yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                 return
 
             log.info(f"{label}hermes ACP initialized")
@@ -410,7 +475,7 @@ class HermesACPBackend:
                     }, timeout=100)
                     if err:
                         error_events.append(f"session/new failed: {err}")
-                        yield ("done", _done_result(-1, "", session_id, error_events, ""))
+                        yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                         return
                     new_session_id = _extract_session_id(result) or ""
                 else:
@@ -421,7 +486,7 @@ class HermesACPBackend:
                 }, timeout=100)
                 if err:
                     error_events.append(f"session/new failed: {err}")
-                    yield ("done", _done_result(-1, "", session_id, error_events, ""))
+                    yield ("done", _done_result(-1, "", session_id, error_events, _stderr_text()))
                     return
                 new_session_id = _extract_session_id(result) or ""
             log.info(f"{label}hermes ACP session: {new_session_id[:12]}...")
@@ -491,7 +556,11 @@ class HermesACPBackend:
                         log.info(f"{label}hermes ACP reader EOF with {len(collected_text)} text chunks, assuming done")
                         prompt_result["stopReason"] = "end_turn"
                         break
-                    error_events.append("hermes process exited before prompt completed")
+                    # issue #416（E7）：启动即死必须可诊断——errors 记退出码
+                    _rc_early = proc.poll()
+                    error_events.append(
+                        f"hermes exited rc={_rc_early if _rc_early is not None else 'unknown'} "
+                        f"before prompt completed")
                     break
 
                 # text 后静默：不再直接判完成——静默只决定「还要不要等」，
@@ -573,11 +642,8 @@ class HermesACPBackend:
                         yield (et, data)
                     event_queue.clear()
 
-            stderr_output = ""
-            try:
-                stderr_output = "".join(_stderr_chunks)[:500]
-            except Exception:
-                pass
+            # issue #416：stderr 尾巴（末尾 ≥2000B，崩溃栈在末尾），不再保头 500B
+            stderr_output = _stderr_text()
 
             # exit_code 判定
             if stop_reason == "end_turn" and not error_events:
@@ -598,6 +664,12 @@ class HermesACPBackend:
                 exit_code = proc.returncode if proc.returncode is not None else -1
             else:
                 exit_code = 0
+
+            # issue #416（E7）：失败结果 errors 必须带退出码，不再为空；
+            # 成功（含疑似提前结束放行）不追加，避免污染正常收尾。
+            if exit_code != 0 and not any("hermes exited" in _e for _e in error_events):
+                _rc_final = proc.returncode if proc.returncode is not None else -1
+                error_events.append(f"hermes exited rc={_rc_final}")
 
             full_text = "\n".join(collected_text)
             # JSON 鲁棒拼接：修复 flush 边界 \n 导致的字段名断裂、缺闭合 } 等
@@ -623,7 +695,7 @@ class HermesACPBackend:
                 "text": full_text,
                 "oc_session_id": new_session_id,
                 "errors": error_events,
-                "stderr": stderr_output[:500],
+                "stderr": stderr_output,
                 "backend": "hermes",
             })
 
@@ -633,7 +705,7 @@ class HermesACPBackend:
             yield ("done", {
                 "exit_code": -1, "text": "\n".join(collected_text),
                 "oc_session_id": new_session_id,
-                "errors": error_events, "stderr": "",
+                "errors": error_events, "stderr": _stderr_text(),
             })
         finally:
             # Unified cleanup via TaskResourceStack (replaces scattered _untrack_proc + _cleanup_overlay)
@@ -1135,8 +1207,14 @@ def _build_overlay_home(iso_home: str, src_home: str):
                 src = os.path.join(src_home, entry)
                 try:
                     os.symlink(src, dst)
-                except Exception:
-                    pass
+                except Exception as _sl_e:
+                    # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
+                    # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
+                    # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
+                    # → hermes ACP 启动后加载资产失败即死（exit rc!=0、无诊断）。
+                    # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
+                    # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
+                    _mirror_without_symlink(src, dst, entry, str(_sl_e))
 
         # 覆写 config.yaml：从源复制 + 改 tool_progress=new
         src_cfg = os.path.join(src_home, "config.yaml")
@@ -1179,6 +1257,55 @@ def _build_overlay_home(iso_home: str, src_home: str):
 
     except Exception as e:
         log.warning(f"hermes ACP overlay build error: {e}")
+
+
+
+# ── issue #416（E7/T5）：Windows overlay home 无符号链接权限时的降级镜像 ──
+# 单文件复制上限：防止把超大缓存（模型/向量库）整体拷进 overlay 拖死启动。
+_MIRROR_FILE_MAX_BYTES = 10 * 1024 * 1024
+
+
+def _mirror_without_symlink(src: str, dst: str, entry: str, reason: str):
+    """symlink 失败后的降级镜像：文件复制（≤10MB），目录浅层复制一层。
+
+    大文件/深层目录跳过并 WARNING——hermes 启动所需的核心资产
+    （skills/plugins/auth 等）通常是小文件或浅目录，复制后即可正常加载；
+    跳过项留日志供 worker 侧排查（issue #416 随 13 台 worker 升级合入）。
+    """
+    try:
+        if os.path.isfile(src):
+            if os.path.getsize(src) > _MIRROR_FILE_MAX_BYTES:
+                log.warning(f"hermes ACP overlay: skip large file '{entry}' "
+                            f"({os.path.getsize(src)} bytes > cap, symlink failed: {reason})")
+                return
+            shutil.copy2(src, dst)
+            log.warning(f"hermes ACP overlay: file '{entry}' copied instead of "
+                        f"symlink (symlink failed: {reason})")
+        elif os.path.isdir(src):
+            copied = skipped = 0
+            os.makedirs(dst, exist_ok=True)
+            for sub in os.listdir(src):
+                _src_sub = os.path.join(src, sub)
+                _dst_sub = os.path.join(dst, sub)
+                if os.path.isfile(_src_sub):
+                    if os.path.getsize(_src_sub) > _MIRROR_FILE_MAX_BYTES:
+                        skipped += 1
+                        continue
+                    try:
+                        shutil.copy2(_src_sub, _dst_sub)
+                        copied += 1
+                    except Exception:
+                        skipped += 1
+                elif os.path.isdir(_src_sub):
+                    # 深层目录不递归（保持降级路径有界），留待引擎按需重建
+                    skipped += 1
+            log.warning(f"hermes ACP overlay: dir '{entry}' shallow-copied "
+                        f"({copied} files, {skipped} skipped; symlink failed: {reason})")
+        else:
+            log.warning(f"hermes ACP overlay: skip special entry '{entry}' "
+                        f"(symlink failed: {reason})")
+    except Exception as _cp_e:
+        log.warning(f"hermes ACP overlay: mirror fallback for '{entry}' failed: {_cp_e}")
 
 def _cleanup_overlay(iso_home: str):
     """清理 per-task HERMES_HOME（保留 state.db 供可能的续接，只删 symlink）。"""

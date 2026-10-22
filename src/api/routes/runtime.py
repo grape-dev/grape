@@ -6,7 +6,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 """
 import hashlib, json, os, threading
 from datetime import datetime, timedelta, timezone
-from fastapi import APIRouter, HTTPException, Depends, Request
+from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token
 from src.config import log
@@ -148,6 +148,12 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
     client_ip = _client_ip(request)
     with db_lock:
         c = db.cursor()
+        # Issue #417：鉴权（_auth_credential）在 db_lock 外，吊销与注册存在竞态——
+        # 鉴权通过后凭据被 revoke 物理删除，此处会以失效 credential_id 重新 INSERT
+        # agent_runtimes（已吊销设备被残留 worker 复活）。锁内复核凭据仍存在且 active。
+        c.execute("SELECT id FROM runtime_credentials WHERE id=? AND status='active'", (credential_id,))
+        if not c.fetchone():
+            raise HTTPException(status_code=401, detail={"code": 401, "message": "runtime credential revoked or not found"})
         # 回填 device_name + 来源 IP
         c.execute("UPDATE runtime_credentials SET device_name=?, last_seen_at=?, last_ip=? WHERE id=?",
                   (body.device_name, datetime.now(timezone.utc).isoformat(), client_ip, credential_id))
@@ -930,7 +936,9 @@ def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
 
 @router.get("/runtimes/{runtime_id}/tasks", operation_id="runtime_tasks_list", summary="List runtime tasks", description="Tasks of a device (front-end device view).")
 def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_token),
-                             status: str = "", limit: int = 50, repo: str = ""):
+                             status: str = "",
+                             limit: int = Query(50, ge=1, le=500, description="最多返回条数，1-500"),
+                             repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
     from src.session_manager import db, db_lock
     clauses = ["runtime_id=?"]

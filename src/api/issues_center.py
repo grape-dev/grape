@@ -1715,6 +1715,87 @@ def _attach_cleanup_dir(owner: str, repo: str, issue_number):
         shutil.rmtree(_attach_dir, ignore_errors=True)
         log.info(f"Attachment cleanup: removed {_attach_dir}")
 
+
+# === Issue #315: GitCode 编辑器上传图片（user-images）服务端鉴权下载 ===
+
+def _user_image_ext(url: str, content_type: str = "") -> str:
+    """从 URL 末段/Content-Type 推断图片扩展名（默认 .png）。"""
+    last = url.rstrip("/").rsplit("/", 1)[-1]
+    ext = os.path.splitext(last)[1].lower()
+    if ext in _ATTACH_IMAGE_EXTS:
+        return ext
+    ct_map = {"image/jpeg": ".jpg", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg"}
+    return ct_map.get(content_type, ".png")
+
+
+def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_key: str = "") -> dict:
+    """提取 Issue 正文/评论中 raw.gitcode.com/user-images 图片链接并鉴权下载转存为平台附件。
+
+    复用 _attach_save 存储语义（OBS 签名 URL 或 /static/issue_attachments/）。
+    token 仅服务端构造请求头使用，不写入日志/注入上下文/返回值。
+
+    Args:
+        texts: 可迭代字符串（Issue 正文、各评论 body 等）。
+        repo_key: 调用方已知的仓库全键（如 "gitcode:owner/repo"）；缺省按 gitcode 拼接。
+
+    Returns:
+        {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}
+        顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
+    """
+    from src.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
+    result: dict = {"ok": [], "failed": []}
+    try:
+        urls: list[str] = []
+        for t in texts or []:
+            if not t:
+                continue
+            for u in extract_gitcode_user_image_urls(str(t)):
+                if u not in urls:
+                    urls.append(u)
+        if not urls:
+            return result
+        # 数量上限：超出部分降级说明（不静默丢弃）
+        for u in urls[USER_IMAGE_MAX_COUNT:]:
+            result["failed"].append({"url": u, "reason": "exceeds count limit"})
+        urls = urls[:USER_IMAGE_MAX_COUNT]
+
+        repo_key = repo_key or f"gitcode:{owner}/{repo}"
+        token = ""
+        try:
+            from src.user.db import get_gitcode_token
+            token = get_gitcode_token(repo_key=repo_key) or ""
+        except Exception:
+            token = ""
+        if not token:
+            for u in urls:
+                result["failed"].append({"url": u, "reason": "no repo token"})
+            return result
+
+        from src.vcs.api_client import create_client
+        client = create_client(repo_key, token)
+        seq = 0
+        for u in urls:
+            dl = client.download_user_image(u)
+            if "error" in dl:
+                result["failed"].append({"url": u, "reason": str(dl["error"])})
+                continue
+            seq += 1
+            ext = _user_image_ext(u, str(dl.get("content_type") or ""))
+            filename = f"user-image-{seq}{ext}"
+            try:
+                url = _attach_save(owner, repo, issue_number, filename, dl["content"])
+                result["ok"].append({"filename": filename, "url": url, "size": dl.get("size", len(dl["content"]))})
+                log.info(f"user-image saved: {owner}/{repo}/{issue_number}/{filename} ({dl.get('size', 0)} bytes)")
+            except Exception as e:
+                seq -= 1
+                result["failed"].append({"url": u, "reason": f"save failed: {e}"})
+    except Exception as e:
+        # 顶层兜底：任何异常都转为降级说明，不阻塞主流程
+        result["error"] = str(e)
+        log.warning(f"_collect_issue_user_images failed: {owner}/{repo}/{issue_number} -> {e}")
+    return result
+
+
 def _get_task_issue_info(task_id: int) -> tuple[str, int, str] | None:
     """从 tasks 表取 repo_key + issue_number + conversation_id（关联 agent_tasks 的键）。"""
     with db_lock:

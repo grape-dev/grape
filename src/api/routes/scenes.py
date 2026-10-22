@@ -1,6 +1,6 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
 import json, os, re
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
@@ -196,7 +196,8 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
                        q: str = "", category_id: int = 0, sort: str = "latest",
                        scope: str = "", repo: str = "",
                        featured_only: int = 0, limit: int = 0,
-                       page: int = 1, page_size: int = 20):
+                       page: int = Query(default=1, ge=1),
+                       page_size: int = Query(default=20, ge=1)):
     """场景市场列表：支持搜索 + 分类过滤 + 排序 + 精选过滤 + 分页 + scope 过滤。
     limit>0 时不分页（精选场景用），否则按 page/page_size 分页。
     scope: official / repo，空=全部。
@@ -1394,7 +1395,8 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api
 @router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
 def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_session_token),
                           q: str = "", scope: str = "", repo: str = "",
-                          page: int = 1, page_size: int = 20):
+                          page: int = Query(1, ge=1, description="页码，从 1 开始"),
+                          page_size: int = Query(20, ge=1, le=200, description="每页条数，1-200")):
     """返回该 agent_type 可选的 skill 列表（支持搜索 + scope 过滤 + 分页）。"""
     from src.session_manager import db, db_lock
     skills = []

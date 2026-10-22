@@ -147,7 +147,7 @@ def get_post(pid: int):
                 "FROM community_posts WHERE id=? AND is_deleted=0", (pid,))
             row = c.fetchone()
             if not row:
-                return {"error": "Post not found"}
+                raise HTTPException(status_code=404, detail="Post not found")
             c.execute(
                 "SELECT id, user_id, username, content, created_at "
                 "FROM community_comments WHERE post_id=? AND is_deleted=0 "
@@ -167,6 +167,8 @@ def get_post(pid: int):
                 "content": cr[3], "created_at": cr[4]
             })
         return {**post, "comments": comments}
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"community get post failed: {e}")
         return {"error": str(e)}
@@ -179,6 +181,9 @@ def toggle_like(pid: int, user: dict = Depends(get_current_user)):
     try:
         with db_lock:
             c = db.cursor()
+            c.execute("SELECT id FROM community_posts WHERE id=? AND is_deleted=0", (pid,))
+            if not c.fetchone():
+                raise HTTPException(status_code=404, detail="Post not found")
             c.execute("SELECT id FROM community_post_likes WHERE post_id=? AND user_id=?", (pid, uid))
             existing = c.fetchone()
             if existing:
@@ -194,6 +199,8 @@ def toggle_like(pid: int, user: dict = Depends(get_current_user)):
             c.execute("SELECT likes FROM community_posts WHERE id=?", (pid,))
             likes = c.fetchone()[0]
         return {"liked": liked, "likes": likes}
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"community toggle like failed: {e}")
         return {"error": "Failed to toggle like"}
@@ -209,7 +216,7 @@ def add_comment(pid: int, body: CreateCommentBody, user: dict = Depends(get_curr
             c = db.cursor()
             c.execute("SELECT id FROM community_posts WHERE id=? AND is_deleted=0", (pid,))
             if not c.fetchone():
-                return {"error": "Post not found"}
+                raise HTTPException(status_code=404, detail="Post not found")
             c.execute(
                 "INSERT INTO community_comments (post_id, user_id, username, content) "
                 "VALUES (?, ?, ?, ?)",
@@ -219,6 +226,8 @@ def add_comment(pid: int, body: CreateCommentBody, user: dict = Depends(get_curr
             cid = c.lastrowid
         log.info(f"community: comment created id={cid} on post={pid} by user={user.get('username')}")
         return {"id": cid, "message": "ok"}
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"community add comment failed: {e}")
         return {"error": "Failed to add comment"}

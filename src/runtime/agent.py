@@ -61,6 +61,9 @@ _PROBE_COMMANDS = {
 _PROBE_TIMEOUT = 30
 _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
 _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长时间）
+# Issue #423: _read_response 防御性行数上限（保险丝，防失控流）。真正终止条件是 deadline；
+# 会话通知量是动态值（三步探活实测 prompt 响应前 36 行），行数上限不得与其耦合。
+_ACP_READ_MAX_LINES = 500
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
@@ -116,33 +119,65 @@ def _probe_hermes_acp(cli_path: str) -> dict:
             proc.stdin.write((_json.dumps(msg) + "\n").encode("utf-8"))
             proc.stdin.flush()
 
+        # QA 实测复核（Optional#1 升级）：select 就绪后 readline() 遇「半行未换行数据」
+        # 会阻塞在 read 系统调用——deadline 只约束 select、管不到 readline（实测
+        # deadline=2s 时探活 >10s 不返回，finally 兜底也执行不到，探测线程永久停摆）。
+        # 修复：fd 置非阻塞（os.set_blocking）+ os.read 小块读 + 行缓冲拼行，
+        # 每轮 select/read 后都重检 deadline。（用 os.set_blocking 而非 os.fcntl：
+        # 部分 Python 构建无 os.fcntl 顶层别名，set_blocking 为标准可移植接口。）
+        _fd = proc.stdout.fileno()
+        os.set_blocking(_fd, False)
+        _buf = bytearray()
+
         def _read_response(req_id: int, timeout: float) -> dict | None:
-            """读 JSON-RPC 行直到匹配到指定 id 的 response。"""
+            """读 JSON-RPC 行直到匹配到指定 id 的 response（Issue #423：deadline 驱动）。
+
+            终止条件以 deadline 为主：三步探活会话中 prompt 响应前 agent 会持续输出
+            session/update 通知（实测 36 行），固定 10 行上限会在通知流中提前耗尽、
+            误判「无响应」。行数仅作防御性上限（_ACP_READ_MAX_LINES，防失控流）。
+            select 超时（deadline 耗尽）与 EOF 立即返回 None。
+            非阻塞 fd + os.read 小块读 + 行缓冲：半行数据不会卡住 read 系统调用，
+            deadline 在每一轮 select 与 read 之后都被重新检查。
+            """
             deadline = _time_mod.time() + timeout
-            for _ in range(10):  # 最多读 10 行（跳过 notification）
-                _remaining = max(deadline - _time_mod.time(), 0.1)
-                _ready, _, _ = _sel.select([proc.stdout], [], [], _remaining)
+            _lines = 0
+            while _time_mod.time() < deadline and _lines < _ACP_READ_MAX_LINES:
+                _remaining = max(deadline - _time_mod.time(), 0)
+                _ready, _, _ = _sel.select([_fd], [], [], _remaining)
                 if not _ready:
-                    return None
-                _line = proc.stdout.readline()
-                if not _line:
-                    return None
-                _line = _line.strip().decode("utf-8", errors="replace")
-                if not _line.startswith("{"):
-                    continue
+                    return None  # deadline 耗尽（select 剩余时间全部用完）
                 try:
-                    _msg = _json.loads(_line)
-                except _json.JSONDecodeError:
-                    continue
-                # 跳过 notification（无 id）和 agent request（有 method）
-                if "id" not in _msg or "method" in _msg:
-                    # agent request（如 session/request_permission）→ 自动批准
-                    if "method" in _msg and "id" in _msg:
-                        _send({"jsonrpc": "2.0", "id": _msg["id"],
-                               "result": {"optionId": ""}})
-                    continue
-                if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
-                    return _msg
+                    _chunk = os.read(_fd, 65536)
+                except BlockingIOError:
+                    continue  # select 与 read 之间的就绪窗口已消失，回循环重检 deadline
+                if not _chunk:
+                    return None  # EOF
+                _buf.extend(_chunk)
+                while _buf:
+                    _nl = _buf.find(b"\n")
+                    if _nl < 0:
+                        if _time_mod.time() >= deadline:
+                            return None  # 半行数据悬置到 deadline（原先在此永久挂起）
+                        break  # 行不完整，等待后续数据
+                    _raw = bytes(_buf[:_nl])
+                    del _buf[:_nl + 1]
+                    _lines += 1
+                    _line = _raw.strip().decode("utf-8", errors="replace")
+                    if not _line.startswith("{"):
+                        continue
+                    try:
+                        _msg = _json.loads(_line)
+                    except _json.JSONDecodeError:
+                        continue
+                    # 跳过 notification（无 id）和 agent request（有 method）
+                    if "id" not in _msg or "method" in _msg:
+                        # agent request（如 session/request_permission）→ 自动批准
+                        if "method" in _msg and "id" in _msg:
+                            _send({"jsonrpc": "2.0", "id": _msg["id"],
+                                   "result": {"optionId": ""}})
+                        continue
+                    if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
+                        return _msg
             return None
 
         # 1. initialize
@@ -191,6 +226,11 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         # prompt 成功（收到 stopReason）→ 端到端可用
         latency = round(_time_mod.time() - start, 1)
         _stop = (_prompt_resp.get("result") or {}).get("stopReason", "unknown")
+        # Issue #423: refusal 独立标记（协议活着但模型拒绝 ≠ 链路不通）。
+        # 服务端心跳落库对非 ok/fail 状态仅记录、不增 probe_fail_count → 不触发连败摘除。
+        if _stop == "refusal":
+            return {"status": "refused", "latency": latency, "error": "",
+                    "output": "ACP initialize+prompt refused (stopReason=refusal)"}
         return {"status": "ok", "latency": latency, "error": "",
                 "output": f"ACP initialize+prompt ok (stopReason={_stop})"}
 
@@ -256,37 +296,58 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
             proc.stdin.flush()
 
         # select + readline 轮询；二进制模式下 readline 返回 bytes。
+        # Issue #423 QA 复核 Optional#1 同构修复：readline() 遇半行未换行数据会阻塞在
+        # read 系统调用（deadline 管不到 readline）。改非阻塞 fd（os.set_blocking，
+        # 标准可移植接口）+ os.read 小块读 + 行缓冲拼行，每轮 select/read 后重检
+        # deadline，半行悬置到 deadline 即返回。
         _fd = proc.stdout.fileno()
-        _probe_buf = [""]
+        os.set_blocking(_fd, False)
+        _probe_buf = bytearray()
 
         def _read_response(req_id: int, timeout: float) -> dict | None:
+            # Issue #423 同步审查：本实现已是 deadline 驱动（while deadline，无固定行数上限），
+            # 无 hermes 同款 10 行 bug；仅补 _ACP_READ_MAX_LINES 防御上限保持同构。
             deadline = _time_mod.time() + timeout
-            while _time_mod.time() < deadline:
+            _lines = 0
+            while _time_mod.time() < deadline and _lines < _ACP_READ_MAX_LINES:
                 _ready, _, _ = _sel.select([_fd], [], [], 0.3)
                 if not _ready:
                     if proc.poll() is not None:
                         return None
                     continue
-                _line = proc.stdout.readline()
-                if not _line:
-                    return None
-                _line = _line.strip().decode("utf-8", errors="replace")
-                if not _line.startswith("{"):
-                    continue
                 try:
-                    _msg = _json.loads(_line)
-                except _json.JSONDecodeError:
+                    _chunk = os.read(_fd, 65536)
+                except BlockingIOError:
                     continue
-                if "id" not in _msg or "method" in _msg:
-                    if "method" in _msg and "id" in _msg:
-                        # 标准 ACP outcome 结构（openagent server.go 3237 处理 union 判别；
-                        # 旧 {"optionId": ""} 走 legacy 路径且空值 fail-closed）。
-                        # 探活不需要执行工具 → 明确 cancelled。
-                        _send({"jsonrpc": "2.0", "id": _msg["id"],
-                               "result": {"outcome": {"outcome": "cancelled"}}})
-                    continue
-                if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
-                    return _msg
+                if not _chunk:
+                    return None
+                _probe_buf.extend(_chunk)
+                while _probe_buf:
+                    _nl = _probe_buf.find(b"\n")
+                    if _nl < 0:
+                        if _time_mod.time() >= deadline:
+                            return None  # 半行悬置到 deadline（原先 readline 在此阻塞）
+                        break
+                    _raw = bytes(_probe_buf[:_nl])
+                    del _probe_buf[:_nl + 1]
+                    _lines += 1
+                    _line = _raw.strip().decode("utf-8", errors="replace")
+                    if not _line.startswith("{"):
+                        continue
+                    try:
+                        _msg = _json.loads(_line)
+                    except _json.JSONDecodeError:
+                        continue
+                    if "id" not in _msg or "method" in _msg:
+                        if "method" in _msg and "id" in _msg:
+                            # 标准 ACP outcome 结构（openagent server.go 3237 处理 union 判别；
+                            # 旧 {"optionId": ""} 走 legacy 路径且空值 fail-closed）。
+                            # 探活不需要执行工具 → 明确 cancelled。
+                            _send({"jsonrpc": "2.0", "id": _msg["id"],
+                                   "result": {"outcome": {"outcome": "cancelled"}}})
+                        continue
+                    if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
+                        return _msg
             return None
 
         # 1. initialize
@@ -330,6 +391,10 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
 
         latency = round(_time_mod.time() - start, 1)
         _stop = (_prompt_resp.get("result") or {}).get("stopReason", "unknown")
+        # Issue #423: refusal 独立标记（与 hermes 探活同构；非 ok/fail 不计入连败摘除）
+        if _stop == "refusal":
+            return {"status": "refused", "latency": latency, "error": "",
+                    "output": "ACP initialize+session/new+prompt refused (stopReason=refusal)"}
         return {"status": "ok", "latency": latency, "error": "",
                 "output": f"ACP initialize+session/new+prompt ok (stopReason={_stop})"}
 
@@ -2323,7 +2388,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                                 # （"engine exit_code=-1, errors: "），真实原因不可见。
                                 # 兜底拼 stderr（引擎快速失败时常有启动报错）；
                                 # 仍无线索时明确标注 errors 为空，提示查 worker 日志。
-                                _stderr_hint = (_result.get("stderr") or "").strip()[:200]
+                                # issue #416：stderr hint 保尾 2000B（崩溃栈在末尾），
+                                # 旧 [:200] 保头会把尾巴上的崩溃栈截掉
+                                _stderr_hint = (_result.get("stderr") or "").strip()[-2000:]
                                 _msg = f"engine exit_code={_exit}, errors: {'; '.join(_errs[:3])}"
                                 if not _errs and _stderr_hint:
                                     _msg += f" | stderr: {_stderr_hint}"

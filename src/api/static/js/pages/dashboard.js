@@ -545,6 +545,20 @@ function renderSceneDetailLocal(sceneId) {
   });
 }
 
+// 副本名称冲突处理：want 已截断到 40 字符；与已有场景名（existing 为 map）冲突时自动追加序号（-copy → -copy2 …），仍保持 ≤40 字符
+window._generateCopySceneName = function(want, existing) {
+  want = String(want || '').trim().slice(0, 40);
+  let finalName = want;
+  if (existing[finalName]) {
+    for (let i = 2; i < 100; i++) {
+      const suf = String(i);
+      finalName = want.slice(0, 40 - suf.length) + suf;
+      if (!existing[finalName]) break;
+    }
+  }
+  return finalName;
+};
+
 function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isApplied, isCustomScene, pipeData, owner, name, metrics, dashData) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -625,6 +639,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
         <div id="sceneDescDisplay" style="font-size:13px;color:#86868b;cursor:text;padding:2px 6px;margin:-2px -6px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneDesc')">${sceneDesc || '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>'}</div>
       </div>
 
+      <button class="ap-btn" style="margin-top:4px" onclick="_copySceneFromDetail()">${I18N.t('dashboard.copy_scene')||'复制场景'}</button>
       ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
     </div>
   </div>`;
@@ -876,7 +891,84 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       .catch(function(e) { app.showToast && app.showToast((e && e.detail && e.detail.message) || (e && e.message) || '保存失败'); });
   };
 
-  // 详情页操作函数
+  // 复制场景（Issue #402，纯前端实现，后端接口零改动）：
+  // 源配置取自页面已加载数据（dashData._scenes 含 description/icon/PR 订阅/关联仓库/nodes），
+  // 按当前用户可选引擎（agentEngines）清洗 engine_runtime_ids——不可用/无权限引擎剔除；
+  // SRE 节点无可用引擎时副本置为停用（启用+空引擎会被创建接口拒绝）；
+  // 名称冲突自动追加序号，最终复用既有 POST /scenes 创建副本，成功后跳转新场景详情。
+  window._copySceneFromDetail = function() {
+    const sn = scene.display_name || scene.name || '';
+    const defaultName = (sn + '-copy').slice(0, 40);
+    const overlay = document.createElement('div');
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:320px;max-width:400px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
+      <h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f">${I18N.t('dashboard.confirm_copy_scene')||'复制场景'}</h3>
+      <p style="margin:0 0 12px;font-size:13px;color:#86868b;line-height:1.5">${I18N.t('dashboard.copy_scene_hint')||'将复制该场景的完整配置为可编辑副本，源场景不受影响。'}</p>
+      <label style="display:block;font-size:12px;font-weight:600;color:#86868b;margin-bottom:6px">${I18N.t('dashboard.copy_scene_name_label')||'副本名称'}</label>
+      <input id="copySceneNameInput" maxlength="40" value="${defaultName.replace(/"/g,'&quot;').replace(/'/g,'&#39;')}" style="width:100%;padding:8px 12px;border:1px solid #e8e8ed;border-radius:12px;font-size:13px;outline:none;background:#f5f5f7;margin-bottom:20px">
+      <div style="display:flex;justify-content:flex-end;gap:8px">
+        <button class="ap-btn" onclick="this.closest('[style*=fixed]').remove()">${I18N.t('common.cancel')||'取消'}</button>
+        <button class="ap-btn" id="confirmCopySceneBtn">${I18N.t('dashboard.copy_scene')||'复制场景'}</button>
+      </div>
+    </div>`;
+    document.body.appendChild(overlay);
+    const input = document.getElementById('copySceneNameInput');
+    if (input) { input.focus(); input.select(); }
+    document.getElementById('confirmCopySceneBtn').onclick = function() {
+      const btn = this;
+      btn.disabled = true;
+      // ① 源场景完整配置：优先 dashData._scenes（含 icon/description/PR 订阅/关联仓库），页面 nodes 兜底
+      const srcList = (dashData && dashData._scenes) || [];
+      let src = srcList.find(function(s) { return s && s.id === scene.id; });
+      if (!src) src = { description: scene.description || '', icon: '', nodes: nodes || [],
+                        pr_subscription_enabled: scene.pr_subscription_enabled ? 1 : 0, linked_repos: [] };
+      // ② 引擎清洗：仅保留当前用户在该角色下可选的引擎（他人个人机器/失效引擎/他仓库引擎自动剔除）
+      const _okEng = {};
+      Object.keys(agentEngines || {}).forEach(function(t) {
+        _okEng[t] = (agentEngines[t] || []).map(function(e) { return e && e.id; });
+      });
+      const copyNodes = JSON.parse(JSON.stringify(src.nodes || []));
+      let _dropped = false;
+      copyNodes.forEach(function(n) {
+        const tag = n.tag || n.id || '';
+        const ok = _okEng[tag] || [];
+        const eids = (n.engine_runtime_ids || []).filter(function(eid) {
+          return ok.some(function(oid) { return oid == eid; });
+        });
+        if (eids.length !== (n.engine_runtime_ids || []).length) _dropped = true;
+        n.engine_runtime_ids = eids;
+        if (tag === 'sre' && n.enabled !== false && !eids.length) n.enabled = false;
+      });
+      // ③ 副本名称：用户输入（默认 <源场景名>-copy），冲突自动追加序号、超 40 字符截断
+      const existing = {};
+      srcList.forEach(function(s) {
+        existing[(s.name || '').trim()] = 1;
+        existing[((s.display_name) || s.name || '').trim()] = 1;
+      });
+      let want = (((document.getElementById('copySceneNameInput') || {}).value || '').trim() || defaultName).slice(0, 40);
+      const finalName = window._generateCopySceneName(want, existing);
+      // ④ 复用既有创建接口 POST /scenes 生成副本（后端零改动）
+      API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), {
+        name: finalName,
+        description: src.description || '',
+        scope: 'repo',
+        nodes: copyNodes,
+        icon: src.icon || '',
+        pr_subscription_enabled: !!src.pr_subscription_enabled,
+        linked_repos: src.linked_repos || []
+      }).then(function(r) {
+        overlay.remove();
+        let _msg = I18N.t('dashboard.scene_copied') || '场景复制成功';
+        if (_dropped) _msg += '（' + (I18N.t('dashboard.copy_engines_dropped') || '不可用引擎已剔除') + '）';
+        app.showToast(_msg);
+        app.nav('scene-detail-local', r.scene_id);
+      }).catch(function(e) {
+        btn.disabled = false;
+        app.showToast(I18N.t('dashboard.copy_failed', {msg: (e && e.detail && e.detail.message) || (e && e.message) || ''})||'复制失败');
+      });
+    };
+  };
+
   window._deleteSceneFromDetail = function(sceneId) {
     const sn = scene.display_name || scene.name;
     const overlay = document.createElement('div');
