@@ -293,9 +293,11 @@ def update_feedback_status(fid: int, body: dict):
                 tuple(params))
             db.commit()
             if c.rowcount == 0:
-                return {"error": "反馈记录不存在"}
+                raise HTTPException(status_code=404, detail={"code": 404, "message": "反馈记录不存在"})
         log.info(f"feedback: updated id={fid} status={new_status} by={handler_name}")
         return {"success": True, "message": "状态已更新"}
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"feedback update failed: {e}")
         return {"error": "更新失败"}
