@@ -2454,7 +2454,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     }
     _runtime_id = task.get("runtime_id") or 0
     from src.api.event_pipeline import _redispatch_vod_after_recommend
-    _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id, repo_gitcode_token)
+    _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id)
 
 
 def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) -> list:
