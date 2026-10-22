@@ -317,6 +317,17 @@ var I18N = (function () {
   };
 
   // ── detectLang(): detect language from URL pathname or localStorage ──
+  // 语言状态传递机制（Issue #275 文档化结论）：
+  //   优先级 = URL /en/ 前缀（权威，刷新/分享安全）→ localStorage grapeLang（工作台自身
+  //   状态）→ localStorage grape-lang（官网首页写入的偏好，跨页面桥接）→ 默认 zh。
+  //   /en/ 前缀不是语言切换的必要条件：SPA 会话内 _currentLang 由本函数的 localStorage
+  //   fallback 维护，URL 无前缀也能正常显示英文；但 F5 刷新后内存状态丢失，会按本
+  //   优先级链重新检测——URL 无前缀且 grapeLang 无值时回退默认中文（#275 用户补充现象）。
+  //   官网首页与工作台是两个独立页面，首页用 grape-lang key、工作台用 grapeLang key；
+  //   grapeLang 未设置时兼容读取首页的 grape-lang，使「进入 Grape」继承首页语言选择。
+  //   仅读取不回写：init() 会把检测结果双写 cookie（grapeLang），工作台内 setLang()
+  //   正常写 grapeLang——一旦用户在工作台内切换过语言，grapeLang 有值，桥接不再参与
+  //   判定，两页面互不干扰。
   function detectLang() {
     var path = window.location.pathname || '';
     // /en/ or /en at start → en
@@ -325,6 +336,10 @@ var I18N = (function () {
     try {
       var stored = localStorage.getItem(STORAGE_KEY);
       if (stored && SUPPORTED.indexOf(stored) >= 0) return stored;
+      // Issue #275: 官网首页用 grape-lang key——grapeLang 未设置时兼容读取（桥接，
+      // 仅初始化时判定，不回写），首页切换语言后新打开的工作台继承该选择
+      var siteLang = localStorage.getItem('grape-lang');
+      if (siteLang && SUPPORTED.indexOf(siteLang) >= 0) return siteLang;
     } catch (e) {}
     return DEFAULT_LANG;
   }
