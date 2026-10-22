@@ -304,7 +304,13 @@
     "whitelist_desc": "您的{{platform}}账号{{username}}尚未获得内测权限。",
     "whitelist_apply_hint": "请先申请内测，审核通过后即可登录。",
     "whitelist_apply_btn": "申请内测",
-    "forgot_email_not_configured": "邮箱服务未配置，请联系管理员重置密码"
+    "forgot_email_not_configured": "邮箱服务未配置，请联系管理员重置密码",
+    "credential_incorrect": "账号或密码不正确，请重新输入",
+    "account_deactivated": "该账号已被停用，请联系管理员",
+    "account_deactivating": "该账号正在注销中，暂时无法登录",
+    "account_locked": "出于安全保护，账号已临时锁定。请 {{minutes}} 分钟后重试，或通过邮箱验证码立即解锁。",
+    "too_many_attempts": "操作过于频繁，请 {{minutes}} 分钟后再试",
+    "account_locked_no_email": "出于安全保护，账号已临时锁定。请 {{minutes}} 分钟后重试。"
   },
   "repo": {
     "select": "选择仓库...",
@@ -636,6 +642,16 @@
     "WEBHOOK_REBUILD_FAILED": "Webhook 重建失败，请检查 Bot Token 权限后重试，或使用 repair_host 恢复。",
     "WEBHOOK_PERMISSION_DENIED": "需要仓库 admin 权限创建 webhook，请联系管理员托管或获取 admin 权限。",
     "NOT_REPO_OWNER": "只有仓库托管人或管理员可配置 Bot Token。",
-    "UNKNOWN": "操作失败，请稍后重试。"
+    "UNKNOWN": "操作失败，请稍后重试。",
+    "NOT_LOGGED_IN": "请先登录",
+    "SESSION_EXPIRED": "会话过期，请重新登录",
+    "USER_NOT_FOUND": "用户不存在",
+    "SESSION_REVOKED": "您的账号在其他设备上修改了密码，请重新登录",
+    "SESSION_INVALID": "会话无效，请重新登录",
+    "ACCOUNT_DISABLED": "该账号已被停用，请联系管理员",
+    "MISSING_REFRESH_TOKEN": "会话已过期，请重新登录",
+    "REFRESH_TOKEN_INVALID": "会话已过期，请重新登录",
+    "SESSION_TOKEN_INVALID": "会话令牌无效或已过期",
+    "API_KEY_INVALID": "API Key 无效或已撤销"
   }
 }

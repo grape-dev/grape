@@ -397,8 +397,8 @@ def login(body: LoginBody, request: Request, response: Response):
             except Exception:
                 pass  # 审计日志失败不影响限流响应
         if throttle.get("captcha"):
-            raise HTTPException(status_code=429, detail={"code": 429, "message": throttle["message"], "captcha": True})
-        raise HTTPException(status_code=429, detail={"code": 429, "message": throttle["message"]})
+            raise HTTPException(status_code=429, detail={"code": 429, "error_code": throttle.get("error_code", ""), "message": throttle["message"], "captcha": True, **({"email_configured": throttle["email_configured"]} if "email_configured" in throttle else {})})
+        raise HTTPException(status_code=429, detail={"code": 429, "error_code": throttle.get("error_code", ""), "message": throttle["message"], **({"email_configured": throttle["email_configured"]} if "email_configured" in throttle else {})})
 
     # 验证账号密码（D32: 只查 grape_accounts，不 fallback 旧表）
     account = verify_grape_account(identifier, body.password)
@@ -407,7 +407,7 @@ def login(body: LoginBody, request: Request, response: Response):
         login_throttle.record_failure(identifier, ip)
         auth_audit.log_audit("login_failed", ip=ip,
                              detail={"identifier": auth_audit.mask_identifier(identifier)})
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "账号或密码错误"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "CREDENTIAL_INCORRECT", "message": "账号或密码不正确，请重新输入"})
 
     # 密码正确但账号被禁用 → 才暴露禁用状态
     if account.get("status", 1) != 1:
@@ -416,8 +416,8 @@ def login(body: LoginBody, request: Request, response: Response):
                                      "reason": "account_disabled"})
         # BUG-9 修复：区分冷静期(status=3)和禁用(status=0)
         if account.get("status") == 3:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "账号已注销，处于冷静期"})
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "账号已被禁用"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "ACCOUNT_DEACTIVATING", "message": "该账号正在注销中，暂时无法登录"})
+        raise HTTPException(status_code=403, detail={"code": 403, "error_code": "ACCOUNT_DEACTIVATED", "message": "该账号已被停用，请联系管理员"})
 
     # 登录成功，清除失败记录
     login_throttle.clear_failures(identifier, ip)
@@ -908,6 +908,11 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
 def unlock_send_code(body: UnlockSendCodeBody, request: Request):
     """发送账号解锁验证码。"""
     ip = _get_client_ip(request)
+
+    # P44: 无邮箱配置降级——返回 503，与 forgot-password/send-code 一致
+    from src.auth.email_service import is_email_configured
+    if not is_email_configured():
+        raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator"})
 
     # BUG-5 修复：防枚举——账号不存在时不返回 404，统一返回"验证码已发送"。
     # P1-4 修复：账号不存在时也调 check_rate_limit，防止 200 vs 429 枚举 + DoS。
@@ -2032,16 +2037,16 @@ def oauth_associate(provider: str, body: OAuthAssociateBody, request: Request, r
             raise HTTPException(status_code=400, detail={"code": 400, "message": "请输入用户名或邮箱"})
         account = verify_grape_account(body.identifier, body.password)
         if not account:
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "账号或密码错误"})
+            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "CREDENTIAL_INCORRECT", "message": "账号或密码不正确，请重新输入"})
     else:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "请提供密码或验证码"})
 
     # 检查账号状态
     if account.get("status", 1) != 1:
         if account.get("status") == 0:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "账号已被禁用"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "ACCOUNT_DEACTIVATED", "message": "该账号已被停用，请联系管理员"})
         if account.get("status") == 3:
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "账号已注销"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "ACCOUNT_DEACTIVATING", "message": "该账号正在注销中，暂时无法登录"})
         raise HTTPException(status_code=403, detail={"code": 403, "message": "账号状态异常，请联系客服"})
 
     # 检查该第三方账号是否已被其他 Grape 账号绑定（仅活跃绑定 status=1）

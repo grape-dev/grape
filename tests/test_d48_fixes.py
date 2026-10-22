@@ -11,7 +11,7 @@
 1. 解绑前检查仓库使用情况（需求17）— unbind 返回 409 + 仓库列表
 2. 管理员不可禁用自己（需求21）— disable 返回 400
 3. 恢复冷静期账号后通知用户（需求22）— restore 后调 send_notification
-4. 锁定提示文案（需求2）— check_throttle 返回含"连续登录失败 5 次"
+4. 锁定提示文案（需求2）— check_throttle 返回含 error_code 和锁定时长
 """
 import pytest
 from unittest.mock import patch, MagicMock
@@ -195,7 +195,7 @@ class TestRestoreSendsNotification:
 class TestLockMessage:
 
     def test_lock_message_contains_failure_count(self):
-        """锁定提示包含"连续登录失败 5 次"和"15 分钟"。"""
+        """锁定提示包含 error_code、锁定时长。邮箱验证码解锁提示根据邮箱配置动态显示。"""
         from src.auth.login_throttle import (
             ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_DURATION, check_throttle,
         )
@@ -207,7 +207,13 @@ class TestLockMessage:
             result = check_throttle("testuser", "127.0.0.1")
         assert not result["allowed"]
         assert result["locked"] is True
-        assert str(ACCOUNT_LOCK_THRESHOLD) in result["message"]
-        assert str(ACCOUNT_LOCK_DURATION // 60) in result["message"]
-        assert "连续登录失败" in result["message"]
-        assert "邮箱验证码" in result["message"]
+        assert result["error_code"] == "ACCOUNT_LOCKED"
+        # P43: message uses remaining time (retry_after // 60 + 1), not fixed ACCOUNT_LOCK_DURATION // 60
+        expected_minutes = result["retry_after"] // 60 + 1
+        assert str(expected_minutes) in result["message"]
+        # P41: email_configured field present; message varies by email config
+        assert "email_configured" in result
+        if result["email_configured"]:
+            assert "邮箱验证码" in result["message"]
+        else:
+            assert "邮箱验证码" not in result["message"]

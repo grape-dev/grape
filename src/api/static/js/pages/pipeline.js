@@ -364,16 +364,16 @@ function triggerSREDeploy(repoFullName, issueNum, stage) {
     }
   }).then(d => {
     if (d.skipped) {
-      alert(I18N.t('pipeline.sre_skipped', {skipped: d.skipped}));
+      app.showToast(I18N.t('pipeline.sre_skipped', {skipped: d.skipped}));
     } else if (d.seq > 0) {
-      alert(I18N.t('pipeline.sre_triggered', {seq: d.seq}));
+      app.showToast(I18N.t('pipeline.sre_triggered', {seq: d.seq}));
       // 刷新 pipeline
       if (typeof loadPipeline === 'function') loadPipeline();
     } else {
-      alert(I18N.t('pipeline.sre_result', {result: JSON.stringify(d)}));
+      app.showToast(I18N.t('pipeline.sre_result', {result: JSON.stringify(d)}));
     }
   }).catch(e => {
-    alert(I18N.t('pipeline.sre_trigger_failed', {msg: (e.message || e)}));
+    app.showToast(I18N.t('pipeline.sre_trigger_failed', {msg: (e.message || e)}), null, 6000);
   });
 }
 

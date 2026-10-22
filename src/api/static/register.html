@@ -444,9 +444,19 @@ function associateAccount(){
     setTimeout(function(){window.location.href='/'},2000);
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
-    var msg=err.message||Auth.t('app.login.toast_associate_failed');
-    if(msg.indexOf('密码')>=0||msg.indexOf('账号')>=0||msg.indexOf('用户')>=0||msg.indexOf('password')>=0)Auth.showFieldError('assocIdentifier',msg);
-    else Auth.showToast(msg);
+    // R4: use error_code instead of string matching
+    var code = (err && err.error_code) || '';
+    var i18nKey = {
+      'CREDENTIAL_INCORRECT': 'app.login.credential_incorrect',
+      'ACCOUNT_DEACTIVATED': 'app.login.account_deactivated',
+      'ACCOUNT_DEACTIVATING': 'app.login.account_deactivating',
+    }[code];
+    if (i18nKey) {
+      var localized = Auth.t(i18nKey);
+      Auth.showFieldError('assocIdentifier', (localized && localized !== i18nKey) ? localized : err.message);
+    } else {
+      Auth.showToast(err.message || Auth.t('app.login.toast_associate_failed'));
+    }
   });
 }
 

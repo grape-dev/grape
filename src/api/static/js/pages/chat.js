@@ -519,9 +519,7 @@ function switchConversation(convId) {
       // 该 user 消息是否已有 agent 回复行（历史已完成 / 兜底写入）
       const hasAgentReply = msgs.some(m => m.role === 'agent' && m.task_id === lastMsg.task_id);
       // 有 task_id → 查后端 status（内存优先，DB 兜底）
-      fetch('/api/chat/task/' + lastMsg.task_id + '/status', {
-        headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
-      }).then(r => r.json()).then(st => {
+      API.get('/chat/task/' + lastMsg.task_id + '/status').then(st => {
         if (st.status === 'running' && !hasAgentReply) {
           // 任务仍在执行且 DB/列表尚无 agent 行 → 追加 3 点动画占位 + SSE 重连
           const elId = 't' + Date.now();
@@ -791,8 +789,9 @@ async function streamTask(taskId, elId, convId) {
   let finalText = '';
 
   try {
+    const token = await API.ensureTokenValid() || '';
     const resp = await fetch('/api/chat/task/' + taskId + '/stream', {
-      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      headers: {'Authorization': 'Bearer ' + token},
       signal: ac.signal
     });
     if (!resp.ok || !resp.body) {
@@ -864,9 +863,7 @@ function resumeChatTask() {
   const task = _getTask(_currentConvId) || _getStoredTask(_currentConvId);
   if (task && task.task_id) {
     // 有 task_id → 查 status
-    fetch('/api/chat/task/' + task.task_id + '/status', {
-      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
-    }).then(r => r.json()).then(st => {
+    API.get('/chat/task/' + task.task_id + '/status').then(st => {
       if (st.status === 'running') {
         // 仍在执行 → 确保 3 点动画占位 + SSE 重连（仅当 DB 尚无该 task 的 agent 行；
         // 若已完成/已写库则不追加，避免与历史消息渲染出重复气泡）

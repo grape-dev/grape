@@ -98,7 +98,11 @@ const API = (() => {
       if (e instanceof TypeError) throw e;   // 网络错误——不清 token
       // refresh 真的失败（HTTP 401/403）——清 token 跳登录
       localStorage.removeItem('token');
-      if (location.pathname !== '/login') location.href = '/login';
+      localStorage.removeItem('user');
+      // R11-2: Unified to app.showLogin() (DOM switch) instead of location.href='/login'
+      // (整页刷新). This also resolves R7's language prefix issue — showLogin doesn't
+      // involve URL navigation.
+      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
       throw e;
     }).finally(() => {
       clearTimeout(timer);
@@ -140,7 +144,12 @@ const API = (() => {
     try {
       return await doRefresh();
     } catch (e) {
-      // 重试 1 次（500ms 后）——_refreshPromise 在 finally 里已清空，重试会发起新请求
+      // R8-2: Network error (TypeError) / timeout (AbortError) — backend unreachable.
+      // Retry won't help in 500ms. Return stale token; the subsequent request will
+      // fail and 401兜底 handles it.
+      if (e instanceof TypeError) return token;
+      if (e.name === 'AbortError') return token;
+      // HTTP error (refresh_token rejected) — retry once after short delay
       await new Promise(r => setTimeout(r, 500));
       try {
         return await doRefresh();
@@ -174,10 +183,8 @@ const API = (() => {
     return doRefresh().then(() => retryFn()).catch(e => {
       // Issue #63: abort/网络错误不清 token（doRefresh 已处理），只有 refresh 真失败才跳登录
       if (e.name === 'AbortError' || e instanceof TypeError) throw e;
-      // refresh 也失败——清 token 跳登录（refresh_token cookie 由服务端清除）
-      localStorage.removeItem('token');
-      localStorage.removeItem('user');
-      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      // R11-2: doRefresh already cleared token + called showLogin.
+      // No need to duplicate here — just throw the session_expired error.
       throw new Error(I18N.t('common.session_expired'));
     });
   }
@@ -202,7 +209,21 @@ const API = (() => {
             _redirectToGitcodeAuth();
             throw new Error(err.detail.message);
           }
-          // 普通 JWT 过期——走 JWT refresh 流程
+          // R1 fix: credential 401 on public auth endpoints — user has no token
+          // or is hitting a public auth endpoint (login/refresh/exchange/associate).
+          // Skip refresh and surface the backend message directly.
+          var reqUrl = r.url || '';
+          var isPublicAuthEndpoint = /\/api\/auth\/(login|refresh|exchange)$/.test(reqUrl)
+            || /\/api\/auth\/login\/[^/]+\/associate$/.test(reqUrl);
+          if (!localStorage.getItem('token') || isPublicAuthEndpoint) {
+            var detail = (err && err.detail) || {};
+            var e = new Error(detail.message || I18N.t('common.request_failed', {status: 401}));
+            e.status = 401;
+            e.detail = detail;
+            e.error_code = detail.error_code || '';
+            throw e;
+          }
+          // Session 401 — JWT expired, attempt refresh
           return handle401(retryFn);
         });
       }
@@ -212,6 +233,18 @@ const API = (() => {
           if (err?.detail?.action === 'reauth_required') {
             _redirectToGitcodeAuth();
             throw new Error(err.detail.message);
+          }
+          // P33 fix: don't clear token for public auth endpoint 401s
+          var reqUrl = r.url || '';
+          var isPublicAuthEndpoint = /\/api\/auth\/(login|refresh|exchange)$/.test(reqUrl)
+            || /\/api\/auth\/login\/[^/]+\/associate$/.test(reqUrl);
+          if (isPublicAuthEndpoint) {
+            // Public auth endpoint 401 — show backend message, don't clear token
+            var detail33 = (err && err.detail) || {};
+            var e33 = new Error(detail33.message || I18N.t('common.request_failed', {status: 401}));
+            e33.status = 401;
+            e33.error_code = detail33.error_code || '';
+            throw e33;
           }
           localStorage.removeItem('token');
           localStorage.removeItem('user');
@@ -234,28 +267,41 @@ const API = (() => {
     // Issue #63: 响应是 HTML（如 nginx 502 页面或登录页重定向）时，不报 "Unexpected token"
     var ct = r.headers.get('content-type') || '';
     if (ct.indexOf('text/html') !== -1) {
-      // 200 + HTML = nginx/proxy 返回了页面而非 API JSON，说明服务异常或 session 失效
-      if (r.status === 200) {
-        // 可能是 token 过期后反代返回登录页 HTML
-        throw new Error(I18N.t('common.session_expired') || '登录已过期，请重新登录');
-      }
-      // 502/503 等 = 服务器错误，不跳登录
-      throw new Error(I18N.t('common.server_error') || '服务器异常，请稍后重试');
+      // R8-1: 200 + HTML is not necessarily session expiry — it's more likely
+      // an nginx/proxy misconfiguration. Use neutral server_error for all HTML responses.
+      var e = new Error(I18N.t('common.server_error') || '服务器异常，请稍后重试');
+      e.status = r.status;
+      throw e;
     }
     return r.json();
   }
 
+  // R7: Language-aware login URL helper
+  function _langLoginUrl() {
+    var lang = (typeof I18N !== 'undefined' && I18N.getLang) ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
+    return (lang === 'en' ? '/en' : '') + '/login';
+  }
+  // R7: Check if currently on any login page (both /login and /en/login)
+  function _isOnLoginPage() {
+    var p = location.pathname;
+    return p === '/login' || p === '/en/login';
+  }
+
   // Issue #52: GitCode OAuth token 过期且无法刷新时跳转授权页
+  // R9-2: Added _reauthRedirecting dedup guard
+  var _reauthRedirecting = false;
   function _redirectToGitcodeAuth() {
-    if (location.pathname.includes('/login')) return;  // 已在登录页不重复跳
+    if (_reauthRedirecting) return;  // R9-2: dedup — already redirecting
+    if (_isOnLoginPage()) return;    // R7: already on login page
+    _reauthRedirecting = true;
     API.get('/auth/login/gitcode').then(d => {
       if (d.redirect_url) {
         location.href = d.redirect_url;
       } else {
-        location.href = '/login';
+        location.href = _langLoginUrl();  // R7: preserve language prefix
       }
     }).catch(() => {
-      location.href = '/login';
+      location.href = _langLoginUrl();    // R7: preserve language prefix
     });
   }
 
@@ -390,6 +436,12 @@ const API = (() => {
     del: _del,
     deleteFeedback: deleteFeedback,  // Issue #177: 删除反馈封装
     scheduleProactiveRefresh: scheduleProactiveRefresh,  // Issue #86: app.js 登录成功后调用
+    // R6: Export getRaw for blob downloads / SSE streams that need raw Response
+    getRaw: (path, timeout) => {
+      return _makeHeaders().then(h => _fetchWithTimeout(BASE + path, {headers: h}, timeout, false, false));
+    },
+    // R6: Export ensureTokenValid for SSE streams that need fresh token before fetch
+    ensureTokenValid: ensureTokenValid,
     upload: (path, formData, onUploadProgress) => {
       return ensureTokenValid().then(token => {
       return new Promise((resolve, reject) => {
@@ -411,13 +463,51 @@ const API = (() => {
             resolve(json || {message: resp});
           } else {
             if (xhr.status === 401) {
-              // upload 401 不自动 refresh——直接跳登录
-              localStorage.removeItem('token');
-              localStorage.removeItem('user');
-              if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+              // R9-1: Attempt refresh before giving up. If refresh succeeds,
+              // retry the upload with the new token. If refresh fails, clear token + showLogin.
+              // NOTE: FormData is consumed after xhr.send() — cannot reuse directly.
+              // The retry creates a new XHR with the same formData (File/Blob objects
+              // are not consumed by send(), only FormData entries are read).
+              doRefresh().then(newToken => {
+                const xhr2 = new XMLHttpRequest();
+                xhr2.open('POST', BASE + path);
+                xhr2.setRequestHeader('Authorization', 'Bearer ' + newToken);
+                if (_orgId) xhr2.setRequestHeader('X-Org-ID', _orgId);
+                xhr2.upload.onprogress = (e) => {
+                  if (onUploadProgress && e.lengthComputable) {
+                    onUploadProgress(Math.round((e.loaded / e.total) * 100));
+                  }
+                };
+                xhr2.onload = () => {
+                  let json2 = null;
+                  try { json2 = JSON.parse(xhr2.responseText); } catch { /* ignore */ }
+                  if (xhr2.status >= 200 && xhr2.status < 300) {
+                    resolve(json2 || {message: xhr2.responseText});
+                  } else {
+                    const err2 = new Error(json2?.detail?.message || I18N.t('common.request_failed', {status: xhr2.status}));
+                    err2.errors = json2?.detail?.errors || null;
+                    err2.status = xhr2.status;
+                    err2.error_code = json2?.detail?.error_code || '';
+                    reject(err2);
+                  }
+                };
+                xhr2.onerror = () => reject(new Error(I18N.t('common.network_upload_error')));
+                xhr2.send(formData);
+              }).catch(() => {
+                // Refresh failed — clear token + show login (same as before)
+                localStorage.removeItem('token');
+                localStorage.removeItem('user');
+                if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+                const err = new Error(json?.detail?.message || I18N.t('common.session_expired'));
+                err.errors = json?.detail?.errors || null;
+                reject(err);
+              });
+              return;  // Don't reject yet — refresh in progress
             }
             const err = new Error(json?.detail?.message || I18N.t('common.request_failed', {status: xhr.status}));
             err.errors = json?.detail?.errors || null;
+            err.status = xhr.status;
+            err.error_code = json?.detail?.error_code || '';
             reject(err);
           }
         };

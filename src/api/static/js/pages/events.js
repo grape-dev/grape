@@ -403,9 +403,7 @@ function _loadEventPrompt(taskId, seq) {
   if (_promptLoadedSeq === seq) return;
   _promptLoadedSeq = seq;
   _pc('<span style="color:#a0aac0">' + I18N.t('events.loading_prompt') + '</span>');
-  const token = localStorage.getItem('token') || '';
-  fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
-    .then(r => r.ok ? r.json() : null)
+  API.get('/task-logs/' + encodeURIComponent(taskId) + '/info')
     .then(info => {
       if (!info) { _pc('<span style="color:#ff5b5b">' + I18N.t('events.load_failed') + '</span>'); return; }
       const prompt = info.prompt || '';
@@ -418,7 +416,7 @@ function _loadEventPrompt(taskId, seq) {
         _pctext(prompt + truncated);
       }
     })
-    .catch(() => { _pc('<span style="color:#ff5b5b">' + I18N.t('events.load_failed') + '</span>'); });
+    .catch(e => { if (e.name === 'AbortError' && e.silent) return; _pc('<span style="color:#ff5b5b">' + I18N.t('events.load_failed') + '</span>'); });
 }
 
 function _convBubble(role, content, time, by) {
@@ -591,10 +589,7 @@ var _delKnowBusy = false;
 function _deleteKnowledge(scope) {
   if (_delKnowBusy) return;
   _delKnowBusy = true;
-  fetch('/api/events/' + _convSeq + '/knowledge/' + scope, {
-    method: 'DELETE',
-    headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')}
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  API.del('/events/' + _convSeq + '/knowledge/' + scope).then(function(d) {
     _delKnowBusy = false;
     if (d.ok) {
       app.showToast(I18N.t('events.knowledge_deleted'));
@@ -604,6 +599,7 @@ function _deleteKnowledge(scope) {
     }
   }).catch(function(e) {
     _delKnowBusy = false;
+    if (e.name === 'AbortError' && e.silent) return;
     app.showToast(I18N.t('events.knowledge_delete_failed', {msg: e.message}));
   });
 }
@@ -656,10 +652,7 @@ var _clearBusy = false;
 function _doClearConv(seq) {
   if (_clearBusy) return;
   _clearBusy = true;
-  fetch('/api/events/' + seq + '/chat', {
-    method: 'DELETE',
-    headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')}
-  }).then(function(r) { return r.json(); }).then(function(d) {
+  API.del('/events/' + seq + '/chat').then(function(d) {
     _clearBusy = false;
     if (d.ok) {
       app.showToast(I18N.t('events.clear_conv_done'));
@@ -669,6 +662,7 @@ function _doClearConv(seq) {
     }
   }).catch(function(e) {
     _clearBusy = false;
+    if (e.name === 'AbortError' && e.silent) return;
     app.showToast(I18N.t('events.clear_conv_failed', {msg: e.message}));
   });
 }
@@ -730,8 +724,9 @@ async function streamConvTask(taskId, elId, seq) {
   const messagesEl = document.getElementById('convMessages');
   let finalText = '';
   try {
+    const token = await API.ensureTokenValid() || '';
     const resp = await fetch('/api/events/chat/task/' + taskId + '/stream', {
-      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
+      headers: {'Authorization': 'Bearer ' + token},
       signal: ac.signal
     });
     if (!resp.ok || !resp.body) {
@@ -781,9 +776,7 @@ function resumeConvTask() {
   if (!_convSeq) return;
   const task = _getConvTask(_convSeq);
   if (task && task.task_id) {
-    fetch('/api/events/chat/task/' + task.task_id + '/status', {
-      headers: {'Authorization': 'Bearer ' + localStorage.getItem('token')},
-    }).then(r => r.json()).then(st => {
+    API.get('/events/chat/task/' + task.task_id + '/status').then(st => {
       if (st.status === 'running') {
         const messagesEl = document.getElementById('convMessages');
         let el = document.getElementById(task.el_id);
@@ -1245,9 +1238,7 @@ function openTaskLog(taskId, title) {
 }
 
 function _tlLoadInfo(taskId) {
-  const token = localStorage.getItem('token') || '';
-  fetch('/api/task-logs/' + encodeURIComponent(taskId) + '/info', {headers: {'Authorization': 'Bearer ' + token}})
-    .then(r => r.ok ? r.json() : null)
+  API.get('/task-logs/' + encodeURIComponent(taskId) + '/info')
     .then(info => {
       if (!info) return;
       const el = document.getElementById('tlInfo');
@@ -1262,7 +1253,7 @@ function _tlLoadInfo(taskId) {
       if (info.memory_percent) bits.push('💾 MEM ' + Number(info.memory_percent).toFixed(1) + '%');
       el.innerHTML = bits.map(b => '<span>' + b + '</span>').join('');
     })
-    .catch(() => {});
+    .catch(e => { if (e.name === 'AbortError' && e.silent) return; });
 }
 
 function _tlArmWaitHint() {
@@ -1278,8 +1269,8 @@ function _tlArmWaitHint() {
   }, 8000);
 }
 
-function _taskLogStream() {
-  const token = localStorage.getItem('token') || '';
+async function _taskLogStream() {
+  const token = await API.ensureTokenValid() || '';
   const ac = new AbortController();
   _taskLog.aborter = ac;
   fetch('/api/task-logs/' + encodeURIComponent(_taskLog.taskId) + '/stream?since=' + _taskLog.seq, {
@@ -1422,10 +1413,7 @@ function _tlHideKillBtn() {
 
 function _tlCheckTaskStatus() {
   if (!_taskLog.taskId) return;
-  const token = localStorage.getItem('token') || '';
-  fetch('/api/runtime/tasks/' + encodeURIComponent(_taskLog.taskId) + '/status', {
-    headers: {'Authorization': 'Bearer ' + token},
-  }).then(r => r.ok ? r.json() : null).then(d => {
+  API.get('/runtime/tasks/' + encodeURIComponent(_taskLog.taskId) + '/status').then(d => {
     if (!d || !d.status) return;
     if (d.status === 'running' || d.status === 'dispatched') {
       const btn = document.getElementById('tlKillBtn');
@@ -1433,7 +1421,7 @@ function _tlCheckTaskStatus() {
     } else {
       _tlHideKillBtn();
     }
-  }).catch(() => {});
+  }).catch(e => { if (e.name === 'AbortError' && e.silent) return; });
 }
 
 function terminateEventTask(seq, taskId) {

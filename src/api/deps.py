@@ -50,34 +50,34 @@ def get_current_user(authorization: str = Header(None)) -> dict:
     任何实例都能验证（集群会话共享）。
     """
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "NOT_LOGGED_IN", "message": "Not logged in"})
     token = authorization.replace("Bearer ", "").strip()
     # JWT access token 验证——签名+过期
     from src.api.jwt_utils import verify_access_token
     payload = verify_access_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session expired"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_EXPIRED", "message": "Session expired"})
     uid = int(payload.get("sub", 0))
     username = payload.get("username", "")
     token_ver = int(payload.get("ver", 0))
     if not uid:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "USER_NOT_FOUND", "message": "User not found"})
 
     # token_version + 禁用状态校验（内存缓存优化，TTL 5 秒）
     db_ver, status, db_username = get_user_status_cached(uid)
 
     if token_ver != db_ver:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "Session revoked"})
     if status != 1:
         # 清除缓存，下次查库
         _user_status_cache.pop(uid, None)
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "ACCOUNT_DISABLED", "message": "账号已被禁用"})
 
     # Issue #343: username/id 一致性校验——防止旧 JWT sub=旧id 撞上新表有效用户
     # JWT payload 里的 username 必须和库里 sub 对应的 username 一致
     if db_username and username and db_username != username:
         _user_status_cache.pop(uid, None)
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session invalid"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_INVALID", "message": "Session invalid"})
 
     # 记录活跃状态——O(1)，不阻塞
     mark_user_active(uid)
@@ -144,12 +144,12 @@ def get_current_user_or_api_key(request: Request) -> dict:
     from src.api.auth_token import SESSION_TOKEN_PREFIX, API_KEY_PREFIX, verify_session_token, verify_api_token
     token = _extract_api_token(request)
     if not token:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "NOT_LOGGED_IN", "message": "Not logged in"})
 
     if token.startswith(SESSION_TOKEN_PREFIX):
         info = verify_session_token(token)
         if not info:
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid or expired session token"})
+            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_TOKEN_INVALID", "message": "Invalid or expired session token"})
         return {
             "id": info["user_id"],
             "username": "",
@@ -164,13 +164,13 @@ def get_current_user_or_api_key(request: Request) -> dict:
     if token.startswith(API_KEY_PREFIX):
         info = verify_api_token(token)
         if not info:
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "Invalid or revoked API Key"})
+            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "API_KEY_INVALID", "message": "Invalid or revoked API Key"})
         uid = info["user_id"]
         # SEC-3: API Key 路径也需校验用户 status
         db_ver, status, _ = get_user_status_cached(uid)
         if status != 1:
             _user_status_cache.pop(uid, None)
-            raise HTTPException(status_code=401, detail={"code": 401, "message": "账号已被禁用"})
+            raise HTTPException(status_code=401, detail={"code": 401, "error_code": "ACCOUNT_DISABLED", "message": "账号已被禁用"})
         # D32: 从 grape_accounts 读 username
         from src.auth.grape_account_db import get_grape_account_by_id
         acc = get_grape_account_by_id(uid) or {}
@@ -210,23 +210,23 @@ def require_admin(authorization: str = Header(None)) -> dict:
     - 校验失败 → 401
     """
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Not logged in"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "NOT_LOGGED_IN", "message": "Not logged in"})
     token = authorization.replace("Bearer ", "").strip()
     from src.api.jwt_utils import verify_access_token
     payload = verify_access_token(token)
     if not payload:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session expired"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_EXPIRED", "message": "Session expired"})
     if payload.get("role") != TOKEN_TYPE_ADMIN:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Admin only"})
     uid = int(payload.get("sub", 0))
     username = payload.get("username", "")
     token_ver = int(payload.get("ver", 0))
     if not uid:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "User not found"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "USER_NOT_FOUND", "message": "User not found"})
     from src.admin.db import get_admin_token_version
     db_ver = get_admin_token_version(uid)
     if token_ver != db_ver:
-        raise HTTPException(status_code=401, detail={"code": 401, "message": "Session revoked"})
+        raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "Session revoked"})
     return {"id": uid, "username": username, "token": token, "token_type": TOKEN_TYPE_ADMIN}
 
 
