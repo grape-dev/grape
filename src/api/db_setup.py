@@ -1830,6 +1830,12 @@ def _create_indexes():
         "CREATE INDEX IF NOT EXISTS idx_autopilot_tasks_repo ON autopilot_tasks(repo_key)",
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_task ON autopilot_executions(task_id)",
         "CREATE INDEX IF NOT EXISTS idx_autopilot_exec_status ON autopilot_executions(status)",
+        # FR-16.1/FR-20.1: chat_conversations 部分唯一索引——issue 绑定的任务会话防双主并发双行
+        # FR-20.1: issue_number > 0 替代 != ''（SQLite 类型亲和性使 0 != '' 为 true，误拦 general 会话）
+        # FR-20.15: 补 conv_type 列，限定 conv_type='task' 只约束任务会话
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_chat_conv_repo_issue "
+        "ON chat_conversations (user_id, repo_key, issue_number, conv_type) "
+        "WHERE issue_number > 0 AND repo_key != '' AND conv_type = 'task'",
     ]
     # autopilot_tasks.created_by 迁移
     try:

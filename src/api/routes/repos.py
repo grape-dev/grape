@@ -116,6 +116,9 @@ def _fetch_and_cache(user_id: int, api_token: str, provider: str = "gitcode") ->
                 r["repo_key"] = f"github:{r.get('full_name', '')}"
     else:
         repos = fetch_repos_with_role(api_token)
+        # FR-5.4: 空结果可能是 token scope 受限，记 warning
+        if not repos:
+            log.warning(f"fetch_repos_with_role returned empty for user (token may lack repo read scope)")
         for r in repos:
             if not r.get("repo_key"):
                 r["repo_key"] = f"gitcode:{r.get('full_name', '')}"
@@ -210,6 +213,24 @@ def _probe_stale_repos(api_token: str, user_id: int):
     if not all_repos:
         return
 
+    # FR-1.3/FR-20.3: token 能力前置检查——探活前验证 token 有效
+    # 401 → 放弃整轮并标记"token 失效"；不做任何判定
+    if api_token:
+        try:
+            _req = urllib.request.Request(
+                "https://gitcode.com/api/v5/user",
+                headers={"Authorization": f"Bearer {api_token}", "Accept": "application/json"},
+                method="GET")
+            with urllib.request.urlopen(_req, timeout=5) as _resp:
+                pass  # 200 = token 有效
+        except urllib.error.HTTPError as _he:
+            if _he.code == 401:
+                log.warning(f"_probe_stale_repos: gitcode token invalid (401) for user {user_id}, abort probe round")
+                return  # 放弃整轮
+            # 其他错误不阻断
+        except Exception:
+            pass  # 网络异常不阻断
+
     # 按 provider 分组：GitHub 仓库需要单独的 token
     github_token = ""
     try:
@@ -219,6 +240,22 @@ def _probe_stale_repos(api_token: str, user_id: int):
         github_token = get_user_github_token_with_refresh(acc.get("username", ""), user_id=user_id)
     except Exception:
         pass
+
+    # FR-8: 兜底 token 也需要能力检查——github_token 有效性
+    if github_token:
+        try:
+            _gh_req = urllib.request.Request(
+                "https://api.github.com/user",
+                headers={"Authorization": f"Bearer {github_token}", "Accept": "application/vnd.github+json", "User-Agent": "Grape-DevOps"},
+                method="GET")
+            with urllib.request.urlopen(_gh_req, timeout=5) as _resp:
+                pass
+        except urllib.error.HTTPError as _he:
+            if _he.code == 401:
+                log.warning(f"_probe_stale_repos: github token invalid (401) for user {user_id}, GitHub repos will be skipped")
+                github_token = ""  # 清空，GitHub 仓跳过
+        except Exception:
+            pass
 
     gitcode_headers = {"Accept": "application/json", "Authorization": f"Bearer {api_token}"} if api_token else {}
     github_headers = {
@@ -278,6 +315,8 @@ def _probe_stale_repos(api_token: str, user_id: int):
             existing_repos.append(r)
 
     # 第二步：串行查 webhook（只查仓库存在且有 webhook_id 的）
+    # FR-1.1: hooks 空列表判"不确定"跳过（可能是 token 权限不足，不是 webhook 丢失）
+    webhook_lost_keys = []  # FR-2.1: webhook 丢失不删数据，与 deleted 分开处理
     for r in existing_repos:
         expected_wh = r.get("webhook_id", 0) or 0
         if not expected_wh:
@@ -301,9 +340,13 @@ def _probe_stale_repos(api_token: str, user_id: int):
             with urllib.request.urlopen(req, timeout=5) as resp:
                 hooks = _json.loads(resp.read().decode() or "[]")
             hook_ids = {h.get("id") for h in hooks if isinstance(h, dict)} if isinstance(hooks, list) else set()
+            # FR-1.1: 空列表 = 不确定（token 权限不足或无 hooks），跳过不判
+            if not hook_ids:
+                log.debug(f"managed repos: hooks list empty for {repo_key}, uncertain (skip)")
+                continue
             if expected_wh not in hook_ids:
-                stale_keys.append((repo_key, owner, repo_name))
-                log.debug(f"managed repos: webhook {expected_wh} not found for {repo_key}, marking stale")
+                webhook_lost_keys.append((repo_key, owner, repo_name))
+                log.debug(f"managed repos: webhook {expected_wh} not found for {repo_key}, marking pending-repair")
         except urllib.error.HTTPError as e:
             # 403 = 非 owner 无权限查 hooks，跳过（不误判）
             # 404 = 仓库在此刻被删了（刚才 200 现在变 404），算 stale
@@ -313,16 +356,71 @@ def _probe_stale_repos(api_token: str, user_id: int):
         except Exception:
             pass  # 超时/网络抖动，不判定
 
+    # FR-1.2: 仓库 404 双信号交叉验证——用 bot token 二次确认
+    # 用户 token 404 可能是权限问题而非仓库真删了，bot token 是 maintainer 有读权限
+    if stale_keys:
+        from src.token_resolver import TokenResolver, create_provider
+        verified_deletes = []
+        for repo_key, owner, repo_name in stale_keys:
+            provider, _, _ = parse_repo_key(repo_key)
+            try:
+                resolver = TokenResolver(create_provider(provider))
+                bot_token = resolver.read_stored_token(repo_key)  # 不检查过期
+            except Exception:
+                bot_token = ""
+            if bot_token:
+                try:
+                    if provider == "github":
+                        url = f"https://api.github.com/repos/{owner}/{repo_name}"
+                    else:
+                        url = f"https://gitcode.com/api/v5/repos/{owner}/{repo_name}"
+                    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {bot_token}", "User-Agent": "Grape-DevOps"}, method="GET")
+                    with urllib.request.urlopen(req, timeout=5) as resp:
+                        pass  # 200 = 仓库仍存在，用户 token 404 是权限问题
+                        log.info(f"probe: {repo_key} 404 with user token but 200 with bot token, skip (permission issue)")
+                        continue
+                except urllib.error.HTTPError as e2:
+                    if e2.code == 404:
+                        verified_deletes.append((repo_key, owner, repo_name))  # 双信号确认删除
+                    # 其他错误跳过不判
+                except Exception:
+                    pass  # 不判定
+            else:
+                # 无 bot token，无法二次验证，保留原判定但标记 unverified
+                verified_deletes.append((repo_key, owner, repo_name))
+                log.warning(f"probe: {repo_key} 404 unverified (no bot token for cross-check)")
+        stale_keys = verified_deletes
+
+    # FR-2.3: 单轮清理上限——stale > 2 时整轮放弃（保险丝，防"一夜清库"）
+    if len(stale_keys) > 2:
+        log.warning(f"probe: {len(stale_keys)} stale repos in one round, abort entire round (safety fuse)")
+        # webhook 丢失也不处理（token 可能有问题，全部保守跳过）
+        return
+
+    # FR-2.1: webhook 丢失（仓库仍存在）→ 置"待修复"状态，不删除任何数据
+    for repo_key, owner, repo_name in webhook_lost_keys:
+        log.info(f"managed repos: webhook lost for {repo_key}, set pending-repair (no data deletion)")
+        try:
+            user_db.set_host_status(repo_key, "webhook_missing")
+        except Exception:
+            log.warning(f"managed repos: failed to set pending-repair for {repo_key}")
+
+    # FR-2.2: 仓库删除（双信号确认）→ 级联清理 + 审计日志
     for repo_key, owner, repo_name in stale_keys:
-        log.info(f"managed repos: repo {repo_key} stale (deleted or webhook lost), auto-cleanup")
+        # FR-20.14: 清理前审计日志（含两路信号：用户 token 404 + bot token 404）
+        log.info(f"managed repos: CLEANUP_START repo={repo_key} owner={owner}/{repo_name} "
+                 f"trigger=polling-confirmed signals=[user_token_404, bot_token_404]")
         # Issue #340：级联清空全部关联数据（含需求中心 Issue 卡片/流水线/场景关联）
         from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
         try:
-            cascade_cleanup_repo_data(repo_key, owner, repo_name, trigger="polling")
+            cascade_cleanup_repo_data(repo_key, owner, repo_name, trigger="polling-confirmed")
         except RepoCleanupError as e:
             log.warning(f"managed repos: cascade cleanup {repo_key} failed (rolled back): {e}")
             continue  # 保留 managed 记录，下次探活重试
         user_db.remove_managed_repo(repo_key)
+        # FR-20.14: 清理后确认日志
+        log.info(f"managed repos: CLEANUP_DONE repo={repo_key} removed_managed=true "
+                 f"signals=[user_token_404, bot_token_404]")
 
 
 def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
@@ -333,8 +431,8 @@ def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
       请求路径不参与 as_completed / 不 join，不因探活阻塞接口返回。
     """
     import time as _time
-    if "gitcode" not in providers:
-        return  # 探活目前只走 gitcode token（GitHub 仓在函数内部按需解析）
+    if "gitcode" not in providers and "github" not in providers:
+        return  # 无任何平台 token，不探活
     uid = user.get("id", 0) or 0
     if not uid:
         return
@@ -346,9 +444,11 @@ def _start_stale_probe_async(user: dict, providers: list[str]) -> None:
             return  # 节流：短时间不重复
         _last_probe_ts[uid] = now
 
+    # FR-21.3: 按用户绑定平台取主 token——有 gitcode 用 gitcode，否则用 github
+    _probe_provider = "gitcode" if "gitcode" in providers else "github"
     def _run():
         try:
-            token = with_oauth_token(user, "gitcode", lambda t: t)
+            token = with_oauth_token(user, _probe_provider, lambda t: t)
         except Exception as e:
             log.warning(f"member: stale probe token fetch failed (non-fatal): {e}")
             return
@@ -1064,6 +1164,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     except RuntimeError as e:
         # Issue #383/#395: 上游 RuntimeError 分流——含内部 API URL 的原文不得透出给用户。
         # _req 报文格式固定：GitCode API {method} {url} failed ({code}): {text}
+        # FR-5.2: 增强错误码——401/403 返回 TOKEN_PERMISSION_INSUFFICIENT 供前端映射
         import re as _re
         _m = _re.search(r'failed \((\d{3})\)', str(e))
         _code = int(_m.group(1)) if _m else 0
@@ -1073,7 +1174,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库不存在或无权访问"})
         if _code in (401, 403):
             # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权限托管，请联系管理员"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "TOKEN_PERMISSION_INSUFFICIENT",
+                "message": "Token 权限不足或已过期，请更新后重试或改用 OAuth"})
         raise HTTPException(status_code=502, detail={"code": 502, "message": "托管服务暂时不可用，请稍后重试"})
     except Exception as e:
         # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
@@ -1613,8 +1715,8 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
         _remove_old_bot_collaborator(repo_key, owner, repo_name, _is_github, user, _old_bot_username)
 
     # 步骤 5-6: 重建 webhook + 写 DB（委托 update_managed_repo_bot_token）
-    ok = update_managed_repo_bot_token(repo_key, body.bot_token)
-    if not ok:
+    _token_result = update_managed_repo_bot_token(repo_key, body.bot_token)
+    if not _token_result.get("ok"):
         raise HTTPException(status_code=500, detail={
             "code": 500, "error_code": "WEBHOOK_REBUILD_FAILED",
             "message": "Webhook 重建失败，请检查 Bot Token 权限后重试，或使用 repair_host 恢复"
@@ -1715,40 +1817,60 @@ def _check_unmanage_vcs_permission(user: dict, owner: str, repo_name: str, repo_
     规则（与托管侧 _check_collaborator_admin 同口径）：
     - GitCode：access_level>=40（Maintainer/Admin）或单数 permission=="admin"
     - GitHub：role_name 为 admin / maintain
-    - 仓库所有者（username==owner）天然通过
+    - 仓库所有者（vcs_login==owner）天然通过
+    FR-24.1: 用 with_oauth_token + VCS /user 获取真实平台 login（对齐 host_repo）
     失败不兜底：token 缺失 / API 不可达 / 无法判定 → 一律 403 拒绝，绝不放行。
     """
-    username = (user.get("username") or "").strip()
-    if not username:
-        raise HTTPException(status_code=403, detail={
-            "code": 403, "message": "无法确定当前用户身份，拒绝解除托管（maintainer 及以上权限方可操作）"})
-    # 仓库所有者天然有完全权限
-    if username == owner:
-        return
+    # FR-24.1: 用 with_oauth_token + VCS /user 接口获取真实平台 login，
+    # 再用 with_oauth_token 包裹权限检查（对齐 host_repo 模式，自动处理 401 刷新）
     if repo_provider == "github":
-        from src.api.deps import get_user_github_token_with_refresh
-        gh_token = get_user_github_token_with_refresh(username, user_id=user.get("id", 0))
-        if not gh_token:
-            raise HTTPException(status_code=403, detail={
-                "code": 403, "message": "未绑定 GitHub 授权，无法校验仓库权限，拒绝解除托管"})
-        from src.user.repo_manager import get_github_collaborator_permission
-        role = (get_github_collaborator_permission(gh_token, owner, repo_name, username) or "").lower()
+        from src.user.repo_manager import _github_req, get_github_collaborator_permission
+        _GH_API = "https://api.github.com"
+        def _get_gh_user(token):
+            return _github_req("GET", f"{_GH_API}/user", token)
+        try:
+            user_data = with_oauth_token(user, "github", _get_gh_user)
+        except HTTPException:
+            raise
+        vcs_login = (user_data or {}).get("login", "")
+        if not vcs_login:
+            raise HTTPException(status_code=502, detail={
+                "code": 502, "message": "无法获取当前用户 GitHub 身份"})
+        if vcs_login == owner:
+            return
+        def _check_gh_perm(token, _owner=owner, _repo=repo_name, _login=vcs_login):
+            return (get_github_collaborator_permission(token, _owner, _repo, _login) or "").lower()
+        try:
+            role = with_oauth_token(user, "github", _check_gh_perm)
+        except HTTPException:
+            raise
         if role not in ("admin", "maintain"):
             raise HTTPException(status_code=403, detail={
                 "code": 403, "message": f"解除托管需要 GitHub maintainer 及以上权限（当前角色：{role or '未知'}）"})
         return
     # GitCode（默认）
-    from src.api.deps import get_user_token_with_refresh
-    gc_token = get_user_token_with_refresh(username, user.get("id", 0))
-    if not gc_token:
-        raise HTTPException(status_code=403, detail={
-            "code": 403, "message": "未绑定 GitCode 授权，无法校验仓库权限，拒绝解除托管"})
-    from src.user.repo_manager import get_member_permission, _RateLimitedError
+    from src.user.repo_manager import _req, get_member_permission, _RateLimitedError
+    def _get_gc_user(token):
+        return _req("GET", "https://gitcode.com/api/v5/user", token)
     try:
-        data = get_member_permission(gc_token, owner, repo_name, username) or {}
+        user_data = with_oauth_token(user, "gitcode", _get_gc_user)
+    except HTTPException:
+        raise
+    vcs_login = (user_data or {}).get("login", "")
+    if not vcs_login:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": "无法获取当前用户 GitCode 身份"})
+    if vcs_login == owner:
+        return
+    def _check_gc_perm(token, _owner=owner, _repo=repo_name, _login=vcs_login):
+        return get_member_permission(token, _owner, _repo, _login) or {}
+    try:
+        data = with_oauth_token(user, "gitcode", _check_gc_perm)
     except _RateLimitedError:
         raise HTTPException(status_code=429, detail={
             "code": 429, "message": "GitCode 权限校验被限流，请稍后重试（未解除任何托管）"})
+    except HTTPException:
+        raise
     if not data:
         raise HTTPException(status_code=403, detail={
             "code": 403, "message": "无法校验 GitCode 仓库权限（非协作者或 API 失败），拒绝解除托管"})
@@ -2043,7 +2165,7 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
                 if not username and user.get("id", 0) > 0:
                     from src.auth.grape_account_db import get_grape_account_by_id
                     username = (get_grape_account_by_id(user["id"]) or {}).get("username", "")
-                return get_user_github_token_with_refresh(username, user_id=user_id) or ""
+                return get_user_github_token_with_refresh(username, user_id=user.get("id", 0)) or ""
             except Exception:
                 return ""
     else:

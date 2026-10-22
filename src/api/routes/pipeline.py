@@ -42,15 +42,21 @@ def _get_latest_assignee(issue_events: list) -> str:
     return ""
 
 
-def _resolve_feishu_name(gitcode_user: str) -> str:
-    """按 GitCode 用户名查飞书昵称（缺失回退用户名）"""
+def _resolve_feishu_name(gitcode_user: str, repo_key: str = "") -> str:
+    """按平台用户名查飞书昵称（缺失回退用户名）。
+
+    FR-17.1: 有 repo_key 时按 provider 分查对应列，避免跨平台同名误命中。
+    """
     if not gitcode_user:
         return ""
     from src.session_manager import db, db_lock
+    # FR-CQ-1: 提取为 um_column_for_repo 工具函数
+    from src.repo_key import um_column_for_repo
+    _col = um_column_for_repo(repo_key)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT feishu_name FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND feishu_name!='' LIMIT 1", (gitcode_user, gitcode_user))
+            c.execute(f"SELECT feishu_name FROM unified_user_mapping WHERE {_col}=? AND feishu_name!='' LIMIT 1", (gitcode_user,))
             row = c.fetchone()
             return row[0] if row else gitcode_user
         except Exception:
@@ -232,7 +238,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
             return ""
         if feishu_name_cache is not None and name in feishu_name_cache:
             return feishu_name_cache[name]
-        result = _resolve_feishu_name(name)
+        result = _resolve_feishu_name(name, repo_key)
         if feishu_name_cache is not None:
             feishu_name_cache[name] = result
         return result

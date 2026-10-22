@@ -199,6 +199,18 @@ def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
     return collabs
 
 
+def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
+    """FR-21.2: 从 external_identities 按 platform login 查 grape_user_id。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        row = c.execute(
+            "SELECT ei.grape_user_id FROM external_identities ei "
+            "WHERE ei.provider=? AND ei.external_login=? AND ei.status=1 LIMIT 1",
+            (provider, login)).fetchone()
+        return row[0] if row else 0
+
+
 class FeishuAsync:
     """纯异步飞书API客户端 — 基于 aiohttp，无阻塞调用"""
 
@@ -765,8 +777,18 @@ class FeishuAsync:
                 continue
             for m in members:
                 if m.get("name") == nick:
-                    update_unified_user_info(login, m["open_id"], nick, gitcode_nickname=nick, app_id=ctx.app_id)
-                    matched += 1
+                    if provider == "github":
+                        # FR-21.2: GitHub 协作者 login 是 GitHub 真名，不能写 gitcode_user 列
+                        # 先从 external_identities 查 grape_user_id，再只写飞书三列
+                        _uid = _resolve_uid_by_platform_login(login, "github")
+                        if _uid:
+                            from src.session_manager import bind_feishu_identity
+                            bind_feishu_identity(_uid, m["open_id"], feishu_name=nick, app_id=ctx.app_id)
+                            matched += 1
+                    else:
+                        # GitCode 协作者 username 就是平台 login，写 gitcode_user 列正确
+                        update_unified_user_info(login, m["open_id"], nick, gitcode_nickname=nick, app_id=ctx.app_id)
+                        matched += 1
                     break
         log.info(f"[{ctx.name}] sync mapping: {repo_key} -> {matched} users matched from {len(members)} group members")
         return matched

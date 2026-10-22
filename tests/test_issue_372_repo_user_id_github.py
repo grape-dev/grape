@@ -1,11 +1,12 @@
-"""Issue #372 §36: _repo_user_id 不查 github_login 导致 GitHub issue user_id 错误测试
+"""Issue #372 §36: _repo_user_id GitHub actor 匹配测试
 
-_repo_user_id 第 1 步只查 gitcode_user，GitHub actor 查不到 → fallback 到
-grape_accounts.username → 命中旧账号。修复：加 OR github_login=?。
+FR-18.1: 按 repo_key provider 分列查询 gitcode_user / github_login。
+GitHub actor 查 github_login 列命中正确 user_id。
 
 测试覆盖（mock-based，避免全量 collection DB 污染）：
 - T19-01: GitHub actor 查 github_login 命中正确 user_id
 - T19-02: GitCode actor 仍查 gitcode_user（不受影响）
+- T19-03: 验证 _repo_user_id 按 provider 分列查询（防回归）
 """
 import os
 import sys
@@ -20,13 +21,10 @@ from unittest.mock import patch, MagicMock
 def test_github_actor_matches_github_login():
     """T19-01: GitHub actor 查 github_login 命中正确 user_id。
 
-    修复前：只查 gitcode_user → 查不到 → fallback grape_accounts → 旧账号。
-    修复后：OR github_login=? → 命中正确 user_id。
+    FR-18.1: 按 provider 分列查询，GitHub 仓库查 github_login 列。
     """
     from src.runtime.engine_select import _repo_user_id
 
-    # Mock DB: unified_user_mapping has user_id=14, gitcode_user="xiaowu", github_login="yangaiwu"
-    # GitHub actor="yangaiwu" → should match github_login → return 14
     mock_cursor = MagicMock()
     # Step 1: unified_user_mapping query returns user_id=14
     mock_cursor.fetchone.return_value = (14,)
@@ -39,12 +37,11 @@ def test_github_actor_matches_github_login():
     assert result == 14, (
         f"GitHub actor 应通过 github_login 命中 user_id=14，实际 {result}"
     )
-    # Verify the SQL contains OR github_login
+    # Verify the SQL uses github_login column (provider-based split, not OR)
     sql_arg = mock_cursor.execute.call_args_list[0][0][0]
     assert "github_login" in sql_arg, (
         f"SQL 应包含 github_login 字段查询，实际 SQL: {sql_arg}"
     )
-    assert "OR" in sql_arg.upper(), f"SQL 应包含 OR 条件，实际: {sql_arg}"
 
 
 def test_gitcode_actor_still_matches_gitcode_user():
@@ -60,18 +57,25 @@ def test_gitcode_actor_still_matches_gitcode_user():
         result = _repo_user_id("gitcode:owner/test-repo", issue_creator="gc_user_123")
 
     assert result == 7, f"GitCode actor 应通过 gitcode_user 命中 user_id=7，实际 {result}"
+    # Verify the SQL uses gitcode_user column
+    sql_arg = mock_cursor.execute.call_args_list[0][0][0]
+    assert "gitcode_user" in sql_arg, (
+        f"SQL 应包含 gitcode_user 字段查询，实际 SQL: {sql_arg}"
+    )
 
 
-def test_sql_query_includes_github_login():
-    """T19-03: 验证 _repo_user_id 第 1 步 SQL 包含 github_login 字段（防回归）。"""
+def test_sql_query_uses_provider_split():
+    """T19-03: 验证 _repo_user_id 按 provider 分列查询（防回归）。
+
+    FR-CQ-1: 重构后用 um_column_for_repo 统一列名选择，不再 inline if/else。
+    """
     import inspect
     from src.runtime.engine_select import _repo_user_id
 
     src = inspect.getsource(_repo_user_id)
-    # Find the unified_user_mapping query
-    assert "github_login" in src, (
-        "_repo_user_id 必须在 unified_user_mapping 查询中包含 github_login 字段"
+    assert "um_column_for_repo" in src, (
+        "_repo_user_id 必须用 um_column_for_repo 做分列查询"
     )
-    assert "OR github_login" in src, (
-        "_repo_user_id 的 SQL 必须有 OR github_login=? 条件"
+    assert "parse_repo_key" in src, (
+        "_repo_user_id 必须用 parse_repo_key 获取 provider（回退链需要）"
     )

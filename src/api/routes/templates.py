@@ -274,7 +274,11 @@ async def create_from_template(body: CreateTemplateRequest,
         from src.repo_key import to_repo_key
         from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
         repo_key = to_repo_key(full_name, provider=provider)
-        owner = user.get("username", "") or owner_login
+        # FR-26.1: 优先用 VCS 平台 login（owner_login），注册名做降级
+        # owner_login 来自 get_user_gitcode_login/get_user_github_login（VCS /user 接口）
+        # 下游 create_standard_task 用 assignee=owner 调 VCS API 指派 Issue，需要平台 login
+        # 下游 _get_user_id_by_gitcode(owner, repo_key) 查 um 平台列，也需要平台 login
+        owner = owner_login or user.get("username", "")
         # 仓库是全新创建时，清理同名旧仓库可能残留的 DB 数据
         # （旧仓库若被用户在 GitCode 网页直接删除、未走解除托管，
         #   events/issue_state/agent_tasks/sessions 等残留，导致新仓库前端界面混乱）

@@ -227,10 +227,29 @@ try:
     except Exception:
         _has_ga = None  # 表不存在
     if _has_ga:
+        # FR-18.4: backfill 改源——只建 (user_id) 空行，不灌注册名
         db.execute(
-            "INSERT OR IGNORE INTO unified_user_mapping (user_id, gitcode_user, gitcode_nickname) "
-            "SELECT id, username, nickname FROM grape_accounts WHERE id>0"
+            "INSERT OR IGNORE INTO unified_user_mapping (user_id) "
+            "SELECT id FROM grape_accounts WHERE id>0"
         )
+        # FR-18.4: 从 external_identities 回填平台列真值（仅填空值不覆盖 PAT 已写真值）
+        try:
+            db.execute(
+                "UPDATE unified_user_mapping SET gitcode_user="
+                "(SELECT ei.external_login FROM external_identities ei "
+                "WHERE ei.grape_user_id=unified_user_mapping.user_id "
+                "AND ei.provider='gitcode' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
+                "WHERE (gitcode_user IS NULL OR gitcode_user='')"
+            )
+            db.execute(
+                "UPDATE unified_user_mapping SET github_login="
+                "(SELECT ei.external_login FROM external_identities ei "
+                "WHERE ei.grape_user_id=unified_user_mapping.user_id "
+                "AND ei.provider='github' AND ei.status=1 AND ei.external_login!='' LIMIT 1) "
+                "WHERE (github_login IS NULL OR github_login='')"
+            )
+        except Exception:
+            pass
         # 补充 gitcode_id 关联：从 external_identities 读
         try:
             db.execute(
@@ -425,14 +444,63 @@ def get_feishu_open_id(gitcode_user, app_id=""):
 
     app_id 非空 → 仅返回该 App 的 open_id；为空 → 向后兼容（不按 app 过滤）。
     """
+    if not gitcode_user:
+        return None
     with db_lock:
         c = db.cursor()
         if app_id:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND app_id=?", (gitcode_user, gitcode_user, app_id))
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? AND app_id=?", (gitcode_user, app_id))
+            row = c.fetchone()
+            # FR-20.8: gitcode_user 未命中或命中但 open_id 为空时回退查 github_login（GitHub-only 用户）
+            # 回退条件不仅是"没查到行"，还包括"查到行但 feishu_open_id 为空"——
+            # 撞名型场景：gitcode_user 列撞名命中了无飞书的行，真身份在 github_login 列
+            if not row or not row[0]:
+                c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE github_login=? AND app_id=?", (gitcode_user, app_id))
+                row = c.fetchone()
         else:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=? OR github_login=?", (gitcode_user, gitcode_user))
-        row = c.fetchone()
-        return row[0] if row else None
+            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE gitcode_user=?", (gitcode_user,))
+            row = c.fetchone()
+            if not row or not row[0]:
+                c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE github_login=?", (gitcode_user,))
+                row = c.fetchone()
+        if row and row[0]:
+            return row[0]
+        # FR-22.5: 注册名回退——gitcode_user/github_login 都未命中时，
+        # 从 grape_accounts 按 username 查 user_id，再按 user_id 查 um 行的 feishu_open_id。
+        # 场景：注册名 != 平台 login（如注册名 "user_a"，平台 login "login_a"），
+        # FR-18.4 backfill 后 um.gitcode_user 存的是平台 login，注册名查不到。
+        try:
+            c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) AND status=1 LIMIT 1", (gitcode_user,))
+            ga_row = c.fetchone()
+            if ga_row:
+                if app_id:
+                    c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=? AND app_id=?", (ga_row[0], app_id))
+                else:
+                    c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE user_id=?", (ga_row[0],))
+                row = c.fetchone()
+                return row[0] if row else None
+        except Exception:
+            pass
+        return None
+
+
+def bind_feishu_identity(user_id, open_id, feishu_name="", app_id=""):
+    """FR-18.7: 注册名语境——只写飞书三列，不碰平台列（gitcode_user/github_login）。
+
+    供 feishu_onboard / handler_async p2p 确认调用。
+    扫码绑定飞书凭什么动 gitcode_user？语义上就是错的。
+    """
+    if not user_id:
+        return False
+    with db_lock:
+        c = db.cursor()
+        c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (user_id,))
+        c.execute(
+            "UPDATE unified_user_mapping SET feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? "
+            "WHERE user_id=?",
+            (open_id, feishu_name, app_id, datetime.now().isoformat(), user_id))
+        db.commit()
+        return True
 
 
 def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_nickname="", app_id=""):
@@ -463,11 +531,14 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
     except Exception:
         pass
 
+    # FR-11.2: 空入参早退，防止空串命中空串列行
+    if not gitcode_user:
+        return False
     with db_lock:
         c = db.cursor()
         stored = c.execute(
-            "SELECT user_id, feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=? OR github_login=?",
-            (gitcode_user, gitcode_user)).fetchone()
+            "SELECT user_id, feishu_open_id, feishu_name, app_id FROM unified_user_mapping WHERE gitcode_user=?",
+            (gitcode_user,)).fetchone()
         stored_open = stored[1] or "" if stored else ""
         stored_name = stored[2] or "" if stored else ""
         stored_app = stored[3] or "" if stored else ""
@@ -493,9 +564,11 @@ def update_unified_user_info(gitcode_user, open_id="", feishu_name="", gitcode_n
                 "INSERT OR IGNORE INTO unified_user_mapping (user_id, updated_at) VALUES (?, datetime('now'))",
                 (user_id,)
             )
+            # FR-18.4: CASE WHEN 守卫——gitcode_user 空串不覆盖真值
             c.execute(
-                "UPDATE unified_user_mapping SET gitcode_user=?, gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? WHERE user_id=?",
-                (gitcode_user, gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), user_id)
+                "UPDATE unified_user_mapping SET gitcode_user=CASE WHEN ?='' THEN gitcode_user ELSE ? END, "
+                "gitcode_nickname=?, feishu_open_id=?, feishu_name=?, app_id=?, updated_at=? WHERE user_id=?",
+                (gitcode_user, gitcode_user, gitcode_nickname, open_id, feishu_name, final_app, datetime.now().isoformat(), user_id)
             )
         else:
             row = stored
@@ -575,6 +648,30 @@ def set_notify_enabled(repo_key, enabled):
         c = db.cursor()
         c.execute("UPDATE repo_im_group_binding SET notify_enabled=? WHERE repo_key=?", (int(enabled), repo_key))
         db.commit()
+
+
+# ====== repo_im_group_binding UPSERT (FR-CQ-2) ======
+
+def upsert_repo_im_binding(chat_id: str, repo_key: str, source: str,
+                           bind_by: str, app_id: str):
+    """群绑定仓库 UPSERT（调用方负责 db_lock + commit）。
+
+    FR-14.1: ON CONFLICT 只更新绑定列，保留 notify_enabled/auto_impl_enabled 用户配置。
+    调用方必须在 db_lock 块内调用，并在调用后执行后续 UPDATE + commit。
+    """
+    c = db.cursor()
+    c.execute(
+        "INSERT INTO repo_im_group_binding (im_provider, im_chat_id, repo_key, source, bind_by, im_app_id) "
+        "VALUES ('feishu',?,?,?,?,?) "
+        "ON CONFLICT(im_provider, im_chat_id, im_app_id) DO UPDATE SET "
+        "repo_key=excluded.repo_key, source=excluded.source, bind_by=excluded.bind_by, im_app_id=excluded.im_app_id",
+        (chat_id, repo_key, source, str(bind_by), app_id))
+
+
+def _is_constraint_error(exc: Exception) -> bool:
+    """FR-20.17: 判断异常是否为约束冲突（兼容 SQLite IntegrityError / MySQL 1062）。"""
+    msg = str(exc).lower()
+    return 'integrity' in msg or 'constraint' in msg or 'duplicate' in msg or '1062' in str(exc)
 
 
 # ====== chat_conversations CRUD ======

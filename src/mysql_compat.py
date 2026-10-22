@@ -92,8 +92,9 @@ _CREATE_UNIQUE_INDEX_RE = re.compile(
     r"^\s*CREATE\s+UNIQUE\s+INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(\w+)\s*\((.+)\)\s*$", re.I
 )
 _CREATE_INDEX_RE = re.compile(
-    r"^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(\w+)\s*\((.+)\)\s*$", re.I
+    r"^\s*CREATE\s+(?:UNIQUE\s+)?INDEX\s+IF\s+NOT\s+EXISTS\s+(\w+)\s+ON\s+(\w+)\s*\((.+?)\)\s*(?:WHERE\s+(.+))?\s*$", re.I
 )
+_CREATE_INDEX_WHERE_RE = re.compile(r"\bWHERE\b", re.I)
 _PRAGMA_IGNORE_RE = re.compile(
     r"^\s*PRAGMA\s+(journal_mode|busy_timeout|synchronous|foreign_keys|locking_mode|cache_size|wal_autocheckpoint|temp_store)",
     re.I,
@@ -518,11 +519,13 @@ class MySQLCompatCursor:
             self.rowcount = len(self._rows)
             self._pycur = None
             return self
-        # CREATE [UNIQUE] INDEX IF NOT EXISTS
+        # CREATE [UNIQUE] INDEX IF NOT EXISTS（含可选 WHERE 子句的部分索引）
         m = _CREATE_INDEX_RE.match(sql)
         if m:
             unique = "UNIQUE " if "UNIQUE" in sql.upper() and not sql.upper().startswith("CREATE INDEX") else ""
             idx, tbl, cols = m.group(1), m.group(2), m.group(3)
+            # MySQL 不支持部分索引（WHERE 子句），降级为全列唯一索引。
+            # m.group(4) 是 WHERE 子句，MySQL 端丢弃不用。
             cur = self._conn._raw_cursor()
             cur.execute(
                 "SELECT COUNT(*) FROM information_schema.statistics "
@@ -545,6 +548,9 @@ class MySQLCompatCursor:
                         fixed_cols.append(f"`{col}`(191)")
                     else:
                         fixed_cols.append(f"`{col}`")
+                # FR-20.2: MySQL 不支持部分索引（WHERE 子句）。
+                # 有 WHERE 子句时降级为全列唯一索引（MySQL 靠全列约束 + 应用层守卫兜底）。
+                # 无 WHERE 子句时正常创建。
                 cur.execute(f"CREATE {unique}INDEX `{idx}` ON `{tbl}` ({', '.join(fixed_cols)})")
             self._rows = []
             self.rowcount = 0

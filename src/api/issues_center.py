@@ -56,28 +56,34 @@ class TaskCloseBody(BaseModel):
     issue_number: int = 0
 
 
-def _get_user_id_by_gitcode(gitcode_user: str) -> int | None:
-    """按 GitCode 用户名查平台 user_id（unified_user_mapping.user_id）。
+def _get_user_id_by_gitcode(gitcode_user: str, repo_key: str = "") -> int | None:
+    """按平台用户名查 user_id（unified_user_mapping.user_id）。
 
     查找失败（未注册或异常）时记录 warning 日志，便于追溯（Issue #178）。
     优先返回「登录账号（grape_accounts）id」——unified_user_mapping 可能存在新旧双 id 映射
     （低 id 遗留 + grape_accounts id），若取到非登录 id 会导致 issue.user_id 与请求用户不符、
     「我的需求」按 user_id 过滤为空（issue-244 关联事故）。无登录账号时回退任意映射。
+
+    FR-11.2: 按 repo_key 的 provider 分查对应列（gitcode_user / github_login），
+    避免 OR 扫两列导致空串交叉命中。repo_key 为空时降级为 gitcode_user 查询（向后兼容）。
     """
     if not gitcode_user:
         return None
     with db_lock:
         c = db.cursor()
         try:
+            # FR-CQ-1: 提取为 um_column_for_repo 工具函数
+            from src.repo_key import um_column_for_repo
+            _col = um_column_for_repo(repo_key)
             row = c.execute(
-                "SELECT um.user_id FROM unified_user_mapping um "
-                "WHERE (um.gitcode_user=? OR um.github_login=?) AND um.user_id>0 "
-                "AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND (ga.username=um.gitcode_user OR ga.username=um.github_login)) "
-                "LIMIT 1", (gitcode_user, gitcode_user)).fetchone()
+                f"SELECT um.user_id FROM unified_user_mapping um "
+                f"WHERE um.{_col}=? AND um.user_id>0 "
+                f"AND EXISTS (SELECT 1 FROM grape_accounts ga WHERE ga.id=um.user_id AND ga.status=1) "
+                f"ORDER BY um.user_id LIMIT 1", (gitcode_user,)).fetchone()
             if not row:
                 row = c.execute(
-                    "SELECT user_id FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND user_id>0 LIMIT 1",
-                    (gitcode_user, gitcode_user)).fetchone()
+                    f"SELECT user_id FROM unified_user_mapping WHERE {_col}=? AND user_id>0 LIMIT 1",
+                    (gitcode_user,)).fetchone()
             if row:
                 return row[0]
             log.warning(f"_get_user_id_by_gitcode: gitcode_user='{gitcode_user}' not found in unified_user_mapping (user_id will be 0)")
@@ -87,12 +93,20 @@ def _get_user_id_by_gitcode(gitcode_user: str) -> int | None:
             return None
 
 
-def _get_feishu_open_id(gitcode_user: str) -> str:
-    """按 GitCode 用户名查飞书 open_id"""
+def _get_feishu_open_id(gitcode_user: str, repo_key: str = "") -> str:
+    """按平台用户名查飞书 open_id。
+
+    FR-17.2: 有 repo_key 时按 provider 分查对应列；无则只查 gitcode_user（调用方从 grape_accounts.username 取值）。
+    """
+    if not gitcode_user:
+        return ""
+    # FR-CQ-1: 提取为 um_column_for_repo 工具函数
+    from src.repo_key import um_column_for_repo
+    _col = um_column_for_repo(repo_key)
     with db_lock:
         c = db.cursor()
         try:
-            c.execute("SELECT feishu_open_id FROM unified_user_mapping WHERE (gitcode_user=? OR github_login=?) AND feishu_open_id!='' LIMIT 1", (gitcode_user, gitcode_user))
+            c.execute(f"SELECT feishu_open_id FROM unified_user_mapping WHERE {_col}=? AND feishu_open_id!='' LIMIT 1", (gitcode_user,))
             row = c.fetchone()
             return row[0] if row else ""
         except Exception:
@@ -275,7 +289,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
     # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
-    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target) if target else 0)
+    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0

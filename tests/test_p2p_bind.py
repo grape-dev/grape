@@ -79,7 +79,8 @@ def test_first_p2p_message_asks_confirmation_no_bind():
 def test_confirm_binds_mapping():
     """回复「是」后绑定映射"""
     import asyncio
-    _seed_user_and_bot("p2puser2", "cli_p2p2", 70002)
+    _user_info = _seed_user_and_bot("p2puser2", "cli_p2p2", 70002)
+    _uid = _user_info["id"]
     # 首次消息建立 pending
     asyncio.run(_send({
         "type": "message", "text": "hi", "chat_id": "oc_x",
@@ -95,10 +96,13 @@ def test_confirm_binds_mapping():
     with db_lock:
         _rows = db.cursor().execute("SELECT user_id, gitcode_user, feishu_open_id FROM unified_user_mapping").fetchall()
     assert _rows, f"mapping table empty after confirm; replies={[c.args for c in api2.reply_text.call_args_list]}"
-    # 已绑定
+    # 已绑定（FR-22.5: bind_feishu_identity 只写飞书三列不写 gitcode_user，
+    # get_feishu_open_id 通过 user_id 回退命中）
     assert get_feishu_open_id("p2puser2") == "ou_p2p2"
-    mapping = get_feishu_mapping("")
-    assert mapping["p2puser2"]["gitcode_nickname"] == "测试昵称"
+    # FR-18.7: bind_feishu_identity 不写 gitcode_user 列，直接查 um 行验证
+    with db_lock:
+        _um = db.cursor().execute("SELECT feishu_open_id, feishu_name FROM unified_user_mapping WHERE user_id=?", (_uid,)).fetchone()
+    assert _um and _um[0] == "ou_p2p2"
 
 
 def test_deny_does_not_bind():

@@ -809,14 +809,40 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
 
 
 def resolve_actor(payload: dict, evt: dict) -> str:
-    """从 payload 提取执行者"""
+    """从 payload 提取执行者。
+
+    FR-12.5: 多级 fallback 防止 actor 为空——
+    evt.actor > payload.user/sender > payload.comment.user > payload.issue.user > payload.pusher > "unknown"
+    """
     actor = evt.get("actor", "")
     if actor:
         return actor
     for key in ("user", "sender"):
         obj = payload.get(key, {})
         if isinstance(obj, dict):
-            return obj.get("username", obj.get("login", ""))
+            _login = obj.get("username", obj.get("login", ""))
+            if _login:
+                return _login
+    # FR-12.5: comment 作者兜底
+    _comment = payload.get("comment", {})
+    if isinstance(_comment, dict):
+        _c_user = _comment.get("user", {})
+        if isinstance(_c_user, dict):
+            _login = _c_user.get("username", _c_user.get("login", ""))
+            if _login:
+                return _login
+    # FR-12.5: issue author 兜底
+    _issue = payload.get("issue", {})
+    if isinstance(_issue, dict):
+        _i_user = _issue.get("user", {})
+        if isinstance(_i_user, dict):
+            _login = _i_user.get("username", _i_user.get("login", ""))
+            if _login:
+                return _login
+    # FR-12.5: pusher 兜底
+    _pusher = payload.get("pusher", "")
+    if _pusher and isinstance(_pusher, str):
+        return _pusher
     return "unknown"
 
 
@@ -2287,6 +2313,8 @@ def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
             from src.user.db import get_github_token
             tok = get_github_token(repo_key=repo_key) or ""
             if not tok:
+                # FR-12.1: token 空时记 warning（不再静默）
+                log.warning(f"_fetch_issue_assignee: no github token for {repo_key}, assignee resolution degraded")
                 return ""
             d = _github_fetch_issue(owner, rname, num, tok)
             asg = d.get("assignee") or {}
@@ -2297,6 +2325,8 @@ def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
         from src.user.db import get_repo_token_with_refresh
         tok = get_repo_token_with_refresh(repo_key) or ""
         if not tok:
+            # FR-12.1: token 空时记 warning（不再静默）
+            log.warning(f"_fetch_issue_assignee: no gitcode token for {repo_key}, assignee resolution degraded")
             return ""
         req = urllib.request.Request(
             f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",

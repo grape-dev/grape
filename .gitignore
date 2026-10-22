@@ -88,6 +88,7 @@ skills.bak.*/
 *.bak2
 scripts/check_*.py
 scripts/clean_*.py
+!scripts/clean_empty_strings_to_null.py
 scripts/batch_*.py
 scripts/clear_*.py
 scripts/find_*.py

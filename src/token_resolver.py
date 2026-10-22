@@ -257,11 +257,12 @@ def create_provider_from_repo_key(repo_key: str) -> VCSProvider:
 class TokenResult:
     """token 获取结果，携带级别信息。"""
     token: str = ""               # token 字符串（向后兼容：薄包装取 .token 返回 str）
-    level: str = ""               # "session" / "repo_bot" / "global_bot" / "user"
+    level: str = ""               # "session" / "repo_bot" / "global_bot" / "user"（执行链实际生效级别，受过期短路影响）
     provider: Optional[VCSProvider] = None  # VCSProvider 实例
     repo_key: str = ""            # 仓库标识
     expired: bool = False         # 是否已标记过期（用户 token status=4 时 expired=True 但仍返回 token）
     issue_id: str = ""            # R20.6.1: 自循环检测用——is_self_loop_actor 需要查 running task
+    config_level: str = ""        # FR-10.3: 配置级别（不受过期短路影响，供自循环检测读取）
 
 
 # ---------------------------------------------------------------------------
@@ -714,10 +715,11 @@ class TokenResolver:
         return ""
 
     def resolve(self, repo_key: str) -> TokenResult:
-        """获取 TokenResult（token + level + provider + repo_key + expired）。
+        """获取 TokenResult（token + level + provider + repo_key + expired + config_level）。
 
         遍历策略链，第一个返回非空 token 的策略胜出。
         返回的 TokenResult 携带级别信息供 TokenActionHandler 分发。
+        FR-10.3: config_level 字段填充配置级别（不受过期短路影响）。
         """
         if not repo_key:
             return TokenResult(token="", level="", provider=self.provider, repo_key="")
@@ -725,6 +727,7 @@ class TokenResolver:
         repo_key = to_repo_key(repo_key)
         if not repo_key:
             return TokenResult(token="", level="", provider=self.provider, repo_key="")
+        # FR-20.7: config_level 从胜出策略推算，不再单独调 resolve_config_level（避免两次策略链扫描）
         for strategy in self.strategies:
             token = strategy.get_token(repo_key)
             if token:
@@ -735,8 +738,11 @@ class TokenResolver:
                     provider=self.provider,
                     repo_key=repo_key,
                     expired=expired,
+                    config_level=strategy.level,
                 )
-        return TokenResult(token="", level="", provider=self.provider, repo_key=repo_key)
+        # 全部策略未命中：config_level 取 resolve_config_level 结果
+        _config_level = self.resolve_config_level(repo_key).level
+        return TokenResult(token="", level="", provider=self.provider, repo_key=repo_key, config_level=_config_level)
 
     def resolve_config_level(self, repo_key: str) -> TokenResult:
         """获取配置级别 TokenResult（不检查过期、不触发 refresh）。
@@ -762,11 +768,15 @@ class TokenResolver:
             else:
                 token = strategy._fetch(repo_key)
             if token:
+                # FR-20.10: resolve_config_level 也填充 expired 字段
+                # 供 session_store 判断是否写入 session token
+                _expired = strategy._is_expired(repo_key) if hasattr(strategy, '_is_expired') else False
                 return TokenResult(
                     token=token,
                     level=strategy.level,
                     provider=self.provider,
                     repo_key=repo_key,
+                    expired=_expired,
                 )
         # 无 token 配置 → 返回空级别（pipeline 不检测自循环）
         return TokenResult(token="", level="", provider=self.provider, repo_key=repo_key)

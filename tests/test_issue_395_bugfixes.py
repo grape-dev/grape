@@ -408,7 +408,8 @@ class TestHostRepoUpstreamErrorMapping:
         if e.status_code == 401:
             assert e.detail.get("action") == "reauth_required"
         else:
-            assert e.detail.get("message") == "无权限托管，请联系管理员"
+            assert e.detail.get("error_code") == "TOKEN_PERMISSION_INSUFFICIENT"
+            assert "Token 权限不足" in e.detail.get("message", "")
         msg = str(e.detail.get("message", ""))
         assert "gitcode.com/api" not in msg, f"internal URL leaked: {msg}"
         assert "failed (401)" not in msg, f"upstream raw error leaked: {msg}"

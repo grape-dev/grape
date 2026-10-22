@@ -53,14 +53,13 @@ _REPO_KEY_TABLES = (
 
 
 def _normalize_keys(repo_key: str) -> list[str]:
-    """repo_key 带/不带 gitcode: 前缀双写兼容。"""
+    """repo_key 带/不带 provider 前缀双写兼容（FR-21.5: 通用化，支持 gitcode/github）。"""
     if not repo_key:
         return []
-    keys = [repo_key]
-    if not repo_key.startswith("gitcode:"):
-        keys.append(f"gitcode:{repo_key}")
-    else:
-        keys.append(repo_key[len("gitcode:"):])
+    from src.repo_key import parse_repo_key
+    provider, owner, repo = parse_repo_key(repo_key)
+    base = f"{owner}/{repo}" if owner and repo else repo_key
+    keys = [repo_key, f"{provider}:{base}", base]
     return list(dict.fromkeys(k for k in keys if k))
 
 

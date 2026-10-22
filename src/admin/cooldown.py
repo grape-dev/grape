@@ -118,8 +118,10 @@ def _anonymize_account(user_id: int):
             c.execute("DELETE FROM scene_likes WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM skill_likes WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM org_member WHERE user_id=?", (user_id,))
-            c.execute("DELETE FROM unified_user_mapping WHERE user_id=?", (user_id,))
             c.execute("DELETE FROM feishu_onboard_task WHERE user_id=?", (user_id,))
+            # 清列保行不 DELETE um——铁律 1：DELETE 后 backfill 重灌伪身份
+            c.execute("UPDATE unified_user_mapping SET gitcode_user='', github_login='', feishu_open_id='', feishu_name='', app_id='' WHERE user_id=?",
+                      (user_id,))
 
             # Step 4: 匿名化字段
             c.execute(

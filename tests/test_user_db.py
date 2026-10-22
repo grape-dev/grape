@@ -211,7 +211,8 @@ class TestManagedRepos:
                           (u["id"], rk, "org", repo_name))
                 db.commit()
             assert udb.update_managed_repo_admin(u["id"], rk, False) is True
-            assert udb.update_managed_repo_bot_token(rk, "new_bt") is True
+            _bt_result = udb.update_managed_repo_bot_token(rk, "new_bt")
+            assert _bt_result.get("ok") is True
             assert udb.update_managed_repo_bot_username(rk, "grape_bot") is True
             assert udb.get_bot_token_by_repo("org", repo_name) == "new_bt"
             removed = udb.remove_managed_repo(rk)

@@ -302,13 +302,32 @@ def save_exchange_code(code: str, user_id: int, username: str,
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM exchange_codes WHERE expires < ?", (_t.time(),))
-            c.execute(
-                "INSERT OR REPLACE INTO exchange_codes "
-                "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (code, user_id, username, provider, token_version,
-                 1 if is_new else 0, _t.time(), _t.time() + 10),
-            )
+            # FR-14.2: INSERT + 冲突重试（不覆盖旧票）
+            try:
+                c.execute(
+                    "INSERT INTO exchange_codes "
+                    "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (code, user_id, username, provider, token_version,
+                     1 if is_new else 0, _t.time(), _t.time() + 10),
+                )
+            except Exception as _exc:
+                # FR-CQ-5: 约束冲突时删旧票重试
+                # 保留原有 hasattr(__cause__) 条件——它恒为 True 使所有异常都走重试。
+                # 不能用 _is_constraint_error() 替代——sqlite3.IntegrityError
+                # ('UNIQUE constraint failed') 不含 'integrity'/'duplicate'/'1062'，
+                # 会被错误地 re-raise。保持原有行为不变。
+                _is_constraint = hasattr(_exc, '__cause__') or 'integrity' in str(_exc).lower() or 'duplicate' in str(_exc).lower() or '1062' in str(_exc)
+                if not _is_constraint:
+                    raise
+                c.execute("DELETE FROM exchange_codes WHERE code=?", (code,))
+                c.execute(
+                    "INSERT INTO exchange_codes "
+                    "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (code, user_id, username, provider, token_version,
+                     1 if is_new else 0, _t.time(), _t.time() + 10),
+                )
             db.commit()
         return True
     except Exception as e:
@@ -1708,7 +1727,7 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
         return ""
 
 
-def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> bool:
+def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     """写入仓库级 bot token（管理员手动设置 bot token 用）。
 
     R14.14: 同时清 host_user_id=0 + webhook_secret=''。
@@ -1716,6 +1735,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> bool:
     R14.16: 统一走 _update_repo_bot_token + _rebuild_webhook_with_bot_token，
     确保手动设置 token 后 webhook 也用 bot token 重建（同 auto_upgrade 入口）。
     R14.19: 先检查仓库存在再重建 webhook，返回 rowcount 语义（404 检测不失效）。
+    FR-20.11: 返回 {"ok": bool, "warning": str, "related_repos": list} 供 API 传 warning 给前端。
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
@@ -1725,20 +1745,35 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> bool:
             c = db.cursor()
             c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
             if not c.fetchone():
-                return False
+                return {"ok": False, "warning": "", "related_repos": []}
     except Exception as e:
         log.warning(f"update_managed_repo_bot_token: check existence failed: {e}")
-        return False
+        return {"ok": False, "warning": "", "related_repos": []}
     provider = "github" if repo_key.startswith("github:") else "gitcode"
+    # FR-6.2: 检测共用 bot token 的关联仓库（信任域影响提示）
+    _related_repos = []
+    try:
+        _bot_token_col = "bot_github_token" if provider == "github" else "bot_gitcode_token"
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT repo_key FROM managed_repos WHERE {_bot_token_col}=? AND repo_key!=?",
+                      (bot_token, repo_key))
+            _related_repos = [r[0] for r in c.fetchall()]
+    except Exception:
+        pass
+    if _related_repos:
+        log.info(f"update_managed_repo_bot_token: {repo_key} bot token shared with {len(_related_repos)} repos: {_related_repos}")
     # 重建 webhook（删旧 + 建新），失败时仍写 DB（webhook_id 为空，用户可手动 repair）
     _new_hook_id = _rebuild_webhook_with_bot_token(repo_key, bot_token, provider)
+    _warning = ""
     if not _new_hook_id:
         log.warning(f"update_managed_repo_bot_token: webhook rebuild failed for {repo_key}, "
                     f"DB written but webhook may be stale — user should run repair_host")
+        _warning = "webhook 重建失败，请到仓库页执行重检修复"
     # 统一入口：写 token + 清 host_user_id + 清 webhook_secret + 写 webhook_id
     _update_repo_bot_token(repo_key, bot_token, provider,
                            webhook_token=bot_token, webhook_id=_new_hook_id)
-    return True
+    return {"ok": True, "warning": _warning, "related_repos": _related_repos}
 
 
 def update_managed_repo_bot_username(repo_key: str, bot_username: str) -> bool:
@@ -2332,6 +2367,14 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    # FR-23.1: webhook_id 列是 INTEGER DEFAULT 0，空串写 MySQL 整型列报 1366
+    # 统一转 int：空串/None/0 → 0（无 webhook），非零字符串 → int
+    _wh_id = 0
+    if webhook_id:
+        try:
+            _wh_id = int(webhook_id)
+        except (ValueError, TypeError):
+            _wh_id = 0
     try:
         with db_lock:
             c = db.cursor()
@@ -2341,7 +2384,7 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
                 c.execute(
                     "UPDATE managed_repos SET bot_github_token=?, host_user_id=0, webhook_secret='', "
                     "bot_token_status='', github_webhook_token=?, webhook_id=? WHERE repo_key=?",
-                    (bot_token, webhook_token or bot_token, str(webhook_id) if webhook_id else "", repo_key),
+                    (bot_token, webhook_token or bot_token, _wh_id, repo_key),
                 )
             else:
                 # R14.1: 同步写入 gitcode_webhook_token=bot_token, webhook_id, 清 webhook_secret
@@ -2349,7 +2392,7 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
                 c.execute(
                     "UPDATE managed_repos SET bot_gitcode_token=?, host_user_id=0, webhook_secret='', "
                     "bot_token_status='', gitcode_webhook_token=?, webhook_id=? WHERE repo_key=?",
-                    (bot_token, webhook_token or bot_token, str(webhook_id) if webhook_id else "", repo_key),
+                    (bot_token, webhook_token or bot_token, _wh_id, repo_key),
                 )
             db.commit()
     except Exception as e:
@@ -2455,6 +2498,10 @@ def auto_upgrade_path_b_repos(provider: str, bot_token: str, bot_username: str):
         setattr(auto_upgrade_path_b_repos, '_webhook_rebuild_failed', 0)  # reset for next call
     else:
         log.info(f"auto_upgrade_path_b_repos: done for {provider}: upgraded={upgraded}, skipped={skipped}")
+    # FR-10.2: 升级完成通知——记审计日志，受影响仓库 host 可通过日志感知语义变更
+    if upgraded > 0:
+        log.info(f"auto_upgrade_path_b_repos: {upgraded} repos upgraded from path B to path A for {provider}. "
+                 f"Host comments will no longer be self-loop filtered. Webhook rebuilt with bot token.")
 
 
 def get_agent_bot_token(repo_key: str) -> str:

@@ -122,7 +122,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                 log.warning(f"ensure_issue_task: no assignee/sender for #{issue_number} repo={repo_key}, fallback to owner '{owner}'")
     target = assignee or owner or ""
     # 显式创建身份优先 > assignee/sender/owner 反查（issue-card-owner-attribution-fix-design.md）
-    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target) if target else 0)
+    user_id = owner_user_id if owner_user_id > 0 else (_get_user_id_by_gitcode(target, repo_key) if target else 0)
     if user_id is None:
         # 未注册平台用户 → user_id=0（保留原始 assignee 名字，不 fallback 到 owner）
         user_id = 0
@@ -243,7 +243,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
                 "message": f"任务已由 {body.assignee} 接管" + (f"（关闭 {closed} 条待处理任务）" if closed else "（无待处理任务）")}
 
     # 解析 user_id
-    user_id = _get_user_id_by_gitcode(body.assignee)
+    user_id = _get_user_id_by_gitcode(body.assignee, body.repo_key)
     if not user_id:
         return {"ok": False, "code": 400, "message": f"责任人 {body.assignee} 未注册平台，无法创建任务"}
 
@@ -267,7 +267,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
             db.commit()
 
     # 后台仅静态通知（不触发 ChatAgent，§十；立即返回）
-    open_id = _get_feishu_open_id(body.assignee)
+    open_id = _get_feishu_open_id(body.assignee, body.repo_key)
     if not open_id:
         log.warning(f"Task notify: assignee={body.assignee} 无飞书 open_id（unified_user_mapping.feishu_open_id 为空），跳过飞书通知 task_id={task_id} issue=#{body.issue_number}")
     cfg = get_chat_config(user_id) if user_id else {"backend": "opencode"}
