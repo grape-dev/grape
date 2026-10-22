@@ -112,6 +112,7 @@
     "install_hint": "📦 在 Worker 机器（普通用户）一键安装接入：",
     "install_desc": "该命令从主控下载运行包（grape-worker.tar.gz）解压到用户家目录，自动写入凭据与主控地址并后台启动注册；免 root。重复执行可升级。",
     "manual_start": "或手动启动 RuntimeAgent：",
+    "manual_start_desc": "需在安装根目录（运行包解压目录）下执行上述命令，请勿进入 src 目录执行。",
     "win_install_hint": "🖥️ Windows 设备接入（PowerShell）：",
     "win_install_desc": "在 Windows 设备上打开 PowerShell 执行以下命令，自动下载安装运行包、写入凭据并后台启动注册。需预装 Python 3.10+。",
     "toast_generated": "凭据已生成",
