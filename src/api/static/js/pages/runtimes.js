@@ -199,18 +199,20 @@ function _healthLabel(h) { return I18N.t('runtimes.health.' + (HEALTH_NAMES[h] |
 function _scopeLabel(s) { return I18N.t('runtimes.scope.' + (SCOPE_NAMES[s] || 'global')); }
 
 // 汇总统计栏：在过滤标签和卡片网格之间显示总体健康分布
+// Issue #432: Engines tab 使用 _filterEngines 过滤后列表（与 renderEngines 同口径）；
+//             Workers tab 维持 devices 口径不变；文案全部走 i18n。
 function _summaryStatsBar(data, devices) {
-  const list = _runtimeTab === 'engines' ? (data.runtimes || []) : devices;
+  const list = _runtimeTab === 'engines' ? _filterEngines(data.runtimes || []) : devices;
   if (!list || !list.length) return '';
   const counts = { online: 0, recently_lost: 0, offline: 0, about_to_gc: 0 };
   list.forEach(e => { counts[e.health || e.status || 'offline'] = (counts[e.health || e.status || 'offline'] || 0) + 1; });
   const total = list.length;
   const parts = [
-    `<span style="color:var(--t2);font-weight:500">共 ${total} 台</span>`,
-    counts.online ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--g)"></span>在线 ${counts.online}</span>` : '',
-    counts.recently_lost ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--y)"></span>刚失联 ${counts.recently_lost}</span>` : '',
-    counts.offline ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--t3)"></span>离线 ${counts.offline}</span>` : '',
-    counts.about_to_gc ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--r)"></span>待回收 ${counts.about_to_gc}</span>` : '',
+    `<span style="color:var(--t2);font-weight:500">${I18N.t('runtimes.stats.total', {count: total})}</span>`,
+    counts.online ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--g)"></span>${I18N.t('runtimes.health.online')} ${counts.online}</span>` : '',
+    counts.recently_lost ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--y)"></span>${I18N.t('runtimes.health.recently_lost')} ${counts.recently_lost}</span>` : '',
+    counts.offline ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--t3)"></span>${I18N.t('runtimes.health.offline')} ${counts.offline}</span>` : '',
+    counts.about_to_gc ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--r)"></span>${I18N.t('runtimes.health.about_to_gc')} ${counts.about_to_gc}</span>` : '',
   ].filter(Boolean);
   return `<div style="display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:7px 14px;margin-bottom:10px;font-size:12px;color:var(--t2);background:var(--bg);border-radius:8px">${parts.join('<span style="color:var(--t3)">·</span>')}</div>`;
 }
@@ -403,11 +405,10 @@ function renderRuntimes(data) {
   el.innerHTML = html;
 }
 
-function renderEngines(data, devices) {
-  const runtimes = data.runtimes || [];
-  // 搜索 + 类型 + scope 过滤（Issue #185: 统一扁平列表，不再按 scope 分区）
+// Issue #432: 共享过滤函数——renderEngines 与 _summaryStatsBar 共用，确保统计口径一致
+function _filterEngines(runtimes) {
   const q = (_runtimeSearch || '').toLowerCase().trim();
-  const filtered = runtimes.filter(rt => {
+  return runtimes.filter(rt => {
     if (q) {
       const hay = [rt.alias, rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.agent_tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
       if (!hay.includes(q)) return false;
@@ -427,6 +428,12 @@ function renderEngines(data, devices) {
     }
     return true;
   });
+}
+
+function renderEngines(data, devices) {
+  const runtimes = data.runtimes || [];
+  // Issue #432: 使用共享过滤函数，与 _summaryStatsBar 口径一致
+  const filtered = _filterEngines(runtimes);
   // 排序：本机直连优先 → 按健康状态（在线→刚失联→离线→待回收）→ 按名称
   filtered.sort((a, b) => (b.is_local ? 1 : 0) - (a.is_local ? 1 : 0));
   _sortByHealth(filtered);
