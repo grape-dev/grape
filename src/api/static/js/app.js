@@ -1158,7 +1158,8 @@ function loadAgentTypes() {
     } else if (document.visibilityState === 'visible' && window._currentView && _hiddenSince) {
       // Issue #86: Tab 切回前台——重设定时器（后台 setTimeout 被浏览器节流可能没触发）
       API.scheduleProactiveRefresh();
-      if (Date.now() - _hiddenSince > 60000) {
+      // Issue #407: 编辑态下不重渲染（避免未保存的表单内容丢失）
+      if (Date.now() - _hiddenSince > 60000 && !window._dashboardEditing) {
         var _v = window._currentView || '';
         var _baseView = _v.split(':')[0];
         setTimeout(function() { if (typeof app !== 'undefined' && app.nav) app.nav(_baseView, window._currentParam); }, 300);
