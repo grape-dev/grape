@@ -45,10 +45,19 @@ function _dashDraftKey(owner, name, mode, sceneId) {
   return 'dashDraft_' + owner + '/' + name + '_' + mode + (sceneId ? '_' + sceneId : '');
 }
 function _saveDashDraft(owner, name, mode, sceneId, data) {
-  try { sessionStorage.setItem(_dashDraftKey(owner, name, mode, sceneId), JSON.stringify(data)); } catch(e) {}
+  // Issue #407 Optional: 草稿带时间戳，与 dashEditMode 一致 1 小时过期（避免 dashEditMode
+  // 过期后旧草稿在页签生命周期内残留、用户再入编辑/创建模式时被静默回填）
+  try { if (data && typeof data === 'object' && data.ts === undefined) data.ts = Date.now(); sessionStorage.setItem(_dashDraftKey(owner, name, mode, sceneId), JSON.stringify(data)); } catch(e) {}
 }
 function _restoreDashDraft(owner, name, mode, sceneId) {
-  try { var raw = sessionStorage.getItem(_dashDraftKey(owner, name, mode, sceneId)); return raw ? JSON.parse(raw) : null; } catch(e) { return null; }
+  try {
+    var raw = sessionStorage.getItem(_dashDraftKey(owner, name, mode, sceneId));
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    if (!o || typeof o !== 'object') { sessionStorage.removeItem(_dashDraftKey(owner, name, mode, sceneId)); return null; }
+    if (o.ts && Date.now() - o.ts > 3600000) { sessionStorage.removeItem(_dashDraftKey(owner, name, mode, sceneId)); return null; }
+    return o;
+  } catch(e) { return null; }
 }
 function _clearDashDraft(owner, name, mode, sceneId) {
   try { sessionStorage.removeItem(_dashDraftKey(owner, name, mode, sceneId)); } catch(e) {}
@@ -146,6 +155,13 @@ function renderDashboard(data) {
       <div class="ap-empty-desc">${I18N.t('dashboard.no_scene_desc')}</div>
       <button class="ap-btn" onclick="_enterCreateFromEmpty()">➕ ${I18N.t('dashboard.no_scene_create')}</button>
     </div>`;
+    // Issue #407 R2: 零场景分支同样走创建模式自动恢复检查（F5/idle 后回填草稿），
+    // 与 _renderSceneCards 渲染路径的恢复逻辑保持一致，否则空态仓库无法恢复创建界面
+    var _autoEditEmpty = _getDashEditMode();
+    if (_autoEditEmpty && _autoEditEmpty.mode === 'create' && owner && name) {
+      _clearDashEditMode();
+      if (typeof enterCreateMode === 'function') enterCreateMode();
+    }
     return;
   }
 
@@ -1362,7 +1378,8 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   };
 
   window.openEngineModal = function(agentType) {
-    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId);
+    // Issue #407 R1: 传入编辑模式草稿保存函数，引擎确认后持久化 engine_runtime_ids
+    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId, _saveEditDraft);
   };
 
   // 保存编辑 — 只刷新执行流程区域
@@ -1531,7 +1548,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
 }
 
 // 引擎 modal 实现（从原有逻辑提取，参数化）
-function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId) {
+function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId, saveDraftCb) {
   const allEngines = (agentEngines[agentType] || []);
   const node = editNodes.find(n => n.id === agentType);
   if (!node) return;
@@ -1750,6 +1767,9 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
       }
       cardsEl.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes, _engIsPRSub);
     }
+    // Issue #407 R1: 引擎选择确认后同步保存草稿（编辑/创建模式共用回调），
+    // 否则仅调整引擎 → F5/闲置恢复后引擎选择丢失
+    if (typeof saveDraftCb === 'function') { try { saveDraftCb(); } catch(e) {} }
   };
   overlay.addEventListener('click', function(ev) { if (ev.target === overlay) overlay.remove(); });
   // 点击下拉外部关闭场景下拉（Issue #198）
@@ -1994,7 +2014,8 @@ function _enterCreateStandardMode(data, owner, name) {
   };
 
   window.openEngineModal = function(agentType) {
-    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '');
+    // Issue #407 R1: 传入创建模式草稿保存函数，引擎确认后持久化 engine_runtime_ids
+    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '', _saveCreateDraft);
   };
 
   window._toggleNewBranchInline = function() {
