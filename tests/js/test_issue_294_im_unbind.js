@@ -61,12 +61,13 @@ function runUnbind(confirmResult) {
   };
   const app = {
     showToast: t => calls.toasts.push(t),
+    showConfirm: (msg, onConfirm, opts) => { if (confirmResult) onConfirm(); },
     currentRepo: () => ({ fullName: 'grape-dev/grape' })
   };
   const fn = new Function(
-    'API', 'app', 'confirm', '_imCurrentProvider', '_imt', 'loadImChannelConfig',
+    'API', 'app', '_imCurrentProvider', '_imt', 'loadImChannelConfig',
     extractFn(imSrc, 'unbindImChannelConfig') + '\nreturn unbindImChannelConfig;'
-  )(API, app, () => confirmResult, 'feishu', k => 'T:' + k, () => { calls.reloads++; });
+  )(API, app, 'feishu', k => 'T:' + k, () => { calls.reloads++; });
   fn();
   return calls;
 }
@@ -99,7 +100,7 @@ test('unbindVodIm：PUT /agents/vod/{owner}/{repo}，body 仅含 im_unbind=true'
   const body = extractFn(agentsSrc, 'unbindVodIm');
   assert.ok(/API\.put\('\/agents\/vod\/' \+ repo\.owner \+ '\/' \+ repo\.name, \{im_unbind: true\}\)/.test(body),
     '解绑应只带 im_unbind 标记，避免误清引擎/技能/订阅配置');
-  assert.ok(/confirm\(I18N\.t\('agents\.config\.unbind_confirm'\)\)/.test(body), 'VOD 解绑应二次确认');
+  assert.ok(/app\.showConfirm\(I18N\.t\('agents\.config\.unbind_confirm'\)/.test(body), 'VOD 解绑应二次确认');
 });
 
 // ─── 测试 5：Chat 后端解绑清理 ───

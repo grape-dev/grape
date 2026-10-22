@@ -91,7 +91,7 @@
     overlay.style.cssText =
       'position:fixed;top:0;left:0;width:100%;height:100%;' +
       'background:rgba(0,0,0,.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);' +
-      'z-index:99999;opacity:0;transition:opacity .25s cubic-bezier(.4,0,.2,1);' +
+      'z-index:1001;opacity:0;transition:opacity .25s cubic-bezier(.4,0,.2,1);' +
       'display:flex;align-items:center;justify-content:center;';
 
     var dlg = document.createElement('div');

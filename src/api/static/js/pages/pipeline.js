@@ -349,31 +349,31 @@ function renderPipeline(data, focusIssueNum) {
 }
 
 function triggerSREDeploy(repoFullName, issueNum, stage) {
-  if (!confirm(I18N.t('pipeline.sre_confirm_title', {issueNum: issueNum}) + I18N.t('pipeline.sre_confirm_body', {repoFullName: repoFullName, stage: stage})))
-    return;
-  const ctx = stage === 'sre'
-    ? I18N.t('pipeline.sre_context_sre', {issueNum: issueNum})
-    : I18N.t('pipeline.sre_context_jump', {issueNum: issueNum, stage: stage});
-  API.post('/a2a', {
-    agent: 'sre',
-    payload: {
-      repository: repoFullName,
-      account: repoFullName,
-      issue_number: parseInt(issueNum) || issueNum,
-      context: ctx
-    }
-  }).then(d => {
-    if (d.skipped) {
-      app.showToast(I18N.t('pipeline.sre_skipped', {skipped: d.skipped}));
-    } else if (d.seq > 0) {
-      app.showToast(I18N.t('pipeline.sre_triggered', {seq: d.seq}));
-      // 刷新 pipeline
-      if (typeof loadPipeline === 'function') loadPipeline();
-    } else {
-      app.showToast(I18N.t('pipeline.sre_result', {result: JSON.stringify(d)}));
-    }
-  }).catch(e => {
-    app.showToast(I18N.t('pipeline.sre_trigger_failed', {msg: (e.message || e)}), null, 6000);
+  app.showConfirm(I18N.t('pipeline.sre_confirm_title', {issueNum: issueNum}) + I18N.t('pipeline.sre_confirm_body', {repoFullName: repoFullName, stage: stage}), function() {
+    const ctx = stage === 'sre'
+      ? I18N.t('pipeline.sre_context_sre', {issueNum: issueNum})
+      : I18N.t('pipeline.sre_context_jump', {issueNum: issueNum, stage: stage});
+    API.post('/a2a', {
+      agent: 'sre',
+      payload: {
+        repository: repoFullName,
+        account: repoFullName,
+        issue_number: parseInt(issueNum) || issueNum,
+        context: ctx
+      }
+    }).then(d => {
+      if (d.skipped) {
+        app.showToast(I18N.t('pipeline.sre_skipped', {skipped: d.skipped}));
+      } else if (d.seq > 0) {
+        app.showToast(I18N.t('pipeline.sre_triggered', {seq: d.seq}));
+        // 刷新 pipeline
+        if (typeof loadPipeline === 'function') loadPipeline();
+      } else {
+        app.showToast(I18N.t('pipeline.sre_result', {result: JSON.stringify(d)}));
+      }
+    }).catch(e => {
+      app.showToast(I18N.t('pipeline.sre_trigger_failed', {msg: (e.message || e)}), null, 6000);
+    });
   });
 }
 

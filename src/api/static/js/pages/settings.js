@@ -21,7 +21,7 @@ function renderSettings(tab) {
         if (!_sg) return;
         _sg.innerHTML = `
         <div class="cd"><h3 style="font-size:13px;font-weight:600;margin-bottom:12px">${I18N.t('settings.credentials.devops_bot_title')}</h3>
-          ${d.bot_token_status === 'expired' ? '<div style="padding:8px 12px;background:rgba(255,59,48,.1);border-radius:6px;margin-bottom:8px;color:#ff3b30;font-size:12px">⚠️ ' + (I18N.t('errors.REPO_TOKEN_EXPIRED') || 'Repo bot token expired') + '</div>' : ''}
+          ${d.bot_token_status === 'expired' ? '<div style="padding:8px 12px;background:rgba(255,59,48,.1);border-radius:6px;margin-bottom:8px;color:#ff3b30;font-size:12px">⚠️ ' + (I18N.t('app.error.REPO_TOKEN_EXPIRED')) + '</div>' : ''}
           <div class="srow"><label>${I18N.t('settings.credentials.bot_token')}</label><input type="password" id="gitcodeBotToken" value="" placeholder="${(function(){var _lv=d.resolved_token_level||'';if(d.has_repo_bot_token||_lv==='repo_bot')return I18N.t('settings.credentials.bot_token_placeholder_configured');if(_lv==='user')return I18N.t('settings.credentials.user_token_placeholder')||I18N.t('settings.credentials.bot_token_placeholder_configured');if(_lv==='global_bot')return I18N.t('settings.credentials.global_bot_placeholder')||I18N.t('settings.credentials.bot_token_placeholder_configured');return I18N.t('settings.credentials.bot_token_placeholder_empty');})()}">${(function(){var _lv=d.resolved_token_level||'';var _has=d.has_repo_bot_token;if(_has)return '<span class="ts" style="color:var(--g);font-size:10px">'+I18N.t('settings.credentials.bot_configured')+'</span>';if(_lv==='user')return '<span class="ts" style="color:var(--a);font-size:10px">'+(I18N.t('settings.credentials.user_token_active')||'User token active')+'</span>';if(_lv==='global_bot')return '<span class="ts" style="color:var(--a);font-size:10px">'+(I18N.t('settings.credentials.global_bot_active')||'Global bot token active')+'</span>';if(_lv==='session')return '<span class="ts" style="color:var(--a);font-size:10px">'+(I18N.t('settings.credentials.session_token_active')||'Session token active')+'</span>';return '';})()}</div>
           <div class="srow"><label>${I18N.t('settings.credentials.scope')}</label><input type="text" value="read_repo, write_repo, manage_webhook" disabled style="background:#f1f5f9;font-size:10px"></div>
           <button class="bt bt-p mt8" onclick="saveGitcodeRepoConfig()">${I18N.t('settings.common.save')}</button>
@@ -122,7 +122,6 @@ function selectLang(lang) {
 
   // 判断是重试（当前语言但包未完整加载）还是切换
   var isRetry = (lang === I18N.getLang() && !I18N.isLangLoaded(lang));
-  var isZh = I18N.getLang() === 'zh';
 
   // 禁用两个语言按钮 + 文案变更（UI 层反馈，非互斥手段）
   var buttons = document.querySelectorAll('[onclick^="selectLang"]');
@@ -133,8 +132,8 @@ function selectLang(lang) {
     btn.style.opacity = '0.5';
     btn.style.cursor = 'wait';
     btn.textContent = isRetry
-      ? (isZh ? '重新加载中…' : 'Reloading…')
-      : (isZh ? '切换中…' : 'Switching…');
+      ? I18N.t('app.account.reloading')
+      : I18N.t('app.account.switching');
   });
 
   function restoreButtons() {
@@ -206,13 +205,12 @@ function togglePipelineModeSetting() {
 function loadApiKeys() {
   API.get('/settings/api-keys').then(d => {
     const keys = d.keys || [];
-    const isZh = I18N.getLang() === 'zh';
     const container = document.getElementById('sApiKeys');
     if (!container) return;
 
     let rowsHtml = '';
     if (keys.length === 0) {
-      rowsHtml = `<div class="tx t2" style="padding:16px;text-align:center">${isZh ? '暂无 API Key，点击上方按钮生成' : 'No API Keys yet. Create one above.'}</div>`;
+      rowsHtml = `<div class="tx t2" style="padding:16px;text-align:center">${I18N.t('app.account.no_api_keys')}</div>`;
     } else {
       rowsHtml = keys.map(k => `
         <div style="display:flex;align-items:center;gap:12px;padding:10px 0;border-bottom:1px solid var(--b)">
@@ -220,12 +218,12 @@ function loadApiKeys() {
             <div style="font-size:12px;font-weight:600;color:var(--t)">${_escApi(k.name)}</div>
             <div style="font-size:11px;color:var(--t3);font-family:monospace;margin-top:2px">${_escApi(k.prefix)}</div>
             <div style="font-size:10px;color:var(--t3);margin-top:2px">
-              ${isZh ? '创建' : 'Created'}: ${_escApi(k.created_at || '—')}
-              ${k.last_used_at ? ' · ' + (isZh ? '最近使用' : 'Last used') + ': ' + _escApi(k.last_used_at) : ''}
+              ${I18N.t('app.account.created')}: ${_escApi(k.created_at || '—')}
+              ${k.last_used_at ? ' · ' + I18N.t('app.account.last_used') + ': ' + _escApi(k.last_used_at) : ''}
             </div>
           </div>
           <button class="bt" style="font-size:11px;padding:5px 12px;background:var(--r);color:#fff;border:none;border-radius:6px;cursor:pointer"
-            onclick="revokeApiKey(${k.id}, '${_escApi(k.name).replace(/'/g, "\\'")}')">${isZh ? '吊销' : 'Revoke'}</button>
+            onclick="revokeApiKey(${k.id}, '${_escApi(k.name).replace(/'/g, "\\'")}')">${I18N.t('app.account.revoke')}</button>
         </div>
       `).join('');
     }
@@ -233,21 +231,18 @@ function loadApiKeys() {
     container.innerHTML = `
       <div class="cd">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
-          <h3 style="font-size:13px;font-weight:600">${isZh ? 'API Keys' : 'API Keys'}</h3>
-          <button class="bt bt-p" style="font-size:12px;padding:7px 16px" onclick="showCreateApiKeyDialog()">${isZh ? '+ 生成新 Key' : '+ Generate Key'}</button>
+          <h3 style="font-size:13px;font-weight:600">${I18N.t('app.account.api_keys_title')}</h3>
+          <button class="bt bt-p" style="font-size:12px;padding:7px 16px" onclick="showCreateApiKeyDialog()">${I18N.t('app.account.generate_key')}</button>
         </div>
         <p class="tx t2" style="font-size:11px;line-height:1.6;margin-bottom:12px">
-          ${isZh
-            ? 'API Key 用于 grape-cli 认证和 CI/自动化场景。前缀 <code>grape_</code>，长效有效，可吊销。明文仅在生成时显示一次，请妥善保存。'
-            : 'API Keys are used for grape-cli authentication and CI/automation. Prefix <code>grape_</code>, long-lived, revocable. Plaintext is shown only once at creation.'}
+          ${I18N.t('app.account.api_key_desc')}
         </p>
         <div id="apiKeyList">${rowsHtml}</div>
       </div>
     `;
   }).catch(e => {
-    const isZh = I18N.getLang() === 'zh';
     document.getElementById('sApiKeys').innerHTML =
-      `<div class="cd"><p style="color:var(--r);font-size:12px">${isZh ? '加载失败: ' : 'Load failed: '}${e.message}</p></div>`;
+      `<div class="cd"><p style="color:var(--r);font-size:12px">${I18N.t('app.account.load_failed', {msg: e.message})}</p></div>`;
   });
 }
 
@@ -256,37 +251,40 @@ function _escApi(s) {
 }
 
 function showCreateApiKeyDialog() {
-  const isZh = I18N.getLang() === 'zh';
-  const name = prompt(isZh ? '请输入 API Key 名称（如 CI Pipeline）：' : 'Enter API Key name (e.g. CI Pipeline):', '');
-  if (name === null) return;
-  if (!name.trim()) {
-    app.showToast(isZh ? '名称不能为空' : 'Name cannot be empty');
-    return;
-  }
-  API.post('/settings/api-keys', {name: name.trim()}).then(d => {
-    // 明文仅展示一次——弹窗显示完整 key
-    const modal = document.createElement('div');
-    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999';
-    modal.innerHTML = `
-      <div style="background:var(--c);border-radius:14px;padding:24px;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.15)">
-        <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">${isZh ? 'API Key 已生成' : 'API Key Created'}</h3>
-        <p style="font-size:12px;color:var(--r);margin-bottom:12px">${isZh ? '⚠ 明文仅显示此次，请立即复制保存！' : '⚠ Plaintext shown only once. Copy and save now!'}</p>
-        <div style="display:flex;gap:8px;margin-bottom:16px">
-          <input type="text" id="newApiKeyInput" value="${d.key}" readonly
-            style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-family:monospace;font-size:12px;background:#f8f9fa">
-          <button class="bt bt-p" style="padding:8px 16px;font-size:12px" onclick="copyApiKeyToClipboard()">${isZh ? '复制' : 'Copy'}</button>
-        </div>
-        <div style="display:flex;justify-content:flex-end">
-          <button class="bt bt-p" style="padding:8px 20px;font-size:12px" onclick="document.querySelector('body > div[style*=fixed]').remove()">${isZh ? '我已保存' : 'Saved'}</button>
-        </div>
-      </div>
-    `;
-    document.body.appendChild(modal);
-    // 选中 key 文本方便复制
-    setTimeout(() => { const inp = document.getElementById('newApiKeyInput'); if (inp) inp.select(); }, 100);
-    loadApiKeys(); // 刷新列表
-  }).catch(e => {
-    app.showToast(I18N.getLang() === 'zh' ? '生成失败: ' + e.message : 'Failed: ' + e.message);
+  app.showPrompt({
+    title: I18N.t('app.account.enter_key_name'),
+    placeholder: I18N.t('app.account.enter_key_name'),
+    onConfirm: function(name) {
+      if (!name || !name.trim()) {
+        app.showToast(I18N.t('app.account.name_required'));
+        return;
+      }
+      API.post('/settings/api-keys', {name: name.trim()}).then(d => {
+        // 明文仅展示一次——弹窗显示完整 key
+        const modal = document.createElement('div');
+        modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1001';
+        modal.innerHTML = `
+          <div style="background:var(--c);border-radius:14px;padding:24px;max-width:520px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.15)">
+            <h3 style="font-size:15px;font-weight:600;margin-bottom:8px">${I18N.t('app.account.api_key_created')}</h3>
+            <p style="font-size:12px;color:var(--r);margin-bottom:12px">${I18N.t('app.account.api_key_warning')}</p>
+            <div style="display:flex;gap:8px;margin-bottom:16px">
+              <input type="text" id="newApiKeyInput" value="${d.key}" readonly
+                style="flex:1;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-family:monospace;font-size:12px;background:#f8f9fa">
+              <button class="bt bt-p" style="padding:8px 16px;font-size:12px" onclick="copyApiKeyToClipboard()">${I18N.t('app.account.copy')}</button>
+            </div>
+            <div style="display:flex;justify-content:flex-end">
+              <button class="bt bt-p" style="padding:8px 20px;font-size:12px" onclick="document.querySelector('body > div[style*=fixed]').remove()">${I18N.t('app.account.saved')}</button>
+            </div>
+          </div>
+        `;
+        document.body.appendChild(modal);
+        // 选中 key 文本方便复制
+        setTimeout(() => { const inp = document.getElementById('newApiKeyInput'); if (inp) inp.select(); }, 100);
+        loadApiKeys(); // 刷新列表
+      }).catch(e => {
+        app.showToast(I18N.t('app.account.generate_failed', {msg: e.message}));
+      });
+    }
   });
 }
 
@@ -295,14 +293,14 @@ function copyApiKeyToClipboard() {
   if (!inp) return;
   inp.select();
   try { navigator.clipboard.writeText(inp.value); } catch(e) { document.execCommand('copy'); }
-  app.showToast(I18N.getLang() === 'zh' ? '已复制到剪贴板' : 'Copied to clipboard');
+  app.showToast(I18N.t('app.account.copied'));
 }
 
 function revokeApiKey(id, name) {
-  const isZh = I18N.getLang() === 'zh';
-  if (!confirm(isZh ? `确定吊销 "${name}" 吗？吊销后立即失效，不可恢复。` : `Revoke "${name}"? This is immediate and irreversible.`)) return;
-  API.del('/settings/api-keys/' + id).then(d => {
-    app.showToast(d.message);
-    loadApiKeys();
-  }).catch(e => app.showToast(isZh ? '吊销失败: ' + (e.message || e) : 'Revoke failed: ' + (e.message || e)));
+  app.showConfirm(I18N.t('app.account.revoke_confirm', {name: name}), function() {
+    API.del('/settings/api-keys/' + id).then(d => {
+      app.showToast(d.message);
+      loadApiKeys();
+    }).catch(e => app.showToast(I18N.t('app.account.revoke_failed', {msg: (e.message || e)})));
+  }, {danger: true});
 }

@@ -58,5 +58,14 @@
     "内容创作项目模板": "内容创作项目模板"
   },
   "gallery_title": "模板画廊",
-  "fork_one_click": "一键 Fork"
+  "fork_one_click": "一键 Fork",
+  "progress_creating": "正在创建仓库...",
+  "fork_not_git_template": "仅云端模板支持 Fork",
+  "forking": "Fork 中...",
+  "progress_forking": "正在 Fork 仓库...",
+  "fork_success_default": "Fork 成功",
+  "fork_exists": "⚠️ 仓库已存在（可能已 Fork 过该模板），可直接在仓库管理中托管",
+  "fork_no_permission": "⚠️ 无 Fork 权限，请检查 Token 权限设置",
+  "fork_success": "Fork 成功：{msg}",
+  "fork_failed": "Fork 失败: {msg}"
 }

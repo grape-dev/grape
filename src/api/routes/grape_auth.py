@@ -564,6 +564,11 @@ def change_password(body: ChangePasswordBody, user: dict = Depends(require_jwt_o
 @router.post("/set-password/send-code")
 def set_password_send_code(user: dict = Depends(require_jwt_only), request: Request = None):
     """发送设置密码验证码（无密码用户）。"""
+    # R14-2: 无邮箱配置降级——返回 503，对齐 forgot_password_send_code 模式
+    from src.auth.email_service import is_email_configured
+    if not is_email_configured():
+        raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator"})
+
     ip = _get_client_ip(request) if request else ""
 
     account = get_grape_account_by_id(user["id"])
@@ -640,6 +645,11 @@ def set_password(body: SetPasswordBody, user: dict = Depends(require_jwt_only),
 def change_email_send_code(body: ChangeEmailSendCodeBody, user: dict = Depends(require_jwt_only),
                            request: Request = None):
     """发送邮箱变更验证码。"""
+    # R14-2: 无邮箱配置降级——返回 503，对齐 forgot_password_send_code 模式
+    from src.auth.email_service import is_email_configured
+    if not is_email_configured():
+        raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator"})
+
     ip = _get_client_ip(request) if request else ""
     new_email = body.new_email.lower().strip()
 
@@ -715,6 +725,11 @@ def change_email(body: ChangeEmailBody, user: dict = Depends(require_jwt_only),
 @router.post("/delete-account/send-code")
 def delete_account_send_code(user: dict = Depends(require_jwt_only), request: Request = None):
     """发送账号注销验证码。"""
+    # R14-2: 无邮箱配置降级——返回 503，对齐 forgot_password_send_code 模式
+    from src.auth.email_service import is_email_configured
+    if not is_email_configured():
+        raise HTTPException(status_code=503, detail={"code": 503, "error_code": "EMAIL_NOT_CONFIGURED", "message": "Email service not configured, please contact administrator"})
+
     ip = _get_client_ip(request) if request else ""
 
     account = get_grape_account_by_id(user["id"])

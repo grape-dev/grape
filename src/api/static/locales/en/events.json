@@ -104,5 +104,12 @@
   "btn_a2a_redo": "🤝 A2A Redispatch",
   "status_pending": "⏳ Queued",
   "btn_feedback": "Feedback",
-  "btn_feedback_title": "Report an issue for this failed event (auto-attaches repo/task/engine context)"
+  "btn_feedback_title": "Report an issue for this failed event (auto-attaches repo/task/engine context)",
+  "no_fail_reason": "No failure reason",
+  "a2a_select_agent": "Please select a target Agent first",
+  "a2a_redo_confirm": "This Agent has already completed.\nRedo will re-execute the entire stage.\nContinue?",
+  "a2a_redo_skipped": "A2A redo skipped: {reason}",
+  "a2a_redo_success": "A2A redo succeeded, new event #{seq}",
+  "a2a_redo_failed": "A2A redo failed: {msg}",
+  "a2a_redo_unknown": "Unknown error"
 }

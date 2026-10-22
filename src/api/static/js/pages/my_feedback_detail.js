@@ -134,9 +134,9 @@ function renderMyFeedbackDetail(feedbackId) {
         },
       }, event);
     } else {
-      if (confirm(msg)) {
+      app.showConfirm(msg, function() {
         API.deleteFeedback(fid).then(function () { app.nav('my-feedback'); });
-      }
+      }, {danger: true});
     }
   };
 }

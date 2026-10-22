@@ -58,5 +58,14 @@
     "内容创作项目模板": "Content Creation Templates"
   },
   "gallery_title": "TEMPLATE GALLERY",
-  "fork_one_click": "Quick Fork"
+  "fork_one_click": "Quick Fork",
+  "progress_creating": "Creating repository...",
+  "fork_not_git_template": "Only cloud templates support Fork",
+  "forking": "Forking...",
+  "progress_forking": "Forking repository...",
+  "fork_success_default": "Fork succeeded",
+  "fork_exists": "⚠️ Repository already exists (may have been forked), manage it in repo settings",
+  "fork_no_permission": "⚠️ No fork permission, please check token settings",
+  "fork_success": "Fork succeeded: {msg}",
+  "fork_failed": "Fork failed: {msg}"
 }

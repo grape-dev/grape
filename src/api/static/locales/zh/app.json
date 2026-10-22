@@ -434,7 +434,7 @@
     "change_email": "更换",
     "set_email": "设置邮箱",
     "loading": "加载中...",
-    "load_failed": "加载失败",
+    "load_failed": "加载失败: {msg}",
     "no_api_keys": "暂无 API Key，点击上方按钮生成",
     "api_keys_title": "API Keys",
     "generate_key": "+ 生成新 Key",
@@ -447,8 +447,8 @@
     "last_used": "最近使用",
     "revoke": "吊销",
     "revoke_confirm": "确定吊销 \"{name}\" 吗？吊销后立即失效，不可恢复。",
-    "revoke_failed": "吊销失败",
-    "generate_failed": "生成失败",
+    "revoke_failed": "吊销失败: {msg}",
+    "generate_failed": "生成失败: {msg}",
     "name_required": "名称不能为空",
     "enter_key_name": "请输入 API Key 名称（如 CI Pipeline）：",
     "copied": "已复制",
@@ -512,6 +512,7 @@
     "confirm_new_password_placeholder": "确认新密码",
     "cancel": "取消",
     "confirm_change": "确认修改",
+    "confirm_create": "确认创建",
     "please_fill_all": "请填写完整",
     "passwords_do_not_match": "两次新密码不一致",
     "password_changed": "密码修改成功",
@@ -624,6 +625,7 @@
     "reset_password_hint": "通过邮箱验证码重置密码，重置后其他设备将自动下线。",
     "verify_with_oauth": "用第三方平台重新授权",
     "set_password_needs_email": "设置密码需要邮箱验证，请先设置邮箱",
+    "email_not_configured": "邮箱服务未配置，请联系管理员",
     "token_expired": "Token 已过期",
     "token_expired_hint": "您的 Token 已过期或被撤销，请重新绑定 Token。",
     "re_bind": "重新绑定"
@@ -652,6 +654,7 @@
     "MISSING_REFRESH_TOKEN": "会话已过期，请重新登录",
     "REFRESH_TOKEN_INVALID": "会话已过期，请重新登录",
     "SESSION_TOKEN_INVALID": "会话令牌无效或已过期",
-    "API_KEY_INVALID": "API Key 无效或已撤销"
+    "API_KEY_INVALID": "API Key 无效或已撤销",
+    "forbidden": "无可访问的仓库"
   }
 }

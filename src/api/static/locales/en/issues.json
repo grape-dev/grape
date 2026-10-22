@@ -46,5 +46,11 @@
     "no_target": "No available target pipelines (vod node required, current pipeline excluded)",
     "err_invalid_target": "Target pipeline unavailable",
     "duplicate_current": "Target pipeline cannot be the current pipeline"
-  }
+  },
+  "deploy_url_saved": "Deploy URL saved",
+  "save_failed": "Save failed: {msg}",
+  "confirm_delete_attach": "Delete attachment?",
+  "upload_failed": "Upload failed: {msg}",
+  "no_scene_for_pr": "No associated scene for this PR, cannot intervene",
+  "uploading": "Uploading..."
 }

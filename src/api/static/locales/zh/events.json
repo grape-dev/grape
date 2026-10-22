@@ -104,5 +104,12 @@
   "terminate_confirm_ok": "确认终止",
   "terminate_confirm_msg": "终止当前运行中的 Agent 任务？<br>此操作不可撤销。进行中的工作将丢失，任务需重新派发。",
   "btn_feedback": "反馈",
-  "btn_feedback_title": "针对该失败事件提交问题反馈（自动携带仓库/任务/引擎上下文）"
+  "btn_feedback_title": "针对该失败事件提交问题反馈（自动携带仓库/任务/引擎上下文）",
+  "no_fail_reason": "暂无失败原因",
+  "a2a_select_agent": "请先选择目标 Agent",
+  "a2a_redo_confirm": "该 Agent 已在此前流程中执行完成。\n补发将重新执行整个阶段（消耗资源与时间），且不会影响已有结果。\n确定继续吗？",
+  "a2a_redo_skipped": "A2A 补发未执行：{reason}",
+  "a2a_redo_success": "A2A 补发成功，新事件 #{seq}",
+  "a2a_redo_failed": "A2A 补发失败：{msg}",
+  "a2a_redo_unknown": "未知原因"
 }

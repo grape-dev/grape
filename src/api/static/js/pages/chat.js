@@ -1024,7 +1024,7 @@ function showOnboardModal() {
   if (document.getElementById('onboardModal')) return;
   const mask = document.createElement('div');
   mask.id = 'onboardModal';
-  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:998;display:flex;align-items:center;justify-content:center';
+  mask.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:1001;display:flex;align-items:center;justify-content:center';
   mask.innerHTML = `
     <div style="width:340px;background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:20px;box-shadow:0 8px 32px rgba(0,0,0,.25);font-size:12px">
       <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">

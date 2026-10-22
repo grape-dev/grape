@@ -46,5 +46,11 @@
     "no_target": "无可用目标流水线（需含 vod 节点且非当前流水线）",
     "err_invalid_target": "目标流水线不可用",
     "duplicate_current": "目标流水线不能是当前流水线"
-  }
+  },
+  "deploy_url_saved": "部署 URL 已保存",
+  "save_failed": "保存失败: {msg}",
+  "confirm_delete_attach": "确认删除附件？",
+  "upload_failed": "上传失败: {msg}",
+  "no_scene_for_pr": "该 PR 无关联场景，无法介入解决",
+  "uploading": "上传中..."
 }

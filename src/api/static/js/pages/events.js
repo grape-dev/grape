@@ -232,6 +232,12 @@ function renderEventDetail(data) {
     _promptFs = false;
     _promptFsPlaceholder = null;
   }
+  // 切换事件时清理对话全屏状态
+  if (_convFs) {
+    const _cfs = document.getElementById('convFullscreen');
+    if (_cfs) _cfs.remove();
+    _convFs = false;
+  }
   const el = document.getElementById('pageContent');
   if (!el) return;
   // 2026-10-12：running 事件自动轮询刷新（A2A 补发/新事件跳转后无需手动刷新即可
@@ -817,7 +823,7 @@ function toggleConvFullscreen() {
     if (!messages) return;
     const fs = document.createElement('div');
     fs.id = 'convFullscreen';
-    fs.style.cssText = 'position:fixed;inset:0;z-index:999;background:var(--bg);display:flex;flex-direction:column;gap:10px;padding:18px;box-sizing:border-box';
+    fs.style.cssText = 'position:fixed;inset:0;z-index:1001;background:var(--bg);display:flex;flex-direction:column;gap:10px;padding:18px;box-sizing:border-box';
     const bar = document.createElement('div');
     bar.style.cssText = 'display:flex;justify-content:space-between;align-items:center;flex-shrink:0';
     const title = document.createElement('h3');
@@ -851,6 +857,12 @@ function toggleConvFullscreen() {
   } else {
     const fs = document.getElementById('convFullscreen');
     if (!fs) return;
+    // panel 已脱离文档（事件切换场景）时直接移除全屏容器
+    if (!panel || !panel.isConnected) {
+      fs.remove();
+      _convFs = false;
+      return;
+    }
     const messages = document.getElementById('convMessages');
     const inputRow = document.getElementById('convInputRow');
     panel.appendChild(messages);
@@ -874,7 +886,7 @@ function _togglePromptFullscreen() {
     body.parentElement.insertBefore(_promptFsPlaceholder, body);
     const fs = document.createElement('div');
     fs.id = 'promptFullscreen';
-    fs.style.cssText = 'position:fixed;inset:0;z-index:999;background:#000;display:flex;flex-direction:column;box-sizing:border-box';
+    fs.style.cssText = 'position:fixed;inset:0;z-index:1001;background:#000;display:flex;flex-direction:column;box-sizing:border-box';
     const bar = document.createElement('div');
     bar.style.cssText = 'display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid #2a3140;flex-shrink:0';
     const title = document.createElement('span');
@@ -915,6 +927,12 @@ function _togglePromptFullscreen() {
 // ESC 键退出全屏
 document.addEventListener('keydown', function (e) {
   if (e.key === 'Escape') {
+    // task log 全屏：检查 box.dataset.fs
+    const tlBox = document.querySelector('#taskLogOverlay > div');
+    if (tlBox && tlBox.dataset.fs === '1') {
+      _toggleTaskLogFullscreen();
+      return;  // task log 全屏退出，不再处理其他全屏状态
+    }
     if (_convFs) toggleConvFullscreen();
     if (_promptFs) _togglePromptFullscreen();
   }
@@ -930,7 +948,7 @@ function _showRedispatchGlass(seq) {
   // 遮罩（居中展示）
   const overlay = document.createElement('div');
   overlay.className = 'rdp-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
   // 弹窗 — 居中
   const modal = document.createElement('div');
   modal.className = 'rdp-glass';
@@ -1019,7 +1037,7 @@ function _showA2aRedoGlass(seq, sceneInfo) {
   };
   const overlay = document.createElement('div');
   overlay.className = 'a2r-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
   const modal = document.createElement('div');
   modal.className = 'a2r-glass';
   modal.style.cssText = 'width:340px;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);overflow:hidden;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
@@ -1079,26 +1097,41 @@ function _closeA2aRedoGlass() {
 
 function _doA2aRedo(seq) {
   const agent = window._a2aRedoSel || '';
-  if (!agent) { app.showToast('请先选择目标 Agent'); return; }
+  if (!agent) { app.showToast(I18N.t('events.a2a_select_agent')); return; }
   // 防手误二次确认（2026-10-12）：目标 Agent 已在此前流程 completed 过 → 重跑确认
   const _doneAgents = window._a2aRedoDoneAgents || [];
   if (_doneAgents.includes(agent)) {
-    if (!window.confirm('该 Agent 已在此前流程中执行完成。\n补发将重新执行整个阶段（消耗资源与时间），且不会影响已有结果。\n确定继续吗？')) return;
+    app.showConfirm(I18N.t('events.a2a_redo_confirm'), function() {
+      _closeA2aRedoGlass();
+      API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
+        if (d && d.skipped) {
+          app.showToast(I18N.t('events.a2a_redo_skipped', {reason: d.skipped}));
+        } else if (d && d.seq) {
+          app.showToast(I18N.t('events.a2a_redo_success', {seq: d.seq}));
+          app.nav('event', d.seq);
+        } else {
+          app.showToast(I18N.t('events.a2a_redo_failed', {msg: (d && d.error) || (d && d.message) || I18N.t('events.a2a_redo_unknown')}));
+        }
+      }).catch(e => {
+        const msg = (e.detail && e.detail.message) || e.message || e;
+        app.showToast(I18N.t('events.a2a_redo_failed', {msg: msg}));
+      });
+    });
+    return;
   }
   _closeA2aRedoGlass();
   API.post('/events/' + seq + '/a2a-redo', { agent: agent }).then(d => {
     if (d && d.skipped) {
-      const _reasons = { not_in_scene: '目标 Agent 不在当前场景内', duplicate_a2a: '该 Agent 已有进行中的任务', sre_subscribed: 'SRE 已订阅，无需补发', task_cancelled: '任务已取消' };
-      app.showToast('A2A 补发未执行：' + (_reasons[d.skipped] || d.skipped));
+      app.showToast(I18N.t('events.a2a_redo_skipped', {reason: d.skipped}));
     } else if (d && d.seq) {
-      app.showToast('A2A 补发成功，新事件 #' + d.seq);
+      app.showToast(I18N.t('events.a2a_redo_success', {seq: d.seq}));
       app.nav('event', d.seq);
     } else {
-      app.showToast('A2A 补发失败：' + ((d && d.error) || (d && d.message) || '未知原因'));
+      app.showToast(I18N.t('events.a2a_redo_failed', {msg: (d && d.error) || (d && d.message) || I18N.t('events.a2a_redo_unknown')}));
     }
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
-    app.showToast('A2A 补发失败：' + msg);
+    app.showToast(I18N.t('events.a2a_redo_failed', {msg: msg}));
   });
 }
 
@@ -1111,7 +1144,7 @@ function _showLocalRetryGlass(seq) {
   _closeLocalRetryGlass();
   const overlay = document.createElement('div');
   overlay.className = 'lr-overlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,0.15);backdrop-filter:blur(6px) saturate(150%);-webkit-backdrop-filter:blur(6px) saturate(150%);animation:rdpFade .2s ease';
   const modal = document.createElement('div');
   modal.className = 'lr-glass';
   modal.style.cssText = 'width:340px;background:rgba(255,255,255,0.72);backdrop-filter:blur(28px) saturate(200%);-webkit-backdrop-filter:blur(28px) saturate(200%);border-radius:18px;border:1px solid rgba(255,255,255,0.6);box-shadow:0 12px 40px rgba(0,0,0,0.12),0 2px 8px rgba(0,0,0,0.06);overflow:hidden;animation:rdpPop .25s cubic-bezier(0.34,1.56,0.64,1)';
@@ -1207,7 +1240,7 @@ function openTaskLog(taskId, title) {
 
   const ov = document.createElement('div');
   ov.id = 'taskLogOverlay';
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1001;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">
     <div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">
       <span style="font-size:13px;font-weight:600">${I18N.t('events.log_title_realtime')} <span style="color:var(--t3);font-weight:400">· ${_tlEsc(title)}</span></span>
@@ -1518,7 +1551,7 @@ function openInlineLog(seq, title) {
     }
     var ov = document.createElement('div');
     ov.id = 'taskLogOverlay';
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1001;display:flex;align-items:center;justify-content:center;';
     ov.innerHTML = '<div style="width:min(960px,94vw);height:min(720px,90vh);background:var(--bg,#11151c);border:1px solid var(--b,#2a3140);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">'
       + '<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b,#2a3140);flex-shrink:0">'
       + '<span style="font-size:13px;font-weight:600">' + I18N.t('events.log_title_inline') + ' <span style="color:var(--t3);font-weight:400">· ' + _tlEsc(title) + '</span></span>'

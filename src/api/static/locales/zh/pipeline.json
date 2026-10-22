@@ -52,5 +52,6 @@
   "page_info": "第 {{cur}} / {{total}} 页",
   "prev_page": "上一页",
   "next_page": "下一页",
-  "cross_scene_handoff": "跨场景移交"
+  "cross_scene_handoff": "跨场景移交",
+  "no_issues": "暂无 Issue"
 }

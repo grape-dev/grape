@@ -351,7 +351,7 @@ function openObsAlertPanel(view) {
   _obsAlertPanelView = view || 'events';
   const modal = document.createElement('div');
   modal.id = 'obsAlertModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = '<div class="cd" style="width:820px;max-width:94vw;max-height:82vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
@@ -793,11 +793,16 @@ function _renderObsAlertPanel() {
 }
 
 function obsAlertSilence(eventId) {
-  const m = window.prompt(I18N.t('observability.silence_prompt'), '60');
-  if (m === null) return;
-  const minutes = parseInt(m, 10);
-  if (!minutes || minutes < 1) return;
-  API.post('/obs/alerts/' + eventId + '/silence?minutes=' + minutes, {}).then(() => refreshObsAlerts()).catch(() => null);
+  app.showPrompt({
+    title: I18N.t('observability.silence_prompt'),
+    value: '60',
+    onConfirm: function(m) {
+      if (m === null) return;
+      const minutes = parseInt(m, 10);
+      if (!minutes || minutes < 1) return;
+      API.post('/obs/alerts/' + eventId + '/silence?minutes=' + minutes, {}).then(() => refreshObsAlerts()).catch(() => null);
+    }
+  });
 }
 
 function obsAlertToggleRule(ruleId, enabled) {
@@ -805,11 +810,16 @@ function obsAlertToggleRule(ruleId, enabled) {
 }
 
 function obsAlertSetThreshold(ruleId, cur) {
-  const v = window.prompt(I18N.t('observability.threshold_prompt'), String(cur));
-  if (v === null) return;
-  const f = parseFloat(v);
-  if (isNaN(f)) return;
-  API.post('/obs/alerts/rules/' + ruleId + '/threshold?threshold=' + encodeURIComponent(String(f)), {}).then(() => refreshObsAlerts()).catch(() => null);
+  app.showPrompt({
+    title: I18N.t('observability.threshold_prompt'),
+    value: String(cur),
+    onConfirm: function(v) {
+      if (v === null) return;
+      const f = parseFloat(v);
+      if (isNaN(f)) return;
+      API.post('/obs/alerts/rules/' + ruleId + '/threshold?threshold=' + encodeURIComponent(String(f)), {}).then(() => refreshObsAlerts()).catch(() => null);
+    }
+  });
 }
 
 function _obsChanLabel(chans) {
@@ -827,12 +837,17 @@ function _obsChanLabel(chans) {
 function obsAlertSetNotify(ruleId, cur) {
   const now = String(cur || '').trim();
   const curIdx = now === 'feishu' ? '1' : (now.indexOf('webhook') >= 0 ? '2' : '0');
-  const v = window.prompt(I18N.t('observability.notify_prompt'), curIdx);
-  if (v === null) return;
-  const map = { '0': '', '1': 'feishu', '2': 'feishu,webhook' };
-  if (map[v] === undefined) return;
-  API.post('/obs/alerts/rules/' + ruleId + '/notify?channels=' + encodeURIComponent(map[v]), {})
-    .then(() => refreshObsAlerts()).catch(() => null);
+  app.showPrompt({
+    title: I18N.t('observability.notify_prompt'),
+    value: curIdx,
+    onConfirm: function(v) {
+      if (v === null) return;
+      const map = { '0': '', '1': 'feishu', '2': 'feishu,webhook' };
+      if (map[v] === undefined) return;
+      API.post('/obs/alerts/rules/' + ruleId + '/notify?channels=' + encodeURIComponent(map[v]), {})
+        .then(() => refreshObsAlerts()).catch(() => null);
+    }
+  });
 }
 
 // 测试飞书通知：给自己发一条，结果就地显示（不依赖全局 toast）
@@ -1315,7 +1330,7 @@ function openObsAnomalyModal() {
   if (old && typeof old.remove === 'function') old.remove();
   const modal = document.createElement('div');
   modal.id = 'obsAnomalyModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => { if (e.target === modal && typeof modal.remove === 'function') modal.remove(); };
   modal.innerHTML = `<div class="cd" style="width:960px;max-width:94vw;max-height:84vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
@@ -1442,7 +1457,7 @@ function openObsSloBurn(sloId) {
   if (old && typeof old.remove === 'function') old.remove();
   const modal = document.createElement('div');
   modal.id = 'obsSloModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => { if (e.target === modal && typeof modal.remove === 'function') modal.remove(); };
   modal.innerHTML = `<div class="cd" style="width:880px;max-width:94vw;max-height:84vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
@@ -2575,7 +2590,7 @@ function openRuntimeSessionModal(rtId, rtName) {
 
   const modal = document.createElement('div');
   modal.id = 'rtSessionModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = '<div class="cd" style="width:760px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
@@ -2725,7 +2740,7 @@ function openSessionLogModal(sessionId, infoEnc) {
 
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = '<div class="cd" style="width:860px;max-width:94vw;max-height:85vh;display:flex;flex-direction:column;padding:0;overflow:hidden">' +
     '<div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">' +
@@ -2770,7 +2785,7 @@ function openRuntimeTaskModal(rtId, rtName) {
 
   const modal = document.createElement('div');
   modal.id = 'rtTaskModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
   modal.innerHTML = `<div class="cd" style="width:720px;max-width:92vw;max-height:80vh;display:flex;flex-direction:column;padding:0;overflow:hidden">
     <div style="display:flex;align-items:center;justify-content:space-between;padding:14px 18px;border-bottom:1px solid var(--b)">
@@ -2834,7 +2849,7 @@ function openTaskLogModal(taskId, infoEnc) {
 
   const modal = document.createElement('div');
   modal.id = 'rtLogModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1000';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.onclick = (e) => {
     if (e.target === modal) {
       if (_taskLogPollTimer) { clearInterval(_taskLogPollTimer); _taskLogPollTimer = null; }
