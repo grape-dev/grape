@@ -25,8 +25,35 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# Issue #429: pip 版本检查提示（stderr，如 "[notice] A new release of pip is available"）
+# 在 Stop 模式下经 2>$null/2>&1 重定向会被包装成错误记录并终止脚本。从源头禁用该提示；
+# 各 pip 调用点另有 EAP 防御层（Invoke-PipQuiet），双保险。
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
+
 function Log([string]$msg) { Write-Host "[install-worker] $msg" }
 function Fail([string]$msg) { Write-Error "[install-worker] ERROR: $msg"; exit 1 }
+
+# Issue #429: 在 $ErrorActionPreference="Stop" 下，PowerShell 对原生命令做 2>$null 重定向
+# 会把 stderr 行包装成错误记录，配合 Stop 变成终止性错误（pip "new release available"
+# 提示即触发实测崩溃）。此包装器临时切 Continue 执行（stderr 合并后丢弃、不中断），
+# 以 $LASTEXITCODE 判定真实成败，然后恢复原 EAP——与 tar 解压段既有模式对齐。
+function Invoke-PipQuiet {
+    param(
+        [Parameter(Mandatory)][string]$CommandPath,
+        [string[]]$Arguments
+    )
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    $exitCode = 1
+    try {
+        & $CommandPath @Arguments 2>&1 | Out-Null
+        $exitCode = $LASTEXITCODE
+    } catch {
+        $exitCode = 1
+    }
+    $ErrorActionPreference = $prevEAP
+    return $exitCode
+}
 
 # ===== 参数校验 =====
 if (-not $Token) {
@@ -239,7 +266,7 @@ $VenvPy = Join-Path $Venv "Scripts\python.exe"
 $VenvPip = Join-Path $Venv "Scripts\pip.exe"
 
 function _VenvPipOk {
-    try { & $VenvPy -m pip --version 2>$null | Out-Null; return $LASTEXITCODE -eq 0 } catch { return $false }
+    return ((Invoke-PipQuiet $VenvPy @("-m", "pip", "--version")) -eq 0)
 }
 
 if (-not (Test-Path $VenvPy)) {
@@ -251,7 +278,7 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
     Log "venv pip missing or broken, starting 3-level self-healing..."
     # Level 1: ensurepip
     Log "  [1/3] ensurepip --upgrade..."
-    & $VenvPy -m ensurepip --upgrade 2>$null
+    Invoke-PipQuiet $VenvPy @("-m", "ensurepip", "--upgrade") | Out-Null
     if (-not (_VenvPipOk)) {
         # Level 2: get-pip.py
         Log "  [2/3] ensurepip failed, trying get-pip.py..."
@@ -259,7 +286,7 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
         $getPkgTmp = Join-Path $env:TEMP "get-pip-$(Get-Random).py"
         try {
             Invoke-WebRequest -Uri $getPipUrl -OutFile $getPkgTmp -UseBasicParsing -TimeoutSec 30
-            & $VenvPy $getPkgTmp 2>$null
+            Invoke-PipQuiet $VenvPy @($getPkgTmp) | Out-Null
             Remove-Item $getPkgTmp -ErrorAction SilentlyContinue
         } catch {
             Log "  get-pip.py download failed: $_"
@@ -271,12 +298,12 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
             if (Test-Path $VersionFile) { $savedVer = Get-Content $VersionFile -ErrorAction SilentlyContinue }
             Remove-Item $Venv -Recurse -Force -ErrorAction SilentlyContinue
             & $Py -m venv $Venv
-            & $VenvPy -m ensurepip --upgrade 2>$null
+            Invoke-PipQuiet $VenvPy @("-m", "ensurepip", "--upgrade") | Out-Null
             if (-not (_VenvPipOk)) {
                 $getPkgTmp2 = Join-Path $env:TEMP "get-pip-$(Get-Random).py"
                 try {
                     Invoke-WebRequest -Uri $getPipUrl -OutFile $getPkgTmp2 -UseBasicParsing -TimeoutSec 30
-                    & $VenvPy $getPkgTmp2 2>$null
+                    Invoke-PipQuiet $VenvPy @($getPkgTmp2) | Out-Null
                     Remove-Item $getPkgTmp2 -ErrorAction SilentlyContinue
                 } catch {}
             }
@@ -315,18 +342,18 @@ if (Test-Path $reqFile) {
     }
     if ($useWheels) {
         Log "Installing deps from bundled wheels (offline)"
-        & $VenvPip install --quiet --no-index --find-links $wheelsDir -r $reqFile
-        if ($LASTEXITCODE -ne 0) {
+        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir, "-r", $reqFile)
+        if ($rc -ne 0) {
             Log "Offline install failed (common on Windows - binary wheel platform mismatch), falling back to online..."
-            & $VenvPip install --quiet -i $pipIndex --retries 3 --timeout 30 -r $reqFile
-            if ($LASTEXITCODE -ne 0) {
+            $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
+            if ($rc -ne 0) {
                 Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
             }
         }
     } else {
         Log "Installing deps online (mirror: $pipIndex, first run takes minutes)"
-        & $VenvPip install --quiet -i $pipIndex --retries 3 --timeout 30 -r $reqFile
-        if ($LASTEXITCODE -ne 0) {
+        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
+        if ($rc -ne 0) {
             Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
         }
     }
@@ -338,21 +365,22 @@ if ($useWheels) {
     $grapeWheel = Get-ChildItem "$wheelsDir\grape-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
 }
 if ($grapeWheel) {
-    & $VenvPip install -q --no-index --find-links $wheelsDir grape 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    # rc 取 Invoke-PipQuiet 返回值（$LASTEXITCODE 在函数作用域内设置，不向调用者传播）
+    $rc = Invoke-PipQuiet $VenvPip @("install", "-q", "--no-index", "--find-links", $wheelsDir, "grape")
+    if ($rc -eq 0) {
         Log "grape CLI installed (offline wheel): $Venv\Scripts\grape.exe"
     } else {
         Log "Offline grape wheel install failed, falling back to online..."
-        & $VenvPip install -q --no-cache-dir "git+https://gitcode.com/grape-dev/grape-cli.git" 2>$null
-        if ($LASTEXITCODE -eq 0) {
+        $rc = Invoke-PipQuiet $VenvPip @("install", "-q", "--no-cache-dir", "git+https://gitcode.com/grape-dev/grape-cli.git")
+        if ($rc -eq 0) {
             Log "grape CLI installed (online)"
         } else {
             Log "Warning: grape-cli install failed, worker will run without grape CLI"
         }
     }
 } else {
-    & $VenvPip install -q --no-cache-dir "git+https://gitcode.com/grape-dev/grape-cli.git" 2>$null
-    if ($LASTEXITCODE -eq 0) {
+    $rc = Invoke-PipQuiet $VenvPip @("install", "-q", "--no-cache-dir", "git+https://gitcode.com/grape-dev/grape-cli.git")
+    if ($rc -eq 0) {
         Log "grape CLI installed (online)"
     } else {
         Log "Warning: grape-cli online install failed, worker will run without grape CLI"

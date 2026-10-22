@@ -235,6 +235,51 @@ _LOG_TAIL_MAX_LINES = 50
 _LOG_TAIL_MAX_BYTES = 4096
 _OOM_KEYWORDS = ("out of memory", "oom-killer", "oom_reaper", "killed process")
 
+# ── stderr 尾采环形缓冲（issue #416）──
+# 旧逻辑只保留 stderr 前 200/500 字节，崩溃栈在末尾被截断丢光（E7：hermes
+# 启动即死零诊断）。改为保留末尾 ≥2000 字节，可用 HERMES_STDERR_TAIL_BYTES 调整。
+STDERR_TAIL_BYTES_DEFAULT = 2000
+
+
+def _stderr_tail_bytes_for(env: dict | None = None) -> int:
+    """stderr 尾采字节上限（HERMES_STDERR_TAIL_BYTES 可调，默认 2000，下限 200）。"""
+    _src = (env or {}).get("HERMES_STDERR_TAIL_BYTES") or \
+        os.environ.get("HERMES_STDERR_TAIL_BYTES", str(STDERR_TAIL_BYTES_DEFAULT))
+    try:
+        return max(int(float(_src)), 200)
+    except Exception:
+        return STDERR_TAIL_BYTES_DEFAULT
+
+
+class _StderrTailBuffer:
+    """stderr 尾采环形缓冲：仅保留末尾 max_bytes 字节（崩溃栈在末尾，issue #416）。
+
+    内存有界：累计超过 2×max_bytes 时折叠为末尾 max_bytes；text() 恒返回末尾
+    ≤ max_bytes 字节，头部日志（启动横幅等低价值信息）自然淘汰。
+    """
+
+    __slots__ = ("max_bytes", "_chunks", "_total")
+
+    def __init__(self, max_bytes: int = STDERR_TAIL_BYTES_DEFAULT):
+        self.max_bytes = max(int(max_bytes), 200)
+        self._chunks: list[str] = []
+        self._total = 0
+
+    def append(self, s: str):
+        if not s:
+            return
+        self._chunks.append(s)
+        self._total += len(s)
+        if self._total > self.max_bytes * 2:
+            joined = "".join(self._chunks)
+            keep = joined[-self.max_bytes:]
+            self._chunks = [keep]
+            self._total = len(keep)
+
+    def text(self) -> str:
+        joined = "".join(self._chunks)
+        return joined[-self.max_bytes:] if len(joined) > self.max_bytes else joined
+
 
 def _push_log_tail(tail: list, line: str):
     """维护引擎 stdout 遗言尾部缓冲：末 50 行 / 累计 4KB 截断。"""
@@ -776,12 +821,13 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         _reader_thread = threading.Thread(target=_stdout_reader, daemon=True)
         _reader_thread.start()
 
-        # stderr reader 线程：持续排空 stderr 管道，防止 Windows 管道缓冲区满导致死锁
-        _stderr_chunks = []
+        # stderr reader 线程：持续排空 stderr 管道，防止 Windows 管道缓冲区满导致死锁；
+        # 尾采环形缓冲（issue #416）：仅保留末尾 ≥2000 字节，崩溃栈在末尾不丢
+        _stderr_tail = _StderrTailBuffer(_stderr_tail_bytes_for(env))
         def _stderr_reader():
             try:
                 for raw_line in iter(proc.stderr.readline, b""):
-                    _stderr_chunks.append(raw_line.decode("utf-8", errors="replace"))
+                    _stderr_tail.append(raw_line.decode("utf-8", errors="replace"))
             except Exception:
                 pass
         _stderr_thread = threading.Thread(target=_stderr_reader, daemon=True)
@@ -903,7 +949,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                         "text": _redact("\n".join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
                         "errors": error_events + ([f"no output for {_silent_window:.0f}s, killed"] if _grace_tail.strip() == "" else []),
-                        "stderr": "",
+                        "stderr": _redact(_stderr_tail.text(), _tokens),
                         "backend": backend.name, "parsed_count": _parsed_count,
                         "text_count": _text_count, "tool_count": _tool_count,
                     })
@@ -965,11 +1011,8 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     collected_text.append(parsed["text"])
 
         full_text = "\n".join(collected_text)
-        stderr_output = ""
-        try:
-            stderr_output = "".join(_stderr_chunks)[:500]
-        except Exception as e:
-            log.warning(f"{label}{backend.name} stderr read err: {e}")
+        # issue #416：stderr 尾巴（末尾 ≥2000B，崩溃栈在末尾），不再保头 500B
+        stderr_output = _stderr_tail.text()
 
         log.info(f"{label}{backend.name} done: exit={proc.returncode} text_len={len(full_text)} stderr={stderr_output[:120]!r}")
         _untrack_proc(proc)
@@ -1002,6 +1045,10 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # 结合系统日志启发式判定 OOM。
         _exit_code = proc.returncode
         _final_errors = list(error_events)
+        # issue #416（E7）：进程退出码非 0 且无文本 → errors 写明 `<引擎> exited rc=N`，
+        # 不再让失败任务 errors 为空（旧形态：exit_code=-1、errors 空、stderr 截断）
+        if _exit_code != 0 and not full_text.strip():
+            _final_errors.append(f"{backend.name} exited rc={_exit_code}")
         if _exit_code != 0:
             if _exit_code == -9:
                 if _oom_kill_evidence():
