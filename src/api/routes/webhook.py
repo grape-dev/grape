@@ -1147,9 +1147,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                                 scene_id=_a2a_scene, user_id=_a2a_scene_uid)
         if engine_id is None:
             log.info(f"A2A: no available engine for repo={repo_key} agent={agent_name}, seq={seq}, skip")
+            # Issue #418：早退统一走 _fail_event，回写 result/exit_code/completed_at
+            # （原裸 update_event_status 落库无诊断字段，排障需倒查日志）
             try:
-                from src.api.event_store import update_event_status
-                update_event_status(seq, "failed")
+                from src.api.event_pipeline import _fail_event
+                _fail_event(seq, f"A2A 派发失败：无可用引擎（pick_engine=None，agent={agent_name}，repo={repository}）")
             except Exception:
                 pass
             # a2a-input-validation-fix：派发失败必须如实告知调用方（原先返回 status=ok seq=0，
@@ -1170,8 +1172,13 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     from src.api.event_pipeline import _fail_scene_all_offline
                     _fail_scene_all_offline(seq, _a2a_scene, agent_name, "A2A", repo_key=repo_key or "")
                 except Exception:
-                    from src.api.event_store import update_event_status
-                    update_event_status(seq, "failed")
+                    # Issue #418：helper 异常兜底同样走 _fail_event（原裸 update_event_status）
+                    try:
+                        from src.api.event_pipeline import _fail_event
+                        _fail_event(seq, f"A2A 派发失败：场景绑定的引擎全部离线（scene={_a2a_scene}，agent={agent_name}，回写降级）")
+                    except Exception:
+                        from src.api.event_store import update_event_status
+                        update_event_status(seq, "failed")
                 return {"status": "failed", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"}
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
@@ -1196,17 +1203,19 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     log.info(f"A2A: auto-selected local engine id={engine_id} name={_be}, seq={seq}")
                 else:
                     log.info(f"A2A: engine_id=0 no online engine for {agent_name}, seq={seq}, skip")
+                    # Issue #418：auto-select 空集早退统一走 _fail_event（完整诊断回写）
                     try:
-                        from src.api.event_store import update_event_status
-                        update_event_status(seq, "failed")
+                        from src.api.event_pipeline import _fail_event
+                        _fail_event(seq, f"A2A 派发失败：无可用引擎（auto-select 空集，无在线本机引擎，agent={agent_name}）")
                     except Exception:
                         pass
                     return {"status": "ok", "seq": 0, "agent": agent_name}
             except Exception as _ae:
                 log.warning(f"A2A: auto-select engine failed: {_ae}")
+                # Issue #418：auto-select 异常早退统一走 _fail_event（完整诊断回写）
                 try:
-                    from src.api.event_store import update_event_status
-                    update_event_status(seq, "failed")
+                    from src.api.event_pipeline import _fail_event
+                    _fail_event(seq, f"A2A 派发失败：无可用引擎（auto-select 异常: {str(_ae)[:150]}）")
                 except Exception:
                     pass
                 return {"status": "ok", "seq": 0, "agent": agent_name}
@@ -1233,10 +1242,11 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     except Exception as e:
         log.warning(f"A2A: failed to start agent execution: {e}")
         # 事件已创建（running）但执行启动失败 → 立即置 failed，防卡 running 僵尸
+        # Issue #418：try 兜底早退统一走 _fail_event（原裸 update_event_status 无诊断字段）
         if seq:
             try:
-                from src.api.event_store import update_event_status
-                update_event_status(seq, "failed")
+                from src.api.event_pipeline import _fail_event
+                _fail_event(seq, f"A2A 派发启动异常: {str(e)[:150]}")
             except Exception:
                 pass
         seq = 0
