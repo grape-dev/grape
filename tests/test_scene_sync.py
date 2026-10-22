@@ -58,25 +58,23 @@ def teardown_module():
 
 class TestLoadConfig:
     def test_defaults(self):
-        """无环境变量无配置文件时用兜底默认值"""
+        """无环境变量无配置文件时用兜底默认值（R31 决策 A：不再返回 interval）"""
         # 清环境变量
         for k in ("GRAPESKILLS_REPO_URL", "GRAPESKILLS_REPO_BRANCH", "SCENE_SYNC_INTERVAL"):
             os.environ.pop(k, None)
-        url, branch, interval = _load_config()
+        url, branch = _load_config()
         assert "gitcode.com" in url
         assert branch == "main"
-        assert interval == 1800.0
 
     def test_env_overrides(self):
-        """环境变量优先于配置文件"""
+        """环境变量优先于配置文件（R31 决策 A：SCENE_SYNC_INTERVAL 已移除，仅容忍并告警）"""
         os.environ["GRAPESKILLS_REPO_URL"] = "https://example.com/foo/bar"
         os.environ["GRAPESKILLS_REPO_BRANCH"] = "main"
-        os.environ["SCENE_SYNC_INTERVAL"] = "600"
+        os.environ["SCENE_SYNC_INTERVAL"] = "600"  # 废弃键：不再进返回值
         try:
-            url, branch, interval = _load_config()
+            url, branch = _load_config()
             assert url == "https://example.com/foo/bar"
             assert branch == "main"
-            assert interval == 600.0
         finally:
             for k in ("GRAPESKILLS_REPO_URL", "GRAPESKILLS_REPO_BRANCH", "SCENE_SYNC_INTERVAL"):
                 os.environ.pop(k, None)
@@ -347,15 +345,25 @@ class TestDownloadRepoZip:
         _run_async(_run())
 
     def test_auth_header(self):
-        """验证请求头包含 Authorization: Bearer {token}"""
+        """验证 gitcode 请求头包含 Authorization: Bearer ***（第七复审 P1 适配）
+
+        S16 per-host header 后，token 只附加到 gitcode 端点——本测试显式固定
+        _DL_BASE 为 gitcode，与环境变量/本地配置的 repo_url 解耦（否则
+        GRAPESKILLS_REPO_URL 指向 GitHub 时走匿名分支，本测试假失败）。
+        GitHub 源的匿名行为由 test_r31_p45_p46.py::test_github_download_sends_no_auth_header 覆盖。
+        """
         async def _run():
+            import src.storage.scene_sync as _ss
             zip_data = _make_zip_bytes()
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
             mock_resp.content = zip_data
             mock_client = AsyncMock()
             mock_client.get = AsyncMock(return_value=mock_resp)
-            await _download_repo_zip(mock_client, "fake_token")
+            with patch.object(_ss, "_DL_BASE", "https://raw.gitcode.com"), \
+                 patch.object(_ss, "_OWNER_REPO", "grape-dev/grape-skills"), \
+                 patch.object(_ss, "_REPO_BRANCH", "main"):
+                await _download_repo_zip(mock_client, "fake_token")
             # 检查 get 调用参数
             call_args = mock_client.get.call_args
             headers = call_args.kwargs.get("headers", {})

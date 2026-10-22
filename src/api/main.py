@@ -209,12 +209,8 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
 
-    # 官方场景定时同步：每 30 分钟从 grape-skills 仓库同步场景到 DB
-    try:
-        from src.storage.scene_sync import start_scene_sync_scheduler
-        start_scene_sync_scheduler()
-    except Exception as e:
-        log.warning(f"Scene sync scheduler start failed: {e}")
+    # 官方技能+场景合并定时同步：每 30 分钟串行同步（R31：skill 完成后自动触发场景同步，
+    # 场景同步已合并进 sync_official_skills，不再有独立的 scene_sync scheduler）
 
     # 临时上传文件定时清理：每小时清理超过 24 小时的孤儿文件（Issue-54）
     try:
@@ -710,12 +706,8 @@ async def lifespan(app: FastAPI):
         await stop_skill_sync_scheduler()
     except Exception:
         pass
-    # 官方场景同步：优雅关闭定时任务
-    try:
-        from src.storage.scene_sync import stop_scene_sync_scheduler
-        await stop_scene_sync_scheduler()
-    except Exception:
-        pass
+    # R31：场景同步随 skill worker 一同优雅关闭（合并进 stop_skill_sync_scheduler），
+    # stop_scene_sync_scheduler 已随 standalone worker 删除（决策 A）
     # Issue #85：健康度定时刷新线程优雅关闭
     try:
         from src.runtime.health_scorer import stop_health_refresh_scheduler
