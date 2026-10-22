@@ -56,10 +56,15 @@ def _seed_scene(scene_id, advanced_options=None):
         db.commit()
 
 
-def _inject(issue_id="5", agent_type=""):
+def _inject(issue_id="5", agent_type="", scene_id_override=""):
     from src.api.event_pipeline import _inject_scene_env
     env_extra = {}
-    _inject_scene_env(env_extra, RK, issue_id, agent_type)
+    if scene_id_override:
+        _inject_scene_env(env_extra, RK, issue_id, agent_type,
+                          scene_id_override=scene_id_override)
+    else:
+        # 与既有调用形态一致：不传 override（参数缺省 = 普通任务路径）
+        _inject_scene_env(env_extra, RK, issue_id, agent_type)
     return env_extra
 
 
@@ -333,3 +338,132 @@ def test_scope_persisted_through_get_for_refill():
     by_name = {x["name"]: x for x in d["custom_fields"]}
     assert by_name["HUAWEI_AK"]["scope"] == ["sre"]
     assert by_name["CICD_ENV"]["scope"] == ["coding", "qa"]
+
+
+# ─────────────────────────────────────────────────────────────────
+# Issue #427：PR 订阅任务 scene_id_override 四条路径
+# ─────────────────────────────────────────────────────────────────
+
+_SUB_SCENE = "sub-scene-427"
+_PR_NUM = "88"
+
+
+def _seed_427():
+    """Issue #419 场景（真实 Issue 场景，custom_fields 空）+ 订阅场景（带口令）。"""
+    # 关联 Issue #419 绑定「Issue 场景」（如代码合规检查，无 custom_fields）
+    _seed_issue(419, "issue-scene")
+    _seed_scene("issue-scene", '{"work_branch": "main", "custom_fields": []}')
+    # PR 订阅场景：BUILD0007 口令 + IP（scope 不限 → qa 全量注入）
+    _seed_scene(_SUB_SCENE, json.dumps({
+        "work_branch": "功能分支",
+        "custom_fields": [
+            {"name": "BUILD0007_PASSWORD", "value": "pw-427"},
+            {"name": "TEST_INTERNAL_IP", "value": "192.0.2.59"},
+        ],
+    }))
+
+
+def test_427_pr_linked_issue_scene_override_injects_subscription_custom_fields():
+    """路径一：PR 关联 Issue + 订阅命中 → env 按订阅场景注入（修复目标）。
+
+    issue_id 为真实编号 #419（解析出 Issue 场景），override 传入订阅场景 →
+    GRAPE_SCENE_ID 必须是订阅场景且订阅 custom_fields 非空。
+    """
+    _seed_427()
+    # 对照：不传 override（修复前行为）→ Issue 场景 + 口令丢失
+    env_before = _inject(issue_id="#419", agent_type="qa")
+    assert env_before["GRAPE_SCENE_ID"] == "issue-scene"
+    assert "BUILD0007_PASSWORD" not in env_before
+    # 修复后：override 短路 issue_id 解析
+    env = _inject(issue_id="#419", agent_type="qa", scene_id_override=_SUB_SCENE)
+    assert env["GRAPE_SCENE_ID"] == _SUB_SCENE
+    assert env["BUILD0007_PASSWORD"] == "pw-427"
+    assert env["TEST_INTERNAL_IP"] == "192.0.2.59"
+
+
+def test_427_pr_no_issue_pseudo_id_override_matches_regex_resolution():
+    """路径二：PR 无关联 Issue（伪 id 路径）→ override 与正则解析结果一致，行为不变。"""
+    _seed_427()
+    _pseudo_id = f"#pr_{_PR_NUM}_{_SUB_SCENE}"
+    # 不传 override：伪 id 正则解析出订阅场景（2026-10-21 已修路径）
+    env_regex = _inject(issue_id=_pseudo_id, agent_type="qa")
+    assert env_regex["GRAPE_SCENE_ID"] == _SUB_SCENE
+    assert env_regex["BUILD0007_PASSWORD"] == "pw-427"
+    # 传 override（主路由入队现在统一传 evt._pr_sub_scene_id）：结果必须一致
+    env_override = _inject(issue_id=_pseudo_id, agent_type="qa", scene_id_override=_SUB_SCENE)
+    assert env_override["GRAPE_SCENE_ID"] == _SUB_SCENE
+    assert env_override["BUILD0007_PASSWORD"] == "pw-427"
+    assert env_override == env_regex
+
+
+def test_427_plain_issue_task_no_override_unchanged():
+    """路径三：普通 Issue 任务（override 空串/不传）→ 按 Issue 场景解析，行为不变。"""
+    _seed_427()
+    # 参数缺省（既有调用形态）
+    env_default = _inject(issue_id="#419", agent_type="qa")
+    assert env_default["GRAPE_SCENE_ID"] == "issue-scene"
+    # 显式空串（_enqueue_pipeline_task 对普通事件 evt.get 的取值形态）
+    env_blank = _inject(issue_id="#419", agent_type="qa", scene_id_override="")
+    assert env_blank == env_default
+    # 订阅场景的口令不得泄漏进普通任务 env
+    assert "BUILD0007_PASSWORD" not in env_blank
+
+
+def test_427_build_task_env_scene_override_redispatch_path():
+    """路径四：重派 PR 订阅任务 → build_task_env 带 scene_id_override，env 带订阅场景变量。
+
+    对照：不传 override 时 issue_id=#419 被解析回 Issue 场景（重派丢订阅变量的 bug 形态）。
+    """
+    _seed_427()
+    from src.api.event_pipeline import build_task_env
+
+    # 修复后：events.py redispatch 从事件行取 scene_id 作为 override 传入
+    env = build_task_env(RK, "qa", "#419", runtime_id=0, account="org/sceneenv",
+                         issue_number="#419", scene_id_override=_SUB_SCENE)
+    assert env["GRAPE_SCENE_ID"] == _SUB_SCENE
+    assert env["BUILD0007_PASSWORD"] == "pw-427"
+    assert env["TEST_INTERNAL_IP"] == "192.0.2.59"
+    # 基础变量仍在（重派防丢变量回归看护）
+    assert env["REPO_FULL_NAME"] == "org/sceneenv"
+    assert env["REPO_OWNER"] == "org"
+    assert env["REPO_NAME"] == "sceneenv"
+    assert env["ISSUE_NUMBER"] == "419"
+
+    # 对照：不传 override（对话入队等无场景事件形态）→ 回退 issue_id 解析
+    env_no_override = build_task_env(RK, "qa", "#419", runtime_id=0,
+                                     account="org/sceneenv", issue_number="#419")
+    assert env_no_override["GRAPE_SCENE_ID"] == "issue-scene"
+    assert "BUILD0007_PASSWORD" not in env_no_override
+
+
+def test_427_redispatch_event_row_scene_id_passed_as_override():
+    """路径四调用链：_load_event 风格事件行（scene_id 列=订阅场景）→ override 生效。
+
+    模拟 events.py redispatch 的取参口径：evt = {"scene_id": <订阅场景>, ...}，
+    scene_id_override=evt.get("scene_id") or ""，断言最终 env 带订阅场景变量。
+    """
+    _seed_427()
+    from src.api.event_pipeline import build_task_env
+
+    # _load_event 返回的事件行（PR 订阅事件：issue_id 为真实关联 Issue 编号，
+    # scene_id 列写入的是订阅场景 _scene_id_for_event）
+    evt_row = {
+        "seq": 16189, "repo_key": RK, "issue_id": "#419", "agent_type": "qa",
+        "event_type": "a2a_event", "title": "PR 订阅 QA", "status": "failed",
+        "scene_id": _SUB_SCENE, "payload": "{}", "source": "a2a", "actor": "grape_bot",
+    }
+    _override = evt_row.get("scene_id") or ""
+    assert _override == _SUB_SCENE
+    env = build_task_env(RK, "qa", evt_row["issue_id"], runtime_id=0,
+                         account="org/sceneenv", issue_number=evt_row["issue_id"],
+                         scene_id_override=_override)
+    assert env["GRAPE_SCENE_ID"] == _SUB_SCENE
+    assert env["BUILD0007_PASSWORD"] == "pw-427"
+
+    # 普通事件行（scene_id = Issue 场景）：override 与 issue_id 解析同值，无行为变化
+    evt_plain = dict(evt_row, scene_id="issue-scene", event_type="issue_comment")
+    env_plain = build_task_env(RK, "qa", evt_plain["issue_id"], runtime_id=0,
+                               account="org/sceneenv", issue_number=evt_plain["issue_id"],
+                               scene_id_override=evt_plain.get("scene_id") or "")
+    assert env_plain["GRAPE_SCENE_ID"] == "issue-scene"
+    assert "BUILD0007_PASSWORD" not in env_plain

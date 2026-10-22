@@ -484,7 +484,86 @@ Never include in the comment body: thinking narration ("让我…", "现在…",
 # 附件文件扩展名分类
 _ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
 
-def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_id=0):
+# Issue #315: user-images 鉴权下载结果缓存（repo_key+issue 维度，TTL 一次流水线）
+_USER_IMAGE_CACHE: dict = {}
+_USER_IMAGE_CACHE_TTL = 600  # 秒
+_USER_IMAGE_CACHE_MAX = 512  # 缓存条目上限，超出淘汰最旧（防长驻进程无界增长）
+
+
+def _collect_user_images_for_injection(repo_key: str, owner: str, repo: str, issue_num: str,
+                                       agent_type: str, evt=None) -> str:
+    """Issue #315：提取事件文本中的 user-images 图片链接，鉴权下载转存后按角色生成注入段。
+
+    - texts 来源：Issue 正文（payload.issue.body/description、object_attributes.description）、
+      评论 note、A2A 前序摘要 —— 均为事件 payload 内已有字段，零额外网络调用。
+    - 结果按 (repo_key, issue_num) 进程内缓存（TTL 600s），流水线多 agent 不重复采集下载。
+    - 失败项一律注入降级说明（含原因短码），无静默丢失；token 绝不进入返回文本。
+    """
+    import time as _time
+    cache_key = (repo_key, issue_num)
+    now = _time.time()
+    cached = _USER_IMAGE_CACHE.get(cache_key)
+    if cached and now - cached[0] < _USER_IMAGE_CACHE_TTL:
+        collected = cached[1]
+    else:
+        texts = []
+        try:
+            payload = (evt or {}).get("payload", {}) or {}
+            issue_data = {}
+            if isinstance(payload.get("issue"), dict):
+                issue_data = payload["issue"]
+            elif isinstance(payload.get("object_attributes"), dict):
+                issue_data = payload["object_attributes"]
+            for field in ("body", "description"):
+                _t = issue_data.get(field)
+                if _t:
+                    texts.append(str(_t))
+            _note = payload.get("object_attributes", {}).get("note") if isinstance(payload.get("object_attributes"), dict) else ""
+            if _note:
+                texts.append(str(_note))
+            _a2a = (evt or {}).get("_a2a_context", "")
+            if _a2a:
+                texts.append(str(_a2a))
+        except Exception:
+            pass
+        from src.api.issues_center import _collect_issue_user_images
+        collected = _collect_issue_user_images(owner, repo, issue_num, texts, repo_key=repo_key)
+        # 缓存淘汰：超上限先清最旧一半（进程内 dict 保序，简单 LRU 近似）
+        if len(_USER_IMAGE_CACHE) >= _USER_IMAGE_CACHE_MAX:
+            for _k in list(_USER_IMAGE_CACHE.keys())[: _USER_IMAGE_CACHE_MAX // 2]:
+                _USER_IMAGE_CACHE.pop(_k, None)
+        _USER_IMAGE_CACHE[cache_key] = (now, collected)
+
+    ok_items = collected.get("ok") or []
+    failed_items = collected.get("failed") or []
+    if not ok_items and not failed_items:
+        return ""
+
+    lines = ["\n## User Attachments (GitCode editor-uploaded images)",
+             "The following images were uploaded via the GitCode issue editor (raw.gitcode.com/user-images); "
+             "the platform has fetched them with server-side authentication:"]
+    if ok_items:
+        if agent_type == "issue":
+            lines.append("- user image (fetched): " + ", ".join(a["filename"] for a in ok_items))
+            lines.append("These images have been fetched by the platform; the VOD Agent analyzes image content (see the prior Agent summary).")
+        else:
+            for a in ok_items:
+                lines.append(f"- user image {a['filename']}: {a['url']}")
+            if agent_type == "vod":
+                lines.append("Images: analyze the image content to get a description (analysis method is described in your current skill's SKILL.md).")
+            elif agent_type == "coding":
+                lines.append("Images: download them into the current working directory and analyze them as requirement reference material.")
+    if failed_items:
+        lines.append("Some images could NOT be fetched (degradation notice, not silently dropped):")
+        for f in failed_items:
+            _url_short = f["url"]
+            if len(_url_short) > 100:
+                _url_short = _url_short[:97] + "..."
+            lines.append(f"- ⚠️ user image fetch failed: {_url_short} (reason: {f['reason']})")
+    return "\n".join(lines) + "\n"
+
+
+def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_id=0, evt=None):
     """统一附件注入入口。按 agent_type 分级，从 OBS/文件系统扫描附件。
 
     所有 agent_type 都走此函数，内部按角色决定注入内容：
@@ -492,6 +571,9 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
     - issue:   只注入文件名清单（无 URL、无下载指引）
     - coding:  非图片附件的文件名 + URL + 简短下载指引
     - qa/sre:  不注入
+
+    Issue #315: 追加 GitCode 编辑器上传图片（raw.gitcode.com/user-images）鉴权下载结果注入；
+    失败项注入明确降级说明（含原因），无静默丢失、不阻塞主流程。
     """
     if agent_type not in ("vod", "issue", "coding"):
         return
@@ -519,7 +601,7 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
         return
     _attachments = _attach_list(_owner, _rname, _issue_num)
     if not _attachments:
-        return
+        _attachments = []
 
     _images = [a for a in _attachments if a.get("is_image")]
     _files = [a for a in _attachments if not a.get("is_image")]
@@ -562,6 +644,19 @@ def _inject_attachments_by_role(parts, repo_key, issue_id, agent_type, runtime_i
                 + "\n".join(_lines) + "\n"
                 "Image attachments have been analyzed by the VOD Agent; see the descriptions in the prior Agent summary.\n"
             )
+
+    # --- Issue #315：GitCode 编辑器上传图片（user-images）鉴权下载结果注入 ---
+    try:
+        _ui = _collect_user_images_for_injection(repo_key, _owner, _rname, _issue_num, agent_type, evt)
+        if _ui:
+            parts.append(_ui)
+    except Exception as _e:
+        # 降级不阻塞：注入失败仅记录，主流程继续
+        try:
+            from src.config import log as _log
+            _log.warning(f"user-image injection failed: {_e}")
+        except Exception:
+            pass
 
 
 def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=None, skill_path="", runtime_id=0,
@@ -648,7 +743,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         parts.append(f"\n## PR 审查任务\n本任务来自 PR 订阅场景，PR 无关联 Issue。请审查 PR #{number} 的变更内容，结果回帖到 PR 评论。")
 
     # 附件注入：按 agent_type 分级（统一走文件系统扫描，不再从 body 正则匹配）
-    _inject_attachments_by_role(parts, _rk, evt.get("issue_id", "") or str(number or ""), agent_type, runtime_id)
+    _inject_attachments_by_role(parts, _rk, evt.get("issue_id", "") or str(number or ""), agent_type, runtime_id, evt=evt)
 
     if history:
         parts.append(f"This repository has {len(history)} past events recorded.")

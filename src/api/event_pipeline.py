@@ -2575,6 +2575,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         "GRAPE_SERVER_URL": _resolve_server_url(runtime_id),
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；值不暴露在 prompt 文本里）
+    # Issue #427：PR 订阅任务（evt 带 _pr_sub_scene_id）场景按订阅场景注入——
+    # PR 有关联 Issue 时 issue_id 是真实编号，按其解析会拿到 Issue 场景，
+    # 订阅场景 custom_fields（口令/IP）全丢；无关联 Issue 时 override 与伪 id
+    # 正则解析结果同值，行为不变；普通任务无该键 → 空串回退。
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -2582,7 +2586,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_scene_env(env_extra, repo_key, issue_id, agent_type)
+    _inject_scene_env(env_extra, repo_key, issue_id, agent_type,
+                      scene_id_override=evt.get("_pr_sub_scene_id", ""))
     # Issue #242: 注入关联仓库列表（coding agent 读取后初始化多仓库 worktree）
     try:
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
@@ -2715,7 +2720,7 @@ def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
 
 
 def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
-                      agent_type: str = "") -> None:
+                      agent_type: str = "", scene_id_override: str = "") -> None:
     """注入场景相关环境变量：GRAPE_SCENE_ID + 高级选项 custom_fields（Issue #236 直接注入）。
 
     值不暴露在 prompt 文本里，agent 通过 printenv / os.environ 直接读取。
@@ -2724,9 +2729,13 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
       注入前做二次冲突/大写校验（兜底存量或旁路数据），冲突项跳过并告警。
       scope 过滤：字段 scope 含 "all" 或含当前 agent_type 才注入；scope 为空/未传
       agent_type 时全量注入（保持现状行为）。
+    - scene_id_override（Issue #427）：PR 订阅派发任务的订阅场景。PR 有关联 Issue 时
+      issue_id 会解析为真实 Issue 编号，场景被误判为 Issue 场景，订阅场景 custom_fields
+      （口令/IP 等）全部丢失；显式传入订阅场景（evt._pr_sub_scene_id）短路 issue_id
+      解析。空串/未传 → 回退现有 _resolve_scene_id 逻辑，普通任务零破坏。
     """
     try:
-        scene_id = _resolve_scene_id(repo_key, issue_id)
+        scene_id = scene_id_override or _resolve_scene_id(repo_key, issue_id)
         env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return
@@ -2804,7 +2813,8 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
 
 
 def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: int = 0,
-                   account: str = "", issue_number: str = "", pr_number: str = "") -> dict:
+                   account: str = "", issue_number: str = "", pr_number: str = "",
+                   scene_id_override: str = "") -> dict:
     """构建任务完整 env_extra（正常入队/重派/对话入队共用，防重派丢变量）。
 
     2026-10-10 事故：events.py 重派路径 enqueue_task(env_extra={}) 丢了
@@ -2817,6 +2827,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     - ISSUE_NUMBER/PR_NUMBER：参数传入则注入
     - BOT_USERNAME（coding）：与正常入队同逻辑
     - evt._env_extra 事件级扩展：重派无 evt，无法还原（快照已在 prompt 里），不注入
+    - scene_id_override（Issue #427）：重派 PR 订阅任务时传旧任务/事件的订阅场景，
+      防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）。
     """
     import json as _json
     env = {}
@@ -2837,7 +2849,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
             env["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_scene_env(env, repo_key, issue_id, agent_type)
+    _inject_scene_env(env, repo_key, issue_id, agent_type,
+                      scene_id_override=scene_id_override)
     try:
         _linked = _read_scene_linked_repos(repo_key, issue_id)
         if _linked:
@@ -3406,6 +3419,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "ACCOUNT": evt.get("actor") or exec_account or "",
     }
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
+    # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入
     try:
         from src.runtime.repogit import _read_scene_work_branch
         _wb = _read_scene_work_branch(repo_key, issue_id)
@@ -3413,7 +3427,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             env_extra["GRAPE_WORK_BRANCH"] = _wb
     except Exception:
         pass
-    _inject_scene_env(env_extra, repo_key, issue_id, agent_type)
+    _inject_scene_env(env_extra, repo_key, issue_id, agent_type,
+                      scene_id_override=evt.get("_pr_sub_scene_id", ""))
     # Issue #242: 注入关联仓库列表（coding agent 读取后初始化多仓库 worktree）
     try:
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
