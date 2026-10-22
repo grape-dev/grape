@@ -107,25 +107,37 @@ def _effective_window_start(runtime_id: int) -> str:
         return window
 
 
-_SQL_DT_FMT = "%Y-%m-%d %H:%M:%S"
+_SQL_DT_FMT = "%Y-%m-%dT%H:%M:%S"
 
 
 def _to_sql_utc(ts) -> str:
-    """把时间戳规范成 MySQL DATETIME 字面量（UTC、秒精度，'YYYY-MM-DD HH:MM:SS'）。
+    """把时间戳规范成与 agent_tasks 时间列存量一致的 T 分隔字面量（UTC、秒精度，
+    'YYYY-MM-DDTHH:MM:SS'）。
 
-    为什么必须规范（2026-10-21 dev 实测）：agent_tasks.created_at 由 UTC_TIMESTAMP()
-    写入（纯 UTC datetime），而赦免窗口起点曾是带时区偏移的 ISO 串（...T07:49:24+00:00）。
-    MySQL 把该 ISO 串按「会话时区」解释，实测被抬高 8 小时
-    （CAST('2026-10-21T07:49:24.519516+00:00' AS DATETIME) = 2026-10-21 15:49:25）→
-    窗口起点落到未来，重置后 8 小时内的新失败全部落在窗口之外 → 健康分不降
-    （赦免期退化成"免疫期"）。7 天窗口写法同一隐患，只是被量级掩盖。
+    格式演进（两次实测踩坑，Issue #428）：
+    1. 最初：直接传带时区偏移的 ISO 串（...T07:49:24+00:00）。MySQL 把该串按
+       「会话时区」解释，实测被抬高 8 小时（CAST('2026-10-21T07:49:24+00:00' AS
+       DATETIME) = 2026-10-21 15:49:25）→ 窗口起点落到未来，重置后 8 小时内的
+       新失败全部落在窗口之外 → 赦免期退化成"免疫期"。2026-10-21 修复引入秒级
+       纯 UTC 规范，方向正确。
+    2. 但当时输出成了空格分隔（'YYYY-MM-DD HH:MM:SS'）。agent_tasks.created_at /
+       completed_at 是 **TEXT 列**，由 Python `datetime.now(timezone.utc).isoformat()`
+       写入，存量全是 T 分隔 ISO（'2026-10-22T05:52:42.090948+00:00'）。SQL
+       `created_at >= ?` 是逐字节字符串比较：日期前 10 位相同时第 11 位
+       T(0x54) > 空格(0x20) → **重置点同日的旧失败被误判入窗，赦免失效**
+       （MySQL 实测 '2026-10-22T05:52:42' >= '2026-10-22 06:21:32' 为真）。
+       首次重置生效（当时无同日旧失败）、二次失效的现象即由此而来。
+    3. 本修复（Issue #428）：输出改为 T 分隔纯 UTC 'YYYY-MM-DDTHH:MM:SS'——
+       与存量数据同格式，字符串比较/排序两侧自然对齐；无时区偏移后缀，不会再被
+       MySQL 按会话时区抬高。治本方案（时间列迁移 DATETIME）另行评估。
 
     性能：只在每次统计前转换一次（两次查询共用一个常量参数），
     **不在 SQL 里对列做任何函数运算** → idx_tasks_runtime_status(runtime_id,status)
     照旧可用；快路径是纯字符串切片，无 datetime 解析开销。
 
-    精度语义：agent_tasks.created_at 是秒精度，故窗口也取秒精度；与重置点同一秒内
-    产生的失败按"发生在重置之后"计入（保守方向——宁可计失败，也不制造免疫期）。
+    精度语义：窗口取秒精度；与重置点同一秒内产生的失败（存量带微秒/偏移后缀，
+    前缀相同串更长 → 字典序更大）按"发生在重置之后"计入（保守方向——宁可计
+    失败，也不制造免疫期）。
     """
     if isinstance(ts, datetime):
         dt = ts
@@ -138,11 +150,11 @@ def _to_sql_utc(ts) -> str:
             body = body[:-1]
         elif body.endswith(("+00:00", "-00:00")):
             body = body[:-6]
-        # 快路径：'YYYY-MM-DDTHH:MM:SS' 或带小数秒（偏移已剥掉）→ 直接切片
+        # 快路径：'YYYY-MM-DDTHH:MM:SS' 或带小数秒（偏移已剥掉）→ 直接切片（保留 T）
         if len(body) >= 19 and body[10] == "T":
             tail = body[19:]
             if tail == "" or tail.startswith("."):
-                return body[:10] + " " + body[11:19]
+                return body[:19]
         dt = datetime.fromisoformat(s)
     if dt.tzinfo is not None:
         dt = dt.astimezone(timezone.utc)
@@ -173,8 +185,12 @@ def _fetch_task_stats(runtime_id: int) -> dict:
 
     返回 {total, failed, completed, consecutive_failures, last_status}
     Issue-P2: 窗口起点走 _effective_window_start（含健康分重置赦免，交集语义）。
-    2026-10-21 修复：窗口起点先经 _to_sql_utc 规范成纯 UTC datetime 字面量再参与比较
+    2026-10-21 修复：窗口起点先经 _to_sql_utc 规范成纯 UTC 字面量再参与比较
     （带时区偏移的 ISO 串会被 MySQL 按会话时区误解释、抬高 8 小时，见 _to_sql_utc 注释）。
+    2026-10-22 修复（Issue #428）：窗口字面量为 T 分隔 'YYYY-MM-DDTHH:MM:SS'，
+    与 agent_tasks 时间列（TEXT，Python isoformat 写入的 T 格式 ISO 存量）同格式——
+    `created_at >= ?` 字符串比较与 `ORDER BY completed_at DESC` 排序两侧口径一致
+    （空格格式会在同日第 11 位 T(0x54) vs 空格(0x20) 上误判，赦免失效）。
     """
     window = _to_sql_utc(_effective_window_start(runtime_id))
     result = {"total": 0, "failed": 0, "completed": 0,

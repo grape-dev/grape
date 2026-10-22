@@ -456,7 +456,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name, rc.status AS cred_status, ar.host_name, "
+                "rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
                 "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error, "
                 "ar.org_id "
                 "FROM agent_runtimes ar "
@@ -466,9 +466,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 ([_filter_org_id] if _filter_org_id else [])
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
-                # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）
-                if (cid or 0) > 0 and rcred_status == 'revoked':
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
+                # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）。
+                # Issue #417：吊销=物理删除凭据行，LEFT JOIN 得 NULL（cred_pk 为 None）
+                # 的孤儿 agent_runtimes 行同样跳过——否则已吊销设备在 runtime 表残留显示
+                # （凭据行存在但 status 为 NULL 的历史合法行不误伤，与 instances.py 语义一致）。
+                if (cid or 0) > 0 and (rcred_status == 'revoked' or cred_pk is None):
                     continue
                 # 跳过从未连接或长期失联(>7天)的远端引擎（与 Workers 视图过滤一致）
                 if (cid or 0) > 0:
@@ -613,9 +616,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     }
 
 
-@router.get("/ops/probe-now")
-def probe_engines_now():
-    """手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
+@router.get("/ops/probe-now", operation_id="dashboard_ops_probe_now")
+def probe_engines_now(user: dict = Depends(require_org_member)):
+    """需登录：组织成员可见。手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""
     from src.observability.engine_probe import get_probe_results, _last_probe_time
     import time, threading
     now = time.time()
@@ -635,9 +638,9 @@ def probe_engines_now():
     return {"status": "accepted", "results": get_probe_results()}
 
 
-@router.get("/ops/error-logs/sources")
-async def get_error_log_sources():
-    """返回可用的日志来源列表（主控 + 各 worker）。"""
+@router.get("/ops/error-logs/sources", operation_id="dashboard_ops_error_log_sources")
+async def get_error_log_sources(user: dict = Depends(require_org_member)):
+    """需登录：组织成员可见。返回可用的日志来源列表（主控 + 各 worker）。"""
     import os as _os, glob as _glob2
     from src.config import LOG_DIR
     from src.session_manager import db, db_lock
@@ -660,8 +663,8 @@ async def get_error_log_sources():
     return {"sources": sources}
 
 
-@router.get("/ops/error-logs")
-async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user_id: str = "", source: str = ""):
+@router.get("/ops/error-logs", operation_id="dashboard_ops_error_logs")
+async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user_id: str = "", source: str = "", user: dict = Depends(require_org_member)):
     """最近错误/警告日志。
 
     同时读取新旧两个日志文件：
@@ -674,7 +677,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     - repo: 仓库名（requiredsa/hello-flask），过滤仅该仓库的日志
     - user_id: 用户 ID，过滤仅该用户的日志
 
-    无认证：运维诊断数据，与 /health/realtime 同级。
+    需登录：组织成员可见。运维诊断数据。
     """
     import os, json as _json, glob as _glob, re as _re
     from src.config import LOG_DIR
@@ -864,11 +867,11 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     return {"entries": entries, "files": files_read, "count": len(entries)}
 
 
-@router.get("/ops/timeline")
-async def get_ops_timeline(repo: str = ""):
+@router.get("/ops/timeline", operation_id="dashboard_ops_timeline")
+async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_member)):
     """任务时序图数据：按 issue 分组的事件链（参考 admin RepoService.timeline）。
 
-    无认证：运维只读数据。
+    需登录：组织成员可见。运维只读数据。
     返回 {repoKey, issues: [{issueId, title, eventCount, firstAt, lastAt, events: [...]}]}
     """
     from src.session_manager import db, db_lock
@@ -976,11 +979,11 @@ async def get_ops_timeline(repo: str = ""):
     return {"repoKey": repo_key, "issues": issues}
 
 
-@router.get("/ops/a2a-health")
-async def get_a2a_health():
+@router.get("/ops/a2a-health", operation_id="dashboard_ops_a2a_health")
+async def get_a2a_health(user: dict = Depends(require_org_member)):
     """A2A 健康检查：server_base_url 可达性 + 最近 A2A 调用记录。
 
-    无认证：运维诊断数据。
+    需登录：组织成员可见。运维诊断数据。
     """
     import requests as _requests
     from src.user.db import get_server_base_url

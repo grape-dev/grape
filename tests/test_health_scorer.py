@@ -663,9 +663,10 @@ class TestResetWindowTimezone:
             c = db.cursor()
             c.execute("INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
                       (self.RID, "healthreset-tz", 0, 4))
-            # created_at 用 Python 计算的 UTC 'YYYY-MM-DD HH:MM:SS'（与 MySQL DATETIME 存储格式一致，
-            # 且 sqlite 后端下同一字面量语义一致）——不依赖 DB 方言函数
-            _now_lit = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+            # created_at 用 Python `datetime.now(timezone.utc).isoformat()` 写入（T 格式 ISO，
+            # 与生产 event_pipeline 写入口径一致；agent_tasks 时间列为 TEXT，MySQL/SQLite 下
+            # 同一字面量语义一致）——不依赖 DB 方言函数
+            _now_lit = datetime.now(timezone.utc).isoformat()
             c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, attempts, status, created_at, prompt) "
                       "VALUES (?,?,?,?,?,?,?)", (self.TID, self.TID, self.RID, 0, "failed", _now_lit, ""))
             db.commit()
@@ -691,9 +692,159 @@ class TestResetWindowTimezone:
         assert stats["failed"] == 1
 
     def test_window_literal_is_plain_utc_datetime(self):
-        """传给 SQL 的窗口起点必须是 'YYYY-MM-DD HH:MM:SS' 纯 UTC 字面量，且不在未来。"""
+        """传给 SQL 的窗口起点必须是 'YYYY-MM-DDTHH:MM:SS' 纯 UTC 字面量，且不在未来。
+
+        Issue #428：T 分隔与 agent_tasks 时间列存量（Python isoformat 写入）对齐；
+        无时区偏移后缀，不会再被 MySQL 按会话时区抬高 8 小时。
+        """
         self._set_reset(5)
         literal = health_scorer._to_sql_utc(health_scorer._effective_window_start(self.RID))
-        assert re.fullmatch(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}", literal), literal
-        now_literal = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", literal), literal
+        now_literal = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         assert literal <= now_literal, "窗口起点不应落在未来: %s > %s（时区误解释的典型症状）" % (literal, now_literal)
+
+
+# ===== Issue #428: 重置赦免失效回归（混格式时间字符串比较） =====
+
+class TestResetAmnestySameDay:
+    """重置点同日存在 failed 任务时，赦免窗口必须把重置前的失败排除。
+
+    背景（Issue #428）：`_to_sql_utc` 曾输出空格分隔 'YYYY-MM-DD HH:MM:SS'，而
+    agent_tasks.created_at 是 TEXT 列、存量为 T 分隔 ISO（'2026-10-22T05:52:42.090948+00:00'）。
+    SQL `created_at >= ?` 逐字符比较：日期前 10 位相同时第 11 位 T(0x54) > 空格(0x20)
+    → 重置点同日的旧失败被误判「在窗口内」→ total=1/failed=1/consecutive=1 → 得分 0，
+    「重置健康分」失效。修复后窗口字面量为 T 格式，与存量对齐。
+    """
+
+    RID = 99997
+    TIDS = ["t_428_old_failed", "t_428_after_failed", "t_428_after_completed"]
+
+    def _cleanup(self):
+        with db_lock:
+            c = db.cursor()
+            for tid in self.TIDS:
+                c.execute("DELETE FROM agent_tasks WHERE id=?", (tid,))
+            c.execute("DELETE FROM runtime_health_scores WHERE runtime_id=?", (self.RID,))
+            c.execute("DELETE FROM agent_runtimes WHERE id=?", (self.RID,))
+            db.commit()
+
+    def setup_method(self):
+        self._cleanup()
+
+    def teardown_method(self):
+        self._cleanup()
+
+    def _insert_task(self, tid, status, created_at, completed_at):
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, attempts, status, "
+                "created_at, completed_at, prompt) VALUES (?,?,?,?,?,?,?,?)",
+                (tid, tid, self.RID, 0, status, created_at, completed_at, ""))
+            db.commit()
+
+    def _set_reset(self, reset_at):
+        with db_lock:
+            db.cursor().execute("UPDATE agent_runtimes SET health_reset_at=? WHERE id=?",
+                                (reset_at, self.RID))
+            db.commit()
+
+    def test_same_day_failed_before_reset_excluded(self):
+        """重置点同日、重置之前的 failed 任务不入窗（修复前漏进窗口 → 赦免失效）。"""
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
+                (self.RID, "issue428-amnesty", 0, 4))
+            db.commit()
+        # 重置点：今天 12:00（与旧失败同一天，复现 Issue #428 的关键条件）
+        reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        reset_at = f"{reset_day}T12:00:00+00:00"
+        self._set_reset(reset_at)
+        # 重置前 29 分钟的同日失败（存量格式：T + 微秒 + 偏移后缀，复刻真实 task id 形态）
+        old_failed = f"{reset_day}T11:31:00.090948+00:00"
+        self._insert_task(self.TIDS[0], "failed", old_failed, old_failed)
+
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["total"] == 0, (
+            "重置点同日的旧失败被计入窗口（混格式比较赦免失效）: created_at=%s window=%s"
+            % (old_failed, health_scorer._to_sql_utc(reset_at))
+        )
+        assert stats["failed"] == 0
+        assert stats["consecutive_failures"] == 0
+        assert stats["last_status"] == "failed"  # last_status 不受窗口限制，仍如实反映最近终态
+
+    def test_same_day_failure_after_reset_counted(self):
+        """重置点之后的同日失败正常入窗（不制造免疫期）。"""
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
+                (self.RID, "issue428-amnesty", 0, 4))
+            db.commit()
+        reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        reset_at = f"{reset_day}T12:00:00+00:00"
+        self._set_reset(reset_at)
+        new_failed = f"{reset_day}T13:05:00.123456+00:00"
+        self._insert_task(self.TIDS[1], "failed", new_failed, new_failed)
+
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["total"] == 1
+        assert stats["failed"] == 1
+        assert stats["consecutive_failures"] == 1
+
+    def test_score_100_after_reset_with_same_day_old_failures(self):
+        """验收主路径：重置点同日存在 failed 任务时，重置后 score=100 / 无历史。"""
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
+                (self.RID, "issue428-amnesty", 0, 4))
+            db.commit()
+        reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        reset_at = f"{reset_day}T12:00:00+00:00"
+        self._set_reset(reset_at)
+        # 重置前同日连续两条失败（含微秒/偏移后缀的存量变体）
+        self._insert_task(self.TIDS[0], "failed",
+                          f"{reset_day}T10:00:00.000111+00:00",
+                          f"{reset_day}T10:30:00.000222+00:00")
+        with patch.object(health_scorer, '_fetch_heartbeat', return_value=True), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(self.RID)
+        assert data["health_score"] == 100
+        assert data["total_tasks"] == 0
+        assert data["failed_tasks"] == 0
+        assert data["consecutive_failures"] == 0
+
+    def test_ordering_with_mixed_format_history(self):
+        """混合历史数据（微秒/偏移后缀/纯秒等 T 格式变体）下 consecutive/last_status 正确。
+
+        修复前：窗口字面量为空格格式，与 T 格式存量在第 11 位交错；修复后两侧同为
+        T 格式，`ORDER BY completed_at DESC` 的字符串排序口径与比较一致（同秒内
+        带后缀的存量串字典序略大，属保守方向，不影响秒级以上排序正确性）。
+        """
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
+                (self.RID, "issue428-amnesty", 0, 4))
+            db.commit()
+        reset_day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        # 不设 health_reset_at → 普通 7 天窗口
+        # 时间倒序（旧→新）：failed(10:00) → failed(11:00) → completed(13:00) → failed(14:00)
+        self._insert_task(self.TIDS[0] + "_a", "failed",
+                          f"{reset_day}T10:00:00.000111+00:00",
+                          f"{reset_day}T10:00:00.000111+00:00")
+        self._insert_task(self.TIDS[0] + "_b", "failed",
+                          f"{reset_day}T11:00:00+00:00",
+                          f"{reset_day}T11:00:00.999999+00:00")
+        self._insert_task(self.TIDS[2] + "_c", "completed",
+                          f"{reset_day}T13:00:00Z",
+                          f"{reset_day}T13:00:00")
+        self._insert_task(self.TIDS[1] + "_d", "failed",
+                          f"{reset_day}T14:00:00.500000+00:00",
+                          f"{reset_day}T14:00:00.500000+00:00")
+
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["total"] == 4
+        assert stats["failed"] == 3
+        # 最近一条是 failed(14:00)，其前一条是 completed(13:00) → 连续失败 = 1
+        assert stats["consecutive_failures"] == 1, (
+            "混合格式历史下连续失败统计错误: %s" % stats
+        )
+        assert stats["last_status"] == "failed"

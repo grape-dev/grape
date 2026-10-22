@@ -33,6 +33,43 @@
 | 出参 | 实时运维指标（任务总量/成功/失败、引擎运行状态等聚合） |
 | 返回 | 200 |
 
+### GET /api/dashboard/ops/probe-now — 手动触发引擎探测
+
+> scope：dual。需登录：组织成员可见。
+
+| 出参 | `throttled`（防抖窗口内返回上次结果）/ `accepted`（后台线程异步探测） |
+| 返回 | 200；401 未登录 |
+
+### GET /api/dashboard/ops/error-logs/sources — 日志来源列表
+
+> scope：dual。需登录：组织成员可见。
+
+| 出参 | 主控 + 各 worker 日志来源列表 |
+| 返回 | 200；401 未登录 |
+
+### GET /api/dashboard/ops/error-logs — 错误/警告日志
+
+> scope：dual。需登录：组织成员可见。
+
+| Query | `limit` `level` `repo` `user_id` `source`（可选） |
+| 出参 | 最近错误/警告日志条目 |
+| 返回 | 200；401 未登录 |
+
+### GET /api/dashboard/ops/timeline — 任务时序图
+
+> scope：dual。需登录：组织成员可见。
+
+| Query | `repo`（可选） |
+| 出参 | 按 issue 分组的事件链 |
+| 返回 | 200；401 未登录 |
+
+### GET /api/dashboard/ops/a2a-health — A2A 健康检查
+
+> scope：dual。需登录：组织成员可见。
+
+| 出参 | server_base_url 可达性 + 最近 A2A 调用记录 |
+| 返回 | 200；401 未登录 |
+
 ### GET /api/dashboard/{owner}/{repo} — 仓库看板
 
 > scope：user_only。权限：`check_repo_access` 当前用户可访问该仓库。

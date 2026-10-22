@@ -1633,6 +1633,13 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
                 log.warning(f"revoke {cid}: 清理 session 失败: {_e}")
         # Issue #250: 物理删除 agent_runtimes 前清理场景配置 engine_runtime_ids 悬空引用
         _cleanup_scene_engine_runtime_ids(rid_list)
+        # Issue #417：级联清理 engine_capabilities（否则悬空能力标签残留）
+        if rid_list:
+            try:
+                _ph_ec = ",".join("?" for _ in rid_list)
+                c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph_ec})", rid_list)
+            except Exception as _ece:
+                log.warning(f"revoke {cid}: 清理 engine_capabilities 失败: {_ece}")
         c.execute("DELETE FROM agent_runtimes WHERE credential_id=?", (cid,))
         c.execute("DELETE FROM runtime_credentials WHERE id=?", (cid,))
         db.commit()
