@@ -1309,9 +1309,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             metrics["auto_resolution"] = round(completed / total_done * 100, 1) if total_done > 0 else 0.0
 
             # Events/Week: 最近 7 天事件数
+            # N1c 修复：原 datetime('now', '-7 days') 是 SQLite 私有函数变体（MySQL
+            # 1064），改应用层预计算 cutoff + 标准参数化 SQL，双方言一致。
+            import time as _time
+            _week_cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 7 * 86400))
             c.execute(
-                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= datetime('now', '-7 days')",
-                (_repo_keys)
+                "SELECT COUNT(*) FROM events WHERE repo_key IN (?,?) AND created_at >= ?",
+                (_repo_keys[0], _repo_keys[1], _week_cutoff)
             )
             metrics["events_week"] = c.fetchone()[0] or 0
 

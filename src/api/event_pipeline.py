@@ -76,15 +76,23 @@ def check_running_task(repo_key: str, issue_id: str) -> bool:
 
 
 def _check_session_active(repo_key: str) -> bool:
-    """R20.10.5/R21.7.2: session 兜底查询——devops_agent_session 最近 60s 活跃。"""
+    """R20.10.5/R21.7.2: session 兜底查询——devops_agent_session 最近 60s 活跃。
+
+    N1b 修复：原 `> datetime('now', '-60 seconds')` 是 SQLite 私有函数变体，
+    翻译层不覆盖（MySQL 1064 被 except 吞掉 → 恒 False）。改为应用层预计算
+    cutoff + 标准参数化 SQL，双方言行为一致（时间串 UTC "%Y-%m-%d %H:%M:%S"，
+    与 datetime('now') 写入格式对齐，可字典序比较）。
+    """
+    import time as _time
+    _cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 60))
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
                 "SELECT 1 FROM devops_agent_session WHERE repo_key=? "
-                "AND status='active' AND last_active_at > datetime('now', '-60 seconds') LIMIT 1",
-                (repo_key,)
+                "AND status='active' AND last_active_at > ? LIMIT 1",
+                (repo_key, _cutoff)
             )
             return c.fetchone() is not None
     except Exception:

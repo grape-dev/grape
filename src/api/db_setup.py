@@ -1884,7 +1884,12 @@ def _create_indexes():
             c = db.cursor()
             for _r in c.execute("PRAGMA index_list('issue')").fetchall():
                 if _r[1] == "idx_tasks_repo_issue" and not _r[2]:
-                    c.execute("DROP INDEX idx_tasks_repo_issue")
+                    # F9/1064 修复（双栈）：裸 DROP INDEX 仅 SQLite 合法，MySQL 需 ON 子句
+                    from src.session_manager import _is_mysql_backend as _imb
+                    if _imb():
+                        c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
+                    else:
+                        c.execute("DROP INDEX idx_tasks_repo_issue")
                     db.commit()
                     log.info("Dropped non-unique idx_tasks_repo_issue for unique re-create")
                     break
@@ -1913,8 +1918,16 @@ def _create_indexes():
             except Exception:
                 pass  # SQLite 无 information_schema，跳过升级检查
             if _need_upgrade:
-                c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
-                c.execute("CREATE UNIQUE INDEX idx_tasks_repo_issue ON issue (repo_key, issue_number)")
+                # F9 修复（双栈）：旧写法裸 CREATE 无前缀在 MySQL 1170 失败 →
+                # DROP 成功 CREATE 失败，索引被删不重建。改为 IF NOT EXISTS 形态
+                # （MySQL 走兼容层特判自动加 TEXT 前缀；SQLite 原生合法）。
+                # DROP 的 ON 子句 MySQL 必须 / SQLite 不允许，按后端分支。
+                from src.session_manager import _is_mysql_backend as _imb
+                if _imb():
+                    c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
+                else:
+                    c.execute("DROP INDEX idx_tasks_repo_issue")
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_tasks_repo_issue ON issue(repo_key, issue_number)")
                 db.commit()
                 log.info("Upgraded idx_tasks_repo_issue to UNIQUE")
     except Exception as e:

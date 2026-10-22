@@ -7,7 +7,18 @@ c.lastrowid / c.rowcount / c.description / PRAGMA table_info / sqlite_master 查
 
 启用方式（开关）：configs/db-backend.json 的 "backend" 字段（sqlite/mysql），
 也可用环境变量 DEVOPS_DB_BACKEND=mysql 覆盖（配合 DEVOPS_DB_HOST/PORT/USER/PASSWORD/NAME，
-或直接用 DEVOPS_DB_URL=mysql://user:pass@host:port/dbname）。默认 sqlite。
+或直接用 DEVOPS_DB_URL=mysql://user:***@host:port/dbname）。默认 sqlite。
+
+团队规则（写 SQL 前必读，docs/weekly-08/mysql-dialect-compat-requirements.md §四）：
+1. SQL 字符串字面量内禁止反斜杠——KWP 关键字保护使字符串字面量绕过翻译层，
+   `ESCAPE '\'` 类写法在 MySQL 上是 1064 语法炸弹（SQLite 部署测不出）。
+2. 前缀匹配 = `LIKE ?` + 常量前缀参数（如 f"{provider}:%"，provider 须白名单枚举），
+   不引入 ESCAPE 子句与转义助手。
+3. 确需用户输入进 LIKE 模式时，用 `ESCAPE '|'`（双方言安全）+ 转义函数。
+4. DISTINCT + ORDER BY 的排序列必须在 SELECT 列表内（ONLY_FULL_GROUP_BY）。
+5. SQL 内时间统一用 datetime('now')（无参形式，本层翻译）；带修饰符变体
+   （datetime('now','-60 seconds')）是 SQLite 私有方言，禁止使用——应用层
+   预计算 cutoff + `?` 参数（UTC 基线统一见 fix/time-utc-baseline 分支）。
 """
 import json
 import os
@@ -84,6 +95,11 @@ _PRAGMA_TABLE_INFO_RE = re.compile(r"^\s*PRAGMA\s+table_info\(\s*([`\"']?)(\w+)\
 _SQLITE_MASTER_NAME_RE = re.compile(
     r"^\s*SELECT\s+name\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s*$", re.I
 )
+# F7/M-11: 参数化判存变体（user/db.py:792 legacy 表清理）——原正则只认无参数形式，
+# MySQL 上静默跳过 legacy 表清理。标记后由 Cursor 特判走 information_schema。
+_SQLITE_MASTER_NAME_PARAM_RE = re.compile(
+    r"^\s*SELECT\s+name\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s+AND\s+name\s*=\s*\?\s*$", re.I
+)
 _SQLITE_MASTER_SQL_RE = re.compile(
     r"^\s*SELECT\s+sql\s+FROM\s+sqlite_master\s+WHERE\s+type\s*=\s*'table'\s+AND\s+name\s*=\s*['\"]([\w]+)['\"]\s*$",
     re.I,
@@ -99,8 +115,8 @@ _PRAGMA_IGNORE_RE = re.compile(
     r"^\s*PRAGMA\s+(journal_mode|busy_timeout|synchronous|foreign_keys|locking_mode|cache_size|wal_autocheckpoint|temp_store)",
     re.I,
 )
-_PRAGMA_INDEX_LIST_RE = re.compile(r"^\s*PRAGMA\s+index_list\(\s*([`\"\w]+)\s*\)\s*$", re.I)
-_PRAGMA_INDEX_INFO_RE = re.compile(r"^\s*PRAGMA\s+index_info\(\s*([`\"\w]+)\s*\)\s*$", re.I)
+_PRAGMA_INDEX_LIST_RE = re.compile(r"^\s*PRAGMA\s+index_list\(\s*([`\"'\w]+)\s*\)\s*$", re.I)
+_PRAGMA_INDEX_INFO_RE = re.compile(r"^\s*PRAGMA\s+index_info\(\s*([`\"'\w]+)\s*\)\s*$", re.I)
 # 仅处理 'gitcode:' || col 拼接模式（代码中唯一用法）
 _CONCAT_RE = re.compile(r"'gitcode:'\s*\|\|\s*([A-Za-z_][A-Za-z0-9_.]*)")
 
@@ -267,6 +283,9 @@ def translate_sql(sql: str) -> str:
     # sqlite_master 表名列举 → SHOW TABLES
     if _SQLITE_MASTER_NAME_RE.match(sql):
         return "SHOW TABLES"
+    # sqlite_master 参数化判存（F7/M-11）→ 标记：Cursor.execute 特判
+    if _SQLITE_MASTER_NAME_PARAM_RE.match(sql):
+        return sql  # 标记：Cursor.execute 特判
     # sqlite_master 取建表 SQL → SHOW CREATE TABLE（结果重排由 Cursor 特判）
     if _SQLITE_MASTER_SQL_RE.match(sql):
         return sql  # 标记：Cursor.execute 特判
@@ -286,13 +305,17 @@ def translate_sql(sql: str) -> str:
     # → ON DUPLICATE KEY UPDATE <col>=... VALUES(col) ...（MySQL 方言，8.0.20 以下用 VALUES()）
     # 关键引用：src/im/bot_lease.py heartbeat() 的实例心跳 UPSERT，缺失翻译会 1064（cluster-seq-11130 根因）。
     sql = _CONFLICT_UPSERT_RE.sub(_mysql_upsert_repl, sql)
-    # datetime('now') → CAST(NOW() AS CHAR)
+    # datetime('now') → CAST(NOW() AS CHAR)（仅无参形式；UTC 基线统一在
+    # fix/time-utc-baseline 分支处理，本分支只修语法层方言）
     sql = _COL_DATETIME_DEFAULT_RE.sub("CAST(NOW() AS CHAR)", sql)
     # 'gitcode:' || col → CONCAT('gitcode:', col)
     sql = _CONCAT_RE.sub(r"CONCAT('gitcode:', \1)", sql)
     # CAST(x AS TEXT) → CAST(x AS CHAR)（MySQL 不支持 TEXT 作为 CAST 目标类型，1064 语法错误；
     #   CHAR 在 SQLite 中按 TEXT 亲和性处理，双方言兼容）
     sql = re.sub(r"\bCAST\((.+?)\s+AS\s+TEXT\)", r"CAST(\1 AS CHAR)", sql, flags=re.I)
+    # CAST(x AS INTEGER) → CAST(x AS SIGNED)（R-3 修复：MySQL 无 INTEGER 目标类型，
+    #   SQLite 中 SIGNED 同义可行，双方言兼容）
+    sql = re.sub(r"\bCAST\((.+?)\s+AS\s+INTEGER\)", r"CAST(\1 AS SIGNED)", sql, flags=re.I)
     # 参数占位符 ? → %s（pymysql 风格）
     sql = _replace_qmarks(sql)
     # meta 表的 key 列是 MySQL 保留字 → 反引号（仅涉及 meta 表的 SQL；跳过字符串字面量）
@@ -466,7 +489,7 @@ class MySQLCompatCursor:
         # PRAGMA index_list(X) → (seq, name, unique) 兼容 sqlite 结构
         m = _PRAGMA_INDEX_LIST_RE.match(sql)
         if m:
-            tbl = m.group(1)
+            tbl = m.group(1).strip("`\"'")
             q = (
                 "SELECT 0, INDEX_NAME, IF(NON_UNIQUE=0,1,0) "
                 "FROM information_schema.statistics WHERE TABLE_SCHEMA=DATABASE() "
@@ -483,7 +506,7 @@ class MySQLCompatCursor:
         # PRAGMA index_info(X) → (seqno, cid, name) 兼容 sqlite 结构
         m = _PRAGMA_INDEX_INFO_RE.match(sql)
         if m:
-            idx = m.group(1)
+            idx = m.group(1).strip("`\"'")
             q = (
                 "SELECT SEQ_IN_INDEX-1, 0, COLUMN_NAME FROM information_schema.statistics "
                 "WHERE TABLE_SCHEMA=DATABASE() AND INDEX_NAME=%s ORDER BY SEQ_IN_INDEX"
@@ -493,6 +516,21 @@ class MySQLCompatCursor:
             self._rows = list(cur.fetchall())
             self._idx = 0
             self.description = [("seqno",), ("cid",), ("name",)]
+            self.rowcount = len(self._rows)
+            self._pycur = None
+            return self
+        # sqlite_master 参数化判存（F7/M-11）→ information_schema 等价
+        if _SQLITE_MASTER_NAME_PARAM_RE.match(sql) and params:
+            tbl = params[0] if isinstance(params, (tuple, list)) else params
+            cur = self._conn._raw_cursor()
+            cur.execute(
+                "SELECT TABLE_NAME FROM information_schema.tables "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s",
+                (tbl,))
+            row = cur.fetchone()
+            self._rows = [(tbl,)] if row and row[0] == tbl else []
+            self._idx = 0
+            self.description = [("name",)]
             self.rowcount = len(self._rows)
             self._pycur = None
             return self
@@ -535,9 +573,13 @@ class MySQLCompatCursor:
             exists = cur.fetchone()[0] > 0
             if not exists:
                 # TEXT/BLOB 列建索引需前缀长度（MySQL 限制），自动加 (191)
+                # F7 附带：调用方已带前缀长度（如 repo_key(255)）时先剥掉，统一走本逻辑
                 col_list = [c.strip().strip("`\"") for c in cols.split(",")]
                 fixed_cols = []
                 for col in col_list:
+                    _paren = col.find("(")
+                    if _paren > 0:
+                        col = col[:_paren].strip()
                     cur.execute(
                         "SELECT DATA_TYPE FROM information_schema.columns "
                         "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME=%s AND COLUMN_NAME=%s",
