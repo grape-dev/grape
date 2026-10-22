@@ -539,7 +539,7 @@ function openScopeSwitcher(cid, currentScope) {
   var curRepo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   var overlay = document.createElement('div');
   overlay.id = 'scopeSwitcherOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
   overlay.onclick = function(e) { if (e.target === overlay) overlay.remove(); };
   var items = scopes.map(function(s) {
     var active = s === currentScope;
@@ -592,7 +592,7 @@ function openAddDevicePanel() {
 
   var overlay = document.createElement('div');
   overlay.id = 'addDeviceOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9998;display:flex;justify-content:flex-end;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .3s ease';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;justify-content:flex-end;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .3s ease';
 
   overlay.onclick = function(e) { if (e.target === overlay) closeAddDevicePanel(); };
 
@@ -836,12 +836,16 @@ function toggleRepoKey() {
 }
 
 function renameCredential(cid) {
-  const nn = prompt(I18N.t('runtimes.credential.rename_prompt'));
-  if (!nn) return;
-  API.put('/settings/runtime-credentials/' + cid, { name: nn.trim() }).then(() => {
-    app.showToast(I18N.t('runtimes.credential.toast_renamed'));
-    refreshRuntimes();
-  }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_rename_failed', {msg: e.message})));
+  app.showPrompt({
+    title: I18N.t('runtimes.credential.rename_prompt'),
+    onConfirm: function(nn) {
+      if (!nn) return;
+      API.put('/settings/runtime-credentials/' + cid, { name: nn.trim() }).then(() => {
+        app.showToast(I18N.t('runtimes.credential.toast_renamed'));
+        refreshRuntimes();
+      }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_rename_failed', {msg: e.message})));
+    }
+  });
 }
 
 function copyText(t) {
@@ -856,11 +860,12 @@ function copyText(t) {
 }
 
 function revokeCredential(cid) {
-  if (!confirm(I18N.t('runtimes.credential.revoke_confirm'))) return;
-  API.post('/settings/runtime-credentials/' + cid + '/revoke').then(() => {
-    app.showToast(I18N.t('runtimes.credential.toast_revoked'));
-    refreshRuntimes();
-  }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_revoke_failed', {msg: e.message})));
+  app.showConfirm(I18N.t('runtimes.credential.revoke_confirm'), function() {
+    API.post('/settings/runtime-credentials/' + cid + '/revoke').then(() => {
+      app.showToast(I18N.t('runtimes.credential.toast_revoked'));
+      refreshRuntimes();
+    }).catch(e => app.showToast(I18N.t('runtimes.credential.toast_revoke_failed', {msg: e.message})));
+  }, {danger: true});
 }
 
 function openDeviceTasks(credId) {
@@ -1059,7 +1064,7 @@ function _rtRepoQs() {
 // Issue #364: 索引未命中 → 异步拉取单引擎详情（loading 弹窗，失败 toast 反馈）
 function _openEngineDetailAsync(runtimeId) {
   closeEngineDetail();
-  const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
+  const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);padding:48px;display:flex;flex-direction:column;align-items:center;gap:14px" onclick="event.stopPropagation()">
       <div style="width:26px;height:26px;border:2.5px solid rgba(59,130,246,.2);border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite"></div>
       <div style="font-size:13px;color:var(--t3)">${I18N.t('common.loading') || '加载中...'}</div>
@@ -1100,18 +1105,19 @@ function _healthCanReset(rt) {
 
 // Issue #394: 重置引擎健康分（写入 health_reset_at 赦免点，健康分按新窗口重算）
 function resetEngineHealth(runtimeId) {
-  if (!confirm(I18N.t('runtimes.health.reset_confirm'))) return;
-  var qs = _rtRepoQs();
-  API.post('/settings/agent-runtimes/' + runtimeId + '/health-reset' + qs).then(function() {
-    app.showToast(I18N.t('runtimes.health.reset_success'));
-    closeEngineDetail();
-    _rtResetPageAndReload();
-  }).catch(function(e) {
-    var msg = (e && e.message) || I18N.t('runtimes.health.reset_failed');
-    if (msg === '仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放') {
-      msg = I18N.t('runtimes.health.reset_global_denied');
-    }
-    app.showToast(msg);
+  app.showConfirm(I18N.t('runtimes.health.reset_confirm'), function() {
+    var qs = _rtRepoQs();
+    API.post('/settings/agent-runtimes/' + runtimeId + '/health-reset' + qs).then(function() {
+      app.showToast(I18N.t('runtimes.health.reset_success'));
+      closeEngineDetail();
+      _rtResetPageAndReload();
+    }).catch(function(e) {
+      var msg = (e && e.message) || I18N.t('runtimes.health.reset_failed');
+      if (msg === '仅仓库级/个人级 worker 设备的引擎支持重置健康分，全局引擎不开放') {
+        msg = I18N.t('runtimes.health.reset_global_denied');
+      }
+      app.showToast(msg);
+    });
   });
 }
 
@@ -1126,7 +1132,7 @@ function _renderEngineDetail(rt) {
   // Issue #335: 统一走 _renderEngineSkillItems 支持搜索过滤
   const skillListHtml = _renderEngineSkillItems(skills, skillDetails, runtimeId);
 
-  const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
+  const html = `<div id="engineDetailOverlay" style="position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center" onclick="closeEngineDetail(event)">
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);max-width:680px;width:90%;max-height:85vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         ${_healthBadge(rt.health)}
@@ -1275,7 +1281,7 @@ function openSkillDetail(skillName, runtimeId, cachedDetail) {
     try { detail = JSON.parse(detail.replace(/&quot;/g, '"').replace(/&#39;/g, "'")); } catch (e) { detail = null; }
   }
 
-  const html = `<div id="skillDetailOverlay" style="position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center" onclick="closeSkillDetail(event)">
+  const html = `<div id="skillDetailOverlay" style="position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center" onclick="closeSkillDetail(event)">
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.25);max-width:520px;width:90%;max-height:80vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         <span style="font-weight:700;font-size:16px">${skillName}</span>
@@ -1428,42 +1434,48 @@ function saveSceneTags(runtimeId) {
 function editRuntimeAlias(runtimeId) {
   var rt = (__runtimeData.runtimes || []).find(function(r) { return r.id === runtimeId; });
   var current = rt ? (rt.alias || '') : '';
-  var name = prompt(I18N.t('runtimes.label.alias_prompt'), current);
-  if (name === null) return;
-  name = name.trim();
-  API.put('/runtime/runtimes/' + runtimeId + '/alias', {alias: name}).then(function(d) {
-    if (rt) rt.alias = d.alias;
-    if (__runtimeDevices) {
-      for (var i = 0; i < __runtimeDevices.length; i++) {
-        var r = (__runtimeDevices[i].runtimes || []).find(function(x) { return x.id === runtimeId; });
-        if (r) r.alias = d.alias;
-      }
-    }
-    app.showToast(I18N.t('runtimes.toast.alias_saved'));
-    if (__runtimeData) renderRuntimes(__runtimeData);
-    // 更新详情面板标题
-    var titleEl = document.querySelector('#engineDetailOverlay span[style*="font-weight:700"]');
-    if (titleEl) {
-      var parent = titleEl.parentElement;
-      var nextSibling = titleEl.nextSibling;
-      // 重建标题区域
-      titleEl.textContent = d.alias || (rt ? (rt.instance_name || rt.name) : '');
-      // 更新括号显示
-      var parenSpan = parent.querySelector('span[style*="color:var(--t3)"][style*="font-size:12px"]');
-      if (d.alias && rt) {
-        if (!parenSpan) {
-          var ns = document.createElement('span');
-          ns.style.cssText = 'font-size:12px;color:var(--t3)';
-          ns.textContent = '(' + (rt.instance_name || rt.name) + ')';
-          titleEl.insertAdjacentElement('afterend', ns);
-        } else {
-          parenSpan.textContent = '(' + (rt.instance_name || rt.name) + ')';
+  var name = null;
+  app.showPrompt({
+    title: I18N.t('runtimes.label.alias_prompt'),
+    value: current,
+    onConfirm: function(v) {
+      if (v === null) return;
+      name = v.trim();
+      API.put('/runtime/runtimes/' + runtimeId + '/alias', {alias: name}).then(function(d) {
+        if (rt) rt.alias = d.alias;
+        if (__runtimeDevices) {
+          for (var i = 0; i < __runtimeDevices.length; i++) {
+            var r = (__runtimeDevices[i].runtimes || []).find(function(x) { return x.id === runtimeId; });
+            if (r) r.alias = d.alias;
+          }
         }
-      } else if (parenSpan) {
-        parenSpan.remove();
-      }
+        app.showToast(I18N.t('runtimes.toast.alias_saved'));
+        if (__runtimeData) renderRuntimes(__runtimeData);
+        // 更新详情面板标题
+        var titleEl = document.querySelector('#engineDetailOverlay span[style*="font-weight:700"]');
+        if (titleEl) {
+          var parent = titleEl.parentElement;
+          var nextSibling = titleEl.nextSibling;
+          // 重建标题区域
+          titleEl.textContent = d.alias || (rt ? (rt.instance_name || rt.name) : '');
+          // 更新括号显示
+          var parenSpan = parent.querySelector('span[style*="color:var(--t3)"][style*="font-size:12px"]');
+          if (d.alias && rt) {
+            if (!parenSpan) {
+              var ns = document.createElement('span');
+              ns.style.cssText = 'font-size:12px;color:var(--t3)';
+              ns.textContent = '(' + (rt.instance_name || rt.name) + ')';
+              titleEl.insertAdjacentElement('afterend', ns);
+            } else {
+              parenSpan.textContent = '(' + (rt.instance_name || rt.name) + ')';
+            }
+          } else if (parenSpan) {
+            parenSpan.remove();
+          }
+        }
+      }).catch(function(e) { app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})); });
     }
-  }).catch(function(e) { app.showToast(I18N.t('runtimes.toast.save_failed', {msg: e.message})); });
+  });
 }
 
 // ===== Engine 角色标签 =====
@@ -2028,7 +2040,16 @@ function _showCreateEnvForm() {
   }
 
 function _devAction(action, devstageId) {
-  if (action === 'delete' && !confirm(I18N.t('runtimes.devspace.confirm_delete'))) return;
+  if (action === 'delete') {
+    app.showConfirm(I18N.t('runtimes.devspace.confirm_delete'), function() {
+      _devActionDo(action, devstageId);
+    }, {danger: true});
+  } else {
+    _devActionDo(action, devstageId);
+  }
+}
+
+function _devActionDo(action, devstageId) {
   var body = document.getElementById('aiDevspaceBody');
   if (body) body.innerHTML = '<div style="padding:32px;text-align:center;color:#a78bfa;font-size:13px"><div style="display:inline-block;width:20px;height:20px;border:2px solid rgba(167,139,250,.2);border-top-color:#a78bfa;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:10px"></div><div>' + I18N.t('runtimes.devspace.operating') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
   if (action === 'delete') {
@@ -2057,7 +2078,7 @@ function _devAction(action, devstageId) {
 
 function _genCredForEnv(envId, envName) {
   var defaultName = 'worker_' + envName.replace(/[^a-zA-Z0-9_]/g, '_').slice(0, 15);
-  var html = '<div class="modal-overlay" id="credModal_' + envId + '" style="position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)_closeEnvCredPanel(\'' + envId + '\')">' +
+  var html = '<div class="modal-overlay" id="credModal_' + envId + '" style="position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.4);display:flex;align-items:center;justify-content:center" onclick="if(event.target===this)_closeEnvCredPanel(\'' + envId + '\')">' +
     '<div class="cd" style="max-width:520px;width:90%;padding:20px;box-shadow:0 4px 24px rgba(0,0,0,0.15)">' +
     '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + I18N.t('runtimes.devspace.gen_cred_for_env', {name: envName}) + '</h3>' +
     '<div class="srow"><label>' + I18N.t('runtimes.devspace.cred_name') + '</label><input id="credName_' + envId + '" value="' + defaultName + '" style="flex:1;padding:7px 10px;border:1px solid var(--b);border-radius:6px;font-size:12px"></div>' +
@@ -2159,7 +2180,7 @@ function openSreAddDeviceModal(section) {
   _stopDevspaceAutoRefresh();
   var overlay = document.createElement('div');
   overlay.id = 'sreAddDeviceOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .25s ease';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .25s ease';
   overlay.onclick = function(e) { if (e.target === overlay) closeSreAddDeviceModal(); };
 
   var modal = document.createElement('div');

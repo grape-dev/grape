@@ -42,7 +42,7 @@ function _loadOrgs() {
 
 function _showCreateOrgDialog() {
   var overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:9999;opacity:0;transition:opacity .2s';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:1001;opacity:0;transition:opacity .2s';
   var dlg = document.createElement('div');
   dlg.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%) scale(1.05);background:var(--c,#fff);border-radius:12px;padding:20px;max-width:360px;width:90%;box-shadow:0 6px 30px rgba(0,0,0,.12);font-family:-apple-system,BlinkMacSystemFont,sans-serif;transition:transform .2s cubic-bezier(.4,0,.2,1)';
   dlg.innerHTML =
@@ -150,7 +150,7 @@ function _showOrgDetail(orgId) {
 
 function _showAddMemberDialog(orgId) {
   var overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:9999;opacity:0;transition:opacity .2s';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:1001;opacity:0;transition:opacity .2s';
   var dlg = document.createElement('div');
   dlg.style.cssText = 'position:fixed;left:50%;top:50%;transform:translate(-50%,-50%) scale(1.05);background:var(--c,#fff);border-radius:12px;padding:20px;max-width:340px;width:90%;box-shadow:0 6px 30px rgba(0,0,0,.12);font-family:-apple-system,BlinkMacSystemFont,sans-serif;transition:transform .2s cubic-bezier(.4,0,.2,1)';
   dlg.innerHTML =
@@ -246,13 +246,14 @@ function _removeMember(orgId, userId, username) {
       }
     });
   } else {
-    if (!confirm(I18N.t("organizations.remove_member.confirm_msg", {name: (username || userId)}))) return;
-    API.del('/orgs/' + orgId + '/members/' + userId).then(function() {
-      app.showToast(I18N.t("organizations.remove_member.success"));
-      _showOrgDetail(orgId);
-    }).catch(function(e) {
-      app.showToast(I18N.t("organizations.remove_member.failed", {msg: (e.message || e)}));
-    });
+    app.showConfirm(I18N.t("organizations.remove_member.confirm_msg", {name: (username || userId)}), function() {
+      API.del('/orgs/' + orgId + '/members/' + userId).then(function() {
+        app.showToast(I18N.t("organizations.remove_member.success"));
+        _showOrgDetail(orgId);
+      }).catch(function(e) {
+        app.showToast(I18N.t("organizations.remove_member.failed", {msg: (e.message || e)}));
+      });
+    }, {danger: true});
   }
 }
 
@@ -277,13 +278,14 @@ function _deleteOrg(orgId, orgName) {
       }
     });
   } else {
-    if (!confirm(I18N.t("organizations.delete_org.confirm_msg", {name: (orgName || orgId)}))) return;
-    API.del('/orgs/' + orgId).then(function() {
-      app.showToast(I18N.t("organizations.delete_org.success"));
-      renderOrganizations();
-    }).catch(function(e) {
-      app.showToast(I18N.t("organizations.delete_org.failed", {msg: (e.message || e)}));
-    });
+    app.showConfirm(I18N.t("organizations.delete_org.confirm_msg", {name: (orgName || orgId)}), function() {
+      API.del('/orgs/' + orgId).then(function() {
+        app.showToast(I18N.t("organizations.delete_org.success"));
+        renderOrganizations();
+      }).catch(function(e) {
+        app.showToast(I18N.t("organizations.delete_org.failed", {msg: (e.message || e)}));
+      });
+    }, {danger: true});
   }
 }
 
@@ -297,7 +299,7 @@ function _showEditOrgDialog(orgId, name, description, maxMembers, maxWorkers, is
   if (existing) { existing.remove(); return; }
   var overlay = document.createElement('div');
   overlay.id = '_editOrgOverlay';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center';
   var dlg = document.createElement('div');
   dlg.style.cssText = 'position:relative;background:var(--c,#fff);border-radius:12px;padding:24px;max-width:400px;width:90%;box-shadow:0 8px 32px rgba(0,0,0,.15);font-family:-apple-system,BlinkMacSystemFont,sans-serif';
   dlg.innerHTML =

@@ -577,7 +577,7 @@ function _showBotCollaboratorPrompt(resp, fullName, owner, name, repoKey) {
     });
   } else {
     // 兜底：alert + 进入仓库
-    alert(title + '\n\n' + message);
+    app.showToast(title + ': ' + message);
     if (inviteUrl) window.open(inviteUrl, '_blank');
     app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
   }

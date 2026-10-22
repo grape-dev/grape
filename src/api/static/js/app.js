@@ -2521,6 +2521,67 @@ function openBetaApply() {
     if (ex) { ex.remove(); document.body.style.overflow = ''; }
   }
 
+  // ── 统一模态弹层（R13-4: z=1001，压过 .tb 1000，低于 toast 10000 / warn 9999）──
+  var _modalEl = null;
+  function showModal(html, opts) {
+    closeModal();
+    var o = opts || {};
+    var overlay = document.createElement('div');
+    overlay.id = 'grapeModalOverlay';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:' +
+      (o.bg || 'rgba(0,0,0,.35)') + ';backdrop-filter:' +
+      (o.blur || 'blur(6px)') + ';-webkit-backdrop-filter:' +
+      (o.blur || 'blur(6px)') + ';display:flex;align-items:center;justify-content:center;padding:20px';
+    var box = document.createElement('div');
+    box.style.cssText = 'width:440px;max-width:92vw;background:var(--c);border-radius:16px;padding:26px;max-height:90vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.12)';
+    box.innerHTML = html;
+    overlay.appendChild(box);
+    var closeOnOutside = o.closeOnOutside !== false;
+    if (closeOnOutside) {
+      overlay.onclick = function(e) {
+        if (e.target === overlay) {
+          if (o.onClickOutside) { o.onClickOutside(); } else { closeModal(); }
+        }
+      };
+    }
+    document.body.appendChild(overlay);
+    document.body.style.overflow = 'hidden';
+    _modalEl = overlay;
+    return box;
+  }
+  function closeModal() {
+    if (_modalEl) { _modalEl.remove(); _modalEl = null; document.body.style.overflow = ''; }
+  }
+
+  // ── 统一输入弹层（R13-4: 替代原生 prompt()）──
+  function showPrompt(opts) {
+    var o = opts || {};
+    var box = showModal(
+      '<h3>' + (o.title || '') + '</h3>' +
+      '<div class="srow" style="margin-top:12px"><input type="text" id="grapePromptInput" class="kb-input" placeholder="' +
+      (o.placeholder || '') + '" value="' + (o.value || '') + '"></div>' +
+      '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:16px">' +
+      '<button class="bt bt-o" id="grapePromptCancel">' + (o.cancelText || I18N.t('common.cancel') || '取消') + '</button>' +
+      '<button class="bt bt-p" id="grapePromptOk">' + (o.confirmText || I18N.t('common.confirm') || '确认') + '</button>' +
+      '</div>',
+      { closeOnOutside: true }
+    );
+    var input = box.querySelector('#grapePromptInput');
+    if (input) { input.focus(); input.select(); }
+    box.querySelector('#grapePromptCancel').onclick = closeModal;
+    box.querySelector('#grapePromptOk').onclick = function() {
+      var val = input ? input.value.trim() : '';
+      if (o.validate && !o.validate(val)) return;
+      closeModal();
+      if (o.onConfirm) o.onConfirm(val);
+    };
+    if (input) {
+      input.addEventListener('keydown', function(e) {
+        if (e.key === 'Enter') { box.querySelector('#grapePromptOk').click(); }
+      });
+    }
+  }
+
   // ── 帮助抽屉 ──
   function openHelp() {
     const overlay = document.getElementById('helpOverlay');
@@ -2611,7 +2672,7 @@ function openBetaApply() {
         return r.json();
       }).then(d => {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '45');
+        localStorage.setItem('app_cache_ver', '46');
         localStorage.removeItem(REPO_CACHE_KEY);
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');
@@ -2639,7 +2700,7 @@ function openBetaApply() {
     const urlToken = p.get('token');
     if (urlToken) {
       localStorage.setItem('token', urlToken);
-      localStorage.setItem('app_cache_ver', '45');
+      localStorage.setItem('app_cache_ver', '46');
       // 每次 OAuth 登录都清除上一个用户的仓库缓存+选择+组织上下文——防止切换账号后看到旧数据或 403
       localStorage.removeItem(REPO_CACHE_KEY);
       localStorage.removeItem('currentRepo');
@@ -2668,13 +2729,13 @@ function openBetaApply() {
     }
 
     // Cache version check - only clear if version mismatch AND not in OAuth flow
-    if (localStorage.getItem('app_cache_ver') !== '45') {
+    if (localStorage.getItem('app_cache_ver') !== '46') {
       const oldToken = localStorage.getItem('token');
       const oldUser = localStorage.getItem('user');
       localStorage.clear();
       if (oldToken) localStorage.setItem('token', oldToken);
       if (oldUser) localStorage.setItem('user', oldUser);
-      localStorage.setItem('app_cache_ver', '45');
+      localStorage.setItem('app_cache_ver', '46');
     }
 
     const token = localStorage.getItem('token');
@@ -2724,7 +2785,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
+  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

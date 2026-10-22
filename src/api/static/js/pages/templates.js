@@ -538,7 +538,7 @@ function createFromTemplate(templateId, defaultName) {
 
   var modal = document.createElement('div');
   modal.id = 'ptCreateModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:stretch;justify-content:center;padding:0;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:stretch;justify-content:center;padding:0;z-index:1001';
   modal.innerHTML =
     '<div class="cd" style="width:100%;max-width:900px;margin:0 auto;padding:0;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;height:100vh">' +
 
@@ -767,7 +767,7 @@ function forkTemplate(templateId) {
 
   var modal = document.createElement('div');
   modal.id = 'ptForkModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;padding:20px;z-index:1001';
   modal.innerHTML =
     '<div class="cd" style="width:100%;max-width:460px;border-radius:12px;overflow:hidden;display:flex;flex-direction:column;max-height:90vh">' +
       '<div style="padding:20px 28px 14px;flex-shrink:0;border-bottom:1px solid var(--b)">' +

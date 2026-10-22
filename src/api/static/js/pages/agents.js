@@ -440,14 +440,15 @@ function _agentVodImSection(data) {
 function unbindVodIm() {
   const repo = app.currentRepo();
   if (!repo) { app.showToast(I18N.t('agents.toast.select_repo_first')); return; }
-  if (!confirm(I18N.t('agents.config.unbind_confirm'))) return;
-  // 只带解绑标记：后端仅清 IM 三字段，保留引擎/技能/事件订阅配置
-  API.put('/agents/vod/' + repo.owner + '/' + repo.name, {im_unbind: true}).then(() => {
-    app.showToast(I18N.t('agents.config.unbind_success'));
-    API.get('/agents/vod/' + repo.owner + '/' + repo.name).then(d => {
-      if (window._currentView === 'vod') renderAgent('vod', d);
-    }).catch(() => {});
-  }).catch(e => app.showToast(I18N.t('agents.config.unbind_failed', {msg: e.message})));
+  app.showConfirm(I18N.t('agents.config.unbind_confirm'), function() {
+    // 只带解绑标记：后端仅清 IM 三字段，保留引擎/技能/事件订阅配置
+    API.put('/agents/vod/' + repo.owner + '/' + repo.name, {im_unbind: true}).then(() => {
+      app.showToast(I18N.t('agents.config.unbind_success'));
+      API.get('/agents/vod/' + repo.owner + '/' + repo.name).then(d => {
+        if (window._currentView === 'vod') renderAgent('vod', d);
+      }).catch(() => {});
+    }).catch(e => app.showToast(I18N.t('agents.config.unbind_failed', {msg: e.message})));
+  }, {danger: true});
 }
 
 function saveAgentConfig(name) {
@@ -485,12 +486,13 @@ function saveAgentConfig(name) {
 }
 
 function cleanAgentSession(name) {
-  if (!confirm(I18N.t('agents.session.clean_confirm', {name: name}))) return;
-  const repo = app.currentRepo();
-  if (!repo) return;
-  API.post('/agents/' + name + '/' + repo.owner + '/' + repo.name + '/clean').then(r => {
-    app.showToast(r.message || I18N.t('agents.session.cleaned'));
-  }).catch(e => app.showToast(I18N.t('agents.session.clean_failed', {msg: e.message})));
+  app.showConfirm(I18N.t('agents.session.clean_confirm', {name: name}), function() {
+    const repo = app.currentRepo();
+    if (!repo) return;
+    API.post('/agents/' + name + '/' + repo.owner + '/' + repo.name + '/clean').then(r => {
+      app.showToast(r.message || I18N.t('agents.session.cleaned'));
+    }).catch(e => app.showToast(I18N.t('agents.session.clean_failed', {msg: e.message})));
+  });
 }
 
 function startVodOnboard() {

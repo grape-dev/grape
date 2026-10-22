@@ -188,14 +188,15 @@ function saveImChannelConfig() {
 
 /** 解绑当前渠道（Issue #294）：置空 app_id 走既有 PUT 语义，后端同步清理注册表/会话/映射。 */
 function unbindImChannelConfig() {
-  if (!confirm(_imt('unbind_confirm'))) return;
-  const provider = _imCurrentProvider;
-  const im = {};
-  im[provider] = {app_id: '', app_secret: ''};
-  const _repo = app.currentRepo();
-  const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
-  API.put('/chat/config' + _qs, {im}).then(() => {
-    app.showToast(_imt('unbind_success'));
-    loadImChannelConfig();
-  }).catch(e => app.showToast(_imt('unbind_failed', {msg: e.message})));
+  app.showConfirm(_imt('unbind_confirm'), function() {
+    const provider = _imCurrentProvider;
+    const im = {};
+    im[provider] = {app_id: '', app_secret: ''};
+    const _repo = app.currentRepo();
+    const _qs = _repo ? '?repo=' + encodeURIComponent(_repo.fullName) : '';
+    API.put('/chat/config' + _qs, {im}).then(() => {
+      app.showToast(_imt('unbind_success'));
+      loadImChannelConfig();
+    }).catch(e => app.showToast(_imt('unbind_failed', {msg: e.message})));
+  }, {danger: true});
 }

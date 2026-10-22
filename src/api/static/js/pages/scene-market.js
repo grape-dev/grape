@@ -399,7 +399,7 @@ function _applyScene(sceneId, sceneName, sceneSkills) {
 function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName, isHwCloudScene) {
   var modal = document.createElement('div');
   modal.id = 'applyOptionsModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:1001;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
 
   var title = isOverwrite
     ? (I18N.t('skills.apply_confirm_title')||'确认覆盖应用')
@@ -666,7 +666,7 @@ function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFi
 function _showSceneNameConflict(message, fullName) {
   var modal = document.createElement('div');
   modal.id = 'sceneNameConflictModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:1001;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
   modal.innerHTML = '<div class="cd" style="width:400px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
     '<div style="display:flex;align-items:flex-start;gap:12px;margin-bottom:14px">' +
       '<span style="font-size:22px;flex-shrink:0">⚠️</span>' +
@@ -711,7 +711,7 @@ function _experienceScene(sceneId) {
 function _showExperienceConfirm(sceneId, fullName, sceneName, sceneApplied) {
   var modal = document.createElement('div');
   modal.id = 'expConfirmModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:1001;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
   var title, desc;
   if (sceneApplied) {
     title = I18N.t('skills.exp_confirm_overwrite_title')||'确认覆盖场景配置';
@@ -746,7 +746,7 @@ function _showExperienceConfirm(sceneId, fullName, sceneName, sceneApplied) {
 function _doExperienceScene(sceneId) {
   var modal = document.createElement('div');
   modal.id = 'expSceneModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:9999;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:1001;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
   modal.innerHTML = '<div class="cd" style="width:440px;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
     '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + (I18N.t('skills.experience')||'体验') + '</h3>' +
     '<div id="expProgress" style="margin-top:6px"></div>' +

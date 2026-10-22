@@ -760,7 +760,7 @@ function showSkillUpload() {
   ];
   const modal = document.createElement('div');
   modal.id = 'skillUploadModal';
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:999';
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);display:flex;align-items:center;justify-content:center;z-index:1001';
   modal.innerHTML = `<div class="cd" style="width:480px;padding:20px;border-radius:10px">
     <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">${I18N.t('skills.upload.title')||'上传技能'}</h3>
     <div class="srow" style="margin-bottom:10px"><label>${I18N.t('skills.upload.type')||'类型'}</label><span>${scope==='repo'?'仓库技能':'个人技能'}</span></div>
@@ -869,7 +869,7 @@ function deleteSkill(skillId, scope) {
 
   var modal = document.createElement('div');
   modal.id = 'deleteSkillModal';
-  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
 
   modal.innerHTML = `
     <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
@@ -921,7 +921,7 @@ function convertSkill(skillName, sourceScope) {
 
   var modal = document.createElement('div');
   modal.id = 'convertSkillModal';
-  modal.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
 
   modal.innerHTML = `
     <div style="background:rgba(255,255,255,0.98);backdrop-filter:saturate(180%) blur(20px);-webkit-backdrop-filter:saturate(180%) blur(20px);border-radius:20px;box-shadow:0 20px 60px rgba(0,0,0,0.15);width:360px;max-width:90vw;overflow:hidden">
@@ -1042,7 +1042,7 @@ function togglePkgSkillMd(skillId) {
     closeSubSkillModal();
     var ov = document.createElement('div');
     ov.id = 'subSkillModal';
-    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9999;display:flex;align-items:center;justify-content:center;';
+    ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1001;display:flex;align-items:center;justify-content:center;';
     ov.innerHTML = '<div style="width:min(860px,92vw);height:min(700px,88vh);background:var(--c);border:1px solid var(--b);border-radius:10px;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 10px 40px rgba(0,0,0,.5)">'
       + '<div style="display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--b);flex-shrink:0"><span style="font-size:13px;font-weight:600">📄 SKILL.md</span><button onclick="closeSubSkillModal()" style="margin-left:auto;border:1px solid var(--b);background:transparent;color:var(--t2);border-radius:6px;padding:3px 10px;font-size:12px;cursor:pointer">✕</button></div>'
       + '<div style="flex:1;min-height:0;overflow-y:auto;padding:14px;font-size:13px;line-height:1.7;white-space:pre-wrap;font-family:monospace;color:var(--t)">'+content+'</div></div>';

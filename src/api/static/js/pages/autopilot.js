@@ -261,7 +261,7 @@ function _apToggleRowMenu(id, e) {
   var rect = btn.getBoundingClientRect();
   var menu = document.createElement('div');
   menu.id = 'apRowMenu';
-  menu.style.cssText = 'position:fixed;z-index:10001;top:' + (rect.bottom + 2) + 'px;left:' + (rect.right - 140) + 'px;width:140px;background:var(--c,#fff);border:1px solid var(--b);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:4px';
+  menu.style.cssText = 'position:fixed;z-index:1001;top:' + (rect.bottom + 2) + 'px;left:' + (rect.right - 140) + 'px;width:140px;background:var(--c,#fff);border:1px solid var(--b);border-radius:8px;box-shadow:0 4px 16px rgba(0,0,0,0.12);padding:4px';
   menu.innerHTML =
     '<div onclick="event.stopPropagation();_apTrigger(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + _apt('list.menu_trigger') + '</div>' +
     '<div onclick="event.stopPropagation();_apToggleTask(' + id + ');_apCloseRowMenu()" style="padding:8px 10px;font-size:12px;cursor:pointer;border-radius:4px;color:var(--t);white-space:nowrap" onmouseover="this.style.background=\'var(--bg)\'" onmouseout="this.style.background=\'transparent\'">' + (_apTaskEnabled(id) ? _apt('list.menu_pause') : _apt('list.menu_enable')) + '</div>' +
@@ -316,13 +316,14 @@ function _apToggleTask(id) {
   });
 }
 function _apBatchDelete() {
-  if (!confirm(_apt('list.confirm_delete_selected', {count: _apSelected.size}))) return;
-  var ids = Array.from(_apSelected);
-  ids.forEach(function(id) {
-    API.del('/autopilot/tasks/' + id).catch(function(){});
-  });
-  _apSelected.clear();
-  setTimeout(_apLoadTasks, 300);
+  app.showConfirm(_apt('list.confirm_delete_selected', {count: _apSelected.size}), function() {
+    var ids = Array.from(_apSelected);
+    ids.forEach(function(id) {
+      API.del('/autopilot/tasks/' + id).catch(function(){});
+    });
+    _apSelected.clear();
+    setTimeout(_apLoadTasks, 300);
+  }, {danger: true});
 }
 
 // ===== 单个操作 =====
@@ -339,13 +340,14 @@ function _apTrigger(id) {
   });
 }
 function _apDelete(id) {
-  if (!confirm(_apt('list.confirm_delete_one'))) return;
-  API.del('/autopilot/tasks/' + id).then(function() {
-    if (app && app.showToast) app.showToast(_apt('deleted'));
-    _apLoadTasks();
-  }).catch(function(e) {
-    if (app && app.showToast) app.showToast(_apt('delete_failed', {msg: (e.message||e)}));
-  });
+  app.showConfirm(_apt('list.confirm_delete_one'), function() {
+    API.del('/autopilot/tasks/' + id).then(function() {
+      if (app && app.showToast) app.showToast(_apt('deleted'));
+      _apLoadTasks();
+    }).catch(function(e) {
+      if (app && app.showToast) app.showToast(_apt('delete_failed', {msg: (e.message||e)}));
+    });
+  }, {danger: true});
 }
 
 // ===== 创建/编辑对话框 =====
@@ -384,7 +386,7 @@ function _apShowDialog(tpl, existing) {
 
   var overlay = document.createElement('div');
   overlay.id = 'apDialog';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
   overlay.innerHTML =
     '<div id="apDialogContent" style="background:var(--c,#fff);border-radius:12px;width:900px;max-width:calc(100vw - 32px);height:min(680px,calc(100vh - 64px));box-shadow:0 12px 48px rgba(0,0,0,0.15);display:flex;flex-direction:column;overflow:hidden;transition:all .3s ease">' +
       // Header
@@ -655,7 +657,7 @@ function _apOpenEnginePickerInner() {
   };
 
   var overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:1001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = '<div id="apEngModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">' +
     '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">' + _apt('engine_picker.title') + '</h3>' +
     '<div style="font-size:12px;color:#86868b;margin-bottom:12px">' + _apt('engine_picker.available_count', {count: sorted.length}) + '</div>' +
@@ -780,7 +782,7 @@ function _apOpenSkillPickerInner() {
   }
 
   var overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:10001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:1001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = '<div style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:560px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">' +
     '<h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">' + _apt('skill_picker.title') + '</h3>' +
     '<div style="font-size:12px;color:#86868b;margin-bottom:12px">' + _apt('skill_picker.available_count', {count: _apAllAutoSkills.length}) + '</div>' +
@@ -1891,7 +1893,7 @@ function _apShowFindings(execId) {
 
     var overlay = document.createElement('div');
     overlay.id = 'apFindingsDialog';
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
     overlay.innerHTML =
       '<div style="background:var(--c,#fff);border-radius:12px;width:560px;max-width:calc(100vw - 32px);max-height:calc(100vh - 64px);display:flex;flex-direction:column;overflow:hidden;box-shadow:0 12px 48px rgba(0,0,0,0.15)">' +
         '<div style="display:flex;align-items:center;justify-content:space-between;padding:12px 20px;border-bottom:1px solid var(--b);flex-shrink:0">' +
@@ -1932,7 +1934,7 @@ function _apShowDispatchDialog(execId, finding, btn) {
 
     var overlay = document.createElement('div');
     overlay.id = 'apDispatchDialog';
-    overlay.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+    overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
     var _inp = 'width:100%;padding:8px 12px;border:1px solid var(--b);border-radius:8px;font-size:13px;background:var(--c);color:var(--t);outline:none;min-width:0';
     var _lbl = 'display:block;font-size:12px;font-weight:600;color:var(--t2);margin-bottom:4px';
     overlay.innerHTML =

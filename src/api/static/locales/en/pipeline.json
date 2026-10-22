@@ -52,5 +52,6 @@
   "page_info": "Page {{cur}} / {{total}}",
   "prev_page": "Previous",
   "next_page": "Next",
-  "cross_scene_handoff": "Cross-Scene Handoff"
+  "cross_scene_handoff": "Cross-Scene Handoff",
+  "no_issues": "No issues"
 }

@@ -434,7 +434,7 @@
     "change_email": "Change",
     "set_email": "Set Email",
     "loading": "Loading...",
-    "load_failed": "Load failed",
+    "load_failed": "Load failed: {msg}",
     "no_api_keys": "No API Keys yet. Create one above.",
     "api_keys_title": "API Keys",
     "generate_key": "+ Generate Key",
@@ -447,8 +447,8 @@
     "last_used": "Last used",
     "revoke": "Revoke",
     "revoke_confirm": "Revoke \"{name}\"? This is immediate and irreversible.",
-    "revoke_failed": "Revoke failed",
-    "generate_failed": "Failed",
+    "revoke_failed": "Revoke failed: {msg}",
+    "generate_failed": "Failed: {msg}",
     "name_required": "Name cannot be empty",
     "enter_key_name": "Enter API Key name (e.g. CI Pipeline):",
     "copied": "Copied",
@@ -512,6 +512,7 @@
     "confirm_new_password_placeholder": "Confirm new password",
     "cancel": "Cancel",
     "confirm_change": "Confirm",
+    "confirm_create": "Create",
     "please_fill_all": "Please fill all",
     "passwords_do_not_match": "Passwords do not match",
     "password_changed": "Password changed",
@@ -624,6 +625,7 @@
     "reset_password_hint": "Reset password via email verification code. Other devices will be logged out.",
     "verify_with_oauth": "Re-authorize via third-party",
     "set_password_needs_email": "Setting a password requires email verification. Please set up an email first.",
+    "email_not_configured": "Email service not configured. Please contact administrator.",
     "token_expired": "Token Expired",
     "token_expired_hint": "Your token has expired or been revoked. Please re-bind your token.",
     "re_bind": "Re-bind"
@@ -652,6 +654,7 @@
     "MISSING_REFRESH_TOKEN": "Your session has expired. Please sign in again.",
     "REFRESH_TOKEN_INVALID": "Your session has expired. Please sign in again.",
     "SESSION_TOKEN_INVALID": "Invalid or expired session token.",
-    "API_KEY_INVALID": "Invalid or revoked API Key."
+    "API_KEY_INVALID": "Invalid or revoked API Key.",
+    "forbidden": "No accessible repository"
   }
 }

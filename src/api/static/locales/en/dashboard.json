@@ -157,5 +157,6 @@
   "sre_aksk_submit": "Save and continue",
   "sre_aksk_saved": "AK/SK saved",
   "sre_aksk_required": "Please enter Access Key and Secret Key",
-  "sre_add_device_title": "Add device"
+  "sre_add_device_title": "Add device",
+  "scene_detail": "Scene Detail"
 }

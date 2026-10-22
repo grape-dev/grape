@@ -157,5 +157,6 @@
   "sre_aksk_submit": "保存并继续",
   "sre_aksk_saved": "AK/SK 已保存",
   "sre_aksk_required": "请输入 Access Key 和 Secret Key",
-  "sre_add_device_title": "添加设备"
+  "sre_add_device_title": "添加设备",
+  "scene_detail": "场景详情"
 }

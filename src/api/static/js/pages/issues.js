@@ -213,8 +213,8 @@ window._saveDeployUrl = function() {
     _deployUrl = url;
     _deployEditing = false;
     _renderDeployLink();
-    app.showToast('部署 URL 已保存');
-  }).catch(e => { app.showToast('保存失败: ' + (e.detail?.message || e.message)); });
+    app.showToast(I18N.t('issues.deploy_url_saved'));
+  }).catch(e => { app.showToast(I18N.t('issues.save_failed', {msg: (e.detail?.message || e.message)})); });
 };
 
 function loadTasks() {
@@ -1161,26 +1161,27 @@ function _onTaskAttachSelect(fileInput, taskId) {
   var formData = new FormData();
   formData.append('file', fileInput.files[0]);
   var list = document.getElementById('_taskAttachmentsList');
-  if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">上传中...</div>';
+  if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">' + I18N.t('issues.uploading') + '</div>';
   API.upload('/issues/' + taskId + '/attachments', formData).then(function() {
     _loadTaskAttachments(taskId);
   }).catch(function(e) {
     if (e && e.name === 'AbortError' && e.silent) return;
-    if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">上传失败: ' + e.message + '</div>';
+    if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">' + I18N.t('issues.upload_failed', {msg: e.message}) + '</div>';
     _loadTaskAttachments(taskId);
   });
   fileInput.value = '';
 }
 
 function _deleteTaskAttach(taskId, filename) {
-  if (!confirm('确认删除附件？')) return;
-  // Issue #175: 走 API.js 获得超时保护
-  API.del('/issues/' + taskId + '/attachments/' + filename).then(function() {
-    _loadTaskAttachments(taskId);
-  }).catch(function(e) {
-    if (e && e.name === 'AbortError' && e.silent) return;
-    app.showToast(I18N.t('tasks.operation_failed', {msg: (e && e.detail && e.detail.message || e && e.message || String(e))}));
-  });
+  app.showConfirm(I18N.t('issues.confirm_delete_attach'), function() {
+    // Issue #175: 走 API.js 获得超时保护
+    API.del('/issues/' + taskId + '/attachments/' + filename).then(function() {
+      _loadTaskAttachments(taskId);
+    }).catch(function(e) {
+      if (e && e.name === 'AbortError' && e.silent) return;
+      app.showToast(I18N.t('tasks.operation_failed', {msg: (e && e.detail && e.detail.message || e && e.message || String(e))}));
+    });
+  }, {danger: true});
 }
 
 // ===== 创建弹窗附件上传 =====
@@ -1196,17 +1197,17 @@ function _onCreateAttachSelect(fileInput) {
   var container = document.getElementById('tcCreateAttachments');
   var loading = document.createElement('div');
   loading.style.cssText = 'font-size:11px;color:#888;padding:4px 8px;background:rgba(0,113,227,.06);border-radius:6px';
-  loading.textContent = '上传中...';
+  loading.textContent = I18N.t('issues.uploading');
   container.appendChild(loading);
   API.upload('/issues/attachments/pre-upload?repo_key=' + encodeURIComponent(repoKey), formData).then(function(d) {
     loading.remove();
-    if (d.error) { app.showToast('上传失败: ' + d.error, null, 6000); return; }
+    if (d.error) { app.showToast(I18N.t('issues.upload_failed', {msg: d.error}), null, 6000); return; }
     _createAttachments.push({filename: d.filename, safe_name: d.safe_name, size: d.size, url: d.url});
     _renderCreateAttachments();
   }).catch(function(e) {
     loading.remove();
     if (e && e.name === 'AbortError' && e.silent) return;
-    app.showToast('上传失败: ' + e.message, null, 6000);
+    app.showToast(I18N.t('issues.upload_failed', {msg: e.message}), null, 6000);
   });
   fileInput.value = '';
 }
@@ -1306,7 +1307,7 @@ window._grapeConfirm = function(opts, event) {
   let posX = window.innerWidth / 2, posY = window.innerHeight / 2;
   if (event && event.clientX) { posX = event.clientX; posY = event.clientY; }
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:9999;opacity:0;transition:opacity .2s';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.2);backdrop-filter:blur(3px);z-index:1001;opacity:0;transition:opacity .2s';
   const dlg = document.createElement('div');
   const dlgW = 260;
   let dlgX = posX - dlgW / 2;
@@ -1339,7 +1340,7 @@ function _withTaskLoading(taskId, apiCall, successMsg, errorFn) {
   if (pc) {
     overlay = document.createElement('div');
     // position:fixed 覆盖全屏（不受可滚动容器的 overflow-y:auto 限制）
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,.7);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:9998';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(255,255,255,.7);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px;z-index:1001';
     var spinner = document.createElement('div');
     spinner.style.cssText = 'width:24px;height:24px;border:3px solid var(--b,rgba(0,0,0,.1));border-top-color:#0071e3;border-radius:50%;animation:_grapeSpin .7s linear infinite';
     // 注入 spinner 动画（仅一次）
@@ -1455,7 +1456,7 @@ function openPrInterveneModal() {
   });
   var sceneList = Object.keys(scenes);
   if (sceneList.length === 0) {
-    alert('该 PR 无关联场景，无法介入解决');
+    app.showToast(I18N.t('issues.no_scene_for_pr'));
     return;
   }
   if (_taskCreateModal) _taskCreateModal.remove();
@@ -1470,7 +1471,7 @@ function openPrInterveneModal() {
   try { _currentUsername = (JSON.parse(localStorage.getItem('user') || '{}').username) || ''; } catch(e) {}
 
   const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1001;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">介入解决 PR#${esc(t.issue_number)}</h3><button onclick="document.getElementById('prInterveneOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
@@ -1560,7 +1561,7 @@ function openTaskCreateModal() {
   } catch(e) { _currentUsername = ''; }
 
   const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1001;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.create.modal_title')}</h3><button onclick="document.getElementById('taskCreateOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
@@ -1715,7 +1716,7 @@ function openTaskCopyModal(taskId) {
   let _sceneOptions = '<option value="">' + I18N.t('tasks.create.scene_vod_auto') + '</option>';
 
   const ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1001;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:1px solid #d6dae2;border-radius:10px;padding:18px 20px;box-shadow:0 10px 40px rgba(0,0,0,.3)">
     <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 14px"><h3 style="margin:0;font-size:15px;color:#111">${I18N.t('tasks.copy.modal_title')}</h3><button onclick="document.getElementById('taskCopyOverlay').remove()" style="background:none;border:none;font-size:18px;color:#8d97a8;cursor:pointer;padding:0;line-height:1" onmouseover="this.style.color='#000'" onmouseout="this.style.color='#8d97a8'">✕</button></div>
     <div style="display:flex;flex-direction:column;gap:10px;font-size:13px">
@@ -1811,7 +1812,7 @@ window.openCrossPipelineModal = function(taskId) {
   var esc = function(v) { return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; }); };
 
   var ov = document.createElement('div');
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:9999;display:flex;align-items:center;justify-content:center;';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:1001;display:flex;align-items:center;justify-content:center;';
   ov.innerHTML = `<div style="width:min(520px,92vw);background:#fff;border:0.5px solid #d2d2d7;border-radius:14px;padding:20px 22px;box-shadow:0 10px 40px rgba(0,0,0,.15);font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","Helvetica Neue",sans-serif">
     <div style="display:flex;align-items:center;justify-content:space-between;margin:0 0 16px">
       <h3 style="margin:0;font-size:15px;font-weight:600;color:#1d1d1f">⇄ ${(I18N.t('issues.cross_pipeline.modal_title')||'跨流水线移交')}</h3>
@@ -1945,6 +1946,6 @@ function changeTaskStatus(taskId, status) {
     .then(() => loadTasks())
     .catch(e => {
       const msg = (e && e.detail && e.detail.message) || (e && e.message) || String(e);
-      alert(I18N.t('tasks.change_status_failed', {msg: msg}));
+      app.showToast(I18N.t('tasks.change_status_failed', {msg: msg}));
     });
 }

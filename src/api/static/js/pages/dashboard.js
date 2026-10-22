@@ -287,7 +287,7 @@ function renderDashboard(data) {
   window._confirmDeleteScene = function(sceneId, sceneName, e) {
     if (e) e.stopPropagation();
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
     overlay.innerHTML = '<div style="background:#fff;border-radius:18px;padding:28px;min-width:320px;max-width:400px;box-shadow:0 12px 48px rgba(0,0,0,.15)">' +
       '<h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f">' + (I18N.t('dashboard.confirm_delete_scene')||'确认删除场景') + '</h3>' +
       '<p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">' + sceneName + '</p>' +
@@ -603,7 +603,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     select::-ms-expand{display:none}
     select:focus{border-color:#0071e3!important}
     /* 自定义下拉面板样式（通过 JS 动态创建） */
-    .custom-dropdown{position:absolute;z-index:9999;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.12);padding:6px;max-height:240px;overflow-y:auto;min-width:160px}
+    .custom-dropdown{position:absolute;z-index:1001;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.12);padding:6px;max-height:240px;overflow-y:auto;min-width:160px}
     .custom-dropdown::-webkit-scrollbar{width:6px}
     .custom-dropdown::-webkit-scrollbar-thumb{background:#d2d2d7;border-radius:3px}
     .custom-dropdown::-webkit-scrollbar-track{background:transparent}
@@ -880,7 +880,7 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
   window._deleteSceneFromDetail = function(sceneId) {
     const sn = scene.display_name || scene.name;
     const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:1001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
     overlay.innerHTML = `<div style="background:#fff;border-radius:18px;padding:28px;min-width:320px;max-width:400px;box-shadow:0 12px 48px rgba(0,0,0,.15)">
       <h3 style="margin:0 0 12px;font-size:17px;font-weight:600;color:#1d1d1f">${I18N.t('dashboard.confirm_delete_scene')||'确认删除场景'}</h3>
       <p style="margin:0 0 20px;font-size:13px;color:#86868b;line-height:1.5">${sn}</p>
@@ -1015,7 +1015,7 @@ window._openSkillDropdown = function(agentType, btn) {
     var top = rect.bottom + 4;
     var estHeight = Math.min(260, Math.max(1, skills.length) * 32) + 60;
     if (top + estHeight > window.innerHeight) top = Math.max(8, rect.top - estHeight - 4);  // 视口溢出向上翻转
-    panel.style.cssText = 'position:fixed;z-index:9999;width:' + Math.max(rect.width, 240) + 'px;left:' + rect.left + 'px;top:' + top + 'px;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.12);padding:8px;box-sizing:border-box';
+    panel.style.cssText = 'position:fixed;z-index:1001;width:' + Math.max(rect.width, 240) + 'px;left:' + rect.left + 'px;top:' + top + 'px;background:#fff;border:1px solid #e8e8ed;border-radius:12px;box-shadow:0 8px 28px rgba(0,0,0,.12);padding:8px;box-sizing:border-box';
 
     var current = btn.getAttribute('data-current') || '';
 
@@ -1529,7 +1529,7 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
   }
 
   const overlay = document.createElement('div');
-  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:9999;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
+  overlay.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,.4);z-index:1001;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';
   overlay.innerHTML = `<div id="engModalBox" style="background:rgba(255,255,255,.85);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);border:none;border-radius:18px;padding:28px;width:460px;height:600px;box-shadow:0 8px 32px rgba(0,0,0,.12);display:flex;flex-direction:column">
     <h3 style="margin:0 0 4px;font-size:17px;font-weight:600;color:#1d1d1f;letter-spacing:-.3px">${I18N.t('dashboard.select_engine')||'选择引擎'} — ${title}</h3>
     <div style="font-size:12px;color:#86868b;margin-bottom:12px">${I18N.t('dashboard.engines_available', {count: allEngines.length})||'已注册引擎: '+allEngines.length}</div>
@@ -2191,7 +2191,7 @@ window._openSceneRecommendModal = function(repoParam) {
   // 创建 overlay
   var ov = document.createElement('div');
   ov.id = 'sceneRecommendOverlay';
-  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:9999;display:flex;align-items:center;justify-content:center;animation:fadeIn .15s';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.25);z-index:1001;display:flex;align-items:center;justify-content:center;animation:fadeIn .15s';
 
   var modal = document.createElement('div');
   modal.className = 'rdp-glass';

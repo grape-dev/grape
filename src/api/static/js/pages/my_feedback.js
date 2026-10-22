@@ -135,9 +135,9 @@ function renderMyFeedback() {
         },
       }, event);
     } else {
-      if (confirm(t('delete_confirm_msg'))) {
+      app.showConfirm(t('delete_confirm_msg'), function() {
         API.deleteFeedback(fid).then(function () { load(); });
-      }
+      }, {danger: true});
     }
   };
 

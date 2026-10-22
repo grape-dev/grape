@@ -325,7 +325,7 @@ function _accountShowChangePassword() {
     '<button class="bt bt-o" onclick="_accountCloseModal()">' + (I18N.t('app.account.cancel')) + '</button>' +
     '<button class="bt bt-p" onclick="_accountDoChangePassword()">' + (I18N.t('app.account.confirm_change')) + '</button>' +
     '</div>' +
-    (hasEmail ? '<p style="text-align:center;margin-top:12px"><a style="font-size:12px;color:var(--a);cursor:pointer;text-decoration:none" onclick="_accountShowResetPassword()">' + I18N.t('app.account.forgot_password_link') + '</a></p>' : '') +
+    (hasEmail && window._emailConfigured !== false ? '<p style="text-align:center;margin-top:12px"><a style="font-size:12px;color:var(--a);cursor:pointer;text-decoration:none" onclick="_accountShowResetPassword()">' + I18N.t('app.account.forgot_password_link') + '</a></p>' : '') +
     '</div>'
   );
 }
@@ -333,8 +333,12 @@ function _accountShowChangePassword() {
 // ===== Reset password (有密码但忘记当前密码——通过邮箱验证码重置) =====
 function _accountShowResetPassword() {
   var hasEmail = _accountProfile && _accountProfile.email;
-  if (!hasEmail) {
-    app.showToast(I18N.t('app.account.set_password_needs_email'));
+  if (!hasEmail || window._emailConfigured === false) {
+    if (window._emailConfigured === false) {
+      app.showToast(I18N.t('app.account.email_not_configured') || 'Email service not configured, please contact administrator');
+    } else {
+      app.showToast(I18N.t('app.account.set_password_needs_email'));
+    }
     return;
   }
   var email = _accountProfile.email;
@@ -400,7 +404,12 @@ function _accountDoChangePassword() {
 
 // ===== Set password (无密码用户) =====
 function _accountShowSetPassword() {
-  // 前置检查：设置密码需要邮箱验证码，无邮箱时引导先绑定邮箱
+  // 第一层：系统邮件服务配置检查
+  if (window._emailConfigured === false) {
+    app.showToast(I18N.t('app.account.email_not_configured') || 'Email service not configured, please contact administrator');
+    return;
+  }
+  // 第二层：用户邮箱检查（系统已配置但用户无邮箱 → 引导绑定）
   if (!_accountProfile || !_accountProfile.email) {
     app.showToast(I18N.t('app.account.set_password_needs_email'));
     _accountShowChangeEmail();
@@ -448,6 +457,10 @@ function _accountDoSetPassword() {
 
 // ===== Change email =====
 function _accountShowChangeEmail() {
+  if (window._emailConfigured === false) {
+    app.showToast(I18N.t('app.account.email_not_configured') || 'Email service not configured, please contact administrator');
+    return;
+  }
   var isZh = _accountIsZh();
   _accountShowModal(
     '<h3>' + (I18N.t('app.account.change_email_btn')) + '</h3>' +
@@ -784,7 +797,7 @@ function _accountShowBindSuccessToast(provider) {
   var pName = provider === 'github' ? 'GitHub' : 'GitCode';
   var overlay = document.createElement('div');
   overlay.id = 'bindSuccessToast';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:400;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.15);backdrop-filter:blur(4px);animation:fadeBg .2s ease';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.15);backdrop-filter:blur(4px);animation:fadeBg .2s ease';
   overlay.innerHTML =
     '<div style="background:var(--c,#fff);border-radius:20px;padding:40px 48px;text-align:center;box-shadow:0 12px 40px rgba(0,0,0,.15);animation:popIn .3s cubic-bezier(.4,0,.2,1)">' +
       '<div style="width:56px;height:56px;border-radius:50%;background:rgba(30,191,58,.12);display:flex;align-items:center;justify-content:center;margin:0 auto 16px">' +
@@ -1226,24 +1239,31 @@ function _accountLoadApiKeys() {
 }
 
 function _accountShowCreateApiKey() {
-  var isZh = _accountIsZh();
-  var name = prompt(I18N.t('app.account.enter_key_name_prompt'), '');
-  if (name === null) return;
-  if (!name.trim()) { app.showToast(I18N.t('app.account.name_required_short')); return; }
-  API.post('/settings/api-keys', {name: name.trim()}).then(function(d) {
-    var key = d.plaintext || d.key || '';
-    _accountShowModal(
-      '<h3>' + (I18N.t('app.account.api_key_created_modal')) + '</h3>' +
-      '<p class="tx" style="color:var(--r);margin-bottom:12px">' + (I18N.t('app.account.api_key_copy_warning')) + '</p>' +
-      '<div style="background:var(--bg);border:1px solid var(--b);border-radius:8px;padding:12px;margin-bottom:12px">' +
-      '<code style="font-size:12px;word-break:break-all">' + _accountEsc(key) + '</code></div>' +
-      '<div style="display:flex;gap:10px;justify-content:flex-end">' +
-      '<button class="bt bt-p" onclick="_accountCopyApiKey(\'' + _accountJsStr(key) + '\')">' + (I18N.t('app.account.copy')) + '</button>' +
-      '<button class="bt bt-o" onclick="_accountCloseModal()">' + (I18N.t('app.account.close')) + '</button>' +
-      '</div>'
-    );
-    _accountLoadApiKeys();
-  }).catch(function(e) { app.showToast(e.message || I18N.t('app.account.error_failed')); });
+  app.showPrompt({
+    title: I18N.t('app.account.enter_key_name_prompt'),
+    placeholder: I18N.t('app.account.enter_key_name_prompt'),
+    confirmText: I18N.t('app.account.confirm_create') || I18N.t('common.confirm') || '确认',
+    validate: function(val) {
+      if (!val) { app.showToast(I18N.t('app.account.name_required_short')); return false; }
+      return true;
+    },
+    onConfirm: function(name) {
+      API.post('/settings/api-keys', {name: name}).then(function(d) {
+        var key = d.plaintext || d.key || '';
+        _accountShowModal(
+          '<h3>' + (I18N.t('app.account.api_key_created_modal')) + '</h3>' +
+          '<p class="tx" style="color:var(--r);margin-bottom:12px">' + (I18N.t('app.account.api_key_copy_warning')) + '</p>' +
+          '<div style="background:var(--bg);border:1px solid var(--b);border-radius:8px;padding:12px;margin-bottom:12px">' +
+          '<code style="font-size:12px;word-break:break-all">' + _accountEsc(key) + '</code></div>' +
+          '<div style="display:flex;gap:10px;justify-content:flex-end">' +
+          '<button class="bt bt-p" onclick="_accountCopyApiKey(\'' + _accountJsStr(key) + '\')">' + (I18N.t('app.account.copy')) + '</button>' +
+          '<button class="bt bt-o" onclick="_accountCloseModal()">' + (I18N.t('app.account.close')) + '</button>' +
+          '</div>'
+        );
+        _accountLoadApiKeys();
+      }).catch(function(e) { app.showToast(e.message || I18N.t('app.account.error_failed')); });
+    }
+  });
 }
 
 function _accountCopyApiKey(key) {
@@ -1273,12 +1293,13 @@ function _accountRevokeApiKey(id, name) {
 function _accountShowDeleteAccount() {
   var hasPwd = _accountProfile ? _accountProfile.has_password : false;
   var hasEmail = _accountProfile ? !!_accountProfile.email : false;
+  var canVerifyByEmail = hasEmail && window._emailConfigured !== false;
   var bindings = (_accountProfile && _accountProfile.bindings) || [];
 
   // 动态渲染可用验证方式
   var methods = [];
   if (hasPwd) methods.push({id: 'pwd', label: I18N.t('app.account.verify_with_password')});
-  if (hasEmail) methods.push({id: 'code', label: I18N.t('app.account.verify_with_code')});
+  if (canVerifyByEmail) methods.push({id: 'code', label: I18N.t('app.account.verify_with_code')});
   if (bindings.length > 0) methods.push({id: 'oauth', label: I18N.t('app.account.verify_with_oauth')});
 
   if (methods.length === 0) {
@@ -1445,7 +1466,7 @@ function _accountShowModal(html) {
   _accountCloseModal();
   var overlay = document.createElement('div');
   overlay.id = 'accountModal';
-  overlay.style.cssText = 'position:fixed;inset:0;z-index:300;background:rgba(0,0,0,.35);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,.35);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center';
   var box = document.createElement('div');
   box.style.cssText = 'width:440px;max-width:92vw;background:var(--c);border-radius:16px;padding:26px;max-height:90vh;overflow-y:auto;box-shadow:0 12px 40px rgba(0,0,0,.12)';
   box.innerHTML = html;
