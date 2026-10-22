@@ -361,13 +361,8 @@ def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends
 @router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
 def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    # Issue #372 R4.1: agent 通过 grape API 发评论时自动追加 grape-auto-comment 标记，
-    # 确保路径 B 场景（actor=用户名）自循环检测第 1 层（标记检测）能拦截。
-    _body = body.body or ""
-    if "<!-- grape-auto-comment -->" not in _body:
-        _body = _body + "\n<!-- grape-auto-comment -->"
     return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
-                    _repo_token(owner, repo, user, p), {"body": _body})
+                    _repo_token(owner, repo, user, p), {"body": body.body})
 
 
 # ===================== Pull Requests =====================
