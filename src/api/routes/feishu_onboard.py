@@ -310,9 +310,13 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
             old_task_id, old_created = active[0], active[1]
             stale = False
             try:
-                # stale = created_at < (now - STALE_TTL)：SQLite datetime('now','-600 seconds') 字符串可字典序比较
-                c.execute("SELECT datetime('now', ?)", (f"-{STALE_TTL} seconds",))
-                _cutoff = c.fetchone()[0]
+                # stale = created_at < (now - STALE_TTL)
+                # N1a 修复：原写法 `SELECT datetime('now', ?)` 是绑定参数变体，
+                # 兼容层无法翻译（MySQL 1064 被 except 吞掉 → stale 恒 False，
+                # 用户被 409 卡死）。改应用层预计算 cutoff——SQLite datetime('now')
+                # 是 UTC "%Y-%m-%d %H:%M:%S" 字符串，Python 用 gmtime 生成同格式，
+                # 双方言行为一致。
+                _cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - STALE_TTL))
                 stale = bool(old_created) and old_created < _cutoff
             except Exception:
                 stale = False  # 解析失败保守不当 stale（避免误作废进行中任务）

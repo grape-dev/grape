@@ -45,9 +45,10 @@ from src.auth.cookie_utils import (
 )
 
 
-def _escape_like_pattern(value: str) -> str:
-    """FR-15: 转义 LIKE 模式中的特殊字符（%、_、\\）。"""
-    return value.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+# FR-15 的 _escape_like_pattern 已删除（weekly-08 MySQL 方言修复）：
+# 解绑链路的 LIKE 模式串是常量前缀（f"{provider}:%"，provider 白名单枚举），
+# 无通配符需要转义；原 ESCAPE '\' 子句在 MySQL 上是语法炸弹（1064）。
+# 如未来确需用户输入进 LIKE 模式，用 ESCAPE '|' + 转义函数（双方言安全）。
 
 
 def _sync_um_platform_col(grape_user_id: int, provider: str, external_login: str):
@@ -1012,6 +1013,12 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     """解绑第三方平台。"""
     ip = _get_client_ip(request) if request else ""
 
+    # F6 加固：provider 白名单——um_column_for_provider() 对未知 provider 会默认
+    # 清 gitcode_user 列（行为错误）；白名单同时是下方 LIKE 前缀为常量、
+    # 无通配符这一安全前提的显式保证。
+    if provider not in ("gitcode", "github"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的平台: {provider}"})
+
     # 需求17: 解绑前检查该平台下是否有正在使用的仓库（已建立 webhook 的托管仓库）
     # R19.3.1: 检查路径 B 仓库依赖（host_user_id 指向该用户的仓库）
     # managed_repos 无 user_id 列，通过 user_repos 关联查询
@@ -1024,9 +1031,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             _c.execute(
                 "SELECT m.repo_key FROM managed_repos m "
                 "INNER JOIN user_repos u ON m.repo_key = u.repo_key "
-                "WHERE u.user_id=? AND m.repo_key LIKE ? ESCAPE '\\' "
+                "WHERE u.user_id=? AND m.repo_key LIKE ? "
                 "AND m.webhook_id != '' AND m.webhook_id IS NOT NULL",
-                (user["id"], _escape_like_pattern(f"{provider}:%"))
+                (user["id"], f"{provider}:%")
             )
             rows = _c.fetchall()
             affected_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in rows]
@@ -1034,13 +1041,15 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             try:
                 _c.execute(
                     "SELECT repo_key FROM managed_repos "
-                    "WHERE host_user_id=? AND repo_key LIKE ? ESCAPE '\\'",
-                    (user["id"], _escape_like_pattern(f"{provider}:%"))
+                    "WHERE host_user_id=? AND repo_key LIKE ?",
+                    (user["id"], f"{provider}:%")
                 )
                 path_b_rows = _c.fetchall()
                 path_b_warehouses = [r[0] if isinstance(r, tuple) else r["repo_key"] for r in path_b_rows]
-            except Exception:
-                pass  # host_user_id 列可能不存在
+            except Exception as e:
+                # C1: 用户决策数据路径——失败必须可见，不得静默漏报 409 确认列表
+                log.warning(f"unbind path-B warehouse query failed (user={user['id']}, provider={provider}): {e}")
+                path_b_warehouses = []
         if affected_warehouses or path_b_warehouses:
             _all_affected = list(set(affected_warehouses + path_b_warehouses))
             raise HTTPException(status_code=409, detail={
@@ -1088,14 +1097,16 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
             _c2.execute(
                 "SELECT COUNT(*) FROM managed_repos m "
                 "INNER JOIN user_repos u ON m.repo_key = u.repo_key "
-                "WHERE u.user_id=? AND m.repo_key LIKE ? ESCAPE '\\' "
+                "WHERE u.user_id=? AND m.repo_key LIKE ? "
                 "AND m.webhook_id != '' AND m.webhook_id IS NOT NULL",
-                (user["id"], _escape_like_pattern(f"{provider}:%"))
+                (user["id"], f"{provider}:%")
             )
             row = _c2.fetchone()
             affected_count = row[0] if row else 0
-    except Exception:
-        pass
+    except Exception as e:
+        # C1: 用户决策数据——查询失败不得静默归零冒充"无影响"，-1 表示未知
+        log.warning(f"unbind affected-count query failed (user={user['id']}, provider={provider}): {e}")
+        affected_count = -1
 
     # OMIT-1: 清理旧表 user_credentials 中的 OAuth 凭据
     from src.user import db as user_db
@@ -1106,11 +1117,18 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
         pass  # 旧表可能没有此记录，静默
 
     # D42: 清理 user_repos 中该平台的仓库缓存
-    with _sm_dl:
-        _c = _sm_db.cursor()
-        _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ? ESCAPE '\\'",
-                   (user["id"], _escape_like_pattern(f"{provider}:%")))
-        _sm_db.commit()
+    # F3: 清理失败不得留"绑定已删、缓存残留、审计缺失"的静默半途状态——
+    # 失败必须可见（响应带 partial 标记），审计仍然记录
+    user_repos_cleanup_failed = False
+    try:
+        with _sm_dl:
+            _c = _sm_db.cursor()
+            _c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key LIKE ?",
+                       (user["id"], f"{provider}:%"))
+            _sm_db.commit()
+    except Exception as e:
+        log.error(f"unbind user_repos cleanup failed (user={user['id']}, provider={provider}): {e}")
+        user_repos_cleanup_failed = True
 
     auth_audit.log_audit("unbind", user_id=user["id"], ip=ip,
                          detail={"provider": provider})
@@ -1119,7 +1137,8 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     remaining_identities = get_user_identities(user["id"])
     remaining_bindings = [ident["provider"] for ident in remaining_identities]
 
-    return {"message": "解绑成功", "bindings": remaining_bindings, "affected_repos": affected_count}
+    return {"message": "解绑成功", "bindings": remaining_bindings, "affected_repos": affected_count,
+            "partial": user_repos_cleanup_failed}
 
 
 @router.get("/identities")

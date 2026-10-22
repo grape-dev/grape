@@ -1505,7 +1505,7 @@ async def process_chat_async(ctx: "BotContext", api: "FeishuAsync", parsed: dict
                     await api.reply_text(ctx, msg_id, "\n".join(reply_parts))
                     return
                 c = db.cursor()
-                c.execute("SELECT DISTINCT repo_key, repository, source FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
+                c.execute("SELECT DISTINCT repo_key, repository, source, last_active_at FROM chat_agent_session ORDER BY last_active_at DESC LIMIT 10")
                 rows = c.fetchall()
                 if rows:
                     reply_parts = ["当前未绑定任何仓库至本聊天。", "已有处理的仓库："]
