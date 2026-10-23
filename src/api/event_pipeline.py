@@ -4290,9 +4290,14 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
-    # conclusion 提取失败时用简洁默认消息，不发原始 result_text（含思考过程/JSON）
+    # conclusion 提取失败时：保留有效 result_text（纯文本），避免占位文案覆盖 Agent 真实产出；
+    # result_text 为空或纯 JSON 时用简洁默认消息（前缀已携带 Agent 身份）
     if not _conclusion:
-        _conclusion = f"任务已完成（{agent_type} agent）。"
+        _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
+        if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _conclusion = _stripped[:3000]
+        else:
+            _conclusion = "任务已完成。"
 
     # 根据 repo_key provider 分流
     if _is_github_repo(repo_key):
