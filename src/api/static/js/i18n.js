@@ -62,7 +62,8 @@ var I18N = (function () {
         create: '创建',
         update: '更新',
         close: '关闭',
-        refresh: '刷新'
+        refresh: '刷新',
+        server_error: '服务器错误，请稍后重试'
       },
       app: {
         login: {
@@ -127,6 +128,9 @@ var I18N = (function () {
           err_confirm_new_required: '请再次输入新密码',
           err_identifier_required: '请输入用户名或邮箱',
           toast_code_sent: '验证码已发送到',
+          toast_code_sent_hint: '如果该邮箱可注册，验证码已发送，请查收邮件',
+          code_not_received_hint: '没收到验证码？如果你已注册，请',
+          or: '或',
           toast_code_resent: '验证码已重新发送',
           toast_send_failed: '发送失败',
           toast_register_failed: '注册失败',
@@ -197,7 +201,8 @@ var I18N = (function () {
         create: 'Create',
         update: 'Update',
         close: 'Close',
-        refresh: 'Refresh'
+        refresh: 'Refresh',
+        server_error: 'Server error, please try again later'
       },
       app: {
         login: {
@@ -262,6 +267,9 @@ var I18N = (function () {
           err_confirm_new_required: 'Please enter new password again',
           err_identifier_required: 'Please enter username or email',
           toast_code_sent: 'Code sent to',
+          toast_code_sent_hint: 'If this email is available, a verification code has been sent. Please check your inbox.',
+          code_not_received_hint: 'Didn\'t receive the code? If you\'re already registered, please',
+          or: 'or',
           toast_code_resent: 'Code resent',
           toast_send_failed: 'Send failed',
           toast_register_failed: 'Registration failed',
@@ -418,9 +426,9 @@ var I18N = (function () {
     });
   }
 
-  // ── t(key, vars): translate a key with optional variable interpolation ──
-  // Lookup order: current lang pack → default lang pack → key itself
-  function t(key, vars) {
+  // ── t(key, vars, fallback): translate a key with optional variable interpolation ──
+  // Lookup order: current lang pack → default lang pack → fallback → key itself
+  function t(key, vars, fallback) {
     var val;
 
     // Try current language
@@ -433,8 +441,10 @@ var I18N = (function () {
       val = _lookup(_packs[DEFAULT_LANG], key);
     }
 
-    // Last resort: return the key itself
-    if (val === undefined || val === null) return key;
+    // Not found: return fallback (if provided) or key itself
+    if (val === undefined || val === null) {
+      return fallback !== undefined ? fallback : key;
+    }
 
     // Interpolate variables
     return _interpolate(val, vars);
@@ -666,21 +676,44 @@ var I18N = (function () {
       }
     }
 
-    // Remove i18n pending flag — translations applied, reveal text
+    // Remove i18n loading flag — translations applied, reveal text
     var html = document.documentElement;
-    if (html && html.hasAttribute('data-i18n-pending')) {
-      html.removeAttribute('data-i18n-pending');
+    if (html) {
+      // New: class-based (i18n-loading)
+      html.classList.remove('i18n-loading');
+      // Legacy: attribute-based (data-i18n-pending) — for backward compat
+      if (html.hasAttribute('data-i18n-pending')) {
+        html.removeAttribute('data-i18n-pending');
+      }
     }
   }
 
-  // ── init(cacheVer): synchronous init with inline packs, then async load full packs ──
+  // ── _initialized: prevent duplicate init calls ──
+  var _initialized = false;
+
+  // ── _deepMerge(target, source): recursively merge source into target ──
+  function _deepMerge(target, source) {
+    for (var key in source) {
+      if (!source.hasOwnProperty(key)) continue;
+      if (typeof source[key] === 'object' && source[key] !== null && !Array.isArray(source[key])) {
+        if (!target[key] || typeof target[key] !== 'object') target[key] = {};
+        _deepMerge(target[key], source[key]);
+      } else {
+        target[key] = source[key];
+      }
+    }
+  }
+
+  // ── init(cacheVer): synchronous init with inline packs + boost, then async load full packs ──
   function init(cacheVer) {
+    if (_initialized) return;
+    _initialized = true;
     _cacheVer = cacheVer || '';
 
     // Detect language
     _currentLang = detectLang();
 
-    // Fill _packs with inline minimal packs (synchronous)
+    // 1. Fill _packs with inline minimal packs (synchronous)
     _packs[DEFAULT_LANG] = _INLINE_PACKS[DEFAULT_LANG] || {};
     if (_currentLang !== DEFAULT_LANG) {
       _packs[_currentLang] = _INLINE_PACKS[_currentLang] || {};
@@ -688,11 +721,23 @@ var I18N = (function () {
     _loadedLangs[DEFAULT_LANG] = false;
     _loadedLangs[_currentLang] = false;
 
-    // Apply DOM translations immediately (inline packs cover critical UI)
+    // 2. Merge server-injected boost data (synchronous, zero network delay)
+    if (typeof window !== 'undefined' && window.__I18N_BOOST__) {
+      var boost = window.__I18N_BOOST__;
+      for (var lang in boost) {
+        if (!boost.hasOwnProperty(lang)) continue;
+        if (!_packs[lang]) _packs[lang] = {};
+        _deepMerge(_packs[lang], boost[lang]);
+      }
+    }
+
+    // 3. Apply DOM translations immediately (inline packs + boost cover critical UI)
     applyI18nToDOM();
 
-    // Async load full packs for current language
+    // 4. Async load full packs for current language (fills in keys not in boost)
     loadPacks(_currentLang).then(function () {
+      // Re-apply after full packs load to cover keys not in boost
+      applyI18nToDOM();
       // Also load default language packs for fallback (if different)
       if (_currentLang !== DEFAULT_LANG) {
         loadPacks(DEFAULT_LANG);
@@ -718,6 +763,22 @@ var I18N = (function () {
     applyI18nToDOM: applyI18nToDOM,
     isLangLoaded: isLangLoaded,
     SUPPORTED: SUPPORTED,
-    DEFAULT_LANG: DEFAULT_LANG
+    DEFAULT_LANG: DEFAULT_LANG,
+    // Expose for auto-init guard (read-only)
+    get isInitialized() { return _initialized; }
   };
 })();
+
+// ── Auto-init for defer mode: if no one called init() yet, do it now ──
+// defer 脚本在 DOM 解析完成后、DOMContentLoaded 前执行
+// 此时 body 中所有 [data-i18n] 元素已解析，querySelectorAll 能找到
+// 仅在 defer 模式下自动 init（页面设置了 __I18N_CACHE_VER__ 标志）
+if (typeof I18N !== 'undefined' && I18N.init && typeof window !== 'undefined' && window.__I18N_CACHE_VER__) {
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', function () {
+      if (!I18N.isInitialized) I18N.init(window.__I18N_CACHE_VER__ || '');
+    });
+  } else {
+    if (!I18N.isInitialized) I18N.init(window.__I18N_CACHE_VER__ || '');
+  }
+}

@@ -184,21 +184,48 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
         _reason = f"场景绑定的引擎全部离线，任务无法派发（scene={scene_id}, agent={agent_type}）"
     _fail_event(seq, _reason)
 
-def _filter_pr_sub_matches(matches: list, issue_scene_id: str, issue_qa_skill: str = "") -> list:
-    """PR 订阅匹配结果三步过滤：
-    1. 排除 PR 关联 Issue 所在场景（同场景的 QA 由流水线自己派）
-    2. 排除跟 Issue 场景 qa_skill 相同的场景（同 skill 审同 PR 结果一样，无意义）
-    3. 剩余场景中 qa_skill 相同的只保留第一个（同 skill 重复审查浪费资源）
+def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
+    """取指定场景 QA 节点的 skill：优先从订阅匹配列表取，查不到再读场景节点表。"""
+    for m in matches:
+        if m[0] == scene_id and m[1]:
+            return m[1]
+    try:
+        import json as _json
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT nodes_json FROM devops_pipeline_scene WHERE repo_key=? AND scene_id=?",
+                      (repo_key, scene_id))
+            row = c.fetchone()
+        if row:
+            nodes = _json.loads(row[0] or "[]")
+            qa_node = next((n for n in nodes if n.get("tag") == "qa" and n.get("enabled", True)), None)
+            if qa_node:
+                return qa_node.get("skill", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _filter_pr_sub_matches(matches: list, issue_scene_id: str, skip_issue_scene: bool = False,
+                           issue_qa_skill: str = "") -> list:
+    """PR 订阅匹配结果过滤（Issue #426 修复口径 + skill 级去重口径）：
+    1. 仅当主路由（stage matrix）已为该事件派发 QA（skip_issue_scene=True）时，
+       排除 PR 关联 Issue 所在场景（避免同场景重复 QA）；
+       其余情况订阅场景不再因绑定关系被排除
+    2. skip_issue_scene=True 且 issue_qa_skill 非空时，排除与主路由 QA 同 skill 的场景
+       （主路由 QA 已覆盖该 skill 的审查，同 skill 异场景再审是重复；#426 后补）
+    3. 剩余场景中 qa_skill 相同的只保留第一个（同 skill 重复审查浪费资源，#318 保留）
 
     matches: [(scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids), ...]
     issue_scene_id: PR 关联 Issue 所在场景（空=无关联 Issue）
-    issue_qa_skill: Issue 所在场景的 qa skill（空=无关联 Issue 或场景无 qa 节点）
+    skip_issue_scene: 主路由是否已为该事件派发 QA（agent_type == "qa"）
+    issue_qa_skill: Issue 所在场景 QA 节点的 skill（仅 skip_issue_scene=True 时使用）
     """
-    # 1. 排除 Issue 所在场景
-    if issue_scene_id:
+    # 1. 仅当主路由已派发 QA 时排除 Issue 所在场景
+    if skip_issue_scene and issue_scene_id:
         matches = [m for m in matches if m[0] != issue_scene_id]
-    # 2. 排除跟 Issue 场景 qa_skill 相同的场景
-    if issue_qa_skill:
+    # 2. 主路由已派发 QA 时排除同 qa_skill 场景（主路由 QA 覆盖同 skill 审查）
+    if skip_issue_scene and issue_qa_skill:
         matches = [m for m in matches if m[1] != issue_qa_skill]
     # 3. 相同 qa_skill 只保留第一个
     seen_skills = set()
@@ -1295,20 +1322,26 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _pr_sub_matches_early = _match_pr_subscription(repo_key, evt, event_type, _pr_branch_early)
         if _pr_sub_matches_early:
             _issue_scene_id_early = ""
-            _issue_qa_skill_early = ""
             if _pre_issue_id:
                 try:
                     from src.api.session_store import get_issue_scene
                     _issue_scene_id_early, _ = get_issue_scene(repo_key, _pre_issue_id)
                 except Exception:
                     pass
-            # 从匹配列表中查找 Issue 所在场景的 qa_skill（排除前先取）
+            # Issue #426：PR 关联 Issue 时订阅场景不再整体排除——仅当主路由（stage matrix）
+            # 会为该事件派发 QA 时跳过同场景（避免同场景重复 QA），其余场景并行共存
+            _stage_qa_early = False
+            _issue_qa_skill_early = ""
             if _issue_scene_id_early:
-                for m in _pr_sub_matches_early:
-                    if m[0] == _issue_scene_id_early:
-                        _issue_qa_skill_early = m[1]
-                        break
-            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, _issue_qa_skill_early)
+                try:
+                    _stage_qa_early = (_resolve_issue_stage_agent(
+                        repo_key, event_type, evt.get("payload", {}) or {}, PR_DEFAULT_AGENT) == "qa")
+                except Exception:
+                    _stage_qa_early = False
+            # 主路由派 QA 时取 Issue 场景的 qa_skill（skill 级去重用）
+            if _stage_qa_early and _issue_scene_id_early:
+                _issue_qa_skill_early = _scene_qa_skill(repo_key, _issue_scene_id_early, _pr_sub_matches_early)
+            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, _stage_qa_early, _issue_qa_skill_early)
             if _pr_sub_matches_early:
                 if _is_bot_actor:
                     _early_dispatched = set()
@@ -1567,50 +1600,71 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     _pr_branch = resolve_pr_target_branch(evt)
     if _pr_branch and not evt.get("branch"):
         evt["branch"] = _pr_branch
-    # PR 订阅：无主路由时（PR 无关联 Issue，非 bot 操作未被自循环拦截），
-    # 第一个匹配作为主 agent。1.5 预匹配仅 bot actor 时预派发（Issue #318），
-    # 人类用户只走此主路由单次派发。
-    if not agent_type and event_type in PR_EVENT_TYPES:
-        _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
+    # PR 订阅与 stage matrix 路由并行共存（Issue #426：PR 关联 Issue 时不再整体放弃）：
+    # - 主路由为空（PR 无关联 Issue）→ 第一个匹配作为主 agent（原行为）
+    # - 主路由非空（PR 关联 Issue，stage matrix 已设 agent_type）→ 订阅场景全部走
+    #   _dispatch_pr_subscription_extra 并行派发（a2a_event），与主路由 agent 互不干扰；
+    #   仅当主路由已派发 QA 时跳过同场景订阅（避免同场景重复审查）
+    # 1.5 预匹配仅 bot actor 时预派发（Issue #318），
+    # 人类用户只走主路由单次派发。
+    if event_type in PR_EVENT_TYPES:
+        # PR 订阅触发条件（与 1.5 预匹配口径一致）：
+        # - pull_request_merged：已合并，审查无意义 → 不订阅
+        # - pull_request_updated 无新 commit → 不订阅
+        _pr_sub_payload = evt.get("payload", {}) or {}
+        _pr_sub_action = str(_pr_sub_payload.get("_raw_action", "") or
+                             (_pr_sub_payload.get("object_attributes", {}) or {}).get("action", "")).lower()
+        if event_type == "pull_request_merged" or _pr_sub_action == "merge":
+            _pr_sub_matches = []
+        elif _pr_sub_action == "update" and event_type == "pull_request_updated":
+            _pr_sub_oa = _pr_sub_payload.get("object_attributes", {}) or {}
+            _pr_sub_has_commit = bool(_pr_sub_payload.get("commits")) or bool(_pr_sub_oa.get("oldrev"))
+            _pr_sub_matches = (_match_pr_subscription(repo_key, evt, event_type, _pr_branch)
+                               if _pr_sub_has_commit else [])
+        else:
+            _pr_sub_matches = _match_pr_subscription(repo_key, evt, event_type, _pr_branch)
         if _pr_sub_matches:
-            # 排除 PR 关联 Issue 所在场景（避免同场景重复 QA）
+            # Issue #426：仅当主路由已派发 QA 时排除同场景（原为无条件排除 Issue 场景）
             _issue_scene_id = ""
-            _issue_qa_skill = ""
             if _pre_issue_id:
                 try:
                     from src.api.session_store import get_issue_scene
                     _issue_scene_id, _ = get_issue_scene(repo_key, _pre_issue_id)
                 except Exception:
                     pass
-            # 从匹配列表中查找 Issue 所在场景的 qa_skill（排除前先取）
-            if _issue_scene_id:
-                for m in _pr_sub_matches:
-                    if m[0] == _issue_scene_id:
-                        _issue_qa_skill = m[1]
-                        break
-            _pr_sub_matches = _filter_pr_sub_matches(_pr_sub_matches, _issue_scene_id, _issue_qa_skill)
+            _pr_sub_matches = _filter_pr_sub_matches(
+                _pr_sub_matches, _issue_scene_id, agent_type == "qa",
+                (_scene_qa_skill(repo_key, _issue_scene_id, _pr_sub_matches)
+                 if agent_type == "qa" and _issue_scene_id else ""))
             # Issue #318 兜底去重：排除 1.5 预匹配已派发的场景（防御 bot actor 未被自循环拦截的边缘情况）
             _early_dispatched = evt.get("_pr_sub_early_dispatched")
             if _early_dispatched:
                 _pr_sub_matches = [m for m in _pr_sub_matches if m[0] not in _early_dispatched]
             if _pr_sub_matches:
-                _first = _pr_sub_matches[0]
-                evt["_pr_sub_scene_id"] = _first[0]
-                evt["_pr_sub_skill"] = _first[1]
-                evt["_pr_sub_engine_ids"] = _first[2]
-                if _first[3]:
-                    evt["_pr_sub_sre_skill"] = _first[3]
-                    evt["_pr_sub_sre_engine_ids"] = _first[4]
-                # 多场景补派（#318 回归修复）：人类用户只走主路由，若只取 _first
-                # 则第 2+ 场景失去唯一触发通道（修复前靠 1.5 预匹配 bug 路径捎带）。
-                # 对称 bot 路径的 1.5 预派发：剩余场景走 _dispatch_pr_subscription_extra
-                # 并行派发（a2a_event）。单场景时 [1:] 为空，不产生额外事件（禁令：
-                # 单场景不得双重触发——#318 修复成果的锁死不变量）。
-                # bot actor 不可达此分支（自循环检测已 return），行为零变化。
-                for _extra in _pr_sub_matches[1:]:
-                    _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
-                agent_type = "qa"
-                log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
+                if not agent_type:
+                    _first = _pr_sub_matches[0]
+                    evt["_pr_sub_scene_id"] = _first[0]
+                    evt["_pr_sub_skill"] = _first[1]
+                    evt["_pr_sub_engine_ids"] = _first[2]
+                    if _first[3]:
+                        evt["_pr_sub_sre_skill"] = _first[3]
+                        evt["_pr_sub_sre_engine_ids"] = _first[4]
+                    # 多场景补派（#318 回归修复）：人类用户只走主路由，若只取 _first
+                    # 则第 2+ 场景失去唯一触发通道（修复前靠 1.5 预匹配 bug 路径捎带）。
+                    # 对称 bot 路径的 1.5 预派发：剩余场景走 _dispatch_pr_subscription_extra
+                    # 并行派发（a2a_event）。单场景时 [1:] 为空，不产生额外事件（禁令：
+                    # 单场景不得双重触发——#318 修复成果的锁死不变量）。
+                    # bot actor 不可达此分支（自循环检测已 return），行为零变化。
+                    for _extra in _pr_sub_matches[1:]:
+                        _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
+                    agent_type = "qa"
+                    log.info(f"Pipeline: PR subscription triggered -> scene={_first[0]} agent=qa branch={_pr_branch}")
+                else:
+                    # Issue #426：主路由已由 stage matrix 设定（PR 关联 Issue）——
+                    # PR 订阅场景全部并行派发（a2a_event），主路由 agent 正常处理
+                    for _extra in _pr_sub_matches:
+                        _dispatch_pr_subscription_extra(repo_key, evt, event_type, _extra)
+                    log.info(f"Pipeline: PR subscription parallel dispatch -> scenes={[m[0] for m in _pr_sub_matches]} (main='{agent_type}')")
     _sub_agent = _match_repo_subscription(repo_key, event_type, _pr_branch)
     if not agent_type:
         # 主路由为空 → 订阅兜底

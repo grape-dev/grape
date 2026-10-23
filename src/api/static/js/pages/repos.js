@@ -493,6 +493,8 @@ function refreshRepos(btn) {
   API.post('/repos/sync').then(d => {
     const repos = (d.repos || []);
     _repoPage = 0;
+    // R7: 清除内存缓存，防止语言切换用旧数据渲染
+    if (typeof app !== 'undefined' && app._clearCachedReposData) app._clearCachedReposData();
     renderRepoSelection(repos);
     app.showToast(I18N.t('repos.sync.refresh_success'));
   }).catch(e => {
@@ -625,6 +627,8 @@ function unhostRepo(fullName, event) {
 function _doUnhost(fullName) {
   API.post('/repos/remove', {full_name: fullName}).then(r => {
     app.showToast(I18N.t('repos.unhost.done'));
+    // R4: 清除仓库缓存，防止 loadRepos 读到含已解除托管仓库的旧缓存
+    localStorage.removeItem('repo_member_cache');
     app.loadProfile().then(() => {
       const cur = app.currentRepo();
       const wasCurrent = cur && cur.fullName === fullName;
@@ -790,6 +794,8 @@ function submitCreateRepo(e) {
           API.post('/repos/sync').then(function(d) {
             var repos = (d && d.repos) || [];
             try { localStorage.setItem('repo_member_cache', JSON.stringify({repos: repos, ts: Date.now()})); } catch(e) {}
+            // R7: 清除内存缓存，防止语言切换用旧数据渲染
+            if (typeof app !== 'undefined' && app._clearCachedReposData) app._clearCachedReposData();
             renderRepoSelection(repos);
           }).catch(function() {
             // 同步失败降级为普通加载

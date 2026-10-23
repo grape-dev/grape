@@ -28,7 +28,7 @@ function testSubmitCreateRepoForceSync() {
   const submitIdx = REPOS_JS.indexOf('function submitCreateRepo');
   assert.ok(submitIdx >= 0, 'submitCreateRepo 函数存在');
 
-  const fnBody = REPOS_JS.slice(submitIdx, submitIdx + 2000);
+  const fnBody = REPOS_JS.slice(submitIdx, submitIdx + 2500);
   // R13.1: 局部刷新——调 /repos/sync 同步后直接 renderRepoSelection，不调 _forceSyncRepos（避免路由跳转）
   assert.ok(/API\.post\('\/repos\/sync'\)/.test(fnBody), 'submitCreateRepo 成功后调 /repos/sync 强制同步');
   assert.ok(/renderRepoSelection/.test(fnBody), '同步成功后调 renderRepoSelection 局部刷新');

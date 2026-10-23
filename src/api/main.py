@@ -1013,13 +1013,120 @@ if os.path.isdir(STATIC_DIR):
             return resp
     app.add_middleware(NoCacheStaticMiddleware)
 
-    from fastapi.responses import FileResponse
+    from fastapi.responses import FileResponse, HTMLResponse
+    from src.auth.email_service import is_email_configured as _is_email_configured
+    import json as _json_mod
+
+    # ── i18n boost: 服务端注入翻译数据，消除首屏 i18n 闪动 ──
+    _I18N_BOOST_CACHE = None
+
+    def _get_i18n_boost():
+        """启动时读取 locale JSON，提取 auth 页面 [data-i18n] 需要的 key，缓存为双语 boost pack。
+        读取失败时返回空 JSON '{}'——early-translate 检测到无 boost 数据会直接 return，
+        降级为 i18n.js defer 翻译（有短暂闪动但页面不崩溃）。"""
+        global _I18N_BOOST_CACHE
+        if _I18N_BOOST_CACHE is not None:
+            return _I18N_BOOST_CACHE
+
+        try:
+            import re as _re
+            boost = {'en': {'app': {}}, 'zh': {'app': {}}}
+
+            # Collect all data-i18n keys from auth pages
+            auth_keys = set()
+            for fname in ('register.html', 'forgot.html', 'index.html'):
+                fpath = os.path.join(STATIC_DIR, fname)
+                if os.path.isfile(fpath):
+                    with open(fpath, 'r', encoding='utf-8') as f:
+                        html = f.read()
+                    for m in _re.finditer(r'data-i18n(?:-placeholder)?="([^"]+)"', html):
+                        auth_keys.add(m.group(1))
+
+            # Extract keys from locale JSON files
+            for lang in ('en', 'zh'):
+                app_path = os.path.join(STATIC_DIR, 'locales', lang, 'app.json')
+                if os.path.isfile(app_path):
+                    with open(app_path, 'r', encoding='utf-8') as f:
+                        app_data = _json_mod.load(f)
+                    # Pre-load organizations.json for organizations.* keys
+                    org_path = os.path.join(STATIC_DIR, 'locales', lang, 'organizations.json')
+                    org_data = {}
+                    if os.path.isfile(org_path):
+                        with open(org_path, 'r', encoding='utf-8') as of:
+                            org_data = _json_mod.load(of)
+                    for k in auth_keys:
+                        parts = k.split('.')
+                        if parts[0] == 'app' and len(parts) >= 2:
+                            section, leaf = parts[1], parts[-1]
+                            if section not in app_data:
+                                continue
+                            if isinstance(app_data[section], dict):
+                                if leaf in app_data[section]:
+                                    boost[lang]['app'].setdefault(section, {})[leaf] = app_data[section][leaf]
+                            elif parts[1] == leaf:
+                                boost[lang]['app'][leaf] = app_data[section]
+                        elif parts[0] == 'organizations' and len(parts) >= 2:
+                            leaf = parts[-1]
+                            if leaf in org_data:
+                                boost[lang].setdefault('organizations', {})[leaf] = org_data[leaf]
+
+                common_path = os.path.join(STATIC_DIR, 'locales', lang, 'common.json')
+                if os.path.isfile(common_path):
+                    with open(common_path, 'r', encoding='utf-8') as f:
+                        common_data = _json_mod.load(f)
+                    for ck in ('server_error', 'request_failed', 'session_expired', 'network_upload_error'):
+                        if ck in common_data:
+                            boost[lang].setdefault('common', {})[ck] = common_data[ck]
+
+            _I18N_BOOST_CACHE = _json_mod.dumps(boost, ensure_ascii=False, separators=(',', ':'))
+        except Exception as _e:
+            import sys
+            print(f"[WARNING] Failed to build i18n boost pack: {_e}", file=sys.stderr)
+            _I18N_BOOST_CACHE = '{}'
+        return _I18N_BOOST_CACHE
+
+    # ── i18n early-translate: 内联翻译 script，在 </body> 前同步执行 ──
+    # 不依赖 i18n.js 外部文件——用 __I18N_BOOST__ 数据直接翻译 DOM 并移除 i18n-loading
+    # HTML 解析到 </body> 时 body 元素已全部就绪，querySelectorAll 能找到所有 [data-i18n]
+    _EARLY_TRANSLATE_SCRIPT = '''<script>
+(function(){if(!window.__I18N_BOOST__)return;var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang==='zh'){document.documentElement.classList.remove('i18n-loading');return;}
+var P=window.__I18N_BOOST__[lang];if(!P)return;
+function L(k){var p=k.split('.'),c=P;for(var i=0;i<p.length;i++){if(c==null||typeof c!=='object')return;c=c[p[i]];}return c;}
+var els=document.querySelectorAll('[data-i18n]');for(var i=0;i<els.length;i++){var k=els[i].getAttribute('data-i18n');if(k){var v=L(k);if(v&&v!==k)els[i].textContent=v;}}
+var phs=document.querySelectorAll('[data-i18n-placeholder]');for(var i=0;i<phs.length;i++){var k=phs[i].getAttribute('data-i18n-placeholder');if(k){var v=L(k);if(v&&v!==k)phs[i].setAttribute('placeholder',v);}}
+document.documentElement.classList.remove('i18n-loading');})();
+</script>'''
+
+    def _inject_email_configured(html: str) -> str:
+        """在 </head> 前注入邮箱配置状态 + i18n boost 翻译数据。
+        在 </body> 前注入早期翻译 script（零网络延迟，HTML 解析阶段完成翻译）。
+        邮箱配置：window.__EMAIL_CONFIGURED__ + html class（CSS 驱动显隐，修复 FOUC）。
+        i18n boost：window.__I18N_BOOST__ + 早期翻译 script（消除首屏闪动）。"""
+        configured = _is_email_configured()
+        val = 'true' if configured else 'false'
+        cls = 'email-configured' if configured else 'email-not-configured'
+        boost_json = _get_i18n_boost()
+        head_inject = (
+            f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls}";'
+            f'window.__I18N_BOOST__={boost_json};</script>'
+        )
+        html = html.replace('</head>', head_inject + '</head>', 1)
+        # 在 </body> 前注入早期翻译 script（内联，零网络延迟）
+        html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
+        return html
+
+    def _serve_auth_page(filename: str) -> HTMLResponse:
+        """读取认证页面 HTML，注入邮箱配置状态，返回 HTMLResponse。"""
+        with open(os.path.join(STATIC_DIR, filename), 'r', encoding='utf-8') as f:
+            html = f.read()
+        html = _inject_email_configured(html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+
     def _spa_response():
-        resp = FileResponse(os.path.join(STATIC_DIR, "index.html"))
-        resp.headers["Cache-Control"] = "no-cache, no-store, must-revalidate"
-        resp.headers["Pragma"] = "no-cache"
-        resp.headers["Expires"] = "0"
-        return resp
+        with open(os.path.join(STATIC_DIR, "index.html"), 'r', encoding='utf-8') as f:
+            html = f.read()
+        html = _inject_email_configured(html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-cache, no-store, must-revalidate", "Pragma": "no-cache", "Expires": "0"})
 
     @app.get("/")
     async def serve_spa():
@@ -1028,14 +1135,12 @@ if os.path.isdir(STATIC_DIR):
     @app.get("/register")
     async def serve_register():
         """注册页面 — 独立 HTML，不加载主应用 JS。"""
-        return FileResponse(os.path.join(STATIC_DIR, "register.html"),
-                            headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        return _serve_auth_page("register.html")
 
     @app.get("/forgot")
     async def serve_forgot():
         """忘记密码页面 — 独立 HTML，不加载主应用 JS。"""
-        return FileResponse(os.path.join(STATIC_DIR, "forgot.html"),
-                            headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+        return _serve_auth_page("forgot.html")
 
     @app.get("/en")
     @app.get("/en/{path:path}")
@@ -1046,11 +1151,9 @@ if os.path.isdir(STATIC_DIR):
             raise HTTPException(status_code=404)
         # 认证页面独立 HTML（不是 SPA view）
         if path == "register":
-            return FileResponse(os.path.join(STATIC_DIR, "register.html"),
-                                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+            return _serve_auth_page("register.html")
         if path == "forgot":
-            return FileResponse(os.path.join(STATIC_DIR, "forgot.html"),
-                                headers={"Cache-Control": "no-cache, no-store, must-revalidate"})
+            return _serve_auth_page("forgot.html")
         # Admin 独立页面——/en/admin 兜底返回 admin.html
         if path == "admin" or path.startswith("admin/"):
             _admin_html = os.path.join(STATIC_DIR, "admin.html")

@@ -27,12 +27,12 @@ var Auth = (function () {
   }
 
   // t(): 快捷翻译函数，内联 JS 调用 Auth.t('app.login.xxx')
-  function t(key) {
+  // 支持第三参数 fallback：缺 key 时返回 fallback 而非 key
+  function t(key, vars, fallback) {
     if (typeof I18N !== 'undefined' && I18N.t) {
-      var val = I18N.t(key);
-      if (val && val !== key) return val;
+      return I18N.t(key, vars, fallback);
     }
-    return key;  // 返回 key 本身，不报错
+    return fallback !== undefined ? fallback : key;
   }
 
   function initI18n() {

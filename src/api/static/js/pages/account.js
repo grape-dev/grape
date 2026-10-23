@@ -997,20 +997,7 @@ function _accountUnbindProvider(provider, confirmed) {
   }
   var url = '/auth/bind/' + provider;
   API.del(url).then(function(d) {
-    _accountShowUnbindSuccess(provider, d, isZh);
-    // D42: 刷新 localStorage.user.bindings，清除仓库缓存
-    if (d && d.bindings) {
-      try {
-        var _u = JSON.parse(localStorage.getItem('user') || '{}');
-        _u.bindings = d.bindings;
-        localStorage.setItem('user', JSON.stringify(_u));
-      } catch(e) {}
-    }
-    // 清除前端仓库缓存
-    localStorage.removeItem('repo_member_cache');
-    renderAccount('security');
-    // 刷新侧边栏仓库列表（后端 user_repos 已清理该平台数据）
-    setTimeout(function() { if (typeof app !== 'undefined' && app.initSidebarRepos) app.initSidebarRepos(); }, 100);
+    _accountOnUnbindSuccess(provider, d, isZh);
   }).catch(function(e) {
     // 需求17: 解绑有正在使用仓库的平台时弹窗警告具体受影响的仓库列表
     if (e && e.detail && e.detail.need_confirm && e.detail.warehouses) {
@@ -1020,35 +1007,81 @@ function _accountUnbindProvider(provider, confirmed) {
       app.showConfirm(wmsg, function() {
         // 用户确认后带 confirm=true 重新调用
         API.del('/auth/bind/' + provider + '?confirm=true').then(function(d) {
-          _accountShowUnbindSuccess(provider, d, isZh);
-          if (d && d.bindings) {
-            try {
-              var _u2 = JSON.parse(localStorage.getItem('user') || '{}');
-              _u2.bindings = d.bindings;
-              localStorage.setItem('user', JSON.stringify(_u2));
-            } catch(e2) {}
-          }
-          localStorage.removeItem('repo_member_cache');
-          renderAccount('security');
-          // 刷新侧边栏仓库列表
-          setTimeout(function() { if (typeof app !== 'undefined' && app.initSidebarRepos) app.initSidebarRepos(); }, 100);
-        }).catch(function(e2) {
-          var code = (e2 && e2.detail && e2.detail.code) || 0;
-          if (code === 400 && e2.detail && e2.detail.need_set_password) {
-            app.showToast(I18N.t('app.account.keep_one_login_method'),
-                          I18N.t('app.account.set_password_before_unbind'));
-          } else {
-            app.showToast(e2.message || I18N.t('app.account.error_failed'));
-          }
-        });
+          _accountOnUnbindSuccess(provider, d, isZh);
+        }).catch(_accountOnUnbindError);
       }, {danger: true});
-    } else if (e && e.detail && e.detail.need_set_password) {
-      app.showToast(I18N.t('app.account.keep_one_login_method'),
-                    I18N.t('app.account.set_password_before_unbind'));
     } else {
-      app.showToast(e.message || I18N.t('app.account.error_failed'));
+      _accountOnUnbindError(e);
     }
   });
+}
+
+// 解绑成功统一处理：更新 bindings → 清缓存 → 清理状态 → 刷新侧边栏 → 渲染
+function _accountOnUnbindSuccess(provider, d, isZh) {
+  _accountShowUnbindSuccess(provider, d, isZh);
+  // D42: 刷新 localStorage.user.bindings，清除仓库缓存
+  if (d && d.bindings) {
+    try {
+      var _u = JSON.parse(localStorage.getItem('user') || '{}');
+      _u.bindings = d.bindings;
+      localStorage.setItem('user', JSON.stringify(_u));
+    } catch(e) {}
+  }
+  // 清除前端仓库缓存
+  localStorage.removeItem('repo_member_cache');
+  // R1/R2/R3: 清理过期仓库状态 + 内存缓存 + 刷新角色 + 引导用户
+  _accountCleanupAfterUnbind(provider);
+  // 刷新侧边栏仓库列表（后端 user_repos 已清理该平台数据）
+  setTimeout(function() { if (typeof app !== 'undefined' && app.initSidebarRepos) app.initSidebarRepos(); }, 100);
+  // R2: 如果 _accountCleanupAfterUnbind 已调 goToRepos，不覆盖布局
+  if (window._currentView !== 'repos') {
+    renderAccount('security');
+  }
+}
+
+// 解绑失败统一处理（普通路径 + 确认后路径共用）
+// 注意：两条路径原代码的错误条件不完全一致——
+// 普通路径只检查 need_set_password，确认后路径额外检查 code === 400。
+// 统一为 need_set_password 检查（更宽松），因为 need_set_password 只在后端返回 400 时设置，
+// code === 400 是冗余的二次确认。行为等价。
+function _accountOnUnbindError(e) {
+  if (e && e.detail && e.detail.need_set_password) {
+    app.showToast(I18N.t('app.account.keep_one_login_method'),
+                  I18N.t('app.account.set_password_before_unbind'));
+  } else {
+    app.showToast(e.message || I18N.t('app.account.error_failed'));
+  }
+}
+
+// R1/R2/R3: 解绑平台后统一清理仓库状态
+function _accountCleanupAfterUnbind(provider) {
+  // R1: 检查 currentRepo 是否属于被解绑的平台
+  var _needRedirect = false;
+  try {
+    var cr = JSON.parse(sessionStorage.getItem('currentRepo') || 'null');
+    if (cr && cr.repoKey && cr.repoKey.indexOf(provider + ':') === 0) {
+      // 当前选中仓库属于被解绑的平台 → 清理
+      sessionStorage.removeItem('currentRepo');
+      _needRedirect = true;
+    }
+  } catch(e) {}
+
+  // R3: 清理内存缓存 _cachedReposData（无条件——缓存数据可能含已解绑平台仓库）
+  if (typeof app !== 'undefined' && app._clearCachedReposData) {
+    app._clearCachedReposData();
+  }
+
+  // R2: 刷新角色（无条件——解绑可能影响托管仓库列表，角色可能变化）
+  if (typeof app !== 'undefined' && app.loadProfile) {
+    app.loadProfile();
+  }
+
+  // R2: 如果清理了 currentRepo，引导用户回到仓库选择页
+  if (_needRedirect) {
+    if (typeof app !== 'undefined' && app.goToRepos) {
+      app.goToRepos();
+    }
+  }
 }
 
 // R30: 解绑成功提示——含受影响仓库数量
