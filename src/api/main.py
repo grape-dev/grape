@@ -495,6 +495,10 @@ async def lifespan(app: FastAPI):
 
         async def _obs_alert_loop():
             _tick = 0
+            # Issue #437：SLO 评估与 30s 告警循环解耦——独立周期（默认 300s，meta/环境变量可配，
+            # eval_interval_sec() 每轮重读支持热更新）；指标 60s 才采样一次，30s 全窗跑一轮太密
+            _slo_next = 0.0
+            _loop = asyncio.get_running_loop()
             while True:
                 await asyncio.sleep(30)
                 _tick += 1
@@ -520,22 +524,26 @@ async def lifespan(app: FastAPI):
                         _obs_loops.beat("obs_alert_retention")
                     # SLO / 错误预算（P2-1）：算三类 SLI → 落小时快照 → 同步违约事件
                     # （违约写 source='slo' 进统一事件视图，复用告警的静默/通知渠道）
-                    try:
-                        _s = await asyncio.to_thread(_obs_slo.evaluate_all)
-                        if _s.get("firing") or _s.get("resolved"):
-                            log.info(f"Observability SLO: {_s}")
-                        if _tick % 120 == 0 and _s.get("cleaned"):
-                            log.info(f"Observability SLO snapshots cleaned: {_s['cleaned']} rows")
-                        _obs_loops.beat("obs_slo")
-                    except Exception as e:
-                        log.warning(f"Observability SLO loop failed: {e}")
+                    # Issue #437：桶数据走小时桶 rollup 预聚合 + 独立评估周期（≥ 默认 300s）
+                    if _loop.time() >= _slo_next:
+                        _slo_next = _loop.time() + _obs_slo.eval_interval_sec()
+                        try:
+                            _s = await asyncio.to_thread(_obs_slo.evaluate_all)
+                            if _s.get("firing") or _s.get("resolved"):
+                                log.info(f"Observability SLO: {_s}")
+                            if _s.get("cleaned"):
+                                log.info(f"Observability SLO snapshots cleaned: {_s['cleaned']} rows")
+                            _obs_loops.beat("obs_slo")
+                        except Exception as e:
+                            log.warning(f"Observability SLO loop failed: {e}")
                     _obs_loops.beat("obs_alert")     # gap 探测在 evaluate_rules 内部
                 except Exception as e:
                     _obs_loops.fail("obs_alert", e)
                     log.warning(f"Observability alert evaluation failed: {e}")
 
         _obs_alert_loop_task = asyncio.create_task(_obs_alert_loop())
-        log.info(f"Observability alert evaluator started (30s, seeded={_obs_seeded})")
+        log.info(f"Observability alert evaluator started (30s, seeded={_obs_seeded});"
+                 f" SLO eval interval {_obs_slo.eval_interval_sec()}s (decoupled, Issue #437)")
     except Exception as e:
         log.warning(f"Observability alert evaluator start failed: {e}")
 

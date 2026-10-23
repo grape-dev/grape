@@ -42,7 +42,8 @@ def _clean():
         c = db.cursor()
         for sql in ("DELETE FROM obs_metric_rollup",
                     "DELETE FROM agent_tasks WHERE id LIKE 't_rl_%'",
-                    "DELETE FROM obs_llm_usage WHERE task_id LIKE 't_rl_%'"):
+                    "DELETE FROM obs_llm_usage WHERE task_id LIKE 't_rl_%'",
+                    "DELETE FROM obs_runtime_samples WHERE runtime_id BETWEEN 9901 AND 9930"):
             try:
                 c.execute(sql)
             except Exception:
@@ -91,6 +92,26 @@ def _setup():
 
 
 # ---------------------------------------------------------------- 分桶计算
+
+def test_compute_bucket_engine_availability_preagg():
+    """Issue #437：小时桶补引擎可用率预聚合（engine_avail_online/total，仅 global 维）。"""
+    from src.session_manager import db, db_lock
+    base = _now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
+    with db_lock:
+        c = db.cursor()
+        for k in range(60):
+            ts = _iso(base + timedelta(seconds=k * 60))
+            c.execute("INSERT INTO obs_runtime_samples (runtime_id, device_name, sampled_at,"
+                      " online) VALUES (9911, 'roll-dev', ?, ?)", (ts, 1 if k < 40 else 0))
+        db.commit()
+    rows = mr.compute_bucket(base, base + timedelta(hours=1))
+    g = rows[mr.DIM_GLOBAL]
+    assert g["engine_avail_online"] == (40.0, 60), g
+    assert g["engine_avail_total"] == (60.0, 60), g
+    # 空桶（无采样）不写 availability 指标
+    rows2 = mr.compute_bucket(base + timedelta(hours=1), base + timedelta(hours=2))
+    assert "engine_avail_online" not in rows2.get(mr.DIM_GLOBAL, {}), rows2.get(mr.DIM_GLOBAL)
+
 
 def test_compute_bucket_counts_rate_and_latency():
     base = _now().replace(second=0, microsecond=0) - timedelta(minutes=5)
