@@ -195,12 +195,11 @@ function _renderDeployLink() {
     </div>`;
   } else if (_deployUrl) {
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="${_deployUrl}">🌐 ↗</a>
-      <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.6" title="编辑部署 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">✎</span>
+      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="${_deployUrl}" oncontextmenu="event.preventDefault();_deployEditing=true;_renderDeployLink();return false">🌐</a>
     </div>`;
   } else {
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.7" title="登记部署访问 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">🌐</span>
+      <span onclick="_deployEditing=true;_renderDeployLink()" oncontextmenu="event.preventDefault();_deployEditing=true;_renderDeployLink();return false" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.7" title="登记部署访问 URL（右击编辑）" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">🌐</span>
     </div>`;
   }
 }
