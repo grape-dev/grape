@@ -542,7 +542,7 @@ window._jumpToPipeline = function(nodeId) {
   const parts = repoKey.split('/');
   if (parts.length < 2) { console.warn('jumpToPipeline: bad repo_key', t.repo_key); return; }
   // 设置当前 repo 到 sessionStorage（app.currentRepo 从这里读）
-  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
   sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   // 导航到流水线页面
   if (typeof app !== 'undefined' && app.nav) {
@@ -568,7 +568,7 @@ window._jumpToNodeEvent = function(seq) {
     const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
     const parts = repoKey.split('/');
     if (parts.length >= 2) {
-      const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+      const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
       sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
     }
   }
@@ -583,7 +583,7 @@ window._jumpToPipePage = function() {
   const repoKey = t.repo_key.replace(/^(github|gitcode):/, '');
   const parts = repoKey.split('/');
   if (parts.length < 2) return;
-  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1]};
+  const repoObj = {owner: parts[0], name: parts[1], fullName: parts[0] + '/' + parts[1], repoKey: t.repo_key};
   sessionStorage.setItem('currentRepo', JSON.stringify(repoObj));
   if (typeof app !== 'undefined' && app.nav) {
     // 传递 issue_number 让流水线页高亮对应任务

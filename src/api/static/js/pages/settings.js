@@ -65,6 +65,8 @@ function unhostFromSettings(fullName) {
   app.showConfirm(I18N.t('settings.host.confirm_remove', {name: fullName}), function() {
     API.post('/repos/remove', {full_name: fullName}).then(r => {
       app.showToast(I18N.t('settings.host.unhost_done'));
+      // R4: 清除仓库缓存
+      localStorage.removeItem('repo_member_cache');
       const cur = app.currentRepo();
       const wasCurrent = cur && cur.fullName === fullName;
       if (wasCurrent) {

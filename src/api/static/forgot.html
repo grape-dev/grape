@@ -5,19 +5,25 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title data-i18n="app.login.title_forgot">重置密码 — Grape</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=84">
+<link rel="stylesheet" href="/static/css/app.css?v=85">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
 <link rel="stylesheet" href="/static/css/auth.css?v=6">
 <script>
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.setAttribute('data-i18n-pending','1');})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='34';})();
+// i18n 加载超时兜底：5 秒后强制移除隐藏状态
+setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
 <style>
-[data-i18n-pending="1"] [data-i18n]{visibility:hidden}
-[data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
+html.i18n-loading [data-i18n]{visibility:hidden}
+html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
+/* FOUC fix: CSS class drives visibility at HTML parse time (F22/F23) */
+.email-not-configured #stepIndicator,
+.email-not-configured #forgotStep1 { display: none !important; }
+.email-not-configured #forgotNotConfigured { display: block !important; }
+.email-configured #forgotNotConfigured { display: none !important; }
 </style>
-<script src="/static/js/i18n.js?v=13"></script>
-<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('34');});</script>
+<script src="/static/js/i18n.js?v=16" defer></script>
 </head>
 <body>
 
@@ -36,8 +42,13 @@
   <div class="step-item" id="dot3"><div class="step-item-circle">3</div><span data-i18n="app.login.step_label_done">完成</span></div>
 </div>
 
-<!-- Step 1（R7.8: 初始隐藏，有邮箱配置时才显示，避免无邮箱场景闪动） -->
-<div id="forgotStep1" class="auth-panel" style="display:none">
+<!-- 无邮箱配置提示（预置，避免动态 createElement 闪动） -->
+<div id="forgotNotConfigured" class="auth-panel" style="display:none;text-align:center;padding:40px 20px">
+  <p style="color:var(--t2);font-size:14px;line-height:1.6" data-i18n="app.login.forgot_email_not_configured">邮箱服务未配置，请联系管理员重置密码</p>
+</div>
+
+<!-- Step 1（有邮箱配置时显示，无邮箱时 JS 同步隐藏） -->
+<div id="forgotStep1" class="auth-panel">
 <form onsubmit="event.preventDefault();sendForgotCode()">
   <div class="field-group">
     <label class="field-label" for="forgotEmail" data-i18n="app.login.email">邮箱</label>
@@ -61,7 +72,7 @@
 <div id="forgotStep2" class="auth-panel" style="display:none">
 <form onsubmit="event.preventDefault();resetPassword()">
   <div class="field-group">
-    <label class="field-label" data-i18n="app.login.email">邮箱</label>
+    <label class="field-label" for="forgotEmailDisplay" data-i18n="app.login.email">邮箱</label>
     <div class="field-input-wrap">
       <input class="field-input" id="forgotEmailDisplay" type="email" disabled>
     </div>
@@ -144,8 +155,8 @@
 </div>
 </div>
 
-<script src="/static/js/api.js?v=29"></script>
-<script src="/static/js/auth.js?v=6"></script>
+<script src="/static/js/api.js?v=31"></script>
+<script src="/static/js/auth.js?v=7"></script>
 <script>
 Auth.initI18n();
 function $(id){return document.getElementById(id)}
@@ -184,9 +195,9 @@ function sendForgotCode(){
     Auth.startCountdown('forgotResendBtn');
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
-    var msg=err.message||Auth.t('app.login.toast_send_failed');
-    if(msg.indexOf('邮箱')>=0||msg.indexOf('email')>=0)Auth.showFieldError('forgotEmail',msg);
-    else Auth.showToast(msg);
+    var code=(err&&err.error_code)||'';
+    var msg=Auth.t('app.error.'+code,null,Auth.t('common.server_error',null,err.message||Auth.t('app.login.toast_send_failed')));
+    Auth.showToast(msg);
   });
 }
 
@@ -230,9 +241,10 @@ function resetPassword(){
     setTimeout(function(){window.location.href='/?reset=1'},2000);
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
-    var msg=err.message||Auth.t('app.login.toast_reset_failed');
-    if(msg.indexOf('验证码')>=0||msg.indexOf('code')>=0){Auth.showFieldError('forgotCode',msg);$('forgotCode').focus();}
-    else Auth.showToast(msg);
+    var code=(err&&err.error_code)||'';
+    var field={'CODE_INVALID':'forgotCode','ACCOUNT_NOT_FOUND':'forgotCode','PASSWORD_WEAK':'forgotNewPass'}[code];
+    var msg=Auth.t('app.error.'+code,null,Auth.t('common.server_error',null,err.message||Auth.t('app.login.toast_reset_failed')));
+    if(field){Auth.showFieldError(field,msg);if(field==='forgotCode')$('forgotCode').focus();}else{Auth.showToast(msg);}
   });
 }
 
@@ -241,33 +253,22 @@ function _onLangChange(){
   // 此处可补充非 data-i18n 的动态内容
 }
 
-// R7.8: 检测邮箱配置——无邮箱时显示提示而非表单（避免闪动）
-document.addEventListener('DOMContentLoaded',function(){
-  API.get('/auth/providers').then(function(d){
-    if(d&&d.email_configured){
-      $('forgotStep1').style.display='block';
-      $('stepIndicator').style.display='';
-      $('forgotEmail').focus();
-    } else {
-      // 无邮箱配置：显示提示
-      var pc=document.querySelector('.auth-card');
-      if(pc){
-        var msg=document.createElement('div');
-        msg.className='auth-panel';
-        msg.style.textAlign='center';
-        msg.style.padding='40px 20px';
-        msg.innerHTML='<p style="color:var(--t2);font-size:14px;line-height:1.6">'+(Auth.t('app.login.forgot_email_not_configured')||'邮箱服务未配置，请联系管理员重置密码')+'</p>';
-        pc.appendChild(msg);
-      }
-      $('stepIndicator').style.display='none';
-    }
-  }).catch(function(){
-    // API 失败：默认显示表单（向后兼容）
+// 同步读取服务端注入的邮箱配置状态（零闪动）
+var emailConfigured=(typeof window.__EMAIL_CONFIGURED__!=='undefined')?window.__EMAIL_CONFIGURED__:false;
+
+// 同步应用邮箱配置状态（DOM 已存在，同步执行无闪动）
+(function applyEmailConfig(){
+  if(emailConfigured){
     $('forgotStep1').style.display='block';
     $('stepIndicator').style.display='';
+    $('forgotNotConfigured').style.display='none';
     $('forgotEmail').focus();
-  });
-});
+  } else {
+    $('forgotStep1').style.display='none';
+    $('stepIndicator').style.display='none';
+    $('forgotNotConfigured').style.display='block';
+  }
+})();
 </script>
 </body>
 </html>
