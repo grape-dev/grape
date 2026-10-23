@@ -108,19 +108,81 @@ Agent 之间通过 A2A 协议链式协作，一个任务自动贯穿全流程。
 
 ## 快速开始
 
+### 环境要求
+
+| 组件 | 版本要求 | 说明 |
+|------|---------|------|
+| **Python** | >= 3.9（主服务） | 推荐 3.10+（devbox sandbox 需要） |
+| **Node.js** | >= 18（Agent CLI） | `npm install -g opencode` |
+| **Git** | 任意较新版本 | |
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/grape-dev/grape.git
+cd grape
+
+# 一键启动：自动建 venv + 装依赖 + 复制 .env + 自检 + 启动
+.\start.ps1                    # 本地开发（最小依赖，SQLite）
+.\start.ps1 -Full              # 完整依赖（含 OBS/MySQL/飞书）
+.\start.ps1 -SkipDoctor        # 跳过自检，直接启动
+
+# 或手动操作：
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-local.txt
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force -Path data
+python -m src.api.run --dev    # 开发模式，打开 http://localhost:3000
+```
+
+> 如遇 PowerShell 执行策略拦截：`Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+### macOS / Linux
+
 ```bash
 git clone https://github.com/grape-dev/grape.git
 cd grape
-pip install -r requirements.txt
 
-# 安装 Agent CLI（至少一个）：
-npm install -g opencode        # 或 pip install codearts-cli
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-local.txt     # 最小依赖（不含 OBS/MySQL/飞书）
+# pip install -r requirements.txt         # 完整依赖
 
-cp configs/global-bot-token.example.json configs/global-bot-token.json
-# 编辑 global-bot-token.json，填入 GitCode Bot Token / OAuth 凭据
-
+cp .env.example .env
 mkdir -p data
-python -m src.api.run --dev    # 开发模式，打开 http://localhost:3000
+python -m src.api.run --dev                # 开发模式，打开 http://localhost:3000
+```
+
+### 国内镜像加速
+
+```bash
+# PyPI 阿里云镜像
+pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
+
+# 永久配置：
+pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+```
+
+### 安装 Agent CLI（至少一个）
+
+```bash
+npm install -g opencode          # 基于 Node.js
+# 或
+pip install codearts-cli         # 基于 Python
+```
+
+### 环境自检（可选）
+
+```bash
+python scripts/doctor.py         # 运行安装前自检
+```
+
+### 复制 Bot Token 配置
+
+```bash
+cp configs/global-bot-token.example.json configs/global-bot-token.json
+# 编辑填入 GitCode Bot Token / OAuth 凭据
 ```
 
 首次登录用 GitCode OAuth 一键授权，即可开始托管仓库、把项目接入 AI 工作流。
@@ -148,12 +210,14 @@ python -m src.api.run --dev    # 开发：单端口 3000，热重载
 ## 开发测试
 
 ```bash
-# 安装依赖
-pip install -r requirements.txt
-pip install pytest pytest-mock
+# 安装依赖（本地开发最小集）
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
+pip install -r requirements-local.txt
+pip install -r requirements-dev.txt
 
 # 运行测试
-mkdir -p data
+mkdir -p data                    # Windows: New-Item -ItemType Directory -Force data
 python -m pytest tests/ -v
 ```
 

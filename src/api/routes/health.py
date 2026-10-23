@@ -23,4 +23,26 @@ def health():
         base = get_server_base_url() or ""
     except Exception:
         base = ""
-    return {"server": "ok", "server_base_url": base}
+
+    # Issue #452: 暴露 agent_runtime 状态，缺失时显式标记 missing 而非静默通过
+    agent_runtime_status = "unknown"
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT name, status, healthy FROM agent_runtimes "
+                "WHERE status='online' AND healthy=1 "
+                "ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END "
+                "LIMIT 1"
+            ).fetchone()
+            if row:
+                agent_runtime_status = "online"
+            else:
+                # 有 runtime 记录但无 online+healthy 的
+                count = c.execute("SELECT COUNT(*) FROM agent_runtimes").fetchone()[0]
+                agent_runtime_status = "missing" if count == 0 else "unhealthy"
+    except Exception:
+        pass
+
+    return {"server": "ok", "server_base_url": base, "agent_runtime": agent_runtime_status}

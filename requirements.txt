@@ -1,7 +1,14 @@
 # Grape 服务端依赖 —— 运行 src.api.run（WebUI + webhook + IM bot + 服务端执行）需要
 #
 # 端侧（worker）不装此清单，只用最小集 requirements-worker.txt（仅 aiohttp）。
-# 安装：python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 本地开发可用 requirements-local.txt（不含 OBS/MySQL/飞书，最小集）。
+#
+# 安装：
+#   python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+# 国内镜像加速：
+#   .venv/bin/pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
+#
+# Python 版本要求：主服务 >= 3.9，devbox sandbox 需 >= 3.10
 paramiko>=3.0
 markdown>=3.4
 lark-oapi>=1.0

@@ -134,3 +134,48 @@ def test_agent_clean_owner_passes_acl(client):
     _as(1)
     r = client.post("/api/agents/vod/alice/repo1/clean")
     assert r.status_code == 200, r.text
+
+
+# ===== deploy-url URL validation (XSS prevention) =====
+
+def test_deploy_url_valid_http(client):
+    """http:// 前缀的 URL 应被接受。"""
+    _as(1)
+    r = client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1", "deploy_url": "http://1.2.3.4:5000"})
+    assert r.status_code == 200, r.text
+    assert r.json()["deploy_url"] == "http://1.2.3.4:5000"
+
+
+def test_deploy_url_valid_https(client):
+    """https:// 前缀的 URL 应被接受。"""
+    _as(1)
+    r = client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1", "deploy_url": "https://example.com"})
+    assert r.status_code == 200, r.text
+
+
+def test_deploy_url_empty_allowed(client):
+    """空串应被接受（清除部署 URL）。"""
+    _as(1)
+    r = client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1", "deploy_url": ""})
+    assert r.status_code == 200, r.text
+
+
+def test_deploy_url_reject_javascript(client):
+    """javascript: 伪协议应被拒绝（400）。"""
+    _as(1)
+    r = client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1", "deploy_url": "javascript:alert(1)"})
+    assert r.status_code == 400, r.text
+
+
+def test_deploy_url_reject_xss_attempt(client):
+    """含双引号的 XSS 注入应被拒绝（400）。"""
+    _as(1)
+    r = client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1", "deploy_url": 'x" onmouseover="alert(1)'})
+    assert r.status_code == 400, r.text
+
+
+def test_deploy_url_reject_too_long(client):
+    """超过 512 字符的 URL 应被拒绝（400）。"""
+    _as(1)
+    r = client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1", "deploy_url": "http://" + "a" * 510})
+    assert r.status_code == 400, r.text

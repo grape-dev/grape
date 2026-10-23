@@ -7,13 +7,19 @@ services:
       - "8080:3000"
     environment:
       - TZ=Asia/Shanghai
-      - JWT_SECRET=${JWT_SECRET:?required: JWT_SECRET must be set (run: python3 -c "import secrets;print(secrets.token_urlsafe(48))")}
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET required}
+      # Issue #452: Docker 环境默认关闭公网 IP 探测
+      - GRAPE_AUTO_DETECT_URL=false
+    # 审查修复: 移除 bind mount ./.env:/app/.env（宿主无 .env 时 compose 失败）
+    # 容器内 /app/.env 由 Dockerfile COPY .env.example .env 提供；
+    # 宿主 .env（如存在）通过 env_file 注入为环境变量，覆盖容器内默认值
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - grape-data:/app/data
-      - ./configs:/app/configs   # 挂载整个 configs 目录（运行时可改配置）
-      # 官方技能由独立技能仓库构建期铺入宿主 ./skills（scripts/sync_skills.sh），卷挂载免重建镜像
+      - ./configs:/app/configs
       - ./skills:/app/skills
-      # 官方项目模板由独立模板仓库构建期铺入宿主 ./examples（scripts/sync_templates.sh），卷挂载免重建镜像
       - ./examples:/app/examples
     restart: unless-stopped
     logging:

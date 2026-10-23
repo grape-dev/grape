@@ -10,3 +10,6 @@ pytest-randomly>=3.15
 pytest-timeout>=2.2
 pytest-xdist>=3.5
 pytest-rerunfailures>=13.0
+# 手工 E2E 脚本（tests/playwright/*.py，pytest 不收集）依赖 playwright。
+# 安装浏览器：playwright install chromium
+playwright>=1.40

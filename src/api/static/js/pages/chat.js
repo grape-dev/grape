@@ -23,6 +23,69 @@ function _clearTask(convId) { delete _chatTasks[convId]; if (convId) _clearStore
 
 // _NO_REPLY: 内联 I18N.t('chat.no_reply')，不缓存（模块顶层缓存会在语言切换后失效）
 
+// ═══════════════════════════════════════════════════════════════
+// Issue #407 遗留缺口: ChatAgent 输入草稿持久化（sessionStorage）
+// chatInput 未发送文本按会话粒度存 chatDraft_<convId>，闲置返回/F5 后
+// renderChat → loadConversations(autoSelect) → switchConversation 回填。
+// 对齐 chat_task_<convId>（上方）与 dashboard dashDraft_* 模式：
+// 1 小时过期、try/catch 降级、老格式无 ts 不误清。
+// ═══════════════════════════════════════════════════════════════
+var _CHAT_DRAFT_TTL = 3600000;  // 1 小时（毫秒）
+function _chatDraftKey(convId) {
+  return 'chatDraft_' + convId;
+}
+function _saveChatDraft(convId, text) {
+  // 无会话粒度（尚未选中会话）不保存，避免跨会话串扰
+  if (!convId) return;
+  try {
+    if (!text) { sessionStorage.removeItem(_chatDraftKey(convId)); return; }
+    sessionStorage.setItem(_chatDraftKey(convId), JSON.stringify({text: String(text), ts: Date.now()}));
+  } catch(e) {}
+}
+function _restoreChatDraft(convId) {
+  if (!convId) return null;
+  try {
+    var raw = sessionStorage.getItem(_chatDraftKey(convId));
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    // 带 ts 的草稿超 1 小时 → 过期清除；老格式（无 ts）不误清，正常返回
+    if (o && o.ts && Date.now() - o.ts > _CHAT_DRAFT_TTL) {
+      sessionStorage.removeItem(_chatDraftKey(convId));
+      return null;
+    }
+    return (o && typeof o.text === 'string') ? o.text : null;
+  } catch(e) { return null; }
+}
+function _clearChatDraft(convId) {
+  if (!convId) return;
+  try { sessionStorage.removeItem(_chatDraftKey(convId)); } catch(e) {}
+}
+// input 事件入口：保存当前会话草稿（空文本 = 清除）
+function _onChatInputDraft(el) {
+  _saveChatDraft(_currentConvId, el.value);
+}
+// Issue #407: 记忆最后所在会话 — 闲置返回/F5 重渲染后 loadConversations
+// 自动选中同一会话（而非列表第一个），否则草稿虽存对键却不可见。
+// 同 1 小时过期；仅影响自动选中目标，不参与会话列表过滤。
+function _saveChatLastConv(convId) {
+  try {
+    if (convId) sessionStorage.setItem('chatLastConv', JSON.stringify({convId: String(convId), ts: Date.now()}));
+    else sessionStorage.removeItem('chatLastConv');
+  } catch(e) {}
+}
+function _getChatLastConv() {
+  try {
+    var raw = sessionStorage.getItem('chatLastConv');
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    if (o && o.ts && Date.now() - o.ts > _CHAT_DRAFT_TTL) {
+      sessionStorage.removeItem('chatLastConv');
+      return null;
+    }
+    return (o && o.convId) ? o.convId : null;
+  } catch(e) { return null; }
+}
+
 /**
  * Issue #293: 剥离标题行首 "Issue #N · " 前缀，返回清理后标题与编号。
  * @param {string} title - 原始标题（可能含 "Issue #N · {title}" 前缀）
@@ -68,7 +131,7 @@ function renderChat(openConvId) {
         <div style="text-align:center;color:var(--t3);padding:60px 20px">${I18N.t('common.loading')}</div>
       </div>
       <div id="chatImgPreview" style="display:none;padding:6px 12px;border-top:1px solid var(--b);flex-wrap:wrap;gap:6px"></div>
-      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this)"></textarea><button class="chat-inpicker-btn" id="chatModelBtn" onclick="toggleChatPicker('model')" data-tooltip="${I18N.t('chat.engine_config_tip')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="14" x2="22" y2="14"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="14" x2="4" y2="14"/></svg></button><button class="chat-inpicker-btn" id="chatSkillBtn" onclick="toggleChatPicker('skill')" data-tooltip="${I18N.t('chat.skill_config_tip')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
+      <div class="chat-in"><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" title="${I18N.t('chat.upload_image')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg><input type="file" accept="image/*" multiple style="display:none" onchange="_onChatImageSelect(this)"></label><label class="chat-img-btn" style="cursor:pointer;display:flex;align-items:center;padding:0 10px;border-radius:6px;color:var(--t3)" data-tooltip="${I18N.t('chat.video_tooltip')}"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg><input type="file" accept="video/*" style="display:none" onchange="_onChatVideoSelect(this)"></label><textarea id="chatInput" rows="1" placeholder="${I18N.t('chat.placeholder')}" style="flex:1" oninput="_autoResizeTextarea(this);_onChatInputDraft(this)"></textarea><button class="chat-inpicker-btn" id="chatModelBtn" onclick="toggleChatPicker('model')" data-tooltip="${I18N.t('chat.engine_config_tip')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="2" x2="9" y2="4"/><line x1="15" y1="2" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="22"/><line x1="15" y1="20" x2="15" y2="22"/><line x1="20" y1="9" x2="22" y2="9"/><line x1="20" y1="14" x2="22" y2="14"/><line x1="2" y1="9" x2="4" y2="9"/><line x1="2" y1="14" x2="4" y2="14"/></svg></button><button class="chat-inpicker-btn" id="chatSkillBtn" onclick="toggleChatPicker('skill')" data-tooltip="${I18N.t('chat.skill_config_tip')}"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5"/><path d="M2 12l10 5 10-5"/></svg></button><button class="bt bt-p" onclick="sendChatStream()">${I18N.t('chat.send')}</button></div>
     </div>
   </div>`;
   loadConversations(true);  // auto-select first
@@ -395,7 +458,11 @@ function loadConversations(autoSelect) {
           if (convs.length > 0) switchConversation(convs[0].id);
         });
       } else if (convs.length > 0) {
-        const target = _openConvId && convs.some(c => c.id === _openConvId) ? _openConvId : convs[0].id;
+        // Issue #407: 优先显式跳转目标 > 最后所在会话（闲置返回/F5 恢复草稿所在会话）> 第一个
+        const _lastConv = _getChatLastConv();
+        const target = _openConvId && convs.some(c => c.id === _openConvId)
+          ? _openConvId
+          : (_lastConv && convs.some(c => c.id === _lastConv) ? _lastConv : convs[0].id);
         _openConvId = null;
         switchConversation(target);
       }
@@ -406,7 +473,21 @@ function loadConversations(autoSelect) {
 function newConversation() {
   const repo = app.currentRepo();
   API.post('/chat/conversations', repo ? {repo_key: (repo.repoKey || repo.fullName)} : {}).then(d => {
+    // Issue #407: 新会话成为当前会话（记忆 + 输入框清空防串扰）
+    if (_currentConvId && _currentConvId !== d.conversation_id) {
+      var _prevInput = document.getElementById('chatInput');
+      if (_prevInput) {
+        _saveChatDraft(_currentConvId, _prevInput.value);
+        _prevInput.value = '';
+        _resetTextareaHeight(_prevInput);
+      }
+      // Issue #407 附件保活: 新会话前持久化旧会话图片，清空内存（新会话无附件）
+      _saveChatImages(_currentConvId, _pendingImages);
+      _pendingImages = [];
+      _clearVideo();
+    }
     _currentConvId = d.conversation_id;
+    _saveChatLastConv(_currentConvId);
     loadConversations();
     var _cb = document.getElementById('chatBody');
     if (_cb) _cb.innerHTML = '';
@@ -468,9 +549,15 @@ function _closeChatDelPopover() {
 
 function _doDeleteConv(convId) {
   _closeChatDelPopover();
+  // Issue #407: 删除会话同时清除其未发送草稿（会话消失草稿不残留）
+  _clearChatDraft(convId);
+  // Issue #407 附件保活: 删除会话同时清除其持久化图片（会话消失附件不残留）
+  _clearChatImages(convId);
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
+      // Issue #407: 当前会话被删 → 作废最后会话记忆（闲置返回不选中已删会话）
+      _saveChatLastConv(null);
       var _cb = document.getElementById('chatBody');
       if (_cb) _cb.innerHTML = '<div style="text-align:center;color:var(--t3);padding:40px">' + I18N.t('chat.conversation.start_hint') + '</div>';
     }
@@ -480,7 +567,23 @@ function _doDeleteConv(convId) {
 }
 
 function switchConversation(convId) {
+  // Issue #407: 切换前保存旧会话未发送草稿，并清空输入框
+  // （新会话仅回填自己的草稿，杜绝上一会话文本跨会话串扰）
+  if (_currentConvId !== convId) {
+    var _prevInput = document.getElementById('chatInput');
+    if (_prevInput) {
+      if (_currentConvId) _saveChatDraft(_currentConvId, _prevInput.value);
+      _prevInput.value = '';
+      _resetTextareaHeight(_prevInput);
+    }
+    // Issue #407 附件保活: 持久化旧会话图片到 IndexedDB，清空内存防串扰
+    // （视频仅守卫保活不持久化，切换后丢失）
+    if (_currentConvId) _saveChatImages(_currentConvId, _pendingImages);
+    _pendingImages = [];
+    _clearVideo();
+  }
   _currentConvId = convId;
+  _saveChatLastConv(convId);
   loadConversations();
   const body = document.getElementById('chatBody');
   const input = document.getElementById('chatInput');
@@ -550,6 +653,23 @@ function switchConversation(convId) {
     }
 
     if (input) input.disabled = false;
+    // Issue #407: 回填当前会话未发送草稿（闲置返回/F5 后恢复；切换会话
+    // 时 switchConversation 已清空输入框，此处仅回填本会话自己的草稿）
+    var _draft = input ? _restoreChatDraft(convId) : null;
+    if (_draft) {
+      input.value = _draft;
+      _autoResizeTextarea(input);
+    }
+    // Issue #407 附件保活: 异步回填当前会话图片附件（闲置返回/F5 恢复）
+    // _currentConvId 守卫防竞态（加载期间用户又切走则丢弃，避免串扰）
+    _loadChatImages(convId).then(function(imgs) {
+      if (_currentConvId !== convId) return;
+      if (imgs && imgs.length > 0) {
+        _pendingImages = imgs.slice(0, _MAX_IMAGES);
+        _renderImgPreview();
+      }
+      _updateChatEditingGuard();
+    });
     const sendBtn = document.querySelector('.chat-in button');
     if (sendBtn) sendBtn.disabled = false;
   }).catch(() => {
@@ -624,6 +744,9 @@ function _onChatImageSelect(fileInput) {
         loaded++;
         if (loaded === toLoad || _pendingImages.length === _MAX_IMAGES) {
           _renderImgPreview();
+          // Issue #407: 图片入队后持久化 + 置守卫（闲置返回不丢）
+          _saveChatImages(_currentConvId, _pendingImages);
+          _updateChatEditingGuard();
           var input = document.getElementById('chatInput');
           if (input) input.focus();
         }
@@ -637,11 +760,17 @@ function _onChatImageSelect(fileInput) {
 function _removeChatImage(idx) {
   _pendingImages.splice(idx, 1);
   _renderImgPreview();
+  // Issue #407: 移除后同步 IndexedDB（空则删键）+ 守卫复位
+  _saveChatImages(_currentConvId, _pendingImages);
+  _updateChatEditingGuard();
 }
 
 function _clearAllImages() {
   _pendingImages = [];
   _renderImgPreview();
+  // Issue #407: 清空图片时清除 IndexedDB 键 + 守卫复位
+  _clearChatImages(_currentConvId);
+  _updateChatEditingGuard();
 }
 
 const _MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB
@@ -677,6 +806,8 @@ function _onChatVideoSelect(fileInput) {
   reader.onload = function(e) {
     _pendingVideo = {data: e.target.result, name: file.name || 'video'};
     _renderVideoPreview();
+    // Issue #407: 视频仅守卫保活（不持久化），置位守卫防闲置重渲染丢失
+    _updateChatEditingGuard();
     var input = document.getElementById('chatInput');
     if (input) input.focus();
   };
@@ -687,6 +818,8 @@ function _onChatVideoSelect(fileInput) {
 function _removeChatVideo() {
   _pendingVideo = null;
   _renderVideoPreview();
+  // Issue #407: 视频移除后守卫复位
+  _updateChatEditingGuard();
   // Hide preview area if no images either
   if (_pendingImages.length === 0) {
     var pv = document.getElementById('chatImgPreview');
@@ -696,6 +829,103 @@ function _removeChatVideo() {
 
 function _clearVideo() {
   _pendingVideo = null;
+  // Issue #407: 视频清空后守卫复位（图片状态由 _pendingImages 决定）
+  _updateChatEditingGuard();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Issue #407 附件保活: 图片/视频附件闲置返回不丢（扩展草稿修复同一改动面）
+//  - 编辑态守卫: _pendingImages/_pendingVideo 非空 → window._chatEditing=true,
+//    app.js visibilitychange 据此跳过整页重渲染（对齐 _dashboardEditing）。
+//  - 图片持久化: 按会话粒度存 IndexedDB（chatImages store, key=convId, 1h 过期），
+//    切换会话/闲置返回/F5 后 switchConversation 异步回填预览。
+//  - 视频仅守卫保活（不持久化）: 切换会话/重渲染后丢失，符合「仅守卫保活不强持久化」。
+//  - 清除: 发送/移除/切换会话/删除会话时清除对应会话图片与守卫。
+// ═══════════════════════════════════════════════════════════════
+var _CHAT_IMG_TTL = 3600000;  // 图片草稿 1 小时过期（对齐 chatDraft/chatLastConv）
+var _chatImgDB = null;        // IndexedDB 连接缓存（复用，避免重复打开）
+var _chatImgDBPromise = null; // 连接进行中的 Promise（防重入）
+try { window._chatEditing = false; } catch(e) {}
+
+// 打开/复用 IndexedDB 连接；不可用（隐身模式/无支持）返回 null（降级为仅守卫保活）
+function _openChatImgDB() {
+  if (_chatImgDB) return Promise.resolve(_chatImgDB);
+  if (_chatImgDBPromise) return _chatImgDBPromise;
+  if (typeof indexedDB === 'undefined' || !indexedDB) return Promise.resolve(null);
+  _chatImgDBPromise = new Promise(function(resolve) {
+    try {
+      var req = indexedDB.open('grapeChatDB', 1);
+      req.onupgradeneeded = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains('chatImages')) {
+          db.createObjectStore('chatImages', { keyPath: 'convId' });
+        }
+      };
+      req.onsuccess = function(e) { _chatImgDB = e.target.result; resolve(_chatImgDB); };
+      req.onerror = function() { _chatImgDB = null; resolve(null); };
+    } catch(e) { _chatImgDB = null; resolve(null); }
+  });
+  return _chatImgDBPromise;
+}
+
+// 保存当前会话图片到 IndexedDB（覆盖式）；空数组 = 删除键
+function _saveChatImages(convId, images) {
+  if (!convId) return;
+  _openChatImgDB().then(function(db) {
+    if (!db) return;
+    try {
+      var tx = db.transaction('chatImages', 'readwrite');
+      var store = tx.objectStore('chatImages');
+      if (!images || images.length === 0) {
+        store.delete(String(convId));
+      } else {
+        store.put({ convId: String(convId), images: images, ts: Date.now() });
+      }
+    } catch(e) {}  // 降级: 不可用则跳过（守卫仍保活）
+  });
+}
+
+// 读取会话图片；过期（>1h）返回空并清除；不可用/无记录返回空
+function _loadChatImages(convId) {
+  return _openChatImgDB().then(function(db) {
+    if (!db || !convId) return [];
+    return new Promise(function(resolve) {
+      try {
+        var tx = db.transaction('chatImages', 'readonly');
+        var req = tx.objectStore('chatImages').get(String(convId));
+        req.onsuccess = function() {
+          var rec = req.result;
+          if (!rec) return resolve([]);
+          if (rec.ts && Date.now() - rec.ts > _CHAT_IMG_TTL) {
+            _clearChatImages(convId);  // 过期清除
+            return resolve([]);
+          }
+          resolve((rec.images && Array.isArray(rec.images)) ? rec.images : []);
+        };
+        req.onerror = function() { resolve([]); };
+      } catch(e) { resolve([]); }
+    });
+  });
+}
+
+// 清除会话图片记录
+function _clearChatImages(convId) {
+  if (!convId) return;
+  _openChatImgDB().then(function(db) {
+    if (!db) return;
+    try {
+      var tx = db.transaction('chatImages', 'readwrite');
+      tx.objectStore('chatImages').delete(String(convId));
+    } catch(e) {}
+  });
+}
+
+// 编辑态守卫: _pendingImages/_pendingVideo 任一非空即置位
+// app.js visibilitychange 据此跳过整页重渲染（图片/视频附件不丢）
+function _updateChatEditingGuard() {
+  try {
+    window._chatEditing = (_pendingImages.length > 0) || (!!_pendingVideo);
+  } catch(e) {}
 }
 
 function sendChatStream() {
@@ -707,6 +937,7 @@ function sendChatStream() {
     const repo = app.currentRepo();
     API.post('/chat/conversations', repo ? {repo_key: (repo.repoKey || repo.fullName)} : {}).then(d => {
       _currentConvId = d.conversation_id;
+      _saveChatLastConv(_currentConvId);
       loadConversations();
       doSend(input, body);
     }).catch(e => app.showToast(I18N.t('chat.conversation.create_conv_failed', {msg: e.message})));
@@ -725,6 +956,8 @@ function doSend(input, body) {
   _resetTextareaHeight(input);
   _clearAllImages();
   _clearVideo();
+  // Issue #407: 已发送文本不再作为草稿（避免回填已发送内容）
+  _clearChatDraft(_currentConvId);
   // 显示用户消息（图片直接显示缩略图）
   var displayMsg = msg.replace(/</g,'&lt;');
   var imgHtml = '';
@@ -773,6 +1006,13 @@ function doSend(input, body) {
     // Issue #297: handleResp 已把非 JSON 错误渲染为带状态码文案（如"请求失败 (413)"）；
     // 兜底分支补传 {status}，杜绝 {{status}} 占位符与裸 parse 异常进入提示
     if (el) el.innerHTML = renderMarkdown(e.message || I18N.t('common.request_failed', {status: (e && e.status) || ''}));
+    // Issue #407: 发送失败 → 恢复草稿（文本未上服务器，不能丢）
+    var _sendInput = document.getElementById('chatInput');
+    if (_sendInput && _currentConvId && !_sendInput.value) {
+      _sendInput.value = msg;
+      _autoResizeTextarea(_sendInput);
+      _saveChatDraft(_currentConvId, msg);
+    }
   });
 }
 

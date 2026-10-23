@@ -104,19 +104,81 @@ Choose a template / existing Git project
 
 ## Quick Start
 
+### Prerequisites
+
+| Component | Requirement | Notes |
+|-----------|-------------|-------|
+| **Python** | >= 3.9 (main service) | 3.10+ recommended for devbox sandbox |
+| **Node.js** | >= 18 (for Agent CLI) | `npm install -g opencode` |
+| **Git** | any recent version | |
+
+### Windows (PowerShell)
+
+```powershell
+git clone https://github.com/grape-dev/grape.git
+cd grape
+
+# One-click setup: venv + deps + .env + preflight check + start
+.\start.ps1                    # Local dev (minimal deps, SQLite)
+.\start.ps1 -Full              # Full deps (OBS/MySQL/Feishu)
+.\start.ps1 -SkipDoctor        # Skip preflight, just start
+
+# Or manual setup:
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements-local.txt
+Copy-Item .env.example .env
+New-Item -ItemType Directory -Force -Path data
+python -m src.api.run --dev    # Dev mode, open http://localhost:3000
+```
+
+> If PowerShell blocks script execution: `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+### macOS / Linux
+
 ```bash
 git clone https://github.com/grape-dev/grape.git
 cd grape
-pip install -r requirements.txt
 
-# Install at least one Agent CLI:
-npm install -g opencode        # or pip install codearts-cli
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements-local.txt     # Minimal (no OBS/MySQL/Feishu)
+# pip install -r requirements.txt         # Full deps
 
-cp configs/global-bot-token.example.json configs/global-bot-token.json
-# Edit global-bot-token.json with your GitCode Bot Token / OAuth credentials
-
+cp .env.example .env
 mkdir -p data
-python -m src.api.run --dev    # Dev mode, open http://localhost:3000
+python -m src.api.run --dev                # Dev mode, open http://localhost:3000
+```
+
+### China Mirror (国内镜像加速)
+
+```bash
+# PyPI mirror
+pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
+
+# Or configure permanently:
+pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
+```
+
+### Install Agent CLI (at least one)
+
+```bash
+npm install -g opencode          # Node.js based
+# or
+pip install codearts-cli         # Python based
+```
+
+### Environment Check (Optional)
+
+```bash
+python scripts/doctor.py         # Run preflight checks
+```
+
+### Copy Bot Token Config
+
+```bash
+cp configs/global-bot-token.example.json configs/global-bot-token.json
+# Edit with your GitCode Bot Token / OAuth credentials
 ```
 
 ## Deployment
@@ -142,12 +204,14 @@ Production deployment examples (nginx reverse proxy / systemd / Docker) in `docs
 ## Development & Testing
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-pip install pytest pytest-mock
+# Install dependencies (local dev minimal set)
+python3 -m venv .venv
+source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
+pip install -r requirements-local.txt
+pip install -r requirements-dev.txt
 
 # Run tests
-mkdir -p data
+mkdir -p data                    # Windows: New-Item -ItemType Directory -Force data
 python -m pytest tests/ -v
 ```
 

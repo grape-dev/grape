@@ -343,7 +343,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
         except Exception:
             _wname = f"worker-{credential_id}"
         _wf = _os.path.join(_worker_log_dir, f"{credential_id}.log")
-        with open(_wf, "a") as _wf_fp:
+        with open(_wf, "a", encoding="utf-8") as _wf_fp:
             for ll in body.log_lines:
                 _entry = {
                     "ts": ll.ts or now,

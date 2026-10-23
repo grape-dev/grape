@@ -50,7 +50,7 @@ def _startup_security_check():
         email_json_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "configs", "email.json")
         if os.path.exists(email_json_path):
             import json as _json
-            with open(email_json_path) as _f:
+            with open(email_json_path, encoding="utf-8") as _f:
                 _email_cfg = _json.load(_f)
             _has_email_json = bool(_email_cfg.get("smtp", {}).get("host") or _email_cfg.get("resend", {}).get("api_key"))
     except Exception:

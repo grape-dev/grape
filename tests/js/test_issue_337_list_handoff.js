@@ -107,7 +107,7 @@ test('locales zh/en cross_pipeline 新词条存在', () => {
 // ─── 测试 9：index.html 版本号已提升 ───
 test('index.html issues.js 版本号已提升（缓存刷新）', () => {
   const html = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
-  assert.ok(html.indexOf('issues.js?v=114') >= 0, 'issues.js 版本号应为 v=114');
+  assert.ok(html.indexOf('issues.js?v=122') >= 0, 'issues.js 版本号应为 v=114');
 });
 
 // ─── 测试 10：语法完整性 ───

@@ -2012,8 +2012,8 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
 
     - 数据源：`get_scenes(repo_key)`（与 /scenes/with-pipeline 同源；仓库作用域即权限过滤，
       调用方仍需先 `check_repo_access`）。
-    - 过滤：① 排除当前流水线（current_scene_id；空 → 由调用方解析，通常为 "default"）；
-      ② 仅保留含 vod 节点的场景（与 _cross_pipeline_handoff 目标节点约定一致）。
+    - 过滤：仅保留含 vod 节点的场景（与 _cross_pipeline_handoff 目标节点约定一致）。
+      Issue #450：不再排除当前流水线，目标列表包含当前场景自身（支持同流水线内移交接续）。
     - 返回 {targets: [{id, name, display_name, description, work_branch, scene_type}],
             current_scene_id}。空列表照常返回（前端展示「无可用目标」，非静默失败）。
     """
@@ -2023,7 +2023,7 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
     try:
         for s in get_scenes(repo_key=repo_key):
             _sid = s.get("id") or ""
-            if not _sid or _sid == _cur:
+            if not _sid:
                 continue
             _nodes = s.get("nodes") or []
             _has_vod = any((n.get("id") or n.get("tag")) == "vod" for n in _nodes)

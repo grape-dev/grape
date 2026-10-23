@@ -402,7 +402,7 @@ def get_or_create_agent_session(repo_key: str, agent_type: str,
 
 def upsert_agent_session(*, repo_key: str, agent_type: str,
                          runtime_id: int = 0, skill: str = "", skill_id: int = 0,
-                         repo_gitcode_token: str = "", status: str = "idle",
+                         repo_gitcode_token: str | None = None, status: str = "idle",
                          enable: int | None = None, subscribe_events: str | None = None,
                          im_app_id: str | None = None, im_app_secret: str | None = None,
                          im_provider: str | None = None) -> str:
@@ -413,8 +413,10 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
     导致 vod_conversations.agent_session_id 悬空（"agent_session_id not found, auto-rebind"）。
     修复：已存在 → UPDATE 保留 id；不存在 → INSERT。
 
-    enable/subscribe_events/im_* 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
+    enable/subscribe_events/im_*/repo_gitcode_token 传 None = 保留既有值（UPDATE 不改；INSERT 用默认）；
     传具体值 = 覆盖（im 三字段仅显式传值才写，防 apply_scene/ensure_default 误清飞书绑定）。
+    repo_gitcode_token 同样 None=保留（R25.9 回声治理：session 行只允许存用户显式配置的
+    agent 专属 token，低级别 token 永不回填；清空走 unbind 的专门 SQL 路径）。
     返回会话 id。
     """
     with db_lock:
@@ -424,9 +426,12 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
             (repo_key, agent_type)).fetchone()
         if row:
             sid = row[0]
-            sets = ["runtime_id=?", "skill=?", "skill_id=?", "repo_gitcode_token=?",
+            sets = ["runtime_id=?", "skill=?", "skill_id=?",
                     "status=?", "last_active_at=datetime('now')"]
-            params = [runtime_id, skill, skill_id, repo_gitcode_token, status]
+            params = [runtime_id, skill, skill_id, status]
+            if repo_gitcode_token is not None:
+                sets.append("repo_gitcode_token=?")
+                params.append(repo_gitcode_token)
             if enable is not None:
                 sets.append("enable=?")
                 params.append(enable)
@@ -447,7 +452,7 @@ def upsert_agent_session(*, repo_key: str, agent_type: str,
         _sub = subscribe_events if subscribe_events is not None else "[]"
         c.execute(
             "INSERT INTO devops_agent_session (id, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token, status, enable, subscribe_events, im_app_id, im_app_secret, im_provider, last_active_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,datetime('now'))",
-            (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token,
+            (sid, repo_key, agent_type, runtime_id, skill, skill_id, repo_gitcode_token or "",
              status, _enable, _sub, im_app_id or "", im_app_secret or "", im_provider or ""))
         db.commit()
         return sid
@@ -549,26 +554,10 @@ def ensure_default_agent_sessions(repo_key: str):
     if not _mapping:
         return
 
-    # R12.13: 改用 read_stored_token（R20.18.1: 写入原始值，不过期检查、不刷新）
-    # R25.8: 路径 B 仓库（level=user）不在 session 行写入用户 token——
-    # ① 避免过期/换绑后 session 残留旧值（守卫漏一处就吃旧 token）
-    # ② 避免 agents API 原样外发用户 OAuth 凭据（安全）
-    # 执行链实时取已足够（claim 注入 + _get_task_token）
-    _token = ""
-    _provider_name = "gitcode"
-    if repo_key:
-        from src.token_resolver import TokenResolver, create_provider_from_repo_key
-        from src.repo_key import parse_repo_key
-        _provider_name, _, _ = parse_repo_key(repo_key)
-        _resolver = TokenResolver(create_provider_from_repo_key(repo_key))
-        _resolve = _resolver.resolve_config_level(repo_key)
-        if _resolve.level != "user":  # 非 path B 才写入 session token
-            # FR-20.10: 过期 token 不写 session——检查 _is_expired 后决定
-            if _resolve.token and not _resolve.expired:
-                _token = _resolve.token
-            else:
-                _token = ""  # 过期或空 → 写空串，agents API 返回 exists=false
-
+    # R25.9 回声治理：绑定时 session 表必然为空，read_stored_token 只可能解析出
+    # bot/用户级 token——session 行只允许存用户显式配置的 agent 专属 token，
+    # 低级别值永不回填（否则第 1 级命中 bot token，自循环检测放行 bot 评论 → 回声）。
+    # 执行链实时取已足够（claim 注入 + _get_task_token）。
     with db_lock:
         c = db.cursor()
         from src.runtime.engine_select import resolve_default_engine
@@ -579,20 +568,15 @@ def ensure_default_agent_sessions(repo_key: str):
                 # 默认引擎：按 专属→全局→本机 选择，写入 session 主引擎；
                 # 无候选则 runtime_id=0（agent 标识"无 engine，不可用"）
                 _rid = resolve_default_engine(repo_key, _at) or 0
-                # 保留既有主键 id 与用户配置（enable/订阅/飞书绑定），不因重建换 uuid
+                # 保留既有主键 id 与用户配置（enable/订阅/飞书绑定/token），不因重建换 uuid
                 #（见 upsert_agent_session 背景注释：INSERT OR REPLACE 新 uuid 会悬空 vod_conversations）
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=_at,
                     runtime_id=_rid, skill=_sk, skill_id=_skill_id,
-                    repo_gitcode_token=_token, status="idle",
+                    repo_gitcode_token=None, status="idle",
                     enable=None, subscribe_events=None,
                     im_app_id=None, im_app_secret=None, im_provider=None,
                 )
-                # FR-21.8: GitHub 仓库追加写入 repo_github_token 列
-                if _token and _provider_name == "github":
-                    c2 = db.cursor()
-                    c2.execute("UPDATE devops_agent_session SET repo_github_token=? WHERE repo_key=? AND agent_type=?",
-                               (_token, repo_key, _at))
             except Exception as e:
                 log.warning(f"Failed to create session for {_at}: {e}")
         db.commit()

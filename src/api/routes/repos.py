@@ -1784,21 +1784,34 @@ class DeployUrlBody(BaseModel):
     deploy_url: str = ""
 
 
+def _validate_deploy_url(url: str) -> str:
+    """校验 deploy_url：空串允许（清除），非空必须以 http:// 或 https:// 开头，长度 ≤512。"""
+    url = (url or "").strip()
+    if not url:
+        return ""
+    if len(url) > 512:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "部署 URL 长度不能超过 512 字符"})
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "部署 URL 必须以 http:// 或 https:// 开头"})
+    return url
+
+
 @router.put("/deploy-url", operation_id="repos_deploy_url_set", summary="Set deployment URL", description="Registers the deployed access URL of the business system.")
 def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_token)):
     """登记业务系统部署后的访问 URL"""
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
+    deploy_url = _validate_deploy_url(body.deploy_url)
     repo_key = to_repo_key(body.full_name)
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
     with db_lock:
         c = db.cursor()
-        c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (body.deploy_url or "", repo_key))
+        c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (deploy_url, repo_key))
         if c.rowcount == 0:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
         db.commit()
-    return {"message": "部署 URL 已更新", "deploy_url": body.deploy_url}
+    return {"message": "部署 URL 已更新", "deploy_url": deploy_url}
 
 
 @router.get("/deploy-url/{owner}/{repo_name}", operation_id="repos_deploy_url", summary="Get repository deployment URL", description="Returns the repository deployment access URL.")
