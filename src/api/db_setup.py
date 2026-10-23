@@ -3720,6 +3720,15 @@ def _migrate_tables():
         "ALTER TABLE user_feedback ADD COLUMN agent_type VARCHAR(32) DEFAULT ''",
         "ALTER TABLE user_feedback ADD COLUMN engine_info TEXT DEFAULT ''",
         "ALTER TABLE user_feedback ADD COLUMN fail_summary TEXT DEFAULT ''",
+        # ===== feedback-openapi（weekly-08）：Agent 自动反馈 + 反馈→Issue 闭环 =====
+        "ALTER TABLE user_feedback ADD COLUMN source VARCHAR(16) DEFAULT 'user'",
+        "ALTER TABLE user_feedback ADD COLUMN skill_id INTEGER DEFAULT NULL",
+        "ALTER TABLE user_feedback ADD COLUMN skill_name VARCHAR(191) DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN skill_scope VARCHAR(16) DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN issue_url TEXT DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN issue_number VARCHAR(32) DEFAULT ''",
+        "ALTER TABLE user_feedback ADD COLUMN converted_at VARCHAR(64) DEFAULT NULL",
+        "ALTER TABLE user_feedback ADD COLUMN feedback_kind VARCHAR(32) DEFAULT ''",
     ]
     # 回填已有分类数据的 slug（幂等，仅 slug 为空时更新）
     _category_slugs = [
