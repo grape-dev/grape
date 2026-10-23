@@ -99,22 +99,49 @@ class VcsApiClient:
 
     # === Issue 评论 ===
 
+    def _ledger(self, content_type: str, content_id, issue_number, body: str = "") -> None:
+        """Issue #453 代发台账（写点8，客户端层收口）：写操作成功后入账，best-effort。
+
+        在 VcsApiClient 四个写方法（评论/关issue/建PR/合PR）统一调用——所有调用方
+        （git_repo_api / issues.py / issues_center / create_pr_for_repo）自动覆盖。
+        content_id：字符串/数字 ID（评论 ID / issue 编号 / PR 编号）。
+        """
+        try:
+            from src.outbound_ledger import record_outbound, content_hash_md5
+            from src.repo_key import to_repo_key
+            if content_id is None or str(content_id) == "":
+                return
+            _rk = to_repo_key(f"{self.owner}/{self.repo}", self.provider)
+            record_outbound(self.provider, _rk, content_type, str(content_id),
+                            issue_number=str(issue_number or ""),
+                            content_hash=content_hash_md5(body) if body else "")
+        except Exception as e:
+            from src.config import log
+            log.warning(f"VcsApiClient ledger record failed (non-blocking): {e}")
+
     def post_issue_comment(self, issue_number: int, body: str) -> dict:
         """在 Issue 上发表评论。"""
         if self.provider == "gitcode":
-            return self._gitcode_request(
+            _resp = self._gitcode_request(
                 "POST", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments",
                 {"body": body})
         elif self.provider == "github":
-            return self._github_request(
+            _resp = self._github_request(
                 "POST", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}/comments",
                 {"body": body})
         elif self.provider == "gitlab":
             project_id = f"{self.owner}%2F{self.repo}"
-            return self._gitlab_request(
+            _resp = self._gitlab_request(
                 "POST", f"/projects/{project_id}/issues/{issue_number}/notes",
                 {"body": body})
-        return {"error": f"unsupported provider: {self.provider}"}
+        else:
+            return {"error": f"unsupported provider: {self.provider}"}
+        # Issue #453 台账：响应 dict 里的评论 ID 入账（无 ID 时记 issue_number 兼值）
+        if isinstance(_resp, dict) and "error" not in _resp:
+            from src.outbound_ledger import extract_content_id
+            _cid = extract_content_id(_resp, "issue_comment")
+            self._ledger("issue_comment", _cid or issue_number, issue_number, body)
+        return _resp
 
     # === Issue 查询 ===
 
@@ -148,19 +175,24 @@ class VcsApiClient:
                 _title = str(_info.get("title") or "") if isinstance(_info, dict) else ""
             except Exception:
                 _title = ""
-            return self._gitcode_request(
+            _resp = self._gitcode_request(
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
                 {"state": "close", "repo": f"{self.owner}/{self.repo}", "title": _title})
         elif self.provider == "github":
-            return self._github_request(
+            _resp = self._github_request(
                 "PATCH", f"/repos/{self.owner}/{self.repo}/issues/{issue_number}",
                 {"state": "closed"})
         elif self.provider == "gitlab":
             project_id = f"{self.owner}%2F{self.repo}"
-            return self._gitlab_request(
+            _resp = self._gitlab_request(
                 "PUT", f"/projects/{project_id}/issues/{issue_number}",
                 {"state_event": "close"})
-        return {"error": f"unsupported provider: {self.provider}"}
+        else:
+            return {"error": f"unsupported provider: {self.provider}"}
+        # Issue #453 台账（写点10）：关闭 issue 入账——issue_closed 事件回流对账
+        if isinstance(_resp, dict) and "error" not in _resp:
+            self._ledger("issue_close", issue_number, issue_number)
+        return _resp
 
     def get_issue_state(self, issue_number: int) -> str:
         """获取 Issue 当前 state（open/closed），失败返回空串。"""
@@ -175,30 +207,41 @@ class VcsApiClient:
         """创建 Pull Request。"""
         data = {"title": title, "head": head, "base": base, "body": body}
         if self.provider == "gitcode":
-            return self._gitcode_request(
+            _resp = self._gitcode_request(
                 "POST", f"/repos/{self.owner}/{self.repo}/pulls", data)
         elif self.provider == "github":
-            return self._github_request(
+            _resp = self._github_request(
                 "POST", f"/repos/{self.owner}/{self.repo}/pulls", data)
         elif self.provider == "gitlab":
             project_id = f"{self.owner}%2F{self.repo}"
-            return self._gitlab_request(
+            _resp = self._gitlab_request(
                 "POST", f"/projects/{project_id}/merge_requests", data)
-        return {"error": f"unsupported provider: {self.provider}"}
+        else:
+            return {"error": f"unsupported provider: {self.provider}"}
+        # Issue #453 台账（写点11）：建 PR 入账——PR 编号（number/iid）为对账键
+        if isinstance(_resp, dict) and "error" not in _resp:
+            from src.outbound_ledger import extract_content_id
+            self._ledger("pr", extract_content_id(_resp, "issue"), "", body)
+        return _resp
 
     def merge_pr(self, pr_number: int) -> dict:
         """合并 Pull Request。"""
         if self.provider == "gitcode":
-            return self._gitcode_request(
+            _resp = self._gitcode_request(
                 "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", {})
         elif self.provider == "github":
-            return self._github_request(
+            _resp = self._github_request(
                 "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", {})
         elif self.provider == "gitlab":
             project_id = f"{self.owner}%2F{self.repo}"
-            return self._gitlab_request(
+            _resp = self._gitlab_request(
                 "PUT", f"/projects/{project_id}/merge_requests/{pr_number}/merge", {})
-        return {"error": f"unsupported provider: {self.provider}"}
+        else:
+            return {"error": f"unsupported provider: {self.provider}"}
+        # Issue #453 台账（写点11）：合并 PR 入账——pr_merge 事件回流对账
+        if isinstance(_resp, dict) and "error" not in _resp:
+            self._ledger("pr_merge", pr_number, "")
+        return _resp
 
     def get_pr(self, pr_number: int) -> dict:
         """获取 PR 详情。"""
