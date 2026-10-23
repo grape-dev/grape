@@ -187,3 +187,27 @@ class TestPRSubIssueBinding:
         print(f"\n[T7] merged 绑定 PR → {rows}")
         extra = [r for r in rows if r[0] == "a2a_event"]
         assert len(extra) == 0, f"merged PR 不应派发订阅 QA, 实际 {rows}"
+
+    def test_T8_bound_issue_stage_qa_same_skill_other_scene_skipped(self):
+        """PR 关联 Issue（stage=qa）异场景同 skill 订阅：主路由 QA 覆盖该 skill，订阅不再重复派发"""
+        _seed([("scene-A", "qa-cli"), ("scene-B", "qa-cli")],
+              stage="qa", scene_of_issue="scene-A")
+        _run_hook("human_user", "open")
+        rows = _events()
+        print(f"\n[T8] 绑定 Issue stage=qa 异场景同 skill → {rows}")
+        main = [r for r in rows if r[0] == "pull_request_opened"]
+        extra = [r for r in rows if r[0] == "a2a_event"]
+        assert len(main) == 1 and main[0][1] == "qa" and main[0][2] == "scene-A", \
+            f"stage matrix 主事件应为 scene-A qa, 实际 {rows}"
+        assert len(extra) == 0, f"同 skill 异场景订阅应被排除（主路由 QA 已覆盖）, 实际 {rows}"
+
+    def test_T9_bound_issue_stage_qa_same_skill_bot_early_skipped(self):
+        """bot actor 预匹配同口径：主路由将派 QA 时，同 skill 异场景订阅预派发也被排除"""
+        _seed([("scene-A", "qa-cli"), ("scene-B", "qa-cli")],
+              stage="qa", scene_of_issue="scene-A")
+        _run_hook("grape_bot", "open")
+        rows = _events()
+        print(f"\n[T9] 绑定 Issue stage=qa 同 skill bot → {rows}")
+        extra = [r for r in rows if r[0] == "a2a_event"]
+        assert all(r[2] != "scene-B" for r in rows), \
+            f"同 skill 异场景 scene-B 不应被派发（主路由 QA 覆盖）, 实际 {rows}"
