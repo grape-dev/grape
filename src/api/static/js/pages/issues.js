@@ -189,17 +189,19 @@ function _renderDeployLink() {
   if (!bar) return;
   if (_deployEditing) {
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <input id="deployUrlInput" value="${_deployUrl}" placeholder="输入部署访问 URL（如 http://1.2.3.4:5000）" style="flex:1;max-width:400px;padding:5px 8px;border:1px solid #ccc;border-radius:6px;font-size:12px;background:#fff">
-      <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;font-size:12px" onclick="_saveDeployUrl()">保存</button>
-      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;font-size:12px" onclick="_deployEditing=false;_renderDeployLink()">取消</button>
+      <input id="deployUrlInput" value="${_deployUrl}" placeholder="输入部署访问 URL（如 http://1.2.3.4:5000）" style="flex:1;max-width:400px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;font-size:12px;background:#fff">
+      <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;font-size:12px;border-radius:8px" onclick="_saveDeployUrl()">保存</button>
+      <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;font-size:12px;border-radius:8px" onclick="_deployEditing=false;_renderDeployLink()">取消</button>
     </div>`;
   } else if (_deployUrl) {
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="访问部署的业务系统">🌐 访问应用 ↗</a>
+      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="${_deployUrl}">🌐 ↗</a>
       <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.6" title="编辑部署 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.6">✎</span>
     </div>`;
   } else {
-    bar.innerHTML = '';
+    bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
+      <span onclick="_deployEditing=true;_renderDeployLink()" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.7" title="登记部署访问 URL" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">🌐</span>
+    </div>`;
   }
 }
 
