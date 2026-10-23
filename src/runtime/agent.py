@@ -84,11 +84,14 @@ _worker_probe_started = False
 
 
 def _probe_hermes_acp(cli_path: str) -> dict:
-    """hermes ACP 模式探活：initialize + 轻量 prompt，端到端验证引擎可用性。
+    """hermes ACP 模式探活：initialize + session/new + 轻量 prompt，端到端验证引擎可用性。
 
     1. 启动 hermes acp 子进程（和实际任务执行路径一致）
     2. 发 JSON-RPC initialize → 验证 ACP 协议层
-    3. 发 session/prompt "hi" → 验证 provider 连接 + 模型推理
+    3. 发 session/new → 获取真实 sessionId（Issue #441：对空/不存在的
+       sessionId，hermes ACP 服务端 prompt 直接返回 stopReason=refusal，
+       导致升级 #423 口径后监控全量 refused；对齐 _probe_hwcloud_acp 先例）
+    4. 发 session/prompt "hi"（真实 sessionId）→ 验证 provider 连接 + 模型推理
     收到 stopReason 响应即表示端到端可用。
     """
     import json as _json
@@ -100,6 +103,7 @@ def _probe_hermes_acp(cli_path: str) -> dict:
 
     start = _time_mod.time()
     proc = None
+    _probe_cwd = ""  # session/new 的临时 cwd（try 内赋值，finally 清理需判空）
     try:
         # 二进制模式（同 _probe_hwcloud_acp 修复——TextIOWrapper 解码缓冲
         # 会吞掉 select 之后的字节；hermes 暂未触发仅因无大块多字节通知，
@@ -202,11 +206,32 @@ def _probe_hermes_acp(cli_path: str) -> dict:
             return {"status": "fail", "latency": latency,
                     "error": f"ACP initialize error: {_err}"}
 
-        # 2. session/prompt "hi" — 端到端验证 provider + 模型推理
-        _send({"jsonrpc": "2.0", "id": 2, "method": "session/prompt",
-               "params": {"sessionId": "",
+        # 2. session/new — 获取真实 sessionId（Issue #441，对齐 _probe_hwcloud_acp）：
+        # hermes ACP 服务端对空/不存在的 sessionId 的 prompt 返回 stopReason=refusal，
+        # 旧探针 sessionId 写死 "" → 升级 #423 refusal 口径后监控全量 refused。
+        # cwd 用轻量临时目录（对齐 hwcloud 探针）：家目录在 devspace/网络挂载场景
+        # 可能不可写或初始化慢，探活不应受其拖累；mcpServers 必须空数组。
+        import tempfile as _tempfile
+        _probe_cwd = _tempfile.mkdtemp(prefix="hermes-probe-")
+        _send({"jsonrpc": "2.0", "id": 2, "method": "session/new",
+               "params": {"cwd": _probe_cwd, "mcpServers": []}})
+        _new_resp = _read_response(2, _ACP_PROBE_TIMEOUT)
+        if not _new_resp or "error" in _new_resp:
+            latency = round(_time_mod.time() - start, 1)
+            _err = "no response" if not _new_resp else _new_resp["error"].get("message", "")[:200]
+            return {"status": "fail", "latency": latency, "error": f"ACP session/new: {_err}"}
+        _sid = (_new_resp.get("result") or {}).get("sessionId", "")
+        if not _sid:
+            # session/new 成功但无 sessionId → 不把空 sessionId 带进 prompt（重蹈 #441 覆辙）
+            latency = round(_time_mod.time() - start, 1)
+            return {"status": "fail", "latency": latency,
+                    "error": "ACP session/new: response missing sessionId"}
+
+        # 3. session/prompt "hi" — 端到端验证 provider + 模型推理（真实 sessionId）
+        _send({"jsonrpc": "2.0", "id": 3, "method": "session/prompt",
+               "params": {"sessionId": _sid,
                           "prompt": [{"type": "text", "text": "hi"}]}})
-        _prompt_resp = _read_response(2, _ACP_PROMPT_TIMEOUT)
+        _prompt_resp = _read_response(3, _ACP_PROMPT_TIMEOUT)
         if not _prompt_resp:
             latency = round(_time_mod.time() - start, 1)
             _stderr = ""
@@ -230,9 +255,9 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         # 服务端心跳落库对非 ok/fail 状态仅记录、不增 probe_fail_count → 不触发连败摘除。
         if _stop == "refusal":
             return {"status": "refused", "latency": latency, "error": "",
-                    "output": "ACP initialize+prompt refused (stopReason=refusal)"}
+                    "output": "ACP initialize+session/new+prompt refused (stopReason=refusal)"}
         return {"status": "ok", "latency": latency, "error": "",
-                "output": f"ACP initialize+prompt ok (stopReason={_stop})"}
+                "output": f"ACP initialize+session/new+prompt ok (stopReason={_stop})"}
 
     except _subprocess.TimeoutExpired:
         latency = round(_time_mod.time() - start, 1)
@@ -252,6 +277,12 @@ def _probe_hermes_acp(cli_path: str) -> dict:
                     proc.kill()
                 except Exception:
                     pass
+        # 探针临时 cwd 清理（hwcloud 探针同款；session 随子进程 terminate 终止）
+        try:
+            _shutil.rmtree(_probe_cwd, ignore_errors=True)
+        except Exception:
+            pass
+
 
 
 
