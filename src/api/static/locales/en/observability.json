@@ -311,6 +311,7 @@
   "log_all_sources": "All sources",
   "log_count": "{{count}} entries (from {{files}} log files)",
   "no_matching_log": "No matching logs",
+  "no_matching_engine": "No matching engines",
   "source_master": "master",
   "task_status_dist": "Task Status Distribution",
   "no_task_events": "No task events",

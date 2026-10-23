@@ -1078,12 +1078,18 @@ function _sortedRuntimes(r) {
 }
 
 function _filterRuntimes(runtimes) {
+  // Issue #436：设备下拉残留失效设备名（设备失联/吊销后被过滤出列表）时，
+  // select 已回显「所有设备」但变量仍持旧值 → 一切搜索 0 匹配。
+  // 此处校验 _rtDeviceFilter 仍在当前数据源中，不在则视为未选设备。
+  const _devSet = _rtDeviceFilter ? new Set(runtimes.map(rt => rt.device_name || '')) : null;
   return runtimes.filter(rt => {
     const _dev = rt.device_name || '';
-    if (_rtDeviceFilter && _dev !== _rtDeviceFilter) return false;
+    if (_rtDeviceFilter && _devSet.has(_rtDeviceFilter) && _dev !== _rtDeviceFilter) return false;
     if (_rtSearch) {
-      const _q = _rtSearch.toLowerCase();
-      if (!(rt.name || '').toLowerCase().includes(_q) &&
+      // Issue #436：搜索词 trim——首尾空格（输入法/粘贴）不应导致全列表 0 匹配
+      const _q = _rtSearch.trim().toLowerCase();
+      if (_q &&
+          !(rt.name || '').toLowerCase().includes(_q) &&
           !(rt.device_name || '').toLowerCase().includes(_q) &&
           !(rt.version || '').toLowerCase().includes(_q) &&
           !(rt.mode || '').toLowerCase().includes(_q)) return false;
@@ -1233,7 +1239,7 @@ function _rerenderRuntimeTable() {
       html += pageRuntimes.map(_runtimeRowHTML).join('');
       html += '</tbody></table></div>';
     } else {
-      html += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
+      html += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_engine') + '</div>';
     }
     rowsEl.innerHTML = html;
   }
@@ -1651,7 +1657,7 @@ function renderOverview(ops, rt) {
       runtimeTable += _pageRuntimes.map(_runtimeRowHTML).join('');
       runtimeTable += '</tbody></table></div>';
     } else {
-      runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_log') + '</div>';
+      runtimeTable += '<div class="ts t2" style="padding:12px">' + I18N.t('observability.no_matching_engine') + '</div>';
     }
     runtimeTable += '</div>';
     runtimeTable += '<div id="rt-pager">' + (_filteredRuntimes.length > 0 ? _paginationWithPageSizeHTML(_runtimePage, _rtTotalPages, '_runtimePage--;_rerenderRuntimeTable()', '_runtimePage++;_rerenderRuntimeTable()', _runtimePageSize, '_runtimePageSize', '_runtimePage=0;_rerenderRuntimeTable()') : '') + '</div>';
