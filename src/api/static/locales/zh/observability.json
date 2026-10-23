@@ -311,6 +311,7 @@
   "log_all_sources": "全部来源",
   "log_count": "{{count}} 条（来自 {{files}} 个日志文件）",
   "no_matching_log": "无匹配日志",
+  "no_matching_engine": "无匹配引擎",
   "source_master": "主控",
   "task_status_dist": "任务状态分布",
   "no_task_events": "暂无任务事件",
