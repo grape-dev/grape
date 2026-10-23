@@ -867,6 +867,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
             rt["scope"] = cred["scope"]          # 引擎 scope 随 worker（凭据）一致
             rt["repo_key"] = from_repo_key(cred.get("repo_key", ""))
         rt["is_local"] = (cid == 0)          # 本机直连（credential_id=0，恒 direct），前端分组/标签用
+        rt["spec"] = cred.get("spec") or ""
         # B5 (Issue #257): worker 版本是否落后（服务端最新版本 vs worker 上报版本）
         try:
             from src.worker_package import worker_code_version, normalize_worker_version
@@ -993,13 +994,14 @@ def _build_cred_map(db, db_lock) -> dict:
     cred_map = {}
     with db_lock:
         c = db.cursor()
-        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id FROM runtime_credentials")
+        c.execute("SELECT id, name, device_name, scope, owner_id, owner_name, status, last_seen_at, last_ip, repo_key, org_id, spec FROM runtime_credentials")
         for r in c.fetchall():
-            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id = r
+            cid, cname, cdev, cscope, cowner_id, cowner_name, cstatus, clast, clast_ip, crepo_key, corg_id, cspec = r
             cred_map[cid] = {"name": cname, "device_name": cdev or "", "scope": cscope,
                              "owner_id": cowner_id or "", "owner_name": cowner_name or "",
                              "status": cstatus, "last_seen_at": clast, "last_ip": clast_ip or "",
-                             "repo_key": crepo_key or "", "org_id": corg_id or 0}
+                             "repo_key": crepo_key or "", "org_id": corg_id or 0,
+                             "spec": cspec or ""}
     return cred_map
 
 

@@ -60,6 +60,7 @@
     "unhealthy": "✗ 异常",
     "worker": "设备",
     "ip": "IP",
+    "spec": "规格",
     "scope_label": "范围",
     "scope_short": "级别",
     "owner": "归属",
