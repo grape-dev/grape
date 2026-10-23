@@ -1869,7 +1869,7 @@ window.openCrossPipelineModal = function(taskId) {
   document.body.appendChild(ov);
   _crossPipelineModal = ov;
 
-  // Issue #337: 目标列表走后端代理接口（权限过滤 + 排除当前流水线 + 仅含 vod 节点，服务端统一裁决）
+  // Issue #337/#450: 目标列表走后端代理接口（权限过滤 + 仅含 vod 节点，含当前流水线，服务端统一裁决）
   var _sel = document.getElementById('cpTargetScene');
   var _btn = document.getElementById('cpSubmitBtn');
   if (_btn) { _btn.disabled = true; _btn.style.opacity = '.5'; _btn.style.cursor = 'not-allowed'; }
@@ -1878,7 +1878,7 @@ window.openCrossPipelineModal = function(taskId) {
     if (!sel) return;
     var targets = d.targets || [];
     if (!targets.length) {
-      sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.no_target')||'无可用目标流水线（需含 vod 节点且非当前流水线）') + '</option>';
+      sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.no_target')||'无可用目标流水线（需含 vod 节点）') + '</option>';
       return;
     }
     sel.innerHTML = '<option value="">' + (I18N.t('issues.cross_pipeline.scene_placeholder')||'请选择目标场景') + '</option>';

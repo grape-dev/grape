@@ -1,11 +1,11 @@
 """Issue #337 — 需求中心列表模式「移交到其他流水线」后端链路测试。
 
 覆盖（对应 docs/issue-337/task.md #1-3）：
-- get_handoff_targets：排除当前流水线 / 仅含 vod 节点 / 空列表语义
+- get_handoff_targets：含当前流水线（Issue #450）/ 仅含 vod 节点 / 空列表语义
 - GET /api/issues/{issue_id}/handoff/targets（targets_issue）：权限过滤（check_repo_access 403）
 - POST /api/issues/{issue_id}/handoff（handoff_issue）：
   * 成功：cross_scene_handoff + a2a_event 审计事件落库、issue.scene_id/stage 回写目标场景
-  * 目标=当前场景 → 409（duplicate_current）
+  * 目标=当前场景 → 移交成功（Issue #450：不再排除当前流水线）
   * 目标不在可移交列表（含无 vod）→ 400/404
   * 30s 幂等防连点 → 409
   * 需求不存在 → 404
@@ -124,11 +124,12 @@ def _run(coro):
 
 # ===== 领域函数：get_handoff_targets =====
 
-def test_targets_excludes_current_scene():
+def test_targets_includes_current_scene():
+    """Issue #450: 目标列表包含当前流水线自身（不再排除）。"""
     _seed_scenes()
     out = get_handoff_targets(REPO, 200, "source-scene")
     ids = [t["id"] for t in out["targets"]]
-    assert "source-scene" not in ids, "必须排除当前流水线"
+    assert "source-scene" in ids, "Issue #450: 当前流水线应在目标列表中"
     assert "target-scene" in ids
     assert "another-scene" in ids
 
@@ -149,19 +150,22 @@ def test_targets_fields():
     assert out["current_scene_id"] == "source-scene"
 
 
-def test_targets_empty_when_only_current():
+def test_targets_includes_current_when_only_current():
+    """Issue #450: 仅当前场景（含 vod）时，列表包含自身（非空）。"""
     _set_scene("source-scene", [{"id": "vod"}])
     out = get_handoff_targets(REPO, 200, "source-scene")
-    assert out["targets"] == []
+    ids = [t["id"] for t in out["targets"]]
+    assert "source-scene" in ids, "当前场景应在目标列表中"
+    assert len(ids) == 1
 
 
 def test_targets_current_scene_defaults_to_default():
-    """无场景记录的需求 → current_scene_id=default，default 亦被排除。"""
+    """无场景记录的需求 → current_scene_id=default；Issue #450: default 也在目标列表中。"""
     _set_scene("default", [{"id": "vod"}])
     _set_scene("target-scene", [{"id": "vod"}])
     out = get_handoff_targets(REPO, 200, "")
     ids = [t["id"] for t in out["targets"]]
-    assert "default" not in ids
+    assert "default" in ids, "Issue #450: default 应在目标列表中"
     assert "target-scene" in ids
 
 
@@ -177,7 +181,7 @@ def test_get_targets_endpoint_ok():
     assert res["issue_number"] == 200
     assert res["current_scene_id"] == "source-scene"
     ids = [t["id"] for t in res["targets"]]
-    assert "source-scene" not in ids
+    assert "source-scene" in ids, "Issue #450: 当前场景应在目标列表中"
     assert "target-scene" in ids
 
 
@@ -226,16 +230,32 @@ def test_handoff_success_creates_events_and_updates_issue():
     assert row[1] == "vod"
 
 
-def test_handoff_rejects_current_scene():
+def test_handoff_to_current_scene_success():
+    """Issue #450: 目标=当前场景移交成功（不再返回 409）。"""
     from unittest.mock import patch
-    _set_issue(200, "source-scene")
+    _set_issue(200, "source-scene", assignee="old_user")
     _seed_scenes()
     body = IssueHandoffBody(target_scene_id="source-scene")
     with patch("src.api.deps.user_db.get_managed_repos",
                return_value=[{"repo_key": REPO}]):
-        with pytest.raises(HTTPException) as ei:
-            _run(handoff_issue(200, body, _user()))
-    assert ei.value.status_code == 409
+        res = _run(handoff_issue(200, body, _user()))
+    assert res.get("status") == "ok", res
+    assert res.get("seq", 0) > 0
+    assert res.get("cross_pipeline") is True
+    # 审计事件落库
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT event_type FROM events WHERE repo_key=? AND issue_id='#200'", (REPO,))
+        types = [r[0] for r in c.fetchall()]
+    assert "cross_scene_handoff" in types
+    assert "a2a_event" in types
+    # issue.stage 回到 vod
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT scene_id, stage FROM issue WHERE repo_key=? AND issue_number=200", (REPO,))
+        row = c.fetchone()
+    assert row[0] == "source-scene"
+    assert row[1] == "vod"
 
 
 def test_handoff_rejects_scene_not_in_targets():

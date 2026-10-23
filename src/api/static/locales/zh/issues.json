@@ -43,9 +43,9 @@
     "confirm_title": "确认移交",
     "confirm_message": "即将把需求 #{issue} 移交到「{scene}」流水线。\n移交后由目标流水线接续处理，原流水线停止流转（历史记录保留）。\n确定继续吗？",
     "no_permission": "无法获取目标流水线列表（无权限或需求不存在）",
-    "no_target": "无可用目标流水线（需含 vod 节点且非当前流水线）",
+    "no_target": "无可用目标流水线（需含 vod 节点）",
     "err_invalid_target": "目标流水线不可用",
-    "duplicate_current": "目标流水线不能是当前流水线"
+    "duplicate_current": "该需求已在当前流水线中运行"
   },
   "deploy_url_saved": "部署 URL 已保存",
   "save_failed": "保存失败: {msg}",

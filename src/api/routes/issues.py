@@ -998,7 +998,7 @@ def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
 
 @router.get("/{issue_id}/handoff/targets", operation_id="issues_handoff_targets",
             summary="List handoff target pipelines for an issue",
-            description="Lists available cross-pipeline handoff targets for the issue-center detail view: repo-scoped scenes (permission-filtered), excluding the issue's current pipeline, vod node required. Empty list is returned as-is (frontend shows explicit empty hint).")
+            description="Lists available cross-pipeline handoff targets for the issue-center detail view: repo-scoped scenes (permission-filtered), vod node required. Issue #450: the current pipeline is included (self-handoff allowed). Empty list is returned as-is (frontend shows explicit empty hint).")
 async def targets_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """Issue #337: 需求详情「移交到其他流水线」目标流水线列表。"""
     from src.api.deps import check_repo_access
@@ -1012,7 +1012,7 @@ async def targets_issue(issue_id: int, user: dict = Depends(require_no_session_t
 
 @router.post("/{issue_id}/handoff", operation_id="issues_handoff",
              summary="Hand off issue to another pipeline",
-             description="Hands the issue off to a target pipeline (Issue #337 list-view entry). Backend proxy: validates repo access + target membership (excludes current pipeline, vod required), 30s idempotency guard, then reuses the standard A2A cross-pipeline handoff path (a2a_endpoint -> _cross_pipeline_handoff). Result (including 'skipped' interceptions like duplicate_handoff) is passed through to the frontend.")
+             description="Hands the issue off to a target pipeline (Issue #337 list-view entry). Backend proxy: validates repo access + target membership (vod required; Issue #450: current pipeline allowed as target), 30s idempotency guard, then reuses the standard A2A cross-pipeline handoff path (a2a_endpoint -> _cross_pipeline_handoff). Result (including 'skipped' interceptions like duplicate_handoff) is passed through to the frontend.")
 async def handoff_issue(issue_id: int, body: IssueHandoffBody,
                         user: dict = Depends(require_no_session_token)):
     """Issue #337: 移交提交——服务内直调 a2a_endpoint（与 a2a-redo 同模式），复用 #329 链路。"""
@@ -1025,12 +1025,10 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
     repo_key, issue_number, current_scene_id = _load_issue_repo_scene(issue_id)
     check_repo_access(user, repo_key)
 
-    # 2) 目标校验：非空 / 非当前场景 / 在可移交列表内（含 vod 过滤，防绕过权限点名任意场景）
+    # 2) 目标校验：非空 / 在可移交列表内（含 vod 过滤，防绕过权限点名任意场景；Issue #450 允许目标=当前场景）
     target_scene_id = (body.target_scene_id or "").strip()
     if not target_scene_id:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "请选择目标流水线"})
-    if target_scene_id == current_scene_id:
-        raise HTTPException(status_code=409, detail={"code": 409, "message": "目标流水线不能是当前流水线"})
     _targets = get_handoff_targets(repo_key, issue_number, current_scene_id)
     _target_ids = {t["id"] for t in _targets["targets"]}
     if target_scene_id not in _target_ids:
