@@ -1,6 +1,6 @@
 ---
 name: grape-architecture-guardian
-version: 1.0.0
+version: 1.0.1
 description: |
   Grape 项目群架构守护技能（qa 型 PR 门禁审查）：PR 提交时按 grape-dev 组织 8 个项目统一架构规则
   执行 review 模式门禁审查。①拉取 PR 材料（diff/变更文件/commits）+ 跑 3 只读脚本取证 →

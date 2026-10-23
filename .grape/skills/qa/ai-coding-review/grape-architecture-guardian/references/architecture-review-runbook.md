@@ -93,7 +93,7 @@ grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" -
    - 命中目标 agent 节点 → 可 A2A；未命中 → **评论说明「当前场景未配置 {agent} 环节」+ 不 A2A**，直接收尾（next_step=reply_comment/done）。
 3. `grape tasks complete`（见 SKILL.md 任务完成流程模板；结构化字段必填）。
    - `APPROVED` 且流程需要 → `a2a handoff --json '{"agent":"sre","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"架构守护审查通过，请继续"}}'`（交办 agent 名 sre）。
-   - `BLOCKED` / 需整改 → `a2a handoff --json '{"agent":"coding","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"架构守护审查发现 N 项问题，请按报告整改"}}'`（交办 agent 名 coding）。
+   - `BLOCKED` / 需整改 → `a2a handoff --json '{"agent":"coding","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"架构审查发现 N 项问题，请按报告整改"}}'`（交办 agent 名 coding）。
    - 通过且无需交办 → `next_step=done`。
 4. 调完即结束任务，不继续等待。
 

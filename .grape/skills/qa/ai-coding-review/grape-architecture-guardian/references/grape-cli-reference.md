@@ -41,7 +41,7 @@ grape a2a handoff --json '{"agent":"coding","payload":{"repository":"...","accou
 grape tasks wait --task-id {id}                       # 异步任务轮询
 ```
 
-## 4. 命令限制与不存在的能力
+## 4. 限制声明
 
 - **命令遮蔽**：`tasks status get` 不可执行，查询任务状态用 `tasks wait --task-id`。
 - **无 `grape api` 逃生舱**：v0.2.2 移除；契约未覆盖端点无法 CLI 调用，不 curl 直连。
