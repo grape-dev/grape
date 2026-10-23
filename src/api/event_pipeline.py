@@ -206,26 +206,26 @@ def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
     return ""
 
 
-def _filter_pr_sub_matches(matches: list, issue_scene_id: str, skip_issue_scene: bool = False,
+def _filter_pr_sub_matches(matches: list, issue_scene_id: str, bound_issue: bool = False,
                            issue_qa_skill: str = "") -> list:
     """PR 订阅匹配结果过滤（Issue #426 修复口径 + skill 级去重口径）：
-    1. 仅当主路由（stage matrix）已为该事件派发 QA（skip_issue_scene=True）时，
-       排除 PR 关联 Issue 所在场景（避免同场景重复 QA）；
+    1. 仅当 PR 绑定了 Issue（bound_issue=True）时，
+       排除 PR 关联 Issue 所在场景（绑 Issue 即问题已被他人解决，该场景无需再被订阅唤醒）；
        其余情况订阅场景不再因绑定关系被排除
-    2. skip_issue_scene=True 且 issue_qa_skill 非空时，排除与主路由 QA 同 skill 的场景
-       （主路由 QA 已覆盖该 skill 的审查，同 skill 异场景再审是重复；#426 后补）
+    2. bound_issue=True 且 issue_qa_skill 非空时，排除与 Issue 场景同 skill 的场景
+       （同 skill 审查重复；#426 后补）
     3. 剩余场景中 qa_skill 相同的只保留第一个（同 skill 重复审查浪费资源，#318 保留）
 
     matches: [(scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids), ...]
     issue_scene_id: PR 关联 Issue 所在场景（空=无关联 Issue）
-    skip_issue_scene: 主路由是否已为该事件派发 QA（agent_type == "qa"）
-    issue_qa_skill: Issue 所在场景 QA 节点的 skill（仅 skip_issue_scene=True 时使用）
+    bound_issue: PR 是否绑定了关联 Issue
+    issue_qa_skill: Issue 所在场景 QA 节点的 skill（仅 bound_issue=True 时使用）
     """
-    # 1. 仅当主路由已派发 QA 时排除 Issue 所在场景
-    if skip_issue_scene and issue_scene_id:
+    # 1. PR 绑定了 Issue 时排除 Issue 所在场景
+    if bound_issue and issue_scene_id:
         matches = [m for m in matches if m[0] != issue_scene_id]
-    # 2. 主路由已派发 QA 时排除同 qa_skill 场景（主路由 QA 覆盖同 skill 审查）
-    if skip_issue_scene and issue_qa_skill:
+    # 2. PR 绑定了 Issue 时排除同 qa_skill 场景
+    if bound_issue and issue_qa_skill:
         matches = [m for m in matches if m[1] != issue_qa_skill]
     # 3. 相同 qa_skill 只保留第一个
     seen_skills = set()
@@ -1328,20 +1328,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _issue_scene_id_early, _ = get_issue_scene(repo_key, _pre_issue_id)
                 except Exception:
                     pass
-            # Issue #426：PR 关联 Issue 时订阅场景不再整体排除——仅当主路由（stage matrix）
-            # 会为该事件派发 QA 时跳过同场景（避免同场景重复 QA），其余场景并行共存
-            _stage_qa_early = False
+            # Issue #426：PR 绑定 Issue 即过滤同场景/同 skill 订阅场景（绑 Issue = 问题已被
+            # 他人解决，无需再被订阅唤醒），其余场景并行共存
             _issue_qa_skill_early = ""
             if _issue_scene_id_early:
-                try:
-                    _stage_qa_early = (_resolve_issue_stage_agent(
-                        repo_key, event_type, evt.get("payload", {}) or {}, PR_DEFAULT_AGENT) == "qa")
-                except Exception:
-                    _stage_qa_early = False
-            # 主路由派 QA 时取 Issue 场景的 qa_skill（skill 级去重用）
-            if _stage_qa_early and _issue_scene_id_early:
                 _issue_qa_skill_early = _scene_qa_skill(repo_key, _issue_scene_id_early, _pr_sub_matches_early)
-            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, _stage_qa_early, _issue_qa_skill_early)
+            _pr_sub_before_filter_early = _pr_sub_matches_early
+            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, bool(_issue_scene_id_early), _issue_qa_skill_early)
+            if not _pr_sub_matches_early and _pr_sub_before_filter_early:
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "pr_sub_filtered_bound_issue",
+                                     issue_id=_pre_issue_id)
             if _pr_sub_matches_early:
                 if _is_bot_actor:
                     _early_dispatched = set()
@@ -1750,10 +1747,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _issue_scene_id, _ = get_issue_scene(repo_key, _pre_issue_id)
                 except Exception:
                     pass
+            # Issue #426：PR 绑定 Issue 即过滤同场景/同 skill 订阅场景
+            _pr_sub_matches_before_filter = _pr_sub_matches
             _pr_sub_matches = _filter_pr_sub_matches(
-                _pr_sub_matches, _issue_scene_id, agent_type == "qa",
+                _pr_sub_matches, _issue_scene_id, bool(_issue_scene_id),
                 (_scene_qa_skill(repo_key, _issue_scene_id, _pr_sub_matches)
-                 if agent_type == "qa" and _issue_scene_id else ""))
+                 if _issue_scene_id else ""))
+            if not _pr_sub_matches and _pr_sub_matches_before_filter:
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "pr_sub_filtered_bound_issue",
+                                     issue_id=_pre_issue_id)
             # Issue #318 兜底去重：排除 1.5 预匹配已派发的场景（防御 bot actor 未被自循环拦截的边缘情况）
             _early_dispatched = evt.get("_pr_sub_early_dispatched")
             if _early_dispatched:
