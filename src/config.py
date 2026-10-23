@@ -232,11 +232,8 @@ def _load_accounts():
             _auto_detect = os.environ.get("GRAPE_AUTO_DETECT_URL", "true").lower().strip()
             if _auto_detect in ("0", "false", "no", "off"):
                 log.info("_detect_server_base: skipped (GRAPE_AUTO_DETECT_URL=false)")
-                try:
-                    from src.user.db import set_meta_value
-                    set_meta_value("webhook_url_detect_failed", "1")
-                except Exception:
-                    pass
+                # 审查修复: 跳过探测不等于探测失败，不写 webhook_url_detect_failed 标记
+                # 用户仍可通过 Host header 中间件自动检测 webhook_url
                 return ""
             # Issue #372 §15.4: 端口从 GRAPE_PORT 环境变量读取，默认 3000（非 8080）
             _port = os.environ.get("GRAPE_PORT", "3000")

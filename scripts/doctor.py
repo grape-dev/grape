@@ -14,8 +14,7 @@
  10. 公网 IP 探测开关状态
 
 用法：
-  python scripts/doctor.py          # 全量检查
-  python scripts/doctor.py --fix    # 检查并给出修复建议
+  python scripts/doctor.py          # 全量检查（检查结果含修复建议）
 
 退出码：
   0 = 全部通过
@@ -28,7 +27,6 @@ import json
 import socket
 import platform
 import shutil
-import subprocess
 
 # 确保项目根目录在 sys.path
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))

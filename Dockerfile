@@ -15,7 +15,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # 默认 .env（Issue #452: SQLite + OBS 关闭，生产环境通过环境变量覆盖）
-COPY .env.example .env.example
+# 审查修复: COPY .env.example .env，确保容器内始终有 /app/.env，不再依赖宿主 bind mount
+COPY .env.example .env
 
 # 时区
 ENV TZ=Asia/Shanghai
