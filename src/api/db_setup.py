@@ -2413,6 +2413,13 @@ def _seed_admin_accounts():
                 db.commit()
                 _src = "GRAPE_ADMIN_PASSWORD env" if os.environ.get("GRAPE_ADMIN_PASSWORD") else "default admin123"
                 log.info(f"Seeded default admin account: admin (password from {_src})")
+                # Issue #452: 默认口令安全告警——使用默认密码时打 WARNING 提示改密
+                if _default_pwd == "admin123":
+                    log.warning(
+                        "⚠️  SECURITY: Admin account using default password 'admin123'. "
+                        "Set GRAPE_ADMIN_PASSWORD env var or change password after first login. "
+                        "(meta admin_pwd_initial=1, frontend will prompt change on next login)"
+                    )
         set_meta_value("admin_initialized", "1")
         if not get_meta_value("admin_pwd_initial"):
             set_meta_value("admin_pwd_initial", "1" if _default_pwd == "admin123" else "0")

@@ -4,7 +4,7 @@ import uvicorn, multiprocessing, signal, sys, os
 # 加载 .env 文件（OBS 等环境变量）
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
 if os.path.isfile(_env_path):
-    with open(_env_path, "r") as _f:
+    with open(_env_path, "r", encoding="utf-8") as _f:
         for _line in _f:
             _line = _line.strip()
             if _line and not _line.startswith("#") and "=" in _line:

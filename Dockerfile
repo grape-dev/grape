@@ -1,4 +1,4 @@
-FROM python:3.14-slim
+FROM python:3.12-slim
 
 WORKDIR /app
 
@@ -7,16 +7,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ && \
     rm -rf /var/lib/apt/lists/*
 
-# Python 依赖
+# Python 依赖（Issue #452: 使用完整 requirements.txt，生产部署需全部功能）
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 代码
 COPY . .
 
+# 默认 .env（Issue #452: SQLite + OBS 关闭，生产环境通过环境变量覆盖）
+COPY .env.example .env.example
+
 # 时区
 ENV TZ=Asia/Shanghai
 RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# Issue #452: 内网/Docker 环境关闭公网 IP 探测
+ENV GRAPE_AUTO_DETECT_URL=false
 
 EXPOSE 3000
 

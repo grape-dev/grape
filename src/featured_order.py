@@ -29,7 +29,7 @@ def _admin_db_config() -> dict:
     _cfg_password = ""
     try:
         _cfg_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "configs", "db-backend.json")
-        with open(_cfg_path) as f:
+        with open(_cfg_path, encoding="utf-8") as f:
             _db_cfg = _json.load(f)
             _mysql = _db_cfg.get("mysql", {})
             _cfg_host = _mysql.get("host", _cfg_host)

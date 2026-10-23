@@ -725,14 +725,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _cfg_path = os.path.join(_iso_home, "config.yaml")
             if os.path.isfile(_cfg_path):
                 try:
-                    with open(_cfg_path, "r") as _f:
+                    with open(_cfg_path, "r", encoding="utf-8") as _f:
                         _cfg_text = _f.read()
                     import re as _re
                     _cfg_text = _re.sub(
                         r'(tool_progress:\s*)\w+',
                         r'\g<1>new',
                         _cfg_text)
-                    with open(_cfg_path, "w") as _f:
+                    with open(_cfg_path, "w", encoding="utf-8") as _f:
                         _f.write(_cfg_text)
                 except Exception:
                     pass
@@ -741,7 +741,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             # .pth 文件由 site 模块在 sys.path 初始化后处理，hermes_state 此时已可 import。
             _inject_dir = os.path.join(_iso_home, "py_inject")
             os.makedirs(_inject_dir, exist_ok=True)
-            with open(os.path.join(_inject_dir, "_grape_memory_db.pth"), "w") as _f:
+            with open(os.path.join(_inject_dir, "_grape_memory_db.pth"), "w", encoding="utf-8") as _f:
                 _f.write("import hermes_state, pathlib; hermes_state.DEFAULT_DB_PATH = pathlib.Path(':memory:')\n")
             _proc_env = dict(env)
             _proc_env["HERMES_HOME"] = _iso_home
