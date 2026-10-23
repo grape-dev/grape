@@ -8,7 +8,7 @@
 |---|---|---|---|
 | `task_success_rate` | 成功任务数 / 任务总数 | `obs_metric_rollup`（done/failed/cancelled） | 小时桶 |
 | `task_queue_wait_p95` | 排队时延 P95 ≤ `max_p95_sec` 的时间占比 | `obs_metric_rollup`（`task_queue_wait_p95`） | 小时桶 |
-| `engine_availability` | 在线采样数 / 总采样数 | `obs_runtime_samples.online` | 小时桶 |
+| `engine_availability` | 在线采样数 / 总采样数 | `obs_metric_rollup`（`engine_avail_online/total`，由采样表按小时桶预聚合；Issue #437 前直扫 `obs_runtime_samples`） | 小时桶 |
 
 **为什么桶粒度是小时而不是设计稿里的"分钟桶"**：分钟明细只保留 7 天（`obs_metric_rollup` 分钟
 分辨率留 7 天），而窗口默认 30 天 —— 30 天窗口只有小时底座可用。方法本身（**桶比例法**）不变：
@@ -29,6 +29,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -67,6 +68,34 @@ MAX_WINDOW_DAYS = 30
 MAX_BURN_POINTS = 240
 
 _RES_HOUR = "hour"
+
+#: SLO 评估周期（Issue #437）：指标 60s 才采样一次，30s 一轮全窗现算太密。
+#: meta 表热更新优先，其次环境变量，默认 300s，下限 60s（允许测试/紧急调快）。
+EVAL_INTERVAL_META_KEY = "slo_eval_interval_sec"
+EVAL_INTERVAL_ENV = "SLO_EVAL_INTERVAL_SEC"
+DEFAULT_EVAL_INTERVAL_SEC = 300
+MIN_EVAL_INTERVAL_SEC = 60
+
+
+def eval_interval_sec() -> int:
+    """SLO 评估周期（秒）：meta 表 `slo_eval_interval_sec` > 环境变量 > 默认 300s。
+
+    meta 表支持运行中热更新（管理台改完下一轮生效），环境变量是部署级兜底；
+    非法值回落默认，最终钳到 `MIN_EVAL_INTERVAL_SEC` 下限。
+    """
+    raw = ""
+    try:
+        from src.user.db import get_meta_value
+        raw = str(get_meta_value(EVAL_INTERVAL_META_KEY) or "").strip()
+    except Exception:
+        raw = ""
+    if not raw:
+        raw = str(os.environ.get(EVAL_INTERVAL_ENV) or "").strip()
+    try:
+        v = int(float(raw))
+    except (TypeError, ValueError):
+        return DEFAULT_EVAL_INTERVAL_SEC
+    return max(MIN_EVAL_INTERVAL_SEC, v)
 
 
 def _now() -> datetime:
@@ -287,18 +316,10 @@ def _latency_buckets(dim_keys: List[str], start: datetime, end: datetime, max_p9
     return rows, round(vals[k], 3)
 
 
-def _availability_buckets(start: datetime, end: datetime,
-                          not_before: Optional[datetime] = None
-                          ) -> List[Tuple[str, float, float]]:
-    """引擎可用率：(桶, 在线采样数, 总采样数)。数据源 `obs_runtime_samples.online`。
-
-    `not_before`：`online` 列上线前的历史行是"未知"（建列默认 0），把它们当"离线"会把可用率
-    长期按 0 算（真机实测：加列当天 L2 可用率 = 0% → 误报违约）。因此可用率**只从该 SLO 的
-    `created_at` 起算**（SLO 建起来 = 这列已在生产里数数了）；更早的桶直接不进窗口。
-    """
+def _availability_raw_buckets(start: datetime, end: datetime
+                              ) -> List[Tuple[str, float, float]]:
+    """原始扫描 `obs_runtime_samples.online`（有界 [start, end)）。"""
     from src.session_manager import db, db_lock
-    if not_before and not_before > start:
-        start = not_before
     if start >= end:
         return []
     s_iso, e_iso = _iso(start), _iso(end)
@@ -318,6 +339,92 @@ def _availability_buckets(start: datetime, end: datetime,
     for h, good, total in rows:
         b = f"{h}:00:00+00:00"
         out.append((b, float(good or 0), float(total or 0)))
+    return out
+
+
+def _availability_buckets(start: datetime, end: datetime,
+                          not_before: Optional[datetime] = None
+                          ) -> List[Tuple[str, float, float]]:
+    """引擎可用率：(桶, 在线采样数, 总采样数)。**读小时桶 rollup，不再全窗扫原始表**（Issue #437）。
+
+    数据源分段（Issue #437）：
+    - 完整闭合小时桶 → `obs_metric_rollup` 的 `engine_avail_online/total` 预聚合
+      （由 60s 聚合循环追赶式回填 30 天）；
+    - **部分回填期**：窗口内已有部分 `engine_avail_*` 桶时，缺失的闭合小时**不静默丢弃**
+      （窗口截断 → budget_total 骤减 → 可能瞬时误报 breached），逐段回退有界原始扫描；
+    - 窗口起点落在小时中段 → 头部不完整小时（bucket_start < start，rollup 序列不含）
+      有界现算该小段，口径与旧原始扫描一致；
+    - 头部小段 / 缺失回填段与 rollup 行**合并后统一按桶时间排序**返回（`burn_series`
+      按序累计，坏桶消耗必须出现在曲线的正确位置）；
+    - 当前未闭合桶 → 原始表现算，**有界仅本小时**；
+    - rollup 一行 availability 都没有（升级初期）→ 回退旧的全窗原始扫描 + 日志，
+      口径与改动前完全一致，回填完成后自动走预聚合路径（两级回退：部分回填逐段回退 +
+      完全无数据全窗回退）。
+
+    `not_before`：`online` 列上线前的历史行是"未知"（建列默认 0），把它们当"离线"会把可用率
+    长期按 0 算（真机实测：加列当天 L2 可用率 = 0% → 误报违约）。因此可用率**只从该 SLO 的
+    `created_at` 起算**（SLO 建起来 = 这列已在生产里数数了）；更早的桶直接不进窗口。
+    """
+    if not_before and not_before > start:
+        start = not_before
+    if start >= end:
+        return []
+    cur_hour = end.replace(minute=0, second=0, microsecond=0)
+    closed_end = min(end, cur_hour)
+    out: List[Tuple[str, float, float]] = []
+    if closed_end > start:
+        # rollup 小时桶只对应"完整闭合小时"（bucket_start >= h1）；窗口头部不完整小时单独现算
+        h1 = start.replace(minute=0, second=0, microsecond=0)
+        if h1 < start:
+            h1 += timedelta(hours=1)
+        rollup_rows: List[Tuple[str, float, float]] = []
+        if closed_end > h1:
+            try:
+                from src.observability import metric_rollup
+                data = metric_rollup.series(["engine_avail_online", "engine_avail_total"],
+                                            ["global"], h1, closed_end, _RES_HOUR)
+                on = {str(p.get("bucket") or ""): float(p.get("value") or 0)
+                      for p in (data.get("engine_avail_online") or [])}
+                tot = {str(p.get("bucket") or ""): float(p.get("value") or 0)
+                       for p in (data.get("engine_avail_total") or [])}
+                for b in sorted(set(on) | set(tot)):
+                    t = tot.get(b, 0.0)
+                    if t > 0:
+                        rollup_rows.append((b, on.get(b, 0.0), t))
+            except Exception as e:
+                log.warning(f"slo availability rollup read failed: {e}")
+        if rollup_rows:
+            out.extend(rollup_rows)
+            # 窗口头部不完整小时（bucket_start < start，rollup 序列不含）：有界现算这一小段
+            if h1 > start:
+                out.extend(_availability_raw_buckets(start, h1))
+            # 部分回填期（审查修复）：缺失的闭合小时回退有界原始扫描，连续缺失段合并为一次查询
+            covered = {b for b, _, _ in rollup_rows}
+            missing: List[datetime] = []
+            h = h1
+            while h < closed_end:
+                if _iso(h) not in covered:
+                    missing.append(h)
+                h += timedelta(hours=1)
+            if missing:
+                seg_start = missing[0]
+                for prev, cur in zip(missing, missing[1:] + [None]):
+                    if cur is None or cur != prev + timedelta(hours=1):
+                        out.extend(_availability_raw_buckets(seg_start,
+                                                             prev + timedelta(hours=1)))
+                        seg_start = cur
+                log.warning(f"slo availability: {len(missing)} closed hour(s) missing from"
+                            f" rollup (partial backfill), raw-scan backfill applied")
+            # 头部小段/回填段追加在 rollup 行之后会破坏时间有序（burn_series 按序累计）
+            # → 合并后统一按桶时间排序（审查修复）
+            out.sort(key=lambda r: r[0])
+        else:
+            log.warning("slo availability: no engine_avail_* rollup rows yet, "
+                        "fallback to raw full-window scan (upgrade/backfill window)")
+            out.extend(_availability_raw_buckets(start, closed_end))
+    # 当前未闭合桶：有界现算（仅本小时，分钟级数据量）
+    if end > cur_hour:
+        out.extend(_availability_raw_buckets(max(start, cur_hour), end))
     return out
 
 
@@ -622,12 +729,21 @@ def _sync_violation(slo: Dict[str, Any], summary: Dict[str, Any], now: datetime)
     return result
 
 
+#: 上次快照清理所在的小时桶（Issue #437：cleanup 从"每轮评估"降为"小时桶变更时"）
+_last_cleanup_hour: str = ""
+
+
 def evaluate_all(now: Optional[datetime] = None) -> Dict[str, int]:
-    """周期评估（循环调用）：算每条 SLO → 落小时快照 → 同步违约事件 → 顺手清老快照。
+    """周期评估（循环调用）：算每条 SLO → 落小时快照 → 同步违约事件 → 清老快照（按小时降频）。
 
     平台视角（`['global']`；repo 范围的 SLO 用自身仓库维度）——快照与违约事件都是"平台事实"，
     用户面看的是同一份事实在**自己可见范围**上的投影（`list_summaries`）。
+
+    Issue #437：桶数据全部来自小时桶 rollup 预聚合（可用率走 `engine_avail_*`，见
+    `_availability_buckets`），本函数不再触发对原始采样表的全窗口扫描；评估周期由
+    `eval_interval_sec()` 控制（默认 300s，meta/环境变量可配），不再挂 30s 告警循环。
     """
+    global _last_cleanup_hour
     now = now or _now()
     bucket = now.replace(minute=0, second=0, microsecond=0)
     stats = {"evaluated": 0, "snapshots": 0, "firing": 0, "resolved": 0, "cleaned": 0}
@@ -642,7 +758,10 @@ def evaluate_all(now: Optional[datetime] = None) -> Dict[str, int]:
         r = _sync_violation(slo, summary, now)
         if r in ("firing", "resolved"):
             stats[r] += 1
-    stats["cleaned"] = cleanup_snapshots(now=now)
+    hour_key = _iso(bucket)
+    if hour_key != _last_cleanup_hour:
+        stats["cleaned"] = cleanup_snapshots(now=now)
+        _last_cleanup_hour = hour_key
     return stats
 
 

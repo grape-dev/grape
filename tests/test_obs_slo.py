@@ -27,10 +27,11 @@ def _clean():
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_metric_rollup WHERE dim_key LIKE 'repo:org/slo-%'",
-                    "DELETE FROM obs_metric_rollup WHERE dim_key='global' AND metric LIKE 'task_%'",
-                    "DELETE FROM obs_runtime_samples WHERE runtime_id BETWEEN 9901 AND 9910",
-                    "DELETE FROM obs_slo_snapshots",
-                    "DELETE FROM obs_slo WHERE name LIKE '__t_%'"):
+                "DELETE FROM obs_metric_rollup WHERE dim_key='global' AND metric LIKE 'task_%'",
+                "DELETE FROM obs_metric_rollup WHERE metric LIKE 'engine_avail_%'",
+                "DELETE FROM obs_runtime_samples WHERE runtime_id BETWEEN 9901 AND 9910",
+                "DELETE FROM obs_slo_snapshots",
+                "DELETE FROM obs_slo WHERE name LIKE '__t_%'"):
             try:
                 c.execute(sql)
             except Exception:
@@ -172,6 +173,118 @@ def test_engine_availability_is_l2_only_and_uses_online_column():
     assert l2["buckets"] == 4, l2
     assert abs(l2["value"] - (210 / 240)) < 1e-3, l2
     assert l2["state"] == S.STATE_BREACHED, l2
+
+
+def test_engine_availability_reads_hour_rollup():
+    """Issue #437：可用率改读小时桶 rollup（engine_avail_online/total），不再全窗扫原始采样。"""
+    slo = _slo(S.SLI_AVAIL)
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE obs_slo SET created_at=? WHERE id=?",
+                  (S._iso(NOW - timedelta(days=7)), slo["id"]))
+        db.commit()
+    slo = S.get_slo(slo["id"]) or slo
+    # 4 个已闭合小时桶写 rollup 预聚合：3 小时 60/60、1 小时 30/60（不碰原始采样表）
+    for h in range(1, 5):
+        online, total = (30, 60) if h == 1 else (60, 60)
+        MR.write_bucket("hour", _hour(h),
+                        {"global": {"engine_avail_online": (float(online), total),
+                                    "engine_avail_total": (float(total), total)}})
+    l2 = S.compute(slo, ["global"], now=NOW, allow_engine=True)
+    assert l2["buckets"] == 4, l2
+    assert abs(l2["value"] - (210 / 240)) < 1e-3, l2
+    assert l2["state"] == S.STATE_BREACHED, l2
+
+
+def test_availability_partial_backfill_fills_missing_hours():
+    """审查修复（Issue #437）：rollup 部分回填期，缺失闭合小时/头部不完整小时不静默丢弃。
+
+    场景：窗口 [start, end) 跨 3+ 小时，rollup 只回了 1 个闭合小时桶；缺失的闭合小时
+    和窗口头部不完整小时都有原始采样 → 逐段回退原始扫描后三类桶齐全。
+    """
+    from src.session_manager import db, db_lock
+    start = _hour(3) + timedelta(minutes=37)       # 窗口起点落在小时中段
+    end = start + timedelta(hours=3)               # 末端同样落在小时中段（含未闭合当前小时）
+    # rollup 只覆盖闭合小时 _hour(2)（回填进行中）：60/60
+    MR.write_bucket("hour", _hour(2),
+                    {"global": {"engine_avail_online": (60.0, 60),
+                                "engine_avail_total": (60.0, 60)}})
+    with db_lock:
+        c = db.cursor()
+        # 头部不完整小时 [start, _hour(2))：10 条采样、5 在线
+        for k in range(10):
+            c.execute("INSERT INTO obs_runtime_samples (runtime_id, device_name, sampled_at,"
+                      " online) VALUES (9901, 'slo-dev', ?, ?)",
+                      ((start + timedelta(seconds=k * 60)).isoformat(), 1 if k < 5 else 0))
+        # 缺失闭合小时 _hour(1)：60 条采样、30 在线
+        for k in range(60):
+            c.execute("INSERT INTO obs_runtime_samples (runtime_id, device_name, sampled_at,"
+                      " online) VALUES (9901, 'slo-dev', ?, ?)",
+                      ((_hour(1) + timedelta(seconds=k * 60)).isoformat(), 1 if k < 30 else 0))
+        db.commit()
+    buckets = S._availability_buckets(start, end)
+    got = {b: (g, t) for b, g, t in buckets}
+    assert got[S._iso(_hour(3))] == (5.0, 10.0), got      # 头部不完整小时（原始现算）
+    assert got[S._iso(_hour(2))] == (60.0, 60.0), got     # rollup 已回填的小时桶
+    assert got[S._iso(_hour(1))] == (30.0, 60.0), got     # 缺失闭合小时（有界回退原始扫描）
+    assert len(buckets) == 3, buckets
+    # 有序性（审查修复）：窗口起点在小时中段 + 部分回填时，头部小段/回填段与 rollup 行
+    # 合并后必须按桶时间升序返回——burn_series 按序累计，坏桶消耗要落在曲线正确位置
+    keys = [b for b, _, _ in buckets]
+    assert keys == sorted(keys), buckets
+    assert keys == [S._iso(_hour(3)), S._iso(_hour(2)), S._iso(_hour(1))], buckets
+
+
+def test_engine_availability_partial_backfill_keeps_full_window():
+    """审查修复（Issue #437，compute 级）：部分回填期窗口不截断、budget_total 不骤减。
+
+    rollup 只覆盖 1/4 个小时桶时，另外 3 小时从原始采样回填 → buckets=4（而非 1），
+    值与全量口径一致（210/240），错误预算按完整窗口计算。
+    """
+    slo = _slo(S.SLI_AVAIL)
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE obs_slo SET created_at=? WHERE id=?",
+                  (S._iso(NOW - timedelta(days=7)), slo["id"]))
+        # 原始采样：3 个小时（30/60 + 60/60 + 60/60）
+        for h in (4, 3, 1):
+            online = 30 if h == 3 else 60
+            for k in range(60):
+                c.execute("INSERT INTO obs_runtime_samples (runtime_id, device_name, sampled_at,"
+                          " online) VALUES (9901, 'slo-dev', ?, ?)",
+                          ((_hour(h) + timedelta(seconds=k * 60)).isoformat(),
+                           1 if k < online else 0))
+        db.commit()
+    slo = S.get_slo(slo["id"]) or slo
+    # rollup 只回了 4 个小时里的 1 个（h=2，60/60）——回填进行中
+    MR.write_bucket("hour", _hour(2),
+                    {"global": {"engine_avail_online": (60.0, 60),
+                                "engine_avail_total": (60.0, 60)}})
+    l2 = S.compute(slo, ["global"], now=NOW, allow_engine=True)
+    assert l2["buckets"] == 4, l2          # 不是 1：缺失小时已回填，窗口未截断
+    assert abs(l2["value"] - (210 / 240)) < 1e-3, l2
+    assert l2["bad_buckets"] == 1 and l2["state"] == S.STATE_BREACHED, l2
+
+
+def test_eval_interval_sec_sources(monkeypatch):
+    """Issue #437：评估周期 meta 表（热更新）> 环境变量 > 默认 300s，下限 60s。"""
+    from src.user.db import set_meta_value
+    monkeypatch.delenv(S.EVAL_INTERVAL_ENV, raising=False)
+    assert S.eval_interval_sec() == S.DEFAULT_EVAL_INTERVAL_SEC == 300
+    monkeypatch.setenv(S.EVAL_INTERVAL_ENV, "600")
+    assert S.eval_interval_sec() == 600
+    monkeypatch.setenv(S.EVAL_INTERVAL_ENV, "not-a-number")
+    assert S.eval_interval_sec() == 300
+    monkeypatch.setenv(S.EVAL_INTERVAL_ENV, "10")
+    assert S.eval_interval_sec() == S.MIN_EVAL_INTERVAL_SEC == 60
+    # meta 表优先于环境变量（管理台热更新）
+    set_meta_value(S.EVAL_INTERVAL_META_KEY, "1200")
+    try:
+        assert S.eval_interval_sec() == 1200
+    finally:
+        set_meta_value(S.EVAL_INTERVAL_META_KEY, "")
 
 
 def test_empty_scope_never_degrades_to_global():
