@@ -172,6 +172,17 @@ function _stopScenePoll() {
 
 let _deployUrl = '';
 let _deployEditing = false;
+let _deployLongPressTimer = null;
+
+function _escapeHtml(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _isValidDeployUrl(url) {
+  if (!url) return true;
+  return url.startsWith('http://') || url.startsWith('https://');
+}
 
 function _loadDeployLink() {
   const repo = app.currentRepo();
@@ -189,20 +200,33 @@ function _renderDeployLink() {
   if (!bar) return;
   if (_deployEditing) {
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <input id="deployUrlInput" value="${_deployUrl}" placeholder="输入部署访问 URL（如 http://1.2.3.4:5000）" style="flex:1;max-width:400px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;font-size:12px;background:#fff">
+      <input id="deployUrlInput" value="${_escapeHtml(_deployUrl)}" placeholder="输入部署访问 URL（如 http://1.2.3.4:5000）" style="flex:1;max-width:400px;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;font-size:12px;background:#fff">
       <button class="tsk-btn tsk-btn-primary" style="padding:4px 10px;font-size:12px;border-radius:8px" onclick="_saveDeployUrl()">保存</button>
       <button class="tsk-btn tsk-btn-ghost" style="padding:4px 10px;font-size:12px;border-radius:8px" onclick="_deployEditing=false;_renderDeployLink()">取消</button>
     </div>`;
   } else if (_deployUrl) {
+    const safeUrl = _escapeHtml(_deployUrl);
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <a href="${_deployUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="${_deployUrl}" oncontextmenu="event.preventDefault();_deployEditing=true;_renderDeployLink();return false">🌐</a>
+      <a href="${safeUrl}" target="_blank" rel="noopener" style="font-size:12px;color:#34c759;text-decoration:none" title="${safeUrl}" oncontextmenu="event.preventDefault();_deployEditing=true;_renderDeployLink();return false" onmousedown="_deployLongPressStart()" onmouseup="_deployLongPressEnd()" onmouseleave="_deployLongPressEnd()" ontouchstart="_deployLongPressStart()" ontouchend="_deployLongPressEnd()" ontouchmove="_deployLongPressEnd()">🌐</a>
     </div>`;
   } else {
     bar.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
-      <span onclick="_deployEditing=true;_renderDeployLink()" oncontextmenu="event.preventDefault();_deployEditing=true;_renderDeployLink();return false" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.7" title="登记部署访问 URL（右击编辑）" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">🌐</span>
+      <span onclick="_deployEditing=true;_renderDeployLink()" oncontextmenu="event.preventDefault();_deployEditing=true;_renderDeployLink();return false" style="cursor:pointer;font-size:12px;color:#86868b;opacity:.7" title="登记部署访问 URL（点击或右击编辑）" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">🌐</span>
     </div>`;
   }
 }
+
+window._deployLongPressStart = function() {
+  if (_deployLongPressTimer) clearTimeout(_deployLongPressTimer);
+  _deployLongPressTimer = setTimeout(function() {
+    _deployEditing = true;
+    _renderDeployLink();
+  }, 600);
+};
+
+window._deployLongPressEnd = function() {
+  if (_deployLongPressTimer) { clearTimeout(_deployLongPressTimer); _deployLongPressTimer = null; }
+};
 
 window._saveDeployUrl = function() {
   const input = document.getElementById('deployUrlInput');
@@ -210,6 +234,10 @@ window._saveDeployUrl = function() {
   const repo = app.currentRepo();
   if (!repo) return;
   const url = input.value.trim();
+  if (url && !_isValidDeployUrl(url)) {
+    app.showToast(I18N.t('issues.save_failed', {msg: 'URL 必须以 http:// 或 https:// 开头'}));
+    return;
+  }
   API.put('/repos/deploy-url', {full_name: repo.fullName, deploy_url: url}).then(() => {
     _deployUrl = url;
     _deployEditing = false;
