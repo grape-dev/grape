@@ -5,9 +5,11 @@
 - 连续失败次数（consecutive_failures）
 - 健康分（0-100，越高越健康）
 
-健康分 = round(100 * (1 - failure_rate)) - consecutive_failure_penalty
+健康分 = round(100 * (1 - failure_rate * 0.5)) - consecutive_failure_penalty
   - failure_rate = failed / total（total=0 且心跳正常时返回满分 100）
-  - consecutive_failure_penalty = min(consecutive_failures * 5, 20)
+    （失败率权重 0.5：给引擎试错空间）
+  - consecutive_failure_penalty = consecutive_failures * 15（每次扣 15，不设上限，
+    小于 0 时整体 clamp 为 0；连挂 3 次即到 30 分临界、5 次归 0）
   - 最终 clamp 到 [0, 100]
 
 Issue #135 心跳因素（优先于失败率计算）：
@@ -163,19 +165,34 @@ def _to_sql_utc(ts) -> str:
 
 # ===== 核心计算 =====
 
+def _consecutive_failure_penalty(consecutive_failures: int) -> int:
+    """连续失败惩罚（2026-10-23 试错友好口径）：每次 -15，不设上限（由整体 clamp 到 0 兜底）。
+
+    配合失败率权重 0.5（基础分最高 75）：连挂 3 次即到 30 分临界，
+    连挂 5 次归 0；失败率越低的引擎基础分越高，能扛更多次连续失败。
+    """
+    n = consecutive_failures
+    if n <= 0:
+        return 0
+    return n * 15
+
+
 def _compute_health_score(total: int, failed: int, consecutive_failures: int) -> int:
     """根据任务统计计算健康分（0-100）。
 
     - total=0 → 100（无历史数据，默认健康）
     - failure_rate = failed / total
-    - 健康分 = round(100 * (1 - failure_rate)) - min(consecutive_failures * 5, 20)
+    - 健康分 = round(100 * (1 - failure_rate * 0.5)) - consecutive_failures * 15
+      （失败率权重 0.5：给引擎试错空间——挂掉一半任务仍有 50 基础分；
+       连续失败惩罚每次 -15、不设上限：连挂 3 次即到 30 分临界、
+       5 次归 0；总分小于 0 时 clamp 为 0）
     - clamp [0, 100]
     """
     if total <= 0:
         return 100
     failure_rate = failed / total if total > 0 else 0.0
-    base_score = round(100 * (1 - failure_rate))
-    penalty = min(consecutive_failures * 5, 20)
+    base_score = round(100 * (1 - failure_rate * 0.5))
+    penalty = _consecutive_failure_penalty(consecutive_failures)
     score = base_score - penalty
     return max(0, min(100, score))
 

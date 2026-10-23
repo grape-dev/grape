@@ -39,18 +39,22 @@ class TestHealthScoreComputation:
         assert score == 0  # 0% 成功率 + 连续失败惩罚 → 0
 
     def test_half_failure(self):
-        """50% 失败率 → 约 50 分（减去连续失败惩罚）。"""
+        """50% 失败率 → 75 分（失败率权重 0.5，给引擎试错空间）。"""
         score = health_scorer._compute_health_score(10, 5, 0)
-        assert score == 50  # 100*(1-0.5) - 0 = 50
+        assert score == 75  # 100*(1-0.5*0.5) - 0 = 75
 
     def test_consecutive_failure_penalty(self):
-        """连续失败惩罚：每次 -5，上限 20。"""
-        # 1 次失败：50 - 5 = 45
-        assert health_scorer._compute_health_score(10, 5, 1) == 45
-        # 4 次连续失败：50 - 20 = 30
-        assert health_scorer._compute_health_score(10, 5, 4) == 30
-        # 5 次连续失败：50 - 20 = 30（上限 20）
-        assert health_scorer._compute_health_score(10, 5, 5) == 30
+        """连续失败惩罚：每次 -15，不设上限，总分 clamp 到 0。"""
+        # 1 次失败：75 - 15 = 60
+        assert health_scorer._compute_health_score(10, 5, 1) == 60
+        # 2 次连续失败：75 - 30 = 45
+        assert health_scorer._compute_health_score(10, 5, 2) == 45
+        # 3 次连续失败：75 - 45 = 30（健康阈值临界）
+        assert health_scorer._compute_health_score(10, 5, 3) == 30
+        # 5 次连续失败：75 - 75 = 0
+        assert health_scorer._compute_health_score(10, 5, 5) == 0
+        # 10 次连续失败：75 - 150 = -75 → clamp 为 0
+        assert health_scorer._compute_health_score(10, 5, 10) == 0
 
     def test_score_clamped_to_0_100(self):
         """健康分 clamp 到 [0, 100]。"""
@@ -60,7 +64,7 @@ class TestHealthScoreComputation:
     def test_low_failure_rate_high_score(self):
         """低失败率 → 高分。"""
         score = health_scorer._compute_health_score(100, 5, 0)
-        assert score == 95  # 100*(1-0.05) = 95
+        assert score == 97.5 or score == 98  # 100*(1-0.05*0.5) = 97.5 → round → 98
 
 
 # ===== 过滤逻辑测试 =====
@@ -409,7 +413,7 @@ class TestHeartbeatCheck:
              patch.object(health_scorer, '_fetch_heartbeat', return_value=True), \
              patch.object(health_scorer, '_persist_score'):
             data = health_scorer._compute_and_persist(910004)
-        assert data["health_score"] == 45  # 100*(1-0.5) - 5 = 45
+        assert data["health_score"] == 60  # 100*(1-0.5*0.5) - 1*15 = 60
         assert data["heartbeat_alive"] is True
 
     def test_heartbeat_timeout_overrides_good_stats(self):
