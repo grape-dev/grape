@@ -228,8 +228,20 @@ def _load_accounts():
     """
     try:
         def _detect_server_base():
+            # Issue #452: GRAPE_AUTO_DETECT_URL=false 时跳过公网 IP 探测，避免内网/受限网络启动拖慢约 40s
+            _auto_detect = os.environ.get("GRAPE_AUTO_DETECT_URL", "true").lower().strip()
+            if _auto_detect in ("0", "false", "no", "off"):
+                log.info("_detect_server_base: skipped (GRAPE_AUTO_DETECT_URL=false)")
+                try:
+                    from src.user.db import set_meta_value
+                    set_meta_value("webhook_url_detect_failed", "1")
+                except Exception:
+                    pass
+                return ""
             # Issue #372 §15.4: 端口从 GRAPE_PORT 环境变量读取，默认 3000（非 8080）
             _port = os.environ.get("GRAPE_PORT", "3000")
+            # Issue #452: 公网探测超时从 3s 降至 2s，减少内网等待
+            _probe_timeout = float(os.environ.get("GRAPE_DETECT_TIMEOUT", "2"))
             methods = [
                 "https://api.ipify.org?format=json",
                 "http://api.ipify.org?format=json",
@@ -237,7 +249,7 @@ def _load_accounts():
             ]
             for url in methods:
                 try:
-                    resp = urllib.request.urlopen(url, timeout=3)
+                    resp = urllib.request.urlopen(url, timeout=_probe_timeout)
                     data = json.loads(resp.read())
                     ip = data.get("ip", "")
                     if ip:

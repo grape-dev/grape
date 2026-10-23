@@ -1,0 +1,32 @@
+# requirements-local.txt —— 本地开发最小依赖（不含 OBS/MySQL/飞书）
+#
+# 安装方式：
+#   python -m venv .venv
+#   # Linux/macOS:
+#   .venv/bin/pip install -r requirements-local.txt
+#   # Windows (PowerShell):
+#   .venv\Scripts\pip install -r requirements-local.txt
+#
+# 国内镜像加速：
+#   pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
+#
+# 生产部署请使用 requirements.txt（完整依赖）。
+
+paramiko>=3.0
+markdown>=3.4
+pyyaml>=6.0
+fastapi>=0.100
+uvicorn>=0.23
+python-multipart>=0.0.9
+aiohttp>=3.9
+websockets>=12.0
+python-jose[cryptography]>=3.3
+bcrypt>=4.0
+prometheus_client>=0.20
+psutil>=5.9
+croniter>=3.0
+
+# 以下为可选依赖（按需安装）：
+# OBS 对象存储：pip install esdk-obs-python crcmod
+# MySQL 数据库：pip install pymysql DBUtils
+# 飞书 Bot：pip install lark-oapi

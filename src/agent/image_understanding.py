@@ -268,7 +268,7 @@ def _call_vlm(ocr_text: str, features: str) -> str:
     model = "glm-5.2"
     try:
         config_path = os.path.expanduser("~/.config/opencode/opencode.jsonc")
-        with open(config_path) as f:
+        with open(config_path, encoding="utf-8") as f:
             raw = f.read()
         # opencode.jsonc is JSONC — strip // comments (not inside strings) and trailing commas
         # Simple state machine: track if inside a string
