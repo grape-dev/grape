@@ -442,12 +442,10 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     check_repo_access(user, repo_key)
 
     app_secret = ""
-    # R12.13: 改用 read_stored_token（R20.18.1: 写入原始值，不过期检查、不刷新）
-    # R20.18.2: 短路仅在运行时 get_token 生效——write 用 read_stored_token
-    from src.token_resolver import TokenResolver, create_provider_from_repo_key
-    from src.repo_key import to_repo_key
-    _rk = to_repo_key(f"{owner}/{repo}")
-    repo_token = TokenResolver(create_provider_from_repo_key(_rk)).read_stored_token(_rk) if _rk else ""
+    # R25.9 回声治理：保存 Agent 配置不触碰 token——session 行只允许存用户显式
+    # 配置的 agent 专属 token（AgentConfig 无 token 字段，原 read_stored_token 取到
+    # 的是 bot/用户级值回填，导致第 1 级命中 bot token → 自循环检测放行 → 回声）。
+    # upsert 传 None = 保留既有 session token。
 
     from src.session_manager import db, db_lock
 
@@ -507,7 +505,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
         if not session_id:
             from src.api.session_store import upsert_agent_session
             session_id = upsert_agent_session(
-                repo_key=repo_key, agent_type=name, repo_gitcode_token=repo_token,
+                repo_key=repo_key, agent_type=name, repo_gitcode_token=None,
                 im_app_id="", im_app_secret="", im_provider="",
             )
         # app_id 已释放（无其他仓库引用）才移除 BotManager 实例，避免影响共用该 app 的仓库
@@ -651,7 +649,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
             session_id = upsert_agent_session(
                 repo_key=repo_key, agent_type=name,
                 runtime_id=runtime_id, skill=skill_name_for_save, skill_id=skill_id,
-                repo_gitcode_token=repo_token, status="idle",
+                repo_gitcode_token=None, status="idle",
                 enable=_enable,
                 subscribe_events=json.dumps(body.subscribe_events, ensure_ascii=False) if body.subscribe_events is not None else "[]",
                 im_app_id=body.im_app_id if name == "vod" and body.im_app_id else None,
