@@ -325,13 +325,9 @@
       // 获取当前 repo_key
       var repoKey = '';
       try {
-        if (window._currentRepo && typeof window._currentRepo === 'function') {
-          var r = window._currentRepo();
-          if (r) repoKey = (r.owner || '') + '/' + (r.name || '');
-        } else if (window._currentRepo) {
-          var r2 = window._currentRepo;
-          if (r2) repoKey = (r2.owner || '') + '/' + (r2.name || '');
-        }
+        // R9: 使用 app.currentRepo() 替代不存在的 window._currentRepo
+        var r = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
+        if (r) repoKey = (r.owner || '') + '/' + (r.name || '');
       } catch (e) {}
 
       submitBtn.disabled = true;

@@ -656,6 +656,8 @@ function loadAgentTypes() {
     localStorage.setItem('current_org_id', orgId);
     // 清除仓库缓存，防止切换组织后仍显示旧组织的仓库
     localStorage.removeItem(REPO_CACHE_KEY);
+    // R5: 清除内存缓存 _cachedReposData，防止语言切换渲染旧组织仓库
+    _cachedReposData = null;
     // 更新组织下拉框选中项
     if (sel) {
       for (var i = 0; i < sel.options.length; i++) {
@@ -756,6 +758,8 @@ function loadAgentTypes() {
       try {
         localStorage.setItem(REPO_CACHE_KEY, JSON.stringify({repos: repos, ts: Date.now()}));
       } catch(e) {}
+      // R7: 清除内存缓存，防止语言切换用旧数据渲染
+      _cachedReposData = null;
       renderReposFromData(repos);
     }).catch(function(e) {
       // 同步失败则降级为普通加载
@@ -1120,6 +1124,11 @@ function loadAgentTypes() {
   let _hiddenSince = 0;
   // 语言切换时缓存 /repos/member 数据，轻量重渲染不发 API 请求
   let _cachedReposData = null;
+
+  // R3: 清理内存缓存 _cachedReposData（供 account.js 等外部调用）
+  function _clearCachedReposData() {
+    _cachedReposData = null;
+  }
 
   // _rerenderReposView: 语言切换时轻量重渲染项目列表页/引导页
   // 不发 API 请求、不闪烁 loading 遮罩——用缓存数据重新执行 HTML 拼接渲染
@@ -2785,7 +2794,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
+  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

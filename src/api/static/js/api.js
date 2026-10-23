@@ -64,6 +64,29 @@ const API = (() => {
           scheduleProactiveRefresh();
         }
       }
+      // R8: 其他标签页清除 repo_member_cache 或修改 user.bindings 时
+      // 检查当前标签页的 currentRepo 是否仍有效
+      if (e.key === 'repo_member_cache' || e.key === 'user') {
+        try {
+          var cr = JSON.parse(sessionStorage.getItem('currentRepo') || 'null');
+          if (cr && cr.repoKey) {
+            // 从 localStorage.user.bindings 检查 currentRepo 的 provider 是否仍绑定
+            var _u = JSON.parse(localStorage.getItem('user') || '{}');
+            var _bindings = _u.bindings || [];
+            // 提取 currentRepo 的 provider 前缀
+            var _colonIdx = cr.repoKey.indexOf(':');
+            if (_colonIdx > 0) {
+              var _provider = cr.repoKey.substring(0, _colonIdx);
+              if (_provider && _provider !== cr.repoKey && _bindings.indexOf(_provider) < 0) {
+                // provider 已被其他标签页解绑 → 清理当前标签页状态
+                sessionStorage.removeItem('currentRepo');
+                if (typeof app !== 'undefined' && app._clearCachedReposData) app._clearCachedReposData();
+                if (typeof app !== 'undefined' && app.goToRepos) app.goToRepos();
+              }
+            }
+          }
+        } catch(ex) {}
+      }
     });
   }
 

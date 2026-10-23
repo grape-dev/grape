@@ -5,19 +5,23 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title data-i18n="app.login.title_register">注册 — Grape</title>
 <link rel="icon" type="image/png" href="/static/logo-64.png">
-<link rel="stylesheet" href="/static/css/app.css?v=84">
+<link rel="stylesheet" href="/static/css/app.css?v=85">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
 <link rel="stylesheet" href="/static/css/auth.css?v=6">
 <script>
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.setAttribute('data-i18n-pending','1');})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='34';})();
+// i18n 加载超时兜底：5 秒后强制移除隐藏状态
+setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
 <style>
-[data-i18n-pending="1"] [data-i18n]{visibility:hidden}
-[data-i18n-pending="1"] [data-i18n-placeholder]::placeholder{color:transparent}
+html.i18n-loading [data-i18n]{visibility:hidden}
+html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
+/* FOUC fix: CSS class drives visibility at HTML parse time (F22/F23) */
+.email-not-configured #stepIndicator,
+.email-not-configured #emailField { display: none !important; }
 </style>
-<script src="/static/js/i18n.js?v=13"></script>
-<script>document.addEventListener('DOMContentLoaded',function(){I18N.init('34');});</script>
+<script src="/static/js/i18n.js?v=16" defer></script>
 </head>
 <body>
 
@@ -28,8 +32,8 @@
 <h1 id="pageTitle" data-i18n="app.login.register_title">注册 Grape 账号</h1>
 <p class="subtitle" id="pageSub" data-i18n="app.login.register_sub">Multi-Agent DevOps</p>
 
-<!-- 步骤指示器（R7.7: 初始隐藏，有邮箱配置时才显示，避免无邮箱场景闪动） -->
-<div class="step-items" id="stepIndicator" style="display:none">
+<!-- 步骤指示器（有邮箱配置时显示，无邮箱时 JS 同步隐藏） -->
+<div class="step-items" id="stepIndicator">
   <div class="step-item active" id="dot1"><div class="step-item-circle">1</div><span data-i18n="app.login.step_label_info">填写信息</span></div>
   <div class="step-line" id="stepLine"></div>
   <div class="step-item" id="dot2"><div class="step-item-circle">2</div><span data-i18n="app.login.step_label_verify">验证码</span></div>
@@ -60,7 +64,7 @@
     <p class="field-error" id="regUsernameErr" role="alert" aria-live="polite"></p>
   </div>
 
-  <div class="field-group" id="emailField" style="display:none">
+  <div class="field-group" id="emailField">
     <label class="field-label" for="regEmail" data-i18n="app.login.email">邮箱</label>
     <div class="field-input-wrap">
       <input class="field-input" id="regEmail" type="email"
@@ -128,6 +132,13 @@
         <button class="send-code-btn" id="regSendBtn" type="button" onclick="resendCode()" data-i18n="app.login.resend_code">重新发送</button>
       </div>
       <p class="field-error" id="regCodeErr" role="alert" aria-live="polite"></p>
+      <!-- 帮助入口：对所有用户一致显示，不暴露单个邮箱状态 -->
+      <p style="margin-top:8px;font-size:12px;color:var(--auth-text-tertiary);line-height:1.5">
+        <span data-i18n="app.login.code_not_received_hint">没收到验证码？如果你已注册，请</span>
+        <a href="/" style="color:var(--auth-accent)" data-i18n="app.login.back_to_login">返回登录</a>
+        <span data-i18n="app.login.or">或</span>
+        <a href="/forgot" style="color:var(--auth-accent)" data-i18n="app.login.forgot_password">忘记密码</a>
+      </p>
     </div>
     <button class="auth-btn" id="regVerifyBtn" type="button" onclick="registerVerify()">
       <span data-i18n="app.login.register_btn">注册</span>
@@ -193,16 +204,16 @@
 </div>
 </div>
 
-<script src="/static/js/api.js?v=29"></script>
-<script src="/static/js/auth.js?v=6"></script>
+<script src="/static/js/api.js?v=31"></script>
+<script src="/static/js/auth.js?v=7"></script>
 <script>
 Auth.initI18n();
 function $(id){return document.getElementById(id)}
 
 // OAuth 模式
 var oauthMode=false,oauthState='',oauthProvider='',oauthExternalLogin='';
-// R7: 邮箱是否已配置（从 /auth/providers 获取）
-var emailConfigured=true;
+// 同步读取服务端注入的邮箱配置状态（零闪动）
+var emailConfigured=(typeof window.__EMAIL_CONFIGURED__!=='undefined')?window.__EMAIL_CONFIGURED__:false;
 
 (function initOAuthMode(){
   var params=new URLSearchParams(location.search);
@@ -210,49 +221,43 @@ var emailConfigured=true;
     oauthMode=true;oauthState=params.get('state')||'';oauthProvider=params.get('provider')||'';
     oauthExternalLogin=params.get('external_login')||'';
     var externalName=params.get('external_name')||oauthExternalLogin;
+    // DOM 操作同步执行（不闪动）
     $('oauthTabs').style.display='block';
     var providerLabel=oauthProvider==='gitcode'?'GitCode':oauthProvider==='github'?'GitHub':oauthProvider;
-    $('pageTitle').textContent=Auth.t('app.login.associate_title').replace('{provider}',providerLabel);
-    $('pageSub').textContent=Auth.t('app.login.select_tab_hint');
-    $('oauthInfo').innerHTML=Auth.t('app.login.oauth_not_associated').replace('{name}','<b>'+Auth.escHtml(externalName)+'</b>').replace('{login}',Auth.escHtml(oauthExternalLogin));
     $('emailField').style.display='none';
     $('stepIndicator').style.display='none';
+    // 翻译调用延迟到 I18N 就绪后（defer i18n.js 在 DOMContentLoaded 前执行）
+    function _applyOAuthText(){
+      $('pageTitle').textContent=Auth.t('app.login.associate_title').replace('{provider}',providerLabel);
+      $('pageSub').textContent=Auth.t('app.login.select_tab_hint');
+      $('oauthInfo').innerHTML=Auth.t('app.login.oauth_not_associated').replace('{name}','<b>'+Auth.escHtml(externalName)+'</b>').replace('{login}',Auth.escHtml(oauthExternalLogin));
+    }
+    if(typeof I18N!=='undefined'&&I18N.isInitialized){_applyOAuthText();}
+    else{document.addEventListener('DOMContentLoaded',_applyOAuthText);}
   }
 })();
 
-// R7.7: 获取邮箱配置状态，初始为无邮箱模式（隐藏），有邮箱时才显示（避免闪动）
-(function checkEmailConfigured(){
+// 同步应用邮箱配置状态（DOM 已存在，同步执行无闪动）
+(function applyEmailConfig(){
   if(oauthMode)return;
-  API.get('/auth/providers').then(function(d){
-    emailConfigured=!!(d&&d.email_configured);
-    if(emailConfigured){
-      // 有邮箱配置：显示邮箱字段、步骤指示器、验证码区域，按钮改为"发送验证码"
-      $('emailField').style.display='';
-      $('stepIndicator').style.display='';
-      $('regCodeArea').style.display='';  // 验证码区域（提交后才显示，这里恢复默认）
-      // 按钮：注册 → 发送验证码
-      var btn=$('regSubmitBtn');
-      if(btn){
-        var span=btn.querySelector('span');
-        if(span){
-          span.setAttribute('data-i18n','app.login.send_code');
-          span.textContent=Auth.t('app.login.send_code');
-        }
+  if(emailConfigured){
+    // 有邮箱配置：元素默认可见，按钮改为"发送验证码"
+    var btn=$('regSubmitBtn');
+    if(btn){
+      var span=btn.querySelector('span');
+      if(span){
+        span.setAttribute('data-i18n','app.login.send_code');
+        span.textContent=Auth.t('app.login.send_code');
       }
-      // 表单提交：走 goToStep2（发送验证码流程）
-      $('registerPanel').setAttribute('onsubmit','event.preventDefault();goToStep2()');
-    } else {
-      // 无邮箱配置：保持初始隐藏状态（邮箱字段、步骤指示器已 display:none）
-      // 验证码区域也隐藏
-      $('regCodeArea').style.display='none';
-      // 按钮保持"注册"，表单提交走 registerVerify（直接注册）
-      $('registerPanel').setAttribute('onsubmit','event.preventDefault();registerVerify()');
     }
-  }).catch(function(){
-    // API 失败：保持初始无邮箱模式（无闪动）
+    $('registerPanel').setAttribute('onsubmit','event.preventDefault();goToStep2()');
+  } else {
+    // 无邮箱配置：同步隐藏邮箱字段、步骤指示器、验证码区域
+    $('emailField').style.display='none';
+    $('stepIndicator').style.display='none';
     $('regCodeArea').style.display='none';
     $('registerPanel').setAttribute('onsubmit','event.preventDefault();registerVerify()');
-  });
+  }
 })();
 
 function switchTab(tab){
@@ -328,7 +333,7 @@ function goToStep2(){
 
   API.post('/auth/register/send-code',{username:u,email:e,password:p}).then(function(){
     Auth.setBtnLoading(btn,false);
-    Auth.showToast(Auth.t('app.login.toast_code_sent') + ' ' + e);
+    Auth.showToast(Auth.t('app.login.toast_code_sent_hint'));
     $('regStep1Btn').style.display='none';
     $('regCodeArea').style.display='block';
     $('regEmail').disabled=true;
@@ -341,11 +346,10 @@ function goToStep2(){
     Auth.startCountdown('regSendBtn');
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
-    var msg=err.message||Auth.t('app.login.toast_send_failed');
-    if(msg.indexOf('用户名')>=0||msg.indexOf('username')>=0)Auth.showFieldError('regUsername',msg);
-    else if(msg.indexOf('邮箱')>=0||msg.indexOf('email')>=0)Auth.showFieldError('regEmail',msg);
-    else if(msg.indexOf('密码')>=0||msg.indexOf('password')>=0)Auth.showFieldError('regPassword',msg);
-    else Auth.showToast(msg);
+    var code=(err&&err.error_code)||'';
+    var field={'USERNAME_INVALID':'regUsername','USERNAME_TAKEN':'regUsername','EMAIL_INVALID':'regEmail','EMAIL_NOT_ALLOWED':'regEmail','PASSWORD_WEAK':'regPassword'}[code];
+    var msg=Auth.t('app.error.'+code,null,Auth.t('common.server_error',null,err.message||Auth.t('app.login.toast_send_failed')));
+    if(field){Auth.showFieldError(field,msg);}else{Auth.showToast(msg);}
   });
 }
 
@@ -397,9 +401,10 @@ function registerVerify(){
     setTimeout(function(){window.location.href='/'},2000);
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
-    var msg=err.message||Auth.t('app.login.toast_register_failed');
-    if(emailConfigured&&(msg.indexOf('验证码')>=0||msg.indexOf('code')>=0)){Auth.showFieldError('regCode',msg);$('regCode').focus();}
-    else Auth.showToast(msg);
+    var code=(err&&err.error_code)||'';
+    var field={'CODE_INVALID':'regCode','USERNAME_INVALID':'regUsername','USERNAME_TAKEN':'regUsername','EMAIL_ALREADY_REGISTERED':'regEmail','PASSWORD_WEAK':'regPassword'}[code];
+    var msg=Auth.t('app.error.'+code,null,Auth.t('common.server_error',null,err.message||Auth.t('app.login.toast_register_failed')));
+    if(field){Auth.showFieldError(field,msg);if(field==='regCode')$('regCode').focus();}else{Auth.showToast(msg);}
   });
 }
 
@@ -418,9 +423,10 @@ function doOAuthRegister(){
     setTimeout(function(){window.location.href='/'},2000);
   }).catch(function(err){
     Auth.setBtnLoading(btn,false);
-    var msg=err.message||Auth.t('app.login.toast_register_failed');
-    if(msg.indexOf('用户名')>=0||msg.indexOf('username')>=0)Auth.showFieldError('regUsername',msg);
-    else Auth.showToast(msg);
+    var code=(err&&err.error_code)||'';
+    var field={'USERNAME_INVALID':'regUsername','USERNAME_TAKEN':'regUsername'}[code];
+    var msg=Auth.t('app.error.'+code,null,Auth.t('common.server_error',null,err.message||Auth.t('app.login.toast_register_failed')));
+    if(field){Auth.showFieldError(field,msg);}else{Auth.showToast(msg);}
   });
 }
 

@@ -310,7 +310,10 @@
     "account_deactivating": "该账号正在注销中，暂时无法登录",
     "account_locked": "出于安全保护，账号已临时锁定。请 {{minutes}} 分钟后重试，或通过邮箱验证码立即解锁。",
     "too_many_attempts": "操作过于频繁，请 {{minutes}} 分钟后再试",
-    "account_locked_no_email": "出于安全保护，账号已临时锁定。请 {{minutes}} 分钟后重试。"
+    "account_locked_no_email": "出于安全保护，账号已临时锁定。请 {{minutes}} 分钟后重试。",
+    "toast_code_sent_hint": "如果该邮箱可注册，验证码已发送，请查收邮件",
+    "code_not_received_hint": "没收到验证码？如果你已注册，请",
+    "or": "或"
   },
   "repo": {
     "select": "选择仓库...",
@@ -655,6 +658,22 @@
     "REFRESH_TOKEN_INVALID": "会话已过期，请重新登录",
     "SESSION_TOKEN_INVALID": "会话令牌无效或已过期",
     "API_KEY_INVALID": "API Key 无效或已撤销",
-    "forbidden": "无可访问的仓库"
+    "forbidden": "无可访问的仓库",
+    "USERNAME_INVALID": "用户名不合法",
+    "USERNAME_TAKEN": "用户名已被占用",
+    "EMAIL_INVALID": "邮箱格式不正确",
+    "EMAIL_NOT_ALLOWED": "该邮箱不在允许注册范围内",
+    "EMAIL_ALREADY_REGISTERED": "该邮箱已注册，请直接登录或找回密码",
+    "PASSWORD_WEAK": "密码强度不足",
+    "CODE_INVALID": "验证码错误或已过期",
+    "ACCOUNT_NOT_FOUND": "账号不存在",
+    "ACCOUNT_CREATE_FAILED": "创建账号失败",
+    "OAUTH_STATE_EXPIRED": "关联会话已过期，请重新登录",
+    "OAUTH_NOT_WHITELISTED": "您不在平台白名单中，无法注册",
+    "OAUTH_ALREADY_BOUND": "该平台账号已绑定其他账号",
+    "OAUTH_TOKEN_DECRYPT_FAILED": "凭据解密失败，请重新发起",
+    "CREDENTIAL_INCORRECT": "账号或密码不正确，请重新输入",
+    "ACCOUNT_DEACTIVATED": "该账号已被停用，请联系管理员",
+    "ACCOUNT_DEACTIVATING": "该账号正在注销中，暂时无法登录"
   }
 }

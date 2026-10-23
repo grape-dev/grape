@@ -272,23 +272,23 @@ def register_send_code(body: RegisterSendCodeBody, request: Request):
     # 用户名校验
     username_err = _validate_username(body.username)
     if username_err:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": username_err})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_INVALID", "message": username_err})
 
     # 用户名唯一性
     if is_username_taken(body.username):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "用户名已被占用"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
 
     # 邮箱格式
     if not email or "@" not in email:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "邮箱格式不正确"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "EMAIL_INVALID", "message": "邮箱格式不正确"})
 
     # 注册策略
     if not signup_policy.check_signup_allowed(email):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "该邮箱不在允许注册范围内"})
+        raise HTTPException(status_code=403, detail={"code": 403, "error_code": "EMAIL_NOT_ALLOWED", "message": "该邮箱不在允许注册范围内"})
 
-    # BUG-2 修复：防枚举——已注册邮箱不返回 409，统一返回"验证码已发送"。
-    # 已注册邮箱不实际发送验证码，但响应与未注册邮箱一致。
-    # P1-1 修复：已注册邮箱也调 check_rate_limit，防止 200 vs 429 枚举 + DoS。
+    # 防枚举：已注册邮箱统一返回"验证码已发送"，不暴露账号存在性
+    # 已注册邮箱不实际发送验证码，但发通知邮件提醒原账号持有人
+    # 明确告知"已注册"放到 register/verify 阶段（需验证码，枚举成本高）
     already_registered = is_email_registered(email)
 
     if not already_registered:
@@ -300,14 +300,14 @@ def register_send_code(body: RegisterSendCodeBody, request: Request):
         rl_result = auth_verification.check_rate_limit(email, "register", ip)
         if not rl_result["ok"]:
             raise HTTPException(status_code=429, detail={"code": 429, "message": rl_result["message"]})
-        # P0-1: 对已注册邮箱发送"您的邮箱已注册"通知邮件（不发送验证码）
+        # 通知原账号持有人（不发送验证码）
         try:
             from src.auth.email_service import get_email_service
             _svc = get_email_service()
             _svc.send_notification(
                 to=email,
-                subject="您的邮箱已注册",
-                body="您的邮箱已在本系统注册，如非本人操作请忽略此邮件。",
+                subject="您的邮箱注册提醒",
+                body="有人尝试使用您的邮箱在本系统注册。如非本人操作请忽略此邮件；如是您本人，请直接登录或找回密码。",
             )
         except Exception as _e:
             log.warning(f"Failed to send already-registered notification to {email}: {_e}")
@@ -328,18 +328,18 @@ def register_verify(body: RegisterVerifyBody, request: Request, response: Respon
     # 再次校验用户名和密码
     username_err = _validate_username(body.username)
     if username_err:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": username_err})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_INVALID", "message": username_err})
     if is_username_taken(body.username):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "用户名已被占用"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
     pwd_err = auth_password.check_password_strength(body.password, body.username, email)
     if pwd_err:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": pwd_err})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "PASSWORD_WEAK", "message": pwd_err})
 
     # 校验验证码（无邮箱配置时跳过）
     if email_configured:
         result = auth_verification.verify_code(email, "register", body.code)
         if not result["ok"]:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": result["message"]})
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "CODE_INVALID", "message": result["message"]})
 
     # 创建账号（R7: 无邮箱配置时 email_verified=False）
     account = create_grape_account(body.username, email, body.password,
@@ -347,10 +347,10 @@ def register_verify(body: RegisterVerifyBody, request: Request, response: Respon
     if not account:
         # D8 修复：并发注册竞态——数据库 UNIQUE 兜底，检查具体冲突原因
         if is_email_registered(email):
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "该邮箱已注册，请直接登录或重置密码"})
+            raise HTTPException(status_code=409, detail={"code": 409, "error_code": "EMAIL_ALREADY_REGISTERED", "message": "该邮箱已注册，请直接登录或重置密码"})
         if is_username_taken(body.username):
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "用户名已被占用"})
-        raise HTTPException(status_code=500, detail={"code": 500, "message": "创建账号失败"})
+            raise HTTPException(status_code=409, detail={"code": 409, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
+        raise HTTPException(status_code=500, detail={"code": 500, "error_code": "ACCOUNT_CREATE_FAILED", "message": "创建账号失败"})
 
     # 创建个人组织（根据用户语言偏好命名）
     _ensure_personal_org(account["id"], body.username, _get_request_lang(request, body.lang))
@@ -490,17 +490,17 @@ def forgot_password_reset(body: ForgotPasswordResetBody, request: Request):
     # 校验验证码
     result = auth_verification.verify_code(email, "reset_password", body.code)
     if not result["ok"]:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": result["message"]})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "CODE_INVALID", "message": result["message"]})
 
     # 查找账号（grape_accounts 优先，旧表无 email 字段无需 fallback）
     account = get_grape_account_by_email(email)
     if not account:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "账号不存在"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "ACCOUNT_NOT_FOUND", "message": "账号不存在"})
 
     # 校验新密码强度
     pwd_err = auth_password.check_password_strength(body.new_password, account["username"], email)
     if pwd_err:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": pwd_err})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "PASSWORD_WEAK", "message": pwd_err})
 
     # 更新密码
     update_password(account["id"], body.new_password)
@@ -2173,31 +2173,31 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     from src.user import db as user_db
     state_data = user_db.validate_oauth_state(body.state, provider)
     if state_data is None:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "关联会话已过期，请重新登录"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_STATE_EXPIRED", "message": "关联会话已过期，请重新登录"})
 
     import time as _t
     if _t.time() > state_data.get("expires", 0):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "关联会话已过期，请重新登录"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "OAUTH_STATE_EXPIRED", "message": "关联会话已过期，请重新登录"})
 
     # 用户名校验
     username_err = _validate_username(body.username)
     if username_err:
-        raise HTTPException(status_code=400, detail={"code": 400, "message": username_err})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_INVALID", "message": username_err})
     if is_username_taken(body.username):
-        raise HTTPException(status_code=400, detail={"code": 400, "message": "用户名已被占用"})
+        raise HTTPException(status_code=400, detail={"code": 400, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
 
     external_id = state_data.get("external_id", "")
     external_login = state_data.get("external_login", "")
 
     # P0-3: 纯 OAuth 注册路径也需检查白名单（需求4"首次自动创建需通过OAuth白名单校验"）
     if not _check_whitelist(provider, external_login):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "您不在平台白名单中，无法注册"})
+        raise HTTPException(status_code=403, detail={"code": 403, "error_code": "OAUTH_NOT_WHITELISTED", "message": "您不在平台白名单中，无法注册"})
 
     # 检查该第三方账号是否已被活跃绑定（status=1）
     # 解绑记录（status=0）不阻止新用户注册绑定——解绑意味着放弃绑定关系
     existing = get_external_identity(provider, external_id)
     if existing:
-        raise HTTPException(status_code=409, detail={"code": 409, "message": "该平台账号已绑定其他账号"})
+        raise HTTPException(status_code=409, detail={"code": 409, "error_code": "OAUTH_ALREADY_BOUND", "message": "该平台账号已绑定其他账号"})
 
     oauth_email = body.email or state_data.get("email", "")
     has_pwd = bool(body.password)
@@ -2205,14 +2205,14 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     if has_pwd:
         # 邮箱密码注册
         if not oauth_email or "@" not in oauth_email:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": "邮箱格式不正确"})
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "EMAIL_INVALID", "message": "邮箱格式不正确"})
         pwd_err = auth_password.check_password_strength(body.password, body.username, oauth_email)
         if pwd_err:
-            raise HTTPException(status_code=400, detail={"code": 400, "message": pwd_err})
+            raise HTTPException(status_code=400, detail={"code": 400, "error_code": "PASSWORD_WEAK", "message": pwd_err})
         if not signup_policy.check_signup_allowed(oauth_email):
-            raise HTTPException(status_code=403, detail={"code": 403, "message": "该邮箱不在允许注册范围内"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "EMAIL_NOT_ALLOWED", "message": "该邮箱不在允许注册范围内"})
         if oauth_email and is_email_registered(oauth_email):
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "该邮箱已注册，请直接登录或关联账号"})
+            raise HTTPException(status_code=409, detail={"code": 409, "error_code": "EMAIL_ALREADY_REGISTERED", "message": "该邮箱已注册，请直接登录或关联账号"})
         account = create_grape_account(body.username, oauth_email, body.password)
     else:
         # 纯 OAuth 注册（无密码）
@@ -2227,17 +2227,17 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     if not isinstance(account, dict):
         # None=其他失败, "username_conflict"/"email_conflict"=UNIQUE 冲突
         if account == "email_conflict":
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "该邮箱已注册，请直接登录或关联账号"})
+            raise HTTPException(status_code=409, detail={"code": 409, "error_code": "EMAIL_ALREADY_REGISTERED", "message": "该邮箱已注册，请直接登录或关联账号"})
         if account == "username_conflict":
-            raise HTTPException(status_code=409, detail={"code": 409, "message": "用户名已被占用"})
-        raise HTTPException(status_code=500, detail={"code": 500, "message": "创建账号失败"})
+            raise HTTPException(status_code=409, detail={"code": 409, "error_code": "USERNAME_TAKEN", "message": "用户名已被占用"})
+        raise HTTPException(status_code=500, detail={"code": 500, "error_code": "ACCOUNT_CREATE_FAILED", "message": "创建账号失败"})
 
     # P2-7 修复：_ensure_personal_org 移到 bind 成功之后，防止绑定失败时遗留孤儿组织
     # P2 加固：access_token 从 state 解密，解密失败则走失败路径
     _state_token, _token_ok = _get_state_access_token(state_data)
     if not _token_ok:
         soft_delete_account(account["id"])
-        raise HTTPException(status_code=500, detail={"code": 500, "message": "凭据解密失败，请重新发起"})
+        raise HTTPException(status_code=500, detail={"code": 500, "error_code": "OAUTH_TOKEN_DECRYPT_FAILED", "message": "凭据解密失败，请重新发起"})
     # 写入绑定关系（失败时回滚 grape_accounts——软删除）
     bind_ok = create_external_identity(
         grape_user_id=account["id"],
@@ -2251,7 +2251,7 @@ def oauth_register(provider: str, body: OAuthRegisterBody, request: Request, res
     if not bind_ok:
         log.warning(f"OAuth register: create_external_identity failed for user {account['id']}, rolling back")
         soft_delete_account(account["id"])
-        raise HTTPException(status_code=409, detail={"code": 409, "message": "该平台账号已被绑定"})
+        raise HTTPException(status_code=409, detail={"code": 409, "error_code": "OAUTH_ALREADY_BOUND", "message": "该平台账号已被绑定"})
 
     # FR-18.6: 补写 um 平台列
     _sync_um_platform_col(account["id"], provider, state_data.get("external_login", ""))
