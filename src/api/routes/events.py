@@ -415,6 +415,49 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     from src.api.deps import check_repo_access
     check_repo_access(user, evt.get("repo_key", "") or "")
 
+    # 1.0a）Issue #453 修复点 3：自循环被拦事件禁止重派（S7）——重派不得复活被拦事件。
+    # 双源判定：① event_skipped 留痕（self_loop / self_loop_path_b / outbound_ledger_hit，
+    # 历史被拦，**事件类型级匹配**——审查 D3 修正：只拦同类型被拦事件的重派，不因该 issue
+    # 历史上有过 bot 留痕就封禁整个 issue 的所有事件重派，事故仓每 issue 上千条留痕会误杀
+    # 正常重派。S29-G3 修正：留痕表无保留期（永久），补 outbound_ledger_hit 后该守卫不再
+    # 受台账 30 天保留期约束——路径 B 用户身份回声（bot 名单拦不住）30 天后也无法经人工
+    # 重派复活）；② 台账命中（该事件内容是我们代发的，30 天内）。任一命中 → 409 拒绝。
+    try:
+        _evt_type = evt.get("event_type", "") or ""
+        if _evt_type in ("issue_comment", "note_hook_pr", "issue_opened", "issue_updated",
+                         "issue_closed", "issue_reopened", "issue_assigned", "issue_labeled"):
+            from src.session_manager import db as _db, db_lock as _dbl
+            with _dbl:
+                _c = _db.cursor()
+                _c.execute("SELECT reason FROM event_skipped WHERE repo_key=? AND issue_id=? "
+                           "AND event_type=? AND reason IN ('self_loop','self_loop_path_b','outbound_ledger_hit') LIMIT 1",
+                           (evt.get("repo_key", "") or "", evt.get("issue_id", "") or "", _evt_type))
+                _blocked = _c.fetchone()
+            if _blocked:
+                raise HTTPException(status_code=409, detail={"code": 409,
+                    "message": "事件曾被自循环检测拦截（" + _blocked[0] + "），重派需管理台人工处置"})
+            _pl = evt.get("payload") or {}
+            if isinstance(_pl, str):
+                try:
+                    import json as _pj
+                    _pl = _pj.loads(_pl)
+                except Exception:
+                    _pl = {}
+            if isinstance(_pl, dict) and not _pl.get("_grape_internal_trigger"):
+                from src.repo_key import parse_repo_key
+                from src.outbound_ledger import is_our_outbound, extract_event_content_id, content_hash_md5
+                _prov = parse_repo_key(evt.get("repo_key", "") or "")[0]
+                _cid = extract_event_content_id(_prov, _pl)
+                _ct = ("issue" if _evt_type == "issue_opened" else
+                       "issue_edit" if _evt_type == "issue_updated" else "issue_comment")
+                if _cid and is_our_outbound(_prov, evt.get("repo_key", ""), _ct, _cid):
+                    raise HTTPException(status_code=409, detail={"code": 409,
+                        "message": "事件内容为系统代发（台账命中），重派会复活自循环，已拒绝"})
+    except HTTPException:
+        raise
+    except Exception as _e:
+        log.warning(f"[redispatch] ledger/skip check failed (allow-through): {_e}")
+
     # 1.5）onboarding 主事件重派 → 任务级自愈（Issue #46 重构后兼容）：
     #     历史 onboarding_exp/onboarding_explore 事件仍可能被 redispatch；onboarding 后端已改为「按模板创建标准任务」，
     #     旧事件映射到新任务 type（onboarding_exp→experience，onboarding_explore→dev）后走 retry_onboarding_task 补建。

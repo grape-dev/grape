@@ -1,12 +1,13 @@
 # -*- coding: utf-8 -*-
 """Issue #426: PR 订阅场景在 PR 与 Issue 绑定关系时彻底失效 — 回归测试。
 
-验证 PR 订阅与 stage matrix 路由并行共存：
-T1 PR 关联 Issue（stage=coding）单场景订阅 → 主路由 coding 事件 + 订阅场景并行 QA
+验证 PR 订阅与 stage matrix 路由并行共存（bound_issue 口径：绑定了 Issue 即过滤
+同场景/同 skill 订阅场景——绑 Issue = 问题已被他人解决）：
+T1 PR 关联 Issue（stage=coding）Issue 场景自身订阅 → 主路由 coding 事件，订阅不派发（不再双重审查）
 T2 PR 关联 Issue（stage=qa）同场景订阅 → 同场景跳过（避免重复审查），无订阅事件
 T3 PR 关联 Issue（stage=qa）异场景订阅（不同 skill）→ stage matrix QA + 订阅场景并行 QA
-T4 PR 关联 Issue（stage=coding）bot actor → 1.5 预派发订阅场景（绑定不再排除）
-T5 同 qa_skill 双场景绑定 PR → 去重保留 1 个（#318 去重不回归）
+T4 PR 关联 Issue（stage=coding）bot actor → Issue 场景订阅预派发同样被过滤
+T5 同 qa_skill 双场景绑定 PR → 订阅全部过滤（同 skill + 同场景双重命中）
 T6 无绑定 PR 订阅不回归（对照 #427 验证要点）
 T7 PR merged（绑定 Issue）→ 不派发订阅 QA（已合并审查无意义）
 """
@@ -117,7 +118,7 @@ class TestPRSubIssueBinding:
         _clean()
 
     def test_T1_bound_issue_stage_coding_parallel_dispatch(self):
-        """PR 关联 Issue（stage=coding）：主路由 coding 事件 + 订阅场景并行 QA"""
+        """PR 关联 Issue（stage=coding）：Issue 场景自身订阅不派发（避免主路由+订阅双重审查）"""
         _seed([("scene-A", "qa-cli", ["qa", "coding"])], stage="coding", scene_of_issue="scene-A")
         _run_hook("human_user", "open")
         rows = _events()
@@ -125,8 +126,7 @@ class TestPRSubIssueBinding:
         main = [r for r in rows if r[0] == "pull_request_opened"]
         extra = [r for r in rows if r[0] == "a2a_event"]
         assert len(main) == 1 and main[0][1] == "coding", f"stage matrix 主路由应为 coding, 实际 {rows}"
-        assert len(extra) == 1 and extra[0][2] == "scene-A" and extra[0][1] == "qa", \
-            f"订阅场景应并行派发 QA, 实际 {rows}"
+        assert len(extra) == 0, f"绑定 Issue 时 Issue 场景订阅不应再派发, 实际 {rows}"
 
     def test_T2_bound_issue_stage_qa_same_scene_skipped(self):
         """PR 关联 Issue（stage=qa）且同场景订阅：跳过同场景，无重复 QA"""
@@ -152,23 +152,22 @@ class TestPRSubIssueBinding:
         assert len(extra) == 1 and extra[0][2] == "scene-B", f"异场景订阅应并行派发, 实际 {rows}"
 
     def test_T4_bound_issue_bot_actor_early_dispatch(self):
-        """PR 关联 Issue + bot actor：1.5 预派发不再排除绑定场景"""
+        """PR 关联 Issue + bot actor：Issue 场景订阅预派发同样被过滤（bound_issue 口径一致）"""
         _seed([("scene-A", "qa-cli")], stage="coding", scene_of_issue="scene-A")
         _run_hook("grape_bot", "open")
         rows = _events()
         print(f"\n[T4] 绑定 Issue bot actor → {rows}")
-        assert all(r[0] == "a2a_event" for r in rows), f"bot 只应有 1.5 预派发 a2a_event, 实际 {rows}"
-        assert any(r[2] == "scene-A" for r in rows), f"预派发应含订阅场景 scene-A, 实际 {rows}"
+        assert len(rows) == 0, f"绑定 Issue 时 bot 预派发应被过滤, 实际 {rows}"
 
     def test_T5_same_skill_dedup_kept(self):
-        """同 qa_skill 双场景 + 绑定 Issue（stage≠qa）：去重保留 1 个订阅派发"""
+        """同 qa_skill 双场景 + 绑定 Issue：订阅全部过滤（同场景 + 同 skill 双重命中）"""
         _seed([("scene-A", "qa-cli"), ("scene-B", "qa-cli")],
               stage="coding", scene_of_issue="scene-A")
         _run_hook("human_user", "open")
         rows = _events()
         print(f"\n[T5] 同 skill 双场景绑定 → {rows}")
         extra = [r for r in rows if r[0] == "a2a_event"]
-        assert len(extra) == 1, f"同 skill 去重应只派发 1 个订阅场景, 实际 {rows}"
+        assert len(extra) == 0, f"绑定 Issue 时同 skill 场景订阅应全部过滤, 实际 {rows}"
 
     def test_T6_unbound_pr_subscription_no_regression(self):
         """无绑定 PR 订阅：主路由单次派发（不回归）"""
@@ -189,7 +188,7 @@ class TestPRSubIssueBinding:
         assert len(extra) == 0, f"merged PR 不应派发订阅 QA, 实际 {rows}"
 
     def test_T8_bound_issue_stage_qa_same_skill_other_scene_skipped(self):
-        """PR 关联 Issue（stage=qa）异场景同 skill 订阅：主路由 QA 覆盖该 skill，订阅不再重复派发"""
+        """PR 关联 Issue（stage=qa）异场景同 skill 订阅：订阅不再重复派发（bound_issue 口径）"""
         _seed([("scene-A", "qa-cli"), ("scene-B", "qa-cli")],
               stage="qa", scene_of_issue="scene-A")
         _run_hook("human_user", "open")
@@ -202,7 +201,7 @@ class TestPRSubIssueBinding:
         assert len(extra) == 0, f"同 skill 异场景订阅应被排除（主路由 QA 已覆盖）, 实际 {rows}"
 
     def test_T9_bound_issue_stage_qa_same_skill_bot_early_skipped(self):
-        """bot actor 预匹配同口径：主路由将派 QA 时，同 skill 异场景订阅预派发也被排除"""
+        """bot actor 预匹配同口径：绑定 Issue 时同 skill 异场景订阅预派发也被排除"""
         _seed([("scene-A", "qa-cli"), ("scene-B", "qa-cli")],
               stage="qa", scene_of_issue="scene-A")
         _run_hook("grape_bot", "open")

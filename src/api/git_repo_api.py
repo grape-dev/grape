@@ -307,7 +307,18 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
         _body = _body + "\n<!-- grape-auto-comment -->"
     neutral = {"title": body.title, "body": _body, "assignee": body.assignee}
     payload = translate_inbound(p, "issues", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
-    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
+    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
+    # Issue #453 代发台账（S12 写入点1）：建 Issue 入账，webhook 回流按编号对账
+    try:
+        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.repo_key import to_repo_key
+        _rk = to_repo_key(f"{owner}/{repo}", p)
+        _cid = extract_content_id(resp, "issue")
+        record_outbound(p, _rk, "issue", _cid, issue_number=_cid,
+                        content_hash=content_hash_md5(_body))
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (create_issue) failed: {_e}")
+    return resp
 
 
 @router.get("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_get", summary="Get issue", description="Returns a single issue.")
@@ -332,8 +343,22 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
         "body": _body,
     }
     payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+    resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
+    # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
+    # S19：非 body 修改（assignee/labels/state）记 issue_meta（编号键）——元数据回声对账
+    try:
+        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.repo_key import to_repo_key
+        _rk = to_repo_key(f"{owner}/{repo}", p)
+        if _body:
+            record_outbound(p, _rk, "issue_edit", str(number),
+                            issue_number=str(number), content_hash=content_hash_md5(_body))
+        else:
+            record_outbound(p, _rk, "issue_meta", str(number), issue_number=str(number))
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (update_issue) failed: {_e}")
+    return resp
 
 
 @router.post("/{owner}/{repo}/issues/{number}/close", operation_id="gitrepo_issues_close", summary="Close issue", description="Closes an issue on the Git provider. Provider-adapted: GitHub PATCH state=closed; GitCode PATCH state=close with the required repo/title (title auto-fetched). Returns the updated issue, or 502 if the provider does not apply the close.")
@@ -361,8 +386,18 @@ def list_issue_comments(owner: str, repo: str, number: int, user: dict = Depends
 @router.post("/{owner}/{repo}/issues/{number}/comments", operation_id="gitrepo_issues_comments_create", summary="Create issue comment", description="Creates a comment on an issue (body required).")
 def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
+    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
+    # Issue #453 代发台账（S12 写入点1）：评论入账，webhook 回流按评论 ID 对账
+    try:
+        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.repo_key import to_repo_key
+        _rk = to_repo_key(f"{owner}/{repo}", p)
+        record_outbound(p, _rk, "issue_comment", extract_content_id(resp, "issue_comment"),
+                        issue_number=str(number), content_hash=content_hash_md5(body.body))
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (create_issue_comment) failed: {_e}")
+    return resp
 
 
 # ===================== Pull Requests =====================
@@ -393,7 +428,20 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
         "auto_close_issues": body.auto_close_issues,
     }
     payload = translate_inbound(p, "pulls", "create", neutral, {"owner_repo": f"{owner}/{repo}"})
-    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/pulls", None, p), _repo_token(owner, repo, user, p), payload)
+    # Issue #453 台账（S29-G2，网关 PR 端点族补全）：建 PR 入账——同族 update_pull/merge_pull
+    # 已入账，此端点原先漏账（外部 API 调用者经网关建 PR 的回流无台账防线）。
+    # best-effort：入账失败不阻断、不影响响应。bot 建 PR 回流由 S24 豁免先于台账判定放行给
+    # QA，不受影响；外部用户建的 PR 无记录 → 放行（判定逻辑不变）。
+    try:
+        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.repo_key import to_repo_key
+        record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", extract_content_id(resp, "issue"),
+                        issue_number=extract_content_id(resp, "issue"),
+                        content_hash=content_hash_md5(_body) if _body else "")
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (create_pull) failed: {_e}")
+    return resp
 
 
 @router.get("/{owner}/{repo}/pulls/{number}", operation_id="gitrepo_pulls_get", summary="Get pull request", description="Returns a single pull request.")
@@ -410,15 +458,35 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     payload = {k: v for k, v in {"title": body.title, "body": _body, "labels": body.labels}.items() if v != ""}
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
+    resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
+    # Issue #453 台账（S25，第十一轮补漏）：agent 改 PR → pull_request_updated 回声对账
+    try:
+        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.repo_key import to_repo_key
+        record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", str(number),
+                        issue_number=str(number),
+                        content_hash=content_hash_md5(_body) if _body else "")
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (update_pull) failed: {_e}")
+    return resp
 
 
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge", summary="Merge pull request", description="Merges a pull request; returns {merged, sha}.")
 def merge_pull(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                p: str = Depends(_provider)):
-    return _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
+    resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
                     _repo_token(owner, repo, user, p))
+    # Issue #453 台账（S25）：合并 PR → pull_request_merged 回声对账（VcsApiClient.merge_pr
+    # 已入账，网关直调路径此处分账）
+    try:
+        from src.outbound_ledger import record_outbound
+        from src.repo_key import to_repo_key
+        record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge", str(number),
+                        issue_number=str(number))
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (merge_pull) failed: {_e}")
+    return resp
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_list", summary="List PR comments", description="Lists PR inline comments.")
@@ -435,8 +503,21 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     _body = body.body or ""
     if "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
-    return _vcs_req(p, "POST", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
+    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": _body})
+    # Issue #453 台账（S29-G1，网关 PR 端点族补全）：PR 评论入账——系统内部发 PR 评论
+    # 走 event_pipeline 裸 urllib 路径（已入账），此网关端点原先漏账，仅剩外部 API 调用者
+    # 的理论路径无台账防线。回流按 note_hook_pr 评论 ID 对账；系统内部 QA 回帖 PR 的
+    # note_hook_pr 回声即命中。best-effort 不阻断。
+    try:
+        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.repo_key import to_repo_key
+        record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "issue_comment",
+                        extract_content_id(resp, "issue_comment"),
+                        issue_number=str(number), content_hash=content_hash_md5(_body))
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (create_pull_comment) failed: {_e}")
+    return resp
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files", description="Lists files changed in a pull request.")

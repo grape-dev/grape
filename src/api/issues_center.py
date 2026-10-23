@@ -1206,16 +1206,39 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
     req = _ur.Request(url, data=data, headers={"Content-Type": "application/json", "Accept": "application/json"}, method="PATCH")
     try:
         with _ur.urlopen(req, timeout=15) as resp:
-            return _json.loads(resp.read().decode()) if resp.read else {}
+            _out = _json.loads(resp.read().decode()) if resp.read else {}
     except Exception:
         raise
+    # Issue #453 台账（S21，第六轮补漏）：多任务模式 patch issue body → issue_edit 记账，
+    # 编辑回声对账（原先 marker 检测在 GitCode 必 miss）
+    try:
+        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.repo_key import to_repo_key
+        record_outbound("gitcode", to_repo_key(f"{owner}/{repo}", "gitcode"), "issue_edit",
+                        str(issue_num), issue_number=str(issue_num),
+                        content_hash=content_hash_md5(body_text))
+    except Exception as _le:
+        from src.config import log as _log
+        _log.warning(f"outbound_ledger record (_patch_issue_body) failed: {_le}")
+    return _out
 
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
     from src.user.repo_manager import _github_req
-    return _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
+    _out = _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
                        api_token, {"body": body_text})
+    # Issue #453 台账（S21，第六轮补漏）：GitHub 多任务模式 patch issue body → issue_edit 记账
+    try:
+        from src.outbound_ledger import record_outbound, content_hash_md5
+        from src.repo_key import to_repo_key
+        record_outbound("github", to_repo_key(f"{owner}/{repo}", "github"), "issue_edit",
+                        str(issue_num), issue_number=str(issue_num),
+                        content_hash=content_hash_md5(body_text))
+    except Exception as _le:
+        from src.config import log as _log
+        _log.warning(f"outbound_ledger record (_patch_github_issue_body) failed: {_le}")
+    return _out
 
 
 def create_standard_task(repo_key: str, title: str, description: str,
@@ -1260,6 +1283,13 @@ def create_standard_task(repo_key: str, title: str, description: str,
             return {"ok": False, "code": 502,
                     "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"}
         issue_num = int(n)
+        # Issue #453 代发台账（写点6/7）：建任务主通道入账
+        try:
+            from src.outbound_ledger import record_outbound, content_hash_md5
+            record_outbound(_provider, repo_key, "issue", str(issue_num), issue_number=str(issue_num),
+                            content_hash=content_hash_md5((description or "").strip()))
+        except Exception as _le:
+            log.warning(f"outbound_ledger record (create_standard_task) failed: {_le}")
         created = True
     task_id = ensure_issue_task(repo_key, issue_num, title.strip(), description or "",
                                 assignee=assignee, event_type="onboarding")
@@ -1469,6 +1499,15 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             raise HTTPException(status_code=502, detail={"code": 502,
                                                          "message": f"创建 GitCode Issue 失败（响应无 issue number）: {str(resp)[:200]}"})
         issue_num = int(n)
+        # Issue #453 代发台账（写点6/7，前端建单入口）：入账
+        try:
+            from src.outbound_ledger import record_outbound, content_hash_md5
+            from src.repo_key import parse_repo_key
+            _prov, _, _ = parse_repo_key(repo_key)
+            record_outbound(_prov, repo_key, "issue", str(issue_num), issue_number=str(issue_num),
+                            content_hash=content_hash_md5(_desc_with_attach))
+        except Exception as _le:
+            log.warning(f"outbound_ledger record (create issue) failed: {_le}")
         created = True
         # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
         from src.storage import get_storage
@@ -1580,6 +1619,8 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "sender": {"login": _assign} if _assign else {},
                 }
                 _pipe_headers = {"Content-Type": "application/json", "X-GitHub-Event": "issues"}
+                # Issue #453：内部同步触发标记（同 GitCode 分支，跳过台账判定）
+                _pipe_payload["_grape_internal_trigger"] = True
             else:
                 _pipe_payload = {
                     "object_kind": "issue",
@@ -1589,6 +1630,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "user": {"username": _assign} if _assign else {},
                 }
                 _pipe_headers = {"Content-Type": "application/json", "X-Gitcode-Event": "issue_opened"}
+            # Issue #453：建单直发同步触发——payload 为内部构造，非 webhook 回流。
+            # 该 issue 已入台账（建单入账），台账检查会命中并拦掉这次触发；
+            # _grape_internal_trigger 标记让读侧跳过台账判定（同步触发是我们自己要开工，
+            # 与 webhook 回流去重语义相反）。
+            # 审查 P0-1 修正：run_pipeline 调用移回 if/else 之外（两平台共用）——
+            # 原版本误缩进进 else（GitCode）分支，GitHub 建单后不再同步触发流水线。
+            _pipe_payload["_grape_internal_trigger"] = True
             from src.api.event_pipeline import run_pipeline
             _pipe_result = run_pipeline(_pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
                                         account=repo_key, repo_key_override=repo_key)

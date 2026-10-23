@@ -1505,9 +1505,13 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                 # 跳过当前任务，尝试下一个
                 _tried_str = ','.join(["'"+x+"'" for x in _tried_ids])
                 if scope == "repo":
+                    # 2026-10-23 认领重试 SQL 修复：重试段是首轮查询的手工复制，
+                    # 漏抄了第三种仓库写法（params 4 值 vs 2 坑 → MySQLdb
+                    # ProgrammingError，claim_by_tag 整体异常退出）。必须与首轮
+                    # （上方 repo_key=? x3）同口径：tag 1 坑 + 仓库 3 坑 = 4 值。
                     c.execute(
                         f"SELECT t.id FROM agent_tasks t "
-                        f"WHERE {_tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=?) "
+                        f"WHERE {_tag_match} AND t.status='queued' AND (t.repo_key=? OR t.repo_key=? OR t.repo_key=?) "
                         f"AND t.id NOT IN ({_tried_str}) "
                         f"AND NOT EXISTS ("
                         f"  SELECT 1 FROM agent_tasks a2 WHERE a2.status IN ('dispatched','running') AND ("
