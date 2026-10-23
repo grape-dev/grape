@@ -10,13 +10,17 @@ services:
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET required}
       # Issue #452: Docker 环境默认关闭公网 IP 探测
       - GRAPE_AUTO_DETECT_URL=false
+    # 审查修复: 移除 bind mount ./.env:/app/.env（宿主无 .env 时 compose 失败）
+    # 容器内 /app/.env 由 Dockerfile COPY .env.example .env 提供；
+    # 宿主 .env（如存在）通过 env_file 注入为环境变量，覆盖容器内默认值
+    env_file:
+      - path: .env
+        required: false
     volumes:
       - grape-data:/app/data
       - ./configs:/app/configs
       - ./skills:/app/skills
       - ./examples:/app/examples
-      # Issue #452: 挂载 .env 文件（可选，不存在不影响启动）
-      - ./.env:/app/.env
     restart: unless-stopped
     logging:
       driver: json-file
