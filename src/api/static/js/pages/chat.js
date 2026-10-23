@@ -481,6 +481,10 @@ function newConversation() {
         _prevInput.value = '';
         _resetTextareaHeight(_prevInput);
       }
+      // Issue #407 附件保活: 新会话前持久化旧会话图片，清空内存（新会话无附件）
+      _saveChatImages(_currentConvId, _pendingImages);
+      _pendingImages = [];
+      _clearVideo();
     }
     _currentConvId = d.conversation_id;
     _saveChatLastConv(_currentConvId);
@@ -547,6 +551,8 @@ function _doDeleteConv(convId) {
   _closeChatDelPopover();
   // Issue #407: 删除会话同时清除其未发送草稿（会话消失草稿不残留）
   _clearChatDraft(convId);
+  // Issue #407 附件保活: 删除会话同时清除其持久化图片（会话消失附件不残留）
+  _clearChatImages(convId);
   API.del('/chat/conversations/' + convId).then(() => {
     if (_currentConvId === convId) {
       _currentConvId = null;
@@ -570,6 +576,11 @@ function switchConversation(convId) {
       _prevInput.value = '';
       _resetTextareaHeight(_prevInput);
     }
+    // Issue #407 附件保活: 持久化旧会话图片到 IndexedDB，清空内存防串扰
+    // （视频仅守卫保活不持久化，切换后丢失）
+    if (_currentConvId) _saveChatImages(_currentConvId, _pendingImages);
+    _pendingImages = [];
+    _clearVideo();
   }
   _currentConvId = convId;
   _saveChatLastConv(convId);
@@ -649,6 +660,16 @@ function switchConversation(convId) {
       input.value = _draft;
       _autoResizeTextarea(input);
     }
+    // Issue #407 附件保活: 异步回填当前会话图片附件（闲置返回/F5 恢复）
+    // _currentConvId 守卫防竞态（加载期间用户又切走则丢弃，避免串扰）
+    _loadChatImages(convId).then(function(imgs) {
+      if (_currentConvId !== convId) return;
+      if (imgs && imgs.length > 0) {
+        _pendingImages = imgs.slice(0, _MAX_IMAGES);
+        _renderImgPreview();
+      }
+      _updateChatEditingGuard();
+    });
     const sendBtn = document.querySelector('.chat-in button');
     if (sendBtn) sendBtn.disabled = false;
   }).catch(() => {
@@ -723,6 +744,9 @@ function _onChatImageSelect(fileInput) {
         loaded++;
         if (loaded === toLoad || _pendingImages.length === _MAX_IMAGES) {
           _renderImgPreview();
+          // Issue #407: 图片入队后持久化 + 置守卫（闲置返回不丢）
+          _saveChatImages(_currentConvId, _pendingImages);
+          _updateChatEditingGuard();
           var input = document.getElementById('chatInput');
           if (input) input.focus();
         }
@@ -736,11 +760,17 @@ function _onChatImageSelect(fileInput) {
 function _removeChatImage(idx) {
   _pendingImages.splice(idx, 1);
   _renderImgPreview();
+  // Issue #407: 移除后同步 IndexedDB（空则删键）+ 守卫复位
+  _saveChatImages(_currentConvId, _pendingImages);
+  _updateChatEditingGuard();
 }
 
 function _clearAllImages() {
   _pendingImages = [];
   _renderImgPreview();
+  // Issue #407: 清空图片时清除 IndexedDB 键 + 守卫复位
+  _clearChatImages(_currentConvId);
+  _updateChatEditingGuard();
 }
 
 const _MAX_VIDEO_SIZE = 50 * 1024 * 1024; // 50MB
@@ -776,6 +806,8 @@ function _onChatVideoSelect(fileInput) {
   reader.onload = function(e) {
     _pendingVideo = {data: e.target.result, name: file.name || 'video'};
     _renderVideoPreview();
+    // Issue #407: 视频仅守卫保活（不持久化），置位守卫防闲置重渲染丢失
+    _updateChatEditingGuard();
     var input = document.getElementById('chatInput');
     if (input) input.focus();
   };
@@ -786,6 +818,8 @@ function _onChatVideoSelect(fileInput) {
 function _removeChatVideo() {
   _pendingVideo = null;
   _renderVideoPreview();
+  // Issue #407: 视频移除后守卫复位
+  _updateChatEditingGuard();
   // Hide preview area if no images either
   if (_pendingImages.length === 0) {
     var pv = document.getElementById('chatImgPreview');
@@ -795,6 +829,103 @@ function _removeChatVideo() {
 
 function _clearVideo() {
   _pendingVideo = null;
+  // Issue #407: 视频清空后守卫复位（图片状态由 _pendingImages 决定）
+  _updateChatEditingGuard();
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Issue #407 附件保活: 图片/视频附件闲置返回不丢（扩展草稿修复同一改动面）
+//  - 编辑态守卫: _pendingImages/_pendingVideo 非空 → window._chatEditing=true,
+//    app.js visibilitychange 据此跳过整页重渲染（对齐 _dashboardEditing）。
+//  - 图片持久化: 按会话粒度存 IndexedDB（chatImages store, key=convId, 1h 过期），
+//    切换会话/闲置返回/F5 后 switchConversation 异步回填预览。
+//  - 视频仅守卫保活（不持久化）: 切换会话/重渲染后丢失，符合「仅守卫保活不强持久化」。
+//  - 清除: 发送/移除/切换会话/删除会话时清除对应会话图片与守卫。
+// ═══════════════════════════════════════════════════════════════
+var _CHAT_IMG_TTL = 3600000;  // 图片草稿 1 小时过期（对齐 chatDraft/chatLastConv）
+var _chatImgDB = null;        // IndexedDB 连接缓存（复用，避免重复打开）
+var _chatImgDBPromise = null; // 连接进行中的 Promise（防重入）
+try { window._chatEditing = false; } catch(e) {}
+
+// 打开/复用 IndexedDB 连接；不可用（隐身模式/无支持）返回 null（降级为仅守卫保活）
+function _openChatImgDB() {
+  if (_chatImgDB) return Promise.resolve(_chatImgDB);
+  if (_chatImgDBPromise) return _chatImgDBPromise;
+  if (typeof indexedDB === 'undefined' || !indexedDB) return Promise.resolve(null);
+  _chatImgDBPromise = new Promise(function(resolve) {
+    try {
+      var req = indexedDB.open('grapeChatDB', 1);
+      req.onupgradeneeded = function(e) {
+        var db = e.target.result;
+        if (!db.objectStoreNames.contains('chatImages')) {
+          db.createObjectStore('chatImages', { keyPath: 'convId' });
+        }
+      };
+      req.onsuccess = function(e) { _chatImgDB = e.target.result; resolve(_chatImgDB); };
+      req.onerror = function() { _chatImgDB = null; resolve(null); };
+    } catch(e) { _chatImgDB = null; resolve(null); }
+  });
+  return _chatImgDBPromise;
+}
+
+// 保存当前会话图片到 IndexedDB（覆盖式）；空数组 = 删除键
+function _saveChatImages(convId, images) {
+  if (!convId) return;
+  _openChatImgDB().then(function(db) {
+    if (!db) return;
+    try {
+      var tx = db.transaction('chatImages', 'readwrite');
+      var store = tx.objectStore('chatImages');
+      if (!images || images.length === 0) {
+        store.delete(String(convId));
+      } else {
+        store.put({ convId: String(convId), images: images, ts: Date.now() });
+      }
+    } catch(e) {}  // 降级: 不可用则跳过（守卫仍保活）
+  });
+}
+
+// 读取会话图片；过期（>1h）返回空并清除；不可用/无记录返回空
+function _loadChatImages(convId) {
+  return _openChatImgDB().then(function(db) {
+    if (!db || !convId) return [];
+    return new Promise(function(resolve) {
+      try {
+        var tx = db.transaction('chatImages', 'readonly');
+        var req = tx.objectStore('chatImages').get(String(convId));
+        req.onsuccess = function() {
+          var rec = req.result;
+          if (!rec) return resolve([]);
+          if (rec.ts && Date.now() - rec.ts > _CHAT_IMG_TTL) {
+            _clearChatImages(convId);  // 过期清除
+            return resolve([]);
+          }
+          resolve((rec.images && Array.isArray(rec.images)) ? rec.images : []);
+        };
+        req.onerror = function() { resolve([]); };
+      } catch(e) { resolve([]); }
+    });
+  });
+}
+
+// 清除会话图片记录
+function _clearChatImages(convId) {
+  if (!convId) return;
+  _openChatImgDB().then(function(db) {
+    if (!db) return;
+    try {
+      var tx = db.transaction('chatImages', 'readwrite');
+      tx.objectStore('chatImages').delete(String(convId));
+    } catch(e) {}
+  });
+}
+
+// 编辑态守卫: _pendingImages/_pendingVideo 任一非空即置位
+// app.js visibilitychange 据此跳过整页重渲染（图片/视频附件不丢）
+function _updateChatEditingGuard() {
+  try {
+    window._chatEditing = (_pendingImages.length > 0) || (!!_pendingVideo);
+  } catch(e) {}
 }
 
 function sendChatStream() {

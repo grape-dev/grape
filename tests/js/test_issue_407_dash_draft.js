@@ -95,12 +95,13 @@ console.log('Issue #407: 编辑草稿持久化 / 编辑模式恢复 — 回归�
 
 // ═══ A. 守卫条件 ═══
 
-test('A1. app.js visibilitychange: 隐藏>60s 且非编辑态才重渲染（!window._dashboardEditing 守卫）', () => {
+test('A1. app.js visibilitychange: 隐藏>60s 且非编辑态才重渲染（_dashboardEditing 守卫保留）', () => {
   const src = readAppSrc();
   assert.ok(
-    /Date\.now\(\)\s*-\s*_hiddenSince\s*>\s*60000\s*&&\s*!window\._dashboardEditing/.test(src),
-    'visibilitychange 重渲染条件应含 !window._dashboardEditing 守卫'
+    /Date\.now\(\)\s*-\s*_hiddenSince\s*>\s*60000\s*&&\s*!\(window\._dashboardEditing\s*\|\|\s*window\._chatEditing\)/.test(src),
+    'visibilitychange 重渲染条件应保留 _dashboardEditing 守卫（与 _chatEditing 合并，dashboard 不回归）'
   );
+  assert.ok(src.includes('window._dashboardEditing'), '_dashboardEditing 守卫保留');
 });
 
 test('A2. _getDashEditMode: 1 小时内返回保存对象', () => {

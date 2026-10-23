@@ -302,12 +302,13 @@ test('D7. newConversation / 首发建会话 / switchConversation 均记忆当前
 
 // ═══ E. PR #598 不回归（静态断言） ═══
 
-test('E1. app.js visibilitychange 守卫条件保持 !window._dashboardEditing 原样', () => {
+test('E1. app.js visibilitychange 守卫保留 _dashboardEditing（PR #598 不回归）并扩展 _chatEditing', () => {
   const src = readAppSrc();
   assert.ok(
-    /Date\.now\(\)\s*-\s*_hiddenSince\s*>\s*60000\s*&&\s*!window\._dashboardEditing/.test(src),
-    'visibilitychange 重渲染条件应保持 PR #598 的 !_dashboardEditing 守卫（未被本次改动破坏）'
+    /Date\.now\(\)\s*-\s*_hiddenSince\s*>\s*60000\s*&&\s*!\(window\._dashboardEditing\s*\|\|\s*window\._chatEditing\)/.test(src),
+    '守卫应同时覆盖 _dashboardEditing（PR #598 不回归）与 _chatEditing（附件保活扩展）'
   );
+  assert.ok(src.includes('window._dashboardEditing'), '_dashboardEditing 守卫保留（dashboard 不回归）');
 });
 
 test('E2. dashboard.js 草稿工具函数原样保留（_saveDashDraft/_restoreDashDraft/_clearDashDraft/_getDashEditMode）', () => {
