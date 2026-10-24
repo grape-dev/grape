@@ -20,6 +20,11 @@ for _k in ("DEVOPS_DB_HOST", "DEVOPS_DB_PORT", "DEVOPS_DB_USER", "DEVOPS_DB_PASS
 # 测试隔离工作区（config.WORKSPACE_DIR 解析优先级 env > 家目录 > 代码目录）
 os.environ["DEVOPS_WORKSPACE_DIR"] = os.path.join(ROOT, "data", "test_workspaces")
 
+# tests/playwright/*.py 是手工 E2E 脚本，不是 pytest 用例。
+# 这些脚本在 import 期就启动浏览器并访问 localhost:3000，pytest 收集会直接执行。
+# 手工运行方式：python tests/playwright/test_r12_fullscreen_zindex.py
+collect_ignore_glob = ["playwright/*.py"]
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _ensure_test_db():

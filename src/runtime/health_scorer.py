@@ -32,6 +32,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone, timedelta
+from decimal import Decimal
 
 from src.config import log
 
@@ -165,19 +166,23 @@ def _to_sql_utc(ts) -> str:
 
 # ===== 核心计算 =====
 
-def _consecutive_failure_penalty(consecutive_failures: int) -> int:
+def _consecutive_failure_penalty(consecutive_failures: "int | Decimal | None") -> int:
     """连续失败惩罚（2026-10-23 试错友好口径）：每次 -15，不设上限（由整体 clamp 到 0 兜底）。
 
     配合失败率权重 0.5（基础分最高 75）：连挂 3 次即到 30 分临界，
     连挂 5 次归 0；失败率越低的引擎基础分越高，能扛更多次连续失败。
+
+    入口归一化（2026-10-23 Decimal 崩溃修复）：MySQL 后端 SUM()/COUNT(*) 返回
+    decimal.Decimal，先 int(or 0) 归一，None 语义保留为 0。
     """
-    n = consecutive_failures
+    n = int(consecutive_failures or 0)
     if n <= 0:
         return 0
     return n * 15
 
 
-def _compute_health_score(total: int, failed: int, consecutive_failures: int) -> int:
+def _compute_health_score(total: "int | Decimal | None", failed: "int | Decimal | None",
+                          consecutive_failures: "int | Decimal | None") -> int:
     """根据任务统计计算健康分（0-100）。
 
     - total=0 → 100（无历史数据，默认健康）
@@ -187,9 +192,17 @@ def _compute_health_score(total: int, failed: int, consecutive_failures: int) ->
        连续失败惩罚每次 -15、不设上限：连挂 3 次即到 30 分临界、
        5 次归 0；总分小于 0 时 clamp 为 0）
     - clamp [0, 100]
+
+    入口归一化（2026-10-23 Decimal 崩溃修复）：本函数被多处调用（健康分重置、
+    管理台展示等），调用方可能直接传 MySQL SUM()/COUNT() 返回的 Decimal 或
+    None——本函数自身容错（而非只靠 _fetch_task_stats 一处归一化）才是结构性
+    修法。归一化放在 total<=0 提前返回之后，提前返回分支自己兜 None。
     """
-    if total <= 0:
+    if int(total or 0) <= 0:
         return 100
+    total = int(total or 0)
+    failed = int(failed or 0)
+    consecutive_failures = int(consecutive_failures or 0)
     failure_rate = failed / total if total > 0 else 0.0
     base_score = round(100 * (1 - failure_rate * 0.5))
     penalty = _consecutive_failure_penalty(consecutive_failures)
@@ -226,9 +239,12 @@ def _fetch_task_stats(runtime_id: int) -> dict:
                 (runtime_id, window))
             row = c.fetchone()
             if row:
-                result["total"] = row[0] or 0
-                result["failed"] = row[1] or 0
-                result["completed"] = row[2] or 0
+                # 2026-10-23 Decimal 崩溃修复：MySQL 后端 SUM()/COUNT(*) 返回
+                # decimal.Decimal（SQLite 返回 int），从 DB 回来的第一时间归一成
+                # int。or 0 保留“SUM 无匹配行返回 None”的兜底语义。
+                result["total"] = int(row[0] or 0)
+                result["failed"] = int(row[1] or 0)
+                result["completed"] = int(row[2] or 0)
 
             # 连续失败次数：从最近一条终态任务倒序遍历，统计连续 failed
             c.execute(

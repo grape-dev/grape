@@ -37,6 +37,41 @@ const _SCENE_ICONS = {
 let _dashScenePipelines = {};  // scene_id → pipeline_config（技能链用）
 let _dashDetailSceneId = '';   // 当前查看详情的场景 ID
 
+// ═══════════════════════════════════════════════════════════════
+// Issue #407: 编辑态草稿持久化 + 编辑模式恢复（sessionStorage）
+// 切走页签/手动刷新后恢复编辑界面并回填表单，避免未保存内容丢失
+// ═══════════════════════════════════════════════════════════════
+function _dashDraftKey(owner, name, mode, sceneId) {
+  return 'dashDraft_' + owner + '/' + name + '_' + mode + (sceneId ? '_' + sceneId : '');
+}
+function _saveDashDraft(owner, name, mode, sceneId, data) {
+  // Issue #407 Optional: 草稿带时间戳，与 dashEditMode 一致 1 小时过期（避免 dashEditMode
+  // 过期后旧草稿在页签生命周期内残留、用户再入编辑/创建模式时被静默回填）
+  try { if (data && typeof data === 'object' && data.ts === undefined) data.ts = Date.now(); sessionStorage.setItem(_dashDraftKey(owner, name, mode, sceneId), JSON.stringify(data)); } catch(e) {}
+}
+function _restoreDashDraft(owner, name, mode, sceneId) {
+  try {
+    var raw = sessionStorage.getItem(_dashDraftKey(owner, name, mode, sceneId));
+    if (!raw) return null;
+    var o = JSON.parse(raw);
+    if (!o || typeof o !== 'object') { sessionStorage.removeItem(_dashDraftKey(owner, name, mode, sceneId)); return null; }
+    if (o.ts && Date.now() - o.ts > 3600000) { sessionStorage.removeItem(_dashDraftKey(owner, name, mode, sceneId)); return null; }
+    return o;
+  } catch(e) { return null; }
+}
+function _clearDashDraft(owner, name, mode, sceneId) {
+  try { sessionStorage.removeItem(_dashDraftKey(owner, name, mode, sceneId)); } catch(e) {}
+}
+function _saveDashEditMode(mode, sceneId) {
+  try { sessionStorage.setItem('dashEditMode', JSON.stringify({mode: mode, sceneId: sceneId || null, ts: Date.now()})); } catch(e) {}
+}
+function _getDashEditMode() {
+  try { var raw = sessionStorage.getItem('dashEditMode'); if (!raw) return null; var o = JSON.parse(raw); if (o.ts && Date.now() - o.ts > 3600000) { sessionStorage.removeItem('dashEditMode'); return null; } return o; } catch(e) { return null; }
+}
+function _clearDashEditMode() {
+  try { sessionStorage.removeItem('dashEditMode'); } catch(e) {}
+}
+
 // ── 主入口：渲染场景中心（Hero + 场景卡片网格）──
 function renderDashboard(data) {
   const el = document.getElementById('pageContent');
@@ -120,6 +155,13 @@ function renderDashboard(data) {
       <div class="ap-empty-desc">${I18N.t('dashboard.no_scene_desc')}</div>
       <button class="ap-btn" onclick="_enterCreateFromEmpty()">➕ ${I18N.t('dashboard.no_scene_create')}</button>
     </div>`;
+    // Issue #407 R2: 零场景分支同样走创建模式自动恢复检查（F5/idle 后回填草稿），
+    // 与 _renderSceneCards 渲染路径的恢复逻辑保持一致，否则空态仓库无法恢复创建界面
+    var _autoEditEmpty = _getDashEditMode();
+    if (_autoEditEmpty && _autoEditEmpty.mode === 'create' && owner && name) {
+      _clearDashEditMode();
+      if (typeof enterCreateMode === 'function') enterCreateMode();
+    }
     return;
   }
 
@@ -237,6 +279,12 @@ function renderDashboard(data) {
 
     el.innerHTML = html;
 
+    // Issue #407: Auto-enter create mode from sessionStorage (F5/idle recovery)
+    var _autoEdit = _getDashEditMode();
+    if (_autoEdit && _autoEdit.mode === 'create' && owner && name) {
+      _clearDashEditMode();
+      if (typeof enterCreateMode === 'function') enterCreateMode();
+    }
   }
 
   // 删除模式切换
@@ -995,6 +1043,15 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       }).catch(e => { overlay.remove(); app.showToast(I18N.t('dashboard.delete_failed', {msg: (e.detail?.message || e.message)})); });
     };
   };
+
+  // Issue #407: Auto-enter edit mode from sessionStorage (F5/idle recovery)
+  var _autoEdit = _getDashEditMode();
+  if (_autoEdit && _autoEdit.mode === 'edit' && _autoEdit.sceneId === scene.id && typeof window._toggleFlowEdit === 'function') {
+    _clearDashEditMode();
+    window._toggleFlowEdit(scene.id, owner, name);
+  } else if (_autoEdit && _autoEdit.mode === 'edit' && _autoEdit.sceneId !== scene.id) {
+    _clearDashEditMode();
+  }
 }
 
 // Issue #249 → 引擎绑定真实性同步：原过滤逻辑（离线引擎隐藏、滤空画"广播"）是表面工程，
@@ -1230,6 +1287,8 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
 function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   window._dashboardEditing = true;
   window._currentSceneId = sceneId;
+  // Issue #407: 持久化编辑模式状态（F5/idle 恢复用）
+  _saveDashEditMode('edit', sceneId);
   const agents = dashData.agents || [];
   const agentEngines = dashData.agent_engines || {};
   // 用原始 nodes（来自 pipeline_config）而不是 dashData.scene_nodes
@@ -1283,6 +1342,20 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
   }
 
+  // Issue #407: 恢复编辑草稿（F5/idle 后重新进入编辑模式时回填节点状态）
+  var _editDraft = _restoreDashDraft(owner, name, 'edit', sceneId);
+  if (_editDraft && _editDraft.nodes) {
+    editNodes.forEach(function(en) {
+      var dn = _editDraft.nodes.find(function(n) { return n.id === en.id; });
+      if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; }
+    });
+    if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
+  }
+  // Issue #407: 编辑草稿自动保存
+  function _saveEditDraft() {
+    _saveDashDraft(owner, name, 'edit', sceneId, { nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }) });
+  }
+
   // 编辑操作函数
   window.toggleAgentInScene = function(agentType) {
     const node = editNodes.find(n => n.id === agentType);
@@ -1293,6 +1366,7 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     if (cardsContainer) {
       cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRSubEdit);
     }
+    _saveEditDraft();
   };
 
   window.selectAgentSkill = function(agentType, skillName) {
@@ -1304,10 +1378,12 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     node.skill = skillName || '';
     var cache = (window._skillPickCache || {})[agentType] || {};
     node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+    _saveEditDraft();
   };
 
   window.openEngineModal = function(agentType) {
-    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId);
+    // Issue #407 R1: 传入编辑模式草稿保存函数，引擎确认后持久化 engine_runtime_ids
+    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId, _saveEditDraft);
   };
 
   // 保存编辑 — 只刷新执行流程区域
@@ -1330,6 +1406,9 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     });
     API.put('/scenes/' + encodeURIComponent(sceneId) + '?repo=' + encodeURIComponent(owner + '/' + name), { nodes: nodesPayload }).then(() => {
       window._dashboardEditing = false;
+      // Issue #407: 保存成功后清除草稿与编辑模式状态
+      _clearDashEditMode();
+      _clearDashDraft(owner, name, 'edit', sceneId);
       app.showToast(I18N.t('dashboard.scene_saved')||'场景已保存');
       // 只重新加载执行流程数据，不刷新整个页面
       API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name)).then(d => {
@@ -1377,6 +1456,9 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
   // 取消编辑 — 只恢复执行流程区域
   window._cancelSceneEdit = function(sceneId, owner, name) {
     window._dashboardEditing = false;
+    // Issue #407: 取消编辑后清除草稿与编辑模式状态
+    _clearDashEditMode();
+    _clearDashDraft(owner, name, 'edit', sceneId);
     // 恢复标题行
     if (headerDiv) {
       headerDiv.innerHTML = `<h2 style="font-size:15px;font-weight:600">${I18N.t('skills.execution_flow')||'执行流程'}</h2>
@@ -1470,7 +1552,7 @@ function _renderEditFlowCards(editNodes, agents, agentEngines, sceneNodes, isPRS
 }
 
 // 引擎 modal 实现（从原有逻辑提取，参数化）
-function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId) {
+function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId, saveDraftCb) {
   const allEngines = (agentEngines[agentType] || []);
   const node = editNodes.find(n => n.id === agentType);
   if (!node) return;
@@ -1689,6 +1771,9 @@ function _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner,
       }
       cardsEl.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes, _engIsPRSub);
     }
+    // Issue #407 R1: 引擎选择确认后同步保存草稿（编辑/创建模式共用回调），
+    // 否则仅调整引擎 → F5/闲置恢复后引擎选择丢失
+    if (typeof saveDraftCb === 'function') { try { saveDraftCb(); } catch(e) {} }
   };
   overlay.addEventListener('click', function(ev) { if (ev.target === overlay) overlay.remove(); });
   // 点击下拉外部关闭场景下拉（Issue #198）
@@ -1715,6 +1800,8 @@ window.enterCreateMode = function() {
   let owner = '', name = '';
   try { const cr = app.currentRepo(); if (cr) { owner = cr.owner; name = cr.name; } } catch(e) {}
   if (!owner || !name) { const parts = stripRepoPrefix(data.repo || '').split('/'); owner = parts[0]||''; name = parts[1]||''; }
+  // Issue #407: 持久化编辑模式状态（F5/idle 恢复用）
+  _saveDashEditMode('create');
   _enterCreateStandardMode(data, owner, name);
 };
 
@@ -1769,7 +1856,7 @@ function _enterCreateStandardMode(data, owner, name) {
   </style>`;
 
   // 返回按钮
-  html += `<button class="ap-btn" onclick="window._dashboardEditing=false;_resetCreateMode();app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
+  html += `<button class="ap-btn" onclick="window._dashboardEditing=false;_resetCreateMode();_clearDashEditMode();_clearDashDraft('${owner}','${name}','create');app.nav('dash')" style="margin-bottom:12px">← ${I18N.t('dashboard.scene_center_title')||'项目场景'}</button>`;
 
   // 场景名称 + 描述 + 图标选择（直接 input，不需要点击切换）
   const _iconPickerHtml = _CUSTOM_SCENE_ICONS.map(ic =>
@@ -1842,6 +1929,17 @@ function _enterCreateStandardMode(data, owner, name) {
 
   el.innerHTML = html;
 
+  // Issue #407: 恢复草稿（F5/idle 后重新进入创建模式时回填表单）
+  var _draft = _restoreDashDraft(owner, name, 'create');
+  if (_draft) {
+    var _nameInput = document.getElementById('createSceneName');
+    var _descInput = document.getElementById('createSceneDesc');
+    if (_nameInput && _draft.sceneName) _nameInput.value = _draft.sceneName;
+    if (_descInput && _draft.sceneDesc) _descInput.value = _draft.sceneDesc;
+    if (_draft.icon) { _createSceneIcon = _draft.icon; var _iconEl = document.getElementById('createSceneIconDisplay'); if (_iconEl) _iconEl.textContent = _draft.icon; }
+    if (_draft.nodes) { editNodes.forEach(function(en) { var dn = _draft.nodes.find(function(n) { return n.id === en.id; }); if (dn) { en.enabled = dn.enabled; en.skill = dn.skill || ''; en.skill_display_name = dn.skill_display_name || ''; en.engine_runtime_ids = dn.engine_runtime_ids || []; } }); var _fc = document.getElementById('flowCardsContainer'); if (_fc) _fc.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes); }
+  }
+
   // Issue #307: 加载托管仓库列表供关联仓库选择
   API.get('/repos/managed').then(function(d) {
     window._linkedRepoOptions = (d && d.repos) || [];
@@ -1849,6 +1947,18 @@ function _enterCreateStandardMode(data, owner, name) {
 
   // PR 订阅开关（创建页，只切 UI，保存时一起提交）
   let _createPrSubEnabled = false;
+  // Issue #407: 草稿恢复 PR 订阅状态
+  if (_draft && _draft.prSubEnabled) { _createPrSubEnabled = true; }
+  // Issue #407: 草稿自动保存函数
+  function _saveCreateDraft() {
+    var _n = (document.getElementById('createSceneName') || {}).value || '';
+    var _d = (document.getElementById('createSceneDesc') || {}).value || '';
+    _saveDashDraft(owner, name, 'create', null, { sceneName: _n, sceneDesc: _d, icon: _createSceneIcon, nodes: editNodes.map(function(n) { return { id: n.id, tag: n.tag, skill: n.skill, skill_display_name: n.skill_display_name, mode: n.mode, next: n.next, handoff: n.handoff, skip: n.skip, enabled: n.enabled, engine_runtime_ids: n.engine_runtime_ids }; }), prSubEnabled: _createPrSubEnabled });
+  }
+  var _nameI = document.getElementById('createSceneName');
+  var _descI = document.getElementById('createSceneDesc');
+  if (_nameI) _nameI.addEventListener('input', _saveCreateDraft);
+  if (_descI) _descI.addEventListener('input', _saveCreateDraft);
   window._toggleCreatePrSubscription = function() {
     var toggle = document.getElementById('prSubToggle');
     if (!toggle) return;
@@ -1857,6 +1967,7 @@ function _enterCreateStandardMode(data, owner, name) {
     toggle.setAttribute('data-on', _createPrSubEnabled ? '1' : '0');
     toggle.style.background = _createPrSubEnabled ? '#34c759' : '#e8e8ed';
     if (knob) knob.style.left = _createPrSubEnabled ? '20px' : '2px';
+    _saveCreateDraft();
   };
 
   // 图标选择
@@ -1870,6 +1981,7 @@ function _enterCreateStandardMode(data, owner, name) {
       el.style.color = isActive ? '#fff' : '';
       el.classList.toggle('active', isActive);
     });
+    _saveCreateDraft();
   };
 
   // 加载分支列表
@@ -1890,6 +2002,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (!node.enabled) { node.skill = ''; node.skill_display_name = ''; node.engine_runtime_ids = []; }
     const cardsContainer = document.getElementById('flowCardsContainer');
     if (cardsContainer) cardsContainer.innerHTML = _renderEditFlowCards(editNodes, agents, agentEngines, editNodes);
+    _saveCreateDraft();
   };
 
   window.selectAgentSkill = function(agentType, skillName) {
@@ -1901,10 +2014,12 @@ function _enterCreateStandardMode(data, owner, name) {
     node.skill = skillName || '';
     var cache = (window._skillPickCache || {})[agentType] || {};
     node.skill_display_name = skillName ? (cache[skillName] || skillName) : '';
+    _saveCreateDraft();
   };
 
   window.openEngineModal = function(agentType) {
-    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '');
+    // Issue #407 R1: 传入创建模式草稿保存函数，引擎确认后持久化 engine_runtime_ids
+    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '', _saveCreateDraft);
   };
 
   window._toggleNewBranchInline = function() {
@@ -1980,6 +2095,9 @@ function _enterCreateStandardMode(data, owner, name) {
     });
     API.post('/scenes?repo=' + encodeURIComponent(owner + '/' + name), { name: sceneNameVal.trim(), description: sceneDescVal.trim(), scope: 'repo', nodes: nodesPayload, icon: _createSceneIcon, pr_subscription_enabled: _createPrSubEnabled }).then(r => {
       window._dashboardEditing = false;
+      // Issue #407: 保存成功后清除草稿与编辑模式状态
+      _clearDashEditMode();
+      _clearDashDraft(owner, name, 'create');
       // 收集高级选项
       var workBranch = (document.getElementById('advWorkBranchInline') || {}).value || 'main';
       var _collectedFields = _cfCollectFields('#advCustomFieldsInline');

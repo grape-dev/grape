@@ -10,7 +10,7 @@
 | 表 | `obs_metric_rollup(resolution, bucket_start, metric, dim_key, repo_key, value, cnt)` |
 | 分辨率 | `minute`（保留 7 天）+ `hour`（保留 30 天）；**小时桶直接从原始表重算**（精确，p95 不靠分钟值拼） |
 | 维度 | `repo:<repo_key>`（各仓库）+ `global`（平台汇总；**只在 L2 暴露**） |
-| 指标 | 任务量/结果/成功率、排队等待与耗时的 avg+p95、四种 token、`runtimes_online`（仅 global） |
+| 指标 | 任务量/结果/成功率、排队等待与耗时的 avg+p95、四种 token、`runtimes_online`（仅 global）、`engine_avail_online/total`（仅 global，引擎可用率小时桶预聚合，Issue #437） |
 | `value`/`cnt` | `value` = 该桶的聚合值（计数/比率/均值/p95/求和）；`cnt` = 参与样本数（比率类=分母，便于加权平均） |
 | 写入 | 60s 循环做**追赶式补齐**（重启/停机后自动补），每 tick 限量，避免长事务 |
 | 补数跨度 | 分钟默认回看 24h、小时回看 30 天（首次安装即有可用趋势） |
@@ -38,8 +38,11 @@ MINUTE_RETENTION_DAYS = 7
 HOUR_RETENTION_DAYS = 30
 
 #: 需要按"求和"聚合的指标；比率/均值类按 cnt 加权；p95 取最大值（保守近似）
+#: engine_avail_online/total（Issue #437）：引擎可用率的小时桶预聚合（仅 global 维），
+#: SLO 据此读小时桶，不再每轮全窗扫 obs_runtime_samples
 SUM_METRICS = ("task_enqueued", "task_done", "task_failed", "task_cancelled",
-               "token_input", "token_output", "token_cache", "token_total")
+               "token_input", "token_output", "token_cache", "token_total",
+               "engine_avail_online", "engine_avail_total")
 RATE_METRICS = ("task_success_rate",)
 AVG_METRICS = ("task_queue_wait_avg", "task_duration_avg")
 P95_METRICS = ("task_queue_wait_p95", "task_duration_p95")
@@ -197,6 +200,20 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
     except Exception as e:
         log.warning(f"obs rollup: online count failed: {e}")
 
+    # ⑥ 引擎可用率采样（Issue #437）：SLO 的 engine_availability 从这里读小时桶，
+    #    不再每轮评估全窗扫描 obs_runtime_samples（仅 global 维，桶内 SUM(online)/COUNT(*)）
+    avail: Optional[Tuple[float, int]] = None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT SUM(online), COUNT(*) FROM obs_runtime_samples"
+                      " WHERE sampled_at >= ? AND sampled_at < ?", (s_iso, e_iso))
+            _row = c.fetchone()
+            if _row and int(_row[1] or 0) > 0:
+                avail = (float(_row[0] or 0), int(_row[1]))
+    except Exception as e:
+        log.warning(f"obs rollup: availability agg failed: {e}")
+
     out: Dict[str, Dict[str, Tuple[float, int]]] = {}
     for repo_key, m in per_repo.items():
         row: Dict[str, Tuple[float, int]] = {}
@@ -257,6 +274,9 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
         if vals:
             g[metric] = (max(vals), sum(cnts))
     g["runtimes_online"] = (float(online), 1)
+    if avail:      # 引擎可用率预聚合（仅 global；见 ⑥）
+        g["engine_avail_online"] = (round(avail[0], 3), avail[1])
+        g["engine_avail_total"] = (float(avail[1]), avail[1])
     out[DIM_GLOBAL] = g
     return out
 

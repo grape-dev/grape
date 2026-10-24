@@ -1372,8 +1372,17 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     if _is_github:
         from src.user.repo_manager import _github_req
         try:
-            _github_req("POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
+            _gh_resp = _github_req("POST", f"https://api.github.com/repos/{owner}/{rname}/issues/{issue_number}/comments",
                         api_token, {"body": comment_body})
+            # Issue #453 台账（S19-4）：GitHub 澄清评论入账——响应 dict 带 comment id
+            try:
+                from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+                from src.repo_key import to_repo_key
+                record_outbound("github", to_repo_key(f"{owner}/{rname}", "github"), "issue_comment",
+                                extract_content_id(_gh_resp, "issue_comment") if isinstance(_gh_resp, dict) else "",
+                                issue_number=str(issue_number), content_hash=content_hash_md5(comment_body))
+            except Exception as _le:
+                log.warning(f"outbound_ledger record (github clarify) failed: {_le}")
             log.info(f"Issue clarify: posted comment to {repo_key}/issues/{issue_number} by {user['username']}")
         except Exception as e:
             raise HTTPException(status_code=502, detail={"code": 502,
@@ -1389,7 +1398,19 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
                                        "Accept": "application/json"}, method="POST")
             try:
                 with _ur.urlopen(req, timeout=30) as resp:
-                    resp.read()
+                    _raw = resp.read()
+                    # Issue #453 代发台账（写点5/7）：澄清评论入账——响应读出后取 ID，不再丢弃
+                    try:
+                        import json as _lj
+                        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+                        from src.repo_key import to_repo_key
+                        _parsed = _lj.loads(_raw) if _raw.strip() else {}
+                        _cid = extract_content_id(_parsed, "issue_comment") if isinstance(_parsed, dict) else ""
+                        record_outbound("gitcode", to_repo_key(f"{_owner}/{_rname}", "gitcode"),
+                                        "issue_comment", _cid, issue_number=str(_issue_num),
+                                        content_hash=content_hash_md5(_body))
+                    except Exception as _le:
+                        log.warning(f"outbound_ledger record (clarify comment) failed: {_le}")
             except _uerr.HTTPError as e:
                 raise RuntimeError(f"GitCode comment failed ({e.code}): {e.read().decode(errors='replace')[:300]}")
             except _uerr.URLError as e:

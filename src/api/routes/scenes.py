@@ -1699,7 +1699,6 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     from src.api.pipeline_config import get_pipeline_config, _query_scene_by_id
     from src.repo_key import to_repo_key
     from src.session_manager import db, db_lock
-    from src.user.db import get_repo_token_with_refresh
     from src.api.session_store import upsert_agent_session
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
@@ -1711,7 +1710,9 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     if not nodes:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "场景无 Agent 节点配置"})
 
-    repo_token = get_repo_token_with_refresh(repo_key) or ""
+    # R25.9 回声治理：应用场景不触碰 token（原 get_repo_token_with_refresh 把 bot/用户级
+    # token 回填 session，第 1 级命中 bot token → 自循环检测放行 bot 评论 → 回声）。
+    # upsert 传 None = 保留既有 session token。
     updated = 0
     with db_lock:
         c = db.cursor()
@@ -1761,7 +1762,7 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=agent_type,
                     runtime_id=runtime_id, skill=skill, skill_id=skill_id,
-                    repo_gitcode_token=repo_token, status="idle",
+                    repo_gitcode_token=None, status="idle",
                     enable=None, subscribe_events=None,
                     im_app_id=None, im_app_secret=None, im_provider=None,
                 )

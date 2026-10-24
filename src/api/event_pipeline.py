@@ -206,26 +206,26 @@ def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
     return ""
 
 
-def _filter_pr_sub_matches(matches: list, issue_scene_id: str, skip_issue_scene: bool = False,
+def _filter_pr_sub_matches(matches: list, issue_scene_id: str, bound_issue: bool = False,
                            issue_qa_skill: str = "") -> list:
     """PR 订阅匹配结果过滤（Issue #426 修复口径 + skill 级去重口径）：
-    1. 仅当主路由（stage matrix）已为该事件派发 QA（skip_issue_scene=True）时，
-       排除 PR 关联 Issue 所在场景（避免同场景重复 QA）；
+    1. 仅当 PR 绑定了 Issue（bound_issue=True）时，
+       排除 PR 关联 Issue 所在场景（绑 Issue 即问题已被他人解决，该场景无需再被订阅唤醒）；
        其余情况订阅场景不再因绑定关系被排除
-    2. skip_issue_scene=True 且 issue_qa_skill 非空时，排除与主路由 QA 同 skill 的场景
-       （主路由 QA 已覆盖该 skill 的审查，同 skill 异场景再审是重复；#426 后补）
+    2. bound_issue=True 且 issue_qa_skill 非空时，排除与 Issue 场景同 skill 的场景
+       （同 skill 审查重复；#426 后补）
     3. 剩余场景中 qa_skill 相同的只保留第一个（同 skill 重复审查浪费资源，#318 保留）
 
     matches: [(scene_id, qa_skill, qa_engine_ids, sre_skill, sre_engine_ids), ...]
     issue_scene_id: PR 关联 Issue 所在场景（空=无关联 Issue）
-    skip_issue_scene: 主路由是否已为该事件派发 QA（agent_type == "qa"）
-    issue_qa_skill: Issue 所在场景 QA 节点的 skill（仅 skip_issue_scene=True 时使用）
+    bound_issue: PR 是否绑定了关联 Issue
+    issue_qa_skill: Issue 所在场景 QA 节点的 skill（仅 bound_issue=True 时使用）
     """
-    # 1. 仅当主路由已派发 QA 时排除 Issue 所在场景
-    if skip_issue_scene and issue_scene_id:
+    # 1. PR 绑定了 Issue 时排除 Issue 所在场景
+    if bound_issue and issue_scene_id:
         matches = [m for m in matches if m[0] != issue_scene_id]
-    # 2. 主路由已派发 QA 时排除同 qa_skill 场景（主路由 QA 覆盖同 skill 审查）
-    if skip_issue_scene and issue_qa_skill:
+    # 2. PR 绑定了 Issue 时排除同 qa_skill 场景
+    if bound_issue and issue_qa_skill:
         matches = [m for m in matches if m[1] != issue_qa_skill]
     # 3. 相同 qa_skill 只保留第一个
     seen_skills = set()
@@ -1328,20 +1328,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _issue_scene_id_early, _ = get_issue_scene(repo_key, _pre_issue_id)
                 except Exception:
                     pass
-            # Issue #426：PR 关联 Issue 时订阅场景不再整体排除——仅当主路由（stage matrix）
-            # 会为该事件派发 QA 时跳过同场景（避免同场景重复 QA），其余场景并行共存
-            _stage_qa_early = False
+            # Issue #426：PR 绑定 Issue 即过滤同场景/同 skill 订阅场景（绑 Issue = 问题已被
+            # 他人解决，无需再被订阅唤醒），其余场景并行共存
             _issue_qa_skill_early = ""
             if _issue_scene_id_early:
-                try:
-                    _stage_qa_early = (_resolve_issue_stage_agent(
-                        repo_key, event_type, evt.get("payload", {}) or {}, PR_DEFAULT_AGENT) == "qa")
-                except Exception:
-                    _stage_qa_early = False
-            # 主路由派 QA 时取 Issue 场景的 qa_skill（skill 级去重用）
-            if _stage_qa_early and _issue_scene_id_early:
                 _issue_qa_skill_early = _scene_qa_skill(repo_key, _issue_scene_id_early, _pr_sub_matches_early)
-            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, _stage_qa_early, _issue_qa_skill_early)
+            _pr_sub_before_filter_early = _pr_sub_matches_early
+            _pr_sub_matches_early = _filter_pr_sub_matches(_pr_sub_matches_early, _issue_scene_id_early, bool(_issue_scene_id_early), _issue_qa_skill_early)
+            if not _pr_sub_matches_early and _pr_sub_before_filter_early:
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "pr_sub_filtered_bound_issue",
+                                     issue_id=_pre_issue_id)
             if _pr_sub_matches_early:
                 if _is_bot_actor:
                     _early_dispatched = set()
@@ -1355,7 +1352,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 2.0b 开发者指令检测（/done /cancel /resume）+ 澄清/审核回复自动恢复
     # R20.6.2: 开发者指令检测移到自循环检测之前——用户指令优先处理，不因自循环检测被跳过
-    if event_type in ("issue_comment", "note_hook_pr"):
+    # Issue #453 修复点 2（S4，审查 D1）：指令与状态变更通道身份前置校验——bot actor
+    # （含 agent 引用用户原文的回声，原文里的指令关键词）不参与指令解析与澄清恢复，
+    # 否则 bot 评论含"确认完成"仍会先执行 confirm_issue_done 再被 1418 入口拦截
+    # （副作用已发生）。仅人类 actor 的指令语义生效。
+    if event_type in ("issue_comment", "note_hook_pr") and not _is_bot_actor:
         try:
             _payload = evt.get("payload", {}) or {}
             _oa = _payload.get("object_attributes", {}) or {}
@@ -1409,6 +1410,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 路径 B（user token）：四条件组合判断 → skip
     # 通过 resolve_config_level 获取配置级别，创建对应 handler 判断
     if actor and repo_key:
+        # Issue #453: 评论类事件入口统一拦截——actor 命中 bot 用户名表（managed_repos.bot_username
+        # + 全局 bot）即自循环，不依赖 resolve_config_level 的级别分派。背景：issue-372 的
+        # read_stored_token() 会把托管人 PAT 抄写进 devops_agent_session，使新托管仓库的级别
+        # 解析返回 session → SessionTokenHandler.is_self_loop_actor 降级不检测 → bot 评论闭环死循环。
+        # 本拦截在 2.0b 之后（保留开发者指令/澄清恢复处理），仅覆盖评论族 issue_comment/note_hook_pr；
+        # issue_opened 的「## 父任务」子任务豁免与 1.5 PR 订阅预匹配（pull_request_* 族）不受影响。
+        if event_type in ("issue_comment", "note_hook_pr") and _is_bot_actor:
+            log.info(f"Pipeline skip: self-loop detected (actor={actor} in bot_usernames, level-independent, repo={repo_key})")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, "self_loop", actor, issue_id=_pre_issue_id)
+            return result
         try:
             from src.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
             _provider = create_provider_from_repo_key(repo_key)
@@ -1471,7 +1483,90 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     # 2.0a 系统回帖标记检测：含 <!-- grape-auto-comment --> 的评论是系统自动回帖的回声，跳过
     # Issue #372: 标记检测在自循环检测之后——自循环检测优先处理 bot actor，标记检测处理系统回帖回声
+    # Issue #453 代发台账（读侧）：查表插在 marker 检测之前——台账是主判定（精确 ID 命中），
+    # marker 降级为 fallback（GitHub 等不净化 HTML 注释的平台仍有效；GitCode 必 miss）。
+    # 查表异常/未命中一律放行，兜底判断（bot 名单，2.0 节已先行）接手。
+    # issue_opened 特例（S16-3）：「## 父任务」多任务豁免优先于台账——我们建的子任务 issue 在台账
+    # 必有记录，但多任务模式恰恰依赖"bot 建子 issue → webhook 触发子流水线"，先判豁免再查表。
+    # _grape_internal_trigger：建单入口的同步直调（issue 刚入账、立即要开工）——跳过台账判定。
+    if event_type == "issue_opened":
+        try:
+            _payload = evt.get("payload", {}) or {}
+            if not _payload.get("_grape_internal_trigger"):
+                _oa_io = _payload.get("object_attributes", {}) or {}
+                _body_io = str(_oa_io.get("description") or _payload.get("issue", {}).get("body") or "")
+                if "## 父任务" not in _body_io:
+                    from src.repo_key import parse_repo_key
+                    _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
+                    from src.outbound_ledger import is_our_outbound
+                    _issue_key = str(_oa_io.get("iid") or _oa_io.get("number")
+                                     or (_payload.get("issue", {}) or {}).get("number") or "")
+                    if _issue_key and is_our_outbound(_provider_name, repo_key, "issue", _issue_key):
+                        log.info(f"Pipeline skip: outbound ledger hit (issue_opened, issue={_issue_key}, repo={repo_key})")
+                        from src.api.event_store import append_skipped_event
+                        append_skipped_event(repo_key, event_type, "outbound_ledger_hit", issue_id=_pre_issue_id or _issue_key)
+                        return result
+        except Exception as e:
+            log.warning(f"Pipeline: outbound ledger issue_opened check failed (allow-through): {e}")
+    # Issue #453 台账（读侧新增）：issue_closed / PR 族——关闭与 PR 事件的
+    # 回流对账（老问题 3/26 顺手覆盖）。查表异常一律放行，PR 订阅预匹配（1.5 节）不受影响。
+    # S19：issue_reopened / issue_assigned / issue_labeled 元数据回声——update_issue
+    # 非 body 修改记 issue_meta（编号键），命中即拦（bot 接管/reopen/打标签回声）。
+    # S24 例外（对齐 1.5 预匹配语义）：bot 建的 PR 必须放行给 QA 审查——PR opened 是
+    # 流水线必需环节（coding→qa），bot 动作回流默认拦唯独此通道保留（问题 3 原设计）。
+    # S26/E2 精确语义：pull_request_updated 命中台账时若有新 commit（oldrev/commits）
+    # 放行给 qa 复审（Issue #46 QA↔coding 回流闭环）——拦回声（纯文本编辑）不拦流转。
+    # 审查 D2 修正：事件名对齐 event_types.py 真实值（pull_request_opened/updated/merged，
+    # 原 pr_opened/pr_updated/pr_merged 为不存在的假名——该段曾是死代码）。
+    if event_type in ("issue_closed", "pull_request_opened", "pull_request_updated", "pull_request_merged",
+                      "issue_reopened", "issue_assigned", "issue_labeled"):
+        try:
+            _payload = evt.get("payload", {}) or {}
+            _pr_opened_exempt = (event_type == "pull_request_opened" and _is_bot_actor)
+            _pr_update_has_commit = False
+            if event_type == "pull_request_updated":
+                _oa_pc = _payload.get("object_attributes", {}) or {}
+                _pr_update_has_commit = bool(_payload.get("commits")) or bool(_oa_pc.get("oldrev"))
+            if not _pr_opened_exempt and not _pr_update_has_commit:
+                from src.repo_key import parse_repo_key
+                _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
+                from src.outbound_ledger import is_our_outbound
+                _oa_cl = _payload.get("object_attributes", {}) or {}
+                _num_cl = str(_oa_cl.get("iid") or _oa_cl.get("number")
+                              or (_payload.get("issue", {}) or {}).get("number") or "")
+                if _num_cl:
+                    if event_type == "issue_closed":
+                        _ct = "issue_close"
+                    elif "merge" in event_type:
+                        _ct = "pr_merge"
+                    elif event_type.startswith("pr") or event_type.startswith("pull_request"):
+                        _ct = "pr"
+                    else:
+                        _ct = "issue_meta"  # reopened / assigned / labeled
+                    if is_our_outbound(_provider_name, repo_key, _ct, _num_cl):
+                        log.info(f"Pipeline skip: outbound ledger hit ({_ct}, num={_num_cl}, repo={repo_key})")
+                        from src.api.event_store import append_skipped_event
+                        append_skipped_event(repo_key, event_type, "outbound_ledger_hit", issue_id=_pre_issue_id or _num_cl)
+                        return result
+        except Exception as e:
+            log.warning(f"Pipeline: outbound ledger close/pr check failed (allow-through): {e}")
     if event_type in ("issue_comment", "note_hook_pr"):
+        try:
+            _payload = evt.get("payload", {}) or {}
+            from src.repo_key import parse_repo_key
+            _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
+            from src.outbound_ledger import is_our_outbound, extract_event_content_id, content_hash_md5
+            _cid = extract_event_content_id(_provider_name, _payload)
+            _note = str((_payload.get("object_attributes") or {}).get("note")
+                        or (_payload.get("comment") or {}).get("body") or _payload.get("body") or "")
+            if _cid and is_our_outbound(_provider_name, repo_key, "issue_comment", _cid,
+                                        content_hash=content_hash_md5(_note)):
+                log.info(f"Pipeline skip: outbound ledger hit (id={_cid}, repo={repo_key}, event={event_type})")
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "outbound_ledger_hit", issue_id=_pre_issue_id)
+                return result
+        except Exception as e:
+            log.warning(f"Pipeline: outbound ledger check failed (allow-through): {e}")
         try:
             _payload = evt.get("payload", {}) or {}
             _oa = _payload.get("object_attributes", {}) or {}
@@ -1485,7 +1580,27 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             log.warning(f"Pipeline: auto-comment marker check failed: {e}")
 
     # 2.0a2 R12.9: issue_updated description 编辑标记检测——agent 编辑 issue description 的回声
+    # Issue #453 代发台账（读侧，S14）：编辑回声无 comment_id，按 (repo+剥离 marker 指纹) 对账；
+    # 指纹不匹配只告警不拦（is_our_outbound 内部实现），ID 精确命中才拦。
     if event_type == "issue_updated":
+        try:
+            _payload = evt.get("payload", {}) or {}
+            from src.repo_key import parse_repo_key
+            _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
+            from src.outbound_ledger import is_our_outbound, content_hash_md5
+            _oa_ed = _payload.get("object_attributes", {}) or {}
+            _desc_ed = str(_oa_ed.get("description") or "")
+            _edit_key = str(_oa_ed.get("iid") or _oa_ed.get("number")
+                            or (_payload.get("issue", {}) or {}).get("number") or "")
+            if _desc_ed and _edit_key:
+                if is_our_outbound(_provider_name, repo_key, "issue_edit", _edit_key,
+                                   content_hash=content_hash_md5(_desc_ed)):
+                    log.info(f"Pipeline skip: outbound ledger hit (issue_edit, issue={_edit_key}, repo={repo_key})")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "outbound_ledger_hit", issue_id=_pre_issue_id)
+                    return result
+        except Exception as e:
+            log.warning(f"Pipeline: outbound ledger issue_edit check failed (allow-through): {e}")
         try:
             _payload = evt.get("payload", {}) or {}
             _oa = _payload.get("object_attributes", {}) or {}
@@ -1632,10 +1747,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     _issue_scene_id, _ = get_issue_scene(repo_key, _pre_issue_id)
                 except Exception:
                     pass
+            # Issue #426：PR 绑定 Issue 即过滤同场景/同 skill 订阅场景
+            _pr_sub_matches_before_filter = _pr_sub_matches
             _pr_sub_matches = _filter_pr_sub_matches(
-                _pr_sub_matches, _issue_scene_id, agent_type == "qa",
+                _pr_sub_matches, _issue_scene_id, bool(_issue_scene_id),
                 (_scene_qa_skill(repo_key, _issue_scene_id, _pr_sub_matches)
-                 if agent_type == "qa" and _issue_scene_id else ""))
+                 if _issue_scene_id else ""))
+            if not _pr_sub_matches and _pr_sub_matches_before_filter:
+                from src.api.event_store import append_skipped_event
+                append_skipped_event(repo_key, event_type, "pr_sub_filtered_bound_issue",
+                                     issue_id=_pre_issue_id)
             # Issue #318 兜底去重：排除 1.5 预匹配已派发的场景（防御 bot actor 未被自循环拦截的边缘情况）
             _early_dispatched = evt.get("_pr_sub_early_dispatched")
             if _early_dispatched:
@@ -2356,6 +2477,61 @@ def _github_post_issue_comment(owner: str, repo: str, issue_num: str, body: str,
     """通过 GitHub API 发 Issue 评论。失败抛异常。"""
     from src.user.repo_manager import _github_req
     return _github_req("POST", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}/comments", token=token, body={"body": body})
+
+
+def _ledger_record_comment(provider: str, repo_key: str, repository: str, issue_num, body: str, resp,
+                           content_type: str = "issue_comment", origin_task: str = "") -> None:
+    """Issue #453 代发台账（S12 写入点3/4）：系统发评论成功后记账。best-effort 不抛异常。
+
+    - provider: gitcode / github（分平台只影响 ID 提取字段）
+    - resp: VCS 响应（dict 带 id）；GitHub 路径由 _github_post_issue_comment 返回 dict；
+      GitCode 裸 urllib 路径由调用方读响应 JSON 后传入
+    - 指纹记剥离 marker 后正文的 md5（仅用于旁路告警核对，不参与拦截）
+    """
+    try:
+        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        _rk = repo_key or ""
+        if not _rk and repository:
+            from src.repo_key import to_repo_key
+            _rk = to_repo_key(repository, provider)
+        _cid = extract_content_id(resp, content_type) if isinstance(resp, dict) else ""
+        if not _cid:
+            from src.config import log as _log
+            _log.warning(f"outbound_ledger: comment response carries no content ID "
+                         f"(provider={provider}, repo={repo_key}, issue={issue_num}) — silent-miss risk, "
+                         f"check provider response field mapping")
+        record_outbound(provider, _rk, content_type, _cid, issue_number=str(issue_num or ""),
+                        origin_channel="webhook", origin_task=origin_task,
+                        content_hash=content_hash_md5(body))
+    except Exception as e:
+        log.warning(f"outbound_ledger record comment failed (non-blocking): {e}")
+
+
+def _gitcode_post_issue_comment_ledgered(repository: str, issue_num, comment: str, bot_token: str,
+                                          repo_key: str = "", origin_task: str = "") -> None:
+    """GitCode 裸 urllib 发 Issue 评论 + 记账（S16-1：该路径原先连响应体都不读）。
+
+    供 _post_result_to_issue / _post_subtask_completion_to_parent / _post_all_subtasks_done
+    共用；失败抛异常（调用方原有 try/except 兜底）。
+    """
+    import urllib.request, json as _json
+    _data = _json.dumps({"body": comment}).encode("utf-8")
+    _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_num}/comments"
+    _req = urllib.request.Request(_url, data=_data,
+        headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
+    _resp = urllib.request.urlopen(_req, timeout=15)
+    _body_resp = b""
+    try:
+        _body_resp = _resp.read()
+    except Exception:
+        pass
+    _parsed = {}
+    try:
+        _parsed = _json.loads(_body_resp) if _body_resp else {}
+    except Exception:
+        _parsed = {}
+    _ledger_record_comment("gitcode", repo_key, repository, issue_num, comment,
+                           _parsed if isinstance(_parsed, dict) else {}, origin_task=origin_task)
 
 
 def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
@@ -4034,7 +4210,8 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             # agent 没发评论，系统补发（只发 conclusion，不发原始 result_text）
             _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
             _comment += "\n<!-- grape-auto-comment -->"
-            _github_post_issue_comment(_owner, _repo, str(issue_number), _comment, bot_token)
+            _gh_resp = _github_post_issue_comment(_owner, _repo, str(issue_number), _comment, bot_token)
+            _ledger_record_comment("github", repo_key, repository, issue_number, _comment, _gh_resp)
             log.info(f"Exec agent: posted system comment (agent did not post) to {repository}/issues/{issue_number}")
         except Exception as e:
             log.warning(f"Exec agent: failed to post result comment (GitHub): {e}")
@@ -4060,17 +4237,8 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
         # agent 没发评论，系统补发（只发 conclusion，不发原始 result_text）
         _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
         _comment += "\n<!-- grape-auto-comment -->"
-        _data = _json.dumps({"body": _comment}).encode("utf-8")
-        _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
-        _req = urllib.request.Request(
-            _url, data=_data,
-            headers={
-                "Authorization": f"Bearer {bot_token}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        urllib.request.urlopen(_req, timeout=15)
+        _gitcode_post_issue_comment_ledgered(repository, issue_number, _comment, bot_token,
+                                             repo_key=repo_key)
         log.info(f"Exec agent: posted system comment (agent did not post) to {repository}/issues/{issue_number}")
     except Exception as e:
         log.warning(f"Exec agent: failed to post result comment: {e}")
@@ -4090,13 +4258,12 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
         if _is_github_repo(repo_key):
             from src.repo_key import split_owner_repo
             _owner, _repo = split_owner_repo(repo_key)
-            _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+            _gh_resp = _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+            # Issue #453 台账（审查 P1-1 补漏）：subtask 完成回帖入账
+            _ledger_record_comment("github", repo_key, repository, parent_issue_num, _comment, _gh_resp)
         else:
-            _data = _json.dumps({"body": _comment}).encode("utf-8")
-            _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
-            _req = urllib.request.Request(_url, data=_data,
-                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(_req, timeout=15)
+            _gitcode_post_issue_comment_ledgered(repository, parent_issue_num, _comment, bot_token,
+                                                 repo_key=repo_key)
         log.info(f"Subtask #{sub_issue_num} completion posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post subtask completion failed: {e}")
@@ -4119,13 +4286,12 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         if _is_github_repo(repo_key):
             from src.repo_key import split_owner_repo
             _owner, _repo = split_owner_repo(repo_key)
-            _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+            _gh_resp = _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
+            # Issue #453 台账（审查 P1-1 补漏）：全部完成汇总回帖入账
+            _ledger_record_comment("github", repo_key, repository, parent_issue_num, _comment, _gh_resp)
         else:
-            _data = _json.dumps({"body": _comment}).encode("utf-8")
-            _url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{parent_issue_num}/comments"
-            _req = urllib.request.Request(_url, data=_data,
-                headers={"Authorization": f"Bearer {bot_token}", "Content-Type": "application/json"}, method="POST")
-            urllib.request.urlopen(_req, timeout=15)
+            _gitcode_post_issue_comment_ledgered(repository, parent_issue_num, _comment, bot_token,
+                                                 repo_key=repo_key)
         log.info(f"All subtasks done summary posted to parent #{parent_issue_num}")
     except Exception as e:
         log.warning(f"Post all subtasks done failed: {e}")
@@ -4171,7 +4337,25 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
             _req = urllib.request.Request(_url, data=_data,
                 headers={"Authorization": f"Bearer {bot_token}",
                          "Content-Type": "application/json"}, method="POST")
-        urllib.request.urlopen(_req, timeout=15)
+        _resp = urllib.request.urlopen(_req, timeout=15)
+        # Issue #453 台账（审查 P1-1 补漏，写点9）：qa 审查结论回帖 PR → note_hook_pr 回流对账。
+        # 原先响应丢弃不入账；GitCode PR 评论与 issue 评论 ID 同值域，按 issue_comment 键记。
+        try:
+            _body_resp = b""
+            try:
+                _body_resp = _resp.read()
+            except Exception:
+                pass
+            _parsed_pr = {}
+            try:
+                _parsed_pr = _json.loads(_body_resp) if _body_resp else {}
+            except Exception:
+                _parsed_pr = {}
+            _ledger_record_comment("github" if _is_github_repo(repo_key) else "gitcode",
+                                   repo_key, repository, pr_number, _comment,
+                                   _parsed_pr if isinstance(_parsed_pr, dict) else {})
+        except Exception as _le:
+            log.warning(f"outbound_ledger record (_post_result_to_pr) failed: {_le}")
         log.info(f"PR-sub: posted result comment to {repository}/pulls/{pr_number}")
     except Exception as e:
         log.warning(f"PR-sub: post result comment failed: {e}")
