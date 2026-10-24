@@ -29,9 +29,15 @@ try {
   }
 } catch (e) { _markedReady = false; }
 
+// 裸 URL 后紧跟 CJK/全角字符时在边界插入空格，让 GFM autolink 在此断开，
+// 避免全角字符被收进链接再 percent-encode（URL 匹配限定 RFC3986 ASCII 字符集，
+// 不会影响行内链接 [文字](URL)、图片 ![](…) 与英文半角括号）
+const BARE_URL_CJK_BOUNDARY = /(^|[^A-Za-z0-9:/@.\-_~#?&=%+])(https?:\/\/[A-Za-z0-9\-._~:/?#\[\]@!$&'*+,;=%]+)(?=[\u2E80-\u9FFF\uF900-\uFAFF\uFF00-\uFFEF\u3000-\u303F])/g;
+
 function renderMarkdown(text) {
   if (!text) return '';
   const safe = String(text)
+    .replace(BARE_URL_CJK_BOUNDARY, '$1$2 ')
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;')
