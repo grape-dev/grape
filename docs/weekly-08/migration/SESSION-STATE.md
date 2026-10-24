@@ -53,6 +53,7 @@
 - CDP调试：Chrome要求message id必须是整数，字符串id会被静默拒收（命令发出但无响应，脚本空等到超时）
 - 测试账号vue-mig-test是0 bindings，scene-market在app.js需求17的_repoDependentViews里会被拦到引导页；验证时种假binding+sessionStorage currentRepo绕过（纯前端测试手段）
 - 老代码 bgColor+'22' / var(--r)22 十六进制拼alpha是非法CSS整条丢弃，一律改 color-mix(in srgb, X N%, transparent)
+- **双主题截图的正确姿势（10-24翻车修正）**：壳的暗色=data-theme-mode="auto"+浏览器prefers-color-scheme媒体查询，只设data-theme-mode="dark"attr是无效的（CSS里没有该组合的变量定义）→截出两张一样的亮图。裸CDP Emulation.setEmulatedMedia在这个headless chrome上也不生效，必须用playwright的page.emulate_media(color_scheme='dark')+localStorage grapeThemeMode='auto'，截完用PIL像素均值核对（亮~241/暗~36）。截图超时重试2-3次即可（swiftshader软渲染慢）。工具链：pip3 install --user --break-system-packages playwright -i https://pypi.tuna.tsinghua.edu.cn/simple（默认源会超时）
 
 ## 命令速查
 - 构建+lint：cd src/api/frontend/app && npm run lint && npx vite build
