@@ -1,0 +1,46 @@
+/* bridge.css — Vue view chunks inside the legacy shell.
+ * Maps new-engine token names onto legacy shell variables (--t/--a/--c/...),
+ * so views get Liquid Glass styling AND follow the shell's light/dark theme
+ * (legacy flips vars via [data-theme="apple"][data-theme-mode=auto] + prefers-color-scheme). */
+:root {
+  --c-bg: var(--bg, #f5f5f7);
+  --c-bg-elevated: var(--c, #ffffff);
+  --c-text: var(--t, #1d1d1f);
+  --c-text-2: var(--t2, #6e6e73);
+  --c-text-3: var(--t3, #86868b);
+  --c-accent: var(--a, #0071e3);
+  --c-accent-soft: color-mix(in srgb, var(--a, #0071e3) 12%, transparent);
+  --c-danger: var(--r, #ff3b30);
+  --c-danger-soft: color-mix(in srgb, var(--r, #ff3b30) 12%, transparent);
+  --c-success: var(--g, #34c759);
+  --c-warning: var(--y, #ff9f0a);
+  --c-vod: #b07a8b;
+  --c-issue: #b8857a;
+  --c-coding: #7a92b0;
+  --c-qa: #9a85a8;
+  --c-sre: #b89b6a;
+  --glass-bg: color-mix(in srgb, var(--c, #fff) 62%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--c, #fff) 88%, transparent);
+  --glass-blur: 16px;
+  --glass-border: color-mix(in srgb, var(--b, #d2d2d7) 70%, transparent);
+  --r-card: var(--r2, 18px);
+  --r-pill: 999px;
+  --r-control: var(--rd, 12px);
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 24px;
+  --s-6: 32px;
+  --s-7: 48px;
+  --f-caption: 12px;
+  --f-body: 14px;
+  --f-head-3: 16px;
+  --f-head-2: 20px;
+  --f-head-1: 28px;
+  --f-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'PingFang SC', 'Noto Sans SC',
+    'Helvetica Neue', sans-serif;
+  --shadow-1: var(--sh, 0 1px 4px rgba(0, 0, 0, 0.06));
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --btn-outline: color-mix(in srgb, var(--a, #0071e3) 30%, transparent);
+}

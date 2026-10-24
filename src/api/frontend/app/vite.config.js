@@ -41,7 +41,14 @@ export default defineConfig({
         }
         for (const f of fs.readdirSync(assetsDir)) {
           if (f.startsWith('AGButton-')) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
+          if (f.startsWith('AGButton-') && f.endsWith('.css'))
+            fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, 'ag-ui.css'))
         }
+        // bridge tokens (hand-maintained, stable name)
+        fs.copyFileSync(
+          path.resolve(__dirname, './src/styles/bridge.css'),
+          path.join(dstAssets, 'bridge.css')
+        )
         console.log(`copied view css/assets -> ${dstAssets}`)
       },
     },
