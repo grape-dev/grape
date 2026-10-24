@@ -44,3 +44,18 @@
   --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
   --btn-outline: color-mix(in srgb, var(--a, #0071e3) 30%, transparent);
 }
+
+/* Dark-mode color softening: legacy dark block only flips backgrounds, never
+ * redefines accent hues (--a/--g/--y/--r stay at light-mode saturation → garish
+ * on black). Views consume these bridge tokens, so soften them here. */
+@media (prefers-color-scheme: dark) {
+  :root {
+    --c-accent: #6fb4ff;
+    --c-accent-soft: rgba(111, 180, 255, 0.16);
+    --c-danger: #ff7a70;
+    --c-danger-soft: rgba(255, 122, 112, 0.16);
+    --c-success: #72d98c;
+    --c-warning: #ffc66e;
+    --btn-outline: rgba(111, 180, 255, 0.4);
+  }
+}

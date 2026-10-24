@@ -54,12 +54,12 @@
         >
           <div
             class="pl__nd-bar"
-            :style="{ background: nodeStatus(i) === 0 ? '#d5d9e0' : nodeColor(node, i) }"
+            :style="{ background: nodeStatus(i) === 0 ? 'var(--c-text-3)' : nodeColor(node, i) }"
           ></div>
           <div class="pl__nd-name">
             <span
               class="pl__nd-dot"
-              :style="{ background: nodeStatus(i) === 0 ? '#c3c9d4' : nodeColor(node, i) }"
+              :style="{ background: nodeStatus(i) === 0 ? 'var(--c-text-3)' : nodeColor(node, i) }"
             ></span>
             {{ nodeLabel(node) }} <span class="mode-ic">{{ modeIcon(node) }}</span>
           </div>
@@ -194,14 +194,14 @@ const props = defineProps({ data: { type: Object, required: true } })
 const PER_PAGE = 10
 const agentIds = ['vod', 'issue', 'coding', 'qa', 'sre']
 const tagCls = ['tg-v', 'tg-i', 'tg-c', 'tg-q', 'tg-s']
-const agentColors = ['#ff2d92', '#ff3b30', '#0071e3', '#af52de', '#ff9f0a']
+const agentColors = ['#e86aa8', '#ff7a70', '#6fb4ff', '#b39bf2', '#ffc66e']
 const TAG_COLORS = {
-  vod: '#ff2d92',
-  issue: '#ff3b30',
-  coding: '#0071e3',
-  qa: '#af52de',
-  sre: '#ff9f0a',
-  chat: '#0c92d4',
+  vod: '#e86aa8',
+  issue: '#ff7a70',
+  coding: '#6fb4ff',
+  qa: '#b39bf2',
+  sre: '#ffc66e',
+  chat: '#67cbe8',
 }
 const MODE_ICONS = { emit: '→', waterfall: '◇', serial: '↻', parallel: '⇄' }
 
@@ -364,16 +364,16 @@ function modeIcon(node) {
 function dotColor(i) {
   const sc = nodeStatus(i)
   return sc === 2
-    ? '#34c759'
+    ? '#72d98c'
     : sc === 1
-      ? '#0071e3'
+      ? '#6fb4ff'
       : sc === 3
-        ? '#ff3b30'
+        ? '#ff7a70'
         : sc === 4
-          ? '#86868b'
+          ? '#9a9aa0'
           : sc === 5
-            ? '#c7c7cc'
-            : '#86868b'
+            ? '#8e8e93'
+            : '#9a9aa0'
 }
 function statusText(i) {
   const sc = nodeStatus(i)
@@ -677,7 +677,7 @@ defineExpose({ focus })
   filter: grayscale(0.6);
 }
 .pl__nd.run {
-  background: rgba(255, 159, 10, 0.1);
+  background: color-mix(in srgb, var(--c-warning) 12%, transparent);
 }
 .pl__nd.run .pl__nd-dot {
   animation: plPulse 1.5s ease-in-out infinite;
@@ -694,7 +694,7 @@ defineExpose({ focus })
   }
 }
 .pl__twe {
-  background: rgba(255, 159, 10, 0.1);
+  background: color-mix(in srgb, var(--c-warning) 12%, transparent);
   border: 1px solid var(--c-warning);
   border-radius: 12px;
   padding: 10px 16px;

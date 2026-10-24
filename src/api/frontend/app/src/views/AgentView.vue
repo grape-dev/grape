@@ -1,11 +1,8 @@
 <template>
-  <div class="ag">
-    <!-- Agent 头卡 -->
-    <div
-      class="ag__head"
-      :style="{ background: meta.bg || 'var(--c-bg)', borderColor: meta.color + '33' }"
-    >
-      <div class="ag__icon" :style="{ background: meta.color + '22' }">{{ meta.icon || '?' }}</div>
+  <div class="ag" :style="{ '--agent-hue': hueOf(name) }">
+    <!-- Agent 头卡（Liquid Glass + agent-hue 染色） -->
+    <div class="ag__head">
+      <div class="ag__icon">{{ meta.icon || '?' }}</div>
       <div class="ag__info">
         <h2>{{ typeDisplay }}</h2>
         <div class="ag__desc">{{ typeDesc }}</div>
@@ -40,15 +37,15 @@
     <!-- 统计 -->
     <div class="ag__stats">
       <div class="ag__st">
-        <div class="v" :style="{ color: meta.color }">{{ totalEvents }}</div>
+        <div class="v">{{ totalEvents }}</div>
         <div class="l">{{ t('agents.event.total') }}</div>
       </div>
       <div class="ag__st">
-        <div class="v" :style="{ color: meta.color }">{{ completed }}</div>
+        <div class="v">{{ completed }}</div>
         <div class="l">{{ t('agents.event.completed') }}</div>
       </div>
       <div class="ag__st">
-        <div class="v" :style="{ color: meta.color }">{{ running }}</div>
+        <div class="v">{{ running }}</div>
         <div class="l">{{ t('agents.event.running') }}</div>
       </div>
     </div>
@@ -164,6 +161,16 @@ let searchTimer = null
 function t(key, params) {
   return G.I18N.t(key, params)
 }
+const HUES = {
+  vod: 'var(--pk)',
+  issue: 'var(--r)',
+  coding: 'var(--a)',
+  qa: 'var(--pu)',
+  sre: 'var(--or)',
+}
+function hueOf(n) {
+  return HUES[n] || 'var(--a)'
+}
 
 const meta = computed(function () {
   return (
@@ -214,7 +221,7 @@ const engineText = computed(function () {
   )
 })
 const engineDot = computed(function () {
-  const dots = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f' }
+  const dots = { opencode: '#6ea8fe', hermes: '#a78bfa', codearts: '#fbbf24', codex: '#34d399' }
   const l = (engineText.value || '').toLowerCase()
   if (l.includes('hermes')) return dots.hermes
   if (l.includes('opencode')) return dots.opencode
@@ -354,9 +361,16 @@ onMounted(function () {
 .ag {
   font-family: var(--f-family);
 }
+/* Liquid Glass head card: glass surface tinted with the agent hue
+ * (color-mix resolves var() colors — the old meta.color+'33' concat produced
+ * invalid CSS that got dropped, leaving a flat text dump) */
 .ag__head {
-  border: 1px solid transparent;
-  border-radius: 18px;
+  background: color-mix(in srgb, var(--glass-bg) 88%, var(--agent-hue) 12%);
+  -webkit-backdrop-filter: blur(var(--glass-blur));
+  backdrop-filter: blur(var(--glass-blur));
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-1);
+  border-radius: var(--r-card);
   padding: var(--s-4);
   display: flex;
   align-items: center;
@@ -367,6 +381,7 @@ onMounted(function () {
   width: 44px;
   height: 44px;
   border-radius: 10px;
+  background: color-mix(in srgb, var(--agent-hue) 18%, transparent);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -465,6 +480,7 @@ onMounted(function () {
 .ag__st .v {
   font-size: var(--f-head-3);
   font-weight: 700;
+  color: color-mix(in srgb, var(--agent-hue) 75%, var(--c-text));
 }
 .ag__st .l {
   font-size: 10px;
