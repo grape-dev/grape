@@ -1202,6 +1202,16 @@ def _build_overlay_home(iso_home: str, src_home: str):
                 if entry in ("state.db", "state.db-wal", "state.db-shm",
                              "config.yaml", ".env", "active_profile", "profiles"):
                     continue
+                # gateway-ctl-not-mirrored（2026-10-24 修复，故障报告 §7.1 G-1/G-3）：
+                # 网关控制文件一律不镜像进任务 home——missing_owner_state(home) 的语义是
+                # "本 home 自己有没有在跑的网关"，把共享 home 的 gateway.lock 等符号链接
+                # 镜像进来，hermes 网关归属判定（lstat 不跟随符号链接）会判
+                # unsafe_control_path → inaccessible → ACP session/new 被拒（-32603）。
+                # 生产实测（worker-ecs-skills-chenjingjie，2026-10-23）：新建工作区任务
+                # 100% 失败；老工作区（lock 出现前建成的 home）不受影响。
+                if entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
+                             "gateway.pid", "gateway_state.json", "gateway-starts.log"):
+                    continue
                 if os.path.exists(dst):
                     continue
                 src = os.path.join(src_home, entry)
@@ -1215,6 +1225,18 @@ def _build_overlay_home(iso_home: str, src_home: str):
                     # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
                     # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
                     _mirror_without_symlink(src, dst, entry, str(_sl_e))
+
+        # gateway-ctl-cleanup（2026-10-24 修复）：清掉历史遗留的网关控制文件链接——
+        # 修复部署前建成的隔离 home 里已经镜像了 gateway.lock 等符号链接，不清理的话
+        # 这些老 home 上的任务在 hermes 升级（带 lstat 加固）后仍会失败。
+        for _gw_entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
+                          "gateway.pid", "gateway_state.json", "gateway-starts.log"):
+            _gw_dst = os.path.join(iso_home, _gw_entry)
+            try:
+                if os.path.islink(_gw_dst):
+                    os.unlink(_gw_dst)
+            except Exception:
+                pass
 
         # 覆写 config.yaml：从源复制 + 改 tool_progress=new
         src_cfg = os.path.join(src_home, "config.yaml")
