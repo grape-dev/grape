@@ -639,6 +639,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
         <div id="sceneDescDisplay" style="font-size:13px;color:#86868b;cursor:text;padding:2px 6px;margin:-2px -6px;border-radius:6px;transition:background .15s" onmouseover="this.style.background='rgba(0,0,0,.04)'" onmouseout="this.style.background='transparent'" onclick="_enterInlineEdit('sceneDesc')">${sceneDesc || '<span style="color:#c7c7cc;font-style:italic">' + (I18N.t('dashboard.desc_optional')||'描述（可选）') + '</span>'}</div>
       </div>
 
+      <span id="sceneDeployGlobe" style="margin-top:4px;font-size:12px;line-height:29px;flex-shrink:0"></span><!-- Issue #461: 场景级访问地址地球仪图标（复制场景按钮前，异步渲染三态） -->
       <button class="ap-btn" style="margin-top:4px" onclick="_copySceneFromDetail()">${I18N.t('dashboard.copy_scene')||'复制场景'}</button>
       ${isCustomScene ? `<button class="ap-btn ap-btn-d" style="margin-top:4px" onclick="_confirmDeleteScene('${scene.id}','${(scene.display_name||scene.name||'').replace(/'/g,'\\\'')}',null)">${I18N.t('common.delete')||'删除'}</button>` : ''}
     </div>
@@ -719,6 +720,9 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   // 将页面内所有 select 转换为自定义下拉面板（圆角风格统一）
   // 加载高级选项数据
   _loadAdvancedOptionsInline(scene.id, owner, name);
+
+  // Issue #461: 加载场景级访问地址（地球仪图标，复制场景按钮前）
+  _loadSceneDeployUrl(scene.id, owner, name);
 
   // 点击单个字段进入编辑模式（名称或描述独立编辑）
   window._enterInlineEdit = function(field) {
@@ -2176,6 +2180,91 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
 }
 
 
+
+// ═══════════════════════════════════════════════════════════════
+// Issue #461: 场景级访问地址（地球仪图标）— 复制场景按钮前入口。
+// 交互/校验/XSS 防护与需求中心 issues.js 登记部署地址完全一致：
+// 三态（未登记灰 globe / 已登记绿 globe 链接 / 编辑输入框）、
+// 右击 + 触屏长按 600ms 进入编辑、http(s) 前缀校验、_skillEsc 转义
+// href/title/value。存储走场景级端点（每场景独立一条，不影响仓库级）。
+// ═══════════════════════════════════════════════════════════════
+window._currentSceneDeployCtx = null;   // { sceneId, owner, name }
+var _sceneDeployUrl = '';
+var _sceneDeployEditing = false;
+var _sceneDeployLongPressTimer = null;
+
+function _isValidSceneDeployUrl(url) {
+  if (!url) return true;   // 空串 = 清除，允许
+  return url.indexOf('http://') === 0 || url.indexOf('https://') === 0;
+}
+
+function _loadSceneDeployUrl(sceneId, owner, name) {
+  window._currentSceneDeployCtx = { sceneId: sceneId, owner: owner, name: name };
+  _sceneDeployUrl = '';
+  _sceneDeployEditing = false;
+  API.get('/scenes/' + encodeURIComponent(sceneId) + '/deploy-url?repo=' + encodeURIComponent(owner + '/' + name))
+    .then(function(d) {
+      // stale guard：异步返回时若已切换到其他场景详情则丢弃
+      if (!window._currentSceneDeployCtx || window._currentSceneDeployCtx.sceneId !== sceneId) return;
+      _sceneDeployUrl = (d && d.deploy_url) || '';
+      _renderSceneDeployGlobe();
+    })
+    .catch(function() { _sceneDeployUrl = ''; _renderSceneDeployGlobe(); });
+}
+
+function _renderSceneDeployGlobe() {
+  var el = document.getElementById('sceneDeployGlobe');
+  if (!el) return;
+  if (_sceneDeployEditing) {
+    el.innerHTML = `<div style="display:flex;align-items:center;gap:6px">
+      <input id="sceneDeployUrlInput" value="${_skillEsc(_sceneDeployUrl)}" placeholder="${I18N.t('dashboard.deploy_url_edit_title')||'登记场景访问 URL（如 http://1.2.3.4:5000）'}" style="width:260px;max-width:40vw;padding:5px 8px;border:0.5px solid #ccc;border-radius:8px;font-size:12px;background:#fff;outline:none">
+      <button class="ap-btn" style="padding:4px 10px;font-size:12px;border-radius:8px" onclick="_saveSceneDeployUrl()">${I18N.t('common.save')||'保存'}</button>
+      <button class="ap-btn" style="padding:4px 10px;font-size:12px;border-radius:8px" onclick="_sceneDeployEditing=false;_renderSceneDeployGlobe()">${I18N.t('common.cancel')||'取消'}</button>
+    </div>`;
+    var input = document.getElementById('sceneDeployUrlInput');
+    if (input) { input.focus(); input.select(); }
+  } else if (_sceneDeployUrl) {
+    var safeUrl = _skillEsc(_sceneDeployUrl);
+    el.innerHTML = `<a href="${safeUrl}" target="_blank" rel="noopener" style="font-size:14px;line-height:29px;color:#34c759;text-decoration:none" title="${safeUrl}" oncontextmenu="event.preventDefault();_sceneDeployEditing=true;_renderSceneDeployGlobe();return false" onmousedown="_sceneDeployLongPressStart()" onmouseup="_sceneDeployLongPressEnd()" onmouseleave="_sceneDeployLongPressEnd()" ontouchstart="_sceneDeployLongPressStart()" ontouchend="_sceneDeployLongPressEnd()" ontouchmove="_sceneDeployLongPressEnd()">🌐</a>`;
+  } else {
+    el.innerHTML = `<span onclick="_sceneDeployEditing=true;_renderSceneDeployGlobe()" oncontextmenu="event.preventDefault();_sceneDeployEditing=true;_renderSceneDeployGlobe();return false" style="cursor:pointer;font-size:14px;line-height:29px;color:#86868b;opacity:.7" title="${I18N.t('dashboard.deploy_url_register')||'登记场景访问地址（点击或右击编辑）'}" onmouseover="this.style.opacity=1" onmouseout="this.style.opacity=.7">🌐</span>`;
+  }
+}
+
+window._sceneDeployLongPressStart = function() {
+  if (_sceneDeployLongPressTimer) clearTimeout(_sceneDeployLongPressTimer);
+  _sceneDeployLongPressTimer = setTimeout(function() {
+    _sceneDeployEditing = true;
+    _renderSceneDeployGlobe();
+  }, 600);
+};
+
+window._sceneDeployLongPressEnd = function() {
+  if (_sceneDeployLongPressTimer) { clearTimeout(_sceneDeployLongPressTimer); _sceneDeployLongPressTimer = null; }
+};
+
+window._saveSceneDeployUrl = function() {
+  var input = document.getElementById('sceneDeployUrlInput');
+  if (!input) return;
+  var ctx = window._currentSceneDeployCtx;
+  if (!ctx || !ctx.sceneId) return;
+  var url = (input.value || '').trim();
+  if (url && !_isValidSceneDeployUrl(url)) {
+    app.showToast(I18N.t('dashboard.deploy_url_invalid')||'URL 必须以 http:// 或 https:// 开头');
+    return;
+  }
+  API.put('/scenes/' + encodeURIComponent(ctx.sceneId) + '/deploy-url?repo=' + encodeURIComponent(ctx.owner + '/' + ctx.name), { deploy_url: url })
+    .then(function() {
+      _sceneDeployUrl = url;
+      _sceneDeployEditing = false;
+      _renderSceneDeployGlobe();
+      app.showToast(I18N.t('dashboard.deploy_url_saved')||'场景访问地址已保存');
+    })
+    .catch(function(e) {
+      app.showToast(I18N.t('dashboard.deploy_url_save_failed', {msg: (e && e.detail && e.detail.message) || (e && e.message) || ''})||('保存失败: ' + ((e && e.detail && e.detail.message) || (e && e.message) || '')));
+    });
+};
+// ═══════════════════════════ Issue #461 END ═══════════════════════════
 
 function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, isCustom, editMode, editNodes, engineMode) {
   let html = '';

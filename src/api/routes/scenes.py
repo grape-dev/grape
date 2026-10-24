@@ -2091,3 +2091,61 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
 
     log.info(f"Advanced options saved: scene={scene_id} repo={repo_key} work_branch={body.work_branch} linked_repos={len(_linked_repos)}")
     return {"message": "高级选项已保存"}
+
+
+# ===== Issue #461: 场景级访问地址（项目场景详情页地球仪图标登记；逻辑与需求中心 repos/deploy-url 一致，存储按 scene_id 维度）=====
+
+class SceneDeployUrlBody(BaseModel):
+    deploy_url: str = ""
+
+
+def _scene_deploy_url_guard(scene_id: str, repo: str, user: dict) -> str:
+    """场景级 deploy-url 端点公共前置：repo 解析 + 归属校验，返回 repo_key。"""
+    repo_key = ""
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+    return repo_key
+
+
+@router.get("/{scene_id}/deploy-url", operation_id="scenes_deploy_url_get", summary="Get scene deployment URL", description="Returns the scene-level access URL registered on the scene detail page.")
+def get_scene_deploy_url(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
+    """获取场景级访问地址（每场景独立一条；不影响需求中心仓库级 deploy_url）"""
+    from src.session_manager import db, db_lock
+    repo_key = _scene_deploy_url_guard(scene_id, repo, user)
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT deploy_url FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+    except Exception:
+        row = None
+    return {"deploy_url": (row[0] if row else "") or ""}
+
+
+@router.put("/{scene_id}/deploy-url", operation_id="scenes_deploy_url_set", summary="Set scene deployment URL", description="Registers/updates the scene-level access URL (validated like the repo deploy URL).")
+def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
+                         user: dict = Depends(require_no_session_token), repo: str = ""):
+    """登记/编辑场景级访问地址（校验与需求中心一致：http(s) 前缀 + ≤512；空串清除）"""
+    from src.session_manager import db, db_lock
+    # 复用 #446 的 XSS 防护校验（与 src/api/routes/repos.py set_deploy_url 同一规则）
+    from src.api.routes.repos import _validate_deploy_url
+    deploy_url = _validate_deploy_url(body.deploy_url)
+    repo_key = _scene_deploy_url_guard(scene_id, repo, user)
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE devops_pipeline_scene SET deploy_url=? "
+            "WHERE scene_id=? AND repo_key=? AND is_active=1",
+            (deploy_url, scene_id, repo_key))
+        if c.rowcount == 0:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在或未激活"})
+        db.commit()
+    log.info(f"Scene deploy url saved: scene={scene_id} repo={repo_key}")
+    return {"message": "场景访问地址已更新", "deploy_url": deploy_url}

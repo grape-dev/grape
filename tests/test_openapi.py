@@ -125,6 +125,8 @@ EXPECTED_PUBLIC = {
     "scenes_delete": ("delete", "/api/scenes/{scene_id}"),
     "scenes_advanced_options_get": ("get", "/api/scenes/{scene_id}/advanced-options"),
     "scenes_advanced_options_set": ("put", "/api/scenes/{scene_id}/advanced-options"),
+    "scenes_deploy_url_get": ("get", "/api/scenes/{scene_id}/deploy-url"),
+    "scenes_deploy_url_set": ("put", "/api/scenes/{scene_id}/deploy-url"),
     # ===== B 批（openapi-full-coverage-design.md）：settings/repos/agents/knowledge 全量进契约 =====
     "settings_credentials_get": ("get", "/api/settings/credentials"),
     "settings_credentials_update": ("put", "/api/settings/credentials"),
