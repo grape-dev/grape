@@ -38,6 +38,7 @@ export default defineConfig({
           organizations: /^organizations-.*\.css$/,
           pipeline: /^[pP]ipeline-.*\.css$/,
           'agent-view': /^[aA]gent-[vV]iew-.*\.css$/,
+          'scene-market': /^scene-market-.*\.css$/,
         }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -87,6 +88,7 @@ export default defineConfig({
         organizations: fileURLToPath(new URL('./src/views/entries/organizations.js', import.meta.url)),
         pipeline: fileURLToPath(new URL('./src/views/entries/pipeline.js', import.meta.url)),
         'agent-view': fileURLToPath(new URL('./src/views/entries/agent-view.js', import.meta.url)),
+        'scene-market': fileURLToPath(new URL('./src/views/entries/scene-market.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
