@@ -37,6 +37,7 @@ export default defineConfig({
           'im-channel': /^im-channel-.*\.css$/,
           organizations: /^organizations-.*\.css$/,
           pipeline: /^[pP]ipeline-.*\.css$/,
+          'agent-view': /^[aA]gent-[vV]iew-.*\.css$/,
         }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -85,6 +86,7 @@ export default defineConfig({
         'im-channel': fileURLToPath(new URL('./src/views/entries/im-channel.js', import.meta.url)),
         organizations: fileURLToPath(new URL('./src/views/entries/organizations.js', import.meta.url)),
         pipeline: fileURLToPath(new URL('./src/views/entries/pipeline.js', import.meta.url)),
+        'agent-view': fileURLToPath(new URL('./src/views/entries/agent-view.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
