@@ -287,6 +287,29 @@
 
 ---
 
+## GET /api/scenes/{scene_id}/deploy-url — 获取场景访问地址
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Path | `{scene_id}` |
+| Query | `repo`（必填，owner/repo） |
+| 出参 | `{deploy_url: "..."}`（场景级，未登记为空串） |
+| 返回 | 200；400（缺 repo）；403（非归属人）；404 |
+
+## PUT /api/scenes/{scene_id}/deploy-url — 登记/编辑场景访问地址
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> 校验与需求中心部署 URL 一致：非空必须以 `http://` 或 `https://` 开头、长度 ≤512；空串=清除。
+
+请求头：`Content-Type: application/json`
+
+请求体（SceneDeployUrlBody）：`{"deploy_url": "http://1.2.3.4:5000"}`
+
+| Path | `{scene_id}` |
+| Query | `repo`（必填，owner/repo） |
+| 出参 | `{"deploy_url": "..."}` |
+| 返回 | 200；400（缺 repo / URL 非法）；403（非归属人）；404（场景不存在或未激活） |
+
+---
+
 ## POST /api/scenes/apply/{owner}/{repo} — 应用场景到仓库
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 

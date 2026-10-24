@@ -4329,6 +4329,15 @@ def _migrate_tables():
             log.info("Added devops_pipeline_scene.linked_repos column")
     except Exception as e:
         log.warning(f"Add devops_pipeline_scene.linked_repos column failed: {e}")
+    # ===== Issue #461: 场景级访问地址列（项目场景详情页地球仪图标登记；与 managed_repos.deploy_url 需求中心级互不影响）=====
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "devops_pipeline_scene", "deploy_url", "VARCHAR(512) DEFAULT ''")
+            db.commit()
+            log.info("Added devops_pipeline_scene.deploy_url column")
+    except Exception as e:
+        log.warning(f"Add devops_pipeline_scene.deploy_url column failed: {e}")
     # ===== events 表补 scene_id 列（PR 订阅场景持久化）=====
     try:
         with db_lock:

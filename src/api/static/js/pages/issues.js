@@ -1599,7 +1599,7 @@ function openTaskCreateModal() {
       <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.title_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.title_hint')}</div>
         <input id="tcCreateTitle" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111" placeholder="${I18N.t('tasks.create.title_placeholder')}">
       </div>
-      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
+      <div style="display:flex;flex-direction:column;gap:4px;color:#333"><div style="font-size:13px;display:flex;align-items:center;gap:4px">${I18N.t('tasks.create.desc_label')} <span style="color:#d32f2f">*</span><span title="${I18N.t('tasks.create.sync_title_to_desc')}" role="button" aria-label="${I18N.t('tasks.create.sync_title_to_desc')}" onclick="syncTitleToDesc()" style="cursor:pointer;color:#0071e3;font-size:14px;line-height:1" onmouseover="this.style.opacity='0.7'" onmouseout="this.style.opacity='1'">↧</span></div><div style="font-size:11px;color:#888">${I18N.t('tasks.create.desc_hint')}</div>
         <textarea id="tcCreateDesc" rows="4" style="padding:7px 10px;border:1px solid #ccc;border-radius:6px;background:#fff;color:#111;resize:vertical" placeholder="${I18N.t('tasks.create.desc_placeholder')}"></textarea>
       </div>
       <label style="display:flex;flex-direction:column;gap:4px;color:#333">${I18N.t('tasks.create.scene_label')} <span style="font-size:11px;color:#888">${I18N.t('tasks.create.scene_hint')}</span>
@@ -1674,6 +1674,18 @@ function openTaskCreateModal() {
   }
 
   // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭
+}
+
+// Issue #460: 同步标题到描述——点击描述旁 ↧ 图标，将标题追加到描述（幂等去重，空行分隔）
+function syncTitleToDesc() {
+  var titleEl = document.getElementById('tcCreateTitle');
+  var descEl = document.getElementById('tcCreateDesc');
+  if (!titleEl || !descEl) return;
+  var title = (titleEl.value || '').trim();
+  if (!title) return;
+  var desc = descEl.value || '';
+  if (desc.indexOf(title) >= 0) return;
+  descEl.value = desc ? desc + '\n\n' + title : title;
 }
 
 function createTaskSubmit() {

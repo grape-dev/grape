@@ -1,6 +1,7 @@
 {
   "title": "Organizations",
   "create_org": "+ Create Organization",
+  "back_to_workspace": "← Back to Workspace",
   "loading": "Loading...",
   "no_orgs": "No organizations",
   "load_failed": "Load failed: {msg}",

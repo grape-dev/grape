@@ -1,6 +1,7 @@
 {
   "title": "组织管理",
   "create_org": "+ 创建组织",
+  "back_to_workspace": "← 返回工作台",
   "loading": "加载中...",
   "no_orgs": "暂无组织",
   "load_failed": "加载失败: {msg}",

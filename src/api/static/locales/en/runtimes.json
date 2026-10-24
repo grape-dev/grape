@@ -60,6 +60,7 @@
     "unhealthy": "✗ Unhealthy",
     "worker": "Worker",
     "ip": "IP",
+    "spec": "Spec",
     "scope_label": "Scope",
     "scope_short": "Level",
     "owner": "Owner",

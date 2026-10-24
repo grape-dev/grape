@@ -88,6 +88,7 @@
     "desc_label": "描述",
     "desc_hint": "将作为 GitCode Issue 正文，供 VOD/Issue/Coding Agent 理解需求",
     "desc_placeholder": "需求描述（必填）",
+    "sync_title_to_desc": "同步标题到描述",
     "scene_label": "开发场景",
     "scene_hint": "不选则由智能推荐自动识别",
     "scene_none": "不指定（由智能推荐自动识别）",
