@@ -2842,3 +2842,5 @@ function _showAppleConfirm(message, onConfirm, onCancel) {
   document.getElementById('appleConfirmOk').onclick = function() { modal.remove(); if (onConfirm) onConfirm(); };
   document.getElementById('appleConfirmCancel').onclick = function() { modal.remove(); if (onCancel) onCancel(); };
 }
+
+window.app = app; // Vue view chunks bridge (batch 2)

@@ -2,11 +2,50 @@ import { defineConfig } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import { fileURLToPath, URL } from 'node:url'
 
-// Vue refactor (phase 1): build output goes to ../static-dist so FastAPI can serve
-// the new app under /static-vue/ without touching legacy /static serving.
-// base must match the mount prefix chosen in src/api/main.py.
+// Vue refactor (phase 2): two output kinds
+// 1. SPA at frontend/static-dist (base /static-vue/) — standalone migrated pages
+// 2. view entry chunks copied to frontend/legacy/js/vue/ — Vue views mounted INSIDE
+//    the legacy shell (index.html + app.js), replacing js/pages/*.js modules batch by
+//    batch. These chunks keep the legacy global contract (renderMyFeedback etc.) and
+//    reuse legacy I18N/API/app globals, so behavior stays identical.
+//    (Chunks are built into static-dist/viewjs/ then copied by a post-build step,
+//    because rollup forbids ../ relative output patterns.)
 export default defineConfig({
-  plugins: [vue()],
+  plugins: [
+    vue(),
+    {
+      name: 'copy-view-chunks',
+      closeBundle() {
+        const fs = require('node:fs')
+        const path = require('node:path')
+        const src = path.resolve(__dirname, '../static-dist/viewjs')
+        const dst = path.resolve(__dirname, '../legacy/js/vue')
+        if (fs.existsSync(src)) {
+          fs.mkdirSync(dst, { recursive: true })
+          for (const f of fs.readdirSync(src)) {
+            fs.copyFileSync(path.join(src, f), path.join(dst, f))
+          }
+          console.log(`copied view chunks -> ${dst}`)
+        }
+        // view css + shared AGButton assets -> legacy/js/assets (stable names, loaded by entry/runtime)
+        const assetsDir = path.resolve(__dirname, '../static-dist/assets')
+        const dstAssets = path.resolve(__dirname, '../legacy/js/assets')
+        fs.mkdirSync(path.join(dstAssets, 'viewcss'), { recursive: true })
+        const viewCssMap = {
+          'my-feedback': /^my-feedback-.*\.css$/,
+          'my-feedback-detail': /^my-feedback-detail-.*\.css$/,
+        }
+        for (const [name, re] of Object.entries(viewCssMap)) {
+          const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
+          if (hit) fs.copyFileSync(path.join(assetsDir, hit), path.join(dstAssets, 'viewcss', name + '.css'))
+        }
+        for (const f of fs.readdirSync(assetsDir)) {
+          if (f.startsWith('AGButton-')) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
+        }
+        console.log(`copied view css/assets -> ${dstAssets}`)
+      },
+    },
+  ],
   base: '/static-vue/',
   resolve: {
     alias: {
@@ -16,5 +55,18 @@ export default defineConfig({
   build: {
     outDir: '../static-dist',
     emptyOutDir: true,
+    rollupOptions: {
+      input: {
+        index: fileURLToPath(new URL('./index.html', import.meta.url)),
+        'my-feedback': fileURLToPath(new URL('./src/views/entries/my-feedback.js', import.meta.url)),
+        'my-feedback-detail': fileURLToPath(
+          new URL('./src/views/entries/my-feedback-detail.js', import.meta.url)
+        ),
+      },
+      output: {
+        entryFileNames: (chunkInfo) =>
+          chunkInfo.name === 'index' ? 'assets/index-[hash].js' : 'viewjs/[name].js',
+      },
+    },
   },
 })

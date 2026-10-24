@@ -541,3 +541,5 @@ const API = (() => {
     },
   };
 })();
+
+window.API = API; // Vue view chunks bridge (batch 2)
