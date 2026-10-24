@@ -1008,6 +1008,24 @@ STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend"
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
+# Vue refactor (phase 1): serve new Vue app build output under /static-vue/
+# (approved Gate 0 option A). Temporary mount — removed when migration completes.
+_VUE_DIST_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "static-dist")
+if os.path.isdir(_VUE_DIST_DIR):
+    class _VueSPAStaticFiles(StaticFiles):
+        """StaticFiles with history-mode fallback: unknown paths -> index.html."""
+        async def get_response(self, path, scope):
+            from starlette.responses import FileResponse as _FR
+            try:
+                resp = await super().get_response(path, scope)
+            except Exception:
+                resp = None
+            if resp is None or resp.status_code == 404:
+                resp = _FR(os.path.join(_VUE_DIST_DIR, "index.html"))
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+            return resp
+    app.mount("/static-vue", _VueSPAStaticFiles(directory=_VUE_DIST_DIR, html=True), name="static_vue")
+
 if os.path.isdir(STATIC_DIR):
     # Static assets (JS/CSS): allow browser caching with ETag revalidation.
     # ?v= bump is the primary cache-buster; must-revalidate ensures stale files are always checked.

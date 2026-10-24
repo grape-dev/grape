@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grape</title>
+    <script>
+      // FOUC guard (parity with legacy): restore theme before first paint
+      try {
+        var t = localStorage.getItem('grapeThemeMode') || localStorage.getItem('grapeTheme') || 'light'
+        if (t === 'dark' || t === 'light') document.documentElement.dataset.theme = t
+      } catch (e) {}
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
