@@ -13,6 +13,7 @@
 - 批1：beta-apply（/static-vue/beta-apply）、help（改生成器CSS）
 - 批2：my_feedback×2、im_channel、organizations（壳内chunk方案）
 - 批3：pipeline、agents（五视图共用AgentView）
+- 批4：scene-market（市场+详情+四弹窗，renderSceneMarket/renderSceneDetail契约；坑：fragment根+根级Teleport会unmount崩，须单一根；renderSceneDetail入口须先设_currentView）
 
 ## 核心架构（每批照此办理）
 - 壳内chunk：Vite 多入口 → viewjs/[name].js 拷到 legacy/js/vue/，共享js全量拷到 legacy/js/assets/
@@ -40,11 +41,18 @@
 - 截图存 docs/weekly-08/screenshots/（明暗各一张是硬要求）
 
 ## 下一批
-- scene-market.js（1069行，自包含导航视图，renderSceneMarket/renderSceneDetail 仅 app.js 调用）→ 然后 skills.js(1058)
+- skills.js(1058)（注意：技能详情返回会调 window.renderSceneDetail(param)——批4已在新chunk里实现该全局）
 - 壳耦合组（后期统一批）：settings.js、repos.js+templates.js（templates是repos大厅的lobby子标签，已重分类）
 - 大件队列：chat(1422) account(1552) events(1569) issues(1981) autopilot(2026) runtimes(2270) dashboard(2513) observability(3035) → admin独立站 → app.js外壳+index.html收口
 - 死代码待主人裁决删除：agents.js的Configure面板函数（约250行无UI入口）
 - help页是否彻底Vue化：阶段3裁决
+
+## 批4新增坑（别再踩）
+- Vue组件根模板是fragment（多节点）且含根级Teleport(AGModal) → unmount时nextSibling撞null直接崩，必须包单一根元素
+- 入口直挂详情（renderSceneDetail(id)→initialDetailId）时必须先设 window._currentView='scene-detail' 再发起加载，否则stale守卫丢弃结果
+- CDP调试：Chrome要求message id必须是整数，字符串id会被静默拒收（命令发出但无响应，脚本空等到超时）
+- 测试账号vue-mig-test是0 bindings，scene-market在app.js需求17的_repoDependentViews里会被拦到引导页；验证时种假binding+sessionStorage currentRepo绕过（纯前端测试手段）
+- 老代码 bgColor+'22' / var(--r)22 十六进制拼alpha是非法CSS整条丢弃，一律改 color-mix(in srgb, X N%, transparent)
 
 ## 命令速查
 - 构建+lint：cd src/api/frontend/app && npm run lint && npx vite build
