@@ -14,9 +14,9 @@ import re
 import pytest
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
-JS_PATH = os.path.join(ROOT, "src", "api", "static", "js", "pages", "runtimes.js")
-ZH_PATH = os.path.join(ROOT, "src", "api", "static", "locales", "zh", "runtimes.json")
-EN_PATH = os.path.join(ROOT, "src", "api", "static", "locales", "en", "runtimes.json")
+JS_PATH = os.path.join(ROOT, "src", "api", "frontend", "legacy", "js", "pages", "runtimes.js")
+ZH_PATH = os.path.join(ROOT, "src", "api", "frontend", "legacy", "locales", "zh", "runtimes.json")
+EN_PATH = os.path.join(ROOT, "src", "api", "frontend", "legacy", "locales", "en", "runtimes.json")
 
 
 def _read_js():

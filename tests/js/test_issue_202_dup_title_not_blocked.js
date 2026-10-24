@@ -16,7 +16,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const issuesJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/issues.js');
+const issuesJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/issues.js');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 
 // ── 从源码中提取 createTaskSubmit 函数定义 ──

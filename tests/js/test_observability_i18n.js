@@ -26,9 +26,9 @@ function check(name, fn) {
   catch (e) { failed++; console.log('  ✗ ' + name + '\n      ' + e.message); }
 }
 
-// ── 真实 i18n 语义（与 src/api/static/js/i18n.js 的 t/_lookup/_interpolate 一致）──
+// ── 真实 i18n 语义（与 src/api/frontend/legacy/js/i18n.js 的 t/_lookup/_interpolate 一致）──
 function loadPack(lang, mod) {
-  const p = path.join(ROOT, 'src/api/static/locales', lang, mod + '.json');
+  const p = path.join(ROOT, 'src/api/frontend/legacy/locales', lang, mod + '.json');
   return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p, 'utf8')) : null;
 }
 const PACKS = {
@@ -77,7 +77,7 @@ function makeDom() {
   };
 }
 function loadObs(dom, payloads) {
-  const src = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
   const state = { api: [] };
   const pick = (u) => {
     for (const [pfx, py] of (payloads || [])) if (String(u).indexOf(pfx) === 0) return Promise.resolve(py);

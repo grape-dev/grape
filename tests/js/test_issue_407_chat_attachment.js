@@ -34,9 +34,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const CHAT_JS = path.join(ROOT, 'src/api/static/js/pages/chat.js');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/static/js/pages/dashboard.js');
-const APP_JS = path.join(ROOT, 'src/api/static/js/app.js');
+const CHAT_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/chat.js');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js');
+const APP_JS = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 
 // ── 提取 chat.js 附件保活工具函数（源码切片求值，不依赖浏览器）──
 // 切片含 _pendingImages/_pendingVideo/_MAX_IMAGES 引用，注入桩值

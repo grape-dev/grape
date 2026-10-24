@@ -16,12 +16,12 @@ function readFile(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
 }
 
-const REPOS_JS = readFile('src/api/static/js/pages/repos.js');
-const TEMPLATES_JS = readFile('src/api/static/js/pages/templates.js');
-const APP_JS = readFile('src/api/static/js/app.js');
-const ACCOUNT_JS = readFile('src/api/static/js/pages/account.js');
-const ZH_APP_JSON = readFile('src/api/static/locales/zh/app.json');
-const EN_APP_JSON = readFile('src/api/static/locales/en/app.json');
+const REPOS_JS = readFile('src/api/frontend/legacy/js/pages/repos.js');
+const TEMPLATES_JS = readFile('src/api/frontend/legacy/js/pages/templates.js');
+const APP_JS = readFile('src/api/frontend/legacy/js/app.js');
+const ACCOUNT_JS = readFile('src/api/frontend/legacy/js/pages/account.js');
+const ZH_APP_JSON = readFile('src/api/frontend/legacy/locales/zh/app.json');
+const EN_APP_JSON = readFile('src/api/frontend/legacy/locales/en/app.json');
 
 // ── T41-01: repos.js submitCreateRepo 成功后局部刷新项目列表 ──
 function testSubmitCreateRepoForceSync() {

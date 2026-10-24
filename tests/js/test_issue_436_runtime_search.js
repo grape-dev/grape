@@ -56,7 +56,7 @@ function makeDom() {
 
 // 与 tests/js/test_anomaly_page_size.js 相同的 sandbox 加载模式（真实源码 + 状态操作同环境执行）
 function loadObs(dom, extraInit) {
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; }, getLang: () => 'zh' };
   const sandbox = {
     document: dom, window: { _currentView:'', history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
@@ -187,9 +187,9 @@ test('T10 无匹配返回空数组（空状态渲染入口）', () => {
 
 test('T11 空状态文案使用 no_matching_engine（渲染级）', () => {
   const dom = makeDom();
-  const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/zh/observability.json'), 'utf8'));
+  const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/observability.json'), 'utf8'));
   // I18N 用真实 zh locale（fake harness 默认桩返回 key 本身，验证不了文案替换）
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
   const I18N = { t: function(k) { const kk = k.replace(/^observability\./, ''); return (zh[kk] !== undefined) ? zh[kk] : k; } };
   const sandbox = {
     document: dom, window: { history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
@@ -220,8 +220,8 @@ _rtSearch = 'nonexistent-device'; _runtimePage = 0; _rerenderRuntimeTable();
 });
 
 test('T12 i18n 键 zh/en 对齐', () => {
-  const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/zh/observability.json'), 'utf8'));
-  const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/en/observability.json'), 'utf8'));
+  const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/observability.json'), 'utf8'));
+  const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/en/observability.json'), 'utf8'));
   assert.ok(zh['no_matching_engine'], 'zh 缺 no_matching_engine');
   assert.ok(en['no_matching_engine'], 'en 缺 no_matching_engine');
   assert.strictEqual(zh['no_matching_engine'], '无匹配引擎');
@@ -230,7 +230,7 @@ test('T12 i18n 键 zh/en 对齐', () => {
 
 test('T13 同 sandbox 全链路：初始 4 行 → 搜索 → 计数正确（renderOverview 渲染骨架 + _rerenderRuntimeTable）', () => {
   const dom = makeDom();
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; } };
   const sandbox = {
     document: dom, window: { history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },
@@ -275,7 +275,7 @@ _rtSearch = 'worker-agentnode-c'; _runtimePage = 0; _rerenderRuntimeTable();
 __countRows = function(){ return (document.getElementById('obs-runtime-rows').innerHTML.match(/<tr id="rt-/g) || []).length; };
 __cnt = function(){ return document.getElementById('obs-runtime-count').textContent; };
 `;
-  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
+  const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/observability.js'), 'utf8');
   const I18N = { t: function(k, opts) { if (opts) { let s=k; for (const [key,val] of Object.entries(opts)) s=s.replace(new RegExp('{{'+key+'}}','g'),val); return s; } return k; } };
   const sandbox = {
     document: dom, window: { history:{pushState(){},replaceState(){},state:null}, location:{hash:''}, addEventListener:()=>{} },

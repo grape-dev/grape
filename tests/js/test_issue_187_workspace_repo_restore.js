@@ -53,7 +53,7 @@ function makeLocalStorage() {
   };
 }
 
-const reposJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/repos.js');
+const reposJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/repos.js');
 const src = fs.readFileSync(reposJsPath, 'utf8');
 
 function loadReposModule(dom, localStorage, apiMock) {

@@ -23,7 +23,7 @@ function readFile(rel) {
 }
 
 function testChatJsUserRight() {
-  const js = readFile('src/api/static/js/pages/chat.js');
+  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
 
   // 历史会话加载（switchConversation 内联模板）
   assert.ok(
@@ -48,7 +48,7 @@ function testChatJsUserRight() {
 }
 
 function testChatJsAgentLeft() {
-  const js = readFile('src/api/static/js/pages/chat.js');
+  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
 
   // renderChatMessages：agent 消息
   assert.ok(
@@ -67,7 +67,7 @@ function testChatJsAgentLeft() {
 }
 
 function testAppCss() {
-  const css = readFile('src/api/static/css/app.css');
+  const css = readFile('src/api/frontend/legacy/css/app.css');
 
   // 用户气泡：蓝色、右对齐、尾角右下
   const rMatch = css.match(/\.chat-body \.msg\.r\{([^}]*)\}/);

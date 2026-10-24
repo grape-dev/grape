@@ -21,8 +21,8 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const EVENTS_JS = path.join(ROOT, 'src/api/static/js/pages/events.js');
-const APP_JS = path.join(ROOT, 'src/api/static/js/app.js');
+const EVENTS_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/events.js');
+const APP_JS = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 
 // ── 极简 DOM mock ──
 function makeSandbox() {

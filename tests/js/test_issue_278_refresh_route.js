@@ -55,7 +55,7 @@ function makeDom() {
 }
 
 // ── 加载 app.js 源码 ──
-const appJsPath = path.resolve(__dirname, '../../src/api/static/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 function loadApp(dom, localStorage, opts) {

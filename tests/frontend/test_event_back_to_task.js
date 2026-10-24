@@ -22,11 +22,11 @@ const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const ISSUES_SRC = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'static', 'js', 'pages', 'issues.js'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'js', 'pages', 'issues.js'),
   'utf8'
 );
 const EVENTS_SRC = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'static', 'js', 'pages', 'events.js'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'js', 'pages', 'events.js'),
   'utf8'
 );
 
@@ -181,7 +181,7 @@ test('事件历史条目 onclick 直接调用 _jumpToNodeEvent（无透传包装
 
 test('i18n：中英文 back_to_requirement 键均存在', () => {
   for (const lang of ['zh', 'en']) {
-    const p = path.join(ROOT, 'src', 'api', 'static', 'locales', lang, 'tasks.json');
+    const p = path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'locales', lang, 'tasks.json');
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
     assert.ok(
       typeof j.back_to_requirement === 'string' && j.back_to_requirement.length > 0,

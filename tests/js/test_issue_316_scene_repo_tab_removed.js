@@ -16,10 +16,10 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.join(__dirname, '..', '..');
-const JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/scene-market.js'), 'utf8');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/skills.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/skills.json'), 'utf8'));
-const INDEX = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
+const JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/scene-market.js'), 'utf8');
+const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/skills.json'), 'utf8'));
+const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/skills.json'), 'utf8'));
+const INDEX = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
 
 // 1. repo 子 Tab 入口移除
 assert.ok(!JS.includes("_switchSceneTab('repo')"), '不应再有 repo 子 Tab 切换入口');

@@ -20,7 +20,7 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const issuesJsPath = path.join(ROOT, 'src/api/static/js/pages/issues.js');
+const issuesJsPath = path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 
 let passed = 0, failed = 0;
@@ -95,8 +95,8 @@ test('成功后刷新 pipeline 段与列表（loadTasks）', () => {
 
 // ─── 测试 8：locales zh/en 新词条存在 ───
 test('locales zh/en cross_pipeline 新词条存在', () => {
-  const zh = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/issues.json'), 'utf8'));
-  const en = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/issues.json'), 'utf8'));
+  const zh = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/issues.json'), 'utf8'));
+  const en = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/issues.json'), 'utf8'));
   for (const k of ['confirm_title', 'confirm_message', 'no_permission', 'no_target']) {
     assert.ok(zh.cross_pipeline && zh.cross_pipeline[k], `zh cross_pipeline.${k} 应存在`);
     assert.ok(en.cross_pipeline && en.cross_pipeline[k], `en cross_pipeline.${k} 应存在`);
@@ -106,7 +106,7 @@ test('locales zh/en cross_pipeline 新词条存在', () => {
 
 // ─── 测试 9：index.html 版本号已提升 ───
 test('index.html issues.js 版本号已提升（缓存刷新）', () => {
-  const html = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
+  const html = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
   assert.ok(html.indexOf('issues.js?v=122') >= 0, 'issues.js 版本号应为 v=114');
 });
 

@@ -20,8 +20,8 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '../..');
-const HTML = fs.readFileSync(path.join(ROOT, 'src/api/static/admin.html'), 'utf8');
-const JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/admin.js'), 'utf8');
+const HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/admin.html'), 'utf8');
+const JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/admin.js'), 'utf8');
 
 // ── mock DOM / window / fetch ──
 function escText(s) {

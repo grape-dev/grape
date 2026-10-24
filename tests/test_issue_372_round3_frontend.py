@@ -20,7 +20,7 @@ import os
 import pytest
 
 
-_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "src", "api", "static")
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "..", "src", "api", "frontend", "legacy")
 
 
 def _read_file(rel_path):

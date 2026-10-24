@@ -55,7 +55,7 @@ function makeDom(innerWidth) {
 }
 
 // ── 加载 app.js 源码 ──
-const appJsPath = path.resolve(__dirname, '../../src/api/static/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 function loadApp(dom, localStorage, innerWidth) {
@@ -210,7 +210,7 @@ test('API 暴露: app.toggleSidebar 在公开返回对象中', () => {
 // ─── 测试 10：#sbOverlay 不在 #sidebar 内部（CSS 包含块修复）───
 // QA Critical: transform 会为 fixed 子孙建立包含块，overlay 必须在 #sidebar 外部
 test('DOM 结构: #sbOverlay 是 #sidebar 的兄弟节点而非子节点', () => {
-  const htmlPath = path.resolve(__dirname, '../../src/api/static/index.html');
+  const htmlPath = path.resolve(__dirname, '../../src/api/frontend/legacy/index.html');
   const html = fs.readFileSync(htmlPath, 'utf8');
   const sidebarOpen = html.indexOf('id="sidebar"');
   const sidebarClose = html.indexOf('</div>', html.indexOf('id="sidebar"'));
@@ -225,7 +225,7 @@ test('DOM 结构: #sbOverlay 是 #sidebar 的兄弟节点而非子节点', () =>
 // ─── 测试 11：apple-theme 窄屏抽屉 transform 过渡 ───
 // QA Required: apple-theme .sb{transition:width} 覆盖了窄屏 transform 过渡
 test('CSS: apple-theme 窄屏 media query 内含 transform 过渡规则', () => {
-  const cssPath = path.resolve(__dirname, '../../src/api/static/css/apple-theme.css');
+  const cssPath = path.resolve(__dirname, '../../src/api/frontend/legacy/css/apple-theme.css');
   const css = fs.readFileSync(cssPath, 'utf8');
   // 提取最后一个 @media(max-width:768px) 块
   const mediaIdx = css.lastIndexOf('@media(max-width:768px)');
@@ -274,7 +274,7 @@ test('initSidebarState(): 无折叠状态时不添加 no-transition', () => {
 
 // ─── 测试 14：app.css 含 .sb.no-transition 规则 ───
 test('CSS: app.css 含 .sb.no-transition{transition:none} 规则', () => {
-  const cssPath = path.resolve(__dirname, '../../src/api/static/css/app.css');
+  const cssPath = path.resolve(__dirname, '../../src/api/frontend/legacy/css/app.css');
   const css = fs.readFileSync(cssPath, 'utf8');
   assert.ok(css.includes('.sb.no-transition{transition:none'),
     'app.css 应含 .sb.no-transition{transition:none!important} 规则');

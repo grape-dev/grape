@@ -1,4 +1,4 @@
-"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference + help/developer 的 markdown 渲染为 src/api/static/help.html。
+"""帮助文档静态页生成器（v2）：将 help/usage + help/api + help/reference + help/developer 的 markdown 渲染为 src/api/frontend/legacy/help.html。
 
 v2 设计（见 docs/weekly-02/help-page-prototype.md）：
 - help.html 为轻量 SPA 壳：入口页(帮助中心)→ 使用文档 / Git事件统一模型 / API 文档 / 开发者文档 四个独立区块
@@ -23,7 +23,7 @@ _REPO_ROOT = Path(os.path.dirname(os.path.abspath(__file__))).parent
 HELP_DIR = _REPO_ROOT / "help"
 USAGE_DIR = HELP_DIR / "usage"
 API_DIR = HELP_DIR / "api"
-OUT_PATH = _REPO_ROOT / "src" / "api" / "static" / "help.html"
+OUT_PATH = _REPO_ROOT / "src" / "api" / "frontend" / "legacy" / "help.html"
 
 # 章节顺序与 tests/test_help_directory.py 的 EXPECTED_USAGE_FILES / EXPECTED_API_FILES 保持一致
 USAGE_ORDER = [
@@ -69,7 +69,7 @@ _MD_EXTENSIONS = ["fenced_code", "tables", "toc", "sane_lists", "nl2br"]
 
 # OpenAPI 契约下载：固定 URL（内容随 API 版本刷新，路径不变）
 OPENAPI_STATIC_URL = "/static/openapi.json"
-OPENAPI_STATIC_PATH = _REPO_ROOT / "src" / "api" / "static" / "openapi.json"
+OPENAPI_STATIC_PATH = _REPO_ROOT / "src" / "api" / "frontend" / "legacy" / "openapi.json"
 OPENAPI_HELP_PATH = HELP_DIR / "api" / "openapi.json"
 
 _CSS = """\
@@ -576,7 +576,7 @@ def build_help_html(data: dict | None = None) -> str:
 
 
 def generate() -> int:
-    """生成并覆写 src/api/static/help.html；返回渲染的 markdown 文件数。"""
+    """生成并覆写 src/api/frontend/legacy/help.html；返回渲染的 markdown 文件数。"""
     OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     data = build_data()
     OUT_PATH.write_text(build_help_html(data), encoding="utf-8")

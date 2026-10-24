@@ -30,8 +30,8 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/static/js/pages/dashboard.js');
-const APP_JS = path.join(ROOT, 'src/api/static/js/app.js');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js');
+const APP_JS = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 
 // ── 提取 dashboard.js 顶部的草稿工具函数（源码切片求值，不依赖浏览器）──
 function extractDraftUtils(sessionStorageMock) {

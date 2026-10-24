@@ -17,9 +17,9 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = path.join(ROOT, 'src/api/static/js/pages/runtimes.js');
-const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/runtimes.json'), 'utf8'));
-const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/runtimes.json'), 'utf8'));
+const RUNTIMES_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/runtimes.js');
+const ZH = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/runtimes.json'), 'utf8'));
+const EN = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/runtimes.json'), 'utf8'));
 
 // ── 与 runtimes.js _renderEngineSkillItems 保持一致的逻辑提取 ──
 // 守卫：无技能 → 全量空态；过滤：name + description 不区分大小写 includes

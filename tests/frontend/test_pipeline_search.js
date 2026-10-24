@@ -20,7 +20,7 @@ const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PIPELINE_SRC = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'static', 'js', 'pages', 'pipeline.js'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'js', 'pages', 'pipeline.js'),
   'utf8'
 );
 
@@ -195,7 +195,7 @@ test('renderPipeline：搜索框渲染 + 过滤分页 + 分页重置', () => {
 
 test('i18n：中英文 search_placeholder 键均存在', () => {
   for (const lang of ['zh', 'en']) {
-    const p = path.join(ROOT, 'src', 'api', 'static', 'locales', lang, 'pipeline.json');
+    const p = path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'locales', lang, 'pipeline.json');
     const j = JSON.parse(fs.readFileSync(p, 'utf8'));
     assert.ok(
       typeof j.search_placeholder === 'string' && j.search_placeholder.length > 0,

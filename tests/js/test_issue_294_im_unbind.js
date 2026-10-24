@@ -21,8 +21,8 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const imSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/im_channel.js'), 'utf8');
-const agentsSrc = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/agents.js'), 'utf8');
+const imSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/im_channel.js'), 'utf8');
+const agentsSrc = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/agents.js'), 'utf8');
 const chatPy = fs.readFileSync(path.join(ROOT, 'src/api/routes/chat.py'), 'utf8');
 const agentsPy = fs.readFileSync(path.join(ROOT, 'src/api/routes/agents.py'), 'utf8');
 
@@ -138,14 +138,14 @@ test('agents.py：im_unbind 显式标记 + 三字段显式传空串（None 为�
 // ─── 测试 7：双语 i18n 文案 ───
 test('locales：zh/en 解绑文案键齐全（按钮/确认/成功/失败）', () => {
   const keys = ['unbind', 'unbind_confirm', 'unbind_success', 'unbind_failed'];
-  const zh = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/chat.json'), 'utf8'));
-  const en = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/chat.json'), 'utf8'));
+  const zh = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/chat.json'), 'utf8'));
+  const en = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/chat.json'), 'utf8'));
   keys.forEach(k => {
     assert.ok(zh.im_channel && zh.im_channel[k], 'zh chat.im_channel.' + k + ' 缺失');
     assert.ok(en.im_channel && en.im_channel[k], 'en chat.im_channel.' + k + ' 缺失');
   });
-  const zhA = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/agents.json'), 'utf8'));
-  const enA = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/agents.json'), 'utf8'));
+  const zhA = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/agents.json'), 'utf8'));
+  const enA = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/agents.json'), 'utf8'));
   keys.forEach(k => {
     assert.ok(zhA.config && zhA.config[k], 'zh agents.config.' + k + ' 缺失');
     assert.ok(enA.config && enA.config[k], 'en agents.config.' + k + ' 缺失');

@@ -15,12 +15,12 @@ const vm = require('vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 
-const ISSUES_JS = path.join(ROOT, 'src/api/static/js/pages/issues.js');
-const PIPELINE_JS = path.join(ROOT, 'src/api/static/js/pages/pipeline.js');
-const ZH_ISSUES = path.join(ROOT, 'src/api/static/locales/zh/issues.json');
-const EN_ISSUES = path.join(ROOT, 'src/api/static/locales/en/issues.json');
-const ZH_PIPE = path.join(ROOT, 'src/api/static/locales/zh/pipeline.json');
-const EN_PIPE = path.join(ROOT, 'src/api/static/locales/en/pipeline.json');
+const ISSUES_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js');
+const PIPELINE_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/pipeline.js');
+const ZH_ISSUES = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/issues.json');
+const EN_ISSUES = path.join(ROOT, 'src/api/frontend/legacy/locales/en/issues.json');
+const ZH_PIPE = path.join(ROOT, 'src/api/frontend/legacy/locales/zh/pipeline.json');
+const EN_PIPE = path.join(ROOT, 'src/api/frontend/legacy/locales/en/pipeline.json');
 
 describe('Issue #329: Cross-pipeline handoff frontend', () => {
 
@@ -109,7 +109,7 @@ describe('Issue #329: Cross-pipeline handoff frontend', () => {
   });
 
   test('index.html bumped issues.js and pipeline.js versions', () => {
-    const html = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
+    const html = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
     // Version moves forward over time (v109 at #329, bumped since); assert >= v109.
     const m = html.match(/issues\.js\?v=(\d+)/);
     expect(m).not.toBeNull();

@@ -21,7 +21,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const DASHBOARD_JS = path.join(ROOT, 'src/api/static/js/pages/dashboard.js');
+const DASHBOARD_JS = path.join(ROOT, 'src/api/frontend/legacy/js/pages/dashboard.js');
 
 // ── 与 dashboard.js selectAgentSkill 保持一致的纯函数提取 ──
 // 输入：editNodes 数组、_skillPickCache（agentType -> {skill_name: display_name}）、agentType、skillName

@@ -25,13 +25,13 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const ACCOUNT_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/account.js'), 'utf8');
-const APP_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/app.js'), 'utf8');
-const API_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/api.js'), 'utf8');
-const REPOS_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/repos.js'), 'utf8');
-const SETTINGS_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/settings.js'), 'utf8');
-const ISSUES_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/issues.js'), 'utf8');
-const FEEDBACK_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/feedback.js'), 'utf8');
+const ACCOUNT_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/account.js'), 'utf8');
+const APP_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/app.js'), 'utf8');
+const API_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/api.js'), 'utf8');
+const REPOS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/repos.js'), 'utf8');
+const SETTINGS_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/settings.js'), 'utf8');
+const ISSUES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js'), 'utf8');
+const FEEDBACK_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/feedback.js'), 'utf8');
 
 let passed = 0, failed = 0;
 function test(name, fn) {
@@ -378,7 +378,7 @@ test('T30: api.js storage 事件中 repoKey 无前缀时不误清理（R8 边界
 });
 
 // ── R10: index.html 版本号递增验证 ──
-const INDEX_HTML = fs.readFileSync(path.join(ROOT, 'src/api/static/index.html'), 'utf8');
+const INDEX_HTML = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/index.html'), 'utf8');
 
 // 基线 weekly-08 的 ?v= 值
 const BASELINE_V = {

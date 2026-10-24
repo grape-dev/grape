@@ -33,7 +33,7 @@ function testNginxBodySize() {
 }
 
 function testApiJsSafeErrJson() {
-  const js = readFile('src/api/static/js/api.js');
+  const js = readFile('src/api/frontend/legacy/js/api.js');
 
   // 降级函数存在：HTML 直接 null，json 解析失败也 null
   assert.ok(js.includes('function _safeErrJson(r)'), 'api.js 应定义 _safeErrJson(r)');
@@ -70,7 +70,7 @@ function testApiJsSafeErrJson() {
 }
 
 function testChatJsSendErrorRender() {
-  const js = readFile('src/api/static/js/pages/chat.js');
+  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
 
   // 旧模式必须移除：无参 request_failed + 裸 e.message 拼接（{{status}} 未渲染 + 异常串入提示）
   assert.ok(
@@ -87,7 +87,7 @@ function testChatJsSendErrorRender() {
 }
 
 function testChatJsSubmitTimeout() {
-  const js = readFile('src/api/static/js/pages/chat.js');
+  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
   assert.ok(
     /hasMedia\s*\?+\s*120000/.test(js),
     '多图/视频 submit 应传加长超时（120000ms），避免大请求体 30s 误超时'
@@ -97,7 +97,7 @@ function testChatJsSubmitTimeout() {
 
 function testLocalesPlaceholder() {
   for (const lang of ['zh', 'en']) {
-    const json = JSON.parse(readFile(`src/api/static/locales/${lang}/common.json`));
+    const json = JSON.parse(readFile(`src/api/frontend/legacy/locales/${lang}/common.json`));
     // common.json 为扁平结构（i18n 的 'common.' 前缀映射到该文件）
     assert.ok(
       /\{\{status\}\}/.test(json.request_failed),
@@ -109,7 +109,7 @@ function testLocalesPlaceholder() {
 
 // 行为级验证：从 api.js 提取 _safeErrJson + handleResp 实源，在沙箱中执行
 function testHandleRespBehavior() {
-  const js = readFile('src/api/static/js/api.js');
+  const js = readFile('src/api/frontend/legacy/js/api.js');
   const start = js.indexOf('function _safeErrJson(r)');
   const end = js.indexOf('// Issue #52');
   assert.ok(start > 0 && end > start, 'api.js 应含 _safeErrJson 定义');

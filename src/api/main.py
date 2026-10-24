@@ -1003,7 +1003,8 @@ _COMMUNITY_UPLOAD_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 os.makedirs(_COMMUNITY_UPLOAD_DIR, exist_ok=True)
 app.mount("/static/community_uploads", StaticFiles(directory=_COMMUNITY_UPLOAD_DIR), name="community_uploads")
 
-STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+# Vue refactor: static root moved to frontend/legacy (phase 1); keep serving under /static
+STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "legacy") if os.path.isdir(os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend", "legacy")) else os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 if os.path.isdir(STATIC_DIR):
     app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
@@ -1410,7 +1411,7 @@ def _check_and_sync_templates() -> bool:
 @app.get("/admin", include_in_schema=False)
 @app.get("/admin/{path:path}", include_in_schema=False)
 async def serve_admin(path: str = ""):
-    """Admin 独立页面：返回 src/api/static/admin.html（frontend 单页）。"""
+    """Admin 独立页面：返回 src/api/frontend/legacy/admin.html（frontend 单页）。"""
     from fastapi.responses import FileResponse
     if path.startswith("api/") or path.startswith("static/"):
         from fastapi import HTTPException

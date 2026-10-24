@@ -22,7 +22,7 @@ function readFile(rel) {
   return fs.readFileSync(path.join(ROOT, rel), 'utf8');
 }
 
-const issuesJs = readFile('src/api/static/js/pages/issues.js');
+const issuesJs = readFile('src/api/frontend/legacy/js/pages/issues.js');
 
 assert.ok(issuesJs.includes('function _escapeHtml(s)'), 'issues.js 应包含 _escapeHtml 转义函数');
 assert.ok(issuesJs.includes('value="${_escapeHtml(_deployUrl)}"'), 'input value 应使用 _escapeHtml 转义');
@@ -39,7 +39,7 @@ assert.ok(issuesJs.includes('window._deployLongPressEnd'), '应暴露 _deployLon
 assert.ok(issuesJs.includes('ontouchstart="_deployLongPressStart()"'), '应绑定 ontouchstart');
 assert.ok(issuesJs.includes('ontouchend="_deployLongPressEnd()"'), '应绑定 ontouchend');
 
-const indexHtml = readFile('src/api/static/index.html');
+const indexHtml = readFile('src/api/frontend/legacy/index.html');
 const issuesScriptMatch = indexHtml.match(/<script src="\/static\/js\/pages\/issues\.js\?v=(\d+)"\s+defer><\/script>/);
 assert.ok(issuesScriptMatch, 'issues.js script 标签应带 defer 属性');
 assert.ok(parseInt(issuesScriptMatch[1]) >= 120, 'issues.js 版本号应 >= 120');

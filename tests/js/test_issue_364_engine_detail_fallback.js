@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 
 const ROOT = path.resolve(__dirname, '..', '..');
-const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/static/js/pages/runtimes.js'), 'utf8');
+const RUNTIMES_JS = fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/js/pages/runtimes.js'), 'utf8');
 const SETTINGS_PY = fs.readFileSync(path.join(ROOT, 'src/api/routes/settings.py'), 'utf8');
 
 // ── 与 runtimes.js _rebuildRtEngineIndex 保持一致的逻辑提取 ──

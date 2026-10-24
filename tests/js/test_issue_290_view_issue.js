@@ -21,8 +21,8 @@ const path = require('path');
 const fs = require('fs');
 
 const ROOT = path.resolve(__dirname, '../..');
-const issuesJsPath = path.join(ROOT, 'src/api/static/js/pages/issues.js');
-const appJsPath = path.join(ROOT, 'src/api/static/js/app.js');
+const issuesJsPath = path.join(ROOT, 'src/api/frontend/legacy/js/pages/issues.js');
+const appJsPath = path.join(ROOT, 'src/api/frontend/legacy/js/app.js');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 const appSrc = fs.readFileSync(appJsPath, 'utf8');
 
@@ -88,8 +88,8 @@ test('_openPRDetail「查看 PR ↗」按钮保持 /pull/ 不变', () => {
 
 // ─── 测试 6：zh/en 词条 issues.detail.view_issue 存在且语义正确 ───
 test('locales：zh「查看 Issue」/ en「View Issue」词条存在', () => {
-  const zh = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/zh/issues.json'), 'utf8'));
-  const en = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/static/locales/en/issues.json'), 'utf8'));
+  const zh = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/zh/issues.json'), 'utf8'));
+  const en = JSON.parse(fs.readFileSync(path.join(ROOT, 'src/api/frontend/legacy/locales/en/issues.json'), 'utf8'));
   assert.strictEqual(zh.detail && zh.detail.view_issue, '查看 Issue', 'zh issues.detail.view_issue 应为「查看 Issue」');
   assert.strictEqual(en.detail && en.detail.view_issue, 'View Issue', 'en issues.detail.view_issue 应为「View Issue」');
 });

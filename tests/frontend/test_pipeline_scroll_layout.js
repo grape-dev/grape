@@ -21,7 +21,7 @@ const vm = require('node:vm');
 
 const ROOT = path.resolve(__dirname, '..', '..');
 const PIPELINE_SRC = fs.readFileSync(
-  path.join(ROOT, 'src', 'api', 'static', 'js', 'pages', 'pipeline.js'),
+  path.join(ROOT, 'src', 'api', 'frontend', 'legacy', 'js', 'pages', 'pipeline.js'),
   'utf8'
 );
 

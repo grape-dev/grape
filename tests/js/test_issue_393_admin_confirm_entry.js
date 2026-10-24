@@ -17,7 +17,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const issuesJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/issues.js');
+const issuesJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/issues.js');
 const src = fs.readFileSync(issuesJsPath, 'utf8');
 
 // ── 提取函数体 ──
@@ -121,8 +121,8 @@ assert.ok(/window\.adminConfirmTaskDone\s*=\s*function/.test(src), '应定义 wi
 assert.ok(src.includes("API.post('/issues/' + taskId + '/admin-confirm-done')"), '应 POST /issues/{id}/admin-confirm-done');
 
 // i18n key（zh/en 均有）
-const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/zh/tasks.json'), 'utf8'));
-const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/static/locales/en/tasks.json'), 'utf8'));
+const zh = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/zh/tasks.json'), 'utf8'));
+const en = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../src/api/frontend/legacy/locales/en/tasks.json'), 'utf8'));
 for (const k of ['admin_confirm_done', 'admin_confirm_done_message', 'admin_only_hint']) {
   assert.ok(zh[k], 'zh 缺 key: ' + k);
   assert.ok(en[k], 'en 缺 key: ' + k);

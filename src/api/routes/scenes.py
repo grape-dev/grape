@@ -1283,7 +1283,7 @@ async def upload_scene_icon(file: UploadFile = File(...),
         obs_icon_key = file_key
     else:
         # 非 OBS 模式：写本地
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "uploads", "scene-icons")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "legacy", "uploads", "scene-icons")
         os.makedirs(static_dir, exist_ok=True)
         local_path = os.path.join(static_dir, f"tmp-{tmp_uuid}{ext}")
         with open(local_path, "wb") as f:
@@ -1331,7 +1331,7 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
         final_obs_key = new_key
     else:
         # 非 OBS 模式：重命名本地文件
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "uploads", "scene-icons")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "legacy", "uploads", "scene-icons")
         old_path = os.path.join(static_dir, os.path.basename(old_key))
         new_path = os.path.join(static_dir, f"{market_id}{ext}")
         try:
@@ -1363,7 +1363,7 @@ def _delete_scene_icon_file(file_key: str):
             log.warning(f"Scene icon delete (OBS): {e}")
     else:
         # 非 OBS 模式
-        static_dir = os.path.join(os.path.dirname(__file__), "..", "static", "uploads", "scene-icons")
+        static_dir = os.path.join(os.path.dirname(__file__), "..", "frontend", "legacy", "uploads", "scene-icons")
         local_path = os.path.join(static_dir, os.path.basename(file_key))
         try:
             if os.path.exists(local_path):

@@ -3,7 +3,7 @@
  *
  * 运行：node tests/js/test_issue_273_lang_switch_toast.js
  *
- * 验证点（与 src/api/static/js/pages/settings.js selectLang 一致）：
+ * 验证点（与 src/api/frontend/legacy/js/pages/settings.js selectLang 一致）：
  *   1. 全部成功（failed=0，非 cached）→ 不弹任何 Toast
  *   2. 重试成功（当前语言包重载成功）→ 不弹任何 Toast
  *   3. 部分成功（0 < failed < total）→ 不弹任何 Toast
@@ -17,7 +17,7 @@ const assert = require('assert');
 const path = require('path');
 const fs = require('fs');
 
-const settingsJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/settings.js');
+const settingsJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/pages/settings.js');
 const src = fs.readFileSync(settingsJsPath, 'utf8');
 
 // ── 极简 DOM mock（覆盖 settings.js 顶层 + selectLang 用到的 API）──

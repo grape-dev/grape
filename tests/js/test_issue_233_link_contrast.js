@@ -71,7 +71,7 @@ function testContrastRatios() {
 }
 
 function testAppCss() {
-  const css = readFile('src/api/static/css/app.css');
+  const css = readFile('src/api/frontend/legacy/css/app.css');
 
   assert.ok(
     css.includes('.chat-body .msg.r a'),
@@ -128,7 +128,7 @@ function testAppCss() {
 }
 
 function testAppleThemeCss() {
-  const css = readFile('src/api/static/css/apple-theme.css');
+  const css = readFile('src/api/frontend/legacy/css/apple-theme.css');
 
   assert.ok(
     css.includes('[data-theme="apple"] .chat-body .msg.r a'),
@@ -166,7 +166,7 @@ function testAppleThemeCss() {
 }
 
 function testLinkifyNoInlineColor() {
-  const js = readFile('src/api/static/js/pages/chat.js');
+  const js = readFile('src/api/frontend/legacy/js/pages/chat.js');
 
   // linkifyIssueNumbers 函数体中不应包含内联 color:var(--a)
   const funcMatch = js.match(/function linkifyIssueNumbers[\s\S]*?\n}/);
@@ -188,7 +188,7 @@ function testLinkifyNoInlineColor() {
 }
 
 function testNonBlueAreaUnaffected() {
-  const css = readFile('src/api/static/css/app.css');
+  const css = readFile('src/api/frontend/legacy/css/app.css');
   // .msg a 通用规则（蓝色链接）应保留，用于 .msg.l（浅色背景）
   assert.ok(
     css.includes('.msg a{color:var(--a)}'),

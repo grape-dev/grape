@@ -84,7 +84,7 @@ function makeSessionStorage() {
   };
 }
 
-const appJsPath = path.resolve(__dirname, '../../src/api/static/js/app.js');
+const appJsPath = path.resolve(__dirname, '../../src/api/frontend/legacy/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
 function loadApp(dom, sessionStorage) {
