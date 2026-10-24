@@ -36,6 +36,7 @@ export default defineConfig({
           'my-feedback-detail': /^my-feedback-detail-.*\.css$/,
           'im-channel': /^im-channel-.*\.css$/,
           organizations: /^organizations-.*\.css$/,
+          pipeline: /^[pP]ipeline-.*\.css$/,
         }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -49,9 +50,12 @@ export default defineConfig({
           .map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8'))
           .join('\n')
         fs.writeFileSync(path.join(dstAssets, 'ag-ui.css'), agCss)
-        // shared AG js chunks keep hashed names (chunk imports reference them)
+        // ALL shared js chunks keep hashed names (view chunks import them relatively)
         for (const f of fs.readdirSync(assetsDir)) {
-          if (f.startsWith('AG') && f.endsWith('.js')) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
+          if (f.endsWith('.js') && f !== 'index-CvjDQIka.js') {
+            // skip the SPA index entry (it imports SPA css); everything else is shared
+            if (!/^index-.*\.js$/.test(f)) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
+          }
         }
         // bridge tokens (hand-maintained, stable name)
         fs.copyFileSync(
@@ -80,6 +84,7 @@ export default defineConfig({
         ),
         'im-channel': fileURLToPath(new URL('./src/views/entries/im-channel.js', import.meta.url)),
         organizations: fileURLToPath(new URL('./src/views/entries/organizations.js', import.meta.url)),
+        pipeline: fileURLToPath(new URL('./src/views/entries/pipeline.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
