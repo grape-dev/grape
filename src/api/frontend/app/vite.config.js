@@ -34,6 +34,7 @@ export default defineConfig({
         const viewCssMap = {
           'my-feedback': /^my-feedback-.*\.css$/,
           'my-feedback-detail': /^my-feedback-detail-.*\.css$/,
+          'im-channel': /^im-channel-.*\.css$/,
         }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -69,6 +70,7 @@ export default defineConfig({
         'my-feedback-detail': fileURLToPath(
           new URL('./src/views/entries/my-feedback-detail.js', import.meta.url)
         ),
+        'im-channel': fileURLToPath(new URL('./src/views/entries/im-channel.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
