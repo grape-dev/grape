@@ -35,15 +35,23 @@ export default defineConfig({
           'my-feedback': /^my-feedback-.*\.css$/,
           'my-feedback-detail': /^my-feedback-detail-.*\.css$/,
           'im-channel': /^im-channel-.*\.css$/,
+          organizations: /^organizations-.*\.css$/,
         }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
           if (hit) fs.copyFileSync(path.join(assetsDir, hit), path.join(dstAssets, 'viewcss', name + '.css'))
         }
+        // ag-ui.css = concat of all AG* component css (stable aggregate for shell views)
+        const agCss = fs
+          .readdirSync(assetsDir)
+          .filter((f) => /^AG[A-Za-z]+-.*\.css$/.test(f))
+          .sort()
+          .map((f) => fs.readFileSync(path.join(assetsDir, f), 'utf8'))
+          .join('\n')
+        fs.writeFileSync(path.join(dstAssets, 'ag-ui.css'), agCss)
+        // shared AG js chunks keep hashed names (chunk imports reference them)
         for (const f of fs.readdirSync(assetsDir)) {
-          if (f.startsWith('AGButton-')) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
-          if (f.startsWith('AGButton-') && f.endsWith('.css'))
-            fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, 'ag-ui.css'))
+          if (f.startsWith('AG') && f.endsWith('.js')) fs.copyFileSync(path.join(assetsDir, f), path.join(dstAssets, f))
         }
         // bridge tokens (hand-maintained, stable name)
         fs.copyFileSync(
@@ -71,6 +79,7 @@ export default defineConfig({
           new URL('./src/views/entries/my-feedback-detail.js', import.meta.url)
         ),
         'im-channel': fileURLToPath(new URL('./src/views/entries/im-channel.js', import.meta.url)),
+        organizations: fileURLToPath(new URL('./src/views/entries/organizations.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
