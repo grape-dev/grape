@@ -47,6 +47,7 @@ export default defineConfig({
           'autopilot-view': /^autopilot-[vV]iew-.*\.css$/,
           'runtimes-view': /^runtimes-[vV]iew-.*\.css$/,
           'dashboard-view': /^dashboard-[vV]iew-.*\.css$/,
+          'observability-view': /^observability-[vV]iew-.*\.css$/,
           }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -105,6 +106,7 @@ export default defineConfig({
         'autopilot-view': fileURLToPath(new URL('./src/views/entries/autopilot-view.js', import.meta.url)),
         'runtimes-view': fileURLToPath(new URL('./src/views/entries/runtimes-view.js', import.meta.url)),
         'dashboard-view': fileURLToPath(new URL('./src/views/entries/dashboard-view.js', import.meta.url)),
+        'observability-view': fileURLToPath(new URL('./src/views/entries/observability-view.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
