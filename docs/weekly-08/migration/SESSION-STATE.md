@@ -16,6 +16,7 @@
 - 批4：scene-market（市场+详情+四弹窗，renderSceneMarket/renderSceneDetail契约；坑：fragment根+根级Teleport会unmount崩，须单一根；renderSceneDetail入口须先设_currentView）
 - 批5：skills（三分域+筛选+详情+华为云包下钻+上传/删除/转换弹窗，renderSkills/renderSkillDetail契约；坑：v-else-if下钻分支须subSkill先于pkg；renderMarkdown需api.js桥接window全局）
 - 批6：chat（会话列表+SSE单气泡流式+引擎技能选择器+飞书扫码+Issue#407草稿/图片持久化，renderChat契约；坑：SSE text chunk逐条push重复气泡→upsert单气泡；syncAbortBridge须在startStream同步调用）
+- 批7：account（五tab+第三方绑定OAuth/手动PAT/转移确认+密码邮箱验证码流+注销三验证+华为云凭据+外观三态+API密钥，renderAccount契约；坑：platformIcon在repos.js需window桥接；通用弹窗v-html+binder回调模式）
 
 ## 核心架构（每批照此办理）
 - 壳内chunk：Vite 多入口 → viewjs/[name].js 拷到 legacy/js/vue/，共享js全量拷到 legacy/js/assets/
