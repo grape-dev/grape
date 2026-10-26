@@ -1,5 +1,6 @@
 """仓库路由：列表、托管、移除、同步 + git 平台凭据/工作区（方案③ CLI 支撑）"""
 import os
+import re
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
 from src.config import log, WORKSPACE_DIR
@@ -950,6 +951,42 @@ def _try_github_bot_collaborator(user_token: str, bot_token: str, bot_username: 
         return {"bot_collaborator_needed": True, "bot_username": bot_username, "bot_status": "error"}
 
 
+_UPSTREAM_CODE_RE = re.compile(r"failed \((\d{3})\)")
+
+
+def _upstream_status_code(err: Exception) -> int:
+    """从 _req/_github_req RuntimeError 报文中提取上游状态码（无则 0）。
+
+    报文格式固定：GitCode API {method} {url} failed ({code}) / GitHub API ... failed ({code})。
+    """
+    try:
+        m = _UPSTREAM_CODE_RE.search(str(err))
+        if m:
+            return int(m.group(1))
+    except Exception:
+        pass
+    return 0
+
+
+def _host_502_detail(stage: str, err: Exception, message: str = "") -> dict:
+    """构造带上下文的 502 detail（Issue #455：托管失败需可解释、可重试）。
+
+    - 不把上游内部 URL/报文透出给客户端（Issue #383/#395 防泄露约束），原文仅落日志；
+    - 401/403/404 为权限/资源类错误，不标记 retryable（盲重试无意义）；
+    - 网络类/5xx 标记 retryable，并给出自愈/重试路径提示。
+    """
+    code = _upstream_status_code(err)
+    retryable = code not in (401, 403, 404)
+    return {
+        "code": 502,
+        "error_code": f"UPSTREAM_{stage.upper()}" + (f"_{code}" if code else ""),
+        "message": message or "托管服务暂时不可用，请稍后重试",
+        "upstream": {"stage": stage, "status": code or None, "retryable": retryable},
+        "retryable": retryable,
+        "retry_hint": "可稍后重试；若 webhook 已创建但托管未完成，可使用「修复托管」自愈（POST /repos/{owner}/{repo}/repair-host）",
+    }
+
+
 @router.post("/host", operation_id="repos_host", summary="Host repository", description="Registers an existing repository for hosting: creates the webhook and sets up the repo bot.")
 def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), request: Request = None,
               provider: str = ""):
@@ -1037,6 +1074,55 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         _gh_webhook_secret = _secrets.token_urlsafe(32) if _gh_use_path_b else ""
 
         try:
+            # Issue #455: 托管前归属/权限前置校验（GitHub）——非所有者/无管理员权限
+            # 直接 403 明确提示，避免上游 403 被包装成无上下文 502（原仅 WARNING）。
+            # 经 with_oauth_token 走 token 刷新机制（与下游一致）；无法确认权限（None/网络类）
+            # 不阻断，交给下游既有流程处理。
+            from src.user.repo_manager import _github_req, _GITHUB_API_BASE
+            import urllib.parse as _gh_up
+
+            def _gh_precheck(token, _owner=owner, _repo=repo_name):
+                _info = _github_req(
+                    "GET", f"{_GITHUB_API_BASE}/repos/{_owner}/{_gh_up.quote(_repo, safe='')}", token)
+                try:
+                    _uinfo = _github_req("GET", f"{_GITHUB_API_BASE}/user", token)
+                except Exception:
+                    _uinfo = {}
+                _login = (_uinfo or {}).get("login", "") if isinstance(_uinfo, dict) else ""
+                _perms = (_info.get("permissions") or {}) if isinstance(_info, dict) else {}
+                return {"info": _info, "login": _login, "perms": _perms}
+
+            try:
+                _gh_pre = with_oauth_token(user, "github", _gh_precheck)
+            except RuntimeError as _gh_pre_err:
+                _gh_pre = None
+                _gh_pre_code = _upstream_status_code(_gh_pre_err)
+                log.warning(f"host_repo GitHub: permission pre-check upstream failed: {_gh_pre_err}")
+                if _gh_pre_code == 404:
+                    raise HTTPException(status_code=404, detail={
+                        "code": 404, "error_code": "REPO_NOT_FOUND",
+                        "message": f"仓库 {owner}/{repo_name} 不存在于 GitHub 或无权访问，请确认仓库归属与授权",
+                    })
+                if _gh_pre_code in (401, 403):
+                    raise HTTPException(status_code=403, detail={
+                        "code": 403, "error_code": "PERMISSION_DENIED",
+                        "message": "无法访问该 GitHub 仓库（权限不足）：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试",
+                    })
+                # 网络类：无法确认权限 → 不阻断，继续既有流程
+                log.warning(f"host_repo GitHub: permission pre-check skipped (network/unknown: {_gh_pre_err})")
+            if isinstance(_gh_pre, dict) and _gh_pre.get("info"):
+                _gh_info = _gh_pre["info"]
+                _gh_login = _gh_pre.get("login", "")
+                _gh_perms = _gh_pre.get("perms") or {}
+                _gh_is_owner = bool(((_gh_info.get("owner") or {}).get("login") or "") == _gh_login)
+                if not _gh_is_owner and not _gh_perms.get("admin"):
+                    log.warning(f"host_repo GitHub: permission pre-check failed (owner={_gh_is_owner}, admin={_gh_perms.get('admin', False)}) for {owner}/{repo_name}")
+                    raise HTTPException(status_code=403, detail={
+                        "code": 403,
+                        "error_code": "PERMISSION_DENIED",
+                        "message": "无权限托管该 GitHub 仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试",
+                    })
+
             def _find_gh_hook(token, _owner=owner, _repo=repo_name, _url=webhook_url):
                 return find_existing_github_webhook(token, _owner, _repo, _url)
             existing_id = with_oauth_token(user, "github", _find_gh_hook)
@@ -1110,7 +1196,9 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
         except HTTPException:
             raise
         except Exception as e:
-            raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
+            # Issue #455: 502 带上下文（stage/上游状态/retryable），原文仅落日志防泄露
+            log.warning(f"host_repo GitHub failed: {e}")
+            raise HTTPException(status_code=502, detail=_host_502_detail("github_host", e))
 
     # ===== GitCode 仓库托管 =====
     # Issue #345: 改用统一入口读取全局 bot 配置
@@ -1165,7 +1253,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             is_admin = with_oauth_token(user, "gitcode", _check_admin)
 
         if not is_admin:
-            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管，请联系管理员"})
+            raise HTTPException(status_code=403, detail={"code": 403, "error_code": "PERMISSION_DENIED", "message": "无权限托管该仓库：请使用该仓库所有者的凭据，或授予机器人管理员权限后再试"})
     except HTTPException:
         raise
     except RuntimeError as e:
@@ -1183,11 +1271,11 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             # token 失效/无权（with_oauth_token 已做刷新重试，仍失败说明凭据或权限不足）
             raise HTTPException(status_code=403, detail={"code": 403, "error_code": "TOKEN_PERMISSION_INSUFFICIENT",
                 "message": "Token 权限不足或已过期，请更新后重试或改用 OAuth"})
-        raise HTTPException(status_code=502, detail={"code": 502, "message": "托管服务暂时不可用，请稍后重试"})
+        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user_permission", e))
     except Exception as e:
         # Issue #383/#395: 兜底不拼接上游原文（防泄露内部 URL/报文），原文仅落日志
         log.warning(f"host_repo upstream failed: {e}")
-        raise HTTPException(status_code=502, detail={"code": 502, "message": "托管服务暂时不可用，请稍后重试"})
+        raise HTTPException(status_code=502, detail=_host_502_detail("gitcode_user", e))
 
     try:
         from src.user.repo_manager import add_collaborator, accept_invite_for_repo, get_member_permission, _RateLimitedError
@@ -1322,7 +1410,8 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
             _mark("partial")
         except Exception:
             pass
-        raise HTTPException(status_code=502, detail={"code": 502, "message": f"托管失败: {e}"})
+        log.warning(f"host_repo failed (outer): {e}")
+        raise HTTPException(status_code=502, detail=_host_502_detail("host_setup", e))
 
 
 @router.post("/{owner}/{repo}/repair-host", operation_id="repos_repair_host", summary="Repair hosting", description="Self-heals an unfinished hosting flow (bot not joined / webhook missing). Idempotent; uses owner-token invite + bot-token webhook, skipping the invite when the bot is already a maintainer.")
@@ -2152,13 +2241,52 @@ _GITHUB_API_BASE = "https://api.github.com"
 _CREDENTIAL_TTL = 600
 
 
-def _repo_provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
-    """Git provider（gitcode/github）：由认证 token 的 repo_key 前缀派生（见 git-repo-provider-from-token-design.md）。"""
+def _provider_from_path(path: str) -> str:
+    """从 /api/repos/{owner}/{repo}/... 请求路径解析目标仓 repo_key 前缀 provider。
+
+    Issue #466 断点一：跨平台联合开发（GitHub 主仓 + GitCode 关联仓）下，会话 token
+    的 repo_key 按主仓签发；关联仓换券请求须按路径中目标仓前缀（gitcode:/github:）
+    解析 provider，否则把 ghp_ token 发给 gitcode.com。仅识别已接入前缀（小写归一），
+    未知前缀（如 gitlab:）返回空由调用方回退。
+    """
+    for seg in str(path or "").split("/"):
+        if not seg:
+            continue
+        low = seg.lower()
+        for p in _SUPPORTED_PROVIDERS:
+            if low.startswith(f"{p}:"):
+                return p
+    return ""
+
+
+def _repo_provider(request: Request, user: dict = Depends(get_current_user_or_api_key)) -> str:
+    """Git provider（gitcode/github）。
+
+    优先按请求路径目标仓 repo_key 前缀解析（Issue #466 跨平台关联仓换券）；
+    路径无前缀时回退认证 token 的 repo_key 前缀（会话主仓，见
+    git-repo-provider-from-token-design.md），保持同平台/无前缀调用向后兼容。
+    """
     from src.repo_key import parse_repo_key
-    p = parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
+    p = _provider_from_path(request.url.path) \
+        or parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
     if p not in _SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
     return p
+
+
+def _strip_provider_prefix(owner: str) -> str:
+    """剥离 owner 段的 provider 前缀（gitcode:/github:），供 URL/workspace 拼接。
+
+    Issue #466：带前缀路径（/api/repos/gitcode:owner/repo/...）的 owner path 段
+    含前缀；token 解析需要带前缀 repo_key（幂等），但 clone_url / workspace
+    路径须用裸 owner/repo。未知前缀原样返回。
+    """
+    s = str(owner or "")
+    low = s.lower()
+    for p in _SUPPORTED_PROVIDERS:
+        if low.startswith(f"{p}:"):
+            return s[len(p) + 1:]
+    return s
 
 
 def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "gitcode") -> str:
@@ -2171,7 +2299,10 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
     from src.repo_key import to_repo_key
 
     if provider == "github":
-        rk = to_repo_key(f"github:{owner}/{repo}")
+        # Issue #466: owner 段可带 github: 前缀（跨平台关联仓换券）；用 to_repo_key(f"{owner}/{repo}")
+        # 带前缀时幂等（单前缀），裸 owner 时补 github: 前缀——禁止再拼 f"github:{owner}/..." 否则
+        # owner 已带前缀时得到 github:github:owner/repo 双前缀，精确匹配 managed_repos 查不到 → 502。
+        rk = to_repo_key(f"{owner}/{repo}", provider="github")
         def _bot():
             try:
                 from src.user.db import get_github_token
@@ -2231,14 +2362,16 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
     """返回 CLI 本地执行 git 所需的平台凭据（一次性/短期，进程内使用不落盘）。
 
     gitcode：Basic 用 username=`x-access-token`、password=配置的 gitcode token。
+    Issue #466：owner 段可带 provider 前缀（跨平台关联仓换券）；clone_url 用裸 owner/repo。
     """
     token = _repo_platform_token(owner, repo, user, p)
     _gh = "github.com" if p == "github" else "gitcode.com"
+    _o = _strip_provider_prefix(owner)
     return {
         "provider": p,
         "username": "x-access-token",
         "password": token,
-        "clone_url": f"https://{_gh}/{owner}/{repo}.git",
+        "clone_url": f"https://{_gh}/{_o}/{repo}.git",
         "expires_in": _CREDENTIAL_TTL,
     }
 
@@ -2246,6 +2379,7 @@ def get_repo_git_credential(owner: str, repo: str, user: dict = Depends(get_curr
 @router.get("/{owner}/{repo}/workspace", operation_id="repos_workspace", summary="Repository workspace path (local git via CLI)", description="Returns the grape-managed local workspace path for the repository (CLI local git on the server). Session-only.")
 def get_repo_workspace(owner: str, repo: str, user: dict = Depends(get_current_user_or_api_key),
                        p: str = Depends(_repo_provider)):
-    ws = os.path.join(WORKSPACE_DIR, owner, repo)
+    _o = _strip_provider_prefix(owner)
+    ws = os.path.join(WORKSPACE_DIR, _o, repo)
     _gh = "github.com" if p == "github" else "gitcode.com"
-    return {"workspace": ws, "clone_url": f"https://{_gh}/{owner}/{repo}.git"}
+    return {"workspace": ws, "clone_url": f"https://{_gh}/{_o}/{repo}.git"}

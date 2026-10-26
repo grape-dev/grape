@@ -2834,6 +2834,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
         if _linked_repos:
             env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
+            # Issue #466: 关联仓 token 随 env 分发（worker 端本地无库，纯本地解析必为空）
+            _inject_linked_repo_tokens(env_extra, env_extra["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
@@ -3013,6 +3015,42 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
         log.warning(f"inject scene env failed: {_e}")
 
 
+def _inject_linked_repo_tokens(env: dict, linked_repos_json: str) -> None:
+    """Issue #466 断点二: 服务端解析各关联仓 bot token 随 env 分发。
+
+    worker 端本地 sqlite 无 managed_repos 数据（无 MySQL），Repo(rk).bot_token
+    必为空 → 关联仓 worktree 全部 skip。服务端托管着有效 token，此处按
+    GRAPE_LINKED_REPOS 逐仓解析注入 GRAPE_LINKED_REPO_TOKENS（JSON
+    {repo_key: token}），与 GRAPE_SESSION_TOKEN 同一 env 分发链路。
+    token 只进 env_extra（随 agent_tasks 存储与任务同生命周期），不进
+    prompt / 日志 / 落盘。解析失败或无 token 的仓不入 map（worker 端回退
+    本地解析）。
+    """
+    if not linked_repos_json:
+        return
+    import json as _json
+    try:
+        linked = _json.loads(linked_repos_json)
+    except Exception:
+        return
+    if not isinstance(linked, list):
+        return
+    tokens = {}
+    for lr in linked:
+        rk = (lr or {}).get("repo_key") or "" if isinstance(lr, dict) else ""
+        if not rk:
+            continue
+        try:
+            from src.token_service import get_repo_bot_token
+            tok = get_repo_bot_token(rk)
+        except Exception:
+            tok = ""
+        if tok:
+            tokens[rk] = tok
+    if tokens:
+        env["GRAPE_LINKED_REPO_TOKENS"] = _json.dumps(tokens, ensure_ascii=False)
+
+
 def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
     """读取场景关联仓库列表（Issue #242）。
 
@@ -3096,6 +3134,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
         _linked = _read_scene_linked_repos(repo_key, issue_id)
         if _linked:
             env["GRAPE_LINKED_REPOS"] = _json.dumps(_linked, ensure_ascii=False)
+            # Issue #466: 关联仓 token 随 env 分发（worker 端本地无库，纯本地解析必为空）
+            _inject_linked_repo_tokens(env, env["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
     # ── coding 注入 BOT_USERNAME（审查人）──
@@ -3727,6 +3767,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
         if _linked_repos:
             env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
+            # Issue #466: 关联仓 token 随 env 分发（worker 端本地无库，纯本地解析必为空）
+            _inject_linked_repo_tokens(env_extra, env_extra["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
@@ -3796,6 +3838,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees
     # → 注入 GRAPE_LINKED_WORKTREES（供 _submit_linked_repo_prs 消费 / SRE 构建部署消费）
+    # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS）——direct 端虽连库，但 env 优先口径与 worker 一致
     try:
         from src.runtime import repogit
         _linked_repos_env_dr = env_extra.get("GRAPE_LINKED_REPOS", "")
@@ -3806,7 +3849,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _gnum_lr = repogit.issue_num_from(issue_id)
                 _wt_list_dr = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list_dr, agent_type, _gnum_lr,
-                    token=repo_gitcode_token)
+                    token=repo_gitcode_token, env=env_extra)
                 if _wt_list_dr:
                     env_extra["GRAPE_LINKED_WORKTREES"] = _json_lr_dr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}

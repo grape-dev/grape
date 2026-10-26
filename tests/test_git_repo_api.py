@@ -397,3 +397,88 @@ def test_close_issue_requires_session_token(_client):
     client = TestClient(app)
     r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/5/close")
     assert r.status_code == 403
+
+
+class TestRepoCredentialProviderByPath:
+    """Issue #466 断点一：/api/repos git-credential 的 provider 按请求路径目标仓
+    repo_key 前缀（gitcode:/github:）解析，无前缀回退会话主仓。
+
+    场景：GitHub 主仓 + GitCode 关联仓联合开发。会话 token repo_key 按主仓
+    （github:...）签发；agent 换券关联仓时路径应带 gitcode: 前缀，服务端须按
+    目标仓宿主解析，而非把 ghp_ token 发给 gitcode.com。
+    """
+
+    def test_cross_platform_path_prefix_gitcode(self, monkeypatch, _client):
+        """主仓 github: 会话 + 请求 gitcode: 前缀目标仓 → provider=gitcode、走 GitCode 解析链。"""
+        calls = {"gitcode": 0, "github": 0}
+        seen = {}
+
+        def _gc(*a, **k):
+            calls["gitcode"] += 1
+            seen["repo_key"] = k.get("repo_key")
+            return "gc_tok"
+
+        monkeypatch.setattr("src.user.db.get_gitcode_token", _gc)
+        monkeypatch.setattr("src.user.db.get_github_token",
+                            lambda *a, **k: (calls.__setitem__("github", calls["github"] + 1), "gh_tok")[1])
+        _override_user(f"github:{OWNER}/{REPO}")
+        r = _client.get("/api/repos/gitcode:linked/hello/git-credential")
+        assert r.status_code == 200
+        cred = r.json()
+        assert cred["provider"] == "gitcode"
+        assert cred["password"] == "gc_tok"
+        assert cred["clone_url"] == "https://gitcode.com/linked/hello.git", \
+            "clone_url 不得泄漏 provider 前缀"
+        assert calls["gitcode"] == 1 and calls["github"] == 0, \
+            "应只调 GitCode 解析链，不得触碰 GitHub token"
+        assert seen.get("repo_key") == "gitcode:linked/hello", \
+            "传给 token 解析的 repo_key 必须为单前缀（gitcode:linked/hello），不得拼成双前缀"
+
+    def test_cross_platform_path_prefix_github(self, monkeypatch, _client):
+        """主仓 gitcode: 会话 + 请求 github: 前缀目标仓 → provider=github（反向组合）。"""
+        seen = {}
+        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+
+        def _gh(*a, **k):
+            seen["repo_key"] = k.get("repo_key")
+            return "gh_tok"
+
+        monkeypatch.setattr("src.user.db.get_github_token", _gh)
+        _override_user(f"gitcode:{OWNER}/{REPO}")
+        r = _client.get("/api/repos/github:linked/hello/git-credential")
+        assert r.status_code == 200
+        cred = r.json()
+        assert cred["provider"] == "github"
+        assert cred["password"] == "gh_tok"
+        assert cred["clone_url"] == "https://github.com/linked/hello.git"
+        assert seen.get("repo_key") == "github:linked/hello", \
+            "owner 带前缀时传给 token 解析的 repo_key 必须为单前缀（github:linked/hello），" \
+            "不得拼成 github:github:linked/hello 导致精确匹配 managed_repos 查不到换券 502"
+
+    def test_no_prefix_falls_back_to_session_repo(self, monkeypatch, _client):
+        """路径无前缀 → 回退会话主仓 provider（向后兼容，同平台现状不回归）。"""
+        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+        monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: "gh_tok")
+        _override_user(f"github:{OWNER}/{REPO}")
+        r = _client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
+        assert r.status_code == 200
+        cred = r.json()
+        assert cred["provider"] == "github"
+        assert cred["password"] == "gh_tok"
+
+    def test_unknown_path_prefix_falls_back(self, monkeypatch, _client):
+        """路径带未接入前缀（gitlab:）→ 不按前缀解析，回退会话主仓。"""
+        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+        _override_user(f"gitcode:{OWNER}/{REPO}")
+        r = _client.get("/api/repos/gitlab:linked/hello/git-credential")
+        assert r.status_code == 200
+        cred = r.json()
+        assert cred["provider"] == "gitcode", "未知前缀应回退会话主仓（gitcode）"
+
+    def test_workspace_provider_follows_path_prefix(self, monkeypatch, _client):
+        """workspace 接口共用 _repo_provider：带前缀路径 clone_url 按目标宿主生成。"""
+        _override_user(f"github:{OWNER}/{REPO}")
+        ws = _client.get("/api/repos/gitcode:linked/hello/workspace").json()
+        assert ws["clone_url"].startswith("https://gitcode.com/")
+        ws2 = _client.get(f"/api/repos/{OWNER}/{REPO}/workspace").json()
+        assert ws2["clone_url"].startswith("https://github.com/")

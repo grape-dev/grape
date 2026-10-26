@@ -8,7 +8,7 @@
 - 鉴权安全：clone 用 `-c http.extraheader` 内联注入（不写 config、不入日志）；push 用 GIT_ASKPASS
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
-import base64, os, shutil, subprocess, threading
+import base64, os, re, shutil, subprocess, threading, time
 from src import config
 from src.config import log
 
@@ -125,6 +125,52 @@ def _run_git(args: list, token: str = "", timeout: int = 900):
         return None
 
 
+# Issue #455: 拉取网络抖动重试——偶发 HTTP/2 帧层错误 / 连接超时 / RPC failed，
+# 有限次退避重试可显著提升 0→1 安装/拉取成功率；4xx 权限/资源类快速失败不放大上游压力。
+_NETWORK_ERR_RE = re.compile(
+    r"(could not resolve|connection (timed out|refused|reset by peer)|failed to connect|"
+    r"http/2|rpc failed|the remote end hung up|early eof|operation timed out|"
+    r"unable to access|network is unreachable|ssl connect|recv failure|"
+    r"could not read from remote repository|"
+    r"connection reset by peer|timed out)", re.IGNORECASE)
+_AUTH_STATUS_RE = re.compile(r"returned error: (401|403|404)")
+
+
+def _is_git_network_error(result) -> bool:
+    """git 结果是否命中网络类错误（可重试）；4xx/无错误返回 False。"""
+    if result is None:
+        return True  # 未产生结果（超时/进程异常）→ 可重试
+    err = ((result.stderr or "") + "\n" + (result.stdout or ""))
+    if _AUTH_STATUS_RE.search(err):
+        return False  # 401/403/404 权限/资源类，快速失败
+    return bool(_NETWORK_ERR_RE.search(err))
+
+
+def _run_git_retry(args: list, token: str = "", timeout: int = 900,
+                   retries: int = 3, base_delay: float = 1.0):
+    """执行 git；网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。
+
+    - 成功（returncode==0）立即返回；
+    - 仅网络类错误重试；4xx（401/403/404）与非网络类立即返回；
+    - 全部重试失败返回最后一次结果（调用方按原有 None/非 0 逻辑降级）。
+    """
+    delay = base_delay
+    last = None
+    for attempt in range(retries):
+        last = _run_git(args, token=token, timeout=timeout)
+        if last is not None and last.returncode == 0:
+            return last
+        if not _is_git_network_error(last):
+            return last
+        if attempt < retries - 1:
+            log.warning(
+                f"repogit git failed (attempt {attempt + 1}/{retries}), retrying in {delay:.1f}s: "
+                f"{(last.stderr if last else 'git exec failed')[:200]}")
+            time.sleep(delay)
+            delay *= 2
+    return last
+
+
 def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
     """确保本机 bare 基线存在并刷新（每机懒建立）。
 
@@ -137,12 +183,12 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
         try:
             if not os.path.isdir(base):
                 os.makedirs(os.path.dirname(base), exist_ok=True)
-                r = _run_git(["init", "--bare", base], token=token)
+                r = _run_git_retry(["init", "--bare", base], token=token)
                 if r is None or r.returncode != 0:
                     log.warning(f"repogit init failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                     return None
-                _run_git(["-C", base, "remote", "add", "origin", url], token=token)
-            r = _run_git(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token)
+                _run_git_retry(["-C", base, "remote", "add", "origin", url], token=token)
+            r = _run_git_retry(["-C", base, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*", "+refs/tags/*:refs/tags/*"], token=token)
             if r is None or r.returncode != 0:
                 log.warning(f"repogit fetch failed {repo_key}: {(r.stderr if r else 'git exec failed')[:300]}")
                 return None
@@ -152,15 +198,20 @@ def ensure_repo_base(repo_key: str, token: str = "") -> str | None:
             return None
 
 
-def ensure_repo_base_multi(linked_repos: list, token: str = "") -> dict:
+def ensure_repo_base_multi(linked_repos: list, token: str = "", env: dict = None) -> dict:
     """批量初始化多个关联仓库的 bare mirror（Issue #242）。
 
     R20.26.1/R20.26.2: 每个关联仓库用各自的 Repo.bot_token 独立获取 token，
     不复用主仓库 token。跨平台关联仓库（主 gitcode + 关联 github）自动分流。
 
+    Issue #466 断点二: token 解析改为 env（GRAPE_LINKED_REPO_TOKENS，服务端派发时
+    随 env 分发）优先，本地 Repo.bot_token 回退——worker 端本地 sqlite 无
+    managed_repos 数据，纯本地解析必然为空导致全部 skip。
+
     Args:
         linked_repos: [{repo_key, branch}] 列表
         token: 主仓库 token（向后兼容，关联仓库独立获取时忽略此参数）
+        env: 任务 env（含 GRAPE_LINKED_REPO_TOKENS）；缺省读 os.environ
     Returns:
         {repo_key: base_dir_or_None} 映射
     """
@@ -171,13 +222,8 @@ def ensure_repo_base_multi(linked_repos: list, token: str = "") -> dict:
         rk = lr.get("repo_key") or ""
         if not rk:
             continue
-        # R20.26.1: 关联仓库独立获取 token
-        _repo_token = ""
-        try:
-            from src.repo import Repo
-            _repo_token = Repo(rk).bot_token
-        except Exception as e:
-            log.warning(f"ensure_repo_base_multi: get token for {rk} failed: {e}")
+        # Issue #466: env 分发 token 优先，本地解析回退
+        _repo_token = _linked_repo_token(rk, env)
         # R20.26.4: token 短路时跳过该仓库
         if not _repo_token:
             log.warning(f"ensure_repo_base_multi: no token for linked repo {rk}, skipping")
@@ -188,14 +234,53 @@ def ensure_repo_base_multi(linked_repos: list, token: str = "") -> dict:
     return result
 
 
+def linked_repo_token_from_env(repo_key: str, env: dict = None) -> str:
+    """从 env 的 GRAPE_LINKED_REPO_TOKENS（JSON {repo_key: token}）解析关联仓 token。
+
+    Issue #466: 服务端派发任务时把各关联仓 bot token 随 env_extra 下发（与
+    GRAPE_SESSION_TOKEN 同链路），worker 端本地无库也能完成 worktree 初始化。
+    env 缺省读 os.environ；JSON 缺失/损坏/键不存在均返回空串（由调用方回退）。
+    """
+    import json as _json
+    _env = os.environ if env is None else (env or {})
+    raw = _env.get("GRAPE_LINKED_REPO_TOKENS", "") or ""
+    if not raw:
+        return ""
+    try:
+        m = _json.loads(raw)
+        return str(m.get(repo_key, "")) if isinstance(m, dict) else ""
+    except Exception:
+        return ""
+
+
+def _linked_repo_token(repo_key: str, env: dict = None) -> str:
+    """关联仓 token 解析：服务端 env 分发优先 → 本地 Repo.bot_token 回退。
+
+    Issue #466 断点二：worker 本地 sqlite 的 managed_repos 为空表（无 MySQL），
+    纯本地解析跨平台/同平台关联仓都拿不到 token；服务端托管的有效 token 随
+    env 分发后以此为准。env 缺省（本地/直连模式）仍走本地解析。
+    """
+    tok = linked_repo_token_from_env(repo_key, env)
+    if tok:
+        return tok
+    try:
+        from src.repo import Repo
+        return Repo(repo_key).bot_token
+    except Exception as e:
+        log.warning(f"linked repo token resolve failed for {repo_key}: {e}")
+        return ""
+
+
 def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
-                                  token: str = "") -> list:
+                                  token: str = "", env: dict = None) -> list:
     """为关联仓库列表创建 Issue 级 worktree（Issue #242）。
 
     遍历 linked_repos，为每个 repo_key 调用 ensure_issue_worktree。
     每个仓库使用各自的 branch 配置（linked_repos 中的 branch 字段）。
 
-    R20.26.1: 每个关联仓库用各自的 Repo.bot_token 独立获取 token。
+    R20.26.1: 每个关联仓库独立获取 token。
+    Issue #466 断点二: token 解析 env（GRAPE_LINKED_REPO_TOKENS）优先，
+    本地 Repo.bot_token 回退（env 由调用方传任务 env，缺省读 os.environ）。
 
     Returns:
         [{repo_key, branch, worktree_dir}] 成功创建的 worktree 列表
@@ -210,13 +295,8 @@ def ensure_linked_repo_worktrees(linked_repos: list, agent_type: str, issue_num,
         branch = lr.get("branch") or ""
         if not rk:
             continue
-        # R20.26.1: 关联仓库独立获取 token
-        _repo_token = ""
-        try:
-            from src.repo import Repo
-            _repo_token = Repo(rk).bot_token
-        except Exception as e:
-            log.warning(f"ensure_linked_repo_worktrees: get token for {rk} failed: {e}")
+        # Issue #466: env 分发 token 优先，本地解析回退
+        _repo_token = _linked_repo_token(rk, env)
         if not _repo_token:
             log.warning(f"ensure_linked_repo_worktrees: no token for {rk}, skipping")
             continue
@@ -410,7 +490,7 @@ def remove_issue_worktree_if_pushed(repo_key: str, agent_type: str, issue_num, t
         if head is None or not (head.stdout or "").strip():
             return False
         local_head = head.stdout.strip()
-        remote = _run_git(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"], token=token)
+        remote = _run_git_retry(["ls-remote", clone_url_for(repo_key), f"refs/heads/{branch}"], token=token)
         if remote is None:
             return False
         remote_out = (remote.stdout or "").strip()

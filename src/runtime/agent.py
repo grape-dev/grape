@@ -1791,6 +1791,8 @@ async def _execute_task(client, task, engine_name: str = ""):
     except Exception as e:
         log.warning(f"git worktree ensure failed: {e}")
     # Issue #242: 关联仓库 worktree 初始化（coding/sre agent 多仓库并行操作）
+    # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS，服务端派发时随 env_extra 下发），
+    # token 解析 env 优先 → 本地 Repo.bot_token 回退
     try:
         from src.runtime import repogit
         _linked_repos_env = env.get("GRAPE_LINKED_REPOS", "")
@@ -1801,7 +1803,7 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _num_lr = repogit.issue_num_from(task.get("issue_id") or "")
                 _wt_list = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list, task.get("agent_type", ""), _num_lr,
-                    token=_get_task_token(task))
+                    token=_get_task_token(task), env=env)
                 if _wt_list:
                     env["GRAPE_LINKED_WORKTREES"] = _json_lr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
