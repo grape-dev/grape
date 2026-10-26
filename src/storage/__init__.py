@@ -705,3 +705,88 @@ def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
     except Exception as e:
         log.warning(f"extract_skill_md failed: {e}")
         return None
+
+
+# ===== 子技能 zip 提取（Issue #448：user/repo 技能存 OBS，references/ 按 entry 读取）=====
+
+def list_zip_sub_skills(zip_bytes: bytes, skill_name: str) -> list:
+    """列出技能 zip 内 references/ 下的子技能（Issue #448）。
+
+    结构：{skill_name}/references/{sub}/SKILL.md。entry 精确匹配（目录名与 skill_name
+    不一致即视为包内容错乱，不做兜底，语义对齐 extract_skill_md 常规技能分支）。
+    返回与本地 list_sub_skills 同构：[{name, display_name, description, file_count}]。
+    """
+    if not zip_bytes or not skill_name:
+        return []
+    subs: dict = {}
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            for n in names:
+                parts = n.rstrip("/").split("/")
+                if (len(parts) != 4 or parts[0] != skill_name
+                        or parts[1] != "references" or parts[3].lower() != "skill.md"):
+                    continue
+                sub_name = parts[2]
+                if not sub_name or sub_name in (".", "..") or sub_name in subs:
+                    continue
+                try:
+                    front = zf.read(n).decode("utf-8", errors="replace")[:500]
+                except Exception:
+                    front = ""
+                display_name, description = sub_name, ""
+                m = re.search(r'description:\s*["\']?(.*?)["\']?$', front, re.MULTILINE)
+                if m:
+                    description = m.group(1)[:200]
+                dm = re.search(r'name:\s*["\']?(.*?)["\']?$', front, re.MULTILINE)
+                if dm:
+                    display_name = dm.group(1)
+                prefix = f"{skill_name}/references/{sub_name}/"
+                file_count = sum(1 for x in names if x.startswith(prefix) and not x.endswith("/"))
+                subs[sub_name] = {
+                    "name": sub_name,
+                    "display_name": display_name,
+                    "description": description,
+                    "file_count": file_count,
+                }
+    except Exception as e:
+        log.warning(f"list_zip_sub_skills failed: {e}")
+        return []
+    return [subs[k] for k in sorted(subs)]
+
+
+def read_zip_sub_skill(zip_bytes: bytes, skill_name: str, sub_name: str) -> dict | None:
+    """读取 zip 内子技能 SKILL.md 及其 references/ 附件（Issue #448，本地版同款行为）。
+
+    entry 精确匹配 {skill_name}/references/{sub_name}/SKILL.md——entry 名来自
+    namelist 全量枚举后比对，天然免疫 ../ 路径穿越。附件读取
+    {skill_name}/references/{sub_name}/references/ 下顶层文件，各截 2000 字符
+    （对齐本地 read_sub_skill）。返回 {"content", "references"}；未找到返回 None。
+    """
+    if not zip_bytes or not skill_name or not sub_name:
+        return None
+    if "/" in sub_name or sub_name in (".", ".."):
+        return None
+    try:
+        with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
+            names = zf.namelist()
+            entry = f"{skill_name}/references/{sub_name}/SKILL.md"
+            if entry not in names:
+                return None
+            content = zf.read(entry).decode("utf-8", errors="replace")
+            refs = []
+            ref_prefix = f"{skill_name}/references/{sub_name}/references/"
+            for n in sorted(names):
+                if not n.startswith(ref_prefix) or n.endswith("/"):
+                    continue
+                rest = n[len(ref_prefix):]
+                if not rest or "/" in rest:
+                    continue  # 只读顶层文件（对齐本地 os.listdir 行为）
+                try:
+                    refs.append({"name": rest, "content": zf.read(n).decode("utf-8", errors="replace")[:2000]})
+                except Exception:
+                    refs.append({"name": rest, "content": ""})
+            return {"content": content, "references": refs}
+    except Exception as e:
+        log.warning(f"read_zip_sub_skill failed: {e}")
+        return None

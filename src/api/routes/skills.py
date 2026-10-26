@@ -959,6 +959,23 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能转换失败。请检查服务端 OBS 配置后重试。"})
 
 
+def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
+    """子技能端点 OBS 分支共用（Issue #448）：取技能 zip 字节。
+
+    本地 references/ 目录未命中时调用。对象键缺失（历史数据未迁移）返回 None
+    （沿用既有 404/空列表口径）；有对象键但存储未启用 → 503（对齐 detail 端点）。
+    """
+    from src.user.db import get_skill_object_key
+    from src.storage import get_skill_storage, get_skill_zip_bytes
+    object_key = get_skill_object_key(skill_id)
+    if not object_key:
+        return None
+    if get_skill_storage() is None:
+        raise HTTPException(status_code=503, detail={
+            "code": 503, "message": "OBS 存储未启用，子技能读取不可用。请检查服务端 OBS 配置后重试。"})
+    return get_skill_zip_bytes(object_key)
+
+
 @router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package", description="Lists a skill package's sub-skills from the references/ directory.")
 def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
@@ -987,6 +1004,11 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
     ref_dir = os.path.join(base_dir, "references")
 
     if not os.path.isdir(ref_dir):
+        # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取 references/ =====
+        from src.storage import list_zip_sub_skills
+        zip_bytes = _get_sub_skill_zip(skill_id, skill_name)
+        if zip_bytes is not None:
+            return {"skill_name": skill_name, "sub_skills": list_zip_sub_skills(zip_bytes, skill_name)}
         return {"skill_name": skill_name, "sub_skills": []}
 
     subs = []
@@ -1048,7 +1070,13 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
 
     if not os.path.isfile(sub_md):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
+        # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
+        from src.storage import read_zip_sub_skill
+        zip_bytes = _get_sub_skill_zip(skill_id, row[0])
+        sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
+        if sub_data is None:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
+        return {"name": sub_name, "content": sub_data["content"], "references": sub_data["references"]}
 
     try:
         with open(sub_md, encoding="utf-8") as f:
@@ -1097,14 +1125,22 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
         else:
             base_dir = os.path.join(SKILLS_DIR, _sp) if _sp else ""
     sub_md = os.path.join(base_dir, "references", sub_name, "SKILL.md")
-    if not os.path.isfile(sub_md):
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
 
-    try:
-        with open(sub_md, encoding="utf-8") as f:
-            content = f.read()
-    except Exception as e:
-        raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+    content = None
+    if os.path.isfile(sub_md):
+        try:
+            with open(sub_md, encoding="utf-8") as f:
+                content = f.read()
+        except Exception as e:
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
+    else:
+        # ===== OBS 分支（Issue #448）：user/repo 技能从 zip 提取子技能 =====
+        from src.storage import read_zip_sub_skill
+        zip_bytes = _get_sub_skill_zip(pkg_id, row[0])
+        sub_data = read_zip_sub_skill(zip_bytes, row[0], sub_name) if zip_bytes else None
+        content = sub_data["content"] if sub_data else None
+    if content is None:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"子技能 {sub_name} 未找到"})
 
     # 从 frontmatter 解析 name 和 description
     display_name = sub_name
