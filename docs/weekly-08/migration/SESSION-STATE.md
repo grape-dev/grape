@@ -14,6 +14,7 @@
 - 批2：my_feedback×2、im_channel、organizations（壳内chunk方案）
 - 批3：pipeline、agents（五视图共用AgentView）
 - 批4：scene-market（市场+详情+四弹窗，renderSceneMarket/renderSceneDetail契约；坑：fragment根+根级Teleport会unmount崩，须单一根；renderSceneDetail入口须先设_currentView）
+- 批5：skills（三分域+筛选+详情+华为云包下钻+上传/删除/转换弹窗，renderSkills/renderSkillDetail契约；坑：v-else-if下钻分支须subSkill先于pkg；renderMarkdown需api.js桥接window全局）
 
 ## 核心架构（每批照此办理）
 - 壳内chunk：Vite 多入口 → viewjs/[name].js 拷到 legacy/js/vue/，共享js全量拷到 legacy/js/assets/
@@ -41,9 +42,8 @@
 - 截图存 docs/weekly-08/screenshots/（明暗各一张是硬要求）
 
 ## 下一批
-- skills.js(1058)（注意：技能详情返回会调 window.renderSceneDetail(param)——批4已在新chunk里实现该全局）
+- 大件队列优先做小件热身：chat(1422) 或直接按队列 chat → account(1552) → events(1569) → issues(1981) → autopilot(2026) → runtimes(2270) → dashboard(2513) → observability(3035) → admin独立站 → app.js外壳+index.html收口
 - 壳耦合组（后期统一批）：settings.js、repos.js+templates.js（templates是repos大厅的lobby子标签，已重分类）
-- 大件队列：chat(1422) account(1552) events(1569) issues(1981) autopilot(2026) runtimes(2270) dashboard(2513) observability(3035) → admin独立站 → app.js外壳+index.html收口
 - 死代码待主人裁决删除：agents.js的Configure面板函数（约250行无UI入口）
 - help页是否彻底Vue化：阶段3裁决
 - **视觉/体验债**：迁移中主人不满意的视觉效果统一记在 docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im-channel太白/pipeline+runtimes+repos霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理，单批迁移不做视觉升级
