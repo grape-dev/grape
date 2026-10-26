@@ -44,11 +44,26 @@
 - 中文字体已装（~/.local/share/fonts/NotoSansSC-Regular.ttf + fontconfig回退）
 - 截图存 docs/weekly-08/screenshots/（明暗各一张是硬要求）
 
+## 本会话产品级改动（非迁移批，已合入）
+- **强制深色三态**（commit 405cd5c4c）：外观页 浅色/深色/自动 三选一；CSS 暗色镜像到 [data-theme-mode="dark]；缓存版本 apple-theme v21 / account.js v44 / i18n 36
+- **应用弹窗主分支预选修复**（commit 3067c6205）：workBranch 默认选中 main（原空值在下拉显示空白+确认被拦）
+- **视觉/体验债清单**：docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im太白/霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理
+
+## 剩余批次队列
+1. issues(1981) — 下一批
+2. autopilot(2026)
+3. runtimes(2270)
+4. dashboard(2513) — 注意 ui-debt#5 卡片边界
+5. observability(3035)
+6. 壳耦合组：settings.js、repos.js+templates.js（repos 里有 platformIcon/selectRepo 等被多方引用）
+7. knowledge(未迁移，Vue app 已有 _knowledgeVueApp 壳内挂载模式可参考 app.js 1296行)
+8. feedback(9) 小件
+9. admin独立站 → app.js外壳+index.html收口
+死代码待主人裁决：agents.js Configure面板（约250行无UI入口）
+help页是否彻底Vue化：阶段3裁决
+
 ## 下一批
-- 大件队列优先做小件热身：chat(1422) 或直接按队列 chat → account(1552) → events(1569) → issues(1981) → autopilot(2026) → runtimes(2270) → dashboard(2513) → observability(3035) → admin独立站 → app.js外壳+index.html收口
-- 壳耦合组（后期统一批）：settings.js、repos.js+templates.js（templates是repos大厅的lobby子标签，已重分类）
-- 死代码待主人裁决删除：agents.js的Configure面板函数（约250行无UI入口）
-- help页是否彻底Vue化：阶段3裁决
+- issues.js(1981)——需求中心，注意 ui-debt#1（太黑看不清细节，详情页尤甚），迁移时顺手把暗色层级修了
 - **视觉/体验债**：迁移中主人不满意的视觉效果统一记在 docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im-channel太白/pipeline+runtimes+repos霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理，单批迁移不做视觉升级
 
 ## 批4新增坑（别再踩）
