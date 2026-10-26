@@ -99,6 +99,23 @@ SEED_RULES: List[Dict[str, Any]] = [
         "description": "任务成功率环比上一窗口下跌超过 20 个百分点"
                        "（两个 30 分钟窗口各需 ≥3 个终态任务，样本不足不出指标）",
     },
+    # ----- Issue #463 P3：agent_tasks 表体积治理指标 -----
+    {
+        "name": "agent_tasks_rows_high", "kind": "metric", "level": "platform",
+        "metric": "agent_tasks_rows",
+        "comparator": "gt", "threshold": 500000, "window_sec": 3600, "for_sec": 0,
+        "severity": "warning", "seed_source": "GrapeAgentTasksRowsHigh",
+        "description": "agent_tasks 表行数超过 50 万"
+                       "（Issue #463：90 天终态删行后应回落，持续超限说明删行未生效）",
+    },
+    {
+        "name": "agent_tasks_size_high", "kind": "metric", "level": "platform",
+        "metric": "agent_tasks_mb",
+        "comparator": "gt", "threshold": 2048, "window_sec": 3600, "for_sec": 0,
+        "severity": "warning", "seed_source": "GrapeAgentTasksSizeHigh",
+        "description": "agent_tasks 表体积超过 2GB"
+                       "（Issue #463：7 天置空大字段 + 90 天删行后应回落）",
+    },
 ]
 
 _COMPARATORS = {
@@ -481,6 +498,36 @@ def _platform_metrics() -> Dict[str, float]:
             _baseline["http"] = (now_ts, tot, c5x)
     except Exception as e:
         log.debug(f"obs platform http metrics skipped: {e}")
+
+    # Issue #463 P3：agent_tasks 表体积指标（行数 + MB，供 agent_tasks_rows_high /
+    # agent_tasks_size_high 告警求值）。体积口径：MySQL 用 information_schema 精确值；
+    # SQLite 无单表统计，用 page_count×page_size 整库体积作上界参考（测试/单机部署）。
+    try:
+        from src.session_manager import _is_mysql_backend, db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM agent_tasks")
+            vals["agent_tasks_rows"] = float(c.fetchone()[0] or 0)
+        if _is_mysql_backend():
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    "SELECT (DATA_LENGTH + INDEX_LENGTH) / 1024 / 1024"
+                    " FROM information_schema.TABLES"
+                    " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'agent_tasks'")
+                r = c.fetchone()
+            if r and r[0] is not None:
+                vals["agent_tasks_mb"] = round(float(r[0]), 2)
+        else:
+            with db_lock:
+                c = db.cursor()
+                c.execute("PRAGMA page_count")
+                pc = c.fetchone()[0]
+                c.execute("PRAGMA page_size")
+                ps = c.fetchone()[0]
+            vals["agent_tasks_mb"] = round((pc or 0) * (ps or 0) / 1024 / 1024, 2)
+    except Exception as e:
+        log.warning(f"obs platform agent_tasks metrics failed: {e}")
 
     return vals
 

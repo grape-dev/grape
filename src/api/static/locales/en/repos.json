@@ -86,7 +86,10 @@
   "host": {
     "confirm_title": "Add Hosting",
     "confirm": "Add this repository to the hosting list?",
-    "confirm_btn": "Confirm"
+    "confirm_btn": "Confirm",
+    "permission_denied": "No permission to host this repository: use the repository owner's credentials, or grant the bot admin permission and retry",
+    "repo_not_found": "Repository {{repo}} does not exist on the code hosting platform or you have no access; check repository ownership and authorization",
+    "upstream_error": "Hosting service temporarily unavailable ({{msg}}), please retry later; if the webhook was created but hosting is unfinished, use 'Repair Hosting' to self-heal"
   },
   "unhost": {
     "confirm": "Are you sure you want to unhost {{name}}?\n\nAfter unhosting, all asset data for this repository on Grape (events, sessions, Agent configs, repo skills, workspace files) will be deleted and cannot be recovered.",

@@ -8,7 +8,7 @@
 # 国内镜像加速：
 #   .venv/bin/pip install -r requirements.txt -i https://mirrors.aliyun.com/pypi/simple/
 #
-# Python 版本要求：主服务 >= 3.9，devbox sandbox 需 >= 3.10
+# Python 版本要求：>= 3.10（主服务与 devbox sandbox 一致；低于 3.10 启动将显式提示并退出）
 paramiko>=3.0
 markdown>=3.4
 lark-oapi>=1.0

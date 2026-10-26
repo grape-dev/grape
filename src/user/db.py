@@ -2865,6 +2865,60 @@ def get_server_base_url() -> str:
     return f"http://localhost:{_port}"
 
 
+def _server_base_url_configured_value() -> str:
+    """读取显式配置的对外基址（server-config.json > meta），空串表示未配置。
+
+    Issue #455：与 get_server_base_url 不同，本函数不做 localhost 兜底，
+    用于判断「用户是否显式配置了对外可访问基址」。
+    """
+    try:
+        from src.config import read_server_config
+        _sb = (read_server_config().get("server_base_url") or "").strip().rstrip("/")
+        if _sb:
+            return _sb
+    except Exception:
+        pass
+    try:
+        return (get_meta_value("server_base_url") or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+_LOOPBACK_HOSTS = ("localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1")
+
+
+def is_server_base_url_configured() -> bool:
+    """对外基址是否已显式配置（非空且非本机回环地址）。
+
+    Issue #455：未配置时 OAuth 回调/安装命令会指向 localhost，第三方平台无法回访，
+    应在启动日志与健康检查中给出告警。
+    """
+    base = _server_base_url_configured_value()
+    if not base:
+        return False
+    _host = base.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return _host not in _LOOPBACK_HOSTS
+
+
+def get_server_base_url_warning() -> str:
+    """未显式配置对外基址时的告警文案；已配置返回空串。"""
+    base = _server_base_url_configured_value()
+    if base and is_server_base_url_configured():
+        return ""
+    if base:
+        return (
+            "server_base_url 当前指向本机回环地址 " + base +
+            "，OAuth 回调与安装命令对第三方平台不可达；"
+            "请在 configs/server-config.json 配置对外可访问基址（如 https://grape.example.com）后重启。"
+        )
+    return (
+        "未配置对外可访问基址 server_base_url：OAuth 回调与安装命令将默认指向 http://localhost:3000，"
+        "第三方平台无法回访导致登录/托管不可用；"
+        "请在 configs/server-config.json 配置 server_base_url（如 https://grape.example.com）后重启。"
+        "配置示例见 configs/server-config.example.json。"
+    )
+
+
 def get_webhook_url() -> str:
     """返回服务端 webhook 地址（GitCode 事件回调注册用，含 /webhook/gitcode 后缀）。
 

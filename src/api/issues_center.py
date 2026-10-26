@@ -1534,15 +1534,30 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     except Exception as _e:
                         log.warning(f"attachment file rename failed: {_e}")
     # 2) 场景选择：用户选了具体场景 → 写入 scene_id（issue_opened 读到有值则跳过推荐）
-    #    选智能推荐（vod-auto）或留空 → 不写 scene_id → issue_opened 走智能推荐
+    #    选智能推荐（vod-auto）或留空 → 仓库无默认场景时不写 scene_id → issue_opened 走智能推荐
+    #    Issue #415: 无显式场景且仓库配置默认场景（managed_repos.dev_scene）→ 回退写入，
+    #    保证对话通道创建的 Issue 详情页「流水线场景」不显示 --。
     try:
+        from src.api.session_store import set_issue_scene
+        from src.runtime.engine_select import _repo_user_id
+        _scene_to_write = ""
         if body.scene_id and body.scene_id != "vod-auto":
-            from src.api.session_store import set_issue_scene
-            from src.runtime.engine_select import _repo_user_id
+            _scene_to_write = body.scene_id
+        else:
+            # 无显式场景 → 仓库默认场景兜底（未配置则保持空，走智能推荐）
+            try:
+                from src.user.db import get_repo_scene
+                _scene_to_write = get_repo_scene(repo_key) or ""
+            except Exception as _re:
+                log.warning(f"create_task: get_repo_scene failed: {_re}")
+                _scene_to_write = ""
+        if _scene_to_write:
             # Issue #343 问题十一修复: issue_creator 必须是 GitCode/GitHub 登录名（external_login），
             # 不能用平台名 user["username"]——_repo_user_id 查的是 unified_user_mapping.gitcode_user
             scene_uid = _repo_user_id(repo_key, issue_creator=assignee) or 0
-            set_issue_scene(repo_key, f"#{issue_num}", body.scene_id, scene_user_id=scene_uid)
+            set_issue_scene(repo_key, f"#{issue_num}", _scene_to_write, scene_user_id=scene_uid)
+            log.info(f"create_task: scene={_scene_to_write} set for #{issue_num}"
+                     + ("" if (body.scene_id and body.scene_id != "vod-auto") else " (repo default fallback)"))
     except Exception as _e:
         from src.config import log
         log.warning(f"create_task: set_issue_scene failed: {_e}")
@@ -2124,6 +2139,18 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     _agent_status_map = _batch_fetch_agent_statuses(_keys)
     _pr_issue_keys = _batch_fetch_pr_issue_keys(_keys)
 
+    # Issue #415: 仓库默认场景缓存（无 Issue 级场景时展示回退用，managed_repos.dev_scene）
+    _repo_default_scene: dict[str, str] = {}
+    for idx, r in enumerate(rows):
+        _rk = _keys[idx][0]
+        if _rk in _repo_default_scene:
+            continue
+        try:
+            from src.user.db import get_repo_scene
+            _repo_default_scene[_rk] = get_repo_scene(_rk) or ""
+        except Exception:
+            _repo_default_scene[_rk] = ""
+
     # P1-B: Pre-resolve scene names in batch (loop-out).
     # Collect unique (scene_id, repo_key) pairs and resolve once, instead of
     # calling get_pipeline_config per-card (348× → 2-5× with cache).
@@ -2132,6 +2159,8 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         _rk = _keys[idx][0]
         _st = _stage_map.get((_rk, _keys[idx][1]))
         _issue_scene_id = (_st.get("scene_id") or "") if _st else ""
+        if not _issue_scene_id:
+            _issue_scene_id = _repo_default_scene.get(_rk, "")  # 展示回退：仓库默认场景
         _scene_key = (_issue_scene_id, _rk)
         if _scene_key not in _scene_name_cache:
             _scene_name = ""
@@ -2153,8 +2182,8 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             _scene_id = _issue_scene_id
             _scene_source = "vod"  # VOD 识别
         else:
-            # 无 Issue 级场景 → 仓库默认场景（原 get_issue_scene 在 scene_id 为空时返回空串，等价）
-            _scene_id = ""
+            # 无 Issue 级场景 → 仓库默认场景（Issue #415：回退展示，避免详情页显示 --）
+            _scene_id = _repo_default_scene.get(_rk, "")
             _scene_source = "repo_default"
         _scene_name = _scene_name_cache.get((_scene_id, _rk), "")
         _has_running_agent = bool(r[3]) and _stage in ("vod", "issue", "coding", "qa", "sre") and ((_rk, _issue_id) in _running)

@@ -1785,6 +1785,15 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         log.warning(f"OAuth auto-create failed: username={username}, provider={provider}")
         return _oauth_error_redirect(request, "create_failed", popup=popup)
 
+    # Issue #455: GitHub OAuth 落库读回校验——实测曾出现「日志称创建成功但库中查不到账号/绑定」（落库无痕）。
+    # 创建后立即读回，读不到则按数据一致性优先返回失败（不再静默 302）；GitCode 语义保持不变。
+    if provider == "github":
+        _readback_account = get_grape_account_by_id(account["id"])
+        if not _readback_account:
+            log.error(f"OAuth auto-create READBACK FAILED: account {account['id']} ({username}) not persisted for provider={provider}; returning failure")
+            soft_delete_account(account["id"])
+            return _oauth_error_redirect(request, "create_failed", popup=popup)
+
     bind_ok = create_external_identity(
         grape_user_id=account["id"],
         provider=provider,
@@ -1800,6 +1809,14 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         log.warning(f"OAuth auto-create: bind failed for user {account['id']}, provider={provider}, rolling back")
         soft_delete_account(account["id"])
         return _oauth_error_redirect(request, "bind_failed", popup=popup)
+
+    if provider == "github":
+        # 绑定读回校验：external_identities 必须能查到刚写入的绑定，否则视为落库失败（回滚账号 + 失败响应）
+        _readback_binding = get_external_identity(provider, external_id)
+        if not _readback_binding:
+            log.error(f"OAuth auto-create READBACK FAILED: binding for user {account['id']} ({username}) not persisted for provider={provider}; rolling back and returning failure")
+            soft_delete_account(account["id"])
+            return _oauth_error_redirect(request, "bind_failed", popup=popup)
     # FR-18.6: 补写 um 平台列
     _sync_um_platform_col(account["id"], provider, external_login)
     _clear_user_repos_cache(account["id"])

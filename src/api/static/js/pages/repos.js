@@ -517,7 +517,21 @@ function hostAndSelect(fullName, owner, name, repoKey, event) {
         app.showToast(I18N.t('repos.sync.host_success'));
         app.loadProfile().then(() => selectRepo(fullName, owner, name, repoKey));
       }
-    }).catch(e => app.showToast(I18N.t('repos.sync.host_failed', {msg: e.message})));
+    }).catch(e => {
+      // Issue #455: 后端 error_code 明确映射——403 属权限/归属问题，502 属上游可重试
+      var code = (e && e.error_code) || '';
+      var toastMsg;
+      if (code === 'PERMISSION_DENIED' || code === 'TOKEN_PERMISSION_INSUFFICIENT') {
+        toastMsg = I18N.t('repos.host.permission_denied');
+      } else if (code === 'REPO_NOT_FOUND') {
+        toastMsg = I18N.t('repos.host.repo_not_found', {repo: fullName});
+      } else if (code && code.indexOf('UPSTREAM_') === 0) {
+        toastMsg = I18N.t('repos.host.upstream_error', {msg: e.message || ''});
+      } else {
+        toastMsg = I18N.t('repos.sync.host_failed', {msg: e.message || ''});
+      }
+      app.showToast(toastMsg);
+    });
   };
   if (window._grapeConfirm) {
     _grapeConfirm({

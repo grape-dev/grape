@@ -103,5 +103,12 @@
     "help_title": "说明",
     "help_desc": "配置 IM 平台的 App ID 和 App Secret，用于 Chat Agent 通过飞书/企业微信/钉钉接收消息和回复。也可使用扫码配置快速接入飞书。"
   },
-  "current_engine": "当前使用"
+  "current_engine": "当前使用",
+  "recall": {
+    "action": "撤回",
+    "confirm": "撤回会删除该消息，并停止 agent 的执行",
+    "hint": "消息已撤回",
+    "re_edit": "重新编辑",
+    "failed": "撤回失败: {{msg}}"
+  }
 }

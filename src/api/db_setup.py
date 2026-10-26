@@ -204,7 +204,8 @@ CREATE TABLE IF NOT EXISTS chat_messages (
     content MEDIUMTEXT NOT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     task_id TEXT,
-    generate_status INTEGER DEFAULT NULL
+    generate_status INTEGER DEFAULT NULL,
+    deleted INTEGER DEFAULT 0
 )
 """
 
@@ -403,6 +404,20 @@ CREATE TABLE IF NOT EXISTS issue_state (
     updated_at   TEXT DEFAULT (datetime('now')),
     created_at   TEXT DEFAULT (datetime('now')),
     UNIQUE (repo_key, issue_id)
+)
+"""
+
+# ===== Issue #455: pipeline_instances 表（0→1 安装/清理路径被引用但此前未建表）=====
+# 清理逻辑（onboarding/repo_cleanup）按 repo_key 直删该表；新实例缺表会报 "no such table"。
+_PIPELINE_INSTANCES_DDL = """
+CREATE TABLE IF NOT EXISTS pipeline_instances (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    repo_key     TEXT NOT NULL,
+    pipeline_id  TEXT DEFAULT '',
+    instance_id  TEXT DEFAULT '',
+    status       TEXT DEFAULT 'pending',
+    created_at   TEXT DEFAULT (datetime('now')),
+    updated_at   TEXT DEFAULT (datetime('now'))
 )
 """
 
@@ -832,6 +847,8 @@ _NEW_TABLES = [
     # issue_state: 保留创建（session_store.py 兜底读取 + 测试引用），
     # C5 DROP 条件性跳过（生产环境确认无孤儿后才删，测试环境保留）
     ("issue_state", _ISSUE_STATE_DDL),
+    # Issue #455: pipeline_instances —— 清理逻辑引用但不建表会导致新实例 "no such table"
+    ("pipeline_instances", _PIPELINE_INSTANCES_DDL),
     ("issue_agent_session", _ISSUE_AGENT_SESSION_DDL),
     ("events", _EVENTS_TABLE_DDL),
     ("event_skipped", _EVENT_SKIPPED_DDL),
@@ -4490,8 +4507,9 @@ def _migrate_tables():
             _ensure_column(c, "issue", "is_subtask_mode", "INTEGER DEFAULT 0")
             _ensure_column(c, "chat_messages", "task_id", "TEXT")
             _ensure_column(c, "chat_messages", "generate_status", "INTEGER DEFAULT NULL")
+            _ensure_column(c, "chat_messages", "deleted", "INTEGER DEFAULT 0")
             db.commit()
-        log.info("Added parent_issue_number/is_subtask_mode to issue + task_id/generate_status to chat_messages")
+        log.info("Added parent_issue_number/is_subtask_mode to issue + task_id/generate_status/deleted to chat_messages")
     except Exception as e:
         log.warning(f"Add multi-task columns failed: {e}")
     # ===== Phase B2: issue 收编 issue_state 字段（新增列 + 存量数据回填）=====
