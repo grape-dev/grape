@@ -40,6 +40,7 @@ export default defineConfig({
           'agent-view': /^[aA]gent-[vV]iew-.*\.css$/,
           'scene-market': /^scene-market-.*\.css$/,
           'skills-view': /^skills-[vV]iew-.*\.css$/,
+          'chat-view': /^chat-[vV]iew-.*\.css$/,
         }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -91,6 +92,7 @@ export default defineConfig({
         'agent-view': fileURLToPath(new URL('./src/views/entries/agent-view.js', import.meta.url)),
         'scene-market': fileURLToPath(new URL('./src/views/entries/scene-market.js', import.meta.url)),
         'skills-view': fileURLToPath(new URL('./src/views/entries/skills-view.js', import.meta.url)),
+        'chat-view': fileURLToPath(new URL('./src/views/entries/chat-view.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>

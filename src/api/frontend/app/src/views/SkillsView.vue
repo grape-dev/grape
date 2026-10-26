@@ -319,15 +319,24 @@
       <button class="bt bt-o bt-s sk__back-btn" @click="backToPkg">← {{ th('back') }}</button>
       <div class="sk__subdet">
         <div class="cd sk__subdet-main">
-          <div class="sk__subdet-h"><span class="sk__subdet-ic">📄</span><h3>{{ subSkill.display_name || subSkill.name }}</h3></div>
+          <div class="sk__subdet-h">
+            <span class="sk__subdet-ic">📄</span>
+            <h3>{{ subSkill.display_name || subSkill.name }}</h3>
+          </div>
           <div class="sk__subdet-desc">{{ subSkill.description || '' }}</div>
           <h3 class="sk__subdet-mdtitle">SKILL.md</h3>
           <pre class="sk__subdet-pre">{{ subSkill.content || th('no_detail') }}</pre>
         </div>
         <div class="cd sk__subdet-side">
           <h3>{{ tt('info_title') }}</h3>
-          <div class="srow"><label>{{ tt('info_name') }}</label><span>{{ subSkill.name }}</span></div>
-          <div class="srow"><label>{{ tt('info_description') }}</label><span class="t2">{{ subSkill.description || '—' }}</span></div>
+          <div class="srow">
+            <label>{{ tt('info_name') }}</label
+            ><span>{{ subSkill.name }}</span>
+          </div>
+          <div class="srow">
+            <label>{{ tt('info_description') }}</label
+            ><span class="t2">{{ subSkill.description || '—' }}</span>
+          </div>
         </div>
       </div>
     </template>

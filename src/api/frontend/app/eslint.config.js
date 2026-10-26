@@ -11,7 +11,7 @@ export default [
     files: ['**/*.vue'],
     languageOptions: { parser: vueTsEslitParserStub() },
   },
-  { languageOptions: { globals: { document: 'readonly', window: 'readonly', localStorage: 'readonly', sessionStorage: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly', URLSearchParams: 'readonly', fetch: 'readonly', navigator: 'readonly', location: 'readonly', console: 'readonly', FormData: 'readonly', URL: 'readonly', history: 'readonly' } } },
+  { languageOptions: { globals: { document: 'readonly', window: 'readonly', localStorage: 'readonly', sessionStorage: 'readonly', setTimeout: 'readonly', clearTimeout: 'readonly', setInterval: 'readonly', clearInterval: 'readonly', URLSearchParams: 'readonly', fetch: 'readonly', navigator: 'readonly', location: 'readonly', console: 'readonly', FormData: 'readonly', URL: 'readonly', history: 'readonly', FileReader: 'readonly', indexedDB: 'readonly', AbortController: 'readonly', fetch: 'readonly', TextDecoder: 'readonly' } } },
   { rules: { 'no-unused-vars': ['error', { caughtErrors: 'none' }] } },
   prettierConfig,
   {

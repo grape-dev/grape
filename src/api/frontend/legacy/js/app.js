@@ -2844,3 +2844,4 @@ function _showAppleConfirm(message, onConfirm, onCancel) {
 }
 
 window.app = app; // Vue view chunks bridge (batch 2)
+window.fmtLocalTime = fmtLocalTime; window._vcsUrl = _vcsUrl; // Vue view chunks bridge (batch 6)
