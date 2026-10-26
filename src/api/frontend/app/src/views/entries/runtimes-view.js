@@ -12,9 +12,8 @@ import RuntimesView from '../RuntimesView.vue'
 
 // Batch 11 (runtimes): legacy shell contract —
 //   renderRuntimes(data?) : app.js nav('runtimes') 调 _loadRuntimesData()；无参调用=组件自加载
-// Also bridges for dashboard.js (typeof-guarded globals it reads from old runtimes.js):
-//   __sceneTagsCache / _sceneDisplayName / _loadSceneTagsCache — kept on window for
-//   dashboard.js engine-modal scene display names until its own migration batch.
+// Batch 11 note: the typeof-guarded bridge for old dashboard.js was retired in
+// batch 12 — DashboardView.vue owns its scene-tags cache internally.
 let _app = null
 function mount(props) {
   const el = document.getElementById('pageContent')
@@ -27,27 +26,3 @@ window.renderRuntimes = function () {
   mount()
 }
 window.renderRuntimesLegacy = window.renderRuntimes
-// dashboard.js 桥接（老 runtimes.js 的全局，dashboard 用 typeof 守卫读取）
-window.__sceneTagsCache = null
-window._loadSceneTagsCache = function (cb) {
-  if (window.__sceneTagsCache) {
-    cb(window.__sceneTagsCache)
-    return
-  }
-  window.API.get('/runtime/scene-tags')
-    .then(function (d) {
-      window.__sceneTagsCache = d.scenes || []
-      cb(window.__sceneTagsCache)
-    })
-    .catch(function () {
-      window.__sceneTagsCache = []
-      cb(window.__sceneTagsCache)
-    })
-}
-window._sceneDisplayName = function (name) {
-  if (!window.__sceneTagsCache) return name
-  var s = window.__sceneTagsCache.find(function (x) {
-    return x.name === name
-  })
-  return s ? s.display_name : name
-}
