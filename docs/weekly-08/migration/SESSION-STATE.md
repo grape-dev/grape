@@ -18,6 +18,7 @@
 - 批6：chat（会话列表+SSE单气泡流式+引擎技能选择器+飞书扫码+Issue#407草稿/图片持久化，renderChat契约；坑：SSE text chunk逐条push重复气泡→upsert单气泡；syncAbortBridge须在startStream同步调用）
 - 批7：account（五tab+第三方绑定OAuth/手动PAT/转移确认+密码邮箱验证码流+注销三验证+华为云凭据+外观三态+API密钥，renderAccount契约；坑：platformIcon在repos.js需window桥接；通用弹窗v-html+binder回调模式）
 - 批8：events（事件详情+轮询指纹+对话SSE+知识沉淀+重派发/A2A/本机重试弹窗+任务日志SSE模态，renderEventDetail契约；坑：v-html内按钮须容器@click委托不能onMounted绑；event不在_nonRepoViews无repo被拦；测试事件在MySQL且账号无权限→mock）
+- 批9：issues（需求中心1981行，renderTasks(param)契约；列表/看板双视图默认board+筛选popover+分页+详情卡+Agent状态卡+附件+流水线卡+任务操作+PR详情QA历史+四弹窗+部署URL+轮询+深链；**契约补齐：window._backToTaskDetail批8引用legacy从未定义，本批补上**；坑：多语句内联handler再犯lint:fix拆行崩build、const ref重赋值忘.value、老默认视图是board不是list、深链标志须loadTasks里实时读window不能setup快照）
 
 ## 核心架构（每批照此办理）
 - 壳内chunk：Vite 多入口 → viewjs/[name].js 拷到 legacy/js/vue/，共享js全量拷到 legacy/js/assets/
@@ -50,11 +51,10 @@
 - **视觉/体验债清单**：docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im太白/霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理
 
 ## 剩余批次队列
-1. issues(1981) — 下一批
-2. autopilot(2026)
-3. runtimes(2270)
-4. dashboard(2513) — 注意 ui-debt#5 卡片边界
-5. observability(3035)
+1. autopilot(2026) — 下一批
+2. runtimes(2270)
+3. dashboard(2513) — 注意 ui-debt#5 卡片边界
+4. observability(3035)
 6. 壳耦合组：settings.js、repos.js+templates.js（repos 里有 platformIcon/selectRepo 等被多方引用）
 7. knowledge(未迁移，Vue app 已有 _knowledgeVueApp 壳内挂载模式可参考 app.js 1296行)
 8. feedback(9) 小件
@@ -63,7 +63,7 @@
 help页是否彻底Vue化：阶段3裁决
 
 ## 下一批
-- issues.js(1981)——需求中心，注意 ui-debt#1（太黑看不清细节，详情页尤甚），迁移时顺手把暗色层级修了
+- autopilot.js(2026)——注意 openTaskLog 跨模块引用已在批8由 event-view.js 持有
 - **视觉/体验债**：迁移中主人不满意的视觉效果统一记在 docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im-channel太白/pipeline+runtimes+repos霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理，单批迁移不做视觉升级
 
 ## 批4新增坑（别再踩）
