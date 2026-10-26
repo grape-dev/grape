@@ -4,7 +4,7 @@
 写入临时文件缓存，代码变更后失效重建。产物由 GET /api/runtime/install/package
 （rta_ 鉴权）下发。
 """
-import hashlib, io, os, shutil, subprocess, sys, tarfile, threading
+import hashlib, io, os, re, shutil, subprocess, sys, tarfile, threading
 
 from src.config import log
 
@@ -71,6 +71,36 @@ def _git(args: list[str]) -> None:
     )
 
 
+# Issue #455: 拉取网络抖动——git clone/pull 偶发 HTTP/2 / 连接超时，
+# 网络类错误有限次退避重试（4xx 快速失败，不放大上游压力）。
+_GIT_NETWORK_ERR_RE = re.compile(
+    r"(could not resolve|connection (timed out|refused|reset by peer)|failed to connect|"
+    r"http/2|rpc failed|the remote end hung up|early eof|operation timed out|"
+    r"unable to access|network is unreachable|ssl connect|timed out|could not read from remote repository)", re.IGNORECASE)
+_GIT_AUTH_ERR_RE = re.compile(r"returned error: (401|403|404)")
+
+
+def _git_retry(args: list[str], retries: int = 3, base_delay: float = 1.0) -> None:
+    """git 网络类错误有限次退避重试（默认 3 次：1s/2s/4s）。"""
+    import time as _time
+    delay = base_delay
+    for attempt in range(retries):
+        try:
+            _git(args)
+            return
+        except subprocess.CalledProcessError as e:
+            err = ((e.stderr or "") + "\n" + (e.stdout or ""))
+            if _GIT_AUTH_ERR_RE.search(err) or not _GIT_NETWORK_ERR_RE.search(err):
+                raise  # 4xx 权限/资源类或非网络类：快速失败
+            if attempt < retries - 1:
+                log.warning(
+                    f"worker_package git failed (attempt {attempt + 1}/{retries}), retrying in {delay:.1f}s: {err[:200]}")
+                _time.sleep(delay)
+                delay *= 2
+            else:
+                raise
+
+
 def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     """把 grape-cli 构建成 wheel 放入 wheels/（离线随包安装）。
 
@@ -84,11 +114,11 @@ def _ensure_grape_cli_wheel(whl_dir: str) -> str:
     try:
         if not os.path.isdir(os.path.join(src, ".git")):
             os.makedirs(os.path.dirname(src), exist_ok=True)
-            _git(["clone", "--depth", "1", GRAPE_CLI_REPO, src])
+            _git_retry(["clone", "--depth", "1", GRAPE_CLI_REPO, src])
             log.info(f"worker_package: cloned grape-cli -> {src}")
         else:
             try:
-                _git(["-C", src, "pull", "--ff-only"])
+                _git_retry(["-C", src, "pull", "--ff-only"])
             except Exception:
                 pass  # 更新失败用已有缓存
         subprocess.run(

@@ -67,6 +67,22 @@ def clear_onboarding_mark(repo_key: str):
         log.warning(f"onboarding: clear mark failed for {repo_key}: {e}")
 
 
+def _probe_existing_tables(c) -> set:
+    """探测当前库实际存在的表（Issue #455：缺表时清理逻辑降级跳过）。
+
+    SQLite 用 sqlite_master；MySQL 兼容层用 SHOW TABLES。失败返回空集（保守降级）。
+    """
+    try:
+        rows = c.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+        return {r[0] for r in rows}
+    except Exception:
+        try:
+            rows = c.execute("SHOW TABLES").fetchall()
+            return {list(r)[-1] for r in rows}
+        except Exception:
+            return set()
+
+
 def cleanup_stale_repo_data(repo_key: str):
     """清理同名旧仓库残留的 DB 数据（不删 managed_repos / workspace / skill 目录）。
 
@@ -110,11 +126,15 @@ def cleanup_stale_repo_data(repo_key: str):
             except Exception:
                 pass
             # 3. 直接按 repo_key 匹配的表
+            # Issue #455: 先探测实际存在的表，缺表直接跳过，避免新实例报 "no such table" 的 WARNING 噪音
+            _existing = _probe_existing_tables(c)
             for tbl in (
                 "events", "event_skipped", "chat_conversations", "chat_agent_session",
                 "repo_im_group_binding", "pipeline_instances", "devops_agent_session",
                 "issue_agent_session", "issue_state", "agent_tasks",
             ):
+                if tbl not in _existing:
+                    continue  # 新/老库缺表：清理逻辑降级跳过（建表由 db_setup 统一补齐）
                 try:
                     c.execute(f"DELETE FROM {tbl} WHERE repo_key IN ({ph})", keys)
                     total += c.rowcount

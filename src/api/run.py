@@ -1,5 +1,12 @@
 """Agentic DevOps API 启动入口 - 生产模式：主 API 内网 3000 + webhook 8080，由 nginx 反代对外 80/443；--dev 单端口 reload"""
-import uvicorn, multiprocessing, signal, sys, os
+import sys, os
+
+# Issue #455：主服务要求 Python >= 3.10（新式类型注解/语法依赖）。低于下限时在 import 任何业务模块
+# 之前显式提示并退出，避免 3.9 环境下导入阶段即报语法错误、排查成本高。
+from src.api.version_check import ensure_python_version
+ensure_python_version()
+
+import uvicorn, multiprocessing, signal
 
 # 加载 .env 文件（OBS 等环境变量）
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), ".env")
