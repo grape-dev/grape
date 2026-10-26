@@ -225,3 +225,25 @@ def test_sub_not_in_zip_404(obs_env):
     with pytest.raises(HTTPException) as exc:
         read_sub_skill(sid, "nope", user={"id": "1001"})
     assert exc.value.status_code == 404
+
+
+def test_official_read_and_package_sub_local_priority(obs_env):
+    """UC4 补齐：read/package-sub 两个详情端点同样本地优先——zip 为垃圾字节也不读 OBS。"""
+    obs_env.objects[OBJECT_KEY] = b"not-a-zip"
+    sid = _insert_skill("huawei-cloud", "official", "issue-448-test",
+                        "sre/app-release/huawei-cloud", OBJECT_KEY)
+    # read 端点：本地 references/huawei-ecs/SKILL.md 命中
+    result = read_sub_skill(sid, "huawei-ecs", user={"id": "1"})
+    assert "description:" in result["content"], "official read_sub must come from local dir"
+    # package-sub 端点：同一本地文件命中
+    pkg = package_sub_skill(sid, "huawei-ecs", user={"id": "1"})
+    assert pkg["type"] == "package-sub" and "description:" in pkg["content"]
+    assert obs_env.read_count == 0, "official local path must not read OBS"
+
+
+def test_package_sub_traversal_404(obs_env):
+    """UC8 补齐：package-sub 端点 sub_name 穿越 → 404（entry 精确匹配免疫）。"""
+    sid = _insert_skill(SKILL, "user", "1001", "skills/user/1001/x.zip", OBJECT_KEY)
+    with pytest.raises(HTTPException) as exc:
+        package_sub_skill(sid, "../" + SKILL, user={"id": "1001"})
+    assert exc.value.status_code == 404
