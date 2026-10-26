@@ -22,6 +22,7 @@
 - 批10：autopilot（2025行，renderAutopilot()/renderAutopilotDetail(id)双契约；列表+空态模板+创建编辑弹窗cron结构化编辑器双向解析+引擎/技能选择器+详情页+执行历史findings派发+日志轮询复用批8openTaskLog+_cf*复用app.js；坑：vue/no-ref-as-operand在ref互相比较时报（loadBranches双target用_isDetail标记区分）、harness的Page.navigate会重载页面丢mock须hash导航+先种mock、python三引号拼JS字符串反斜杠n转义要双写）
 - 批11：runtimes（2269行，renderRuntimes()契约；双tab引擎/设备+四维筛选+引擎详情弹窗全套+添加设备侧边栏凭据/devspace+Issue #364多源索引；坑：radio的value="s"字面量陷阱四犯→:value、ref(false)模板却用.addPanel.open→reactive、harness的localhost/127.0.0.1 origin不一致会让hash nav静默失败；批11曾留dashboard桥接3全局，批12已撤）
 - 批12：dashboard（2513行最大件，renderDashboard(data)/renderSceneDetailLocal(id)双契约；主页+场景详情+编辑/创建模式+复制/删除/推荐规则弹窗全套+Issue#407草稿+#292技能下拉+#249引擎三态徽章+#307关联仓库；**window._dashboardEditing 与app.js守卫互通**；坑：组件重mount后loaded忘了复位导致详情页永远loading——多模式视图(同一组件承载list/detail/create三种)必须在每个模式入口函数里设loaded=true；CDP Page.reload(ignoreCache)后页面缓存清了但sessionStorage repo被app.js踢到repos视图，harness须重种repo再nav）
+- 批13：observability（3034行最后大件，renderObservability(section)契约+window.stopObsAuto typeof守卫；页内三大Tab+全部子视图/弹窗等价迁移（SLO卡/告警面板/echarts三图/资源曲线/Worker卡/引擎表/Session弹窗/异常任务/Issue列表+mermaid时序图/统一事件视图游标分页/错误日志双源降级/任务日志增量轮询/追踪时间线）；echarts走vendored全局G.echarts、mermaid保持CDN动态加载；坑：lint:fix拆多语句handler共6处炸build——超多交互的大视图写模板时直接全部用methods不带内联多语句；harness须劫持API.get+fetch双通道（本页混用两套请求）**至此js/pages/全部8个大件迁移完毕（issues/autopilot/runtimes/dashboard/observability）+此前的scene-market/skills/chat/account/events/my-feedback等**）
 
 ## 核心架构（每批照此办理）
 - 壳内chunk：Vite 多入口 → viewjs/[name].js 拷到 legacy/js/vue/，共享js全量拷到 legacy/js/assets/
@@ -53,12 +54,11 @@
 - **应用弹窗主分支预选修复**（commit 3067c6205）：workBranch 默认选中 main（原空值在下拉显示空白+确认被拦）
 - **视觉/体验债清单**：docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im太白/霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理
 
-## 剩余批次队列
-1. observability(3035) — 下一批（最后一个未迁移大件）
-2. 壳耦合组：settings.js、repos.js+templates.js
-3. knowledge(未迁移，Vue app 已有 _knowledgeVueApp 壳内挂载模式可参考 app.js 1296行)
-4. feedback(9) 小件
-5. admin独立站 → app.js外壳+index.html收口
+## 剩余批次队列（全部小件/壳耦合，无大件）
+1. 壳耦合组：settings.js、repos.js+templates.js（repos 里有 platformIcon/selectRepo 等被多方引用）— 下一批
+2. knowledge(未迁移，Vue app 已有 _knowledgeVueApp 壳内挂载模式可参考 app.js 1296行)
+3. feedback(9) 小件
+4. admin独立站 → app.js外壳+index.html收口
 6. 壳耦合组：settings.js、repos.js+templates.js（repos 里有 platformIcon/selectRepo 等被多方引用）
 7. knowledge(未迁移，Vue app 已有 _knowledgeVueApp 壳内挂载模式可参考 app.js 1296行)
 8. feedback(9) 小件
@@ -67,7 +67,7 @@
 help页是否彻底Vue化：阶段3裁决
 
 ## 下一批
-- observability.js(3035)——含echarts图表（唯一用echarts的页面）+ openTaskLogModal 自有日志弹窗
+- 壳耦合组：settings.js + repos.js + templates.js（templates 是 repos 大厅的子标签，三者一起迁；注意 platformIcon 桥接已就位、selectRepo 被 app.js/scene-market 交叉调用）
 - **视觉/体验债**：迁移中主人不满意的视觉效果统一记在 docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im-channel太白/pipeline+runtimes+repos霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理，单批迁移不做视觉升级
 
 ## 批4新增坑（别再踩）
