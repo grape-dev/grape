@@ -285,7 +285,12 @@ async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_sessi
     recall_agent_replies_by_task(task_id)
     # 3) 终止该轮执行
     terminated = ChatTaskManager.cancel(task_id, reason="用户撤回消息，终止执行")
+    # 远端模式终止（复用 #136）：进程内映射是同主控的快路径；跨主控时映射缺失，此时
+    # 由任务归属主控的轮询循环（remote_agent_fn）感知撤回标记后自行 cancel_task（≤0.5s）。
+    # 若消息 task_id 本身就是 agent_tasks.id（如 t_xxx），直接 DB 置 cancelled（跨节点安全）。
     enqueue_tid = _CHAT_ENQUEUE_MAP.get(task_id, "")
+    if not enqueue_tid and task_id and not str(task_id).startswith("chat_"):
+        enqueue_tid = task_id
     if enqueue_tid:
         try:
             from src.runtime.service import cancel_task as _svc_cancel_task
@@ -293,6 +298,10 @@ async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_sessi
             terminated = True
         except Exception as e:
             log.warning(f"[Chat recall] cancel remote task failed: enqueue_tid={enqueue_tid} err={e}")
+        # 本次撤回方若不在任务归属主控上（跨主控），此处无映射可终止 —— 记录以便排查
+        if task_id not in _CHAT_ENQUEUE_MAP:
+            log.info(f"[Chat recall] cross-master recall: local map miss task_id={task_id}, "
+                     f"owning master loop will cancel enqueue_tid={enqueue_tid}")
     log.info(f"[Chat recall] msg={msg_id} conv={msg['conversation_id']} task={task_id} "
              f"terminated={terminated} user={user['username']}")
     return {"recalled": True, "message_id": msg_id, "task_id": task_id, "terminated": terminated}
@@ -1799,6 +1808,13 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     repo_key=repo_key,
                     env_extra=chat_session_env_extra(user["id"], conv_id, repo_key),
                 ):
+                    # Issue #442 跨主控兜底：撤回请求可能落在另一台主控（ChatTaskManager 是进程内
+                    # 状态），此时本地 cancel 不会触发。撤回标记写在共享库（chat_messages.deleted），
+                    # 因此每个事件都复查一次，感知到即中断本轮生成（direct 模式生成即本循环）。
+                    if is_task_recalled(chat_task_id):
+                        log.info(f"[Chat submit] task recalled, break direct generation "
+                                 f"task_id={chat_task_id}")
+                        break
                     _mu.feed(evt_type, data)
                     if evt_type == "text":
                         text = data if isinstance(data, str) else (
@@ -1916,6 +1932,18 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             last_seq = 0
             while True:
                 _t.sleep(0.5)
+                # Issue #442 跨主控兜底：撤回请求可能落在另一台主控（_CHAT_ENQUEUE_MAP 是进程内
+                # 状态，跨节点不可见）。撤回标记写在共享库，因此本循环（任务归属主控）复查后
+                # 主动终止远端任务 → worker 心跳感知杀引擎，不再依赖撤回方那台机器的内存映射。
+                if is_task_recalled(chat_task_id):
+                    try:
+                        from src.runtime.service import cancel_task as _svc_cancel_task
+                        _svc_cancel_task(enqueue_tid)
+                        log.info(f"[Chat submit remote] task recalled, cancelled remote task "
+                                 f"enqueue_tid={enqueue_tid} chat_task_id={chat_task_id}")
+                    except Exception as _rce:
+                        log.warning(f"[Chat submit remote] cancel recalled task failed: {_rce}")
+                    break
                 # 检查任务终态
                 tk = get_task(enqueue_tid)
                 if tk and tk.get("status") in ("completed", "failed", "cancelled"):
