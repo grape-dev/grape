@@ -103,5 +103,12 @@
     "help_title": "Info",
     "help_desc": "Configure the IM platform App ID and App Secret for Chat Agent to receive and reply messages via Feishu/WeCom/DingTalk. You can also use scan-to-configure for quick Feishu setup."
   },
-  "current_engine": "Current"
+  "current_engine": "Current",
+  "recall": {
+    "action": "Recall",
+    "confirm": "Recalling will delete this message and stop the agent's execution",
+    "hint": "Message recalled",
+    "re_edit": "Re-edit",
+    "failed": "Recall failed: {{msg}}"
+  }
 }

@@ -825,18 +825,69 @@ def add_message(conversation_id: str, role: str, content: str, task_id: str = ""
         return c.lastrowid
 
 
+_MSG_COLS = "id, conversation_id, role, content, created_at, task_id, generate_status, deleted"
+
+
+def _row_to_msg(r) -> dict:
+    return {"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3],
+            "created_at": normalize_event_time(r[4]), "task_id": r[5] or "",
+            "generate_status": r[6], "deleted": int(r[7] or 0)}
+
+
+def get_message(msg_id: int) -> dict | None:
+    """按主键取单条消息（Issue #442 撤回用）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE id=?", (msg_id,))
+        row = c.fetchone()
+        return _row_to_msg(row) if row else None
+
+
+def recall_message(msg_id: int) -> bool:
+    """软删除一条消息（Issue #442：撤回 = deleted=1，保留原文供重新编辑）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE chat_messages SET deleted=1 WHERE id=? AND deleted=0", (msg_id,))
+        db.commit()
+        return c.rowcount > 0
+
+
+def recall_agent_replies_by_task(task_id: str) -> int:
+    """软删除同一轮（task_id 相同）的 agent 回复消息（Issue #442）。"""
+    if not task_id:
+        return 0
+    with db_lock:
+        c = db.cursor()
+        c.execute("UPDATE chat_messages SET deleted=1 WHERE task_id=? AND role IN ('agent','assistant') AND deleted=0",
+                  (task_id,))
+        db.commit()
+        return c.rowcount
+
+
+def is_task_recalled(task_id: str) -> bool:
+    """该轮次用户消息是否已撤回（agent_fn 落库前校验，Issue #442）。"""
+    if not task_id:
+        return False
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT deleted FROM chat_messages WHERE task_id=? AND role='user' ORDER BY id DESC LIMIT 1",
+                  (task_id,))
+        row = c.fetchone()
+        return bool(row and row[0])
+
+
 def get_messages(conversation_id: str, limit: int = 50, before_id: int = 0) -> list[dict]:
     with db_lock:
         c = db.cursor()
         if before_id > 0:
-            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
+            c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? AND id<? ORDER BY id DESC LIMIT ?",
                       (conversation_id, before_id, limit))
         else:
-            c.execute("SELECT id, conversation_id, role, content, created_at, task_id, generate_status FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
+            c.execute(f"SELECT {_MSG_COLS} FROM chat_messages WHERE conversation_id=? ORDER BY id DESC LIMIT ?",
                       (conversation_id, limit))
         rows = c.fetchall()
         rows.reverse()
-        return [{"id": r[0], "conversation_id": r[1], "role": r[2], "content": r[3], "created_at": normalize_event_time(r[4]), "task_id": r[5] or "", "generate_status": r[6]} for r in rows]
+        return [_row_to_msg(r) for r in rows]
 
 
 def delete_messages_by_conv(conversation_id: str):

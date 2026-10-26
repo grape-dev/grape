@@ -32,6 +32,7 @@ from src.session_manager import (
     get_chat_config as _get_chat_config,
     set_chat_config as _set_chat_config,
     mark_task_processing_by_conversation,
+    get_message, recall_message, recall_agent_replies_by_task, is_task_recalled,
 )
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -245,6 +246,56 @@ def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depen
             pass  # 旁路同步，不影响消息加载
     msgs = get_messages(conv_id, before_id=before)
     return {"messages": msgs, "conversation": conv}
+
+
+# Issue #442: chat_task_id → 远端 enqueue_tid 映射（撤回时经 #136 cancel_task 终止远端任务）
+_CHAT_ENQUEUE_MAP: dict[str, str] = {}
+
+
+@router.post("/messages/{msg_id}/recall", operation_id="chat_recall_message", summary="Recall a message", description="Soft-deletes own user message and terminates the agent execution it triggered (reuses #136 stop mechanism). The original text is kept for re-editing.")
+async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_session_token)):
+    """撤回本人已发送消息（Issue #442）。
+
+    - 仅限本人会话内的 user 消息（他人消息/agent 消息拒绝）
+    - 软删除（deleted=1，保留原文供「重新编辑」），同轮 agent 回复一并软删除
+    - 先置撤回状态，再终止该轮执行：
+      - direct 模式：ChatTaskManager.cancel（cancelled 后丢弃后续状态推送）
+      - remote 模式：service.cancel_task(enqueue_tid)（复用 #136，worker 心跳感知杀引擎）
+    - 幂等：已撤回消息重复调用返回 200 {recalled: true}
+    """
+    from src.api.chat_task_manager import ChatTaskManager
+
+    msg = get_message(msg_id)
+    if not msg:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "消息不存在"})
+    conv = get_conversation(msg["conversation_id"])
+    if not conv or conv["user_id"] != user["id"]:
+        # 不泄露他人消息存在性
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "消息不存在"})
+    if msg["role"] != "user":
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "仅支持撤回自己发送的消息"})
+    if msg.get("deleted"):
+        task_id = msg.get("task_id") or ""
+        return {"recalled": True, "message_id": msg_id, "task_id": task_id, "terminated": False}
+
+    task_id = msg.get("task_id") or ""
+    # 1) 先置撤回状态（竞态防护：推送侧/落库侧据此丢弃）
+    recall_message(msg_id)
+    # 2) 同轮 agent 回复一并软删除
+    recall_agent_replies_by_task(task_id)
+    # 3) 终止该轮执行
+    terminated = ChatTaskManager.cancel(task_id, reason="用户撤回消息，终止执行")
+    enqueue_tid = _CHAT_ENQUEUE_MAP.get(task_id, "")
+    if enqueue_tid:
+        try:
+            from src.runtime.service import cancel_task as _svc_cancel_task
+            _svc_cancel_task(enqueue_tid)
+            terminated = True
+        except Exception as e:
+            log.warning(f"[Chat recall] cancel remote task failed: enqueue_tid={enqueue_tid} err={e}")
+    log.info(f"[Chat recall] msg={msg_id} conv={msg['conversation_id']} task={task_id} "
+             f"terminated={terminated} user={user['username']}")
+    return {"recalled": True, "message_id": msg_id, "task_id": task_id, "terminated": terminated}
 
 
 # ====== Send ======
@@ -1446,6 +1497,10 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> 
 async def update_chat_config(body: dict, user: dict = Depends(require_no_session_token), repo: str = ""):
     im = body.get("im", {})
     feishu = im.get("feishu", {})
+    # Issue #431：body 未携带 im 键（或 im 下无 feishu 键）时为普通保存（换引擎/技能），不写任何 im_
+    # 字段，保持现有 IM 配置不变；仅显式携带 im.feishu 且 app_id 为空才视为解绑
+    # （沿用 _purge_chat_im_binding 清理链路，Issue #294）
+    explicit_unbind = ("im" in body) and ("feishu" in im) and not feishu.get("app_id")
     kwargs = {}
     if feishu.get("app_id"):
         app_id = feishu["app_id"]
@@ -1486,12 +1541,17 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
                 log.info(f"Chat IM: saved im config for user={user['id']} app_id={app_id[:30]}")
             else:
                 kwargs["im_app_id"] = app_id
-    else:
+    elif explicit_unbind:
+        # 显式解绑：清空 IM 三字段（配合 _purge_chat_im_binding 完成注册表/渠道清理）
         old_cfg = _get_chat_config(user["id"])
         old_app_id = old_cfg.get("im_app_id", "")
         kwargs["im_app_id"] = ""
         kwargs["im_app_secret"] = ""
         kwargs["im_provider"] = ""
+    else:
+        # Issue #431：普通保存（body 无 im 键）——只读旧值供对账，不动任何 im_ 字段
+        old_cfg = _get_chat_config(user["id"])
+        old_app_id = old_cfg.get("im_app_id", "")
     if feishu.get("app_secret") and feishu["app_secret"] != "********":
         kwargs["im_app_secret"] = feishu["app_secret"]
     if body.get("backend"):
@@ -1553,8 +1613,8 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         kwargs["skill_scope"] = skill_scope
     _set_chat_config(user["id"], **kwargs)
 
-    # Issue #294：解绑（显式携带 im 且 app_id 置空）→ 清理全局注册表/渠道会话 + unified_user_mapping 对账
-    if "im" in body and not feishu.get("app_id") and old_app_id:
+    # Issue #294：解绑（显式携带 im.feishu 且 app_id 置空）→ 清理全局注册表/渠道会话 + unified_user_mapping 对账
+    if explicit_unbind and old_app_id:
         _purge_chat_im_binding(user["id"], user.get("username", ""), old_app_id)
 
     # 手动配置换 app：对账 unified_user_mapping（feishu-app-scoped-openid-fix.md §2.3）
@@ -1583,7 +1643,8 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
                         await bot_manager.remove_bot(app_id)
                     await bot_manager.add_bot(app_id, new_secret, bot_type="chat_bot")
                     log.info(f"Chat IM: added bot {app_id[:30]} to BotManager")
-            elif not feishu.get("app_id") and old_app_id:
+            elif explicit_unbind and old_app_id:
+                # Issue #431：仅显式解绑才摘除 BotManager 中在跑的 bot，普通保存不动
                 await bot_manager.remove_bot(old_app_id)
                 log.info(f"Chat IM: removed bot {old_app_id[:30]} from BotManager")
     except Exception as e:
@@ -1619,7 +1680,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
 
     import uuid as _uuid
     chat_task_id = "chat_" + _uuid.uuid4().hex[:12]
-    add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)), task_id=chat_task_id, generate_status=1)
+    message_id = add_message(conv_id, "user", body.message + _build_image_markers(_save_chat_images(body.image_data, conv_id)), task_id=chat_task_id, generate_status=1)
     mark_task_processing_by_conversation(conv_id)
 
     cfg = _get_chat_config(user["id"])
@@ -1788,24 +1849,28 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                         except Exception as _ce:
                             log.warning(f"[Chat submit] 401 detect failed: {_ce}")
                 if _final_text:
-                    try:
-                        add_message(conv_id, "agent", _final_text,
-                                   task_id=chat_task_id, generate_status=2)
-                        touch_conversation(conv_id)
-                        log.info(f"[Chat submit] DB saved task_id={chat_task_id} len={len(_final_text)}")
-                    except Exception as _de:
-                        log.warning(f"[Chat submit] DB save failed: {_de}")
-                else:
+                    # Issue #442: 用户消息已撤回 → 不落库、不推送（执行已被终止）
+                    if is_task_recalled(chat_task_id):
+                        log.info(f"[Chat submit] task recalled, skip DB save task_id={chat_task_id}")
+                    else:
+                        try:
+                            add_message(conv_id, "agent", _final_text,
+                                        task_id=chat_task_id, generate_status=2)
+                            touch_conversation(conv_id)
+                            log.info(f"[Chat submit] DB saved task_id={chat_task_id} len={len(_final_text)}")
+                        except Exception as _de:
+                            log.warning(f"[Chat submit] DB save failed: {_de}")
+                elif not is_task_recalled(chat_task_id):
                     try:
                         add_message(conv_id, "agent", "（无返回内容）",
-                                   task_id=chat_task_id, generate_status=3)
+                                    task_id=chat_task_id, generate_status=3)
                         touch_conversation(conv_id)
                     except Exception as _de:
                         log.warning(f"[Chat submit] DB save (empty) failed: {_de}")
                 # 用量落台账：**放在最后**——累计型账本那次 1s 短重试不该拖慢"回复落库/推送"（用户可见）
                 _mu.finish(session_id=_new_sid)
                 # 飞书推送（投递到主事件循环；后台线程不能跨 loop 复用共享 aiohttp session）
-                if _final_text:
+                if _final_text and not is_task_recalled(chat_task_id):
                     try:
                         import asyncio as _aio
                         _dispatch_push_to_main_loop(_push_reply_to_feishu(conv, user, _final_text))
@@ -1839,6 +1904,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
             env_extra={"USER_ID": str(user["id"]), "CONVERSATION_ID": conv_id},
         )
         log.info(f"Chat submit enqueued: enqueue_tid={enqueue_tid} chat_task_id={chat_task_id}")
+        # Issue #442: 记录映射，撤回时经 #136 cancel_task 终止远端任务
+        _CHAT_ENQUEUE_MAP[chat_task_id] = enqueue_tid
 
         # 远端轮询 agent_fn
         def remote_agent_fn():
@@ -1858,7 +1925,10 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     elif tk.get("status") == "failed":
                         _final_text = f"查询失败: {tk.get('result_text', '')}"
                     break
-            # DB 写入
+            # DB 写入（Issue #442: 已撤回则跳过）
+            if is_task_recalled(chat_task_id):
+                log.info(f"[Chat submit remote] task recalled, skip DB save task_id={chat_task_id}")
+                return
             try:
                 add_message(conv_id, "agent", _final_text,
                            task_id=chat_task_id, generate_status=2)
@@ -1875,7 +1945,8 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
 
         ChatTaskManager.submit(chat_task_id, conv_id, user["id"], user["username"], remote_agent_fn)
 
-    return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "running"}
+    return {"task_id": chat_task_id, "conversation_id": conv_id, "status": "running",
+            "message_id": message_id}
 
 
 @router.get("/task/{task_id}/stream", operation_id="chat_task_stream", summary="Async task stream", description="SSE subscribe to task output: replays the buffer then appends live events; DB fallback for finished tasks.")
