@@ -2021,6 +2021,9 @@ async def _execute_task(client, task, engine_name: str = ""):
                 log.info(f"  [{_esq}] 🔧 {str(data)[:150]}")
             elif evt_type == "step_finish":
                 log.info(f"  [{_esq}] ✅ {data}")
+            elif evt_type == "task:retry":
+                # issue #403：模型流瞬时异常自动重试（用户侧可感知，事件流已透出）
+                log.warning(f"  [{_esq}] ↻ auto-retry: {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
             # Context compaction: compact batch if it grows too large (prevents context overflow)
             if should_compact(batch):

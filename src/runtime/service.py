@@ -1818,7 +1818,7 @@ def report_messages(task_id, messages):
         if not isinstance(m, dict):
             continue
         _t = m.get("type")
-        if _t in ("step_start", "step_finish", "text", "reasoning", "tool_use", "error"):
+        if _t in ("step_start", "step_finish", "text", "reasoning", "tool_use", "error", "task:retry"):
             _d = m.get("data")
             log.info(f"[task {task_id}] [{_esq}] {_t}: {str(_d)[:120]}")
     if task.get("event_seq"):
@@ -2042,6 +2042,21 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         else:
             log.info(f"Task {task_id} already {task.get('status')}, skip complete_task (result={result_text[:60]})")
             return
+    # Issue #403：瞬时上游抖动自动重试（判定层收口，worker 完成上报路径）。
+    # 仅拦 exit_code!=0 的失败；可重试（瞬时分类 ∧ 无写操作/结构化产出证据 ∧
+    # attempts 未耗尽）则退避 requeue 并跳过本函数全部终态写入。放在 event_seq
+    # 分支之外：无关联事件的任务同样适用；「exit!=0 但结构化产出」由闸门放行
+    # （不重试，走既有 override-to-completed 路径）。
+    if exit_code != 0:
+        try:
+            from src.runtime.transient_retry import retry_transient_task
+            if retry_transient_task(task_id, exit_code, "",
+                                    result_text=result_text or ""):
+                log.info(f"Task {task_id}: transient failure scheduled for retry, "
+                         f"skip terminal write (exit={exit_code})")
+                return
+        except Exception as _e:
+            log.warning(f"complete_task: transient retry check failed for {task_id}: {_e}")
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import parse_agent_output_json, update_event_complete
@@ -2060,7 +2075,8 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                          f"(agent={task.get('agent_type')}), overriding exit_code to 1")
 
             # exit_code=0 但无结构化产出 → 接受 hermes 的 end_turn 结果，直接 completed
-            # （旧逻辑会 requeue 最多49次，导致重复评论污染；现改为不重试）
+            # （旧逻辑会 requeue 最多49次，导致重复评论污染；现改为不重试；
+            #  瞬时抖动场景已由函数开头的 #403 判定层收口处理）
 
             status = "completed" if exit_code == 0 else "failed"
             duration = None
@@ -2509,6 +2525,23 @@ def _task_created_key(value):
         return (0, 0.0, _v)
 
 
+def _task_errors_json(task_id):
+    """读取 agent_tasks.errors 的 JSON 列表（异常回退空列表）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+        if row and row[0]:
+            try:
+                v = json.loads(row[0])
+                return v if isinstance(v, list) else [str(v)]
+            except Exception:
+                return [str(row[0])]
+    except Exception:
+        pass
+    return []
+
+
 def fail_task(task_id, error, exit_code=-1):
     task = get_task(task_id)
     # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
@@ -2546,21 +2579,66 @@ def fail_task(task_id, error, exit_code=-1):
                 return
         except Exception as e:
             log.warning(f"fail_task stale-report check failed: {e}")
+    # Issue #403：瞬时上游抖动自动重试（判定层收口，worker 失败上报路径）。
+    # 终态幂等（completed/failed 跳过）与过期上报丢弃均已通过，此处任务仍
+    # running；可重试（瞬时分类 ∧ 无写操作证据 ∧ attempts 未耗尽）则退避
+    # requeue 并跳过本函数全部判死写入。
+    try:
+        from src.runtime.transient_retry import retry_transient_task
+        if retry_transient_task(task_id, exit_code, str(error or "")):
+            log.info(f"Task {task_id}: transient failure scheduled for retry, "
+                     f"skip fail_task (exit={exit_code})")
+            return
+    except Exception as _e:
+        log.warning(f"fail_task: transient retry check failed for {task_id}: {_e}")
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import update_event_complete
             from src.api.event_archive import finalize_event_archive
+            # issue #403：耗尽后判死 → 分类失败摘要写 result（区分上游抖动 vs 配置错误）
+            _result_show = None
+            try:
+                from src.runtime.transient_retry import format_stream_failure_result
+                _retries = [e for e in _task_errors_json(task_id)
+                            if isinstance(e, dict) and e.get("error_code") in
+                            ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+                if _retries:
+                    _ex = next((e for e in _retries
+                                if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
+                    _result_show = format_stream_failure_result(
+                        _ex.get("error_class") or "", _ex.get("attempts") or len(_retries),
+                        _ex.get("max") or len(_retries), _ex.get("reason") or "",
+                        exit_code=exit_code, errors=[str(error or "")])
+            except Exception as _fe:
+                log.warning(f"fail_task: failure summary build failed for {task_id}: {_fe}")
             finalize_event_archive(task["repo_key"], task["event_seq"], "failed",
                                    exit_code, None, None,
                                    tokens=[_get_task_token(task)],
                                    issue_num_hint=task.get("issue_id") or "")
             update_event_complete(task["event_seq"], "failed", exit_code=exit_code,
                                   completed_at=datetime.now(timezone.utc).isoformat(),
-                                  result=(error or "")[:200])
+                                  result=(_result_show or (error or ""))[:200])
         except Exception as e:
             log.warning(f"fail_task finalize failed: {e}")
+    # Issue #403：耗尽判死时 errors 合并而非覆盖——上方 retry 检查已把
+    # TRANSIENT_RETRY_EXHAUSTED（分类/次数/摘要）写入 errors，直接覆盖会
+    # 洗掉诊断记录（部署实测 V5 抓到）。追加侧语义见 transient_retry._append_task_error
+    # （append 最新记录 + errs[-5:]，无头部保护需求——与判死合并的首条保护是不同场景）。
+    _fail_errors = json.dumps([str(error)] if error else [])
+    try:
+        _prior = _task_errors_json(task_id)
+        if _prior:
+            # 保留既有结构化记录（dict 的 TRANSIENT_RETRY_* 诊断），原文去重合并
+            _merged = [str(error)] + [e for e in _prior if e != str(error)][:4]
+            _fail_errors = json.dumps(_merged[:5])
+    except Exception:
+        pass
+    # 外审第 5 轮实测发现：update_task_status 写入后，下方 NO_TOKEN_AVAILABLE
+    # 段的两段式追加 + [-5:] 截断会把首位的本次失败原因挤出去（5 条满载场景：
+    # final = hist0-3 + NO_TOKEN，new failure 丢失）。已改为按信息价值截断
+    # （首条永不挤掉），复现测试见 tests/test_transient_retry.py UC7-3。
     update_task_status(task_id, "failed", exit_code=exit_code,
-                       errors=json.dumps([str(error)] if error else []))
+                       errors=_fail_errors)
     # Issue #372 R10/R16.1: 统一 token 过期检测（fail_task 统一入口）
     # task failed 时检查 error 是否含 401/auth 错误
     # R16.1: 按 token 来源统一分流（用户 / 全局 / 仓库级 / session），不再只针对路径 B
@@ -2598,7 +2676,9 @@ def fail_task(task_id, error, exit_code=-1):
                                 "message": _R16_ERROR_MESSAGES["NO_TOKEN_AVAILABLE"],
                                 "rebind_url": "/#settings",
                             })
-                            _existing_errors = _existing_errors[-5:]
+                            # 按信息价值截断：首条（本次失败原因）永不挤掉
+                            # （外审第 5 轮：旧 [-5:] 在满载时把新错误截没了）
+                            _existing_errors = _existing_errors[:1] + _existing_errors[1:][-4:] if len(_existing_errors) > 5 else _existing_errors
                             c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_existing_errors), task_id))
                             db.commit()
                 except Exception:
@@ -2679,7 +2759,9 @@ def fail_task(task_id, error, exit_code=-1):
                             if not _already_has_code:
                                 _existing_errors.append(_token_expired_err)
                                 # 限制 errors 列表长度（dashboard _errors[:3] 切片，保留最近 5 条）
-                                _existing_errors = _existing_errors[-5:]
+                                # 首条保护式（与 NO_TOKEN 段同修，外审 P0）：本次失败原因永不挤掉，
+                                # 截断只作用于历史部分
+                                _existing_errors = _existing_errors[:1] + _existing_errors[1:][-4:] if len(_existing_errors) > 5 else _existing_errors
                                 _err_obj = json.dumps(_existing_errors)
                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (_err_obj, task_id))
                                 db.commit()
@@ -2751,7 +2833,8 @@ def fail_task(task_id, error, exit_code=-1):
                                                     "error_code": "COMMENT_POST_FAILED",
                                                     "message": "failed to post comment to issue (token expired or no permission)",
                                                 })
-                                                _errs2 = _errs2[-5:]
+                                                # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
+                                                _errs2 = _errs2[:1] + _errs2[1:][-4:] if len(_errs2) > 5 else _errs2
                                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs2), task_id))
                                                 db.commit()
                                     except Exception:
@@ -2793,7 +2876,8 @@ def fail_task(task_id, error, exit_code=-1):
                             )
                             if not _already_has_code:
                                 _existing_errors.append(_no_token_err)
-                                _existing_errors = _existing_errors[-5:]
+                                # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
+                                _existing_errors = _existing_errors[:1] + _existing_errors[1:][-4:] if len(_existing_errors) > 5 else _existing_errors
                                 _err_obj = json.dumps(_existing_errors)
                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (_err_obj, task_id))
                                 db.commit()
