@@ -864,7 +864,7 @@ function showApplyModal(s, owner, repoName, isOverwrite, sceneName, isHwCloudSce
   applyCtx.isOverwrite = !!isOverwrite
   applyCtx.sceneName = sceneName || ''
   applyCtx.isHwCloudScene = !!isHwCloudScene
-  applyCtx.workBranch = ''
+  applyCtx.workBranch = 'main' // 老代码语义：默认选中 main，分支列表回来后校正（含 catch 兜底，勿留空——select :value 空值匹配不到 option 会显示空白）
   applyCtx.branches = [{ name: 'main' }]
   applyCtx.showNewBranch = false
   applyCtx.newBranchName = ''
@@ -884,7 +884,9 @@ function showApplyModal(s, owner, repoName, isOverwrite, sceneName, isHwCloudSce
         : applyCtx.branches[0].name
     })
     .catch(function () {
+      // 分支列表拉取失败（如仓库 bot token 失效 502）：保留 main 兜底且必须选中，否则下拉显示空白
       applyCtx.branches = [{ name: 'main' }]
+      applyCtx.workBranch = 'main'
     })
   // 华为云场景：注入 AK/SK 只读配置项
   if (isHwCloudScene) {
