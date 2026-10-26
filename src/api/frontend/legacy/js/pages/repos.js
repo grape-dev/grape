@@ -818,3 +818,4 @@ function submitCreateRepo(e) {
       app.showToast(I18N.t('repos.create.err_check_failed', {msg: (err.message || err)}));
     });
 }
+window.platformIcon = typeof platformIcon === "function" ? platformIcon : null; // Vue view chunks bridge (batch 7)
