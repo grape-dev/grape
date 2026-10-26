@@ -1333,6 +1333,44 @@
 }
 
 /* Dark mode auto-adapt (developer.apple.com supports dark) */
+/* ── 强制深色模式（方案A 10-26）：与 auto 暗色变量保持同源镜像 ──
+   语义：data-theme-mode="dark" 时无条件应用暗色（不看系统偏好） */
+[data-theme="apple"][data-theme-mode="dark"] {
+  --s: #1c1c1e;
+  --s2: #2c2c2e;
+  --s3: #3a3a3c;
+  --bg: #000000;
+  --c: #1c1c1e;
+  --b: #38383a;
+  --t: #f5f5f7;
+  --t2: #aeaeb2;
+  --t3: #8e8e93;
+  --result-fg: #e0e6f0;
+  --result-link: #5b9eff;
+  --result-code: #b8c2d6;
+}
+[data-theme="apple"][data-theme-mode="dark"] .sb {
+  background: rgba(28,28,30,0.8);
+  border-right-color: rgba(255,255,255,0.08);
+}
+[data-theme="apple"][data-theme-mode="dark"] .tb {
+  background: rgba(28,28,30,0.72);
+  border-bottom-color: rgba(255,255,255,0.08);
+}
+[data-theme="apple"][data-theme-mode="dark"] .sidebar {
+  background: rgba(28,28,30,0.85) !important;
+  border-right-color: rgba(255,255,255,0.08) !important;
+}
+[data-theme="apple"][data-theme-mode="dark"] .msg pre {
+  background: #000;
+}
+[data-theme="apple"][data-theme-mode="dark"] .project-hero-btn { background: #2d2d2f !important; }
+[data-theme="apple"][data-theme-mode="dark"] .project-hero-btn:hover { background: #3d3d3f !important; }
+[data-theme="apple"][data-theme-mode="dark"] .project-card { border-color: rgba(255,255,255,0.08) !important; }
+[data-theme="apple"][data-theme-mode="dark"] .project-card:hover { background: rgba(255,255,255,0.04) !important; border-color: rgba(255,255,255,0.12) !important; }
+[data-theme="apple"][data-theme-mode="dark"] .template-card { border-color: rgba(255,255,255,0.08) !important; }
+[data-theme="apple"][data-theme-mode="dark"] .template-card:hover { background: rgba(255,255,255,0.04) !important; }
+
 @media (prefers-color-scheme: dark) {
   [data-theme="apple"][data-theme-mode="auto"] {
     --s: #1c1c1e;

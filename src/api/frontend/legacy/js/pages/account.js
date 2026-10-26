@@ -1160,6 +1160,7 @@ function _accountLoadAppearance() {
     + '<p class="tx t2" style="margin-bottom:14px;font-size:12px">' + (I18N.t('app.account.display_mode_hint')) + '</p>'
     + '<div style="display:flex;gap:10px">'
     + '<button onclick="_accountSelectThemeMode(\'light\')" style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:' + (curMode==='light'?'var(--a)':'var(--c)') + ';color:' + (curMode==='light'?'#fff':'var(--t2)') + ';transition:all .2s">' + (I18N.t('app.account.light_mode')) + '</button>'
+    + '<button onclick="_accountSelectThemeMode(\'dark\')" style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:' + (curMode==='dark'?'var(--a)':'var(--c)') + ';color:' + (curMode==='dark'?'#fff':'var(--t2)') + ';transition:all .2s">' + (I18N.t('app.account.dark_mode')) + '</button>'
     + '<button onclick="_accountSelectThemeMode(\'auto\')" style="padding:10px 22px;border-radius:980px;font-size:13px;font-weight:500;cursor:pointer;border:1px solid var(--b);background:' + (curMode==='auto'?'var(--a)':'var(--c)') + ';color:' + (curMode==='auto'?'#fff':'var(--t2)') + ';transition:all .2s">' + (I18N.t('app.account.auto_mode')) + '</button>'
     + '</div></div>';
 

@@ -23,8 +23,9 @@
     "apple_desc": "毛玻璃侧栏 + 系统字体栈",
     "current": "✓ 当前",
     "mode_title": "外观模式",
-    "mode_desc": "Liquid Glass 风格专属 — 跟随系统自动切换深浅色。",
+    "mode_desc": "Liquid Glass 风格专属 — 浅色/深色固定，或跟随系统自动切换。",
     "light": "☀️ 浅色",
+    "dark": "🌙 深色",
     "auto": "🌓 跟随系统"
   },
   "theme": {

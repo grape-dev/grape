@@ -23,8 +23,9 @@
     "apple_desc": "Frosted sidebar + system fonts",
     "current": "✓ Current",
     "mode_title": "Appearance Mode",
-    "mode_desc": "Liquid Glass only — follows system dark/light preference.",
+    "mode_desc": "Liquid Glass only — fixed light/dark, or follow system preference.",
     "light": "☀️ Light",
+    "dark": "🌙 Dark",
     "auto": "🌓 Follow System"
   },
   "theme": {
