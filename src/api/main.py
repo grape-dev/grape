@@ -1,5 +1,11 @@
 """Agentic DevOps API — FastAPI REST API Server (port 3000)"""
 import sys, os, asyncio
+
+# Issue #455：主服务要求 Python >= 3.10。防御直接 `uvicorn src.api.main:app` 的启动方式，
+# 在业务模块导入链触发前显式提示并退出。
+from src.api.version_check import ensure_python_version
+ensure_python_version()
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI, Request
@@ -89,6 +95,18 @@ async def lifespan(app: FastAPI):
         _startup_security_check()
     except SystemExit as e:
         raise
+
+    # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
+    # 未显式配置时默认 localhost，第三方平台无法回访（登录/托管不可用）。
+    try:
+        from src.user.db import get_server_base_url_warning
+        _base_warn = get_server_base_url_warning()
+        if _base_warn:
+            log.warning(f"[CONFIG] {_base_warn}")
+        else:
+            log.info("[CONFIG] server_base_url configured OK")
+    except Exception as _bw:
+        log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
     try:
         from src.im.feishu_async import BotManager
@@ -221,6 +239,7 @@ async def lifespan(app: FastAPI):
 
     # P2-C (Issue #357): Large table maintenance — nullify old agent_tasks fields
     # and delete old task_messages. Runs every 6 hours with distributed lock.
+    # Issue #463 P1: also delete terminal agent_tasks older than 90 days.
     try:
         from src.runtime.task_lock import run_with_distributed_lock
 
@@ -233,8 +252,10 @@ async def lifespan(app: FastAPI):
                         from src.runtime.table_maintenance import (
                             cleanup_old_agent_tasks_fields,
                             cleanup_old_task_messages,
+                            delete_old_agent_tasks,
                         )
                         cleanup_old_agent_tasks_fields()
+                        delete_old_agent_tasks()
                         cleanup_old_task_messages()
                 except asyncio.CancelledError:
                     raise

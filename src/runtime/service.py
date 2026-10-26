@@ -824,6 +824,15 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                               if k.startswith("member/") or k in _PROJECT_INFO_FILES}
     knowledge_file_urls = {k: v for k, v in _file_urls.items()
                            if not k.startswith("member/") and k not in _PROJECT_INFO_FILES}
+    # Issue #463 P2：URL 优先单写——已生成 OBS URL 的文件不再内联 MEDIUMTEXT 内容（置空串）。
+    # worker 端 _materialize_files 三级降级（URL → content → storage_key），置空后走
+    # URL 下载 / storage_key 直连，无 URL 的键仍保留内联兜底，消除 DB 内联与 OBS 双写。
+    if project_info_file_urls:
+        project_info_files = {k: ("" if k in project_info_file_urls else v)
+                              for k, v in (project_info_files or {}).items()}
+    if knowledge_file_urls:
+        knowledge_files = {k: ("" if k in knowledge_file_urls else v)
+                           for k, v in (knowledge_files or {}).items()}
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
