@@ -228,6 +228,7 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
       hermes: ~/.hermes/skills
       opencode: ~/.config/opencode/skills
       codearts: ~/.codeartsdoer/cli-data/system/skills
+      dsh(DeepSeek Harness): ~/.dsh/skills
       hwcloud(AIShell): ~/.hwcloud/skills + ~/.agents/skills（后者为 openagent
       原生全局 skill 根——acp/server.go buildSessionSkillProvider 约定，
       任务执行时 agent 实际读取的目录；前者为 grape 侧自定义路径，两者都扫）
@@ -249,6 +250,13 @@ def engine_skill_dirs(engine_name: str) -> list[str]:
         # env（冒号分隔）追加任意目录，扫描时合并进所有引擎。
         "hwcloud": [os.path.join(home, ".agents", "skills"),
                     os.path.join(home, ".hwcloud", "skills")],
+        # dsh(DeepSeek Harness)：用户级 skill 根为 <dshHome>/skills（默认 ~/.dsh/skills）。
+        # 依据 dsh-skill-filesystem/lib/index.js:roots() —— 它扫三处：
+        #   project-dsh  <projectRoot>/.dsh/skills      （项目级，随任务工作区走）
+        #   project-agents <projectRoot>/.agents/skills
+        #   user-dsh     <dshHome>/skills               （← 平台投送落点，本行即此）
+        # 另有 customSkillDirs 可配置，但平台按现有约定只投 user 级。
+        "dsh": [os.path.join(home, ".dsh", "skills")],
     }
     return mapping.get(key, [])
 
