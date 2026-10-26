@@ -7,6 +7,7 @@ from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
 from .hermes import HermesBackend
 from .codex import CodexBackend
+from .dsh import DshBackend
 from .hwcloud import HwcloudBackend
 
 
@@ -15,6 +16,7 @@ _BACKENDS = {
     "codearts": CodeArtsBackend(),
     "hermes": HermesBackend(),
     "codex": CodexBackend(),
+    "dsh": DshBackend(),
     "hwcloud": HwcloudBackend(),
 }
 
@@ -154,6 +156,7 @@ def discover_backends() -> list[dict]:
         "codearts": {"cli": "codearts", "pip": "codearts-cli"},
         "hermes": {"cli": "hermes", "pip": "hermes"},
         "codex": {"cli": "codex", "pip": "@openai/codex"},
+        "dsh": {"cli": "dsh", "pip": "@deepseek-ai/dsh"},
         "hwcloud": {"cli": "hwcloud", "pip": ""},
         "cursor": {"cli": "cursor", "pip": "cursor"},
     }

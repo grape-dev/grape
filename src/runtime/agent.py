@@ -57,6 +57,7 @@ _PROBE_COMMANDS = {
     "codearts": ["codearts", "run", "hello"],
     "codex": ["codex", "exec", "--json", "--sandbox", "danger-full-access", "--skip-git-repo-check", "hello"],
     "cursor": ["cursor", "run", "hello"],
+    "dsh": ["dsh", "headless", "hello"],
 }
 _PROBE_TIMEOUT = 30
 _ACP_PROBE_TIMEOUT = 15  # hermes ACP initialize 超时
@@ -902,6 +903,8 @@ def _backend_for_engine(engine_name: str | None = "") -> str:
         return "codex"
     if name.startswith("hwcloud") or name.startswith("aishell"):
         return "hwcloud"
+    if name.startswith("dsh"):
+        return "dsh"
     return "opencode"
 
 
@@ -1160,6 +1163,7 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         "hwcloud": ["hwcloud serve --acp"],
         "codearts": ["codearts run"],
         "codex": ["codex exec"],
+        "dsh": ["dsh headless"],
     }.get(backend, ["opencode run"])
 
     if is_windows():
