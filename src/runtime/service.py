@@ -2239,6 +2239,14 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     _handle_vod_recommend_complete(_repo_key, _issue_id, _result_text, task_id, task, _token)
                 except Exception as _se:
                     log.warning(f"complete_task vod recommend handler failed: {_se}")
+            # 6. Issue #468: SRE 完成 → 从 result_text 提取部署 URL 登记到 managed_repos.deploy_url
+            #    （remote worker 模式下 _execute_agent 不执行，此处与直连路径统一调用共享函数）
+            if _agent_type == "sre" and _result_text:
+                try:
+                    from src.api.event_pipeline import register_sre_deploy_url
+                    register_sre_deploy_url(_repo_key, _result_text)
+                except Exception as _se:
+                    log.warning(f"complete_task sre deploy_url register failed: {_se}")
         except Exception as _pe:
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
