@@ -44,6 +44,7 @@ export default defineConfig({
           'account-view': /^account-[vV]iew-.*\.css$/,
           'event-view': /^event-[vV]iew-.*\.css$/,
           'issues-view': /^issues-[vV]iew-.*\.css$/,
+          'autopilot-view': /^autopilot-[vV]iew-.*\.css$/,
           }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -99,6 +100,7 @@ export default defineConfig({
         'account-view': fileURLToPath(new URL('./src/views/entries/account-view.js', import.meta.url)),
         'event-view': fileURLToPath(new URL('./src/views/entries/event-view.js', import.meta.url)),
         'issues-view': fileURLToPath(new URL('./src/views/entries/issues-view.js', import.meta.url)),
+        'autopilot-view': fileURLToPath(new URL('./src/views/entries/autopilot-view.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
