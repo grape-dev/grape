@@ -79,7 +79,9 @@ def main():
         print("[1] 上传 OBS OK ->", key)
 
         # 2) 详情提取（内存缓存 + 真实 OBS 回源）
-        content = skill_md_content(key, SKILL, 1)
+        # B1 后固定 key 两参数签名（version 参数已移除）；脚本自 b37aa7f44 起未随 API 更新，
+        # 三参调用 TypeError——本次对齐（scripts 维护性修复，非 #444 功能范围）
+        content = skill_md_content(key, SKILL)
         assert content and "## 场景" in content, "详情提取失败"
         print("[2] 详情提取 OK (content 含 SKILL.md 章节)")
 
