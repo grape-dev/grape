@@ -543,3 +543,4 @@ const API = (() => {
 })();
 
 window.API = API; // Vue view chunks bridge (batch 2)
+window.renderMarkdown = renderMarkdown; // Vue view chunks bridge (batch 5)

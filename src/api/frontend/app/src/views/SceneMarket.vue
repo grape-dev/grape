@@ -1,87 +1,38 @@
 <template>
   <!-- 单一根元素：fragment 根 + 根级 Teleport(AGModal) 组合会让 Vue unmount 遍历 anchor 撞 null -->
   <div class="sm">
-  <!-- ═══ 市场主页 ═══ -->
-  <template v-if="!detailId">
-    <!-- 一级 Tab：场景 / 技能 -->
-    <div class="sm__top">
-      <div class="seg-bar sm__seg">
-        <a class="ac">🏪 {{ tt('scenes_tab') }}</a>
-        <a @click="G.app.nav('skills')">⚙ {{ tt('skills_tab') }}</a>
-      </div>
-      <div class="sm__intro">
-        <b class="sm__intro-b">{{ tt('scenes_tab') }}</b>
-        {{ tt('market_intro_scene') }} ·
-        <b class="sm__intro-b">{{ tt('skills_tab') }}</b>
-        {{ tt('market_intro_skill') }}
-      </div>
-    </div>
-    <div class="sm__body">
-      <!-- 子 Tab：场景市场(official) -->
-      <div class="sm__subtab">
+    <!-- ═══ 市场主页 ═══ -->
+    <template v-if="!detailId">
+      <!-- 一级 Tab：场景 / 技能 -->
+      <div class="sm__top">
         <div class="seg-bar sm__seg">
-          <a class="ac">{{ tt('scene_scope_official') }}</a>
+          <a class="ac">🏪 {{ tt('scenes_tab') }}</a>
+          <a @click="G.app.nav('skills')">⚙ {{ tt('skills_tab') }}</a>
+        </div>
+        <div class="sm__intro">
+          <b class="sm__intro-b">{{ tt('scenes_tab') }}</b>
+          {{ tt('market_intro_scene') }} ·
+          <b class="sm__intro-b">{{ tt('skills_tab') }}</b>
+          {{ tt('market_intro_skill') }}
         </div>
       </div>
+      <div class="sm__body">
+        <!-- 子 Tab：场景市场(official) -->
+        <div class="sm__subtab">
+          <div class="seg-bar sm__seg">
+            <a class="ac">{{ tt('scene_scope_official') }}</a>
+          </div>
+        </div>
 
-      <!-- 精选场景 -->
-      <div v-if="featured.length" class="apple-card">
-        <div class="cd-h">
-          <h2>🌟 {{ tt('featured_scenes') }}</h2>
-        </div>
-        <div class="feat-row">
-          <SceneCard
-            v-for="s in featured"
-            :key="'f' + s.id"
-            :s="s"
-            @open="openDetail(s.id)"
-            @apply="onApply(s)"
-            @experience="onExperience(s)"
-            @like="onLike(s)"
-          />
-        </div>
-      </div>
-
-      <!-- 全部场景 -->
-      <div class="apple-card">
-        <div class="cd-h apple-search sm__search">
-          <h2>
-            {{ tt('all_scenes') }}
-            <span class="sm__count">{{ total }}</span>
-          </h2>
-          <input
-            v-model="qDraft"
-            class="sm__q"
-            :placeholder="tt('search_placeholder')"
-            @keyup.enter="doSearch"
-          />
-          <button class="bt bt-p bt-s" @click="doSearch">{{ tt('query') }}</button>
-          <button
-            :class="['bt bt-s', sort === 'latest' ? 'bt-tg' : 'bt-o']"
-            @click="setSort('latest')"
-          >
-            {{ tt('sort_latest') }}
-          </button>
-          <button :class="['bt bt-s', sort === 'hot' ? 'bt-tg' : 'bt-o']" @click="setSort('hot')">
-            {{ tt('sort_hot') }}
-          </button>
-        </div>
-        <div class="stabs">
-          <a
-            v-for="c in catList"
-            :key="c.id"
-            :class="{ ac: c.id === activeCat }"
-            @click="setCat(c.id)"
-            >{{ c.icon ? c.icon + ' ' : '' }}{{ c.name }}</a
-          >
-        </div>
-        <div class="sm__gridwrap">
-          <div v-if="listLoading" class="scn-loading"><span class="scn-spinner"></span></div>
-          <div v-else-if="!scenes.length" class="ts t3 sm__empty">{{ tt('no_scenes') }}</div>
-          <div v-else class="rgrid">
+        <!-- 精选场景 -->
+        <div v-if="featured.length" class="apple-card">
+          <div class="cd-h">
+            <h2>🌟 {{ tt('featured_scenes') }}</h2>
+          </div>
+          <div class="feat-row">
             <SceneCard
-              v-for="s in scenes"
-              :key="s.id"
+              v-for="s in featured"
+              :key="'f' + s.id"
               :s="s"
               @open="openDetail(s.id)"
               @apply="onApply(s)"
@@ -89,379 +40,447 @@
               @like="onLike(s)"
             />
           </div>
-          <!-- 分页器 -->
-          <div v-if="scenes.length" class="sm__pager">
-            <button class="bt bt-o bt-s" :disabled="page <= 1" @click="goPage(page - 1)">‹</button>
-            <span class="sm__pginfo"
-              >{{ page }} / {{ totalPages }} ({{ total }}{{ tt('items_count_suffix') }})</span
+        </div>
+
+        <!-- 全部场景 -->
+        <div class="apple-card">
+          <div class="cd-h apple-search sm__search">
+            <h2>
+              {{ tt('all_scenes') }}
+              <span class="sm__count">{{ total }}</span>
+            </h2>
+            <input
+              v-model="qDraft"
+              class="sm__q"
+              :placeholder="tt('search_placeholder')"
+              @keyup.enter="doSearch"
+            />
+            <button class="bt bt-p bt-s" @click="doSearch">{{ tt('query') }}</button>
+            <button
+              :class="['bt bt-s', sort === 'latest' ? 'bt-tg' : 'bt-o']"
+              @click="setSort('latest')"
             >
-            <button class="bt bt-o bt-s" :disabled="page >= totalPages" @click="goPage(page + 1)">
-              ›
+              {{ tt('sort_latest') }}
             </button>
-            <select :value="pageSize" class="sm__pgsize" @change="setPageSize($event.target.value)">
-              <option value="20">20{{ tt('per_page_suffix') }}</option>
-              <option value="50">50{{ tt('per_page_suffix') }}</option>
-              <option value="100">100{{ tt('per_page_suffix') }}</option>
-            </select>
+            <button :class="['bt bt-s', sort === 'hot' ? 'bt-tg' : 'bt-o']" @click="setSort('hot')">
+              {{ tt('sort_hot') }}
+            </button>
+          </div>
+          <div class="stabs">
+            <a
+              v-for="c in catList"
+              :key="c.id"
+              :class="{ ac: c.id === activeCat }"
+              @click="setCat(c.id)"
+              >{{ c.icon ? c.icon + ' ' : '' }}{{ c.name }}</a
+            >
+          </div>
+          <div class="sm__gridwrap">
+            <div v-if="listLoading" class="scn-loading"><span class="scn-spinner"></span></div>
+            <div v-else-if="!scenes.length" class="ts t3 sm__empty">{{ tt('no_scenes') }}</div>
+            <div v-else class="rgrid">
+              <SceneCard
+                v-for="s in scenes"
+                :key="s.id"
+                :s="s"
+                @open="openDetail(s.id)"
+                @apply="onApply(s)"
+                @experience="onExperience(s)"
+                @like="onLike(s)"
+              />
+            </div>
+            <!-- 分页器 -->
+            <div v-if="scenes.length" class="sm__pager">
+              <button class="bt bt-o bt-s" :disabled="page <= 1" @click="goPage(page - 1)">
+                ‹
+              </button>
+              <span class="sm__pginfo"
+                >{{ page }} / {{ totalPages }} ({{ total }}{{ tt('items_count_suffix') }})</span
+              >
+              <button class="bt bt-o bt-s" :disabled="page >= totalPages" @click="goPage(page + 1)">
+                ›
+              </button>
+              <select
+                :value="pageSize"
+                class="sm__pgsize"
+                @change="setPageSize($event.target.value)"
+              >
+                <option value="20">20{{ tt('per_page_suffix') }}</option>
+                <option value="50">50{{ tt('per_page_suffix') }}</option>
+                <option value="100">100{{ tt('per_page_suffix') }}</option>
+              </select>
+            </div>
           </div>
         </div>
       </div>
-    </div>
-  </template>
+    </template>
 
-  <!-- ═══ 场景详情页 ═══ -->
-  <template v-else>
-    <div v-if="detailLoading" class="loading">{{ tc('loading') }}</div>
-    <div v-else-if="detailError" class="error">{{ tc('load_failed') }}: {{ detailError }}</div>
-    <template v-else-if="detail">
-      <AGButton class="sm__back" size="sm" variant="plain" @click="backToMarket"
-        >← {{ tt('back_to_scene_market') }}</AGButton
-      >
-
-      <!-- 头部卡片 -->
-      <div class="sm__dhead">
-        <div class="sm__dhead-top">
-          <div :class="['scn-ic', catBg(detail), 'sm__dic']">
-            <img v-if="iconIsUrl(detail)" :src="detail.icon" alt="" @error="onIconErr" />
-            <template v-else>{{ detail.icon || '⚙' }}</template>
-          </div>
-          <div class="sm__dhead-info">
-            <div class="sm__dtitle-row">
-              <h2>{{ detail.display_name || detail.name }}</h2>
-              <span
-                v-if="detail.name && detail.name !== detail.display_name"
-                class="sm__dnamepill"
-                >{{ detail.name }}</span
-              >
-            </div>
-            <div class="sm__dmeta-row">
-              <span v-if="detail.category_name" class="tg tg-d sm__tg10">{{
-                detail.category_name
-              }}</span>
-              <span v-if="isOfficial && detail.is_featured" class="tg sm__tgfeat"
-                >🌟 {{ tt('featured_tag') }}</span
-              >
-              <span v-if="detail.version" class="tg tg-d sm__tg9">v{{ detail.version }}</span>
-            </div>
-            <div class="sm__ddesc">{{ detail.market_description || detail.description || '' }}</div>
-          </div>
-        </div>
-        <div class="sm__dfoot">
-          <template v-if="isOfficial">
-            <span class="sm__dlike" @click="onLike(detail)">
-              {{ detail.liked_by_me ? '❤️' : '🤍' }} {{ detail.like_count || 0 }}
-            </span>
-            <span class="sm__drepos">{{ detail.repo_count || 0 }} {{ tt('repos_in_use') }}</span>
-          </template>
-          <div class="sm__dactions">
-            <AGButton variant="plain" size="sm" @click="onApply(detail)">{{
-              tt('apply_scene')
-            }}</AGButton>
-            <AGButton
-              v-if="detail.recommended_template"
-              variant="plain"
-              size="sm"
-              @click="onExperience(detail)"
-              >{{ tt('experience') }}</AGButton
-            >
-          </div>
-        </div>
-      </div>
-
-      <!-- 执行流程 -->
-      <template v-if="detailSkills.length">
-        <div class="cd-h sm__sech">
-          <h2>{{ tt('execution_flow') }}</h2>
-        </div>
-        <div class="sm__flow-wrap">
-          <div class="sm__flow-grid">
-            <template v-for="(sk, i) in detailSkills" :key="'f' + i">
-              <div :class="['sm__fcard', { 'sm__fcard--del': sk.skill_deleted }]">
-                <div
-                  class="sm__fcard-top"
-                  :style="{ background: sk.skill_deleted ? 'var(--r)' : agentMeta(sk).color }"
-                ></div>
-                <div class="sm__fcard-h">
-                  <span class="sm__fnum" :style="numStyle(sk)">{{ i + 1 }}</span>
-                  <span class="sm__flabel">{{ agentMeta(sk).icon }} {{ agentMeta(sk).label }}</span>
-                  <span v-if="sk.skill_deleted" class="sm__fdel">⚠ {{ td('deleted') }}</span>
-                </div>
-                <div class="sm__fdesc" :title="sk.role_desc || ''">{{ sk.role_desc || '' }}</div>
-                <div class="sm__fsep"></div>
-                <div class="sm__fbox">
-                  <div class="sm__flbl">{{ td('label_skill') }}</div>
-                  <span v-if="sk.skill_deleted" class="sm__fval sm__fval--del">{{
-                    skillName(sk)
-                  }}</span>
-                  <span
-                    v-else
-                    class="sm__fval sm__fval--skill"
-                    @click="G.app.nav('skill', sk.skill_id || '')"
-                    >{{ skillName(sk) }}</span
-                  >
-                </div>
-                <div class="sm__feng">
-                  <div class="sm__flbl">{{ td('label_engine') }}</div>
-                  <span class="sm__feng-pill">{{ td('broadcast') }}</span>
-                </div>
-              </div>
-              <span v-if="i < detailSkills.length - 1" class="sm__farrow">→</span>
-            </template>
-          </div>
-        </div>
-      </template>
-
-      <!-- 技能套件 -->
-      <template v-if="detailSkills.length">
-        <div class="cd-h sm__sech2">
-          <h2>{{ tt('skill_suite') }}</h2>
-        </div>
-        <div class="sm__flow-wrap">
-          <div class="sm__suite-grid">
-            <div
-              v-for="(sk, i) in detailSkills"
-              :key="'s' + i"
-              :class="['sm__scard', { 'sm__scard--del': sk.skill_deleted }]"
-              @click="!sk.skill_deleted && G.app.nav('skill', sk.skill_id || '')"
-            >
-              <div
-                class="sm__snum"
-                :style="{ background: sk.skill_deleted ? 'var(--r)' : agentMeta(sk).color }"
-              >
-                {{ i + 1 }}
-              </div>
-              <div class="sm__sbody">
-                <div class="sm__sname">
-                  {{ agentMeta(sk).icon }} {{ skillName(sk) }}
-                  <span v-if="sk.skill_deleted" class="sm__fdel">⚠ {{ td('deleted') }}</span>
-                </div>
-                <div class="sm__srole" :title="sk.role_desc || agentMeta(sk).label">
-                  {{ sk.role_desc || agentMeta(sk).label }}
-                </div>
-              </div>
-              <span class="sm__sbadge" :style="badgeStyle(sk)">{{ agentMeta(sk).label }}</span>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <!-- 场景参数 -->
-      <template v-if="presetFields.length">
-        <div class="cd-h sm__sech2">
-          <h2>{{ tt('scene_params') }}</h2>
-          <span class="sm__param-hint">{{ tt('scene_params_hint') }}</span>
-        </div>
-        <div class="sm__flow-wrap">
-          <div class="sm__param-list">
-            <div v-for="p in presetFields" :key="p.name" class="sm__param-row">
-              <div class="sm__param-info">
-                <div class="sm__param-name-row">
-                  <code class="sm__param-name">{{ p.name }}</code>
-                  <span v-if="p.is_secret" class="sm__pill sm__pill--sec"
-                    >🔒 {{ td('secret') }}</span
-                  >
-                  <span class="sm__pill">{{ scopeText(p) }}</span>
-                  <span v-if="p.default_value" class="sm__param-dv"
-                    >{{ td('default') }}: {{ p.default_value }}</span
-                  >
-                </div>
-                <div v-if="p.description" class="sm__param-desc">{{ p.description }}</div>
-              </div>
-            </div>
-          </div>
-        </div>
-      </template>
-
-      <!-- 样例项目模板 -->
-      <template v-if="detail.recommended_template && isOfficial">
-        <div class="cd-h sm__sech2">
-          <h2>{{ tt('sample_template') }}</h2>
-        </div>
-        <div
-          :class="['sm__flow-wrap', { 'sm__tpl--remote': tplIsRemote }]"
-          @click="tplIsRemote && openTpl()"
+    <!-- ═══ 场景详情页 ═══ -->
+    <template v-else>
+      <div v-if="detailLoading" class="loading">{{ tc('loading') }}</div>
+      <div v-else-if="detailError" class="error">{{ tc('load_failed') }}: {{ detailError }}</div>
+      <template v-else-if="detail">
+        <AGButton class="sm__back" size="sm" variant="plain" @click="backToMarket"
+          >← {{ tt('back_to_scene_market') }}</AGButton
         >
-          <div class="sm__tpl-row">
-            <span class="sm__tpl-ic">{{ tpl.icon || '📦' }}</span>
-            <div class="sm__tpl-info">
-              <div class="sm__tpl-name-row">
-                <span class="sm__tpl-name">{{
-                  tpl.name || detail.recommended_template_name || detail.recommended_template
-                }}</span>
-                <span v-if="tplIsRemote" class="sm__pill sm__pill--ok">{{
-                  tt('gitcode_remote')
-                }}</span>
-                <span v-else class="sm__pill">{{ tt('local_template') }}</span>
-                <span v-if="tpl.language" class="sm__pill sm__pill--lang">{{ tpl.language }}</span>
-                <span v-if="tpl.stars" class="sm__tpl-stars">⭐ {{ tpl.stars }}</span>
-              </div>
-              <div class="sm__tpl-desc">{{ tpl.description || tt('template_desc') }}</div>
+
+        <!-- 头部卡片 -->
+        <div class="sm__dhead">
+          <div class="sm__dhead-top">
+            <div :class="['scn-ic', catBg(detail), 'sm__dic']">
+              <img v-if="iconIsUrl(detail)" :src="detail.icon" alt="" @error="onIconErr" />
+              <template v-else>{{ detail.icon || '⚙' }}</template>
             </div>
-            <span v-if="tplIsRemote" class="sm__tpl-view">{{ tt('view_project') }} ↗</span>
+            <div class="sm__dhead-info">
+              <div class="sm__dtitle-row">
+                <h2>{{ detail.display_name || detail.name }}</h2>
+                <span
+                  v-if="detail.name && detail.name !== detail.display_name"
+                  class="sm__dnamepill"
+                  >{{ detail.name }}</span
+                >
+              </div>
+              <div class="sm__dmeta-row">
+                <span v-if="detail.category_name" class="tg tg-d sm__tg10">{{
+                  detail.category_name
+                }}</span>
+                <span v-if="isOfficial && detail.is_featured" class="tg sm__tgfeat"
+                  >🌟 {{ tt('featured_tag') }}</span
+                >
+                <span v-if="detail.version" class="tg tg-d sm__tg9">v{{ detail.version }}</span>
+              </div>
+              <div class="sm__ddesc">
+                {{ detail.market_description || detail.description || '' }}
+              </div>
+            </div>
+          </div>
+          <div class="sm__dfoot">
+            <template v-if="isOfficial">
+              <span class="sm__dlike" @click="onLike(detail)">
+                {{ detail.liked_by_me ? '❤️' : '🤍' }} {{ detail.like_count || 0 }}
+              </span>
+              <span class="sm__drepos">{{ detail.repo_count || 0 }} {{ tt('repos_in_use') }}</span>
+            </template>
+            <div class="sm__dactions">
+              <AGButton variant="plain" size="sm" @click="onApply(detail)">{{
+                tt('apply_scene')
+              }}</AGButton>
+              <AGButton
+                v-if="detail.recommended_template"
+                variant="plain"
+                size="sm"
+                @click="onExperience(detail)"
+                >{{ tt('experience') }}</AGButton
+              >
+            </div>
           </div>
         </div>
+
+        <!-- 执行流程 -->
+        <template v-if="detailSkills.length">
+          <div class="cd-h sm__sech">
+            <h2>{{ tt('execution_flow') }}</h2>
+          </div>
+          <div class="sm__flow-wrap">
+            <div class="sm__flow-grid">
+              <template v-for="(sk, i) in detailSkills" :key="'f' + i">
+                <div :class="['sm__fcard', { 'sm__fcard--del': sk.skill_deleted }]">
+                  <div
+                    class="sm__fcard-top"
+                    :style="{ background: sk.skill_deleted ? 'var(--r)' : agentMeta(sk).color }"
+                  ></div>
+                  <div class="sm__fcard-h">
+                    <span class="sm__fnum" :style="numStyle(sk)">{{ i + 1 }}</span>
+                    <span class="sm__flabel"
+                      >{{ agentMeta(sk).icon }} {{ agentMeta(sk).label }}</span
+                    >
+                    <span v-if="sk.skill_deleted" class="sm__fdel">⚠ {{ td('deleted') }}</span>
+                  </div>
+                  <div class="sm__fdesc" :title="sk.role_desc || ''">{{ sk.role_desc || '' }}</div>
+                  <div class="sm__fsep"></div>
+                  <div class="sm__fbox">
+                    <div class="sm__flbl">{{ td('label_skill') }}</div>
+                    <span v-if="sk.skill_deleted" class="sm__fval sm__fval--del">{{
+                      skillName(sk)
+                    }}</span>
+                    <span
+                      v-else
+                      class="sm__fval sm__fval--skill"
+                      @click="G.app.nav('skill', sk.skill_id || '')"
+                      >{{ skillName(sk) }}</span
+                    >
+                  </div>
+                  <div class="sm__feng">
+                    <div class="sm__flbl">{{ td('label_engine') }}</div>
+                    <span class="sm__feng-pill">{{ td('broadcast') }}</span>
+                  </div>
+                </div>
+                <span v-if="i < detailSkills.length - 1" class="sm__farrow">→</span>
+              </template>
+            </div>
+          </div>
+        </template>
+
+        <!-- 技能套件 -->
+        <template v-if="detailSkills.length">
+          <div class="cd-h sm__sech2">
+            <h2>{{ tt('skill_suite') }}</h2>
+          </div>
+          <div class="sm__flow-wrap">
+            <div class="sm__suite-grid">
+              <div
+                v-for="(sk, i) in detailSkills"
+                :key="'s' + i"
+                :class="['sm__scard', { 'sm__scard--del': sk.skill_deleted }]"
+                @click="!sk.skill_deleted && G.app.nav('skill', sk.skill_id || '')"
+              >
+                <div
+                  class="sm__snum"
+                  :style="{ background: sk.skill_deleted ? 'var(--r)' : agentMeta(sk).color }"
+                >
+                  {{ i + 1 }}
+                </div>
+                <div class="sm__sbody">
+                  <div class="sm__sname">
+                    {{ agentMeta(sk).icon }} {{ skillName(sk) }}
+                    <span v-if="sk.skill_deleted" class="sm__fdel">⚠ {{ td('deleted') }}</span>
+                  </div>
+                  <div class="sm__srole" :title="sk.role_desc || agentMeta(sk).label">
+                    {{ sk.role_desc || agentMeta(sk).label }}
+                  </div>
+                </div>
+                <span class="sm__sbadge" :style="badgeStyle(sk)">{{ agentMeta(sk).label }}</span>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- 场景参数 -->
+        <template v-if="presetFields.length">
+          <div class="cd-h sm__sech2">
+            <h2>{{ tt('scene_params') }}</h2>
+            <span class="sm__param-hint">{{ tt('scene_params_hint') }}</span>
+          </div>
+          <div class="sm__flow-wrap">
+            <div class="sm__param-list">
+              <div v-for="p in presetFields" :key="p.name" class="sm__param-row">
+                <div class="sm__param-info">
+                  <div class="sm__param-name-row">
+                    <code class="sm__param-name">{{ p.name }}</code>
+                    <span v-if="p.is_secret" class="sm__pill sm__pill--sec"
+                      >🔒 {{ td('secret') }}</span
+                    >
+                    <span class="sm__pill">{{ scopeText(p) }}</span>
+                    <span v-if="p.default_value" class="sm__param-dv"
+                      >{{ td('default') }}: {{ p.default_value }}</span
+                    >
+                  </div>
+                  <div v-if="p.description" class="sm__param-desc">{{ p.description }}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </template>
+
+        <!-- 样例项目模板 -->
+        <template v-if="detail.recommended_template && isOfficial">
+          <div class="cd-h sm__sech2">
+            <h2>{{ tt('sample_template') }}</h2>
+          </div>
+          <div
+            :class="['sm__flow-wrap', { 'sm__tpl--remote': tplIsRemote }]"
+            @click="tplIsRemote && openTpl()"
+          >
+            <div class="sm__tpl-row">
+              <span class="sm__tpl-ic">{{ tpl.icon || '📦' }}</span>
+              <div class="sm__tpl-info">
+                <div class="sm__tpl-name-row">
+                  <span class="sm__tpl-name">{{
+                    tpl.name || detail.recommended_template_name || detail.recommended_template
+                  }}</span>
+                  <span v-if="tplIsRemote" class="sm__pill sm__pill--ok">{{
+                    tt('gitcode_remote')
+                  }}</span>
+                  <span v-else class="sm__pill">{{ tt('local_template') }}</span>
+                  <span v-if="tpl.language" class="sm__pill sm__pill--lang">{{
+                    tpl.language
+                  }}</span>
+                  <span v-if="tpl.stars" class="sm__tpl-stars">⭐ {{ tpl.stars }}</span>
+                </div>
+                <div class="sm__tpl-desc">{{ tpl.description || tt('template_desc') }}</div>
+              </div>
+              <span v-if="tplIsRemote" class="sm__tpl-view">{{ tt('view_project') }} ↗</span>
+            </div>
+          </div>
+        </template>
       </template>
     </template>
-  </template>
 
-  <!-- ═══ 应用场景弹窗（高级选项） ═══ -->
-  <AGModal
-    :open="applyCtx.open"
-    :title="applyCtx.isOverwrite ? tt('apply_confirm_title') : tt('apply_scene')"
-    @close="applyCtx.open = false"
-  >
-    <div class="sm__form">
-      <!-- 覆盖警告 -->
-      <div v-if="applyCtx.isOverwrite" class="sm__warn">
+    <!-- ═══ 应用场景弹窗（高级选项） ═══ -->
+    <AGModal
+      :open="applyCtx.open"
+      :title="applyCtx.isOverwrite ? tt('apply_confirm_title') : tt('apply_scene')"
+      @close="applyCtx.open = false"
+    >
+      <div class="sm__form">
+        <!-- 覆盖警告 -->
+        <div v-if="applyCtx.isOverwrite" class="sm__warn">
+          <span class="sm__warn-ic">⚠️</span>
+          <div class="sm__warn-txt">
+            {{ tt('apply_confirm_desc')
+            }}<template v-if="applyCtx.sceneName">（{{ applyCtx.sceneName }}）</template>，{{
+              tt('apply_confirm_warning')
+            }}
+          </div>
+        </div>
+        <!-- 华为云提示 -->
+        <div v-if="applyCtx.isHwCloud" class="sm__hwhint">
+          ☁ {{ td('hw_hint') }}
+          <a class="sm__hwlink" @click="G.app.nav('settings')">{{ td('hw_goto_settings') }}</a>
+        </div>
+        <!-- 工作分支 -->
+        <div class="sm__fld">
+          <label class="sm__lbl">{{ td2('dashboard.work_branch') }}</label>
+          <div class="sm__row">
+            <AGSelect v-model="applyCtx.workBranch" :options="branchOpts" class="sm__f1" />
+            <AGButton size="sm" @click="applyCtx.showNewBranch = !applyCtx.showNewBranch">{{
+              td2('dashboard.create_branch')
+            }}</AGButton>
+          </div>
+          <div v-if="applyCtx.showNewBranch" class="sm__newbranch">
+            <input
+              v-model="applyCtx.newBranchName"
+              class="sm__nbname"
+              :placeholder="td2('dashboard.branch_name')"
+            />
+            <AGSelect v-model="applyCtx.newBranchRef" :options="branchRefOpts" class="sm__nbref" />
+            <AGButton size="sm" @click="createBranch">{{ td2('common.create') }}</AGButton>
+          </div>
+        </div>
+        <!-- 自定义配置项 -->
+        <div class="sm__fld">
+          <label class="sm__lbl">{{ td2('dashboard.custom_config') }}</label>
+          <div class="sm__cf-list">
+            <div v-for="(f, i) in applyCtx.fields" :key="i" class="sm__cf">
+              <span v-if="f.preset" class="sm__cf-key-static">
+                <b>{{ f.name }}</b>
+                <small v-if="f.description">{{ f.description }}</small>
+              </span>
+              <AGInput v-else v-model="f.name" class="sm__f1" :invalid="cfNameError(f)" />
+              <div class="sm__cf-val">
+                <input
+                  v-model="f.value"
+                  :type="f.reveal ? 'text' : fInputType(f)"
+                  :placeholder="td('value_ph')"
+                />
+                <button
+                  v-if="fInputType(f) === 'password'"
+                  class="sm__cf-eye"
+                  type="button"
+                  @click="f.reveal = !f.reveal"
+                >
+                  {{ f.reveal ? '🙈' : '👁' }}
+                </button>
+              </div>
+              <div v-if="!f.preset && !f.readOnlyKey" class="sm__cf-scope">
+                <label v-for="a in scopeAgents" :key="a" class="sm__cf-scope-lbl">
+                  <input
+                    v-model="f.scope"
+                    type="checkbox"
+                    :value="a"
+                    @change="scopeToggle(f, a)"
+                  />{{ a }}
+                </label>
+              </div>
+              <AGButton
+                v-if="!f.preset"
+                variant="danger"
+                size="sm"
+                @click="applyCtx.fields.splice(i, 1)"
+                >×</AGButton
+              >
+            </div>
+          </div>
+          <AGButton size="sm" variant="plain" @click="addField()"
+            >+ {{ td2('dashboard.add_config') }}</AGButton
+          >
+        </div>
+      </div>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="applyCtx.open = false">{{
+          td2('common.cancel')
+        }}</AGButton>
+        <AGButton size="sm" :disabled="applyCtx.busy" @click="confirmApply">
+          {{ applyCtx.isOverwrite ? tt('apply_confirm_btn') : tt('apply_scene') }}
+        </AGButton>
+      </template>
+    </AGModal>
+
+    <!-- ═══ 场景名称冲突弹窗 ═══ -->
+    <AGModal
+      :open="conflict.open"
+      :title="tt('scene_name_conflict_title')"
+      @close="conflict.open = false"
+    >
+      <div class="sm__conf">
         <span class="sm__warn-ic">⚠️</span>
-        <div class="sm__warn-txt">
-          {{ tt('apply_confirm_desc')
-          }}<template v-if="applyCtx.sceneName">（{{ applyCtx.sceneName }}）</template>，{{
-            tt('apply_confirm_warning')
+        <div>
+          <div class="sm__conf-desc">{{ conflict.message || tt('scene_name_conflict_desc') }}</div>
+        </div>
+      </div>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="conflict.open = false">{{
+          td2('common.close')
+        }}</AGButton>
+        <AGButton size="sm" @click="gotoRepoScenes">{{ tt('goto_repo_scenes') }}</AGButton>
+      </template>
+    </AGModal>
+
+    <!-- ═══ 体验确认弹窗 ═══ -->
+    <AGModal
+      :open="expConfirm.open"
+      :title="
+        expConfirm.applied ? tt('exp_confirm_overwrite_title') : tt('exp_confirm_exists_title')
+      "
+      @close="expConfirm.open = false"
+    >
+      <div class="sm__conf">
+        <span class="sm__warn-ic">⚠️</span>
+        <div class="sm__conf-desc">
+          {{
+            expConfirm.applied ? tt('exp_confirm_overwrite_desc') : tt('exp_confirm_exists_desc')
+          }}
+          {{ expConfirm.fullName }}
+          {{
+            expConfirm.applied
+              ? tt('exp_confirm_overwrite_warning')
+              : tt('exp_confirm_exists_warning')
           }}
         </div>
       </div>
-      <!-- 华为云提示 -->
-      <div v-if="applyCtx.isHwCloud" class="sm__hwhint">
-        ☁ {{ td('hw_hint') }}
-        <a class="sm__hwlink" @click="G.app.nav('settings')">{{ td('hw_goto_settings') }}</a>
-      </div>
-      <!-- 工作分支 -->
-      <div class="sm__fld">
-        <label class="sm__lbl">{{ td2('dashboard.work_branch') }}</label>
-        <div class="sm__row">
-          <AGSelect v-model="applyCtx.workBranch" :options="branchOpts" class="sm__f1" />
-          <AGButton size="sm" @click="applyCtx.showNewBranch = !applyCtx.showNewBranch">{{
-            td2('dashboard.create_branch')
-          }}</AGButton>
-        </div>
-        <div v-if="applyCtx.showNewBranch" class="sm__newbranch">
-          <input
-            v-model="applyCtx.newBranchName"
-            class="sm__nbname"
-            :placeholder="td2('dashboard.branch_name')"
-          />
-          <AGSelect v-model="applyCtx.newBranchRef" :options="branchRefOpts" class="sm__nbref" />
-          <AGButton size="sm" @click="createBranch">{{ td2('common.create') }}</AGButton>
-        </div>
-      </div>
-      <!-- 自定义配置项 -->
-      <div class="sm__fld">
-        <label class="sm__lbl">{{ td2('dashboard.custom_config') }}</label>
-        <div class="sm__cf-list">
-          <div v-for="(f, i) in applyCtx.fields" :key="i" class="sm__cf">
-            <span v-if="f.preset" class="sm__cf-key-static">
-              <b>{{ f.name }}</b>
-              <small v-if="f.description">{{ f.description }}</small>
-            </span>
-            <AGInput v-else v-model="f.name" class="sm__f1" :invalid="cfNameError(f)" />
-            <div class="sm__cf-val">
-              <input
-                v-model="f.value"
-                :type="f.reveal ? 'text' : fInputType(f)"
-                :placeholder="td('value_ph')"
-              />
-              <button
-                v-if="fInputType(f) === 'password'"
-                class="sm__cf-eye"
-                type="button"
-                @click="f.reveal = !f.reveal"
-              >
-                {{ f.reveal ? '🙈' : '👁' }}
-              </button>
-            </div>
-            <div v-if="!f.preset && !f.readOnlyKey" class="sm__cf-scope">
-              <label v-for="a in scopeAgents" :key="a" class="sm__cf-scope-lbl">
-                <input v-model="f.scope" type="checkbox" :value="a" @change="scopeToggle(f, a)" />{{
-                  a
-                }}
-              </label>
-            </div>
-            <AGButton
-              v-if="!f.preset"
-              variant="danger"
-              size="sm"
-              @click="applyCtx.fields.splice(i, 1)"
-              >×</AGButton
-            >
-          </div>
-        </div>
-        <AGButton size="sm" variant="plain" @click="addField()"
-          >+ {{ td2('dashboard.add_config') }}</AGButton
-        >
-      </div>
-    </div>
-    <template #footer>
-      <AGButton size="sm" variant="plain" @click="applyCtx.open = false">{{
-        td2('common.cancel')
-      }}</AGButton>
-      <AGButton size="sm" :disabled="applyCtx.busy" @click="confirmApply">
-        {{ applyCtx.isOverwrite ? tt('apply_confirm_btn') : tt('apply_scene') }}
-      </AGButton>
-    </template>
-  </AGModal>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="expConfirm.open = false">{{
+          td2('common.cancel')
+        }}</AGButton>
+        <AGButton size="sm" @click="doExperience">{{ tt('exp_confirm_btn') }}</AGButton>
+      </template>
+    </AGModal>
 
-  <!-- ═══ 场景名称冲突弹窗 ═══ -->
-  <AGModal
-    :open="conflict.open"
-    :title="tt('scene_name_conflict_title')"
-    @close="conflict.open = false"
-  >
-    <div class="sm__conf">
-      <span class="sm__warn-ic">⚠️</span>
-      <div>
-        <div class="sm__conf-desc">{{ conflict.message || tt('scene_name_conflict_desc') }}</div>
+    <!-- ═══ 体验进度弹窗 ═══ -->
+    <AGModal :open="expModal.open" :title="tt('experience')" @close="cancelExperience">
+      <div class="sm__exp">
+        <div class="sm__exp-txt">{{ expModal.text }}</div>
+        <div class="sm__exp-bar">
+          <div class="sm__exp-fill" :style="{ width: expModal.pct + '%' }"></div>
+        </div>
+        <div class="sm__exp-pct">{{ expModal.pct }}%</div>
       </div>
-    </div>
-    <template #footer>
-      <AGButton size="sm" variant="plain" @click="conflict.open = false">{{
-        td2('common.close')
-      }}</AGButton>
-      <AGButton size="sm" @click="gotoRepoScenes">{{ tt('goto_repo_scenes') }}</AGButton>
-    </template>
-  </AGModal>
-
-  <!-- ═══ 体验确认弹窗 ═══ -->
-  <AGModal
-    :open="expConfirm.open"
-    :title="expConfirm.applied ? tt('exp_confirm_overwrite_title') : tt('exp_confirm_exists_title')"
-    @close="expConfirm.open = false"
-  >
-    <div class="sm__conf">
-      <span class="sm__warn-ic">⚠️</span>
-      <div class="sm__conf-desc">
-        {{ expConfirm.applied ? tt('exp_confirm_overwrite_desc') : tt('exp_confirm_exists_desc') }}
-        {{ expConfirm.fullName }}
-        {{
-          expConfirm.applied
-            ? tt('exp_confirm_overwrite_warning')
-            : tt('exp_confirm_exists_warning')
-        }}
-      </div>
-    </div>
-    <template #footer>
-      <AGButton size="sm" variant="plain" @click="expConfirm.open = false">{{
-        td2('common.cancel')
-      }}</AGButton>
-      <AGButton size="sm" @click="doExperience">{{ tt('exp_confirm_btn') }}</AGButton>
-    </template>
-  </AGModal>
-
-  <!-- ═══ 体验进度弹窗 ═══ -->
-  <AGModal :open="expModal.open" :title="tt('experience')" @close="cancelExperience">
-    <div class="sm__exp">
-      <div class="sm__exp-txt">{{ expModal.text }}</div>
-      <div class="sm__exp-bar">
-        <div class="sm__exp-fill" :style="{ width: expModal.pct + '%' }"></div>
-      </div>
-      <div class="sm__exp-pct">{{ expModal.pct }}%</div>
-    </div>
-    <template #footer>
-      <AGButton size="sm" variant="plain" @click="cancelExperience">{{
-        expModal.done ? td2('common.close') : td2('common.cancel')
-      }}</AGButton>
-    </template>
-  </AGModal>
+      <template #footer>
+        <AGButton size="sm" variant="plain" @click="cancelExperience">{{
+          expModal.done ? td2('common.close') : td2('common.cancel')
+        }}</AGButton>
+      </template>
+    </AGModal>
   </div>
 </template>
 
@@ -1963,5 +1982,7 @@ onMounted(function () {
   color: var(--t3);
   margin-top: 3px;
 }
-.sm { min-height: 100%; }
+.sm {
+  min-height: 100%;
+}
 </style>
