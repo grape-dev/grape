@@ -359,11 +359,18 @@ class TestConfig:
         assert row and row[0] == sid
 
     def test_put_config_clear_im(self, _client):
+        """Issue #431：body 无 im 键的普通保存不再清空 IM 字段（原断言的是缺陷行为，已修正）。"""
+        app_id = "cli_keep_%s" % uuid.uuid4().hex[:6]
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, repo_key, im_app_id, im_app_secret, im_provider) VALUES (?,?,?,?,?,?)",
+                      ("sess-cfg-%d" % UID, UID, "", app_id, "sec", "feishu"))
+            db.commit()
         r = _client.put("/api/chat/config", json={})
         assert r.status_code == 200
         with db_lock:
-            row = db.cursor().execute("SELECT im_app_id FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
-        assert row and row[0] == ""
+            row = db.cursor().execute("SELECT im_app_id, im_app_secret, im_provider FROM chat_agent_session WHERE user_id=? AND repo_key=''", (UID,)).fetchone()
+        assert tuple(row) == (app_id, "sec", "feishu"), f"无 im 键保存不应清空 IM 字段, got {row}"
 
     def test_put_config_unbind_cleans_im(self, _client):
         """Issue #294：解绑（app_id 置空）→ 清凭证 + 释放注册表 + 删渠道会话 + 映射对账 + 移除 bot。"""
