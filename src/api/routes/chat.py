@@ -298,10 +298,11 @@ async def recall_chat_message(msg_id: int, user: dict = Depends(require_no_sessi
             terminated = True
         except Exception as e:
             log.warning(f"[Chat recall] cancel remote task failed: enqueue_tid={enqueue_tid} err={e}")
-        # 本次撤回方若不在任务归属主控上（跨主控），此处无映射可终止 —— 记录以便排查
-        if task_id not in _CHAT_ENQUEUE_MAP:
-            log.info(f"[Chat recall] cross-master recall: local map miss task_id={task_id}, "
-                     f"owning master loop will cancel enqueue_tid={enqueue_tid}")
+    elif task_id:
+        # 跨主控：撤回请求落在非归属主控（进程内映射不可见）→ 无法在此终止。
+        # 由归属主控的轮询循环（remote_agent_fn）感知共享库撤回标记后 cancel_task（≤0.5s）。
+        log.info(f"[Chat recall] cross-master recall: local map miss task_id={task_id}; "
+                 f"the owning master's loop will cancel the enqueued task")
     log.info(f"[Chat recall] msg={msg_id} conv={msg['conversation_id']} task={task_id} "
              f"terminated={terminated} user={user['username']}")
     return {"recalled": True, "message_id": msg_id, "task_id": task_id, "terminated": terminated}

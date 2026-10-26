@@ -157,3 +157,24 @@ class TestCrossMasterRecall:
                 "SELECT COUNT(*) FROM chat_messages WHERE conversation_id=? AND role='agent'",
                 (cid,)).fetchone()[0]
         assert n == 0
+
+    def test_cross_master_map_miss_is_logged(self, _client):
+        """跨主控撤回（本机无映射）必须留下可排障的日志锚点。
+
+        真跑发现：该日志原被写在 `if enqueue_tid:` 块内，而跨主控恰恰是 enqueue_tid 为空
+        的分支 → 永远不会打印（死代码）。本用例锁死该行为。
+        """
+        from unittest.mock import MagicMock
+        from src.api.routes import chat as chat_mod
+
+        cid = _new_conv()
+        tid = "chat_" + uuid.uuid4().hex[:8]
+        mid = add_message(cid, "user", "跨主控撤回", task_id=tid)
+        fake_log = MagicMock()
+        with patch.object(chat_mod, "log", fake_log):
+            r = _client.post(f"/api/chat/messages/{mid}/recall")
+        assert r.status_code == 200
+        # 本机无映射 → 无法本地终止（terminated=False），但必须打印跨主控锚点
+        assert r.json()["terminated"] is False
+        msgs = [str(c.args[0]) for c in fake_log.info.call_args_list if c.args]
+        assert any("cross-master recall" in m for m in msgs), f"缺少跨主控日志锚点: {msgs}"
