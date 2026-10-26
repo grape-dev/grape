@@ -456,7 +456,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
             c.execute(
                 "SELECT ar.id, ar.name, ar.credential_id, ar.status, ar.last_seen_at, ar.provider, "
                 "ar.healthy, ar.busy_slots, ar.max_concurrent, ar.version, "
-                "rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
+                "rc.name AS rc_name, rc.device_name, rc.status AS cred_status, rc.id AS cred_pk, ar.host_name, "
                 "ar.probe_status, ar.probe_latency, ar.probe_last, ar.probe_error, "
                 "ar.org_id "
                 "FROM agent_runtimes ar "
@@ -466,7 +466,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                 ([_filter_org_id] if _filter_org_id else [])
             )
             for r in c.fetchall():
-                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
+                rid, rname, cid, rstatus, rlast_seen, rprovider, rhealthy, rbusy, rmax, rver, rc_name, rdev, rcred_status, cred_pk, rhost, rprobe_status, rprobe_latency, rprobe_last, rprobe_error, _rt_org_id = r
                 # 跳过已注销（revoked）凭据绑定的远端引擎（与 Workers 视图一致）。
                 # Issue #417：吊销=物理删除凭据行，LEFT JOIN 得 NULL（cred_pk 为 None）
                 # 的孤儿 agent_runtimes 行同样跳过——否则已吊销设备在 runtime 表残留显示
@@ -545,9 +545,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                         "error": rprobe_error or "",
                     }
                 # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
-                _dev_name = rdev or ""
+                # 远端引擎优先用户自定义凭据名 rc.name（与 Agent 运行时页 Workers 卡片一致），
+                # 为空回退边端自报 device_name（Issue #465，避免存量空名出现空列）
                 if (cid or 0) == 0:
                     _dev_name = rhost or "本机直连"
+                else:
+                    _dev_name = rc_name or rdev or ""
                 from src.runtime.instances import to_display as _td
                 runtime_list.append({
                     "id": rid, "name": _td(rname or ""), "status": rstatus or "offline",
