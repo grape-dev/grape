@@ -47,6 +47,10 @@ _MAX_CONSECUTIVE_FAILURES = int(os.environ.get("HEALTH_MAX_CONSECUTIVE_FAILURES"
 # 心跳超时阈值（秒）：last_seen_at 超过此值或为 NULL → 引擎失联，健康分强制 0。
 # 与 engine_select._RUNTIME_STALE_SECONDS / health.py 5min 判定保持一致。
 _HEARTBEAT_STALE_SECONDS = int(os.environ.get("HEALTH_HEARTBEAT_STALE_SECONDS", "100"))
+# 小样本保护阈值（issue #439）：窗口内任务总数 < N 时豁免连败惩罚、失败率按
+# failed/N 稀释——低样本引擎单次失败不再打入拒派区（旧逻辑 total=1/failed=1
+# → 0 分 → claim_by_tag 拒派死锁）。
+_MIN_SAMPLES = int(os.environ.get("HEALTH_MIN_SAMPLES", "5"))
 
 # ===== 内存缓存 =====
 
@@ -193,6 +197,12 @@ def _compute_health_score(total: "int | Decimal | None", failed: "int | Decimal 
        5 次归 0；总分小于 0 时 clamp 为 0）
     - clamp [0, 100]
 
+    issue #439 小样本保护：0 < total < _MIN_SAMPLES 时——
+    - 失败率稀释为 failed / _MIN_SAMPLES 再按 0.5 权重计分
+      （单次失败 total=1 → 90 分，不再直接打入低分区）
+    - 连败惩罚豁免（样本不足时连败不构成统计显著性）
+    样本数达到 N 后恢复原公式（原行为不回归）。
+
     入口归一化（2026-10-23 Decimal 崩溃修复）：本函数被多处调用（健康分重置、
     管理台展示等），调用方可能直接传 MySQL SUM()/COUNT() 返回的 Decimal 或
     None——本函数自身容错（而非只靠 _fetch_task_stats 一处归一化）才是结构性
@@ -203,9 +213,13 @@ def _compute_health_score(total: "int | Decimal | None", failed: "int | Decimal 
     total = int(total or 0)
     failed = int(failed or 0)
     consecutive_failures = int(consecutive_failures or 0)
-    failure_rate = failed / total if total > 0 else 0.0
+    if total < _MIN_SAMPLES:
+        failure_rate = failed / _MIN_SAMPLES
+        penalty = 0
+    else:
+        failure_rate = failed / total if total > 0 else 0.0
+        penalty = _consecutive_failure_penalty(consecutive_failures)
     base_score = round(100 * (1 - failure_rate * 0.5))
-    penalty = _consecutive_failure_penalty(consecutive_failures)
     score = base_score - penalty
     return max(0, min(100, score))
 
@@ -434,13 +448,19 @@ def is_healthy(runtime_id: int, threshold: int | None = None,
 
     threshold 默认 _HEALTH_THRESHOLD（可环境变量调优）。
     连续失败超过 _MAX_CONSECUTIVE_FAILURES 也视为不健康。
+
+    issue #439 小样本保护：窗口任务总数 < _MIN_SAMPLES 时连败拒派豁免
+    （单次/少量失败不把低样本引擎打入拒派区，避免 claim_by_tag 拒派死锁）；
+    total_tasks 未知（旧档/兼容 mock）时维持原判定。
     """
     if not runtime_id:
         return True  # runtime_id=0（广播/未绑定）不参与健康过滤
     _thr = threshold if threshold is not None else _HEALTH_THRESHOLD
     data = get_health_score(runtime_id, force_refresh=force_refresh)
-    if data["consecutive_failures"] >= _MAX_CONSECUTIVE_FAILURES:
-        return False
+    _total = data.get("total_tasks")
+    if _total is None or _total >= _MIN_SAMPLES:
+        if data["consecutive_failures"] >= _MAX_CONSECUTIVE_FAILURES:
+            return False
     return data["health_score"] >= _thr
 
 
