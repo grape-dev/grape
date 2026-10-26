@@ -6,8 +6,19 @@
 > - `mine` / `context` / `delete` / `upload`：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 > - `list` / `stats` / `status`：**admin-only**（JWT role=admin），**不进公开契约**。
 
+> **CLI 命令**：由契约 `operation_id` 派生（`<tag> <verb>`，issue-45-cli-design.md §3.1）。
+
+| operation_id | CLI 命令 |
+|---|---|
+| `feedback_submit` | `grape feedback submit` |
+| `feedback_mine` | `grape feedback mine` |
+| `feedback_context` | `grape feedback context <event_seq>` |
+| `feedback_delete` | `grape feedback delete <fid>` |
+| `feedback_upload` | `grape feedback upload` |
+
 ## POST /api/feedback — 提交反馈
 > scope（x-token-scope）：**dual**（JWT / API Key / `tk_` Agent 会话均可用）
+> CLI：`grape feedback submit --json '{...}'`
 
 请求头：`Content-Type: application/json`
 
@@ -29,11 +40,19 @@ Agent（`tk_`）提交说明：
 - 落库 `source='agent'`；每任务（session_key）最多 2 条，超出返回 **429**；
 - 反馈随后由后台 reconcile worker 按技能归属自动转 Issue（见「反馈 → Issue 闭环」）。
 
+```bash
+# 用户提交（API Key 三通道自动带 Authorization）
+grape feedback submit --json '{"category":"bug","title":"x","description":"y"}'
+# Agent 自动反馈（tk_ 经 GRAPE_SESSION_TOKEN 注入 → token 权威解析仓库/任务/技能）
+grape feedback submit --json '{"category":"suggestion","title":"CLI 不友好","description":"...","feedback_kind":"cli_ux"}'
+```
+
 | 出参 | `{id, status: "open", message}` |
 | 返回 | 200；401 未认证；429 超限 |
 
 ## GET /api/feedback/mine — 我的反馈列表
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape feedback mine [--page 0] [--size 10]`
 
 | Query | `page`（默认 0）`size`（默认 10，≤100） |
 | 出参 | `{items:[{id,category,title,description,attachment_url,attachment_name,status,priority,handler_name,handler_remark,created_at,updated_at,source,skill_name,issue_url,issue_number}], total, page, total_pages}` |
@@ -41,6 +60,7 @@ Agent（`tk_`）提交说明：
 
 ## GET /api/feedback/context/{event_seq} — 反馈上下文
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape feedback context 12345`
 
 | Path | `{event_seq}` |
 | 出参 | `{event_seq, repo_key, issue_id, issue_number, agent_type, event_status, task, engine, skill, fail_summary}` |
@@ -48,6 +68,7 @@ Agent（`tk_`）提交说明：
 
 ## DELETE /api/feedback/{fid} — 删除反馈
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape feedback delete <fid>`
 
 | Path | `{fid}` |
 | 出参 | `{success, message}` |
@@ -55,6 +76,7 @@ Agent（`tk_`）提交说明：
 
 ## POST /api/feedback/upload — 上传附件
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> CLI：`grape feedback upload --file <path>`（multipart）
 
 | Body | multipart `file`（jpg/png/webp/gif/svg/zip，≤5MB） |
 | 出参 | `{url, file_key, is_zip, original_name}` |
