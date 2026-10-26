@@ -61,9 +61,12 @@ def check_running_task(repo_key: str, issue_id: str) -> bool:
         with db_lock:
             c = db.cursor()
             # 1. 查 agent_tasks
+            # 'queued' 计入活跃（#403 重试收口）：退避窗口内任务回 queued，
+            # 若不查 queued，同 issue 新事件会建第二个任务 → 旧重试任务稍后
+            # 被认领 → 双实例并发、双份评论。语义 =「该 issue 有任务在链上」。
             c.execute(
                 "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? "
-                "AND status IN ('running','dispatched') LIMIT 1",
+                "AND status IN ('running','dispatched','queued') LIMIT 1",
                 (repo_key, issue_id)
             )
             if c.fetchone():
@@ -4018,6 +4021,41 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         log.warning(f"Exec agent: token expired during direct exec (error_code={_pipeline_error_code}), repo={repo_key}")
                 except Exception as _pe:
                     log.warning(f"Exec agent: post-exec 401 detect failed: {_pe}")
+    # Issue #403：瞬时上游抖动自动重试（判定层收口，direct 执行路径）。
+    # new_status 判定完成后、终态写入（任务+事件）之前拦截：可重试（瞬时分类
+    # ∧ 无写操作证据 ∧ attempts 未耗尽）则退避 requeue 并跳过终态写入。
+    _retry_info = {}
+    if new_status == "failed" and task_id:
+        try:
+            from src.runtime.transient_retry import retry_transient_task
+            _err_txt = " ".join(str(e) for e in (_exec_done_errors or [])) + " " + str(_exec_done_stderr or "")
+            if retry_transient_task(task_id, exit_code, _err_txt, has_output=has_output,
+                                    tool_uses=tool_uses, result_text=result_text or ""):
+                log.info(f"Exec agent: seq={seq} transient retry scheduled, skip terminal write")
+                return
+        except Exception as _e:
+            log.warning(f"Exec agent: transient retry check failed for seq={seq}: {_e}")
+    # Issue #403：耗尽/不可重试判死 → 分类失败摘要写 result_text（区分上游抖动
+    # vs 配置错误 + 重试次数 + 原始错误摘要）。非重试场景（无 #403 记录）零变化。
+    if new_status == "failed" and task_id and not (result_text or "").strip():
+        try:
+            from src.runtime.service import _task_errors_json
+            from src.runtime.transient_retry import format_stream_failure_result
+            _retries = [e for e in _task_errors_json(task_id)
+                        if isinstance(e, dict) and e.get("error_code") in
+                        ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+            if _retries:
+                _ex = next((e for e in _retries
+                            if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
+                _retry_info = {"class": _ex.get("error_class") or "",
+                               "attempts": _ex.get("attempts") or len(_retries),
+                               "max": _ex.get("max") or len(_retries)}
+                result_text = format_stream_failure_result(
+                    _retry_info["class"], _retry_info["attempts"], _retry_info["max"],
+                    _ex.get("reason") or "", exit_code=exit_code,
+                    errors=_exec_done_errors)
+        except Exception as _e:
+            log.warning(f"Exec agent: failure summary build failed for seq={seq}: {_e}")
     if task_id:
         from src.runtime.service import update_task_status
         update_task_status(task_id, new_status, exit_code=exit_code, result_text=result_text)
@@ -4073,7 +4111,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             _has_rpf = any(isinstance(e, dict) and e.get("error_code") == "RESULT_POST_FAILED" for e in _errs)
                             if not _has_rpf:
                                 _errs.append({"error_code": "RESULT_POST_FAILED", "message": "result posted but issue comment failed"})
-                                _errs = _errs[-5:]
+                                # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
+                                _errs = _errs[:1] + _errs[1:][-4:] if len(_errs) > 5 else _errs
                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs), task_id))
                                 db.commit()
                     except Exception:
