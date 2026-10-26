@@ -46,6 +46,7 @@
 - 大件队列：chat(1422) account(1552) events(1569) issues(1981) autopilot(2026) runtimes(2270) dashboard(2513) observability(3035) → admin独立站 → app.js外壳+index.html收口
 - 死代码待主人裁决删除：agents.js的Configure面板函数（约250行无UI入口）
 - help页是否彻底Vue化：阶段3裁决
+- **视觉/体验债**：迁移中主人不满意的视觉效果统一记在 docs/weekly-08/ui-debt.md（5条：issues太黑/scene+im-channel太白/pipeline+runtimes+repos霓虹小配色/skills+knowledge+chat配色/dashboard卡片边界），迁移收口后批量处理，单批迁移不做视觉升级
 
 ## 批4新增坑（别再踩）
 - Vue组件根模板是fragment（多节点）且含根级Teleport(AGModal) → unmount时nextSibling撞null直接崩，必须包单一根元素
