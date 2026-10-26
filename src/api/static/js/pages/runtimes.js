@@ -754,7 +754,7 @@ function doCreateCredentialInPanel() {
     var token = d.token || '';
     var oneCmd = 'curl -fsSL ' + window.location.origin + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + window.location.origin;
     var winCmd = '& ([scriptblock]::Create((irm ' + window.location.origin + '/api/runtime/install.ps1))) -Token ' + token + ' -Server ' + window.location.origin;
-    var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m runtime.agent';
+    var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m src.runtime.agent';
     if (area) area.innerHTML =
       '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
         // 警告
@@ -778,6 +778,7 @@ function doCreateCredentialInPanel() {
         // 手动启动
         '<div style="font-size:12px;font-weight:600;color:var(--t1);margin-bottom:5px">' + I18N.t('runtimes.credential.manual_start') + '</div>' +
         '<code style="display:block;padding:10px 12px;background:var(--c);border:1px solid var(--b);border-radius:8px;word-break:break-all;font-size:11px;margin-bottom:6px">' + runCmd + '</code>' +
+        '<div style="font-size:11px;color:var(--t2);margin-bottom:14px;line-height:1.5">' + I18N.t('runtimes.credential.manual_start_desc') + '</div>' +
         '<button class="bt bt-o" style="width:100%;justify-content:center" onclick="copyText(\'' + token + '\')">' + I18N.t('runtimes.action.copy_token') + '</button>' +
       '</div>';
     app.showToast(I18N.t('runtimes.credential.toast_generated'));
