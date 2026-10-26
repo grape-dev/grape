@@ -17,6 +17,7 @@
 - 批5：skills（三分域+筛选+详情+华为云包下钻+上传/删除/转换弹窗，renderSkills/renderSkillDetail契约；坑：v-else-if下钻分支须subSkill先于pkg；renderMarkdown需api.js桥接window全局）
 - 批6：chat（会话列表+SSE单气泡流式+引擎技能选择器+飞书扫码+Issue#407草稿/图片持久化，renderChat契约；坑：SSE text chunk逐条push重复气泡→upsert单气泡；syncAbortBridge须在startStream同步调用）
 - 批7：account（五tab+第三方绑定OAuth/手动PAT/转移确认+密码邮箱验证码流+注销三验证+华为云凭据+外观三态+API密钥，renderAccount契约；坑：platformIcon在repos.js需window桥接；通用弹窗v-html+binder回调模式）
+- 批8：events（事件详情+轮询指纹+对话SSE+知识沉淀+重派发/A2A/本机重试弹窗+任务日志SSE模态，renderEventDetail契约；坑：v-html内按钮须容器@click委托不能onMounted绑；event不在_nonRepoViews无repo被拦；测试事件在MySQL且账号无权限→mock）
 
 ## 核心架构（每批照此办理）
 - 壳内chunk：Vite 多入口 → viewjs/[name].js 拷到 legacy/js/vue/，共享js全量拷到 legacy/js/assets/
