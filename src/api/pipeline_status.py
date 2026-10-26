@@ -41,9 +41,9 @@ def compute_node_statuses(nodes, issue_events, current_stage):
     nodes = [dict(n) for n in nodes]
     is_done = current_stage in DONE_STAGES
 
-    # 按 agent_type 分组，保留最新一条事件（后覆盖前）
+    # 按 agent_type 分组，保留最新一条事件（后覆盖前；先按 seq 升序排序，不依赖调用方传入顺序）
     events_by_agent = {}
-    for e in issue_events:
+    for e in sorted(issue_events, key=lambda x: x.get("seq") or 0):
         at = e.get("agent_type", "")
         if at:
             events_by_agent[at] = e
