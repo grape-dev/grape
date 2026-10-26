@@ -1565,12 +1565,11 @@ function loadAgentTypes() {
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
       if (typeof renderRuntimes !== 'function') {
-        // runtimes.js failed to load (stale cache) — force reload to fetch latest
+        // runtimes view chunk failed to load (stale cache) — force reload to fetch latest
         window.location.reload();
         return;
       }
-      _rtPage = 1; _rtDevPage = 1;  // Issue #185: 切入页面重置分页
-      _loadRuntimesData();
+      renderRuntimes();  // batch 11: Vue chunk 自管分页重置与数据加载
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
       // param = 分区（overview/devices/inspect），由侧栏子项写入 URL，可深链
