@@ -1,22 +1,46 @@
-# Task: grape-architecture-guardian 任务拆解清单
+# grape-architecture-guardian 2.0 任务拆解（Issue #467）
 
-- [x] T1 查重：skills list（平台同名 id=3180 为用户上传附件副本）+ 仓库 `.grape/skills/qa/` 无同名目录 → 仓库侧生成通过
-- [x] T2 读取三件套（grape-cli-reference / spec-reference / command-matrix）
-- [x] T3 下载并通读附件技能包（9 文件）+ 敏感信息扫描（无内网 IP/绝对路径/真实凭据；剔除个人名分支、泛化内部 org_id）
-- [x] T4 生成 SKILL.md（130 行：frontmatter bash+grape / 安全硬约束 5 条 / 两条不可协商规则 / Prerequisites / env 表 / 定位 / 评论规范 / runbook 引用 / 操作边界 / 硬约束 / tasks complete 收尾）——验收：≤130 行、tools 含 bash、含 CLI 优先+任务上下文先行、数值门禁+反虚假保证保留
-- [x] T5 生成 references/architecture-review-runbook.md（117 行：Step 0-6 走查表 + 错误排查 + 明确禁止）
-- [x] T6 适配 references/grape-architecture-rules.md（250 行：7 Gate 检查项+历史事故背景保留，新增 §8.1 适用矩阵 + §8.2 评论首行格式，剔除个人名/内部 ID）
-- [x] T7 保留 references/known-config-values.md（数值注册表）+ 新增 references/grape-cli-reference.md（qa 审查命令子集）
-- [x] T8 保留 templates/（pr-review-report.md + finding.md）、scripts/×3、agents/grape-architecture-auditor.md 原样
-- [x] T9 验证 3 脚本可独立运行（只读、标准库、零依赖）——本仓与空目录冒烟
-- [x] T10 生成 .grape/docs/grape-architecture-guardian/（spec 原样落盘 / plan / task）
-- [x] T11 质量自检（spec §8 清单 + 需求单验收标准逐项）
-- [x] T12 建分支提交 + 创建 PR（base=$GRAPE_WORK_BRANCH=weekly-08）+ Issue 评论告知
-- [x] T13 A2A 交棒 qa agent 审查 + tasks complete 收尾
+> 逐项验收/验证清单，对照 spec.md Acceptance Criteria。
 
-## 验证方式
+## T1 规则文件 2.0 升级（grape-architecture-rules.md）
+- [ ] 4 级判定体系定义落位（BLOCKED/Critical/Medium/Informational + 合入建议映射）
+- [ ] 16 条规则完整：A1-A9 / B1-B2 / C1-C3 / D1-D2，每条含【级别】+ 检查方式 + 证据要求
+- [ ] 既有 7 Gate 检查项无丢失（§1-§7 原样保留）
+- [ ] A3/A4/A5 证据类规则沿用数值证据门禁标签（verified/measured/INSUFFICIENT DATA）
+- 验证：grep 逐条 ID 核对 16 条 + 7 Gate 章节标题齐全
 
-- `wc -l`：SKILL.md 130 ≤130；references 最大 250 ≤250；frontmatter description ≤500 字符。
-- 脚本冒烟：`python3 scripts/repo_inventory.py . --json` / `magic_number_audit.py . --min-severity medium` / `grape_constraint_check.py . --json` 均正常退出（exit 0）。
-- 敏感扫描：无 `weekly-08-ljt`、无内网 IP 字面量（`192.168.x.x` 为掩码示例）、无绝对路径、无真实凭据。
-- 后续由 QA agent 对 PR 做技能规范合规性审查闭环验证。
+## T2 SKILL.md 升级
+- [ ] frontmatter version 1.0.1 → 2.0.0
+- [ ] 处理流程/硬约束：结论按 4 级别归类统计 + 合入建议（BLOCKED/Critical 不建议合入、Medium 人工判断、Informational 不影响）
+- [ ] 行数 ≤130
+- 验证：行数统计 + grep 四级别关键字
+
+## T3 runbook 升级（architecture-review-runbook.md）
+- [ ] Step 3 双轨判定（7 Gate + 2.0 规则 A-D）
+- [ ] Step 4 按 4 级别统计汇总
+- [ ] Step 4b Medium 级不遵从 → pending-review 流程节点落地（flow_nodes）
+- [ ] 行数 ≤250
+- 验证：行数统计 + grep pending-review 命令
+
+## T4 模板升级（pr-review-report.md / finding.md）
+- [ ] 总体结论按 4 级别统计（0 BLOCKED / N Critical / N Medium / N Informational）+ 合入建议
+- [ ] finding.md 严重度指引与 2.0 四级对齐
+- 验证：目视核对模板字段
+
+## T5 脚本扩展（grape_constraint_check.py）
+- [ ] A6 表名检查（grape_t_xxx / grape_admin_t_xxx，存量白名单）
+- [ ] B1 SQL 双模式（sqlite/mysql 方言混用检测）
+- [ ] D1 i18n key 化检查（zh/en 语言包对照）
+- [ ] B2 复用 magic_number_audit.py（不新写，规则文件注明）
+- [ ] 冒烟：3 脚本在本仓库可执行、输出 JSON 合法
+- 验证：构造正反用例（合规表名/违规表名、双语 key/缺 key）跑脚本
+
+## T6 agents 子审计指令同步
+- [ ] grape-architecture-auditor.md 执行步骤含 2.0 规则对照
+- 验证：目视核对
+
+## T7 提交与交付
+- [ ] commit（feat(skills): … Issue #467）+ push feat/issue-467
+- [ ] 建 PR（base=$GRAPE_WORK_BRANCH=weekly-08）+ Issue 评论告知
+- [ ] A2A 交棒 qa + grape tasks complete
+- 验证：PR html_url + comment id + a2a seq
