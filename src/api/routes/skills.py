@@ -1,6 +1,6 @@
 """Skills 路由：列表、上传、删除、个人技能转仓库技能"""
 import io as _io
-import os, tempfile, zipfile, json, shutil, stat as _stat
+import hashlib, os, tempfile, zipfile, json, shutil, stat as _stat
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Form, Response
 from pydantic import BaseModel
 from src.user import db as user_db
@@ -14,8 +14,14 @@ router = APIRouter(prefix="/api/skills", tags=["skills"])
 MAX_EXTRACT_BYTES = int(os.environ.get("SKILL_MAX_EXTRACT_BYTES", str(100 * 1024 * 1024)))
 
 
-def _resolve_repo_key(repo: str) -> str:
-    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
+def _resolve_repo_key(repo: str, strict: bool = False) -> str:
+    """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。
+
+    strict=True（#444 根治，仅写路径 upload/convert 使用）：裸 repo 同时命中
+    gitcode: 与 github: 两行时显式报错（歧义从"静默 LIMIT 1 不确定归属"变为
+    "可处置的明确指引"），防止覆盖上传写错 provider 行。读路径（list/search/
+    download）保持原 LIMIT 1 行为不变——读错列表无数据损害，收窄修复范围。
+    """
     from src.repo_key import to_repo_key
     rk = to_repo_key(repo)
     if ":" in repo:
@@ -24,10 +30,16 @@ def _resolve_repo_key(repo: str) -> str:
         from src.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
-            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
-                            (f"gitcode:{repo}", f"github:{repo}")).fetchone()
-            if row:
-                return row[0]
+            rows = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
+                             (f"gitcode:{repo}", f"github:{repo}")).fetchall()
+            if len(rows) == 2 and strict:
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"仓库 {repo} 同时存在于 gitcode 与 github，请指定完整仓库标识（如 gitcode:{repo}）后重试"})
+            if rows:
+                return rows[0][0]
+    except HTTPException:
+        raise
     except Exception:
         pass
     return rk
@@ -726,7 +738,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
             from src.repo_key import to_repo_key
-            owner = _resolve_repo_key(repo) if scope == "repo" else str(user["id"])
+            owner = _resolve_repo_key(repo, strict=True) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
             try:
                 # 固定 key（v2.4 去版本化）：putObject 同 key 原子覆盖（最后写者胜）；
@@ -734,14 +746,23 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                 object_key = skill_key("custom" if db_scope == "user" else db_scope,
                                        owner, skill_name)
                 zip_bytes = _normalize_skill_zip(skill_dir, skill_name)
+                # Issue #444 收尾（P-B）：save 前留存旧对象字节——upsert 失败（并发
+                # 同名 409）时恢复，防止"存储已是新字节、DB hash 停留旧值"的指纹
+                # 失真窗口（写序 save_bytes → upsert，最后写者胜；409 输者恢复旧字节
+                # 使存储与 DB 记录回到一致）。对齐 convert 409 分支的回滚语义。
+                _prev_bytes = storage.read_bytes(object_key)
                 storage.save_bytes(object_key, zip_bytes)
-                ok = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
-                                      description, object_key, str(user["id"]),
-                                      category_id)
-                if not ok:
+                # Issue #444 (P47)：写入 content_hash，使另一进程读时校验可感知覆盖更新
+                content_hash = hashlib.sha256(zip_bytes).hexdigest()
+                skill_id = upsert_skill_obs(db_scope, owner, skill_name, agent_type,
+                                            description, object_key, str(user["id"]),
+                                            category_id, content_hash)
+                if not skill_id:
+                    if _prev_bytes is not None:
+                        storage.save_bytes(object_key, _prev_bytes)   # 恢复旧对象（DB 行未动）
                     raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录写入失败（同名冲突或并发上传）"})
-                zip_cache_put(object_key, zip_bytes)  # put 覆盖同名 key 即天然失效旧缓存
-                mem_cache_invalidate(skill_name)      # 覆盖后显式失效内存提取缓存
+                zip_cache_put(object_key, zip_bytes, content_hash, skill_id or 0)  # put 覆盖同名 key + hash + id 锚点供读时校验
+                mem_cache_invalidate(object_key)      # 覆盖后显式失效内存提取缓存（object_key 口径，P49）
                 log.info(f"skill uploaded (storage={storage.backend_name()}, key={object_key})")
             except HTTPException:
                 raise
@@ -853,7 +874,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的 source_scope: {source_scope}"})
 
     from src.repo_key import from_repo_key
-    repo_key = _resolve_repo_key(repo)
+    repo_key = _resolve_repo_key(repo, strict=True)  # 写路径（convert）：歧义显式报错（#444 根治）
     user_id = str(user["id"])
 
     from src.session_manager import db, db_lock
@@ -904,7 +925,7 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     from src.storage import get_skill_storage
     storage = get_skill_storage()
     if storage is not None:
-        from src.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate
+        from src.storage import skill_key, zip_cache_get, zip_cache_put, mem_cache_invalidate, zip_cache_get_with_hash, get_skill_zip_bytes
         from src.user.db import get_skill_object_key, upsert_skill_obs
         src_key = get_skill_object_key(skill_rec["id"])
         if not src_key:
@@ -913,17 +934,24 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
         dst_key = skill_key(dst_skill_key_scope, dst_owner, skill_name)
         if not storage.copy_object(src_key, dst_key):
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"OBS 复制技能失败: {src_key} -> {dst_key}"})
-        ok = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
-                              skill_rec.get("description", ""), dst_key, user_id,
-                              skill_rec.get("category_id", 0))
-        if not ok:
+        # Issue #444 (P47)：convert 同款写 content_hash——copy 的 zip 字节与源一致，
+        # hash 复用源缓存条目的 hash；源无 hash（存量）则对 src_zip 现算
+        _src_zip = zip_cache_get_with_hash(src_key)
+        src_zip, _src_hash = (_src_zip[:2] if _src_zip else (None, ""))
+        if src_zip is None:
+            src_zip = get_skill_zip_bytes(src_key) or b""
+        content_hash = _src_hash or (hashlib.sha256(src_zip).hexdigest() if src_zip else "")
+        skill_id = upsert_skill_obs(dst_scope, dst_owner, skill_name, skill_rec.get("agent_type", ""),
+                                    skill_rec.get("description", ""), dst_key, user_id,
+                                    skill_rec.get("category_id", 0), content_hash)
+        if not skill_id:
             storage.delete_object(dst_key)
             raise HTTPException(status_code=409, detail={"code": 409, "message": dedup_msg})
-        # 源 zip 若在磁盘缓存，复制到目标 key（懒加载兜底亦可）
-        src_zip = zip_cache_get(src_key)
+        # 源 zip 若在磁盘缓存，复制到目标 key（懒加载兜底亦可）；写侧拿到新行 id，
+        # 直接锚定（目标行是新 upsert 的行，id 即 dst 锚点）
         if src_zip:
-            zip_cache_put(dst_key, src_zip)
-        mem_cache_invalidate(skill_name)
+            zip_cache_put(dst_key, src_zip, content_hash, skill_id or 0)
+        mem_cache_invalidate(dst_key)  # Issue #444 (P49)：object_key 口径（原 skill_name 会失效错键）
         dst_label = f"仓库 {repo}" if dst_scope == "repo" else "个人技能"
         return {"message": f"技能 {skill_name} 已复制到{dst_label}", "skill_name": skill_name, "scope": dst_scope, "repo": repo if dst_scope == "repo" else ""}
 

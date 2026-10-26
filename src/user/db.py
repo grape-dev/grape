@@ -1140,6 +1140,71 @@ def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[in
         return (0, "", "")
 
 
+def get_skill_hash_by_key(skill_name: str, scope: str, owner_id: str = "") -> tuple[int, str, str, int]:
+    """按 (skill_name, scope, owner_id) 精确读取技能 hash（Issue #444 读时校验用）。
+
+    (skill_name, scope, owner_id) 受 skill 表 UNIQUE 约束，唯一确定一行——
+    避免 user scope 多 owner 同名时 LIMIT 1 命中不确定行（需求 backlog F3）。
+    official 技能 owner_id 为空串。返回 (id, content_hash, file_path, is_active)，
+    id=0 表示不存在；is_active=0 表示行已被软删除。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, content_hash, file_path, is_active FROM skill "
+                "WHERE skill_name=? AND scope=? AND owner_id=? LIMIT 1",
+                (skill_name, scope or "official", owner_id or ""))
+            row = c.fetchone()
+            if not row:
+                return (0, "", "", 0)
+            return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
+    except Exception as e:
+        log.warning(f"get_skill_hash_by_key failed: {e}")
+        return (0, "", "", 0)
+
+
+def get_skill_hash_by_id(skill_id: int) -> tuple[int, str, str, int]:
+    """按主键 id 读取技能 hash（Issue #444 id 锚点校验：校验层跟 id 走）。
+
+    返回 (id, content_hash, file_path, is_active)；id=0 表示不存在（行被删/
+    删除重传换 id），调用方应强制失效缓存而非降级通过。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, content_hash, file_path, is_active FROM skill WHERE id=?",
+                (skill_id,))
+            row = c.fetchone()
+            if not row:
+                return (0, "", "", 0)
+            return (row[0], row[1] or "", row[2] or "", row[3] if row[3] is not None else 1)
+    except Exception as e:
+        log.warning(f"get_skill_hash_by_id failed: {e}")
+        return (0, "", "", 0)
+
+
+def get_skill_hashes_by_name_scope(skill_name: str, scope: str) -> list[tuple[str, str]]:
+    """按 (skill_name, scope) 取全部匹配行的 (owner_id, content_hash)（Issue #444 P1-1）。
+
+    repo scope 的 DB owner_id 带 provider 前缀（gitcode:/github:/gitlab:），而对象键
+    owner 段无前缀——调用侧（storage 读时校验）需拿全部行后在 Python 侧去前缀比对，
+    覆盖全部 provider 口径。返回空列表表示无行。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT owner_id, content_hash FROM skill "
+                "WHERE skill_name=? AND scope=? AND is_active=1",
+                (skill_name, scope or "official"))
+            return [(r[0] or "", r[1] or "") for r in c.fetchall()]
+    except Exception as e:
+        log.warning(f"get_skill_hashes_by_name_scope failed: {e}")
+        return []
+
+
 def update_skill_content_hash(skill_id: int, content_hash: str, file_path: str = "") -> bool:
     """按主键 id 更新技能的 content_hash 和 file_path（OBS 同步后调用）"""
     try:
@@ -1242,11 +1307,14 @@ def get_skill_current_version(skill_id) -> int:
 
 def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
                      description: str, object_key: str, created_by: str = "",
-                     category_id: int = 0) -> bool:
+                     category_id: int = 0, content_hash: str = "") -> int | None:
     """OBS 模式技能记录 upsert（存在则更新固定 key，不存在则插入；v2.5 file_path + by 字段）。
 
-    scope: user/repo；owner: user_id 或 repo_key。返回是否成功。
+    scope: user/repo；owner: user_id 或 repo_key。
     Issue #179: 新增 category_id 参数。
+    Issue #444: 新增 content_hash 参数（UPDATE/INSERT 补写 content_hash 列，
+    读时校验据此感知跨进程覆盖更新）；返回值改为 int | None（技能主键 id，
+    失败返回 None——0/None 均为 falsy，既有 `if not ok` 判断语义不变）。
     """
     try:
         with db_lock:
@@ -1263,21 +1331,24 @@ def upsert_skill_obs(scope: str, owner: str, skill_name: str, agent_type: str,
             if row:
                 c.execute(
                     "UPDATE skill SET file_path=?, display_name=?, "
-                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, updated_at=datetime('now') WHERE id=?",
+                    "agent_type=?, description=?, category_id=?, updated_by=?, is_active=1, "
+                    "content_hash=?, updated_at=datetime('now') WHERE id=?",
                     (object_key, skill_name, agent_type or "", description or "",
-                     category_id, created_by or "", row[0]))
-            else:
-                c.execute(
-                    "INSERT INTO skill (skill_name, display_name, description, agent_type, "
-                    "file_path, scope, owner_id, created_by, updated_by, is_active, category_id) "
-                    "VALUES (?,?,?,?,?,?,?,?,?,1,?)",
-                    (skill_name, skill_name, description or "", agent_type or "",
-                     object_key, scope, owner, created_by or "", created_by or "", category_id))
+                     category_id, created_by or "", content_hash or "", row[0]))
+                db.commit()
+                return int(row[0])
+            cur = c.execute(
+                "INSERT INTO skill (skill_name, display_name, description, agent_type, "
+                "file_path, scope, owner_id, created_by, updated_by, is_active, category_id, content_hash) "
+                "VALUES (?,?,?,?,?,?,?,?,?,1,?,?)",
+                (skill_name, skill_name, description or "", agent_type or "",
+                 object_key, scope, owner, created_by or "", created_by or "", category_id,
+                 content_hash or ""))
             db.commit()
-            return True
+            return int(cur.lastrowid or 0)
     except Exception as e:
         log.warning(f"upsert_skill_obs failed: {e}")
-        return False
+        return None
 
 
 

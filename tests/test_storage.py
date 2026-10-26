@@ -34,8 +34,12 @@ class TestSkillKey:
         assert k == "grape/test/skills/custom/123/hello/hello.zip"
 
     def test_repo_key_two_level(self):
+        # #444 根治：repo 键含 provider 段（裸 owner/repo 默认 gitcode）
         k = skill_key("repo", "Jason7602/grape", "my-skill", 1, rand8="00001111")
-        assert k == "grape/test/skills/repo/Jason7602/grape/my-skill/my-skill.zip"
+        assert k == "grape/test/skills/repo/gitcode/Jason7602/grape/my-skill/my-skill.zip"
+        k2 = skill_key("repo", "github:Jason7602/grape", "my-skill")
+        assert k2 == "grape/test/skills/repo/github/Jason7602/grape/my-skill/my-skill.zip"
+        assert k != k2, "不同 provider 不得共享对象键（#444 根治）"
 
     def test_official_key(self):
         k = skill_key("official", "", "ops", 1, rand8="ffffffff")

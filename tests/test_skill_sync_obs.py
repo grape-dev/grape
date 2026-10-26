@@ -5,7 +5,7 @@ Issue #254 增强：缓存命中时校验 content_hash 回源（skill_md_content
 PR #349 修复了上传 OBS 后未失效两级缓存的 bug（skill_sync.py:188-191）：
     await loop.run_in_executor(None, storage.save_bytes, object_key, zip_data)
     zip_cache_put(object_key, zip_data)        # 磁盘 zip 缓存覆盖
-    mem_cache_invalidate(skill_name)           # 内存 SKILL.md 缓存清除
+    mem_cache_invalidate(object_key)           # 内存 SKILL.md 缓存清除（Issue #444：object_key 口径）
 
 本测试验证修复不被退化：
   1. 正向：上传新 zip 后 zip_cache_put + mem_cache_invalidate 各调用一次，
@@ -149,7 +149,7 @@ class TestSyncOfficialSkillsToObs:
 
         zip_calls = []
 
-        def _track_zip_put(object_key, data, content_hash=""):
+        def _track_zip_put(object_key, data, content_hash="", skill_id=0):
             zip_calls.append((object_key, data, content_hash))
 
         monkeypatch.setattr("src.storage.zip_cache_put", _track_zip_put)
@@ -196,11 +196,12 @@ class TestSyncOfficialSkillsToObs:
         assert zip_put_data == fake.objects[object_key], \
             "zip_cache_put data must match OBS uploaded data"
 
-        # mem_cache_invalidate 断言：恰好调用 1 次，skill_name 正确
+        # mem_cache_invalidate 断言：恰好调用 1 次，key 与 OBS 对象 key 一致
+        # （Issue #444：object_key 口径，原 skill_name 口径已随 P49 更换）
         assert len(mem_calls) == 1, \
             f"mem_cache_invalidate should be called once, calls={mem_calls}"
-        assert mem_calls[0] == skill_env["skill_name"], \
-            f"mem_cache_invalidate skill_name: {mem_calls[0]}"
+        assert mem_calls[0] == object_key, \
+            f"mem_cache_invalidate object_key: {mem_calls[0]}"
 
     # ------------------------------------------------------------------
     # 反向：hash 未变且 file_path 已存在 → skip，不调用缓存失效函数
@@ -213,7 +214,7 @@ class TestSyncOfficialSkillsToObs:
 
         zip_calls = []
 
-        def _track_zip_put(object_key, data, content_hash=""):
+        def _track_zip_put(object_key, data, content_hash="", skill_id=0):
             zip_calls.append((object_key, data, content_hash))
 
         monkeypatch.setattr("src.storage.zip_cache_put", _track_zip_put)
@@ -333,7 +334,7 @@ class TestSyncOfficialSkillsToObs:
         """DB 中不存在该 skill（id=0, db_hash=""）→ 上传后 added +1。"""
         fake = FakeStorage()
         monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="": None)
+        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
         monkeypatch.setattr("src.storage.mem_cache_invalidate", lambda skill_name: None)
 
         monkeypatch.setattr(
@@ -359,7 +360,7 @@ class TestSyncOfficialSkillsToObs:
         """hash 未变但 file_path 为空且 OBS 模式 → 不 skip，上传补 file_path，updated +1。"""
         fake = FakeStorage()
         monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="": None)
+        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
         monkeypatch.setattr("src.storage.mem_cache_invalidate", lambda skill_name: None)
 
         real_hash = _compute_skill_hash(skill_env["skill_dir"])
@@ -410,7 +411,7 @@ class TestSyncOfficialSkillsToObs:
 
         fake = FakeStorage()
         monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="": None)
+        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
         monkeypatch.setattr("src.storage.mem_cache_invalidate", lambda skill_name: None)
         monkeypatch.setattr(
             "src.user.db.get_skill_content_hash",
@@ -466,7 +467,7 @@ class TestMemCacheHash:
         mem_cache_put("test-hash-skill", "content v1", "hash-v1")
         result = mem_cache_get_with_hash("test-hash-skill")
         assert result is not None
-        content, cached_hash = result
+        content, cached_hash = result[0], result[1]
         assert content == "content v1"
         assert cached_hash == "hash-v1"
 
@@ -502,7 +503,7 @@ class TestZipCacheHash:
         zip_cache_put(k, b"zip-data-v1", "content-hash-v1")
         result = zip_cache_get_with_hash(k)
         assert result is not None
-        data, cached_hash = result
+        data, cached_hash = result[0], result[1]
         assert data == b"zip-data-v1"
         assert cached_hash == "content-hash-v1"
 
@@ -543,12 +544,14 @@ class TestSkillMdContentHashVerification:
         """隔离缓存环境。"""
         monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
         monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
-        # 清理内存缓存
-        mem_cache_invalidate("hash-verify-skill")
+        # 清理内存缓存（Issue #444：object_key 口径）
+        from src.storage import skill_key as _sk
+        _okey = _sk("official", "", "hash-verify-skill")
+        mem_cache_invalidate(_okey)
         # 重置 storage 单例
         reset_storage()
         yield
-        mem_cache_invalidate("hash-verify-skill")
+        mem_cache_invalidate(_okey)
 
     def test_hash_match_returns_cached_fast_path(self, monkeypatch):
         """缓存命中 + DB hash 一致 → 走快路径，不回源 OBS。"""
@@ -557,11 +560,11 @@ class TestSkillMdContentHashVerification:
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（带 hash）
-        mem_cache_put(skill_name, "cached content", "hash-v1")
+        mem_cache_put(object_key, "cached content", "hash-v1")
         # DB hash 一致
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
-            lambda sn, scope="official": (1, "hash-v1", "file_path"),
+            "src.user.db.get_skill_hash_by_key",
+            lambda sn, scope="official", owner_id="": (1, "hash-v1", "file_path", 1),
         )
         # OBS 不应被调用
         class _NoCallStorage:
@@ -579,11 +582,11 @@ class TestSkillMdContentHashVerification:
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（旧 hash）
-        mem_cache_put(skill_name, "old content", "hash-old")
+        mem_cache_put(object_key, "old content", "hash-old")
         # DB hash 不同（内容已更新）
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
-            lambda sn, scope="official": (1, "hash-new", "file_path"),
+            "src.user.db.get_skill_hash_by_key",
+            lambda sn, scope="official", owner_id="": (1, "hash-new", "file_path", 1),
         )
 
         # OBS 回源返回新 zip
@@ -596,7 +599,7 @@ class TestSkillMdContentHashVerification:
         result = skill_md_content(object_key, skill_name)
         assert "new skill md with updated content" in result, f"expected new content, got: {result}"
         # 旧缓存已失效，新内容已回填
-        mem_result = mem_cache_get_with_hash(skill_name)
+        mem_result = mem_cache_get_with_hash(object_key)
         assert mem_result is not None
         assert mem_result[1] == "hash-new"  # 回填时带最新 DB hash
 
@@ -606,15 +609,15 @@ class TestSkillMdContentHashVerification:
         from src.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
-        # 清内存缓存（强制走磁盘路径）
-        mem_cache_invalidate(skill_name)
+        # 清内存缓存（强制走磁盘路径，object_key 口径）
+        mem_cache_invalidate(object_key)
         # 预填磁盘缓存（旧 zip + 旧 hash）
         old_zip = _make_skill_zip_v1(skill_name)
         zip_cache_put(object_key, old_zip, "hash-old")
         # DB hash 不同
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
-            lambda sn, scope="official": (1, "hash-new", "file_path"),
+            "src.user.db.get_skill_hash_by_key",
+            lambda sn, scope="official", owner_id="": (1, "hash-new", "file_path", 1),
         )
 
         # OBS 回源返回新 zip
@@ -633,15 +636,15 @@ class TestSkillMdContentHashVerification:
         from src.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
-        # 清内存缓存（强制走磁盘路径）
-        mem_cache_invalidate(skill_name)
+        # 清内存缓存（强制走磁盘路径，object_key 口径）
+        mem_cache_invalidate(object_key)
         # 预填磁盘缓存（zip + 匹配的 hash）
         zip_data = _make_skill_zip_v1(skill_name)
         zip_cache_put(object_key, zip_data, "hash-v1")
         # DB hash 一致
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
-            lambda sn, scope="official": (1, "hash-v1", "file_path"),
+            "src.user.db.get_skill_hash_by_key",
+            lambda sn, scope="official", owner_id="": (1, "hash-v1", "file_path", 1),
         )
         # OBS 不应被调用
         class _NoCallStorage:
@@ -659,7 +662,7 @@ class TestSkillMdContentHashVerification:
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（无 hash）
-        mem_cache_put(skill_name, "legacy cached content")
+        mem_cache_put(object_key, "legacy cached content")
         # OBS 不应被调用
         class _NoCallStorage:
             def read_bytes(self, key):
@@ -676,11 +679,11 @@ class TestSkillMdContentHashVerification:
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（带 hash）
-        mem_cache_put(skill_name, "cached content", "some-hash")
+        mem_cache_put(object_key, "cached content", "some-hash")
         # DB hash 为空（技能不存在或未同步）
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
-            lambda sn, scope="official": (0, "", ""),
+            "src.user.db.get_skill_hash_by_key",
+            lambda sn, scope="official", owner_id="": (0, "", ""),
         )
         # OBS 不应被调用
         class _NoCallStorage:
@@ -697,13 +700,13 @@ class TestSkillMdContentHashVerification:
         from src.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
-        # 清所有缓存
-        mem_cache_invalidate(skill_name)
+        # 清所有缓存（object_key 口径）
+        mem_cache_invalidate(object_key)
         zip_cache_invalidate(object_key)
         # DB hash
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
-            lambda sn, scope="official": (1, "db-hash-abc", "file_path"),
+            "src.user.db.get_skill_hash_by_key",
+            lambda sn, scope="official", owner_id="": (1, "db-hash-abc", "file_path", 1),
         )
 
         new_zip = _make_skill_zip_v2(skill_name)
@@ -721,6 +724,6 @@ class TestSkillMdContentHashVerification:
         assert zip_result[1] == "db-hash-abc", f"zip cache should have DB hash, got: {zip_result[1]}"
 
         # 验证内存缓存带 hash
-        mem_result = mem_cache_get_with_hash(skill_name)
+        mem_result = mem_cache_get_with_hash(object_key)
         assert mem_result is not None
         assert mem_result[1] == "db-hash-abc", f"mem cache should have DB hash, got: {mem_result[1]}"
