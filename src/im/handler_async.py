@@ -1721,7 +1721,7 @@ async def _process_chat_inner_async(ctx: "BotContext", api: "FeishuAsync",
         # 引擎类型感知的 has_valid_session：提前解析引擎类型，
         # codearts 忽略 session_id；只有 opencode/hermes 才真正使用 session 续接。
         from src.runtime.engine_select import resolve_local_engine, engine_name
-        _rid = chat_runtime_id or (resolve_local_engine() or 0)
+        _rid = chat_runtime_id or (resolve_local_engine(_uid or 0) or 0)
         _engine_name = engine_name(_rid) if _rid else ""
         _conv_sid = (conv or {}).get("runtime_session_id", "").strip()
         has_valid_session = bool(_conv_sid) and _engine_name in ("opencode", "hermes")

@@ -882,7 +882,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     if not rid:
         try:
             from src.runtime.engine_select import resolve_local_engine
-            rid = resolve_local_engine() or 0
+            rid = resolve_local_engine(user.get("id") or 0) or 0
         except Exception:
             rid = 0
     kind = runtime_execution_kind(rid)
@@ -1188,7 +1188,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     if not runtime_id:
         try:
             from src.runtime.engine_select import resolve_local_engine
-            runtime_id = resolve_local_engine() or 0
+            runtime_id = resolve_local_engine(user.get("id") or 0) or 0
         except Exception:
             runtime_id = 0
     if not runtime_id:
@@ -1291,8 +1291,10 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
 def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
     """按引擎唯一键去重（Issue #400）：个人机器 user/repo 双档或历史重复行合并为单条。
 
-    键语义与 src/runtime/engine_select.engine_unique_key 对齐（本机直连以类型名为键、
-    个人/远端以实例名为键）；保留首个出现项（查询 id 排序下的权威行）。
+    键语义与 src/runtime/engine_select.engine_unique_key 对齐（本机直连以
+    **类型名+runtime_id** 为键——多主控机同名直连引擎是两台不同机器，不能按类型名
+    互并，否则前端下拉只剩一台 master 的引擎；个人/远端以实例名为键）；
+    保留首个出现项（查询 id 排序下的权威行）。
     """
     seen: set = set()
     out: list[dict] = []
@@ -1302,7 +1304,11 @@ def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
         if not nm:
             out.append(b)
             continue
-        key = f"local:{nm.lower()}" if scope == "local" else f"{scope}:{nm.lower()}"
+        if scope == "local":
+            # runtime_id 进键：不同主控机的同名直连引擎各自保留
+            key = f"local:{nm.lower()}#{int(b.get('runtime_id') or 0)}"
+        else:
+            key = f"{scope}:{nm.lower()}"
         if key in seen:
             continue
         seen.add(key)
@@ -1372,13 +1378,21 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
         c = db.cursor()
         # 本机直连引擎（credential_id=0，已知类型且已装且健康——与执行 resolve_local_engine 口径一致，
         # local-direct-health-probe-design.md 方案 C，避免"页面有、执行无"）
+        # host_name 进列表：多主控机同名直连引擎都展示（名称标注归属机，区分显示）
         try:
-            c.execute("SELECT id, name, version FROM agent_runtimes WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id")
+            c.execute("SELECT id, name, version, COALESCE(host_name,'') FROM agent_runtimes WHERE credential_id=0 AND installed=1 AND healthy=1 ORDER BY id")
             for r in c.fetchall():
-                _rid, ename, ver = r
+                _rid, ename, ver, _hn = r
                 if not is_known_engine_name(ename or ""):
                     continue
-                backends.append({"name": ename, "display_name": f"{ename} v{ver or ''}（本机直连）", "scope": "local", "owner": "", "runtime_id": _rid})
+                _label = f"{ename} v{ver or ''}"
+                if _hn:
+                    # 主控机短名（ecs-grape-master-001 → master-001）便于前端区分双主
+                    _short = _hn.replace("ecs-grape-", "")
+                    _label += f"（{_short} 直连）"
+                else:
+                    _label += "（本机直连）"
+                backends.append({"name": ename, "display_name": _label, "scope": "local", "owner": _hn, "runtime_id": _rid})
         except Exception:
             pass
         # 个人引擎（scope=user，仅当前用户 + active）
@@ -1745,7 +1759,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
     if not rid:
         try:
             from src.runtime.engine_select import resolve_local_engine
-            rid = resolve_local_engine() or 0
+            rid = resolve_local_engine(user.get("id") or 0) or 0
         except Exception:
             rid = 0
     kind = runtime_execution_kind(rid)
@@ -2167,7 +2181,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     if not rid:
         try:
             from src.runtime.engine_select import resolve_local_engine
-            rid = resolve_local_engine() or 0
+            rid = resolve_local_engine(user.get("id") or 0) or 0
         except Exception:
             rid = 0
 

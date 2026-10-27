@@ -1013,7 +1013,7 @@ def get_chat_config(user_id: int) -> dict:
         picked_id, row, backend_name = _pick_chat_config_row(c, user_id)
         if row is None:
             # 无配置：本机直连兜底 + 幂等物化默认 runtime_id（chat-agent-backend-resolution-fix.md §3.1）
-            cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "")
+            cfg = _chat_config_with_local_backend("", 0, "", 0, "", "", "", "", user_id=user_id)
             if cfg.get("runtime_id"):
                 try:
                     _write_chat_config_row(user_id, runtime_id=cfg["runtime_id"])
@@ -1025,15 +1025,18 @@ def get_chat_config(user_id: int) -> dict:
             log.info(f"get_chat_config: user_id={user_id} 命中历史遗留配置行 '{picked_id}'"
                      f"（写路径行为 'sess-cfg-{user_id}'），建议迁移合并")
         return _chat_config_with_local_backend(backend_name, row[0] or 0, row[1] or "", row[2] or 0,
-                                               row[3] or "", row[4] or "", row[5] or "", "")
+                                               row[3] or "", row[4] or "", row[5] or "", "", user_id=user_id)
 
 
 def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
-                                    im_app_id, im_app_secret, im_provider, updated_at) -> dict:
+                                    im_app_id, im_app_secret, im_provider, updated_at, user_id: int = 0) -> dict:
     """backend 为空的配置行：尝试本机直连引擎兜底（engine-selection-design.md §8.2）。
 
     有本机直连引擎 → backend=其类型名、runtime_id=其 id（恒 direct）；
     无 → backend=''、runtime_id=0（前端"无 engine，不可用"）。
+
+    user_id>0 时按 per-user-random-default-engine 选：限定当前主控机直连引擎，
+    按 user_id 稳定取模散开，避免全员滑向同一个默认引擎。
 
     注意：如果 runtime_id 已显式配置（>0），即使 backend 未知也不覆盖，
     由上游 get_chat_config 自行决定是否用 runtime_id 直接执行。
@@ -1041,7 +1044,7 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     if not backend and not runtime_id:
         try:
             from src.runtime.engine_select import resolve_local_engine, engine_name
-            _rid = resolve_local_engine() or 0
+            _rid = resolve_local_engine(user_id) or 0
             if _rid:
                 backend = engine_name(_rid) or ""
                 runtime_id = _rid

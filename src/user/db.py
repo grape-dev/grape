@@ -3526,12 +3526,15 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
             if current_names:
                 placeholders = ",".join("?" for _ in current_names)
                 c.execute(f"DELETE FROM agent_runtimes WHERE scope=? AND owner_id=? AND credential_id=0 AND host_name=? AND lower(name) NOT IN ({placeholders})", (scope, owner_id, host_name, *current_names))
-            # 去重：同 name+scope+owner_id+org_id+cred=0 的重复行只保留 id 最小的一条
-            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行）
+            # 去重：同 name+scope+owner_id+org_id+host_name+cred=0 的重复行只保留 id 最小的一条
+            # （upsert 已 claim 旧行并写入 host_name，此处清理未被 claim 的重复行。
+            #  host_name 必须进 GROUP BY：本机直连引擎按主控机隔离（engine-selection-design.md §4.3），
+            #  002 的行与 001 同名不同机，缺 host_name 分组会把 002 的行当重复删掉——
+            #  见 chat-engine-visibility-20261027 排障）
             c.execute(
                 "DELETE FROM agent_runtimes WHERE credential_id=0 AND id NOT IN "
                 "(SELECT MIN(id) FROM agent_runtimes WHERE credential_id=0 "
-                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0))"
+                "GROUP BY lower(name), scope, owner_id, COALESCE(org_id, 0), COALESCE(host_name, ''))"
             )
             db.commit()
         except Exception as e:
