@@ -611,6 +611,15 @@ BWRAP_RW_ENGINE = {
 
 
 
+# ===== 模型流瞬时异常自动重试（issue #403，判定层收口）=====
+# 对可重试的流类瞬时异常（上游 IAM 瞬断/流中断/exit 0 空输出）在任务终态
+# 收敛点延迟 requeue 重跑：
+# - GRAPE_TRANSIENT_RETRY_MAX：最大重试次数（默认 3；0 = 关闭自动重试）
+# - GRAPE_TRANSIENT_RETRY_BASE：指数退避基数秒（第 n 次重试前等待 base × 2^n，封顶 300s）
+# 注意：非瞬时错误（鉴权/配置）与有写操作证据的失败不重试（transient_retry.py 分类器+闸门）。
+GRAPE_TRANSIENT_RETRY_MAX = max(0, int(os.environ.get("GRAPE_TRANSIENT_RETRY_MAX", "3") or 3))
+GRAPE_TRANSIENT_RETRY_BASE = max(1, int(os.environ.get("GRAPE_TRANSIENT_RETRY_BASE", "10") or 10))
+
 # ===== Admin Console =====
 ADMIN_CONSOLE_URL = os.environ.get("ADMIN_CONSOLE_URL", "").rstrip("/")
 ADMIN_BETA_APPLY_API_KEY = os.environ.get("ADMIN_BETA_APPLY_API_KEY", "")

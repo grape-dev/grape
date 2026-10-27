@@ -67,6 +67,63 @@ class TestHealthScoreComputation:
         assert score == 97.5 or score == 98  # 100*(1-0.05*0.5) = 97.5 → round → 98
 
 
+# ===== Issue #439: 健康分小样本保护 =====
+
+class TestSmallSampleProtection:
+    """样本数 < N（默认 5）时豁免连败惩罚、稀释失败率——单次失败不打入拒派区。"""
+
+    def test_single_failure_not_zero(self):
+        """total=1/failed=1（旧逻辑 0 分拒派死锁根因）→ 稀释后 90 分。"""
+        score = health_scorer._compute_health_score(1, 1, 1)
+        assert score == 90  # 100*(1-1/5*0.5) - 0（连败惩罚豁免）
+
+    def test_small_sample_penalty_exempt(self):
+        """小样本连败惩罚豁免：consec 不再扣分。"""
+        assert health_scorer._compute_health_score(3, 1, 3) == \
+            health_scorer._compute_health_score(3, 1, 0)  # 100*(1-1/5*0.5) = 90
+
+    def test_sample_reaching_threshold_restores_full_penalty(self):
+        """样本 ≥ N → 恢复原公式（原行为不回归）。"""
+        # total=5/failed=5：rate=1 → base=50，consec=1 → -15 → 35（小样本豁免消失）
+        assert health_scorer._compute_health_score(5, 5, 1) == 35
+        # total=3/failed=1（小样本）同失败数得 90：豁免前后差异即保护幅度
+        assert health_scorer._compute_health_score(3, 1, 1) == 90
+        assert health_scorer._compute_health_score(10, 5, 1) == 60  # 原用例不变（75-15=60）
+
+    def test_min_samples_env_configurable(self):
+        """N 可通过 env HEALTH_MIN_SAMPLES 调整。"""
+        import importlib
+        old = os.environ.get("HEALTH_MIN_SAMPLES")
+        try:
+            os.environ["HEALTH_MIN_SAMPLES"] = "10"
+            importlib.reload(health_scorer)
+            # total=5 < N=10 → 1 次失败稀释为 1/10*0.5 → 95 分
+            assert health_scorer._compute_health_score(5, 1, 1) == 95
+        finally:
+            if old is None:
+                os.environ.pop("HEALTH_MIN_SAMPLES", None)
+            else:
+                os.environ["HEALTH_MIN_SAMPLES"] = old
+            importlib.reload(health_scorer)
+
+    def test_is_healthy_consecutive_check_gated_by_sample(self):
+        """小样本引擎连败拒派豁免：total_tasks < N 时连败不再直接拒派。"""
+        with patch.object(health_scorer, 'get_health_score') as mock_get:
+            mock_get.return_value = {"health_score": 80, "consecutive_failures": 6,
+                                     "total_tasks": 2}
+            assert health_scorer.is_healthy(1) is True  # 分数 80 ≥ 30，小样本豁免连败
+        with patch.object(health_scorer, 'get_health_score') as mock_get:
+            mock_get.return_value = {"health_score": 90, "consecutive_failures": 6,
+                                     "total_tasks": 50}
+            assert health_scorer.is_healthy(1) is False  # 大样本连败照旧拒派
+
+    def test_is_healthy_missing_total_keeps_old_behavior(self):
+        """健康度数据无 total_tasks 字段（兼容旧 mock/旧档）→ 维持原连败判定。"""
+        with patch.object(health_scorer, 'get_health_score') as mock_get:
+            mock_get.return_value = {"health_score": 90, "consecutive_failures": 10}
+            assert health_scorer.is_healthy(1) is False
+
+
 # ===== 过滤逻辑测试 =====
 
 class TestHealthFiltering:

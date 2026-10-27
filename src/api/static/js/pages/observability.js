@@ -1065,10 +1065,17 @@ function _paginationWithPageSizeHTML(page, totalPages, prevExpr, nextExpr, pageS
   </div>`;
 }
 
+// Worker 卡片显示名（Issue #465）：name（凭据自定义名）优先、空回退 device_name，
+// 与 runtimes 表「所属设备」列（PR #650）及 Agent 运行时页 Workers 卡片口径一致。
+function _workerDisplayName(wk) {
+  return wk.name || wk.device_name || '';
+}
+
 function _sortedWorkers(w) {
+  // Issue #465：排序键与卡片显示名同口径（name 优先），保证卡片位置按用户看到的名字稳定
   return (w.list || []).slice().sort((a, b) => {
-    const na = (a.device_name || a.name || '').toLowerCase();
-    const nb = (b.device_name || b.name || '').toLowerCase();
+    const na = _workerDisplayName(a).toLowerCase();
+    const nb = _workerDisplayName(b).toLowerCase();
     return na < nb ? -1 : na > nb ? 1 : 0;
   });
 }
@@ -1102,10 +1109,13 @@ function _workerCardHTML(wk) {
   const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
   const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
   const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
+  // Issue #465：卡片标题显示名 name 优先（凭据自定义名），空回退 device_name，
+  // 与 runtimes 表「所属设备」列及 Agent 运行时页 Workers 卡片口径一致，不出现空名称
+  const displayName = wk.name || wk.device_name || I18N.t('observability.worker_id', {id: wk.id});
   return `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
-      <b style="font-size:13px">${wk.device_name || wk.name || I18N.t('observability.worker_id', {id: wk.id})}</b>
+      <b style="font-size:13px">${displayName}</b>
       <span id="wk-${wid}-health" style="margin-left:auto;font-size:10px;color:${hc};font-weight:600">${I18N.t("observability." + (wk.health || "offline"))}</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr 1fr;gap:2px 12px;font-size:10px;color:var(--t3);margin-bottom:8px">

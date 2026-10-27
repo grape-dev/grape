@@ -42,34 +42,51 @@ python3 "$SKILL_DIR/scripts/grape_constraint_check.py" "$REPO_PATH" --json    # 
 ```
 
 - 脚本零依赖（标准库）、只读，可独立运行；`grape_constraint_check.py` 支持 `--changed-files file1,file2` 聚焦 PR 变更。
+- **规则 2.0 静态可检项**：`grape_constraint_check.py` 已扩展 A6 表名（grape_t_xxx/grape_admin_t_xxx，存量白名单）、B1 SQL 双模式（sqlite/mysql 单边方言）、D1 i18n（zh/en 语言包 key 一致 + 硬编码中文文案，需 `--changed-files`）；B2 魔鬼数字复用 `magic_number_audit.py`。gate 字段为 `A6`/`B1`/`D1`，输出为候选需复核。
 - 脚本不在本仓库时（如审查其他 7 个项目）：从 grape 主仓 `git-repo contents --path {skill_scripts} --ref {sha} --raw` 拉取后本地执行。
 - 脚本输出是**候选与问题，不是结论**：每条 finding 需按 Finding 证据契约复核（证据是否成立、是否需人工复核）。
 
-### Step 3 · 逐 Gate 三态判定（必做）
+### Step 3 · 逐 Gate + 2.0 规则双轨三态判定（必做）
 
-按 `references/grape-architecture-rules.md` §8 适用矩阵选择 Gate（先跑 repo_inventory 确认技术栈）：
+按 `references/grape-architecture-rules.md` §8.1 适用矩阵选择 Gate（先跑 repo_inventory 确认技术栈）：
 
-| Gate | 名称 | 适用仓库 |
-|-----|------|---------|
-| 1 | Grape 核心架构约束 | 所有仓库 |
-| 2 | 组织隔离与安全 | grape 主仓必查，其他按需 |
-| 3 | 前端规范 | grape-admin 前端、grape-website 必查 |
-| 4 | Git 与提交规范 | 所有仓库 |
-| 5 | 测试规范 | grape / grape-cli / grape-admin / grape-test 必查 |
-| 6 | 数值证据 | 所有仓库（对照 known-config-values.md） |
-| 7 | 架构适配性 | grape 主仓必查，其他按需 |
+|| Gate | 名称 | 适用仓库 | 2.0 规则类别 |
+|-----|------|---------|-------------|
+| 1 | Grape 核心架构约束 | 所有仓库 | B1（SQL 双模式） |
+| 2 | 组织隔离与安全 | grape 主仓必查，其他按需 | C1-C3（可信约束） |
+| 3 | 前端规范 | grape-admin 前端、grape-website 必查 | D1-D2（UI 架构约束） |
+| 4 | Git 与提交规范 | 所有仓库 | — |
+| 5 | 测试规范 | grape / grape-cli / grape-admin / grape-test 必查 | — |
+| 6 | 数值证据 | 所有仓库（对照 known-config-values.md） | B2（魔鬼数字，脚本复用） |
+| 7 | 架构适配性 | grape 主仓必查，其他按需 | A1-A9（设计架构约束） |
 
+- **双轨判定**：先按 7 Gate（§1-§7）逐项三态，再按 2.0 规则（§10，A1-A9/B1-B2/C1-C3/D1-D2 共 16 条）逐条三态；2.0 规则级别（BLOCKED/Critical/Medium/Informational）见 §10.1。
 - 每项三态：**符合 / 不符合（附证据定位 文件+行号/commit sha）/ 不适用（PR 未涉及）**。
-- 不符合项按 `templates/finding.md` 契约记录：标题 / Gate / 严重度 / 证据（文件+行号+最小代码引用）/ 问题（事实描述）/ 故障场景 / 为什么对 Grape 重要 / 修复 / 验证。
+- 不符合项按 `templates/finding.md` 契约记录：标题 / Gate（或 2.0 规则 ID）/ 严重度 / 证据（文件+行号+最小代码引用）/ 问题（事实描述）/ 故障场景 / 为什么对 Grape 重要 / 修复 / 验证。
+- A3/A4/A5 数值/证据类：走数值证据门禁标签（`verified: code/config/doc` / `measured` / `INSUFFICIENT DATA`），禁止虚假保证。
 - 证据不足或需业务判断 → 标注「需人工复核」，不判死。
 - 反幻觉自检：每条技术声明前验证——能被仓库代码、项目文档、标准或实测数据支持吗？不能则不作事实陈述；对数值这是绝对的。
 
-### Step 4 · 汇总报告（必做）
+### Step 4 · 按 4 级别汇总报告（必做）
 
-按 `templates/pr-review-report.md` 组装：首行（PR 编号、head sha8、模式 A-D、执行位置、重启状态、被中断他人任务数）→ 总体结论 → 审查范围 → 逐 Gate 明细表 → 发现清单（按严重度排序）→ 独立验证（脚本结果摘要）→ 结论与建议。
+按 `templates/pr-review-report.md` 组装：首行（PR 编号、head sha8、模式 A-D、执行位置、重启状态、被中断他人任务数）→ 总体结论（4 级别归类统计 + 合入建议）→ 审查范围 → 逐 Gate 明细表 → 2.0 规则明细 → 发现清单（按级别排序）→ 独立验证（脚本结果摘要）→ 结论与建议。
 
-- 总体结论三态唯一：`APPROVED`（0 BLOCKED / 0 Critical）/ `APPROVED WITH CONDITIONS`（有 Critical 可修复，列出条件）/ `BLOCKED`（N 项 BLOCKED，给具体技术原因）。
+- 4 级别归类统计：`{N} BLOCKED / {N} Critical / {N} Medium / {N} Informational`。
+- 合入建议映射：BLOCKED/Critical 不建议合入；Medium 人工判断（置 pending-review）；Informational 不影响合入。
+- 总体结论三态唯一：`APPROVED`（0 BLOCKED / 0 Critical，Medium 全部经人工判断通过或不适用）/ `APPROVED WITH CONDITIONS`（有 Critical 可修复，列出条件）/ `BLOCKED`（有 BLOCKED 或未整改 Critical，给具体技术原因）。
 - 敏感值一律掩码（`ghp_****`、`192.168.****`），只留定位。
+
+### Step 4b · Medium 级置 pending-review 人工判断（必做，存在 Medium 级不符合时）
+
+> flow_nodes: pending-review 落地步骤。Medium 级不遵从需人工判断是否合入 PR。
+
+```bash
+grape issues pending-review --issue_id "${GRAPE_ISSUE_ID}" \
+  --json '{"review_points":"{N} 项 Medium 级不遵从（{规则 ID 清单}），需人工判断是否合入 PR #{PR_NUMBER}","references":"PR #{PR_NUMBER} + 审查报告评论 id=XXXX"}' --json-out
+```
+
+- 审核点置入后，报告结论标注「Medium 待人工判断」；用户回复后 `grape issues review-pass --json '{"target":"done/processing","evidence":"..."}'` / `grape issues review-reject --json '{"reason":"..."}'` 续接（幂等，`changed:false` 忽略）。
+- 无 Medium 级不符合 → 跳过本步。
 
 ### Step 5 · 发布 PR 评论（必做）
 
@@ -83,7 +100,7 @@ grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" -
 
 ### Step 6 · 收尾 / 交办（必做，任何分支都执行到最后）
 
-1. 输出人类可读摘要：PR 编号、适用 Gate、各严重度计数、报告评论 id。
+1. 输出人类可读摘要：PR 编号、适用 Gate 与 2.0 规则类别、4 级别计数（BLOCKED/Critical/Medium/Informational）、报告评论 id、是否置 pending-review。
 2. 需 A2A 交办前，**先做场景节点核验**（必须 A2A 前）：
    ```bash
    echo "scene_id=${GRAPE_SCENE_ID:+set}"
@@ -94,6 +111,7 @@ grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" -
 3. `grape tasks complete`（见 SKILL.md 任务完成流程模板；结构化字段必填）。
    - `APPROVED` 且流程需要 → `a2a handoff --json '{"agent":"sre","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"架构守护审查通过，请继续"}}'`（交办 agent 名 sre）。
    - `BLOCKED` / 需整改 → `a2a handoff --json '{"agent":"coding","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"架构审查发现 N 项问题，请按报告整改"}}'`（交办 agent 名 coding）。
+   - Medium 待人工判断（已置 pending-review）→ 不 A2A，`next_step=reply_comment`，等待用户审阅。
    - 通过且无需交办 → `next_step=done`。
 4. 调完即结束任务，不继续等待。
 

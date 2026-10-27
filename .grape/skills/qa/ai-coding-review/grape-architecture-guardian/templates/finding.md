@@ -7,12 +7,12 @@
 ### {简短、具体的缺陷标题}
 
 **Gate**
-Gate 1 / Gate 2 / Gate 3 / Gate 4 / Gate 5 / Gate 6 / Gate 7
+Gate 1 / Gate 2 / Gate 3 / Gate 4 / Gate 5 / Gate 6 / Gate 7；规则 2.0：A1-A9 / B1-B2 / C1-C3 / D1-D2
 
 **严重度**
-BLOCKED / Critical / Medium / Low / Informational
+BLOCKED / Critical / Medium / Informational（规则 2.0 四级；Low 归并 Informational）
 
-不计算发明的数值风险评分。严重度由故障场景决定。
+不计算发明的数值风险评分。严重度由故障场景决定（2.0 规则按 `references/grape-architecture-rules.md` §10 级别标注）。
 
 **证据**
 `path/to/file.ext:LINE`
@@ -40,13 +40,12 @@ BLOCKED / Critical / Medium / Low / Informational
 
 ## 严重度指引
 
-| 严重度 | 用途 |
-|--------|------|
-| BLOCKED | 违反 Grape 核心架构约束（单 worker、db_lock、组织隔离、测试隔离、MANIFEST 完整性） |
-| Critical | 可被利用的安全问题、数据泄露风险、生产事故风险 |
-| Medium | 真实缺陷，有限影响或需要不太可能的前置条件 |
-| Low | 真实但轻微，或防御纵深 |
-| Informational | 观察，未确立缺陷 |
+|| 严重度 | 用途 | 合入建议 |
+|--------|------|----------|
+| BLOCKED | 违反 Grape 核心架构约束（单 worker、db_lock、组织隔离、测试隔离、MANIFEST 完整性）；2.0 强制规则（A5/A9/B1/D1/D2） | 不建议合入 |
+| Critical | 可被利用的安全问题、数据泄露风险、生产事故风险；2.0 关键规则（A1/A3/A4/A6/B2/C2/C3） | 不建议合入 |
+| Medium | 真实缺陷，有限影响或需要不太可能的前置条件；2.0 一般规则（A2/A7/A8/C1） | 人工判断是否合入（置 pending-review） |
+| Informational | 观察，未确立缺陷；防御纵深（原 Low 归并） | 不影响合入 |
 
 不夸大严重度制造紧迫感，也不因修复昂贵而降低严重度。写出故障场景，让严重度从中自然得出。
 

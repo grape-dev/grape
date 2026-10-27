@@ -1207,6 +1207,7 @@ function _tlIcon(type) {
   if (type === 'tool_use') return '🔧';
   if (type === 'step_start') return '▶';
   if (type === 'step_finish') return '✅';
+  if (type === 'task:retry') return '↻';
   if (type === 'reasoning') return '🤔';
   if (type === 'error') return '❌';
   if (type === 'text') return '💬';
@@ -1223,7 +1224,7 @@ function _tlLine(payload) {
     } catch (e) {}
     return `<div style="margin-bottom:8px">${time}🔧 <span style="color:#5b9eff;font-weight:600">${_tlEsc(payload.tool || 'tool')}</span>${inputHtml}</div>`;
   }
-  const color = type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0';
+  const color = type === 'error' ? '#ff5b5b' : type === 'task:retry' ? '#f0a741' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0';
   return `<div style="margin-bottom:8px">${time}${_tlIcon(type)} <span style="color:${color};white-space:pre-wrap;word-break:break-all">${_tlEsc(payload.content || '')}</span></div>`;
 }
 
@@ -1530,7 +1531,7 @@ function openInlineLog(seq, title) {
         if (!l) return '';
         var type = l.type || 'log';
         var time = l.time ? '<span style="color:#7a85a0;margin-right:6px">' + (l.time.substring(11,19) || '') + '</span>' : '';
-        var msg = l.msg || '';
+        var msg = l.msg || (typeof l.data === 'string' ? l.data : '') || '';
         if (type === 'tool_use') {
           var toolName = msg;
           var inputHtml = '';
@@ -1541,8 +1542,8 @@ function openInlineLog(seq, title) {
           } catch(e) {}
           return '<div style="margin-bottom:8px">' + time + '🔧 <span style="color:#5b9eff;font-weight:600">' + toolName + '</span>' + inputHtml + '</div>';
         }
-        var icon = type === 'error' ? '❌' : type === 'reasoning' ? '🤔' : type === 'step_start' ? '▶' : type === 'text' ? '💬' : '·';
-        var color = type === 'error' ? '#ff5b5b' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0';
+        var icon = type === 'error' ? '❌' : type === 'task:retry' ? '↻' : type === 'reasoning' ? '🤔' : type === 'step_start' ? '▶' : type === 'text' ? '💬' : '·';
+        var color = type === 'error' ? '#ff5b5b' : type === 'task:retry' ? '#f0a741' : type === 'reasoning' ? '#a0aac0' : '#e0e6f0';
         return '<div style="margin-bottom:8px">' + time + icon + ' <span style="color:' + color + ';white-space:pre-wrap;word-break:break-all">' + _tlEsc(msg) + '</span></div>';
       }).join('');
     } else {

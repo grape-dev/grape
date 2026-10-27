@@ -152,13 +152,17 @@ def engine_unique_key(m: dict) -> str:
     account identity 思路）：同一实例（同一 name+device+credential）只会有一个键，
     历史重复行、user/repo 双档同实例被归一为单条候选。
 
-    - 本机直连（credential_id=0）：`local:{engine_type}`（本机引擎以类型名为键）
+    - 本机直连（credential_id=0）：`local:{engine_type}@{host_name}`（本机引擎以类型名+归属主控机为键——
+      多主控机同名引擎是两台不同的机器，不是重复行；host_name 缺失时退回 `local:{engine_type}`）
     - 个人/远端：`{scope}:{instance_name}`（instance_name 与 src/runtime/instances.py 同源）
     """
     cid = m.get("credential_id") or 0
     scope = (m.get("scope") or "global").strip().lower()
     name = (m.get("name") or "").strip()
     if cid == 0:
+        _hn = (m.get("host_name") or "").strip()
+        if _hn:
+            return f"local:{name.lower()}@{_hn}"
         return f"local:{name.lower()}"
     try:
         from src.runtime.instances import instance_name
@@ -528,28 +532,50 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     return ""
 
 
-def resolve_local_engine() -> int | None:
+def resolve_local_engine(user_id: int = 0) -> int | None:
     """返回一个健康的本机直连引擎（credential_id=0 且 installed+healthy）；无则 None。
 
     用于 chat 等未显式绑定时的本机兜底（engine-selection-design.md §8.2）。
     无本机直连时回退全局健康引擎（credential_id>0 的远端 worker，chat 走队列执行），
     避免"无可用引擎"硬失败（#60：清理设备后无 cred0 引擎，chat 全挂）。
 
+    user_id > 0（chat 场景，per-user-random-default-engine 设计）：候选限定**当前这台
+    主控机**的直连引擎（host_name=本机 hostname，ELB 分流下请求落哪台就直连哪台，
+    跨主机的直连行无法本机拉进程），再按 user_id 稳定取模挑选——同一用户在同一台
+    机器上恒定同一引擎，不同用户自然散开，避免全员滑向同一个默认引擎（此前取
+    MIN(id) 造成单引擎压力集中）。
+    user_id=0（IM 等无用户上下文兜底）：维持旧行为取最小 id。
+
     结果缓存 30 秒——引擎列表不频繁变化，缓存可大幅减少 DB 查询。
     """
     now = _time.time()
-    cached = _resolve_local_cache.get("expires", 0)
-    if cached > now:
+    _ck = _resolve_local_cache.get("expires", 0)
+    if _ck > now and not user_id:
         return _resolve_local_cache.get("result")
     cand = query_engines("", "local")
     cand = _apply_filters([dict(m, scope="local") for m in cand], load_engine_selection())
+    if user_id:
+        # 方案 A：只挑当前主控机自己的直连引擎（别的 master 的行留显示，不留执行）
+        try:
+            import socket as _sock
+            _hn = _sock.gethostname()
+            _own = [m for m in cand if (m.get("host_name") or "") == _hn]
+            if _own:
+                cand = _own
+        except Exception:
+            pass
     if not cand:
         # 回退：任意健康全局引擎（chat 未配置时可用远端 worker 引擎入队执行）
         cand = query_engines("", "global")
         cand = _apply_filters([dict(m, scope="global") for m in cand], load_engine_selection())
     if not cand:
         return None
-    result = min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
+    if user_id:
+        # 稳定取模：同一用户恒定命中同一引擎（会话连续），用户间均匀散开
+        _ids = sorted(r["runtime_id"] for r in cand)
+        result = _ids[int(user_id) % len(_ids)]
+    else:
+        result = min(cand, key=lambda r: (r["runtime_id"]))["runtime_id"]
     _resolve_local_cache["result"] = result
     _resolve_local_cache["expires"] = _time.time() + _RESOLVE_LOCAL_TTL
     return result
@@ -625,11 +651,12 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
                         "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id=r.credential_id "
                         "WHERE r.credential_id>0 AND rc.scope='repo' AND rc.status='active' ORDER BY r.id")
             elif scope == "local":
-                # 本机引擎（credential_id=0）对所有人可见
+                # 本机引擎（credential_id=0）对所有人可见；host_name 区分多台主控机
+                # （per-user-random-default-engine 方案 A 靠它过滤"当前这台主控机"）
                 c.execute(
                     "SELECT id, name, status, healthy, installed, credential_id, last_seen_at, '', '', '',"
                     " (SELECT GROUP_CONCAT(tag) FROM engine_capabilities WHERE runtime_id=agent_runtimes.id AND enabled=1),"
-                    " COALESCE(alias,''), COALESCE(scene_tags,''), COALESCE(org_id,0)"
+                    " COALESCE(alias,''), COALESCE(scene_tags,''), COALESCE(org_id,0), COALESCE(host_name,'')"
                     "FROM agent_runtimes WHERE credential_id=0 ORDER BY id")
             elif scope == "user":
                 if username:
@@ -695,6 +722,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
             "alias": r[11] or "",
             "scene_tags": _scene_tags,
             "org_id": r[13] or 0,
+            "host_name": (r[14] or "") if len(r) > 14 else "",
         })
     return out
 

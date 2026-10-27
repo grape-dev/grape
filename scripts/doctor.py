@@ -64,21 +64,15 @@ def _try_import(module_name):
 
 
 def check_python_version():
-    """1. Python 版本检查"""
+    """1. Python 版本检查（Issue #455：OSS 主线主服务要求 >= 3.10）"""
     ver = sys.version_info
     ver_str = f"{ver.major}.{ver.minor}.{ver.micro}"
 
-    if ver < (3, 9):
-        return CheckResult(
-            "Python 版本", "error",
-            f"当前 {ver_str}，主服务需要 >= 3.9",
-            "升级 Python 到 3.9+（推荐 3.12）"
-        )
     if ver < (3, 10):
         return CheckResult(
-            "Python 版本", "warn",
-            f"当前 {ver_str}，主服务可用但 devbox sandbox 需 >= 3.10",
-            "如需 devbox 功能，升级到 Python 3.10+"
+            "Python 版本", "error",
+            f"当前 {ver_str}，主服务需要 >= 3.10",
+            "升级 Python 到 3.10+（推荐 3.12）；README 环境要求见 docs/0-to-1-checklist.md"
         )
     return CheckResult("Python 版本", "ok", f"{ver_str} ({platform.python_implementation()})")
 

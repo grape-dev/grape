@@ -20,6 +20,7 @@ ACP 协议流程：
 通信格式：每行一个 JSON-RPC 消息（NDJSON over stdin/stdout）
 """
 import os
+import stat as _stat
 import json
 import re
 import time
@@ -180,6 +181,9 @@ class HermesACPBackend:
         # symlink 镜像共享 home 的内容（学习 multica mirrorSharedHermesHome）
         # 只覆写 state.db（task-local）和 config.yaml（tool_progress=new）
         _build_overlay_home(iso_home, src_home)
+        # issue #439 worker 写前兜底：可写目录必须是真实目录（reparse point 会触发
+        # Windows 提权引擎 hermes_dir_acl 拒绝授权）。覆盖存量 home 与构建后竞态。
+        ensure_overlay_writable_dirs(iso_home)
 
         proc_env = dict(env) if env else os.environ.copy()
         proc_env["HERMES_HOME"] = iso_home
@@ -1185,10 +1189,113 @@ def _done_result(exit_code, text, session_id, errors, stderr) -> dict:
         "oc_session_id": session_id, "errors": errors, "stderr": stderr,
     }
 
+# ── issue #439：overlay home 条目分类（替代全量 symlink）──
+# 可写状态目录白名单：per-task 真实目录。Windows 提权引擎下 symlink 是 reparse
+# point，hermes_dir_acl 拒绝授权 → 引擎写 cron/memories 即 exit_code=-1。
+_OVERLAY_WRITABLE_DIRS = frozenset({
+    "cron", "sessions", "logs", "log", "cache", "tmp", "temp",
+    "memories", "history", "backups", "output", "outputs", "data",
+})
+# lock/pid 类：真实空文件（引擎自行接管内容）
+_OVERLAY_LOCK_FILES = frozenset({
+    "processes.json", ".port-locks", "gateway.pid", "hermes.pid",
+})
+# 只读共享资产：保留 symlink（Linux 不回归；symlink 失败降级复制）
+_OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
+    "skills", "plugins", "venv", "assets", "themes", "prompts",
+})
+
+
+def _overlay_entry_kind(entry: str, src_path: str | None = None) -> str:
+    """分类 overlay 条目的构建类型："dir"（真实目录）/ "file"（真实空文件）/
+    "symlink"（只读共享资产）。
+
+    分类依据显式白名单（确定性高、易测试）；未知目录保守按真实目录处理
+    （issue #439：宁可多建目录，也不再对可能被写的目录产生 reparse point）；
+    未知文件按只读资产 symlink 处理（失败降级复制，issue #416）。
+    """
+    if entry.endswith(".lock") or entry in _OVERLAY_LOCK_FILES:
+        return "file"
+    if entry in _OVERLAY_WRITABLE_DIRS:
+        return "dir"
+    if entry in _OVERLAY_READONLY_SYMLINK_ENTRIES:
+        return "symlink"
+    if src_path is not None and os.path.isdir(src_path):
+        return "dir"
+    return "symlink"
+
+
+def _is_reparse_point_or_link(path: str) -> bool:
+    """判断 path 是否为 symlink / Windows reparse point（junction 等）。
+
+    os.path.islink 覆盖 symlink；Windows 上目录 junction 也是 reparse point
+    （st_file_attributes 含 FILE_ATTRIBUTE_REPARSE_POINT），hermes_dir_acl
+    同样拒绝授权，需一并识别。
+    """
+    if os.path.islink(path):
+        return True
+    if os.name == "nt":
+        try:
+            st = os.lstat(path)
+            return bool(getattr(st, "st_file_attributes", 0)
+                        & _stat.FILE_ATTRIBUTE_REPARSE_POINT)
+        except OSError:
+            return False
+    return False
+
+
+def _remove_path(path: str):
+    """删除文件/链接/目录（构建期遗留清理用）。
+
+    安全要点：Windows 目录 junction 是 reparse point（os.path.islink=False、
+    isdir=True），若走 shutil.rmtree 会穿透 junction 递归删除共享 HERMES_HOME
+    目标目录内容（共享资产/状态数据丢失风险）。reparse point 目录必须用
+    os.rmdir 仅删链接本身；symlink 用 os.remove；真实目录才走 rmtree。
+    """
+    if os.path.islink(path):
+        os.remove(path)  # 链接本身（含 dangling link）
+    elif _is_reparse_point_or_link(path):
+        os.rmdir(path)  # Windows junction/reparse point 目录：仅删链接本身
+    elif os.path.isdir(path):
+        shutil.rmtree(path)
+    elif os.path.exists(path):
+        os.remove(path)
+
+
+def ensure_overlay_writable_dirs(iso_home: str):
+    """issue #439 worker 写前兜底：确保可写状态目录为真实目录。
+
+    覆盖两类场景：
+    - 存量 overlay home：旧版本构建的全量 symlink（升级窗口期内遗留）；
+    - 构建与写入之间的竞态/外部工具误建。
+    对每个可写目录名：是链接/reparse point → 删除后建真实目录；已是真实
+    目录 → 幂等保留（不清理内容）。只读资产不受影响。
+    """
+    for name in _OVERLAY_WRITABLE_DIRS:
+        p = os.path.join(iso_home, name)
+        try:
+            if _is_reparse_point_or_link(p):
+                _remove_path(p)
+                log.info(f"hermes ACP overlay: replaced legacy link '{name}' "
+                         f"with real dir (issue #439)")
+            os.makedirs(p, exist_ok=True)
+        except Exception as _e:
+            log.warning(f"hermes ACP overlay: ensure real dir '{name}' failed: {_e}")
+
+
 def _build_overlay_home(iso_home: str, src_home: str):
     """构建 per-task HERMES_HOME overlay（学习 multica mirrorSharedHermesHome）。
 
-    - symlink 镜像共享 home 的所有内容（skills/plugins/auth 等）
+    issue #439：不再对 src_home 全量 symlink。Windows 提权引擎下 symlink 是
+    NTFS reparse point，hermes_dir_acl 拒绝给 reparse point 授权 → 引擎写
+    cron/memories 即 exit_code=-1。改为按条目类型分类构建：
+    - 可写状态目录 → per-task 真实目录（per-task 隔离 + ACL 可授权）
+    - lock/pid 文件 → 真实空文件
+    - 只读共享资产 → 保留 symlink（Linux 不回归；失败降级 _mirror_without_symlink）
+    - 未知目录 → 保守按真实目录处理（宁可多建目录也不再产生 reparse point）
+    并在构建期清理历史遗留的同类旧链接（旧版本 `if os.path.exists(dst):
+    continue` 会放过全量 symlink 时代的产物）。
+
     - 覆写 config.yaml（tool_progress=new）
     - 覆写 .env（pin HERMES_HOME + 保留凭据）
     - state.db 保持 task-local（不 symlink，每个 task 独立）
@@ -1202,19 +1309,69 @@ def _build_overlay_home(iso_home: str, src_home: str):
                 if entry in ("state.db", "state.db-wal", "state.db-shm",
                              "config.yaml", ".env", "active_profile", "profiles"):
                     continue
-                if os.path.exists(dst):
+                # gateway-ctl-not-mirrored（2026-10-24 修复）：
+                # 网关控制文件一律不镜像进任务 home——missing_owner_state(home) 的语义是
+                # "本 home 自己有没有在跑的网关"，把共享 home 的 gateway.lock 等符号链接
+                # 镜像进来，hermes 网关归属判定（lstat 不跟随符号链接）会判
+                # unsafe_control_path → inaccessible → ACP session/new 被拒（-32603）。
+                # 生产实测（内部 worker 事故，2026-10-23）：新建工作区任务
+                # 100% 失败；老工作区（lock 出现前建成的 home）不受影响。
+                if entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
+                             "gateway.pid", "gateway_state.json", "gateway-starts.log"):
                     continue
                 src = os.path.join(src_home, entry)
+                kind = _overlay_entry_kind(entry, src)
                 try:
-                    os.symlink(src, dst)
-                except Exception as _sl_e:
-                    # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
-                    # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
-                    # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
-                    # → hermes ACP 启动后加载资产失败即死（exit rc!=0、无诊断）。
-                    # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
-                    # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
-                    _mirror_without_symlink(src, dst, entry, str(_sl_e))
+                    if kind == "dir":
+                        # 遗留清理：旧版本可能建了 symlink/reparse point 或类型不符
+                        if _is_reparse_point_or_link(dst) or \
+                                (os.path.exists(dst) and not os.path.isdir(dst)):
+                            _remove_path(dst)
+                        os.makedirs(dst, exist_ok=True)
+                    elif kind == "file":
+                        if _is_reparse_point_or_link(dst) or \
+                                (os.path.exists(dst) and not os.path.isfile(dst)):
+                            _remove_path(dst)
+                        if not os.path.exists(dst):
+                            # 真实空文件：lock/pid 类，引擎自行接管内容
+                            with open(dst, "a", encoding="utf-8"):
+                                pass
+                    else:  # symlink：只读共享资产
+                        if os.path.isdir(dst) and not os.path.islink(dst):
+                            continue  # issue #416 降级复制的真实目录，可用
+                        if os.path.isfile(dst) and not os.path.islink(dst):
+                            continue  # issue #416 降级复制的真实文件，可用
+                        if _is_reparse_point_or_link(dst):
+                            # 遗留/失效链接 → 删除重建
+                            _remove_path(dst)
+                        try:
+                            os.symlink(src, dst)
+                        except Exception as _sl_e:
+                            # issue #416（E7/T5）：Windows 非管理员/未开 Developer Mode 时
+                            # os.symlink 抛 OSError（缺 SeCreateSymbolicLinkPrivilege），
+                            # 旧逻辑 except:pass 静默吞掉 → overlay home 缺 skills/plugins/auth
+                            # → hermes ACP 启动后加载资产失败即死（exit rc!=0、无诊断）。
+                            # 降级为复制（文件 copy2；目录浅层复制一层），并留 WARNING 供 worker
+                            # 日志定位（随 13 台 worker 升级合入后可收敛根因）。
+                            _mirror_without_symlink(src, dst, entry, str(_sl_e))
+                except Exception as _e_e:
+                    log.warning(f"hermes ACP overlay: build entry '{entry}' failed: {_e_e}")
+
+        # issue #439：共享 home 中不存在的可写目录也补建为真实目录
+        # （cron/memories/sessions 等是引擎运行时必然要写的状态目录）
+        ensure_overlay_writable_dirs(iso_home)
+
+        # gateway-ctl-cleanup（2026-10-24 修复）：清掉历史遗留的网关控制文件链接——
+        # 修复部署前建成的隔离 home 里已经镜像了 gateway.lock 等符号链接，不清理的话
+        # 这些老 home 上的任务在 hermes 升级（带 lstat 加固）后仍会失败。
+        for _gw_entry in ("gateway.sock", "gateway.sock.path", "gateway.lock",
+                          "gateway.pid", "gateway_state.json", "gateway-starts.log"):
+            _gw_dst = os.path.join(iso_home, _gw_entry)
+            try:
+                if os.path.islink(_gw_dst):
+                    os.unlink(_gw_dst)
+            except Exception:
+                pass
 
         # 覆写 config.yaml：从源复制 + 改 tool_progress=new
         src_cfg = os.path.join(src_home, "config.yaml")

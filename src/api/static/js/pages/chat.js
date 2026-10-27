@@ -5,6 +5,8 @@ let _openConvId = null;
 // { conv_id: { task_id, el_id, status, finalText } }
 let _chatTasks = {};
 let _chatStreamAbort = null;  // 当前活跃的 SSE AbortController
+// Issue #442: 撤回消息原文注册表 { msgId: 原文 }（供「重新编辑」追加输入框）
+let _chatRecallTexts = {};
 
 // ===== 任务状态持久化（sessionStorage，对齐 Admin AI）=====
 function _getStoredTask(convId) {
@@ -547,6 +549,89 @@ function _closeChatDelPopover() {
   if (o) o.remove();
 }
 
+// ====== Issue #442: 消息撤回（二次确认 + 终止执行 + 重新编辑追加）======
+
+/**
+ * 用户消息气泡 HTML：带 data-msg-id + hover 撤回按钮。
+ * @param {number|string} msgId - 消息 id（0/空 = live 未回填，不显示撤回入口）
+ * @param {string} innerHtml - 气泡内容（已转义/渲染）
+ * @param {string} originalText - 原文（剥离 [chat_img:] 标记），注册到 _chatRecallTexts 供重新编辑
+ */
+function _userMsgHtml(msgId, innerHtml, originalText) {
+  var id = parseInt(msgId, 10) || 0;
+  if (id > 0) {
+    if (typeof originalText === 'string' && originalText) _chatRecallTexts[id] = originalText;
+    return '<div class="msg r" data-msg-id="' + id + '">'
+      + '<span class="msg-recall-btn" onclick="recallChatMessage(' + id + ', event)" title="' + I18N.t('chat.recall.action') + '">'
+      + '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v4h4"/><path d="M3.5 11a9 9 0 1 0 2.1-5.4L3 8"/><path d="M9 17l6-6"/><path d="M15 17l-6-6"/></svg>'
+      + I18N.t('chat.recall.action') + '</span>'
+      + innerHtml + '</div>';
+  }
+  return '<div class="msg r">' + innerHtml + '</div>';
+}
+
+/** 撤回提示占位气泡（原位置，含「重新编辑」入口）。 */
+function _recalledMsgHtml(msgId, originalText) {
+  var id = parseInt(msgId, 10) || 0;
+  if (id > 0 && typeof originalText === 'string' && originalText) _chatRecallTexts[id] = originalText;
+  return '<div class="msg r chat-msg-recalled" data-msg-id="' + (id || '') + '">'
+    + '<span>' + I18N.t('chat.recall.hint') + '</span>'
+    + (id > 0 ? ' <a href="javascript:void(0)" onclick="_recallReEdit(' + id + ')">' + I18N.t('chat.recall.re_edit') + '</a>' : '')
+    + '</div>';
+}
+
+/** 剥离 [chat_img:] 标记后的纯文本（重新编辑用原文）。 */
+function _stripChatImgMarkers(content) {
+  return String(content || '').replace(/\[chat_img:[^\]]+\]/g, '').trim();
+}
+
+/** 撤回入口：二次确认 → 调端点 → 原位置替换撤回提示。 */
+function recallChatMessage(msgId, ev) {
+  if (ev && ev.stopPropagation) ev.stopPropagation();
+  app.showConfirm(I18N.t('chat.recall.confirm'), function() {
+    API.post('/chat/messages/' + msgId + '/recall').then(function(d) {
+      _applyRecallUI(msgId, d && d.task_id);
+    }).catch(function(e) {
+      app.showToast(I18N.t('chat.recall.failed', {msg: e.message}));
+    });
+  }, {danger: true, confirmText: I18N.t('chat.recall.action')});
+}
+
+/** 撤回成功后的 UI 收尾：替换气泡 + 终止当前 SSE 占位。 */
+function _applyRecallUI(msgId, taskId) {
+  var body = document.getElementById('chatBody');
+  if (!body) return;
+  var el = body.querySelector('.msg[data-msg-id="' + msgId + '"]');
+  if (el) {
+    var hint = document.createElement('div');
+    hint.className = 'msg r chat-msg-recalled';
+    hint.setAttribute('data-msg-id', msgId);
+    hint.innerHTML = '<span>' + I18N.t('chat.recall.hint') + '</span>'
+      + ' <a href="javascript:void(0)" onclick="_recallReEdit(' + msgId + ')">' + I18N.t('chat.recall.re_edit') + '</a>';
+    el.replaceWith(hint);
+  }
+  // 终止该轮执行的前端表现：中止 SSE + 移除三点占位 + 清任务态
+  var convId = _currentConvId;
+  var task = convId ? _getTask(convId) : null;
+  if (task && (!taskId || task.task_id === taskId)) {
+    if (_chatStreamAbort) { _chatStreamAbort.abort(); _chatStreamAbort = null; }
+    var ph = document.getElementById(task.el_id);
+    if (ph) ph.remove();
+    _clearTask(convId);
+  }
+}
+
+/** 「重新编辑」：原文追加到输入框现有内容之后（不覆盖）。 */
+function _recallReEdit(msgId) {
+  var input = document.getElementById('chatInput');
+  if (!input) return;
+  var text = _chatRecallTexts[msgId] || '';
+  if (!text) return;
+  input.value = input.value ? (input.value + '\n' + text) : text;
+  _autoResizeTextarea(input);
+  input.focus();
+}
+
 function _doDeleteConv(convId) {
   _closeChatDelPopover();
   // Issue #407: 删除会话同时清除其未发送草稿（会话消失草稿不残留）
@@ -607,6 +692,16 @@ function switchConversation(convId) {
 
     // 渲染消息列表
     body.innerHTML = msgs.map(m => {
+      if (m.role === 'user') {
+        // Issue #442: 已撤回 → 原位置撤回提示 + 重新编辑
+        if (m.deleted) return _recalledMsgHtml(m.id, _stripChatImgMarkers(m.content));
+        let rendered = renderMarkdown(m.content);
+        // 将 [chat_img:url] 标记替换为图片缩略图
+        rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
+          return '<img src="' + url + '?thumb=1" style="max-width:140px;max-height:140px;border-radius:6px;margin-top:4px;display:inline-block;cursor:pointer" onclick="window.open(\'' + url + '\',\'_blank\')">';
+        });
+        return _userMsgHtml(m.id, linkifyIssueNumbers(rendered, conv.repo_key || ''), _stripChatImgMarkers(m.content));
+      }
       let rendered = renderMarkdown(m.content);
       // 将 [chat_img:url] 标记替换为图片缩略图
       rendered = rendered.replace(/\[chat_img:([^\]]+)\]/g, function(match, url) {
@@ -971,7 +1066,9 @@ function doSend(input, body) {
   if (vid) {
     imgHtml += '<div style="margin-top:4px"><div style="display:inline-flex;align-items:center;gap:4px;padding:4px 8px;border-radius:6px;background:var(--bg);color:var(--t2);font-size:12px"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="23 7 16 12 23 17 23 7"/><rect x="1" y="5" width="15" height="14" rx="2" ry="2"/></svg>' + (_pendingVideo ? (_pendingVideo.name || 'video') : 'video') + '</div></div>';
   }
-  body.innerHTML += '<div class="msg r">' + displayMsg + imgHtml + '</div>';
+  var userBubbleId = 'um' + Date.now();
+  body.innerHTML += '<div class="msg r" id="' + userBubbleId + '">' + displayMsg + imgHtml
+    + '<span class="msg-recall-btn" style="display:none"></span></div>';
   const tid = 't' + Date.now();
   body.innerHTML += '<div class="msg l" id="' + tid + '">'
     + '<span class="chat-dots"><span></span><span></span><span></span></span>'
@@ -999,6 +1096,21 @@ function doSend(input, body) {
     }
     // per-conversation 记录
     _setTask(convId, {task_id: r.task_id, conv_id: convId, el_id: tid, status: 'running'});
+    // Issue #442: 回填 message_id → live 气泡可撤回（注册原文供重新编辑）
+    if (r.message_id) {
+      var ub = document.getElementById(userBubbleId);
+      if (ub) {
+        ub.setAttribute('data-msg-id', r.message_id);
+        var btn = ub.querySelector('.msg-recall-btn');
+        if (btn) {
+          btn.style.display = '';
+          btn.setAttribute('title', I18N.t('chat.recall.action'));
+          btn.setAttribute('onclick', 'recallChatMessage(' + r.message_id + ', event)');
+          btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 7v4h4"/><path d="M3.5 11a9 9 0 1 0 2.1-5.4L3 8"/><path d="M9 17l6-6"/><path d="M15 17l-6-6"/></svg>' + I18N.t('chat.recall.action');
+        }
+        _chatRecallTexts[r.message_id] = msg;
+      }
+    }
     // 2. SSE 订阅
     streamTask(r.task_id, tid, convId);
   }).catch(e => {
@@ -1060,6 +1172,11 @@ async function streamTask(taskId, elId, convId) {
               if (el) el.innerHTML = renderMarkdown(finalText) || I18N.t('chat.no_reply');
             } else if (d.type === 'error') {
               if (el) el.innerHTML = renderMarkdown(d.text || '') || I18N.t('chat.no_reply');
+            } else if (d.type === 'cancelled') {
+              // Issue #442: 消息被撤回 → 移除占位、结束订阅（可能在其它窗口触发撤回）
+              if (el) el.remove();
+              _clearTask(convId);
+              return;
             } else if (d.type === '思考中') {
               // 思考阶段 — 保持三点动画占位
               if (el) el.innerHTML = '<span class="chat-dots"><span></span><span></span><span></span></span>';
@@ -1179,8 +1296,13 @@ function renderChatMessages(messages) {
     // 移除标记后的纯文本（用于 escaped 显示）
     const textOnly = content.replace(/\[chat_img:[^\]]+\]/g, '').trim();
     if (m.role === 'user') {
+      // Issue #442: 已撤回 → 原位置撤回提示 + 重新编辑
+      if (m.deleted) {
+        body.innerHTML += _recalledMsgHtml(m.id, textOnly);
+        return;
+      }
       const escaped = textOnly.replace(/</g, '&lt;');
-      body.innerHTML += '<div class="msg r">' + escaped + (imgHtml !== content ? imgHtml : '') + '</div>';
+      body.innerHTML += _userMsgHtml(m.id, escaped + (imgHtml !== content ? imgHtml : ''), textOnly);
     } else {
       body.innerHTML += '<div class="msg l">' + renderMarkdown(content) + '</div>';
     }

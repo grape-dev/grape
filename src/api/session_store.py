@@ -208,7 +208,8 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     返回 (scene_id, scene_user_id)：
     - get_issue_stage 返回 scene_id → 用该值 + scene_user_id
     - 否则从 issue 表回退读 scene_id/scene_user_id
-    - 都没有 → ("", 0)，由调用方决定走智能推荐
+    - 都没有 → 回退仓库默认场景（managed_repos.dev_scene，Issue #415）
+    - 再没有 → ("", 0)，由调用方决定走智能推荐
     """
     # PR 订阅伪 issue_id（#pr_<PR号>_<scene_id>，event_pipeline L~1706 构造）：
     # issue 表查不到 → 原先回退 managed_repos.dev_scene（仓库默认场景），
@@ -234,6 +235,16 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
             r = c.fetchone()
             if r and r[0]:
                 return r[0], r[1] or 0
+    except Exception:
+        pass
+    # Issue #415: Issue 级场景为空 → 回退仓库默认场景（managed_repos.dev_scene），
+    # 与 _resolve_scene_id / repogit / prompt_builder 的仓库默认场景语义一致；
+    # 仓库未配置默认场景时保持 ("", 0)，由调用方决定走智能推荐。
+    try:
+        from src.user.db import get_repo_scene
+        _repo_scene = get_repo_scene(repo_key) or ""
+        if _repo_scene:
+            return _repo_scene, 0
     except Exception:
         pass
     return "", 0

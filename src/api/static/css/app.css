@@ -284,6 +284,23 @@
 /* Issue #233: 蓝色背景用户消息气泡内链接高对比度样式（WCAG AA ≥4.5:1） */
 .chat-body .msg.r a,.chat-body .msg.r a:link,.chat-body .msg.r a:visited{color:#fff;text-decoration:underline}
 .chat-body .msg.r a:hover{text-decoration:underline;background-color:rgba(255,255,255,.18);border-radius:2px}
+/* Issue #442: 用户消息 hover 撤回入口 + 撤回提示占位气泡 */
+.chat-body .msg.r .msg-recall-btn{display:none;position:absolute;left:-58px;top:8px;align-items:center;gap:3px;padding:2px 7px;border-radius:6px;background:var(--bg);border:1px solid var(--b);color:var(--t3);font-size:10px;cursor:pointer;white-space:nowrap}
+.chat-body .msg.r .msg-recall-btn:hover{color:var(--r);border-color:var(--r)}
+.chat-body .msg.r{position:relative}
+.chat-body .msg.r:hover .msg-recall-btn{display:inline-flex}
+.chat-body .msg.r.chat-msg-recalled{background:var(--bg);color:var(--t3);font-size:11px;font-style:italic;box-shadow:none}
+.chat-body .msg.r.chat-msg-recalled .msg-recall-btn{display:none}
+/* Issue #464: hover 命中桥——气泡左缘至撤回按钮间隙全程保持 .msg.r:hover，按钮可达 */
+.chat-body .msg.r::before{content:"";position:absolute;left:-60px;top:0;width:60px;height:100%;pointer-events:none}
+.chat-body .msg.r:hover::before{pointer-events:auto}
+/* Issue #464: 撤回提示条「重新编辑」链接配色——复合选择器覆盖 #233 蓝底白字全局规则（浅色 var(--bg) 背景上 var(--a) 对比度 4.64:1 ≥ WCAG AA） */
+.chat-body .msg.r.chat-msg-recalled a,.chat-body .msg.r.chat-msg-recalled a:link,.chat-body .msg.r.chat-msg-recalled a:visited{color:var(--a);text-decoration:underline}
+.chat-body .msg.r.chat-msg-recalled a:hover{text-decoration:underline;background-color:var(--b);border-radius:2px}
+/* Issue #464 QA 复审：apple-theme.css 后加载且默认主题为 apple，同特异性 (0,4,1) 时 #233 白字规则层叠胜出（对比度 1.09:1）。
+   加 [data-theme="apple"] 前缀升至 (0,5,1)，跨文件加载顺序必胜；三态齐全 */
+[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a,[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:link,[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:visited{color:var(--a);text-decoration:underline}
+[data-theme="apple"] .chat-body .msg.r.chat-msg-recalled a:hover{text-decoration:underline;background-color:var(--b);border-radius:2px}
 
 /* ===== Template card video link ===== */
 .tmpl-card-foot{gap:8px}

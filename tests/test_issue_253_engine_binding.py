@@ -161,14 +161,14 @@ def test_ut3_stale_queued_three_tiers(setup_db):
               "agent_session_id, issue_session_id, created_at, agent_type) "
               "VALUES ('t_253c', 'queued', 0, 'coding', '[201]', 's', 'is', ?, 'coding')", (_old,))
     # 档2：在线、物理健康（healthy=1）但健康分低 → 限时等待到点 → failed。
-    #   健康分由任务史计算：塞 2 条 failed 任务史 → 失败率 100% → 低分 →
+    #   健康分由任务史计算：塞 6 条 failed 任务史（≥ HEALTH_MIN_SAMPLES，issue #439
+    #   小样本豁免阈值——低样本单次失败不再打入低分区）→ 失败率 100% → 低分 →
     #   has_healthy=False；物理可达检查（healthy 列=1 + 心跳新鲜 + tag + 槽位）通过 →
     #   走 _fail_task_pool_unhealthy（120s 到点）。这正是 #253 事故第一次派发的死区形态。
     _mk_engine(c, 202, "codex-low", healthy=1, seen=_now, tag="coding")
-    c.execute("INSERT INTO agent_tasks (id, status, runtime_id, created_at, completed_at) VALUES "
-              "('t_hist1', 'failed', 202, ?, ?)", (_old, _old))
-    c.execute("INSERT INTO agent_tasks (id, status, runtime_id, created_at, completed_at) VALUES "
-              "('t_hist2', 'failed', 202, ?, ?)", (_old, _old))
+    for _i in range(1, 7):
+        c.execute("INSERT INTO agent_tasks (id, status, runtime_id, created_at, completed_at) VALUES "
+                  "(?, 'failed', 202, ?, ?)", (f"t_hist{_i}", _old, _old))
     c.execute("INSERT INTO agent_tasks (id, status, runtime_id, pool_tag, pool_engine_ids, "
               "agent_session_id, issue_session_id, created_at, agent_type) "
               "VALUES ('t_253d', 'queued', 0, 'coding', '[202]', 's', 'is', ?, 'coding')", (_old,))

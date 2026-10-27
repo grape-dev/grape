@@ -145,3 +145,4 @@ _e2e_test.py
 configs/oauth-providers.json
 .upgrade-backup/
 .project-info/
+_uid_backup*.json
