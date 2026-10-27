@@ -75,10 +75,7 @@
                 {{ t('filter_status') }}<span>{{ statusExpanded ? '▾' : '▸' }}</span>
               </div>
               <div v-if="statusExpanded" class="isk-pop-body">
-                <label
-                  class="isk-chk"
-                  @click="clearStatusFilter"
-                >
+                <label class="isk-chk" @click="clearStatusFilter">
                   <span class="isk-box"></span>
                   {{ t('tab.all') }} <span class="isk-cnt">{{ tasks.length }}</span>
                 </label>
@@ -201,13 +198,7 @@
           <div style="flex: 1"></div>
           <!-- 分页 -->
           <div v-if="totalPages > 1" class="isk-pager">
-            <button
-              class="tsk-btn tsk-btn-ghost"
-              :disabled="page <= 1"
-              @click="prevPage"
-            >
-              ‹
-            </button>
+            <button class="tsk-btn tsk-btn-ghost" :disabled="page <= 1" @click="prevPage">‹</button>
             <template v-for="pn in pageNums" :key="pn">
               <span v-if="pn === '…'" class="isk-ellipsis">…</span>
               <button
@@ -219,11 +210,7 @@
                 {{ pn }}
               </button>
             </template>
-            <button
-              class="tsk-btn tsk-btn-ghost"
-              :disabled="page >= totalPages"
-              @click="nextPage"
-            >
+            <button class="tsk-btn tsk-btn-ghost" :disabled="page >= totalPages" @click="nextPage">
               ›
             </button>
             <span class="isk-pager-sum">{{

@@ -8,7 +8,7 @@
 
 ---
 
-## 1. 分支与提交状态（2026-10-26 会话末）
+## 1. 分支与提交状态（2026-10-27 会话末，批14 完成）
 
 - **分支**：`weekly-clean-mys`（Vue 重构专用分支，动手前必须 `git branch --show-current` 确认——仓库可能被别的会话切到 fix/hotfix-*）
 - **工作树**：干净（仅 1 个未跟踪 `.hermes-handoff-pr-subscription.md`，与本工程无关）
@@ -17,6 +17,7 @@
 
 | commit | 内容 |
 |---|---|
+| `9905c518c` | docs: add full handoff state for vue refactor (batches 1-13) |
 | `cad68fac5` | docs: 批13 observability 完成记录 |
 | `161d3b694` | **feat: 批13 observability → Vue（3034行，最后大件）** |
 | `c2182b2d3` | docs: 批12 dashboard 完成记录 |
@@ -34,13 +35,13 @@
 
 ## 2. 迁移进度总览
 
-**批1-13 完成。`js/pages/` 大件全部清零**，剩余 5 个 legacy 文件共 3425 行（全是小件/壳耦合组）：
+**批1-14 完成。`js/pages/` 大件+壳耦合组全部清零**，剩余 2 个 legacy 文件共 1451 行：
 
 ```
-legacy/js/pages/ 剩余：feedback.js(367) knowledge.js(1084) repos.js(821) settings.js(308) templates.js(845)
+legacy/js/pages/ 剩余：feedback.js(367) knowledge.js(1084)
 ```
 
-Vue 侧现状：`app/src/views/` 17 个 .vue 组件（Dashboard 3891 / Observability 3874 / Issues 3532 / Autopilot 3346 / Runtimes 3323 / Event 2237 / Account 2173 / SceneMarket 1988 / 其余更小）+ `entries/` 16 个入口 chunk。
+Vue 侧现状：`app/src/views/` 20 个 .vue 组件（Dashboard 3891 / Observability 3874 / Issues 3532 / Autopilot 3346 / Runtimes 3323 / ReposView+TemplatesView 合一 chunk / Event 2237 / Account 2173 / SceneMarket 1988 / 其余更小）+ `entries/` 17 个入口 chunk。
 
 每批窗口契约（entry 持有 window 全局函数，app.js nav 路由段调用，函数名/签名与老代码一致）：
 - 批9 issues：`renderTasks(param)`；导出 `_stopScenePoll/_grapeConfirm/_backToTaskDetail/_jumpToNodeEvent/_jumpToPipeline/_tasksById`
@@ -48,6 +49,7 @@ Vue 侧现状：`app/src/views/` 17 个 .vue 组件（Dashboard 3891 / Observabi
 - 批11 runtimes：`renderRuntimes()`；app.js 路由段已改调它（app.js **v188**）；dashboard 桥接已随批12 撤除
 - 批12 dashboard：`renderDashboard(data)` / `renderSceneDetailLocal(id)`；`window._dashboardEditing` 与 app.js 可见性守卫互通
 - 批13 observability：`renderObservability(section)`；`window.stopObsAuto`（app.js typeof 守卫）；echarts 走 vendored 全局 `G.echarts`、mermaid 保持 CDN 动态加载
+- 批14 壳耦合组：`renderRepoSelection(repos)` / `renderRepos()` / `renderSettings(tab)` / `switchSidebarTab(tab)` / `selectRepo` / `platformIcon`（裸标识符，app.js onboarding 用）/ `openCreateRepoModal` 由 entries/repos-view.js 持有；templates 是 ReposView 内子 tab 组件；死代码不迁（settings 的 theme/lang/apikeys 函数已由批7 AccountView 承载、_loadOrgSection 无渲染者）
 
 ## 3. 改动口径（不变式，每批照此办理）
 
@@ -74,11 +76,10 @@ Vue 侧现状：`app/src/views/` 17 个 .vue 组件（Dashboard 3891 / Observabi
 ## 5. 未完成事项（按优先序）
 
 ### 5.1 剩余迁移批次
-1. **壳耦合组（下一批）**：`settings.js(308)` + `repos.js(821)` + `templates.js(845)`——templates 是 repos 大厅 lobby 子标签（renderSelectionShell/ptContent/sidebarTab 在 repos 壳内）；repos 的 `selectRepo` 被 app.js/scene-market/templates 交叉调用，`platformIcon` 桥已就位（批7 加的，bump repos.js v63）。三者建议一批迁。
-2. **knowledge.js(1084)**：已有 `_knowledgeVueApp` 壳内挂载模式可参考（app.js 1296 行路由特判）。
-3. **feedback.js(367)**：小件。
-4. **admin 独立站** → 最后 `app.js` 外壳 + `index.html` 收口（清死代码、统一路由段、撤全部剩余桥接）。
-5. 死代码待主人裁决：agents.js Configure 面板（约250行无UI入口）；help 页是否彻底 Vue 化（阶段3裁决）。
+1. **knowledge.js(1084)**：已有 `_knowledgeVueApp` 壳内挂载模式可参考（app.js 1296 行路由特判）——下一批。
+2. **feedback.js(367)**：小件。
+3. **admin 独立站** → 最后 `app.js` 外壳 + `index.html` 收口（清死代码、统一路由段、撤全部剩余桥接）。
+4. 死代码待主人裁决：agents.js Configure 面板（约250行无UI入口）；help 页是否彻底 Vue 化（阶段3裁决）。
 
 ### 5.2 视觉/体验债（`docs/weekly-08/ui-debt.md`，迁移收口后批量处理）
 - #1 issues 太黑 / #2 scene+im 太白 / #3 霓虹小配色 / #4 skills+knowledge+chat 配色 / #5 dashboard 卡片边界 / #6 需求详情字体色撞背景 / #6a dashboard 毛玻璃白底暗色过亮

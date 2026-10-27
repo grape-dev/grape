@@ -80,9 +80,9 @@
                 <div id="evEngineRow" v-html="engineText"></div>
                 <div><span class="ev__lbl">Skill:</span> {{ data.skill || agentType }}</div>
                 <div id="evDurationRow" v-html="durationText"></div>
-                <div id="evStatusRow" v-html="statusText" @click="onInfoClick($event)"></div>
+                <div id="evStatusRow" @click="onInfoClick($event)" v-html="statusText"></div>
                 <div id="evFailReason" v-html="failReasonText"></div>
-                <div id="evLogRow" v-html="logRowText" @click="onInfoClick($event)"></div>
+                <div id="evLogRow" @click="onInfoClick($event)" v-html="logRowText"></div>
                 <div v-if="gateLoaded" id="convGate" v-html="gateText"></div>
               </div>
             </div>

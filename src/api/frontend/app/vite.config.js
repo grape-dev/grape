@@ -48,6 +48,7 @@ export default defineConfig({
           'runtimes-view': /^runtimes-[vV]iew-.*\.css$/,
           'dashboard-view': /^dashboard-[vV]iew-.*\.css$/,
           'observability-view': /^observability-[vV]iew-.*\.css$/,
+          'repos-view': /^repos-[vV]iew-.*\.css$/,
           }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -107,6 +108,7 @@ export default defineConfig({
         'runtimes-view': fileURLToPath(new URL('./src/views/entries/runtimes-view.js', import.meta.url)),
         'dashboard-view': fileURLToPath(new URL('./src/views/entries/dashboard-view.js', import.meta.url)),
         'observability-view': fileURLToPath(new URL('./src/views/entries/observability-view.js', import.meta.url)),
+        'repos-view': fileURLToPath(new URL('./src/views/entries/repos-view.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
