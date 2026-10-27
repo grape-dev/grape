@@ -3485,14 +3485,12 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             pass
 
 
-def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
-    """Issue #468: SRE 完成后从 result_text 提取部署 URL 登记到 managed_repos.deploy_url。
+def _extract_deploy_url(result_text: str) -> str:
+    """Issue #468/#482: 从 result_text 提取并校验部署 URL（双登记路径共享）。
 
-    直连 _execute_agent_inner 与远程 worker complete_task() 两条收尾路径统一调用。
     提取策略：结构化优先（artifacts / issue_summary 中的 `deploy_url: <url>` 条目），
-    回落全文完整 URL 正则（修复旧正则截断资源路径缺陷）。
-    校验 http(s) 前缀 + 长度 ≤512 后 UPDATE，成功打日志并返回登记到的 URL；
-    未登记（无 URL / 校验拒绝 / repo 不存在）返回空串。
+    回落全文完整 URL 正则（保留资源路径不截断）。
+    校验 http(s) 前缀 + 长度 ≤512；未命中/拒绝返回空串。
     """
     text = (result_text or "").strip()
     if not text:
@@ -3523,7 +3521,20 @@ def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
     # ③ 校验：http(s) 前缀 + 长度 ≤512（沿用 #446 规则）
     if not url or not url.lower().startswith(("http://", "https://")) or len(url) > 512:
         return ""
-    # ④ 登记（repo 不存在时 rowcount=0，不写库）
+    return url
+
+
+def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
+    """Issue #468: SRE 完成后从 result_text 提取部署 URL 登记到 managed_repos.deploy_url。
+
+    直连 _execute_agent_inner 与远程 worker complete_task() 两条收尾路径统一调用。
+    提取校验逻辑见 _extract_deploy_url；成功打日志并返回登记到的 URL；
+    未登记（无 URL / 校验拒绝 / repo 不存在）返回空串。
+    """
+    url = _extract_deploy_url(result_text)
+    if not url:
+        return ""
+    # 登记（repo 不存在时 rowcount=0，不写库）
     try:
         with db_lock:
             c = db.cursor()
@@ -3534,6 +3545,44 @@ def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
                 return url
     except Exception as _e:
         log.warning(f"SRE deploy_url extraction failed: {_e}")
+    return ""
+
+
+def register_scene_deploy_url(repo_key: str, issue_id: str, result_text: str) -> str:
+    """Issue #482: SRE 完成后把部署 URL 登记到需求绑定场景的 devops_pipeline_scene.deploy_url。
+
+    与 register_sre_deploy_url（仓库级，#468）并列，双收尾路径统一调用：
+    - 场景定位：get_issue_scene 读 issue 绑定 scene_id（Issue 级快照），
+      仅更新该绑定场景（scene_id+repo_key+is_active=1），无绑定跳过不报错；
+    - 提取校验：复用 _extract_deploy_url；
+    - UPDATE 幂等覆盖（与手动 PUT /api/scenes/{scene_id}/deploy-url 同语义，后写为准）；
+    - 登记失败仅记日志，不影响任务收尾主流程；未登记返回空串。
+    """
+    scene_id = ""
+    try:
+        from src.api.session_store import get_issue_scene
+        scene_id, _ = get_issue_scene(repo_key, issue_id)
+    except Exception as _e:
+        log.warning(f"scene deploy_url register: resolve issue scene failed: {_e}")
+        return ""
+    if not scene_id:
+        return ""
+    url = _extract_deploy_url(result_text)
+    if not url:
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE devops_pipeline_scene SET deploy_url=? "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1",
+                (url, scene_id, repo_key))
+            if c.rowcount > 0:
+                db.commit()
+                log.info(f"scene deploy_url auto-registered: {url} for scene {scene_id} ({repo_key})")
+                return url
+    except Exception as _e:
+        log.warning(f"scene deploy_url register failed: {_e}")
     return ""
 
 
@@ -4145,6 +4194,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             register_sre_deploy_url(repo_key, result_text)
         except Exception as _e:
             log.warning(f"SRE deploy_url extraction failed: {_e}")
+        # Issue #482: 场景级登记——按 issue 绑定 scene_id 更新
+        # devops_pipeline_scene.deploy_url（无绑定/失败不影响收尾主流程）
+        try:
+            register_scene_deploy_url(repo_key, issue_id, result_text)
+        except Exception as _e:
+            log.warning(f"scene deploy_url register failed: {_e}")
 
     # Issue #51: SRE（最后节点）完成后 → 设 stage=pending_review 等待开发者审核
     if new_status == "completed" and agent_type == "sre" and issue_id:

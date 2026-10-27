@@ -2231,6 +2231,13 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     register_sre_deploy_url(_repo_key, _result_text)
                 except Exception as _se:
                     log.warning(f"complete_task sre deploy_url register failed: {_se}")
+                # Issue #482: 场景级登记——按 issue 绑定 scene_id 更新
+                # devops_pipeline_scene.deploy_url（无绑定/失败不影响收尾主流程）
+                try:
+                    from src.api.event_pipeline import register_scene_deploy_url
+                    register_scene_deploy_url(_repo_key, _issue_id, _result_text)
+                except Exception as _se:
+                    log.warning(f"complete_task scene deploy_url register failed: {_se}")
         except Exception as _pe:
             log.warning(f"complete_task post-completion hooks failed: {_pe}")
     # 可观察性埋点：任务到达终态
