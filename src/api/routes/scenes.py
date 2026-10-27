@@ -840,40 +840,65 @@ def _normalize_owner_repo(owner: str, repo: str) -> tuple[str, str]:
 def _detect_repo_provider(owner: str, repo: str) -> str:
     """根据 managed_repos.repo_key 前缀判断仓库属于 gitcode 还是 github。
 
-    优先查 managed_repos 表（托管仓库有明确的 provider 前缀）；
-    其次查 user_repos（用户绑定的仓库缓存）；
-    默认返回 'gitcode'。
+    两轮干净结构（2026-10-24 修复，生产 github 同名碰撞事故）：
+    - 第一轮**只查 managed_repos**（平台托管事实源），github/gitcode 都查，命中即返回；
+    - 第二轮才查 user_repos，且**同名冲突（两平台都有用户绑定记录）时不返回、回退默认
+      gitcode**——用户绑定记录没有资格裁决平台归属的歧义。
+    - 默认返回 'gitcode'。
+
+    旧实现按 provider 外层循环、managed/user 内层交错，导致"user_repos 里 github: 同名
+    记录"压过"managed_repos 里 gitcode: 记录"：GitHub 上存在别人建的同名仓（只有一个
+    main 分支）时，分支下拉只显示 main。实测（生产 grape-dev/grape，2026-10-24）：
+    GitCode 侧 133 个分支被误判成 GitHub 仓库后只剩 main。
     """
     from src.user.db import db_lock, db
     from src.repo_key import to_repo_key
+
+    def _hit(table: str, rk: str) -> bool:
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(f"SELECT 1 FROM {table} WHERE repo_key=? LIMIT 1", (rk,))
+                return bool(c.fetchone())
+        except Exception:
+            return False
+
+    # 第一轮：managed_repos（托管事实源，查到即返回）
     for prov in ("github", "gitcode"):
         rk = to_repo_key(f"{owner}/{repo}", provider=prov)
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (rk,))
-                if c.fetchone():
-                    return prov
-        except Exception:
-            pass
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT 1 FROM user_repos WHERE repo_key=? LIMIT 1", (rk,))
-                if c.fetchone():
-                    return prov
-        except Exception:
-            pass
+        if _hit("managed_repos", rk):
+            return prov
+
+    # 第二轮：user_repos（仅无歧义时采用；同名冲突回退默认）
+    _gh = _hit("user_repos", to_repo_key(f"{owner}/{repo}", provider="github"))
+    _gc = _hit("user_repos", to_repo_key(f"{owner}/{repo}", provider="gitcode"))
+    if _gh and not _gc:
+        return "github"
+    if _gc and not _gh:
+        return "gitcode"
     return "gitcode"
 
 
-@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker).")
-def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
-    """列出仓库所有分支（供高级选项工作分支选择）"""
+@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker). Optional provider/repo_key query param overrides platform detection (2026-10-24: same-name GitHub repos could shadow managed GitCode repos).")
+def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str = "",
+                       user: dict = Depends(require_no_session_token)):
+    """列出仓库所有分支（供高级选项工作分支选择）
+
+    provider/repo_key（可选，2026-10-24 新增）：显式指定平台，跳过猜测逻辑。
+    前端托管仓场景应直接传（/repos/managed 返回的 repo_key 自带前缀）。
+    """
     from src.user.repo_manager import _req, _github_req
 
     owner, repo = _normalize_owner_repo(owner, repo)
-    provider = _detect_repo_provider(owner, repo)
+    if repo_key:
+        # repo_key 优先：自带前缀，直接解析
+        _prov = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+        provider = provider or _prov
+    if provider in ("github", "gitcode"):
+        _detected = provider
+    else:
+        _detected = _detect_repo_provider(owner, repo)
+    provider = _detected
 
     if provider == "github":
         from src.user.db import get_github_token
@@ -934,14 +959,25 @@ def list_repo_branches(owner: str, repo: str, user: dict = Depends(require_no_se
     return {"branches": branches}
 
 
-@router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch", description="Creates a new branch in the repo.")
+@router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch", description="Creates a new branch in the repo. Optional provider/repo_key query param overrides platform detection (2026-10-24).")
 def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
+                        provider: str = "", repo_key: str = "",
                         user: dict = Depends(require_no_session_token)):
-    """在仓库中创建新分支"""
+    """在仓库中创建新分支
+
+    provider/repo_key（可选，2026-10-24 新增）：显式指定平台，跳过猜测逻辑。
+    """
     from src.user.repo_manager import _req, _github_req
 
     owner, repo = _normalize_owner_repo(owner, repo)
-    provider = _detect_repo_provider(owner, repo)
+    if repo_key:
+        _prov = repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode"
+        provider = provider or _prov
+    if provider in ("github", "gitcode"):
+        _detected = provider
+    else:
+        _detected = _detect_repo_provider(owner, repo)
+    provider = _detected
 
     if provider == "github":
         from src.user.db import get_github_token

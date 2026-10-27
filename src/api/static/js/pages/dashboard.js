@@ -906,12 +906,29 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     container.appendChild(row);
   };
 
-  window._createNewBranchInline = function(owner, name) {
+  
+// 2026-10-24（生产同名仓误判修复）：分支接口显式带平台，避免 _detect_repo_provider 被
+// user_repos 里 github: 同名记录带偏（托管仓被误判成 GitHub 同名仓 → 分支只剩 main）。
+window._branchQS = function(owner, repo) {
+  try {
+    var rk = (app.currentRepo() || {}).repoKey || '';
+    if (rk && rk.indexOf(':') > 0) {
+      var bare = rk.replace(/^(gitcode|github):/, '');
+      // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
+      if (!owner || !repo || bare === (owner + '/' + repo)) {
+        return '?repo_key=' + encodeURIComponent(rk);
+      }
+    }
+  } catch (e) {}
+  return '';
+};
+
+window._createNewBranchInline = function(owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
     var refs = (document.getElementById('newBranchRefInline') || {}).value || 'main';
     if (!branchName.trim()) { app.showToast && app.showToast(I18N.t('dashboard.branch_name_empty')||'分支名不能为空'); return; }
-    API.post('/scenes/branches/' + owner + '/' + name, { branch_name: branchName.trim(), refs: refs })
-      .then(function() { app.showToast && app.showToast(I18N.t('dashboard.branch_created')||'分支已创建'); return API.get('/scenes/branches/' + owner + '/' + name); })
+    API.post('/scenes/branches/' + owner + '/' + name + window._branchQS(owner, name), { branch_name: branchName.trim(), refs: refs })
+      .then(function() { app.showToast && app.showToast(I18N.t('dashboard.branch_created')||'分支已创建'); return API.get('/scenes/branches/' + owner + '/' + name + window._branchQS(owner, name)); })
       .then(function(b) {
         var branches = (b && b.branches) || [];
         var sel = document.getElementById('advWorkBranchInline');
@@ -1985,7 +2002,7 @@ function _enterCreateStandardMode(data, owner, name) {
   };
 
   // 加载分支列表
-  API.get('/scenes/branches/' + owner + '/' + name).then(function(b) {
+  API.get('/scenes/branches/' + owner + '/' + name + window._branchQS(owner, name)).then(function(b) {
     var branches = (b && b.branches) || [];
     var sel = document.getElementById('advWorkBranchInline');
     if (sel && branches.length) sel.innerHTML = branches.map(function(br) { return '<option value="' + br.name + '">' + br.name + (br.protected ? ' 🔒' : '') + '</option>'; }).join('');
@@ -2058,8 +2075,8 @@ function _enterCreateStandardMode(data, owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
     var refs = (document.getElementById('newBranchRefInline') || {}).value || 'main';
     if (!branchName.trim()) { app.showToast && app.showToast(I18N.t('dashboard.branch_name_empty')||'分支名不能为空'); return; }
-    API.post('/scenes/branches/' + owner + '/' + name, { branch_name: branchName.trim(), refs: refs })
-      .then(function() { app.showToast && app.showToast(I18N.t('dashboard.branch_created')||'分支已创建'); return API.get('/scenes/branches/' + owner + '/' + name); })
+    API.post('/scenes/branches/' + owner + '/' + name + window._branchQS(owner, name), { branch_name: branchName.trim(), refs: refs })
+      .then(function() { app.showToast && app.showToast(I18N.t('dashboard.branch_created')||'分支已创建'); return API.get('/scenes/branches/' + owner + '/' + name + window._branchQS(owner, name)); })
       .then(function(b) {
         var branches = (b && b.branches) || [];
         var sel = document.getElementById('advWorkBranchInline');
@@ -2200,7 +2217,7 @@ window._addLinkedRepoInline = function(repoKey, branch) {
     loadOpt.value = '';
     loadOpt.textContent = '加载中...';
     brSel.appendChild(loadOpt);
-    API.get('/scenes/branches/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo)).then(function(b) {
+    API.get('/scenes/branches/' + encodeURIComponent(owner) + '/' + encodeURIComponent(repo) + window._branchQS(owner, repo)).then(function(b) {
       var branches = (b && b.branches) || [];
       window._linkedRepoBranchCache[rk] = branches;
       brSel.removeChild(loadOpt);
@@ -2266,7 +2283,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var sel = document.getElementById('advWorkBranchInline');
     if (sel) {
       sel.innerHTML = '<option value="' + (d.work_branch || 'main') + '">' + (d.work_branch || 'main') + '</option>';
-      API.get('/scenes/branches/' + owner + '/' + name).then(function(b) {
+      API.get('/scenes/branches/' + owner + '/' + name + window._branchQS(owner, name)).then(function(b) {
         var branches = (b && b.branches) || [];
         if (branches.length) {
           sel.innerHTML = branches.map(function(br) {

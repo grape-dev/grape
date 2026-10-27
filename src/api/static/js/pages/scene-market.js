@@ -523,14 +523,30 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   }
 
   // 创建新分支
-  window._applyCreateNewBranch = function(o, n) {
+  
+// 2026-10-24（生产同名仓误判修复）：分支接口显式带平台。
+window._branchQS = function(owner, repo) {
+  try {
+    var rk = (app.currentRepo() || {}).repoKey || '';
+    if (rk && rk.indexOf(':') > 0) {
+      var bare = rk.replace(/^(gitcode|github):/, '');
+      // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
+      if (!owner || !repo || bare === (owner + '/' + repo)) {
+        return '?repo_key=' + encodeURIComponent(rk);
+      }
+    }
+  } catch (e) {}
+  return '';
+};
+
+window._applyCreateNewBranch = function(o, n) {
     var branchName = (document.getElementById('applyNewBranchName') || {}).value || '';
     var refs = (document.getElementById('applyNewBranchRef') || {}).value || 'main';
     if (!branchName.trim()) { app.showToast && app.showToast(I18N.t('dashboard.branch_name_empty')||'分支名不能为空'); return; }
-    API.post('/scenes/branches/' + o + '/' + n, { branch_name: branchName.trim(), refs: refs })
+    API.post('/scenes/branches/' + o + '/' + n + window._branchQS(o, n), { branch_name: branchName.trim(), refs: refs })
       .then(function() {
         app.showToast && app.showToast(I18N.t('dashboard.branch_created')||'分支已创建');
-        return API.get('/scenes/branches/' + o + '/' + n);
+        return API.get('/scenes/branches/' + o + '/' + n + window._branchQS(o, n));
       })
       .then(function(b) {
         var branches = (b && b.branches) || [];
@@ -546,7 +562,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
   };
 
   // 加载仓库分支列表
-  API.get('/scenes/branches/' + owner + '/' + repoName).then(function(b) {
+  API.get('/scenes/branches/' + owner + '/' + repoName + window._branchQS(owner, repoName)).then(function(b) {
     var branches = (b && b.branches) || [];
     var sel = document.getElementById('applyAdvWorkBranch');
     if (!sel) return; // 弹窗可能已关闭

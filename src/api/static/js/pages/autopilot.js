@@ -504,7 +504,7 @@ function _apShowDialog(tpl, existing) {
     var _rk = _taskRepoKey.replace(/^(gitcode|github):/, '');
     var _parts = _rk.split('/');
     if (_parts.length === 2) {
-      API.get('/scenes/branches/' + _parts[0] + '/' + _parts[1]).then(function(b) {
+      API.get('/scenes/branches/' + _parts[0] + '/' + _parts[1] + '?repo_key=' + encodeURIComponent(_taskRepoKey)).then(function(b) {
         var branches = (b && b.branches) || [];
         var sel = document.getElementById('apFormWorkBranch');
         if (!sel) return;
@@ -1606,7 +1606,7 @@ function _apAdvancedOptionsHTML(t) {
       var rk = repoKey.replace(/^(gitcode|github):/, '');
       var parts = rk.split('/');
       if (parts.length === 2) {
-        API.get('/scenes/branches/' + parts[0] + '/' + parts[1]).then(function(b) {
+        API.get('/scenes/branches/' + parts[0] + '/' + parts[1] + '?repo_key=' + encodeURIComponent(repoKey)).then(function(b) {
           var branches = (b && b.branches) || [];
           var sel = document.getElementById('apDetailWorkBranch');
           if (!sel) return;
