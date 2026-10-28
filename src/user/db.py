@@ -1575,40 +1575,56 @@ def get_scene_recommend_config(repo_key: str) -> dict:
     return {"fallback_scene": "", "rules": []}
 
 
-def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list):
+def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list) -> bool:
     """写入仓库智能推荐配置（managed_repos.scene_recommend_config），幂等。
 
     写入时自检：过滤 scene_id 不在当前场景列表中的规则。
-    fallback_scene 必填，空则报错。
+    #487 失败显式化：
+    - 场景列表为空 → raise ValueError（调用方映射 4xx，不再静默丢保存）；
+    - UPDATE 0 行 → INSERT OR IGNORE 兜底补行后再 UPDATE；
+    - 返回 True=已落库，False=兜底后仍未写入（调用方显式报错）。
     """
-    from src.repo_key import to_repo_key
+    from src.repo_key import to_repo_key, parse_repo_key
     repo_key = to_repo_key(repo_key)
     import json
 
     # 自检：过滤无效 scene_id
-    try:
-        from src.api.pipeline_config import get_scenes
-        scenes = get_scenes(repo_key=repo_key)
-        valid_ids = {s["id"] for s in scenes}
-        if not valid_ids:
-            log.warning(f"Set scene recommend config: no scenes for {repo_key}")
-            return
-        rules = [r for r in (rules or []) if isinstance(r, dict) and r.get("scene_id") in valid_ids]
-        if fallback_scene and fallback_scene not in valid_ids:
-            fallback_scene = scenes[0]["id"] if scenes else ""
-            log.info(f"Set scene recommend config: fallback invalid, reset to {fallback_scene}")
-    except Exception as e:
-        log.warning(f"Set scene recommend config: sanitize failed: {e}")
+    from src.api.pipeline_config import get_scenes
+    scenes = get_scenes(repo_key=repo_key)
+    if not scenes:
+        raise ValueError(f"仓库 {repo_key} 场景列表为空，无法保存智能推荐配置")
+    valid_ids = {s["id"] for s in scenes}
+    rules = [r for r in (rules or []) if isinstance(r, dict) and r.get("scene_id") in valid_ids]
+    if fallback_scene and fallback_scene not in valid_ids:
+        fallback_scene = scenes[0]["id"]
+        log.info(f"Set scene recommend config: fallback invalid, reset to {fallback_scene}")
 
     cfg = json.dumps({"fallback_scene": fallback_scene or "", "rules": rules or []}, ensure_ascii=False)
     try:
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE managed_repos SET scene_recommend_config=? WHERE repo_key=?", (cfg, repo_key))
+            if not c.rowcount:
+                # #487 upsert 兜底：仓库行缺失时补行（repo_key 主键幂等）再写入
+                _provider, _owner, _name = parse_repo_key(repo_key)
+                c.execute("INSERT OR IGNORE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
+                          "VALUES (?,?,?,?)",
+                          (repo_key, _owner, _name, f"{_owner}/{_name}"))
+                c.execute("UPDATE managed_repos SET scene_recommend_config=? WHERE repo_key=?", (cfg, repo_key))
+                if not c.rowcount:
+                    db.rollback()
+                    log.warning(f"Set scene recommend config failed: no managed_repos row for {repo_key}")
+                    return False
             db.commit()
         log.info(f"Scene recommend config saved: repo={repo_key} fallback={fallback_scene} rules={len(rules)}")
+        return True
     except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
         log.warning(f"Set scene recommend config failed: {e}")
+        return False
 
 
 def set_host_status(repo_key: str, status: str = ""):

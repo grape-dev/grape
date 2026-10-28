@@ -2527,12 +2527,12 @@ window._openSceneRecommendModal = function(repoParam) {
     <div style="border-top:1px solid rgba(0,0,0,.06);padding-top:16px">\
       <div style="font-size:13px;font-weight:600;color:#1d1d1f;margin-bottom:8px">' + (I18N.t('dashboard.recommend_rules')||'场景功能') + '</div>\
       <div id="recRulesContainer" style="display:flex;flex-direction:column;gap:8px"></div>\
-      <button class="ap-btn" style="margin-top:8px;font-size:11px" onclick="_addRecRuleRow()">+ ' + (I18N.t('dashboard.recommend_add_rule')||'添加规则') + '</button>\
+      <button id="recAddRuleBtn" class="ap-btn" style="margin-top:8px;font-size:11px" disabled onclick="_addRecRuleRow()">+ ' + (I18N.t('dashboard.recommend_add_rule')||'添加规则') + '</button>\
       <div style="font-size:11px;color:#86868b;margin-top:8px">' + (I18N.t('dashboard.recommend_rules_hint')||'key 从当前仓库已应用场景中选择，value 描述什么情况下推荐使用该场景') + '</div>\
     </div>\
     <div style="display:flex;justify-content:flex-end;gap:8px;margin-top:20px">\
       <button class="ap-btn" onclick="document.getElementById(\'sceneRecommendOverlay\').remove()">' + (I18N.t('common.cancel')||'取消') + '</button>\
-      <button class="ap-btn" onclick="_saveSceneRecommendConfig(\'' + owner + '\',\'' + name + '\')">' + (I18N.t('common.save')||'保存') + '</button>\
+      <button id="recSaveBtn" class="ap-btn" disabled onclick="_saveSceneRecommendConfig(\'' + owner + '\',\'' + name + '\')">' + (I18N.t('common.save')||'保存') + '</button>\
     </div>';
 
   ov.appendChild(modal);
@@ -2542,7 +2542,9 @@ window._openSceneRecommendModal = function(repoParam) {
   document.body.appendChild(ov);
 
   // 加载场景列表 + 已有配置（PR 订阅场景不参与兜底推荐）
+  // Issue #487 竞态防护：场景列表加载完成前禁用「添加规则/保存」，防止空选项导致规则被静默丢弃
   var sceneOptions = '';
+  var sceneListLoaded = false;
   API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name)).then(function(d) {
     var scenes = (d && d.scenes) || [];
     sceneOptions = scenes.map(function(s) {
@@ -2551,9 +2553,19 @@ window._openSceneRecommendModal = function(repoParam) {
     }).join('');
     var fallbackSel = document.getElementById('recFallbackScene');
     if (fallbackSel) fallbackSel.innerHTML = sceneOptions;
+    if (!scenes.length) {
+      app.showToast && app.showToast(I18N.t('dashboard.recommend_no_scenes')||'当前仓库暂无可用场景，无法配置智能推荐规则');
+      return null; // 空场景：保持按钮禁用，跳过配置回显
+    }
+    sceneListLoaded = true;
+    ['recAddRuleBtn', 'recSaveBtn'].forEach(function(id) {
+      var b = document.getElementById(id);
+      if (b) b.disabled = false;
+    });
     // 加载已有配置
     return API.get('/repos/' + owner + '/' + name + '/scene-recommend-config');
   }).then(function(cfg) {
+    if (!cfg) return;
     if (!cfg) cfg = {fallback_scene: '', rules: []};
     // 设置兜底场景
     var fallbackSel = document.getElementById('recFallbackScene');
@@ -2574,13 +2586,20 @@ window._openSceneRecommendModal = function(repoParam) {
       _addRecRuleRow(r.scene_id, r.condition);
     });
   }).catch(function(e) {
-    app.showToast && app.showToast('加载推荐配置失败: ' + ((e && e.message) || ''));
+    // Issue #487：加载失败保持按钮禁用（防误操作/静默丢规则），给出明确提示
+    var msg = (e && e.message) || '';
+    app.showToast && app.showToast((I18N.t('dashboard.recommend_load_failed')||'加载推荐配置失败') + (msg ? ': ' + msg : ''));
   });
 
   // 设置全局函数
   window._addRecRuleRow = function(sceneId, condition) {
     var container = document.getElementById('recRulesContainer');
     if (!container) return;
+    // Issue #487 双保险：场景选项未就绪时不添加空下拉行（回显规则除外——sceneOptions 已就绪时才到达此处）
+    if (!sceneOptions && sceneId === undefined) {
+      app.showToast && app.showToast(I18N.t('dashboard.recommend_scenes_loading')||'场景列表尚未加载完成，请稍后再添加规则');
+      return;
+    }
     var row = document.createElement('div');
     row.style.cssText = 'display:flex;gap:8px;align-items:center';
     var selOpts = sceneOptions;
@@ -2596,6 +2615,11 @@ window._openSceneRecommendModal = function(repoParam) {
   };
 
   window._saveSceneRecommendConfig = function(owner, name) {
+    // Issue #487：场景列表未加载完成时禁止保存（防静默丢规则）
+    if (!sceneListLoaded) {
+      app.showToast && app.showToast(I18N.t('dashboard.recommend_scenes_loading')||'场景列表尚未加载完成，请稍后保存');
+      return;
+    }
     var fallback = (document.getElementById('recFallbackScene') || {}).value || '';
     if (!fallback) { app.showToast && app.showToast(I18N.t('dashboard.recommend_fallback_required')||'兜底场景不能为空'); return; }
     var rules = [];

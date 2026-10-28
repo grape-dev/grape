@@ -2193,12 +2193,35 @@ class SceneRecommendConfigBody(BaseModel):
     rules: list = []  # [{"scene_id": "", "condition": ""}]
 
 
+def _resolve_scene_recommend_repo_key(owner: str, repo: str) -> str:
+    """按 managed_repos 实际前缀解析 repo_key（Issue #487）。
+
+    固定 to_repo_key（默认 gitcode: 前缀）在 github: 托管仓上读写错 key，
+    导致保存假成功。与 /scenes/with-pipeline 同源：裸名查 DB 解析真实前缀，
+    已带前缀幂等返回。
+    """
+    from src.repo_key import to_repo_key
+    owner_repo = f"{owner}/{repo}"
+    if ":" in owner or ":" in repo:
+        return to_repo_key(owner_repo)
+    try:
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            c = _db.cursor()
+            row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
+                            (f"gitcode:{owner_repo}", f"github:{owner_repo}")).fetchone()
+            if row:
+                return row[0]
+    except Exception:
+        pass
+    return to_repo_key(owner_repo)
+
+
 @router.get("/{owner}/{repo}/scene-recommend-config", operation_id="repos_scene_recommend_config_get", summary="Get scene recommend config", description="Reads the repository smart scene-recommend config (fallback scene + routing rules).")
 def get_scene_recommend_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     """读取仓库智能推荐配置（兜底场景 + 路由规则）。"""
-    from src.repo_key import to_repo_key
     from src.user.db import get_scene_recommend_config
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_scene_recommend_repo_key(owner, repo)
     return get_scene_recommend_config(repo_key)
 
 
@@ -2209,11 +2232,11 @@ def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfi
 
     写入时自检：过滤 scene_id 不在当前场景列表中的规则。
     fallback_scene 必填，空则报错。
+    #487：repo_key 按 managed_repos 实际前缀解析；场景列表为空 / 落库失败
+    返回明确 400，不再假成功。
     """
-    from src.repo_key import to_repo_key
     from src.user.db import set_scene_recommend_config
-    from src.api.pipeline_config import get_scenes
-    repo_key = to_repo_key(f"{owner}/{repo}")
+    repo_key = _resolve_scene_recommend_repo_key(owner, repo)
 
     # 校验 fallback_scene 非空
     if not body.fallback_scene or not body.fallback_scene.strip():
@@ -2227,7 +2250,13 @@ def save_scene_recommend_config(owner: str, repo: str, body: SceneRecommendConfi
             raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景 '{sid}' 重复"})
         seen.add(sid)
 
-    set_scene_recommend_config(repo_key, body.fallback_scene.strip(), body.rules or [])
+    try:
+        saved = set_scene_recommend_config(repo_key, body.fallback_scene.strip(), body.rules or [])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": str(e)})
+    if not saved:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "智能推荐配置保存失败（仓库行不存在或写入不满足），请稍后重试"})
     return {"message": "智能推荐规则已保存"}
 
 
