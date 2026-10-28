@@ -100,7 +100,9 @@
     "search_placeholder": "Search engine name/device/tag...",
     "cancel": "Cancel",
     "confirm": "Confirm",
-    "selected_count": "{{count}} engines selected"
+    "selected_count": "{{count}} engines selected",
+    "detached_group": "Unavailable",
+    "detached_hint": "Engine no longer available in current scope (may belong to another repo/user); removal only"
   },
   "skill_picker": {
     "scope_official": "Official",

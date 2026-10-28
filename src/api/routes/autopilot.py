@@ -82,6 +82,52 @@ def _check_exec_access(user: dict, exec_id: int) -> dict:
     return {"id": row[0], "task_id": row[1], "repo_key": repo_key}
 
 
+def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) -> None:
+    """Issue #486: 服务端校验 engine_runtime_ids 归属（复用 #277 可见性口径）。
+
+    引擎对应凭据不在当前用户于该仓库的可见范围（全局 / 本人个人 / 当前仓库仓库级）
+    时拒绝，防止 API 层越权绑定其他仓库或他人个人的引擎。空列表 = 广播模式，
+    不在校验范围，行为保持不变。凭据已吊销（revoked）同样拒绝。
+    """
+    if not engine_ids:
+        return
+    from src.repo_key import from_repo_key
+    from src.user import db as user_db
+    from src.api.routes.settings import _build_cred_map, _make_visible_credential_fn
+    uid = user.get("id") or 0
+    uname = user.get("username") or ""
+    user_repos = {r["full_name"] for r in (user_db.get_user_repos(uid) if uid else [])}
+    repo_base = from_repo_key(repo_key or "")
+    cred_map = _build_cred_map(db, db_lock)
+    _visible = _make_visible_credential_fn(uname, user_repos, repo_filter=repo_base)
+    try:
+        ids = [int(x) for x in engine_ids]
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "invalid engine_runtime_ids"})
+    with db_lock:
+        c = db.cursor()
+        ph = ",".join("?" * len(ids))
+        rows = c.execute(f"SELECT id, credential_id FROM agent_runtimes WHERE id IN ({ph})", ids).fetchall()
+    rt_cred = {r[0]: (r[1] or 0) for r in rows}
+    invalid = []
+    for eid in ids:
+        if eid not in rt_cred:
+            invalid.append(str(eid))
+            continue
+        cid = rt_cred[eid]
+        cred = cred_map.get(cid) or {"scope": "global", "owner_name": "", "owner_id": "", "repo_key": ""}
+        if cred.get("status") == "revoked":
+            invalid.append(str(eid))
+            continue
+        if not _visible(cid, cred.get("scope", "global"), cred.get("owner_name", ""),
+                        cred.get("owner_id", ""), from_repo_key(cred.get("repo_key", ""))):
+            invalid.append(str(eid))
+    if invalid:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": f"engine runtime ids not available for this repo/user: {', '.join(invalid)}"})
+
+
 def _autopilot_exec_cols() -> list:
     """返回 autopilot_executions 表的实际列名（v3.0 迁移后 issue_number 可能不存在）。"""
     with db_lock:
@@ -318,6 +364,8 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
             # 用用户实际关联的 repo_key（正确的前缀），而非前端硬编码的
             body.repo_key = _matched_repo_key
         check_repo_access(user, body.repo_key)
+    # Issue #486: 服务端校验 engine_runtime_ids 归属（与 #277 引擎可见性口径一致）
+    _validate_engine_runtime_ids(user, body.repo_key or "", body.engine_runtime_ids or [])
     next_run = _compute_next_run(body.cron)
     now_str = datetime.now(timezone.utc).isoformat()
     engine_ids_json = json.dumps(body.engine_runtime_ids) if body.engine_runtime_ids else ""
@@ -341,10 +389,13 @@ def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
 @router.put("/tasks/{task_id}")
 def update_task(task_id: int, body: UpdateTaskBody, user: dict = Depends(get_current_user)):
     """更新自动化任务（部分更新）。"""
-    _check_task_access(user, task_id)
+    task = _check_task_access(user, task_id)
     # 如果要改 repo_key，校验新仓库归属
     if body.repo_key:
         check_repo_access(user, body.repo_key)
+    # Issue #486: engine_runtime_ids 服务端归属校验（生效仓库 = 提交的 repo_key 或任务原 repo_key）
+    if body.engine_runtime_ids is not None:
+        _validate_engine_runtime_ids(user, body.repo_key or task.get("repo_key") or "", body.engine_runtime_ids)
     fields = []
     params = []
     updates = body.model_dump(exclude_none=True)

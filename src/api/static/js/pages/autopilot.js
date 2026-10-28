@@ -487,19 +487,24 @@ function _apShowDialog(tpl, existing) {
   // 存储初始cron
   _apFormCron = cron;
   _apRenderScheduleEditor();
-  // 先加载引擎列表，再初始化选中状态
-  _apSelectedEngines = new Set(engineIds);
-  _apSelectedSkill = skillName;
-  if (!_apAllEngines.length) {
-    _apLoadEngineList();
-  } else {
-    _apUpdateEngineLabel();
-  }
-  // 加载工作分支列表（编辑时用 task.repo_key，新建时用当前仓库）
+  // 先解析当前表单仓库（编辑时用 task.repo_key，新建时用当前仓库，与工作分支加载同源）
+  // Issue #486: 引擎列表按该仓库过滤加载
   var _taskRepoKey = existing ? (existing.repo_key || '') : '';
   if (!_taskRepoKey && typeof app !== 'undefined' && app.currentRepo()) {
     _taskRepoKey = (app.currentRepo().repoKey || '') || ('gitcode:' + (app.currentRepo().fullName || ''));
   }
+  _apFormRepoKey = (_taskRepoKey || '').replace(/^(gitcode|github):/, '');
+  if (_apFormRepoKey.split('/').length !== 2) _apFormRepoKey = '';
+  // 先加载引擎列表，再初始化选中状态
+  _apSelectedEngines = new Set(engineIds);
+  _apSelectedSkill = skillName;
+  if (!_apAllEngines.length || _apEnginesRepoKey !== _apFormRepoKey) {
+    _apLoadEngineList();
+  } else {
+    _apComputeDetachedEngines();
+    _apUpdateEngineLabel();
+  }
+  // 加载工作分支列表（编辑时用 task.repo_key，新建时用当前仓库）
   if (_taskRepoKey) {
     var _rk = _taskRepoKey.replace(/^(gitcode|github):/, '');
     var _parts = _rk.split('/');
@@ -532,11 +537,26 @@ function _apShowDialog(tpl, existing) {
 
 var _apSelectedEngines = new Set();
 var _apAllEngines = [];
+// Issue #486: 引擎列表按仓库过滤 + 按仓库缓存，避免跨仓库表单串缓存
+var _apFormRepoKey = '';       // 当前表单对应仓库 full_name（无前缀）
+var _apEnginesRepoKey = '';    // 当前引擎缓存对应的仓库 full_name（无前缀）
+var _apDetachedEngineIds = new Set();  // 编辑态原绑定引擎已超出当前可见范围的 ID 集合
+function _apComputeDetachedEngines() {
+  // 已选引擎不在当前可见列表中 → 标记为超范围（编辑态兼容，Issue #486）
+  _apDetachedEngineIds = new Set(Array.from(_apSelectedEngines).filter(function(eid) {
+    return !_apAllEngines.some(function(e) { return String(e.id) === String(eid); });
+  }));
+}
 function _apLoadEngineList() {
-  API.get('/settings/agent-runtimes').then(function(d) {
+  // Issue #486: 传入当前仓库 repo 参数（与 #473 runtimes.js 传参模式一致），
+  // 后端按 #277 口径过滤，仅返回当前仓库 + 本人 + 全局引擎
+  var qs = _apFormRepoKey ? ('?repo=' + encodeURIComponent(_apFormRepoKey)) : '';
+  return API.get('/settings/agent-runtimes' + qs).then(function(d) {
     _apAllEngines = (d.runtimes || d || []).filter(function(e) { return e.status === 'online'; });
+    _apEnginesRepoKey = _apFormRepoKey;
+    _apComputeDetachedEngines();
     _apUpdateEngineLabel();
-  }).catch(function() { _apAllEngines = []; _apUpdateEngineLabel(); });
+  }).catch(function() { _apAllEngines = []; _apEnginesRepoKey = _apFormRepoKey; _apComputeDetachedEngines(); _apUpdateEngineLabel(); });
 }
 function _apUpdateEngineLabel() {
   var pill = $('apEnginePill');
@@ -551,9 +571,9 @@ function _apUpdateEngineLabel() {
 }
 function _apOpenEnginePicker() {
   console.log('[autopilot] _apOpenEnginePicker called, engines:', _apAllEngines.length);
-  if (_apAllEngines.length === 0) {
-    API.get('/settings/agent-runtimes').then(function(d) {
-      _apAllEngines = (d.runtimes || d || []).filter(function(e) { return e.status === 'online'; });
+  // Issue #486: 缓存为空或仓库已切换 → 按 repo 重新拉取后再打开
+  if (_apAllEngines.length === 0 || _apEnginesRepoKey !== _apFormRepoKey) {
+    _apLoadEngineList().then(function() {
       console.log('[autopilot] engines loaded:', _apAllEngines.length);
       _apOpenEnginePickerInner();
     }).catch(function(e) {
@@ -636,6 +656,20 @@ function _apOpenEnginePickerInner() {
           '<span style="font-size:11px;font-weight:500;color:#34c759;flex-shrink:0">' + _apt('engine_picker.online') + '</span></label>';
       }).join('');
     });
+    // Issue #486: 编辑态原绑定引擎已超出当前可见范围 → 单独分组展示，
+    // 保留勾选态（呈现当前绑定）但仅允许取消，不允许重新选中
+    var detached = Array.from(_apDetachedEngineIds);
+    if (detached.length) {
+      html += '<div style="margin-top:12px;margin-bottom:4px;font-size:11px;font-weight:600;color:#d32f2f;text-transform:uppercase;letter-spacing:.5px">' + _apt('engine_picker.detached_group') + ' (' + detached.length + ')</div>';
+      html += detached.map(function(eid) {
+        var checked = _apSelectedEngines.has(eid);
+        return '<label style="display:flex;align-items:center;gap:12px;padding:12px 16px;border:none;border-radius:14px;cursor:' + (checked ? 'pointer' : 'not-allowed') + ';background:#fff5f5;opacity:.75;box-shadow:0 1px 2px rgba(0,0,0,.03)">' +
+          '<input type="checkbox" data-eid="' + eid + '" ' + (checked ? 'checked' : 'disabled') + ' onchange="window._apEngToggle(' + eid + ')" style="width:18px;height:18px;cursor:' + (checked ? 'pointer' : 'not-allowed') + ';accent-color:#d32f2f">' +
+          '<div style="flex:1;min-width:0"><div style="font-weight:600;font-size:13px;color:#1d1d1f">#' + eid + '</div>' +
+          '<div style="font-size:10px;color:#d32f2f;margin-top:3px">' + _apt('engine_picker.detached_hint') + '</div></div>' +
+          '<span style="font-size:11px;font-weight:500;color:#d32f2f;flex-shrink:0">⚠️</span></label>';
+      }).join('');
+    }
     return html;
   }
 
@@ -651,7 +685,7 @@ function _apOpenEnginePickerInner() {
   window._apEngClearAll = function() { _apSelectedEngines.clear(); _refreshAll(); _apUpdateEngineLabel(); };
   window._apEngToggle = function(id) {
     if (_apSelectedEngines.has(id)) _apSelectedEngines.delete(id);
-    else _apSelectedEngines.add(id);
+    else if (!_apDetachedEngineIds.has(id)) _apSelectedEngines.add(id);  // 超范围引擎不可重新选中（Issue #486）
     _refreshAll();
     _apUpdateEngineLabel();
   };

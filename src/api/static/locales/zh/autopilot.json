@@ -100,7 +100,9 @@
     "search_placeholder": "搜索引擎名称/设备/标签...",
     "cancel": "取消",
     "confirm": "确认",
-    "selected_count": "已选择 {{count}} 个引擎"
+    "selected_count": "已选择 {{count}} 个引擎",
+    "detached_group": "不可用引擎",
+    "detached_hint": "引擎已不在当前可用范围（可能已归属其他仓库或用户），仅可移除"
   },
   "skill_picker": {
     "scope_official": "官方",
