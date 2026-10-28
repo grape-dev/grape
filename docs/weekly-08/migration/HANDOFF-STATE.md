@@ -8,7 +8,7 @@
 
 ---
 
-## 1. 分支与提交状态（2026-10-28 会话末，批15 完成）
+## 1. 分支与提交状态（2026-10-28 会话末，批16 完成）
 
 - **分支**：`weekly-clean-mys`（Vue 重构专用分支，动手前必须 `git branch --show-current` 确认——仓库可能被别的会话切到 fix/hotfix-*）
 - **工作树**：干净（仅 1 个未跟踪 `.hermes-handoff-pr-subscription.md`，与本工程无关）
@@ -17,6 +17,7 @@
 
 | commit | 内容 |
 |---|---|
+| `0892e6150` | **feat: 批15 knowledge → Vue** |
 | `635aac467` | **feat: 批14 壳耦合组 settings+repos+templates → Vue** |
 | `9905c518c` | docs: add full handoff state for vue refactor (batches 1-13) |
 | `cad68fac5` | docs: 批13 observability 完成记录 |
@@ -39,7 +40,7 @@
 **批1-15 完成。`js/pages/` 只剩最后 1 个文件**：
 
 ```
-legacy/js/pages/ 剩余：feedback.js(367)
+**批1-16 完成。js/pages/ 目录已清零（22模块约2.3万行全部迁移）。**
 ```
 
 Vue 侧现状：`app/src/views/` 20 个 .vue 组件（Dashboard 3891 / Observability 3874 / Issues 3532 / Autopilot 3346 / Runtimes 3323 / ReposView+TemplatesView 合一 chunk / Event 2237 / Account 2173 / SceneMarket 1988 / 其余更小）+ `entries/` 17 个入口 chunk。
@@ -52,6 +53,7 @@ Vue 侧现状：`app/src/views/` 20 个 .vue 组件（Dashboard 3891 / Observabi
 - 批13 observability：`renderObservability(section)`；`window.stopObsAuto`（app.js typeof 守卫）；echarts 走 vendored 全局 `G.echarts`、mermaid 保持 CDN 动态加载
 - 批14 壳耦合组：`renderRepoSelection(repos)` / `renderRepos()` / `renderSettings(tab)` / `switchSidebarTab(tab)` / `selectRepo` / `platformIcon`（裸标识符，app.js onboarding 用）/ `openCreateRepoModal` 由 entries/repos-view.js 持有；templates 是 ReposView 内子 tab 组件；死代码不迁（settings 的 theme/lang/apikeys 函数已由批7 AccountView 承载、_loadOrgSection 无渲染者）
 - 批15 knowledge：`renderKnowledge()` + `_knowledgeVueApp` 裸标识符句柄（app.js 1296/1375/1562 三处守卫）由 entries/knowledge-view.js 持有；句柄只在真 mount 后设置（防拦截首次 nav）；散装 Vue app 收编（Options API → 组合式 SFC）
+- 批16 feedback：`openFeedbackDialog(opts)` 全局弹窗（非页面视图）由 entries/feedback-dialog.js 持有，单例挂 body 隐藏宿主；app.js 顶栏裸调用 + EventView 带 event_seq
 
 ## 3. 改动口径（不变式，每批照此办理）
 
@@ -78,7 +80,7 @@ Vue 侧现状：`app/src/views/` 20 个 .vue 组件（Dashboard 3891 / Observabi
 ## 5. 未完成事项（按优先序）
 
 ### 5.1 剩余迁移批次
-1. **feedback.js(367)**：小件——下一批（js/pages 最后一个文件）。
+1. **admin 独立站** → `app.js` 外壳 + `index.html` 收口批（清死代码、统一路由段、撤全部剩余桥接、vue chunk ?v= 统一梳理）——下一批。
 3. **admin 独立站** → 最后 `app.js` 外壳 + `index.html` 收口（清死代码、统一路由段、撤全部剩余桥接）。
 4. 死代码待主人裁决：agents.js Configure 面板（约250行无UI入口）；help 页是否彻底 Vue 化（阶段3裁决）。
 

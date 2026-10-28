@@ -50,6 +50,7 @@ export default defineConfig({
           'observability-view': /^observability-[vV]iew-.*\.css$/,
           'repos-view': /^repos-[vV]iew-.*\.css$/,
           'knowledge-view': /^knowledge-[vV]iew-.*\.css$/,
+          'feedback-dialog': /^feedback-[dD]ialog-.*\.css$/,
           }
         for (const [name, re] of Object.entries(viewCssMap)) {
           const hit = fs.readdirSync(assetsDir).find((f) => re.test(f))
@@ -111,6 +112,7 @@ export default defineConfig({
         'observability-view': fileURLToPath(new URL('./src/views/entries/observability-view.js', import.meta.url)),
         'repos-view': fileURLToPath(new URL('./src/views/entries/repos-view.js', import.meta.url)),
         'knowledge-view': fileURLToPath(new URL('./src/views/entries/knowledge-view.js', import.meta.url)),
+        'feedback-dialog': fileURLToPath(new URL('./src/views/entries/feedback-dialog.js', import.meta.url)),
       },
       output: {
         entryFileNames: (chunkInfo) =>
