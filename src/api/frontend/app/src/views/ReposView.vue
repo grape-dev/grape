@@ -943,7 +943,11 @@ function showTemplatesTab() {
 onMounted(() => {
   // renderRepoSelection contract (legacy): the projects list ALWAYS renders the projects tab,
   // regardless of the persisted sidebarTab — old code called renderSelectionShell('projects', ...) directly.
-  activeTab.value = (props.initialTabName || (props.initialRepos ? 'projects' : null) || localStorage.getItem('sidebarTab') || 'projects')
+  activeTab.value =
+    props.initialTabName ||
+    (props.initialRepos ? 'projects' : null) ||
+    localStorage.getItem('sidebarTab') ||
+    'projects'
   if (activeTab.value === 'workspace') activeTab.value = 'projects'
   if (activeTab.value === 'projects') localStorage.setItem('sidebarTab', 'projects')
   if (props.initialRepos) {
