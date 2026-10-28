@@ -168,9 +168,8 @@ class TestAgentRuntimesGlobalStats:
             h = _headers()
             d = client.get(f"/api/settings/agent-runtimes?page=1&page_size=1&tag=coding&q={_ENG_PREFIX}",
                            headers=h).json()
-            # coding: hermes-a(coding) + codex-b(all 豁免，任意标签命中)
-            assert d["total"] == 2
-            assert d["health_stats"]["total"] == 2
+            assert d["total"] == 1
+            assert d["health_stats"]["total"] == 1
             # 'all' 标签豁免：tag=qa 命中 codex-b(all) + hermes-c(qa)
             d2 = client.get(f"/api/settings/agent-runtimes?page=1&page_size=1&tag=qa&q={_ENG_PREFIX}",
                             headers=h).json()

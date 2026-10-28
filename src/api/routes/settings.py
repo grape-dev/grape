@@ -746,10 +746,9 @@ def update_github_oauth_config(body: GitHubOAuthConfig, user: dict = Depends(req
 
 # ====== Agent Runtimes ======
 
-@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo. Issue #472: q/type/scene/tag params apply search/filters server-side over the full visible set (not just the current page) and the response carries health_stats (total + health distribution over the whole filtered result) so the stats bar reflects the overall search result, decoupled from pagination.")
+@router.get("/agent-runtimes", operation_id="settings_agent_runtimes", summary="List agent runtimes", description="Lists agent executors from DB with derived health and unique instance_name. Visibility: global + personal (owner=current user) + repo-level of repos the user belongs to. Supports pagination via page/page_size query params. Issue #277: repo param filters repo-scoped engines to only the current repo.")
 def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, page_size: int = 0,
-                       scope: str = "", repo: str = "",
-                       q: str = "", type: str = "", scene: str = "", tag: str = ""):
+                       scope: str = "", repo: str = ""):
     """从 DB 读取 Agent 执行引擎列表，含健康态派生与唯一引擎名（instance_name）。
 
     可见性（按当前登录用户）：全局 + 个人（owner=当前用户）+ 我所在仓库的仓库级（仓库所有成员可见，不只 owner）。
@@ -760,10 +759,6 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     - page_size>0 → 返回 {runtimes: [...page slice...], total: N, page: P, page_size: S}
     可见性过滤在应用层完成（依赖 credential scope + 用户仓库列表），无法纯 SQL 分页，
     因此先全量过滤再切片——total 为过滤后总数。
-
-    筛选（Issue #472 全局口径）：q/type/scene/tag 在分页切片前对全量可见集过滤
-    （谓词与原前端 _filterEngines 一致），health_stats 为筛选后整体搜索结果的
-    健康分布（total + online/recently_lost/offline/about_to_gc）——统计栏与分页解耦。
 
     Issue #277 数据隔离：repo 参数非空时，repo scope 引擎仅返回该仓库的引擎，
     避免跨仓库看到其他仓库的 worker 设备和引擎。
@@ -943,41 +938,6 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         for rt in visible_runtimes
     ))
 
-    # Issue #472 全局口径：筛选标签（类型/场景/标签）从全量可见集派生（分页/筛选后不消失）
-    _avail_types = list(set(_engine_type_of(rt) for rt in visible_runtimes if _engine_type_of(rt)))
-    _avail_scenes = sorted({s for rt in visible_runtimes for s in (rt.get("scene_tags") or []) if s})
-    _avail_tags = sorted({t for rt in visible_runtimes for t in (rt.get("agent_tags") or []) if t})
-
-    # Issue #472 全局口径：q/type/scene/tag 在分页切片前对全量可见集过滤
-    # （谓词与原前端 _filterEngines 一致，搜索作用于整体结果而非当前页）
-    _q = (q or "").strip().lower()
-    if _q:
-        visible_runtimes = [rt for rt in visible_runtimes if _q in " ".join([
-            str(rt.get("alias") or ""), str(rt.get("instance_name") or ""),
-            str(rt.get("name") or ""), str(rt.get("worker_name") or ""),
-            str(rt.get("owner") or ""), str(rt.get("host_name") or ""),
-            " ".join(rt.get("agent_tags") or []),
-            " ".join(rt.get("local_skills") or []),
-        ]).lower()]
-    if type:
-        _tlow = type.lower()
-        visible_runtimes = [rt for rt in visible_runtimes if _tlow in (
-            rt.get("instance_name") or rt.get("name") or "").lower()]
-    if scene:
-        _scenes = [s.strip().lower() for s in scene.split(",") if s.strip()]
-        visible_runtimes = [rt for rt in visible_runtimes
-                            if any((s in [str(x).lower() for x in (rt.get("scene_tags") or [])])
-                                   for s in _scenes)]
-    if tag:
-        _tags = [t.strip().lower() for t in tag.split(",") if t.strip()]
-        visible_runtimes = [rt for rt in visible_runtimes
-                            if any((t in [str(x).lower() for x in (rt.get("agent_tags") or [])]
-                                    or "all" in [str(x).lower() for x in (rt.get("agent_tags") or [])])
-                                   for t in _tags)]
-
-    # Issue #472 全局口径：统计栏数据源 = 筛选后整体搜索结果的健康分布（与分页解耦）
-    health_stats = _health_stats(visible_runtimes)
-
     # Issue #185: 分页（page_size>0 时对 visible_runtimes 切片，total 为过滤后总数）
     total_runtimes = len(visible_runtimes)
     if page_size and page_size > 0:
@@ -986,43 +946,9 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         paged_runtimes = visible_runtimes[_offset:_offset + page_size]
         return {"runtimes": paged_runtimes, "devices": devices,
                 "total": total_runtimes, "page": _page, "page_size": page_size,
-                "avail_scopes": _avail_scopes, "avail_types": _avail_types,
-                "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
-                "health_stats": health_stats}
+                "avail_scopes": _avail_scopes}
     return {"runtimes": visible_runtimes, "devices": devices, "total": total_runtimes,
-            "avail_scopes": _avail_scopes, "avail_types": _avail_types,
-            "avail_scenes": _avail_scenes, "avail_tags": _avail_tags,
-            "health_stats": health_stats}
-
-
-def _engine_type_of(rt: dict) -> str:
-    """从引擎名派生类型标签（与前端 _availTypes 的 includes 判定一致）。"""
-    n = (rt.get("instance_name") or rt.get("name") or "").lower()
-    if "aishell" in n or "hwcloud" in n:
-        return "aishell"
-    if "hermes" in n:
-        return "hermes"
-    if "opencode" in n:
-        return "opencode"
-    if "codearts" in n:
-        return "codearts"
-    if "codex" in n:
-        return "codex"
-    return ""
-
-
-_HEALTH_STAT_KEYS = ("online", "recently_lost", "offline", "about_to_gc")
-
-
-def _health_stats(items: list) -> dict:
-    """Issue #472: 整体搜索结果的健康分布（total + 四态计数），统计栏全局口径数据源。"""
-    counts = {k: 0 for k in _HEALTH_STAT_KEYS}
-    for it in items:
-        h = it.get("health") or it.get("status") or "offline"
-        if h in counts:
-            counts[h] += 1
-    counts["total"] = len(items)
-    return counts
+            "avail_scopes": _avail_scopes}
 
 
 def _runtime_health(rt: dict, now: float) -> str:
@@ -1349,18 +1275,14 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
 
     # 分页切片（total 为筛选后总数）
     total = len(devices)
-    # Issue #472 全局口径：统计栏数据源 = 筛选后整体搜索结果的健康分布（与分页解耦）
-    health_stats = _health_stats(devices)
     if page_size and page_size > 0:
         _page = max(page, 1)
         _offset = (_page - 1) * page_size
         paged_devices = devices[_offset:_offset + page_size]
         return {"devices": paged_devices, "total": total, "page": _page, "page_size": page_size,
-                "avail_scopes": _avail_scopes, "avail_types": _avail_types,
-                "health_stats": health_stats}
+                "avail_scopes": _avail_scopes, "avail_types": _avail_types}
     return {"devices": devices, "total": total,
-            "avail_scopes": _avail_scopes, "avail_types": _avail_types,
-            "health_stats": health_stats}
+            "avail_scopes": _avail_scopes, "avail_types": _avail_types}
 
 
 def _device_engine_types(d: dict) -> list:
