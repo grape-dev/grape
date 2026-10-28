@@ -66,7 +66,6 @@ class TestCheckGitcodeAdminRoleName:
         from src.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=40, permission="write",
-        """#393 终审口径回归：Maintainer(40) 不是 admin（payload 对齐 #393 先例：permission=write）。"""
         from src.user import repo_manager
         from src.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
