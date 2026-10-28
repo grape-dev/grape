@@ -1,10 +1,7 @@
-"""Issue #432/#472: Runtimes 统计栏口径一致性 + i18n 静态断言测试。
+"""Issue #432: Runtimes 统计栏口径一致性 + i18n 静态断言测试。
 
 前端纯函数测试+静态断言模式（参考 #406）：
-- 读取 runtimes.js 源码，断言统计栏使用后端 health_stats 全局口径（Issue #472）：
-  _summaryStatsBar 消费 health_stats（engines→data.health_stats，workers→_rtDevHealthStats）
-- 断言 Engines 筛选参数（q/type/scene/tag）由 _rtFilterQs 拼装传给后端（全局过滤）
-- 断言 renderEngines 不再本地二次过滤（后端已过滤）
+- 读取 runtimes.js 源码，断言 _filterEngines 共享函数存在且被 renderEngines 与 _summaryStatsBar 共用
 - 断言 _summaryStatsBar 不含中文硬编码（共/在线/刚失联/离线/待回收）
 - 断言 _summaryStatsBar 使用 I18N.t('runtimes.stats.total', {count: ...}) 插值
 - 读取 zh/en locale JSON，断言 stats.total key 存在且含 {count} 占位符
@@ -32,51 +29,29 @@ def _read_json(path):
         return json.load(f)
 
 
-# ── Issue #472: 统计栏全局口径（health_stats）──
+# ── _filterEngines 共享函数存在且被共用 ──
 
-class TestGlobalStatsBar:
-    """Issue #472: 统计栏数据源切换为后端 health_stats（整体搜索结果），与分页解耦。"""
+class TestFilterEnginesShared:
+    """Issue #432: _filterEngines 提取为共享函数，renderEngines 与 _summaryStatsBar 共用。"""
 
-    def test_summary_stats_bar_reads_health_stats(self):
+    def test_filter_engines_function_exists(self):
         js = _read_js()
+        assert "function _filterEngines(" in js, "_filterEngines 函数应存在"
+
+    def test_render_engines_uses_filter_engines(self):
+        js = _read_js()
+        # renderEngines 内应调用 _filterEngines
+        match = re.search(r'function renderEngines\([^)]*\)\s*\{[^}]*?_filterEngines\(', js, re.DOTALL)
+        assert match, "renderEngines 应调用 _filterEngines"
+
+    def test_summary_stats_bar_uses_filter_engines(self):
+        js = _read_js()
+        # _summaryStatsBar 在 engines tab 应调用 _filterEngines
         match = re.search(
-            r'function _summaryStatsBar\([^)]*\)\s*\{(.*?)^\}',
-            js, re.DOTALL | re.MULTILINE,
+            r'function _summaryStatsBar\([^)]*\)\s*\{[^}]*?_filterEngines\(',
+            js, re.DOTALL,
         )
-        assert match, "_summaryStatsBar 函数应存在"
-        body = match.group(1)
-        assert "health_stats" in body, "_summaryStatsBar 应消费 health_stats（全局口径）"
-
-    def test_workers_stats_from_rt_dev_health_stats(self):
-        js = _read_js()
-        # Workers tab 统计来自 runtime-devices 返回的 _rtDevHealthStats
-        assert "_rtDevHealthStats" in js, "应保存 runtime-devices 的 health_stats"
-
-    def test_load_runtimes_data_sends_filter_params(self):
-        js = _read_js()
-        # _rtFilterQs 应拼装 q/type/scene/tag 筛选参数传给后端
-        assert "function _rtFilterQs(" in js, "_rtFilterQs 函数应存在"
-        match = re.search(r'function _rtFilterQs\(\)\s*\{(.*?)^\}', js, re.DOTALL | re.MULTILINE)
-        assert match
-        body = match.group(1)
-        for param in ("&q=", "&type=", "&scene=", "&tag="):
-            assert param in body, f"_rtFilterQs 应包含筛选参数 {param}"
-
-    def test_render_engines_no_local_filter(self):
-        js = _read_js()
-        # Issue #472: q/type/scene/tag 筛选已迁移到后端，renderEngines 不再本地过滤
-        match = re.search(r'function renderEngines\([^)]*\)\s*\{(.*?)^\}', js, re.DOTALL | re.MULTILINE)
-        assert match, "renderEngines 函数应存在"
-        body = match.group(1)
-        assert "_filterEngines" not in body, "renderEngines 不应再调用 _filterEngines（后端已过滤）"
-        assert "function _filterEngines(" not in js, "_filterEngines 应删除（口径已迁移后端）"
-
-    def test_avail_tags_prefer_backend_fields(self):
-        js = _read_js()
-        # Engines 筛选标签优先用后端全量可见集派生值（avail_types/scenes/tags）
-        assert "data.avail_types" in js
-        assert "data.avail_scenes" in js
-        assert "data.avail_tags" in js
+        assert match, "_summaryStatsBar 应在 engines tab 调用 _filterEngines"
 
 
 # ── _summaryStatsBar 无中文硬编码 ──
@@ -182,8 +157,10 @@ class TestStatsTotalLocaleKey:
 # ── 口径一致性逻辑验证（纯函数模拟） ──
 
 class TestFilterConsistency:
-    """Issue #432/#472: 模拟后端过滤谓词（原 _filterEngines 逻辑，已迁移到
-    agent-runtimes 端点），验证统计口径一致性：过滤后 total = 过滤后条数 = 各健康状态之和。
+    """Issue #432: 模拟 _filterEngines 逻辑，验证统计口径与 renderEngines 一致。
+
+    使用与 runtimes.js _filterEngines 相同的过滤谓词，验证：
+    - 搜索/类型/场景/标签过滤后，统计栏 total = 过滤后条数 = 各健康状态之和
     """
 
     def _filter_engines(self, runtimes, q="", ftype="", fscene=None, ftag=None):

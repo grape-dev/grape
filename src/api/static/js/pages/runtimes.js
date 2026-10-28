@@ -32,8 +32,6 @@ let _rtPageSize = 20;   // 每页条数
 let _rtTotal = 0;       // 服务端返回的过滤后总数
 let _rtDevPage = 1;     // Workers 当前页码
 let _rtDevTotal = 0;    // Workers 总数
-// Issue #472: Workers 统计栏全局口径（runtime-devices 返回的整体搜索结果健康分布）
-let _rtDevHealthStats = null;
 // Issue #245: Workers 筛选标签由后端 runtime-devices 返回（不依赖当前页数据）
 let _rtDevAvailScopes = [];
 let _rtDevAvailTypes = [];
@@ -88,21 +86,10 @@ window._rtDevGoPage = function(p) {
   _loadRuntimeDevices();
 };
 
-// Issue #472: Engines 筛选参数（q/type/scene/tag）统一拼装——列表与统计口径都在后端全局过滤
-function _rtFilterQs() {
-  var qs = '';
-  if (_runtimeSearch) qs += '&q=' + encodeURIComponent(_runtimeSearch);
-  if (_rtFilterType) qs += '&type=' + encodeURIComponent(_rtFilterType);
-  if (_rtFilterScene.length) qs += '&scene=' + encodeURIComponent(_rtFilterScene.join(','));
-  if (_rtFilterTag.length) qs += '&tag=' + encodeURIComponent(_rtFilterTag.join(','));
-  return qs;
-}
-
 // Issue #185: Engines 分页加载
 // Issue #277: 传入当前仓库 repo 参数，隔离 repo scope 引擎
-// Issue #472: q/type/scene/tag 筛选传给后端（全局口径，统计栏数据源 health_stats 由后端返回）
 function _loadRuntimesData() {
-  var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize + _rtFilterQs();
+  var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
   var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
@@ -139,7 +126,6 @@ function _loadRuntimeDevices() {
   API.get('/settings/runtime-devices' + qs).then(function(d) {
     if (window._currentView !== 'runtimes') return;
     _rtDevTotal = d.total || 0;
-    _rtDevHealthStats = d.health_stats || null;   // Issue #472: 全局口径统计
     _rtDevAvailScopes = d.avail_scopes || [];
     _rtDevAvailTypes = d.avail_types || [];
     // 合并到 __runtimeData 供 renderWorkers 使用
@@ -213,27 +199,14 @@ function _healthLabel(h) { return I18N.t('runtimes.health.' + (HEALTH_NAMES[h] |
 function _scopeLabel(s) { return I18N.t('runtimes.scope.' + (SCOPE_NAMES[s] || 'global')); }
 
 // 汇总统计栏：在过滤标签和卡片网格之间显示总体健康分布
-// Issue #432: Engines tab 曾使用 _filterEngines 过滤后列表（当前页口径）
-// Issue #472: 统计口径升级为「整体搜索结果」——数据源为后端返回的 health_stats
-//             （engines 来自 agent-runtimes 响应，workers 来自 runtime-devices 响应），
-//             与分页解耦：翻页/筛选不改变统计数字，数字始终反映全局搜索结果；
-//             旧缓存无 health_stats 时回退当前列表本地聚合。文案全部走 i18n。
+// Issue #432: Engines tab 使用 _filterEngines 过滤后列表（与 renderEngines 同口径）；
+//             Workers tab 维持 devices 口径不变；文案全部走 i18n。
 function _summaryStatsBar(data, devices) {
-  const stats = _runtimeTab === 'engines' ? (data && data.health_stats) : _rtDevHealthStats;
-  let counts, total;
-  if (stats) {
-    // Issue #472: 全局口径——整体搜索结果分布（total=0 时不渲染统计栏）
-    if (!stats.total) return '';
-    counts = { online: stats.online || 0, recently_lost: stats.recently_lost || 0,
-               offline: stats.offline || 0, about_to_gc: stats.about_to_gc || 0 };
-    total = stats.total;
-  } else {
-    const list = _runtimeTab === 'engines' ? (data.runtimes || []) : devices;
-    if (!list || !list.length) return '';
-    counts = { online: 0, recently_lost: 0, offline: 0, about_to_gc: 0 };
-    list.forEach(e => { counts[e.health || e.status || 'offline'] = (counts[e.health || e.status || 'offline'] || 0) + 1; });
-    total = list.length;
-  }
+  const list = _runtimeTab === 'engines' ? _filterEngines(data.runtimes || []) : devices;
+  if (!list || !list.length) return '';
+  const counts = { online: 0, recently_lost: 0, offline: 0, about_to_gc: 0 };
+  list.forEach(e => { counts[e.health || e.status || 'offline'] = (counts[e.health || e.status || 'offline'] || 0) + 1; });
+  const total = list.length;
   const parts = [
     `<span style="color:var(--t2);font-weight:500">${I18N.t('runtimes.stats.total', {count: total})}</span>`,
     counts.online ? `<span style="display:inline-flex;align-items:center;gap:4px"><span style="width:7px;height:7px;border-radius:50%;background:var(--g)"></span>${I18N.t('runtimes.health.online')} ${counts.online}</span>` : '',
@@ -376,10 +349,9 @@ function renderRuntimes(data) {
     </div>`;
   // 过滤标签栏
   // Issue #245: Workers tab 的筛选标签由后端 runtime-devices 返回（不依赖当前页数据）；
-  // Issue #472: Engines tab 的类型/场景/标签同样由后端从全量可见集返回（avail_types/scenes/tags），
-  //             旧缓存缺字段时回退当前页派生
+  // Engines tab 仍从当前 runtimes 列表派生
   const _availTypes = _runtimeTab === 'engines'
-    ? (data.avail_types || [...new Set((data.runtimes||[]).map(e => {
+    ? [...new Set((data.runtimes||[]).map(e => {
         const n = ((e.instance_name || e.name || '')).toLowerCase();
         if (n.includes('aishell') || n.includes('hwcloud')) return 'aishell';
         if (n.includes('hermes')) return 'hermes';
@@ -387,7 +359,7 @@ function renderRuntimes(data) {
         if (n.includes('codearts')) return 'codearts';
         if (n.includes('codex')) return 'codex';
         return '';
-      }).filter(Boolean))])
+      }).filter(Boolean))]
     : (_rtDevAvailTypes || []);
   const _allScopes = ['local','user','repo','global'];
   const _SCOPE_LABELS = {global:'全局', user:'个人', repo:'仓库', local:'本机'};
@@ -395,10 +367,10 @@ function renderRuntimes(data) {
   const _availScopes = _runtimeTab === 'engines' ? (data.avail_scopes || []) : (_rtDevAvailScopes || []);
   const _hasScope = (sc) => _availScopes.includes(sc);
   const _ENGINE_DOT = { opencode: '#3b82f6', hermes: '#8b5cf6', codearts: '#f59e0b', codex: '#10a37f', aishell: '#0a8cd8' };
-  // 收集可用场景和标签（Issue #472: 优先用后端返回的全量可见集派生值）
+  // 收集可用场景和标签（从引擎数据提取）
   const _allRuntimes = (data.runtimes || []);
-  const _availScenes = (data.avail_scenes || [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))]).filter(Boolean);
-  const _availTags = (data.avail_tags || [...new Set(_allRuntimes.flatMap(rt => rt.agent_tags || []))]).filter(Boolean);
+  const _availScenes = [...new Set(_allRuntimes.flatMap(rt => rt.scene_tags || []))].filter(Boolean);
+  const _availTags = [...new Set(_allRuntimes.flatMap(rt => rt.agent_tags || []))].filter(Boolean);
   html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
     <span style="font-size:11px;color:var(--t3);font-weight:500;margin-right:2px">筛选</span>
     ${_availTypes.map(t => {
@@ -433,11 +405,35 @@ function renderRuntimes(data) {
   el.innerHTML = html;
 }
 
+// Issue #432: 共享过滤函数——renderEngines 与 _summaryStatsBar 共用，确保统计口径一致
+function _filterEngines(runtimes) {
+  const q = (_runtimeSearch || '').toLowerCase().trim();
+  return runtimes.filter(rt => {
+    if (q) {
+      const hay = [rt.alias, rt.instance_name, rt.name, rt.worker_name, rt.owner, rt.host_name, (rt.agent_tags||[]).join(' '), (rt.local_skills||[]).join(' ')].join(' ').toLowerCase();
+      if (!hay.includes(q)) return false;
+    }
+    if (_rtFilterType) {
+      const ename = (rt.instance_name || rt.name || '').toLowerCase();
+      if (!ename.includes(_rtFilterType)) return false;
+    }
+    // scope 筛选已由后端处理，前端不再过滤
+    if (_rtFilterScene.length > 0) {
+      const tags = rt.scene_tags || [];
+      if (!_rtFilterScene.some(s => tags.includes(s))) return false;
+    }
+    if (_rtFilterTag.length > 0) {
+      const tags = rt.agent_tags || [];
+      if (!_rtFilterTag.some(t => tags.includes(t) || tags.includes('all'))) return false;
+    }
+    return true;
+  });
+}
+
 function renderEngines(data, devices) {
   const runtimes = data.runtimes || [];
-  // Issue #472: q/type/scene/tag 筛选已迁移到后端（agent-runtimes 端点全局过滤），
-  // 此处仅保留排序，不再做本地二次过滤
-  const filtered = runtimes.slice();
+  // Issue #432: 使用共享过滤函数，与 _summaryStatsBar 口径一致
+  const filtered = _filterEngines(runtimes);
   // 排序：本机直连优先 → 按健康状态（在线→刚失联→离线→待回收）→ 按名称
   filtered.sort((a, b) => (b.is_local ? 1 : 0) - (a.is_local ? 1 : 0));
   _sortByHealth(filtered);
@@ -968,20 +964,13 @@ function refreshRuntimes() {
       // Workers 标签页：直接加载 runtime-devices（权威数据源），避免 agent-runtimes 的 devices 闪现
       _loadRuntimeDevices();
       // 后台静默加载 agent-runtimes 以填充 engines 数据（不触发渲染）
-      // Issue #472: 带筛选参数（与 _loadRuntimesData 同口径），health_stats 一并保存
-      API.get('/settings/agent-runtimes?page=1&page_size=' + _rtPageSize + _rtFilterQs()).then(function(d) {
+      API.get('/settings/agent-runtimes?page=1&page_size=' + _rtPageSize).then(function(d) {
         if (window._currentView !== 'runtimes') return;
         if (!__runtimeData) {
-          __runtimeData = {runtimes: d.runtimes || [], devices: [], total: d.total || 0,
-                           health_stats: d.health_stats, avail_types: d.avail_types,
-                           avail_scenes: d.avail_scenes, avail_tags: d.avail_tags};
+          __runtimeData = {runtimes: d.runtimes || [], devices: [], total: d.total || 0};
         } else {
           __runtimeData.runtimes = d.runtimes || [];
           __runtimeData.total = d.total || 0;
-          __runtimeData.health_stats = d.health_stats;
-          __runtimeData.avail_types = d.avail_types;
-          __runtimeData.avail_scenes = d.avail_scenes;
-          __runtimeData.avail_tags = d.avail_tags;
         }
       }).catch(function() {});
     } else {
