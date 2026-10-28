@@ -1,5 +1,5 @@
 """事件处理管道：归一化 → 路由 → 存储 → Agent 执行"""
-import json, os, re, time, uuid, threading
+import json, os, time, uuid, threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
 from src.config import log, WORKSPACE_DIR
@@ -3501,58 +3501,6 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             pass
 
 
-def register_sre_deploy_url(repo_key: str, result_text: str) -> str:
-    """Issue #468: SRE 完成后从 result_text 提取部署 URL 登记到 managed_repos.deploy_url。
-
-    直连 _execute_agent_inner 与远程 worker complete_task() 两条收尾路径统一调用。
-    提取策略：结构化优先（artifacts / issue_summary 中的 `deploy_url: <url>` 条目），
-    回落全文完整 URL 正则（修复旧正则截断资源路径缺陷）。
-    校验 http(s) 前缀 + 长度 ≤512 后 UPDATE，成功打日志并返回登记到的 URL；
-    未登记（无 URL / 校验拒绝 / repo 不存在）返回空串。
-    """
-    text = (result_text or "").strip()
-    if not text:
-        return ""
-    url = ""
-    # ① 结构化优先：result_text 为 JSON 时，在 artifacts / issue_summary 中找 deploy_url: 条目
-    try:
-        _parsed = json.loads(text)
-        if isinstance(_parsed, dict):
-            for _key in ("artifacts", "issue_summary"):
-                _val = _parsed.get(_key)
-                _candidates = [str(x) for x in _val] if isinstance(_val, list) else ([_val] if isinstance(_val, str) else [])
-                for _cand in _candidates:
-                    _m = re.search(r"deploy_url:\s*(https?://\S+)", _cand)
-                    if _m:
-                        url = _m.group(1)
-                        break
-                if url:
-                    break
-    except (json.JSONDecodeError, TypeError, ValueError):
-        pass
-    # ② 回落：全文完整 URL 正则（保留资源路径，不截断）
-    if not url:
-        _urls = re.findall(r'https?://[^\s"\'\)\]，。]+', text)
-        if _urls:
-            url = _urls[0]
-    url = (url or "").strip().rstrip('.,;')
-    # ③ 校验：http(s) 前缀 + 长度 ≤512（沿用 #446 规则）
-    if not url or not url.lower().startswith(("http://", "https://")) or len(url) > 512:
-        return ""
-    # ④ 登记（repo 不存在时 rowcount=0，不写库）
-    try:
-        with db_lock:
-            c = db.cursor()
-            c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (url, repo_key))
-            if c.rowcount > 0:
-                db.commit()
-                log.info(f"SRE deploy_url auto-registered: {url} for {repo_key}")
-                return url
-    except Exception as _e:
-        log.warning(f"SRE deploy_url extraction failed: {_e}")
-    return ""
-
-
 def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          backend: str, skill_name: str, evt: dict, runtime_id: int = 0,
                          task_id: str = ""):
@@ -4154,11 +4102,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _post_result_to_pr(repository, _pr_num, result_text, repo_gitcode_token, agent_type, repo_key)
 
     # SRE 完成后 → 从 result_text 提取部署 URL 并写入 managed_repos.deploy_url
-    # Issue #468: 登记逻辑抽为共享函数 register_sre_deploy_url，与远程 worker
-    # complete_task() 收尾路径统一调用（根治双路径钩子清单不同步缺陷）
     if new_status == "completed" and agent_type == "sre" and result_text:
         try:
-            register_sre_deploy_url(repo_key, result_text)
+            import re
+            _urls = re.findall(r'https?://[\d\w.\-]+(?::\d+)?(?:/)?', result_text)
+            if _urls:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("UPDATE managed_repos SET deploy_url=? WHERE repo_key=?", (_urls[0], repo_key))
+                    if c.rowcount > 0:
+                        db.commit()
+                        log.info(f"SRE deploy_url auto-registered: {_urls[0]} for {repo_key}")
         except Exception as _e:
             log.warning(f"SRE deploy_url extraction failed: {_e}")
 
