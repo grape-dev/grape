@@ -192,7 +192,13 @@ def _resolve_target(row):
 
 
 def _build_issue_body(row: dict) -> str:
-    """Issue 正文组装 + 消毒（长度/空行/URL 化）。"""
+    """Issue 正文组装 + 消毒（长度/空行/URL 化）。
+
+    M-1：正文可能发布到公开仓库（skill.scope=official → GRAPE_SKILLS_REPO），Agent 输出的
+    fail_summary / description 可能含内网 IP、绝对路径、凭据串 —— 出转发前统一脱敏
+    （docs/weekly-08/feedback-issue-body-redact-m1-design.md）。
+    """
+    from src.observability.redact_issue_body import redact_issue_text
     lines = [
         f"> 来源：Agent 自动反馈（source=agent）",
         f"- 反馈ID：{row['id']}",
@@ -206,10 +212,10 @@ def _build_issue_body(row: dict) -> str:
     ]
     desc = (row.get("description") or "").strip()
     if desc:
-        lines.append(desc[:2000])
+        lines.append(redact_issue_text(desc, 2000))
     summary = (row.get("fail_summary") or "").strip()
     if summary:
-        lines += ["", "## 失败摘要", "```", summary[:2000], "```"]
+        lines += ["", "## 失败摘要", "```", redact_issue_text(summary, 2000), "```"]
     return "\n".join(lines)
 
 

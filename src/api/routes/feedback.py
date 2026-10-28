@@ -333,6 +333,11 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(get_current_user_or
     skill_name = skill.get("skill_name") or ''
     skill_scope = skill.get("skill_scope") or ''
 
+    # M-1（feedback-issue-body-redact-m1-design.md）：fail_summary 会进入转换器生成的公开仓库 Issue 正文，
+    # 落库前先脱敏（防明文囤积库内）；出转时 _build_issue_body 再打码一次兜存量明文。两层皆幂等。
+    from src.observability.redact_issue_body import redact_issue_text
+    fail_summary = redact_issue_text(fail_summary, 500)
+
     engine_info = ''
     if ctx and ctx.get("engine"):
         import json as _json
