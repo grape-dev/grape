@@ -12,7 +12,15 @@
     "reset_confirm": "Reset this engine's health score? After reset, the score is recalculated from the reset point onwards.",
     "reset_success": "Health score reset",
     "reset_failed": "Failed to reset health score",
-    "reset_global_denied": "Global engines cannot reset health score"
+    "reset_global_denied": "Global engines cannot reset health score",
+    "hint": {
+      "consecutive_failures": "Engine is abnormal: consecutive health probe failures. Log in to the machine to troubleshoot.",
+      "heartbeat_lost": "Heartbeat lost. Check the machine's network and process status.",
+      "offline": "Engine is offline. Check whether the device is powered on and connected, and whether the engine process is running.",
+      "recently_lost": "Engine was recently lost (<5 min), usually due to network jitter. If it stays lost, check the machine's network.",
+      "about_to_gc": "Engine is about to be garbage-collected (>6 days offline). Reconnect the device soon to keep it.",
+      "low_score": "Health score is low. Investigate recent failed tasks, or reset the health score to recalculate."
+    }
   },
   "stats": {
     "total": "Total {count}"

@@ -279,6 +279,44 @@ function _healthScoreBadge(rt) {
   return `<span style="color:${c};font-weight:600">${s}</span>${cf}${hb ? `<span class="ts t3" style="font-size:10px">${hb}</span>` : ''}`;
 }
 
+// Issue #475: 非健康状态 → 处理建议 i18n key 映射（一个卡片取最严重一个信号）
+// 优先级：探活连续失败 > 心跳失联 > 待回收 > 离线 > 刚失联 > 健康分过低；健康返回 ''（不渲染帮助按钮）
+function _healthHelpHint(rt) {
+  if (!rt) return '';
+  if ((rt.health_consecutive_failures || 0) > 0) return 'runtimes.health.hint.consecutive_failures';
+  if (rt.health_heartbeat_alive === false) return 'runtimes.health.hint.heartbeat_lost';
+  const h = rt.health || rt.status || 'offline';
+  if (h === 'about_to_gc') return 'runtimes.health.hint.about_to_gc';
+  if (h === 'offline') return 'runtimes.health.hint.offline';
+  if (h === 'recently_lost') return 'runtimes.health.hint.recently_lost';
+  if (rt.health_score !== null && rt.health_score !== undefined && rt.health_score < 50) return 'runtimes.health.hint.low_score';
+  return '';
+}
+
+// Issue #475: ? 帮助小按钮——悬浮展示处理建议（复用页面已注入的 data-tooltip 样式），
+// stopPropagation 防止触发卡片 onclick（openEngineDetail）
+function _helpBtn(key) {
+  if (!key) return '';
+  const tip = I18N.t(key).replace(/"/g, '&quot;');
+  return `<span data-tooltip="${tip}" onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--bg);color:var(--t2);font-size:10px;font-weight:700;cursor:help;flex-shrink:0;user-select:none">?</span>`;
+}
+
+// Issue #475: 引擎卡片异常判定——存在帮助提示信号或状态非 online 即异常（用于红色描边强化）
+function _isAbnormalEngine(rt) {
+  if (!rt) return false;
+  if (_healthHelpHint(rt)) return true;
+  const h = rt.health || rt.status || 'offline';
+  return h !== 'online';
+}
+
+// Issue #475: 严重异常（红/灰态或派生信号异常）强制红色左边框；recently_lost 为瞬时态保留黄色
+function _abnormalBorderColor(rt) {
+  const h = rt.health || rt.status || 'offline';
+  if (h === 'about_to_gc' || h === 'offline') return 'var(--r)';
+  if ((rt.health_consecutive_failures || 0) > 0 || rt.health_heartbeat_alive === false) return 'var(--r)';
+  return '';
+}
+
 function _legendHtml() {
   return `<div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;padding:8px 0;font-size:11px;color:var(--t3);border-top:1px dashed var(--b)">
     <span style="font-weight:500;color:var(--t2)">${I18N.t('runtimes.devspace.legend_label')}</span>
@@ -501,14 +539,19 @@ function renderEngines(data, devices) {
   filtered.forEach(rt => {
     const _hStatus = rt.health || rt.status || 'offline';
     const _cardLeftBorder = RUNTIME_COLOR[_hStatus] || 'var(--t3)';
+    // Issue #475: 异常态红色左边框/描边强化（健康引擎不变）
+    const _abnormal = _isAbnormalEngine(rt);
+    const _borderColor = _abnormal ? (_abnormalBorderColor(rt) || _cardLeftBorder) : _cardLeftBorder;
+    const _cardShadow = _abnormal ? 'var(--sh),0 0 0 1px var(--r)' : 'var(--sh)';
     const _engineName = rt.alias || rt.instance_name || rt.name || '—';
     const _engineType = rt.name || '—';
     const _engineVersion = rt.version || '—';
     const _engineInstalled = rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no');
-    html += `<div style="background:var(--c);border:1px solid var(--b);border-left:3px solid ${_cardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:14px 16px;box-shadow:var(--sh);cursor:pointer;position:relative;overflow:hidden;display:flex;flex-direction:column" onclick="openEngineDetail(${rt.id})">
+    html += `<div style="background:var(--c);border:1px solid var(--b);border-left:3px solid ${_borderColor};border-radius:0 var(--r2) var(--r2) 0;padding:14px 16px;box-shadow:${_cardShadow};cursor:pointer;position:relative;overflow:hidden;display:flex;flex-direction:column" onclick="openEngineDetail(${rt.id})">
       ${_engineWatermark(rt.name)}
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap;min-height:24px">
         ${_healthBadge(rt.health)}
+        ${_helpBtn(_healthHelpHint(rt))}
         ${_scopeBadge(rt.scope, rt.is_local)}
         <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
           <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_engineName}</span>
@@ -556,6 +599,7 @@ function renderWorkers(data, devices) {
     html += `<div style="background:var(--c);border:1px solid var(--b);border-left:${_wCardLeftBorder === 'none' ? '1px solid var(--b)' : '3px solid ' + _wCardLeftBorder};border-radius:0 var(--r2) var(--r2) 0;padding:12px 14px;box-shadow:var(--sh)">
       <div style="display:flex;align-items:center;gap:8px;margin-bottom:10px;flex-wrap:wrap">
         ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
+        ${_helpBtn(_healthHelpHint(d))}
         ${_scopeBadge(_curScope, _isLocal)}
         <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
         <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
