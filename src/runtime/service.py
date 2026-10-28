@@ -751,6 +751,16 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         raise ValueError("runtime_id or pool_agent_type is required (确定路由 D3)")
     task_id = "t_" + uuid.uuid4().hex[:12]
     skill_files = {}
+    # Issue #463 P2 扩展（2026-10-27）：skill_files URL/引用单写——技能在 OBS 有原始 zip
+    # （file_path 非空，99% 的技能满足），DB 里再存一份完整内容拷贝属于双写：
+    # 单任务约 600KB，单周 1.7GB，agent_tasks 表因此无上限增长（生产实测 4.76GB）。
+    # 消费侧降级链早已有之：claim 现签 skill_obs_url（① worker 直连 OBS）→
+    # POST /tasks/{id}/skill-zip 服务端代拉（② 现查 file_path 走 zip_cache，不读本列）→
+    # skill_files 文本物化（③ 仅 ①② 都失败时）。因此 ①② 可达时本列只需存引用标记：
+    # {"<skill_name>": {"__obs_key__": "<对象键>"}}（~50 字节）。
+    # worker 侧（agent.py）识别 __obs_key__ 后按 ② 的路径拉 zip；只有无 _okey 的
+    # 本地目录技能（约 1%）仍走原样全量内联兜底。
+    _skill_obs_key = ""
     if skill:
         try:
             from src.user.db import resolve_skill_id, get_skill_path, get_skill_object_key, get_skill_by_id
@@ -771,15 +781,17 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                 _sid = resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or resolve_skill_id(skill)
                 _path = get_skill_path(_sid) if _sid else (skill_path or "")
                 _okey = get_skill_object_key(_sid) if _sid else ""
-            # 本地目录存在 → 打包（official 技能 + 少数有磁盘目录的 user/repo 技能）
-            if _path and os.path.isdir(os.path.dirname(_path)):
+            # 本地目录存在 → 打包（仅无 OBS 键的兜底路径；有 _okey 时跳过本地打包——
+            # OBS zip 是权威源且内容一致，本地再打一份就是双写）
+            if _path and os.path.isdir(os.path.dirname(_path)) and not _okey:
                 skill_files = _pack_skill_dir(skill, _path)
             # file_path 非空 → OBS zip 提取（user/repo 技能主要走此路径）
             if _okey and not skill_files:
-                from src.storage import get_skill_zip_bytes
-                _zip = get_skill_zip_bytes(_okey)
-                if _zip:
-                    skill_files = _skill_files_from_zip(_zip, skill)
+                # Issue #463 P2 扩展：有 OBS 对象键 → 不再从 zip 提取内容内联（原
+                # _skill_files_from_zip 双写路径），只存引用标记；worker 侧按
+                # skill_obs_url / 服务端代拉获取原始 zip（内容等价且含二进制）。
+                _skill_obs_key = _okey
+                skill_files = {skill: {"__obs_key__": _okey}}
         except Exception as e:
             log.warning(f"enqueue: skill pack failed for {skill}: {e}")
     # Issue #95：统一调 collect_knowledge_files 过滤知识文件（三源不交叉，过滤只做一次）
