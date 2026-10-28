@@ -1354,6 +1354,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                     log.info(f"Pipeline: PR subscription pre-match skipped (actor={actor} not bot, deferred to main route)")
 
     # 2.0b 开发者指令检测（/done /cancel /resume）+ 澄清/审核回复自动恢复
+    # 等待态恢复标记：用户澄清回复把 awaiting_input/pending_review 翻回 processing 后，
+    # 本期台账（2.0a）跳过不再成立（线段恢复 > 台账抑制，见 issue-comment-resume-outbound-ledger-fix-design.md）
+    _resume_applied = False
     # R20.6.2: 开发者指令检测移到自循环检测之前——用户指令优先处理，不因自循环检测被跳过
     # Issue #453 修复点 2（S4，审查 D1）：指令与状态变更通道身份前置校验——bot actor
     # （含 agent 引用用户原文的回声，原文里的指令关键词）不参与指令解析与澄清恢复，
@@ -1369,7 +1372,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _note_lower = _note.lower().strip()
             _issue_num = ""
             try:
-                _issue_num = str(_oa.get("iid") or _oa.get("number") or (_payload.get("issue", {}) or {}).get("number") or "").lstrip("#")
+                # GitCode Note Hook 的 issue 号在 noteable_iid（iid 是评论自身的 id，非 issue 号）——
+                # 与 resolve_issue_id（对齐 noteable_iid）语义一致，漏读会导致恢复/指令永不到达
+                # （issue-comment-resume-outbound-ledger-fix-design.md RC-B）
+                _issue_num = str(_oa.get("iid") or _oa.get("number") or _oa.get("noteable_iid")
+                                 or (_payload.get("issue", {}) or {}).get("number") or "").lstrip("#")
             except Exception:
                 pass
             if _issue_num and _issue_num.isdigit():
@@ -1402,6 +1409,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 try:
                     from src.api.issues_center import _resume_issue_waiting
                     if _resume_issue_waiting(repo_key, int(_issue_num)):
+                        _resume_applied = True  # 等待态恢复已消费用户输入 → 2.0a 台账跳过不成立
                         log.info(f"Pipeline: issue #{_issue_num} awaiting/pending_review → processing (issue_comment reply)")
                 except Exception as _re:
                     log.warning(f"Pipeline: issue_comment resume failed: {_re}")
@@ -1564,10 +1572,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         or (_payload.get("comment") or {}).get("body") or _payload.get("body") or "")
             if _cid and is_our_outbound(_provider_name, repo_key, "issue_comment", _cid,
                                         content_hash=content_hash_md5(_note)):
-                log.info(f"Pipeline skip: outbound ledger hit (id={_cid}, repo={repo_key}, event={event_type})")
-                from src.api.event_store import append_skipped_event
-                append_skipped_event(repo_key, event_type, "outbound_ledger_hit", issue_id=_pre_issue_id)
-                return result
+                if event_type == "issue_comment" and _resume_applied:
+                    # 等待态用户澄清回复已消费（awaiting_input/pending_review → processing）：
+                    # 台账记录源于「经 grape VCS 代理（git-repo API）代发的用户回复」，非 bot/系统自回帖，
+                    # 恢复优先于台账抑制（issue-comment-resume-outbound-ledger-fix-design.md RC-A）。bot 自回帖
+                    # 已在更早的 2.0 自循环检测被拦，不会走到此豁免。
+                    log.info(f"Pipeline: outbound ledger hit but resume supersedes "
+                             f"(user clarification reply consumed for issue={_pre_issue_id}), allow through")
+                else:
+                    log.info(f"Pipeline skip: outbound ledger hit (id={_cid}, repo={repo_key}, event={event_type})")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "outbound_ledger_hit", issue_id=_pre_issue_id)
+                    return result
         except Exception as e:
             log.warning(f"Pipeline: outbound ledger check failed (allow-through): {e}")
         try:
@@ -4372,9 +4388,14 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
-    # conclusion 提取失败时用简洁默认消息，不发原始 result_text（含思考过程/JSON）
+    # conclusion 提取失败时：保留有效 result_text（纯文本），避免占位文案覆盖 Agent 真实产出；
+    # result_text 为空或纯 JSON 时用简洁默认消息（前缀已携带 Agent 身份）
     if not _conclusion:
-        _conclusion = f"任务已完成（{agent_type} agent）。"
+        _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
+        if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _conclusion = _stripped[:3000]
+        else:
+            _conclusion = "任务已完成。"
 
     # 根据 repo_key provider 分流
     if _is_github_repo(repo_key):

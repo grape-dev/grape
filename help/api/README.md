@@ -59,6 +59,9 @@
 | [14 Runtime](14-runtime.md) | 全部（健康度/任务/会话/标签/凭据聚合） | user_only |
 | [15 DevStage](15-devstage.md) | 全部（环境 CRUD/开机/关机） | user_only |
 | [16 Auth+Misc](16-auth-and-misc.md) | 全部（profile/logout/dashboard/pipeline/search/templates/feishu-onboard） | user_only |
+| [17 Feedback](17-feedback.md) | `POST /api/feedback`（Submit） | dual（Agent tk_ 场景） |
+| | `mine` / `context` / `delete` / `upload` | user_only |
+| | `list` / `stats` / `{fid}/status`（管理） | admin-only（不进契约） |
 
 ## 目录
 
@@ -79,6 +82,7 @@
 15. [Runtime 运行时接口（/api/runtime）](14-runtime.md)
 16. [DevStage 开发环境（/api/devstage）](15-devstage.md)
 17. [Auth/Misc 账号与全局（/api/auth · dashboard · pipeline · search · project-templates · feishu）](16-auth-and-misc.md)
+18. [Feedback 意见反馈（/api/feedback）](17-feedback.md)
 
 ## 状态码约定
 

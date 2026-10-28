@@ -270,6 +270,12 @@ EXPECTED_PUBLIC = {
     "issues_upload_attachment": ("post", "/api/issues/{issue_id}/attachments"),
     "issues_list_attachments": ("get", "/api/issues/{issue_id}/attachments"),
     "issues_delete_attachment": ("delete", "/api/issues/{issue_id}/attachments/{filename}"),
+    # ===== 意见反馈对外（feedback-openapi-expose-design.md）：submit=dual，其余 user_only =====
+    "feedback_submit": ("post", "/api/feedback"),
+    "feedback_mine": ("get", "/api/feedback/mine"),
+    "feedback_context": ("get", "/api/feedback/context/{event_seq}"),
+    "feedback_delete": ("delete", "/api/feedback/{fid}"),
+    "feedback_upload": ("post", "/api/feedback/upload"),
 }
 
 # 内部（会话认证）或管理类端点，不应出现在契约
@@ -277,6 +283,9 @@ NOT_IN_CONTRACT = [
     "/api/agents/types",                 # 无认证
     "/api/auth/login",
     "/api/runtime/start",                # 管理类模块
+    "/api/feedback/list",                # 管理类（require_admin）
+    "/api/feedback/stats",               # 管理类（require_admin）
+    "/api/feedback/{fid}/status",        # 管理类（require_admin）
 ]
 
 
@@ -373,7 +382,9 @@ def test_x_token_scope_consistency():
                          "/api/issues/{issue_id}/status": "put",
                          "/api/issues/{issue_id}/start": "post",
                          # skills agent-stats：仅 Web UI/用户级消费，禁 session
-                         "/api/skills/agent-stats": "get", "/api/skills/stats": "get"}
+                         "/api/skills/agent-stats": "get", "/api/skills/stats": "get",
+                         # 意见反馈 user_only（Agent tk_ submit 为 dual）
+                         "/api/feedback/mine": "get", "/api/feedback/{fid}": "delete"}
     for path, method in user_only_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "user_only",             f"期望 user_only: {method} {path}"
 
@@ -383,7 +394,9 @@ def test_x_token_scope_consistency():
                     "/api/skills/by-id/{skill_id}": "get",
                     "/api/skills/{skill_id}/sub": "get",
                     # Issue 状态只读轮询（CLI wait 用）保持 dual
-                    "/api/issues/{issue_id}/status": "get"}
+                    "/api/issues/{issue_id}/status": "get",
+                    # 意见反馈提交：Agent（tk_）自动反馈场景 → dual
+                    "/api/feedback": "post"}
     for path, method in dual_samples.items():
         assert s["paths"][path][method]["x-token-scope"] == "dual",             f"期望 dual: {method} {path}"
 

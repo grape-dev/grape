@@ -844,9 +844,11 @@ class TokenActionHandler(ABC):
 
     @abstractmethod
     def post_issue_comment(self, repo_key: str, issue_num: str,
-                           body: str, result: TokenResult) -> bool:
+                           body: str, result: TokenResult,
+                           agent_type: str = "agent") -> bool:
         """R18.6.10: 发 Issue 评论。按级别差异化处理 actor 和标记。
-        成功返回 True，失败返回 False（调用方据此 append RESULT_POST_FAILED）。"""
+        成功返回 True，失败返回 False（调用方据此 append RESULT_POST_FAILED）。
+        agent_type 透传真实 Agent 身份（如 vod/coding/sre），避免占位「agent agent」。"""
 
     @abstractmethod
     def mark_expired(self, result: TokenResult) -> str:
@@ -866,7 +868,7 @@ class SessionTokenHandler(TokenActionHandler):
     def get_comment_token(self, result):
         return ""  # session token scope 可能受限，不用于发评论
 
-    def post_issue_comment(self, repo_key, issue_num, body, result):
+    def post_issue_comment(self, repo_key, issue_num, body, result, agent_type="agent"):
         # session token 通常不用于发评论
         return False
 
@@ -915,12 +917,12 @@ class RepoBotTokenHandler(TokenActionHandler):
                 pass
         return ""
 
-    def post_issue_comment(self, repo_key, issue_num, body, result):
+    def post_issue_comment(self, repo_key, issue_num, body, result, agent_type="agent"):
         comment_token = self.get_comment_token(result)
         if not comment_token or not result.provider:
             return False
         body_with_marker = body + "\n<!-- grape-auto-comment -->"
-        return _post_comment_via_provider(result.provider, repo_key, issue_num, body_with_marker, comment_token)
+        return _post_comment_via_provider(result.provider, repo_key, issue_num, body_with_marker, comment_token, agent_type)
 
     def mark_expired(self, result):
         if result.provider and result.repo_key:
@@ -966,12 +968,12 @@ class GlobalBotTokenHandler(TokenActionHandler):
                 pass
         return ""
 
-    def post_issue_comment(self, repo_key, issue_num, body, result):
+    def post_issue_comment(self, repo_key, issue_num, body, result, agent_type="agent"):
         comment_token = self.get_comment_token(result)
         if not comment_token or not result.provider:
             return False
         body_with_marker = body + "\n<!-- grape-auto-comment -->"
-        return _post_comment_via_provider(result.provider, repo_key, issue_num, body_with_marker, comment_token)
+        return _post_comment_via_provider(result.provider, repo_key, issue_num, body_with_marker, comment_token, agent_type)
 
     def mark_expired(self, result):
         if result.provider and result.repo_key:
@@ -1031,13 +1033,13 @@ class UserTokenHandler(TokenActionHandler):
                 pass
         return ""
 
-    def post_issue_comment(self, repo_key, issue_num, body, result):
+    def post_issue_comment(self, repo_key, issue_num, body, result, agent_type="agent"):
         comment_token = self.get_comment_token(result)
         if not comment_token or not result.provider:
             return False
         body_with_marker = body + "\n<!-- grape-auto-comment -->"
         try:
-            return _post_comment_via_provider(result.provider, repo_key, issue_num, body_with_marker, comment_token)
+            return _post_comment_via_provider(result.provider, repo_key, issue_num, body_with_marker, comment_token, agent_type)
         except Exception:
             # 用户 token 过期 → 回帖失败 → R20.2 降级处理
             return False
@@ -1066,11 +1068,13 @@ def create_action_handler(result: TokenResult) -> TokenActionHandler:
 
 
 def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
-                                issue_num: str, body: str, token: str) -> bool:
+                                issue_num: str, body: str, token: str,
+                                agent_type: str = "agent") -> bool:
     """R18.6.10 辅助函数：通过 provider 接口发 Issue 评论。
 
     内部委托 event_pipeline._post_result_to_issue 的评论发送逻辑，
     但只发评论（不含 conclusion 提取等业务逻辑），加 grape-auto-comment 标记。
+    agent_type 透传真实 Agent 身份（如 vod/coding/sre），避免占位「agent agent」。
     """
     if not token or not repo_key or not issue_num:
         return False
@@ -1081,7 +1085,7 @@ def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
         if not _repo:
             return False
         # 复用现有 _post_result_to_issue 发评论（含去重、conclusion 提取等逻辑）
-        _post_result_to_issue(_repo, str(issue_num), body, token, "agent", repo_key)
+        _post_result_to_issue(_repo, str(issue_num), body, token, agent_type, repo_key)
         return True
     except Exception as e:
         from src.config import log

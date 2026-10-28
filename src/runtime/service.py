@@ -2196,7 +2196,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     _r.issue_id = _issue_id
                     _h = create_action_handler(_r)
                     if _h:
-                        _h.post_issue_comment(_repo_key, _issue_num, _result_text or f"任务已完成（{_agent_type} agent）。", _r)
+                        _h.post_issue_comment(_repo_key, _issue_num, _result_text or "任务已完成。", _r, _agent_type)
                     elif _token:
                         # 无 handler（无 token 配置）→ fallback 直接调 _post_result_to_issue
                         from src.api.event_pipeline import _post_result_to_issue
@@ -2827,7 +2827,7 @@ def fail_task(task_id, error, exit_code=-1):
                                     _resolve_r.issue_id = _issue_id
                                     _h = create_action_handler(_resolve_r)
                                     if _h:
-                                        _ok = _h.post_issue_comment(_rk, _issue_num, _msg, _resolve_r)
+                                        _ok = _h.post_issue_comment(_rk, _issue_num, _msg, _resolve_r, task.get("agent_type") or "agent")
                                         if not _ok:
                                             raise RuntimeError("handler.post_issue_comment returned False")
                                     else:

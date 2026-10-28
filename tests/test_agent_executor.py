@@ -48,7 +48,10 @@ class TestCodeArtsRuntime:
         self.backend = CodeArtsRuntime()
 
     def test_build_args_basic(self):
-        args = self.backend.build_args("hello world")
+        # CLI 支持 --auto 时才传（能力探测结果 mock，不依赖真实二进制）
+        from unittest.mock import patch
+        with patch.object(self.backend, "_probe_auto_flag", return_value=True):
+            args = self.backend.build_args("hello world")
         assert "run" in args
         assert "--format" in args
         assert "json" in args
@@ -61,6 +64,17 @@ class TestCodeArtsRuntime:
         import os
         if not os.environ.get("CODEARTS_MODEL"):
             assert "--model" not in args
+
+    def test_build_args_cli_without_auto_flag(self):
+        """旧版 codearts CLI 不支持 --auto（如 26.6.2）：不注入，避免 usage help + exit=1。"""
+        from unittest.mock import patch
+        with patch.object(self.backend, "_probe_auto_flag", return_value=False):
+            args = self.backend.build_args("hello world")
+        assert "--auto" not in args
+        assert "run" in args
+        assert "--format" in args
+        assert "json" in args
+        assert "hello world" in args
 
     def test_build_args_with_session(self):
         """E2: codearts session_id 当前不通过命令行传递（per-task KERNEL_DATA_DIR 隔离）"""

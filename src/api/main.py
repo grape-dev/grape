@@ -227,6 +227,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
 
+    # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
+    try:
+        from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
+        start_feedback_reconcile_scheduler()
+    except Exception as e:
+        log.warning(f"Feedback reconcile scheduler start failed: {e}")
+
     # 官方技能+场景合并定时同步：每 30 分钟串行同步（R31：skill 完成后自动触发场景同步，
     # 场景同步已合并进 sync_official_skills，不再有独立的 scene_sync scheduler）
 
@@ -733,6 +740,12 @@ async def lifespan(app: FastAPI):
     try:
         from src.storage.skill_sync import stop_skill_sync_scheduler
         await stop_skill_sync_scheduler()
+    except Exception:
+        pass
+    # 反馈→Issue reconcile：优雅关闭定时任务（weekly-08）
+    try:
+        from src.api.feedback_issue_converter import stop_feedback_reconcile_scheduler
+        await stop_feedback_reconcile_scheduler()
     except Exception:
         pass
     # R31：场景同步随 skill worker 一同优雅关闭（合并进 stop_skill_sync_scheduler），

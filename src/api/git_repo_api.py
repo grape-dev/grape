@@ -388,15 +388,22 @@ def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
                          user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, f"/issues/{number}/comments", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
-    # Issue #453 代发台账（S12 写入点1）：评论入账，webhook 回流按评论 ID 对账
-    try:
-        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-        from src.repo_key import to_repo_key
-        _rk = to_repo_key(f"{owner}/{repo}", p)
-        record_outbound(p, _rk, "issue_comment", extract_content_id(resp, "issue_comment"),
-                        issue_number=str(number), content_hash=content_hash_md5(body.body))
-    except Exception as _e:
-        log.warning(f"outbound_ledger record (create_issue_comment) failed: {_e}")
+    # Issue #453 代发台账（S12 写入点1）：评论入账，webhook 回流按评论 ID 对账。
+    # 写侧语义净化（issue-comment-resume-outbound-ledger-fix-design.md §2.2）：台账本质是「系统自回帖
+    # 回声抑制」。讨论区经 chat agent 会话（agent_type=chat，_repo_token 解析为**用户 token**）代发的评论
+    # 是用户真实回复（正遭受 awaiting_input 恢复所需），必须留回声 → 不记账；devops 事件 agent
+    # （agent_type≠chat，bot token 仓库身份）系统回帖 → 记账。git-repo API 仅接受 tk_ 会话 token
+    # （_repo_token 403 非 session），故无 jwt/api_key 分支。
+    if user.get("agent_type") != "chat":
+        try:
+            from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+            from src.repo_key import to_repo_key
+            _rk = to_repo_key(f"{owner}/{repo}", p)
+            record_outbound(p, _rk, "issue_comment", extract_content_id(resp, "issue_comment"),
+                            issue_number=str(number), content_hash=content_hash_md5(body.body),
+                            actor_identity=user.get("username") or "")
+        except Exception as _e:
+            log.warning(f"outbound_ledger record (create_issue_comment) failed: {_e}")
     return resp
 
 

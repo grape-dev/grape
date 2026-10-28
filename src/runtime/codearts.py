@@ -6,15 +6,17 @@
   临时目录在 _execute_task (agent.py) 中创建，通过 env_extra 覆盖 get_env 的默认值。
 
 调用形态：
-    codearts run --format json --auto [--model <model>] [--session <sid>] <prompt>
+    codearts run --format json [--auto] [--model <model>] [--session <sid>] <prompt>
 
---auto: 设置 bash_mode=always_allow，解决 bash 权限
+--auto: 设置 bash_mode=always_allow，解决 bash 权限（仅 CLI 支持时传，见 _probe_auto_flag）
 global.json write=allow: 不触发 permission.asked，解决 write/edit 权限
 sandbox/config.json allow_all: bash 命令中的网络请求不被拦截
 
 输出协议：NDJSON 事件流，与 opencode 完全兼容（parse_output 复用基类解析）。
 """
 import os
+import subprocess
+import threading
 from .base import AgentRuntime
 
 # 预写的权限配置：write/edit/external_directory_write=allow
@@ -37,15 +39,44 @@ class CodeArtsRuntime(AgentRuntime):
                                     # issue #351: Windows .cmd 壳截断风险由 exe 优先解析
                                     # + executor 启动前 WARN 兜底，不改 stdin（避免网络回归）。
 
+    def __init__(self):
+        super().__init__()
+        self._auto_ok: bool | None = None
+        self._auto_probe_lock = threading.Lock()
+
+    def _probe_auto_flag(self) -> bool:
+        """探测当前 codearts CLI 是否支持 --auto（一次性，带锁缓存）。
+
+        实测某些版本（如 26.6.2）`codearts run` 无 --auto 参数：硬传会被
+        yargs 判为未知参数 → 打印 usage help + exit=1，事件秒挂 failed
+        （2026-10-21 远端部署 seq#2309/#2310 根因）。
+        以 `codearts run --help` 输出是否含 --auto 判断，比版本号阈值更直接。
+        探测失败保守返回 False（不传 --auto，权限已由 global.json/config.json 兜底）。
+        """
+        with self._auto_probe_lock:
+            if self._auto_ok is not None:
+                return self._auto_ok
+            ok = False
+            try:
+                res = subprocess.run([self.binary, "run", "--help"],
+                                     capture_output=True, text=True, timeout=10)
+                ok = "--auto" in ((res.stdout or "") + (res.stderr or ""))
+            except Exception:
+                ok = False
+            self._auto_ok = ok
+            return ok
+
     def build_args(self, prompt: str, session_id: str = "") -> list[str]:
         """构建 codearts run 参数。
 
-        --auto: 设置 bash_mode=always_allow，解决 bash 工具权限。
+        --auto: 设置 bash_mode=always_allow，解决 bash 工具权限（仅 CLI 支持时传）。
         write/edit 权限通过 global.json (action=allow) 解决，不触发 permission.asked。
         session_id 当前未启用——codearts 有独立 KERNEL_DATA_DIR（per-task 临时目录），
         session 跨 task 不可见；pipeline 上下文传递靠 prompt_builder 注入前序结论。
         """
-        args = ["run", "--format", "json", "--auto"]
+        args = ["run", "--format", "json"]
+        if self._probe_auto_flag():
+            args.append("--auto")
         # 模型名以 worker 本机 codearts_cli.json 的 model 为准（与 opencode/hermes
         # 引擎同逻辑：模型由本机配置决定）；仅当显式设置 CODEARTS_MODEL 环境变量
         # 时才传 --model 覆盖。不设默认硬编码前缀——
