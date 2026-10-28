@@ -132,6 +132,12 @@ class HermesACPBackend:
         env["TERM"] = "dumb"
         # ACP 模式自动批准工具执行（等效旧 --yolo）
         env["HERMES_YOLO_MODE"] = "1"
+        # 2026-10-28 止血（initialize 100s 超时）：ACP 子进程禁止 pm 懒安装——
+        # 隔离 home 里依赖/运行时由 overlay symlink 共享源 home（见
+        # _OVERLAY_READONLY_SYMLINK_ENTRIES），本就无需懒装；历史上白名单漏列
+        # installs/tools 时 bootstrap 会判"未装完"并在握手前联网重下全套运行时，
+        # 远超 HERMES_INIT_TIMEOUT 导致任务超时判死。双保险关闭懒安装。
+        env["HERMES_DISABLE_LAZY_INSTALLS"] = "1"
         return env
 
     def stream_execute(
@@ -1203,6 +1209,21 @@ _OVERLAY_LOCK_FILES = frozenset({
 # 只读共享资产：保留 symlink（Linux 不回归；symlink 失败降级复制）
 _OVERLAY_READONLY_SYMLINK_ENTRIES = frozenset({
     "skills", "plugins", "venv", "assets", "themes", "prompts",
+    # hermes 自管运行时（只读共享，引擎不写）：
+    # installs/ 依赖环境代际、tools/ 托管 Python/node/chromium、bin/ uv/tirith、
+    # lsp/ 语言服务器、huaweicloud-plugins/ 插件源码。
+    # 2026-10-28 修复（initialize 100s 超时根因）：#439 白名单漏列这几个目录时，
+    # 它们落"未知目录→真实空目录"兜底，隔离 home 里 installs/tools 为空 →
+    # hermes bootstrap 判"安装未完成"→ 每次冷启动联网重下全套运行时
+    # （几百 MB，国内网络下载远超 HERMES_INIT_TIMEOUT=100s）→ 任务超时判死；
+    # 且每个 home 各下各的，磁盘按 2G/home 炸。归入 symlink 后共享源 home 一份，
+    # 启动恢复秒级。
+    "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
+})
+# 新归入 symlink 的 hermes 自管运行时目录（构建期遇到历史真实空目录/下载残骸时
+# 删除重建 symlink；见 overlay 构建分支 2026-10-28 修复）
+_OVERLAY_RUNTIME_SYMLINK_DIRS = frozenset({
+    "installs", "tools", "bin", "lsp", "huaweicloud-plugins",
 })
 
 
@@ -1338,9 +1359,21 @@ def _build_overlay_home(iso_home: str, src_home: str):
                                 pass
                     else:  # symlink：只读共享资产
                         if os.path.isdir(dst) and not os.path.islink(dst):
-                            continue  # issue #416 降级复制的真实目录，可用
+                            # 2026-10-28 修复（initialize 100s 超时善后）：installs/tools 等新归入
+                            # symlink 的自管运行时，历史上被 #439 兜底规则建成"真实空目录"
+                            # （或 hermes 懒安装留下的半成品 tools/python-*.staging-*）。
+                            # 空目录/下载残骸对引擎不可用（bootstrap 判"未装完"→联网重下），
+                            # 必须删除换成指向源 home 的 symlink；只有 issue #416 降级复制的
+                            # 完整资产（非运行时目录）才 continue 保留。
+                            if entry in _OVERLAY_RUNTIME_SYMLINK_DIRS:
+                                _remove_path(dst)
+                            else:
+                                continue  # issue #416 降级复制的真实目录，可用
                         if os.path.isfile(dst) and not os.path.islink(dst):
-                            continue  # issue #416 降级复制的真实文件，可用
+                            if entry in _OVERLAY_RUNTIME_SYMLINK_DIRS:
+                                _remove_path(dst)
+                            else:
+                                continue  # issue #416 降级复制的真实文件，可用
                         if _is_reparse_point_or_link(dst):
                             # 遗留/失效链接 → 删除重建
                             _remove_path(dst)
