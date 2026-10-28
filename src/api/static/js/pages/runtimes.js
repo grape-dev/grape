@@ -293,13 +293,37 @@ function _healthHelpHint(rt) {
   return '';
 }
 
-// Issue #475: ? 帮助小按钮——悬浮展示处理建议（复用页面已注入的 data-tooltip 样式），
-// stopPropagation 防止触发卡片 onclick（openEngineDetail）
+// Issue #475: ? 帮助小按钮——鼠标悬浮用 fixed 定位气泡展示处理建议（挂在 body 上，不受卡片 overflow:hidden 裁剪，
+// 显示在按钮上方避开鼠标；离开/滚动/点击时自动清理）。stopPropagation 防止触发卡片 onclick（openEngineDetail）
 function _helpBtn(key) {
   if (!key) return '';
   const tip = I18N.t(key).replace(/"/g, '&quot;');
-  return `<span data-tooltip="${tip}" onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--bg);color:var(--t2);font-size:10px;font-weight:700;cursor:help;flex-shrink:0;user-select:none">?</span>`;
+  return `<span data-tip="${tip}" onmouseenter="_helpTipShow(this)" onmouseleave="_helpTipHide()" onclick="event.stopPropagation()" style="display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:50%;background:var(--bg);color:var(--t2);font-size:10px;font-weight:700;cursor:help;flex-shrink:0;user-select:none">?</span>`;
 }
+// Issue #475 修订: fixed 气泡实现（替代原 data-tooltip ::after 方案——原方案显示在按钮下方被鼠标遮挡，且被卡片 overflow:hidden 截断）
+function _helpTipShow(el) {
+  _helpTipHide();
+  const tip = el.getAttribute('data-tip') || '';
+  if (!tip) return;
+  const r = el.getBoundingClientRect();
+  const d = document.createElement('div');
+  d.id = '_help-tip-bubble';
+  d.textContent = tip;
+  d.style.cssText = 'position:fixed;z-index:9999;max-width:340px;white-space:normal;line-height:1.5;background:#1e2940;color:#fff;padding:6px 14px;border-radius:8px;font-size:11px;font-weight:500;box-shadow:0 4px 12px rgba(0,0,0,.25);pointer-events:none;opacity:0;transition:opacity .15s ease';
+  document.body.appendChild(d);
+  // 显示在按钮上方；若上方空间不足则翻到下方（仍左对齐错开鼠标）
+  let x = Math.min(r.left, window.innerWidth - d.offsetWidth - 8);
+  let y = r.top - d.offsetHeight - 8;
+  if (y < 4) y = r.bottom + 8;
+  d.style.left = Math.max(4, x) + 'px';
+  d.style.top = y + 'px';
+  requestAnimationFrame(() => { d.style.opacity = '1'; });
+}
+function _helpTipHide() {
+  const d = document.getElementById('_help-tip-bubble');
+  if (d) d.remove();
+}
+window.addEventListener('scroll', _helpTipHide, true);
 
 // Issue #475: 引擎卡片异常判定——存在帮助提示信号或状态非 online 即异常（用于红色描边强化）
 function _isAbnormalEngine(rt) {

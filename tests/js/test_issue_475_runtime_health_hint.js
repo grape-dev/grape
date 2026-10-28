@@ -72,7 +72,8 @@ function testRenderWorkersWired() {
 function testHelpBtnTooltip() {
   const m = RUNTIMES_JS.match(/function _helpBtn\(key\) \{[\s\S]*?\n\}/);
   assert.ok(m, '_helpBtn 函数应存在');
-  assert.ok(m[0].includes('data-tooltip'), '帮助按钮应带 data-tooltip');
+  assert.ok(m[0].includes('data-tip'), '帮助按钮应带 data-tip 提示数据');
+  assert.ok(m[0].includes('_helpTipShow(this)'), '帮助按钮应挂 _helpTipShow 悬浮气泡');
   assert.ok(m[0].includes('event.stopPropagation()'), '帮助按钮应 stopPropagation 防触发卡片点击');
   assert.ok(!/[\u4e00-\u9fff]/.test(m[0].replace(/引擎状态异常[\s\S]*$/, '')) || true); // 函数体内不硬编码文案（i18n key 由调用方传入）
 }
