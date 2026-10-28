@@ -77,10 +77,10 @@ def test_structured_artifacts_hit():
 def test_structured_issue_summary_hit():
     import json
     text = json.dumps({
-        "issue_summary": "部署完成 deploy_url: http://100.1.2.3:5000/app 其他说明",
+        "issue_summary": "部署完成 deploy_url: http://10.0.0.8:5000/app 其他说明",
     })
-    assert _register(text) == "http://100.1.2.3:5000/app"
-    assert _deploy_url() == "http://100.1.2.3:5000/app"
+    assert _register(text) == "http://10.0.0.8:5000/app"
+    assert _deploy_url() == "http://10.0.0.8:5000/app"
 
 
 def test_structured_artifacts_string_hit():
