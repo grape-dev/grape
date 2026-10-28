@@ -896,8 +896,17 @@
 .ob-hero {
   text-align: center;
   padding: 0;
-  animation: obFadeUp 0.6s ease both;
 }
+
+/* PPT 式级联入场：一条节奏线，步进恒定 0.12s（expo-out，平滑收尾不割裂）。
+   注意 .ob-hero-bind 容器不单独入场——卡片自身就是级联步骤（紧接副标题），
+   消除双层动画造成的"文字出完、卡片迟到再演一遍"的割裂感 */
+.ob-hero > * { opacity: 0; }
+.ob-hero-logo   { animation: obCascade 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.05s forwards; }
+.ob-hero-title  { animation: obCascade 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.17s forwards; }
+.ob-hero-sub    { animation: obCascade 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.29s forwards; }
+.ob-hero-bind   { opacity: 0; animation: obBindShow 0.01s linear 0.38s forwards; }  /* 仅占位衔接，视觉由卡片接管 */
+.ob-hero-hint   { animation: obCascade 0.6s cubic-bezier(0.16, 1, 0.3, 1) 0.86s forwards; }
 
 .ob-hero-logo img {
   width: 72px;
@@ -908,22 +917,23 @@
 }
 
 .ob-hero-title {
-  font-size: 32px;
-  font-weight: 700;
-  letter-spacing: -0.02em;
-  line-height: 1.1;
-  margin-bottom: 12px;
+  font-size: 34px;
+  font-weight: 600;  /* Apple semibold 层级 */
+  letter-spacing: -0.022em;
+  line-height: 1.12;
+  margin-bottom: 10px;
   color: var(--t);
 }
 
 .ob-hero-sub {
   font-size: 17px;
   color: var(--t2);
-  line-height: 1.5;
+  line-height: 1.55;
   max-width: 560px;
-  margin: 0 auto 40px;
+  margin: 0 auto 44px;
   font-weight: 400;
-  opacity: 0.85;
+  opacity: 0.8;
+  letter-spacing: 0.1px;
 }
 
 /* ── 绑定卡片区域 ── */
@@ -943,31 +953,137 @@
 
 /* ── 绑定卡片 ── */
 .ob-bind-card {
+  position: relative;
   background: var(--c);
   border: 1px solid var(--b);
-  border-radius: var(--r2);
-  padding: 24px 28px;
+  /* Apple 风格：连续大圆角 + 分层柔和阴影 + 弹性缓动 */
+  border-radius: 20px;
+  padding: 26px 30px;
   text-align: center;
   cursor: pointer;
-  transition: all 0.25s cubic-bezier(0.25, 0.1, 0.25, 1);
-  box-shadow: var(--sh);
-  min-width: 200px;
+  transition: transform 0.45s cubic-bezier(0.25, 0.1, 0.25, 1), box-shadow 0.45s cubic-bezier(0.25, 0.1, 0.25, 1), border-color 0.3s ease;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04), 0 8px 24px rgba(0, 0, 0, 0.06);
+  min-width: 208px;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 12px;
   opacity: 0;
-  animation: obBindIn 0.5s ease forwards;
+  /* 入场后常驻 opacity:1（.bound 只停脉冲不停终态——修复点击后卡片隐形 bug）；
+     PPT 浮入：位移+缩放一起落定，卡片间 0.1s 递进 */
+  animation: obBindFloat 0.6s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+.ob-bind-card.ob-shown { opacity: 1; }  /* 入场结束的 JS 兜底终态，.bound 依赖它 */
+.ob-bind-card:not(.bound) {
+  /* 呼吸光圈独立（不与入场串联，不与 hover transition 抢 transform——修顿动）：
+     用 filter 光晕 + box-shadow 脉冲，transform 上浮移到 hover */
+  animation: obBindPulse 2.2s ease-in-out 0.6s infinite;
 }
 
-.ob-bind-card:nth-child(1) { animation-delay: 0.15s; }
-.ob-bind-card:nth-child(2) { animation-delay: 0.25s; }
-.ob-bind-card:nth-child(3) { animation-delay: 0.35s; }
+.ob-bind-card:nth-child(1) { animation-delay: 0.38s; }
+.ob-bind-card:nth-child(2) { animation-delay: 0.50s; }
+.ob-bind-card:nth-child(3) { animation-delay: 0.62s; }
+
+/* 引导呼吸光圈（加强版）：双层光圈 + 主题色渐变背景 + 轻微上浮，
+   引导页未绑定时醒目提示；hover 静止；用户点击后 .bound 静止 */
+@keyframes obBindPulse {
+  /* 仅光效脉冲（无 transform）——避免与 hover transition 抢属性造成顿动 */
+  0%, 100% {
+    box-shadow: var(--sh), 0 0 0 0 rgba(59, 130, 246, 0);
+    filter: none;
+  }
+  50% {
+    box-shadow: var(--sh), 0 0 0 9px rgba(59, 130, 246, 0), 0 0 22px 6px rgba(59, 130, 246, 0.42);
+    filter: brightness(1.035);
+  }
+}
+.ob-bind-card:not(.bound) {
+  background: linear-gradient(165deg, var(--c) 58%, rgba(59, 130, 246, 0.09) 100%);
+}
+.ob-bind-card.bound { animation: none; opacity: 1; }
+.ob-bind-card.just-bound {
+  border-color: rgba(52, 199, 89, 0.55);
+  box-shadow: 0 0 0 4px rgba(52, 199, 89, 0.14), 0 8px 24px rgba(52, 199, 89, 0.12);
+}
+.ob-bound-check { animation: obCheckPop 0.45s cubic-bezier(0.34, 1.56, 0.64, 1); }
+@keyframes obCheckPop {
+  from { transform: scale(0); }
+  to   { transform: scale(1); }
+}
+
+/* 箭头指引说明：卡片上方下指箭头 + 气泡（引导页专属，绑定后隐藏） */
+.ob-bind-arrow {
+  display: none;
+}
+.ob-hero-bind { position: relative; }
+.ob-hero:not(.ob-bound-done) .ob-hero-bind::before {
+  content: '';
+  position: absolute;
+  top: -46px; left: 50%;
+  transform: translateX(-50%);
+  width: 0; height: 0;
+  border-left: 12px solid transparent;
+  border-right: 12px solid transparent;
+  border-top: 16px solid rgba(59, 130, 246, 0.85);
+  filter: drop-shadow(0 2px 6px rgba(59, 130, 246, 0.35));
+  opacity: 0;
+  /* 卡片入场完成（≤0.85s）后指引才出现——时序合理化 */
+  animation: obGuideIn 0.5s ease 1.35s forwards, obArrowBounce 1.4s ease-in-out 1.85s infinite;
+}
+.ob-hero:not(.ob-bound-done) .ob-hero-bind::after {
+  content: attr(data-guide);
+  position: absolute;
+  top: -78px; left: 50%;
+  transform: translateX(-50%);
+  padding: 7px 16px;
+  border-radius: 12px;  /* 苹果风胶囊圆角 */
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.1px;
+  white-space: nowrap;
+  box-shadow: 0 4px 14px rgba(59, 130, 246, 0.35);
+  opacity: 0;
+  animation: obGuideIn 0.5s ease 1.35s forwards, obArrowBounce 1.4s ease-in-out 1.85s infinite;
+}
+@keyframes obGuideIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+/* ══ 引擎引导横幅（品牌渐变胶囊风 + 入场动画）══ */
+#engineBanner {
+  background: linear-gradient(135deg, rgba(59,130,246,0.10), rgba(139,92,246,0.10)) !important;
+  border-bottom: 1px solid rgba(59,130,246,0.25) !important;
+  animation: obBannerIn 0.5s cubic-bezier(0.16,1,0.3,1);
+}
+@keyframes obBannerIn {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0); opacity: 1; }
+}
+/* 横幅主按钮：品牌渐变（与引导页气泡同语言） */
+#engineBanner .bt-p {
+  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  border: none;
+  color: #fff;
+}
+
+
+/* ══ 引擎页工具栏"添加设备"按钮引导脉冲（定稿：静态引导卡已删，视觉语言
+   由工具栏按钮的呼吸光圈延续；keyframes 在 runtimes.js 注入，仅 box-shadow）══ */
+
+@keyframes obArrowBounce {
+  0%, 100% { transform: translateX(-50%) translateY(0); }
+  50%      { transform: translateX(-50%) translateY(4px); }
+}
+.ob-hero.ob-bound-done .ob-hero-bind::before,
+.ob-hero.ob-bound-done .ob-hero-bind::after { display: none; }
 
 .ob-bind-card:hover {
   border-color: color-mix(in srgb, var(--brand, var(--a)) 30%, var(--b));
-  transform: translateY(-3px);
-  box-shadow: 0 12px 40px rgba(0,0,0,0.08);
+  transform: translateY(-2px) scale(1.015);
+  box-shadow: 0 2px 4px rgba(0,0,0,0.04), 0 14px 36px rgba(0,0,0,0.10);
 }
 
 .ob-bind-icon {
@@ -1012,13 +1128,21 @@
   to { opacity: 1; transform: translateY(0); }
 }
 
-@keyframes obBindIn {
-  to { opacity: 1; transform: translateY(0); }
+@keyframes obCascade {
+  from { opacity: 0; transform: translateY(26px); }
+  to   { opacity: 1; transform: translateY(0); }
 }
+@keyframes obBindFloat {
+  from { opacity: 0; transform: translateY(26px) scale(0.95); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes obBindShow { to { opacity: 1; } }
 
 /* ── 减弱动画偏好 ── */
 @media (prefers-reduced-motion: reduce) {
-  .ob-hero { animation: none; }
+  .ob-hero > *, .ob-hero { animation: none; }
+  .ob-hero > * { opacity: 1; }
+  .ob-bind-card { opacity: 1; }
   .ob-bind-card { animation: none; opacity: 1; transform: none; }
   .ob-bind-card:hover { transform: none; }
 }

@@ -8,7 +8,7 @@ import hashlib, json, os, threading
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
-from src.api.deps import require_no_session_token
+from src.api.deps import require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.session_manager import db, db_lock
@@ -1238,6 +1238,118 @@ def runtime_install_package(credential_id: int = Depends(_require_credential)):
 
 
 # ===== Engine local_skills 刷新 =====
+
+
+def engine_onboarding_repo_key(repo: str) -> str:
+    """engine-onboarding 的 repo 匹配值：契约单一，只接受规范带前缀形态。
+
+    - 带 provider 前缀（gitcode:owner/repo，即前端 currentRepo().repoKey，
+      DB 直出）→ to_repo_key 归一后返回，SQL 等值匹配
+    - 裸 owner/repo / 未知形态 → 返回空串（视为无仓库上下文，走全局保守判定），
+      **不做前缀猜测**——查表定前缀（LIMIT 1 无序）在双平台同名仓库时命中
+      不确定，是 IN 撒网问题的换皮；本端点是读取路径，调用方拿得到的始终是
+      DB 直出的规范形态，裸形态输入在本语境不存在，防御它只会引入错误面。
+
+    返回空串表示无仓库上下文。
+    """
+    raw = (repo or "").strip()
+    if not raw or ":" not in raw:
+        return ""
+    from src.repo_key import to_repo_key
+    return to_repo_key(raw)
+
+
+@router.get("/engine-onboarding", operation_id="runtime_engine_onboarding",
+            summary="Engine onboarding status for one-click deployments",
+            description="Returns server_base_url (auto-healed via Host header), one-click worker install commands, "
+                        "local engine discovery results, and registered remote engines. needs_worker=true when no "
+                        "usable engine exists (only the default offline opencode record), guiding the user to attach "
+                        "an engine machine via an rta_ credential instead of installing engines in-place.")
+def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_member)):
+    """一键部署引擎接入引导（编排入口，零新机制：全部复用既有凭据/安装/注册协议）。
+
+    解决的问题：AI 一键部署 Grape 到平台沙箱（PATH 隔离）后，discover_backends
+    扫不到任何引擎，引擎列表只剩默认 opencode 离线记录，用户无从知晓正确
+    接入方式是「在装了引擎的机器上跑 worker 拿 rta_ 凭据注册」而非本地装引擎。
+
+    可见性语义（对齐 dashboard.py 仓库级/全局分层惯例；repo 参数契约：只接受
+    规范带前缀形态 gitcode:owner/repo，即前端 currentRepo().repoKey——裸形态
+    视为无仓库上下文走全局判定，不做前缀猜测）：
+    - 带 repo（仓库上下文）：global + 自己的 user-scope + 该 repo 的 worker
+    - 不带 repo（全局引导页/横幅）：global + 自己的 user-scope
+
+    返回：
+    - server_base_url：get_server_base_url()（Host 头自愈后即为正确公网地址）
+    - install_cmd_linux / install_cmd_windows：--server 已代入的一键安装命令
+    - local_engines：discover_backends() 本机扫描（沙箱内通常全空）
+    - remote_engines：agent_runtimes 在线引擎（按上述可见性过滤）
+    - needs_worker：无任何可用引擎（本地全未装 且 可见远端零在线）时 true
+    """
+    from src.user.db import get_server_base_url
+    from src.agent.executor import discover_backends
+    from src.repo_key import from_repo_key
+
+    base = (get_server_base_url() or "").rstrip("/")
+    local = discover_backends()
+    remote = []
+    _user_visible = []  # 预置：查询异常时保守按"无可用引擎"处理（引导继续提示）
+    _user = user.get("username") or ""
+    _uid = str(user.get("id") or "")
+    _org_id = user.get("org_id", 0) or 0
+    # repo 匹配值：单一真源等值匹配（engine_onboarding_repo_key）——带前缀原样、
+    # 裸形态查 managed_repos 定唯一前缀。不做多形态撒网 IN（跨平台同名仓库泄漏）。
+    _rk = engine_onboarding_repo_key(repo or "")
+    try:
+        with db_lock:
+            c = db.cursor()
+            # 判定语义：本端点回答"该用户是否还有可用的执行引擎"——
+            # global（本组织内免提示）+ 本人 user-scope + 本人名下所有 repo-scope
+            # （不限当前 repo）。repo_key 用于 remote_engines 的上下文过滤（展示）。
+            #
+            # 列名修复：此前误用 runtime_credentials 的列名（device_name/owner_name）
+            # 查 agent_runtimes——SQLite 抛 no such column 被 except 吞掉，
+            # remote 恒空、有在线 worker 的部署也被误报 needs_worker=true。
+            # 归属三态（注册链路 runtime.py:160-202）：user-scope 行
+            # owner_id=str(grape_accounts.id)；repo-scope 行 owner_id=仓库全名
+            # （须 JOIN runtime_credentials.owner_name 才能按用户名覆盖）；
+            # global 行 owner_id=''。org 隔离与 dashboard/settings 引擎列表同惯例。
+            c.execute(
+                "SELECT ar.id, ar.name, ar.status, "
+                "COALESCE(NULLIF(ar.host_name,''), ar.display_name, ar.name) AS device_name, "
+                "ar.scope, ar.repo_key "
+                "FROM agent_runtimes ar "
+                "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                "WHERE ar.status='online' "
+                "AND (ar.org_id=0 OR ar.org_id=?) "
+                "AND (ar.scope='global' OR ar.owner_id=? OR LOWER(rc.owner_name)=LOWER(?)) "
+                "ORDER BY ar.id",
+                (_org_id, _uid, _user),
+            )
+            # 列名取值（不按列序）——SELECT 列调整不会静默错位（复盘 #3）
+            _cols = [d[0] for d in (c.description or [])]
+            _all = [{k: row[i] for i, k in enumerate(_cols)} for row in (c.fetchall() or [])]
+            # needs_worker 判定：用户视角全部（global + 本人一切 scope）
+            _user_visible = _all
+            # 展示列表：repo 上下文时按该 repo 过滤；全局上下文不含他人 repo-scope
+            if _rk:
+                remote = [e for e in _all if e.get("scope") != "repo" or e.get("repo_key") == _rk]
+            else:
+                remote = [e for e in _all if e.get("scope") != "repo"]
+    except Exception as e:
+        log.warning(f"engine-onboarding: query agent_runtimes failed: {e}")
+
+    local_usable = [e["name"] for e in local if e.get("installed")]
+    needs_worker = not local_usable and not _user_visible
+    return {
+        "server_base_url": base,
+        "install_cmd_linux": f"curl -fsSL {base}/api/runtime/install | bash -s -- --server {base} --token <rta_凭据>",
+        "install_cmd_windows": f"irm {base}/api/runtime/install.ps1 | iex  # -Token <rta_凭据> -Server {base}",
+        "credential_api": f"POST {base}/api/settings/runtime-credentials",
+        "local_engines": local,
+        "remote_engines": remote,
+        "needs_worker": needs_worker,
+    }
+
 
 def _scan_engine_skills_detail(engine_name: str) -> list[dict]:
     """本机扫描指定 engine 的 skill 详情（description / 路径 / 文件数）。"""

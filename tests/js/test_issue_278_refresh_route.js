@@ -28,6 +28,8 @@ function makeDom() {
       innerHTML: '',
       textContent: '',
       value: '',
+      // F5 刷新守卫读 repoSelect.options.length（app.js nav:1617）——mock 需带 options
+      options: [],
       querySelector: () => null,
       querySelectorAll: () => [],
       addEventListener: () => {},
@@ -58,7 +60,17 @@ function makeDom() {
 const appJsPath = path.resolve(__dirname, '../../src/api/static/js/app.js');
 const src = fs.readFileSync(appJsPath, 'utf8');
 
-function loadApp(dom, localStorage, opts) {
+function makeSessionStore() {
+  return {
+    _s: {},
+    getItem(k) { return (k in this._s) ? this._s[k] : null; },
+    setItem(k,v) { this._s[k] = String(v); },
+    removeItem(k) { delete this._s[k]; },
+    clear() { this._s = {}; },
+  };
+}
+
+function loadApp(dom, localStorage, opts, sessionStore) {
   opts = opts || {};
   var navLog = [];
   var win = {
@@ -81,13 +93,9 @@ function loadApp(dom, localStorage, opts) {
   var console_ = { log:()=>{}, error:()=>{}, warn:()=>{} };
   // 本地版 app.js（Issue #231）将 currentRepo 存于 sessionStorage——远程测试未 mock，
   // 此处补独立 store，使该测试兼容本地代码
-  var sessionStorageMock = {
-    _s: {},
-    getItem(k) { return (k in this._s) ? this._s[k] : null; },
-    setItem(k,v) { this._s[k] = String(v); },
-    removeItem(k) { delete this._s[k]; },
-    clear() { this._s = {}; },
-  };
+  //（2026-10-28 修正：mock 一直在场但用例把 currentRepo 写进 localStorage，
+  //  与实现漂移导致 7 用例全红——统一改写/读 sessionStorage）
+  var sessionStorageMock = sessionStore || makeSessionStore();
 
   var sandbox = {
     document: dom,
@@ -125,7 +133,7 @@ function loadApp(dom, localStorage, opts) {
     };
   }
 
-  return { app: app, window: win, localStorage: localStorage, navLog: navLog };
+  return { app: app, window: win, localStorage: localStorage, sessionStorage: sessionStorageMock, navLog: navLog };
 }
 
 let passed = 0, failed = 0;
@@ -139,12 +147,13 @@ console.log('Issue #278: 刷新后保持当前页面路由 — 回归测试\n');
 // ─── 测试 1：hash 指向有效子页面 → 导航到该页，不跳 dash ───
 test('renderReposFromData: hash=#coding → 导航到 coding（非 dash）', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#coding' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#coding' }, ss);
   // _currentView 为空 → loadRepos cachedRepos 路径走 renderReposFromData
   app.loadRepos(false);
 
@@ -157,12 +166,13 @@ test('renderReposFromData: hash=#coding → 导航到 coding（非 dash）', () 
 // ─── 测试 2：无 hash → 回退默认 dash ───
 test('renderReposFromData: 无 hash → 回退默认 dash', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '' }, ss);
   app.loadRepos(false);
 
   assert.strictEqual(win._currentView, 'dash',
@@ -172,12 +182,13 @@ test('renderReposFromData: 无 hash → 回退默认 dash', () => {
 // ─── 测试 3：hash 指向无效视图 → 回退 dash ───
 test('renderReposFromData: hash=#invalidview → 回退 dash', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#invalidview' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#invalidview' }, ss);
   app.loadRepos(false);
 
   assert.strictEqual(win._currentView, 'dash',
@@ -187,12 +198,13 @@ test('renderReposFromData: hash=#invalidview → 回退 dash', () => {
 // ─── 测试 4：带 param 的 hash 路由正确恢复 ───
 test('renderReposFromData: hash=#event/123 → 导航到 event，param=123', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#event/123' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#event/123' }, ss);
   app.loadRepos(false);
 
   assert.strictEqual(win._currentView, 'event',
@@ -204,14 +216,15 @@ test('renderReposFromData: hash=#event/123 → 导航到 event，param=123', () 
 // ─── 测试 5：_currentView 已设时 init 不重复导航 ───
 test('init: _currentView 已设 → 跳过重复 hash 导航', () => {
   var { dom, localStorage: ls } = makeDom();
+  var ss = makeSessionStore();
   ls.setItem('token', 'test-token');
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
   ls.setItem('app_cache_ver', '32');
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#coding' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#coding' }, ss);
 
   // 模拟 renderReposFromData 已通过 loadRepos 恢复了路由
   // （cachedRepos 同步路径 → renderReposFromData → nav('coding') → _currentView='coding'）
@@ -230,12 +243,13 @@ test('init: _currentView 已设 → 跳过重复 hash 导航', () => {
 // ─── 测试 6：刷新场景端到端——hash 不被覆写 ───
 test('场景: 用户在 coding 页刷新 → URL hash 保持 #coding 不变为 #dash', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#coding' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#coding' }, ss);
 
   // 刷新触发 loadRepos（cachedRepos 同步路径）
   app.loadRepos(false);
@@ -250,12 +264,13 @@ test('场景: 用户在 coding 页刷新 → URL hash 保持 #coding 不变为 #
 // ─── 测试 7：不在 VIEWS 数组但在 nav() 中有渲染分支的视图也能恢复 ───
 test('renderReposFromData: hash=#scene-detail-local/abc → 导航到 scene-detail-local', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'o/r', owner:'o', name:'r'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [{full_name:'o/r', owner:'o', name:'r', is_joined:true}],
     ts: Date.now()
   }));
-  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#scene-detail-local/abc' });
+  var { app, window: win, navLog } = loadApp(dom, ls, { hash: '#scene-detail-local/abc' }, ss);
   app.loadRepos(false);
   assert.strictEqual(win._currentView, 'scene-detail-local',
     'hash=#scene-detail-local/abc 时 _currentView 应为 scene-detail-local，实际为 ' + win._currentView);
@@ -264,7 +279,8 @@ test('renderReposFromData: hash=#scene-detail-local/abc → 导航到 scene-deta
 // ─── 回归：Issue #82 原有行为不受影响 ───
 test('回归 #82: currentRepo 存在但不在列表中 → 保留用户选择不覆写', () => {
   var { dom, localStorage: ls } = makeDom();
-  ls.setItem('currentRepo', JSON.stringify({fullName:'owner/repo-B', owner:'owner', name:'repo-B'}));
+  var ss = makeSessionStore();
+  ss.setItem('currentRepo', JSON.stringify({fullName:'owner/repo-B', owner:'owner', name:'repo-B'}));
   ls.setItem('repo_member_cache', JSON.stringify({
     repos: [
       {full_name:'owner/repo-A', owner:'owner', name:'repo-A', is_joined:true},
@@ -272,9 +288,9 @@ test('回归 #82: currentRepo 存在但不在列表中 → 保留用户选择不
     ],
     ts: Date.now()
   }));
-  var { app } = loadApp(dom, ls, { hash: '' });
+  var { app } = loadApp(dom, ls, { hash: '' }, ss);
   app.loadRepos(false);
-  var after = JSON.parse(ls.getItem('currentRepo'));
+  var after = JSON.parse(ss.getItem('currentRepo'));
   assert.strictEqual(after.fullName, 'owner/repo-B',
     '刷新后 currentRepo 应保持 repo-B，实际为 ' + after.fullName);
 });

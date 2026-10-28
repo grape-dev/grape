@@ -23,7 +23,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 .email-not-configured #forgotNotConfigured { display: block !important; }
 .email-configured #forgotNotConfigured { display: none !important; }
 </style>
-<script src="/static/js/i18n.js?v=16" defer></script>
+<script src="/static/js/i18n.js?v=17" defer></script>
 </head>
 <body>
 
@@ -96,7 +96,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
         autocomplete="new-password"
         aria-describedby="forgotNewPassErr"
         oninput="onNewPwdInput()"
-        onblur="Auth.blurValidate('forgotNewPass',function(v){return v&&v.length<8?Auth.t('app.login.pwd_req_length'):null;})">
+        onblur="Auth.blurValidate('forgotNewPass',function(v){return v&&window.isPwdTooShort(v)?Auth.t('app.login.pwd_req_length'):null;})">
       <button type="button" class="pwd-toggle" onclick="Auth.togglePwd('forgotNewPass',this)" aria-label="显示密码" data-i18n-aria="app.login.show_password">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
       </button>
@@ -156,6 +156,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 </div>
 
 <script src="/static/js/api.js?v=31"></script>
+<script src="/static/js/pwd-blocklist.js?v=3"></script><!-- 重置密码预检消费（复核 #3） -->
 <script src="/static/js/auth.js?v=7"></script>
 <script>
 Auth.initI18n();
@@ -163,7 +164,7 @@ function $(id){return document.getElementById(id)}
 
 // 验证规则
 var EMAIL_RULE = function(v){return v&&v.indexOf('@')<0?Auth.t('app.login.err_email_format'):null;};
-var NEWPWD_RULE = function(v){return v&&v.length<8?Auth.t('app.login.pwd_req_length'):null;};
+var NEWPWD_RULE = function(v){return v&&window.isPwdTooShort(v)?Auth.t('app.login.pwd_req_length'):(window.isWeakPassword(v)?Auth.t('app.login.err_password_blocklist'):null);};
 var CONFIRM_RULE = function(v){return v&&v!==$('forgotNewPass').value.trim()?Auth.t('app.login.err_confirm_mismatch'):null;};
 
 function onNewPwdInput(){
@@ -172,7 +173,7 @@ function onNewPwdInput(){
     strengthId:'forgotNewPassStrength', fillId:'newPwdStrengthFill',
     labelId:'newPwdStrengthLabel', reqsId:'newPwdReqs',
     reqs:[
-      {id:'newreq-len', test:function(p){return p.length>=8}},
+      {id:'newreq-len', test:function(p){return !window.isPwdTooShort(p)}},
       {id:'newreq-complex', test:function(p){return /[a-zA-Z]/.test(p)&&/\d/.test(p)}}
     ]
   });

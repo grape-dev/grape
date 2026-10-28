@@ -572,9 +572,22 @@ function _accountSwitchBindTab(tab) {
 }
 
 function _accountManualBindForm(provider, isZh, pName, oauthConfigured) {
+  // 令牌创建直达链接（实测 200 / 官方支持的预选参数）：
+  // - GitHub: scopes=repo 预勾选仓库权限，description 预填备注
+  // - GitCode: gitcode.com/settings/personal-access-tokens/new
+  var tokenCreateUrl = provider === 'github'
+    ? 'https://github.com/settings/tokens/new?scopes=repo&description=Grape%20DevOps'
+    : 'https://gitcode.com/setting/token-classic/create';
+  var tokenCreateLabel = provider === 'github' ? 'github.com' : 'gitcode.com';
+  // 帮助文案第一步做成超链接，直达令牌创建页（新标签页打开）
   var helpSteps = provider === 'github'
     ? (I18N.t('app.account.github_token_help'))
     : (I18N.t('app.account.gitcode_token_help'));
+  // 单一直达入口（方案 A）：通栏按钮是唯一的令牌创建链接，帮助步骤保持纯文本
+  // （步骤 2/3 是权限/复制指引有增量；第 1 步链接与按钮同目标，属重复入口，已移除）
+  var createLinkBtn = '<a href="' + tokenCreateUrl + '" target="_blank" rel="noopener noreferrer" class="bt" '
+    + 'style="display:block;text-align:center;text-decoration:none;margin:0 0 12px;color:var(--a);border:1px solid var(--a)">'
+    + (I18N.t('app.account.open_token_page')) + ' ' + _esc(tokenCreateLabel) + '</a>';
 
   var html = '';
   // R13.3: 未配 OAuth App 时提示 PAT 不会自动续期
@@ -585,6 +598,7 @@ function _accountManualBindForm(provider, isZh, pName, oauthConfigured) {
       + (I18N.t('app.account.pat_no_refresh_hint'))
       + '</div></div>';
   }
+  html += createLinkBtn;
   html += '<div class="srow"><label>' + (I18N.t('app.account.access_token')) + '</label>'
     + '<input type="password" id="manualTokenInput" class="kb-input" placeholder="' + (I18N.t('app.account.paste_token')) + '">'
     + '</div>'
@@ -1033,7 +1047,8 @@ function _accountOnUnbindSuccess(provider, d, isZh) {
   _accountCleanupAfterUnbind(provider);
   // 刷新侧边栏仓库列表（后端 user_repos 已清理该平台数据）
   setTimeout(function() { if (typeof app !== 'undefined' && app.initSidebarRepos) app.initSidebarRepos(); }, 100);
-  // R2: 如果 _accountCleanupAfterUnbind 已调 goToRepos，不覆盖布局
+  // 解绑不跳转（需求变更：_accountCleanupAfterUnbind 不再调 goToRepos）——
+  // 用户留在 account 页看到成功 toast，renderAccount 重渲染安全页反映新绑定状态
   if (window._currentView !== 'repos') {
     renderAccount('security');
   }
@@ -1055,14 +1070,14 @@ function _accountOnUnbindError(e) {
 
 // R1/R2/R3: 解绑平台后统一清理仓库状态
 function _accountCleanupAfterUnbind(provider) {
-  // R1: 检查 currentRepo 是否属于被解绑的平台
-  var _needRedirect = false;
+  // R1: 检查 currentRepo 是否属于被解绑的平台 → 属于则清理（不跳转，见函数尾）
   try {
     var cr = JSON.parse(sessionStorage.getItem('currentRepo') || 'null');
     if (cr && cr.repoKey && cr.repoKey.indexOf(provider + ':') === 0) {
-      // 当前选中仓库属于被解绑的平台 → 清理
+      // 当前选中仓库属于被解绑的平台 → 清理（跳转已按需求移除：解绑是用户在
+      // account 页的主动操作，完成后留在原地；用户下次进入工作台/仓库列表时
+      // 由既有路由逻辑落到正确页面，不在解绑瞬间打断）
       sessionStorage.removeItem('currentRepo');
-      _needRedirect = true;
     }
   } catch(e) {}
 
@@ -1074,13 +1089,6 @@ function _accountCleanupAfterUnbind(provider) {
   // R2: 刷新角色（无条件——解绑可能影响托管仓库列表，角色可能变化）
   if (typeof app !== 'undefined' && app.loadProfile) {
     app.loadProfile();
-  }
-
-  // R2: 如果清理了 currentRepo，引导用户回到仓库选择页
-  if (_needRedirect) {
-    if (typeof app !== 'undefined' && app.goToRepos) {
-      app.goToRepos();
-    }
   }
 }
 

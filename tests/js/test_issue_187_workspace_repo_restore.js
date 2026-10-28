@@ -56,21 +56,31 @@ function makeLocalStorage() {
 const reposJsPath = path.resolve(__dirname, '../../src/api/static/js/pages/repos.js');
 const src = fs.readFileSync(reposJsPath, 'utf8');
 
-function loadReposModule(dom, localStorage, apiMock) {
+function loadReposModule(dom, localStorage, apiMock, sessionStore) {
   const window = { _currentView: '', addEventListener: () => {} };
   const I18N = { t: (k) => k, getLang: () => 'zh' };
+  // Issue #231 起 currentRepo 存于 sessionStorage（本测试历史写/读 localStorage，
+  // 与实现漂移导致 9 用例全红——修正为同源 sessionStorage）
+  const sessionStorage = sessionStore || makeLocalStorage();
   const app = {
     initSidebarRepos: () => {},
     nav: () => {},
     loadProfile: () => Promise.resolve(),
     showToast: () => {},
     logout: () => {},
+    currentRepo() {
+      try {
+        const r = JSON.parse(sessionStorage.getItem('currentRepo'));
+        return (r && r.fullName) ? r : null;
+      } catch (e) { return null; }
+    },
   };
   const console_ = { log: () => {}, error: () => {}, warn: () => {} };
   const sandbox = {
     document: dom,
     window,
     localStorage,
+    sessionStorage,
     API: apiMock,
     I18N,
     app,
@@ -83,7 +93,9 @@ function loadReposModule(dom, localStorage, apiMock) {
   const keys = Object.keys(sandbox);
   const vals = keys.map(k => sandbox[k]);
   const fn = new Function(...keys, src + '\n; return { switchSidebarTab: typeof switchSidebarTab !== "undefined" ? switchSidebarTab : null };');
-  return fn(...vals);
+  const mod = fn(...vals);
+  mod._sessionStorage = sessionStorage;  // 用例经此读写 currentRepo（与实现同源）
+  return mod;
 }
 
 const HOSTED = [
@@ -111,11 +123,12 @@ console.log('Issue #187: 工作台切 tab 记忆仓库 — 回归测试\n');
   await test('命中：currentRepo 在 hosted 列表 → 恢复该仓库（非首位 repo-C）', async () => {
     const { dom } = makeDom();
     const ls = makeLocalStorage();
-    ls.setItem('currentRepo', JSON.stringify({ fullName: 'owner/repo-C', owner: 'owner', name: 'repo-C', repoKey: 'gitcode:owner/repo-C' }));
-    const mod = loadReposModule(dom, ls, apiReturning(HOSTED));
+    const ss = makeLocalStorage();
+    ss.setItem('currentRepo', JSON.stringify({ fullName: 'owner/repo-C', owner: 'owner', name: 'repo-C', repoKey: 'gitcode:owner/repo-C' }));
+    const mod = loadReposModule(dom, ls, apiReturning(HOSTED), ss);
     mod.switchSidebarTab('workspace');
     await flush();
-    const after = JSON.parse(ls.getItem('currentRepo'));
+    const after = JSON.parse(ss.getItem('currentRepo'));
     assert.strictEqual(after.fullName, 'owner/repo-C',
       '切回工作台应恢复 repo-C，实际恢复为 ' + after.fullName);
   });
@@ -123,11 +136,12 @@ console.log('Issue #187: 工作台切 tab 记忆仓库 — 回归测试\n');
   await test('未命中：无 currentRepo → 降级选 hosted[0]（首次登录）', async () => {
     const { dom } = makeDom();
     const ls = makeLocalStorage();
-    ls.removeItem('currentRepo');
-    const mod = loadReposModule(dom, ls, apiReturning(HOSTED));
+    const ss = makeLocalStorage();
+    ss.removeItem('currentRepo');
+    const mod = loadReposModule(dom, ls, apiReturning(HOSTED), ss);
     mod.switchSidebarTab('workspace');
     await flush();
-    const after = JSON.parse(ls.getItem('currentRepo'));
+    const after = JSON.parse(ss.getItem('currentRepo'));
     assert.ok(after, '首次登录应设置 currentRepo');
     assert.strictEqual(after.fullName, 'owner/repo-A', '首次登录应选 hosted[0]=repo-A');
   });
@@ -135,11 +149,12 @@ console.log('Issue #187: 工作台切 tab 记忆仓库 — 回归测试\n');
   await test('失效降级：currentRepo 已不在 hosted 列表（解除托管）→ 降级 hosted[0]，不报错', async () => {
     const { dom } = makeDom();
     const ls = makeLocalStorage();
-    ls.setItem('currentRepo', JSON.stringify({ fullName: 'owner/gone-repo', owner: 'owner', name: 'gone-repo', repoKey: 'gitcode:owner/gone-repo' }));
-    const mod = loadReposModule(dom, ls, apiReturning(HOSTED));
+    const ss = makeLocalStorage();
+    ss.setItem('currentRepo', JSON.stringify({ fullName: 'owner/gone-repo', owner: 'owner', name: 'gone-repo', repoKey: 'gitcode:owner/gone-repo' }));
+    const mod = loadReposModule(dom, ls, apiReturning(HOSTED), ss);
     mod.switchSidebarTab('workspace');
     await flush();
-    const after = JSON.parse(ls.getItem('currentRepo'));
+    const after = JSON.parse(ss.getItem('currentRepo'));
     assert.strictEqual(after.fullName, 'owner/repo-A',
       '上次仓库已解除托管应降级 repo-A，实际为 ' + after.fullName);
   });
@@ -147,26 +162,28 @@ console.log('Issue #187: 工作台切 tab 记忆仓库 — 回归测试\n');
   await test('场景：选中 repo-B 后离开工作台再切回 → 恢复 repo-B', async () => {
     const { dom } = makeDom();
     const ls = makeLocalStorage();
-    const mod = loadReposModule(dom, ls, apiReturning(HOSTED));
-    ls.removeItem('currentRepo');
+    const ss = makeLocalStorage();
+    const mod = loadReposModule(dom, ls, apiReturning(HOSTED), ss);
+    ss.removeItem('currentRepo');
     mod.switchSidebarTab('workspace');
     await flush();
-    assert.strictEqual(JSON.parse(ls.getItem('currentRepo')).fullName, 'owner/repo-A', '首次进入应选 repo-A');
-    ls.setItem('currentRepo', JSON.stringify({ fullName: 'owner/repo-B', owner: 'owner', name: 'repo-B', repoKey: 'gitcode:owner/repo-B' }));
+    assert.strictEqual(JSON.parse(ss.getItem('currentRepo')).fullName, 'owner/repo-A', '首次进入应选 repo-A');
+    ss.setItem('currentRepo', JSON.stringify({ fullName: 'owner/repo-B', owner: 'owner', name: 'repo-B', repoKey: 'gitcode:owner/repo-B' }));
     mod.switchSidebarTab('workspace');
     await flush();
-    assert.strictEqual(JSON.parse(ls.getItem('currentRepo')).fullName, 'owner/repo-B',
+    assert.strictEqual(JSON.parse(ss.getItem('currentRepo')).fullName, 'owner/repo-B',
       '切回工作台应恢复 repo-B');
   });
 
   await test('空 hosted 列表 → 走空态渲染，不调用 selectRepo（currentRepo 不变）', async () => {
     const { dom } = makeDom();
     const ls = makeLocalStorage();
-    ls.setItem('currentRepo', JSON.stringify({ fullName: 'owner/old', owner: 'owner', name: 'old', repoKey: '' }));
+    const ss = makeLocalStorage();
+    ss.setItem('currentRepo', JSON.stringify({ fullName: 'owner/old', owner: 'owner', name: 'old', repoKey: '' }));
     const mod = loadReposModule(dom, ls, apiReturning([]));
     mod.switchSidebarTab('workspace');
     await flush();
-    const after = JSON.parse(ls.getItem('currentRepo'));
+    const after = JSON.parse(ss.getItem('currentRepo'));
     assert.strictEqual(after.fullName, 'owner/old', '无托管仓库时不应覆写 currentRepo');
     assert.ok(dom.getElementById('pageContent').innerHTML.indexOf('ws-empty') !== -1,
       '应渲染空态引导');

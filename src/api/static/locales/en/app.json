@@ -313,7 +313,19 @@
     "account_locked_no_email": "For security reasons, this account has been temporarily locked. Please try again in {{minutes}} minutes.",
     "toast_code_sent_hint": "If this email is available, a verification code has been sent. Please check your inbox.",
     "code_not_received_hint": "Didn't receive the code? If you're already registered, please",
-    "or": "or"
+    "or": "or",
+    "ob_engine_title": "Connect an Agent engine",
+    "ob_engine_sub": "No usable engine in this deployment. No local install needed — run this on any machine with an engine installed to attach it as a worker:",
+    "ob_engine_cmd_copy": "Copy install command",
+    "ob_engine_copied": "Copied",
+    "ob_engine_token_hint": "Replace <rta_ credential> with a one-time token from Settings → Workers; code platform tokens can be configured in User Settings after binding.",
+    "ob_engine_banner_hint": "No usable engine for this repo yet — add a device and bind an engine to run tasks",
+    "ob_engine_banner_btn": "Add device & bind engine",
+    "pwd_req_blocklist": "Not a common weak password",
+    "err_password_blocklist": "This password is too common — pick something more unique",
+    "PASSWORD_WEAK": "This password is too common — pick something more unique",
+    "ob_bind_guide": "↓ Click a card below to bind your code platform",
+    "engine_banner_queued_hint": "+1 engine notice next"
   },
   "repo": {
     "select": "Select repository...",
@@ -631,7 +643,8 @@
     "email_not_configured": "Email service not configured. Please contact administrator.",
     "token_expired": "Token Expired",
     "token_expired_hint": "Your token has expired or been revoked. Please re-bind your token.",
-    "re_bind": "Re-bind"
+    "re_bind": "Re-bind",
+    "open_token_page": "Open token creation page"
   },
   "error": {
     "TOKEN_EXPIRED": "Your token has expired or been revoked. Please re-bind your token in Settings.",
@@ -664,7 +677,7 @@
     "EMAIL_INVALID": "Invalid email format",
     "EMAIL_NOT_ALLOWED": "This email is not allowed for registration",
     "EMAIL_ALREADY_REGISTERED": "This email is already registered. Please log in or reset your password.",
-    "PASSWORD_WEAK": "Password is too weak",
+    "PASSWORD_WEAK": "This password is too common — pick something more unique",
     "CODE_INVALID": "Verification code is incorrect or expired",
     "ACCOUNT_NOT_FOUND": "Account not found",
     "ACCOUNT_CREATE_FAILED": "Failed to create account",

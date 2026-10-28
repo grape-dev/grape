@@ -96,7 +96,11 @@
     "no_local_skill": "No local skill",
     "unassigned": "Unassigned",
     "loading": "Loading...",
-    "no_scenes": "No scenes"
+    "no_scenes": "No scenes",
+    "no_engines_title": "No engines",
+    "no_engines_sub": "No engines or devices attached in this organization yet",
+    "worker_guide_title": "Attach your first engine device",
+    "worker_guide_sub": "Add a device from any machine with an agent engine installed — the panel guides you through credential creation and the install command"
   },
   "time": {
     "not_online": "Not online",

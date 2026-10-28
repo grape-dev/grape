@@ -74,6 +74,7 @@ function _clearDashEditMode() {
 
 // ── 主入口：渲染场景中心（Hero + 场景卡片网格）──
 function renderDashboard(data) {
+  try { app._checkEngineBanner(); } catch (e) {}  // 时序链：进仓库后无引擎 → 引导添加设备
   const el = document.getElementById('pageContent');
   if (!el) return;
   const scenes = data._scenes || [];

@@ -21,7 +21,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 .email-not-configured #stepIndicator,
 .email-not-configured #emailField { display: none !important; }
 </style>
-<script src="/static/js/i18n.js?v=16" defer></script>
+<script src="/static/js/i18n.js?v=17" defer></script>
 </head>
 <body>
 
@@ -101,6 +101,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
       <li id="req-len" data-i18n="app.login.pwd_req_length">至少8个字符</li>
       <li id="req-complex" data-i18n="app.login.pwd_req_alnum">包含字母和数字</li>
       <li id="req-notmatch" data-i18n="app.login.pwd_req_not_match">不与用户名/邮箱相同</li>
+      <li id="req-blocklist" data-i18n="app.login.pwd_req_blocklist">非常见弱密码</li>
     </ul>
     <p class="field-error" id="regPasswordErr" role="alert" aria-live="polite"></p>
   </div>
@@ -205,7 +206,8 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 </div>
 
 <script src="/static/js/api.js?v=31"></script>
-<script src="/static/js/auth.js?v=7"></script>
+<script src="/static/js/pwd-blocklist.js?v=3" defer></script>
+    <script src="/static/js/auth.js?v=7"></script>
 <script>
 Auth.initI18n();
 function $(id){return document.getElementById(id)}
@@ -280,7 +282,9 @@ var RULES = {
   },
   regPassword: function(v){
     if(!v) return Auth.t('app.login.err_password_required');
-    if(v.length<8) return Auth.t('app.login.err_password_length');
+    if(window.isPwdTooShort(v)) return Auth.t('app.login.err_password_length');
+    if(window.isWeakPassword(v))
+      return Auth.t('app.login.err_password_blocklist');
     return null;
   },
   regPasswordConfirm: function(v){
@@ -304,12 +308,17 @@ function onPwdInput(){
     strengthId:'regPasswordStrength', fillId:'pwdStrengthFill',
     labelId:'pwdStrengthLabel', reqsId:'pwdReqs',
     reqs:[
-      {id:'req-len', test:function(p){return p.length>=8}},
+      {id:'req-len', test:function(p){return !window.isPwdTooShort(p)}},
       {id:'req-complex', test:function(p){return /[a-zA-Z]/.test(p)&&/\d/.test(p)}},
       {id:'req-notmatch', test:function(p){
         var u=$('regUsername').value.trim().toLowerCase();
         var e=$('regEmail').value.trim().toLowerCase();
         return p.length>0 && p.toLowerCase()!==u && p.toLowerCase()!==e;
+      }},
+      {id:'req-blocklist', test:function(p){
+        // 与后端 check_password_strength 同源的黑名单（大小写不敏感），
+        // scripts/gen-pwd-blocklist.py 生成——防"前端三条件全绿、后端悄悄拒绝"
+        return p.length>0 && !window.isWeakPassword(p);
       }}
     ]
   });

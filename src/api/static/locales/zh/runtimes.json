@@ -96,7 +96,11 @@
     "no_local_skill": "无本地 skill",
     "unassigned": "未分配",
     "loading": "加载中...",
-    "no_scenes": "暂无场景"
+    "no_scenes": "暂无场景",
+    "no_engines_title": "暂无引擎",
+    "no_engines_sub": "当前组织下暂无接入的引擎或设备",
+    "worker_guide_title": "接入你的第一台引擎设备",
+    "worker_guide_sub": "在任意装了 Agent 引擎的机器上添加设备接入为执行节点——侧边栏会引导你生成凭据并给出安装命令"
   },
   "time": {
     "not_online": "未上线",

@@ -313,7 +313,19 @@
     "account_locked_no_email": "出于安全保护，账号已临时锁定。请 {{minutes}} 分钟后重试。",
     "toast_code_sent_hint": "如果该邮箱可注册，验证码已发送，请查收邮件",
     "code_not_received_hint": "没收到验证码？如果你已注册，请",
-    "or": "或"
+    "or": "或",
+    "ob_engine_title": "接入 Agent 引擎",
+    "ob_engine_sub": "当前部署环境没有可用引擎。无需在本机安装——在任意装了引擎的机器上执行以下命令，把它接入为执行节点：",
+    "ob_engine_cmd_copy": "复制安装命令",
+    "ob_engine_copied": "已复制",
+    "ob_engine_token_hint": "将 <rta_凭据> 替换为「设置 → Workers」页生成的一次性凭据；代码平台 token 可在绑定平台后于「用户设置」中配置。",
+    "ob_engine_banner_hint": "当前仓库还没有可用的执行引擎 —— 添加设备绑定引擎后才能跑任务",
+    "ob_engine_banner_btn": "添加设备绑定引擎",
+    "pwd_req_blocklist": "非常见弱密码",
+    "err_password_blocklist": "该密码过于常见，请更换为更独特的密码",
+    "PASSWORD_WEAK": "密码过于常见，请更换为更独特的密码",
+    "ob_bind_guide": "↓ 点击下方卡片，绑定代码平台开始配置",
+    "engine_banner_queued_hint": "稍后还有 1 条引擎提示"
   },
   "repo": {
     "select": "选择仓库...",
@@ -631,7 +643,8 @@
     "email_not_configured": "邮箱服务未配置，请联系管理员",
     "token_expired": "Token 已过期",
     "token_expired_hint": "您的 Token 已过期或被撤销，请重新绑定 Token。",
-    "re_bind": "重新绑定"
+    "re_bind": "重新绑定",
+    "open_token_page": "前往令牌创建页面"
   },
   "error": {
     "TOKEN_EXPIRED": "您的 Token 已过期或被撤销，请在设置页重新绑定 Token。",
@@ -664,7 +677,7 @@
     "EMAIL_INVALID": "邮箱格式不正确",
     "EMAIL_NOT_ALLOWED": "该邮箱不在允许注册范围内",
     "EMAIL_ALREADY_REGISTERED": "该邮箱已注册，请直接登录或找回密码",
-    "PASSWORD_WEAK": "密码强度不足",
+    "PASSWORD_WEAK": "密码过于常见，请更换为更独特的密码",
     "CODE_INVALID": "验证码错误或已过期",
     "ACCOUNT_NOT_FOUND": "账号不存在",
     "ACCOUNT_CREATE_FAILED": "创建账号失败",

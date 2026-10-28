@@ -28,6 +28,7 @@
     "confirm": "Confirm",
     "empty_fields": "Please fill in current and new password",
     "too_short": "New password must be at least 8 characters",
+    "too_common": "This password is too common — pick something more unique",
     "mismatch": "Passwords do not match",
     "changed": "Password changed, please sign in again"
   },

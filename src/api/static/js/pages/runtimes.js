@@ -287,6 +287,38 @@ function _legendHtml() {
   </div>`;
 }
 
+// 简化版引擎接入指引（纯横幅+跳转+脉冲，非打断式）：
+// 引擎页渲染后查 needs_worker（会话级缓存，一次探测），true 时给工具栏
+// "添加设备"按钮加脉冲高亮——不遮罩、不挡内容、无持久记忆；面板打开即撤。
+window._rtMaybePulseAddBtn = function () {
+  if (window._rtPulseProbing || window._rtPulseDone) return;
+  window._rtPulseProbing = true;
+  API.get('/runtime/engine-onboarding').then(function (d) {
+    if (!d || !d.needs_worker) return;
+    if (window._currentView !== 'runtimes' || _runtimeTab !== 'engines') return;
+    var btn = document.getElementById('rtAddDeviceBtn');
+    if (btn) btn.classList.add('rt-guide-pulse');
+  }).catch(function () {}).finally(function () { window._rtPulseProbing = false; });
+};
+
+// 工具栏"添加设备"按钮（空态/非空两条渲染路径共用）。
+// id 供横幅跳转后的脉冲高亮定位（.rt-guide-pulse 由引擎页渲染时按 needs_worker
+// 添加，openAddDevicePanel 关闭分支移除；只动 box-shadow，transform 归 hover）。
+function _addDeviceBtnHtml() {
+  return '<button id="rtAddDeviceBtn" onclick="openAddDevicePanel()" style="display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 12px rgba(59,130,246,.35);transition:transform .2s;position:relative;overflow:hidden" onmouseover="this.style.transform=\'translateY(-1px)\'" onmouseout="this.style.transform=\'translateY(0)\'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg>' + (I18N.t('runtimes.action.add_device') || '添加设备') + '</button>';
+}
+
+// 引导脉冲样式（一次性注入；keyframes 仅 box-shadow）+ 聚光箭头弹跳
+(function () {
+  var s = document.createElement('style');
+  s.textContent = '.rt-guide-pulse{animation:rtGuidePulse 1.5s ease-in-out infinite}'
+    + '@keyframes rtGuidePulse{0%,100%{box-shadow:0 2px 12px rgba(59,130,246,.35),0 0 0 0 rgba(59,130,246,.55)}'
+    + '50%{box-shadow:0 2px 12px rgba(59,130,246,.35),0 0 0 10px rgba(59,130,246,0)}}'
+    // prefers-reduced-motion：前庭障碍用户不被持续动画打扰
+    + '@media (prefers-reduced-motion: reduce){.rt-guide-pulse{animation:none}}';
+  document.head.appendChild(s);
+})();
+
 function _renderRuntimesSkeleton(data) {
   var el = document.getElementById('pageContent');
   if (!el) return;
@@ -298,20 +330,33 @@ function _renderRuntimesSkeleton(data) {
     return '<button class="bt ' + (active ? 'bt-p' : 'bt-o') + '" onclick="_runtimeTab=\'' + t + '\';_onRuntimeTabSwitch(\'' + t + '\')">' + (I18N.t('runtimes.tab.' + t) || t) + '</button>';
   };
   var toolbar = '<div style="display:flex;gap:8px;margin-bottom:10px;align-items:center;flex-wrap:wrap">' +
-    tabBtn('engines') + tabBtn('workers') +
-    '<div class="sp"></div>' +
-    '<button class="bt bt-o" onclick="refreshRuntimes()">' + (I18N.t('runtimes.refresh') || '⟳') + '</button>' +
-    '</div>';
+  tabBtn('engines') + tabBtn('workers') +
+  '<div class="sp"></div>' +
+  '<button class="bt bt-o" onclick="refreshRuntimes()">' + (I18N.t('runtimes.refresh') || '⟳') + '</button>' +
+  _addDeviceBtnHtml() +
+  '</div>';
   if (isEmpty) {
     el.innerHTML = toolbar +
       '<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:60px 20px;gap:12px">' +
-      '<div style="font-size:48px">🔧</div>' +
-      '<div style="font-size:15px;font-weight:600;color:var(--t1)">暂无引擎</div>' +
-      '<div style="font-size:13px;color:var(--t3)">当前组织下暂无接入的引擎或设备</div>' +
+      '<svg width="56" height="56" viewBox="0 0 24 24" fill="none" stroke="var(--t3)" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" style="opacity:.55"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>' +
+      '<div style="font-size:15px;font-weight:600;color:var(--t1)">' + I18N.t('runtimes.empty.no_engines_title') + '</div>' +
+      '<div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.empty.no_engines_sub') + '</div>' +
       '</div>';
+    // 一键部署闭环（时序引导第三步）：引擎页空态引导用户打开"添加设备"——
+    // 侧边栏里有完整的凭据生成与安装命令流程；不在空态里堆命令文本。
+    // 门条件用 needs_worker（后端语义"该用户是否有可用引擎"），不用列表为空：
+    // 启动迁移会预置默认 opencode 占位行（credential_id=0）、server-metrics 会
+    // 自注册主控设备行，真实部署上两表永非空——按"列表为空"门控会让引导不可达。
+    window._rtMaybePulseAddBtn();
   } else {
     el.innerHTML = toolbar + '<div class="loading">' + (I18N.t('common.loading') || '加载中...') + '</div>';
   }
+}
+
+function _escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }
 
 // Issue #364: 重建引擎多源索引（Engines 列表缓存 ∪ Workers 设备承载引擎）
@@ -372,7 +417,7 @@ function renderRuntimes(data) {
         <input id="runtimeSearchInput" placeholder="搜索名称、设备、标签..." value="${_runtimeSearch}" onkeyup="if(event.key==='Enter'){_runtimeSearch=this.value;_rtResetPageAndReload()}" onchange="_runtimeSearch=this.value;_rtResetPageAndReload()" style="flex:1;padding:7px 12px 7px 14px;border:1px solid var(--b);border-radius:10px 0 0 10px;font-size:13px;background:var(--bg);color:var(--t1);transition:border-color .2s;outline:none" onfocus="this.style.borderColor='#0071e3';this.style.background='var(--c)'" onblur="this.style.borderColor='var(--b)';this.style.background='var(--bg)'">
         <button onclick="var i=document.getElementById('runtimeSearchInput');_runtimeSearch=i.value;_rtResetPageAndReload()" style="padding:7px 14px;border:1px solid var(--b);border-left:none;border-radius:0 10px 10px 0;background:var(--bg);color:var(--t3);font-size:13px;cursor:pointer;flex-shrink:0;transition:all .15s" onmouseover="this.style.background='#0071e3';this.style.color='#fff'" onmouseout="this.style.background='var(--bg)';this.style.color='var(--t3)'"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="display:block"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg></button>
       </div>
-      <button onclick="openAddDevicePanel()" style="margin-left:auto;display:inline-flex;align-items:center;gap:7px;padding:8px 18px;border:none;border-radius:10px;background:linear-gradient(135deg,#3b82f6,#8b5cf6);color:#fff;font-size:13px;font-weight:600;cursor:pointer;box-shadow:0 2px 12px rgba(59,130,246,.35);transition:all .2s;position:relative;overflow:hidden" onmouseover="this.style.transform='translateY(-1px)';this.style.boxShadow='0 4px 20px rgba(59,130,246,.45)'" onmouseout="this.style.transform='translateY(0)';this.style.boxShadow='0 2px 12px rgba(59,130,246,.35)'><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0"><path d="M12 5v14M5 12h14"/></svg>${I18N.t('runtimes.action.add_device')}</button>
+      ${_addDeviceBtnHtml()}
     </div>`;
   // 过滤标签栏
   // Issue #245: Workers tab 的筛选标签由后端 runtime-devices 返回（不依赖当前页数据）；
@@ -431,6 +476,14 @@ function renderRuntimes(data) {
   html += '<style>[data-tooltip]{position:relative}[data-tooltip]:hover::after{content:attr(data-tooltip);position:absolute;top:calc(100% + 8px);left:50%;transform:translateX(-50%);background:#1e2940;color:#fff;padding:6px 14px;border-radius:8px;font-size:11px;font-weight:500;white-space:nowrap;box-shadow:0 4px 12px rgba(0,0,0,.15);z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}[data-tooltip]:hover::before{content:"";position:absolute;top:calc(100% + 3px);left:50%;transform:translateX(-50%);border:5px solid transparent;border-bottom-color:#1e2940;z-index:100;pointer-events:none;opacity:0;animation:tipIn .2s ease forwards}@keyframes tipIn{to{opacity:1}}</style>';
   html += _legendHtml();
   el.innerHTML = html;
+  // 占位行存在时列表非空但用户仍无可用引擎——脉冲指引同样适用（幂等探测）
+  window._rtMaybePulseAddBtn();
+  // 引擎横幅跳转（_gotoEnginePage 设定）：渲染完成后自动展开"添加设备"面板，
+  // 用户从横幅一步直达凭据生成界面（省一次寻找与点击）
+  if (window._rtOpenPanelOnEnter) {
+    window._rtOpenPanelOnEnter = false;
+    setTimeout(function () { if (window._currentView === 'runtimes') openAddDevicePanel(); }, 150);
+  }
 }
 
 function renderEngines(data, devices) {
@@ -598,7 +651,19 @@ function openScopeSwitcher(cid, currentScope) {
 
 function openAddDevicePanel() {
   var existing = document.getElementById('addDeviceOverlay');
-  if (existing) { existing.remove(); return; }
+  if (existing) {
+    existing.remove();
+    return;
+  }
+  // 从引擎横幅跳转过来时自动开面板（_gotoEnginePage 设定）：省一步点击。
+  // 标记本身在渲染完成路径消费（见 _loadRuntimesData 渲染后的
+  // _rtOpenPanelOnEnter 检查）；此处仅作废标记（openAddDevicePanel 由
+  // 用户直接点击进入时，自动开面板意图已由本次点击替代）+ 撤脉冲。
+  window._rtOpenPanelOnEnter = false;
+  // 用户已点击：撤脉冲（会话内不再加回——_rtPulseDone 由 _rtMaybePulseAddBtn 检查）
+  window._rtPulseDone = true;
+  var _pb0 = document.getElementById('rtAddDeviceBtn');
+  if (_pb0) _pb0.classList.remove('rt-guide-pulse');
   _stopDevspaceAutoRefresh();
 
   var overlay = document.createElement('div');
@@ -606,6 +671,13 @@ function openAddDevicePanel() {
   overlay.style.cssText = 'position:fixed;inset:0;z-index:1001;display:flex;justify-content:flex-end;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px);background:rgba(0,0,0,.3);opacity:0;transition:opacity .3s ease';
 
   overlay.onclick = function(e) { if (e.target === overlay) closeAddDevicePanel(); };
+
+  // Esc 关闭面板（键盘完整路径）：监听随面板创建/关闭增删，不残留。
+  window._addDeviceEscHandler = function (e) {
+    if (e.key !== 'Escape') return;
+    closeAddDevicePanel();
+  };
+  document.addEventListener('keydown', window._addDeviceEscHandler);
 
   var sidebar = document.createElement('div');
   sidebar.id = 'addDeviceSidebar';
@@ -627,9 +699,9 @@ function openAddDevicePanel() {
     // ── 内容区 ──
     '<div style="padding:24px;flex:1">' +
 
-      // 选项一：生成凭据
+      // 选项一：生成凭据（id 供分阶段引导阶段二聚光定位）
       '<div style="margin-bottom:16px">' +
-        '<div onclick="toggleAddDeviceCred()" style="display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--bg);border:1px solid var(--b);border-radius:12px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'#3b82f6\';this.style.boxShadow=\'0 2px 12px rgba(59,130,246,.08)\'" onmouseout="this.style.borderColor=\'var(--b)\';this.style.boxShadow=\'none\'">' +
+        '<div id="rtGenCredCard" onclick="toggleAddDeviceCred()" style="display:flex;align-items:center;gap:14px;padding:16px 18px;background:var(--bg);border:1px solid var(--b);border-radius:12px;cursor:pointer;transition:all .2s" onmouseover="this.style.borderColor=\'#3b82f6\';this.style.boxShadow=\'0 2px 12px rgba(59,130,246,.08)\'" onmouseout="this.style.borderColor=\'var(--b)\';this.style.boxShadow=\'none\'">' +
           '<div style="width:42px;height:42px;border-radius:10px;background:#dbeafe;display:flex;align-items:center;justify-content:center;flex-shrink:0">' +
             '<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>' +
           '</div>' +
@@ -670,6 +742,8 @@ function openAddDevicePanel() {
 
 function closeAddDevicePanel() {
   _stopDevspaceAutoRefresh();
+  // Esc 阶梯监听随面板关闭移除（不残留全局 handler）
+  if (window._addDeviceEscHandler) { document.removeEventListener('keydown', window._addDeviceEscHandler); window._addDeviceEscHandler = null; }
   var overlay = document.getElementById('addDeviceOverlay');
   if (!overlay) return;
   var sidebar = overlay.firstElementChild;
@@ -756,8 +830,22 @@ function doCreateCredentialInPanel() {
   if (area) area.innerHTML = '<div style="padding:32px;text-align:center"><div style="display:inline-block;width:24px;height:24px;border:2.5px solid rgba(59,130,246,.2);border-top-color:#3b82f6;border-radius:50%;animation:spin .8s linear infinite;margin-bottom:12px"></div><div style="font-size:13px;color:var(--t3)">' + I18N.t('runtimes.toast.refreshing') + '</div><style>@keyframes spin{to{transform:rotate(360deg)}}</style></div>';
   API.post('/settings/runtime-credentials', { name, scope, repo_key }).then(d => {
     var token = d.token || '';
-    var oneCmd = 'curl -fsSL ' + window.location.origin + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + window.location.origin;
-    var winCmd = '& ([scriptblock]::Create((irm ' + window.location.origin + '/api/runtime/install.ps1))) -Token ' + token + ' -Server ' + window.location.origin;
+    // 安装命令的 --server 用服务端权威地址（优先 health.server_base_url，
+    // 5 分钟 localStorage 缓存），回退 window.location.origin。CLI 可达地址 ≠
+    // 用户浏览地址（与 devspace 凭据流同语义）。与 devspace 流的"发射后不管"
+    // 不同：此处先取地址后渲染——token 面板一次性展示，命令必须一次拼对。
+    var serverUrl = window.location.origin;
+    var cachedOk = false;
+    try {
+      var cached = JSON.parse(localStorage.getItem('grape_server_base') || 'null');
+      if (cached && cached.url && Date.now() - (cached.ts || 0) < 300000) {
+        serverUrl = cached.url;
+        cachedOk = true;
+      }
+    } catch (e) {}
+    var render = function() {
+      var oneCmd = 'curl -fsSL ' + serverUrl + '/api/runtime/install | bash -s -- --token ' + token + ' --server ' + serverUrl;
+      var winCmd = '& ([scriptblock]::Create((irm ' + serverUrl + '/api/runtime/install.ps1))) -Token ' + token + ' -Server ' + serverUrl;
     var runCmd = 'RUNTIME_TOKEN=' + token + ' python -m src.runtime.agent';
     if (area) area.innerHTML =
       '<div style="background:var(--bg);border:1px solid var(--b);border-radius:12px;padding:18px 20px">' +
@@ -786,6 +874,17 @@ function doCreateCredentialInPanel() {
         '<button class="bt bt-o" style="width:100%;justify-content:center" onclick="copyText(\'' + token + '\')">' + I18N.t('runtimes.action.copy_token') + '</button>' +
       '</div>';
     app.showToast(I18N.t('runtimes.credential.toast_generated'));
+    };
+    // 缓存未命中（或已过期）时先问 /health 再渲染；失败/超时回退 origin 渲染，
+    // token 面板在任何路径下都只渲染一次。
+    if (cachedOk) { render(); return; }
+    API.get('/health').then(function(h) {
+      var base = (h && h.server_base_url) || '';
+      if (base) {
+        serverUrl = base;
+        try { localStorage.setItem('grape_server_base', JSON.stringify({url: base, ts: Date.now()})); } catch (e) {}
+      }
+    }).catch(function() {}).finally(function() { render(); });
   }).catch(e => {
     app.showToast(I18N.t('runtimes.credential.toast_gen_failed', {msg: e.message}));
     _renderAddDeviceCredForm();

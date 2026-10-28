@@ -114,7 +114,10 @@
   function changePwd() {
     var oldP = $2('oldPass').value, newP = $2('newPass').value, confirmP = $2('confirmPass').value;
     if (!oldP || !newP) { toast(I18N.t('admin.pwd_modal.empty_fields'), false); return; }
-    if (newP.length < 8) { toast(I18N.t('admin.pwd_modal.too_short'), false); return; }
+    if (window.isPwdTooShort(newP)) { toast(I18N.t('admin.pwd_modal.too_short'), false); return; }
+    // A 项修复（2026-10-28 深扫）：弱口令预检与用户侧四入口同源（后端 admin
+    // /change-password 有 check_password_strength，前端预检消除"前端全绿后端 400"）
+    if (window.isWeakPassword(newP)) { toast(I18N.t('admin.pwd_modal.too_common'), false); return; }
     if (newP !== confirmP) { toast(I18N.t('admin.pwd_modal.mismatch'), false); return; }
     api('/change-password', { method: 'POST', body: { old_password: oldP, new_password: newP } }).then(function () {
       toast(I18N.t('admin.pwd_modal.changed'), true);
@@ -848,7 +851,7 @@
     var username = document.getElementById('um_username').value.trim();
     var password = document.getElementById('um_password').value.trim();
     if (!username) { toast(I18N.t('admin.users.username_required'), false); return; }
-    if (!password || password.length < 8) { toast(I18N.t('admin.users.password_required'), false); return; }
+    if (window.isPwdTooShort(password)) { toast(I18N.t('admin.users.password_required'), false); return; }
     var body = {
       username: username,
       password: password,
@@ -886,7 +889,7 @@
 
   function submitResetPassword(uid) {
     var password = document.getElementById('um_password').value.trim();
-    if (!password || password.length < 8) { toast(I18N.t('admin.users.password_required'), false); return; }
+    if (window.isPwdTooShort(password)) { toast(I18N.t('admin.users.password_required'), false); return; }
     api('/users/' + uid + '/reset-password', {method: 'POST', body: {password: password}}).then(function() {
       toast(I18N.t('admin.users.password_reset'), true);
       closeUserModal();

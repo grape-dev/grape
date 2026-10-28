@@ -95,10 +95,10 @@ test('T09: register.html stepIndicator 无 display:none 初始状态', () => {
   assert.ok(m[0].indexOf('display:none') < 0, 'stepIndicator 不应有 display:none');
 });
 
-// ── T10: register.html api.js?v=31, app.css?v=85 ──
-test('T10: register.html api.js?v=31, app.css?v=85', () => {
-  assert.ok(REGISTER_HTML.indexOf('api.js?v=31') >= 0, 'api.js 应为 v31');
-  assert.ok(REGISTER_HTML.indexOf('app.css?v=85') >= 0, 'app.css 应为 v85');
+// ── T10: register.html api.js / app.css 带版本号（只锁存在，不锁具体值——版本随迭代 bump）──
+test('T10: register.html api.js / app.css versioned', () => {
+  assert.ok(/api\.js\?v=\d+/.test(REGISTER_HTML), 'api.js 应带 ?v= 版本号');
+  assert.ok(/app\.css\?v=\d+/.test(REGISTER_HTML), 'app.css 应带 ?v= 版本号');
 });
 
 // ── T11: register.html 不含 msg.indexOf ──
@@ -145,10 +145,10 @@ test('T18: forgot.html forgotEmailDisplay label 有 for 属性', () => {
   assert.ok(FORGOT_HTML.indexOf('for="forgotEmailDisplay"') >= 0, 'label 应有 for="forgotEmailDisplay"');
 });
 
-// ── T19: forgot.html api.js?v=31, app.css?v=85 ──
-test('T19: forgot.html api.js?v=31, app.css?v=85', () => {
-  assert.ok(FORGOT_HTML.indexOf('api.js?v=31') >= 0, 'api.js 应为 v31');
-  assert.ok(FORGOT_HTML.indexOf('app.css?v=85') >= 0, 'app.css 应为 v85');
+// ── T19: forgot.html api.js / app.css 带版本号（只锁存在，不锁具体值——版本随迭代 bump）──
+test('T19: forgot.html api.js / app.css versioned', () => {
+  assert.ok(/api\.js\?v=\d+/.test(FORGOT_HTML), 'api.js 应带 ?v= 版本号');
+  assert.ok(/app\.css\?v=\d+/.test(FORGOT_HTML), 'app.css 应带 ?v= 版本号');
 });
 
 // ── T20: forgot.html 不含 msg.indexOf ──
@@ -383,8 +383,9 @@ test('T49: i18n.js reads __I18N_BOOST__', () => {
 
 // ── T50: register/forgot/index i18n.js 标签含 defer ──
 test('T50: register/forgot/index i18n.js has defer attribute', () => {
-  assert.ok(REGISTER_HTML.indexOf('i18n.js?v=16" defer') >= 0 || REGISTER_HTML.indexOf('i18n.js?v=16"defer') >= 0, 'register.html i18n.js 应有 defer');
-  assert.ok(FORGOT_HTML.indexOf('i18n.js?v=16" defer') >= 0 || FORGOT_HTML.indexOf('i18n.js?v=16"defer') >= 0, 'forgot.html i18n.js 应有 defer');
+  // 版本号随迭代 bump（2026-10-28 v=17），断言只锁 defer 属性不锁版本
+  assert.ok(/i18n\.js\?v=\d[\w-]*"\s+defer/.test(REGISTER_HTML), 'register.html i18n.js 应有 defer');
+  assert.ok(/i18n\.js\?v=\d[\w-]*"\s+defer/.test(FORGOT_HTML), 'forgot.html i18n.js 应有 defer');
   assert.ok(INDEX_HTML.indexOf('defer') >= 0 && INDEX_HTML.indexOf('i18n.js') >= 0, 'index.html i18n.js 应有 defer');
 });
 

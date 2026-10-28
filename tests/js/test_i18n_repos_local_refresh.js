@@ -109,10 +109,11 @@ function testReposBranchBeforeNavFallback() {
 
 // ── T9: index.html 版本号 bump ──
 function testVersionBumped() {
-  assert.ok(INDEX_HTML.indexOf('i18n.js?v=20261020') >= 0,
-    'index.html should bump i18n.js version');
-  assert.ok(INDEX_HTML.indexOf('app.js?v=179') >= 0,
-    'index.html should bump app.js version to 179');
+  // 版本随迭代 bump（2026-10-28 i18n 20261028-1 / app 195）——只锁带版本号，不锁具体值
+  assert.ok(/i18n\.js\?v=\d[\w-]*/.test(INDEX_HTML),
+    'index.html 应带 i18n.js 版本号');
+  assert.ok(/js\/app\.js\?v=\d+/.test(INDEX_HTML),
+    'index.html 应带 app.js 版本号');
   console.log('  PASS: T9 index.html 版本号 bump');
 }
 

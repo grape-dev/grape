@@ -906,10 +906,21 @@ async def request_id_and_log_middleware(request: Request, call_next):
     if _uid:
         try:
             from src.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
+            _host = request.headers.get("host", "")
+            _fwd_host = request.headers.get("x-forwarded-host", "")
+            _fwd_proto = request.headers.get("x-forwarded-proto", "")
+
+            def _is_local_base(base: str) -> bool:
+                # 本地地址作为对外基址必然错误（启动探测关闭/失败时的残留），可安全覆盖
+                b = (base or "").lower().rstrip("/")
+                # 复核 #7（2026-10-28 审查）：https://localhost 等同本地无效——
+                # 反代终结 TLS 后写回的本地值同样必须可自愈，四个前缀 × 两协议全覆盖
+                return (not b) or b.startswith(("http://localhost", "https://localhost",
+                                                "http://127.", "https://127.",
+                                                "http://0.0.0.0", "https://0.0.0.0",
+                                                "http://[::1]", "https://[::1]"))
+
             if not get_meta_value("webhook_url"):
-                _host = request.headers.get("host", "")
-                _fwd_host = request.headers.get("x-forwarded-host", "")
-                _fwd_proto = request.headers.get("x-forwarded-proto", "")
                 _candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
                 if _candidate:
                     set_meta_value("webhook_url", _candidate)
@@ -917,6 +928,16 @@ async def request_id_and_log_middleware(request: Request, call_next):
                     if get_meta_value("webhook_url_detect_failed"):
                         set_meta_value("webhook_url_detect_failed", "")
                     _log.info(f"webhook_url auto-detected from Host header: {_candidate}")
+
+            # 一键部署闭环补全：server_base_url 同样从 Host 头自愈
+            # 此前仅 webhook_url 有 Host 推导，server_base_url 为空/本地值时各读取点兜底
+            # http://localhost:3000，导致 OAuth 回调 / A2A / 前端接入在平台托管环境静默失败
+            if _is_local_base(get_meta_value("server_base_url")):
+                _base_candidate = detect_webhook_from_host(_host, _fwd_host, _fwd_proto)
+                if _base_candidate:
+                    _base = _base_candidate[: -len("/webhook/gitcode")]
+                    set_meta_value("server_base_url", _base)
+                    _log.info(f"server_base_url auto-detected from Host header: {_base}")
         except Exception:
             pass
 

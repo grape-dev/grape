@@ -17,7 +17,7 @@
 | 编号 | 需求 | 类型 | 影响文件 |
 |------|------|------|---------|
 | R1 | 解绑平台后清理过期的 `sessionStorage.currentRepo` | Bug 修复 | account.js |
-| R2 | 解绑平台后引导用户回到仓库选择页 + 刷新角色 | 体验优化 | account.js |
+| R2 | 解绑平台后刷新角色，**不跳转**（2026-10-28 需求变更：解绑留在 account 页） | 体验优化 | account.js |
 | R3 | 解绑平台后清理内存缓存 `_cachedReposData` | Bug 修复 | account.js + app.js |
 | R4 | 解除托管后清理 `localStorage.repo_member_cache` | Bug 修复 | repos.js + settings.js |
 | R5 | 组织切换后清理内存缓存 `_cachedReposData` | Bug 修复 | app.js |
@@ -203,13 +203,13 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 4. `sessionStorage.currentRepo` 未清理 → 用户点「返回工作台」→ `nav('dash')` → 403 → 自愈
 5. **用户看到 403 错误页面闪烁**
 
-#### 用例 1.2：解绑 GitHub 后直接跳仓库选择页（修复后预期）
+#### 用例 1.2：解绑 GitHub 后留在 account 页（修复后预期）
 
 1-3. 同用例 1.1
-4. 前端检查 `currentRepo().repoKey` 以 `"github:"` 开头 → 匹配 → 清除 currentRepo
+4. 前端检查 `currentRepo().repoKey` 以 `"github:"` 开头 → 匹配 → 清除 currentRepo（R1）
 5. 前端清除 `_cachedReposData`（R3）+ 调 `loadProfile()` 刷新角色（R2）
-6. 前端调 `goToRepos()` → `/repos/member` → 显示 GitCode 仓库列表
-7. **用户直接看到仓库选择页，无 403 闪烁，顶栏角色已刷新**
+6. **不跳转（2026-10-28 需求变更）**——用户留在 account 安全页，看到成功 toast，绑定卡片状态刷新
+7. 用户主动点「返回工作台」→ bindings 仍含 gitcode → 仓库选择页显示 GitCode 仓库，无 403 闪烁
 
 ### 场景 2：选中 GitCode 仓库，解绑 GitCode
 
@@ -218,12 +218,12 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 1-3. 同场景 1 对应步骤
 4. `currentRepo` 未清理 → 403 → 自愈 → **403 闪烁**
 
-#### 用例 2.2：修复后——直接跳仓库选择页
+#### 用例 2.2：修复后——留在 account 页
 
 1-3. 同用例 2.1
-4. `currentRepo().repoKey` 以 `"gitcode:"` 开头 → 匹配 → 清除
-5. 清 `_cachedReposData` + `loadProfile()` + `goToRepos()`
-6. **用户看到 GitHub 仓库列表，无 403 闪烁**
+4. `currentRepo().repoKey` 以 `"gitcode:"` 开头 → 匹配 → 清除（R1）
+5. 清 `_cachedReposData`（R3）+ `loadProfile()`（R2）
+6. **不跳转**——用户留在 account 页；主动返回工作台时看到 GitHub 仓库列表，无 403 闪烁
 
 ### 场景 3：选中 GitCode 仓库，解绑 GitHub
 
@@ -262,9 +262,9 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 #### 用例 4.1：修复后预期
 
 1. 用户解绑 GitHub → `bindings` = `[]`
-2. `currentRepo().repoKey` 匹配 → 清除 + 清 `_cachedReposData` + `loadProfile()`
-3. `goToRepos()` → `bindings.length === 0` → 显示新手引导页
-4. **用户看到新手引导页**
+2. `currentRepo().repoKey` 匹配 → 清除（R1）+ 清 `_cachedReposData`（R3）+ `loadProfile()`（R2）
+3. **不跳转**——用户留在 account 页看到成功 toast
+4. 用户主动点「返回工作台」→ `goToRepos()` → `bindings.length === 0` → 显示新手引导页（该路径语义合理：用户主动发起导航）
 
 ### 场景 5：二次确认后解绑
 
@@ -274,11 +274,11 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 2. 用户确认 → `API.del('/auth/bind/github?confirm=true')` → 成功
 3. currentRepo 未清理 → 403 → 自愈 → **403 闪烁**
 
-#### 用例 5.2：修复后——直接跳仓库选择页
+#### 用例 5.2：修复后——留在 account 页
 
 1-2. 同用例 5.1
-3. `currentRepo().repoKey` 匹配 → 清除 + 清 `_cachedReposData` + `loadProfile()` + `goToRepos()`
-4. **用户直接看到 GitCode 仓库列表**
+3. `currentRepo().repoKey` 匹配 → 清除（R1）+ 清 `_cachedReposData`（R3）+ `loadProfile()`（R2）
+4. **不跳转**——用户留在 account 页；主动返回时看到 GitCode 仓库列表，无 403 闪烁
 
 ### 场景 6：解绑后通过 popstate 导航到非 dash 视图（完全卡死）
 
@@ -290,10 +290,10 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 
 #### 用例 6.2：修复后——不卡死
 
-1. 用户解绑 → R1 清 currentRepo + R2 跳 `goToRepos()`
-2. 用户在仓库选择页选 GitCode 仓库 → `switchRepo` → currentRepo 更新
+1. 用户解绑 → R1 清 currentRepo（R2 不跳转，用户留在 account 页）
+2. 用户点「返回工作台」→ 仓库选择页选 GitCode 仓库 → `switchRepo` → currentRepo 更新
 3. `nav('pipe')` → GitCode 仓库 → 正常加载
-4. **用户正常使用**
+4. **用户正常使用，无卡死无 403**
 
 ### 场景 7：解绑后语言切换触发脏数据渲染（R3）
 
@@ -393,6 +393,8 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 4. 如果 `bindings` 不再含 currentRepo 的 provider → 清 `sessionStorage.currentRepo` + 清 `_cachedReposData` + 调 `goToRepos()`
 5. **Tab B 自动跳到仓库选择页，无 403 闪烁**
 
+> 注：Tab B 的跳转与 R2 的"不跳转"变更不冲突——R8 面向的是**被动失效的旁观标签页**（它正停在已失效的仓库视图上，不跳走会持续面对 403）；R2 变更面向的是**发起解绑的 account 页**（用户主动操作原地完成）。两个场景的用户心智不同，跳转语义分别成立。
+
 ### 场景 13：提交反馈不带 repo_key（R9）
 
 #### 用例 13.1：当前缺陷
@@ -447,6 +449,45 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 2. 检查 7 个改动文件的 `?v=` 值全部大于基线值
 3. **全部递增 → 浏览器缓存失效 → 修复生效**
 
+
+### 场景用例代码（R2 不跳转变更，2026-10-28）
+
+载体：`tests/js/test_unbind_repo_list_invisible.js`（源码结构守卫 + 行为模拟），
+`node tests/js/test_unbind_repo_list_invisible.js` 运行，44 项断言。
+T08/T09/T10 为既有行为模拟用例（runCleanup 沙箱：mock sessionStorage/app，
+记录 goToRepos 是否被调）；T40-T42 为本轮变更新增守卫：
+
+```js
+// T08: 清除 currentRepo 后不跳转（需求变更 2026-10-28：解绑留在 account 页）
+test('T08: 清除 currentRepo 后不调 goToRepos（解绑不跳转）', () => {
+  const c1 = runCleanup('github', {repoKey: 'github:octocat/my-repo', fullName: 'octocat/my-repo'});
+  assert.ok(c1.removedCurrentRepo, 'GitHub 匹配时仍应清除');      // R1 清理保留
+  assert.ok(!c1.goToReposCalled, '清除后不跳转（留在 account 页）'); // R2 跳转移除
+  const c2 = runCleanup('gitcode', {repoKey: 'gitcode:dev/project', fullName: 'dev/project'});
+  assert.ok(c2.removedCurrentRepo && !c2.goToReposCalled, 'GitCode 对称');
+});
+
+// T40: 解绑成功回调留在 account 页（renderAccount 重渲染安全页，无 goToRepos 调用）
+const fn = extractFn(ACCOUNT_JS, '_accountOnUnbindSuccess');
+assert.ok(fn.includes("renderAccount('security')"), '解绑后重渲染 account 安全页');
+assert.ok(!/\bgoToRepos\s*\(/.test(fn.replace(/^ *\/\/.*$/gm, '')),
+          '解绑成功回调不应调用 goToRepos');
+
+// T41: 清理函数清 currentRepo 但全程无 goToRepos（R1 保留 / R2 移除，无死代码）
+const cfn = extractFn(ACCOUNT_JS, '_accountCleanupAfterUnbind');
+assert.ok(cfn.includes("sessionStorage.removeItem('currentRepo')"), 'R1 清理保留');
+assert.ok(!cfn.includes('goToRepos'), 'R2 跳转已移除');
+assert.ok(!cfn.includes('_needRedirect'), '跳转标志变量已删');
+
+// T42: account.js ?v ≥ 45（R10：本轮改动必须触发浏览器缓存失效）
+assert.ok(extractVersion(INDEX_HTML, 'pages/account.js') >= 45);
+```
+
+端到端实测记录（2026-10-28，真实服务 + 专用账号 unbind_e2e，已清理）：
+最后一平台解绑 + 当前选中 gitcode 仓库（原触发条件全齐）→ view 保持
+account 无跳转、currentRepo 已清、bindings=[] 刷新、toast「GitCode 已解绑…」；
+主动点「返回工作台」→ 落新手引导页（bindings 为空时该路径语义合理）。
+
 ---
 
 ## 四、修复需求
@@ -465,11 +506,13 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 
 **触发条件**：R1 清理了 `sessionStorage.currentRepo` 后。
 
-**行为**：
+**行为**（2026-10-28 需求变更后）：
 1. 调 `loadProfile()` 刷新顶栏角色（L6 `userRole.textContent`）——解绑后托管仓库变化，角色可能从「管理员」变为「成员」
-2. 调 `goToRepos()` 引导用户回到仓库选择页
+2. **不跳转**——解绑是用户在 account 页的主动操作，完成后留在原地（成功 toast + `renderAccount('security')` 重渲染反映新绑定状态）。currentRepo 已清、仓库缓存已清，用户下次进入工作台/仓库列表时由既有路由逻辑落到正确页面。
 
-**不引导的情况**：R1 未清理（场景 3），不跳转。但仍调 `loadProfile()` 刷新角色——因为解绑可能影响托管仓库列表（即使当前仓库未变，角色可能变化）。
+**变更理由**：原实现解绑瞬间 `goToRepos()` 把用户从 account 页拽走——最后一平台解绑时直接落新手引导页，体验像"账号被重置"。跳转的必要性不成立：状态清理（R1/R3）已消除 403 闪烁的根因，落点正确性由下次导航的既有路由保证。
+
+**不清理的情况**：R1 未清理（场景 3），currentRepo 保持。仍调 `loadProfile()` 刷新角色——因为解绑可能影响托管仓库列表（即使当前仓库未变，角色可能变化）。
 
 ### R3：解绑平台后清理内存缓存 `_cachedReposData`
 
@@ -526,7 +569,7 @@ OAuth 登录流程（app.js:2566-2570, 2596-2599）清理了 `sessionStorage.cur
 **规则**：
 1. 当 `e.key === 'repo_member_cache'` 且 `e.newValue` 为 null（被清除）时，说明其他标签页执行了解绑/解除托管等操作
 2. 检查当前标签页的 `sessionStorage.currentRepo` 是否仍有效——通过 `localStorage.user.bindings` 判断 currentRepo 的 provider 是否仍在 bindings 中
-3. 如果 currentRepo 的 provider 不在 bindings 中 → 清 `sessionStorage.currentRepo` + 清 `_cachedReposData` + 调 `goToRepos()`
+3. 如果 currentRepo 的 provider 不在 bindings 中 → 清 `sessionStorage.currentRepo` + 清 `_cachedReposData` + 调 `goToRepos()`（旁观标签页被动失效，跳转语义成立——区别于 R2 发起页的不跳转）
 
 **实现位置**：api.js:54 的 `storage` 事件监听中，扩展处理 `repo_member_cache` 和 `user` 键。
 
@@ -573,14 +616,14 @@ if (r) repoKey = (r.owner || '') + '/' + (r.name || '');
 
 | 验证项 | 场景 | 预期结果 |
 |--------|------|----------|
-| V1 | 选中 GitHub 仓库 + 解绑 GitHub + 点「返回工作台」 | currentRepo 清除，跳仓库选择页，无 403 闪烁，显示 GitCode 仓库 |
-| V2 | 选中 GitCode 仓库 + 解绑 GitCode + 点「返回工作台」 | currentRepo 清除，跳仓库选择页，无 403 闪烁，显示 GitHub 仓库 |
+| V1 | 选中 GitHub 仓库 + 解绑 GitHub | currentRepo 清除，**留在 account 页**（无跳转）；主动点「返回工作台」→ 仓库选择页显示 GitCode 仓库，无 403 闪烁 |
+| V2 | 选中 GitCode 仓库 + 解绑 GitCode | currentRepo 清除，**留在 account 页**（无跳转）；主动返回 → 显示 GitHub 仓库，无 403 闪烁 |
 | V3 | 选中 GitCode 仓库 + 解绑 GitHub | currentRepo 不清除，用户无感知继续使用 GitCode 仓库 |
 | V3b | 选中 GitHub 仓库 + 解绑 GitCode | currentRepo 不清除，用户无感知继续使用 GitHub 仓库 |
-| V4 | 选中 GitHub 仓库 + 解绑 GitHub（仅绑定一个平台） | currentRepo 清除，跳转新手引导页 |
-| V4b | 选中 GitCode 仓库 + 解绑 GitCode（仅绑定一个平台） | currentRepo 清除，跳转新手引导页 |
-| V5 | 二次确认后解绑 | 确认后 currentRepo 清除，直接跳仓库选择页，无 403 闪烁 |
-| V6 | 解绑后通过 popstate 导航到 pipe/vod 等非 dash 视图 | 不卡死（R1+R2 已清理并跳转） |
+| V4 | 选中 GitHub 仓库 + 解绑 GitHub（仅绑定一个平台） | currentRepo 清除，**留在 account 页**；主动点「返回工作台」→ 新手引导页 |
+| V4b | 选中 GitCode 仓库 + 解绑 GitCode（仅绑定一个平台） | currentRepo 清除，**留在 account 页**；主动返回 → 新手引导页 |
+| V5 | 二次确认后解绑 | 确认后 currentRepo 清除，**留在 account 页**；主动返回时无 403 闪烁 |
+| V6 | 解绑后通过 popstate 导航到 pipe/vod 等非 dash 视图 | 不卡死（R1 已清理 currentRepo，无失效仓库可命中） |
 | V7 | 解绑后侧边栏仓库下拉列表 | 已解绑平台的仓库消失，剩余平台正常显示 |
 | V8 | 解绑后切换语言 → 项目列表渲染 | 不显示已解绑平台仓库（_cachedReposData 已清理） |
 | V9 | 解绑后 goToRepos() 加载项目列表 | /repos/member 只返回剩余平台仓库 |
