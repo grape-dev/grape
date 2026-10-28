@@ -12,7 +12,15 @@
     "reset_confirm": "确认重置该引擎的健康分？重置后健康分将基于重置点之后的任务数据重新统计。",
     "reset_success": "健康分已重置",
     "reset_failed": "重置健康分失败",
-    "reset_global_denied": "全局引擎不支持重置健康分"
+    "reset_global_denied": "全局引擎不支持重置健康分",
+    "hint": {
+      "consecutive_failures": "引擎状态异常：探活连续失败，建议登录机器进行定位",
+      "heartbeat_lost": "心跳失联，建议检查机器网络/进程状态",
+      "offline": "引擎离线，建议检查设备是否开机联网、引擎进程是否运行",
+      "recently_lost": "引擎刚失联（<5 分钟），通常为网络抖动；若持续失联请检查机器网络",
+      "about_to_gc": "引擎即将被回收（>6 天未上线），如需保留请尽快让设备续联",
+      "low_score": "健康分过低，建议排查近期失败任务，或重置健康分重新统计"
+    }
   },
   "stats": {
     "total": "共 {count} 台"
