@@ -82,6 +82,9 @@ _worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, 
 _worker_probe_lock = _threading.Lock()
 _worker_probe_thread = None
 _worker_probe_started = False
+# Issue #490：已成功发送的探针观测指纹 {engine_name: last_probe}。
+# 心跳成功后写回；未变化的观测（last_probe 相同）不再重复发送，避免服务端重放计数。
+_last_sent_probe_fingerprint: dict = {}
 
 
 def _probe_hermes_acp(cli_path: str) -> dict:
@@ -517,9 +520,15 @@ def _worker_probe_once():
 
 
 def _worker_probe_loop():
-    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
+    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。
+
+    Issue #490：首轮先 sleep _PROBE_INTERVAL 再探测，与注册时 _worker_probe_once()
+    的即时结果间隔 ≥ 一个周期，避免启动阶段连续两轮探测。
+    """
     global _worker_probe_started
     while True:
+        # 首轮先等待一个周期，复用注册时 _worker_probe_once() 的即时结果
+        _time_mod.sleep(_PROBE_INTERVAL)
         try:
             engines = _discover_local_runtimes()
             for eng in engines:
@@ -539,7 +548,6 @@ def _worker_probe_loop():
                 log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
         except Exception as e:
             log.warning(f"worker engine probe loop error: {e}")
-        _time_mod.sleep(_PROBE_INTERVAL)
 
 
 def _start_worker_probe():
@@ -554,9 +562,30 @@ def _start_worker_probe():
 
 
 def _collect_worker_probe_results() -> dict:
-    """返回当前探测结果快照（供心跳上报）。"""
+    """返回当前探测结果快照（供心跳上报）。
+
+    Issue #490：按观测指纹去重——已成功发送且 last_probe 未变化的引擎不再重复携带，
+    避免心跳重放同一观测导致服务端计数虚增。新观测（last_probe 变化）正常发送。
+    """
     with _worker_probe_lock:
-        return dict(_worker_probe_results)
+        snapshot = dict(_worker_probe_results)
+        # 过滤掉已成功发送且未变化的观测
+        return {
+            eng: data for eng, data in snapshot.items()
+            if data.get("last_probe") != _last_sent_probe_fingerprint.get(eng)
+        }
+
+
+def _mark_probe_fingerprint_sent(sent: dict) -> None:
+    """心跳成功后写回已发送观测的指纹（engine_name → last_probe）。
+
+    Issue #490：仅心跳成功才更新指纹；失败不更新，下次重试仍可发送。
+    """
+    with _worker_probe_lock:
+        for eng, data in (sent or {}).items():
+            lp = (data or {}).get("last_probe") if isinstance(data, dict) else None
+            if lp:
+                _last_sent_probe_fingerprint[eng] = lp
 
 
 def _collect_worker_metrics() -> dict:
@@ -2465,6 +2494,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
             _recent_logs = _collect_recent_logs()
             _metrics = _collect_worker_metrics()
+            # Issue #490：_collect_worker_probe_results 已按指纹去重未变化观测
             _probe_results = _collect_worker_probe_results()
             ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics, probe_results=_probe_results)
             # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
@@ -2472,6 +2502,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             if ok is not None and ok.get("status") == "ok":
                 heartbeat_fail_streak = 0
                 log.debug(f"heartbeat ok, ids={runtime_ids}")
+                # Issue #490：心跳成功后写回已发送观测指纹，未变化的观测下次不再重发
+                if _probe_results:
+                    _mark_probe_fingerprint_sent(_probe_results)
                 # 检查取消信号——发现 cancelled 立即杀引擎进程
                 cancelled_tasks = ok.get("cancelled_tasks", [])
                 if cancelled_tasks:
