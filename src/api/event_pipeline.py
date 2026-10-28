@@ -61,9 +61,12 @@ def check_running_task(repo_key: str, issue_id: str) -> bool:
         with db_lock:
             c = db.cursor()
             # 1. 查 agent_tasks
+            # 'queued' 计入活跃（#403 重试收口）：退避窗口内任务回 queued，
+            # 若不查 queued，同 issue 新事件会建第二个任务 → 旧重试任务稍后
+            # 被认领 → 双实例并发、双份评论。语义 =「该 issue 有任务在链上」。
             c.execute(
                 "SELECT 1 FROM agent_tasks WHERE repo_key=? AND issue_id=? "
-                "AND status IN ('running','dispatched') LIMIT 1",
+                "AND status IN ('running','dispatched','queued') LIMIT 1",
                 (repo_key, issue_id)
             )
             if c.fetchone():
@@ -2831,6 +2834,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
         if _linked_repos:
             env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
+            # Issue #466: 关联仓 token 随 env 分发（worker 端本地无库，纯本地解析必为空）
+            _inject_linked_repo_tokens(env_extra, env_extra["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
     # 事件级扩展环境变量（evt["_env_extra"] 通用机制；onboarding 已不使用，Issue #46）
@@ -3010,6 +3015,42 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
         log.warning(f"inject scene env failed: {_e}")
 
 
+def _inject_linked_repo_tokens(env: dict, linked_repos_json: str) -> None:
+    """Issue #466 断点二: 服务端解析各关联仓 bot token 随 env 分发。
+
+    worker 端本地 sqlite 无 managed_repos 数据（无 MySQL），Repo(rk).bot_token
+    必为空 → 关联仓 worktree 全部 skip。服务端托管着有效 token，此处按
+    GRAPE_LINKED_REPOS 逐仓解析注入 GRAPE_LINKED_REPO_TOKENS（JSON
+    {repo_key: token}），与 GRAPE_SESSION_TOKEN 同一 env 分发链路。
+    token 只进 env_extra（随 agent_tasks 存储与任务同生命周期），不进
+    prompt / 日志 / 落盘。解析失败或无 token 的仓不入 map（worker 端回退
+    本地解析）。
+    """
+    if not linked_repos_json:
+        return
+    import json as _json
+    try:
+        linked = _json.loads(linked_repos_json)
+    except Exception:
+        return
+    if not isinstance(linked, list):
+        return
+    tokens = {}
+    for lr in linked:
+        rk = (lr or {}).get("repo_key") or "" if isinstance(lr, dict) else ""
+        if not rk:
+            continue
+        try:
+            from src.token_service import get_repo_bot_token
+            tok = get_repo_bot_token(rk)
+        except Exception:
+            tok = ""
+        if tok:
+            tokens[rk] = tok
+    if tokens:
+        env["GRAPE_LINKED_REPO_TOKENS"] = _json.dumps(tokens, ensure_ascii=False)
+
+
 def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
     """读取场景关联仓库列表（Issue #242）。
 
@@ -3093,6 +3134,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
         _linked = _read_scene_linked_repos(repo_key, issue_id)
         if _linked:
             env["GRAPE_LINKED_REPOS"] = _json.dumps(_linked, ensure_ascii=False)
+            # Issue #466: 关联仓 token 随 env 分发（worker 端本地无库，纯本地解析必为空）
+            _inject_linked_repo_tokens(env, env["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
     # ── coding 注入 BOT_USERNAME（审查人）──
@@ -3773,6 +3816,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
         if _linked_repos:
             env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
+            # Issue #466: 关联仓 token 随 env 分发（worker 端本地无库，纯本地解析必为空）
+            _inject_linked_repo_tokens(env_extra, env_extra["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
     # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
@@ -3842,6 +3887,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # Issue #242: 关联仓库 worktree 初始化（direct 模式 coding/sre agent 多仓库并行操作）
     # 与 worker 端 _execute_task 中的逻辑等价：遍历 GRAPE_LINKED_REPOS → ensure_linked_repo_worktrees
     # → 注入 GRAPE_LINKED_WORKTREES（供 _submit_linked_repo_prs 消费 / SRE 构建部署消费）
+    # Issue #466: 传 env（含 GRAPE_LINKED_REPO_TOKENS）——direct 端虽连库，但 env 优先口径与 worker 一致
     try:
         from src.runtime import repogit
         _linked_repos_env_dr = env_extra.get("GRAPE_LINKED_REPOS", "")
@@ -3852,7 +3898,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 _gnum_lr = repogit.issue_num_from(issue_id)
                 _wt_list_dr = repogit.ensure_linked_repo_worktrees(
                     _linked_repos_list_dr, agent_type, _gnum_lr,
-                    token=repo_gitcode_token)
+                    token=repo_gitcode_token, env=env_extra)
                 if _wt_list_dr:
                     env_extra["GRAPE_LINKED_WORKTREES"] = _json_lr_dr.dumps(
                         [{"repo_key": w["repo_key"], "branch": w["branch"], "dir": w["worktree_dir"]}
@@ -4119,6 +4165,41 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                         log.warning(f"Exec agent: token expired during direct exec (error_code={_pipeline_error_code}), repo={repo_key}")
                 except Exception as _pe:
                     log.warning(f"Exec agent: post-exec 401 detect failed: {_pe}")
+    # Issue #403：瞬时上游抖动自动重试（判定层收口，direct 执行路径）。
+    # new_status 判定完成后、终态写入（任务+事件）之前拦截：可重试（瞬时分类
+    # ∧ 无写操作证据 ∧ attempts 未耗尽）则退避 requeue 并跳过终态写入。
+    _retry_info = {}
+    if new_status == "failed" and task_id:
+        try:
+            from src.runtime.transient_retry import retry_transient_task
+            _err_txt = " ".join(str(e) for e in (_exec_done_errors or [])) + " " + str(_exec_done_stderr or "")
+            if retry_transient_task(task_id, exit_code, _err_txt, has_output=has_output,
+                                    tool_uses=tool_uses, result_text=result_text or ""):
+                log.info(f"Exec agent: seq={seq} transient retry scheduled, skip terminal write")
+                return
+        except Exception as _e:
+            log.warning(f"Exec agent: transient retry check failed for seq={seq}: {_e}")
+    # Issue #403：耗尽/不可重试判死 → 分类失败摘要写 result_text（区分上游抖动
+    # vs 配置错误 + 重试次数 + 原始错误摘要）。非重试场景（无 #403 记录）零变化。
+    if new_status == "failed" and task_id and not (result_text or "").strip():
+        try:
+            from src.runtime.service import _task_errors_json
+            from src.runtime.transient_retry import format_stream_failure_result
+            _retries = [e for e in _task_errors_json(task_id)
+                        if isinstance(e, dict) and e.get("error_code") in
+                        ("TRANSIENT_RETRY_EXHAUSTED", "TRANSIENT_RETRY")]
+            if _retries:
+                _ex = next((e for e in _retries
+                            if e.get("error_code") == "TRANSIENT_RETRY_EXHAUSTED"), _retries[-1])
+                _retry_info = {"class": _ex.get("error_class") or "",
+                               "attempts": _ex.get("attempts") or len(_retries),
+                               "max": _ex.get("max") or len(_retries)}
+                result_text = format_stream_failure_result(
+                    _retry_info["class"], _retry_info["attempts"], _retry_info["max"],
+                    _ex.get("reason") or "", exit_code=exit_code,
+                    errors=_exec_done_errors)
+        except Exception as _e:
+            log.warning(f"Exec agent: failure summary build failed for seq={seq}: {_e}")
     if task_id:
         from src.runtime.service import update_task_status
         update_task_status(task_id, new_status, exit_code=exit_code, result_text=result_text)
@@ -4174,7 +4255,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                             _has_rpf = any(isinstance(e, dict) and e.get("error_code") == "RESULT_POST_FAILED" for e in _errs)
                             if not _has_rpf:
                                 _errs.append({"error_code": "RESULT_POST_FAILED", "message": "result posted but issue comment failed"})
-                                _errs = _errs[-5:]
+                                # 首条保护式（同 UC7-3 家族）：头部诊断不被挤掉
+                                _errs = _errs[:1] + _errs[1:][-4:] if len(_errs) > 5 else _errs
                                 c.execute("UPDATE agent_tasks SET errors=? WHERE id=?", (json.dumps(_errs), task_id))
                                 db.commit()
                     except Exception:
