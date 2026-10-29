@@ -10,6 +10,22 @@ from .codex import CodexBackend
 from .dsh import DshBackend
 from .hwcloud import HwcloudBackend
 
+_bwrap_fail_notified = False
+
+
+def _note_bwrap_fail_once(message: str) -> None:
+    """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
+
+    放在调用方模块（而非 src.agent.sandbox）是因为本函数需覆盖 sandbox
+    自身导入失败的场景，此时不能依赖 sandbox 内的助手。
+    """
+    global _bwrap_fail_notified
+    if _bwrap_fail_notified:
+        log.debug(message)
+        return
+    _bwrap_fail_notified = True
+    log.warning(message)
+
 
 _BACKENDS = {
     "opencode": OpencodeBackend(),
@@ -754,16 +770,23 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
             _proc_env["PYTHONPATH"] = _inject_dir + (_sep + _old_pp if _old_pp else "")
             log.info(f"{label}hermes HERMES_HOME isolated: {_iso_home} (state.db=:memory: via .pth)")
 
-        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        # 组件2：文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
+        # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音）
         _cmd = [agent_cmd] + args
         try:
-            from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
-            if _wrap:
-                _cmd = _wrap + _cmd
-                log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
-        except Exception as _bw_e:
-            log.warning(f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
+            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+        except Exception:
+            _sbx_on = False
+        if _sbx_on:
+            try:
+                from src.agent.sandbox import build_bwrap_cmd
+                _wrap = build_bwrap_cmd(cwd, backend_name=backend.name)
+                if _wrap:
+                    _cmd = _wrap + _cmd
+                    log.info(f"{label}{backend.name} sandboxed via bwrap (cwd={cwd})")
+            except Exception as _bw_e:
+                _note_bwrap_fail_once(
+                    f"{label}{backend.name} bwrap wrap failed, running unsandboxed: {_bw_e}")
 
         # 纯管道启动（与 main 一致；script 包装为临时对照，已按分析移除）
         proc = subprocess.Popen(

@@ -209,7 +209,7 @@ class TestRedact:
 
         fake_proc = FakeStream()
         with patch("src.agent.executor.subprocess.Popen", return_value=fake_proc), \
-             patch("src.agent.executor.shutil.which", return_value="/fake/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/fake/opencode"):
             events = list(stream_runtime("prompt", os.getcwd(), "", "issue",
                                        bot_token="BOTTOK", user_token="USERTOK"))
         combined = " ".join(str(d) for _, d in events)
@@ -251,13 +251,23 @@ class _ChatterBackend(_SleepBackend):
 
 
 class TestStreamAgentTimeout:
+    # 环境密闭性（worker 会话会继承 AGENT_SILENT_WINDOW=1200 等任务级注入，
+    # 把 1s 静默窗口放大到 20min，测试等不到超时即被 pytest-timeout 杀死）：
+    # 先例见 tests/test_agent_silent_timeouts.py 的 monkeypatch.delenv 用法。
+    _ENV_KEYS = ("AGENT_SILENT_WINDOW", "AGENT_SILENT_EXTEND_CAP", "AGENT_SILENT_LIMIT")
+
+    def _clear_silent_env(self, monkeypatch):
+        for _k in self._ENV_KEYS:
+            monkeypatch.delenv(_k, raising=False)
+
     def _register(self, backend):
         from src.agent.executor import register_backend, _BACKENDS
         _BACKENDS[backend.name] = backend
         return backend.name
 
-    def test_kills_silent_process_on_no_output(self):
+    def test_kills_silent_process_on_no_output(self, monkeypatch):
         """完全无输出的 agent，超过 max_exec_seconds 后被优雅终止，返回 done(exit_code=-9)"""
+        self._clear_silent_env(monkeypatch)
         name = self._register(_SleepBackend())
         from src.agent.executor import stream_agent
         events = list(stream_agent("p", os.getcwd(), "", backend_name=name, max_exec_seconds=1))
@@ -273,8 +283,9 @@ class TestStreamAgentTimeout:
             capture_output=True, text=True).stdout.strip()
         assert leftovers == "", f"leftover agent process: {leftovers}"
 
-    def test_continuous_output_no_timeout(self):
+    def test_continuous_output_no_timeout(self, monkeypatch):
         """持续有输出的 agent 不被超时杀掉，正常走完并返回 done(exit_code=0)"""
+        self._clear_silent_env(monkeypatch)
         name = self._register(_ChatterBackend())
         from src.agent.executor import stream_agent
         events = list(stream_agent("p", os.getcwd(), "", backend_name=name, max_exec_seconds=0.4))
@@ -410,7 +421,7 @@ class TestStreamAgentSessionAutoRetry:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -436,7 +447,7 @@ class TestStreamAgentSessionAutoRetry:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
 
         done_events = [et for et, d in events if et == "done"]
@@ -455,7 +466,7 @@ class TestStreamAgentSessionAutoRetry:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -473,7 +484,7 @@ class TestStreamAgentSessionAutoRetry:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -502,7 +513,7 @@ class TestStreamAgentSessionAutoRetry:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_dead", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -523,7 +534,7 @@ class TestStreamAgentSessionAutoRetry:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_any", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -574,7 +585,7 @@ class TestExecutorPipeInvocation:
             return FakeProc(cmd, *a, **k)
 
         with patch("src.agent.executor.subprocess.Popen", side_effect=fake_popen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"), \
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
              patch("src.agent.sandbox.build_bwrap_cmd", return_value=None):
             list(stream_runtime("p", os.getcwd(), "", "issue"))
 
@@ -634,7 +645,7 @@ class TestAbnormalExitRecovery:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -662,7 +673,7 @@ class TestAbnormalExitRecovery:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done_events = [(et, d) for et, d in events if et == "done"]
@@ -689,7 +700,7 @@ class TestAbnormalExitRecovery:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done_events = [(et, d) for et, d in events if et == "done"]
@@ -718,7 +729,7 @@ class TestAbnormalExitRecovery:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"):
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead",
                                          backend_name="opencode"))
 
@@ -744,7 +755,7 @@ class TestAbnormalExitRecovery:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"), \
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
              patch("src.agent.executor._oom_kill_evidence", return_value=True):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
@@ -768,7 +779,7 @@ class TestAbnormalExitRecovery:
         ]
         FakePopen = self._make_popen(calls)
         with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.agent.executor.shutil.which", return_value="/usr/bin/opencode"), \
+             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
              patch("src.agent.executor._oom_kill_evidence", return_value=False):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
