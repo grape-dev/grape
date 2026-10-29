@@ -51,16 +51,18 @@
 
 /* Dark-mode color softening: legacy dark block only flips backgrounds, never
  * redefines accent hues (--a/--g/--y/--r stay at light-mode saturation → garish
- * on black). Views consume these bridge tokens, so soften them here. */
+ * on black). Views consume these bridge tokens, so soften them here.
+ * 2026-10-29: aligned with the owner's Apple dark palette spec — the shell's
+ * dark accent vars are now spec colors themselves, these mirror them. */
 @media (prefers-color-scheme: dark) {
   :root {
-    --c-accent: #6fb4ff;
-    --c-accent-soft: rgba(111, 180, 255, 0.16);
-    --c-danger: #ff7a70;
-    --c-danger-soft: rgba(255, 122, 112, 0.16);
-    --c-success: #72d98c;
-    --c-warning: #ffc66e;
-    --btn-outline: rgba(111, 180, 255, 0.4);
+    --c-accent: #0a84ff;
+    --c-accent-soft: rgba(10, 132, 255, 0.16);
+    --c-danger: #ff375f;
+    --c-danger-soft: rgba(255, 55, 95, 0.16);
+    --c-success: #30d158;
+    --c-warning: #ff9f0a;
+    --btn-outline: rgba(10, 132, 255, 0.4);
   }
 }
 
@@ -69,21 +71,27 @@
  * barely separate from the page (issues board read as a wall of black) and
  * hairline borders vanish. Only the media-query variant is targeted: forced
  * dark ([data-theme-mode="dark"]) sets the same vars, so mirror it there too.
- * Light mode is untouched: these overrides only apply in dark. */
+ * Light mode is untouched: these overrides only apply in dark.
+ * 2026-10-29: aligned with the owner's palette spec (glass card / border / shadow). */
 @media (prefers-color-scheme: dark) {
   :root,
   [data-theme='apple'][data-theme-mode='auto'] {
-    /* elevated glass surfaces: lifted one step above the shell card color */
-    --glass-bg: color-mix(in srgb, #2c2c2e 62%, transparent);
-    --glass-bg-strong: color-mix(in srgb, #2c2c2e 88%, transparent);
-    --glass-border: rgba(255, 255, 255, 0.12);
-    /* dark card separation (#5): visible hairline on dark surfaces */
-    --card-border: rgba(255, 255, 255, 0.1);
+    /* spec: glass card rgba(28,28,30,.72) blur 20px + top highlight */
+    --glass-bg: rgba(28, 28, 30, 0.72);
+    --glass-bg-strong: rgba(28, 28, 30, 0.88);
+    --glass-blur: 20px;
+    /* spec: glass hairline rgba(255,255,255,.08); standard card border rgba(84,84,88,.6) */
+    --glass-border: rgba(255, 255, 255, 0.08);
+    --card-border: rgba(84, 84, 88, 0.6);
+    /* spec: soft shadows only */
+    --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.35);
   }
 }
 [data-theme='apple'][data-theme-mode='dark'] {
-  --glass-bg: color-mix(in srgb, #2c2c2e 62%, transparent);
-  --glass-bg-strong: color-mix(in srgb, #2c2c2e 88%, transparent);
-  --glass-border: rgba(255, 255, 255, 0.12);
-  --card-border: rgba(255, 255, 255, 0.1);
+  --glass-bg: rgba(28, 28, 30, 0.72);
+  --glass-bg-strong: rgba(28, 28, 30, 0.88);
+  --glass-blur: 20px;
+  --glass-border: rgba(255, 255, 255, 0.08);
+  --card-border: rgba(84, 84, 88, 0.6);
+  --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.35);
 }
