@@ -2,6 +2,8 @@ name: windows-smoke
 
 # Issue #351: Windows 冒烟测试——覆盖多行提示词经 stdin 完整到达、
 # find_cli exe 优先解析、cmd/bat 壳兜底降级 WARN。
+# Issue #473 PR #668 审查修复（QA Nice-to-have）：新增 linux-backend job，
+# 运行本 Issue 的后端 pytest 与前端 node 源断言测试，回归不再只靠人工。
 on:
   push:
     branches: ["**"]
@@ -24,3 +26,25 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/test_issue_351_windows_prompt.py tests/test_os_adapter.py tests/test_issue_452_windows_install.py -v
+
+  linux-backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pytest
+      - name: Backend range-filter tests (issue #473)
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_473_range_filter.py tests/test_issue_473_local_engine_range.py -v
+      - name: Frontend source-assertion tests (issue #473)
+        run: node tests/js/test_issue_473_range_filter.js

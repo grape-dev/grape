@@ -15,6 +15,14 @@ let _runtimeTab = 'engines';
 let _runtimeSearch = '';
 let _rtFilterType = '';
 let _rtFilterScope = '';
+let _rtRange = 'all';
+
+// Issue #473: 范围筛选标签（当前选中项高亮即选中范围提示）
+const _RT_RANGE_OPTIONS = [
+  { key: 'all', label: '全部' },
+  { key: 'repo', label: '仓库' },
+  { key: 'user', label: '个人' },
+];
 let _rtFilterScene = [];
 let _rtFilterTag = [];
 let __runtimeData = null;
@@ -104,6 +112,7 @@ function _rtFilterQs() {
 function _loadRuntimesData() {
   var qs = '?page=' + _rtPage + '&page_size=' + _rtPageSize + _rtFilterQs();
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
+  if (_rtRange && _rtRange !== 'all') qs += '&range=' + encodeURIComponent(_rtRange);
   var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
   if (_repo) qs += '&repo=' + encodeURIComponent(_repo);
   API.get('/settings/agent-runtimes' + qs).then(function(d) {
@@ -132,6 +141,7 @@ function _loadRuntimesData() {
 function _loadRuntimeDevices() {
   var qs = '?page=' + _rtDevPage + '&page_size=' + _rtPageSize;
   if (_rtFilterScope) qs += '&scope=' + encodeURIComponent(_rtFilterScope);
+  if (_rtRange && _rtRange !== 'all') qs += '&range=' + encodeURIComponent(_rtRange);
   if (_rtFilterType) qs += '&type=' + encodeURIComponent(_rtFilterType);
   if (_runtimeSearch) qs += '&q=' + encodeURIComponent(_runtimeSearch);
   var _repo = (typeof app !== 'undefined' && app.currentRepo) ? ((app.currentRepo() || {}).fullName || '') : '';
@@ -531,6 +541,11 @@ function renderRuntimes(data) {
   const _availTags = (data.avail_tags || [...new Set(_allRuntimes.flatMap(rt => rt.agent_tags || []))]).filter(Boolean);
   html += `<div style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-bottom:8px">
     <span style="font-size:11px;color:var(--t3);font-weight:500;margin-right:2px">筛选</span>
+    ${_RT_RANGE_OPTIONS.map(r => {
+      const act = _rtRange === r.key;
+      return `<span onclick="_rtSetRange('${r.key}')" title="查看范围：${r.label}" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0e7490':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0e7490':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${r.label}</span>`;
+    }).join('')}
+    <span style="font-size:11px;color:var(--t3)">范围：${(_RT_RANGE_OPTIONS.find(r => r.key === _rtRange) || _RT_RANGE_OPTIONS[0]).label}</span>
     ${_availTypes.map(t => {
       const act = _rtFilterType === t;
       return `<span onclick="_rtToggleType('${t}')" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px"><span style="width:7px;height:7px;border-radius:50%;background:${_ENGINE_DOT[t]||'#999'};flex-shrink:0"></span>${t}</span>`;
@@ -1098,12 +1113,18 @@ window._rtToggleScope = function(s) {
   _rtFilterScope = (_rtFilterScope === s) ? '' : s;
   _rtResetPageAndReload();
 };
+window._rtSetRange = function(r) {
+  if (_rtRange === r) return;
+  _rtRange = r;
+  _rtResetPageAndReload();
+};
 window._rtClearFilters = function() {
   _rtFilterType = '';
   _rtFilterScope = '';
   _rtFilterScene = [];
   _rtFilterTag = [];
   _runtimeSearch = '';
+  _rtRange = 'all';
   _rtResetPageAndReload();
 };
 window._rtToggleMulti = function(kind, val) {
