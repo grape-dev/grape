@@ -9,7 +9,7 @@ Issue #259：新鲜度阈值与 engine_select._RUNTIME_STALE_SECONDS 对齐（en
 原 5min 写死导致展示层与调度层判定不一致。
 """
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 _STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 
@@ -20,7 +20,14 @@ def parse_dt(s: str) -> float | None:
     try:
         dt = datetime.fromisoformat(s)
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            # 无时区值语义与存储层归一口径一致（Issue #512）：
+            # mysql=naive 视为 CST(+08:00) 本地墙钟 → 转 UTC（防 MySQL 直连链路历史
+            # CST 值按 UTC 解析被误判为"未来时间"）；sqlite=naive 视为 UTC（行为不变）
+            from src.api.time_utils import _db_backend
+            if _db_backend() == "mysql":
+                dt = dt.replace(tzinfo=timezone(timedelta(hours=8), "CST"))
+            else:
+                dt = dt.replace(tzinfo=timezone.utc)
         return dt.timestamp()
     except Exception:
         return None

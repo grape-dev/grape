@@ -1099,8 +1099,11 @@ def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_toke
 
 def _server_url() -> str:
     try:
-        from src.user.db import get_server_base_url
-        return get_server_base_url()
+        # Issue #471 E1（QA 建议）：register 响应的 server_url 是 worker 回连地址
+        # （设备/CLI 回连服务端用），与 devstage RUNTIME_SERVER_URL / 任务 server_url
+        # 同语义——对齐 get_worker_connect_url（未配置回退 server_base_url）。
+        from src.user.db import get_worker_connect_url
+        return get_worker_connect_url()
     except Exception:
         return ""
 

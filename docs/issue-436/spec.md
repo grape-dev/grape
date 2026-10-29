@@ -7,8 +7,7 @@
 ## 现状与根因分析（2026-10-22 实测排查）
 
 **排查过程**：
-- 生产站（www.grapedev.cn）与仓库（功能分支 / origin/main）代码逐字节一致（md5 `d52000ad…`）；
-- 后端 `/api/dashboard/ops/overview` 返回的 `runtimes.list[].device_name` 字段有值且全 ASCII（生产库 94 台设备验证）；
+- 生产站（www.grapedev.cn）与仓库（local-liufei / origin/main）代码逐字节一致（md5 `d52000ad…`）；- 后端 `/api/dashboard/ops/overview` 返回的 `runtimes.list[].device_name` 字段有值且全 ASCII（生产库 94 台设备验证）；
 - `_filterRuntimes`（observability.js:1080）过滤字段含 `name/device_name/version/mode`，纯逻辑复现「搜设备名」在正常路径下能命中。
 
 **可复现缺陷**（与「搜设备名直接没一个匹配」吻合）：

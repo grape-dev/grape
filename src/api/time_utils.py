@@ -14,10 +14,16 @@ _CST = timezone(timedelta(hours=8), "CST")
 
 
 def _db_backend() -> str:
-    """当前数据库后端：mysql / sqlite（测试环境由 DEVOPS_DB_BACKEND 或 conftest 覆盖）。"""
+    """当前数据库后端：mysql / sqlite（测试环境由 DEVOPS_DB_BACKEND 或 conftest 覆盖）。
+
+    与 src.mysql_compat.get_db_backend() 同口径：环境变量 DEVOPS_DB_BACKEND 优先，
+    其次配置文件。否则 conftest 强制 sqlite 时本函数仍返回 mysql，
+    parse_dt/migrate 会把 SQLite 的 UTC naive 值按 CST 解析（Issue #512 回归，
+    test_event_conversation TestLocalRetry 409 根因）。
+    """
     try:
-        from src.mysql_compat import load_db_backend_config
-        return str(load_db_backend_config().get("backend", "sqlite")).lower()
+        from src.mysql_compat import get_db_backend
+        return get_db_backend()
     except Exception:
         return "sqlite"
 
