@@ -921,11 +921,16 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（可见性由 _visible_credential 的 owner 判定收敛）
-        # repo scope 设备只在创建它的组织下可见，不在个人组织下跨组织展示
+        # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
+        # 切换为仓库级后 org_id 对齐到仓库所属组织（可能是其他用户的个人组织），
+        # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
+        # user_repos 判定收敛，不越权。
         _devices_cred_map = {k: v for k, v in cred_map.items()
                              if (v.get("org_id") or 0) in (0, _org_id)
+                             or v.get("scope") == "repo"
                              or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
-        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)]
+        _devices_cached = [rt for rt in cached if (rt.get("org_id") or 0) in (0, _org_id)
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
     devices = _build_runtime_devices(db, db_lock, _devices_cred_map, _visible_credential,
                                      valid_users, _devices_cached, now)
 
@@ -1303,11 +1308,15 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
         # 个人组织：只保留 org_id=0（全局）和 org_id=自身 的凭据/引擎；
         # Issue #338：个人归属 worker 设备（scope=user 且 owner=当前用户）不受
         # 凭据创建时绑定的 org_id 隔离（与 dashboard 个人组织视图语义一致）
-        # repo scope 设备只在创建它的组织下可见，不在个人组织下跨组织展示
+        # Issue #430：repo scope 设备豁免（与 #371 非个人组织分支同口径）——
+        # 仓库级设备对仓库成员可见，可见性由 _visible_credential 的 repo_key in
+        # user_repos 判定收敛，不越权。
         _local_runtimes = [rt for rt in _local_runtimes if (rt.get("org_id") or 0) == 0
-                           or (rt.get("org_id") or 0) == _org_id]
+                           or (rt.get("org_id") or 0) == _org_id
+                           or (rt.get("credential_id") and (cred_map.get(rt.get("credential_id")) or {}).get("scope") == "repo")]
         cred_map = {k: v for k, v in cred_map.items()
                     if (v.get("org_id") or 0) in (0, _org_id)
+                    or v.get("scope") == "repo"
                     or (v.get("scope") == "user" and (v.get("owner_name") or "") == uname)}
 
     # 构建设备列表（共享 helper）
