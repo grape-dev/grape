@@ -337,7 +337,7 @@ function _renderSceneCard(s) {
     : iconVal;
 
   const btns = `<div class="scn-card-btns">
-    <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id},'${s.name}','${(s.skills||[]).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
+    <button class="bt bt-o bt-s" onclick="event.stopPropagation();_applyScene(${s.id},'${s.display_name || s.name}','${(s.skills||[]).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
     ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
   </div>`;
 
@@ -385,34 +385,22 @@ function _applyScene(sceneId, sceneName, sceneSkills) {
   const repoName = encodeURIComponent(parts[1]);
   // sceneSkills 可能是逗号分隔字符串，转回数组
   var skillsArr = typeof sceneSkills === 'string' ? (sceneSkills ? sceneSkills.split(',') : []) : (Array.isArray(sceneSkills) ? sceneSkills : []);
-  // 判断是否为华为云 Skill 场景（name=skill-dev 或 skills 含 huawei-cloud）
-  var isHwCloudScene = (sceneName === 'huawei-skill') || (skillsArr.indexOf('huawei-cloud') >= 0);
-  // 先检查是否已应用过，然后统一弹高级选项弹窗
-  API.get('/scenes/market/' + sceneId + '/applied?owner=' + owner + '&repo=' + repoName).then(check => {
-    _showApplyOptionsModal(sceneId, owner, repoName, check.applied, check.scene_name, isHwCloudScene);
-  }).catch(() => {
-    _showApplyOptionsModal(sceneId, owner, repoName, false, '', isHwCloudScene);
-  });
+  // 判断是否为华为云 Skill 场景：按技能集判断（huawei-cloud）。
+  // weekly-09 修正：_applyScene 第二参改为 display_name，不能再用 name==='huawei-skill' 判断。
+  var isHwCloudScene = (skillsArr.indexOf('huawei-cloud') >= 0);
+  // weekly-09 修订：删除「已应用预检」——每次应用都是全新场景（后端 custom-{uuid}），
+  // 同一用户基于同一模板创建多个自己的场景是正当需求，不存在覆盖语义。
+  _showApplyOptionsModal(sceneId, owner, repoName, sceneName, isHwCloudScene);
 }
 
-// 高级选项弹窗：工作分支 + 自定义配置项
-function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName, isHwCloudScene) {
+// 应用弹窗：场景名称（可编辑）+ 工作分支 + 自定义配置项
+function _showApplyOptionsModal(sceneId, owner, repoName, sceneName, isHwCloudScene) {
   var modal = document.createElement('div');
   modal.id = 'applyOptionsModal';
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.3);display:flex;align-items:center;justify-content:center;z-index:1001;backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px)';
 
-  var title = isOverwrite
-    ? (I18N.t('skills.apply_confirm_title')||'确认覆盖应用')
-    : (I18N.t('skills.apply_scene')||'应用场景');
-  var warnHtml = isOverwrite
-    ? '<div style="display:flex;align-items:center;gap:8px;margin-bottom:16px;padding:12px 14px;background:rgba(255,59,48,.06);border-radius:12px">' +
-        '<span style="font-size:16px;flex-shrink:0;line-height:1">⚠️</span>' +
-        '<div style="font-size:12px;color:var(--t2);line-height:1.6">' +
-          (I18N.t('skills.apply_confirm_desc')||'当前仓库已应用过此场景') + (sceneName ? '（' + sceneName + '）' : '') + '，' +
-          (I18N.t('skills.apply_confirm_warning')||'再次应用将覆盖更新已有的场景配置。') +
-        '</div>' +
-      '</div>'
-    : '';
+  var title = I18N.t('skills.apply_scene')||'应用场景';
+  var warnHtml = '';
 
   modal.innerHTML =
     '<style>' +
@@ -424,6 +412,12 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
     '<div class="cd" style="width:600px;max-height:92vh;overflow-y:auto;padding:24px;border-radius:18px;background:rgba(255,255,255,.92);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);box-shadow:0 8px 30px rgba(0,0,0,.12)">' +
       '<h3 style="font-size:15px;font-weight:600;margin-bottom:14px">' + title + '</h3>' +
       warnHtml +
+      // 场景名称（weekly-09：每次应用可编辑，预填模板名）
+      '<div style="margin-bottom:16px">' +
+        '<div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">' + (I18N.t('skills.apply_scene_name_label')||'场景名称') + '</div>' +
+        '<input id="applySceneNameInput" value="' + (sceneName || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;') + '" maxlength="50" style="width:100%;box-sizing:border-box;padding:8px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:13px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'">' +
+        '<div id="applySceneNameErr" style="display:none;margin-top:6px;font-size:11px;color:#ff3b30;line-height:1.5"></div>' +
+      '</div>' +
       // 工作分支
       '<div style="margin-bottom:16px">' +
         '<div style="font-size:12px;font-weight:600;color:#86868b;margin-bottom:8px">' + (I18N.t('dashboard.work_branch')||'工作分支') + '</div>' +
@@ -449,7 +443,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, isOverwrite, sceneName
       // 底部按钮
       '<div style="display:flex;justify-content:flex-end;gap:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,.06)">' +
         '<button class="bt bt-o bt-s" id="applyCancelBtn">' + (I18N.t('common.cancel')||'取消') + '</button>' +
-        '<button class="bt bt-p bt-s" id="applyConfirmBtn">' + (isOverwrite ? (I18N.t('skills.apply_confirm_btn')||'确认覆盖') : (I18N.t('skills.apply_scene')||'应用')) + '</button>' +
+        '<button class="bt bt-p bt-s" id="applyConfirmBtn">' + (I18N.t('skills.apply_scene')||'应用') + '</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(modal);
@@ -579,51 +573,8 @@ window._applyCreateNewBranch = function(o, n) {
     if (sel) sel.innerHTML = '<option value="main">main</option>';
   });
 
-  // 如果是覆盖应用，加载已有的高级选项数据回填
-  if (isOverwrite) {
-    var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName);
-    API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(repoFull)).then(function(pipeData) {
-      var scenes = (pipeData && pipeData.scenes) || [];
-      var target = sceneName ? scenes.find(function(s) { return s.name === sceneName || s.display_name === sceneName; }) : null;
-      if (!target) return;
-      var sceneIdLocal = target.id;
-      return API.get('/scenes/' + encodeURIComponent(sceneIdLocal) + '/advanced-options?repo=' + encodeURIComponent(repoFull));
-    }).then(function(d) {
-      if (!d) return;
-      var sel = document.getElementById('applyAdvWorkBranch');
-      if (sel && d.work_branch) {
-        var opts = sel.querySelectorAll('option');
-        var found = false;
-        opts.forEach(function(opt) { if (opt.value === d.work_branch) { opt.selected = true; found = true; } });
-        if (!found) {
-          var newOpt = document.createElement('option');
-          newOpt.value = d.work_branch;
-          newOpt.textContent = d.work_branch;
-          newOpt.selected = true;
-          sel.insertBefore(newOpt, sel.firstChild);
-        }
-      }
-      var fields = d.custom_fields || [];
-      // 华为云场景已自动注入 AK/SK 行，回填时跳过这些 name 避免重复
-      var hwKeys = isHwCloudScene ? ['HUAWEICLOUD_SDK_AK', 'HUAWEICLOUD_SDK_SK'] : [];
-      fields.forEach(function(f) {
-        var fname = f.name || f.key || '';
-        if (hwKeys.indexOf(fname) >= 0) {
-          // 已有 AK/SK 行 → 只更新 value，不新增行
-          var rows = document.querySelectorAll('#applyAdvCustomFields .adv-kv');
-          for (var i = 0; i < rows.length; i++) {
-            var k = (rows[i].querySelector('.adv-kv-key') || {}).value || '';
-            if (k === fname) {
-              var valInput = rows[i].querySelector('.adv-kv-val');
-              if (valInput) valInput.value = f.value || '';
-              return;
-            }
-          }
-        }
-        window._applyAddCustomField(fname, f.value !== undefined ? f.value : '', false, f.is_secret, f.scope, f.value_exist, f.preset, f.description);
-      });
-    }).catch(function() {});
-  }
+  // weekly-09 修订：覆盖回填逻辑随幂等路径一并删除——每次应用都是全新场景，
+  // 不存在「回填旧场景高级选项」。分支默认值 + 预置参数由下方常规逻辑处理。
 
   // 确认按钮
   document.getElementById('applyConfirmBtn').onclick = function() {
@@ -631,16 +582,55 @@ window._applyCreateNewBranch = function(o, n) {
     if (!workBranch) { app.showToast && app.showToast(I18N.t('dashboard.branch_required')||'工作分支不能为空'); return; }
     var _collected = _cfCollectFields('#applyAdvCustomFields');
     if (_collected.error) { app.showToast && app.showToast(_collected.error); return; }
-    modal.remove();
-    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, _collected.fields);
+    var _sceneNameInput = document.getElementById('applySceneNameInput');
+    var _newName = (_sceneNameInput && _sceneNameInput.value || '').trim();
+    if (!_newName) {
+      _sceneNameInput && _sceneNameInput.focus();
+      var _errEl = document.getElementById('applySceneNameErr');
+      if (_errEl) { _errEl.style.display = 'block'; _errEl.textContent = I18N.t('skills.apply_scene_name_empty')||'场景名称不能为空'; }
+      return;
+    }
+    var _nameErr = document.getElementById('applySceneNameErr');
+    var _showNameErr = function(msg) {
+      if (!_nameErr) { app.showToast && app.showToast(msg); return; }
+      _nameErr.style.display = 'block';
+      _nameErr.textContent = msg;
+      if (_sceneNameInput) { _sceneNameInput.style.borderColor = '#ff3b30'; _sceneNameInput.focus(); }
+    };
+    var _confirmBtn = this;
+    _confirmBtn.disabled = true;
+    _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, _collected.fields, _newName, function(err) {
+      // 失败回叫：409 撞名/其他错误 → 弹窗保留，用户改名重试
+      _confirmBtn.disabled = false;
+      if (err && err.status === 409) {
+        _showNameErr(err.message || (I18N.t('skills.apply_scene_name_conflict_inline')||'仓库中已有同名场景，请换个名称'));
+      } else if (err) {
+        _showNameErr(err.message || (I18N.t('skills.toast.apply_failed')||'应用失败'));
+      }
+    });
   };
 }
 
 // 应用场景 + 保存高级选项
 // 应用成功后直接跳转到该场景的详情页（scene-detail-local），而不是回场景中心列表
-function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFields) {
+// weekly-09：带用户可编辑的场景名称；可选 onFail 回叫（弹窗保留供改名重试），成功时调 onDone 销毁弹窗
+function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFields, sceneDisplayName, onFail) {
   var repoFull = decodeURIComponent(owner) + '/' + decodeURIComponent(repoName);
-  API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName).then(function(r) {
+  var _errObj = function(e) { return { status: (e && e.status) || 0, message: (e && e.message) || '' }; };
+  var _cleanupErr = function() {
+    var _errEl = document.getElementById('applySceneNameErr');
+    if (_errEl) { _errEl.style.display = 'none'; _errEl.textContent = ''; }
+    var _inp = document.getElementById('applySceneNameInput');
+    if (_inp) { _inp.style.borderColor = '#e8e8ed'; }
+  };
+  var _onDone = function() {
+    var m = document.getElementById('applyOptionsModal');
+    if (m) m.remove();
+  };
+  var _reqBody = sceneDisplayName ? { display_name: sceneDisplayName } : {};
+  API.post('/scenes/market/' + sceneId + '/apply?owner=' + owner + '&repo=' + repoName, _reqBody).then(function(r) {
+    _cleanupErr();
+    _onDone();
     var sceneIdLocal = r.scene_id;
     var _navAfterApply = function(extraMsg) {
       if (app && app.showToast) app.showToast((r.message || I18N.t('skills.toast.apply_success')||'场景已应用') + (extraMsg || ''));
@@ -670,6 +660,10 @@ function _doApplySceneWithOptions(sceneId, owner, repoName, workBranch, customFi
       _navAfterApply('（高级选项保存失败）');
     });
   }).catch(function(e) {
+    if (onFail) {
+      // weekly-09：弹窗保留，错误透传给应用弹窗内联提示（409 撞名 → 改名重试）
+      if (typeof onFail === 'function') { onFail(_errObj(e)); return; }
+    }
     if (e.status === 409) {
       _showSceneNameConflict(e.message);
     } else {
@@ -900,7 +894,7 @@ function _renderSceneDetailPage(s) {
       ${isOfficial ? `<span style="cursor:pointer;font-size:13px;color:var(--t2);display:flex;align-items:center;gap:4px" onclick="_toggleSceneLike(${s.id},this)">${likeIcon} <span data-scene-like="${s.id}">${s.like_count||0}</span></span>
       <span style="font-size:11px;color:var(--t3)">${s.repo_count||0} ${I18N.t('skills.repos_in_use')||'仓库在用'}</span>` : ''}
       <div style="margin-left:auto;display:flex;align-items:center;gap:8px">
-        <button class="bt bt-o bt-s" onclick="_applyScene(${s.id},'${s.name}','${(s.skills||[]).map(function(x){return x.name||x;}).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
+        <button class="bt bt-o bt-s" onclick="_applyScene(${s.id},'${s.display_name || s.name}','${(s.skills||[]).map(function(x){return x.name||x;}).join(',')}')">${I18N.t('skills.apply_scene')||'应用'}</button>
         ${s.recommended_template ? `<button class="bt bt-o bt-s" onclick="_experienceScene(${s.id})">${I18N.t('skills.experience')||'体验'}</button>` : ''}
       </div>
     </div>

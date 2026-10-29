@@ -405,9 +405,13 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_s
     return {"applied": bool(row), "scene_name": row[0] if row else ""}
 
 
-@router.post("/market/{market_id}/apply", operation_id="scenes_market_apply", summary="Apply market scene", description="Applies a market scene to the repo-level pipeline scene. Idempotent per market_scene_id + repo_key.")
+class MarketApplyBody(BaseModel):
+    display_name: str = ""
+
+@router.post("/market/{market_id}/apply", operation_id="scenes_market_apply", summary="Apply market scene", description="Applies a market scene to the repo-level pipeline scene. Idempotent per market_scene_id + repo_key. Issue weekly-09: scene_id is a fresh custom-{uuid} per application so multiple users can apply the same template independently; display_name is user-editable (falls back to template display_name).")
 def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_token),
-                       owner: str = "", repo: str = "", repo_key: str = ""):
+                       owner: str = "", repo: str = "", repo_key: str = "",
+                       body: MarketApplyBody | None = None):
     """应用场景：从市场复制配置到仓库级 devops_pipeline_scene。
 
     - scope='repo'（方案 B：场景只与仓库关联，无 user 级）
@@ -456,66 +460,44 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
             if missing:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"场景引用了已删除的技能: {', '.join(sorted(missing))}，无法应用"})
 
-    # 幂等：先查 devops_pipeline_scene WHERE market_scene_id=? AND repo_key=?
-    existing_scene_id = ""
-    existing_row_id = 0
+    # weekly-09 修订（主人确认）：删除「同模板重应用=幂等更新」路径——
+    # 那是旧世界（scene_id=模板名，重复应用必然撞同一行）的产物。现在每次应用
+    # 都是一个全新场景（custom-{uuid}），同一用户基于同一模板创建多个自己的场景
+    # 是正当需求，不应被覆盖语义挡住。market_scene_id 仅作来源标记保留。
+
+    # display_name 来源：用户输入（应用弹窗可编辑）→ 模板 display_name → 模板 name。
+    # weekly-09：每次应用都弹窗让用户确认/改名；撞名 409 让用户改名重试。
+    display_name = ((body.display_name if body else "") or "").strip() or (scene["display_name"] or scene["name"])
     with db_lock:
         c = db.cursor()
         c.execute(
-            "SELECT scene_id, id FROM devops_pipeline_scene "
-            "WHERE market_scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-            (market_id, repo_key),
+            "SELECT name FROM devops_pipeline_scene "
+            "WHERE name=? AND repo_key=? AND is_active=1 LIMIT 1",
+            (display_name, repo_key),
         )
-        row = c.fetchone()
-        if row:
-            existing_scene_id = row[0]
-            existing_row_id = row[1]
-
-    # display_name 查重：仓库内不能有同名场景（排除自己）
-    display_name = scene["display_name"] or scene["name"]
-    with db_lock:
-        c = db.cursor()
-        if existing_row_id:
-            c.execute(
-                "SELECT name FROM devops_pipeline_scene "
-                "WHERE name=? AND repo_key=? AND is_active=1 AND id!=? LIMIT 1",
-                (display_name, repo_key, existing_row_id),
-            )
-        else:
-            c.execute(
-                "SELECT name FROM devops_pipeline_scene "
-                "WHERE name=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (display_name, repo_key),
-            )
         conflict = c.fetchone()
     if conflict:
-        raise HTTPException(status_code=409, detail={"code": 409, "message": f"仓库中已存在名为'{display_name}'的场景，请先修改已有场景名称后再应用"})
+        raise HTTPException(status_code=409, detail={"code": 409, "message": f"仓库中已存在名为'{display_name}'的场景，请更换名称后重试", "field": "display_name"})
 
-    if existing_scene_id:
-        # 已存在 → 更新
-        update_custom_scene(
-            scene_id=existing_scene_id, repo_key=repo_key, nodes=nodes,
-            name=scene["display_name"], description=scene["description"],
-        )
-        scene_id = existing_scene_id
-    else:
-        # 不存在 → 新建（scope='repo'，scene_id 用 custom-uuid 或市场 name）
-        new_scene_id = scene["name"] or f"custom-{uuid.uuid4().hex[:8]}"
-        db_id = create_custom_scene(
-            scene_id=new_scene_id, name=scene["display_name"] or new_scene_id,
-            description=scene["description"] or "",
-            repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding",
-            created_by=user.get("username", ""))
-        scene_id = new_scene_id
-        # 回写 market_scene_id 关联
-        try:
-            with db_lock:
-                c = db.cursor()
-                c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, db_id))
-                db.commit()
-                log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={db_id}, rowcount={c.rowcount}")
-        except Exception as _e:
-            log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
+    # 新建（scope='repo'）。
+    # weekly-09：scene_id 不再用模板 name（扁平命名空间会互相覆盖/409 挡路），
+    # 每次应用生成独立 custom-{uuid}，多个用户应用同一模板互不影响。
+    new_scene_id = f"custom-{uuid.uuid4().hex[:8]}"
+    db_id = create_custom_scene(
+        scene_id=new_scene_id, name=display_name or new_scene_id,
+        description=scene["description"] or "",
+        repo_key=repo_key, nodes=nodes, onboarding=scene["onboarding"] or "repo-onboarding",
+        created_by=user.get("username", ""))
+    scene_id = new_scene_id
+    # 回写 market_scene_id 关联（仅来源标记，不再参与幂等判断）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("UPDATE devops_pipeline_scene SET market_scene_id=? WHERE id=?", (market_id, db_id))
+            db.commit()
+            log.info(f"apply_market_scene: UPDATE market_scene_id={market_id} WHERE id={db_id}, rowcount={c.rowcount}")
+    except Exception as _e:
+        log.warning(f"apply_market_scene: link market_scene_id failed: {_e}")
 
     # 合并预置自定义参数（Issue #246）：仅追加缺失项，不覆盖用户已有配置
     try:

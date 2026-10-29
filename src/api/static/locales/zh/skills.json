@@ -179,6 +179,10 @@
   "toast.upload_failed": "上传失败：{msg}",
   "toast.upload_success": "上传成功",
   "apply_confirm_title": "确认覆盖应用",
+  "apply_scene_name_label": "场景名称",
+  "apply_scene_name_empty": "场景名称不能为空",
+  "apply_scene_name_conflict_inline": "仓库中已有同名场景，请换个名称",
+
   "apply_confirm_desc": "当前仓库已应用过此场景",
   "apply_confirm_warning": "再次应用将覆盖更新已有的场景配置。",
   "apply_confirm_btn": "确认覆盖",

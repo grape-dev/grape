@@ -179,6 +179,10 @@
   "toast.upload_failed": "Upload failed: {msg}",
   "toast.upload_success": "Uploaded successfully",
   "apply_confirm_title": "Confirm Overwrite",
+  "apply_scene_name_label": "Scene Name",
+  "apply_scene_name_empty": "Scene name cannot be empty",
+  "apply_scene_name_conflict_inline": "A scene with this name already exists in this repo. Try another name.",
+
   "apply_confirm_desc": "This scene has already been applied to this repository",
   "apply_confirm_warning": "Applying again will overwrite the existing scene configuration.",
   "apply_confirm_btn": "Confirm Overwrite",
