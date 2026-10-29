@@ -2300,7 +2300,21 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
                             skill_path, skill_id, evt, issue_id, runtime_id or 0)
-        _fail_event(seq, f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态")
+        _reason_offline = f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态"
+        # Issue #496：PR merged → sre 收尾链路（merge webhook 一次性投递，无二次触发机会）
+        # 保留 #259 即时终态语义的同时追加派发级自动重试（引擎恢复后自动重派）。
+        if event_type == "pull_request_merged" and agent_type == "sre":
+            try:
+                from src.api.pr_merged_sre_retry import schedule_pr_merged_sre_retry
+                if schedule_pr_merged_sre_retry(
+                        repo_key, seq, agent_type, backend or "", skill_name or "",
+                        skill_id or 0, skill_path or "", evt, issue_id=issue_id or "",
+                        runtime_id=runtime_id or 0, scene_id=_issue_scene or "",
+                        scene_uid=_issue_scene_uid or 0):
+                    _reason_offline += "；已安排自动重试（引擎恢复后自动重派，Issue #496）"
+            except Exception as _e496:
+                log.warning(f"Pipeline: schedule #496 sre merge retry failed: {_e496}")
+        _fail_event(seq, _reason_offline)
         return result
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
         _be = backend or "opencode"
