@@ -63,3 +63,27 @@
     --btn-outline: rgba(111, 180, 255, 0.4);
   }
 }
+
+/* ── ui-debt #1/#5: dark-mode surface elevation for view chunks ──
+ * The shell's dark palette flips --bg to pure #000 and --c to #1c1c1e — cards
+ * barely separate from the page (issues board read as a wall of black) and
+ * hairline borders vanish. Only the media-query variant is targeted: forced
+ * dark ([data-theme-mode="dark"]) sets the same vars, so mirror it there too.
+ * Light mode is untouched: these overrides only apply in dark. */
+@media (prefers-color-scheme: dark) {
+  :root,
+  [data-theme='apple'][data-theme-mode='auto'] {
+    /* elevated glass surfaces: lifted one step above the shell card color */
+    --glass-bg: color-mix(in srgb, #2c2c2e 62%, transparent);
+    --glass-bg-strong: color-mix(in srgb, #2c2c2e 88%, transparent);
+    --glass-border: rgba(255, 255, 255, 0.12);
+    /* dark card separation (#5): visible hairline on dark surfaces */
+    --card-border: rgba(255, 255, 255, 0.1);
+  }
+}
+[data-theme='apple'][data-theme-mode='dark'] {
+  --glass-bg: color-mix(in srgb, #2c2c2e 62%, transparent);
+  --glass-bg-strong: color-mix(in srgb, #2c2c2e 88%, transparent);
+  --glass-border: rgba(255, 255, 255, 0.12);
+  --card-border: rgba(255, 255, 255, 0.1);
+}
