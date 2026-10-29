@@ -73,7 +73,7 @@ async def analyze_image(request: Request):
     if raw_qs.startswith("url="):
         url = raw_qs[4:]
     else:
-        return {"error": "missing url parameter"}
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "missing url parameter"})
 
     # 域名白名单（防 SSRF）
     parsed = urlparse(url)
@@ -1578,8 +1578,17 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         old_app_id = old_cfg.get("im_app_id", "")
     if feishu.get("app_secret") and feishu["app_secret"] != "********":
         kwargs["im_app_secret"] = feishu["app_secret"]
-    if body.get("backend"):
-        kwargs["backend"] = body["backend"]
+    # Issue #508：backend 无类型校验直传落库 → _resolve_chat_runtime_id（str 形参）
+    # → TypeError → 500（GET /config 返回对象形态 {"type": ...} 被调用方回填即触发）。
+    # 显式校验：仅接受字符串（本 Issue 口径：对象形态显式 400 拒绝，不归一——
+    # 与 #504 的归一落库口径分歧，以两 Issue 各自验收为准）。
+    # 空串/None/缺键 → 跳过写入（#431 普通 200 保存不变量保持）；空 dict {} 等畸形值
+    # 必须走校验拒绝（验收：{"backend":{}} → 4xx），故用显式空值判断而非真值判断。
+    if body.get("backend") is not None and body["backend"] != "":
+        _be = body["backend"]
+        if not isinstance(_be, str):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "backend 必须为字符串"})
+        kwargs["backend"] = _be
     if body.get("runtime_id") is not None:
         kwargs["runtime_id"] = body["runtime_id"]
     if body.get("skill_id") is not None:
@@ -1600,6 +1609,10 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         kwargs["skill_scope"] = skill_scope
     elif body.get("skill") is not None:
         # 旧方式兼容：按名称+scope 查 id
+        # Issue #508：同根因区域一致防御——skill 非 str 直传 SQL 绑定 →
+        # ProgrammingError → 500，显式 400（与 backend 校验同一修法口径）。
+        if not isinstance(body["skill"], str):
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "skill 必须为字符串"})
         kwargs["skill"] = body["skill"]
         skill_name = body["skill"]
         skill_scope = body.get("skill_scope", "")
