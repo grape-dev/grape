@@ -249,21 +249,35 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     result["engine_health"] = engine_health
 
     # 关联任务（重派按钮展示/判定用，见 event-redispatch-design.md §4.1.1）
+    # Issue #494：带出 task_errors（失败归因摘要，前端失败态展示用）
     task_info = {"task_id": "", "task_status": "", "runtime_id": 0,
-                 "runtime_session_id": "", "task_created_at": "", "task_started_at": ""}
+                 "runtime_session_id": "", "task_created_at": "", "task_started_at": "",
+                 "task_errors": []}
     try:
         with db_lock:
             c4 = db.cursor()
             c4.execute(
-                "SELECT id, status, runtime_id, runtime_session_id, created_at, started_at "
+                "SELECT id, status, runtime_id, runtime_session_id, created_at, started_at, errors "
                 "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
                 (seq,))
             tr3 = c4.fetchone()
             if tr3:
+                _task_errors = []
+                if tr3[6]:
+                    try:
+                        _parsed = json.loads(tr3[6])
+                        if isinstance(_parsed, list):
+                            _task_errors = [str(e)[:500] for e in _parsed
+                                            if str(e).strip()][:5]
+                        else:
+                            _task_errors = [str(tr3[6])[:500]]
+                    except (json.JSONDecodeError, TypeError):
+                        _task_errors = [str(tr3[6])[:500]]
                 task_info = {
                     "task_id": tr3[0], "task_status": tr3[1], "runtime_id": tr3[2] or 0,
                     "runtime_session_id": tr3[3] or "", "task_created_at": tr3[4] or "",
                     "task_started_at": tr3[5] or "",
+                    "task_errors": _task_errors,
                 }
     except Exception:
         pass

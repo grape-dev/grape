@@ -111,5 +111,7 @@
   "a2a_redo_skipped": "A2A redo skipped: {reason}",
   "a2a_redo_success": "A2A redo succeeded, new event #{seq}",
   "a2a_redo_failed": "A2A redo failed: {msg}",
-  "a2a_redo_unknown": "Unknown error"
+  "a2a_redo_unknown": "Unknown error",
+  "fail_expand": "Expand",
+  "fail_collapse": "Collapse"
 }

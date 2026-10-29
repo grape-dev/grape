@@ -947,11 +947,14 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
                     # 若收尾窗口内收到输出，视为 agent 已收尾（exit 以进程实际状态为准，不再强制 -9）
                     _killed = "-9" if _grace_tail.strip() == "" else "grace"
                     log.info(f"{label}{backend.name} hang fallback: tail_chars={len(_grace_tail)} outcome={_killed}")
+                    # Issue #494：静默超时强杀必须带明确归因（不再只写英文 killed 短语）
+                    from src.agent.failure_attribution import timeout_error_text
                     yield ("done", {
                         "exit_code": -9 if _grace_tail.strip() == "" else (proc.returncode if proc.returncode is not None else -1),
                         "text": _redact("\n".join(collected_text), _tokens),
                         "oc_session_id": new_session_id,
-                        "errors": error_events + ([f"no output for {_silent_window:.0f}s, killed"] if _grace_tail.strip() == "" else []),
+                        "errors": error_events + ([timeout_error_text(
+                            _silent_window, f"{backend.name} 无输出静默超时被终止")] if _grace_tail.strip() == "" else []),
                         "stderr": _redact(_stderr_tail.text(), _tokens),
                         "backend": backend.name, "parsed_count": _parsed_count,
                         "text_count": _text_count, "tool_count": _tool_count,
@@ -1048,6 +1051,12 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # 结合系统日志启发式判定 OOM。
         _exit_code = proc.returncode
         _final_errors = list(error_events)
+        # Issue #494：超时类死亡显式归因——returncode=124（timeout 命令）/ -15（SIGTERM）
+        # 时 stderr 常为空，尾采拿不到原因，直接构造「执行超时」文案进 errors。
+        from src.agent.failure_attribution import process_exit_attribution
+        _exit_attr = process_exit_attribution(_exit_code)
+        if _exit_attr:
+            _final_errors.append(_exit_attr)
         # issue #416（E7）：进程退出码非 0 且无文本 → errors 写明 `<引擎> exited rc=N`，
         # 不再让失败任务 errors 为空（旧形态：exit_code=-1、errors 空、stderr 截断）
         if _exit_code != 0 and not full_text.strip():

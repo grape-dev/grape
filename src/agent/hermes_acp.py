@@ -533,6 +533,7 @@ class HermesACPBackend:
             _TEXT_INCOMPLETE_TIMEOUT = _text_incomplete_timeout_for()  # 无证据时最多再等到这里 → 按疑似提前结束收尾
             _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
             _last_event_type = ""   # 记录最后一次事件类型
+            _timeout_secs = None    # Issue #494：触发超时的实际上限秒数（归因文案用）
             _rec_check_n = -1       # 已完成收尾记录检查的 collected_text 长度（避免静默期每 50ms 重复解析）
             _rec_ok = False         # 是否已检测到收尾记录（actions + conclusion）
             _silent_wait_logged = False
@@ -597,6 +598,7 @@ class HermesACPBackend:
                 elif elapsed_silent > _SILENT_TIMEOUT:
                     log.warning(f"{label}hermes ACP silent {elapsed_silent:.0f}s, timeout")
                     prompt_result["stopReason"] = "timeout"
+                    _timeout_secs = _SILENT_TIMEOUT
                     break
 
                 # 全局超时（#282：对齐外层 RUNTIME_TASK_TIMEOUT，默认 3600s）
@@ -605,6 +607,7 @@ class HermesACPBackend:
                     _gt_src_txt = f"env RUNTIME_TASK_TIMEOUT={_gt_src}" if _gt_src else "default 3600s"
                     log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT:.0f}s, {_gt_src_txt}) exceeded")
                     prompt_result["stopReason"] = "timeout"
+                    _timeout_secs = _GLOBAL_TIMEOUT
                     break
 
                 time.sleep(0.05)
@@ -615,6 +618,14 @@ class HermesACPBackend:
 
             stop_reason = prompt_result.get("stopReason", "")
             log.info(f"{label}hermes ACP done: stopReason={stop_reason}")
+
+            # Issue #494：超时失败显式归因（与 hwcloud_acp 同口径）——stopReason=timeout
+            # 时 stderr/errors 常为空，补「执行超时（Ns）」文案进 errors。
+            if stop_reason == "timeout" and not error_events:
+                from src.agent.failure_attribution import timeout_error_text
+                error_events.append(timeout_error_text(
+                    _timeout_secs if _timeout_secs is not None else _GLOBAL_TIMEOUT,
+                    "hermes ACP stopReason=timeout"))
 
             yield ("step_finish", f"Step 1 done (stopReason={stop_reason})")
 

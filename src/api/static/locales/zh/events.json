@@ -111,5 +111,7 @@
   "a2a_redo_skipped": "A2A 补发未执行：{reason}",
   "a2a_redo_success": "A2A 补发成功，新事件 #{seq}",
   "a2a_redo_failed": "A2A 补发失败：{msg}",
-  "a2a_redo_unknown": "未知原因"
+  "a2a_redo_unknown": "未知原因",
+  "fail_expand": "展开全文",
+  "fail_collapse": "收起"
 }

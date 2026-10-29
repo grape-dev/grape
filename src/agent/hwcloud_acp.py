@@ -509,6 +509,7 @@ class HwcloudACPBackend:
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后 60s 无后续 → 视为完成（响应丢失兜底）
             _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
             _last_event_type = ""   # 记录最后一次事件类型
+            _timeout_secs = None    # Issue #494：触发超时的实际上限秒数（归因文案用）
 
             while True:
                 with queue_lock:
@@ -546,6 +547,7 @@ class HwcloudACPBackend:
                 if elapsed_silent > _SILENT_TIMEOUT:
                     log.warning(f"{label}hwcloud ACP silent {elapsed_silent:.0f}s, timeout")
                     prompt_result["stopReason"] = "timeout"
+                    _timeout_secs = _SILENT_TIMEOUT
                     break
 
                 # 全局超时（#282：对齐外层 RUNTIME_TASK_TIMEOUT，默认 3600s）
@@ -554,6 +556,7 @@ class HwcloudACPBackend:
                     _gt_src_txt = f"env RUNTIME_TASK_TIMEOUT={_gt_src}" if _gt_src else "default 3600s"
                     log.warning(f"{label}hwcloud ACP global timeout ({_GLOBAL_TIMEOUT:.0f}s, {_gt_src_txt}) exceeded")
                     prompt_result["stopReason"] = "timeout"
+                    _timeout_secs = _GLOBAL_TIMEOUT
                     break
 
                 time.sleep(0.05)
@@ -564,6 +567,15 @@ class HwcloudACPBackend:
 
             stop_reason = prompt_result.get("stopReason", "")
             log.info(f"{label}hwcloud ACP done: stopReason={stop_reason}")
+
+            # Issue #494：超时失败显式归因——stopReason=timeout 时 stderr/errors 常
+            # 为空（timeout 杀进程无遗言），补「执行超时（Ns）」文案进 errors，
+            # 经 done → worker/直接收口写入 agent_tasks.errors 并透出事件流/前端。
+            if stop_reason == "timeout" and not error_events:
+                from src.agent.failure_attribution import timeout_error_text
+                error_events.append(timeout_error_text(
+                    _timeout_secs if _timeout_secs is not None else _GLOBAL_TIMEOUT,
+                    "hwcloud ACP stopReason=timeout"))
 
             # 信息透传修复（seq#559 排障盲点）：stopReason=error 时把 PromptResponse
             # 里的 error 详情补进 error_events——旧实现只置 stopReason 不带消息，

@@ -523,17 +523,53 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
                   exc_info=True)
 
 
-def _update_direct_task(seq, status, exit_code=0, result_text=""):
-    """direct 执行完成后更新 agent_tasks 状态（通过 event_seq 反查）。"""
+def _update_direct_task(seq, status, exit_code=0, result_text="", errors=None):
+    """direct 执行完成后更新 agent_tasks 状态（通过 event_seq 反查）。
+
+    Issue #494：失败时 errors（JSON 字符串）合并写入——旧路径不写 errors，
+    超时失败任务详情零归因。None = 不动 errors 列（保持既有语义）。
+    """
     try:
         from datetime import datetime, timezone
         with db_lock:
             c = db.cursor()
-            c.execute(
-                "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, completed_at=? "
-                "WHERE event_seq=? AND status IN ('queued','running','dispatched')",
-                (status, exit_code, result_text or "", datetime.now(timezone.utc).isoformat(), seq)
-            )
+            if errors is not None:
+                # 合并而非覆盖（与 _fail_event 的 COALESCE 口径不同：这里 done
+                # errors 是权威增量，读取已有记录去重追加）
+                c.execute(
+                    "SELECT errors FROM agent_tasks WHERE event_seq=? "
+                    "AND status IN ('queued','running','dispatched')",
+                    (seq,))
+                _row = c.fetchone()
+                _merged = []
+                if _row and _row[0]:
+                    try:
+                        _merged = [e for e in json.loads(_row[0])
+                                   if isinstance(e, str) and e.strip()]
+                    except (json.JSONDecodeError, TypeError):
+                        _merged = [_row[0]]
+                try:
+                    _new = [str(e).strip()[:500] for e in json.loads(errors)
+                            if str(e).strip()] if errors else []
+                except (json.JSONDecodeError, TypeError):
+                    _new = []
+                for _e in _new:
+                    if _e not in _merged:
+                        _merged.append(_e)
+                c.execute(
+                    "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, "
+                    "completed_at=?, errors=? "
+                    "WHERE event_seq=? AND status IN ('queued','running','dispatched')",
+                    (status, exit_code, result_text or "",
+                     datetime.now(timezone.utc).isoformat(),
+                     json.dumps(_merged) if _merged else errors, seq)
+                )
+            else:
+                c.execute(
+                    "UPDATE agent_tasks SET status=?, exit_code=?, result_text=?, completed_at=? "
+                    "WHERE event_seq=? AND status IN ('queued','running','dispatched')",
+                    (status, exit_code, result_text or "", datetime.now(timezone.utc).isoformat(), seq)
+                )
             db.commit()
     except Exception as e:
         log.warning(f"update_direct_task failed for seq={seq}: {e}")
@@ -4230,11 +4266,45 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                     errors=_exec_done_errors)
         except Exception as _e:
             log.warning(f"Exec agent: failure summary build failed for seq={seq}: {_e}")
+    # Issue #494：失败收口归因双写——done 事件的 errors 必须落 agent_tasks.errors
+    # （旧路径只写 status/exit_code/result_text，超时失败 errors 与 stderr 双空，
+    # 用户只看到 failed/exit_code=-1 无任何原因）。同时 result_text 为空时构造
+    # 可读失败摘要透出到事件 result（前端失败原因卡片数据源）。
+    _fail_errors_json = None
+    if new_status == "failed" and _exec_done_errors:
+        try:
+            from src.agent.failure_attribution import failure_summary
+            if not (result_text or "").strip():
+                result_text = failure_summary(_exec_done_errors, exit_code)
+        except Exception as _e:
+            log.warning(f"Exec agent: failure attribution summary failed for seq={seq}: {_e}")
+            if not (result_text or "").strip():
+                result_text = f"任务失败（exit_code={exit_code}）"
+        # 合并而非覆盖：保留 #403 transient retry 等已写入的诊断记录
+        try:
+            _merged = []
+            if task_id:
+                from src.runtime.service import _task_errors_json
+                _merged = [e for e in (_task_errors_json(task_id) or [])
+                           if str(e).strip()]
+            for _e in _exec_done_errors:
+                _s = str(_e).strip()[:500]
+                if _s and _s not in _merged:
+                    _merged.append(_s)
+            if _merged:
+                _fail_errors_json = json.dumps(_merged)
+        except Exception as _e:
+            log.warning(f"Exec agent: errors merge for seq={seq} failed: {_e}")
     if task_id:
         from src.runtime.service import update_task_status
-        update_task_status(task_id, new_status, exit_code=exit_code, result_text=result_text)
+        if _fail_errors_json is not None:
+            update_task_status(task_id, new_status, exit_code=exit_code,
+                               result_text=result_text, errors=_fail_errors_json)
+        else:
+            update_task_status(task_id, new_status, exit_code=exit_code, result_text=result_text)
     else:
-        _update_direct_task(seq, new_status, exit_code=exit_code, result_text=result_text)
+        _update_direct_task(seq, new_status, exit_code=exit_code,
+                            result_text=result_text, errors=_fail_errors_json)
     update_event_config(seq, inst_name, skill_name, started_at)
     update_event_complete(seq, new_status, exit_code=exit_code, duration=duration,
                           agent_logs=agent_logs, completed_at=completed_at, result=result_text)

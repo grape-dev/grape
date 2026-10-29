@@ -167,15 +167,47 @@ function _evStatusText(data) {
   return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : data.status === 'pending' ? '' : 'ty'}">${_statusLabel}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${(data.status === 'running' || data.status === 'pending') ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
 }
 
+// Issue #494：失败态展示错误归因摘要（>200 字符截断 + 展开全文/收起）
+function _evEsc494(s) {
+  if (typeof _esc === 'function') return _esc(s);
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+window._evToggleFailDetail = function (a) {
+  const box = a.closest && a.closest('.ev-fail-box');
+  if (!box) return;
+  const shortEl = box.querySelector('.ev-fail-short');
+  const fullEl = box.querySelector('.ev-fail-full');
+  if (!shortEl || !fullEl) return;
+  const expand = fullEl.style.display === 'none';
+  fullEl.style.display = expand ? '' : 'none';
+  shortEl.style.display = expand ? 'none' : '';
+  a.textContent = expand ? (I18N.t('events.fail_collapse') || '收起')
+    : (I18N.t('events.fail_expand') || '展开全文');
+};
+
 function _evFailReasonText(data) {
+  if (data.status !== 'failed') return '';
   const txt = (data.result || '').toString().trim();
-  // Step 1：失败原因只取 result，不再 fallback 事件标题/摘要
+  // Issue #494：result 为空/不足时补充 task errors 归因（超时等失败此前零归因）
+  const errs = ((data.task && data.task.task_errors) || [])
+    .map(e => String(e || '').trim()).filter(Boolean);
+  const parts = [];
+  if (txt) parts.push(txt);
+  if (errs.length && errs.join('\n') !== txt) parts.push(errs.join('\n'));
+  const full = parts.join('\n');
+  if (!full) {
+    return `<div style="margin-top:6px;font-size:11px;color:var(--t3,#86868b)">${I18N.t('events.no_fail_reason') || '暂无失败原因'}</div>`;
+  }
+  // Step 1：失败原因只取 result/errors，不再 fallback 事件标题/摘要
   // ——否则停机失败事件（result 为空）会显示"失败原因：A2A: → coding"等无意义文案（#2337）。
-  return (data.status === 'failed' && txt)
-    ? `<div style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason')||'失败原因'}：</b>${String(txt).substring(0, 500)}</div>`
-    : (data.status === 'failed'
-      ? `<div style="margin-top:6px;font-size:11px;color:var(--t3,#86868b)">${I18N.t('events.no_fail_reason')||'暂无失败原因'}</div>`
-      : '');
+  const LIMIT = 200;
+  const short = full.length > LIMIT ? full.slice(0, LIMIT) + '…' : full;
+  const toggle = full.length > LIMIT
+    ? ` <a href="javascript:void(0)" onclick="_evToggleFailDetail(this)" style="color:var(--a);white-space:nowrap">${I18N.t('events.fail_expand') || '展开全文'}</a>`
+    : '';
+  return `<div class="ev-fail-box" style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason') || '失败原因'}：</b><span class="ev-fail-short" style="white-space:pre-wrap">${_evEsc494(short)}</span>${toggle}<div class="ev-fail-full" style="display:none;white-space:pre-wrap;margin-top:4px;border-top:1px dashed rgba(255,59,48,.25);padding-top:4px">${_evEsc494(full)}</div></div>`;
 }
 
 function _evLogRowText(data) {
@@ -198,6 +230,7 @@ function _evFingerprint(d) {
     d.engine_device, d.engine_ip, (d.engine_health && d.engine_health.score) || null,
     d.archive && d.archive.output ? JSON.stringify(d.archive.output) : null,
     (d.task && d.task.task_status) || '', (d.task && d.task.task_id) || '',
+    JSON.stringify((d.task && d.task.task_errors) || []),
     (d.agent_logs || []).length]);
 }
 
