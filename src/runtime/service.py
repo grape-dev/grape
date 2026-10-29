@@ -300,6 +300,24 @@ _RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 # 双跑窗口=0。前提：该值 >= worker 端 RUNTIME_TASK_TIMEOUT（部署注意）。
 _TASK_RECOVER_STALE_SECONDS = int(os.environ.get("TASK_RECOVER_STALE_SECONDS", "3600"))
 
+
+def _recover_cutoff_for_agent(agent_type: str) -> str:
+    """Issue #516 M1：running 任务回收阈值按 agent_type 超时对齐。
+
+    worker 侧超时已配置化（coding 默认 7200s，见 src/runtime/task_timeout.py），
+    服务端若仍用固定 3600s 阈值回收 running 任务，会在 worker 本地仍在执行时
+    重派 → 双跑。此处与 worker 同源解析该 agent 的超时上限，再加固定余量
+    （对齐旧部署约定 TASK_RECOVER_STALE_SECONDS >= worker 超时）。
+    解析失败回退旧固定阈值（行为不回退）。
+    """
+    _grace = max(_TASK_RECOVER_STALE_SECONDS - _WORKER_TASK_TIMEOUT_DEFAULT, 0)
+    try:
+        from src.runtime.task_timeout import resolve_task_timeout
+        _to, _src = resolve_task_timeout({"agent_type": (agent_type or "").strip().lower()})
+        return (datetime.now(timezone.utc) - timedelta(seconds=_to + _grace)).isoformat()
+    except Exception:
+        return (datetime.now(timezone.utc) - timedelta(seconds=_TASK_RECOVER_STALE_SECONDS)).isoformat()
+
 # Issue #259 Optional：启动期配置耦合告警——防双跑前提是 TASK_RECOVER_STALE_SECONDS >= worker RUNTIME_TASK_TIMEOUT。
 # 二者默认均 3600s（安全），但部署侧单边调大 RUNTIME_TASK_TIMEOUT 而不调 TASK_RECOVER_STALE_SECONDS
 # 会导致服务端在 worker 仍本地执行时重派 → 双跑。启动期告警一次，运行期不再重复。
@@ -3225,10 +3243,10 @@ def reap_stale_runtimes() -> dict:
     from src.runtime.health import parse_dt
     now = time.time()
     cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_RUNTIME_STALE_SECONDS)).isoformat()
-    # Issue #259：回收分级——running 任务的对齐 worker 本地超时（RUNTIME_TASK_TIMEOUT 默认 3600s），
-    # 防假死 worker（断连但任务还在本地跑）的服务端重派与本地执行重叠造成双跑。
-    # dispatched 任务从未开始执行，无双跑风险，跟心跳阈值走（100s）。
-    _recover_cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_TASK_RECOVER_STALE_SECONDS)).isoformat()
+    # Issue #259：回收分级——running 任务的对齐 worker 本地超时（Issue #516 起按 agent
+    # 配置化对齐，见 _recover_cutoff_for_agent），防假死 worker（断连但任务还在本地跑）
+    # 的服务端重派与本地执行重叠造成双跑。dispatched 任务从未开始执行，无双跑风险，
+    # 跟心跳阈值走（100s）。
     reaped = []
     with db_lock:
         c = db.cursor()
@@ -3258,14 +3276,38 @@ def reap_stale_runtimes() -> dict:
                     (rid,)
                 )
                 recovered = c.rowcount
-                # 回收 running 任务 → queued（可能还在假死 worker 本地执行，3600s 对齐 worker
-                # 本地 RUNTIME_TASK_TIMEOUT 默认值——worker 本地到点自杀后才重派，双跑窗口=0）
-                # 前提：TASK_RECOVER_STALE_SECONDS 必须 >= worker 的 RUNTIME_TASK_TIMEOUT（部署注意）。
+                # 回收 running 任务 → queued（可能还在假死 worker 本地执行，阈值对齐 worker
+                # 本地超时——worker 本地到点自杀后才重派，双跑窗口=0）。
+                # Issue #516：阈值按 agent_type 超时配置化对齐（coding 默认 7200s），
+                # 防服务端在 worker 仍在本地执行长任务时重派双跑。宽口径预筛（最大阈值）
+                # 后逐任务按各自 agent 的 cutoff 精确判定，避免逐行扫全表。
+                try:
+                    from src.runtime.task_timeout import (AGENT_TIMEOUT_DEFAULTS,
+                                                          DEFAULT_TASK_TIMEOUT, load_timeout_config)
+                    _cfg_ad = load_timeout_config().get("agent_defaults") or {}
+                    _max_to = max([DEFAULT_TASK_TIMEOUT] +
+                                  [float(v) for v in AGENT_TIMEOUT_DEFAULTS.values()] +
+                                  [float(v) for v in _cfg_ad.values()
+                                   if isinstance(v, (int, float)) and float(v) > 0])
+                except Exception:
+                    _max_to = float(_TASK_RECOVER_STALE_SECONDS)
+                _wide_cutoff = (datetime.now(timezone.utc) - timedelta(
+                    seconds=max(_max_to, _TASK_RECOVER_STALE_SECONDS))).isoformat()
                 c.execute(
-                    "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0, attempts=attempts+1 "
-                    "WHERE runtime_id=? AND status='running' AND (started_at IS NULL OR started_at='' OR started_at < ?)",
-                    (rid, _recover_cutoff_iso)
+                    "SELECT id, agent_type, started_at FROM agent_tasks"
+                    " WHERE runtime_id=? AND status='running'"
+                    "   AND (started_at IS NULL OR started_at='' OR started_at < ?)",
+                    (rid, _wide_cutoff)
                 )
+                for _task_id, _agent_t, _started_at in c.fetchall():
+                    _cut = _recover_cutoff_for_agent(_agent_t or "")
+                    if _started_at and _cut and _started_at >= _cut:
+                        continue  # 该 agent 超时更宽（如 coding 7200s），未到其回收点
+                    c.execute(
+                        "UPDATE agent_tasks SET status='queued', started_at=NULL, runtime_id=0,"
+                        " attempts=attempts+1 WHERE id=? AND status='running'",
+                        (_task_id,)
+                    )
                 recovered += c.rowcount
                 if recovered > 0:
                     c.execute(

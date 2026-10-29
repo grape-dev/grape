@@ -1784,6 +1784,11 @@ async def _execute_task(client, task, engine_name: str = ""):
     # TaskResourceStack: unified resource lifecycle for this task
     from src.runtime.resource_stack import TaskResourceStack
     _res = TaskResourceStack(task_id=tid, cwd=cwd)
+    # Issue #516 M2：进度快照——流式事件周期性原子落盘；超时被杀前留有可用快照，
+    # 自动重试时加载注入续跑上下文（见下方 resume 段）。成功/异常路径随 dispose 清理。
+    from src.runtime.checkpoint import TaskCheckpoint
+    _ckpt = TaskCheckpoint(tid)
+    _res.track_checkpoint(_ckpt)
     # Register known tmp patterns for cleanup on any exit path
     for pat in [
         "/tmp/tf-deploy-*", "/tmp/tf-sys-xhy*", "/tmp/blog-build-*",
@@ -1913,6 +1918,15 @@ async def _execute_task(client, task, engine_name: str = ""):
     if _is_local_worker and _old_server_url and _local_base and _old_server_url != _local_base:
         prompt = prompt.replace(_old_server_url, _local_base)
         log.info(f"local worker: rewrote prompt server_url {_old_server_url} -> {_local_base}")
+    # Issue #516 M2：超时自动重试续跑——_wrap 重试轮次给 task 打了 _grape_resume_attempt，
+    # 此处加载上一轮进度快照，把最近事件摘要追加为续跑上下文（避免从零重做已完成步骤）。
+    # 快照损坏/缺失 → 降级从零跑（仅记日志）。注入逻辑见 checkpoint.inject_resume（可单测）。
+    from src.runtime.checkpoint import inject_resume
+    prompt, _resumed = inject_resume(task, env, prompt, _ckpt)
+    if _resumed:
+        log.info(f"task {tid}: retry resumed from checkpoint {os.path.basename(_ckpt.path)}")
+    elif int(task.get("_grape_resume_attempt") or 0) >= 2:
+        log.info(f"task {tid}: retry without usable checkpoint, running from scratch")
     try:
         # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
         # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
@@ -2105,6 +2119,11 @@ async def _execute_task(client, task, engine_name: str = ""):
                 # issue #403：模型流瞬时异常自动重试（用户侧可感知，事件流已透出）
                 log.warning(f"  [{_esq}] ↻ auto-retry: {data}")
             batch.append({"type": evt_type, "data": data if not isinstance(data, str) else data})
+            # Issue #516 M2：进度快照——喂流式事件（内存 tail + 周期原子落盘）
+            try:
+                _ckpt.feed(evt_type, data)
+            except Exception:
+                pass  # 快照是尽力而为的优化，绝不影响主执行链路
             # Context compaction: compact batch if it grows too large (prevents context overflow)
             if should_compact(batch):
                 batch = compact_messages(batch)
@@ -2487,13 +2506,15 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                # Issue #470：看门狗超时任务级 env 优先（服务端统一配置经 env_extra 注入），
-                # worker 本地 os.environ（runtime.env 显式设置）仍可覆盖，默认 3600 不变。
-                try:
-                    _task_env = json.loads(t.get("env_extra") or "{}")
-                except Exception:
-                    _task_env = {}
-                task_timeout = _watchdog_timeout_for(_task_env)
+                # Issue #516 M1：超时上限配置化——读取链 per-skill > per-repo > agent 默认
+                # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/runtime/task_timeout.py。
+                # （#470 任务级 env_extra 优先语义已包含：链条第 1 优先级即任务级显式 env。）
+                from src.runtime.task_timeout import (resolve_task_timeout, timeout_retry_count,
+                                                      retry_backoff_sec)
+                task_timeout, _timeout_src = resolve_task_timeout(t)
+                # Issue #516 M2：超时失败有限次自动重试（默认 1 次，可配置禁用）
+                _retry_max = timeout_retry_count(t)
+                _retry_backoff = retry_backoff_sec()
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
@@ -2518,16 +2539,36 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                     except Exception:
                         pass
                     return
+                _result = None
+                _timeout_attempts = 0  # Issue #516 M2：超时触发的尝试次数（观测/fail 消息用）
                 try:
                     if _test_execute is not None:
                         await _test_execute(client, t, e)
                     else:
-                        # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理
-                        _result = await asyncio.wait_for(_execute_task(client, t, e), timeout=task_timeout)
-                except asyncio.TimeoutError:
-                    log.warning(f"task {_tid} timed out after {task_timeout}s, killing child processes and failing")
-                    _kill_stale_engine(t, _backend_for_engine(e))
-                    _result = None  # timeout → 走 fail 路径
+                        # timeout 只保护流式执行阶段，complete/fail 在 timeout 外处理。
+                        # Issue #516 M2：超时失败有限次自动重试——每次超时 kill 引擎 →
+                        # 退避 → 从 checkpoint 快照续跑（_execute_task 内注入续跑上下文）；
+                        # 重试耗尽仍超时才走 fail 路径。
+                        for _attempt in range(1, _retry_max + 2):
+                            if _attempt > 1:
+                                log.info(f"task {_tid} timeout auto-retry {_attempt - 1}/{_retry_max}"
+                                         f" (backoff {_retry_backoff}s, resume from checkpoint)")
+                                await asyncio.sleep(_retry_backoff)
+                                t["_grape_resume_attempt"] = _attempt
+                            try:
+                                _result = await asyncio.wait_for(
+                                    _execute_task(client, t, e), timeout=task_timeout)
+                                break  # 拿到结果（含 _error dict），交给下方 complete/fail 判定
+                            except asyncio.TimeoutError:
+                                _timeout_attempts = _attempt
+                                _will_retry = _attempt <= _retry_max
+                                log.warning(
+                                    f"task {_tid} timed out after {task_timeout}s (attempt "
+                                    f"{_attempt}/{_retry_max + 1}, source={_timeout_src}), killing "
+                                    f"child processes and failing" +
+                                    (", will retry" if _will_retry else ""))
+                                _kill_stale_engine(t, _backend_for_engine(e))
+                                _result = None  # timeout → 重试或最终走 fail 路径
                 except CredentialRevokedError:
                     # 凭据吊销——_execute_task 已杀引擎清理。置全局 Event 让主循环
                     # 下一轮退出进程（_wrap 是 create_task，异常不穿透主循环）。
@@ -2560,8 +2601,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                         if isinstance(_result, dict) and _result.get("_error"):
                             await _do_report("failed", _result["_error"], -1)
                         elif _result is None:
-                            # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发
-                            await _do_report("failed", f"task timed out after {task_timeout}s", -1)
+                            # 超时：透传负数 exit_code，服务端死 session 检测（连续3次负数）才能触发。
+                            # Issue #516 M2：保留 "timed out after" 签名（M3 观测聚合依赖），
+                            # 追加尝试数（含自动重试）便于排障。
+                            _to_msg = f"task timed out after {task_timeout}s"
+                            if _timeout_attempts > 1:
+                                _to_msg += f" (attempts: {_timeout_attempts}, retries: {_retry_max})"
+                            await _do_report("failed", _to_msg, -1)
                         elif isinstance(_result, dict) and "exit_code" in _result:
                             _exit = _result.get("exit_code", 0)
                             _text = _result.get("text", "")
