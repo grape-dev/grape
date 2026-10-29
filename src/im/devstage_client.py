@@ -23,9 +23,30 @@ def _resolve_base_url():
 
 
 class DevStageError(Exception):
-    def __init__(self, code: str, msg: str):
+    def __init__(self, code: str, msg: str, not_found: bool = False):
         self.code = code
+        # Issue #513/#413: 「资源不存在」分类标志——路由层据此映射 404 统一包络，
+        # 其余（网络/解析/白名单外错误码）视为上游真实故障，维持 502。
+        # 带默认值，存量两参构造不受影响。
+        self.not_found = not_found
         super().__init__(f"[{code}] {msg}")
+
+
+# 「资源不存在」上游错误码白名单（最小集，仅收录实测明确的特征码）：
+# HD.97420111 —— 删除/操作不存在的 DevStage 环境时上游返回（parameter invalid）。
+# 宁可保守 502 也不误报 404：白名单未命中一律 not_found=False。
+_NOT_FOUND_ERROR_CODES = frozenset({"HD.97420111"})
+
+
+def _is_not_found_error(error_code: str, error_msg: str) -> bool:
+    """判别上游错误是否为「资源不存在」类（区别于上游真实故障）。"""
+    if error_code in _NOT_FOUND_ERROR_CODES:
+        return True
+    # 兜底特征：华为云 param 校验类错误码 + 明确的 not exist 文案
+    msg = (error_msg or "").lower()
+    if error_code.startswith("HD.9742") and ("not exist" in msg or "not found" in msg):
+        return True
+    return False
 
 
 # ====== AK/SK signing (SDK-HMAC-SHA256) ======
@@ -117,7 +138,10 @@ def _request(method, path, ak, sk, body=None):
         raise DevStageError("PARSE", "JSON error: {}".format(e))
     err = raw.get("error_code", "0000")
     if err != "0000":
-        raise DevStageError(err, raw.get("error_msg", "Unknown"))
+        error_msg = raw.get("error_msg", "Unknown")
+        raise DevStageError(
+            err, error_msg,
+            not_found=_is_not_found_error(err, error_msg))
     return raw.get("result") or {}
 
 
