@@ -1398,11 +1398,11 @@ function loadAgentTypes() {
       var tb = $('tb'); if (tb) tb.style.display = 'flex';
       var mv = $('mainView'); if (mv) { mv.style.position = ''; mv.style.inset = ''; mv.style.zIndex = ''; }
     }
-    // 离开需求中心时停止场景识别轮询
+    // 离开需求中心时停止场景识别轮询（该全局在 IssuesView 首次渲染后才存在，保留守卫）
     if (view !== 'tasks' && typeof _stopScenePoll === 'function') _stopScenePoll();
-    // 离开 observability 时停止定时轮询
+    // 离开 observability 时停止定时轮询（同上：渲染后才挂载）
     if (view !== 'observability' && typeof stopObsAuto === 'function') stopObsAuto();
-    // 离开 chat 时停止飞书接入轮询
+    // 离开 chat 时停止飞书接入轮询（同上：渲染后才挂载）
     if (view !== 'chat' && typeof _stopOnboardPoll === 'function') _stopOnboardPoll();
     // 离开场景中心时清除编辑标志（防止 _dashboardEditing 泄漏导致重新进入时卡在加载中）
     window._dashboardEditing = false;
@@ -1535,25 +1535,13 @@ function loadAgentTypes() {
       repoTitle.textContent = '';
       // 组织管理页面隐藏左侧菜单，全屏展示
       var _orgSb = $('sidebar'); if (_orgSb) _orgSb.style.display = 'none';
-      if (typeof renderOrganizations === 'function') {
-        renderOrganizations();
-      } else {
-        pc.innerHTML = '<div class="error">' + (I18N.t('common.load_failed') || '加载失败') + '</div>';
-      }
+      renderOrganizations();
     } else if (view === 'my-feedback') {
       title.textContent = '我的反馈';
-      if (typeof renderMyFeedback === 'function') {
-        renderMyFeedback();
-      } else {
-        pc.innerHTML = '<div class="error">反馈页面加载失败，请刷新重试</div>';
-      }
+      renderMyFeedback();
     } else if (view === 'my-feedback-detail') {
       title.textContent = '反馈详情';
-      if (typeof renderMyFeedbackDetail === 'function') {
-        renderMyFeedbackDetail(param);
-      } else {
-        pc.innerHTML = '<div class="error">详情页面加载失败，请刷新重试</div>';
-      }
+      renderMyFeedbackDetail(param);
     } else if (view === 'skills') {
       title.textContent = I18N.t('app.current_project');
       renderSkills();
@@ -1564,16 +1552,11 @@ function loadAgentTypes() {
       }
     } else if (view === 'runtimes') {
       title.textContent = I18N.t('app.current_project');
-      if (typeof renderRuntimes !== 'function') {
-        // runtimes view chunk failed to load (stale cache) — force reload to fetch latest
-        window.location.reload();
-        return;
-      }
       renderRuntimes();  // batch 11: Vue chunk 自管分页重置与数据加载
     } else if (view === 'observability') {
       title.textContent = I18N.t('app.current_project');
       // param = 分区（overview/devices/inspect），由侧栏子项写入 URL，可深链
-      if (typeof renderObservability === 'function') renderObservability(param);
+      renderObservability(param);
     } else if (view === 'repos') {
       title.textContent = I18N.t('app.current_project');
       goToRepos();
@@ -1597,10 +1580,10 @@ function loadAgentTypes() {
       renderSceneDetailLocal(param);
     } else if (view === 'autopilot') {
       title.textContent = I18N.t('app.current_project');
-      if (typeof renderAutopilot === 'function') renderAutopilot();
+      renderAutopilot();
     } else if (view === 'autopilot-detail') {
       title.textContent = I18N.t('app.current_project');
-      if (typeof renderAutopilotDetail === 'function') renderAutopilotDetail(param);
+      renderAutopilotDetail(param);
     }
   }
 
@@ -1635,19 +1618,6 @@ function loadAgentTypes() {
       _replaying = false;
     }
   });
-
-  function search(q) {
-    if (!q.trim()) return;
-    const pc = $('pageContent');
-    API.get('/search/?q=' + encodeURIComponent(q) + '&type=all').then(d => {
-      let html = '<div class="cd"><div class="cd-h"><h2>' + I18N.t('app.search.title') + ': "' + q + '"</h2></div>';
-      html += '<div class="ts t2">' + I18N.t('app.search.events') + ': ' + (d.events || []).length + ' / ' + I18N.t('app.search.repos') + ': ' + (d.repos || []).length + ' / ' + I18N.t('app.search.agents') + ': ' + (d.agents || []).length + '</div>';
-      (d.events || []).forEach(ev => { html += '<div class="ai" onclick="app.nav(\'event\',' + ev.seq + ')" style="cursor:pointer"><div class="ac"><b>' + (ev.title || '') + '</b><span class="ts t3"> ' + (ev.repo_key || '') + '</span></div></div>'; });
-      (d.agents || []).forEach(a => { html += '<div class="cl" onclick="app.nav(\'' + a.name + '\')"><div class="cx"><h4>' + a.display_name + '</h4></div></div>'; });
-      html += '</div>';
-      pc.innerHTML = html;
-    }).catch(() => {});
-  }
 
   function oauthLogin(provider) {
     // 登录场景：全页重定向（业界标准，兼容性最强）
@@ -2796,7 +2766,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
+  return {nav, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

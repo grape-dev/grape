@@ -84,3 +84,4 @@ help页是否彻底Vue化：阶段3裁决
 ## 命令速查
 - 构建+lint：cd src/api/frontend/app && npm run lint && npx vite build
 - 迁移清单：docs/weekly-08/migration/MIGRATION-LIST.md（每批更新：模块/commit/验收/截图路径）
+- 收口批（2026-10-29）：app.js 外壳收口——撤7处renderXxx的typeof守卫（module加载即存在），但_stopScenePoll/stopObsAuto/_stopOnboardPoll三处保留（组件setup后才挂window，直调会在未渲染时ReferenceError，实测炸过）；vue chunk ?v=统一v7、app.js v190；删孤儿search()。坑：①Teleport弹窗harness断言看body上的#feedbackOverlay不是宿主div；②测试账号假binding在dash 403→R13.6踢回repos大厅，knowledge二次nav被仓库守卫拦，harness须mock dashboard。**🎉 迁移阶段全部结束：批1-17+收口批完成，只剩ui-debt视觉债批量处理**

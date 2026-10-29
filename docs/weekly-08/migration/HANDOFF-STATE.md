@@ -1,6 +1,6 @@
 # Vue 重构 · 全量交接状态（HANDOFF-STATE）
 
-> 本文件是 2026-10-29 会话末的**全量交接快照**（批1-17 全部完成，js/pages 清零 + admin 独立站迁移完毕）。新会话续接顺序：
+> 本文件是 2026-10-29 会话末的**全量交接快照**（批1-17 + 收口批全部完成——**Vue 迁移阶段收官**）。新会话续接顺序：
 > ① 读 `docs/weekly-08/migration/SESSION-STATE.md`（每批坑/协议速查）→
 > ② 读本文件（全局口径 + 未完成事项）→
 > ③ 开工前 `git branch --show-current` 确认在 weekly-clean-mys。
@@ -83,10 +83,10 @@ Vue 侧现状：`app/src/views/` 22 个 .vue 组件（Dashboard 3891 / Observabi
 
 ## 5. 未完成事项（按优先序）
 
-### 5.1 剩余工作（收口阶段，批17 admin 已完成）
-1. **`app.js` 外壳 + `index.html` 收口批**（最后一批，唯一剩余工作）：清死代码、统一路由段、撤全部剩余桥接（window.x 临时桥）、vue chunk `?v=` 统一梳理（现为 v1~v6 混杂）、`_showAppleConfirm` 等 app.js 尾部全局函数归属梳理。
-2. 收口后 → 视觉债批量处理（见 5.2，主人已裁决：agents.js Configure 面板死代码与 help 页 Vue 化一并归入视觉债批处理）。
+### 5.1 剩余工作（迁移阶段已全部完成 🎉）
+1. **视觉债批量处理**（唯一剩余工作，见 5.2 + 主人裁决项：agents.js Configure 面板死代码、help 页是否彻底 Vue 化一并处理）。
 - **批17（2026-10-29）已完成**：admin 独立站全 Vue 化（AdminView.vue + entries/admin-view.js；登录/配置中心/用户列表/双白名单/改密/语言切换/401 refresh 全等价）；admin.html 只剩壳 + module script；老 admin.js 已 git rm。admin 无暗色主题（老版即如此）→ ui-debt #7。
+- **收口批（2026-10-29）已完成**：撤 7 处 renderXxx typeof 守卫（_stopScenePoll/stopObsAuto/_stopOnboardPoll 三处保留——组件 setup 后才挂 window）；vue chunk ?v= 统一 v7、app.js v190；删孤儿 search()；_showAppleConfirm/stripRepoPrefix/_grapeConfirm 等核对有调用者保留。回归 12/12 PASS + 零 pageerror + 双主题截图。
 
 ### 5.2 视觉/体验债（`docs/weekly-08/ui-debt.md`，迁移收口后批量处理）
 - #1 issues 太黑 / #2 scene+im 太白 / #3 霓虹小配色 / #4 skills+knowledge+chat 配色 / #5 dashboard 卡片边界 / #6 需求详情字体色撞背景 / #6a dashboard 毛玻璃白底暗色过亮
