@@ -16,8 +16,9 @@
 ### 2. 项目场景（scene）与 IM 渠道页面太白太亮，不符合暗色风格
 - 范围：scene-market（已迁移 Vue）、im-channel（已迁移 Vue）
 - 症状：暗色主题下这两页反而偏白偏亮，与整体暗色风格不协调
-- 疑似原因（待迁移收口后核实）：壳内 Vue 视图的 bridge.css 把 `--glass-bg` 映射到 `var(--c)`（暗色下 #1c1c1e），但视图内部大量硬编码 `rgba(255,255,255,.6)`/`color-mix(var(--c) 72%, transparent)` 的白色系表面未跟随；毛玻璃层在暗色下应该用深色基底+白色低透明度分层，而不是亮色面
-- 状态：`[ ]`
+- 根源（2026-10-29 核实）：①DashboardView 毛玻璃卡硬编码 rgba(255,255,255,.6/.8) 系；②ImChannel 平台卡 JS 里硬编码浅色底 #EBF1FF/#F5F8FF 等
+- 修复（2026-10-29）：Dashboard 卡底全部改 color-mix(var(--c) N%, transparent)（暗色自动深色基底）；ImChannel 平台卡改 color-mix(品牌色 N%, var(--c))。PIL 复核：dash 卡区暗色均值 20（原亮像素 13-17%→~0），im-channel 暗色 mean=55/亮21%→mean=14/亮1%；scene-market 勘察发现已走 token 无需改动（暗色 mean=26）
+- 状态：`[x]`（2026-10-29，截图 debt1-dash-*.png / debt2-*-*.png）
 
 ### 3. 流水线/Agent运行时/仓库设置页面的小配色太突兀（霓虹感、扎眼）
 - 范围：pipeline（已迁移）、runtimes（未迁移 2270行）、repos+settings（壳耦合组，未迁移）
@@ -41,7 +42,8 @@
 - 症状：暗色模式下 scn-row/ap-nd/det-card-wrap 等卡片用 rgba(255,255,255,.6) 半透明白底+blur，暗色像素占比仅 37-59%，卡片与深色背景对比刺眼（亮像素 13-17%）
 - 定位：老代码同款硬编码（等价迁移带过来），与债项2 同根源
 - 方向：卡片底色改 color-mix(var(--c) 62%, transparent)（bridge token 已有 --glass-bg），暗色自动深色基底
-- 状态：`[ ]`（与 #1/#2/#6 同批收口处理）
+- 修复（2026-10-29）：DashboardView 全部毛玻璃卡底改 color-mix(var(--c) N%, transparent) + 文字/输入/边框硬编码色改带 fallback 的壳变量。PIL 复核暗色卡区均值 20（深色玻璃）
+- 状态：`[x]`（2026-10-29，截图 debt1-dash-*.png）
 
 ### 6. 需求详情页字体颜色接近背景无法辨别（2026-10-26 批9验收后新增）
 - 范围：issues 需求详情页（批9已迁移 Vue，IssuesView.vue 详情卡）
