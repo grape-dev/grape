@@ -97,8 +97,8 @@ EOF
 
 ```json
 {
-  "browser_callback_url": "https://www.grapedev.cn",
-  "worker_connect_url": "https://worker.grapedev.cn"
+  "browser_callback_url": "https://grape.example.com",
+  "worker_connect_url": "https://worker.grape.example.com"
 }
 ```
 

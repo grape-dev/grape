@@ -14,8 +14,8 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # 双地址部署推荐配置：只有拆分项，无 server_base_url
 _SPLIT_ONLY = {
-    "browser_callback_url": "https://www.grapedev.cn",
-    "worker_connect_url": "https://worker.grapedev.cn",
+    "browser_callback_url": "https://grape.example.com",
+    "worker_connect_url": "https://worker.grape.example.com",
 }
 
 
@@ -48,7 +48,7 @@ class TestConfiguredSplit:
         from src.user.db import get_server_base_url_warning
         with patch("src.config.read_server_config",
                    return_value={"browser_callback_url": "http://localhost:3000",
-                                 "worker_connect_url": "https://worker.grapedev.cn"}), \
+                                 "worker_connect_url": "https://worker.grape.example.com"}), \
              patch("src.user.db.get_meta_value", return_value=""):
             w = get_server_base_url_warning()
             assert "browser_callback_url" in w
@@ -58,7 +58,7 @@ class TestConfiguredSplit:
         """worker 面拆分项指向回环 → 告警（含 worker_connect_url 字样）。"""
         from src.user.db import get_server_base_url_warning
         with patch("src.config.read_server_config",
-                   return_value={"browser_callback_url": "https://www.grapedev.cn",
+                   return_value={"browser_callback_url": "https://grape.example.com",
                                  "worker_connect_url": "http://127.0.0.1:3000"}), \
              patch("src.user.db.get_meta_value", return_value=""):
             w = get_server_base_url_warning()
@@ -99,8 +99,8 @@ class TestHealthSplitConfigured:
             data = client.get("/api/health").json()
         assert data["server_base_url_configured"] is True
         assert data["server_base_url_warning"] == ""
-        assert data["browser_callback_url"] == "https://www.grapedev.cn"
-        assert data["worker_connect_url"] == "https://worker.grapedev.cn"
+        assert data["browser_callback_url"] == "https://grape.example.com"
+        assert data["worker_connect_url"] == "https://worker.grape.example.com"
 
     def test_health_warns_when_all_unconfigured(self):
         from fastapi.testclient import TestClient
@@ -127,9 +127,9 @@ class TestRuntimeServerUrlWorkerFace:
     def test_runtime_server_url_value(self):
         from src.api.routes.runtime import _server_url
         with patch("src.config.read_server_config",
-                   return_value={"worker_connect_url": "https://worker.grapedev.cn",
-                                 "server_base_url": "https://www.grapedev.cn"}):
-            assert _server_url() == "https://worker.grapedev.cn"
+                   return_value={"worker_connect_url": "https://worker.grape.example.com",
+                                 "server_base_url": "https://grape.example.com"}):
+            assert _server_url() == "https://worker.grape.example.com"
 
 
 def _src_text(rel: str) -> str:

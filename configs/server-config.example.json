@@ -2,6 +2,6 @@
   "server_base_url": "https://grape.example.com",
   "webhook_url": "https://grape.example.com/webhook/gitcode",
   "_comment_issue_471": "Issue #471 E1 拆分项（可选，未配置回退 server_base_url）：browser_callback_url=浏览器回调（OAuth/附件/前端展示）；worker_connect_url=worker 回连（devstage/任务下发/远程 worker）。双地址部署（浏览器公网域名 ≠ worker 可达地址）时必须分别配置。",
-  "browser_callback_url": "https://www.grapedev.cn",
-  "worker_connect_url": "https://worker.grapedev.cn"
+  "browser_callback_url": "https://grape.example.com",
+  "worker_connect_url": "https://worker.grape.example.com"
 }
