@@ -1391,21 +1391,34 @@ def _delete_scene_icon_file(file_key: str):
 
 
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
-def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api_key)):
-    """返回场景详情（nodes + engine 信息）"""
+def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
+    """返回场景详情（nodes + engine 信息）。
+
+    Issue #502 读侧修复：
+    - repo_key 解析优先级 = ?repo= 请求参数 > 会话上下文 app_current_repo()；
+    - 解析不到时返回 404，不再静默回退默认场景并回显请求 id；
+    - 响应 id 恒为解析到的真实 scene_id（cfg['scene_id']），不回显请求值。
+    """
     from src.api.pipeline_config import get_pipeline_config
-    from src.repo_key import to_repo_key
     repo_key = ""
-    try:
-        repo = app_current_repo()
-        if repo:
-            repo_key = _resolve_repo_key(f"{repo.get('owner','')}/{repo.get('name','')}")
-    except Exception:
-        pass
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    else:
+        try:
+            _repo = app_current_repo()
+            if _repo:
+                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
+        except Exception:
+            pass
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
-    return {"id": scene_id, "name": cfg["name"], "nodes": cfg["nodes"],
+    if cfg.get("fallback"):
+        # 命中 pipelines.json default 兜底（与请求 scene_id 不一致）→ 视为未解析到，禁止静默回退
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+    resolved_id = cfg.get("scene_id") or scene_id
+    return {"id": resolved_id, "name": cfg["name"], "nodes": cfg["nodes"],
+            "display_name": cfg.get("display_name") or cfg["name"],
             "onboarding": cfg.get("onboarding", ""),
             "scene_type": cfg.get("scene_type", "standard")}
 

@@ -357,8 +357,17 @@ def get_scenes(repo_key: str = "") -> list[dict]:
 def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
     """Return pipeline config for a repo-scoped scene: {name, nodes: [...], onboarding}.
 
-    DB-first: query devops_pipeline_scene (repo_key-scoped).
-    Fallback: scene_market official template → pipelines.json file → default scene.
+    Resolution priority (Issue #502, aligns docs/new-version3/scene-center-design.md):
+      1. repo 作用域：显式仓库上下文时，仓库已应用的场景副本优先
+         （保证详情与 list --repo 一致、保留仓库自定义，不回退覆盖）。
+      2. 全局/官方作用域：repo_key 为空也允许按 scene_id 查 devops_pipeline_scene
+         中 repo_key='' 的全局/官方行（原实现 repo_key 为空直接跳过 DB）。
+      3. scene_market 官方模板（source='official'）。
+      4. pipelines.json 文件：先精确按 scene_id 匹配；兜底 default 时结果带
+         fallback=true + fallback_source 标记（供读侧接口拒绝静默回退，内部执行链路保持兼容）。
+
+    返回结果统一携带真实 scene_id（scene.get('scene_id')），并附 fallback / fallback_source
+    元数据；调用方可根据 fallback 决定是否视为「未解析到」。
 
     Results are cached at process level (TTL 60s) to eliminate N+1 in _query_tasks
     (P1-B, Issue #357). Write paths (create/update/delete_custom_scene) invalidate
@@ -370,15 +379,26 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
         return cached
 
     scene = None
+    fallback = False
+    fallback_source = {}
     if repo_key:
+        # 1. repo 作用域（仓库已应用的场景副本优先，保留自定义）
         scene = _query_scene_by_id(scene_id, repo_key=repo_key)
     if not scene:
-        # Fallback 1: official template from scene_market
+        # 2. 全局/官方作用域：repo_key 为空也允许按 scene_id 查全局行
+        scene = _query_scene_by_id(scene_id, repo_key="")
+    if not scene:
+        # 3. scene_market 官方模板
         scene = _load_official_scene_from_market(scene_id)
     if not scene:
-        # Fallback 2: pipelines.json file → default scene
+        # 4. pipelines.json 文件：精确 scene_id → 否则 default（标记 fallback）
         data = _load_pipelines_file()
-        file_scene = data.get("scenes", {}).get(scene_id) or data.get("scenes", {}).get("default")
+        file_scene = data.get("scenes", {}).get(scene_id)
+        if not file_scene:
+            file_scene = data.get("scenes", {}).get("default")
+            if file_scene:
+                fallback = True
+                fallback_source = {"scene_id": "default", "name": file_scene.get("name", "default")}
         if file_scene:
             _name = file_scene.get("name", scene_id)
             result = {
@@ -386,6 +406,9 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
                 "display_name": _name,
                 "nodes": file_scene.get("nodes", []),
                 "onboarding": file_scene.get("onboarding", "repo-onboarding"),
+                "scene_id": fallback_source.get("scene_id") or scene_id,
+                "fallback": fallback,
+                "fallback_source": fallback_source,
             }
             _cache_put(scene_id, repo_key, result)
             return result
@@ -397,6 +420,9 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
         "nodes": scene.get("nodes") or [],
         "onboarding": scene.get("onboarding", "repo-onboarding"),
         "scene_type": scene.get("scene_type", "standard"),
+        "scene_id": scene.get("scene_id") or scene_id,
+        "fallback": fallback,
+        "fallback_source": fallback_source,
     }
     _cache_put(scene_id, repo_key, result)
     return result
