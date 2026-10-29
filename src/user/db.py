@@ -2908,7 +2908,12 @@ def is_server_base_url_configured() -> bool:
 
     Issue #455：未配置时 OAuth 回调/安装命令会指向 localhost，第三方平台无法回访，
     应在启动日志与健康检查中给出告警。
+    Issue #471 E1（QA Required）：配置检查纳入拆分项——浏览器面认
+    browser_callback_url、worker 面认 worker_connect_url，任一拆分项
+    已配置（非回环）即视为已配置（双地址部署只配拆分项不再误报）。
     """
+    if _split_face_public("browser_callback_url") or _split_face_public("worker_connect_url"):
+        return True
     base = _server_base_url_configured_value()
     if not base:
         return False
@@ -2916,11 +2921,43 @@ def is_server_base_url_configured() -> bool:
     return _host not in _LOOPBACK_HOSTS
 
 
+def _split_face_public(key: str) -> bool:
+    """拆分配置项（browser_callback_url/worker_connect_url）是否已配置且非回环。"""
+    _v = _split_url_configured_value(key)
+    if not _v:
+        return False
+    _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    return _host not in _LOOPBACK_HOSTS
+
+
+def _split_face_warning(key: str) -> str:
+    """单个拆分项指向回环时的告警文案（面向对应语义：浏览器回调/worker 回连）。"""
+    _v = _split_url_configured_value(key)
+    _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+    _usage = "浏览器回调" if key == "browser_callback_url" else "worker 回连"
+    return (
+        f"{key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
+        f"请在 configs/server-config.json 配置对外可访问地址后重启。"
+    )
+
+
 def get_server_base_url_warning() -> str:
-    """未显式配置对外基址时的告警文案；已配置返回空串。"""
-    base = _server_base_url_configured_value()
-    if base and is_server_base_url_configured():
+    """未显式配置对外基址时的告警文案；已配置返回空串。
+
+    Issue #471 E1（QA Required）：告警按面拆分——
+    - 任一拆分项（browser_callback_url / worker_connect_url）或 server_base_url
+      已配置且非回环 → 无告警；
+    - 拆分项/旧值指向回环 → 按对应面输出回环告警（引导改对应配置项）；
+    - 全未配置 → 保留「未配置」告警（提示配 server_base_url 或两个拆分项均可）。
+    """
+    # 逐面检查拆分项：指向回环的面对出回环告警
+    for _key in ("browser_callback_url", "worker_connect_url"):
+        if _split_url_configured_value(_key) and not _split_face_public(_key):
+            return _split_face_warning(_key)
+    # 任一面已公网配置 → 无告警（含拆分项，双地址部署不误报）
+    if is_server_base_url_configured():
         return ""
+    base = _server_base_url_configured_value()
     if base:
         return (
             "server_base_url 当前指向本机回环地址 " + base +
@@ -2928,9 +2965,11 @@ def get_server_base_url_warning() -> str:
             "请在 configs/server-config.json 配置对外可访问基址（如 https://grape.example.com）后重启。"
         )
     return (
-        "未配置对外可访问基址 server_base_url：OAuth 回调与安装命令将默认指向 http://localhost:3000，"
+        "未配置对外可访问基址（server_base_url 或拆分项 browser_callback_url/worker_connect_url）："
+        "OAuth 回调与安装命令将默认指向 http://localhost:3000，"
         "第三方平台无法回访导致登录/托管不可用；"
-        "请在 configs/server-config.json 配置 server_base_url（如 https://grape.example.com）后重启。"
+        "请在 configs/server-config.json 配置 server_base_url（如 https://grape.example.com）"
+        "或分别配置 browser_callback_url / worker_connect_url 后重启。"
         "配置示例见 configs/server-config.example.json。"
     )
 
