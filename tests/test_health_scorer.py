@@ -909,3 +909,236 @@ class TestResetAmnestySameDay:
             "混合格式历史下连续失败统计错误: %s" % stats
         )
         assert stats["last_status"] == "failed"
+
+
+# ===== Issue #498: 失败衰减自愈 + 统一异常判定口径 =====
+
+class TestIssue498FailureDecay:
+    """失败衰减窗口（默认 72h）：无新失败 → consecutive_failures 清零、
+    failed_effective=0（健康分回升），failed_tasks 保留 7 天窗口信息口径。
+
+    复现场景（runtime 13031）：7 天窗口内仅 1 次 3 天前的偶发失败 →
+    修复前 cf=1 长期异常标记；修复后衰减清零、自动恢复。
+    """
+
+    RID = 99996
+    TIDS = ["t_498_old_failed", "t_498_recent_failed", "t_498_recent_completed"]
+
+    def _cleanup(self):
+        with db_lock:
+            c = db.cursor()
+            for tid in self.TIDS:
+                c.execute("DELETE FROM agent_tasks WHERE id LIKE ?", (tid + "%",))
+            c.execute("DELETE FROM runtime_health_scores WHERE runtime_id=?", (self.RID,))
+            c.execute("DELETE FROM agent_runtimes WHERE id=?", (self.RID,))
+            db.commit()
+
+    def setup_method(self):
+        self._cleanup()
+
+    def teardown_method(self):
+        self._cleanup()
+
+    def _insert_runtime(self):
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_runtimes (id, name, busy_slots, max_concurrent) VALUES (?,?,?,?)",
+                (self.RID, "issue498-decay", 0, 4))
+            db.commit()
+
+    def _insert_task(self, tid, status, created_at, completed_at):
+        with db_lock:
+            db.cursor().execute(
+                "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, attempts, status, "
+                "created_at, completed_at, prompt) VALUES (?,?,?,?,?,?,?,?)",
+                (tid, tid, self.RID, 0, status, created_at, completed_at, ""))
+            db.commit()
+
+    def test_decayed_failure_clears_consecutive_and_effective(self):
+        """4 天前的单次偶发失败（7 天窗内、72h 衰减窗外）→ cf=0、effective=0，信息口径保留。"""
+        self._insert_runtime()
+        old = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+        self._insert_task(self.TIDS[0], "failed", old, old)
+
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["total"] == 1
+        assert stats["failed"] == 1            # 7 天窗口信息口径（排障）
+        assert stats["failed_effective"] == 0  # 衰减窗口外 → 不计入健康分
+        assert stats["consecutive_failures"] == 0  # 无新失败 → 连败清零（自愈）
+        assert stats["last_failure_at"], "最近失败时间应留痕透出"
+
+    def test_recent_failure_kept(self):
+        """1 小时前的新失败 → 正常计入 effective 与连败（衰减不制造免疫期）。"""
+        self._insert_runtime()
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        self._insert_task(self.TIDS[1], "failed", recent, recent)
+
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["failed_effective"] == 1
+        assert stats["consecutive_failures"] == 1
+
+    def test_self_heal_score_recovers_and_flag_clears(self):
+        """验收主路径（13031 场景）：旧偶发失败 + 心跳正常 → 分数回升 100、异常标记消除。"""
+        self._insert_runtime()
+        old = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+        self._insert_task(self.TIDS[0], "failed", old, old)
+
+        with patch.object(health_scorer, '_fetch_heartbeat', return_value=True), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(self.RID)
+        assert data["health_score"] == 100
+        assert data["consecutive_failures"] == 0
+        assert data["failed_tasks"] == 1              # 信息口径保留
+        assert data["failed_tasks_effective"] == 0
+        assert data["health_abnormal"] is False       # 异常标记消除
+        assert data["health_reason"] == ""
+        assert data["last_failure_at"]
+
+    def test_new_failure_after_heal_remarks_abnormal_path(self):
+        """自愈后出现新失败 → 立即重新计入（小样本稀释保护仍在，cf 重新累计）。"""
+        self._insert_runtime()
+        old = (datetime.now(timezone.utc) - timedelta(days=4)).isoformat()
+        recent = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+        self._insert_task(self.TIDS[0], "failed", old, old)
+        self._insert_task(self.TIDS[1], "failed", recent, recent)
+
+        stats = health_scorer._fetch_task_stats(self.RID)
+        assert stats["failed"] == 2
+        assert stats["failed_effective"] == 1
+        assert stats["consecutive_failures"] == 2
+
+    def test_decay_window_env_configurable(self):
+        """衰减窗口可通过 HEALTH_FAILURE_DECAY_HOURS 配置（1h → 4h 前失败已衰减）。"""
+        import importlib
+        old = os.environ.get("HEALTH_FAILURE_DECAY_HOURS")
+        try:
+            os.environ["HEALTH_FAILURE_DECAY_HOURS"] = "1"
+            importlib.reload(health_scorer)
+            self._insert_runtime()
+            stale = (datetime.now(timezone.utc) - timedelta(hours=4)).isoformat()
+            self._insert_task(self.TIDS[1] + "_env", "failed", stale, stale)
+            stats = health_scorer._fetch_task_stats(self.RID)
+            assert stats["failed_effective"] == 0
+            assert stats["consecutive_failures"] == 0
+        finally:
+            if old is None:
+                os.environ.pop("HEALTH_FAILURE_DECAY_HOURS", None)
+            else:
+                os.environ["HEALTH_FAILURE_DECAY_HOURS"] = old
+            importlib.reload(health_scorer)
+
+
+class TestIssue498HealthFlag:
+    """统一异常判定口径 _derive_health_flag（后端单一事实源，接口/前端透出复用）。
+
+    优先级：心跳失联 > 连败超限（小样本豁免）> 低分；健康 → abnormal=False。
+    """
+
+    def test_flag_heartbeat_lost(self):
+        flag = health_scorer._derive_health_flag(
+            {"heartbeat_alive": False, "health_score": 0,
+             "total_tasks": 10, "consecutive_failures": 0})
+        assert flag == {"health_abnormal": True, "health_reason": "heartbeat_lost"}
+
+    def test_flag_consecutive_failures_large_sample(self):
+        flag = health_scorer._derive_health_flag(
+            {"heartbeat_alive": True, "health_score": 30,
+             "total_tasks": 10, "consecutive_failures": 5})
+        assert flag == {"health_abnormal": True, "health_reason": "consecutive_failures"}
+
+    def test_flag_small_sample_exempt(self):
+        """小样本（total < MIN_SAMPLES）连败不判异常（#439/#498 抗抖动）。"""
+        flag = health_scorer._derive_health_flag(
+            {"heartbeat_alive": True, "health_score": 90,
+             "total_tasks": 2, "consecutive_failures": 6})
+        assert flag == {"health_abnormal": False, "health_reason": ""}
+
+    def test_flag_low_score(self):
+        flag = health_scorer._derive_health_flag(
+            {"heartbeat_alive": True, "health_score": 20,
+             "total_tasks": 10, "consecutive_failures": 0})
+        assert flag == {"health_abnormal": True, "health_reason": "low_score"}
+
+    def test_flag_healthy(self):
+        flag = health_scorer._derive_health_flag(
+            {"heartbeat_alive": True, "health_score": 100,
+             "total_tasks": 0, "consecutive_failures": 0})
+        assert flag == {"health_abnormal": False, "health_reason": ""}
+
+    def test_flag_missing_total_keeps_consecutive_check(self):
+        """旧档无 total_tasks → 维持连败判定（与 is_healthy 兼容口径一致）。"""
+        flag = health_scorer._derive_health_flag(
+            {"heartbeat_alive": True, "health_score": 90, "consecutive_failures": 5})
+        assert flag == {"health_abnormal": True, "health_reason": "consecutive_failures"}
+
+    def test_compute_and_persist_heartbeat_reason(self):
+        """失联引擎 → reason=heartbeat_lost（score=0 优先）。"""
+        with patch.object(health_scorer, '_fetch_task_stats', return_value={
+                "total": 10, "failed": 0, "completed": 10,
+                "consecutive_failures": 0, "last_status": "completed"}), \
+             patch.object(health_scorer, '_fetch_heartbeat', return_value=False), \
+             patch.object(health_scorer, '_persist_score'):
+            data = health_scorer._compute_and_persist(930001)
+        assert data["health_abnormal"] is True
+        assert data["health_reason"] == "heartbeat_lost"
+
+
+class TestIssue498PersistColumns:
+    """runtime_health_scores 新列（failed_tasks_effective / last_failure_at）持久化 + 读回。"""
+
+    RID = 99995
+
+    def _cleanup(self):
+        with db_lock:
+            db.cursor().execute("DELETE FROM runtime_health_scores WHERE runtime_id=?", (self.RID,))
+            db.commit()
+
+    def setup_method(self):
+        self._cleanup()
+
+    def teardown_method(self):
+        self._cleanup()
+
+    def test_persist_and_read_back_new_columns(self):
+        data = {
+            "runtime_id": self.RID,
+            "health_score": 100,
+            "total_tasks": 1,
+            "failed_tasks": 1,
+            "failed_tasks_effective": 0,
+            "completed_tasks": 0,
+            "consecutive_failures": 0,
+            "failure_rate": 1.0,
+            "last_status": "failed",
+            "last_failure_at": "2026-10-26T01:13:00+00:00",
+            "window_days": 7,
+            "updated_at": "2026-10-29T00:00:00+00:00",
+        }
+        health_scorer._persist_score(data)
+        read = health_scorer.get_health_score(self.RID)
+        assert read["failed_tasks"] == 1
+        assert read["failed_tasks_effective"] == 0
+        assert read["last_failure_at"] == "2026-10-26T01:13:00+00:00"
+        # 读路径同样派生统一异常口径（自愈后不异常）
+        assert read["health_abnormal"] is False
+        assert read["health_reason"] == ""
+
+    def test_persist_without_new_fields_degrades(self):
+        """旧调用方数据缺新字段 → 降级写旧列集，不抛错。"""
+        data = {
+            "runtime_id": self.RID,
+            "health_score": 60,
+            "total_tasks": 10,
+            "failed_tasks": 5,
+            "completed_tasks": 5,
+            "consecutive_failures": 1,
+            "failure_rate": 0.5,
+            "last_status": "failed",
+            "window_days": 7,
+            "updated_at": "2026-10-29T00:00:00+00:00",
+        }
+        health_scorer._persist_score(data)  # 不抛错即通过
+        read = health_scorer.get_health_score(self.RID)
+        assert read["health_score"] == 60
+        assert read["failed_tasks_effective"] == 0  # 缺省兜底
+        assert read["last_failure_at"] == ""
