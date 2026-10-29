@@ -1105,18 +1105,6 @@ def claim(runtime_id) -> dict | None:
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
-            # Issue #495：healthy=1 门控（与 claim_by_tag 同款）——CLI 损坏/探活失败
-            # （healthy=0）的引擎不得认领新任务。healthy 为 NULL 的存量行视为
-            # 未知（fail-open），不阻塞认领。
-            try:
-                c.execute("SELECT healthy FROM agent_runtimes WHERE id=?", (runtime_id,))
-                _hg = c.fetchone()
-                if _hg and _hg[0] is not None and int(_hg[0]) != 1:
-                    log.info(f"claim: engine {runtime_id} healthy={_hg[0]} (unhealthy), reject claiming")
-                    return None
-            except Exception as _hge:
-                log.warning(f"claim: healthy gate check failed for engine {runtime_id}: {_hge}")
-
             # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
             # pool_engine_ids 为空或包含本引擎即可领；
             # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
@@ -1405,17 +1393,11 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             # 废弃 engine_capabilities.max_concurrent，统一走 agent_runtimes.max_concurrent
             # 方案 D（2026-10-18）：满载判定以真实 running/dispatched COUNT 为事实源（covering 索引），
             # 不再读 busy_slots 列——busy_slots 仅为展示快照，僵尸残留不阻塞认领。
-            # Issue #495：healthy=1 门控——CLI 损坏/探活失败（healthy=0）的引擎
-            # 不得认领新任务（rc=127 瞬时失败根因）。healthy 为 NULL 的存量行
-            # 视为未知（fail-open），不阻塞认领。
             c.execute(
-                "SELECT max_concurrent, healthy FROM agent_runtimes WHERE id=?",
+                "SELECT max_concurrent FROM agent_runtimes WHERE id=?",
                 (runtime_id,)
             )
             rt_row = c.fetchone()
-            if rt_row and rt_row[1] is not None and int(rt_row[1]) != 1:
-                log.info(f"claim_by_tag: engine {runtime_id} healthy={rt_row[1]} (unhealthy), reject claiming")
-                return None
             if rt_row and rt_row[0] and _real_active_count(c, runtime_id) >= rt_row[0]:
                 return None  # 引擎已满载（真实 active >= max_concurrent）
 
@@ -2163,14 +2145,6 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     update_task_status(task_id, "completed" if exit_code == 0 else "failed",
                        exit_code=exit_code, result_text=result_text or "",
                        usage_json=json.dumps(usage or {}), **_err_kw)
-    # Issue #495：任务成功 → 连续失败熔断计数清零（成功即健康证据，
-    # 偶发失败不累积熔断）。增强层，失败不影响终态主流程。
-    if exit_code == 0:
-        try:
-            from src.runtime.circuit_breaker import record_task_success
-            record_task_success((task or {}).get("runtime_id") or 0)
-        except Exception as _cbe:
-            log.warning(f"complete_task: circuit breaker reset failed for task {task_id}: {_cbe}")
     # 新会话续接指针回写——仅写回 Issue 级执行会话
     # repo 级 devops_agent_session.runtime_session_id 已废弃（无消费方），不再回写。
     # 引擎守卫（B2）：usage.engine 为本次执行引擎（worker done 事件带上），回写时
@@ -2956,14 +2930,6 @@ def fail_task(task_id, error, exit_code=-1):
         except Exception as e:
             log.warning(f"fail_task session check failed: {e}")
     log.warning(f"Task failed: {task_id} exit={exit_code} err={str(error)[:120]}")
-    # Issue #495：连续失败熔断——同一 runtime 连续失败达阈值（默认 3，env
-    # ENGINE_CIRCUIT_BREAKER_THRESHOLD 可配置）自动置 offline 摘出调度池；
-    # 上方幂等/过期/瞬时重试早退路径不计数。增强层，失败不影响终态主流程。
-    try:
-        from src.runtime.circuit_breaker import record_task_failure
-        record_task_failure((task or {}).get("runtime_id") or 0, task_id, exit_code)
-    except Exception as _cbe:
-        log.warning(f"fail_task: circuit breaker record failed for task {task_id}: {_cbe}")
     # 可观察性埋点：任务失败
     try:
         from src.observability import record_task_terminal, record_task_failed
