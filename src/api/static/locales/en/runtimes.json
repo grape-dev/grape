@@ -95,7 +95,9 @@
     "result": "Result",
     "skills_label": "Skills",
     "max_concurrent": "Max Concurrent",
-    "max_concurrent_desc": "Maximum concurrent tasks for this engine (1-100)"
+    "max_concurrent_desc": "Maximum concurrent tasks for this engine (1-100)",
+    "worker_version_stale": "Worker version outdated",
+    "worker_version_stale_hint": "The reported worker version is outdated. Re-run the one-line install command to upgrade. This hint is independent of engine health."
   },
   "empty": {
     "no_engines": "No engines",

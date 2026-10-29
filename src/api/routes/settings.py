@@ -885,14 +885,20 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         except Exception:
             rt["worker_version_stale"] = False
         # 引擎健康分（Issue #134 展示增强）
+        # Issue #498: 透出统一异常口径（health_abnormal/health_reason）与自愈留痕
+        # （最近失败时间/衰减窗口有效失败数），前端两口径一致呈现、异常原因可见
         try:
             from src.runtime.health_scorer import get_health_score
             _hd = get_health_score(rt["id"])
             rt["health_score"] = _hd.get("health_score")
             rt["health_total_tasks"] = _hd.get("total_tasks", 0)
             rt["health_failed_tasks"] = _hd.get("failed_tasks", 0)
+            rt["health_failed_tasks_effective"] = _hd.get("failed_tasks_effective", 0)
             rt["health_consecutive_failures"] = _hd.get("consecutive_failures", 0)
             rt["health_heartbeat_alive"] = _hd.get("heartbeat_alive")
+            rt["health_last_failure_at"] = _hd.get("last_failure_at", "")
+            rt["health_abnormal"] = _hd.get("health_abnormal", False)
+            rt["health_reason"] = _hd.get("health_reason", "")
         except Exception:
             rt["health_score"] = None
         # 引擎标签（event-dispatch-redesign-v2.md §2.5）

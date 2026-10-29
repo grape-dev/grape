@@ -95,7 +95,9 @@
     "result": "结果",
     "skills_label": "技能",
     "max_concurrent": "最大并发数",
-    "max_concurrent_desc": "该引擎同时执行的任务上限（1-100）"
+    "max_concurrent_desc": "该引擎同时执行的任务上限（1-100）",
+    "worker_version_stale": "Worker 版本落后",
+    "worker_version_stale_hint": "Worker 上报版本落后于服务端最新版本，重新执行一键安装命令即可升级；此提示与引擎健康异常无关。"
   },
   "empty": {
     "no_engines": "暂无引擎",

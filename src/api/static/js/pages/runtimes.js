@@ -280,15 +280,19 @@ function _healthScoreBadge(rt) {
 }
 
 // Issue #475: 非健康状态 → 处理建议 i18n key 映射（一个卡片取最严重一个信号）
-// 优先级：探活连续失败 > 心跳失联 > 待回收 > 离线 > 刚失联 > 健康分过低；健康返回 ''（不渲染帮助按钮）
+// Issue #498: 优先采用后端统一异常口径 health_reason（心跳失联 > 连败超限 > 低分，
+// 含小样本豁免与失败衰减自愈）；旧缓存无该字段时回退原前端推导逻辑。
+// 状态类提示（待回收/离线/刚失联）优先于健康分口径（在线态引擎才受健康口径影响）。
 function _healthHelpHint(rt) {
   if (!rt) return '';
-  if ((rt.health_consecutive_failures || 0) > 0) return 'runtimes.health.hint.consecutive_failures';
-  if (rt.health_heartbeat_alive === false) return 'runtimes.health.hint.heartbeat_lost';
   const h = rt.health || rt.status || 'offline';
   if (h === 'about_to_gc') return 'runtimes.health.hint.about_to_gc';
   if (h === 'offline') return 'runtimes.health.hint.offline';
   if (h === 'recently_lost') return 'runtimes.health.hint.recently_lost';
+  if (rt.health_reason) return 'runtimes.health.hint.' + rt.health_reason;
+  if (rt.health_abnormal === false) return '';  // 后端口径判定健康 → 无提示（旧缓存无该字段走老逻辑）
+  if ((rt.health_consecutive_failures || 0) > 0) return 'runtimes.health.hint.consecutive_failures';
+  if (rt.health_heartbeat_alive === false) return 'runtimes.health.hint.heartbeat_lost';
   if (rt.health_score !== null && rt.health_score !== undefined && rt.health_score < 50) return 'runtimes.health.hint.low_score';
   return '';
 }
@@ -326,19 +330,38 @@ function _helpTipHide() {
 window.addEventListener('scroll', _helpTipHide, true);
 
 // Issue #475: 引擎卡片异常判定——存在帮助提示信号或状态非 online 即异常（用于红色描边强化）
+// Issue #498: 后端返回 health_abnormal 时以其为准（在线 + 健康口径一致：单次偶发/
+// 已衰减失败不再判异常）；旧缓存无该字段时回退原推导。
 function _isAbnormalEngine(rt) {
   if (!rt) return false;
-  if (_healthHelpHint(rt)) return true;
   const h = rt.health || rt.status || 'offline';
-  return h !== 'online';
+  if (h !== 'online') return true;
+  if (rt.health_abnormal !== undefined && rt.health_abnormal !== null) {
+    return rt.health_abnormal === true;
+  }
+  return (rt.health_consecutive_failures || 0) > 0
+    || rt.health_heartbeat_alive === false
+    || (rt.health_score !== null && rt.health_score !== undefined && rt.health_score < 50);
 }
 
 // Issue #475: 严重异常（红/灰态或派生信号异常）强制红色左边框；recently_lost 为瞬时态保留黄色
+// Issue #498: 派生信号红框优先看后端 health_abnormal（在线但健康异常才红）；
+// worker_version_stale 属版本提示，不参与异常描边（独立琥珀标签展示）。
 function _abnormalBorderColor(rt) {
   const h = rt.health || rt.status || 'offline';
   if (h === 'about_to_gc' || h === 'offline') return 'var(--r)';
+  if (rt.health_abnormal !== undefined && rt.health_abnormal !== null) {
+    return rt.health_abnormal === true ? 'var(--r)' : '';
+  }
   if ((rt.health_consecutive_failures || 0) > 0 || rt.health_heartbeat_alive === false) return 'var(--r)';
   return '';
+}
+
+// Issue #498: worker 版本落后独立提示（琥珀色标签）——与引擎健康异常区分展示，
+// 不触发异常描边/帮助按钮，仅提示升级 worker。
+function _workerVersionStaleBadge(rt) {
+  if (!rt || !rt.worker_version_stale) return '';
+  return `<span title="${(I18N.t('runtimes.label.worker_version_stale_hint') || '').replace(/"/g, '&quot;')}" style="display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;color:var(--y);background:var(--bg);padding:2px 8px;border-radius:999px;white-space:nowrap;cursor:help">⬆ ${I18N.t('runtimes.label.worker_version_stale')}</span>`;
 }
 
 function _legendHtml() {
@@ -577,6 +600,7 @@ function renderEngines(data, devices) {
         ${_healthBadge(rt.health)}
         ${_helpBtn(_healthHelpHint(rt))}
         ${_scopeBadge(rt.scope, rt.is_local)}
+        ${_workerVersionStaleBadge(rt)}
         <span style="display:inline-flex;align-items:center;gap:3px;overflow:hidden;flex:1;min-width:0">
           <span style="font-weight:600;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${_engineName}</span>
           ${rt.alias ? `<span style="font-size:10px;color:var(--t3);font-weight:400">(${rt.instance_name || rt.name || '—'})</span>` : ''}
@@ -1322,6 +1346,8 @@ function _renderEngineDetail(rt) {
     <div style="background:var(--c);border-radius:12px;box-shadow:0 8px 30px rgba(0,0,0,.2);max-width:680px;width:90%;max-height:85vh;overflow:auto;padding:24px" onclick="event.stopPropagation()">
       <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
         ${_healthBadge(rt.health)}
+        ${_helpBtn(_healthHelpHint(rt))}
+        ${_workerVersionStaleBadge(rt)}
         <span style="font-weight:700;font-size:18px">${rt.alias || rt.instance_name || rt.name}</span>
         ${rt.alias ? `<span style="font-size:12px;color:var(--t3)">(${rt.instance_name || rt.name})</span>` : ''}
         <button class="bt bt-o" style="font-size:11px;padding:3px 8px;border-radius:4px" onclick="editRuntimeAlias(${runtimeId})">${I18N.t('runtimes.action.edit_alias')}</button>
@@ -1339,6 +1365,8 @@ function _renderEngineDetail(rt) {
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.owner')}</span> ${rt.owner || '—'}</div>
         <div><span style="color:var(--t3);display:inline-block;min-width:70px">${I18N.t('runtimes.label.installed')}</span> ${rt.installed ? I18N.t('runtimes.label.yes') : I18N.t('runtimes.label.no')}</div>
         <div style="display:flex;align-items:center;gap:8px"><span style="color:var(--t3);display:inline-block;min-width:70px">健康分</span> ${_healthScoreBadge(rt) || '—'}${_healthCanReset(rt) ? `<button class="bt bt-o" title="${I18N.t('runtimes.action.reset_health')}" style="font-size:11px;padding:3px 10px;border-radius:4px;margin-left:4px" onclick="event.stopPropagation();resetEngineHealth(${rt.id})">${I18N.t('runtimes.action.reset_health')}</button>` : ''}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">异常原因</span> ${(() => { const _k = _healthHelpHint(rt); return _k ? `<span style="color:var(--r);font-weight:500">${I18N.t(_k)}</span>` : '<span class="ts t3">—</span>'; })()}</div>
+        <div><span style="color:var(--t3);display:inline-block;min-width:70px">最近失败</span> ${rt.health_last_failure_at ? `<span class="ts t2">${relTime(rt.health_last_failure_at)}</span>` : '<span class="ts t3">—</span>'}</div>
       </div>
       <div style="border-top:1px solid var(--b);padding-top:16px;margin-bottom:16px">
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">

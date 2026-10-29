@@ -391,12 +391,13 @@ def event_bus_debug(user: dict = Depends(require_no_session_token)):
 
 # ===== Issue #134: 机器健康度查询 API =====
 
-@router.get("/admin/machine-health", operation_id="runtime_machine_health", summary="Machine health overview", description="Machine health overview for all engines: {runtime_id, name, health_score, total_tasks, failed_tasks, consecutive_failures, failure_rate, ...}.")
+@router.get("/admin/machine-health", operation_id="runtime_machine_health", summary="Machine health overview", description="Machine health overview for all engines: {runtime_id, name, health_score, total_tasks, failed_tasks, consecutive_failures, failure_rate, health_abnormal, health_reason, last_failure_at, ...}. Issue #498: health_abnormal/health_reason expose the unified abnormality verdict (heartbeat_lost > consecutive_failures > low_score) with small-sample exemption and failure decay self-heal.")
 def machine_health_overview(user: dict = Depends(require_no_session_token)):
     """获取所有引擎的机器健康度概览（供前端/运维查看）。
 
     返回 [{runtime_id, name, health_score, total_tasks, failed_tasks,
-           consecutive_failures, failure_rate, ...}]
+           consecutive_failures, failure_rate, health_abnormal,
+           health_reason, last_failure_at, ...}]
     """
     from src.runtime.health_scorer import get_all_health_scores
     from src.runtime.instances import runtime_instance_name
@@ -407,7 +408,7 @@ def machine_health_overview(user: dict = Depends(require_no_session_token)):
     return {"engines": scores}
 
 
-@router.get("/admin/machine-health/{runtime_id}", operation_id="runtime_machine_health_detail", summary="Single runtime health detail", description="Health detail for a single engine.")
+@router.get("/admin/machine-health/{runtime_id}", operation_id="runtime_machine_health_detail", summary="Single runtime health detail", description="Health detail for a single engine. Issue #498: includes health_abnormal/health_reason (unified verdict), failed_tasks_effective (decayed-window failures) and last_failure_at for self-heal observability.")
 def machine_health_detail(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """获取单个引擎的健康度详情。"""
     from src.runtime.health_scorer import get_health_score
