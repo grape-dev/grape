@@ -28,4 +28,4 @@
 ## 收尾
 - [ ] 全量回归（相关测试文件）
 - [ ] 自审查（code-review-and-quality + pre-pr-release-check）
-- [ ] 建 PR（base=local-liufei）+ Issue 评论 + A2A QA + tasks complete
+- [ ] 建 PR（base=weekly-09）+ Issue 评论 + A2A QA + tasks complete

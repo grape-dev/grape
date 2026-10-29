@@ -1,6 +1,6 @@
 # Spec: Issue #476 — 失败终态事件强制携带可诊断 result
 
-> 目标分支: local-liufei | 优先级: P1 | 类型: bug + enhancement（可观测性缺口）
+> 目标分支: weekly-09 | 优先级: P1 | 类型: bug + enhancement（可观测性缺口）
 
 ## 需求背景（VOD 收敛 + 前序 Agent 分析）
 

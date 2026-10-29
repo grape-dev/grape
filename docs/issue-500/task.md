@@ -5,4 +5,4 @@
 - [ ] T3 绿：`src/agent/hermes_acp.py` 配置短路 + `_note_bwrap_fail_once`
 - [ ] T4 绿：`src/agent/hwcloud_acp.py`、`src/agent/executor.py` 同型修改
 - [ ] T5 回归：现有相关测试（test_agent_executor / test_hermes_* / test_hwcloud_acp / test_probe_acp_*）全通过
-- [ ] T6 自审查（5 轴 + pre-pr 增量检查）→ push → PR（base=local-liufei）→ Issue 评论 → A2A QA
+- [ ] T6 自审查（5 轴 + pre-pr 增量检查）→ push → PR（base=weekly-09）→ Issue 评论 → A2A QA
