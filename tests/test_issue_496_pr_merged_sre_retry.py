@@ -189,12 +189,40 @@ class TestPRMergedSRERetry:
         assert scheduled, "应调用自动重试调度器"
         assert scheduled[0]["seq"] == seq and scheduled[0]["scene_id"] == "scene-496"
 
-    def test_T6_schedule_idempotent_per_seq(self):
-        """同 seq 重复调度幂等（只调度一次）。"""
+    def test_T6_schedule_idempotent_per_seq(self, monkeypatch):
+        """同 seq 重复调度幂等（只调度一次）。
+
+        monkeypatch _schedule_attempt 为 no-op：仅验证去重语义，
+        不挂真实 threading.Timer（避免测试进程残留长定时器）。
+        """
         import src.api.pr_merged_sre_retry as mod
+        monkeypatch.setattr(mod, "_schedule_attempt", lambda *a, **kw: None)
         p = _params(12345)
-        assert mod.schedule_pr_merged_sre_retry(**p, base_delay=3600) is True
-        assert mod.schedule_pr_merged_sre_retry(**p, base_delay=3600) is False
+        assert mod.schedule_pr_merged_sre_retry(**p) is True
+        assert mod.schedule_pr_merged_sre_retry(**p) is False
+
+    def test_T7_broadcast_backend_fallback_opencode(self, monkeypatch):
+        """T7 审查修复回归：plugin 广播 + engine_id=0 + backend 为空 →
+        兜底 "opencode" 入队，不 raise（与 run_pipeline 广播分支语义一致）。"""
+        import src.api.pr_merged_sre_retry as mod
+        import src.runtime.engine_select as es
+        import src.api.event_pipeline as ep
+        seq = _mk_event()
+        monkeypatch.setattr(es, "get_scene_pool_engine_ids",
+                            lambda *a, **kw: json.dumps([]))
+        monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
+        monkeypatch.setattr(es, "engine_name", lambda eid: "")
+        monkeypatch.setattr(ep, "is_plugin_mode", lambda: True)
+        calls = []
+        monkeypatch.setattr(ep, "_enqueue_pipeline_task",
+                            lambda *a, **kw: calls.append((a, kw)))
+        p = mod._normalize_params(**_params(seq))
+        p["backend"] = ""
+        mod._run_attempt(1, p, attempts=3, base_delay=0)
+        assert calls, "广播分支 backend 为空应兜底 opencode 继续入队，不应 raise"
+        a, kw = calls[0]
+        assert a[3] == "opencode", f"广播分支 backend 应兜底 opencode，实际 {a[3]}"
+        assert kw.get("pool_engine_source") == "scene"
 
 
 def _seed_stage_qa():

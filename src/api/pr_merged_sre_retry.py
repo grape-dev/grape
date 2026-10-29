@@ -151,20 +151,41 @@ def _run_attempt(n: int, p: dict, attempts: int, base_delay=None) -> None:
 
 
 def _claim_for_redispatch(seq: int) -> bool:
-    """重派前置校验：事件仍为 failed 且无活跃任务（未被人工重派/并发接管）。"""
+    """原子 claim：仅当事件仍为 failed 且无活跃任务时，条件 UPDATE 复位为 running。
+
+    check 与 reset 合并为同锁同事务的条件 UPDATE（WHERE status='failed'），
+    消除 check-then-act 窗口内人工重派并发滑入导致的重复派发；
+    复位语义与 event_store.reset_event_terminal 对齐（清 exit_code/structured_output，
+    并重抢 event guard 防重跑期间并发事件滑入）。
+    """
     from src.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT status FROM events WHERE seq=?", (seq,))
-            row = c.fetchone()
-            if not row or row[0] != "failed":
-                return False
             c.execute("SELECT COUNT(*) FROM agent_tasks WHERE event_seq=? "
                       "AND status IN ('queued','running','dispatched')", (seq,))
             if (c.fetchone()[0] or 0) > 0:
                 return False
-        return True
+            c.execute(
+                "UPDATE events SET status='running', exit_code=NULL, completed_at='', "
+                "structured_output=NULL, result='' WHERE seq=? AND status='failed'",
+                (seq,))
+            claimed = (c.rowcount or 0) > 0
+            db.commit()
+        if claimed:
+            try:
+                with db_lock:
+                    row = db.cursor().execute(
+                        "SELECT repo_key, issue_id, agent_type FROM events "
+                        "WHERE seq=? LIMIT 1", (seq,)).fetchone()
+                if row:
+                    from src.api.event_store import (claim_event_guard,
+                                                     update_event_guard_seq)
+                    claim_event_guard(row[0], row[1] or "#0", row[2] or "")
+                    update_event_guard_seq(row[0], row[1] or "#0", row[2] or "", seq)
+            except Exception as ge:
+                log.warning(f"[496-retry] guard re-claim seq={seq} failed: {ge}")
+        return claimed
     except Exception as e:
         log.warning(f"[496-retry] claim check seq={seq} failed: {e}")
         return False
@@ -179,16 +200,14 @@ def _redispatch(p: dict, engine_id: int, pool: str) -> bool:
         _release_seq(seq)
         return True
     try:
-        from src.api.event_store import reset_event_terminal
-        reset_event_terminal(seq)
         _dispatch_picked(p, engine_id, pool)
         _release_seq(seq)
         log.info(f"[496-retry] seq={seq} auto-redispatched engine={engine_id} pool={pool}")
         return True
     except Exception as e:
         log.warning(f"[496-retry] seq={seq} redispatch failed: {e}")
-        # 复位后重派失败 → 收口回 failed（reset_event_terminal 已把事件置 running，
-        # 不收口会成为无任务支撑的僵尸 running）
+        # claim 已把事件复位 running，重派失败 → 收口回 failed
+        # （不收口会成为无任务支撑的僵尸 running）
         try:
             from src.api.event_pipeline import _fail_event
             _fail_event(seq, f"[Issue #496] 引擎恢复后自动重派失败：{str(e)[:150]}")
@@ -204,19 +223,23 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
     from src.api.event_pipeline import is_plugin_mode, _enqueue_pipeline_task
     seq = p["seq"]
     _be = engine_name(engine_id) or p["backend"] or ""
-    if not _be or not p["skill_name"]:
-        raise RuntimeError(f"missing dispatch params backend={_be!r} "
-                           f"skill={p['skill_name']!r}")
     if not engine_id and is_plugin_mode():
         # 无主池广播（plugin 模式 engine_id=0）：pool 限定认领范围，来源=scene
-        # backend 兜底与 run_pipeline 广播分支一致（backend or "opencode"）
+        # backend 兜底先于参数校验（run_pipeline 广播分支为 backend or "opencode"，
+        # 广播路径不因 backend 为空而失败）
         _be = _be or "opencode"
+        if not p["skill_name"]:
+            raise RuntimeError(f"missing dispatch params backend={_be!r} "
+                               f"skill={p['skill_name']!r}")
         _enqueue_pipeline_task(p["repo_key"], seq, p["agent_type"], _be,
                                p["skill_name"], p["evt"], p["skill_id"],
                                p["skill_path"], 0, p["issue_id"],
                                pool_engine_ids=pool, user_id=p["scene_uid"],
                                pool_engine_source="scene")
         return
+    if not _be or not p["skill_name"]:
+        raise RuntimeError(f"missing dispatch params backend={_be!r} "
+                           f"skill={p['skill_name']!r}")
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
     if runtime_execution_kind(engine_id) != EXEC_MODE_DIRECT:
         # 远程定向：确定性路由到恢复的引擎
