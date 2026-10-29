@@ -1692,6 +1692,21 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
 
 # ===== Chat Agent v2: submit/stream 分离（学习 Admin AI AiTaskManager）=====
 
+def _format_chat_failure_text(enqueue_tid: str) -> str:
+    """远端 chat 任务失败 → 友好提示（chat-remote-failure-hint-design §2.4）。
+
+    失败原因此前只写 services.errors 列而此处只读 result_text（失败路径恒空），
+    用户只见光秃秃「查询失败」。现统一走 friendly_failure_hint 输出
+    「发生了什么 + 下一步行动」。enqueue_tid 取不到任务时给出稳定兜底文案。
+    """
+    try:
+        from src.runtime.service import get_task, friendly_failure_hint
+        tk = get_task(enqueue_tid) or {}
+        hint, action = friendly_failure_hint(tk)
+    except Exception:
+        hint, action = "任务执行失败", "请稍后重试，必要时联系管理员查看 worker 日志"
+    return f"查询失败：{hint}；{action}"
+
 @router.post("/submit", operation_id="chat_submit", summary="Submit (task scenario)", description="Submits a chat query and immediately returns {task_id, conversation_id, status}; the agent runs in the background.")
 async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session_token)):
     """提交 chat 查询 → 立即返回 {task_id, conversation_id, status}。
@@ -1979,7 +1994,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     if not _final_text and tk.get("status") == "completed":
                         _final_text = "Done"
                     elif tk.get("status") == "failed":
-                        _final_text = f"查询失败: {tk.get('result_text', '')}"
+                        _final_text = _format_chat_failure_text(enqueue_tid)
                     break
             # DB 写入（Issue #442: 已撤回则跳过）
             if is_task_recalled(chat_task_id):
@@ -2255,7 +2270,7 @@ async def _poll_worker(chat_task_id: str, enqueue_task_id: str, conv_id: str):
             if not final_text and tk.get("status") == "completed":
                 final_text = "Done"
             elif tk.get("status") == "failed":
-                final_text = f"查询失败: {tk.get('result_text', '')}"
+                final_text = _format_chat_failure_text(enqueue_task_id)
             add_message(conv_id, "agent", final_text)
             touch_conversation(conv_id)
             with _chat_tasks_lock:
@@ -2367,7 +2382,7 @@ def _execute_chat_task(task_id: str):
                     if not final_text and tk.get("status") == "completed":
                         final_text = "Done"
                     elif tk.get("status") == "failed":
-                        final_text = f"查询失败: {tk.get('result_text', '')}"
+                        final_text = _format_chat_failure_text(tid)
                     break
                 _t.sleep(1)
 

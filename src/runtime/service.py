@@ -2597,6 +2597,54 @@ def _task_errors_json(task_id):
     return []
 
 
+def friendly_failure_hint(task: dict | None) -> tuple[str, str]:
+    """失败任务 → (发生了什么, 下一步行动) 的友好提示（chat-remote-failure-hint-design §2.2）。
+
+    纯判定、无副作用、不写库；输入 `get_task` 的行 dict。
+    输入为空 / 未命中任何分类 → 兜底「原始原因截断 + 参考任务详情/worker 日志」，
+    严禁返回空文案（避免再次出现「查询失败: 」空尾）。
+    """
+    if not task:
+        return "任务不存在或已被清理", "请重新发起对话重试"
+    _errors = task.get("errors") or ""
+    _result = task.get("result_text") or ""
+    _stderr = task.get("stderr") or ""
+    _exit = task.get("exit_code")
+    # 统一检索串：errors 可能是 JSON 数组/dict/字符串，统一展平后拼接
+    _haystack = " ".join(str(x) for x in [_errors, _result, _stderr])
+    # token 类：先精确分 NO_TOKEN（仓库未配置凭据，比"授权失效"更贴切），再走通用映射
+    # （复用既有映射；401 已由 fail_task 内 detect 处理，这里只做展示分类）
+    if "NO_TOKEN_AVAILABLE" in _haystack or "no token available" in _haystack:
+        return "仓库未配置可用凭据", "请检查仓库的机器人/token 配置后重试"
+    for _code, _msg in _R16_ERROR_MESSAGES.items():
+        if _code in _haystack:
+            return "登录/授权状态失效（%s）" % _msg, "请重新授权后重试"
+    # 引擎崩溃 / CLI 或数据版本不兼容（本次事故类：SQLiteError / replacement_seq 等）
+    _eng_cli_markers = ("engine exit_code", "SQLiteError", "no such column", "databaseMigrations",
+                        "localMigrations", "migration", "cli not found", "exit_code=")
+    if any(_m in _haystack.lower() or _m in _haystack for _m in _eng_cli_markers):
+        _detail = ""
+        if _exit is not None:
+            _detail = f"（exit_code={_exit}）"
+        return (f"引擎执行异常{_detail}：本地引擎 CLI 可能损坏或与数据版本不兼容",
+                "请检查所选 worker 上的引擎是否正常，或更换引擎后重试")
+    # 超时
+    if (_exit is not None and (str(_exit).startswith("-") or int(_exit or 0) < 0)) \
+            or "timed out" in _haystack.lower() or "timeout" in _haystack.lower() \
+            or "超时" in _haystack:
+        return "任务执行超时", "请稍后重试，或简化问题后重发"
+    # 兜底：原始原因截断（取 errors ≈ result ≈ stderr 首个非空）
+    _raw = ""
+    for _src in (_errors, _result, _stderr):
+        if _src:
+            _raw = str(_src)
+            break
+    _raw = " ".join(_raw.split())[:200]
+    if not _raw:
+        _raw = "引擎未报告具体错误信息"
+    return f"执行失败：{_raw}", "请参考任务详情或 worker 日志排障"
+
+
 def fail_task(task_id, error, exit_code=-1):
     task = get_task(task_id)
     # 幂等保护：如果 task 已经 completed，不调 fail（防止 complete→fail 竞态覆盖）
@@ -2646,12 +2694,12 @@ def fail_task(task_id, error, exit_code=-1):
             return
     except Exception as _e:
         log.warning(f"fail_task: transient retry check failed for {task_id}: {_e}")
+    _result_show = None  # Issue #403：耗尽判死 → 分类失败摘要（无 event_seq 时保持 None）
     if task and task.get("event_seq"):
         try:
             from src.api.event_store import update_event_complete
             from src.api.event_archive import finalize_event_archive
             # issue #403：耗尽后判死 → 分类失败摘要写 result（区分上游抖动 vs 配置错误）
-            _result_show = None
             try:
                 from src.runtime.transient_retry import format_stream_failure_result
                 _retries = [e for e in _task_errors_json(task_id)
@@ -2692,7 +2740,13 @@ def fail_task(task_id, error, exit_code=-1):
     # 段的两段式追加 + [-5:] 截断会把首位的本次失败原因挤出去（5 条满载场景：
     # final = hist0-3 + NO_TOKEN，new failure 丢失）。已改为按信息价值截断
     # （首条永不挤掉），复现测试见 tests/test_transient_retry.py UC7-3。
+    # 失败原因双写（chat-remote-failure-hint-design §2.1）：失败路径 result_text 此前恒空，
+    # chat 远端轮询只读 result_text → 用户只见光秃秃「查询失败」。此处同步写入可读原因，
+    # errors 仍保留原始排障详情（可能含结构化诊断 dict，如 TRANSIENT_RETRY_*）。
+    _result_text_write = (_result_show if _result_show is not None else "") \
+        or str(error or "")[:500]
     update_task_status(task_id, "failed", exit_code=exit_code,
+                       result_text=_result_text_write,
                        errors=_fail_errors)
     # Issue #372 R10/R16.1: 统一 token 过期检测（fail_task 统一入口）
     # task failed 时检查 error 是否含 401/auth 错误
