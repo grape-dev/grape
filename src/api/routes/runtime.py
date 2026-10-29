@@ -267,14 +267,30 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
             c.execute(f"UPDATE agent_runtimes SET status='online', last_seen_at=? WHERE id IN ({ph}) AND credential_id=?",
                       [now] + body.runtime_ids + [credential_id])
             # worker 上报的引擎探测结果写入 DB（probe_* 列已由 db_setup.py 自动迁移添加）
+            # Issue #490：按 last_probe 幂等去重——同一观测（相同 last_probe）重放只刷新状态，
+            # 不递增/重置 probe_fail_count、不动 healthy，避免心跳重放导致计数虚增与 Runtime 误摘除。
             if body.probe_results:
                 for _pname, _pdata in body.probe_results.items():
                     _pstatus = (_pdata.get("status") or "pending") if isinstance(_pdata, dict) else "pending"
                     _platency = (_pdata.get("latency") or 0) if isinstance(_pdata, dict) else 0
                     _plast = (_pdata.get("last_probe") or now) if isinstance(_pdata, dict) else now
                     _perror = (_pdata.get("error") or "") if isinstance(_pdata, dict) else ""
+                    # 取已存 probe_last：相同观测重放 → 幂等（仅刷新字段，不动计数/健康）
+                    _existing_last = c.execute(
+                        "SELECT probe_last FROM agent_runtimes WHERE name=? AND credential_id=?",
+                        (_pname, credential_id)).fetchone()
+                    _existing_last = (_existing_last[0] if _existing_last else "") or ""
+                    if _plast and _plast == _existing_last:
+                        # 相同观测重放：只刷新 probe_* 字段（值相同，幂等），不触碰 probe_fail_count / healthy
+                        c.execute(
+                            "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=? "
+                            "WHERE name=? AND credential_id=?",
+                            (_pstatus, _platency, _plast, _perror, _pname, credential_id)
+                        )
+                        continue
+                    # 新观测（last_probe 不同 / 旧 Worker 无 last_probe 回退 now 每次不同）：
                     # probe_status 联动 healthy：ok→升级（纠正 --version 误判），fail→降级（实际不能干活）
-                    # skip/pending 不动 healthy，保留 --version 的结果
+                    # skip/pending/refused 不动 healthy，保留 --version 的结果
                     if _pstatus == "ok":
                         c.execute(
                             "UPDATE agent_runtimes SET probe_status=?, probe_latency=?, probe_last=?, probe_error=?, "

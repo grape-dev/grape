@@ -82,6 +82,9 @@ _worker_probe_results: dict = {}  # {engine_name: {status, latency, last_probe, 
 _worker_probe_lock = _threading.Lock()
 _worker_probe_thread = None
 _worker_probe_started = False
+# Issue #490：已成功发送的探针观测指纹 {engine_name: last_probe}。
+# 心跳成功后写回；未变化的观测（last_probe 相同）不再重复发送，避免服务端重放计数。
+_last_sent_probe_fingerprint: dict = {}
 
 
 def _probe_hermes_acp(cli_path: str) -> dict:
@@ -517,9 +520,15 @@ def _worker_probe_once():
 
 
 def _worker_probe_loop():
-    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。"""
+    """后台探测循环：每 10 分钟对所有本机引擎发起测试对话。
+
+    Issue #490：首轮先 sleep _PROBE_INTERVAL 再探测，与注册时 _worker_probe_once()
+    的即时结果间隔 ≥ 一个周期，避免启动阶段连续两轮探测。
+    """
     global _worker_probe_started
     while True:
+        # 首轮先等待一个周期，复用注册时 _worker_probe_once() 的即时结果
+        _time_mod.sleep(_PROBE_INTERVAL)
         try:
             engines = _discover_local_runtimes()
             for eng in engines:
@@ -539,7 +548,6 @@ def _worker_probe_loop():
                 log.info(f"worker engine probe: {eng['name']} -> {result['status']} ({result['latency']}s)")
         except Exception as e:
             log.warning(f"worker engine probe loop error: {e}")
-        _time_mod.sleep(_PROBE_INTERVAL)
 
 
 def _start_worker_probe():
@@ -554,9 +562,30 @@ def _start_worker_probe():
 
 
 def _collect_worker_probe_results() -> dict:
-    """返回当前探测结果快照（供心跳上报）。"""
+    """返回当前探测结果快照（供心跳上报）。
+
+    Issue #490：按观测指纹去重——已成功发送且 last_probe 未变化的引擎不再重复携带，
+    避免心跳重放同一观测导致服务端计数虚增。新观测（last_probe 变化）正常发送。
+    """
     with _worker_probe_lock:
-        return dict(_worker_probe_results)
+        snapshot = dict(_worker_probe_results)
+        # 过滤掉已成功发送且未变化的观测
+        return {
+            eng: data for eng, data in snapshot.items()
+            if data.get("last_probe") != _last_sent_probe_fingerprint.get(eng)
+        }
+
+
+def _mark_probe_fingerprint_sent(sent: dict) -> None:
+    """心跳成功后写回已发送观测的指纹（engine_name → last_probe）。
+
+    Issue #490：仅心跳成功才更新指纹；失败不更新，下次重试仍可发送。
+    """
+    with _worker_probe_lock:
+        for eng, data in (sent or {}).items():
+            lp = (data or {}).get("last_probe") if isinstance(data, dict) else None
+            if lp:
+                _last_sent_probe_fingerprint[eng] = lp
 
 
 def _collect_worker_metrics() -> dict:
@@ -1239,24 +1268,14 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         log.info(f"_kill_stale_engine({backend}): no matching process found for cwd={cwd}")
 
 
-def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
-    """v3.0 技能 zip 获取降级链：① URL 直连 OBS（重试）→ ② 服务端代拉（复用 zip_cache）。
+def _fetch_skill_zip_by_key(obs_key: str, task_id: str = "") -> bytes | None:
+    """Issue #463 P2 扩展（2026-10-27）：按对象键拉技能 zip（skill_files 引用单写格式的
+    消费端）。复用 _fetch_skill_zip 的 ② 服务端代拉通道——服务端按 task 重解析对象键，
+    本函数仅在无预签名 URL 的兜底分支调用（①② 主链路不受影响）。
 
-    返回 zip 字节；两条路都失败返回 None（调用方降级 skill_files 或回池）。
+    走 POST /api/runtime/tasks/{task_id}/skill-zip（服务端现查 file_path → zip_cache）。
     """
     timeout = float(os.environ.get("RUNTIME_OBS_FETCH_TIMEOUT", "10"))
-    retries = int(os.environ.get("RUNTIME_OBS_FETCH_RETRIES", "3"))
-    # ① URL 直连 OBS（预签名 URL，重试）
-    for i in range(retries):
-        try:
-            with _urllib.urlopen(skill_obs_url, timeout=timeout) as resp:
-                data = resp.read()
-            if data:
-                return data
-            log.warning(f"[skill] OBS URL 直连返回空({i + 1}/{retries})")
-        except Exception as e:
-            log.warning(f"[skill] OBS URL 直连失败({i + 1}/{retries}): {type(e).__name__}")
-    # ② 服务端代拉（服务端现查 file_path → zip_cache → base64）
     server = os.environ.get("RUNTIME_SERVER_URL", "http://localhost:3000")
     token = os.environ.get("RUNTIME_TOKEN", "")
     if task_id and token:
@@ -1268,11 +1287,12 @@ def _fetch_skill_zip(skill_obs_url: str, task_id: str = "") -> bytes | None:
                 payload = json.loads(resp.read())
             b64 = (payload or {}).get("zip_base64") or ""
             if b64:
-                log.info(f"[skill] 服务端代拉成功 task={task_id}")
+                log.info(f"[skill] __obs_key__ 服务端代拉成功 task={task_id}")
                 return _b64.b64decode(b64)
-            log.warning(f"[skill] 代拉返回空 task={task_id}")
         except Exception as e:
-            log.warning(f"[skill] 服务端代拉失败: {type(e).__name__}")
+            log.warning(f"[skill] __obs_key__ 代拉失败: {type(e).__name__}")
+    # task_id/token 不可用（极老 worker 无凭据）→ 只能告警，由调用方降级
+    log.warning(f"[skill] __obs_key__ 拉取通道不可用（无 task_id/token）key={obs_key[:60]}")
     return None
 
 
@@ -1873,6 +1893,22 @@ async def _execute_task(client, task, engine_name: str = ""):
         else:
             # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
             skill_files = json.loads(task.get("skill_files") or "{}")
+            # Issue #463 P2 扩展（2026-10-27）：引用单写格式 {"<skill>": {"__obs_key__": ...}}
+            # —— 内容不内联 DB，按对象键现拉原始 zip（含二进制，优于文本物化）。
+            # 老 worker 不识别此标记时（物化出一个 __obs_key__ 文件，无害），实际任务
+            # 仍走 skill_obs_url 直连 / 服务端代拉，本分支只在 ①② 都失败时到达。
+            _ref_key = ""
+            for _sn, files in skill_files.items():
+                if isinstance(files, dict) and "__obs_key__" in files:
+                    _ref_key = str(files["__obs_key__"])
+                    break
+            if _ref_key:
+                raw = _fetch_skill_zip_by_key(_ref_key, task_id=task.get("id", ""))
+                if raw:
+                    skill_zip_b64 = _b64.b64encode(raw).decode()  # 走下方统一 zip 物化分支
+                    skill_files = {}
+                else:
+                    log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
             for _sn, files in skill_files.items():
                 for rel, content in (files or {}).items():
                     dest = _os.path.join(skill_dir, _sn, rel)
@@ -2465,6 +2501,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             # 收集最近的 ERROR/WARNING 日志（从内存日志缓冲区）
             _recent_logs = _collect_recent_logs()
             _metrics = _collect_worker_metrics()
+            # Issue #490：_collect_worker_probe_results 已按指纹去重未变化观测
             _probe_results = _collect_worker_probe_results()
             ok = await client.heartbeat(runtime_ids, log_lines=_recent_logs, metrics=_metrics, probe_results=_probe_results)
             # ⚠️ heartbeat 返回值从 bool 改为 dict——判断逻辑调整
@@ -2472,6 +2509,9 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             if ok is not None and ok.get("status") == "ok":
                 heartbeat_fail_streak = 0
                 log.debug(f"heartbeat ok, ids={runtime_ids}")
+                # Issue #490：心跳成功后写回已发送观测指纹，未变化的观测下次不再重发
+                if _probe_results:
+                    _mark_probe_fingerprint_sent(_probe_results)
                 # 检查取消信号——发现 cancelled 立即杀引擎进程
                 cancelled_tasks = ok.get("cancelled_tasks", [])
                 if cancelled_tasks:

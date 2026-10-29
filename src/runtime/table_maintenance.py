@@ -39,7 +39,9 @@ def _time_expr(days: int) -> str:
 
 def cleanup_old_agent_tasks_fields() -> int:
     """Nullify large text fields (10 fields, see _AGENT_TASKS_CLEANUP_FIELDS) for
-    completed agent_tasks older than 7 days (#463 P0: 30d → 7d, fields 3 → 10).
+    terminal agent_tasks (completed/failed/cancelled) older than 7 days
+    (#463 P0: 30d → 7d, fields 3 → 10; 2026-10-27 补漏：completed → 全部终态——
+    failed/cancelled 的大字段原先不置空，须等 90 天整行删除，期间约 140MB 无法回收).
 
     This reduces the agent_tasks table volume. The task metadata
     (status, timing, etc.) is preserved until the 90-day row delete (P1).
@@ -63,7 +65,7 @@ def cleanup_old_agent_tasks_fields() -> int:
                 # Select IDs of rows to update (batched)
                 c.execute(
                     f"SELECT id FROM agent_tasks "
-                    f"WHERE status='completed' AND created_at < {time_expr} "
+                    f"WHERE status IN ('completed','failed','cancelled') AND created_at < {time_expr} "
                     f"AND ({dirty_cond}) "
                     f"LIMIT {_BATCH_SIZE}"
                 )

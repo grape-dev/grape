@@ -60,7 +60,8 @@ function _renderCrossSceneBadge(pipe) {
     var ev = (stages[i] && stages[i].latest_event) || {};
     if (ev.event_type === 'cross_scene_handoff') {
       hasCrossScene = true;
-      crossSceneName = ev.scene_id || '';
+      // Issue #479 家族：优先后端解析的真实场景名（scene_name），缺失兜底原始 scene_id
+      crossSceneName = ev.scene_name || ev.scene_id || '';
       break;
     }
   }
@@ -287,8 +288,10 @@ function renderPipeline(data, focusIssueNum) {
     const dur = _dur ? (_dur >= 60 ? Math.floor(_dur/60) + 'm ' + Math.round(_dur%60) + 's' : _dur + 's') : '—';
     const owner = p.current_owner || '—';
     const _sceneId = p.scene_id || '';
-    const _sceneLabels = {default:I18N.t('pipeline.scene_default'),'cloud-native':I18N.t('pipeline.scene_cloud_native'),'iac':I18N.t('pipeline.scene_iac'),'agent-dev':I18N.t('pipeline.scene_agent_dev'),'skill-dev':I18N.t('pipeline.scene_skill_dev'),'api-skill-dev':I18N.t('pipeline.scene_api_skill_dev'),'blog-publish':I18N.t('pipeline.scene_blog_publish')};
-    const sceneLabel = _sceneId ? (_sceneLabels[_sceneId] || p.scene_name || _sceneId) : '—';
+    // Issue #479: 后端已在流水线/需求/详情接口按 (scene_id, repo_key) 解析真实场景名（scene_name 字段），
+    // 前端写死标签表会覆盖仓库级场景被改名后的真实名称（如 default 被改为「【开放能力】SDK」仍显示「通用开发」）。
+    // 因此 scene_name 优先，仅在后端未返回名称时兜底显示原始 scene_id。
+    const sceneLabel = _sceneId ? (p.scene_name || _sceneId) : '—';
     const sceneBadge = _sceneId ? `<span class="tg tg-i" style="font-size:10px">${sceneLabel}</span>` : '<span class="ts t3">—</span>';
     const _issueNum = String(p.issue_id || '').replace(/^#/, '');
     // PR 订阅事件：issue_id 为 PR#N，链接指向 /pull/N 而非 /issues/N

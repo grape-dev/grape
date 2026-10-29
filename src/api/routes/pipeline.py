@@ -63,6 +63,27 @@ def _resolve_feishu_name(gitcode_user: str, repo_key: str = "") -> str:
             return gitcode_user
 
 
+def _scene_label_for_event(scene_id: str, get_pipe_cfg, repo_key: str, pipe_cfg_cache: dict) -> str:
+    """按 (scene_id, repo_key) 解析事件级真实场景名（Issue #479 家族：跨场景移交徽章）。
+
+    复用调用方传入的 get_pipe_cfg 回调（带缓存），无配置时返回空串
+    （前端兜底显示原始 scene_id）。任何异常吞掉返回空串——徽章是纯展示层，
+    不允许影响流水线列表主数据。
+    """
+    if not scene_id:
+        return ""
+    try:
+        _cfg = get_pipe_cfg(scene_id) if get_pipe_cfg else None
+        if not _cfg:
+            from src.api.pipeline_config import get_pipeline_config
+            _cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+            if pipe_cfg_cache is not None:
+                pipe_cfg_cache[scene_id] = _cfg
+        return (_cfg.get("display_name") or _cfg.get("name", "")) if _cfg else ""
+    except Exception:
+        return ""
+
+
 def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                         title_map: dict = None, stage_map: dict = None,
                         pipe_cfg_cache: dict = None, get_pipe_cfg=None,
@@ -209,6 +230,12 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                 "event_type": _le.get("event_type", ""),
                 "status": _le.get("status", ""),
                 "actor": _le.get("actor", ""),
+                # Issue #479 家族修复：跨场景移交徽章需要事件级 scene 信息。
+                # compute_node_statuses 塞入的是原始事件 dict（含 DB 带出的 scene_id），
+                # 此处白名单透传，并按 (scene_id, repo_key) 解析真实场景名（与场景列同构，
+                # 仓库级场景被改名后显示真实名而非写死标签/原始 ID）。
+                "scene_id": _le.get("scene_id", "") or "",
+                "scene_name": _scene_label_for_event(_le.get("scene_id", "") or "", get_pipe_cfg, repo_key, pipe_cfg_cache),
             }
         else:
             _latest_event = None

@@ -58,13 +58,22 @@ def _get_github_login(user: dict) -> str:
 
 
 def _check_gitcode_admin(token: str, owner: str, repo: str, username: str) -> bool:
-    """GitCode admin 判定（单次查询，异常向上抛由调用方 fail-closed）。"""
+    """GitCode admin 判定（单次查询，异常向上抛由调用方 fail-closed）。
+
+    Issue #491: 自定义管理员角色在该端点返回 role_name="Admin" 但
+    access_level=20 / permission="custom" / 复数 permissions.admin=false
+    （与 /user/repos 列表口径 permission.admin=true 不一致），旧三条判定链
+    全部落空导致管理员确认完成需求误报 403——最前补 role_name 判定对齐口径。
+    """
     import urllib.parse
     from src.user.repo_manager import _req
     url = (f"https://gitcode.com/api/v5/repos/{owner}/"
            f"{urllib.parse.quote(repo, safe='')}/collaborators/"
            f"{urllib.parse.quote(username, safe='')}/permission")
     data = _req("GET", url, token)
+    # Issue #491: role_name=="Admin"（自定义管理员角色，数字等级可能 <50）
+    if str(data.get("role_name", "") or "").lower() == "admin":
+        return True
     try:
         access_level = int(data.get("access_level", 0) or 0)
     except (TypeError, ValueError):

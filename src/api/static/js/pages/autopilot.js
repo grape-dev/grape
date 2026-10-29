@@ -1963,7 +1963,8 @@ function _apShowDispatchDialog(execId, finding, btn) {
     var scenes = d.scenes || [];
     var sceneOpts = '<option value="">' + _apt('dispatch.scene_smart') + '</option>' +
       scenes.map(function(s) {
-        return '<option value="' + _esc(s.id || s.scene_id || '') + '">' + _esc(s.name || s.id || '') + '</option>';
+        // Issue #479 家族：display_name 优先（后端 get_scenes 已返回三字段），与其他页面场景名展示一致
+        return '<option value="' + _esc(s.id || s.scene_id || '') + '">' + _esc(s.display_name || s.name || s.id || '') + '</option>';
       }).join('');
 
     var overlay = document.createElement('div');
