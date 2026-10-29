@@ -21,6 +21,7 @@ EVENT_TYPES = frozenset({
     "email_change",                # 邮箱变更
     "bind",                        # 第三方绑定
     "unbind",                      # 第三方解绑
+    "login_rename",                # 第三方登录名变更（Issue #497：external_id 不变、login 变）
     "account_disabled",            # 账号禁用
     "account_restored",            # 账号恢复
     "account_locked",              # 账号锁定
@@ -43,6 +44,7 @@ EVENT_TYPES = frozenset({
     "dev_verification_code_used",   # 固定验证码使用（需求8/16）
     "repo_cascade_cleanup",         # 仓库级联清理（Issue #340：解除托管/仓库删除清空关联数据）
     "issue_admin_confirmed",        # 仓库 admin 确认需求完成（Issue #393：人工终审留痕）
+    "credential_reveal",            # 凭据明文按需取回（Issue #474 方案A：二次确认后当次返回，detail 含 provider/field，不落明文）
 })
 
 

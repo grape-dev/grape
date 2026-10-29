@@ -204,13 +204,19 @@ function _accountLoadCredentials() {
 
   API.get('/settings/credentials').then(function(d) {
     var hw = d.huawei_cloud || {};
-    // Bugfix（显示/隐藏都是星号）：后端本就返回真实 ak/sk，此前前端丢弃真实值、
-    // 用字面量 '********' 填充输入框 → 点"显示"也只是把星号从圆点变成明文星号。
-    // 现在直接填真实值（type=password 默认遮蔽，👁 切换显示真实凭据），
-    // 并记录原始值供保存时比对（未改动则不回传，避免无意义写库）。
-    var akVal = hw.ak_exists ? (hw.ak || '') : '';
-    var skVal = hw.sk_exists ? (hw.sk || '') : '';
+    // Issue #474：接口不再回显明文 AK/SK，仅回存在性（机密只回存在性口径）。
+    // 已配置 → 输入框显示 '********' 掩码占位；未配置 → 空框。
+    // 记录占位符哨兵供保存时比对（未改动不回传，清空显式清除）。
+    var akVal = hw.ak_exists ? '********' : '';
+    var skVal = hw.sk_exists ? '********' : '';
     window._accountCloudCredOriginal = { ak: akVal, sk: skVal };
+    // Issue #474 方案A：按需取回明文——已配置凭据保留 👁 查看明文（走 reveal 接口临时显示，不落缓存）
+    window._accountCloudCredRevealed = { ak: null, sk: null };
+
+    function revealBtn(field, exists) {
+      if (!exists) return '';
+      return '<button type="button" title="' + (I18N.t('app.account.reveal_plaintext') || '') + '" onclick="_accountToggleReveal(\'' + field + '\')" style="border:1px solid var(--b);background:var(--bg);border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:var(--t3);flex-shrink:0">' + '👁' + '</button>';
+    }
 
     var html = '';
 
@@ -219,12 +225,12 @@ function _accountLoadCredentials() {
     html += '<div class="srow" style="align-items:center"><label>' + (I18N.t('app.account.access_key')) + '</label>';
     html += '<div style="display:flex;align-items:center;gap:6px;flex:1">';
     html += '<input type="password" id="accHuaweiAk" value="' + _accountEsc(akVal) + '" autocomplete="new-password" placeholder="' + (I18N.t('app.account.access_key')) + '" style="flex:1">';
-    html += '<button type="button" onclick="_accountToggleSecret(&apos;accHuaweiAk&apos;)" style="border:1px solid var(--b);background:var(--bg);border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:var(--t3);flex-shrink:0">👁</button>';
+    html += revealBtn('ak', hw.ak_exists);
     html += '</div></div>';
     html += '<div class="srow" style="align-items:center"><label>' + (I18N.t('app.account.secret_key')) + '</label>';
     html += '<div style="display:flex;align-items:center;gap:6px;flex:1">';
     html += '<input type="password" id="accHuaweiSk" value="' + _accountEsc(skVal) + '" autocomplete="new-password" placeholder="' + (I18N.t('app.account.secret_key')) + '" style="flex:1">';
-    html += '<button type="button" onclick="_accountToggleSecret(&apos;accHuaweiSk&apos;)" style="border:1px solid var(--b);background:var(--bg);border-radius:8px;width:30px;height:30px;padding:0;font-size:14px;cursor:pointer;color:var(--t3);flex-shrink:0">👁</button>';
+    html += revealBtn('sk', hw.sk_exists);
     html += '</div></div>';
     html += '<p class="tx t2 mt8">' + (I18N.t('app.account.huawei_cloud_desc')) + '</p>';
     html += '<button class="bt bt-p mt8" onclick="_accountSaveCloudCreds()">' + (I18N.t('app.account.save')) + '</button>';
@@ -1530,10 +1536,59 @@ function _accountCloseModal() {
 }
 
 // ===== Cloud Credentials (华为云 AK/SK) =====
-function _accountToggleSecret(inputId) {
-  var el = document.getElementById(inputId);
+// Issue #474 方案A：按需取回明文——点击 👁 走 /settings/credentials/reveal（二次确认：重新输入
+// 当前 Grape 密码；服务端当次返回一次明文，Cache-Control: no-store；审计 + 高频告警）。
+// 明文仅临时写入输入框展示，不落任何前端缓存；再次点击恢复掩码。
+function _accountToggleReveal(field) {
+  var el = document.getElementById(field === 'ak' ? 'accHuaweiAk' : 'accHuaweiSk');
   if (!el) return;
-  el.type = el.type === 'password' ? 'text' : 'password';
+  var revealed = window._accountCloudCredRevealed || {};
+  if (revealed[field]) {
+    // 已显示 → 隐藏（恢复掩码）
+    el.value = '********';
+    el.type = 'password';
+    revealed[field] = null;
+    return;
+  }
+  _accountAskPasswordForReveal(field);
+}
+
+function _accountAskPasswordForReveal(field) {
+  var html = '<h3 style="color:var(--t)">' + (I18N.t('app.account.reveal_title') || '') + '</h3>';
+  html += '<p class="tx t2" style="margin-bottom:12px">' + (I18N.t('app.account.reveal_desc') || '') + '</p>';
+  html += '<div class="srow"><label>' + (I18N.t('app.account.password')) + '</label><input type="password" id="revealPwd" class="kb-input" autocomplete="current-password" placeholder="' + (I18N.t('app.account.enter_password')) + '"></div>';
+  html += '<div style="display:flex;gap:10px;justify-content:flex-end;margin-top:14px">';
+  html += '<button class="bt bt-o" onclick="_accountCloseModal()">' + (I18N.t('app.account.cancel')) + '</button>';
+  html += '<button class="bt bt-p" onclick="_accountDoReveal(\'' + field + '\')">' + (I18N.t('app.account.reveal_confirm') || '') + '</button>';
+  html += '</div>';
+  _accountShowModal(html);
+  var pwdInput = document.getElementById('revealPwd');
+  if (pwdInput) { pwdInput.focus(); }
+}
+
+function _accountDoReveal(field) {
+  var pwdEl = document.getElementById('revealPwd');
+  var password = pwdEl ? pwdEl.value : '';
+  if (!password) { app.showToast(I18N.t('app.account.enter_password')); return; }
+  // 只对华为云凭据取回；provider 固定 huawei_cloud
+  API.post('/settings/credentials/reveal', {provider: 'huawei_cloud', field: field, password: password}, 15000).then(function(d) {
+    _accountCloseModal();
+    var value = (d && d.value) || '';
+    if (!value) { app.showToast(I18N.t('app.account.reveal_not_configured')); return; }
+    var el = document.getElementById(field === 'ak' ? 'accHuaweiAk' : 'accHuaweiSk');
+    if (!el) return;
+    el.value = value;
+    el.type = 'text';
+    var revealed = window._accountCloudCredRevealed || {};
+    revealed[field] = value;
+    window._accountCloudCredRevealed = revealed;
+  }).catch(function(e) {
+    var msg = (e && e.message) || '';
+    // 服务端返回的中文提示已可读；此处补兜底文案
+    if (msg && msg.indexOf('密码') !== -1) { app.showToast(msg); return; }
+    if (msg) { app.showToast(msg); return; }
+    app.showToast(I18N.t('app.account.reveal_failed'));
+  });
 }
 
 function _accountSaveCloudCreds() {
@@ -1542,11 +1597,13 @@ function _accountSaveCloudCreds() {
   var body = {};
   var akVal = akEl && akEl.value ? akEl.value.trim() : '';
   var skVal = skEl && skEl.value ? skEl.value.trim() : '';
-  // 与加载时的原始值比对：未改动不回传（真实值已在输入框，旧的 '********'
-  // 跳过逻辑不再适用；否则每次保存都会把未变的凭据重写一遍）。
+  // 与加载时的占位符哨兵比对：未改动（'********' 掩码 / 空框）不回传；
+  // 输入新值回传；清空已有凭据（空串且原值为掩码）走显式清除语义。
   var orig = window._accountCloudCredOriginal || { ak: null, sk: null };
-  if (akVal !== '********' && akVal !== orig.ak) body.huawei_cloud_ak = akVal;
-  if (skVal !== '********' && skVal !== orig.sk) body.huawei_cloud_sk = skVal;
+  // Issue #474 方案A：取回展示的明文视为「未改动」，不与回传 PUT（避免把明文原样写回触发多余写）
+  var revealed = window._accountCloudCredRevealed || {};
+  if (akVal !== '********' && akVal !== orig.ak && akVal !== revealed.ak) body.huawei_cloud_ak = akVal;
+  if (skVal !== '********' && skVal !== orig.sk && skVal !== revealed.sk) body.huawei_cloud_sk = skVal;
   if (Object.keys(body).length === 0) {
     app.showToast(I18N.t('app.account.no_changes'));
     return;

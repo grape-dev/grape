@@ -644,7 +644,16 @@
     "token_expired": "Token 已过期",
     "token_expired_hint": "您的 Token 已过期或被撤销，请重新绑定 Token。",
     "re_bind": "重新绑定",
-    "open_token_page": "前往令牌创建页面"
+    "open_token_page": "前往令牌创建页面",
+    "reveal_plaintext": "查看明文",
+    "reveal_title": "查看明文凭据",
+    "reveal_desc": "为安全起见，请重新输入当前 Grape 密码确认身份。明文将仅显示本次，不会保存在浏览器中。",
+    "reveal_confirm": "确认查看",
+    "reveal_wrong_password": "当前密码错误",
+    "reveal_too_frequent": "明文取回过于频繁，请稍后再试",
+    "reveal_failed": "明文取回失败",
+    "reveal_need_password": "请先设置 Grape 密码后再取回明文凭据",
+    "reveal_not_configured": "该凭据未配置"
   },
   "error": {
     "TOKEN_EXPIRED": "您的 Token 已过期或被撤销，请在设置页重新绑定 Token。",

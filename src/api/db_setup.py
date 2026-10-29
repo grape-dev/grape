@@ -1132,6 +1132,18 @@ CREATE TABLE IF NOT EXISTS login_failures (
 )
 """
 
+# Issue #474（方案A）：凭据明文按需取回日志——审计+高频取回告警计数用（不存明文值）
+_CREDENTIAL_REVEAL_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS credential_reveal_log (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id      INTEGER NOT NULL,
+    provider     VARCHAR(32) NOT NULL,
+    field        VARCHAR(16) NOT NULL,
+    ip           VARCHAR(64) DEFAULT '',
+    created_at   TEXT DEFAULT (datetime('now'))
+)
+"""
+
 # P0-3: OAuth 回调成功后的一次性交换码——替代 URL 直接传递 access_token
 _EXCHANGE_CODES_DDL = """
 CREATE TABLE IF NOT EXISTS exchange_codes (
@@ -1168,6 +1180,7 @@ _NEW_TABLES.extend([
     ("audit_logs", _AUDIT_LOGS_DDL),
     ("signup_whitelist", _SIGNUP_WHITELIST_DDL),
     ("login_failures", _LOGIN_FAILURES_DDL),
+    ("credential_reveal_log", _CREDENTIAL_REVEAL_LOG_DDL),
     ("exchange_codes", _EXCHANGE_CODES_DDL),
     ("binding_tickets", _BINDING_TICKETS_DDL),
 ])
@@ -1697,6 +1710,10 @@ def _create_tables():
         "ON login_failures(identifier, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_lf_ip_time "
         "ON login_failures(ip, created_at)",
+
+        # credential_reveal_log 索引：高频取回按 (用户,时间) 计数
+        "CREATE INDEX IF NOT EXISTS idx_crl_user_time "
+        "ON credential_reveal_log(user_id, created_at)",
         # audit_logs 索引（seq UNIQUE 约束——集群并发安全，DDL 中已有 UNIQUE，此索引兼容已有表）
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_seq "
         "ON audit_logs(seq)",

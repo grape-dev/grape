@@ -644,7 +644,16 @@
     "token_expired": "Token Expired",
     "token_expired_hint": "Your token has expired or been revoked. Please re-bind your token.",
     "re_bind": "Re-bind",
-    "open_token_page": "Open token creation page"
+    "open_token_page": "Open token creation page",
+    "reveal_plaintext": "View plaintext",
+    "reveal_title": "Reveal credential plaintext",
+    "reveal_desc": "For security, please re-enter your current Grape password to confirm your identity. The plaintext will be shown once and is not stored in the browser.",
+    "reveal_confirm": "Reveal",
+    "reveal_wrong_password": "Incorrect current password",
+    "reveal_too_frequent": "Too many reveal attempts, try again later",
+    "reveal_failed": "Failed to reveal plaintext",
+    "reveal_need_password": "Please set your Grape password before revealing credential plaintext",
+    "reveal_not_configured": "Credential is not configured"
   },
   "error": {
     "TOKEN_EXPIRED": "Your token has expired or been revoked. Please re-bind your token in Settings.",

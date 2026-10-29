@@ -494,21 +494,22 @@ function _showApplyOptionsModal(sceneId, owner, repoName, sceneName, isHwCloudSc
     var hwHint = document.createElement('div');
     hwHint.id = 'hwCloudCredsHint';
     hwHint.style.cssText = 'padding:10px 14px;background:rgba(0,113,227,0.06);border-radius:10px;font-size:11px;color:#86868b;line-height:1.6;margin-bottom:8px';
-    hwHint.innerHTML = '☁ 华为云场景需要 AK/SK 凭证。如已配置将自动填入，也可在此直接填写。' +
+    hwHint.innerHTML = '☁ 华为云场景需要 AK/SK 凭证，可在下方直接填写。已配置的凭据不会在页面回显，可在个人设置中管理。' +
       ' <a href="javascript:void(0)" onclick="app.nav(\'settings\')" style="color:#0071e3;cursor:pointer">前往设置</a>';
     var customFieldsContainer = document.getElementById('applyAdvCustomFields');
     if (customFieldsContainer) {
       customFieldsContainer.parentNode.insertBefore(hwHint, customFieldsContainer);
     }
-    // 从用户设置中获取已配置的 AK/SK
+    // Issue #474：接口不再回显明文 AK/SK，仅回存在性；此处不再自动填入明文，
+    // 统一添加空行让用户按需填写（存在性仅用于提示已配置）。
     API.get('/settings/credentials').then(function(credData) {
       var hw = (credData && credData.huawei_cloud) || {};
-      var ak = hw.ak || '';
-      var sk = hw.sk || '';
-      // 添加 AK 行（name 只读）
-      window._applyAddCustomField('HUAWEICLOUD_SDK_AK', ak, true);
-      // 添加 SK 行（name 只读）
-      window._applyAddCustomField('HUAWEICLOUD_SDK_SK', sk, true);
+      window._applyAddCustomField('HUAWEICLOUD_SDK_AK', '', true);
+      window._applyAddCustomField('HUAWEICLOUD_SDK_SK', '', true);
+      if (hw.ak_exists || hw.sk_exists) {
+        var hintEl = document.getElementById('hwCloudCredsHint');
+        if (hintEl) hintEl.innerHTML += '<br>✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）';
+      }
     }).catch(function() {
       // 获取失败也添加空行，让用户手动填写
       window._applyAddCustomField('HUAWEICLOUD_SDK_AK', '', true);
