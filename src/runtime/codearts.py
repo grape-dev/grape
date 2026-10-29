@@ -14,6 +14,7 @@ sandbox/config.json allow_all: bash 命令中的网络请求不被拦截
 
 输出协议：NDJSON 事件流，与 opencode 完全兼容（parse_output 复用基类解析）。
 """
+import json
 import os
 import subprocess
 import threading
@@ -30,6 +31,75 @@ _ALLOW_PERMS = [
     {"permission": "external_directory_read", "pattern": "*", "action": "allow"},
     {"permission": "dotfile", "pattern": "*", "action": "ask"},
 ]
+
+
+def write_trust_settings(data_dir: str, trusted_dirs: list[str]) -> None:
+    """Issue #471 C2：预写/合并 codearts 目录信任配置，根治无 TTY 致命退出。
+
+    codearts CLI 的 folder-trust-middleware 在 security.folderTrust.enabled=true
+    且 cwd 不在 security.trustedFolders 且 stdin 非 TTY 时直接 exit 1（worker
+    systemd/nohup 环境必然无 TTY）。settings.json 位于 $KERNEL_DATA_DIR。
+
+    合并语义（幂等）：
+    - 保留用户已有 enabled 标志（未配置时写 true，确保显式信任生效）；
+    - trustedFolders 并入 trusted_dirs，不覆盖已有条目；
+    - 保留 settings.json 其它顶层键。
+    """
+    if not data_dir:
+        return
+    os.makedirs(data_dir, exist_ok=True)
+    settings_path = os.path.join(data_dir, "settings.json")
+    settings: dict = {}
+    try:
+        if os.path.exists(settings_path):
+            with open(settings_path, encoding="utf-8") as f:
+                _loaded = json.load(f)
+            if isinstance(_loaded, dict):
+                settings = _loaded
+    except Exception:
+        settings = {}
+    sec = settings.get("security")
+    if not isinstance(sec, dict):
+        sec = {}
+    ft = sec.get("folderTrust")
+    if not isinstance(ft, dict):
+        ft = {}
+    if "enabled" not in ft:
+        ft["enabled"] = True
+    folders = sec.get("trustedFolders")
+    if not isinstance(folders, list):
+        folders = []
+    for d in trusted_dirs:
+        if d and d not in folders:
+            folders.append(d)
+    sec["folderTrust"] = ft
+    sec["trustedFolders"] = folders
+    settings["security"] = sec
+    with open(settings_path, "w", encoding="utf-8") as f:
+        json.dump(settings, f, indent=2)
+
+
+def probe_env(cwd: str = "") -> dict:
+    """Issue #471 C2：codearts 引擎探测专用环境（隔离数据目录 + 目录信任）。
+
+    探测进程同样受 folder-trust 闸门约束（run 属 TRUST_COMMANDS）：使用专用
+    探测数据目录（~/.codeartsdoer/cli-data-probe），预写 settings.json 信任
+    探测 cwd，避免污染/误改宿主 ~/.codeartsdoer/cli-data 配置。
+    """
+    from src.runtime.os_adapter import home_dir
+    home = home_dir()
+    data_dir = os.path.join(home, ".codeartsdoer", "cli-data-probe")
+    write_trust_settings(data_dir, [cwd or os.getcwd()])
+    # 复用宿主 system/skills（探测需模型与技能配置可用）
+    host_cli = os.path.join(home, ".codeartsdoer", "cli-data")
+    sys_skills = os.path.join(data_dir, "system", "skills")
+    if not os.path.exists(sys_skills) and os.path.isdir(os.path.join(host_cli, "system", "skills")):
+        os.makedirs(os.path.join(data_dir, "system"), exist_ok=True)
+        try:
+            os.symlink(os.path.join(host_cli, "system", "skills"), sys_skills)
+        except OSError:
+            pass
+    return {"KERNEL_DATA_DIR": data_dir}
 
 
 class CodeArtsRuntime(AgentRuntime):

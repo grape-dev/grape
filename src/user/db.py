@@ -12,7 +12,7 @@ D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
   link_gitcode_user/link_github_user → create_external_identity
   get_user_by_gitcode_id/get_user_by_github_id → get_external_identity
 """
-import json, hashlib, time, os, warnings
+import json, hashlib, re, time, os, warnings, threading
 from src.session_manager import db, db_lock
 from src.config import log
 
@@ -3463,13 +3463,105 @@ def save_backend_agents(agents: list[dict], scope: str = "global", owner_id: str
     return save_agent_runtimes(agents, scope, owner_id, host_name)
 
 
+_NAIVE_DT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(\.\d+)?$")
+
+# Issue #512 维护方评审意见②：迁移扫描进程内节流——同一进程两次全表扫描间隔 ≥ 该阈值（秒），
+# 避免每轮本机直连重探（10min）都全表 SELECT。monotonic 时钟不受墙钟跳变影响；
+# 判断与标记在专用锁内原子完成（与 db_lock 同语义的互斥保障），并发刷新不会重复扫描。
+_AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL = 3600
+_agent_runtimes_migrate_throttle_lock = threading.Lock()
+_agent_runtimes_migrate_last_mono = 0.0
+
+
+def migrate_agent_runtimes_utc_caliber(tolerance_seconds: int = 60, throttle_seconds: int | None = None) -> int:
+    """幂等修正 agent_runtimes 中"超前当前 UTC"的行（Issue #512）。
+
+    根因：本机直连刷新链路历史写 SQL 字面量 datetime('now')，MySQL backend 经
+    mysql_compat 翻译为 NOW()（CST 本地墙钟、无时区），与心跳链路 UTC ISO
+    （datetime.now(timezone.utc).isoformat()）同表混存，last_seen_at/updated_at
+    超前 UTC 约 8h，健康窗口误判为"未来时间"。
+
+    规则（仅 MySQL backend 生效；SQLite 下 naive 已是 UTC，无超前问题）：
+    - 对 last_seen_at/updated_at 中满足 naive 格式（无 Z/无 offset）且按 UTC 解释后
+      超前当前 UTC（容差 tolerance_seconds）的值，按 normalize_event_time 语义
+      （mysql=CST(+08:00) → UTC）改写为带 +00:00 的 UTC ISO；
+    - 幂等：改写后值带时区偏移，不再命中 naive 正则，重复执行不重复改写；
+    - 不超前 / 非 naive / 带 offset 的行一概不动（避免误伤正常离线行）；
+    - 进程内节流（throttle_seconds，默认 _AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL=3600s）：
+      同一进程两次全表扫描间隔低于阈值时直接返回 0 不扫描；传 0 可禁用（测试/手动强制迁移）。
+
+    挂载点：save_agent_runtimes 开头（本机直连周期重探与手动刷新均经此入口）。
+    """
+    from src.api.time_utils import _db_backend, normalize_event_time
+    from datetime import datetime as _dt, timezone as _tz
+
+    if _db_backend() != "mysql":
+        return 0
+    global _agent_runtimes_migrate_last_mono
+    _interval = _AGENT_RUNTIMES_MIGRATE_MIN_INTERVAL if throttle_seconds is None else throttle_seconds
+    with _agent_runtimes_migrate_throttle_lock:
+        _now_mono = time.monotonic()
+        if _now_mono - _agent_runtimes_migrate_last_mono < _interval:
+            return 0
+        _agent_runtimes_migrate_last_mono = _now_mono
+    now_ts = _dt.now(_tz.utc).timestamp()
+    changed = 0
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, last_seen_at, updated_at FROM agent_runtimes")
+            for rid, last_seen, updated in c.fetchall():
+                new_last, new_updated = last_seen, updated
+                for col, val in (("last_seen_at", last_seen), ("updated_at", updated)):
+                    if not val or not isinstance(val, str):
+                        continue
+                    raw = val.strip()
+                    if not _NAIVE_DT_RE.match(raw):
+                        continue
+                    try:
+                        ts_utc = _dt.fromisoformat(raw.replace(" ", "T")).replace(tzinfo=_tz.utc).timestamp()
+                    except Exception:
+                        continue
+                    if ts_utc > now_ts + tolerance_seconds:
+                        norm = normalize_event_time(raw) or raw
+                        if col == "last_seen_at":
+                            new_last = norm
+                        else:
+                            new_updated = norm
+                if new_last != last_seen or new_updated != updated:
+                    c.execute(
+                        "UPDATE agent_runtimes SET last_seen_at=?, updated_at=? WHERE id=?",
+                        (new_last, new_updated, rid))
+                    changed += 1
+            db.commit()
+        except Exception as e:
+            log.warning(f"migrate_agent_runtimes_utc_caliber failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+    return changed
+
+
 def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str = "", host_name: str = ""):
     """批量写入 agent runtimes 缓存（scope: global/repo/user）
 
     幂等 upsert：按 name+scope+owner_id+host_name 匹配，存在则更新（保留 id），不存在才插入。
     保证跨刷新 id 稳定，供各表 runtime_id 引用。
     host_name：本机直连引擎（credential_id=0）归属的主控机 hostname，区分多台主控机。
+
+    Issue #512：本机直连刷新链路的时间口径统一为 UTC（带 +00:00），与心跳链路一致——
+    不再写 SQL 字面量 datetime('now')（MySQL 下经 mysql_compat 翻译为 NOW()=CST 墙钟，
+    导致 last_seen_at 超前 UTC 约 8h），改为 Python 参数化 UTC 时间戳写入
+    last_seen_at/updated_at；写前先幂等迁移存量超前行。
     """
+    from datetime import datetime as _dt, timezone as _tz
+
+    _now_iso = _dt.now(_tz.utc).isoformat()
+    try:
+        migrate_agent_runtimes_utc_caliber()
+    except Exception as _me:
+        log.warning(f"migrate_agent_runtimes_utc_caliber skipped: {_me}")
     with db_lock:
         c = db.cursor()
         # P0 修复：MySQL 下缩短 innodb_lock_wait_timeout（50s→5s），
@@ -3499,12 +3591,13 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                 if row:
                     c.execute(
                         "UPDATE agent_runtimes SET display_name=?, installed=?, cli_path=?, version=?, healthy=?, "
-                        "pip_package=?, status='online', last_seen_at=datetime('now'), updated_at=datetime('now'), "
+                        "pip_package=?, status='online', last_seen_at=?, updated_at=?, "
                         "local_skills=?, skill_scan_result=?, host_name=? WHERE id=?",
                         (a.get("display_name", name),
                          1 if a.get("installed") else 0, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), _ls_json, _detail_json, host_name, row[0])
+                         a.get("pip_package", ""), _now_iso, _now_iso,
+                         _ls_json, _detail_json, host_name, row[0])
                     )
                 else:
                     # 方案1（engine-selection-design.md §4.3）：本机直连（credential_id=0）是独立受管资源。
@@ -3514,11 +3607,12 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     if not a.get("installed"):
                         continue
                     c.execute(
-                        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO agent_runtimes (name, display_name, installed, cli_path, version, healthy, pip_package, scope, owner_id, local_skills, skill_scan_result, host_name, last_seen_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         (name, a.get("display_name", name),
                          1, a.get("cli_path", ""),
                          a.get("version", ""), 1 if a.get("healthy") else 0,
-                         a.get("pip_package", ""), scope, owner_id, _ls_json, _detail_json, host_name)
+                         a.get("pip_package", ""), scope, owner_id,
+                         _ls_json, _detail_json, host_name, _now_iso, _now_iso)
                     )
                     rid = c.lastrowid or 0
                     # 新本机直连引擎默认写入 "all" 标签（与远端 worker 注册行为对齐）：
@@ -3527,8 +3621,7 @@ def save_agent_runtimes(agents: list[dict], scope: str = "global", owner_id: str
                     c.execute(
                         "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1", (rid,))
                     if not c.fetchone():
-                        from datetime import datetime as _dt, timezone as _tz
-                        _now_ec = _dt.now(_tz.utc).isoformat()
+                        _now_ec = _now_iso
                         c.execute(
                             "INSERT INTO engine_capabilities (runtime_id, tag, max_concurrent, priority, enabled, created_at, updated_at) "
                             "VALUES (?, 'all', 1, 50, 1, ?, ?)",
@@ -4487,3 +4580,63 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
                      "is_featured": r[5], "like_count": r[6], "category_id": r[7] or 0}
                     for r in c.fetchall()]
 
+
+def get_browser_callback_url() -> str:
+    """浏览器回调基址（OAuth 回调 / 附件 URL / 前端展示用）。
+
+    Issue #471 E1：优先 browser_callback_url（server-config.json > meta），
+    未配置回退 server_base_url（向前兼容）。
+    """
+    _v = _split_url_configured_value("browser_callback_url")
+    if _v:
+        return _v
+    return get_server_base_url()
+
+
+def get_worker_connect_url() -> str:
+    """worker 回连基址（devstage RUNTIME_SERVER_URL / 任务 server_url / 远程 worker 地址）。
+
+    Issue #471 E1：优先 worker_connect_url（server-config.json > meta），
+    未配置回退 server_base_url（向前兼容）。双地址部署（浏览器公网 ≠ worker 可达）
+    时必须单独配置本项，否则设备永远接不进来。
+    """
+    _v = _split_url_configured_value("worker_connect_url")
+    if _v:
+        return _v
+    return get_server_base_url()
+
+
+def _split_url_configured_value(key: str) -> str:
+    """读取拆分配置项（server-config.json > meta），空串表示未配置。
+
+    Issue #471 E1：browser_callback_url / worker_connect_url 双写两级来源，
+    未配置返回空串（调用方回退 server_base_url）。
+    """
+    try:
+        from src.config import read_server_config
+        _v = (read_server_config().get(key) or "").strip().rstrip("/")
+        if _v:
+            return _v
+    except Exception:
+        pass
+    try:
+        return (get_meta_value(key) or "").strip().rstrip("/")
+    except Exception:
+        return ""
+
+
+def get_url_split_warning() -> str:
+    """Issue #471 E1：拆分配置项错误的明确报错引导；配置正确返回空串。"""
+    warnings = []
+    for _key in ("browser_callback_url", "worker_connect_url"):
+        _v = _split_url_configured_value(_key)
+        if not _v:
+            continue
+        _host = _v.split("://", 1)[-1].split("/", 1)[0].split(":", 1)[0].lower()
+        if _host in _LOOPBACK_HOSTS:
+            _usage = "浏览器回调" if _key == "browser_callback_url" else "worker 回连"
+            warnings.append(
+                f"{_key} 当前指向本机回环地址 {_v}，{_usage}对外不可达；"
+                f"请在 configs/server-config.json 配置对外可访问地址后重启。"
+            )
+    return " ".join(warnings)

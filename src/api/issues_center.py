@@ -1702,8 +1702,8 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     fpath = os.path.join(attach_dir, filename)
     with open(fpath, "wb") as f:
         f.write(content)
-    from src.user.db import get_meta_value as _gmv
-    _base_url = (_gmv("server_base_url") or "").rstrip("/")
+    from src.user.db import get_browser_callback_url as _bcb
+    _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
 
@@ -1744,8 +1744,9 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
         return result
     # 本地降级
     attach_dir = _attach_base_dir(owner, repo, issue_number)
-    from src.user.db import get_meta_value as _gmv
-    _base_url = (_gmv("server_base_url") or "").rstrip("/")
+    # Issue #471 E1：附件 URL 是浏览器面地址——走 browser_callback_url
+    from src.user.db import get_browser_callback_url as _bcb
+    _base_url = (_bcb() or "").rstrip("/")
     result = []
     if os.path.isdir(attach_dir):
         for fname in sorted(os.listdir(attach_dir)):

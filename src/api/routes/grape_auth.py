@@ -30,6 +30,7 @@ from src.auth.grape_account_db import (
     delete_external_identity, count_user_identities, has_password,
     get_external_identity, get_external_identity_any_status,
     update_external_identity_tokens,
+    _sync_um_platform_col,
     update_last_login_at,
     # D22: 软删除/恢复绑定支持
     get_unbound_identity, restore_external_identity,
@@ -50,24 +51,6 @@ from src.auth.cookie_utils import (
 # 无通配符需要转义；原 ESCAPE '\' 子句在 MySQL 上是语法炸弹（1064）。
 # 如未来确需用户输入进 LIKE 模式，用 ESCAPE '|' + 转义函数（双方言安全）。
 
-
-def _sync_um_platform_col(grape_user_id: int, provider: str, external_login: str):
-    """FR-18.6: OAuth/PAT 绑定成功后补写 um 平台列（消除空窗）。"""
-    if not grape_user_id or not external_login:
-        return
-    try:
-        from src.session_manager import db as _sm_db, db_lock as _sm_dl
-        with _sm_dl:
-            _c = _sm_db.cursor()
-            _c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (grape_user_id,))
-            # FR-CQ-1: 提取为 um_column_for_provider 工具函数
-            from src.repo_key import um_column_for_provider
-            _col = um_column_for_provider(provider)
-            _c.execute(f"UPDATE unified_user_mapping SET {_col}=?, updated_at=datetime('now') WHERE user_id=?",
-                       (external_login, grape_user_id))
-            _sm_db.commit()
-    except Exception as _e:
-        log.warning(f"_sync_um_platform_col: failed for user {grape_user_id} provider {provider}: {_e}")
 
 router = APIRouter(prefix="/api/auth", tags=["grape-auth"])
 
@@ -1671,6 +1654,20 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         if not _token_updated:
             log.warning(f"OAuth login: token refresh failed for user={grape_user_id}, provider={provider}")
 
+        # Issue #497: 登录名变更同步（external_id 不变、login 变）——检测到不一致时四表一致化
+        _oauth_new_login = (user_info.get("external_login") or "").strip()
+        _oauth_old_login = (binding.get("external_login") or "").strip()
+        if _oauth_new_login and _oauth_new_login != _oauth_old_login:
+            from src.auth.grape_account_db import sync_external_login_on_rename
+            _renamed = sync_external_login_on_rename(grape_user_id, provider,
+                                                     _oauth_new_login, _oauth_old_login)
+            if _renamed:
+                log.info(f"OAuth login: external_login synced {_oauth_old_login} -> {_oauth_new_login} for user={grape_user_id}")
+                # username 可能已同步更新，刷新 account 供 JWT/重定向使用
+                _fresh_account = get_grape_account_by_id(grape_user_id)
+                if _fresh_account:
+                    account = _fresh_account
+
         token_version = account.get("token_version", 0)
         jwt_access, jwt_refresh = _issue_jwt(account["id"], account["username"],
                                               token_version, login_provider=provider)
@@ -1720,6 +1717,19 @@ def _handle_oauth_login(request, provider, external_id, user_info, access_token,
         )
         if not restored:
             return _oauth_error_redirect(request, "rebind_failed", popup=popup)
+
+        # Issue #497: rebind 路径同样同步登录名变更（external_id 不变、login 变）
+        _oauth_new_login = (user_info.get("external_login") or "").strip()
+        _oauth_old_login = (unbound.get("external_login") or "").strip()
+        if _oauth_new_login and _oauth_new_login != _oauth_old_login:
+            from src.auth.grape_account_db import sync_external_login_on_rename
+            _renamed = sync_external_login_on_rename(original_user_id, provider,
+                                                     _oauth_new_login, _oauth_old_login)
+            if _renamed:
+                log.info(f"OAuth rebind: external_login synced {_oauth_old_login} -> {_oauth_new_login} for user={original_user_id}")
+                _fresh_account = get_grape_account_by_id(original_user_id)
+                if _fresh_account:
+                    original_account = _fresh_account
 
         _clear_user_repos_cache(original_user_id)
         _rebind_lang = (state_data or {}).get("lang", "") if isinstance(state_data, dict) else ""

@@ -128,7 +128,11 @@ class RuntimeClient:
         data = await self._request("POST", "/api/runtime/register", payload)
         if not data:
             return [], ""
-        ids = [r["id"] for r in (data.get("runtimes") or [])]
+        _detail = [r for r in (data.get("runtimes") or []) if isinstance(r, dict)]
+        # Issue #471 S2：暴露最近一次注册明细（{id, name}），供 _reregister 按 name
+        # 配对 rid→引擎（个别引擎被跳过时位置对齐会错位）。测试 Fake 亦可提供该属性。
+        self.last_register_detail = _detail
+        ids = [r["id"] for r in _detail]
         return ids, (data.get("probe_url") or "")
 
     async def latest_version(self) -> str:

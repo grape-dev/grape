@@ -46,7 +46,65 @@
 3. 在 **系统监控** 页面检查对应 Worker 的引擎探活状态
 4. SSH 到对应 Worker 查看 `journalctl -u runtime-agent` 日志
 
-### Q3: 控制台页面显示"加载中..."不消失？
+### Q3: Worker 已安装但接不进来 / 引擎相关问题（安装、目录信任）
+
+**Worker 无引擎也能注册上线（正常状态）：**
+
+> 全新 worker 未安装任何引擎时，注册依然成功（日志 `RuntimeAgent registered: []` 属正常）。
+> 之后安装引擎**无需重启 worker**——worker 周期性重新发现本机引擎并自动注册（≤5 分钟）。
+
+**安装引擎：**
+
+1. **opencode**：安装 Node.js 后执行 `npm install -g opencode-ai`
+2. **hermes**：`pip install 'hermes[acp]'`（必须带 `[acp]`，否则引擎在线但调不通）
+3. 一行式安装脚本支持 `--engine auto|opencode|hermes|none`：默认 `auto`（检测到 npm 且未装 opencode 时自动安装）
+4. codearts 引擎由华为云 CodeArts CLI 提供，按官方渠道安装
+
+**目录信任（codearts，无 TTY 致命退出）：**
+
+> codearts CLI 的 folder-trust 闸门在 systemd/nohup 等无终端环境下，对未信任目录会直接退出（exit 1）。
+
+- grape worker 已自动处理：per-task 数据目录与引擎探测均预写 `settings.json` 信任配置；一行式安装脚本也会把 worker 目录合并进 `~/.codeartsdoer/cli-data/settings.json` 的 `trustedFolders`
+- 手动安装 codearts 后如仍报"目录不受信任"，执行：
+
+```bash
+python3 - ~/.codeartsdoer/cli-data/settings.json ~/grape /var/cache/codearts-tasks <<'EOF'
+import json, os, sys
+path, dirs = sys.argv[1], sys.argv[2:]
+s = {}
+try:
+    s = json.load(open(path, encoding="utf-8"))
+except Exception:
+    pass
+sec = s.get("security") if isinstance(s.get("security"), dict) else {}
+ft = sec.get("folderTrust") if isinstance(sec.get("folderTrust"), dict) else {}
+ft.setdefault("enabled", True)
+folders = sec.get("trustedFolders") if isinstance(sec.get("trustedFolders"), list) else []
+for d in dirs:
+    if d and d not in folders:
+        folders.append(d)
+sec["folderTrust"], sec["trustedFolders"] = ft, folders
+s["security"] = sec
+json.dump(s, open(path, "w", encoding="utf-8"), indent=2)
+EOF
+```
+
+**worker 接不进来（server_base_url 双语义，Issue #471 E1）：**
+
+> 单一 `server_base_url` 同时承担"浏览器回调地址"与"worker 回连地址"两个语义，双地址部署（浏览器公网域名 ≠ worker 可达地址）时必然配错。
+
+在 `configs/server-config.json` 分别配置（未配置回退 `server_base_url`）：
+
+```json
+{
+  "browser_callback_url": "https://www.grapedev.cn",
+  "worker_connect_url": "https://worker.grapedev.cn"
+}
+```
+
+配置后重启服务；`GET /api/health` 返回两个字段与 `url_split_warning` 告警可用于自检。只配这两个拆分项（不配 `server_base_url`）即视为基址已配置，健康检查与启动日志不会误报「server_base_url 未配置」；拆分项指向 localhost 等回环地址时按对应面（浏览器回调 / worker 回连）给出告警。
+
+### Q4: 控制台页面显示"加载中..."不消失？
 
 **排查步骤：**
 
@@ -56,7 +114,7 @@
 4. **检查后端服务**：直接访问 `https://<域名>/health` 确认服务在线
 5. **查看浏览器控制台**：F12 打开开发者工具，查看 Network 标签中是否有请求超时
 
-### Q4: Agent 执行的任务一直卡在"运行中"？
+### Q5: Agent 执行的任务一直卡在"运行中"？
 
 1. **任务超时**：Worker 默认任务超时 30 分钟，超时后自动标记失败
 2. **Worker 离线**：检查系统监控中对应 Worker 是否在线（心跳是否正常）
@@ -64,7 +122,7 @@
 4. **手动处理**：在流水线页面点击"重试"重新执行，或在 Issue 评论区重新触发
 5. **清理僵尸任务**：联系管理员在数据库中执行 `UPDATE events SET status='failed', exit_code=-15 WHERE status='running' AND started_at < ...`
 
-### Q5: 如何添加新的 Worker 机器？
+### Q6: 如何添加新的 Worker 机器？
 
 1. 在目标机器上安装 Python 3.10+ 和所需 AI CLI（opencode/hermes/codearts）
 2. 在 Grape 控制台 **Agent 运行时** → **通用设置** 中创建新的 Worker 凭据
@@ -77,7 +135,7 @@
 4. 安装完成后 Worker 自动注册，在运行时页面可见
 5. 确认引擎探活状态为 ✅
 
-### Q6: 引擎探活显示"pending"或"fail"？
+### Q7: 引擎探活显示"pending"或"fail"？
 
 **pending（等待）**：引擎刚注册，等待首次探活（每 10 分钟执行一次）。等待几分钟后刷新即可。
 
@@ -88,7 +146,7 @@
 - 检查 AI 模型 API Key 是否配置正确（`/etc/grape/grape.env` 或 `~/.hermes/.env`）
 - 如果使用 hermes 引擎，确认已安装 ACP 依赖：`hermes acp` 应输出 "ACP client connected"
 
-### Q7: SRE Agent 销毁云资源时需要注意什么？
+### Q8: SRE Agent 销毁云资源时需要注意什么？
 
 > 🚨 **⚠️ 安全提示**
 >
@@ -102,20 +160,20 @@
 
 如果需要中止销毁，在确认前关闭 Issue 或在评论区回复"取消"即可。
 
-### Q8: 如何查看 Agent 的详细执行日志？
+### Q9: 如何查看 Agent 的详细执行日志？
 
 - **控制台**：在任务中心/流水线页面点击任务行，弹出日志详情弹窗，显示每一步的思考和工具调用
 - **Worker 日志**：SSH 到 Worker 机器执行 `journalctl -u runtime-agent -n 100 --no-pager`
 - **服务端日志**：在系统监控页面查看错误日志来源，或 SSH 到主服务器查看 `/opt/grape/data/main.log`
 - **数据库**：事件的 `result` 字段包含 Agent 的最终输出摘要
 
-### Q9: Coding Agent 提交的 PR 需要手动合并吗？
+### Q10: Coding Agent 提交的 PR 需要手动合并吗？
 
 是的。Coding Agent 提交 PR 后，QA Agent 会自动审查并给出意见，但**PR 合并需要仓库维护者手动操作**。这是设计上的安全机制——AI 可以编写代码和提交 PR，但代码合入主线需要人工确认。
 
 在 GitCode 的 PR 页面可以查看 QA Agent 的审查意见和代码变更，确认后点击"合并"即可。
 
-### Q10: 如何配置 AI 模型的 API Key？
+### Q11: 如何配置 AI 模型的 API Key？
 
 AI 模型配置在以下位置：
 
@@ -125,7 +183,7 @@ AI 模型配置在以下位置：
 
 修改后需重启对应服务（主服务器：grape-main/grape-webhook；Worker：runtime-agent）。
 
-### Q11: 如何为仓库配置自定义技能？
+### Q12: 如何为仓库配置自定义技能？
 
 1. 在 **DevOps 技能** 页面点击"创建技能"
 2. 选择作用域：仓库级（选择目标仓库）或全局
@@ -133,7 +191,7 @@ AI 模型配置在以下位置：
 4. 可选：添加 `references/`（参考文档）、`scripts/`（脚本）、`templates/`（模板）
 5. 保存后技能自动分发到 OBS（如已启用），Worker 执行时自动下载
 
-### Q12: 系统监控中 Worker 的 tmp 百分比很高怎么办？
+### Q13: 系统监控中 Worker 的 tmp 百分比很高怎么办？
 
 Worker 的 `/tmp` 目录可能被 AI 引擎运行时生成的 JIT 缓存文件（隐藏 `.so` 文件）占满。症状：scp 传输文件报 "No space left on device"，但 Worker 运行正常。
 

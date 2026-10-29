@@ -170,9 +170,24 @@ class TestKillStaleEngine:
             ra._kill_stale_engine({})
         m_kill.assert_not_called()
 
+class TestRegisterNoEngines:
+    """Issue #471 C1：无引擎 worker 注册成功即成功，引擎列表为空是正常状态。"""
+
+    def test_register_failed_empty_ids_no_engines(self):
+        # 无引擎 + 空 ids → 不算失败（注册请求本身已成功）
+        assert ra._register_failed([], []) is False
+
+    def test_register_failed_empty_ids_with_engines(self):
+        # 有引擎但服务端返回空 ids → 真失败
+        assert ra._register_failed([], [{"name": "opencode", "installed": True}]) is True
+
+    def test_register_failed_with_ids(self):
+        assert ra._register_failed([1], []) is False
+        assert ra._register_failed([1], [{"name": "opencode", "installed": True}]) is False
+
 
 class TestReregister:
-    async def _client(self, ids):
+    def _client(self, ids):
         c = AsyncMock()
         c.register.return_value = ids
         return c
@@ -182,21 +197,55 @@ class TestReregister:
         c.register = AsyncMock(return_value=([1, 2], "https://p/probe"))
         c.recover_orphans = AsyncMock()
         c.reset_session = AsyncMock()
-        ids = asyncio.run(ra._reregister(c, [], "dev"))
+        with patch.object(ra, "_discover_local_runtimes",
+                          return_value=[{"name": "opencode", "installed": True, "cli_path": "/bin/oc"}]):
+            result = asyncio.run(ra._reregister(c, [], "dev"))
+        assert result is not None
+        ids, engine_by_rid, installed = result
         assert ids == [1, 2]
+        assert installed and installed[0]["name"] == "opencode"
         assert c.recover_orphans.await_count == 2
 
-    def test_empty_ids_returns_none(self):
+    def test_empty_ids_no_engines_is_success(self):
+        """C1：无引擎时重注册返回 ([], {}, []) 而非 None——空引擎为正常状态。"""
         c = MagicMock()
         c.register = AsyncMock(return_value=([], ""))
         c.reset_session = AsyncMock()
-        assert asyncio.run(ra._reregister(c, [], "dev")) is None
+        with patch.object(ra, "_discover_local_runtimes", return_value=[]):
+            result = asyncio.run(ra._reregister(c, [], "dev"))
+        assert result == ([], {}, [])
+
+    def test_empty_ids_with_engines_returns_none(self):
+        c = MagicMock()
+        c.register = AsyncMock(return_value=([], ""))
+        c.reset_session = AsyncMock()
+        with patch.object(ra, "_discover_local_runtimes",
+                          return_value=[{"name": "opencode", "installed": True, "cli_path": "/bin/oc"}]):
+            assert asyncio.run(ra._reregister(c, [], "dev")) is None
 
     def test_register_exception_returns_none(self):
         c = MagicMock()
         c.register = AsyncMock(side_effect=RuntimeError("boom"))
         c.reset_session = AsyncMock()
-        assert asyncio.run(ra._reregister(c, [], "dev")) is None
+        with patch.object(ra, "_discover_local_runtimes", return_value=[]):
+            assert asyncio.run(ra._reregister(c, [], "dev")) is None
+
+    def test_rediscovers_newly_installed_engines(self):
+        """C1：重注册前重新发现本机引擎——启动时无引擎、后来装了引擎也能注册上。"""
+        c = MagicMock()
+        c.register = AsyncMock(return_value=([7], ""))
+        c.recover_orphans = AsyncMock()
+        c.reset_session = AsyncMock()
+        new_engine = {"name": "hermes", "installed": True, "cli_path": "/bin/hermes"}
+        with patch.object(ra, "_discover_local_runtimes", return_value=[new_engine]):
+            result = asyncio.run(ra._reregister(c, [], "dev"))
+        assert result is not None
+        ids, engine_by_rid, installed = result
+        assert ids == [7]
+        assert installed == [new_engine]
+        # register 收到的是重新发现后的引擎列表（而非启动时的空快照）
+        sent = c.register.await_args.args[0]
+        assert sent and sent[0]["name"] == "hermes"
 
 
 class TestStreamRuntimeAsync:
@@ -290,7 +339,7 @@ class TestRunLoop:
         client.claim_by_tag.return_value = None
         client.claim.return_value = None
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
-        with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])) as m_rr:
+        with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=([1], {}, []))) as m_rr:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
         m_rr.assert_awaited()
@@ -341,7 +390,7 @@ class TestRunLoop:
         client.claim.return_value = None
         client.heartbeat.return_value = None
         client.reset_session = AsyncMock()
-        with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])):
+        with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=([1], {}, []))):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
         client.reset_session.assert_awaited()

@@ -292,6 +292,18 @@ def _load_accounts():
                     if base:
                         set_meta_value("server_base_url", base)
                         log.info(f"Auto-detected server base URL: {base}")
+            # Issue #471 E1：拆分配置项双写 meta（与 server_base_url 同语义：
+            # server-config.json 显式配置 > meta；未配置不写，getter 回退 server_base_url）
+            if not get_meta_value("browser_callback_url"):
+                _bcb = (_cfg.get("browser_callback_url") or "").strip().rstrip("/")
+                if _bcb:
+                    set_meta_value("browser_callback_url", _bcb)
+                    log.info(f"Configured browser_callback_url from server-config.json: {_bcb}")
+            if not get_meta_value("worker_connect_url"):
+                _wcu = (_cfg.get("worker_connect_url") or "").strip().rstrip("/")
+                if _wcu:
+                    set_meta_value("worker_connect_url", _wcu)
+                    log.info(f"Configured worker_connect_url from server-config.json: {_wcu}")
         except Exception:
             pass
     except Exception as e:
@@ -367,6 +379,187 @@ def get_chat_stream_timeout() -> int:
 _WL_ENABLED_CACHE = None
 _WL_CACHE_TS = 0.0
 _WL_CACHE_TTL = 60.0  # 60s TTL—meta 配置变更频率极低
+
+
+# ====== 运行配置统一读取层（Issue #470：写死配置抽取） ======
+# 单一配置源：超时家族（RUNTIME_TASK_TIMEOUT，默认 3600s）与 DevStage 规格
+# 原先散布写死于 src/runtime/agent.py / src/agent/hermes_acp.py / hwcloud_acp.py /
+# observability / dashboard / cleanup / devstage.py，现全部收敛到本节 getter。
+#
+# 优先级（Spec 验收标准）：env 覆盖 > 管理台值（DB meta）> 配置文件 > 代码默认值。
+# - env：保留既有运维兜底能力（worker runtime.env / 容器环境变量），语义与抽取前一致
+# - meta：小管理台配置中心在线调整（config_store 写入），集群共享
+# - 文件：configs/runtime-config.json（gitignored；example 入库），缺省即全默认
+# - 默认值与抽取前现状完全一致（3600s / 3c6g / 现有模板 / ARM）
+# 派生阈值（stuck 预警 / 孤儿回收）跟随超时语义派生，不再独立写死。
+RUNTIME_CONFIG_PATH = os.path.join(CONFIG_DIR, "runtime-config.json")
+
+_DEFAULT_TASK_TIMEOUT = 3600
+_DEFAULT_DEVSTAGE = {
+    "template_id": "4ef59a2b4d3d4909aacd80f6007c00b2",
+    "flavor_id": "23ebdfe3b2d34cc4b34a1aaf03d27c54",
+    "cores": 3,
+    "memory": 6,
+    "arch": "ARM",
+}
+
+# 60s TTL 缓存（meta + 文件读取；login_whitelist 同款模式——配置变更频率极低，
+# 管理台保存后显式失效，最长 60s 后其他实例生效）
+_rt_cfg_cache: dict = {"ts": 0.0, "meta": {}, "file": {}}
+_RT_CFG_CACHE_TTL = 60.0
+
+
+def invalidate_runtime_config_cache():
+    """失效运行配置缓存（管理台保存后调用，当前实例立即生效）。"""
+    _rt_cfg_cache["ts"] = 0.0
+
+
+def _read_runtime_config_file() -> dict:
+    try:
+        if os.path.exists(RUNTIME_CONFIG_PATH):
+            with open(RUNTIME_CONFIG_PATH, encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+    except Exception:
+        pass
+    return {}
+
+
+def _read_runtime_meta() -> dict:
+    """DB meta 表读取管理台配置值（异常时返回空——worker 端无 DB 等场景）。"""
+    try:
+        from src.user.db import get_meta_value
+        keys = ("runtime_task_timeout",
+                "devstage_template_id", "devstage_flavor_id",
+                "devstage_cores", "devstage_memory", "devstage_arch")
+        return {k: get_meta_value(k) for k in keys}
+    except Exception:
+        return {}
+
+
+def _rt_cfg_sources() -> tuple:
+    """返回 (meta_dict, file_dict)，带 60s TTL 缓存。"""
+    import time as _t
+    now = _t.time()
+    if (now - _rt_cfg_cache["ts"]) >= _RT_CFG_CACHE_TTL:
+        _rt_cfg_cache["meta"] = _read_runtime_meta()
+        _rt_cfg_cache["file"] = _read_runtime_config_file()
+        _rt_cfg_cache["ts"] = now
+    return _rt_cfg_cache["meta"], _rt_cfg_cache["file"]
+
+
+def _positive_int(raw, fallback: int) -> int:
+    """解析正整数；None/空/非法/非正 → fallback。"""
+    if raw is None or raw == "":
+        return fallback
+    try:
+        v = int(float(raw))
+        if v > 0:
+            return v
+    except Exception:
+        pass
+    return fallback
+
+
+def _first_nonempty(*vals) -> str:
+    for v in vals:
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return ""
+
+
+def get_runtime_task_timeout() -> int:
+    """任务超时家族单一来源（秒）。
+
+    优先级：env RUNTIME_TASK_TIMEOUT > meta runtime_task_timeout >
+    runtime-config.json runtime_task_timeout > 默认 3600。
+    与抽取前各写死点（agent.py 看门狗 / hermes·hwcloud 全局超时 / service.py
+    耦合告警）同默认值；非法值逐级回退。
+    """
+    env = os.environ.get("RUNTIME_TASK_TIMEOUT", "").strip()
+    if env:
+        try:
+            v = int(float(env))
+            if v > 0:
+                return v
+        except Exception:
+            pass  # 非法 env 不致命——继续走 meta/文件（部署侧错误配置不阻断启动）
+    meta, cfg = _rt_cfg_sources()
+    v = _positive_int(meta.get("runtime_task_timeout"), 0)
+    if v:
+        return v
+    v = _positive_int(cfg.get("runtime_task_timeout"), 0)
+    if v:
+        return v
+    return _DEFAULT_TASK_TIMEOUT
+
+
+def get_stuck_threshold_minutes() -> int:
+    """stuck 预警派生阈值（分钟）。
+
+    旧值写死 22min（对应默认超时 3600s 的 22/60≈36.7%——超时前预警窗口）。
+    现按当前超时同比例派生：timeout_minutes × 22 / 60，下限 1min。
+    观测口径（observability 采样器 / dashboard）共用。
+    """
+    t = get_runtime_task_timeout()
+    return max(1, round(t / 60.0 * 22.0 / 60.0))
+
+
+def get_orphan_threshold_minutes() -> int:
+    """running·dispatched 孤儿回收派生阈值（分钟）。
+
+    旧值写死 360min（worker 超时 1h，6h 仍运行必为孤儿——6× 超时）。
+    现按当前超时 6 倍派生：timeout_minutes × 6。cleanup sweeper 共用
+    （SWEEPER_LONG_RUNNING_MINUTES env 兜底仍保留，优先级更高）。
+    """
+    t = get_runtime_task_timeout()
+    return max(1, round(t / 60.0 * 6))
+
+
+def get_devstage_template_id() -> str:
+    """DevStage（AI DevSpace）模板 ID 单一定义。
+
+    旧实现两处重复写死于 devstage.py（模块级常量 + create_environment 内），
+    现收敛为本函数。优先级：meta > runtime-config.json devstage.template_id > 默认。
+    （模板 ID 无既有 env 覆盖，不新增 env。）
+    """
+    meta, cfg = _rt_cfg_sources()
+    v = _first_nonempty(meta.get("devstage_template_id"),
+                         (cfg.get("devstage") or {}).get("template_id", ""))
+    return v or _DEFAULT_DEVSTAGE["template_id"]
+
+
+def get_devstage_flavor() -> dict:
+    """DevStage 环境规格（flavor_id / cores / memory / arch）。
+
+    优先级：env GRAPE_DEVSTAGE_* （既有覆盖语义保留）> meta > runtime-config.json
+    devstage.* > 默认（3c6g / ARM / 现有 flavor）。
+    """
+    meta, cfg = _rt_cfg_sources()
+    fcfg = cfg.get("devstage") or {}
+    flavor_id = os.environ.get("GRAPE_DEVSTAGE_FLAVOR_ID", "").strip() \
+        or _first_nonempty(meta.get("devstage_flavor_id"), fcfg.get("flavor_id", "")) \
+        or _DEFAULT_DEVSTAGE["flavor_id"]
+    cores = _positive_int(os.environ.get("GRAPE_DEVSTAGE_CORES"), 0) \
+        or _positive_int(meta.get("devstage_cores"), 0) \
+        or _positive_int(fcfg.get("cores"), 0) \
+        or _DEFAULT_DEVSTAGE["cores"]
+    memory = _positive_int(os.environ.get("GRAPE_DEVSTAGE_MEMORY"), 0) \
+        or _positive_int(meta.get("devstage_memory"), 0) \
+        or _positive_int(fcfg.get("memory"), 0) \
+        or _DEFAULT_DEVSTAGE["memory"]
+    arch = _first_nonempty(os.environ.get("GRAPE_DEVSTAGE_ARCH"),
+                           meta.get("devstage_arch"), fcfg.get("arch", "")) \
+        or _DEFAULT_DEVSTAGE["arch"]
+    return {"flavor_id": flavor_id, "cores": cores, "memory": memory, "arch": arch}
+
+
+def _write_runtime_config_for_test(cfg: dict):
+    """测试辅助：写 runtime-config.json（仅测试用，运行时只读该文件）。"""
+    with open(RUNTIME_CONFIG_PATH, "w", encoding="utf-8") as f:
+        json.dump(cfg, f, ensure_ascii=False, indent=2)
+    invalidate_runtime_config_cache()
+
 
 
 def _is_login_whitelist_enabled() -> bool:

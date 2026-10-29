@@ -45,13 +45,14 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
 
     本地引擎走 localhost 直连，避免 NAT 回环不通
     （服务端无法通过自己的公网 IP 访问自己）；
-    远程 worker 走 meta.server_base_url（公网地址）。
+    远程 worker 走 worker 回连地址（Issue #471 E1：worker_connect_url，
+    未配置回退 server_base_url）。
 
     判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
     """
     try:
-        from src.user.db import get_server_base_url
-        public_url = get_server_base_url()
+        from src.user.db import get_worker_connect_url
+        public_url = get_worker_connect_url()
         if runtime_id and runtime_id > 0:
             from src.session_manager import db, db_lock
             with db_lock:
