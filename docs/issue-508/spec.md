@@ -1,6 +1,6 @@
 # Issue #508 需求文档（Spec）
 
-> 目标分支：local-liufei ｜ 依据：Issue #508 原文 + issue-agent Spec 评论（comment id=196786338）。已核对 #504（同根因独立 Issue）在 feat/issue-504 分支的修法，两者改动同构、语义互补，无冲突。
+> 目标分支：weekly-09 ｜ 依据：Issue #508 原文 + issue-agent Spec 评论（Issue 评论）。已核对 #504（同根因独立 Issue）在 feat/issue-504 分支的修法，两者改动同构、语义互补，无冲突。
 
 ## 1. 问题
 
@@ -38,7 +38,7 @@
 
 #504（普通保存 500 修复）将 `{"type":"opencode"}` 归一为 `"opencode"` 后落库（200）。**本 Issue Spec 明确**：`{"backend":{"type":"opencode"}}` → **400 拒绝**（Issue 标题即"非字符串返回 4xx"）。两个 Issue 验收口径不同——本分支按本 Issue Spec 实现：**仅纯字符串接受**，对象形态一律 400。
 
-> 备注：#504 与 #508 是同根因的两个独立 Issue，各自分支独立实现、独立验收；若两 PR 先后合入 local-liufei，以后合入者为准（本 Issue 显式 400 拒绝更严格，语义收窄安全）。
+> 备注：#504 与 #508 是同根因的两个独立 Issue，各自分支独立实现、独立验收；若两 PR 先后合入 weekly-09，以后合入者为准（本 Issue 显式 400 拒绝更严格，语义收窄安全）。
 
 ## 6. 风险与缓解
 

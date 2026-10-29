@@ -1,6 +1,6 @@
 # Issue #470 — 方案设计与任务计划
 
-> 关联：`spec.md` | 分支 `feat/issue-470` ← base `local-liufei`
+> 关联：`spec.md` | 分支 `feat/issue-470` ← base `weekly-09`
 
 ## 1. 总体设计
 
@@ -105,7 +105,7 @@ worker 端 `runtime.env` 显式设置仅在任务 env 未注入该键时兜底�
 
 ## 4. 已知预存问题（非本改动范围）
 
-- `tests/test_devstage_filter.py` 6 个用例在基线即红：历史提交 812e8933d 把 `list_environments` 从 `async def` 改成 `def`，测试仍用 `asyncio.run()` 调用 → `ValueError: a coroutine was expected`。基线 `origin/local-liufei`（fe563608f）复现一致，与本 Issue 无关。本 Issue 不修（超范围），PR body 注明。
+- `tests/test_devstage_filter.py` 6 个用例在基线即红：历史提交 812e8933d 把 `list_environments` 从 `async def` 改成 `def`，测试仍用 `asyncio.run()` 调用 → `ValueError: a coroutine was expected`。对应基线分支复现一致，与本 Issue 无关。本 Issue 不修（超范围），PR body 注明。
 
 ## 5. 任务拆解（TDD 红/绿切片）
 

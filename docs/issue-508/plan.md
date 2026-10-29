@@ -61,4 +61,4 @@
 | 2 | chat.py backend 显式校验 + skill 防御 | 待做 → 提交 feat(#508) |
 | 3 | 回归：新测试全绿 + chat config 相关既有测试全绿 | 待做 |
 | 4 | 自审查 5 轴 + pre-pr 增量检查 | 待做 |
-| 5 | 建 PR（base=local-liufei）→ Issue 评论 → A2A QA → tasks complete | 待做 |
+| 5 | 建 PR（base=weekly-09）→ Issue 评论 → A2A QA → tasks complete | 待做 |

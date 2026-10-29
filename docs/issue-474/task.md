@@ -9,7 +9,7 @@
 - [ ] T5 修改 `src/api/static/js/pages/account.js`：掩码占位 + 移除 👁 + 删除 `_accountToggleSecret` + 注释更新
 - [ ] T6 修改 `src/api/static/js/pages/scene-market.js`：去掉明文自动填入 + 提示语更新
 - [ ] T7 自审查（5 轴：正确性/安全/性能/可维护/测试）+ 开源前置增量检查（黑名单拦截 + 敏感增量扫描）
-- [ ] T8 原子提交（test 红 → feat 后端绿 → feat 前端）→ push → 建 PR（base=local-liufei）
+- [ ] T8 原子提交（test 红 → feat 后端绿 → feat 前端）→ push → 建 PR（base=weekly-09）
 - [ ] T9 Issue 评论告知 + A2A 通知 QA → `grape tasks complete`
 
 ## 提交拆分（默认红/绿）

@@ -1,6 +1,6 @@
 # Spec: Issue #500 — 日志噪音问题清理（bwrap WARNING 刷屏）
 
-> 来源：Issue #500 Spec（issue agent 已发布）；本文为开发落地版。目标分支：local-liufei。
+> 来源：Issue #500 Spec（issue agent 已发布）；本文为开发落地版。目标分支：weekly-09。
 
 ## 目标
 - 清理 worker 日志中重复刷屏的 `hermes ACP bwrap wrap failed, running unsandboxed: cannot import name 'build_bwrap_cmd' from 'src.agent.sandbox'` WARNING；

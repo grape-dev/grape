@@ -1,6 +1,6 @@
 # Spec: Issue #474 — 个人设置「凭据」接口明文回显云账号 SK（机密泄露面）
 
-> 来源：Issue #474 + Issue Agent Spec 评论（id=196154565）| 目标分支：local-liufei | 优先级：P1
+> 来源：Issue #474 + Issue Agent Spec 评论| 目标分支：weekly-09 | 优先级：P1
 
 ## 需求
 `GET /api/settings/credentials` 响应体 `huawei_cloud` 块当前同时返回

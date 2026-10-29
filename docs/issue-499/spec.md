@@ -1,6 +1,6 @@
 # Spec: Issue #499 — worker 安装体验优化
 
-> 来源：Issue #499（issue agent Spec 评论）| 目标分支：local-liufei
+> 来源：Issue #499（issue agent Spec 评论）| 目标分支：weekly-09
 
 ## 目标
 1. 删除安装脚本中引导用户安装 opencode/hermes/codearts/codex 执行引擎的提示段（worker 启动自动发现引擎，引导无必要）。

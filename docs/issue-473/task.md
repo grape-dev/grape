@@ -4,7 +4,7 @@
 - [x] T2 前端：runtimes.js 范围 chips 控件 + `range` 参数透传 + 清除联动
 - [x] T3 测试：tests/test_issue_473_range_filter.py（红→绿）+ tests/js/test_issue_473_range_filter.js
 - [x] T4 回归：pytest 相关模块 + node JS 测试通过
-- [x] T5 自审查（5 轴 + pre-pr 增量检查）→ 建 PR（base local-liufei）→ 评论 → A2A QA → tasks complete
+- [x] T5 自审查（5 轴 + pre-pr 增量检查）→ 建 PR（base weekly-09）→ 评论 → A2A QA → tasks complete
 
 ## PR #668 审查修复（QA 交办，追加）
 

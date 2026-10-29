@@ -1,6 +1,6 @@
 # Spec: Issue #514 — /webhook/gitcode 非 POST 方法返回 405
 
-> 来源：Issue Agent Spec（目标分支 local-liufei）
+> 来源：Issue Agent Spec（目标分支 weekly-09）
 
 ## 目标
 `/webhook/gitcode` 对非 POST 方法（GET/PUT/DELETE/PATCH/OPTIONS/HEAD）显式返回 405 Method Not Allowed，不得落入 SPA catch-all 兜底返回 200 HTML。

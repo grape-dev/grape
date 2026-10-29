@@ -1,6 +1,6 @@
 # Spec: Issue #473 — 设备与引擎页 runtime 列表范围筛选
 
-> 来源：Issue #473 Spec（评论 id=196119974）| 分支：feat/issue-473（base local-liufei）
+> 来源：Issue #473 Spec（Issue 评论）| 分支：feat/issue-473（base weekly-09）
 
 ## 目标
 运行驾驶舱「设备与引擎」页 runtime 列表新增**范围筛选**（全部/仓库/个人），避免全局所有设备/引擎一锅端展示。

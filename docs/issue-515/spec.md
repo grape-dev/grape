@@ -1,6 +1,6 @@
 # Spec: Issue #515 — worker 安装包支持 x86_64 Linux 接入
 
-> 来源：Issue Agent 已发布 Spec（评论 id=196804372），本文件为 Coding 落地实现的需求文档。
+> 来源：Issue Agent 已发布 Spec（Issue 评论），本文件为 Coding 落地实现的需求文档。
 
 ## Objective
 
@@ -75,4 +75,4 @@
 
 ## Open Questions
 
-- 无（VOD 已完成根因核验与需求收敛，详见评论 id=196803827）
+- 无（VOD 已完成根因核验与需求收敛，详见Issue 评论）

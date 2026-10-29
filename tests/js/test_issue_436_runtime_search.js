@@ -92,9 +92,9 @@ function loadObs(dom, extraInit) {
 function makeOps() {
   return {
     runtimes: { total: 4, online: 4, offline: 0, by_mode: {}, list: [
-      { id: 1, name: 'hermes', device_name: 'worker-ecs-grape-dev-build-0005', mode: 'remote', version: 'v1', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },
-      { id: 2, name: 'opencode', device_name: 'worker-ecs-grape-dev-build-0006', mode: 'remote', version: 'v2', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },
-      { id: 3, name: 'codearts', device_name: 'worker-ecs-caiting', mode: 'remote', version: 'v3', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },
+      { id: 1, name: 'hermes', device_name: 'worker-buildnode-a', mode: 'remote', version: 'v1', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },
+      { id: 2, name: 'opencode', device_name: 'worker-buildnode-b', mode: 'remote', version: 'v2', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },
+      { id: 3, name: 'codearts', device_name: 'worker-buildnode-c', mode: 'remote', version: 'v3', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },
       { id: 4, name: 'hermes', device_name: 'worker-desktop-k8gtld1', mode: 'remote', version: 'v1', health: 'idle', running: 0, max_concurrent: 3, avg_duration: 0, probe_status: 'ok', probe_latency: 1, probe_error: '' },    ] },
     workers: { total: 2, online: 2, offline: 0, list: [] },
   };
@@ -111,19 +111,19 @@ console.log('Issue #436: runtime 列表搜索回归\n');
 test('T1 搜完整设备名命中', () => {
   const obs = loadObs(makeDom());
   const rts = obs._sortedRuntimes(makeOps().runtimes);
-  obs.setSearch('worker-ecs-caiting'); obs.setDeviceFilter('');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
+  obs.setSearch('worker-buildnode-c'); obs.setDeviceFilter('');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
 });
 
 test('T2 搜部分设备名命中', () => {
   const obs = loadObs(makeDom());
   const rts = obs._sortedRuntimes(makeOps().runtimes);
-  obs.setSearch('build-0006'); obs.setDeviceFilter('');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
+  obs.setSearch('buildnode-b'); obs.setDeviceFilter('');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
 });
 
 test('T3 搜索词带首尾空格仍命中（trim）', () => {
   const obs = loadObs(makeDom());
   const rts = obs._sortedRuntimes(makeOps().runtimes);
-  obs.setSearch('  worker-ecs-caiting  '); obs.setDeviceFilter('');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
+  obs.setSearch('  worker-buildnode-c  '); obs.setDeviceFilter('');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
 });
 
 test('T4 纯空格等价于无搜索（全列表）', () => {
@@ -151,13 +151,13 @@ test('T6 幽灵设备过滤 + 清空搜索恢复全列表', () => {
 test('T7 有效设备下拉过滤仍生效', () => {
   const obs = loadObs(makeDom());
   const rts = obs._sortedRuntimes(makeOps().runtimes);
-  obs.setSearch(''); obs.setDeviceFilter('worker-ecs-caiting');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
+  obs.setSearch(''); obs.setDeviceFilter('worker-buildnode-c');  assert.strictEqual(obs._filterRuntimes(rts).length, 1);
 });
 
 test('T8 有效设备过滤与搜索 AND 组合', () => {
   const obs = loadObs(makeDom());
   const rts = obs._sortedRuntimes(makeOps().runtimes);
-  obs.setSearch('hermes'); obs.setDeviceFilter('worker-ecs-caiting');  assert.strictEqual(obs._filterRuntimes(rts).length, 0);
+  obs.setSearch('hermes'); obs.setDeviceFilter('worker-buildnode-c');  assert.strictEqual(obs._filterRuntimes(rts).length, 0);
 });
 
 test('T9 引擎名/版本/模式字段搜索仍生效', () => {
@@ -265,7 +265,7 @@ test('T14 同 sandbox 全链路：搜索 → 行数 1 → 清空 → 行数 4（
   const init = `
 ; _obsData = { ops: ${JSON.stringify(makeOps())}, realtime: null };
 document.getElementById('obsContent').innerHTML = renderOverview(_obsData.ops, {});
-_rtSearch = 'worker-ecs-caiting'; _runtimePage = 0; _rerenderRuntimeTable();__countRows = function(){ return (document.getElementById('obs-runtime-rows').innerHTML.match(/<tr id="rt-/g) || []).length; };
+_rtSearch = 'worker-buildnode-c'; _runtimePage = 0; _rerenderRuntimeTable();__countRows = function(){ return (document.getElementById('obs-runtime-rows').innerHTML.match(/<tr id="rt-/g) || []).length; };
 __cnt = function(){ return document.getElementById('obs-runtime-count').textContent; };
 `;
   const src = fs.readFileSync(path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');

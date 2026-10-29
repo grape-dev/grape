@@ -11,7 +11,7 @@
 - [x] T7 回归：`pytest -m atomic -k online_runtime_last_seen_not_in_future` 通过；
     相关既有测试（test_user_db / test_runtime_protocol / test_local_probe / test_health_scorer 等）不回归
 - [ ] T8 自审查（5 轴 + 开源前置增量检查：无关内容拦截 + 敏感信息增量扫描）
-- [ ] T9 建 PR（base=local-liufei）+ Issue 评论告知 + A2A QA
+- [ ] T9 建 PR（base=weekly-09）+ Issue 评论告知 + A2A QA
 
 ## 验收关联
 
