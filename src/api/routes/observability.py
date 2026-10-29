@@ -465,6 +465,31 @@ def obs_events(
 
 
 @router.get(
+    "/events/failed-result-gap",
+    operation_id="obs_events_failed_result_gap",
+    summary="Failed events with empty result ratio (cross-repo)",
+    description=(
+        "Issue #476: cross-repo ratio of failed events whose result is empty or only a "
+        "legacy marker (pre-#476 undiagnosable failures). Scope restricted to the caller's "
+        "visible repositories. Returns total_failed / empty_result / legacy / with_diag and "
+        "ratios plus recent empty-or-legacy samples."
+    ),
+)
+def obs_events_failed_result_gap(
+    limit: int = 20,
+    user: dict = Depends(require_org_member),
+):
+    """跨仓 failed 空 result 占比（#476）。融入可观测性统一事件视图 Tab。"""
+    from src.observability import failed_gap
+    _limit = max(1, min(int(limit or 20), 100))
+    try:
+        return failed_gap.failed_result_gap(user, limit=_limit)
+    except Exception as e:
+        log.warning(f"obs/events/failed-result-gap failed user={user.get('id')}: {e}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message": "failed-result-gap failed"})
+
+
+@router.get(
     "/metrics/series",
     operation_id="obs_metrics_series",
     summary="Business metric time series (from the rollup table)",

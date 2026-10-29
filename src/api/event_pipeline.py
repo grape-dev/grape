@@ -2723,7 +2723,7 @@ def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str
     return os.path.join(_base, f"{agent_type}-agent")
 
 
-def _fail_event(seq: int, reason: str, exit_code: int = 1):
+def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
     """事件入队/启动失败 → 立即置 failed 终态（防卡 running 僵尸）。
 
     事件在 append_event 时即为 running，若后续入队/启动失败而不更新，
@@ -2732,6 +2732,10 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1):
 
     Issue #418：补 exit_code 形参（默认 1，兼容既有调用点），webhook.py A2A
     早退分支统一走本入口，回写 result/exit_code/completed_at 三字段。
+    Issue #476：扩展 diag 诊断上下文——
+    - result 内嵌机器可读错误码前缀 `[<code>] <reason>`（免表结构变更，前端可解析）；
+    - diag 字典（code/target_stage/phase/ref_seq 等）合并写入 events.payload._fail_diag，
+      幂等：已存在 _fail_diag 的终态事件不被二次覆盖（与 result 终态保护同语义）。
     幂等：update_event_complete 自带终态保护（terminal→terminal 跳过），
     agent_tasks 更新限定 status IN ('running','queued','dispatched')，
     重复触发同一 seq 早退不覆盖已写入的终态诊断字段（双主安全）。
@@ -2741,9 +2745,36 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1):
     try:
         from datetime import datetime, timezone
         from src.api.event_store import update_event_complete
+        _result = reason
+        _code = (diag or {}).get("code") or ""
+        if _code:
+            _result = f"[{_code}] {reason}"
+        _now = datetime.now(timezone.utc).isoformat()
         update_event_complete(seq, "failed", exit_code=exit_code,
-                              completed_at=datetime.now(timezone.utc).isoformat(),
-                              result=reason)
+                              completed_at=_now, result=_result)
+        # Issue #476：诊断上下文写入 events.payload._fail_diag（幂等：已存在不覆盖）
+        if diag:
+            try:
+                from src.session_manager import db, db_lock
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT status, payload FROM events WHERE seq=?", (seq,))
+                    _cur = c.fetchone()
+                    if _cur and _cur[0] == "failed":
+                        _payload = {}
+                        try:
+                            _payload = json.loads(_cur[1] or "{}") if _cur[1] else {}
+                            if not isinstance(_payload, dict):
+                                _payload = {}
+                        except Exception:
+                            _payload = {}
+                        if "_fail_diag" not in _payload:
+                            _payload["_fail_diag"] = dict(diag)
+                            c.execute("UPDATE events SET payload=? WHERE seq=?",
+                                      (json.dumps(_payload, ensure_ascii=False), seq))
+                            db.commit()
+            except Exception as _de:
+                log.warning(f"Pipeline: _fail_event diag write failed seq={seq}: {_de}")
         # 同步更新 agent_tasks 表（如果有关联的 task）
         from src.session_manager import db, db_lock
         with db_lock:
@@ -2753,14 +2784,13 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1):
                 "exit_code=COALESCE(exit_code, ?), "
                 "errors=COALESCE(errors, ?) "
                 "WHERE event_seq=? AND status IN ('running','queued','dispatched')",
-                (datetime.now(timezone.utc).isoformat(),
-                 exit_code,
-                 json.dumps([reason][:500]) if reason else None, seq)
+                (_now, exit_code,
+                 json.dumps([_result][:500]) if _result else None, seq)
             )
             db.commit()
             if c.rowcount > 0:
                 log.info(f"Pipeline: synced agent_tasks event_seq={seq} -> failed")
-        log.info(f"Pipeline: event {seq} -> failed ({reason[:80]})")
+        log.info(f"Pipeline: event {seq} -> failed ({_result[:80]})")
     except Exception as e:
         log.warning(f"Pipeline: _fail_event failed for seq={seq}: {e}")
 

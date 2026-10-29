@@ -382,8 +382,9 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
         log.warning(f"Event terminate: cancel_direct_task failed: {e}")
 
     # 3) 事件状态回写 failed（兜底，fail_task/cancel_task 已处理但再确认一次）
+    # Issue #476：显式 reason，避免 terminate 产生空 result 无头失败
     try:
-        update_event_status(seq, "failed")
+        update_event_status(seq, "failed", result="用户手动终止事件（terminate）")
     except Exception as e:
         log.warning(f"Event terminate: update_event_status failed: {e}")
 
@@ -486,8 +487,10 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
         _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
         # 原 seq 标记 failed（保持历史记录），新 seq 接管
+        # Issue #476：显式 reason，避免 redispatch 产生空 result 无头失败
         try:
-            update_event_status(seq, "failed")
+            update_event_status(seq, "failed",
+                                result="事件已重新派发（onboarding 重建任务，原事件标记 failed）")
         except Exception:
             pass
         try:
@@ -1050,7 +1053,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _a2a_result.get("status") == "ok":
                         _new_seq = _a2a_result.get("seq", 0)
                         log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
-                        update_event_status(seq, "failed")
+                        update_event_status(
+                            seq, "failed",
+                            result=f"事件已重新派发（A2A 新 seq={_new_seq} 接管，原事件标记 failed）")
                         try:
                             from src.user.db import set_meta_value as _smv
                             import time as _tm
@@ -1091,7 +1096,10 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 if _rp_result.get("ok"):
                     log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
                     # 原 seq 事件标记 failed（保持历史记录），新 seq 接管执行
-                    update_event_status(seq, "failed")
+                    # Issue #476：显式 reason，避免 redispatch 产生空 result 无头失败
+                    update_event_status(
+                        seq, "failed",
+                        result=f"事件已重新派发（run_pipeline 新 seq={_rp_result.get('seq', 0)} 接管，原事件标记 failed）")
                     try:
                         from src.user.db import set_meta_value as _smv
                         import time as _tm
@@ -2138,10 +2146,10 @@ def list_events(owner: str, repo: str,
     _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
-    where_clauses = [f"repo_key IN ({_rk_placeholders})"]
+    where_clauses = [f"e.repo_key IN ({_rk_placeholders})"]
     params = _repo_keys
     if status:
-        where_clauses.append("status=?")
+        where_clauses.append("e.status=?")
         params.append(status)
 
     where_sql = " AND ".join(where_clauses)
@@ -2149,17 +2157,23 @@ def list_events(owner: str, repo: str,
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(f"SELECT COUNT(*) FROM events WHERE {where_sql}", params)
+            c.execute(f"SELECT COUNT(*) FROM events e WHERE {where_sql}", params)
             total = c.fetchone()[0]
 
             offset = (page - 1) * page_size
+            # Issue #476：列表补 result / issue_id / task_id（LEFT JOIN 取最新 task）
+            # result 摘要由前端截断展示；task_id 为空表示未关联任务（仍可跳 Issue）
             c.execute(
-                f"SELECT seq, event_type, agent_type, title, summary, status, created_at FROM events WHERE {where_sql} ORDER BY seq DESC LIMIT ? OFFSET ?",
+                f"SELECT e.seq, e.event_type, e.agent_type, e.title, e.summary, e.status, e.created_at, "
+                f"e.result, e.issue_id, "
+                f"(SELECT t.id FROM agent_tasks t WHERE t.event_seq=e.seq ORDER BY t.created_at DESC LIMIT 1) AS task_id "
+                f"FROM events e WHERE {where_sql} ORDER BY e.seq DESC LIMIT ? OFFSET ?",
                 params + [page_size, offset]
             )
             events = [
                 {"seq": r[0], "event_type": r[1], "agent_type": r[2] or "", "title": r[3] or r[1],
-                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6])}
+                 "summary": r[4] or r[3] or r[1], "status": r[5], "created_at": normalize_event_time(r[6]),
+                 "result": r[7] or "", "issue_id": r[8] or "", "task_id": r[9] or ""}
                 for r in c.fetchall()
             ]
         except Exception:

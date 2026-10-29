@@ -83,6 +83,27 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     return {"status": "repo_deleted", "message": "repository deleted, cascade cleanup done"}
 
 
+def _a2a_source_event_seq(session_info) -> int:
+    """取 A2A 调用方（源事件）seq：会话 token 的 session_key=调用方任务 id → agent_tasks.event_seq。
+
+    Issue #476：A2A 失败诊断需要"引用 seq"（触发本次交办的源事件 seq）。
+    无 session / 无任务关联时返回 0（不阻断诊断写入）。
+    """
+    try:
+        if session_info and session_info.get("session_key"):
+            from src.session_manager import db, db_lock
+            with db_lock:
+                c = db.cursor()
+                c.execute("SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
+                          (session_info["session_key"],))
+                row = c.fetchone()
+            if row and row[0]:
+                return int(row[0])
+    except Exception as e:
+        log.warning(f"A2A: resolve source event seq failed: {e}")
+    return 0
+
+
 async def _on_handoff_dispatch(event):
     """Event-driven A2A dispatch listener (Phase 4).
 
@@ -123,15 +144,69 @@ async def _on_handoff_dispatch(event):
         )
         log.info(f"agent/handoff listener: result={result}")
         if result.get("status") == "failed":
-            from src.api.event_store import update_event_status
-            update_event_status(event.seq, "failed")
+            # Issue #476：listener 失败统一走 _fail_event（原裸 update_event_status 无诊断字段）
+            _err = result.get("error") or result.get("errors") or "dispatch_node 返回 failed"
+            if isinstance(_err, list):
+                _err = "; ".join(str(x) for x in _err)
+            try:
+                from src.api.event_pipeline import _fail_event
+                _ref_seq = (payload.get("evt") or {}).get("ref_seq") or payload.get("ref_seq") or 0
+                _fail_event(
+                    event.seq,
+                    f"A2A 交办派发失败（target={target_agent}, node={node_id}）：{str(_err)[:200]}",
+                    diag={
+                        "code": "a2a_dispatch_failed",
+                        "target_stage": target_agent,
+                        "target_node": node_id,
+                        "phase": "dispatch",
+                        "ref_seq": _ref_seq,
+                    },
+                )
+            except Exception as _fe:
+                log.warning(f"agent/handoff listener _fail_event failed: {_fe}")
+                try:
+                    from src.api.event_store import update_event_status
+                    update_event_status(event.seq, "failed")
+                except Exception:
+                    pass
     except Exception as e:
         log.warning(f"agent/handoff listener failed: {e}")
         try:
-            from src.api.event_store import update_event_status
-            update_event_status(event.seq, "failed")
-        except Exception:
-            pass
+            from src.api.event_pipeline import _fail_event
+            _ref_seq = (payload.get("evt") or {}).get("ref_seq") or payload.get("ref_seq") or 0
+            _fail_event(
+                event.seq,
+                f"A2A 交办派发异常（target={target_agent}, node={node_id}）：{str(e)[:200]}",
+                diag={
+                    "code": "a2a_dispatch_exception",
+                    "target_stage": target_agent,
+                    "target_node": node_id,
+                    "phase": "exception",
+                    "ref_seq": _ref_seq,
+                },
+            )
+        except Exception as _fe2:
+            log.warning(f"agent/handoff listener _fail_event failed (exception path): {_fe2}")
+            try:
+                from src.api.event_store import update_event_status
+                update_event_status(event.seq, "failed")
+            except Exception:
+                pass
+
+
+# Issue #514：非 POST 方法显式拒绝（405），防止落入 SPA catch-all 兜底返回 200 HTML，
+# 误导健康探针/监控把 webhook 入口误判为成功。仅 POST 是合法的 webhook 入口方法。
+_WEBHOOK_REJECTED_METHODS = ["GET", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+
+
+@router.api_route("/webhook/gitcode", methods=_WEBHOOK_REJECTED_METHODS,
+                  include_in_schema=False, name="gitcode_webhook_method_reject")
+async def gitcode_webhook_method_reject():
+    """非 POST 方法访问 /webhook/gitcode → 405 Method Not Allowed（Issue #514）。"""
+    return JSONResponse(
+        status_code=405,
+        content={"code": 405, "message": "method not allowed: webhook endpoint accepts POST only"},
+    )
 
 
 @router.post("/webhook/gitcode")
@@ -1052,6 +1127,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 pass
         if not _a2a_title:
             _a2a_title = f"A2A: {agent_name}"
+        # Issue #476：记录源事件 seq（触发本次交办的调用方事件；无 session 时为 0）
+        _a2a_ref_seq = _a2a_source_event_seq(_a2a_session_info)
         seq = append_event(
             repo_key=repo_key,
             event_type="a2a_event",
@@ -1061,7 +1138,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             agent_type=agent_name,
             actor="",
             summary=f"A2A: → {agent_name}",
-            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None},
+            payload={"repository": repository, "account": account, "issue_number": issue_number, "pr_number": pr_number, "context": context[:500], "is_subtask_mode": _is_subtask_mode, "parent_issue": _parent_issue, "carried_context": carried_context if (target_scene_id or carried_context) else {}, "engine_config": engine_config if (target_scene_id or engine_config) else None, "ref_seq": _a2a_ref_seq},
             status="running",
         )
         if not seq:
@@ -1110,7 +1187,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         "scene_id": scene_id,
                         "scene_user_id": scene_user_id,
                         "node_id": node["id"] if node else agent_name,
-                        "evt": evt,
+                        "ref_seq": _a2a_ref_seq,
+                        "evt": dict(evt, ref_seq=_a2a_ref_seq),
                     },
                 )
 

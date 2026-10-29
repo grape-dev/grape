@@ -210,6 +210,21 @@ function _evFailReasonText(data) {
   return `<div class="ev-fail-box" style="margin-top:6px;background:rgba(255,59,48,.08);border:1px solid rgba(255,59,48,.18);border-radius:10px;padding:8px 12px;font-size:12px;color:#d32f2f;line-height:1.6"><b>${I18N.t('events.fail_reason') || '失败原因'}：</b><span class="ev-fail-short" style="white-space:pre-wrap">${_evEsc494(short)}</span>${toggle}<div class="ev-fail-full" style="display:none;white-space:pre-wrap;margin-top:4px;border-top:1px dashed rgba(255,59,48,.25);padding-top:4px">${_evEsc494(full)}</div></div>`;
 }
 
+// Issue #476：A2A 失败诊断（payload._fail_diag）→ 目标阶段/失败环节/引用 seq/错误码
+function _evFailDiagText(data) {
+  if (data.status !== 'failed') return '';
+  const diag = (data.payload && data.payload._fail_diag) || {};
+  const rows = [];
+  const pair = (k, v) => { if (v !== '' && v !== null && v !== undefined && v !== 0 && String(v) !== '') rows.push(`<span style="color:var(--t3)">${k}</span><b>${String(v)}</b>`); };
+  if (diag.code) rows.push(`<span style="color:var(--t3)">Code</span><b style="color:#d32f2f">${String(diag.code)}</b>`);
+  if (diag.target_stage) pair(I18N.t('events.diag_target') || '目标阶段', diag.target_stage);
+  if (diag.target_node && diag.target_node !== diag.target_stage) pair('Node', diag.target_node);
+  if (diag.phase) pair(I18N.t('events.diag_phase') || '失败环节', diag.phase);
+  if (diag.ref_seq) rows.push(`<span style="color:var(--t3)">${I18N.t('events.diag_ref_seq') || '引用 Seq'}</span><a href="javascript:void(0)" onclick="navEvent(${Number(diag.ref_seq)})" style="color:var(--a);text-decoration:underline">#${String(diag.ref_seq)}</a>`);
+  if (!rows.length) return '';
+  return `<div style="margin-top:6px;background:rgba(255,149,0,.07);border:1px solid rgba(255,149,0,.2);border-radius:10px;padding:8px 12px;font-size:12px;color:var(--t);line-height:1.8"><b>${I18N.t('events.fail_diag_title') || '失败诊断'}</b><div style="display:grid;grid-template-columns:auto 1fr;gap:2px 12px;margin-top:4px">${rows.join('')}</div></div>`;
+}
+
 function _evLogRowText(data) {
   return data.task && data.task.task_id
     ? `<div style="margin-top:4px"><a href="javascript:void(0)" onclick="openTaskLog('${data.task.task_id}','seq#${data.seq}')" style="color:var(--a);text-decoration:underline">${I18N.t('events.view_realtime_log')}</a></div>`
@@ -253,6 +268,7 @@ function _patchEventDetail(data) {
   _evSetFragment('evDurationRow', _evDurationText(data));
   _evSetFragment('evStatusRow', _evStatusText(data));
   _evSetFragment('evFailReason', _evFailReasonText(data));
+  _evSetFragment('evFailDiag', _evFailDiagText(data));
   _evSetFragment('evLogRow', _evLogRowText(data));
   _evSetFragment('evProcessingBody', _evProcessingText(data));
 }
@@ -343,6 +359,7 @@ function renderEventDetail(data) {
               <div id="evDurationRow">${_evDurationText(data)}</div>
               <div id="evStatusRow">${_evStatusText(data)}</div>
               <div id="evFailReason">${_evFailReasonText(data)}</div>
+              <div id="evFailDiag">${_evFailDiagText(data)}</div>
               <div id="evLogRow">${_evLogRowText(data)}</div>
               <div id="convGate" style="display:none"></div>
             </div>

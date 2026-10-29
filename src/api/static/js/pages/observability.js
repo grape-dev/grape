@@ -535,11 +535,34 @@ function obsEventSearch() {
   obsEventReload();
 }
 
+// Issue #476：跨仓 "failed 且 result 为空" 占比摘要卡（不阻塞主列表加载）
+function loadObsEventGap() {
+  API.get('/obs/events/failed-result-gap?limit=5').then(function(d) {
+    const box = document.getElementById('obsEventGap');
+    if (!box) return;
+    if (!d || !d.total_failed) { box.innerHTML = ''; return; }
+    const pct = function(n) { return ((n == null ? 0 : n) * 100).toFixed(1) + '%'; };
+    const st = d.empty_ratio > 0 ? 'var(--r)' : 'var(--g)';
+    box.innerHTML = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px;background:rgba(255,59,48,.05);border:1px solid rgba(255,59,48,.12);border-radius:6px;padding:6px 10px">'
+      + '<span style="font-weight:600">' + (I18N.t('observability.ev_failed_gap_title') || '失败空结果占比') + '</span>'
+      + '<span>Failed ' + (d.total_failed || 0) + '</span>'
+      + '<span style="color:' + st + ';font-weight:600">' + pct(d.empty_ratio) + ' 空 result</span>'
+      + '<span class="ts t3">' + (d.empty_result || 0) + ' 条</span>'
+      + '<span class="ts t3">legacy ' + (d.legacy || 0) + '</span>'
+      + '<span class="ts t3">' + (d.with_diag || 0) + ' 有诊断</span>'
+      + '</div>';
+  }).catch(function() {
+    const box = document.getElementById('obsEventGap');
+    if (box) box.innerHTML = '';
+  });
+}
+
 function obsEventReload() {
   _obsEventCursor = null;
   _obsEventMore = false;
   _obsEventNew = [];
   loadObsEvents(document.getElementById('obsContent'), false);
+  loadObsEventGap();
 }
 
 function _obsEventQStr() {
@@ -574,6 +597,7 @@ function _obsEventShellHtml() {
       <span class="ts t3" id="obsEventCount"></span>
     </div>
     <div id="obsEventNew" style="display:none;margin-top:8px"></div>
+    <div id="obsEventGap" style="margin-top:8px"></div>
     <div id="obsEventTrunc" class="ts t3" style="margin-top:6px"></div>
     <div id="obsEventBody" style="margin-top:8px"><div class="loading">${I18N.t('observability.loading')}</div></div>
     <div id="obsEventMore" style="text-align:center;margin-top:10px"></div>
@@ -1820,7 +1844,8 @@ function loadA2aHealth() {
   const container = document.getElementById('obs-a2a-health');
   if (!container) return;
   container.innerHTML = section(I18N.t('observability.a2a_health'), I18N.t('observability.a2a_health_subtitle')) + '<div class="loading">' + I18N.t('observability.checking') + '</div>';
-  fetch('/api/dashboard/ops/a2a-health', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
+  // 同 timeline：/ops/a2a-health 已加鉴权（require_org_member），裸 fetch 恒 401——走 API.get 带 token
+  API.get('/dashboard/ops/a2a-health').then(d => {
     const status = d.reachable
       ? `<span style="color:var(--g)">${I18N.t('observability.a2a_reachable')}</span> (${d.latency_ms}ms)`
       : `<span style="color:var(--r)">${I18N.t('observability.a2a_unreachable')}</span> ${d.error ? '<span class="ts t3">'+d.error.substring(0,80)+'</span>' : ''}`;
@@ -1944,8 +1969,8 @@ function loadErrorLogs(container) {
     <div class="ts t3" style="margin-bottom:10px">${I18N.t('observability.log_scope_hint')}</div>
     <div id="errorLogBody"><div class="loading">${I18N.t('observability.loading')}</div></div>
   `;
-  // 来源列表从 obs_log 取（跨机聚合后的实际来源）
-  fetch('/api/obs/logs/sources', {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
+  // 来源列表从 obs_log 取（跨机聚合后的实际来源）——同 timeline：接口需登录，走 API.get 带 token
+  API.get('/obs/logs/sources').then(d => {
     const sel = document.getElementById('errorLogSource');
     if (sel) {
       (d.sources || []).forEach(s => {
@@ -2011,7 +2036,8 @@ function _loadErrorLogsFileFallback(currentLevel, currentSource) {
   const sourceParam = currentSource ? '&source=' + encodeURIComponent(currentSource) : '';
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
-  fetch('/api/dashboard/ops/error-logs?limit=100' + levelParam + sourceParam + repoParam, {signal: AbortSignal.timeout(15000)}).then(r => r.json()).then(d => {
+  // 同 timeline：/ops/error-logs 需登录（require_org_member），走 API.get 带 token（裸 fetch 恒 401）
+  API.get('/dashboard/ops/error-logs?limit=100' + levelParam + sourceParam + repoParam).then(d => {
     const entries = d.entries || [];
     const countEl = document.getElementById('errorLogCount');
     const bodyEl = document.getElementById('errorLogBody');
@@ -2176,7 +2202,10 @@ function renderTasksTab(ops, rt) {
     setTimeout(() => renderTimelineList(document.getElementById('obs-timeline-container'), _timelineCache.issues, _timelineCache.repoKey), 0);
   } else {
     const repoParam = repoFullName ? '?repo=' + encodeURIComponent(repoFullName) : '';
-    fetch('/api/dashboard/ops/timeline' + repoParam, {signal: AbortSignal.timeout(10000)}).then(r => r.json()).then(d => {
+    // Issue 2b8e386ed 起 /ops/timeline 需登录（require_org_member）——必须走 API.get 带
+    // Bearer token（401 自动 refresh 重试）。裸 fetch 无 Authorization 会恒 401，
+    // d.issues 恒空 → 任务列表永远显示"暂无任务事件"（2026-10-29 排查修复）。
+    API.get('/dashboard/ops/timeline' + repoParam).then(d => {
       _timelineCache = { repo: repoFullName, ts: Date.now(), issues: d.issues || [], repoKey: d.repoKey || '' };
       _timelineIssues = d.issues || [];
       renderTimelineList(document.getElementById('obs-timeline-container'), d.issues || [], d.repoKey || '');
@@ -2771,11 +2800,8 @@ function openSessionLogModal(sessionId, infoEnc) {
   const repo = (typeof app !== 'undefined' && app.currentRepo) ? app.currentRepo() : null;
   const repoParam = repo && repo.fullName ? '&repo=' + encodeURIComponent(repo.fullName) : '';
   // 先查该引擎 + 该仓库最近的任务
-  // 使用 runtime tasks 端点找到最近的 task_id
-  fetch('/api/runtime/runtimes/1/tasks?limit=10' + repoParam, {
-    headers: { 'Authorization': 'Bearer ' + (localStorage.token || '') },
-    signal: AbortSignal.timeout(10000)
-  }).then(r => r.json()).then(d => {
+  // 使用 runtime tasks 端点找到最近的 task_id（走 API.get：带 token + 401 自动 refresh）
+  API.get('/runtime/runtimes/1/tasks?limit=10' + repoParam).then(d => {
     const tasks = d.tasks || [];
     if (!tasks.length) {
       document.getElementById('rtLogModalBody').innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_session_task_log') + '</div>';

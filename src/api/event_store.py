@@ -488,7 +488,7 @@ def evaluate_agent_output(agent_type: str, tool_uses: list, final_text: str) -> 
     return has_output, result
 
 
-def update_event_status(seq: int, status: str):
+def update_event_status(seq: int, status: str, result: str = "", exit_code: int = None):
     """更新事件状态（含终态保护）。
 
     幂等保护：已终态（completed/failed/cancelled）的事件不允许被其他终态覆盖。
@@ -497,8 +497,17 @@ def update_event_status(seq: int, status: str):
     - 已 failed 的事件不允许被 completed 覆盖（防止用户终止后残留进程跑完调 complete 把
       failed 覆盖成 completed，2026-08-24 seq#2488 实例）。
     - 非终态（running/dispatched）→终态或非终态→非终态的更新不受限制。
+
+    Issue #476：终态 failed 非空 result 防御。裸调用（只传 status="failed"）历史上产生
+    "无头失败"（result 空 / exit_code NULL / 无 completed_at），事件列表出现无法解释的红。
+    防御规则：
+    - 目标 status=failed 且当前 result 为空时，回填 fallback reason + exit_code + completed_at；
+    - 调用方显式传 result 时优先使用（不覆盖已存在的非空 result/exit_code/completed_at）。
+    - failed 之外的状态（completed/cancelled/running/dispatched）不受影响，保持原语义。
     """
     _TERMINAL = ("completed", "failed", "cancelled")
+    _FALLBACK_REASON = "[E-FAIL-NODIAG] 事件置 failed 但未携带诊断信息（update_event_status 裸调用，见 #476）"
+    from datetime import datetime, timezone as _tz
     with db_lock:
         try:
             c = db.cursor()
@@ -508,7 +517,22 @@ def update_event_status(seq: int, status: str):
                 if row and row[0] in _TERMINAL and row[0] != status:
                     log.info(f"Event {seq} already {row[0]}, skip {status} overwrite (terminal state protection)")
                     return
-            c.execute("UPDATE events SET status=? WHERE seq=?", (status, seq))
+            if status == "failed":
+                c.execute("SELECT result, exit_code, completed_at FROM events WHERE seq=?", (seq,))
+                cur = c.fetchone()
+                _need_fallback = not (cur and cur[0])
+                _reason = result or (
+                    _FALLBACK_REASON if _need_fallback else (cur[0] if cur else _FALLBACK_REASON))
+                _exit = exit_code if exit_code is not None else (cur[1] if cur and cur[1] is not None else 1)
+                _completed = (cur[2] if cur and cur[2] else
+                              datetime.now(_tz.utc).isoformat())
+                c.execute(
+                    "UPDATE events SET status=?, result=?, exit_code=?, completed_at=? WHERE seq=?",
+                    (status, _reason, _exit, _completed, seq))
+                if _need_fallback:
+                    log.warning(f"Event {seq}: bare failed update, backfilled diagnostic result (#476)")
+            else:
+                c.execute("UPDATE events SET status=? WHERE seq=?", (status, seq))
             db.commit()
         except Exception as e:
             log.warning(f"Failed to update event {seq}: {e}")
