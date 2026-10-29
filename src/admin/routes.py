@@ -8,7 +8,7 @@
 from typing import List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional
 from src.admin import db as admin_db
 from src.api.deps import require_admin
@@ -55,6 +55,14 @@ class ConfigBody(BaseModel):
     bot_usernames: list[str] = []
     webhook_url: str = ""
     gitcode_webhook_token: str = ""
+    # 运行参数（Issue #470：写死配置抽取到管理台）。数值字段 0 = 未设置
+    # （前端留空不提交覆盖）；显式提交非正数 → pydantic gt 约束 400。
+    runtime_task_timeout: int = Field(default=0, gt=0)
+    devstage_template_id: str = ""
+    devstage_flavor_id: str = ""
+    devstage_cores: int = Field(default=0, gt=0)
+    devstage_memory: int = Field(default=0, gt=0)
+    devstage_arch: str = ""
 
 
 class VerifyTokenBody(BaseModel):
@@ -195,7 +203,10 @@ def put_config(body: ConfigBody, admin: dict = Depends(require_admin)):
     payload = body.model_dump(exclude_none=True)
     # 只保存非空字段（脱敏读、增量写）
     from src.admin.config_store import save_config
-    cleaned = {k: v for k, v in payload.items() if v is not None and v != "" and v != []}
+    # Issue #470：运行参数数值字段 0（默认值，前端留空）不进增量保存；
+    # 显式非正数已被 pydantic gt 约束拦截（422）。字符串字段空串同样跳过。
+    cleaned = {k: v for k, v in payload.items()
+               if v is not None and v != "" and v != [] and v != 0}
     result = save_config(cleaned)
     from src.auth.audit import log_audit
     log_audit("admin_config_saved", operator_id=admin["id"],

@@ -43,16 +43,35 @@ import shutil
 from typing import Generator
 from src.config import log
 
+_bwrap_fail_notified = False
 
-def _global_timeout_for(max_exec_seconds: float) -> float:
+
+def _note_bwrap_fail_once(message: str) -> None:
+    """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
+
+    放在调用方模块（而非 src.agent.sandbox）是因为本函数需覆盖 sandbox
+    自身导入失败的场景，此时不能依赖 sandbox 内的助手。
+    """
+    global _bwrap_fail_notified
+    if _bwrap_fail_notified:
+        log.debug(message)
+        return
+    _bwrap_fail_notified = True
+    log.warning(message)
+
+
+def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hwcloud ACP 内循环全局墙钟上限（#282 对齐，与 hermes_acp 同一配置源）。
 
-    取 RUNTIME_TASK_TIMEOUT 环境变量（与 src/runtime/agent.py 任务级看门狗
-    `_env_float("RUNTIME_TASK_TIMEOUT", 3600)` 同源、同默认值），下限保护
-    max_exec_seconds。
+    取 RUNTIME_TASK_TIMEOUT（与 src/runtime/agent.py 任务级看门狗同源、同默认值），
+    下限保护 max_exec_seconds。
+
+    Issue #470：任务级 env 优先（服务端经 env_extra 注入的统一配置值），
+    os.environ 次之，默认 3600——与 hermes_acp 同模式。
     """
+    _src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
     try:
-        _v = float(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+        _v = float(_src) if _src not in (None, "") else 3600.0
     except Exception:
         _v = 3600.0
     return max(_v, float(max_exec_seconds))
@@ -225,16 +244,23 @@ class HwcloudACPBackend:
         if hasattr(os, "getpgid"):
             _popen_kwargs["start_new_session"] = True
 
-        # 文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        # 文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
+        # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音）
         _acp_cmd = [agent_cmd, "serve", "--acp"]
         try:
-            from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name="hwcloud")
-            if _wrap:
-                _acp_cmd = _wrap + _acp_cmd
-                log.info(f"{label}hwcloud ACP sandboxed via bwrap (cwd={cwd})")
-        except Exception as _bw_e:
-            log.warning(f"{label}hwcloud ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
+            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+        except Exception:
+            _sbx_on = False
+        if _sbx_on:
+            try:
+                from src.agent.sandbox import build_bwrap_cmd
+                _wrap = build_bwrap_cmd(cwd, backend_name="hwcloud")
+                if _wrap:
+                    _acp_cmd = _wrap + _acp_cmd
+                    log.info(f"{label}hwcloud ACP sandboxed via bwrap (cwd={cwd})")
+            except Exception as _bw_e:
+                _note_bwrap_fail_once(
+                    f"{label}hwcloud ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
 
         proc = subprocess.Popen(
             _acp_cmd,
@@ -507,7 +533,7 @@ class HwcloudACPBackend:
             except Exception:
                 _SILENT_TIMEOUT = 900.0
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后 60s 无后续 → 视为完成（响应丢失兜底）
-            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
+            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds, env)
             _last_event_type = ""   # 记录最后一次事件类型
             _timeout_secs = None    # Issue #494：触发超时的实际上限秒数（归因文案用）
 
@@ -552,7 +578,7 @@ class HwcloudACPBackend:
 
                 # 全局超时（#282：对齐外层 RUNTIME_TASK_TIMEOUT，默认 3600s）
                 if time.time() - _global_start > _GLOBAL_TIMEOUT:
-                    _gt_src = os.environ.get("RUNTIME_TASK_TIMEOUT")
+                    _gt_src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
                     _gt_src_txt = f"env RUNTIME_TASK_TIMEOUT={_gt_src}" if _gt_src else "default 3600s"
                     log.warning(f"{label}hwcloud ACP global timeout ({_GLOBAL_TIMEOUT:.0f}s, {_gt_src_txt}) exceeded")
                     prompt_result["stopReason"] = "timeout"

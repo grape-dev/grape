@@ -21,6 +21,7 @@ configs/db-backend.json
 configs/db-backend.json.*
 configs/db-backend.json.bak-*
 configs/server-config.json
+configs/runtime-config.json
 configs/vlm-config.json
 configs/SETUP-GUIDE.md
 skills/custom/

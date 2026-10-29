@@ -470,11 +470,21 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         return {"status": "skip", "latency": 0, "error": f"unknown engine: {engine_name}"}
     if cli_path:
         cmd = [cli_path] + cmd[1:]
+    # Issue #471 C2：codearts 探测走专用数据目录（预写目录信任）——
+    # 探测进程无 TTY，folder-trust 闸门未信任 cwd 时会 exit 1 误报引擎不健康。
+    _probe_env = None
+    if engine_name == "codearts":
+        try:
+            from src.runtime.codearts import probe_env as _codearts_probe_env
+            _probe_env = {**os.environ, **_codearts_probe_env(os.getcwd())}
+        except Exception as _pe:
+            log.warning(f"codearts probe env setup failed: {_pe}")
     start = _time_mod.time()
     try:
         result = _subprocess.run(
             cmd, capture_output=True, text=True,
             timeout=_PROBE_TIMEOUT, stdin=_subprocess.DEVNULL,
+            env=_probe_env,
         )
         latency = round(_time_mod.time() - start, 1)
         if result.returncode == 0:
@@ -845,6 +855,22 @@ def _env_float(name, default):
         return float(os.environ.get(name, default))
     except Exception:
         return float(default)
+
+
+def _watchdog_timeout_for(env: dict | None = None) -> float:
+    """worker 任务级看门狗超时（秒，Issue #470 收敛点）。
+
+    取 RUNTIME_TASK_TIMEOUT：任务级 env 优先（服务端 enqueue 时经 env_extra 注入的
+    统一配置值——env > 管理台 meta > 配置文件）→ os.environ → 默认 3600；
+    新任务经 setdefault 注入后任务级值生效，worker 本地 os.environ 仅在任务 env
+    无该键时兜底（本地直跑/旧任务）。
+    与 hermes/hwcloud `_global_timeout_for(env)` 同优先级语义。
+    """
+    _src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
+    try:
+        return float(_src) if _src not in (None, "") else 3600.0
+    except Exception:
+        return 3600.0
 
 
 def _env_int(name, default):
@@ -1685,6 +1711,53 @@ def _submit_linked_repo_prs(task: dict, env: dict):
     log.info(f"linked PR summary: {len(_created)} created, {len(_skipped)} skipped, {len(_failed)} failed")
 
 
+def _prepare_codearts_data_dir(tid: str, cwd: str) -> str:
+    """方案 G + Issue #471 C2：创建 codearts per-task 独立数据目录并预写配置。
+
+    预写内容（均幂等）：
+    1. storage/permission/global.json + config.json（write/edit 等权限 allow）
+    2. storage/sandbox/config.json（network_policy=allow_all）
+    3. settings.json——目录信任（C2）：把任务 cwd 加入 trustedFolders，
+       根治无 TTY 环境 folder-trust 闸门 exit 1。
+    4. symlink sandbox_runner / system/skills 指向宿主机（避免每次解压 66MB）
+
+    返回 per-task cli-data 目录（调用方设为 KERNEL_DATA_DIR）。
+    """
+    import os as _os
+    _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
+    _data_dir = _os.path.join(_tasks_base, tid)
+    _cli_data = _os.path.join(_data_dir, "cli-data")
+    # 1. 预写 global.json + config.json (write/edit/external_directory_write=allow)
+    _perm_dir = _os.path.join(_cli_data, "storage", "permission")
+    _os.makedirs(_perm_dir, exist_ok=True)
+    for _fname in ("global.json", "config.json"):
+        _f = _os.path.join(_perm_dir, _fname)
+        if not _os.path.exists(_f):
+            with open(_f, "w") as f:
+                json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
+    # 2. 预写 sandbox/config.json (network_policy=allow_all)
+    _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
+    _os.makedirs(_sandbox_dir, exist_ok=True)
+    _sandbox_cfg = _os.path.join(_sandbox_dir, "config.json")
+    if not _os.path.exists(_sandbox_cfg):
+        with open(_sandbox_cfg, "w") as f:
+            f.write('{"network_policy": "allow_all"}')
+    # 3. 预写 settings.json：目录信任（Issue #471 C2，无 TTY 不再致命退出）
+    from src.runtime.codearts import write_trust_settings
+    write_trust_settings(_cli_data, [cwd])
+    # 4. symlink sandbox_runner + system/skills 指向宿主机
+    _home = _os.path.expanduser("~")
+    _host_cli = _os.path.join(_home, ".codeartsdoer", "cli-data")
+    _sandbox_runner = _os.path.join(_cli_data, "sandbox_runner")
+    if not _os.path.exists(_sandbox_runner) and _os.path.isdir(_os.path.join(_host_cli, "sandbox_runner")):
+        _os.symlink(_os.path.join(_host_cli, "sandbox_runner"), _sandbox_runner)
+    _sys_skills = _os.path.join(_cli_data, "system", "skills")
+    if not _os.path.exists(_sys_skills) and _os.path.isdir(_os.path.join(_host_cli, "system", "skills")):
+        _os.makedirs(_os.path.join(_cli_data, "system"), exist_ok=True)
+        _os.symlink(_os.path.join(_host_cli, "system", "skills"), _sys_skills)
+    return _cli_data
+
+
 async def _execute_task(client, task, engine_name: str = ""):
     """执行单个任务：git worktree 前置 → 落地技能/知识 → 占位符替换 → stream_runtime → 回报。
 
@@ -1942,49 +2015,18 @@ async def _execute_task(client, task, engine_name: str = ""):
 
     # ── 方案 G: codearts per-task 独立数据目录 ──
     # 通过 KERNEL_DATA_DIR 指向 per-task 临时目录，预写 global.json + sandbox/config.json
-    # 实现 per-process 权限隔离，不影响宿主机全局配置。
+    # + settings.json（Issue #471 C2 目录信任）实现 per-process 权限隔离，
+    # 不影响宿主机全局配置。
     # env 是局部变量，并发安全（不用 os.environ 避免 async 交错竞态）。
     # 通过 env_extra 传给 stream_agent → env.update(env_extra) 覆盖 get_env 的默认值。
     _engine = engine_name or ""
     if "codearts" in _engine.lower():
         try:
+            env["KERNEL_DATA_DIR"] = _prepare_codearts_data_dir(tid, cwd)
+            # 注册清理：task 结束时删除临时目录
             _tasks_base = _os.environ.get("CODEARTS_TASKS_DIR", "/var/cache/codearts-tasks")
-            _data_dir = _os.path.join(_tasks_base, tid)
-            _cli_data = _os.path.join(_data_dir, "cli-data")
-            # 1. 预写 global.json (write/edit/external_directory_write=allow)
-            _perm_dir = _os.path.join(_cli_data, "storage", "permission")
-            _os.makedirs(_perm_dir, exist_ok=True)
-            _global_json = _os.path.join(_perm_dir, "global.json")
-            if not _os.path.exists(_global_json):  # 幂等
-                with open(_global_json, "w") as f:
-                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
-            # 1b. 预写 config.json (codearts 26.8.8 getEffectivePermissions 实际读取路径)
-            _config_json = _os.path.join(_perm_dir, "config.json")
-            if not _os.path.exists(_config_json):  # 幂等
-                with open(_config_json, "w") as f:
-                    json.dump(_CODEARTS_ALLOW_PERMS, f, indent=2)
-            # 2. 预写 sandbox/config.json (network_policy=allow_all)
-            _sandbox_dir = _os.path.join(_cli_data, "storage", "sandbox")
-            _os.makedirs(_sandbox_dir, exist_ok=True)
-            _sandbox_cfg = _os.path.join(_sandbox_dir, "config.json")
-            if not _os.path.exists(_sandbox_cfg):  # 幂等
-                with open(_sandbox_cfg, "w") as f:
-                    f.write('{"network_policy": "allow_all"}')
-            # 3. symlink sandbox_runner + system/skills 指向宿主机（避免每次解压 66MB）
-            _home = _os.path.expanduser("~")
-            _host_cli = _os.path.join(_home, ".codeartsdoer", "cli-data")
-            _sandbox_runner = _os.path.join(_cli_data, "sandbox_runner")
-            if not _os.path.exists(_sandbox_runner) and _os.path.isdir(_os.path.join(_host_cli, "sandbox_runner")):
-                _os.symlink(_os.path.join(_host_cli, "sandbox_runner"), _sandbox_runner)
-            _sys_skills = _os.path.join(_cli_data, "system", "skills")
-            if not _os.path.exists(_sys_skills) and _os.path.isdir(_os.path.join(_host_cli, "system", "skills")):
-                _os.makedirs(_os.path.join(_cli_data, "system"), exist_ok=True)
-                _os.symlink(_os.path.join(_host_cli, "system", "skills"), _sys_skills)
-            # 4. 设置 KERNEL_DATA_DIR 到 env dict（局部变量，并发安全）
-            env["KERNEL_DATA_DIR"] = _cli_data
-            # 5. 注册清理：task 结束时删除临时目录
             _res.track_tmp_pattern(f"{_tasks_base}/{tid}")
-            log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {_cli_data}")
+            log.info(f"[Agent:{task.get('agent_type') or ''}] codearts data dir: {env['KERNEL_DATA_DIR']}")
         except Exception as e:
             log.warning(f"codearts data dir setup failed: {e}")
 
@@ -2178,8 +2220,32 @@ async def _report_llm_usage(client, tid: str, collector, done) -> None:
         log.warning(f"llm usage collect/report failed task={tid}: {e}")
 
 
-async def _reregister(client, installed, device_name, cli_version: str = "") -> list[int] | None:
+def _register_failed(ids: list[int], installed: list[dict]) -> bool:
+    """Issue #471 C1：注册请求成功（HTTP 200）即注册成功。
+
+    无引擎 worker 的空 ids 是正常状态（服务端按实例键 upsert，无引擎则无行），
+    不判失败、不退出——否则 daemon/systemd Restart=always 无限重启、安装脚本
+    30s 注册验证失败触发回滚循环（鸡生蛋：引擎未装 → 注册"失败" → 重启 → 永远装不上）。
+    仅当本机有引擎而服务端未返回任何 runtime id 时才视为真失败（服务端异常）。
+    """
+    return (not ids) and bool(installed)
+
+
+async def _reregister(client, prev_installed, device_name, cli_version: str = "") -> tuple[list[int], dict, list] | None:
     """重新注册获取新 runtime id。先重置连接池清除 CLOSE-WAIT 死连接，再注册。
+
+    Issue #471 C1：
+    - 每次重注册前重新发现本机引擎（不用启动时快照）——启动时无引擎的 worker，
+      用户后续安装引擎后无需重启即可自动注册上线（≤ RE_REGISTER_INTERVAL 秒）。
+    - 返回 (runtime_ids, engine_by_rid, installed)；无引擎时返回 ([], {}, []) 同样算成功。
+    - 有引擎但服务端返回空 ids → 返回 None（真失败）。
+
+    Issue #471 QA 建议（S2/S3）：
+    - S2：engine_by_rid 按 name 配对（服务端 register 返回 runtimes 明细含
+      name；个别引擎被跳过时 zip 位置对齐会错位，按 name 配对根治）。
+    - S3：重扫瞬时为空（此前快照有引擎）视为异常扫描——沿用上次快照、
+      返回 None（调用方保留原 runtime_ids），不把空列表注册上去清空在线态；
+      真实无引擎（快照也为空）仍正常注册空列表（C1 语义不变）。
 
     凭据被吊销（401 → CredentialRevokedError）时直接上抛——调用方退出进程，
     不再当普通失败无限退避重试。
@@ -2188,19 +2254,58 @@ async def _reregister(client, installed, device_name, cli_version: str = "") -> 
     await client.reset_session()
     log.warning("re-registering with server to refresh runtime ids...")
     try:
+        # C1：重新发现本机引擎（启动后新安装的引擎在此被拾起）
+        installed = [r for r in _discover_local_runtimes() if r.get("installed")]
+        # S3：重扫瞬时为空（快照曾有引擎）→ 沿用快照不注册（异常扫描自愈交给下轮）
+        if not installed and prev_installed:
+            log.warning("re-scan found no engines while snapshot had "
+                        f"{len(prev_installed)}; keeping snapshot (transient scan?)")
+            return None
         _ls = _scan_local_skills()
         ids, _probe = await client.register(installed, device_name=device_name, cli_version=cli_version, local_skills=_ls)
         if ids:
             for rid in ids:
                 await client.recover_orphans(rid)
+            from src.runtime.instances import instance_name
+            # S2：按 name 配对（服务端返回顺序/跳过与本地发现列表可能不一致，
+            # zip 位置对齐在个别引擎被跳过时会错位）
+            _name_by_rid = {}
+            for _rt in (_probe_runtimes_detail(client) or []):
+                if isinstance(_rt, dict) and _rt.get("id") is not None:
+                    _name_by_rid[_rt["id"]] = str(_rt.get("name") or "").strip().lower()
+            _local_by_name = {str(r.get("name") or "").strip().lower(): r for r in installed}
+            engine_by_rid = {}
+            for rid in ids:
+                _nm = _name_by_rid.get(rid, "")
+                _r = _local_by_name.get(_nm) if _nm else None
+                if _r is None:
+                    # 兜底：按位置对齐（服务端未返回明细/name 未知时保持旧行为）
+                    _idx = ids.index(rid)
+                    _r = installed[_idx] if _idx < len(installed) else {}
+                engine_by_rid[rid] = instance_name(_r.get("name", ""), device_name, 0)
             log.info(f"re-registered successfully, new runtime ids: {ids}")
-            return ids
-        log.warning("re-register returned empty ids")
+            return ids, engine_by_rid, installed
+        if not installed:
+            # C1：无引擎为正常状态——注册成功，ids 为空
+            log.info("re-registered with no engines installed (normal state); "
+                     "engines will auto-register once installed")
+            return [], {}, []
+        log.warning("re-register returned empty ids despite installed engines")
     except CredentialRevokedError:
         raise  # 凭据已吊销——重试无意义，上抛退出
     except Exception as e:
         log.warning(f"re-register failed: {e}")
     return None
+
+
+def _probe_runtimes_detail(client):
+    """S2 辅助：读取最近一次 register 响应中的 runtimes 明细（{id, name}）。
+
+    真实 RuntimeClient.register 只返回 (ids, probe_url)；服务端响应明细
+    挂在 client.last_register_detail（无则为 None，兜底按位置对齐）。
+    测试 Fake 可自行提供该属性。
+    """
+    return getattr(client, "last_register_detail", None)
 
 
 _report_queue_obj = None
@@ -2281,9 +2386,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
         # ---- 定期重注册（防 id 静默失效）----
         now = asyncio.get_running_loop().time()
         if now - last_reregister >= RE_REGISTER_INTERVAL:
-            new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-            if new_ids:
-                runtime_ids = new_ids
+            _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+            if _rr is not None:
+                runtime_ids, _new_ebr, installed = _rr
+                if _new_ebr:
+                    engine_by_rid = _new_ebr
                 heartbeat_fail_streak = 0
             last_reregister = asyncio.get_running_loop().time()
 
@@ -2380,7 +2487,13 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
-                task_timeout = _env_float("RUNTIME_TASK_TIMEOUT", 3600)
+                # Issue #470：看门狗超时任务级 env 优先（服务端统一配置经 env_extra 注入），
+                # worker 本地 os.environ（runtime.env 显式设置）仍可覆盖，默认 3600 不变。
+                try:
+                    _task_env = json.loads(t.get("env_extra") or "{}")
+                except Exception:
+                    _task_env = {}
+                task_timeout = _watchdog_timeout_for(_task_env)
                 # 立即标记 running（不等引擎首个事件）：hermes chat -q 冷启动+模型响应
                 # 常 >120s 才产出首个事件，保持 dispatched 会被服务端 120s 回收逻辑
                 # 误判未执行 → 回收重跑循环（attempts 累加 3 次直接 failed，实测 #49 100042）。
@@ -2537,9 +2650,11 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
 
             if heartbeat_fail_streak >= HEARTBEAT_FAIL_THRESHOLD:
                 log.warning(f"heartbeat failed {heartbeat_fail_streak} times in a row, triggering re-register")
-                new_ids = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
-                if new_ids:
-                    runtime_ids = new_ids
+                _rr = await _reregister(client, installed, device_name, cli_version=_read_local_worker_version())
+                if _rr is not None:
+                    runtime_ids, _new_ebr, installed = _rr
+                    if _new_ebr:
+                        engine_by_rid = _new_ebr
                     heartbeat_fail_streak = 0
                     last_reregister = asyncio.get_running_loop().time()
                 else:
@@ -3024,7 +3139,10 @@ def main():
         runtimes = _discover_local_runtimes()
         installed = [r for r in runtimes if r.get("installed")]
         if not installed:
-            log.warning("No runtimes installed locally, registering empty")
+            # Issue #471 C1：无引擎是正常初始状态（注册成功即成功），不再用 warning 误导
+            log.info("No engines installed locally yet, registering with empty engine list "
+                     "(install engines later, e.g. `npm install -g opencode-ai`; "
+                     "they will auto-register without worker restart)")
         device = os.environ.get("RUNTIME_DEVICE_NAME", "")
         if not device:
             from src.runtime.os_adapter import hostname as _hostname
@@ -3039,9 +3157,12 @@ def main():
                   "Reinstall with a new credential to rejoin.", file=sys.stderr)
             log.error("register 401: credential revoked/invalid, exiting (code 42)")
             raise SystemExit(42)
-        if not ids:
+        if _register_failed(ids, installed):
             log.error("Register failed (check RUNTIME_TOKEN / server URL)")
             return
+        # Issue #471 C1：无引擎 worker（ids=[]）注册成功即成功——正常状态进入主循环：
+        # 心跳维持凭据在线，周期性 re-register 自动拾起后续安装的引擎。
+        # 此前判失败退出 → daemon/systemd 无限重启 + 安装脚本 30s 验证失败回滚循环。
         # v3.0 启动探测（B）：GET probe_url 验证完整链路（网络+签名+读取）
         global _OBS_SUPPORT
         if probe_url:

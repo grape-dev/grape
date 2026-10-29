@@ -20,7 +20,25 @@ _SESSION_DIR_TTL_DAYS = int(os.environ.get("SWEEPER_SESSION_DIR_TTL_DAYS", "3"))
 # running·dispatched 超长未收敛（worker 侧任务超时 RUNTIME_TASK_TIMEOUT=1h，6h 仍运行必为孤儿）
 _QUEUED_STALE_MINUTES = int(os.environ.get("SWEEPER_QUEUED_STALE_MINUTES", "180"))
 _DEAD_RUNTIME_MINUTES = int(os.environ.get("SWEEPER_DEAD_RUNTIME_MINUTES", "30"))
-_LONG_RUNNING_MINUTES = int(os.environ.get("SWEEPER_LONG_RUNNING_MINUTES", "360"))
+
+
+def _long_running_minutes() -> int:
+    """running·dispatched 孤儿回收阈值（分钟）。
+
+    Issue #470：默认值随统一超时配置派生（timeout 分钟 × 6——worker 超时 1h 时
+    6h 仍运行必为孤儿），不再写死 360；SWEEPER_LONG_RUNNING_MINUTES env 兜底
+    优先级保留（运维显式调参 > 配置派生）。
+    """
+    _env = os.environ.get("SWEEPER_LONG_RUNNING_MINUTES", "").strip()
+    if _env:
+        try:
+            v = int(float(_env))
+            if v > 0:
+                return v
+        except Exception:
+            pass
+    from src.config import get_orphan_threshold_minutes
+    return get_orphan_threshold_minutes()
 
 _QUEUED_STALE_TXT = "中断：queued 超时无 worker 认领（sweeper 兜底回收）"
 _DEAD_RUNTIME_TXT = "中断：running/dispatched 悬空，所属 runtime 已离线或不存在（sweeper 兜底回收）"
@@ -409,7 +427,7 @@ def sweep_stuck_agent_tasks_once(queued_stale_minutes: int | None = None,
     now = time.time()
     q_stale = _QUEUED_STALE_MINUTES if queued_stale_minutes is None else int(queued_stale_minutes)
     d_stale = _DEAD_RUNTIME_MINUTES if dead_runtime_minutes is None else int(dead_runtime_minutes)
-    l_stale = _LONG_RUNNING_MINUTES if long_running_minutes is None else int(long_running_minutes)
+    l_stale = _long_running_minutes() if long_running_minutes is None else int(long_running_minutes)
     if l_stale <= d_stale:
         l_stale = d_stale  # 长超时阈值不得小于 runtime 死亡阈值（避免重叠误读）
 

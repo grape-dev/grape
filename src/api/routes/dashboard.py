@@ -9,6 +9,12 @@ from src.config import log
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
+def _stuck_minutes() -> int:
+    """stuck 预警阈值（分钟，Issue #470：随统一超时配置派生，默认超时 3600s → 22min）。"""
+    from src.config import get_stuck_threshold_minutes
+    return get_stuck_threshold_minutes()
+
+
 # ===== Issue #180: 本机带宽占用率差分采样缓存 =====
 _BW_SNAPSHOT = {"ts": 0.0, "bytes": 0}
 
@@ -130,8 +136,9 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
         repo_key = _repo_keys[0]
         _repo_filter = f" AND repo_key IN ({','.join('?' * len(_repo_keys))})"
         _repo_params = _repo_keys
-    # stuck 阈值：running 超 22 分钟（worker 默认 RUNTIME_TASK_TIMEOUT=3600s=1h，22min 能在超时前预警）
-    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=22)).isoformat()
+    # stuck 阈值：running 超过统一超时配置的派生预警窗口（默认超时 3600s → 22min，
+    # 超时前预警；Issue #470 起随 RUNTIME_TASK_TIMEOUT 配置派生，不再写死 22min）
+    stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_stuck_minutes())).isoformat()
 
     # 组织隔离：非个人组织只显示该组织的引擎/凭据
     from src.user.org_db import is_org_personal

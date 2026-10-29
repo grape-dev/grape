@@ -147,7 +147,32 @@ def list_specs(template_id: str = "", user: dict = Depends(require_no_session_to
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
 
 
-GRAPE_AI_DEVSPACE_TEMPLATE = "4ef59a2b4d3d4909aacd80f6007c00b2"
+def GRAPE_AI_DEVSPACE_TEMPLATE() -> str:
+    """Grape AI Devspace 模板 ID 单一定义（Issue #470：原先模块级常量 +
+    create_environment 内两处重复写死，现收敛到统一配置 getter）。
+
+    优先级：管理台 meta > configs/runtime-config.json > 默认（现有模板）。
+    保留原名称（list_environments 过滤、tests 引用），仅从常量变函数。
+    """
+    from src.config import get_devstage_template_id
+    return get_devstage_template_id()
+
+
+def _create_env_call_args(body: dict) -> dict:
+    """create_environment 的云侧调用参数组装（Issue #470 抽取，便于单测）。
+
+    规格从统一 getter 取（env GRAPE_DEVSTAGE_* > 管理台 meta > runtime-config.json
+    > 默认 3c6g/ARM）——原写死 flavor_id/cores/memory/arch 与重复 template_id 已收敛。
+    """
+    from src.config import get_devstage_flavor
+    f = get_devstage_flavor()
+    return {
+        "template_id": GRAPE_AI_DEVSPACE_TEMPLATE(),
+        "flavor_id": f["flavor_id"],
+        "cores": f["cores"],
+        "memory": f["memory"],
+        "arch": f["arch"],
+    }
 
 
 @router.get("/environments", operation_id="devstage_environments", summary="List dev environments", description="Lists DevStage environments created from the Grape AI Devspace template, with worker_online flags.")
@@ -166,12 +191,12 @@ def list_environments(user: dict = Depends(require_no_session_token)):
         for e in envs:
             tpl = (e.get("template_id") or "").strip()
             env_vars = e.get("_env_vars") or {}
-            if tpl == GRAPE_AI_DEVSPACE_TEMPLATE and env_vars.get("GRAPE_DEV_SERVER"):
+            if tpl == GRAPE_AI_DEVSPACE_TEMPLATE() and env_vars.get("GRAPE_DEV_SERVER"):
                 filtered.append(e)
         # 防御：如果过滤后为空但原始列表非空，说明 v1 detail 可能获取失败，
         # 此时回退到仅按 template_id 过滤（放宽条件，至少排除非 Grape 模板的环境）
         if not filtered and envs:
-            tpl_only = [e for e in envs if (e.get("template_id") or "").strip() == GRAPE_AI_DEVSPACE_TEMPLATE]
+            tpl_only = [e for e in envs if (e.get("template_id") or "").strip() == GRAPE_AI_DEVSPACE_TEMPLATE()]
             if tpl_only:
                 log.warning(f"GRAPE_DEV_SERVER 过滤后为空，回退到仅按 template_id 过滤，匹配 {len(tpl_only)} 个")
                 filtered = tpl_only
@@ -202,34 +227,35 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(require_no_sess
     云侧规格下线/变更时可用 GRAPE_DEVSTAGE_* 环境变量覆盖兜底，失败错误码透传前端可定位。
     """
     ak, sk = _get_ak_sk(user)
-    # 默认 AI DEVSPACE 模板
-    template_id = "4ef59a2b4d3d4909aacd80f6007c00b2"
-    # 固定规格（此前实时查 specs[0]，规格可见性/排序受华为侧发布状态影响）；
-    # 云侧规格下线/变更时可用环境变量覆盖兜底（QA 审查建议）：
-    #   GRAPE_DEVSTAGE_FLAVOR_ID / GRAPE_DEVSTAGE_CORES / GRAPE_DEVSTAGE_MEMORY
-    flavor_id = os.environ.get("GRAPE_DEVSTAGE_FLAVOR_ID", "23ebdfe3b2d34cc4b34a1aaf03d27c54")
-    cores = int(os.environ.get("GRAPE_DEVSTAGE_CORES", "3"))
-    memory = int(os.environ.get("GRAPE_DEVSTAGE_MEMORY", "6"))
+    # Issue #470：模板 ID + 固定规格从统一配置取（env GRAPE_DEVSTAGE_* 覆盖兜底保留，
+    # 云侧规格下线/变更时可经 env/管理台/runtime-config.json 调整，不再改代码）。
+    _args = _create_env_call_args(body.model_dump())
+    template_id = _args["template_id"]
+    flavor_id = _args["flavor_id"]
+    cores = _args["cores"]
+    memory = _args["memory"]
+    arch = _args["arch"]
     try:
         env_vars = None
         init_scripts = None
         if body.grape_server and body.grape_token:
             # 2026-10-15 修复（devspace 注入错地址）：前端传来的 grape_server 是
             # window.location.origin（用户浏览页面用的地址，如生产 www.grapedev.cn），
-            # 不等于 CLI 可达的服务端基址（worker 心跳实际用 meta.server_base_url，
-            # 如 https://worker.grapedev.cn）。以服务端权威值为准：前端值仅在与
-            # server_base_url 一致时采纳（dev 环境两者恰好相同），否则一律用
-            # get_server_base_url()——从源头保证 RUNTIME_SERVER_URL 正确。
+            # 不等于 CLI 可达的服务端基址（worker 心跳实际用 worker 回连地址，
+            # 如 https://worker.grapedev.cn）。以服务端权威值为准：前端值仅与
+            # worker_connect_url 一致时采纳（dev 环境两者恰好相同），否则一律用
+            # get_worker_connect_url()——从源头保证 RUNTIME_SERVER_URL 正确。
+            # Issue #471 E1：改用拆分后的 worker 回连地址（未配置回退 server_base_url）。
             _server_base = ""
             try:
-                from src.user.db import get_server_base_url
-                _server_base = (get_server_base_url() or "").strip().rstrip("/")
+                from src.user.db import get_worker_connect_url
+                _server_base = (get_worker_connect_url() or "").strip().rstrip("/")
             except Exception:
                 pass
             _grape_server = (body.grape_server or "").strip().rstrip("/")
             if _server_base and _grape_server != _server_base:
                 log.info(
-                    f"devstage: grape_server overridden by server_base_url "
+                    f"devstage: grape_server overridden by worker_connect_url "
                     f"(frontend={_grape_server} -> {_server_base})")
                 _grape_server = _server_base
             env_vars = {
@@ -253,7 +279,7 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(require_no_sess
             ]
         devstage_id = _create_env(
             ak, sk, name=body.name, cores=cores,
-            arch="ARM", memory=memory,
+            arch=arch, memory=memory,
             flavor_id=flavor_id, template_id=template_id,
             env_vars=env_vars, init_scripts=init_scripts,
         )
@@ -286,22 +312,50 @@ def environment_action(action: str, body: dict = {}, user: dict = Depends(requir
 
 @router.delete("/environments/{devstage_id}", operation_id="devstage_environment_delete", summary="Delete dev environment", description="Deletes a dev environment and its worker credential.")
 def delete_environment(devstage_id: str, user: dict = Depends(require_no_session_token)):
-    """删除开发环境，同时删除对应的 Worker 凭据"""
+    """删除开发环境，同时删除对应的 Worker 凭据。
+
+    Issue #513/#413：删除不存在的环境返回 404 统一包络（不回传上游云厂商
+    错误码/文案），上游真实故障维持 502。两层判别：
+    1. 前置 _list_envs 可枚举且无该 id → 直接 404（不发起注定失败的删除调用）；
+    2. 删除调用抛 DevStageError 时按 not_found 分类（上游 parameter invalid 类
+       错误码白名单，见 devstage_client._is_not_found_error）。
+    """
     ak, sk = _get_ak_sk(user)
-    # 先查环境名（用于匹配凭据）
+    # 先查环境名（用于匹配凭据）。列表可用时该 id 不在列表 = 环境不存在：
+    # 直接 404（此前「不存在」信号在此被吞掉后仍发起删除，由上游报
+    # parameter invalid 再被误映射 502）。
+    env_name = ""
+    found = False
+    list_ok = False
     try:
         envs = _list_envs(ak, sk)
-        env_name = ""
+        list_ok = True
         for e in envs:
             if e.get("id") == devstage_id:
+                found = True
                 env_name = e.get("name", "")
                 break
     except DevStageError:
-        env_name = ""
+        # 列表接口本身故障（网络/上游异常）：不能据此断定资源不存在，
+        # 交由删除调用结果分类（避免把上游 list 故障误报成 404）。
+        log.warning(f"devstage delete: pre-check list failed for {devstage_id}, fall through to delete")
+    if list_ok and not found:
+        raise HTTPException(status_code=404, detail={
+            "code": 404,
+            "message": "DevStage environment not found",
+        })
     # 删除 DevStage 环境
     try:
         result = _delete_env(ak, sk, devstage_id)
     except DevStageError as e:
+        if e.not_found:
+            # 上游明确「资源不存在」（如 HD.97420111 parameter invalid）：
+            # 翻译为本地 404 统一包络，不泄露上游错误码/文案
+            log.info(f"devstage delete: upstream not-found for {devstage_id}: {e}")
+            raise HTTPException(status_code=404, detail={
+                "code": 404,
+                "message": "DevStage environment not found",
+            })
         raise HTTPException(status_code=502, detail={"code": e.code, "message": str(e)})
     # 删除对应的 Worker 凭据和 runtime（精确匹配环境名）
     if env_name:

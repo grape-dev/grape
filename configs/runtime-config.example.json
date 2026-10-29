@@ -1,0 +1,10 @@
+{
+  "runtime_task_timeout": 3600,
+  "devstage": {
+    "template_id": "4ef59a2b4d3d4909aacd80f6007c00b2",
+    "flavor_id": "23ebdfe3b2d34cc4b34a1aaf03d27c54",
+    "cores": 3,
+    "memory": 6,
+    "arch": "ARM"
+  }
+}

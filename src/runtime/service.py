@@ -303,13 +303,27 @@ _TASK_RECOVER_STALE_SECONDS = int(os.environ.get("TASK_RECOVER_STALE_SECONDS", "
 # Issue #259 Optional：启动期配置耦合告警——防双跑前提是 TASK_RECOVER_STALE_SECONDS >= worker RUNTIME_TASK_TIMEOUT。
 # 二者默认均 3600s（安全），但部署侧单边调大 RUNTIME_TASK_TIMEOUT 而不调 TASK_RECOVER_STALE_SECONDS
 # 会导致服务端在 worker 仍本地执行时重派 → 双跑。启动期告警一次，运行期不再重复。
-_WORKER_TASK_TIMEOUT_DEFAULT = int(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+# Issue #470：改读统一配置 getter（env > 管理台 meta > runtime-config.json > 默认 3600）。
+from src.config import get_runtime_task_timeout as _get_runtime_task_timeout_cfg
+_WORKER_TASK_TIMEOUT_DEFAULT = _get_runtime_task_timeout_cfg()
 if _TASK_RECOVER_STALE_SECONDS < _WORKER_TASK_TIMEOUT_DEFAULT:
     log.warning(
         f"Config coupling risk: TASK_RECOVER_STALE_SECONDS={_TASK_RECOVER_STALE_SECONDS}s < "
         f"RUNTIME_TASK_TIMEOUT={_WORKER_TASK_TIMEOUT_DEFAULT}s — running tasks may be re-dispatched "
         f"before worker local timeout, causing double execution (Issue #259)"
     )
+
+
+def _runtime_timeout_env_kv() -> dict:
+    """Issue #470：统一超时配置下发给 worker 的 env 键值。
+
+    服务端 enqueue_task 时以此 setdefault 进 env_extra（JSON 列），worker 端
+    _execute_task env.update(env_extra) 后：
+      - 看门狗 _watchdog_timeout_for(env) 任务级优先
+      - hermes/hwcloud _global_timeout_for(max_exec, env) 任务级优先
+    worker 本地 os.environ 显式设置仍最高优（优先级语义见 src/config.py）。
+    """
+    return {"RUNTIME_TASK_TIMEOUT": str(_get_runtime_task_timeout_cfg())}
 
 
 def _remote_runtime_ready(runtime_id: int) -> bool:
@@ -848,6 +862,10 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     env = dict(env_extra or {})
     for k, v in _collect_server_env(user_id, account).items():
         env.setdefault(k, v)
+    # Issue #470：统一超时配置下发（setdefault——上层 env_extra 显式设置优先）。
+    # worker 端看门狗 + ACP 全局超时均任务级 env 优先，管理台/配置文件改后对新任务生效。
+    for k, v in _runtime_timeout_env_kv().items():
+        env.setdefault(k, v)
     # Issue-45 M2：签发会话级临时 token 注入 GRAPE_SESSION_TOKEN（存在即有效，删除即失效）。
     # session_key=task_id（精确失效、不误伤并发同类会话）；chat 任务绑定 USER_ID 用户身份，
     # devops 事件任务无用户概念（user_id=0，仓库身份）。
@@ -869,8 +887,9 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     _server_url = server_url or ""
     if not _server_url:
         try:
-            from src.user.db import get_server_base_url
-            _server_url = get_server_base_url()
+            # Issue #471 E1：任务下发的 server_url 是 worker 回连地址
+            from src.user.db import get_worker_connect_url
+            _server_url = get_worker_connect_url()
         except Exception:
             pass
     with db_lock:

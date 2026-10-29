@@ -60,7 +60,12 @@
     "verify_failed": "校验失败",
     "github_bot_username": "GitHub bot username",
     "webhook_url": "webhook_url",
-    "gitcode_webhook_token": "gitcode_webhook_token"
+    "gitcode_webhook_token": "gitcode_webhook_token",
+    "runtime_params": "运行参数",
+    "runtime_params_desc": "超时与 DevSpace 规格",
+    "runtime_timeout_hint": "任务超时（秒，默认 3600）；引擎全局超时/看门狗/stuck 预警/孤儿回收均随此派生，env RUNTIME_TASK_TIMEOUT 可覆盖",
+    "devstage_hint": "AI DevSpace 默认规格（3c6g/ARM）；留空保持现值，env GRAPE_DEVSTAGE_* 可覆盖",
+    "effective_value": "生效值 {{v}}（env 覆盖）"
   },
   "token_health": {
     "title": "Bot Token 健康状态",

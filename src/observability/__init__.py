@@ -459,7 +459,15 @@ import threading as _threading
 _sampler_cache: dict = {"snapshot": None, "taken_at": 0}
 _sampler_lock = _threading.Lock()
 _SAMPLER_CACHE_TTL = 8  # 秒
-_STUCK_MINUTES = 22  # running > 22min 视为卡住（worker 默认 RUNTIME_TASK_TIMEOUT=3600s=1h，22min 能在超时前预警）
+
+
+def _stuck_minutes() -> int:
+    """stuck 预警阈值（分钟，Issue #470：随统一超时配置派生，不再写死 22）。
+
+    采样器 8s TTL，每轮取当前配置值——管理台/配置文件修改后 ≤8s 生效。
+    """
+    from src.config import get_stuck_threshold_minutes
+    return get_stuck_threshold_minutes()
 
 
 # 采样器 Gauge 描述（用 ConstMetric，避免 stale series）
@@ -520,7 +528,7 @@ def collect_business_sampler():
         from datetime import datetime, timezone, timedelta
 
         now_ts = _time.time()
-        stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_STUCK_MINUTES)).isoformat()
+        stuck_cutoff = (datetime.now(timezone.utc) - timedelta(minutes=_stuck_minutes())).isoformat()
 
         with db_lock:
             c = db.cursor()

@@ -248,6 +248,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Noto Sans SC",sans
         <div class="hint" data-i18n="admin.config.bot_usernames_fill_hint">手动填写或点击上方「校验」后用返回的用户名自动回填</div>
       </div>
 
+      <!-- 运行参数 (Issue #470) -->
+      <div class="card">
+        <div class="card-h"><h2><span data-i18n="admin.config.runtime_params">运行参数</span><span class="tag" data-i18n="admin.config.runtime_params_desc">超时与 DevSpace 规格</span></h2></div>
+        <div class="f-row"><label>runtime_task_timeout</label><input id="f_runtime_task_timeout" type="number" min="1" placeholder="3600"><span class="st" id="s_runtime_task_timeout"></span></div>
+        <div class="hint" data-i18n="admin.config.runtime_timeout_hint">任务超时（秒，默认 3600）；引擎全局超时/看门狗/stuck 预警/孤儿回收均随此派生，env RUNTIME_TASK_TIMEOUT 可覆盖</div>
+        <div class="f-row"><label>devstage_template_id</label><input id="f_devstage_template_id" placeholder="4ef59a2b…"></div>
+        <div class="f-row"><label>devstage_flavor_id</label><input id="f_devstage_flavor_id" placeholder="23ebdfe3…"></div>
+        <div class="f-row"><label>devstage_cores</label><input id="f_devstage_cores" type="number" min="1" placeholder="3"></div>
+        <div class="f-row"><label>devstage_memory</label><input id="f_devstage_memory" type="number" min="1" placeholder="6"></div>
+        <div class="f-row"><label>devstage_arch</label>
+          <select id="f_devstage_arch">
+            <option value="ARM">ARM</option>
+            <option value="x86">x86</option>
+          </select>
+        </div>
+        <div class="hint" data-i18n="admin.config.devstage_hint">AI DevSpace 默认规格（3c6g/ARM）；留空保持现值，env GRAPE_DEVSTAGE_* 可覆盖</div>
+      </div>
+
       <!-- Bot Token Health (Issue #348) -->
       <div class="card">
         <div class="card-h">

@@ -188,6 +188,18 @@
       $2('f_webhook_url').value = c.webhook_url || '';
       $2('f_webhook_url').placeholder = c.webhook_url_present ? I18N.t('admin.config.configured') : 'GitCode webhook callback URL';
       applyToField('f_gitcode_webhook_token', c.gitcode_webhook_token_present, c.gitcode_webhook_token_tail);
+      // 运行参数 (Issue #470)：回显当前值 + 生效值标注（env 覆盖时管理台值不生效）
+      $2('f_runtime_task_timeout').value = c.runtime_task_timeout || '';
+      var _eff_t = c.runtime_task_timeout_effective;
+      var _st_t = $2('s_runtime_task_timeout');
+      if (_st_t) _st_t.textContent = (_eff_t != null && String(_eff_t) !== String(c.runtime_task_timeout))
+        ? I18N.t('admin.config.effective_value', {v: _eff_t}) : '';
+      $2('f_devstage_template_id').value = c.devstage_template_id || '';
+      $2('f_devstage_flavor_id').value = c.devstage_flavor_id || '';
+      $2('f_devstage_cores').value = c.devstage_cores || '';
+      $2('f_devstage_memory').value = c.devstage_memory || '';
+      _loadedDevstageArch = c.devstage_arch || '';
+      $2('f_devstage_arch').value = _loadedDevstageArch || 'ARM';
   }
 
   function applyToField(fieldId, present, tail) {
@@ -195,6 +207,10 @@
     if (present) { el.value = ''; el.placeholder = I18N.t('admin.config.configured_tail', {tail: tail}); }
     else { el.value = ''; el.placeholder = I18N.t('admin.config.not_configured'); }
   }
+
+  // devstage_arch 仅变化时提交（QA Suggested）：select 恒有值，若每次保存都写入
+  // meta 会隐式固化该层；记录加载时的现值，保存时无变化则不提交（保持现值）。
+  var _loadedDevstageArch = '';
 
   function saveConfig() {
     $2('saveBtn').disabled = true;
@@ -223,6 +239,19 @@
     if (webhookUrl) body.webhook_url = webhookUrl;
     var webhookToken = $2('f_gitcode_webhook_token').value.trim();
     if (webhookToken) body.gitcode_webhook_token = webhookToken;
+    // 运行参数 (Issue #470)：留空不提交（保持现值）；数值字段转 int
+    var rtTimeout = parseInt($2('f_runtime_task_timeout').value, 10);
+    if (rtTimeout > 0) body.runtime_task_timeout = rtTimeout;
+    var dsTpl = $2('f_devstage_template_id').value.trim();
+    if (dsTpl) body.devstage_template_id = dsTpl;
+    var dsFlavor = $2('f_devstage_flavor_id').value.trim();
+    if (dsFlavor) body.devstage_flavor_id = dsFlavor;
+    var dsCores = parseInt($2('f_devstage_cores').value, 10);
+    if (dsCores > 0) body.devstage_cores = dsCores;
+    var dsMem = parseInt($2('f_devstage_memory').value, 10);
+    if (dsMem > 0) body.devstage_memory = dsMem;
+    var dsArch = $2('f_devstage_arch').value;
+    if (dsArch && dsArch !== _loadedDevstageArch) body.devstage_arch = dsArch;
     api('/config', { method: 'PUT', body: body }).then(function (d) {
       toast(I18N.t('admin.config.save_success'), true);
       showCfg();

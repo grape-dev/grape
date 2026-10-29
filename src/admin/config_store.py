@@ -27,6 +27,18 @@ _BOT_FIELDS = [
     "bot_usernames",
 ]
 
+# 运行参数字段（Issue #470：写死配置抽取到管理台）——写 DB meta，运行时经
+# src/config.py 统一 getter 读取（env > meta > runtime-config.json > 默认）。
+# 非敏感，明文回显。空值/0 = 未设置（回退下一层），沿用「只保存非空字段」约定。
+_RUNTIME_FIELDS = [
+    "runtime_task_timeout",
+    "devstage_template_id",
+    "devstage_flavor_id",
+    "devstage_cores",
+    "devstage_memory",
+    "devstage_arch",
+]
+
 # OAuth 扁平字段 → oauth-providers.json provider 条目映射
 # flat_field: (provider, cred_field)
 _OAUTH_FIELD_MAP = {
@@ -113,6 +125,33 @@ def read_public_config() -> dict:
     # allow_signup — 归一化为 "1"/"0"（兼容 meta 中可能存在的 "true"/"yes" 旧值）
     from src.auth.signup_policy import _is_allow_signup
     out["allow_signup"] = "1" if _is_allow_signup() else "0"
+    # 运行参数（Issue #470）：明文回显管理台设置值（未设置回退展示默认）+
+    # 当前生效值（含 env/文件层，便于管理员核对覆盖关系）
+    from src.config import (get_runtime_task_timeout, get_devstage_template_id,
+                            get_devstage_flavor, RUNTIME_CONFIG_PATH)
+    _rt_meta = {f: (get_meta_value(f) or "") for f in _RUNTIME_FIELDS}
+    _fl_eff = get_devstage_flavor()
+
+    def _rt_int(meta_val, fallback):
+        """meta 数值字段防御性转换（QA Minor2）：非数字/非正数脏数据
+        （绕过 API 写库）回退默认，避免 /api/admin/config GET 500。"""
+        try:
+            v = int(meta_val)
+            return v if v > 0 else fallback
+        except Exception:
+            return fallback
+
+    # 未设置（空）时回显默认值——管理员看到的「当前值」语义；设置过则回显设置值
+    out["runtime_task_timeout"] = _rt_int(_rt_meta["runtime_task_timeout"], get_runtime_task_timeout())
+    out["devstage_template_id"] = _rt_meta["devstage_template_id"] or get_devstage_template_id()
+    out["devstage_flavor_id"] = _rt_meta["devstage_flavor_id"] or _fl_eff["flavor_id"]
+    out["devstage_cores"] = _rt_int(_rt_meta["devstage_cores"], _fl_eff["cores"])
+    out["devstage_memory"] = _rt_int(_rt_meta["devstage_memory"], _fl_eff["memory"])
+    out["devstage_arch"] = _rt_meta["devstage_arch"] or _fl_eff["arch"]
+    out["runtime_task_timeout_effective"] = get_runtime_task_timeout()
+    out["devstage_template_id_effective"] = get_devstage_template_id()
+    out["devstage_flavor_effective"] = _fl_eff
+    out["runtime_config_file"] = os.path.exists(RUNTIME_CONFIG_PATH)
     return out
 
 
@@ -125,6 +164,25 @@ def save_config(payload: dict) -> dict:
     只更新 payload 中给出的字段；未给出的字段保留原值。
     返回落盘后的完整配置（脱敏）。
     """
+    # 0. 运行参数字段（Issue #470）→ DB meta + 失效统一配置缓存
+    runtime_payload = {k: v for k, v in payload.items() if k in _RUNTIME_FIELDS}
+    if runtime_payload:
+        from src.user.db import set_meta_value
+        for field, val in runtime_payload.items():
+            # 数值字段类型校验：超时/cores/memory 必须为正整数（值本身已在路由层
+            # 通过 ConfigBody 类型 + gt 约束校验，这里防御性兜底）
+            if field in ("runtime_task_timeout", "devstage_cores", "devstage_memory"):
+                try:
+                    if int(val) <= 0:
+                        continue
+                except Exception:
+                    continue
+            set_meta_value(field, str(val))
+        # 当前实例立即生效（其他实例 ≤60s TTL）
+        from src.config import invalidate_runtime_config_cache
+        invalidate_runtime_config_cache()
+        log.info("admin config_store: runtime config updated (DB meta)")
+
     # 1. Bot 字段 → DB meta（唯一权威源）
     # Issue #345: 集群部署下 DB 是唯一权威源，不再写文件。
     # global-bot-token.json 保留只读，仅供启动迁移读取（迁移后不再被运行时访问）。

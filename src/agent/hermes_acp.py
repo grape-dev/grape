@@ -31,19 +31,39 @@ import signal
 from typing import Generator
 from src.config import log
 
+_bwrap_fail_notified = False
 
-def _global_timeout_for(max_exec_seconds: float) -> float:
+
+def _note_bwrap_fail_once(message: str) -> None:
+    """issue #500：bwrap 包装失败告警只发一次（后续降 DEBUG），防逐命令刷屏。
+
+    放在调用方模块（而非 src.agent.sandbox）是因为本函数需覆盖 sandbox
+    自身导入失败的场景，此时不能依赖 sandbox 内的助手。
+    """
+    global _bwrap_fail_notified
+    if _bwrap_fail_notified:
+        log.debug(message)
+        return
+    _bwrap_fail_notified = True
+    log.warning(message)
+
+
+def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hermes ACP 内循环全局墙钟上限（#282 对齐修复）。
 
-    取 RUNTIME_TASK_TIMEOUT 环境变量（与 src/runtime/agent.py 任务级看门狗
-    `_env_float("RUNTIME_TASK_TIMEOUT", 3600)` 同一配置源、同默认值），
-    解析失败回退 3600；下限保护 max_exec_seconds——全局上限始终 ≥ 静默超时窗口，
+    取 RUNTIME_TASK_TIMEOUT（与 src/runtime/agent.py 任务级看门狗同一配置源、
+    同默认值），下限保护 max_exec_seconds——全局上限始终 ≥ 静默超时窗口，
     防止配置异常把全局上限压到静默超时之下。
     旧逻辑 `max_exec_seconds * 2`（=1200s 写死倍率）会在长任务 20 分钟处
     硬切仍在正常输出的任务，已废弃。
+
+    Issue #470：任务级 env 优先（服务端经 env_extra 注入的统一配置值），
+    os.environ 次之（worker runtime.env 手动调参/测试），默认 3600——
+    与同文件 _silent_timeout_for(env) 模式一致（#378/#416 先例）。
     """
+    _src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
     try:
-        _v = float(os.environ.get("RUNTIME_TASK_TIMEOUT", "3600"))
+        _v = float(_src) if _src not in (None, "") else 3600.0
     except Exception:
         _v = 3600.0
     return max(_v, float(max_exec_seconds))
@@ -202,16 +222,25 @@ class HermesACPBackend:
         if hasattr(os, "getpgid"):
             _popen_kwargs["start_new_session"] = True
 
-        # 组件2：文件系统隔离（GRAPE_AGENT_SANDBOX 开 + bwrap 可用时套白名单锁）
+        # 组件2：文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
+        # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音。
+        # 直接读 src.config（与 sandbox_enabled() 同语义），规避 sandbox 模块
+        # 自身导入损坏时短路失效）
         _acp_cmd = [agent_cmd, "acp"]
         try:
-            from src.agent.sandbox import build_bwrap_cmd
-            _wrap = build_bwrap_cmd(cwd, backend_name="hermes")
-            if _wrap:
-                _acp_cmd = _wrap + _acp_cmd
-                log.info(f"{label}hermes ACP sandboxed via bwrap (cwd={cwd})")
-        except Exception as _bw_e:
-            log.warning(f"{label}hermes ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
+            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+        except Exception:
+            _sbx_on = False
+        if _sbx_on:
+            try:
+                from src.agent.sandbox import build_bwrap_cmd
+                _wrap = build_bwrap_cmd(cwd, backend_name="hermes")
+                if _wrap:
+                    _acp_cmd = _wrap + _acp_cmd
+                    log.info(f"{label}hermes ACP sandboxed via bwrap (cwd={cwd})")
+            except Exception as _bw_e:
+                _note_bwrap_fail_once(
+                    f"{label}hermes ACP bwrap wrap failed, running unsandboxed: {_bw_e}")
 
         proc = subprocess.Popen(
             _acp_cmd,
@@ -537,7 +566,7 @@ class HermesACPBackend:
             _SILENT_TIMEOUT = _silent_timeout_for(env)
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后静默 60s → 先做一次「完成证据」检查
             _TEXT_INCOMPLETE_TIMEOUT = _text_incomplete_timeout_for()  # 无证据时最多再等到这里 → 按疑似提前结束收尾
-            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds)
+            _GLOBAL_TIMEOUT = _global_timeout_for(max_exec_seconds, env)
             _last_event_type = ""   # 记录最后一次事件类型
             _timeout_secs = None    # Issue #494：触发超时的实际上限秒数（归因文案用）
             _rec_check_n = -1       # 已完成收尾记录检查的 collected_text 长度（避免静默期每 50ms 重复解析）
@@ -609,7 +638,7 @@ class HermesACPBackend:
 
                 # 全局超时（#282：对齐外层 RUNTIME_TASK_TIMEOUT，默认 3600s）
                 if time.time() - _global_start > _GLOBAL_TIMEOUT:
-                    _gt_src = os.environ.get("RUNTIME_TASK_TIMEOUT")
+                    _gt_src = (env or {}).get("RUNTIME_TASK_TIMEOUT") or os.environ.get("RUNTIME_TASK_TIMEOUT")
                     _gt_src_txt = f"env RUNTIME_TASK_TIMEOUT={_gt_src}" if _gt_src else "default 3600s"
                     log.warning(f"{label}hermes ACP global timeout ({_GLOBAL_TIMEOUT:.0f}s, {_gt_src_txt}) exceeded")
                     prompt_result["stopReason"] = "timeout"
