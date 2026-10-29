@@ -137,6 +137,7 @@ def test_list_sub_skills_from_obs(obs_env):
     assert sub1["description"] == "sub one"
     # sub1: SKILL.md + references/extra.md + references/nested/deep.md = 3
     assert sub1["file_count"] == 3, f"file_count wrong: {sub1}"
+    assert sub1["readable"] is True, f"OBS 枚举项必然可读: {sub1}"
 
 
 def test_read_sub_skill_from_obs(obs_env):
@@ -247,3 +248,51 @@ def test_package_sub_traversal_404(obs_env):
     with pytest.raises(HTTPException) as exc:
         package_sub_skill(sid, "../" + SKILL, user={"id": "1001"})
     assert exc.value.status_code == 404
+
+
+def test_sub_skill_list_readable_and_detail_404(tmp_path, monkeypatch):
+    """Issue #509（维护方回退口径「列出 + 标注」）：无 SKILL.md 的子目录仍列出且 readable=false，detail 仍 404。
+
+    本地分支复现：references/ 下存在 empty_dir（无 SKILL.md，含 helper.md）与 valid_sub（有 SKILL.md）。
+    monkeypatch resolve_official_skill_path 指向受控 tmp 目录，不依赖真实 skills/ 运行时目录。
+    断言：list 同时含 empty_dir(readable=false, file_count 口径不变) 与 valid_sub(readable=true)；
+    detail 读 empty_dir → 404 统一包络 {"code":404,...}；读 valid_sub → 200 content。
+    """
+    with db_lock:
+        db.execute("DELETE FROM skill WHERE skill_name LIKE 'local-sub-test%'")
+        db.commit()
+
+    ref_dir = tmp_path / "references"
+    (ref_dir / "empty_dir").mkdir(parents=True)
+    (ref_dir / "empty_dir" / "helper.md").write_text("helper", encoding="utf-8")
+    (ref_dir / "valid_sub").mkdir()
+    (ref_dir / "valid_sub" / "SKILL.md").write_text(
+        "---\nname: valid_sub\ndescription: valid\n---\n\nvalid content", encoding="utf-8")
+
+    monkeypatch.setattr(
+        "src.config.resolve_official_skill_path",
+        lambda skill_name: str(tmp_path / "SKILL.md"))
+
+    sid = _insert_skill("local-sub-test", "official", "issue-509-test", "local-sub-test", "")
+    try:
+        result = list_sub_skills(sid, user={"id": "1"})
+        by_name = {s["name"]: s for s in result["sub_skills"]}
+        assert "empty_dir" in by_name, f"empty_dir must be listed (list+annotate), got: {sorted(by_name)}"
+        assert "valid_sub" in by_name, f"valid_sub should be listed, got: {sorted(by_name)}"
+        assert by_name["empty_dir"]["readable"] is False, f"empty_dir readable must be False: {by_name['empty_dir']}"
+        assert by_name["valid_sub"]["readable"] is True
+        assert by_name["empty_dir"]["file_count"] == 1, "file_count 口径不变：无 SKILL.md 也统计目录内文件"
+        assert by_name["empty_dir"]["display_name"] == "empty_dir"
+        assert by_name["empty_dir"]["description"] == ""
+
+        detail = read_sub_skill(sid, "valid_sub", user={"id": "1"})
+        assert "valid content" in detail["content"]
+
+        with pytest.raises(HTTPException) as exc:
+            read_sub_skill(sid, "empty_dir", user={"id": "1"})
+        assert exc.value.status_code == 404
+        assert exc.value.detail.get("code") == 404, f"detail 统一包络缺失: {exc.value.detail}"
+    finally:
+        with db_lock:
+            db.execute("DELETE FROM skill WHERE skill_name LIKE 'local-sub-test%'")
+            db.commit()

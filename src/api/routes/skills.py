@@ -1017,10 +1017,13 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
         if not os.path.isdir(sub_dir):
             continue
         sub_md = os.path.join(sub_dir, "SKILL.md")
+        # Issue #509（维护方回退口径「列出 + 标注」）：列表恢复枚举 references/ 全部目录（不静默过滤），
+        # 新增 readable 标注（= 该目录下是否存在 SKILL.md）；无 SKILL.md 详情仍 404（read_sub_skill 不变）。
+        readable = os.path.isfile(sub_md)
         display_name = entry
         description = ""
         file_count = 0
-        if os.path.isfile(sub_md):
+        if readable:
             try:
                 with open(sub_md, encoding="utf-8") as f:
                     front = f.read(500)
@@ -1039,6 +1042,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
             "display_name": display_name,
             "description": description,
             "file_count": file_count,
+            "readable": readable,
         })
 
     return {"skill_name": skill_name, "sub_skills": subs}

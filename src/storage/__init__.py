@@ -748,6 +748,8 @@ def list_zip_sub_skills(zip_bytes: bytes, skill_name: str) -> list:
                     "display_name": display_name,
                     "description": description,
                     "file_count": file_count,
+                    # Issue #509「列出 + 标注」：zip 枚举仅含 SKILL.md entry，故必然可读
+                    "readable": True,
                 }
     except Exception as e:
         log.warning(f"list_zip_sub_skills failed: {e}")
