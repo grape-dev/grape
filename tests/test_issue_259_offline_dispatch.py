@@ -222,6 +222,44 @@ class TestReapStaleRuntimes:
             c.execute("SELECT status FROM agent_runtimes WHERE id=?", (eng,))
             assert c.fetchone()[0] == "offline"     # 引擎被标 offline
 
+    def test_recovered_count_multi_running(self):
+        """PR #722 审查修复：多条 running 回收时 recovered_tasks 逐条累计。
+
+        原 bug：`recovered += c.rowcount` 在 per-task UPDATE 循环外，只计入最后
+        一条（1）；循环零次时残留 SELECT 的 -1，导致 recovered_tasks 为负。
+        """
+        eng = _mk_engine("opencode-rc2", credential_id=_mk_cred("c-rc2"),
+                         status="online", last_seen=_stale_ts(400))
+        old_ts = (datetime.datetime.now(datetime.timezone.utc)
+                  - datetime.timedelta(seconds=3700)).isoformat()
+        older_ts = (datetime.datetime.now(datetime.timezone.utc)
+                    - datetime.timedelta(seconds=3800)).isoformat()
+        t_old1 = self._mk_task(eng, "running", started_at=old_ts)
+        t_old2 = self._mk_task(eng, "running", started_at=older_ts)
+        t_fresh = self._mk_task(eng, "running", started_at=_now())  # 未超时，不回收
+        result = svc.reap_stale_runtimes()
+        entry = next(r for r in result["reaped"] if r["runtime_id"] == eng)
+        assert entry["recovered_tasks"] == 2  # 两条超时 running 逐条累计
+        with db_lock:
+            c = db.cursor()
+            for tid in (t_old1, t_old2):
+                c.execute("SELECT status FROM agent_tasks WHERE id=?", (tid,))
+                assert c.fetchone()[0] == "queued"
+            c.execute("SELECT status FROM agent_tasks WHERE id=?", (t_fresh,))
+            assert c.fetchone()[0] == "running"
+
+    def test_recovered_count_zero_when_no_tasks(self):
+        """PR #722 审查修复：running 循环零次命中时 recovered_tasks 为 0 而非 -1
+        （原 bug：残留前一条 SELECT 的 rowcount=-1 被累加成负数）。"""
+        eng = _mk_engine("opencode-rc3", credential_id=_mk_cred("c-rc3"),
+                         status="online", last_seen=_stale_ts(400))
+        # 只有未超时的 running 任务：dispatched UPDATE rowcount=0，
+        # 宽口径 SELECT 命中 0 行（旧代码此处 recovered 会被累加 SELECT 的 -1）
+        self._mk_task(eng, "running", started_at=_now())
+        result = svc.reap_stale_runtimes()
+        entry = next(r for r in result["reaped"] if r["runtime_id"] == eng)
+        assert entry["recovered_tasks"] == 0
+
 
 class TestDirectDispatchStaleCheck:
     """Issue #259：pipeline_executor 直选定向加心跳检查（通过 _enqueue_via_pipeline 验证降级）。"""

@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from src.config import log
 from src.observability import alert_policy as _policy
+from src.runtime.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
 # ===== 种子规则 =====
 # 7 条与 deploy/alerts.yml 一一对应（seed_source 记原名）；后 3 条是 P1-3 新增的
@@ -376,14 +377,16 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                 if (status or "").lower() != "completed":
                     m["_bad"] += cnt
             # ②b Issue #516 M3：超时失败计数（worker 超时 kill 上报的
-            # "timed out after" 签名），按仓库聚合供 task_timeout 告警规则消费
+            # "timed out after" 签名，PR #722 起常量集中在 task_timeout.py），
+            # 按仓库聚合供 task_timeout 告警规则消费
+            _to_sig = f"%{_TIMEOUT_FAIL_SIGNATURE}%"
             c.execute(
                 "SELECT repo_key, COUNT(*) FROM agent_tasks"
                 " WHERE repo_key IS NOT NULL AND repo_key != ''"
                 "   AND status='failed'"
                 "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
-                "   AND (result_text LIKE '%timed out after%' OR errors LIKE '%timed out after%')"
-                " GROUP BY repo_key", (fail_cutoff,))
+                "   AND (result_text LIKE ? OR errors LIKE ?)"
+                " GROUP BY repo_key", (fail_cutoff, _to_sig, _to_sig,))
             for repo_key, n in c.fetchall():
                 m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
                                               "_done": 0.0, "_bad": 0.0,

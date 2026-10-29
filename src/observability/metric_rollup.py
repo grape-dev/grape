@@ -30,6 +30,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 from src.api.time_utils import normalize_event_time
 from src.config import log
 from src.observability.overview import _p95   # 复用同一分位数实现，避免两套口径
+from src.runtime.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
 RES_MINUTE = "minute"
 RES_HOUR = "hour"
@@ -163,14 +164,16 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
             elif st == "cancelled":
                 m.setdefault("task_cancelled", []).append(float(n))
 
-        # ②b Issue #516 M3：超时失败（timed out after 签名，worker 侧超时 kill 上报）
-        #    按仓库计数——与告警指标同口径，供趋势/仪表盘消费
+        # ②b Issue #516 M3：超时失败（timed out after 签名，worker 侧超时 kill 上报，
+        #     PR #722 起常量集中在 task_timeout.py）按仓库计数——与告警指标同口径，
+        #     供趋势/仪表盘消费
+        _to_sig = f"%{_TIMEOUT_FAIL_SIGNATURE}%"
         c.execute("SELECT repo_key, COUNT(*) FROM agent_tasks"
                   " WHERE completed_at >= ? AND completed_at < ?"
                   "   AND status='failed'"
-                  "   AND (result_text LIKE '%timed out after%' OR errors LIKE '%timed out after%')"
+                  "   AND (result_text LIKE ? OR errors LIKE ?)"
                   "   AND repo_key IS NOT NULL AND repo_key != ''"
-                  " GROUP BY repo_key", (s_iso, e_iso))
+                  " GROUP BY repo_key", (s_iso, e_iso, _to_sig, _to_sig))
         for repo_key, n in c.fetchall():
             bucket(repo_key).setdefault("task_timeout", []).append(float(n))
 

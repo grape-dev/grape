@@ -48,6 +48,11 @@ DEFAULT_TIMEOUT_RETRIES = 1
 #: 重试前退避间隔（秒）
 DEFAULT_RETRY_BACKOFF_SEC = 30.0
 
+#: 超时 fail 消息签名（PR #722 审查建议集中定义）：worker 侧超时 kill 上报
+#: `task timed out after {N}s`，alerts.py / metric_rollup.py 的 M3 观测按此
+#: LIKE 过滤聚合——签名常量集中在此，避免双处硬编码后消息改版导致指标静默失效。
+TIMEOUT_FAIL_SIGNATURE = "timed out after"
+
 _CONFIG_CACHE: Dict[str, Any] = {"path": None, "mtime": None, "data": {}, "loaded_at": 0.0}
 
 

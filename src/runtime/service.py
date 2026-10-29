@@ -3279,20 +3279,23 @@ def reap_stale_runtimes() -> dict:
                 # 回收 running 任务 → queued（可能还在假死 worker 本地执行，阈值对齐 worker
                 # 本地超时——worker 本地到点自杀后才重派，双跑窗口=0）。
                 # Issue #516：阈值按 agent_type 超时配置化对齐（coding 默认 7200s），
-                # 防服务端在 worker 仍在本地执行长任务时重派双跑。宽口径预筛（最大阈值）
-                # 后逐任务按各自 agent 的 cutoff 精确判定，避免逐行扫全表。
+                # 防服务端在 worker 仍在本地执行长任务时重派双跑。宽口径预筛（PR #722
+                # 审查修复：取各 agent 超时的**最小值**作为最宽回收窗口——原取最大值
+                # 会把短超时 agent（如 vod 3600s）已到回收点、但未满最大阈值 7200s 的
+                # running 任务永久漏掉）后逐任务按各自 agent 的 cutoff 精确判定。
                 try:
                     from src.runtime.task_timeout import (AGENT_TIMEOUT_DEFAULTS,
                                                           DEFAULT_TASK_TIMEOUT, load_timeout_config)
                     _cfg_ad = load_timeout_config().get("agent_defaults") or {}
-                    _max_to = max([DEFAULT_TASK_TIMEOUT] +
+                    _min_to = min([DEFAULT_TASK_TIMEOUT,
+                                   _WORKER_TASK_TIMEOUT_DEFAULT] +
                                   [float(v) for v in AGENT_TIMEOUT_DEFAULTS.values()] +
                                   [float(v) for v in _cfg_ad.values()
                                    if isinstance(v, (int, float)) and float(v) > 0])
                 except Exception:
-                    _max_to = float(_TASK_RECOVER_STALE_SECONDS)
+                    _min_to = float(_TASK_RECOVER_STALE_SECONDS)
                 _wide_cutoff = (datetime.now(timezone.utc) - timedelta(
-                    seconds=max(_max_to, _TASK_RECOVER_STALE_SECONDS))).isoformat()
+                    seconds=min(_min_to, _TASK_RECOVER_STALE_SECONDS))).isoformat()
                 c.execute(
                     "SELECT id, agent_type, started_at FROM agent_tasks"
                     " WHERE runtime_id=? AND status='running'"
@@ -3308,7 +3311,9 @@ def reap_stale_runtimes() -> dict:
                         " attempts=attempts+1 WHERE id=? AND status='running'",
                         (_task_id,)
                     )
-                recovered += c.rowcount
+                    # PR #722 审查：rowcount 必须在每次 UPDATE 后立即累计（放循环外只会
+                    # 计入最后一条，且循环零次时残留 SELECT 的 -1，导致 recovered 为负）
+                    recovered += c.rowcount
                 if recovered > 0:
                     c.execute(
                         "UPDATE agent_runtimes SET busy_slots=0 WHERE id=?",
