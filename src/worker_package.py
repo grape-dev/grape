@@ -214,47 +214,105 @@ def _python_subset_entries(py_root: str) -> list[str]:
     return sorted(out)
 
 
-def _find_python() -> str | None:
-    """定位可打包的 Python 3.10+ standalone 构建目录；找不到返回 None。"""
-    def _scan() -> list[str]:
-        found: list[str] = []
-        try:
-            if os.path.isdir(UV_PYTHON_DIR):
-                for d in os.listdir(UV_PYTHON_DIR):
-                    full = os.path.join(UV_PYTHON_DIR, d)
-                    if not os.path.isdir(full) or not d.startswith("cpython-"):
-                        continue
-                    try:
-                        ver = tuple(int(x) for x in d.split("-")[1].split(".")[:2])
-                    except Exception:
-                        continue
-                    if ver >= (3, 10) and os.path.isfile(os.path.join(full, "bin", "python3")):
-                        found.append(full)
-        except Exception as e:
-            log.warning(f"worker_package: scan python dir failed: {e}")
-        return found
+# Issue #515: 支持打包的 Linux 架构（与 install-worker.sh uname -m 归一化一致）。
+# 构建机为 aarch64 时，旧实现只会捆绑单架构解释器 → x86_64 目标机选中后
+# `Exec format error` 提前退出、无法到达在线兜底。现按架构双目录捆绑：
+# python-x86_64/ 与 python-aarch64/，install-worker.sh 按 uname -m 选对应目录。
+PY_ARCH_ALIASES = {
+    "x86_64": "x86_64", "amd64": "x86_64",
+    "aarch64": "aarch64", "arm64": "aarch64",
+}
+_UV_INSTALL_REQUEST = "3.12"
 
-    candidates = _scan()
-    if not candidates:
-        # 尝试现场用 uv 装一个（幂等，装过即跳过）
-        uv = shutil.which("uv")
-        if uv:
+
+def _py_ver_key(py_root: str) -> tuple:
+    """从 standalone 目录名解析版本 key（cpython-<ver>-...），失败返回 0 元组。"""
+    try:
+        return tuple(int(x) for x in os.path.basename(py_root).split("-")[1].split("."))
+    except Exception:
+        return (0, 0, 0)
+
+
+def _arch_label(parts: list[str]) -> str | None:
+    """从 uv standalone 目录名分段识别架构标签（兼容两种命名），非支持架构返回 None。
+
+    - 新式：cpython-3.12.8-x86_64-unknown-linux-gnu
+    - 旧式：cpython-3.11.15-linux-aarch64-gnu
+    """
+    for p in parts:
+        if p in PY_ARCH_ALIASES:
+            return PY_ARCH_ALIASES[p]
+    return None
+
+
+def _scan_pythons() -> dict[str, str]:
+    """扫描 UV_PYTHON_DIR 下可打包的 Linux standalone Python，返回 {arch_label: py_root}。
+
+    每个架构取版本最高者；仅收 linux standalone（worker 安装目标是 linux），
+    mac/win 平台由 wheels 矩阵与 ps1 覆盖，不入包。
+    """
+    found: dict[str, str] = {}
+    try:
+        if os.path.isdir(UV_PYTHON_DIR):
+            for d in os.listdir(UV_PYTHON_DIR):
+                full = os.path.join(UV_PYTHON_DIR, d)
+                if not os.path.isdir(full) or not d.startswith("cpython-"):
+                    continue
+                parts = d.split("-")
+                try:
+                    ver = tuple(int(x) for x in parts[1].split(".")[:2])
+                except Exception:
+                    continue
+                if "linux" not in parts or ver < (3, 10):
+                    continue
+                arch = _arch_label(parts)
+                if arch is None:
+                    continue
+                if not os.path.isfile(os.path.join(full, "bin", "python3")):
+                    continue
+                if arch not in found or _py_ver_key(full) > _py_ver_key(found[arch]):
+                    found[arch] = full
+    except Exception as e:
+        log.warning(f"worker_package: scan python dir failed: {e}")
+    return found
+
+
+def _find_pythons() -> dict[str, str]:
+    """定位可打包的 Python 3.10+ standalone 构建（按架构），缺失架构现场用 uv 补齐。
+
+    返回 {arch_label: py_root}；找不到任何 python 返回空 dict（包将依赖系统 Python）。
+    uv 安装失败（请求串不被支持 / 网络不可达）仅告警（含 stderr 尾部）：保持单架构
+    打包 + 安装端 --version 校验兜底，不阻断主流程。
+
+    交叉架构安装用完整请求串 `cpython-3.12-linux-<arch>-gnu`（uv 官方 Python 请求
+    格式 <impl>-<ver>-<os>-<arch>-<libc>）。`uv python install` 没有 --arch 参数
+    （本机 uv 0.12.3 实测 `unexpected argument '--arch'` rc=2），完整请求串随
+    uv 任意版本可用；实测 3.12 → 落盘 cpython-3.12.13-linux-x86_64-gnu。
+    """
+    found = _scan_pythons()
+    if set(found) == set(PY_ARCH_ALIASES.values()):
+        return found
+    uv = shutil.which("uv")
+    if uv:
+        for arch in sorted(PY_ARCH_ALIASES.values()):
+            if arch in found:
+                continue
+            request = f"cpython-{_UV_INSTALL_REQUEST}-linux-{arch}-gnu"
             try:
-                subprocess.run([uv, "python", "install", "3.12"],
-                               capture_output=True, text=True, timeout=300)
-                candidates = _scan()
+                r = subprocess.run([uv, "python", "install", request],
+                                   capture_output=True, text=True, timeout=300)
+                # QA R2：非零退出不触发 except，必须显式检查并告警（附 stderr 尾部），
+                # 否则补装静默失败、双架构悄悄退化为单架构无人知晓
+                if r.returncode != 0:
+                    log.warning(
+                        f"worker_package: uv python install ({request}) failed "
+                        f"with rc={r.returncode}: {(r.stderr or '')[-300:]}")
             except Exception as e:
-                log.warning(f"worker_package: uv python install failed: {e}")
-    if not candidates:
+                log.warning(f"worker_package: uv python install ({request}) failed: {e}")
+        found = _scan_pythons()
+    if not found:
         log.warning("worker_package: no bundled Python found; package will rely on system Python>=3.10")
-        return None
-    # 版本最高者优先
-    def _key(p: str):
-        try:
-            return tuple(int(x) for x in os.path.basename(p).split("-")[1].split("."))
-        except Exception:
-            return (0, 0, 0)
-    return max(candidates, key=_key)
+    return found
 
 
 def _python_fingerprint(py_root: str | None) -> str:
@@ -277,17 +335,67 @@ def _python_fingerprint(py_root: str | None) -> str:
     return h.hexdigest()[:8]
 
 
-def _ensure_wheels(py_version: str = "") -> str:
-    """下载 worker 依赖 wheels 到缓存目录（离线安装用），返回目录。
+def _pythons_fingerprint(pythons: dict[str, str]) -> str:
+    """多架构 python 目录联合指纹（架构标签 + 单目录指纹），任一变化触发包重建。"""
+    h = hashlib.sha256()
+    for arch in sorted(pythons):
+        h.update(arch.encode("utf-8"))
+        h.update(_python_fingerprint(pythons[arch]).encode("utf-8"))
+    return h.hexdigest()[:8]
 
-    - py_version 指定目标 Python 版本（如 "3.11"）：与包内 bundle python 匹配，
-      保证离线安装可用；为空则按当前解释器（构建机）平台下载；
-    - requirements 变更或 py_version 变更时重新下载；
-    - 目标机器平台/Python 版本不匹配时离线安装会回退在线（见 install-worker.sh）。
+
+# Issue #499: 随包预置多平台 wheels 矩阵——安装端 pip 按 wheel 平台标签自动精确匹配
+# 本机平台（不匹配的 wheel 自动跳过），矩阵外平台（macOS 等）离线失败回退在线安装。
+# 保留 aarch64（构建机原生平台，现有 arm worker 离线安装能力不回退）。
+WHEEL_PLATFORMS = [
+    ("manylinux2014_x86_64", "linux x86_64"),
+    ("manylinux2014_aarch64", "linux aarch64"),
+    ("win_amd64", "windows amd64"),
+]
+
+
+def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:
+    """pip download 依赖 wheels 到 dest（可带跨平台 --platform 参数），返回退出码。
+
+    失败仅告警不抛异常：单平台失败由安装端在线兜底（见 install-worker.sh/ps1）。
+    """
+    cmd = [sys.executable, "-m", "pip", "download",
+           "-r", REQUIREMENTS_PATH, "-d", dest,
+           "--only-binary=:all:", "--retries", "3", "--timeout", "30",
+           "-i", PIP_INDEX]
+    if py_version:
+        cmd += ["--python-version", py_version]
+    cmd += platform_args
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if r.returncode != 0:
+            log.warning(f"worker_package: pip download wheels failed: {r.stderr[-400:]}")
+        return r.returncode
+    except Exception as e:
+        log.warning(f"worker_package: pip download wheels exception: {e}")
+        return 1
+
+
+def _wheels_cache_key(py_version: str) -> str:
+    """wheels 缓存键：py_version + 平台矩阵 + requirements 指纹（任一变更重新下载）。"""
+    return f"{py_version}:{'|'.join(p for p, _ in WHEEL_PLATFORMS)}:{_requirements_hash()}"
+
+
+def _ensure_wheels(py_version: str = "") -> str:
+    """按平台矩阵下载 worker 依赖 wheels 到缓存目录（多平台预置），返回目录。
+
+    - 按 WHEEL_PLATFORMS 矩阵为每个平台各下载一份 wheels（linux x86_64 /
+      linux aarch64 / win_amd64），统一平铺混装于 WHEELS_DIR——纯 Python wheel
+      天然去重，二进制 wheel 文件名带平台标签互不冲突；
+    - 安装端 `pip install --no-index --find-links <wheels>` 按 wheel 平台标签
+      自动精确匹配本机平台（不兼容 wheel 被跳过），实现常见平台首装离线；
+    - py_version 指定目标 Python 版本（与包内 bundle python 匹配）；为空则按
+      当前解释器（构建机）版本；
+    - 矩阵外平台（macOS/其他架构）或 Python 版本不匹配时安装端回退在线。
     """
     os.makedirs(WHEELS_DIR, exist_ok=True)
     marker = os.path.join(WHEELS_DIR, ".req-hash")
-    cur = f"{py_version}:{_requirements_hash()}"
+    cur = _wheels_cache_key(py_version)
     old = ""
     try:
         old = open(marker, encoding="utf-8").read().strip()
@@ -296,25 +404,23 @@ def _ensure_wheels(py_version: str = "") -> str:
     has_whl = any(f.endswith(".whl") for f in os.listdir(WHEELS_DIR))
     if cur == old and has_whl:
         return WHEELS_DIR
-    log.info(f"worker_package: downloading wheels (py={py_version or 'build-host'}, index={PIP_INDEX})")
+    dl_py = py_version or f"{sys.version_info.major}.{sys.version_info.minor}"
+    log.info(
+        f"worker_package: downloading wheels for platforms "
+        f"{[label for _, label in WHEEL_PLATFORMS]} (py={dl_py}, index={PIP_INDEX})"
+    )
     for f in os.listdir(WHEELS_DIR):
         if f.endswith(".whl"):
             try:
                 os.remove(os.path.join(WHEELS_DIR, f))
             except Exception:
                 pass
-    try:
-        cmd = [sys.executable, "-m", "pip", "download",
-               "-r", REQUIREMENTS_PATH, "-d", WHEELS_DIR,
-               "--only-binary=:all:", "--retries", "3", "--timeout", "30",
-               "-i", PIP_INDEX]
-        if py_version:
-            cmd += ["--python-version", py_version]
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-        if r.returncode != 0:
-            log.warning(f"worker_package: pip download wheels failed: {r.stderr[-400:]}")
-    except Exception as e:
-        log.warning(f"worker_package: pip download wheels exception: {e}")
+    for plat, label in WHEEL_PLATFORMS:
+        rc = _pip_download_wheels(WHEELS_DIR, ["--platform", plat], dl_py)
+        if rc == 0:
+            log.info(f"worker_package: wheels ready for {label}")
+        else:
+            log.warning(f"worker_package: wheels download failed for {label} (install side will fall back online)")
     with open(marker, "w", encoding="utf-8") as f:
         f.write(cur)
     return WHEELS_DIR
@@ -341,16 +447,20 @@ _cached_package_version_ts = 0.0
 _PACKAGE_VERSION_TTL = float(os.environ.get("PACKAGE_VERSION_TTL", "60"))
 
 
-def package_version() -> str:
+def package_version(force: bool = False) -> str:
     """当前包版本：git commit/manifest 指纹 + wheels 指纹 + 内置 python 指纹。
 
     带 TTL 缓存：心跳高频调用（默认 15s 间隔），但版本变更频率远低于此，
     缓存 60s 可避免 95%+ 的重复 git 子进程 + manifest 扫描开销。
+
+    force=True 绕过 TTL 缓存强制重算：打包重建路径专用（QA R1）——
+    _find_pythons() 可能刚补装了缺失架构，TTL 缓存窗口内会返回补装前的
+    单架构指纹，导致包内容（双架构）与 VERSION 戳（单架构指纹）不一致。
     """
     import time
     global _cached_package_version, _cached_package_version_ts
     _now = time.monotonic()
-    if _cached_package_version and (_now - _cached_package_version_ts) < _PACKAGE_VERSION_TTL:
+    if not force and _cached_package_version and (_now - _cached_package_version_ts) < _PACKAGE_VERSION_TTL:
         return _cached_package_version
     base = ""
     try:
@@ -365,7 +475,8 @@ def package_version() -> str:
         pass
     if not base:
         base = "h-" + _manifest_version()
-    py = _python_fingerprint(_find_python())
+    # 只用无副作用的扫描（心跳热路径不触发 uv 安装；安装补齐仅在 build_package 重建路径）
+    py = _pythons_fingerprint(_scan_pythons())
     ver = f"{base}-w{_wheels_fingerprint()}-p{py}"
     _cached_package_version = ver
     _cached_package_version_ts = _now
@@ -522,21 +633,31 @@ def build_package() -> str:
             else:
                 return PKG_PATH
 
+        # 重建路径：先确保解释器就绪（可能现场 uv 补齐缺失架构），
+        # 再强制重算版本（force=True 绕过 TTL 缓存，QA R1——_find_pythons 刚补装的
+        # 架构不在缓存指纹里，必须重扫才能保证指纹与包内容一致）
+        pythons = _find_pythons()
+        ver = package_version(force=True)
+
         tmp = PKG_PATH + ".tmp"
         members: list = []  # ("arc", bytes) 小文件 / ("arc", path, "path") 大文件流式
-        # 内置 Python>=3.10 standalone（离线装 worker 时解释器缺失的兜底；无则靠系统 Python）
-        py_root = _find_python()
-        # 依赖 wheels：按 bundle python 版本下载（匹配离线安装）；无 bundle 时按构建机
+        # 内置 Python>=3.10 standalone（按架构分目录，Issue #515；无则靠系统 Python）
+        # 依赖 wheels：按 bundle python 版本下载（匹配离线安装）；无 bundle 时按构建机。
+        # 多架构版本不一致时取最高版本（双架构通常 uv 同请求安装、版本一致）。
         py_ver = ""
-        if py_root:
+        if pythons:
             import re as _re
-            _m = _re.search(r"(\d+\.\d+)", os.path.basename(os.path.normpath(py_root)) or "")
-            if _m:
-                py_ver = _m.group(1)
+            _vers = []
+            for py_root in pythons.values():
+                _m = _re.search(r"(\d+\.\d+)", os.path.basename(os.path.normpath(py_root)) or "")
+                if _m:
+                    _vers.append(tuple(int(x) for x in _m.group(1).split(".")))
+            if _vers:
+                py_ver = ".".join(str(x) for x in max(_vers))
         whl_dir = _ensure_wheels(py_ver)
         _ensure_grape_cli_wheel(whl_dir)  # grape-cli 轮子随包（离线安装，issue-45）
-        if py_root:
-            log.info(f"worker_package: bundling python {os.path.basename(py_root)}")
+        if pythons:
+            log.info(f"worker_package: bundling python per-arch: {sorted(pythons)}")
         else:
             log.warning("worker_package: no python to bundle (system python required on worker)")
         with tarfile.open(tmp, "w:gz") as tar:
@@ -580,18 +701,20 @@ def build_package() -> str:
                             members.append((f"grape-worker/wheels/{f}", fh.read()))
                     except Exception as e:
                         log.warning(f"worker_package: add wheel {f} failed: {e}")
-            # 内置 Python 解释器（python/ 目录，standalone 免编译；含 python 可执行 + stdlib + libpython.so）
-            if py_root:
+            # 内置 Python 解释器（按架构分目录 python-<arch>/，standalone 免编译；
+            # 含 python 可执行 + stdlib + libpython.so；install-worker.sh 按 uname -m 选目录）
+            for arch in sorted(pythons):
+                py_root = pythons[arch]
                 for r in _python_subset_entries(py_root):
                     fp = os.path.join(py_root, r)
-                    arc = f"grape-worker/python/{r}"
+                    arc = f"grape-worker/python-{arch}/{r}"
                     try:
                         tar.add(fp, arcname=arc, filter=_tar_filter)
                         if os.path.isfile(fp) and not os.path.islink(fp):
                             with open(fp, "rb") as fh:
                                 members.append((arc, fh.read()))
                     except Exception as e:
-                        log.warning(f"worker_package: add python {r} failed: {e}")
+                        log.warning(f"worker_package: add python {arch}/{r} failed: {e}")
             _write_sha256sums(tar, members)
         os.replace(tmp, PKG_PATH)
         with open(VERSION_PATH, "w", encoding="utf-8") as f:

@@ -154,7 +154,7 @@ function restore_upgrade_backup {
     if (Test-Path $backupVer) {
         Copy-Item -Path $backupVer -Destination $versionFilePath -Force -ErrorAction SilentlyContinue
     }
-    $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "未知版本" }
+    $restoredVer = if (Test-Path $versionFilePath) { Get-Content $versionFilePath -ErrorAction SilentlyContinue } else { "unknown" }
     Log "Restored old code ($restoredVer)"
     # 重启旧 agent
     Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", $startScript -WindowStyle Hidden -PassThru | Out-Null
@@ -326,25 +326,18 @@ if (Test-Path $reqFile) {
     $pipIndex = $env:PIP_INDEX_URL
     if (-not $pipIndex) { $pipIndex = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 
-    # 离线 wheels 优先 —— 仅 Linux aarch64（wheels 按打包机平台 aarch64 manylinux 下载，
-    # 其他平台（Windows/x86_64）离线装必失败，直接走在线，避免无谓报错刷屏）
+    # 离线 wheels 优先 —— Issue #499: 包内 wheels 为多平台矩阵（linux x86_64/aarch64 + win_amd64），
+    # pip 按 wheel 平台标签自动精确匹配本机平台；不匹配平台（或 Python 版本不匹配）离线失败回退在线。
     $wheelsDir = Join-Path $Dir "wheels"
     $useWheels = $false
     if ((Test-Path $wheelsDir) -and (Get-ChildItem "$wheelsDir\*.whl" -ErrorAction SilentlyContinue)) {
-        # Linux aarch64 only: bundled wheels are built for aarch64 manylinux;
-        # other platforms (Windows/x86_64) always fail offline, go online directly.
-        $isArm = $env:PROCESSOR_ARCHITECTURE -match "ARM64"
-        if ($isArm) {
-            $useWheels = $true
-        } else {
-            Log "Non-Linux/arm64 host detected, skipping bundled wheels, installing online"
-        }
+        $useWheels = $true
     }
     if ($useWheels) {
         Log "Installing deps from bundled wheels (offline)"
         $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir, "-r", $reqFile)
         if ($rc -ne 0) {
-            Log "Offline install failed (common on Windows - binary wheel platform mismatch), falling back to online..."
+            Log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
             $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
             if ($rc -ne 0) {
                 Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
@@ -359,7 +352,7 @@ if (Test-Path $reqFile) {
     }
 }
 
-# ===== 4.5 安装 grape CLI（离线 wheel 优先，回退在线；非 Linux/arm64 平台直接在线）=====
+# ===== 4.5 安装 grape CLI（离线 wheel 优先——grape wheel 为纯 Python 平台无关，回退在线）=====
 $grapeWheel = $null
 if ($useWheels) {
     $grapeWheel = Get-ChildItem "$wheelsDir\grape-*.whl" -ErrorAction SilentlyContinue | Select-Object -First 1
@@ -517,34 +510,8 @@ if ($regOk) {
 # ===== 6.5 hermes 沙箱降级标注 =====
 Log "Note: hermes sandbox (namespace/cgroup isolation) is not supported on Windows, disabled. Other engines are unaffected."
 
-# ===== 7. 执行引擎提示 =====
-$engineHints = @()
-$engines = @("opencode", "hermes", "codearts", "codex")
-foreach ($eng in $engines) {
-    $found = $false
-    try { $cmd = Get-Command $eng -ErrorAction Stop; $found = $true } catch {}
-    if (-not $found) {
-        $exts = @(".cmd", ".exe", ".bat")
-        foreach ($ext in $exts) {
-            if (Get-Command "$eng$ext" -ErrorAction SilentlyContinue) { $found = $true; break }
-        }
-    }
-    if (-not $found) {
-        switch ($eng) {
-            "opencode" { $engineHints += "  npm install -g opencode-ai（opencode 引擎）" }
-            "hermes" { $engineHints += "  pip install 'hermes[acp]'（hermes 引擎，含 ACP 协议包——普通 pip install hermes 不带，会导致引擎在线但调不通）" }
-            "codearts" { $engineHints += "  安装 CodeArts CLI（codearts 引擎）" }
-            "codex" { $engineHints += "  npm install -g @openai/codex（codex 引擎）" }
-        }
-    }
-}
-
-if ($engineHints.Count -gt 0) {
-    Log "Some execution engines not detected. Install them and restart worker:"
-    foreach ($hint in $engineHints) { Log $hint }
-    Log "  $startScript"
-    Log "(Engine type is not restricted; worker auto-discovers and registers installed engines on startup)"
-}
+# Issue #499: 执行引擎安装引导段已删除——worker 启动自动发现并注册本机已装引擎，
+# 无需在安装期引导用户安装 opencode/hermes/codearts/codex。
 
 Log "Install complete! Verify registration:"
 Log "  Check log: $workerLog  -> should see RuntimeAgent registered: [...]"

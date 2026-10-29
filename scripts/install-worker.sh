@@ -6,18 +6,22 @@
 #     --token <rta_...> \
 #     [--server https://<grape主控>] \
 #     [--device worker-01] \
-#     [--dir ~/grape]
+#     [--dir ~/grape] \
+#     [--engine auto|opencode|hermes|none]
 #
 # 流程：
 #   1. 从主控公开端点下载运行包 grape-worker.tar.gz（无需鉴权，包内无敏感信息）
 #   2. 解压到普通用户家目录（默认 ~/grape，--dir 可改）
 #   3. 建 venv + 安装最小依赖
 #   4. 写入接入配置（凭据 token + 主系统地址，权限 600）
-#   5. 后台启动 runtime-agent（免 root，nohup/setsid；root 时自动用 systemd）
-#   6. 启动后自动注册到主控系统（RuntimeAgent registered）
+#   5. best-effort 安装执行引擎（Issue #471 C2：--engine auto 时有 npm 则装 opencode）
+#      + codearts 目录信任预配置（无 TTY 不再因 folder-trust 闸门致命退出）
+#   6. 后台启动 runtime-agent（免 root，nohup/setsid；root 时自动用 systemd）
+#   7. 启动后自动注册到主控系统（RuntimeAgent registered；无引擎时也注册成功）
 #
 # 幂等：重复执行安全（复用已有目录/venv，仅更新代码与配置并重启）。
-# 不安装执行引擎（opencode 等由用户自行安装，worker 启动自动发现注册）。
+# 引擎（Issue #471 C2）：--engine auto 默认 best-effort 安装 opencode（需 npm）；
+# 未装引擎时 worker 仍正常注册上线（空引擎为正常状态），后续装引擎无需重启自动注册。
 set -euo pipefail
 
 # ===== 参数解析 =====
@@ -26,6 +30,7 @@ SERVER=""
 DEVICE=""
 INSTALL_DIR=""
 ROOT_MODE=0
+ENGINE="${ENGINE:-auto}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -33,24 +38,29 @@ while [ $# -gt 0 ]; do
     --server)  SERVER="$2"; shift 2 ;;
     --device)  DEVICE="$2"; shift 2 ;;
     --dir)     INSTALL_DIR="$2"; shift 2 ;;
+    --engine)  ENGINE="$2"; shift 2 ;;
     --root)    ROOT_MODE=1; shift ;;
-    *) echo "未知参数: $1"; echo "用法: --token <rta_...> [--server URL] [--device 名] [--dir 安装目录] [--root]"; exit 1 ;;
+    *) echo "Unknown argument: $1"; echo "Usage: --token <rta_...> [--server URL] [--device name] [--dir install-dir] [--engine auto|opencode|hermes|none] [--root]"; exit 1 ;;
   esac
 done
+case "$ENGINE" in
+  auto|opencode|hermes|none) ;;
+  *) echo "[install-worker] Error: --engine only supports auto|opencode|hermes|none (got: $ENGINE)" >&2; exit 1 ;;
+esac
 
 # ===== 工具函数 =====
 log() { echo "[install-worker] $*"; }
-fail() { echo "[install-worker] 错误: $*" >&2; exit 1; }
+fail() { echo "[install-worker] Error: $*" >&2; exit 1; }
 
 if [ -z "$TOKEN" ]; then
-  fail "缺少 --token（rta_ 凭据，在主控 WebUI「Workers」页生成）"
+  fail "Missing --token (rta_ credential, generated on the controller WebUI 'Workers' page)"
 fi
 if [ "$(id -u)" = "0" ]; then
   ROOT_MODE=1
 fi
 if [ -z "$SERVER" ]; then
   SERVER="https://grape.example.com"
-  log "未指定 --server，使用默认 $SERVER（如不对请加 --server https://<你的主控域名>）"
+  log "No --server given, using default $SERVER (if wrong, add --server https://<your-controller-domain>)"
 fi
 SERVER="${SERVER%/}"
 # 设备名：hostname 小写，非字母数字替换为 -，清理首尾 -（hostname 输出含换行会产生尾随 -）
@@ -80,10 +90,19 @@ fi
 ENV_FILE="$CFG_DIR/runtime.env"
 VERSION_FILE="$CFG_DIR/worker.version"
 
-log "安装目录: $INSTALL_DIR | 设备名: $DEVICE | 主控: $SERVER | 模式: $([ "$ROOT_MODE" = 1 ] && echo root/systemd || echo 用户/nohup)"
+# 目标机架构（Issue #515：worker 安装包按架构捆绑 python-x86_64/ python-aarch64/，
+# 安装端按 uname -m 选对应目录；amd64/arm64 为兼容别称）
+TARGET_ARCH="$(uname -m)"
+case "$TARGET_ARCH" in
+  x86_64|amd64) TARGET_ARCH="x86_64" ;;
+  aarch64|arm64) TARGET_ARCH="aarch64" ;;
+esac
+
+log "Install dir: $INSTALL_DIR | Device: $DEVICE | Controller: $SERVER | Arch: $TARGET_ARCH | Mode: $([ "$ROOT_MODE" = 1 ] && echo root/systemd || echo user/nohup)"
 
 # ===== 1. 准备 Python >= 3.10 =====
-# 优先级：系统 python3.12/3.11/3.10/python3 → 包内自带解释器（python/ 目录，standalone 免编译）
+# 优先级：系统 python3.12/3.11/3.10/python3 → 包内自带解释器（python-<arch>/ 分目录，
+# standalone 免编译；arch 由第 3.5 步按 TARGET_ARCH 选取；旧包 python/ 单目录仅为读取兜底）
 # 注意：包内解释器要等第 3 步解压后才可用，故此处只探测系统 python，第 3 步后再补探测包内。
 pick_python() {
   for py in python3.12 python3.11 python3.10 python3; do
@@ -95,20 +114,20 @@ pick_python() {
 }
 PY="$(pick_python || true)"
 if [ -z "$PY" ]; then
-  log "未找到系统 Python>=3.10，将尝试使用包内自带解释器（解压后自动探测）"
+  log "No system Python>=3.10 found, will try the bundled interpreter (auto-detected after extraction)"
 fi
 
 # ===== 2. 下载运行包（公开端点，无需鉴权）=====
 PKG_URL="$SERVER/api/runtime/grape-worker.tar.gz"
 TMP_PKG="/tmp/grape-worker-$$.tar.gz"
-log "下载运行包: $PKG_URL"
+log "Downloading worker package: $PKG_URL"
 if ! curl -fsSL --connect-timeout 15 "$PKG_URL" -o "$TMP_PKG"; then
   rm -f "$TMP_PKG"
-  fail "下载运行包失败: $PKG_URL（请确认主控地址/网络可达）"
+  fail "Failed to download worker package: $PKG_URL (check controller address / network reachability)"
 fi
 if ! gzip -t "$TMP_PKG" 2>/dev/null; then
   rm -f "$TMP_PKG"
-  fail "下载的运行包损坏（gzip 校验失败），请重试"
+  fail "Downloaded worker package is corrupt (gzip check failed), please retry"
 fi
 
 # ===== 3. 解压到安装目录（幂等，升级前备份旧代码供回滚）=====
@@ -123,10 +142,10 @@ if [ -d "$INSTALL_DIR/src" ]; then
   mkdir -p "$_upgrade_backup_dir"
   cp -a "$INSTALL_DIR/src" "$_upgrade_backup_dir/src" 2>/dev/null || true
   [ -f "$INSTALL_DIR/VERSION" ] && cp -a "$INSTALL_DIR/VERSION" "$_upgrade_backup_dir/VERSION" 2>/dev/null || true
-  log "已备份当前代码到 $_upgrade_backup_dir（升级失败时自动回滚）"
+  log "Backed up current code to $_upgrade_backup_dir (auto-rollback on upgrade failure)"
 fi
-log "解压运行包到 $INSTALL_DIR"
-tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "解压运行包失败"
+log "Extracting worker package to $INSTALL_DIR"
+tar -xzf "$TMP_PKG" -C "$INSTALL_DIR" --strip-components=1 || fail "Failed to extract worker package"
 rm -f "$TMP_PKG"
 
 # ===== 3.5 升级前 import 冒烟检查（2026-10-14 五台 worker 心跳全断事故）=====
@@ -140,30 +159,30 @@ rm -f "$TMP_PKG"
 _smoke_check() {
   [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
   if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" >/dev/null 2>&1; then
-    log "新代码 import 冒烟检查通过"
+    log "New code import smoke check passed"
     return 0
   else
     _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" 2>&1 | tail -1)"
-    log "!!! 新代码 import 冒烟检查失败：$_smoke_err"
-    log "!!! 拒绝升级（旧代码未动，worker 保持当前版本运行）——请把此日志反馈主控维护者"
+    log "!!! New code import smoke check failed: $_smoke_err"
+    log "!!! Upgrade rejected (old code untouched, worker keeps running the current version) -- please report this log to the controller maintainer"
     return 1
   fi
 }
-_smoke_check || fail "新运行包 import 冒烟失败（坏包），已中止升级，旧代码未受影响"
+_smoke_check || fail "New worker package import smoke check failed (bad package); upgrade aborted, old code untouched"
 
 # restore_upgrade_backup <起服务方式>：恢复备份的旧代码并按传入方式重启 agent。
 # systemd: restore_upgrade_backup systemd；nohup: restore_upgrade_backup nohup
 restore_upgrade_backup() {
   _mode="${1:-nohup}"
-  log "!!! 新 agent 启动失败，回滚到升级前代码并重启旧 agent !!!"
+  log "!!! New agent failed to start, rolling back to pre-upgrade code and restarting old agent !!!"
   if [ ! -d "$_upgrade_backup_dir/src" ]; then
-    log "回滚失败: 无备份（$_upgrade_backup_dir 不存在，可能是全新安装）—— worker 将保持失联，需人工介入"
+    log "Rollback failed: no backup ($_upgrade_backup_dir missing, probably a fresh install) -- worker will stay offline, manual intervention required"
     return 1
   fi
   rm -rf "$INSTALL_DIR/src"
   cp -a "$_upgrade_backup_dir/src" "$INSTALL_DIR/src"
   [ -f "$_upgrade_backup_dir/VERSION" ] && cp -a "$_upgrade_backup_dir/VERSION" "$INSTALL_DIR/VERSION"
-  log "已恢复旧代码（$(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo '未知版本')）"
+  log "Restored old code ($(cat "$INSTALL_DIR/VERSION" 2>/dev/null || echo 'unknown'))"
   if [ "$_mode" = "systemd" ]; then
     systemctl daemon-reload >/dev/null 2>&1 || true
     systemctl restart runtime-agent >/dev/null 2>&1 || true
@@ -181,10 +200,10 @@ restore_upgrade_backup() {
   fi
   sleep 5
   if pgrep -f "$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g').*-m src\.runtime\.agent" >/dev/null 2>&1; then
-    log "回滚成功：旧 agent 已恢复运行"
+    log "Rollback OK: old agent restored and running"
     return 0
   fi
-  log "回滚后 agent 仍未运行—— worker 失联，需人工介入（日志: $INSTALL_DIR/data/worker.log / journalctl -u runtime-agent）"
+  log "Agent still not running after rollback -- worker offline, manual intervention needed (log: $INSTALL_DIR/data/worker.log / journalctl -u runtime-agent)"
   return 1
 }
 
@@ -192,31 +211,49 @@ restore_upgrade_backup() {
 # 实际文件在安装目录根，校验时去掉前缀（存在则校验；缺失仅告警）
 if [ -f "$INSTALL_DIR/SHA256SUMS" ]; then
   if ( cd "$INSTALL_DIR" && sed 's|  grape-worker/|  |' SHA256SUMS | sha256sum -c >/dev/null 2>&1 ); then
-    log "运行包内容校验通过（SHA256SUMS）"
+    log "Worker package content checksum verified (SHA256SUMS)"
   else
-    log "警告: 运行包内容校验未通过，请确认来源可信"
+    log "Warning: worker package content checksum FAILED, make sure the source is trusted"
   fi
 fi
 mkdir -p "$CFG_DIR"
 if [ -f "$INSTALL_DIR/VERSION" ]; then
   cp "$INSTALL_DIR/VERSION" "$VERSION_FILE" 2>/dev/null || true
-  log "Worker 版本: $(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
+  log "Worker version: $(cat "$VERSION_FILE" 2>/dev/null || echo unknown)"
 fi
 
 # data/ 运行时目录
 mkdir -p "$INSTALL_DIR/data"
 
-# ===== 3.5 包内解释器补探测（解压后）=====
+# ===== 3.5 包内解释器补探测（解压后）+ 架构校验（Issue #515）=====
+# 双保险：① 按 TARGET_ARCH 选 python-<arch>/ 目录（与包内捆绑目录对应）；
+#         ② 试运行 --version 确认可执行（免解析 ELF，交叉架构/损坏包提前暴露）。
+# 不匹配 → 跳过包内解释器并引导安装系统 Python>=3.10，确保在线安装兜底路径可达
+# （旧实现：x86_64 机选中 aarch64 解释器 → venv 创建时 Exec format error 直接退出）。
+# 注：python/ 单目录为老主控旧包格式兜底（同样过 --version 校验，防交叉架构误选）。
+_pick_bundled_python() {
+  for _cand in "$INSTALL_DIR/python-$TARGET_ARCH/bin/python3" "$INSTALL_DIR/python/bin/python3"; do
+    if [ -x "$_cand" ] && "$_cand" --version >/dev/null 2>&1; then
+      echo "$_cand"
+      return 0
+    fi
+  done
+  return 1
+}
 if [ -z "$PY" ]; then
-  if [ -x "$INSTALL_DIR/python/bin/python3" ]; then
-    PY="$INSTALL_DIR/python/bin/python3"
-    log "使用包内自带 Python（standalone，免系统安装）"
+  _BUNDLED_PY="$(_pick_bundled_python || true)"
+  if [ -n "$_BUNDLED_PY" ]; then
+    PY="$_BUNDLED_PY"
+    log "Using bundled Python (standalone, arch=$TARGET_ARCH, no system install needed)"
+  else
+    log "Warning: bundled Python for arch '$TARGET_ARCH' is missing or cannot run on this machine (arch mismatch or corrupted package)"
+    log "Hint: install a system Python>=3.10 first (apt/yum install python3.12 python3.12-venv), then retry"
   fi
 fi
 if [ -z "$PY" ]; then
-  fail "未找到 Python>=3.10，请先安装（apt/yum install python3.12 python3.12-venv）后重试，或重新下载安装包（应含 python/ 目录）"
+  fail "Python>=3.10 not found; install a system Python>=3.10 first (apt/yum install python3.12 python3.12-venv) and retry, or re-download the install package from an upgraded controller (should contain python-$TARGET_ARCH/)"
 fi
-log "使用 Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
+log "Using Python: $PY ($($PY --version 2>&1 | awk '{print $2}'))"
 
 # ===== 4. 建 venv + 最小依赖 =====
 # venv 三级自愈（Issue #257 B1）：pip 文件在但损坏（ModuleNotFoundError）时递进修复
@@ -227,7 +264,7 @@ _venv_python_ok() { "$VENV/bin/python" -c 'import sys; sys.exit(0 if sys.version
 _venv_pip_ok() { "$VENV/bin/python" -m pip --version >/dev/null 2>&1; }
 
 if [ ! -x "$VENV/bin/python" ] || ! _venv_python_ok; then
-  log "创建 venv ($PY)"
+  log "Creating venv ($PY)"
   rm -rf "$VENV"
   "$PY" -m venv "$VENV"
 fi
@@ -237,23 +274,23 @@ PIP_CMD="$VENV/bin/pip"
 if [ -x "$PIP_CMD" ] && _venv_pip_ok; then
   : # pip 文件在且可正常 import，无需修复
 elif [ -x "$VENV/bin/pip3" ] && "$VENV/bin/python" -m pip3 --version >/dev/null 2>&1; then
-  log "venv 无 pip（有 pip3），使用 pip3 作为替代"
+  log "venv has no pip (but has pip3), using pip3 instead"
   PIP_CMD="$VENV/bin/pip3"
 else
   # pip 缺失或损坏——三级递进自愈
-  log "venv pip 不可用，启动三级自愈..."
+  log "venv pip not usable, starting 3-level self-repair..."
   # Level 1: ensurepip
-  log "  [1/3] 尝试 ensurepip --upgrade..."
+  log "  [1/3] trying ensurepip --upgrade..."
   if "$VENV/bin/python" -m ensurepip --upgrade >/dev/null 2>&1 && _venv_pip_ok; then
-    log "  ensurepip 修复成功"
+    log "  ensurepip repair succeeded"
   else
     # Level 2: get-pip.py
-    log "  [2/3] ensurepip 无效，尝试 get-pip.py..."
+    log "  [2/3] ensurepip did not help, trying get-pip.py..."
     if curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" >/dev/null 2>&1 && _venv_pip_ok; then
-      log "  get-pip.py 修复成功"
+      log "  get-pip.py repair succeeded"
     else
       # Level 3: 重建 venv
-      log "  [3/3] pip 损坏严重（site-packages 损坏），重建 venv..."
+      log "  [3/3] pip badly broken (site-packages damaged), rebuilding venv..."
       _saved_ver=""
       [ -f "$VERSION_FILE" ] && _saved_ver=$(cat "$VERSION_FILE" 2>/dev/null || true)
       rm -rf "$VENV"
@@ -262,9 +299,9 @@ else
         curl -fsSL https://bootstrap.pypa.io/get-pip.py | "$VENV/bin/python" >/dev/null 2>&1 || true
       [ -n "$_saved_ver" ] && echo "$_saved_ver" > "$VERSION_FILE" 2>/dev/null || true
       if _venv_pip_ok; then
-        log "  venv 重建成功，pip 已恢复"
+        log "  venv rebuilt, pip restored"
       else
-        fail "venv 三级自愈均失败，pip 仍不可用。请手动删除 $VENV 后重试，或安装 python3-venv 包"
+        fail "All 3 venv self-repair levels failed, pip still unusable. Manually remove $VENV and retry, or install the python3-venv package"
       fi
     fi
   fi
@@ -278,24 +315,24 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   # 优先离线安装：包内已带依赖 wheels（grape-worker/wheels/），免网络下载
   if [ -d "$INSTALL_DIR/wheels" ] && ls "$INSTALL_DIR/wheels"/*.whl >/dev/null 2>&1; then
-    log "离线安装依赖（包内 wheels: $(ls "$INSTALL_DIR/wheels"/*.whl | wc -l) 个，免网络）"
+    log "Installing deps offline (bundled wheels: $(ls "$INSTALL_DIR/wheels"/*.whl | wc -l) files, no network needed)"
     if "$PIP_CMD" install --quiet --no-index --find-links "$INSTALL_DIR/wheels" \
         -r "$INSTALL_DIR/requirements-worker.txt"; then
-      log "依赖离线安装完成"
+      log "Deps installed offline (wheels auto-matched to arch $TARGET_ARCH by pip)"
     else
-      log "离线安装失败（可能平台/Python 版本不匹配），回退在线安装..."
+      log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
       if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
           -r "$INSTALL_DIR/requirements-worker.txt"; then
-        log "依赖安装失败。请检查网络后重试，或指定可用镜像："
+        log "Dependency install failed. Check network and retry, or specify a reachable mirror:"
         log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple bash -c 'curl -fsSL $SERVER/api/runtime/install | bash -s -- --token <token> --server $SERVER'"
-        fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+        fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
       fi
     fi
   else
-    log "包内无离线 wheels，在线安装依赖（镜像: $PIP_INDEX，首次需数分钟）"
+    log "Installing deps online (mirror: $PIP_INDEX, first run takes minutes)"
     if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
         -r "$INSTALL_DIR/requirements-worker.txt"; then
-      fail "依赖安装失败（aiohttp 未装好 worker 无法启动）：请重试本安装命令，或设置 PIP_INDEX_URL 环境变量指定可用 pip 镜像"
+      fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
     fi
   fi
 fi
@@ -305,15 +342,15 @@ _install_grape_online() {
   "$PIP_CMD" install -q --no-cache-dir \
       git+https://gitcode.com/grape-dev/grape-cli.git 2>/dev/null \
     && chmod +x "$VENV/bin/grape" 2>/dev/null || true \
-    && log "grape CLI 已装（在线）: $VENV/bin/grape" \
-    || log "警告: grape-cli 在线安装失败，agent 内暂无 \`grape\`；不影响 worker 运行"; return 0
+    && log "grape CLI installed (online): $VENV/bin/grape" \
+    || log "Warning: grape-cli online install failed, no 'grape' available in the agent for now; worker keeps running"; return 0
 }
 if ls "$INSTALL_DIR/wheels"/grape-*.whl >/dev/null 2>&1; then
   if "$PIP_CMD" install -q --no-index --find-links "$INSTALL_DIR/wheels" grape 2>/dev/null; then
     chmod +x "$VENV/bin/grape" 2>/dev/null || true
-    log "grape CLI 已装（离线 wheel，随包）: $VENV/bin/grape"
+    log "grape CLI installed (offline wheel, bundled): $VENV/bin/grape"
   else
-    log "警告: 离线 grape wheel 安装失败，回退在线..."
+    log "Warning: offline grape wheel install failed, falling back to online..."
     _install_grape_online
   fi
 else
@@ -361,7 +398,7 @@ for _key_name in "${_HERMES_API_KEYS[@]}"; do
 done
 unset _key_name _key_value
 chmod 600 "$ENV_FILE" 2>/dev/null || true
-log "接入配置已写入 $ENV_FILE（token + 主控地址）"
+log "Runtime config written to $ENV_FILE (token + controller address)"
 
 # ===== 5.5 安装 bwrap（agent 文件系统隔离锁；root 自动装，普通用户提示）=====
 # bwrap 用于给 agent 子进程套文件系统隔离（阶段二）。已装且可用 → 跳过；
@@ -372,33 +409,33 @@ _bwrap_ok() {
 }
 install_bwrap() {
   if _bwrap_ok; then
-    log "bwrap 已可用（agent 文件系统隔离锁就绪）"
+    log "bwrap already usable (agent filesystem isolation lock ready)"
     return 0
   fi
   if [ "$ROOT_MODE" = "1" ]; then
-    log "安装 bwrap（bubblewrap）+ 解除 AppArmor 限制（setuid）..."
+    log "Installing bwrap (bubblewrap) + lifting AppArmor restriction (setuid)..."
     if command -v apt-get >/dev/null 2>&1; then
       apt-get update -qq >/dev/null 2>&1 || true
-      apt-get install -y -qq bubblewrap >/dev/null 2>&1 || log "警告: apt 安装 bwrap 失败"
+      apt-get install -y -qq bubblewrap >/dev/null 2>&1 || log "Warning: apt install of bwrap failed"
       if command -v bwrap >/dev/null 2>&1; then
-        chmod u+s /usr/bin/bwrap || log "警告: 设置 bwrap setuid 位失败"
+        chmod u+s /usr/bin/bwrap || log "Warning: failed to set bwrap setuid bit"
         dpkg-statoverride --add root root 4755 /usr/bin/bwrap >/dev/null 2>&1 || true
       fi
     elif command -v yum >/dev/null 2>&1; then
-      yum install -y -q bubblewrap >/dev/null 2>&1 || log "警告: yum 安装 bwrap 失败"
+      yum install -y -q bubblewrap >/dev/null 2>&1 || log "Warning: yum install of bwrap failed"
       command -v bwrap >/dev/null 2>&1 && chmod u+s /usr/bin/bwrap
     else
-      log "警告: 未找到 apt/yum，无法自动装 bwrap"
+      log "Warning: no apt/yum found, cannot auto-install bwrap"
     fi
     if _bwrap_ok; then
-      log "bwrap 安装成功（agent 文件系统隔离锁就绪）"
+      log "bwrap installed (agent filesystem isolation lock ready)"
     else
-      log "警告: bwrap 仍不可用（AppArmor 严格限制），文件系统锁降级关闭（worker 照常运行）"
+      log "Warning: bwrap still unusable (AppArmor strict), filesystem lock downgraded to off (worker runs fine)"
     fi
   else
-    log "提示: 未检测到可用的 bwrap（agent 文件系统隔离锁需要）。如需启用，请以 root 重跑本脚本（加 --root），或手动执行："
+    log "Note: no usable bwrap detected (needed by the agent filesystem isolation lock). To enable it, re-run this script as root (add --root), or manually run:"
     log "  sudo apt-get install -y bubblewrap && sudo dpkg-statoverride --add root root 4755 /usr/bin/bwrap"
-    log "  （未装 bwrap 时 worker 照常运行，仅文件系统隔离锁关闭）"
+    log "  (without bwrap the worker still runs normally, only the filesystem isolation lock is off)"
   fi
 }
 install_bwrap
@@ -407,9 +444,113 @@ install_bwrap
 if [ "$ROOT_MODE" = "1" ]; then
   if ! command -v sshpass >/dev/null 2>&1; then
     apt-get install -y -qq sshpass 2>/dev/null || yum install -y -q sshpass 2>/dev/null || true
-    log "sshpass 已安装（SRE 远程部署密码认证）"
+    log "sshpass installed (SRE remote deploy password auth)"
   fi
 fi
+
+# ===== 5.7 best-effort 安装执行引擎（Issue #471 C2）=====
+# --engine auto（默认）：未装 opencode 且有 npm → npm install -g opencode-ai；
+# --engine opencode/hermes：显式指定安装对应引擎；--engine none：跳过。
+# 安装失败不阻断（worker 无引擎也正常注册上线，后续装好引擎无需重启自动注册）。
+install_engine() {
+  if [ "$ENGINE" = "none" ]; then
+    log "Skipping engine install (--engine none; worker registers fine without engines)"
+    return 0
+  fi
+  # auto：已有任一引擎即跳过；显式指定：仅检查对应引擎
+  if [ "$ENGINE" = "auto" ]; then
+    if command -v opencode >/dev/null 2>&1 || command -v hermes >/dev/null 2>&1; then
+      log "Execution engine detected (opencode/hermes), skipping install"
+      return 0
+    fi
+    _want_oc=1; _want_hermes=0
+  elif [ "$ENGINE" = "opencode" ]; then
+    if command -v opencode >/dev/null 2>&1; then
+      log "opencode engine already present, skipping install"
+      return 0
+    fi
+    _want_oc=1; _want_hermes=0
+  else
+    if command -v hermes >/dev/null 2>&1 || [ -x "$VENV/bin/hermes" ]; then
+      log "hermes engine already present, skipping install"
+      return 0
+    fi
+    _want_oc=0; _want_hermes=1
+  fi
+  if [ "$_want_oc" = "1" ]; then
+    if command -v npm >/dev/null 2>&1; then
+      log "Installing opencode engine (npm install -g opencode-ai, takes ~1-3 minutes)..."
+      if timeout 300 npm install -g opencode-ai >/dev/null 2>&1 && command -v opencode >/dev/null 2>&1; then
+        log "opencode engine installed"
+        return 0
+      fi
+      log "Warning: opencode install failed (network/mirror issue). Worker still registers; install it later manually if needed: npm install -g opencode-ai"
+    else
+      log "Note: npm not found, cannot auto-install opencode. Worker still registers; after a later manual install no restart is needed:"
+      log "  Install Node.js then run npm install -g opencode-ai (see help/usage/faq.md)"
+    fi
+  fi
+  if [ "$_want_hermes" = "1" ]; then
+    log "Installing hermes engine (pip install 'hermes[acp]')..."
+    if timeout 300 "$VENV/bin/pip" install -q 'hermes[acp]' >/dev/null 2>&1 && [ -x "$VENV/bin/hermes" ]; then
+      log "hermes engine installed ($VENV/bin/hermes)"
+      return 0
+    fi
+    log "Warning: hermes install failed. Worker still registers; install it later manually if needed: pip install 'hermes[acp]'"
+  fi
+  return 0
+}
+install_engine
+
+# ===== 5.8 codearts 目录信任预配置（Issue #471 C2）=====
+# codearts CLI 的 folder-trust 闸门在无 TTY（systemd/nohup）环境下对未信任
+# 目录直接 exit 1。把 worker 安装目录与 codearts tasks 目录合并进
+# ~/.codeartsdoer/cli-data/settings.json 的 trustedFolders（保留已有配置）。
+# ⚠️ Issue #471 QA S4：合并语义（保留 enabled 标志、trustedFolders 并入、
+# 保留其它顶层键）与 src/runtime/codearts.write_trust_settings 逐条对齐——
+# 修改任意一处必须同步另一处（worker 运行态用 Python 版，安装态用本段自包含实现）。
+provision_codearts_trust() {
+  command -v codearts >/dev/null 2>&1 || return 0
+  _oc_data="$HOME/.codeartsdoer/cli-data"
+  mkdir -p "$_oc_data"
+  _oc_tasks="${CODEARTS_TASKS_DIR:-/var/cache/codearts-tasks}"
+  # 优先复用安装包内 Python 实现（与运行态同一份逻辑，防漂移）；不可用时回退内联版
+  if [ -x "$VENV/bin/python" ]; then
+    "$VENV/bin/python" -c "
+import sys
+sys.path.insert(0, '$INSTALL_DIR')
+from src.runtime.codearts import write_trust_settings
+write_trust_settings('$_oc_data', ['$INSTALL_DIR', '$_oc_tasks'])
+" && log "codearts folder trust configured (write_trust_settings: trustedFolders += $INSTALL_DIR)" && return 0
+  fi
+  python3 - "$_oc_data/settings.json" "$INSTALL_DIR" "$_oc_tasks" <<'PYEOF' || log "Warning: codearts trust config write failed (does not affect worker registration)"
+import json, os, sys
+path, dirs = sys.argv[1], sys.argv[2:]
+settings = {}
+try:
+    if os.path.exists(path):
+        with open(path, encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            settings = loaded
+except Exception:
+    settings = {}
+sec = settings.get("security") if isinstance(settings.get("security"), dict) else {}
+ft = sec.get("folderTrust") if isinstance(sec.get("folderTrust"), dict) else {}
+if "enabled" not in ft:
+    ft["enabled"] = True
+folders = sec.get("trustedFolders") if isinstance(sec.get("trustedFolders"), list) else []
+for d in dirs:
+    if d and d not in folders:
+        folders.append(d)
+sec["folderTrust"], sec["trustedFolders"] = ft, folders
+settings["security"] = sec
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(settings, f, indent=2)
+PYEOF
+  log "codearts folder trust configured (trustedFolders += $INSTALL_DIR)"
+}
+provision_codearts_trust
 
 # ===== 6. 生成启动脚本并启动 =====
 # systemd 可用性检测：容器环境（如 DevSpace）通常无 systemd（PID 1 非 systemd），
@@ -443,7 +584,7 @@ WantedBy=multi-user.target
 EOF
   systemctl daemon-reload
   systemctl enable runtime-agent >/dev/null 2>&1 || true
-  systemctl restart runtime-agent || { restore_upgrade_backup systemd || true; fail "新 agent 启动失败（已尝试回滚旧版本，请查 journalctl -u runtime-agent）"; }
+  systemctl restart runtime-agent || { restore_upgrade_backup systemd || true; fail "New agent failed to start (rollback attempted); check journalctl -u runtime-agent"; }
   # 启动验证 + 失败回滚（2026-10-14 五台 worker 心跳全断事故补齐）：
   # `systemctl restart` 对 Type=simple 单元在进程 spawn 即返回成功，agent 随后
   # 崩溃（如 import 失败）它感知不到——nohup 分支自 2026-10-08 起有 3s+30s
@@ -456,7 +597,7 @@ EOF
   if [ "$_unit_state" != "active" ] || [ "$_unit_sub" = "auto-restart" ] \
      || journalctl -u runtime-agent --since "-10 seconds" --no-pager 2>/dev/null | grep -q "Traceback"; then
     restore_upgrade_backup systemd || true
-    fail "新 agent 启动即崩溃（active=$_unit_state sub=$_unit_sub，已尝试回滚旧版本），日志: journalctl -u runtime-agent"
+    fail "New agent crashed on startup (active=$_unit_state sub=$_unit_sub, rollback attempted); logs: journalctl -u runtime-agent"
   fi
   _reg_ok=""
   for _i in $(seq 1 10); do
@@ -467,16 +608,16 @@ EOF
     sleep 3
   done
   if [ -n "$_reg_ok" ]; then
-    log "已通过 systemd 启动并注册成功（runtime-agent）"
+    log "Started via systemd and registered (runtime-agent)"
   elif restore_upgrade_backup systemd; then
-    log "新 agent 30s 未注册成功——已回滚旧版本（新版本可能无法连接 master）"
+    log "New agent not registered within 30s -- rolled back (new version may not reach master)"
   else
-    log "新 agent 注册超时且回滚失败，worker 状态异常，请人工检查: journalctl -u runtime-agent"
+    log "New agent registration timed out and rollback failed, worker state abnormal; manual check: journalctl -u runtime-agent"
   fi
 else
   # ---- 普通用户 或 容器环境（无 systemd）：nohup/setsid 后台启动 ----
   if [ "$ROOT_MODE" = "1" ] && ! _has_systemd; then
-    log "root 模式但 systemd 不可用（容器环境？），回退到 nohup/setsid 启动"
+    log "root mode but systemd unavailable (container?), falling back to nohup/setsid"
     # 容器内 root 也需要 start-worker.sh，路径用 INSTALL_DIR 而非 /opt/grape 硬编码
     START_SCRIPT="$INSTALL_DIR/start-worker.sh"
   fi
@@ -549,7 +690,7 @@ EOF
   sleep 3
   if ! pgrep -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1; then
     restore_upgrade_backup nohup || true
-    fail "新 agent 启动失败（已尝试回滚旧版本），日志: $INSTALL_DIR/data/worker.log"
+    fail "New agent failed to start (rollback attempted); log: $INSTALL_DIR/data/worker.log"
   fi
   _reg_ok=""
   for _i in $(seq 1 10); do
@@ -560,29 +701,14 @@ EOF
     sleep 3
   done
   if [ -n "$_reg_ok" ]; then
-    log "已后台启动并注册成功（pid $(pgrep -f "${_pat}.*-m src\.runtime\.agent" | head -1)），日志: $INSTALL_DIR/data/worker.log"
+    log "Started in background and registered (pid $(pgrep -f "${_pat}.*-m src\.runtime\.agent" | head -1)), log: $INSTALL_DIR/data/worker.log"
   elif restore_upgrade_backup nohup; then
-    log "新 agent 进程存活但 30s 未注册成功——已回滚旧版本（新版本可能无法连接 master，如 502 窗口期升级）"
+    log "New agent alive but not registered within 30s -- rolled back (new version may not reach master, e.g. upgrade during a 502 window)"
   else
-    log "新 agent 注册超时且回滚失败，worker 状态异常，请人工检查: $INSTALL_DIR/data/worker.log"
+    log "New agent registration timed out and rollback failed, worker state abnormal; manual check: $INSTALL_DIR/data/worker.log"
   fi
 fi
 
-# ===== 7. 执行引擎提示 =====
-_engine_hint=""
-if ! command -v opencode >/dev/null 2>&1; then
-  _engine_hint="  npm install -g opencode-ai（opencode 引擎）"
-fi
-if ! command -v hermes >/dev/null 2>&1; then
-  _engine_hint="${_engine_hint:+$_engine_hint\n}  pip install 'hermes[acp]'（hermes 引擎，含 ACP 协议包——普通 pip install hermes 不带，会导致引擎在线但调不通）"
-fi
-if [ -n "$_engine_hint" ]; then
-  log "未检测到执行引擎。请自行安装后重启 worker："
-  printf "%b\n" "$_engine_hint"
-  if [ "$ROOT_MODE" = "1" ]; then log "  systemctl restart runtime-agent"; else log "  $START_SCRIPT"; fi
-  log "（引擎类型不限定，worker 启动会自动发现本机已装引擎并注册）"
-fi
-
-log "安装完成！验证注册："
-log "  查看日志: $INSTALL_DIR/data/worker.log  → 应看到 RuntimeAgent registered: [...]"
-log "  主控 WebUI Workers 页应出现设备 $DEVICE"
+log "Install complete! Verify registration:"
+log "  Check log: $INSTALL_DIR/data/worker.log  -> should show RuntimeAgent registered (with no engines it is 'registered: []', which is normal)"
+log "  Controller WebUI Workers page should show device $DEVICE"
