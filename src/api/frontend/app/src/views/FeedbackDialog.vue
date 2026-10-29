@@ -446,7 +446,7 @@ defineExpose({ show, close })
   white-space: pre-wrap;
 }
 .fb-ctx-toggle {
-  color: #0071e3;
+  color: var(--a, #0071e3);
   text-decoration: none;
   cursor: pointer;
   font-weight: 500;
@@ -475,9 +475,9 @@ defineExpose({ show, close })
   gap: 4px;
 }
 .fb-cat-btn.active {
-  border-color: #0071e3;
+  border-color: var(--a, #0071e3);
   background: rgba(0, 113, 227, 0.06);
-  color: #0071e3;
+  color: var(--a, #0071e3);
 }
 .fb-cat-icon {
   font-size: 18px;
@@ -555,7 +555,7 @@ defineExpose({ show, close })
   padding: 9px 24px;
   border-radius: 10px;
   border: none;
-  background: #0071e3;
+  background: var(--a, #0071e3);
   font-size: 13px;
   font-weight: 600;
   color: #fff;
@@ -573,7 +573,7 @@ defineExpose({ show, close })
 }
 .fb-myfeedback a {
   font-size: 12px;
-  color: #0071e3;
+  color: var(--a, #0071e3);
   text-decoration: none;
   cursor: pointer;
   font-weight: 500;

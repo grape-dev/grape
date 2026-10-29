@@ -58,7 +58,7 @@
                 <span
                   v-if="canToggle(node.id)"
                   class="ap-nd-toggle"
-                  :style="{ color: node.enabled ? '#ff3b30' : '#34c759' }"
+                  :style="{ color: node.enabled ? 'var(--r, #ff3b30)' : '#34c759' }"
                   @click.stop="toggleAgent(node.id)"
                   >{{ node.enabled ? '✕' : '✓' }}</span
                 >
@@ -277,7 +277,7 @@
                   <span
                     v-if="flowEditing && canToggle(node.id)"
                     class="ap-nd-toggle"
-                    :style="{ color: node.enabled ? '#ff3b30' : '#34c759' }"
+                    :style="{ color: node.enabled ? 'var(--r, #ff3b30)' : '#34c759' }"
                     @click.stop="toggleAgent(node.id)"
                     >{{ node.enabled ? '✕' : '✓' }}</span
                   >
@@ -327,7 +327,7 @@
             </template>
             <div
               v-if="!(flowEditing ? editNodes : viewNodes).length"
-              style="padding: 20px; text-align: center; color: #86868b"
+              style="padding: 20px; text-align: center; color: var(--t3, #86868b)"
             >
               无 Agent 节点
             </div>
@@ -470,11 +470,11 @@
                 <div class="l">{{ t('stat_active') }}</div>
               </div>
               <div class="pl-stat">
-                <div class="v" style="color: #ff3b30">{{ scenePipeFailed }}</div>
+                <div class="v" style="color: var(--r, #ff3b30)">{{ scenePipeFailed }}</div>
                 <div class="l">{{ t('stat_failed') }}</div>
               </div>
               <div class="pl-stat">
-                <div class="v" style="color: #0071e3">{{ scenePipes.length }}</div>
+                <div class="v" style="color: var(--a, #0071e3)">{{ scenePipes.length }}</div>
                 <div class="l">{{ t('stat_total') }}</div>
               </div>
             </div>
@@ -589,11 +589,11 @@
               <div class="l">{{ t('stat_active') }}</div>
             </div>
             <div class="ap-stat">
-              <div class="v" style="color: #ff3b30">{{ metrics.failed_events || 0 }}</div>
+              <div class="v" style="color: var(--r, #ff3b30)">{{ metrics.failed_events || 0 }}</div>
               <div class="l">{{ t('stat_failed') }}</div>
             </div>
             <div class="ap-stat">
-              <div class="v" style="color: #0071e3">{{ metrics.total_issues || 0 }}</div>
+              <div class="v" style="color: var(--a, #0071e3)">{{ metrics.total_issues || 0 }}</div>
               <div class="l">{{ t('stat_total') }}</div>
             </div>
           </div>
@@ -921,10 +921,10 @@ const G = globalThis
 // ═══ 常量 ═══
 const AGENT_META = {
   vod: { icon: '🔍', label: 'VOD', color: '#ff2d92' },
-  issue: { icon: '📋', label: 'Issue', color: '#ff3b30' },
-  coding: { icon: '💻', label: 'Coding', color: '#0071e3' },
+  issue: { icon: '📋', label: 'Issue', color: 'var(--r, #ff3b30)' },
+  coding: { icon: '💻', label: 'Coding', color: 'var(--a, #0071e3)' },
   qa: { icon: '🧪', label: 'QA', color: '#af52de' },
-  sre: { icon: '⚙️', label: 'SRE', color: '#ff9f0a' },
+  sre: { icon: '⚙️', label: 'SRE', color: 'var(--y, #ff9f0a)' },
   chat: { icon: '💬', label: 'Chat', color: '#34c759' },
 }
 const SCENE_ICONS = {
@@ -967,17 +967,17 @@ const ENG_TAG_COLORS = {
   all: '#6366f1',
   vod: '#ec4899',
   issue: '#ef4444',
-  coding: '#3b82f6',
+  coding: 'var(--a, #3b82f6)',
   qa: '#a855f7',
-  sre: '#f59e0b',
+  sre: 'var(--y, #f59e0b)',
 }
 const SCOPE_COLORS_ALL = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: '#86868b' }
 const SCOPE_LABELS_ALL = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
 const SCOPE_ORDER2 = ['user', 'repo', 'global', 'local']
 const ENG_SCENE_COLORS = {
   default: '#10b981',
-  'cloud-native': '#3b82f6',
-  iac: '#f59e0b',
+  'cloud-native': 'var(--a, #3b82f6)',
+  iac: 'var(--y, #f59e0b)',
   'agent-dev': '#8b5cf6',
   'skill-dev': '#ec4899',
   'api-skill-dev': '#06b6d4',
@@ -1182,7 +1182,7 @@ function resolveOwnerName(data) {
   return [owner, name]
 }
 function agentColor(tag) {
-  return (AGENT_META[tag] || {}).color || tagColors[tag] || '#0071e3'
+  return (AGENT_META[tag] || {}).color || tagColors[tag] || 'var(--a, #0071e3)'
 }
 function agentIcon(tag) {
   return (AGENT_META[tag] || {}).icon || '◈'
@@ -1314,7 +1314,7 @@ function chainTagLabel(n) {
 function chainTagStyle(n) {
   const tag = n.tag || n.id || ''
   const c = tagColors[tag] || '#B0B0B0'
-  return { background: c + '1A', color: c }
+  return { background: 'color-mix(in srgb, ' + c + ' 10%, transparent)', color: c }
 }
 function nodeSkill(node) {
   const tag = node.tag || node.id
@@ -2571,33 +2571,37 @@ onBeforeUnmount(function () {
   transition: all 0.2s ease;
   background: transparent;
   border: 1px solid rgba(0, 113, 227, 0.3);
-  color: #0071e3;
+  color: var(--a, #0071e3);
   font-family: inherit;
 }
 .ap-btn:hover {
-  background: #0071e3;
-  border-color: #0071e3;
+  background: var(--a, #0071e3);
+  border-color: var(--a, #0071e3);
   color: #fff;
 }
 .ap-btn-d {
   border: 1px solid rgba(255, 59, 48, 0.3);
-  color: #ff3b30;
+  color: var(--r, #ff3b30);
 }
 .ap-btn-d:hover {
-  background: #ff3b30;
-  border-color: #ff3b30;
+  background: var(--r, #ff3b30);
+  border-color: var(--r, #ff3b30);
   color: #fff;
 }
 /* Hero */
 .ap-hero {
   background: color-mix(in srgb, var(--c, #fff) 72%, transparent);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
+  backdrop-filter: blur(var(--glass-blur, 12px));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 12px));
   border: none;
   border-radius: 18px;
   padding: 24px 32px;
   margin-bottom: 16px;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+
+  /* spec §7: glass top highlight (dark only via token) */
+  background-image: var(--glass-highlight, none);
+  box-shadow: var(--shadow-2, 0 1px 4px rgba(0, 0, 0, 0.05));
 }
 .ap-hero-row {
   display: flex;
@@ -2608,7 +2612,7 @@ onBeforeUnmount(function () {
   width: 44px;
   height: 44px;
   border-radius: 12px;
-  background: linear-gradient(135deg, #5ac8fa, #0071e3);
+  background: linear-gradient(135deg, #5ac8fa, var(--a, #0071e3));
   display: flex;
   align-items: center;
   justify-content: center;
@@ -2652,7 +2656,7 @@ onBeforeUnmount(function () {
 .dbv-rolepill {
   font-size: 10px;
   font-weight: 500;
-  color: #0071e3;
+  color: var(--a, #0071e3);
   background: #e3edfd;
   padding: 2px 8px;
   border-radius: 6px;
@@ -2681,7 +2685,7 @@ onBeforeUnmount(function () {
 .dbv-hostbanner button {
   margin-left: auto;
   background: rgba(255, 149, 0, 0.15);
-  color: #ff9500;
+  color: var(--y, #ff9500);
   border: 1px solid rgba(255, 149, 0, 0.3);
   border-radius: 999px;
   padding: 6px 16px;
@@ -2690,27 +2694,31 @@ onBeforeUnmount(function () {
   font-weight: 500;
 }
 .dbv-hostbanner button:hover {
-  background: #ff9500;
+  background: var(--y, #ff9500);
   color: #fff;
 }
 .dbv-hostbanner.error button {
-  color: #ff3b30;
+  color: var(--r, #ff3b30);
   border-color: rgba(255, 59, 48, 0.3);
   background: rgba(255, 59, 48, 0.1);
 }
 .dbv-hostbanner.error button:hover {
-  background: #ff3b30;
+  background: var(--r, #ff3b30);
   color: #fff;
 }
 /* 市场卡 */
 .dbv-marketcard {
   margin-bottom: 16px;
   background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--glass-blur, 16px));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 16px));
   border: none;
   border-radius: 18px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+
+  /* spec §7: glass top highlight (dark only via token) */
+  background-image: var(--glass-highlight, none);
+  box-shadow: var(--shadow-2, 0 1px 4px rgba(0, 0, 0, 0.05));
 }
 .dbv-marketrow {
   display: flex;
@@ -2732,11 +2740,15 @@ onBeforeUnmount(function () {
 /* 场景卡 */
 .dbv-scenecard {
   background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--glass-blur, 16px));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 16px));
   border: none;
   border-radius: 18px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+
+  /* spec §7: glass top highlight (dark only via token) */
+  background-image: var(--glass-highlight, none);
+  box-shadow: var(--shadow-2, 0 1px 4px rgba(0, 0, 0, 0.05));
 }
 .dbv-scenehead {
   display: flex;
@@ -2764,7 +2776,7 @@ onBeforeUnmount(function () {
   gap: 16px;
   padding: 16px 20px;
   background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
-  backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--glass-blur, 16px));
   border: none;
   border-radius: 18px;
   cursor: pointer;
@@ -2772,6 +2784,10 @@ onBeforeUnmount(function () {
   position: relative;
   overflow: hidden;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+
+  /* spec §7: glass top highlight (dark only via token) */
+  background-image: var(--glass-highlight, none);
+  box-shadow: var(--shadow-2, 0 1px 4px rgba(0, 0, 0, 0.05));
 }
 .scn-row:hover {
   background: color-mix(in srgb, var(--c, #fff) 80%, transparent);
@@ -2994,19 +3010,23 @@ onBeforeUnmount(function () {
   background: var(--bg, #f5f5f7);
 }
 .dbv-iconpick.on {
-  background: #0071e3;
+  background: var(--a, #0071e3);
   color: #fff;
 }
 /* 详情卡 */
 .det-card-wrap {
   background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--glass-blur, 16px));
+  -webkit-backdrop-filter: blur(var(--glass-blur, 16px));
   border: none;
   border-radius: 18px;
   padding: 24px;
   margin-bottom: 16px;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+
+  /* spec §7: glass top highlight (dark only via token) */
+  background-image: var(--glass-highlight, none);
+  box-shadow: var(--shadow-2, 0 1px 4px rgba(0, 0, 0, 0.05));
 }
 .dbv-sechead {
   display: flex;
@@ -3033,7 +3053,7 @@ onBeforeUnmount(function () {
   max-width: 260px;
   min-height: 260px;
   background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
-  backdrop-filter: blur(16px);
+  backdrop-filter: blur(var(--glass-blur, 16px));
   border: none;
   border-radius: 18px;
   padding: 18px;
@@ -3042,6 +3062,10 @@ onBeforeUnmount(function () {
   transition: all 0.25s ease;
   position: relative;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
+
+  /* spec §7: glass top highlight (dark only via token) */
+  background-image: var(--glass-highlight, none);
+  box-shadow: var(--shadow-2, 0 1px 4px rgba(0, 0, 0, 0.05));
 }
 .ap-nd:hover {
   background: color-mix(in srgb, var(--c, #fff) 80%, transparent);
@@ -3157,7 +3181,7 @@ onBeforeUnmount(function () {
   white-space: nowrap;
 }
 .dbv-skillpick:hover {
-  border-color: #0071e3;
+  border-color: var(--a, #0071e3);
   background: var(--c, #fff);
 }
 .ap-nd-engbtn {
@@ -3170,12 +3194,12 @@ onBeforeUnmount(function () {
   cursor: pointer;
 }
 .ap-nd-engbtn:hover {
-  border-color: #0071e3;
-  color: #0071e3;
+  border-color: var(--a, #0071e3);
+  color: var(--a, #0071e3);
 }
 .ap-arr {
   font-size: 18px;
-  color: #0071e3;
+  color: var(--a, #0071e3);
   font-weight: 700;
   align-self: center;
   margin: 0 4px;
@@ -3196,12 +3220,12 @@ onBeforeUnmount(function () {
   color: #34c759;
 }
 .dbv-engbadge.blue {
-  background: #0071e314;
-  color: #0071e3;
+  background: var(--a, #0071e3) 14;
+  color: var(--a, #0071e3);
 }
 .dbv-engbadge.red {
-  background: #ff3b3014;
-  color: #ff3b30;
+  background: var(--r, #ff3b30) 14;
+  color: var(--r, #ff3b30);
 }
 .dbv-engbadge.gray {
   background: #86868b14;
@@ -3388,7 +3412,7 @@ onBeforeUnmount(function () {
   border-radius: 999px;
   border: none;
   background: rgba(255, 59, 48, 0.08);
-  color: #ff3b30;
+  color: var(--r, #ff3b30);
   cursor: pointer;
   font-size: 14px;
   display: flex;
@@ -3562,7 +3586,7 @@ onBeforeUnmount(function () {
   background: rgba(0, 113, 227, 0.08);
 }
 .dbv-skillcheck {
-  color: #0071e3;
+  color: var(--a, #0071e3);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -3641,9 +3665,9 @@ onBeforeUnmount(function () {
   font-weight: 500;
 }
 .dbv-engfilters > span.on {
-  border-color: #0071e3;
+  border-color: var(--a, #0071e3);
   color: #fff;
-  background: #0071e3;
+  background: var(--a, #0071e3);
 }
 .dbv-engsep {
   width: 1px;
@@ -3655,7 +3679,7 @@ onBeforeUnmount(function () {
   cursor: default !important;
 }
 .dbv-engclear {
-  color: #86868b !important;
+  color: var(--t3, #86868b) !important;
 }
 .dbv-engsearch {
   width: 100%;
@@ -3711,7 +3735,7 @@ onBeforeUnmount(function () {
   width: 18px;
   height: 18px;
   cursor: pointer;
-  accent-color: #0071e3;
+  accent-color: var(--a, #0071e3);
 }
 .dbv-engbody {
   flex: 1;

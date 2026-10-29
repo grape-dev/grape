@@ -598,7 +598,7 @@
             type="radio"
             :value="sc"
             name="scopeRadio"
-            :style="{ accentColor: '#0071e3', width: '16px', height: '16px' }"
+            :style="{ accentColor: 'var(--a, #0071e3)', width: '16px', height: '16px' }"
           />
           <span>{{ scopeShort(sc) }}</span>
         </label>
@@ -652,7 +652,7 @@
                   height="22"
                   viewBox="0 0 24 24"
                   fill="none"
-                  stroke="#2563eb"
+                  stroke="var(--a, #2563eb)"
                   stroke-width="2"
                   stroke-linecap="round"
                   stroke-linejoin="round"
@@ -737,7 +737,7 @@
                       height="16"
                       viewBox="0 0 24 24"
                       fill="none"
-                      stroke="#d97706"
+                      stroke="var(--y, #d97706)"
                       stroke-width="2"
                       stroke-linecap="round"
                       stroke-linejoin="round"
@@ -940,23 +940,23 @@ const HEALTH_BADGE = {
   about_to_gc: { color: 'var(--r)', bg: '#fee2e2' },
 }
 const SCOPE_BADGE_CFG = {
-  global: { label: '全局', color: '#3168e0', bg: '#e3edfd' },
+  global: { label: '全局', color: 'var(--a, #3168e0)', bg: '#e3edfd' },
   repo: { label: '仓库', color: '#8b5cf6', bg: '#ede9fe' },
   user: { label: '个人', color: '#1ca44c', bg: '#dcfce7' },
   local: { label: '本机', color: '#0e7490', bg: '#cffafe' },
 }
 const SCOPE_LABELS = { global: '全局', user: '个人', repo: '仓库', local: '本机' }
 const ENGINE_DOT = {
-  opencode: '#3b82f6',
+  opencode: 'var(--a, #3b82f6)',
   hermes: '#8b5cf6',
-  codearts: '#f59e0b',
+  codearts: 'var(--y, #f59e0b)',
   codex: '#10a37f',
   aishell: '#0a8cd8',
 }
 const SCENE_TAG_COLORS = {
   default: '#10b981',
-  'cloud-native': '#3b82f6',
-  iac: '#f59e0b',
+  'cloud-native': 'var(--a, #3b82f6)',
+  iac: 'var(--y, #f59e0b)',
   'agent-dev': '#8b5cf6',
   'skill-dev': '#ec4899',
   'api-skill-dev': '#06b6d4',
@@ -966,22 +966,22 @@ const RT_TAG_COLORS = {
   all: '#6366f1',
   vod: '#ec4899',
   issue: '#ef4444',
-  coding: '#3b82f6',
+  coding: 'var(--a, #3b82f6)',
   qa: '#a855f7',
-  sre: '#f59e0b',
+  sre: 'var(--y, #f59e0b)',
 }
 const RT_TAG_OPTIONS = ['all', 'vod', 'issue', 'coding', 'qa', 'sre']
 const HEALTH_ORDER = { online: 0, recently_lost: 1, offline: 2, about_to_gc: 3 }
 const DEV_STATUS_COLORS = {
   'cde.0000': '#6b7280',
-  'cde.0001': '#2563eb',
+  'cde.0001': 'var(--a, #2563eb)',
   'cde.0002': '#16a34a',
-  'cde.0003': '#2563eb',
+  'cde.0003': 'var(--a, #2563eb)',
   'cde.0004': '#16a34a',
-  'cde.0005': '#d97706',
+  'cde.0005': 'var(--y, #d97706)',
   'cde.0006': '#dc2626',
-  'cde.0007': '#d97706',
-  'cde.0008': '#d97706',
+  'cde.0007': 'var(--y, #d97706)',
+  'cde.0008': 'var(--y, #d97706)',
   'cde.0009': '#9ca3af',
   'cde.1001': '#dc2626',
   'cde.1002': '#dc2626',
@@ -2219,7 +2219,7 @@ onBeforeUnmount(function () {
   min-width: 0;
 }
 .rtv-search:focus {
-  border-color: #0071e3;
+  border-color: var(--a, #0071e3);
   background: var(--c);
 }
 .rtv-searchbtn {
@@ -2235,7 +2235,7 @@ onBeforeUnmount(function () {
   transition: all 0.15s;
 }
 .rtv-searchbtn:hover {
-  background: #0071e3;
+  background: var(--a, #0071e3);
   color: #fff;
 }
 .rtv-addbtn {
@@ -2246,7 +2246,7 @@ onBeforeUnmount(function () {
   padding: 8px 18px;
   border: none;
   border-radius: 10px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  background: linear-gradient(135deg, var(--a, #3b82f6), #8b5cf6);
   color: #fff;
   font-size: 13px;
   font-weight: 600;
@@ -2309,9 +2309,9 @@ onBeforeUnmount(function () {
   transition: all 0.2s;
 }
 .rtv-chip.on {
-  border-color: #0071e3;
+  border-color: var(--a, #0071e3);
   color: #fff;
-  background: #0071e3;
+  background: var(--a, #0071e3);
 }
 .rtv-chip-dot {
   width: 7px;
@@ -2334,7 +2334,7 @@ onBeforeUnmount(function () {
   font-size: 11px;
   padding: 4px 12px;
   border-radius: 999px;
-  color: #86868b;
+  color: var(--t3, #86868b);
   font-weight: 400;
 }
 .rtv-clear:hover {
@@ -2479,7 +2479,7 @@ onBeforeUnmount(function () {
   color: #fff;
 }
 .rtv-sbadge.global {
-  background: #3168e0;
+  background: var(--a, #3168e0);
 }
 .rtv-sbadge.repo {
   background: #8b5cf6;
@@ -2623,8 +2623,8 @@ onBeforeUnmount(function () {
   margin: 0 2px;
 }
 .rtv-pager button.on {
-  border-color: #0071e3;
-  background: #0071e3;
+  border-color: var(--a, #0071e3);
+  background: var(--a, #0071e3);
   color: #fff;
   font-weight: 600;
 }
@@ -2886,7 +2886,7 @@ onBeforeUnmount(function () {
   color: var(--t1);
 }
 .rtv-sm-item.on {
-  border-color: #0071e3;
+  border-color: var(--a, #0071e3);
   background: rgba(0, 113, 227, 0.06);
   font-weight: 600;
 }
@@ -2945,7 +2945,7 @@ onBeforeUnmount(function () {
   width: 36px;
   height: 36px;
   border-radius: 10px;
-  background: linear-gradient(135deg, #3b82f6, #8b5cf6);
+  background: linear-gradient(135deg, var(--a, #3b82f6), #8b5cf6);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -3002,7 +3002,7 @@ onBeforeUnmount(function () {
   transition: all 0.2s;
 }
 .rtv-sb-opt:hover {
-  border-color: #3b82f6;
+  border-color: var(--a, #3b82f6);
   box-shadow: 0 2px 12px rgba(59, 130, 246, 0.08);
 }
 .rtv-sb-opt.dev {
@@ -3061,7 +3061,7 @@ onBeforeUnmount(function () {
   width: 24px;
   height: 24px;
   border: 2.5px solid rgba(59, 130, 246, 0.2);
-  border-top-color: #3b82f6;
+  border-top-color: var(--a, #3b82f6);
   border-radius: 50%;
   animation: rtvSpin 0.8s linear infinite;
   margin-bottom: 12px;
