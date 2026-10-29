@@ -42,7 +42,9 @@ HOUR_RETENTION_DAYS = 30
 #: SLO 据此读小时桶，不再每轮全窗扫 obs_runtime_samples
 SUM_METRICS = ("task_enqueued", "task_done", "task_failed", "task_cancelled",
                "token_input", "token_output", "token_cache", "token_total",
-               "engine_avail_online", "engine_avail_total")
+               "engine_avail_online", "engine_avail_total",
+               # Issue #516 M3：超时失败（timed out after）按仓库聚合（趋势/仪表盘消费）
+               "task_timeout")
 RATE_METRICS = ("task_success_rate",)
 AVG_METRICS = ("task_queue_wait_avg", "task_duration_avg")
 P95_METRICS = ("task_queue_wait_p95", "task_duration_p95")
@@ -161,6 +163,17 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
             elif st == "cancelled":
                 m.setdefault("task_cancelled", []).append(float(n))
 
+        # ②b Issue #516 M3：超时失败（timed out after 签名，worker 侧超时 kill 上报）
+        #    按仓库计数——与告警指标同口径，供趋势/仪表盘消费
+        c.execute("SELECT repo_key, COUNT(*) FROM agent_tasks"
+                  " WHERE completed_at >= ? AND completed_at < ?"
+                  "   AND status='failed'"
+                  "   AND (result_text LIKE '%timed out after%' OR errors LIKE '%timed out after%')"
+                  "   AND repo_key IS NOT NULL AND repo_key != ''"
+                  " GROUP BY repo_key", (s_iso, e_iso))
+        for repo_key, n in c.fetchall():
+            bucket(repo_key).setdefault("task_timeout", []).append(float(n))
+
         # ③ 排队等待与执行耗时（started_at 落在桶内的任务）
         c.execute("SELECT repo_key, created_at, started_at, completed_at FROM agent_tasks"
                   " WHERE started_at >= ? AND started_at < ?"
@@ -221,7 +234,7 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
             n = int(sum(m["task_enqueued"]))
             row["task_enqueued"] = (float(n), n)
         for k, metric in (("task_done", "task_done"), ("task_failed", "task_failed"),
-                          ("task_cancelled", "task_cancelled")):
+                          ("task_cancelled", "task_cancelled"), ("task_timeout", "task_timeout")):
             if m.get(k):
                 n = int(sum(m[k]))
                 row[metric] = (float(n), n)

@@ -43,6 +43,13 @@ SEED_RULES: List[Dict[str, Any]] = [
         "severity": "warning", "seed_source": "GrapeTaskFailureRateHigh",
         "description": "近 5 分钟终态任务失败率超过 50%",
     },
+    # Issue #516 M3：超时失败聚合告警——识别易超时仓库/场景（长任务需拆分或上调超时配置）
+    {
+        "name": "task_timeout", "kind": "metric", "level": "user", "metric": "task_timeout",
+        "comparator": "gt", "threshold": 0, "window_sec": 600, "for_sec": 300,
+        "severity": "warning", "seed_source": "GrapeTaskTimeout",
+        "description": "近 10 分钟有任务因超时被强制失败（timed out after），建议预拆分长任务或上调该 skill/仓库超时配置",
+    },
     {
         "name": "task_queue_backlog", "kind": "metric", "level": "user", "metric": "task_queued",
         "comparator": "gt", "threshold": 10, "window_sec": 600, "for_sec": 600,
@@ -368,6 +375,21 @@ def _repo_metrics() -> Dict[str, Dict[str, float]]:
                 m["_done"] += cnt
                 if (status or "").lower() != "completed":
                     m["_bad"] += cnt
+            # ②b Issue #516 M3：超时失败计数（worker 超时 kill 上报的
+            # "timed out after" 签名），按仓库聚合供 task_timeout 告警规则消费
+            c.execute(
+                "SELECT repo_key, COUNT(*) FROM agent_tasks"
+                " WHERE repo_key IS NOT NULL AND repo_key != ''"
+                "   AND status='failed'"
+                "   AND completed_at IS NOT NULL AND completed_at != '' AND completed_at >= ?"
+                "   AND (result_text LIKE '%timed out after%' OR errors LIKE '%timed out after%')"
+                " GROUP BY repo_key", (fail_cutoff,))
+            for repo_key, n in c.fetchall():
+                m = out.setdefault(repo_key, {"task_stuck": 0.0, "task_queued": 0.0,
+                                              "_done": 0.0, "_bad": 0.0,
+                                              "_mut0_tot": 0.0, "_mut0_bad": 0.0,
+                                              "_mut1_tot": 0.0, "_mut1_bad": 0.0})
+                m["task_timeout"] = m.get("task_timeout", 0.0) + float(n or 0)
             # ③ 突变检测的两个相邻窗口（本窗口 / 上一窗口），同样 SQL 侧计数
             c.execute(
                 "SELECT repo_key, status,"

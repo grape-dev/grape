@@ -130,11 +130,14 @@ def test_seed_rules_idempotent_and_levels():
                           # P1-3：数据缺失 + 突变
                           "runtime_silent", "repo_silent", "task_success_rate_drop",
                           # Issue #463 P3：表体积
-                          "agent_tasks_rows_high", "agent_tasks_size_high"}
-    assert len(al.list_rules()) == 12, "种子规则应为 12 条（7 指标 + 2 缺失 + 1 突变 + 2 表体积）"
+                          "agent_tasks_rows_high", "agent_tasks_size_high",
+                          # Issue #516 M3：超时失败聚合告警
+                          "task_timeout"}
+    assert len(al.list_rules()) == 13, "种子规则应为 13 条（8 指标 + 2 缺失 + 1 突变 + 2 表体积）"
     user_rules = {r["name"] for r in al.list_rules(level="user")}
     assert user_rules == {"task_stuck", "task_failure_rate", "task_queue_backlog",
-                          "runtime_silent", "repo_silent", "task_success_rate_drop"}
+                          "runtime_silent", "repo_silent", "task_success_rate_drop",
+                          "task_timeout"}
     for name in ("db_pool_usage", "db_aborted_connects", "http_error_rate_5xx",
                  "all_runtimes_offline"):
         assert rules[name]["level"] == "platform"
