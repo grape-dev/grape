@@ -16,9 +16,14 @@ import asyncio
 from src.session_manager import db, db_lock
 from src.config import log
 
-# 官方技能仓库（平台配置，格式 <owner>/<repo>；缺省空 = 官方反馈不转换，标记 skipped）
-GRAPE_SKILLS_REPO = os.environ.get("GRAPE_SKILLS_REPO", "").strip()
-# 官方技能仓库 provider（默认 gitcode；github 可配置）
+# 官方技能仓库（owner 唯一固定、无其它值；无 env 覆盖——反馈目标恒为官方技能仓。
+# 与 src/storage/scene_sync.py 同源：grape-dev/grape-skills）
+_OFFICIAL_SKILLS_REPO = "grape-dev/grape-skills"
+# 项目自身组件反馈标识（CLI / 平台）→ 一律进官方技能仓（official-repo-config-unify-design.md §3.2）
+_OFFICIAL_COMPONENT_KINDS = {"cli", "platform"}
+# 是否向官方技能仓提交官方技能 / CLI / 平台反馈 Issue；默认允许（1），私有部署可设 0 关闭
+GRAPE_FEEDBACK_OFFICIAL_ISSUE = os.environ.get("GRAPE_FEEDBACK_OFFICIAL_ISSUE", "1").strip()
+
 GRAPE_SKILLS_PROVIDER = os.environ.get("GRAPE_SKILLS_PROVIDER", "gitcode").strip() or "gitcode"
 
 FEEDBACK_CATEGORY_OTHER = "other"
@@ -33,8 +38,11 @@ def _provider_module(provider: str):
 
 
 def _official_skills_target():
-    """官方技能仓库目标：返回 (provider, owner, repo, global_bot_token)；未配置返回 None。"""
-    repo = GRAPE_SKILLS_REPO
+    """官方技能仓目标：返回 (provider, owner, repo, global_bot_token)；未配置返回 None。
+
+    地址硬编码 `_OFFICIAL_SKILLS_REPO`（owner 唯一固定，无 env 覆盖）。
+    """
+    repo = _OFFICIAL_SKILLS_REPO
     if not repo or "/" not in repo:
         return None
     owner, rname = repo.split("/", 1)
@@ -51,6 +59,11 @@ def _official_skills_target():
     except Exception:
         token = ""
     return (GRAPE_SKILLS_PROVIDER, owner, rname, token)
+
+
+def _feedback_official_issue_enabled() -> bool:
+    """默认允许向官方技能仓提交 official / CLI / platform 反馈；显式 '0'/'false'/'no' 视为关闭。"""
+    return GRAPE_FEEDBACK_OFFICIAL_ISSUE.lower() not in ("0", "false", "no")
 
 
 def _repo_target(repo_key: str):
@@ -110,7 +123,7 @@ def _fetch_pending(limit: int):
         c = db.cursor()
         c.execute(
             "SELECT id, repo_key, task_id, agent_type, skill_name, skill_scope, "
-            "title, description, fail_summary, event_seq, issue_id, issue_number "
+            "title, description, fail_summary, event_seq, issue_id, issue_number, feedback_kind "
             "FROM user_feedback WHERE source='agent' AND issue_url='' AND is_deleted=0 "
             "ORDER BY id LIMIT ?",
             (limit,))
@@ -120,6 +133,7 @@ def _fetch_pending(limit: int):
         "agent_type": r[3] or '', "skill_name": r[4] or '', "skill_scope": r[5] or '',
         "title": r[6] or '', "description": r[7] or '', "fail_summary": r[8] or '',
         "event_seq": r[9], "issue_id": r[10], "issue_number": r[11] or '',
+        "feedback_kind": r[12] or '',
     } for r in rows]
 
 
@@ -178,17 +192,26 @@ def convert_pending_feedback(limit: int = 20) -> dict:
 
 
 def _resolve_target(row):
-    """路由：official → 官方技能仓库；repo/user → 反馈所属仓库。返回 (provider, owner, repo, token)。"""
-    scope = row.get("skill_scope") or ""
-    if scope == "official":
-        target = _official_skills_target()
-        if target is None:
-            return ("", "", "", "")
-        provider, owner, repo, token = target
+    """路由：
+    - 非官方技能（repo/user 技能类）→ 反馈所属仓库（现状语义，私有 bug 不进公开仓）
+    - official 技能 / CLI / platform（项目自身组件）→ 官方技能仓（受 GRAPE_FEEDBACK_OFFICIAL_ISSUE，
+      默认允许）。关闭时返回空目标 → convert 走 skipped（表内保留，不丢）。
+    见 official-repo-config-unify-design.md §2/§3.2。
+    """
+    scope = (row.get("skill_scope") or "").lower()
+    kind = (row.get("feedback_kind") or "").lower()
+    if scope != "official" and kind not in _OFFICIAL_COMPONENT_KINDS:
+        provider, owner, repo = _repo_target(row.get("repo_key") or "")
+        token = _repo_bot_token(row.get("repo_key") or "")
         return (provider, owner, repo, token)
-    provider, owner, repo = _repo_target(row.get("repo_key") or "")
-    token = _repo_bot_token(row.get("repo_key") or "")
-    return (provider, owner, repo, token)
+    if not _feedback_official_issue_enabled():
+        log.info(f"feedback→issue: official/CLI/platform feedback skipped "
+                 f"(GRAPE_FEEDBACK_OFFICIAL_ISSUE=0) fid={row.get('id')}")
+        return ("", "", "", "")
+    target = _official_skills_target()
+    if target is None:
+        return ("", "", "", "")
+    return target
 
 
 def _build_issue_body(row: dict) -> str:
