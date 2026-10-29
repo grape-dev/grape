@@ -1,6 +1,6 @@
 # Vue 重构 · 全量交接状态（HANDOFF-STATE）
 
-> 本文件是 2026-10-26 会话末的**全量交接快照**。新会话续接顺序：
+> 本文件是 2026-10-28 会话末的**全量交接快照**（批1-16 全部完成，js/pages 清零）。新会话续接顺序：
 > ① 读 `docs/weekly-08/migration/SESSION-STATE.md`（每批坑/协议速查）→
 > ② 读本文件（全局口径 + 未完成事项）→
 > ③ 开工前 `git branch --show-current` 确认在 weekly-clean-mys。
@@ -17,6 +17,7 @@
 
 | commit | 内容 |
 |---|---|
+| `fee3b30bb` | **feat: 批16 feedback → Vue（js/pages 目录清零 🏁）** |
 | `0892e6150` | **feat: 批15 knowledge → Vue** |
 | `635aac467` | **feat: 批14 壳耦合组 settings+repos+templates → Vue** |
 | `9905c518c` | docs: add full handoff state for vue refactor (batches 1-13) |
@@ -37,13 +38,9 @@
 
 ## 2. 迁移进度总览
 
-**批1-15 完成。`js/pages/` 只剩最后 1 个文件**：
+**批1-16 全部完成。`js/pages/` 目录已清零——22个模块约2.3万行全部迁移完毕。**
 
-```
-**批1-16 完成。js/pages/ 目录已清零（22模块约2.3万行全部迁移）。**
-```
-
-Vue 侧现状：`app/src/views/` 20 个 .vue 组件（Dashboard 3891 / Observability 3874 / Issues 3532 / Autopilot 3346 / Runtimes 3323 / ReposView+TemplatesView 合一 chunk / Event 2237 / Account 2173 / SceneMarket 1988 / 其余更小）+ `entries/` 17 个入口 chunk。
+Vue 侧现状：`app/src/views/` 22 个 .vue 组件（Dashboard 3891 / Observability 3874 / Issues 3532 / Autopilot 3346 / Runtimes 3323 / ReposView+TemplatesView+SettingsView 合一批 / KnowledgeView / FeedbackDialog（全局弹窗组件）/ Event 2237 / Account 2173 / SceneMarket 1988 / 其余更小）+ `entries/` 19 个入口 chunk。
 
 每批窗口契约（entry 持有 window 全局函数，app.js nav 路由段调用，函数名/签名与老代码一致）：
 - 批9 issues：`renderTasks(param)`；导出 `_stopScenePoll/_grapeConfirm/_backToTaskDetail/_jumpToNodeEvent/_jumpToPipeline/_tasksById`
@@ -76,12 +73,20 @@ Vue 侧现状：`app/src/views/` 20 个 .vue 组件（Dashboard 3891 / Observabi
 7. **echarts**：vendored 全局 `G.echarts.init(el)` + 函数 ref 收集容器 + nextTick；**勿 import**（重复打包 1MB）。mermaid 保持动态 script 注入。
 8. **computed 内不能写 window 副作用**（no-side-effects）：拆 `watch(x, …, {immediate:true})`。
 9. **harness 断言选择器精确到 `.ap-nd-name`** 这类标签元素，整卡 textContent 模糊匹配会命中错误卡片（假阴性）。
+10. **`createApp().mount()` 返回值才是根组件实例**：`app._instance` 生产构建为 undefined，defineExpose 方法从 mount 返回值取（批14）。
+11. **fragment 根 + 根级 Teleport 炸 unmount**（批4/批15 两犯）：必须包单一根 div。
+12. **entry 的 window 句柄必须真 mount 后才设**（批15）：模块加载即设会拦截 app.js 首次 nav 守卫。
+13. **harness mock 必须返回深拷贝**（批15）：Vue3 ref 同引用赋值是 no-op，真实后端每次返回新 JSON。
+14. **reload 后 hash 自动恢复会让登录前 mount 抢跑**（批15）：loadList 401 → firstLoad 卡 true；harness 先 nav away 再 nav 回。
+15. **CDP 原生 `.click()` 在 Teleport 弹层内不触发 Vue handler**（批15）：用 `dispatchEvent(new MouseEvent('click', {bubbles:true}))`。
+16. **弹窗类组件截图 PIL 判定**（批16）：overlay 非整页，均值判定失真——用亮像素占比（亮>10% vs 暗~0%）。
 
 ## 5. 未完成事项（按优先序）
 
-### 5.1 剩余迁移批次
-1. **admin 独立站** → `app.js` 外壳 + `index.html` 收口批（清死代码、统一路由段、撤全部剩余桥接、vue chunk ?v= 统一梳理）——下一批。
-3. **admin 独立站** → 最后 `app.js` 外壳 + `index.html` 收口（清死代码、统一路由段、撤全部剩余桥接）。
+### 5.1 剩余工作（收口阶段，无页面迁移批次了）
+1. **admin 独立站** → 独立页面迁移。
+2. **`app.js` 外壳 + `index.html` 收口批**（最后一批）：清死代码、统一路由段、撤全部剩余桥接（window.x 临时桥）、vue chunk `?v=` 统一梳理（现为 v1~v6 混杂）、`_showAppleConfirm` 等 app.js 尾部全局函数归属梳理。
+3. 收口后 → 视觉债批量处理（见 5.2）。
 4. 死代码待主人裁决：agents.js Configure 面板（约250行无UI入口）；help 页是否彻底 Vue 化（阶段3裁决）。
 
 ### 5.2 视觉/体验债（`docs/weekly-08/ui-debt.md`，迁移收口后批量处理）
