@@ -242,7 +242,7 @@ def create_environment(body: CreateEnvBody, user: dict = Depends(require_no_sess
             # 2026-10-15 修复（devspace 注入错地址）：前端传来的 grape_server 是
             # window.location.origin（用户浏览页面用的地址，如生产 www.grapedev.cn），
             # 不等于 CLI 可达的服务端基址（worker 心跳实际用 worker 回连地址，
-            # 如 https://worker.grapedev.cn）。以服务端权威值为准：前端值仅与
+            # 如 worker 回连地址）。以服务端权威值为准：前端值仅与
             # worker_connect_url 一致时采纳（dev 环境两者恰好相同），否则一律用
             # get_worker_connect_url()——从源头保证 RUNTIME_SERVER_URL 正确。
             # Issue #471 E1：改用拆分后的 worker 回连地址（未配置回退 server_base_url）。
