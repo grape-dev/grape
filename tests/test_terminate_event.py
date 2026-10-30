@@ -113,7 +113,7 @@ class TestTerminateWorkerMode:
             f"worker 模式 task 应为 cancelled, 实际={task['status']}"
         )
 
-    def test_worker_event_status_failed(self):
+    def test_worker_event_status_cancelled(self):
         from src.api.routes.events import terminate_event
 
         _insert_event(seq=101, status="running")
@@ -126,8 +126,10 @@ class TestTerminateWorkerMode:
             c = db.cursor()
             c.execute("SELECT status FROM events WHERE seq=?", (101,))
             row = c.fetchone()
-        assert row and row[0] == "failed", (
-            f"事件状态应为 failed, 实际={row[0] if row else 'None'}"
+        # Issue #587：worker 模式终止 → task cancelled → 事件级联收敛为 cancelled
+        # （取消是非业务终态，不当作业务通过；此前兜底回写 failed 已由终态保护取代）
+        assert row and row[0] == "cancelled", (
+            f"事件状态应为 cancelled（#587 级联收敛），实际={row[0] if row else 'None'}"
         )
 
     def test_heartbeat_matches_cancelled_task(self):
