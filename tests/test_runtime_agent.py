@@ -154,14 +154,19 @@ class TestDiscoverLocalRuntimes:
 @pytest.mark.skipif(_is_win, reason="POSIX-only: pgrep/readlink/killpg")
 class TestKillStaleEngine:
     def test_kills_matching_pid(self):
+        import signal
         task = {"cwd": "/home/grape/org/repo"}
         with patch("os.path.expanduser", return_value="/home/zhangsan"), \
-             patch("subprocess.run", return_value=MagicMock(stdout="1234\n")), \
+             patch("subprocess.run", return_value=MagicMock(stdout="1234\n")) as m_run, \
              patch("os.readlink", return_value="/home/zhangsan/org/repo/x"), \
              patch("os.getpgid", return_value=99), \
              patch("os.killpg") as m_kill:
             ra._kill_stale_engine(task)
-        m_kill.assert_called_once_with(99, __import__("signal").SIGTERM)
+        # SIGTERM 必发（首个调用）；随后还有 os.killpg(pgid, 0) 存活探测
+        assert m_kill.call_args_list[0] == ((99, signal.SIGTERM),)
+        # pgrep 已执行（无 TTY 环境下不再因 os.getlogin() ENXIO 跳过，Issue #522）
+        pgrep_cmd = m_run.call_args_list[0][0][0]
+        assert pgrep_cmd[:4] == ["pgrep", "-u", ra._current_username(), "-f"]
 
     def test_no_processes(self):
         with patch("subprocess.run", return_value=MagicMock(stdout="")), \

@@ -1204,6 +1204,28 @@ def _worker_server_url_reachable(rts: str, task_server_url: str) -> bool:
     return ok
 
 
+def _current_username() -> "str | None":
+    """Resolve the current username without touching a controlling terminal.
+
+    Fallback chain: USER env var -> pwd.getpwuid(os.getuid()).pw_name -> str(os.getuid()).
+    os.getlogin() is deliberately avoided: it raises OSError(ENXIO) on TTY-less
+    workers, and as a default-argument expression it is evaluated eagerly even
+    when USER is set (Issue #522). Returns None only on platforms without
+    os.getuid (Windows callers never reach this code path).
+    """
+    user = os.environ.get("USER", "")
+    if user:
+        return user
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_name
+    except Exception:
+        pass
+    if hasattr(os, "getuid"):
+        return str(os.getuid())
+    return None
+
+
 def _kill_stale_engine(task: dict, backend: str = "opencode"):
     """超时/终止后杀掉对应引擎子进程（opencode run / hermes acp / hermes chat / codearts run）。
     按 cwd 匹配，避免误杀其他任务。SIGTERM 后 3s SIGKILL 兜底。
@@ -1253,10 +1275,12 @@ def _kill_stale_engine(task: dict, backend: str = "opencode"):
         return
 
     killed_any = False
+    user = _current_username()
     for pattern in patterns:
         try:
+            pgrep_args = ["pgrep", "-u", user, "-f", pattern] if user else ["pgrep", "-f", pattern]
             out = subprocess.run(
-                ["pgrep", "-u", os.environ.get("USER", os.getlogin() if hasattr(os, "getlogin") else ""), "-f", pattern],
+                pgrep_args,
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5
             )
             for pid_str in out.stdout.strip().split():
