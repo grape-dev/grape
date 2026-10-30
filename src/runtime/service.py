@@ -2562,6 +2562,14 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
         "payload": {"issue_number": _issue_num, "issue": {"number": int(_issue_num) if _issue_num.isdigit() else _issue_num}},
     }
     _runtime_id = task.get("runtime_id") or 0
+    # Issue #565: bot 建单只做场景判定不进执行棒——worker 侧 evt 是重建的、无原始标记，
+    # 按该 issue 首个事件 actor（建单人）是否 bot 还原 _bot_opened，
+    # _redispatch_vod_after_recommend 内据此短路重派（查询失败降级为不标记，人建单行为不变）。
+    try:
+        from src.user.db import get_all_bot_usernames
+        _evt["_bot_opened"] = _vod_issue_creator in (get_all_bot_usernames() or [])
+    except Exception:
+        pass
     from src.api.event_pipeline import _redispatch_vod_after_recommend
     _redispatch_vod_after_recommend(repo_key, issue_id, _vod_skill, _evt, _runtime_id)
 
