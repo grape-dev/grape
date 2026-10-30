@@ -338,10 +338,7 @@
           <div class="isk-board-head">
             <span
               class="isk-board-dot"
-              :style="{
-                background: col.color,
-                boxShadow: '0 0 6px color-mix(in srgb, ' + col.color + ' 25%, transparent)',
-              }"
+              :style="{ background: col.color, boxShadow: '0 0 6px ' + col.color + '40' }"
             ></span>
             <span class="isk-board-name">{{ col.lbl }}</span>
             <span class="isk-board-cnt">{{ boardGrouped[col.k].length }}</span>
@@ -887,9 +884,9 @@ const STAGE_LABELS = computed(() => ({
 const STAGE_COLORS = {
   vod: '#ec4899',
   issue: '#ef4444',
-  coding: 'var(--a, #3b82f6)',
+  coding: '#3b82f6',
   qa: '#a855f7',
-  sre: 'var(--y, #f59e0b)',
+  sre: '#f59e0b',
   pending_review: '#10b981',
   done: '#34c759',
   '': '#86868b',
@@ -1203,12 +1200,7 @@ const agentStatusCardHtml = computed(() => {
       icon: '○',
       label: t('agent_status.pending'),
     },
-    running: {
-      color: 'var(--a, #3b82f6)',
-      bg: 'var(--a, #3b82f6)',
-      icon: '●',
-      label: t('agent_status.running'),
-    },
+    running: { color: '#3b82f6', bg: '#3b82f6', icon: '●', label: t('agent_status.running') },
     completed: { color: '#34c759', bg: '#34c759', icon: '✓', label: t('agent_status.completed') },
     failed: { color: '#ef4444', bg: '#ef4444', icon: '✕', label: t('agent_status.failed') },
     cancelled: {
@@ -1282,9 +1274,9 @@ const pipelineCardHtml = computed(() => {
       const col = isCompleted
         ? '#34c759'
         : isCurrent
-          ? 'var(--a, #0071e3)'
+          ? '#0071e3'
           : isFailed
-            ? 'var(--r, #ff3b30)'
+            ? '#ff3b30'
             : isCancelledN
               ? '#86868b'
               : isSkipped
@@ -1293,9 +1285,9 @@ const pipelineCardHtml = computed(() => {
       const bg = isCompleted
         ? '#34c759'
         : isCurrent
-          ? 'var(--a, #0071e3)'
+          ? '#0071e3'
           : isFailed
-            ? 'var(--r, #ff3b30)'
+            ? '#ff3b30'
             : isCancelledN
               ? '#86868b'
               : isSkipped
@@ -1337,7 +1329,7 @@ const pipelineCardHtml = computed(() => {
             ? '#ef4444'
             : e.status === 'cancelled'
               ? '#86868b'
-              : 'var(--a, #3b82f6)'
+              : '#3b82f6'
       const statusIcon =
         e.status === 'completed'
           ? '✓'
@@ -1432,9 +1424,9 @@ const prStatus = computed(() => {
       st === 'completed'
         ? '#34c759'
         : st === 'cancelled'
-          ? 'var(--r, #ff3b30)'
+          ? '#ff3b30'
           : st === 'processing'
-            ? 'var(--a, #3b82f6)'
+            ? '#3b82f6'
             : '#86868b',
     text:
       st === 'completed'
@@ -1852,7 +1844,7 @@ window._grapeConfirm = function (opts, event) {
     (cancelText || t('cancel') || '取消') +
     '</button>' +
     '<button id="_grapeOK" style="flex:1;padding:6px 0;border-radius:8px;border:none;background:' +
-    (danger ? 'var(--r, #ff3b30)' : 'var(--a, #0071e3)') +
+    (danger ? '#ff3b30' : '#0071e3') +
     ';font-size:11px;font-weight:600;color:#fff;cursor:pointer;font-family:inherit">' +
     (confirmText || t('confirm') || '确认') +
     '</button></div>'
@@ -2507,9 +2499,9 @@ onBeforeUnmount(function () {
   font-family: inherit;
 }
 .isk-viewtabs button.on {
-  border-bottom-color: var(--a, var(--a, #0071e3));
+  border-bottom-color: var(--a, #0071e3);
   color: #fff;
-  background: var(--a, var(--a, #0071e3));
+  background: var(--a, #0071e3);
 }
 /* 筛选 popover */
 .isk-pop-wrap {
@@ -2533,7 +2525,7 @@ onBeforeUnmount(function () {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--a, #3b82f6);
+  background: #3b82f6;
 }
 .isk-popover {
   position: absolute;
@@ -2620,8 +2612,8 @@ onBeforeUnmount(function () {
   flex-shrink: 0;
 }
 .isk-box.on {
-  border-color: var(--a, #3b82f6);
-  background: var(--a, #3b82f6);
+  border-color: #3b82f6;
+  background: #3b82f6;
 }
 .isk-cnt {
   font-size: 11px;
@@ -2656,7 +2648,7 @@ onBeforeUnmount(function () {
 }
 .isk-vcheck {
   margin-left: auto;
-  color: var(--a, #3b82f6);
+  color: #3b82f6;
   font-size: 12px;
 }
 .isk-caret {
@@ -2728,8 +2720,8 @@ onBeforeUnmount(function () {
   font-size: 11px;
 }
 .isk-pager button.on {
-  border-color: var(--a, var(--a, #0071e3));
-  color: var(--a, var(--a, #0071e3));
+  border-color: var(--a, #0071e3);
+  color: var(--a, #0071e3);
   font-weight: 600;
 }
 .isk-pager button:disabled {
@@ -2817,7 +2809,7 @@ onBeforeUnmount(function () {
   width: 100%;
 }
 .isk :deep(.isk-link) {
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   text-decoration: none;
   font-weight: 500;
 }
@@ -2853,7 +2845,7 @@ onBeforeUnmount(function () {
   font-size: 12px;
 }
 .isk-attach-item a {
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   text-decoration: none;
   flex: 1;
 }
@@ -2869,7 +2861,7 @@ onBeforeUnmount(function () {
 .isk-attach-del {
   margin-left: 6px;
   font-size: 11px;
-  color: var(--r, var(--r, #ff3b30));
+  color: var(--r, #ff3b30);
   background: none;
   border: none;
   cursor: pointer;
@@ -2884,7 +2876,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   border: 0.5px solid rgba(0, 113, 227, 0.3);
   font-size: 12px;
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   width: fit-content;
   margin-top: 10px;
 }
@@ -2911,7 +2903,7 @@ onBeforeUnmount(function () {
   color: #d32f2f;
 }
 .isk-handoff {
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   border-color: rgba(0, 113, 227, 0.3);
 }
 /* 流水线卡片内部 */
@@ -2920,7 +2912,7 @@ onBeforeUnmount(function () {
 }
 .isk :deep(.isk-contin) {
   font-size: 11px;
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   background: rgba(0, 113, 227, 0.06);
   border-radius: 8px;
   padding: 6px 10px;
@@ -3055,7 +3047,7 @@ onBeforeUnmount(function () {
 }
 .isk :deep(.isk-cross-badge) {
   font-size: 9px;
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   background: rgba(0, 113, 227, 0.08);
   border-radius: 999px;
   padding: 1px 6px;
@@ -3189,7 +3181,7 @@ onBeforeUnmount(function () {
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
 }
 .isk-bcard-sel {
-  border-color: var(--a, #3b82f6);
+  border-color: #3b82f6;
   box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.12);
 }
 .isk-bcard.tsk-card-radar {
@@ -3303,7 +3295,7 @@ onBeforeUnmount(function () {
 }
 .isk :deep(.isk-verdict.fail) {
   background: rgba(255, 59, 48, 0.1);
-  color: var(--r, #ff3b30);
+  color: #ff3b30;
 }
 .isk :deep(.isk-verdict.neutral) {
   background: rgba(142, 142, 147, 0.1);
@@ -3320,13 +3312,13 @@ onBeforeUnmount(function () {
   padding: 3px 10px;
   border-radius: 999px;
   background: rgba(0, 113, 227, 0.08);
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   font-size: 11px;
   margin-left: 6px;
 }
 .isk :deep(.isk-qa-running) {
   font-size: 10px;
-  color: var(--y, #ff9f0a);
+  color: #ff9f0a;
   margin-left: 6px;
 }
 .isk :deep(.isk-qa-item) {
@@ -3466,7 +3458,7 @@ onBeforeUnmount(function () {
 }
 .isk-attach-chip button {
   margin-left: 2px;
-  color: var(--r, var(--r, #ff3b30));
+  color: var(--r, #ff3b30);
   background: none;
   border: none;
   cursor: pointer;
@@ -3474,7 +3466,7 @@ onBeforeUnmount(function () {
   padding: 0 2px;
 }
 .isk-modal-err {
-  color: var(--r, #ff3b30);
+  color: #ff3b30;
   font-size: 12px;
   background: rgba(255, 59, 48, 0.06);
   border: 0.5px solid rgba(255, 59, 48, 0.2);
@@ -3496,7 +3488,7 @@ onBeforeUnmount(function () {
   flex-wrap: wrap;
 }
 .isk-scene-warn a {
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   text-decoration: none;
   cursor: pointer;
   font-weight: 600;

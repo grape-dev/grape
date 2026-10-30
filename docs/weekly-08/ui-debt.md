@@ -22,10 +22,8 @@
 
 ### 3. 流水线/Agent运行时/仓库设置页面的小配色太突兀（霓虹感、扎眼）
 - 根源：壳暗色块只翻背景从不重定义强调色 → 亮色高饱和 #0071e3/#34c759 系直接怼在纯黑上
-- 修复（2026-10-29 两轮，按主人苹果暗色系色板落地）：
-  第一轮：apple-theme.css 两个暗色块新增规范强调色系 + bridge.css 对齐 + 卡片边界/玻璃参数规范 token 化。
-  第二轮（全量色彩盘点后清扫，color_audit.py）：发现①apple-theme 组件规则里 38 处硬编码 #0071e3/#0077ed **不走变量**（暗色变量换了它们不动——主人"看不到改变"的主因）→ 全改 var(--a/--ah)；②DashboardView(45)/IssuesView(37)/RuntimesView(28)/AutopilotView(14)/FeedbackDialog(5)/EventView(7) 共 136 处硬编码蓝红橙/白底/黑字 → var 带 fallback（亮色渲染逐字节不变）；③防误伤：JS 对象里喂 canvas/字符串拼接的 hex（SCOPE_COLORS_ALL/statusColor/tagColors）保持纯 hex，hex+alpha 拼接（col.color+'40'/c+'1A'）改 color-mix 防坑#5 重演；④TemplatesView 的 #0d1117 系是模板预览缩略图（内容非 UI）不收编。
-- 状态：`[x]`（2026-10-29，截图 palette-*3-{light,dark}.png 6页×2；亮色 mean 241-248 不变、暗色 3-54；回归 12/12；apple-theme v23/bridge v5/chunk v10）
+- 修复（2026-10-29，按主人苹果暗色系色板落地）：apple-theme.css 两个暗色块（forced-dark + auto-dark）新增规范强调色系 --a:#0A84FF/--ah:#409CFF/--g:#30D158/--y:#FF9F0A/--r:#FF375F/--pu:#BF5AF2/--pk:#FF6482；bridge.css 暗色降饱和块对齐同值；卡片边界/玻璃卡参数同步规范（--card-border:rgba(84,84,88,.6)/--glass-border:rgba(255,255,255,.08)/--glass-bg:rgba(28,28,30,.72) blur20）。亮色零改动（暗色块内才定义）
+- 状态：`[x]`（2026-10-29，截图 palette-{issues,dash,runtimes,pipe}-{light,dark}.png；暗色实测 --a=#0a84ff 等生效）
 
 ### 4. 场景技能/项目知识库/chat agent 页面配色问题
 - 范围：skills（下一批 1058行）、knowledge（未迁移）、chat（未迁移 1422行）

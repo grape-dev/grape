@@ -369,7 +369,7 @@
     <Teleport to="body">
       <div v-if="projectDel.open" class="chat-del-overlay" @click.self="projectDel.open = false">
         <div class="chat-del-pop ev__centerpop">
-          <div class="chat-del-title" style="color: var(--r, #ff3b30)">
+          <div class="chat-del-title" style="color: #ff3b30">
             {{ t('knowledge_delete_confirm_project') }}
           </div>
           <div class="chat-del-btns">
@@ -1941,7 +1941,7 @@ onMounted(function () {
 .ev__clearbtn {
   border: 1px solid var(--b);
   background: transparent;
-  color: var(--r, #ff3b30);
+  color: #ff3b30;
   border-radius: 6px;
   padding: 3px 10px;
   font-size: 12px;
@@ -2130,11 +2130,11 @@ onMounted(function () {
   margin-bottom: 10px;
 }
 .ev__glass-ic--orange {
-  background: linear-gradient(135deg, var(--y, #ff9f0a), #ff6a00);
+  background: linear-gradient(135deg, #ff9f0a, #ff6a00);
   box-shadow: 0 4px 12px rgba(255, 159, 10, 0.3);
 }
 .ev__glass-ic--blue {
-  background: linear-gradient(135deg, #0a84ff, var(--a, #0071e3));
+  background: linear-gradient(135deg, #0a84ff, #0071e3);
   box-shadow: 0 4px 12px rgba(10, 132, 255, 0.3);
 }
 .ev__glass-ic--green {
@@ -2169,11 +2169,11 @@ onMounted(function () {
   border: none;
 }
 .ev__glass-ok--orange {
-  background: linear-gradient(135deg, var(--y, #ff9f0a), #ff6a00);
+  background: linear-gradient(135deg, #ff9f0a, #ff6a00);
   box-shadow: 0 4px 12px rgba(255, 159, 10, 0.35);
 }
 .ev__glass-ok--blue {
-  background: linear-gradient(135deg, #0a84ff, var(--a, #0071e3));
+  background: linear-gradient(135deg, #0a84ff, #0071e3);
   box-shadow: 0 4px 12px rgba(10, 132, 255, 0.35);
 }
 .ev__glass-ok--green {
@@ -2226,7 +2226,7 @@ onMounted(function () {
 }
 .ev__a2a-cur {
   font-size: 11px;
-  color: var(--a, var(--a, #0071e3));
+  color: var(--a, #0071e3);
   margin-left: auto;
 }
 .ev__centerpop {

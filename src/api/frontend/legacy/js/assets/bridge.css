@@ -84,13 +84,7 @@
     --glass-border: rgba(255, 255, 255, 0.08);
     --card-border: rgba(84, 84, 88, 0.6);
     /* spec: soft shadows only */
-    --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
     --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.35);
-    --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.45);
-    /* spec §7: glass card top highlight */
-    --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
-    /* spec §8: primary button blue glow */
-    --btn-primary-shadow: 0 6px 16px rgba(10, 132, 255, 0.35);
   }
 }
 [data-theme='apple'][data-theme-mode='dark'] {
@@ -99,9 +93,5 @@
   --glass-blur: 20px;
   --glass-border: rgba(255, 255, 255, 0.08);
   --card-border: rgba(84, 84, 88, 0.6);
-  --shadow-1: 0 1px 2px rgba(0, 0, 0, 0.4);
   --shadow-2: 0 4px 12px rgba(0, 0, 0, 0.35);
-  --shadow-3: 0 10px 30px rgba(0, 0, 0, 0.45);
-  --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
-  --btn-primary-shadow: 0 6px 16px rgba(10, 132, 255, 0.35);
 }

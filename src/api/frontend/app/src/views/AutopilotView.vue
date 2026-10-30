@@ -369,10 +369,7 @@
               <label class="apv-lbl-s">{{ tt('form.engine_label') }}</label>
               <div class="apv-pickerbtn" @click="openEnginePicker">
                 <span
-                  :style="{
-                    color: selectedEngines.size ? 'var(--a, #0071e3)' : '#34c759',
-                    fontWeight: 500,
-                  }"
+                  :style="{ color: selectedEngines.size ? '#0071e3' : '#34c759', fontWeight: 500 }"
                 >
                   {{
                     selectedEngines.size
@@ -386,12 +383,7 @@
             <div class="apv-fld">
               <label class="apv-lbl-s">{{ tt('form.skill_label') }}</label>
               <div class="apv-pickerbtn" @click="openSkillPicker">
-                <span
-                  :style="{
-                    color: selectedSkill ? 'var(--a, #0071e3)' : '#86868b',
-                    fontWeight: 500,
-                  }"
-                >
+                <span :style="{ color: selectedSkill ? '#0071e3' : '#86868b', fontWeight: 500 }">
                   {{ selectedSkill || tt('form.skill_empty') }}
                 </span>
               </div>
@@ -1712,11 +1704,11 @@ const EXEC_ICONS = {
 const EXEC_COLORS = {
   success: '#28a745',
   failed: '#dc3545',
-  running: 'var(--a, #3168e0)',
+  running: '#3168e0',
   pending: 'var(--t3)',
   retrying: '#e8a000',
   skipped: 'var(--t3)',
-  dispatched: 'var(--a, #3168e0)',
+  dispatched: '#3168e0',
   cancelled: '#e8a000',
 }
 function execIcon(st) {
@@ -1836,7 +1828,7 @@ function sevIcon(sev) {
   return { high: '🔴', medium: '🟡', low: '🔵' }[sev] || '•'
 }
 function sevColor(sev) {
-  return { high: '#dc3545', medium: '#e8a000', low: 'var(--a, #3168e0)' }[sev] || 'var(--t3)'
+  return { high: '#dc3545', medium: '#e8a000', low: '#3168e0' }[sev] || 'var(--t3)'
 }
 // 高级选项保存
 function saveAdvanced() {
@@ -2145,9 +2137,9 @@ const ENG_TAG_COLORS = {
   all: '#6366f1',
   vod: '#ec4899',
   issue: '#ef4444',
-  coding: 'var(--a, #3b82f6)',
+  coding: '#3b82f6',
   qa: '#a855f7',
-  sre: 'var(--y, #f59e0b)',
+  sre: '#f59e0b',
 }
 const SCOPE_COLORS = { global: '#6366f1', user: '#34c759', repo: '#f59e0b', local: '#86868b' }
 function tagColor(t) {
@@ -2312,7 +2304,7 @@ onBeforeUnmount(function () {
 }
 .apv-c-ck input {
   cursor: pointer;
-  accent-color: var(--a, #3168e0);
+  accent-color: #3168e0;
 }
 .apv-c-name {
   cursor: pointer;
@@ -2494,7 +2486,7 @@ onBeforeUnmount(function () {
   width: 16px;
   height: 16px;
   border-radius: 50%;
-  background: var(--c, #fff);
+  background: #fff;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
   transition: left 0.2s;
 }
@@ -2717,7 +2709,7 @@ onBeforeUnmount(function () {
 .apv-badge {
   font-size: 10px;
   background: rgba(49, 104, 224, 0.12);
-  color: var(--a, #3168e0);
+  color: #3168e0;
   padding: 2px 8px;
   border-radius: 8px;
   flex-shrink: 0;
@@ -2858,7 +2850,7 @@ onBeforeUnmount(function () {
   justify-content: center;
   border-radius: 4px;
   background: rgba(49, 104, 224, 0.15);
-  color: var(--a, #3168e0);
+  color: #3168e0;
   font-size: 11px;
 }
 .apv-dlg-tools {
@@ -3191,9 +3183,9 @@ onBeforeUnmount(function () {
   transition: all 0.15s;
 }
 .apv-pick-tags > span.on {
-  border-color: var(--a, var(--a, #0071e3));
+  border-color: var(--a, #0071e3);
   color: #fff;
-  background: var(--a, var(--a, #0071e3));
+  background: var(--a, #0071e3);
 }
 .apv-tag-sep {
   width: 1px;
@@ -3259,7 +3251,7 @@ onBeforeUnmount(function () {
   width: 18px;
   height: 18px;
   cursor: pointer;
-  accent-color: var(--a, #0071e3);
+  accent-color: #0071e3;
 }
 .apv-pick-body {
   flex: 1;
