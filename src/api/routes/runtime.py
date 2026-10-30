@@ -900,7 +900,7 @@ def runtime_recover_orphans(runtime_id: int, credential_id: int = Depends(_requi
 
 # ===== 用户态端点（M2，保留）=====
 
-@router.get("/tasks/{task_id}/status", operation_id="runtime_task_status", summary="Task status polling", description="Task status polling (chat front-end D5 typewriter fallback).")
+@router.get("/tasks/{task_id}/status", operation_id="runtime_task_status", summary="Task status polling", description="Task status polling (chat front-end D5 typewriter fallback). Issue #539: also the authorized query path referenced by pipeline segment output.task_ref.query_path — returns full result_text for authorized callers; pipeline summaries only carry a redacted result_ref summary.")
 def get_task_status(task_id: str, user: dict = Depends(require_no_session_token)):
     """任务状态轮询（chat 前端用，D5 打字机降级）。"""
     task = service.get_task(task_id)

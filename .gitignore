@@ -102,6 +102,7 @@ scripts/check-*-*.py
 !scripts/check-i18n-keys.py
 !scripts/check-css-vars.py
 !scripts/check-health-contract.py
+!scripts/check-destructive-ddl.py
 scripts/verify-*-*.py
 scripts/install-worker.sh.bak.*
 start-cluster.sh

@@ -4,6 +4,9 @@ name: windows-smoke
 # find_cli exe 优先解析、cmd/bat 壳兜底降级 WARN。
 # Issue #473 PR #668 审查修复（QA Nice-to-have）：新增 linux-backend job，
 # 运行本 Issue 的后端 pytest 与前端 node 源断言测试，回归不再只靠人工。
+# Issue #536 QA-Impt 修复：linux-backend 增加 DDL 安全带卡点——显式目标分支
+# 运行 scripts/check-destructive-ddl.py + Issue #536 新增 pytest 用例，
+# 危险 DDL 回归不再依赖人工本地执行。
 on:
   push:
     branches: ["**"]
@@ -32,6 +35,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -48,3 +53,13 @@ jobs:
         run: python -m pytest tests/test_issue_473_range_filter.py tests/test_issue_473_local_engine_range.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
+      - name: Destructive DDL guard + Issue #536 migration safety tests
+        # Issue #536 QA-Impt：CI 显式接入 DDL 卡点与新增用例；base 显式传目标分支
+        # （GitCode 注入 CI_MERGE_REQUEST_TARGET_BRANCH_NAME，GitHub 用 PR base），
+        # 脚本对不可解析 base 按 FAIL 处理（不再 fail-open）。
+        env:
+          GITCODE_API_TOKEN: test_token
+          DDL_BASE: ${{ github.event.pull_request.base.ref || github.event.repository.default_branch }}
+        run: |
+          python3 scripts/check-destructive-ddl.py "$DDL_BASE"
+          python -m pytest tests/atomic/test_issue_536_migrations.py tests/test_check_destructive_ddl.py -v
