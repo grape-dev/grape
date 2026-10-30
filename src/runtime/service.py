@@ -298,7 +298,11 @@ _RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 # Issue #259：running 任务回收阈值——对齐 worker 本地 RUNTIME_TASK_TIMEOUT（默认 3600s）。
 # 假死 worker（断连但本地任务还在跑）的 running 任务须等本地超时自杀后才服务端重派，
 # 双跑窗口=0。前提：该值 >= worker 端 RUNTIME_TASK_TIMEOUT（部署注意）。
-_TASK_RECOVER_STALE_SECONDS = int(os.environ.get("TASK_RECOVER_STALE_SECONDS", "3600"))
+# Issue #470 后续：回收阈值改为 get_task_recover_stale_seconds() 动态取值——
+# env TASK_RECOVER_STALE_SECONDS 显式覆盖 > 跟随管理台 runtime_task_timeout 实时值。
+# 启动期 env 覆盖仅用于耦合告警；回收循环（_reap_stale_loop）每次执行实时取值。
+from src.config import get_task_recover_stale_seconds as _get_recover_stale_cfg
+_TASK_RECOVER_STALE_SECONDS = _get_recover_stale_cfg()
 
 
 def _recover_cutoff_for_agent(agent_type: str) -> str:
@@ -3276,6 +3280,9 @@ def reap_stale_runtimes() -> dict:
     # 配置化对齐，见 _recover_cutoff_for_agent），防假死 worker（断连但任务还在本地跑）
     # 的服务端重派与本地执行重叠造成双跑。dispatched 任务从未开始执行，无双跑风险，
     # 跟心跳阈值走（100s）。
+    # Issue #470 后续：回收阈值实时取值（env > meta runtime_task_timeout），
+    # 管理台改 runtime_task_timeout 后回收循环下一轮（≤60s）即跟随，无需重启。
+    _recover_cutoff_iso = (datetime.now(timezone.utc) - timedelta(seconds=_get_recover_stale_cfg())).isoformat()
     reaped = []
     with db_lock:
         c = db.cursor()

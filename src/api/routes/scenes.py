@@ -1521,6 +1521,12 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
     - 解析不到时返回 404，不再静默回退默认场景并回显请求 id；
     - 命中 pipelines.json default 兜底（cfg.fallback）同样视为未解析到，禁止静默回退；
     - 响应 id 恒为解析到的真实 scene_id（cfg['scene_id']），不回显请求值。
+
+    会话级补充（fix: agent runbook 场景核验 404 断链）：
+    - ?repo= 为空且认证为会话 token（tk_）时，用 token 绑定的 repo_key（session_api_tokens
+      行自带，格式 "gitcode:owner/repo"）——agent 的 `grape scenes detail` 未传 --repo
+      也能解析到本仓库的仓库级场景副本，不再 404；
+    - JWT / grape_ Key（用户侧调用）行为不变：仍需显式 ?repo=，解析不到照旧 404。
     """
     from src.api.pipeline_config import get_pipeline_config
     repo_key = _resolve_scene_repo_key(repo, user)
