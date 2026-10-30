@@ -2,6 +2,7 @@
 
 > 目的：把 PR 开源合规审查的每一步固化，Agent 照着执行、不查 `--help` 探索。
 > 环境变量直接使用：`$REPO_OWNER` / `$REPO_NAME` / `$REPO_FULL_NAME` / `$ISSUE_NUMBER` / `$PR_NUMBER` / `$GRAPE_ISSUE_ID` / `$GRAPE_SCENE_ID` / `$BOT_USERNAME`。
+> ⚠️ Issue #528：PR 订阅场景（PR 无关联 Issue）`$ISSUE_NUMBER` **不注入**（服务端只注入纯数字编号），`$PR_NUMBER` 为纯数字 PR 号——涉及 Issue 的步骤（`issues detail` 等）跳过，结论改走 PR 评论回帖。
 > **评论前缀硬规**：PR 审查报告 body 一律以 `[QA Agent]` 开头。
 > ⚠️ **纯审查**：全程只读 + PR 评论发布；禁 git 写操作 / 合并 / 改文件。
 
@@ -74,9 +75,16 @@ grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" -
    echo "$SCENE_NODES" | jq -r '[.nodes[]?.tag // .nodes[]?.skill] | unique | join(",")' 2>/dev/null
    ```
    - 命中 coding 节点 → 可 A2A；未命中 → **评论说明「当前场景未配置 coding 整改环节」+ 不 A2A**，直接收尾（next_step=reply_comment/done）。
+   - **ISSUE_NUMBER 降级（Issue #528）**：`$ISSUE_NUMBER` 为空或非数字（PR 订阅无关联 Issue 场景，此时 `$PR_NUMBER` 为纯数字 PR 号）→ **不调用 A2A 交办**（A2A 的 `issue_number` 必须为数字，占位值会被拒），改为向 PR 评论回帖输出整改结论：
+     ```bash
+     grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" --number "$PR_NUMBER" \
+       --json '{"body":"[QA Agent] PR #'"$PR_NUMBER"' 审查不通过（无关联 Issue，无法 A2A 交办整改），整改建议如下：\n{报告摘要}"}'
+     ```
+     `next_step=reply_comment`，由 PR 作者/维护者依据回帖处理。
 3. `grape tasks complete`（见 SKILL.md 任务完成流程模板；结构化字段必填）。
    - 通过且无需整改 → `next_step` 按流程（如 `a2a_sre` 或 `done`）。
    - 不通过需整改 → 必要时 `a2a handoff --json '{"agent":"coding","payload":{"repository":"...","account":"...","issue_number":N,"pr_number":P,"context":"审查报告列明 N 项不符合，请按整改建议修复"}}'`（交办 agent 名 coding，非技能名；**仅 scene 命中 coding 节点时发起**）。
+   - ⚠️ Issue #528：`issue_number` 必须为纯数字（`$ISSUE_NUMBER`）；为空/非数字（PR 订阅无关联 Issue）→ 不发起 A2A，走上方「ISSUE_NUMBER 降级」PR 评论回帖路径。
 4. 调完即结束任务，不继续等待。
 
 ## 错误排查速查

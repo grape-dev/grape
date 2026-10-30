@@ -675,6 +675,30 @@ def resolve_issue_card_id(repo_key: str, issue_number) -> str:
         return ""
 
 
+def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
+    """Issue #528：ISSUE_NUMBER/PR_NUMBER 仅注入纯数字值。
+
+    PR 订阅场景（PR 无关联 Issue）事件 issue_id 为伪 id（#pr_{PR号}_{scene_id}，
+    参与去重/会话键），非数字 → 不注入 ISSUE_NUMBER/GRAPE_ISSUE_ID（下游 A2A
+    交办接口要求 issue_number 为数字，注入占位值会被拒）；PR 号由 PR_NUMBER
+    独立承载（payload.pr_number 优先，evt._pr_sub_pr_number 兜底），非数字同样
+    不注入。关联 Issue 的场景（issue_id 为真实编号）行为不变。
+    """
+    _issue_num = str(evt.get("issue_id", "") or (evt.get("payload", {}) or {}).get("issue_number", "") or "").lstrip("#")
+    if _issue_num.isdigit():
+        env_extra["ISSUE_NUMBER"] = _issue_num
+        # 需求卡片 id（issue 表主键）：awaiting-input 等 --issue_id 用（≠ ISSUE_NUMBER）
+        env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
+    elif _issue_num:
+        log.info(f"Pipeline env: non-numeric issue_id '{_issue_num}', skip ISSUE_NUMBER/GRAPE_ISSUE_ID injection (Issue #528)")
+    _pr_num = str((evt.get("payload", {}) or {}).get("pr_number", "")
+                  or evt.get("_pr_sub_pr_number", "") or "").lstrip("#")
+    if _pr_num.isdigit():
+        env_extra["PR_NUMBER"] = _pr_num
+    elif _pr_num:
+        log.info(f"Pipeline env: non-numeric pr_number '{_pr_num}', skip PR_NUMBER injection (Issue #528)")
+
+
 def resolve_issue_id(payload: dict) -> str:
     """从事件 payload 提取 Issue 编号。
 
@@ -2977,14 +3001,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             env_extra["BOT_USERNAME"] = _bot_name
         except Exception:
             pass
-    _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
-    if _issue_num:
-        env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
-        # 需求卡片 id（issue 表主键）：awaiting-input 等 --issue_id 用（≠ ISSUE_NUMBER）
-        env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
-    _pr_num = evt.get("payload", {}).get("pr_number", "")
-    if _pr_num:
-        env_extra["PR_NUMBER"] = str(_pr_num)
+    _inject_issue_pr_env(env_extra, evt, repo_key)
 
     # 方案 D 防御：有关联 Issue 时，Issue 级会话指针不得指向其他 Issue 的 workdir（防 cwd/session 错位回归）
     try:
@@ -3273,11 +3290,13 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
             env["BOT_USERNAME"] = _bot_name
         except Exception:
             pass
-    # ── issue/pr 编号 ──
-    if issue_number:
-        env["ISSUE_NUMBER"] = str(issue_number).lstrip("#")
-    if pr_number:
-        env["PR_NUMBER"] = str(pr_number)
+    # ── issue/pr 编号（Issue #528：仅注入纯数字，伪 id/占位值不注入）──
+    _in = str(issue_number or "").lstrip("#")
+    if _in.isdigit():
+        env["ISSUE_NUMBER"] = _in
+    _pn = str(pr_number or "").lstrip("#")
+    if _pn.isdigit():
+        env["PR_NUMBER"] = _pn
     return env
 
 
@@ -3966,13 +3985,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _ext = evt.get("_env_extra") or {}
     if isinstance(_ext, dict):
         env_extra.update(_ext)
-    _issue_num = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "")
-    if _issue_num:
-        env_extra["ISSUE_NUMBER"] = str(_issue_num).lstrip("#")
-        env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
-    _pr_num = evt.get("payload", {}).get("pr_number", "")
-    if _pr_num:
-        env_extra["PR_NUMBER"] = str(_pr_num)
+    _inject_issue_pr_env(env_extra, evt, repo_key)
 
     # git worktree（coding/qa/sre，direct 模式；见 multi-issue-isolation-design.md §3.4.1）
     # P2（vcs-env-token-boundary-audit）：不再把 GIT_ASKPASS 路径注入 agent env——
