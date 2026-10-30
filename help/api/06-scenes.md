@@ -213,6 +213,10 @@
 | 出参 | `{id, name, nodes[], onboarding, scene_type}`（`id`=传入的 scene_id；`nodes`=技能链；`onboarding` 默认 `repo-onboarding`；`scene_type` 默认 `standard`） |
 | 返回 | 200；404（报错附「跨仓库场景请附 --repo <owner/repo> 后重试」提示） |
 
+> Issue #568 两级解析：`tk_` 会话 token 未显式传 `repo` 且仓库作用域未命中该 scene_id 的场景行时，
+> 回落**会话绑定**二级解析（session token → `agent_tasks` → issue 绑定场景，与 a2a handoff
+> 场景可见性口径一致，两路返回一致节点集合）；显式 `repo` 行为不变（不放松权限）。
+
 **示例（`default` 场景）**：
 
 ```json
