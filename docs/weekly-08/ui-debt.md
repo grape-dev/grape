@@ -21,9 +21,10 @@
 - 状态：`[x]`（2026-10-29，截图 debt1-dash-*.png / debt2-*-*.png）
 
 ### 3. 流水线/Agent运行时/仓库设置页面的小配色太突兀（霓虹感、扎眼）
-- 根源：壳暗色块只翻背景从不重定义强调色 → 亮色高饱和 #0071e3/#34c759 系直接怼在纯黑上
-- 修复（2026-10-29，按主人苹果暗色系色板落地）：apple-theme.css 两个暗色块（forced-dark + auto-dark）新增规范强调色系 --a:#0A84FF/--ah:#409CFF/--g:#30D158/--y:#FF9F0A/--r:#FF375F/--pu:#BF5AF2/--pk:#FF6482；bridge.css 暗色降饱和块对齐同值；卡片边界/玻璃卡参数同步规范（--card-border:rgba(84,84,88,.6)/--glass-border:rgba(255,255,255,.08)/--glass-bg:rgba(28,28,30,.72) blur20）。亮色零改动（暗色块内才定义）
-- 状态：`[x]`（2026-10-29，截图 palette-{issues,dash,runtimes,pipe}-{light,dark}.png；暗色实测 --a=#0a84ff 等生效）
+- 范围：pipeline（已迁移）、runtimes（未迁移 2270行）、repos+settings（壳耦合组，未迁移）
+- 症状：各种小配色（状态色点/徽标/强调色块）饱和度过高，像霓虹灯，扎眼
+- 方向：暗色下全面降饱和（SRE 空绑定那套"柔和层"经验可复用：prefers-color-scheme 时降饱和已有先例），统一色板
+- 状态：`[ ]`
 
 ### 4. 场景技能/项目知识库/chat agent 页面配色问题
 - 范围：skills（下一批 1058行）、knowledge（未迁移）、chat（未迁移 1422行）

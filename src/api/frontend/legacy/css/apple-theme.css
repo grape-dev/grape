@@ -1348,14 +1348,6 @@
   --result-fg: #e0e6f0;
   --result-link: #5b9eff;
   --result-code: #b8c2d6;
-  /* palette spec (dark): Apple dark-mode accent set, low-saturation friendly */
-  --a: #0a84ff;
-  --ah: #409cff;
-  --g: #30d158;
-  --y: #ff9f0a;
-  --r: #ff375f;
-  --pu: #bf5af2;
-  --pk: #ff6482;
 }
 [data-theme="apple"][data-theme-mode="dark"] .sb {
   background: rgba(28,28,30,0.8);
@@ -1393,14 +1385,6 @@
     --result-fg: #e0e6f0;
     --result-link: #5b9eff;
     --result-code: #b8c2d6;
-    /* palette spec (dark): Apple dark-mode accent set, low-saturation friendly */
-    --a: #0a84ff;
-    --ah: #409cff;
-    --g: #30d158;
-    --y: #ff9f0a;
-    --r: #ff375f;
-    --pu: #bf5af2;
-    --pk: #ff6482;
   }
   [data-theme="apple"][data-theme-mode="auto"] .sb {
     background: rgba(28,28,30,0.8);
