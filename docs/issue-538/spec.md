@@ -1,6 +1,6 @@
 # Spec: Issue #538 — 空仓库用户进入仓库大厅被误判为加载失败
 
-> 来源：Issue Agent Spec（评论 id=197052581），coding 阶段引用基线。
+> 来源：Issue Agent Spec（Issue 评论），coding 阶段引用基线。
 
 ## 目标
 修复 `list_member_repos`（`GET /api/repos/member`）与 `sync_repos`（`POST /api/repos/sync`）

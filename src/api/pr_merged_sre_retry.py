@@ -262,23 +262,57 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
                        name=f"ag-{p['agent_type']}-{seq}")
 
 
+def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
+    """Issue #544 L4：断链发生时向关联 Issue 发可见提示评论。
+
+    仅真实 Issue 号（#N，N 为纯数字且非 0）才发；伪 issue（#pr_...）与
+    无关联（空）不发。复用 `_post_result_to_issue`（含 agent 已评论去重），
+    以 sre 身份、仓库 bot token 发送；失败只告警不影响主流程。
+    """
+    num = str(issue_id or "").lstrip("#")
+    if not num.isdigit() or num == "0":
+        return False
+    try:
+        from src.user.db import get_repo_token_with_refresh
+        from src.api.event_pipeline import _post_result_to_issue
+        from src.repo_key import from_repo_key
+        token = get_repo_token_with_refresh(repo_key) or ""
+        repo = from_repo_key(repo_key)
+        if not token or not repo:
+            log.info(f"[544-broken-chain] no token/repo for {repo_key}, skip issue comment")
+            return False
+        body = (f"[sre agent] ⚠️ PR 合并收尾（merge→sre）交接链路断链提示：{note}\n"
+                f"事件已留痕（含失败原因），可人工重派或在引擎恢复后重试。")
+        _post_result_to_issue(repo, num, body, token, "sre", repo_key)
+        log.info(f"[544-broken-chain] issue comment posted for {repo_key}#{num}")
+        return True
+    except Exception as e:
+        log.warning(f"[544-broken-chain] issue comment failed: {e}")
+        return False
+
+
 def _mark_retry_exhausted(seq: int, attempts: int, err=None) -> None:
-    """重试耗尽收口：failed 事件追加终止说明；running（复位后重派异常）收口回 failed。"""
+    """重试耗尽收口：failed 事件追加终止说明；running（复位后重派异常）收口回 failed。
+
+    Issue #544 L4：收口同时向关联 Issue 发断链提示评论（真实 Issue 号才发）。
+    """
     _release_seq(seq)
     note = (f"[Issue #496] 场景引擎离线自动重试 {attempts} 次后仍未恢复，自动重试终止，"
             f"请检查引擎在线状态后人工重派")
     if err:
         note += f"（最后一次异常：{str(err)[:120]}）"
     status = ""
+    _bk_repo, _bk_issue = "", ""
     try:
         from src.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+            c.execute("SELECT status, repo_key, issue_id FROM events WHERE seq=?", (seq,))
             row = c.fetchone()
             if not row:
                 return
             status = row[0]
+            _bk_repo, _bk_issue = row[1] or "", row[2] or ""
             if status == "failed":
                 c.execute("UPDATE events SET result=COALESCE(result,'') || ? WHERE seq=?",
                           ("\n" + note, seq))
@@ -293,4 +327,10 @@ def _mark_retry_exhausted(seq: int, attempts: int, err=None) -> None:
             _fail_event(seq, note)
         except Exception as e:
             log.warning(f"[496-retry] exhausted fail-close seq={seq} error: {e}")
+    if status in ("failed", "running"):
+        # Issue #544 L4：断链收口 → Issue 可见提示评论（失败留痕之外的用户面通知）
+        try:
+            _notify_issue_broken_chain(_bk_repo, _bk_issue, note)
+        except Exception as _ne:
+            log.warning(f"[544-broken-chain] notify seq={seq} failed: {_ne}")
     log.info(f"[496-retry] seq={seq} auto retry exhausted after {attempts} attempts")

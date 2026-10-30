@@ -67,6 +67,7 @@ _SESSION_ONLY_OPERATIONS = frozenset({
     "gitrepo_issues_comments_create", "gitrepo_pulls_list", "gitrepo_pulls_create",
     "gitrepo_pulls_get", "gitrepo_pulls_update", "gitrepo_pulls_merge",
     "gitrepo_pulls_comments_list", "gitrepo_pulls_comments_create", "gitrepo_pulls_files",
+    "gitrepo_pulls_comments_update", "gitrepo_pulls_comments_delete",
     # CLI 本地 git 凭据/工作区（repos.py，体内 _repo_platform_token 强制 session）
     "repos_git_credential", "repos_workspace",
     # Agent 执行期动作（tasks.py / issues.py，体内 _require_session_repo_token / auth_type 强制 session）

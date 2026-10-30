@@ -58,13 +58,16 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                  actor: str = "", summary: str = "",
                  payload: dict = None, status: str = "completed",
                  result: str = "", scene_id: str = "",
-                 entity_type: str = "") -> int:
+                 entity_type: str = "", idempotency_key: str = "") -> int:
     """写入事件到 events 表，返回 seq。result 为 Agent 答复结论（纯文本）。
 
     issue_id 保证非空：传入为空时按 payload → result → title/summary 顺序兜底解析，
     仍无法解析则用 #0 表示"无关联"。
     scene_id: PR 订阅等场景级事件持久化场景ID，空字符串表示无关联场景。
     entity_type: 实体类型（"issue" / "pull_request"），区分编号相同的 issue 与 PR。
+    idempotency_key: A2A 幂等键（Issue #544 L2）。非空时写入列并受
+    (repo_key, idempotency_key) 唯一索引约束；撞键时返回已存在事件 seq 的负值
+    （调用方据此走"返回已有事件"分支），异常仍返回 0。
     """
     # 兜底解析 issue_id
     if not issue_id:
@@ -92,11 +95,18 @@ def append_event(repo_key: str, event_type: str, title: str = "",
             # 解析 org_id（从 managed_repos.org_id 获取）
             from src.user.org_db import get_org_id_by_repo_key
             _org_id = get_org_id_by_repo_key(repo_key)
-            c.execute(
-                "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
-                 json.dumps(payload or {}), status, result, scene_id, entity_type, _org_id)
-            )
+            if idempotency_key:
+                c.execute(
+                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id, idempotency_key) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
+                     json.dumps(payload or {}), status, result, scene_id, entity_type, _org_id,
+                     idempotency_key))
+            else:
+                c.execute(
+                    "INSERT INTO events (repo_key, issue_id, event_type, source, agent_type, title, actor, summary, payload, status, result, scene_id, entity_type, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (repo_key, issue_id, event_type, source, agent_type, title, actor, summary,
+                     json.dumps(payload or {}), status, result, scene_id, entity_type, _org_id)
+                )
             db.commit()
             _seq = c.lastrowid
             # 验证行确实写入（防止 WAL 并发写入冲突时 lastrowid 返回旧值）
@@ -111,6 +121,11 @@ def append_event(repo_key: str, event_type: str, title: str = "",
                      f"status={status}, result={result[:80]}, payload_keys={payload_keys}")
         except Exception as e:
             log.warning(f"Failed to store event: {e}")
+            # Issue #544 L2：幂等键撞唯一索引 → 返回已存在事件 seq 的负值（调用方转"返回已有事件"）
+            if idempotency_key:
+                _existing = find_event_by_idempotency_key(repo_key, idempotency_key)
+                if _existing:
+                    return -int(_existing["seq"])
             return 0
     # WAL checkpoint 在 db_lock 释放后执行（避免阻塞其他需要 db_lock 的操作）
     try:
@@ -118,6 +133,30 @@ def append_event(repo_key: str, event_type: str, title: str = "",
     except Exception:
         pass
     return _seq
+
+
+def find_event_by_idempotency_key(repo_key: str, idempotency_key: str) -> dict | None:
+    """Issue #544 L2：按 (repo_key, idempotency_key) 查已有 A2A 事件（核对/去重共用）。"""
+    if not repo_key or not idempotency_key:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, issue_id, event_type, agent_type, title, status, created_at,"
+                " completed_at, payload FROM events"
+                " WHERE repo_key=? AND idempotency_key=? ORDER BY seq DESC LIMIT 1",
+                (repo_key, idempotency_key))
+            row = c.fetchone()
+        if not row:
+            return None
+        return {"seq": row[0], "issue_id": row[1] or "", "event_type": row[2] or "",
+                "agent_type": row[3] or "", "title": row[4] or "", "status": row[5] or "",
+                "created_at": row[6] or "", "completed_at": row[7] or "",
+                "payload": row[8] or ""}
+    except Exception as e:
+        log.warning(f"find_event_by_idempotency_key failed: {e}")
+        return None
 
 
 def claim_event_guard(repo_key: str, issue_id: str, agent_type: str) -> bool:

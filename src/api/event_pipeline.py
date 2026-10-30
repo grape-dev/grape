@@ -150,6 +150,29 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
     return check_running_task(repo_key, issue_id)
 
 
+# Issue #565: bot 建单智能推荐仓级滑动窗口限流（进程内实现，不进 DB）
+_BOT_OPEN_RECOMMEND_LIMIT = 5
+_BOT_OPEN_RECOMMEND_WINDOW_SECONDS = 60.0
+_BOT_OPEN_RECOMMEND_WINDOWS: dict = {}
+
+
+def _bot_open_recommend_rate_limited(repo_key: str) -> bool:
+    """同 repo_key 60s 窗口内 bot 建单推荐超过 _BOT_OPEN_RECOMMEND_LIMIT 条 → True（超限不计数）。
+
+    进程内 dict（repo_key → 时间戳列表）：webhook 去重层挡重投，重启丢失可接受。
+    """
+    import time as _time
+    _now = _time.monotonic()
+    _window = [t for t in (_BOT_OPEN_RECOMMEND_WINDOWS.get(repo_key) or [])
+               if _now - t < _BOT_OPEN_RECOMMEND_WINDOW_SECONDS]
+    if len(_window) >= _BOT_OPEN_RECOMMEND_LIMIT:
+        _BOT_OPEN_RECOMMEND_WINDOWS[repo_key] = _window
+        return True
+    _window.append(_now)
+    _BOT_OPEN_RECOMMEND_WINDOWS[repo_key] = _window
+    return False
+
+
 def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: str = "",
                             repo_key: str = ""):
     """Issue #259 Optional：场景引擎全灭时统一置事件 failed 并告警（5 处调用点共用）。
@@ -408,6 +431,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
             status="queued", stream_ended=0, self_reported=0,
             exit_code=None, result_text="", errors="", stderr="",
             usage_json="{}", started_at=now, completed_at=None, created_at=now,
+            pending_since=None,
             user_gitcode_token="")
         with db_lock:
             c = db.cursor()
@@ -509,6 +533,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
             status="failed", stream_ended=1, self_reported=0,
             exit_code=1, result_text="", errors=_reason, stderr="",
             usage_json="{}", started_at=now, completed_at=now, created_at=now,
+            pending_since=None,
             user_gitcode_token="")
         with db_lock:
             c = db.cursor()
@@ -1503,7 +1528,13 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 if _handler:
                     # 多任务豁免：bot 创建的子任务 issue_opened（body 含「## 父任务」）不跳过
                     _allow_through = False
-                    if event_type == "issue_opened" and _config_result.level != "user":
+                    if event_type == "issue_opened" and _is_bot_actor:
+                        # Issue #565: bot 创建的建单 issue_opened 一律放行 → 进入流水线触发
+                        # 智能推荐（VOD 判定场景写 scene_id）。评论族拦截（上方）不动，
+                        # 防死循环最后闸门保留。
+                        _allow_through = True
+                        evt["_bot_opened"] = True  # 推荐完成回调据此短路执行棒（不重派 VOD）
+                    elif event_type == "issue_opened" and _config_result.level != "user":
                         try:
                             _payload = evt.get("payload", {}) or {}
                             _oa = _payload.get("object_attributes", {}) or {}
@@ -1513,7 +1544,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         except Exception:
                             pass
                     if _allow_through:
-                        log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+                        if evt.get("_bot_opened"):
+                            log.info(f"Pipeline: bot={actor} opened issue, allow through for scene recommend (Issue #565)")
+                        else:
+                            log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
                     else:
                         _is_self_loop = _handler.is_self_loop_actor(actor, event_type, _config_result)
                         if _is_self_loop:
@@ -1530,16 +1564,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             if actor in bot_usernames:
                 _allow_through = False
                 if event_type == "issue_opened":
-                    try:
-                        _payload = evt.get("payload", {}) or {}
-                        _oa = _payload.get("object_attributes", {}) or {}
-                        _body = _oa.get("description", "") or ""
-                        if "## 父任务" in _body:
-                            _allow_through = True
-                    except Exception:
-                        pass
+                    # Issue #565: bot 建单 issue_opened 一律放行（与主路径同构）→ 智能推荐
+                    _allow_through = True
+                    evt["_bot_opened"] = True
                 if _allow_through:
-                    log.info(f"Pipeline: bot={actor} created subtask issue, allow through")
+                    log.info(f"Pipeline: bot={actor} opened issue, allow through for scene recommend (fallback, Issue #565)")
                 else:
                     log.info(f"Pipeline skip: bot={actor} self-action (fallback)")
                     from src.api.event_store import append_skipped_event
@@ -1579,6 +1608,25 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                         return result
         except Exception as e:
             log.warning(f"Pipeline: outbound ledger issue_opened check failed (allow-through): {e}")
+    # 2.0c Issue #565: bot 建单推荐仓级滑动窗口限流——放行后、路由判定前。
+    # 同 repo_key 60s 内最多 5 条 bot 建单进推荐（防 bot 批量建单打爆模型调用），
+    # 超限记 event_skipped(bot_open_recommend_rate_limited) 并终止（进程内 dict，不进 DB）。
+    # 「## 父任务」子任务开单是多任务流水线内部通道，不占推荐配额。
+    if event_type == "issue_opened" and _is_bot_actor:
+        _rl_subtask = False
+        try:
+            _rl_payload = evt.get("payload", {}) or {}
+            _rl_body = str((_rl_payload.get("object_attributes", {}) or {}).get("description", "")
+                           or (_rl_payload.get("issue", {}) or {}).get("body") or "")
+            if "## 父任务" in _rl_body:
+                _rl_subtask = True
+        except Exception:
+            pass
+        if not _rl_subtask and _bot_open_recommend_rate_limited(repo_key):
+            log.info(f"Pipeline skip: bot open recommend rate limited (repo={repo_key}, actor={actor}, issue={_pre_issue_id})")
+            from src.api.event_store import append_skipped_event
+            append_skipped_event(repo_key, event_type, "bot_open_recommend_rate_limited", actor, issue_id=_pre_issue_id)
+            return result
     # Issue #453 台账（读侧新增）：issue_closed / PR 族——关闭与 PR 事件的
     # 回流对账（老问题 3/26 顺手覆盖）。查表异常一律放行，PR 订阅预匹配（1.5 节）不受影响。
     # S19：issue_reopened / issue_assigned / issue_labeled 元数据回声——update_issue
@@ -1875,6 +1923,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 双路径并行：主路由 agent 正常处理 + 订阅 Agent 独立分派
         _dispatch_subscription_agent(repo_key, evt, event_type, _sub_agent, agent_type)
         log.info(f"Pipeline: subscription double-path -> extra event for '{_sub_agent}' (main='{agent_type}')")
+    if not agent_type and event_type == "pull_request_merged":
+        # Issue #544 L4：merge 订阅兜底推广——所有启用 A2A 的仓库，PR 合并默认 sre 收尾。
+        # 原先仅显式配置 sre 订阅的仓库在 merge 时触发 sre；现无任何路由命中时默认派发
+        # （sre agent 被禁用的仓库除外）。配合 #496 派发级重试 + 断链 Issue 提示，
+        # 消除「merge webhook 一次性投递 + 无兜底 → 收尾断链」。
+        try:
+            from src.api.session_store import is_agent_enabled as _iae_l4
+            if _iae_l4(repo_key, "sre"):
+                agent_type = "sre"
+                log.info(f"Pipeline: merged-PR default sre fallback (Issue #544 L4), repo={repo_key}")
+        except Exception as _l4_e:
+            log.warning(f"Pipeline: merged-PR sre fallback check failed: {_l4_e}")
     if not agent_type:
         _reason = "issue_done" if (event_type in ISSUE_EVENT_TYPES or event_type in PR_EVENT_TYPES) else "no_route"
         log.info(f"Pipeline: no route for type={event_type} ({_reason}), skip")
@@ -2364,16 +2424,25 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # Issue #496：PR merged → sre 收尾链路（merge webhook 一次性投递，无二次触发机会）
         # 保留 #259 即时终态语义的同时追加派发级自动重试（引擎恢复后自动重派）。
         if event_type == "pull_request_merged" and agent_type == "sre":
+            _retry_scheduled = False
             try:
                 from src.api.pr_merged_sre_retry import schedule_pr_merged_sre_retry
-                if schedule_pr_merged_sre_retry(
+                _retry_scheduled = schedule_pr_merged_sre_retry(
                         repo_key, seq, agent_type, backend or "", skill_name or "",
                         skill_id or 0, skill_path or "", evt, issue_id=issue_id or "",
                         runtime_id=runtime_id or 0, scene_id=_issue_scene or "",
-                        scene_uid=_issue_scene_uid or 0):
+                        scene_uid=_issue_scene_uid or 0)
+                if _retry_scheduled:
                     _reason_offline += "；已安排自动重试（引擎恢复后自动重派，Issue #496）"
             except Exception as _e496:
                 log.warning(f"Pipeline: schedule #496 sre merge retry failed: {_e496}")
+            if not _retry_scheduled:
+                # Issue #544 L4：未安排上自动重试（参数不全/异常）→ 断链即时提示 Issue
+                try:
+                    from src.api.pr_merged_sre_retry import _notify_issue_broken_chain
+                    _notify_issue_broken_chain(repo_key, issue_id or "", _reason_offline)
+                except Exception as _ne544:
+                    log.warning(f"Pipeline: #544 broken-chain notify failed: {_ne544}")
         _fail_event(seq, _reason_offline)
         return result
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:
@@ -4812,7 +4881,12 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
 
     R20.29.2: 移除 repo_gitcode_token 参数（冗余，pipeline 内部通过 _get_task_repo_token 重新获取）。
     R20.29.4: redispatch 时 token 短路返回空 → 新 task 行 repo_gitcode_token=空 → agent 运行时实时获取。
+    Issue #565: bot 建单只做场景判定（scene_id 已写库），不进执行棒——evt 带 _bot_opened
+    标记时短路，不重派 VOD 执行流（不派 issue/coding 棒）。
     """
+    if evt.get("_bot_opened"):
+        log.info(f"智能推荐完成: bot-opened issue {issue_id}, scene-only, skip redispatch (Issue #565)")
+        return
     from src.api.event_store import append_event
     from src.runtime.engine_select import pick_engine, engine_name
     from src.runtime.service import get_execution_mode, EXEC_MODE_DIRECT

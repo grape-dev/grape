@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
 from src.config import log
+from src.user.repo_manager import UpstreamAPIError
 from src.vcs.providers import (
     translate_inbound,
     translate_query_state,
@@ -39,6 +40,16 @@ class PRUpdateBody(BaseModel):
     title: str = ""
     body: str = ""
     labels: str = ""
+
+
+class PRMergeBody(BaseModel):
+    """Issue #558：merge 端点 body 参数（均可选，空值不透传，存量行为不变）。
+
+    - merge_method：merge/squash/rebase；缺省空 → 不传（上游默认 merge）。
+    - title：自定义合并提交标题。
+    """
+    merge_method: str = ""
+    title: str = ""
 
 
 class IssueCreateBody(BaseModel):
@@ -147,11 +158,20 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
 
 
 def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None = None):
-    """按 provider 注册表分发原生 API 调用（新增 provider=加模块）。"""
+    """按 provider 注册表分发原生 API 调用（新增 provider=加模块）。
+
+    Issue #549/#558：上游 Git 平台返回 >=400 时透传真实状态码与完整 message
+    （404 → 404，403 → 403…，不截断），502 仅保留给代理自身故障（连接失败/超时/非上游异常）。
+    """
     try:
         return _PROVIDER_MODULES[provider].request(method, url, token, body)
     except HTTPException:
         raise
+    except UpstreamAPIError as e:
+        log.warning(f"Git repo API {method} {url} upstream error: {e}")
+        msg = e.message or f"{provider} API 上游错误 ({e.status_code})"
+        raise HTTPException(status_code=e.status_code,
+                            detail={"code": e.status_code, "message": msg})
     except Exception as e:
         log.warning(f"Git repo API {method} {url} failed: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} API 调用失败: {str(e)[:120]}"})
@@ -515,11 +535,20 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
     return resp
 
 
-@router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge", summary="Merge pull request", description="Merges a pull request; returns {merged, sha}.")
-def merge_pull(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
-               p: str = Depends(_provider)):
+@router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge",
+            summary="Merge pull request",
+            description="Merges a pull request; returns {merged, sha}. Optional body: merge_method (merge/squash/rebase, default merge) and title (custom merge commit title), passed through to the provider merge endpoint. Upstream failures (e.g. 405 not mergeable) return the upstream status code with the full error message.")
+def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = None,
+               user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #558：merge_method/title 透传（空值过滤，缺省保持 body=None 存量行为）
+    _payload = None
+    if body is not None:
+        _filtered = {k: v for k, v in
+                     {"merge_method": (body.merge_method or "").strip(),
+                      "title": (body.title or "").strip()}.items() if v}
+        _payload = _filtered or None
     resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
-                    _repo_token(owner, repo, user, p))
+                    _repo_token(owner, repo, user, p), _payload)
     # Issue #453 台账（S25）：合并 PR → pull_request_merged 回声对账（VcsApiClient.merge_pr
     # 已入账，网关直调路径此处分账）
     try:
@@ -561,6 +590,22 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     except Exception as _e:
         log.warning(f"outbound_ledger record (create_pull_comment) failed: {_e}")
     return resp
+
+
+@router.patch("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_update", summary="Update PR comment", description="Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments.")
+def update_pull_comment(owner: str, repo: str, number: int, comment_id: int, body: CommentBody,
+                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # 上游 comment id 全局唯一（不含 PR number）：透传 PATCH /pulls/comments/{id}
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+                    _repo_token(owner, repo, user, p), {"body": body.body})
+
+
+@router.delete("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_delete", summary="Delete PR comment", description="Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments.")
+def delete_pull_comment(owner: str, repo: str, number: int, comment_id: int,
+                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # 上游 comment id 全局唯一（不含 PR number）：透传 DELETE /pulls/comments/{id}
+    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+                    _repo_token(owner, repo, user, p))
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files", description="Lists files changed in a pull request.")

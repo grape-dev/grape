@@ -424,7 +424,16 @@ grapecli git diff --repo Jason7602/hello
 
 ### PUT /api/git-repo/{owner}/{repo}/pulls/{number}/merge
 
-**返回（200）**：`{"merged": true, "sha": "..."}`。**错误**：409（不可合并）。
+**入参 Body（JSON，均可选）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `merge_method` | string | 否 | 合并方式：`merge` / `squash` / `rebase`；缺省不传（上游默认 merge） |
+| `title` | string | 否 | 自定义合并提交标题，空值不透传 |
+
+**返回（200）**：`{"merged": true, "sha": "..."}`。
+
+**错误（Issue #558 透传语义）**：上游平台拒绝合并（如 PR 不可自动合并返回 405）时，本接口**透传上游真实状态码与完整错误 message**（如 405/409，`detail.message` 为上游原文，不截断）；仅代理自身异常（超时/连接失败）返回 502。
 
 ### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
 

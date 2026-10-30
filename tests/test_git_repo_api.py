@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
+from src.user.repo_manager import UpstreamAPIError
 
 UID = 98701
 OWNER = "o"
@@ -215,6 +216,39 @@ def test_pulls_mapping(gitcode_calls, _client):
 
     assert _get(client, f"{base}/pulls/9/files").status_code == 200
     assert gitcode_calls[-1]["url"].endswith("/pulls/9/files")
+
+
+def test_pulls_comments_update_delete(gitcode_calls, _client):
+    """Issue #563：PR 评论 update/delete 透传上游 /pulls/comments/{id}（comment id 全局唯一，不含 PR number）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+
+    r = client.patch(f"{base}/pulls/9/comments/123", json={"body": "corrected"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "PATCH"
+    assert last["url"].endswith("/pulls/comments/123")
+    assert last["body"] == {"body": "corrected"}
+
+    r = client.delete(f"{base}/pulls/9/comments/123")
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "DELETE"
+    assert last["url"].endswith("/pulls/comments/123")
+    assert last["body"] is None
+
+
+def test_pulls_comments_update_delete_contract_operations():
+    """Issue #563：新端点进 OpenAPI 契约且标注 session_only（CLI refresh 后自动获得命令）。"""
+    from src.api.openapi import custom_openapi
+    schema = custom_openapi(app)
+    ops = {(p, m) for p, methods in schema["paths"].items() for m in methods}
+    _cp = "/api/git-repo/{owner}/{repo}/pulls/{number}/comments/{comment_id}"
+    assert (_cp, "patch") in ops
+    assert (_cp, "delete") in ops
+    op = schema["paths"][_cp]["patch"]
+    assert op["operationId"] == "gitrepo_pulls_comments_update"
+    assert op.get("x-token-scope") == "session_only"
 
 
 def test_contents_branches_milestones_labels(gitcode_calls, _client):
@@ -482,3 +516,61 @@ class TestRepoCredentialProviderByPath:
         assert ws["clone_url"].startswith("https://gitcode.com/")
         ws2 = _client.get(f"/api/repos/{OWNER}/{REPO}/workspace").json()
         assert ws2["clone_url"].startswith("https://github.com/")
+
+# ===================== Issue #549: 上游错误码透传（404 不再被 502 包装） =====================
+
+@pytest.fixture
+def upstream_error(monkeypatch):
+    """Mock repo_manager._req：抛 UpstreamAPIError，模拟上游 GitCode >=400 响应。"""
+    def _install(status_code: int, message: str):
+        def _fake_req(method, url, token="", body=None):
+            raise UpstreamAPIError(method, url, status_code, message)
+        monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    return _install
+
+
+def test_upstream_404_passthrough(upstream_error, _client):
+    """contents 不存在路径（上游 404）→ HTTP 404 + 统一包络（不再 502 包装）。"""
+    upstream_error(404, '{"message":"Not Found","documentation_url":"https://gitcode.com"}')
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents/no/such/path.py")
+    assert r.status_code == 404
+    envelope = r.json()["detail"]
+    assert envelope["code"] == 404
+    assert "Not Found" in envelope["message"]
+
+
+def test_upstream_403_passthrough(upstream_error, _client):
+    """上游 403 → HTTP 403 透传（真实权限语义）。"""
+    upstream_error(403, '{"message":"Forbidden"}')
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/branches")
+    assert r.status_code == 403
+    assert r.json()["detail"]["code"] == 403
+
+
+def test_upstream_405_passthrough(upstream_error, _client):
+    """上游 405（如 pulls merge）→ HTTP 405 透传（#558 同根因场景）。"""
+    upstream_error(405, '{"message":"Method Not Allowed"}')
+    r = _client.put(f"/api/git-repo/{OWNER}/{REPO}/pulls/1/merge")
+    assert r.status_code == 405
+    assert r.json()["detail"]["code"] == 405
+
+
+def test_network_error_still_502(monkeypatch, _client):
+    """代理自身故障（连接失败 RuntimeError，非上游响应）→ 仍 502。"""
+    def _fake_req(method, url, token="", body=None):
+        raise RuntimeError("Cannot reach GitCode API: connection refused")
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents/README.md")
+    assert r.status_code == 502
+    assert r.json()["detail"]["code"] == 502
+
+
+def test_upstream_error_keeps_runtime_error_compat(_client):
+    """UpstreamAPIError 继承 RuntimeError（既有 except RuntimeError 调用点零改动兼容）。"""
+    e = UpstreamAPIError("GET", "https://gitcode.com/api/v5/x", 404, "Not Found")
+    assert isinstance(e, RuntimeError)
+    assert e.status_code == 404
+    # str 格式兼容 _extract_http_code 正则
+    assert "(404)" in str(e)
+    from src.user.repo_manager import _extract_http_code
+    assert _extract_http_code(e) == 404

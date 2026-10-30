@@ -503,6 +503,7 @@ function _renderSkillCard(s, fixedWidth) {
     let btns = '';
     if (s.scope !== 'official') {
       btns = `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.id}','${s.scope}')">${I18N.t('skills.action.delete')||'删除'}</button>`;
+      btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();showSkillUpdate(${s.id},'${s.name}')">${I18N.t('skills.action.update_skill')||'上传更新'}</button>`;
       if (_currentRepo()) {
         if (s.scope === 'user') {
           btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}','user')">转仓库</button>`;
@@ -855,6 +856,68 @@ function doSkillUpload() {
     _setSkillUploadProgress(0, true);
     // 优先展示后端返回的具体校验错误（errors 数组）
     let msg = e.message || (I18N.t('skills.toast.upload_failed')||'上传失败');
+    if (e.errors && Array.isArray(e.errors) && e.errors.length > 0) {
+      msg = e.errors.join('；');
+    }
+    if (app && app.showToast) app.showToast(msg);
+  });
+}
+
+// ══════════════════════════════════════════
+// 上传更新技能（Issue #561：卡片直接覆盖更新，免删了重传）
+// ══════════════════════════════════════════
+function showSkillUpdate(skillId, skillName) {
+  var existing = document.getElementById('skillUpdateModal');
+  if (existing) { existing.remove(); return; }
+  var modal = document.createElement('div');
+  modal.id = 'skillUpdateModal';
+  modal.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
+  modal.innerHTML = `<div class="cd" style="width:480px;padding:20px;border-radius:10px">
+    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">${I18N.t('skills.update.title')||'上传更新技能'} — ${skillName}</h3>
+    <div style="font-size:12px;color:var(--t2);margin-bottom:10px">${I18N.t('skills.update.tip')||'上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致'}</div>
+    <div style="margin-bottom:14px">
+      <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">${I18N.t('skills.upload.file_label')||'技能 ZIP 包'}</label>
+      <input type="file" id="skillUpdateFile" accept=".zip" style="font-size:12px">
+    </div>
+    <div id="skillUpdateProgress" style="display:none;margin-bottom:12px">
+      <div style="font-size:11px;color:var(--t2);margin-bottom:4px">${I18N.t('skills.upload.uploading')||'上传中'} <span id="skillUpdatePct">0%</span></div>
+      <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden"><div id="skillUpdateBar" style="background:var(--a);height:100%;width:0%;transition:width .2s"></div></div>
+    </div>
+    <div style="display:flex;gap:8px;justify-content:flex-end">
+      <button class="bt bt-o bt-s" onclick="document.getElementById('skillUpdateModal').remove()">${I18N.t('skills.action.cancel')||'取消'}</button>
+      <button class="bt bt-p bt-s" onclick="doSkillUpdate(${skillId})">${I18N.t('skills.action.confirm_update')||'确认覆盖更新'}</button>
+    </div>
+  </div>`;
+  document.body.appendChild(modal);
+}
+
+function _setSkillUpdateProgress(pct, done) {
+  const prog = document.getElementById('skillUpdateProgress');
+  const bar = document.getElementById('skillUpdateBar');
+  const pctEl = document.getElementById('skillUpdatePct');
+  if (!prog || !bar || !pctEl) return;
+  prog.style.display = done ? 'none' : 'block';
+  bar.style.width = pct + '%';
+  pctEl.textContent = pct + '%';
+}
+
+function doSkillUpdate(skillId) {
+  const fileInput = document.getElementById('skillUpdateFile');
+  if (!fileInput || !fileInput.files || !fileInput.files[0]) {
+    if (app && app.showToast) app.showToast(I18N.t('skills.toast.select_zip')||'请选择 ZIP 文件');
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', fileInput.files[0]);
+  _setSkillUpdateProgress(0, false);
+  API.upload('/skills/by-id/' + skillId + '/update', fd, (pct) => _setSkillUpdateProgress(pct, false)).then(r => {
+    _setSkillUpdateProgress(100, true);
+    document.getElementById('skillUpdateModal')?.remove();
+    if (app && app.showToast) app.showToast(r.message || (I18N.t('skills.toast.update_success')||'更新成功'));
+    renderSkills();
+  }).catch(e => {
+    _setSkillUpdateProgress(0, true);
+    let msg = e.message || (I18N.t('skills.toast.update_failed')||'更新失败');
     if (e.errors && Array.isArray(e.errors) && e.errors.length > 0) {
       msg = e.errors.join('；');
     }

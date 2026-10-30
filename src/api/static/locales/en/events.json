@@ -103,6 +103,7 @@
   "fail_reason": "Failure reason",
   "btn_a2a_redo": "🤝 A2A Redispatch",
   "status_pending": "⏳ Queued",
+  "status_cancelled": "⊘ Cancelled",
   "btn_feedback": "Feedback",
   "btn_feedback_title": "Report an issue for this failed event (auto-attaches repo/task/engine context)",
   "no_fail_reason": "No failure reason",

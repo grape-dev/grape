@@ -1,4 +1,4 @@
-"""Bot Token 健康探活（Issue #345 方向 1 + R17/R21.3 改造）。
+"""Issue #345 方向 1 + R17/R21.3 改造 + Issue #519 异步化。
 
 集群部署下，定时探活全局/仓库级 bot token 有效性，结果写入 DB meta 表供所有实例共享。
 
@@ -14,6 +14,11 @@ R21.3 超时误标记修复：
 - 401 → 标记过期（token 确实无效）
 - 超时/5xx → 不标记，记 warning，等下次健康检查重试
 - FAILURE_THRESHOLD=1 只对 401 生效
+
+Issue #519 异步化（消除每小时约 74 秒全站卡顿）：
+- _verify_repo_bot_tokens 改 async：单仓验证经 asyncio.to_thread 丢入线程池
+- 批内 REPO_BATCH_SIZE 个并发（asyncio.gather），批间隔 asyncio.sleep
+- 事件循环不再被同步 HTTP 验证 + time.sleep 阻塞，检查期间 API 可正常响应
 """
 import asyncio
 import json
@@ -119,8 +124,12 @@ def _update_global_token_status(provider: str, result: dict):
     # network/config → 不改变
 
 
-def _verify_repo_bot_tokens():
+async def _verify_repo_bot_tokens():
     """R17.2.4/R17.2.11: 遍历有仓库级 bot token 的仓库，按 provider 验证。
+
+    Issue #519: 改为 async——单仓验证（_verify_single_repo_token，同步 DB+HTTP）
+    经 asyncio.to_thread 丢入线程池执行，批内 asyncio.gather 并发，
+    批间隔 asyncio.sleep，检查期间不再阻塞 asyncio 事件循环。
 
     R17.2.5: 401 → 标记 managed_repos.bot_token_status=expired
     R17.2.6: 200 → 清除过期标记
@@ -159,19 +168,27 @@ def _verify_repo_bot_tokens():
     if not repos_to_check:
         return
 
-    log.info(f"bot_token_health: checking {len(repos_to_check)} repo-level tokens")
+    # Issue #519: 检查任务启动日志（含仓库数，便于监控/对账检查窗口）
+    log.info(f"bot_token_health: repo token check started ({len(repos_to_check)} repos)")
 
-    # R17.2.10: 分批执行
+    # R17.2.10 + Issue #519: 分批执行，批内并发（asyncio.gather），
+    # 单仓验证经 asyncio.to_thread 在线程池执行，不阻塞事件循环
     for i in range(0, len(repos_to_check), REPO_BATCH_SIZE):
         batch = repos_to_check[i:i + REPO_BATCH_SIZE]
-        for repo_key, provider in batch:
-            try:
-                _verify_single_repo_token(repo_key, provider)
-            except Exception as e:
-                log.warning(f"bot_token_health: repo token check failed for {repo_key}: {e}")
-        # 批间间隔
+        # return_exceptions=True：单仓异常隔离（对齐原逐仓 try/except 语义），
+        # 不中断整轮检查；_verify_single_repo_token 内部已 try/except，
+        # 此处防御 to_thread 包装层本身抛错（如 loop 关闭竞态）
+        results = await asyncio.gather(
+            *(asyncio.to_thread(_verify_single_repo_token, repo_key, provider)
+              for repo_key, provider in batch),
+            return_exceptions=True,
+        )
+        for (repo_key, provider), res in zip(batch, results):
+            if isinstance(res, BaseException):
+                log.warning(f"bot_token_health: repo token check failed for {repo_key}: {res}")
+        # 批间间隔（Issue #519: asyncio.sleep 让出事件循环，不阻塞调用线程）
         if i + REPO_BATCH_SIZE < len(repos_to_check):
-            time.sleep(REPO_BATCH_INTERVAL)
+            await asyncio.sleep(REPO_BATCH_INTERVAL)
 
 
 def _verify_single_repo_token(repo_key: str, provider: str):
@@ -327,8 +344,8 @@ async def bot_token_health_loop():
                     # R17.2.1: 全局 bot token 检查
                     result = _verify_global_bot_token()
                     _update_health_status(result)
-                    # R17.2.4: 仓库级 bot token 检查
-                    _verify_repo_bot_tokens()
+                    # R17.2.4: 仓库级 bot token 检查（Issue #519: async，不阻塞事件循环）
+                    await _verify_repo_bot_tokens()
                 finally:
                     release_lock("token_health_check")
             # 未抢到锁 = 其他实例在探活，跳过

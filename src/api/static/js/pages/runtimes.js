@@ -1090,7 +1090,7 @@ function revokeCredential(cid) {
 function openDeviceTasks(credId) {
   API.get('/runtime/credentials/' + credId + '/tasks').then(d => {
     const tasks = d.tasks || [];
-    const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
+    const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔', pending_self_report: '⏳', timeout_failed: '⛔' };
     const rows = tasks.length ? tasks.map(t =>
       `<tr><td>${t.id}</td><td>${t.repo_key || ''}<br><span class="ts t2">${t.agent_type || ''} / ${t.skill || ''}</span></td>
        <td>${statusIcon[t.status] || ''} ${I18N.t('common.status.' + t.status) !== ('common.status.' + t.status) ? I18N.t('common.status.' + t.status) : t.status}</td><td>${t.exit_code ?? ''}</td><td class="ts t2">${(t.result_text || '').slice(0, 60)}</td></tr>`).join('')

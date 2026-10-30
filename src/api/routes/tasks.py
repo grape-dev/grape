@@ -382,7 +382,7 @@ def self_complete_task(body: TaskSelfCompleteBody, user: dict = Depends(get_curr
         return {"ok": True, "task_id": task_id, "status": "completed", "enriched": _enriched}
     _cur = _svc.get_task(task_id) or {}
     _cur_status = _cur.get("status") or "queued"
-    if _cur_status in ("completed", "failed", "cancelled"):
+    if _cur_status in ("completed", "failed", "cancelled", "timeout_failed"):
         return {"ok": True, "task_id": task_id, "status": _cur_status, "already": True,
                 "self_reported": True}
     return {"ok": True, "task_id": task_id, "status": _cur_status, "self_reported": True,

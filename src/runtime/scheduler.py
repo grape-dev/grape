@@ -16,7 +16,7 @@ import json
 import os
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from src.config import log
@@ -26,6 +26,11 @@ _SCHEDULER_INTERVAL = 60  # 秒：调度器扫描间隔
 _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
 _MAX_RETRY_DELAY = 300    # 秒：退避上限
 _RUNNING_TASKS: set[int] = set()  # 内存互斥锁：正在执行的 task_id 集合
+
+# Issue #537：pending_self_report 超时（worker 未自报）→ timeout_failed 兜底阈值；
+# zombie 判死离线宽限（停双主/重启 master 的短暂离线不误判 failed）。
+PENDING_SELF_REPORT_TIMEOUT_SECONDS = int(os.environ.get("PENDING_SELF_REPORT_TIMEOUT_SECONDS", "1800"))
+ZOMBIE_OFFLINE_GRACE_SECONDS = int(os.environ.get("ZOMBIE_OFFLINE_GRACE_SECONDS", "300"))
 
 # agent_type 固定为 'issue'，不再由用户选择
 _FIXED_AGENT_TYPE = "issue"
@@ -539,8 +544,26 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
 
     # 更新 autopilot_executions
     status = "success" if exit_code == 0 else "failed"
+    _ev_error = ""
+    if status == "success":
+        # Issue #537 P1-1：部署类任务收口前做落地证据校验（版本指纹/健康检查）。
+        # 校验失败 → 收口 failed 带 evidence 详情（纵深防御，防 false-success 也防 false-failed）。
+        # QA R1 三表终态一致性取舍：仅 autopilot_executions 判 failed；agent_tasks/events 保留
+        # completed——worker 确实完成执行，部署落地矛盾由 exec.error 承载；不回翻任务/事件侧
+        # 终态（update_task_status 终态幂等，也不应把已完成任务后改为 failed）。
+        try:
+            from src.runtime.service import get_task
+            from src.runtime.deploy_evidence import check_deploy_evidence
+            _evd = check_deploy_evidence(get_task(task_id) or {})
+        except Exception:
+            _evd = {"checked": False}
+        if _evd.get("checked") and not _evd.get("passed"):
+            status = "failed"
+            _ev_error = _evd.get("reason", "部署证据校验未通过")
+            log.info(f"Autopilot exec {exec_id}: deploy evidence failed -> {status} ({_evd.get('reason')})")
     _update_execution_result(exec_id, status,
                              result=_result_summary,
+                             error=_ev_error,
                              findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
 
     log.info(f"Autopilot exec {exec_id}: completed status={status} findings={len(findings_result['findings'])}")
@@ -876,26 +899,29 @@ def _update_task_run_info(task_id: int, next_run: str):
         db.commit()
 
 
-async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
+async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600,
+                                     poll_interval: float = 10.0) -> str:
     """轮询 dispatched 状态的 exec 等待 worker 完成执行。
 
     通过查 agent_tasks（event_seq=exec_id）的状态推断 autopilot_executions 终态：
-    - agent_tasks status=completed/success → exec success
+    - agent_tasks status=completed/success → exec success（部署类任务先过 evidence 校验）
     - agent_tasks status=failed → exec failed
-    - agent_tasks status 仍为 queued/dispatched/running → 继续等
+    - agent_tasks status=timeout_failed → exec failed（带超时说明，不等自身 3600s）
+    - agent_tasks status 仍为 queued/dispatched/running/pending_self_report → 继续等
+      （pending_self_report 为 Issue #537 主控停机中间态，视同 running 等待 worker 自报）
     - 超时 → exec failed (timeout)
     """
     import time as _time
     _start = _time.time()
     while _time.time() - _start < timeout:
-        await asyncio.sleep(10)  # 每10秒查一次
+        await asyncio.sleep(poll_interval)
         try:
             with db_lock:
                 c = db.cursor()
-                # 查 agent_tasks 按 event_seq=exec_id
+                # 查 agent_tasks 按 event_seq=exec_id（含 skill/env_extra/runtime_id 供 evidence 校验）
                 row = c.execute(
-                    "SELECT status, result_text, exit_code FROM agent_tasks "
-                    "WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                    "SELECT status, result_text, exit_code, skill, env_extra, runtime_id "
+                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
                     (exec_id,)
                 ).fetchone()
             if not row:
@@ -903,8 +929,29 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
             _at_status = row[0] or ""
             _result_text = row[1] or ""
             _exit_code = row[2]
+            _at_task = {
+                "status": _at_status,
+                "result_text": _result_text,
+                "skill": row[3] or "",
+                "env_extra": row[4] or "",
+                "runtime_id": row[5] or 0,
+            }
 
             if _at_status in ("completed", "success"):
+                # 部署类任务收口前证据校验（Issue #537 P1-1 纵深防御）
+                # QA R1 三表终态一致性取舍：同 finalize——evidence 判失败仅 exec 侧 failed，
+                # 任务/事件侧保留 completed（worker 已完成），错误详情写入 exec.error。
+                try:
+                    from src.runtime.deploy_evidence import check_deploy_evidence
+                    _evd = check_deploy_evidence(_at_task)
+                except Exception:
+                    _evd = {"checked": False}
+                if _evd.get("checked") and not _evd.get("passed"):
+                    _update_execution_result(exec_id, "failed",
+                                             result=_result_text[:5000],
+                                             error=f"部署证据校验未通过: {_evd.get('reason', '')}")
+                    log.info(f"Autopilot poll exec {exec_id}: -> failed (deploy evidence: {_evd.get('reason')})")
+                    return "failed"
                 # worker 完成，同步终态到 autopilot_executions
                 findings_result = parse_findings(_result_text)
                 # result 只存 summary（不存原始工作日志），解析失败时降级存最后 500 字
@@ -933,8 +980,15 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
                 _notify_subscribers(_exec_task_id(exec_id), exec_id, "failed",
                                     _result_text[:500], {})
                 return "failed"
-            elif _at_status == "running":
-                # worker 已认领并开始执行，同步 autopilot_executions 为 running
+            elif _at_status == "timeout_failed":
+                # Issue #537：pending_self_report 超时兜底终态 → poll 快速收口 failed
+                _update_execution_result(exec_id, "failed",
+                                         result=_result_text[:5000],
+                                         error="agent_tasks status=timeout_failed（worker 未自报超时）")
+                return "failed"
+            elif _at_status in ("running", "pending_self_report"):
+                # worker 已认领并开始执行（pending_self_report = 主控停机等自报），
+                # 同步 autopilot_executions 为 running
                 _update_execution_result(exec_id, "running")
             # queued/dispatched → 继续等
         except Exception as e:
@@ -1010,6 +1064,215 @@ async def _execute_task(task: dict):
         _RUNNING_TASKS.discard(task_id)
 
 
+def _offline_duration_seconds(last_seen_at: str):
+    """引擎已离线秒数；last_seen_at 缺失/解析失败 → None（信息不足，不判死）。
+
+    parse_dt 返回 epoch 秒（float），兼容 datetime 分支。
+    """
+    if not last_seen_at:
+        return None
+    try:
+        from src.runtime.health import parse_dt
+        _ts = parse_dt(last_seen_at)
+        if not _ts:
+            return None
+        if isinstance(_ts, (int, float)):
+            _secs = datetime.now(timezone.utc).timestamp() - float(_ts)
+        else:
+            _dt = _ts
+            if _dt.tzinfo is None:
+                _dt = _dt.replace(tzinfo=timezone.utc)
+            _secs = (datetime.now(timezone.utc) - _dt).total_seconds()
+        return max(_secs, 0.0)
+    except Exception:
+        return None
+
+
+def _sweep_pending_self_report_timeouts() -> int:
+    """pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed。
+
+    主控停机时 REMOTE 任务被置 pending_self_report；正常路径是 worker 继续执行并
+    complete_task/fail_task 自报。若 worker 失联/永远不自报，超过
+    PENDING_SELF_REPORT_TIMEOUT_SECONDS（默认 30min）→ 判 timeout_failed
+    （带说明的终态，区别于 plain failed），并同步 events=failed + autopilot_executions=failed。
+    """
+    from src.runtime.service import update_task_status
+    from src.api.event_store import update_event_complete
+    _cutoff_ts = datetime.now(timezone.utc).timestamp() - PENDING_SELF_REPORT_TIMEOUT_SECONDS
+    _now = datetime.now(timezone.utc).isoformat()
+    _reason = (f"worker 在 {PENDING_SELF_REPORT_TIMEOUT_SECONDS}s 内未自报完成/失败"
+               f"（pending_self_report 超时），判 timeout_failed")
+    marked = 0
+    try:
+        _pending_rows = []
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, event_seq, runtime_id, pending_since FROM agent_tasks "
+                "WHERE status='pending_self_report' AND pending_since IS NOT NULL "
+                "AND pending_since != ''"
+            )
+            # 数值比较（parse_dt→epoch）：兼容停机写入的 "%Y-%m-%d %H:%M:%S"（executor）与
+            # ISO8601（测试/新写入）混合格式——字符串比较会因 ' '(0x20) < 'T'(0x54)
+            # 把停机写入的 pending 误判为已过期（超时窗口形同虚设）。
+            from src.runtime.health import parse_dt
+            for _r in c.fetchall():
+                try:
+                    _ts = parse_dt(_r[3])
+                except Exception:
+                    _ts = None
+                if _ts and float(_ts) <= _cutoff_ts:
+                    _pending_rows.append(_r)
+            rows = _pending_rows
+        for tid, evt_seq, _rt_id, _ps in rows:
+            try:
+                update_task_status(tid, "timeout_failed", exit_code=-1,
+                                   errors=json.dumps([_reason], ensure_ascii=False),
+                                   completed_at=_now)
+                if evt_seq:
+                    try:
+                        update_event_complete(evt_seq, "failed", exit_code=-1,
+                                              completed_at=_now, result=_reason[:200])
+                    except Exception as _ee:
+                        log.warning(f"pending timeout: event sync failed seq={evt_seq}: {_ee}")
+                    try:
+                        _update_execution_result(evt_seq, "failed", error=_reason)
+                    except Exception as _ee2:
+                        log.warning(f"pending timeout: autopilot sync failed exec={evt_seq}: {_ee2}")
+                log.info(f"pending_self_report timeout: task {tid} -> timeout_failed")
+                marked += 1
+            except Exception as e:
+                log.warning(f"pending timeout: mark timeout_failed failed for task {tid}: {e}")
+        return marked
+    except Exception as e:
+        log.warning(f"sweep pending_self_report timeouts failed: {e}")
+        return 0
+
+
+def _reap_zombie_executions() -> None:
+    """僵尸执行回收：主控重启后 _poll_dispatched_completion 协程被杀，
+    autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
+    每轮扫描顺带检查并同步终态（幂等自愈）。
+
+    Issue #537 增强（生产 exec incident case 误报根因修复）：
+    - engine 离线判死加宽限（ZOMBIE_OFFLINE_GRACE_SECONDS，默认 5min）——
+      停双主/重启 master 的短暂离线不误判 failed；last_seen 信息缺失也不判死；
+    - pending_self_report 不判死（等 worker 自报，超时由 _sweep_pending_self_report_timeouts 兜底）；
+    - 收口 success 前对部署类任务做 evidence 校验（版本指纹/健康检查，见 deploy_evidence.py）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id FROM autopilot_executions "
+                "WHERE status IN ('running', 'dispatched') "
+                "ORDER BY id DESC LIMIT 20"
+            )
+            stuck = c.fetchall()
+        for row in stuck:
+            _exec_id = row[0]
+            with db_lock:
+                c2 = db.cursor()
+                c2.execute(
+                    "SELECT id, status, result_text, exit_code, skill, env_extra, runtime_id "
+                    "FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
+                    (_exec_id,)
+                )
+                at_row = c2.fetchone()
+            if not at_row:
+                continue
+            _at_id = at_row[0]
+            _at_status = at_row[1] or ""
+            _result_text = at_row[2] or ""
+            _at_task = {
+                "status": _at_status,
+                "result_text": _result_text,
+                "skill": at_row[4] or "",
+                "env_extra": at_row[5] or "",
+                "runtime_id": at_row[6] or 0,
+            }
+            if _at_status in ("completed", "success"):
+                # 部署类任务收口前证据校验（Issue #537 P1-1）
+                # QA R1 三表终态一致性取舍：同 finalize——evidence 判失败仅 exec 侧 failed，
+                # 任务/事件侧保留 completed，错误详情写入 exec.error。
+                try:
+                    from src.runtime.deploy_evidence import check_deploy_evidence
+                    _evd = check_deploy_evidence(_at_task)
+                except Exception:
+                    _evd = {"checked": False}
+                if _evd.get("checked") and not _evd.get("passed"):
+                    _update_execution_result(_exec_id, "failed",
+                        result=_result_text[:5000],
+                        error=f"部署证据校验未通过: {_evd.get('reason', '')}")
+                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed "
+                             f"(deploy evidence: {_evd.get('reason')})")
+                    continue
+                findings_result = parse_findings(_result_text)
+                _summary = findings_result["summary"] or (_result_text[-500:] if _result_text else "")
+                _update_execution_result(_exec_id, "success",
+                    result=_summary,
+                    findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
+                log.info(f"Autopilot zombie recovery: exec {_exec_id} -> success (agent_task completed)")
+            elif _at_status == "cancelled":
+                _update_execution_result(_exec_id, "cancelled",
+                    result=_result_text[:5000], error="用户手动终止")
+                log.info(f"Autopilot zombie recovery: exec {_exec_id} -> cancelled")
+            elif _at_status == "failed":
+                _update_execution_result(_exec_id, "failed",
+                    result=_result_text[:5000], error="agent_tasks status=failed")
+                log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed")
+            elif _at_status == "timeout_failed":
+                # Issue #537：pending 超时兜底终态 → 僵尸 exec 同步 failed（带说明）
+                _update_execution_result(_exec_id, "failed",
+                    result=_result_text[:5000],
+                    error="agent_tasks status=timeout_failed（worker 未自报超时）")
+                log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed (timeout_failed)")
+            # running/queued/dispatched -> 引擎离线超阈值才判死，否则跳过，等下一轮。
+            # Issue #404 自杀修复配套（2026-10-15）：主控停机不再把 REMOTE 任务标
+            # failed（terminate_active_agents 跳过 worker 承载任务）。正常路径是
+            # worker 继续跑完 → agent_tasks 变 completed → 上面分支同步 success。
+            # Issue #537：离线判死加 5min 宽限（重启窗口短暂离线不误判 failed）；
+            # pending_self_report 一律不判死（等 worker 自报，超时由 sweep 兜底）。
+            elif _at_status in ("running", "dispatched"):
+                try:
+                    _rt_row = None
+                    with db_lock:
+                        c3 = db.cursor()
+                        c3.execute(
+                            "SELECT t.runtime_id, ar.status, ar.last_seen_at FROM agent_tasks t "
+                            "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
+                            "WHERE t.event_seq=? ORDER BY t.created_at DESC LIMIT 1",
+                            (_exec_id,)
+                        )
+                        _rt_row = c3.fetchone()
+                    _rt_id = (_rt_row[0] or 0) if _rt_row else 0
+                    _rt_status = (_rt_row[1] or "") if _rt_row else ""
+                    _rt_last_seen = (_rt_row[2] or "") if _rt_row else ""
+                    if _rt_id and _rt_status and _rt_status != "online":
+                        _offline_secs = _offline_duration_seconds(_rt_last_seen)
+                        if _offline_secs is None or _offline_secs <= ZOMBIE_OFFLINE_GRACE_SECONDS:
+                            # 重启窗口内短暂离线 / last_seen 信息缺失 → 不判死，等下一轮
+                            continue
+                        _update_execution_result(_exec_id, "failed",
+                            error=f"worker 引擎离线 (runtime={_rt_id}) 超过 {_offline_secs:.0f}s，任务无法完成")
+                        # 同步 agent_tasks 判死（任务实际已不可能自报，终态对齐全链路）
+                        try:
+                            from src.runtime.service import update_task_status
+                            update_task_status(_at_id, "failed", exit_code=-1,
+                                errors=json.dumps([f"worker 引擎离线超过 {_offline_secs:.0f}s，任务无法完成"],
+                                                  ensure_ascii=False))
+                        except Exception as _tk:
+                            log.warning(f"Autopilot zombie recovery: task {_at_id} mark failed failed: {_tk}")
+                        log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed "
+                                 f"(agent_task {_at_status}, engine {_rt_id} offline {_offline_secs:.0f}s)")
+                    # 引擎在线 → 活任务，等下一轮
+                except Exception as _oe:
+                    log.warning(f"Autopilot zombie recovery offline-check failed for exec {_exec_id}: {_oe}")
+            # pending_self_report → 等待（不判死）；超时由 _sweep_pending_self_report_timeouts 兜底
+    except Exception as _ze:
+        log.warning(f"Autopilot zombie recovery error: {_ze}")
+
+
 async def scheduler_loop():
     """Autopilot 调度主循环——每 60 秒扫描到期任务。
 
@@ -1040,73 +1303,14 @@ async def scheduler_loop():
         # autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
         # 每轮扫描顺带检查并同步终态（幂等自愈）。
         try:
-            with db_lock:
-                c = db.cursor()
-                c.execute(
-                    "SELECT id FROM autopilot_executions "
-                    "WHERE status IN ('running', 'dispatched') "
-                    "ORDER BY id DESC LIMIT 20"
-                )
-                stuck = c.fetchall()
-            for row in stuck:
-                _exec_id = row[0]
-                with db_lock:
-                    c2 = db.cursor()
-                    c2.execute(
-                        "SELECT status, result_text, exit_code FROM agent_tasks "
-                        "WHERE event_seq=? ORDER BY created_at DESC LIMIT 1",
-                        (_exec_id,)
-                    )
-                    at_row = c2.fetchone()
-                if not at_row:
-                    continue
-                _at_status = at_row[0] or ""
-                _result_text = at_row[1] or ""
-                if _at_status in ("completed", "success"):
-                    findings_result = parse_findings(_result_text)
-                    _summary = findings_result["summary"] or (_result_text[-500:] if _result_text else "")
-                    _update_execution_result(_exec_id, "success",
-                        result=_summary,
-                        findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
-                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> success (agent_task completed)")
-                elif _at_status == "cancelled":
-                    _update_execution_result(_exec_id, "cancelled",
-                        result=_result_text[:5000], error="用户手动终止")
-                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> cancelled")
-                elif _at_status == "failed":
-                    _update_execution_result(_exec_id, "failed",
-                        result=_result_text[:5000], error="agent_tasks status=failed")
-                    log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed")
-                # running/queued/dispatched -> 引擎离线才判死，否则跳过，等下一轮。
-                # Issue #404 自杀修复配套（2026-10-15）：主控停机不再把 REMOTE 任务标
-                # failed（terminate_active_agents 跳过 worker 承载任务）。正常路径是
-                # worker 继续跑完 → agent_tasks 变 completed → 上面分支同步 success。
-                # 悬空兜底：agent_task 仍 running/dispatched 且其引擎已离线（status !=
-                # online）→ worker 进程实际已死，永远不会再上报 → 同步 failed 收口。
-                elif _at_status in ("running", "dispatched"):
-                    try:
-                        _rt_row = None
-                        with db_lock:
-                            c3 = db.cursor()
-                            c3.execute(
-                                "SELECT t.runtime_id, ar.status FROM agent_tasks t "
-                                "LEFT JOIN agent_runtimes ar ON ar.id = t.runtime_id "
-                                "WHERE t.event_seq=? ORDER BY t.created_at DESC LIMIT 1",
-                                (_exec_id,)
-                            )
-                            _rt_row = c3.fetchone()
-                        _rt_id = (_rt_row[0] or 0) if _rt_row else 0
-                        _rt_status = (_rt_row[1] or "") if _rt_row else ""
-                        if _rt_id and _rt_status and _rt_status != "online":
-                            _update_execution_result(_exec_id, "failed",
-                                error=f"worker 引擎离线 (runtime={_rt_id})，任务无法完成")
-                            log.info(f"Autopilot zombie recovery: exec {_exec_id} -> failed "
-                                     f"(agent_task {_at_status}, engine {_rt_id} offline)")
-                        # 引擎在线 → 活任务，等下一轮
-                    except Exception as _oe:
-                        log.warning(f"Autopilot zombie recovery offline-check failed for exec {_exec_id}: {_oe}")
-        except Exception as _ze:
-            log.warning(f"Autopilot zombie recovery error: {_ze}")
+            _reap_zombie_executions()
+        except Exception as _ze2:
+            log.warning(f"Autopilot zombie recovery error: {_ze2}")
+        # pending_self_report 超时兜底（Issue #537 P0-1）：worker 未在阈值内自报 → timeout_failed
+        try:
+            _sweep_pending_self_report_timeouts()
+        except Exception as _se2:
+            log.warning(f"Autopilot pending timeout sweep error: {_se2}")
 
         await asyncio.sleep(_SCHEDULER_INTERVAL)
 

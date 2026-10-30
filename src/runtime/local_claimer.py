@@ -188,7 +188,8 @@ def _engine_busy(runtime_id: int) -> bool:
             c = db.cursor()
             c.execute(
                 "SELECT COUNT(*) FROM agent_tasks "
-                "WHERE runtime_id=? AND status IN ('running','dispatched')", (runtime_id,))
+                "WHERE runtime_id=? AND status IN ('running','dispatched','pending_self_report')",
+                (runtime_id,))
             r = c.fetchone()
             c.execute("SELECT max_concurrent FROM agent_runtimes WHERE id=?", (runtime_id,))
             m = c.fetchone()
