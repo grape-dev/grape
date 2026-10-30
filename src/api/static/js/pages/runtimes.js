@@ -19,9 +19,9 @@ let _rtRange = 'all';
 
 // Issue #473: 范围筛选标签（当前选中项高亮即选中范围提示）
 const _RT_RANGE_OPTIONS = [
-  { key: 'all', label: '全部' },
-  { key: 'repo', label: '仓库' },
-  { key: 'user', label: '个人' },
+  { key: 'all', label: () => I18N.t('runtimes.rt_range_all') || '全部' },
+  { key: 'repo', label: () => I18N.t('runtimes.rt_range_repo') || '仓库' },
+  { key: 'user', label: () => I18N.t('runtimes.rt_range_user') || '个人' },
 ];
 let _rtFilterScene = [];
 let _rtFilterTag = [];
@@ -543,9 +543,10 @@ function renderRuntimes(data) {
     <span style="font-size:11px;color:var(--t3);font-weight:500;margin-right:2px">筛选</span>
     ${_RT_RANGE_OPTIONS.map(r => {
       const act = _rtRange === r.key;
-      return `<span onclick="_rtSetRange('${r.key}')" title="查看范围：${r.label}" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0e7490':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0e7490':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${r.label}</span>`;
+      const lbl = r.label();
+      return `<span onclick="_rtSetRange('${r.key}')" title="${lbl}" style="cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'var(--a)':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'var(--a)':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px">${lbl}</span>`;
     }).join('')}
-    <span style="font-size:11px;color:var(--t3)">范围：${(_RT_RANGE_OPTIONS.find(r => r.key === _rtRange) || _RT_RANGE_OPTIONS[0]).label}</span>
+    <span style="font-size:11px;color:var(--t3)">${(_RT_RANGE_OPTIONS.find(r => r.key === _rtRange) || _RT_RANGE_OPTIONS[0]).label()}</span>
     ${_availTypes.map(t => {
       const act = _rtFilterType === t;
       return `<span onclick="_rtToggleType('${t}')" style="display:inline-flex;align-items:center;gap:5px;cursor:pointer;font-size:11px;padding:4px 12px;border-radius:999px;border:1px solid ${act?'#0071e3':'var(--b)'};color:${act?'#fff':'var(--t1)'};background:${act?'#0071e3':'var(--c)'};font-weight:500;transition:all .2s;letter-spacing:.2px"><span style="width:7px;height:7px;border-radius:50%;background:${_ENGINE_DOT[t]||'#999'};flex-shrink:0"></span>${t}</span>`;

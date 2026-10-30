@@ -182,7 +182,6 @@
   "apply_scene_name_label": "场景名称",
   "apply_scene_name_empty": "场景名称不能为空",
   "apply_scene_name_conflict_inline": "仓库中已有同名场景，请换个名称",
-
   "apply_confirm_desc": "当前仓库已应用过此场景",
   "apply_confirm_warning": "再次应用将覆盖更新已有的场景配置。",
   "apply_confirm_btn": "确认覆盖",
@@ -236,5 +235,8 @@
   "converting": "转换中...",
   "scene_detail": "查看详情",
   "scene_params": "场景参数",
-  "scene_params_hint": "应用场景时需配置，Agent 将通过环境变量读取"
+  "scene_params_hint": "应用场景时需配置，Agent 将通过环境变量读取",
+  "hw_creds_hint": "☁ 华为云场景需要 AK/SK 凭证，可在下方直接填写。已配置的凭据不会在页面回显，可在个人设置中管理。",
+  "hw_creds_go_settings": "前往设置",
+  "hw_creds_configured": "✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）"
 }

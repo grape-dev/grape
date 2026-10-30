@@ -244,5 +244,8 @@
       "cde_1004": "异常",
       "unknown": "未知"
     }
-  }
+  },
+  "rt_range_all": "全部",
+  "rt_range_repo": "仓库",
+  "rt_range_user": "个人"
 }

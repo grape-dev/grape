@@ -53,7 +53,7 @@ def setup_module():
             ver = 0
         # 清理本用户可能残留的凭据 / 取回日志，保证用例间状态干净
         c.execute("DELETE FROM user_credentials WHERE user_id=?", (_uid["id"],))
-        c.execute("DELETE FROM credential_reveal_log WHERE user_id=?", (_uid["id"],))
+        c.execute("DELETE FROM grape_t_credential_reveal_log WHERE user_id=?", (_uid["id"],))
         db.commit()
     _headers = {"Authorization": "Bearer " + create_access_token(_uid["id"], "test_474_reveal", ver)}
 
@@ -62,7 +62,7 @@ def teardown_module():
     if _uid:
         with db_lock:
             c = db.cursor()
-            c.execute("DELETE FROM credential_reveal_log WHERE user_id=?", (_uid["id"],))
+            c.execute("DELETE FROM grape_t_credential_reveal_log WHERE user_id=?", (_uid["id"],))
             c.execute("DELETE FROM user_credentials WHERE user_id=?", (_uid["id"],))
             c.execute("DELETE FROM grape_accounts WHERE id=?", (_uid["id"],))
             db.commit()
@@ -179,7 +179,7 @@ class TestCredentialsReveal:
                 c = db.cursor()
                 for _ in range(_REVEAL_MAX_PER_WINDOW):
                     c.execute(
-                        "INSERT INTO credential_reveal_log (user_id, provider, field, ip) VALUES (?,?,?,?)",
+                        "INSERT INTO grape_t_credential_reveal_log (user_id, provider, field, ip) VALUES (?,?,?,?)",
                         (_uid["id"], "huawei_cloud", "ak", "127.0.0.1"))
                 db.commit()
             r = client.post("/api/settings/credentials/reveal", json={
@@ -192,7 +192,7 @@ class TestCredentialsReveal:
             user_db.set_credential(_uid["id"], "huawei_cloud", {})
             with db_lock:
                 c = db.cursor()
-                c.execute("DELETE FROM credential_reveal_log WHERE user_id=?", (_uid["id"],))
+                c.execute("DELETE FROM grape_t_credential_reveal_log WHERE user_id=?", (_uid["id"],))
                 db.commit()
 
 

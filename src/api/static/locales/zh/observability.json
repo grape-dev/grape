@@ -402,5 +402,9 @@
     "failed": "任务失败",
     "completed": "任务完成",
     "stuck": "任务卡住"
-  }
+  },
+  "ev_failed_gap_title": "失败空结果占比",
+  "ev_failed_empty": "空 result",
+  "ev_failed_empty_unit": "条",
+  "ev_failed_with_diag": "有诊断"
 }

@@ -113,5 +113,8 @@
   "a2a_redo_failed": "A2A 补发失败：{msg}",
   "a2a_redo_unknown": "未知原因",
   "fail_expand": "展开全文",
-  "fail_collapse": "收起"
+  "fail_collapse": "收起",
+  "diag_target": "目标阶段",
+  "diag_phase": "失败环节",
+  "diag_ref_seq": "引用 Seq"
 }

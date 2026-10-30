@@ -182,7 +182,6 @@
   "apply_scene_name_label": "Scene Name",
   "apply_scene_name_empty": "Scene name cannot be empty",
   "apply_scene_name_conflict_inline": "A scene with this name already exists in this repo. Try another name.",
-
   "apply_confirm_desc": "This scene has already been applied to this repository",
   "apply_confirm_warning": "Applying again will overwrite the existing scene configuration.",
   "apply_confirm_btn": "Confirm Overwrite",
@@ -236,5 +235,8 @@
   "converting": "Converting...",
   "scene_detail": "Details",
   "scene_params": "Scene Parameters",
-  "scene_params_hint": "Required when applying; Agent reads via env vars"
+  "scene_params_hint": "Required when applying; Agent reads via env vars",
+  "hw_creds_hint": "☁ Huawei Cloud scenes require AK/SK credentials, fill them below. Stored credentials are never echoed on the page; manage them in personal settings.",
+  "hw_creds_go_settings": "Go to settings",
+  "hw_creds_configured": "✓ AK/SK configured (plaintext not echoed; fill here to use)"
 }

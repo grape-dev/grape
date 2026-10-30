@@ -32,7 +32,7 @@ def _client():
         cur = db.cursor()
         _rt_cols = [r[1] for r in cur.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
         _rt_rows = cur.execute("SELECT * FROM agent_runtimes").fetchall()
-        cur.execute("DELETE FROM agent_runtimes")
+        cur.execute("DELETE FROM agent_runtimes WHERE 1=1")
         db.commit()
 
     def _fake_user():
@@ -46,7 +46,7 @@ def _client():
     with db_lock:
         cur = db.cursor()
         cur.execute("DELETE FROM chat_agent_session WHERE user_id=?", (UID,))
-        cur.execute("DELETE FROM agent_runtimes")
+        cur.execute("DELETE FROM agent_runtimes WHERE 1=1")
         for row in _rt_rows:
             cur.execute(
                 f"INSERT INTO agent_runtimes ({','.join(_rt_cols)}) VALUES ({','.join('?' * len(_rt_cols))})", row)

@@ -244,5 +244,8 @@
       "cde_1004": "Error",
       "unknown": "Unknown"
     }
-  }
+  },
+  "rt_range_all": "All",
+  "rt_range_repo": "Repo",
+  "rt_range_user": "Personal"
 }

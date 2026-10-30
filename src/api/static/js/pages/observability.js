@@ -546,10 +546,10 @@ function loadObsEventGap() {
     box.innerHTML = '<div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:11px;background:rgba(255,59,48,.05);border:1px solid rgba(255,59,48,.12);border-radius:6px;padding:6px 10px">'
       + '<span style="font-weight:600">' + (I18N.t('observability.ev_failed_gap_title') || '失败空结果占比') + '</span>'
       + '<span>Failed ' + (d.total_failed || 0) + '</span>'
-      + '<span style="color:' + st + ';font-weight:600">' + pct(d.empty_ratio) + ' 空 result</span>'
-      + '<span class="ts t3">' + (d.empty_result || 0) + ' 条</span>'
+      + '<span style="color:' + st + ';font-weight:600">' + pct(d.empty_ratio) + ' ' + (I18N.t('observability.ev_failed_empty') || '空 result') + '</span>'
+      + '<span class="ts t3">' + (d.empty_result || 0) + ' ' + (I18N.t('observability.ev_failed_empty_unit') || '条') + '</span>'
       + '<span class="ts t3">legacy ' + (d.legacy || 0) + '</span>'
-      + '<span class="ts t3">' + (d.with_diag || 0) + ' 有诊断</span>'
+      + '<span class="ts t3">' + (d.with_diag || 0) + ' ' + (I18N.t('observability.ev_failed_with_diag') || '有诊断') + '</span>'
       + '</div>';
   }).catch(function() {
     const box = document.getElementById('obsEventGap');

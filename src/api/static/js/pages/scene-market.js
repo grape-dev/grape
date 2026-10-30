@@ -494,8 +494,8 @@ function _showApplyOptionsModal(sceneId, owner, repoName, sceneName, isHwCloudSc
     var hwHint = document.createElement('div');
     hwHint.id = 'hwCloudCredsHint';
     hwHint.style.cssText = 'padding:10px 14px;background:rgba(0,113,227,0.06);border-radius:10px;font-size:11px;color:#86868b;line-height:1.6;margin-bottom:8px';
-    hwHint.innerHTML = '☁ 华为云场景需要 AK/SK 凭证，可在下方直接填写。已配置的凭据不会在页面回显，可在个人设置中管理。' +
-      ' <a href="javascript:void(0)" onclick="app.nav(\'settings\')" style="color:#0071e3;cursor:pointer">前往设置</a>';
+    hwHint.innerHTML = (I18N.t('skills.hw_creds_hint') || '☁ 华为云场景需要 AK/SK 凭证，可在下方直接填写。已配置的凭据不会在页面回显，可在个人设置中管理。') +
+      ' <a href="javascript:void(0)" onclick="app.nav(\'settings\')" style="color:#0071e3;cursor:pointer">' + (I18N.t('skills.hw_creds_go_settings') || '前往设置') + '</a>';
     var customFieldsContainer = document.getElementById('applyAdvCustomFields');
     if (customFieldsContainer) {
       customFieldsContainer.parentNode.insertBefore(hwHint, customFieldsContainer);
@@ -508,7 +508,7 @@ function _showApplyOptionsModal(sceneId, owner, repoName, sceneName, isHwCloudSc
       window._applyAddCustomField('HUAWEICLOUD_SDK_SK', '', true);
       if (hw.ak_exists || hw.sk_exists) {
         var hintEl = document.getElementById('hwCloudCredsHint');
-        if (hintEl) hintEl.innerHTML += '<br>✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）';
+        if (hintEl) hintEl.innerHTML += '<br>' + (I18N.t('skills.hw_creds_configured') || '✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）');
       }
     }).catch(function() {
       // 获取失败也添加空行，让用户手动填写

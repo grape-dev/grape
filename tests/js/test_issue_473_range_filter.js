@@ -22,8 +22,9 @@ const SETTINGS_PY = fs.readFileSync(path.join(ROOT, 'src/api/routes/settings.py'
 // 1. 范围状态与选项
 assert.ok(/let _rtRange = 'all';/.test(RUNTIMES_JS), '应有范围状态 _rtRange 默认 all');
 assert.ok(/_RT_RANGE_OPTIONS\s*=\s*\[/.test(RUNTIMES_JS), '应有 _RT_RANGE_OPTIONS 选项表');
-for (const label of ['全部', '仓库', '个人']) {
-  assert.ok(RUNTIMES_JS.includes(`label: '${label}'`), `范围选项应含「${label}」`);
+// 范围标签已 i18n 化（架构审查 Critical #1 修复）：断言 key 引用而非中文字面量
+for (const key of ['rt_range_all', 'rt_range_repo', 'rt_range_user']) {
+  assert.ok(RUNTIMES_JS.includes(`I18N.t('runtimes.${key}')`), `范围选项应引用 i18n key runtimes.${key}`);
 }
 
 // 2. 两个加载函数透传 range 参数
@@ -36,7 +37,7 @@ assert.ok(/_rtRange !== 'all'/.test(loadEngines) && /_rtRange !== 'all'/.test(lo
 
 // 3. 筛选栏范围 chips + 选中范围提示
 assert.ok(/_rtSetRange\('\$\{r\.key\}'\)/.test(RUNTIMES_JS), '范围 chips 应调用 _rtSetRange');
-assert.ok(RUNTIMES_JS.includes('范围：${'), '筛选栏应展示当前选中范围提示');
+assert.ok(/_RT_RANGE_OPTIONS\.find\(r => r\.key === _rtRange\)[\s\S]*?\.label\(\)/.test(RUNTIMES_JS), '筛选栏应展示当前选中范围提示');
 assert.ok(/window\._rtSetRange = function\(r\) \{/.test(RUNTIMES_JS), '应导出 _rtSetRange');
 
 // 4. 清除联动

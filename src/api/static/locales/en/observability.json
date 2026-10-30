@@ -402,5 +402,9 @@
     "failed": "Task failed",
     "completed": "Task completed",
     "stuck": "Task stuck"
-  }
+  },
+  "ev_failed_gap_title": "Failed empty-result ratio",
+  "ev_failed_empty": "empty result",
+  "ev_failed_empty_unit": "rows",
+  "ev_failed_with_diag": "with diagnostics"
 }

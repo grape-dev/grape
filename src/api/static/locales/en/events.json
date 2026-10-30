@@ -113,5 +113,8 @@
   "a2a_redo_failed": "A2A redo failed: {msg}",
   "a2a_redo_unknown": "Unknown error",
   "fail_expand": "Expand",
-  "fail_collapse": "Collapse"
+  "fail_collapse": "Collapse",
+  "diag_target": "Target stage",
+  "diag_phase": "Failure phase",
+  "diag_ref_seq": "Ref seq"
 }

@@ -129,7 +129,7 @@ def _count_reveals_in_window(user_id: int) -> int:
         with _sdl:
             c = _sdb.cursor()
             c.execute(
-                "SELECT COUNT(*) FROM credential_reveal_log WHERE user_id=? AND created_at>=?",
+                "SELECT COUNT(*) FROM grape_t_credential_reveal_log WHERE user_id=? AND created_at>=?",
                 (user_id, since))
             return c.fetchone()[0] or 0
     except Exception:
@@ -143,7 +143,7 @@ def _record_reveal(user_id: int, provider: str, field: str, ip: str):
         with _sdl:
             c = _sdb.cursor()
             c.execute(
-                "INSERT INTO credential_reveal_log (user_id, provider, field, ip) VALUES (?,?,?,?)",
+                "INSERT INTO grape_t_credential_reveal_log (user_id, provider, field, ip) VALUES (?,?,?,?)",
                 (user_id, provider, field, ip))
             _sdb.commit()
     except Exception as e:

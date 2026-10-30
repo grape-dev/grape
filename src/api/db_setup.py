@@ -1136,7 +1136,7 @@ CREATE TABLE IF NOT EXISTS login_failures (
 
 # Issue #474（方案A）：凭据明文按需取回日志——审计+高频取回告警计数用（不存明文值）
 _CREDENTIAL_REVEAL_LOG_DDL = """
-CREATE TABLE IF NOT EXISTS credential_reveal_log (
+CREATE TABLE IF NOT EXISTS grape_t_credential_reveal_log (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id      INTEGER NOT NULL,
     provider     VARCHAR(32) NOT NULL,
@@ -1182,7 +1182,7 @@ _NEW_TABLES.extend([
     ("audit_logs", _AUDIT_LOGS_DDL),
     ("signup_whitelist", _SIGNUP_WHITELIST_DDL),
     ("login_failures", _LOGIN_FAILURES_DDL),
-    ("credential_reveal_log", _CREDENTIAL_REVEAL_LOG_DDL),
+    ("grape_t_credential_reveal_log", _CREDENTIAL_REVEAL_LOG_DDL),
     ("exchange_codes", _EXCHANGE_CODES_DDL),
     ("binding_tickets", _BINDING_TICKETS_DDL),
 ])
@@ -1713,9 +1713,9 @@ def _create_tables():
         "CREATE INDEX IF NOT EXISTS idx_lf_ip_time "
         "ON login_failures(ip, created_at)",
 
-        # credential_reveal_log 索引：高频取回按 (用户,时间) 计数
+        # grape_t_credential_reveal_log 索引：高频取回按 (用户,时间) 计数
         "CREATE INDEX IF NOT EXISTS idx_crl_user_time "
-        "ON credential_reveal_log(user_id, created_at)",
+        "ON grape_t_credential_reveal_log(user_id, created_at)",
         # audit_logs 索引（seq UNIQUE 约束——集群并发安全，DDL 中已有 UNIQUE，此索引兼容已有表）
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_audit_seq "
         "ON audit_logs(seq)",
