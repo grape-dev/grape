@@ -186,7 +186,11 @@ def _build_autopilot_prompt(task: dict, repo_key: str, repository: str) -> str:
     if skill_name:
         parts.append(f"\n## Skill: {skill_name}\n")
         parts.append(f"Skill 文件：{{{{SKILL_DIR}}}}/{skill_name}/SKILL.md\n")
+        parts.append("技能内容位置：环境变量 DEVOPS_SKILLS_DIR 与 {{SKILL_DIR}} 指向同一目录；"
+                     f"布局为 {skill_name}/SKILL.md（主文件）与 {skill_name}/references/ 参考文件（同目录下）。\n")
         parts.append("**必须先执行**：用 read tool 读取该 SKILL.md，并严格执行其中的指令。\n")
+        parts.append("若技能目录为空或文件缺失（降级下发，见 [Skill Materialization Notice]），"
+                     "改用 `grape skills detail` 或平台 skills API 取回技能内容，禁止无技能继续执行。\n")
 
     # 环境变量提示（custom_fields + work_branch）
     env_lines = []

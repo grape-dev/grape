@@ -3392,8 +3392,6 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
     任一步失败仅告警并跳过（不抛异常、不阻断执行），保留其它占位符继续替换。
     """
-    import shutil as _shutil
-
     _issue = issue_id or evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
 
     # 1) project-info + knowledge 物化（Issue #95：统一调 collect_knowledge_files）
@@ -3429,50 +3427,63 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
     except Exception as e:
         log.warning(f"direct knowledge materialize failed for {repo_key}: {e}")
 
-    # 2) skill 物化（OBS zip 解压 / 本地技能 copytree 到 ws/.skills/{skill_name}/）
+    # 2) skill 物化（OBS zip / 本地技能目录 / skill_path → ws/.skills/{skill_name}/）
+    #    Issue #564：原子物化（tmp+rename）+ 完整性校验（SKILL.md+references 按定义清单）
+    #    + 官方技能包回退 + 降级标注（evt._skill_materialize / prompt 降级说明），不静默空注入。
     skill_dir = os.path.join(ws, ".skills")
     try:
-        _skill_local = ""  # 本地技能根目录（非空则 copytree）
-        from src.user.db import get_skill_by_id, get_skill_path
-        _skill_id = evt.get("_skill_id") or 0
-        if _skill_id:
-            _sk = get_skill_by_id(_skill_id)
-            if _sk:
-                _okey = _sk.get("file_path") or ""
-                if _okey:
-                    # OBS 技能：zip 根 = {skill_name}/，解压到 ws/.skills/
-                    from src.storage import get_skill_zip_bytes
-                    _zip = get_skill_zip_bytes(_okey)
-                    if _zip:
-                        import zipfile as _zf, io as _io
-                        os.makedirs(skill_dir, exist_ok=True)
-                        with _zf.ZipFile(_io.BytesIO(_zip)) as zf:
-                            zf.extractall(skill_dir)
-                else:
+        def _skill_primary():
+            _skill_local = ""  # 本地技能根目录（非空则 copytree）
+            from src.user.db import get_skill_by_id, get_skill_path
+            _skill_id = evt.get("_skill_id") or 0
+            if _skill_id:
+                _sk = get_skill_by_id(_skill_id)
+                if _sk:
+                    _okey = _sk.get("file_path") or ""
+                    if _okey:
+                        # OBS 技能：zip 根 = {skill_name}/，原子解压到 ws/.skills/
+                        from src.storage import get_skill_zip_bytes
+                        _zip = get_skill_zip_bytes(_okey)
+                        if _zip:
+                            return ("zip", _zip)
+                        return ("none", f"skill zip unavailable: {_okey}")
                     _full = get_skill_path(_skill_id)
                     if _full and os.path.exists(_full):
                         _skill_local = os.path.dirname(_full)
-        else:
-            from src.config import resolve_official_skill_path as _resolve_skill_path
-            _real_skill_md = _resolve_skill_path(skill_name or "")
-            if not _real_skill_md:
-                _sp = evt.get("_skill_path", "") or ""
-                if _sp and os.path.isfile(_sp):
-                    _real_skill_md = _sp
-                elif _sp and os.path.isfile(os.path.join(_sp, "SKILL.md")):
-                    _real_skill_md = os.path.join(_sp, "SKILL.md")
-            if _real_skill_md:
-                _skill_local = os.path.dirname(_real_skill_md)
-        if _skill_local and skill_name and os.path.isdir(_skill_local):
-            _dst = os.path.join(skill_dir, skill_name)
-            if not os.path.isdir(_dst):
-                try:
-                    _shutil.copytree(_skill_local, _dst)
-                except Exception:
-                    pass
+            else:
+                from src.config import resolve_official_skill_path as _resolve_skill_path
+                _real_skill_md = _resolve_skill_path(skill_name or "")
+                if not _real_skill_md:
+                    _sp = evt.get("_skill_path", "") or ""
+                    if _sp and os.path.isfile(_sp):
+                        _real_skill_md = _sp
+                    elif _sp and os.path.isfile(os.path.join(_sp, "SKILL.md")):
+                        _real_skill_md = os.path.join(_sp, "SKILL.md")
+                if _real_skill_md:
+                    _skill_local = os.path.dirname(_real_skill_md)
+            if _skill_local and skill_name and os.path.isdir(_skill_local):
+                return ("dir", _skill_local)
+            return ("none", f"skill source not found for {skill_name}")
+
+        if skill_name:
+            from src.runtime.skill_materialize import materialize_skill_with_fallback
+            _mat = materialize_skill_with_fallback(skill_dir, skill_name, _skill_primary)
+            # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
+            evt["_skill_materialize"] = _mat
+            if _mat.get("status") in ("fallback", "degraded"):
+                _note = (f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                         f"({_mat.get('status')}): {_mat.get('detail')}. "
+                         f"If skill files under this path are missing, fetch the skill via "
+                         f"`grape skills detail` or the platform skills API before proceeding.")
+                prompt += _note
+                log.warning(f"direct skill materialize {skill_name}: {_mat.get('status')} "
+                            f"({_mat.get('detail')})")
+            else:
+                log.info(f"direct skill materialize {skill_name}: ok")
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
+        evt["_skill_materialize"] = {"status": "degraded", "detail": str(e), "skill_dir": ""}
 
     return prompt
 
@@ -3978,6 +3989,17 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _exec_done_stderr = ""
     tool_uses = []
     agent_logs = []
+    # Issue #564：技能物化降级标注落入事件 agent_logs（不静默空注入）
+    try:
+        _sk_mat = evt.get("_skill_materialize") or {}
+        if _sk_mat.get("status") in ("fallback", "degraded"):
+            agent_logs.append({
+                "time": datetime.utcnow().isoformat(),
+                "type": "skill_materialize",
+                "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
+            })
+    except Exception:
+        pass
     env_extra = {
         "REPO_FULL_NAME": repository,
         "REPO_OWNER": (exec_account or repository).split("/", 1)[0],

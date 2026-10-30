@@ -819,8 +819,13 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         parts.append(
             f"## Skill: {skills[0]}\n"
             f"Skill file: {_sp}\n"
+            f"Skill content location: DEVOPS_SKILLS_DIR environment variable points to the "
+            f"same directory as {{{{SKILL_DIR}}}}; layout: {skills[0]}/SKILL.md (main) plus "
+            f"{skills[0]}/references/ files under the same directory.\n"
             f"**MANDATORY**: Read this SKILL.md with the read tool and strictly follow its instructions (do not skip reading or guess from the name).\n"
             f"If the SKILL.md instructs reading reference files under references/, read them as needed before you proceed.\n"
+            f"If the skill directory is empty or files are missing (degraded delivery, see [Skill Materialization Notice] if present), "
+            f"fetch the skill content via `grape skills detail` or the platform skills API instead of proceeding without the skill.\n"
             f"Execute the instructions directly - do not analyze or propose; just execute."
         )
 
