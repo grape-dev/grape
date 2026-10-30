@@ -700,6 +700,79 @@ def resolve_issue_card_id(repo_key: str, issue_number) -> str:
         return ""
 
 
+def _resolve_bot_username(repo_key: str) -> str:
+    """解析仓库 bot 用户名（Issue #573 抽公共 helper，三级兜底与原 coding 逻辑一致）。
+
+    优先级：
+    1. managed_repos.bot_username（repo 级，GitCodeRepoConfig 来源）；
+    2. 全局 bot username（github 走 get_global_github_bot_username，其余 get_global_bot_usernames[0]）；
+    3. Issue #372 路径 B：host_user 的平台用户名（external_login）。
+
+    全部为空 → 返回空串（下游 skill 按空值降级，不注入占位值）。
+    任何异常静默返回空串（与原注入块行为一致，不阻断任务派发）。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        from src.repo_key import to_repo_key
+        _rk = to_repo_key(repo_key)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+            row = c.fetchone()
+            _bot_name = row[0] if row else ""
+        if _bot_name:
+            return _bot_name
+        # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
+        # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
+        from src.repo_key import parse_repo_key
+        _prov, _o, _r = parse_repo_key(_rk)
+        if _prov == "github":
+            from src.user.db import get_global_github_bot_username
+            _bot_name = get_global_github_bot_username()
+        else:
+            from src.user.db import get_global_bot_usernames
+            _us = get_global_bot_usernames()
+            _bot_name = _us[0] if _us else ""
+        if _bot_name:
+            return _bot_name
+        # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
+        from src.user.db import get_host_user_id
+        _hid = get_host_user_id(_rk)
+        if _hid > 0:
+            try:
+                from src.auth.grape_account_db import get_user_identities
+                for _ident in get_user_identities(_hid):
+                    if _ident.get("provider") == _prov:
+                        return _ident.get("external_login") or ""
+            except Exception:
+                pass
+        return ""
+    except Exception:
+        return ""
+
+
+def _inject_bot_agent_env(env_extra: dict, repo_key: str, agent_type: str) -> None:
+    """Issue #573：BOT_USERNAME / AGENT_NAME 注入全部 devops agent 任务 env。
+
+    原实现仅 `agent_type == "coding"` 注入 BOT_USERNAME（create_skill_pr.sh 审查人用），
+    issue agent（issue-runbook Step 4 机器人接管 assignee）等其余 agent 拿不到值；
+    AGENT_NAME 仅 direct 模式经 stream_devops_agent 参数注入，worker 模式 env 取自
+    env_extra 快照从未写入。本 helper 三个注入点统一调用：
+    - BOT_USERNAME：_resolve_bot_username(repo_key)（可能为空串，空值时 skill 侧降级）
+    - AGENT_NAME：get_agent_display_name(agent_type)（agent runtime 显示名）
+
+    幂等：env_extra 已显式设置（上层调用方手工调参）时不覆盖。
+    """
+    try:
+        env_extra.setdefault("BOT_USERNAME", _resolve_bot_username(repo_key))
+    except Exception:
+        pass
+    try:
+        env_extra.setdefault("AGENT_NAME", get_agent_display_name(agent_type))
+    except Exception:
+        pass
+
+
 def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     """Issue #528：ISSUE_NUMBER/PR_NUMBER 仅注入纯数字值。
 
@@ -3031,45 +3104,9 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
-    # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
-    if agent_type == "coding":
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            _rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
-                _bot_name = row[0] if row else ""
-            if not _bot_name:
-                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
-                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-                from src.repo_key import parse_repo_key
-                _prov, _o, _r = parse_repo_key(_rk)
-                if _prov == "github":
-                    from src.user.db import get_global_github_bot_username
-                    _bot_name = get_global_github_bot_username()
-                else:
-                    from src.user.db import get_global_bot_usernames
-                    _us = get_global_bot_usernames()
-                    _bot_name = _us[0] if _us else ""
-                # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-                if not _bot_name:
-                    from src.user.db import get_host_user_id
-                    _hid = get_host_user_id(_rk)
-                    if _hid > 0:
-                        try:
-                            from src.auth.grape_account_db import get_user_identities
-                            for _ident in get_user_identities(_hid):
-                                if _ident.get("provider") == _prov:
-                                    _bot_name = _ident.get("external_login") or ""
-                                    break
-                        except Exception:
-                            pass
-            env_extra["BOT_USERNAME"] = _bot_name
-        except Exception:
-            pass
+    # Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME，
+    # issue-runbook Step 4 机器人接管 assignee 拿不到值）；源/兜底见 _inject_bot_agent_env。
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
     _inject_issue_pr_env(env_extra, evt, repo_key)
 
     # 方案 D 防御：有关联 Issue 时，Issue 级会话指针不得指向其他 Issue 的 workdir（防 cwd/session 错位回归）
@@ -3286,7 +3323,7 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
 
     与正常入队的差异（调用方已持有或无意义的不重复注入）：
     - ISSUE_NUMBER/PR_NUMBER：参数传入则注入
-    - BOT_USERNAME（coding）：与正常入队同逻辑
+    - BOT_USERNAME/AGENT_NAME（Issue #573）：与正常入队同逻辑（全部 devops agent）
     - evt._env_extra 事件级扩展：重派无 evt，无法还原（快照已在 prompt 里），不注入
     - scene_id_override（Issue #427）：重派 PR 订阅任务时传旧任务/事件的订阅场景，
       防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）。
@@ -3320,45 +3357,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
             _inject_linked_repo_tokens(env, env["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
-    # ── coding 注入 BOT_USERNAME（审查人）──
-    if agent_type == "coding":
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            _rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
-                _bot_name = row[0] if row else ""
-            if not _bot_name:
-                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
-                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-                from src.repo_key import parse_repo_key
-                _prov, _o, _r = parse_repo_key(_rk)
-                if _prov == "github":
-                    from src.user.db import get_global_github_bot_username
-                    _bot_name = get_global_github_bot_username()
-                else:
-                    from src.user.db import get_global_bot_usernames
-                    _us = get_global_bot_usernames()
-                    _bot_name = _us[0] if _us else ""
-                # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-                if not _bot_name:
-                    from src.user.db import get_host_user_id
-                    _hid = get_host_user_id(_rk)
-                    if _hid > 0:
-                        try:
-                            from src.auth.grape_account_db import get_user_identities
-                            for _ident in get_user_identities(_hid):
-                                if _ident.get("provider") == _prov:
-                                    _bot_name = _ident.get("external_login") or ""
-                                    break
-                        except Exception:
-                            pass
-            env["BOT_USERNAME"] = _bot_name
-        except Exception:
-            pass
+    # ── Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME）──
+    _inject_bot_agent_env(env, repo_key, agent_type)
     # ── issue/pr 编号（Issue #528：仅注入纯数字，伪 id/占位值不注入）──
     _in = str(issue_number or "").lstrip("#")
     if _in.isdigit():
@@ -4011,45 +4011,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _inject_linked_repo_tokens(env_extra, env_extra["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
-    # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
-    if agent_type == "coding":
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            _rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
-                _bot_name = row[0] if row else ""
-            if not _bot_name:
-                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
-                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-                from src.repo_key import parse_repo_key
-                _prov, _o, _r = parse_repo_key(_rk)
-                if _prov == "github":
-                    from src.user.db import get_global_github_bot_username
-                    _bot_name = get_global_github_bot_username()
-                else:
-                    from src.user.db import get_global_bot_usernames
-                    _us = get_global_bot_usernames()
-                    _bot_name = _us[0] if _us else ""
-                # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-                if not _bot_name:
-                    from src.user.db import get_host_user_id
-                    _hid = get_host_user_id(_rk)
-                    if _hid > 0:
-                        try:
-                            from src.auth.grape_account_db import get_user_identities
-                            for _ident in get_user_identities(_hid):
-                                if _ident.get("provider") == _prov:
-                                    _bot_name = _ident.get("external_login") or ""
-                                    break
-                        except Exception:
-                            pass
-            env_extra["BOT_USERNAME"] = _bot_name
-        except Exception:
-            pass
+    # Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME）；
+    # direct 路径 agent_name 参数仍同步传 stream_devops_agent（幂等同值）。
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
     # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT / ONBOARDING_TARGET）
     _ext = evt.get("_env_extra") or {}
     if isinstance(_ext, dict):
