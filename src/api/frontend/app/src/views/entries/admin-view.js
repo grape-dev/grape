@@ -4,7 +4,7 @@
   ;['viewcss/admin-view.css'].forEach(function (f) {
     var link = document.createElement('link')
     link.rel = 'stylesheet'
-    link.href = '/static/js/assets/' + f + '?v=6'
+    link.href = '/static/js/assets/' + f + '?v=5'
     document.head.appendChild(link)
   })
 })()
