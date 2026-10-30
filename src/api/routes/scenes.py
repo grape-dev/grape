@@ -1509,6 +1509,7 @@ class UpdateSceneRequest(BaseModel):
 
 class ApplySceneRequest(BaseModel):
     scene_id: str
+    strict: bool = False  # Issue #524: true=任一节点 skipped（声明引擎不健康）时整单拒绝；默认部分应用
 
 
 def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
@@ -1745,8 +1746,12 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
     # token 回填 session，第 1 级命中 bot token → 自循环检测放行 bot 评论 → 回声）。
     # upsert 传 None = 保留既有 session token。
     updated = 0
+    node_receipts = []
+    skipped_receipts = []
     with db_lock:
         c = db.cursor()
+        # Issue #524: Pass 1——先逐节点解析引擎选择（只读，不落库），产出结构化回执
+        _pending = []  # (node_receipt, agent_type, skill, runtime_id)
         for node in nodes:
             agent_type = node.get("tag") or node.get("id", "")
             skill = node.get("skill", "")
@@ -1755,17 +1760,21 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
             # 跳过场景中 enabled=false 的 agent
             if node.get("enabled") is False:
                 continue
+            declared_ids = list(node.get("engine_runtime_ids") or [])
+            receipt = {
+                "agent_type": agent_type,
+                "skill": skill,
+                "status": "failed",
+                "effective_runtime_id": 0,
+                "declared_runtime_ids": declared_ids,
+                "reason": "",
+            }
             try:
-                from src.user.db import resolve_skill_id
-                from src.api.session_store import get_agent_type_enable
-                skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
-
                 runtime_id = 0
-                # 优先使用场景 node 配置的 engine_runtime_ids
-                node_engine_ids = node.get("engine_runtime_ids") or []
-                if node_engine_ids:
-                    # 验证配置的引擎是否在线可用，选第一个可用的
-                    for eid in node_engine_ids:
+                # 优先使用场景 node 配置 engine_runtime_ids：选第一个 online 且 healthy 的
+                if declared_ids:
+                    _declared_state = ""
+                    for eid in declared_ids:
                         try:
                             _row = c.execute(
                                 "SELECT status, healthy FROM agent_runtimes WHERE id=?",
@@ -1773,10 +1782,33 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                             if _row and _row[0] == "online" and _row[1] == 1:
                                 runtime_id = eid
                                 break
+                            if _row and not _declared_state:
+                                _declared_state = f"engine {eid} {_row[0]} healthy={_row[1]}"
                         except Exception:
                             pass
-                # 场景未配置引擎或配置的引擎都不可用 → fallback
-                if not runtime_id:
+                    # Issue #524: 声明引擎存在但全部不健康/离线 → skipped（不再静默回退旧绑定）
+                    if not runtime_id:
+                        _cur_rid = 0
+                        try:
+                            _cur = c.execute(
+                                "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                                (repo_key, agent_type)).fetchone()
+                            if _cur and _cur[0]:
+                                _cur_rid = _cur[0]
+                        except Exception:
+                            _cur_rid = 0
+                        _reason = _declared_state or f"declared engines {declared_ids} unavailable"
+                        receipt.update({
+                            "status": "skipped",
+                            "effective_runtime_id": _cur_rid,
+                            "reason": (f"{_reason}, keep runtime "
+                                       f"{_cur_rid if _cur_rid else 'none (no effective engine)'}"),
+                        })
+                        node_receipts.append(receipt)
+                        skipped_receipts.append(receipt)
+                        continue
+                else:
+                    # 场景未声明引擎 → 旧回退链：session 旧绑定 → 默认引擎
                     try:
                         _cur = c.execute(
                             "SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1785,11 +1817,37 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                             runtime_id = _cur[0]
                     except Exception:
                         runtime_id = 0
-                if not runtime_id:
-                    from src.runtime.engine_select import resolve_default_engine
-                    _rid = resolve_default_engine(repo_key, agent_type) or 0
-                    runtime_id = _rid
+                    if not runtime_id:
+                        from src.runtime.engine_select import resolve_default_engine
+                        runtime_id = resolve_default_engine(repo_key, agent_type) or 0
+                receipt.update({
+                    "status": "applied",
+                    "effective_runtime_id": runtime_id,
+                    "reason": (f"engine {runtime_id} applied" if runtime_id
+                               else "applied (broadcast/default engine)"),
+                })
+                _pending.append((receipt, agent_type, skill, runtime_id))
+            except Exception as e:
+                log.warning(f"Scene apply: resolve failed for {agent_type}: {e}")
+                receipt.update({"status": "failed", "reason": str(e)})
+            node_receipts.append(receipt)
 
+        # Issue #524: strict 模式——任一声明引擎不健康的节点 skipped → 整单拒绝（Pass 1 未落库）
+        if body.strict and skipped_receipts:
+            _skip_desc = "; ".join(
+                f"{r['agent_type']}: {r['reason']}" for r in skipped_receipts)
+            raise HTTPException(status_code=409, detail={
+                "code": 409,
+                "message": (f"场景 '{cfg.get('name', body.scene_id)}' 应用被拒绝（strict 模式，"
+                            f"{len(skipped_receipts)} 个节点声明引擎不健康）：{_skip_desc}"),
+                "nodes": node_receipts,
+            })
+
+        # Pass 2——对 applied 节点落库（strict 已在落库前拒绝）
+        from src.user.db import resolve_skill_id
+        for receipt, agent_type, skill, runtime_id in _pending:
+            try:
+                skill_id = resolve_skill_id(skill, repo_key=repo_key, user_id=user.get("id", ""))
                 upsert_agent_session(
                     repo_key=repo_key, agent_type=agent_type,
                     runtime_id=runtime_id, skill=skill, skill_id=skill_id,
@@ -1800,11 +1858,23 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                 updated += 1
             except Exception as e:
                 log.warning(f"Scene apply: failed for {agent_type}: {e}")
+                receipt.update({"status": "failed", "reason": str(e)})
         db.commit()
+
+    applied_cnt = sum(1 for r in node_receipts if r["status"] == "applied")
+    skipped_cnt = sum(1 for r in node_receipts if r["status"] == "skipped")
+    failed_cnt = sum(1 for r in node_receipts if r["status"] == "failed")
 
     log.info(f"Scene applied: scene={body.scene_id}, repo={repo_key}, updated={updated} agents")
 
-    return {"message": f"场景 '{cfg.get('name', body.scene_id)}' 已应用", "updated": updated}
+    return {
+        "message": f"场景 '{cfg.get('name', body.scene_id)}' 已应用",
+        "updated": updated,
+        "nodes": node_receipts,
+        "applied": applied_cnt,
+        "skipped": skipped_cnt,
+        "failed": failed_cnt,
+    }
 
 
 def app_current_repo():

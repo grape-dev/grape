@@ -229,6 +229,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
                 session_data = {"id": row[0], "runtime": backend_name, "skill": row[2] or "", "skill_id": row[3] or 0, "repo_token_exists": bool(row[4]), "runtime_session_id": row[5], "status": row[6], "last_active_at": row[7],
                                "im_app_id": row[8] or "",
                                "instance_name": instance_name_val,
+                               "runtime_id": row[1] or 0,  # Issue #524: 实际生效引擎 ID（声明/生效区分）
                                "enable": bool(row[9]) if row[9] is not None else True,
                                "subscribe_events": _sub_evts}
         except Exception:
@@ -316,12 +317,22 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
 
     # 当前引擎集合（从场景 node 的 engine_runtime_ids 读取，前端回显多选）
     pool = []
+    _eids = []  # Issue #524: 场景声明引擎集合（声明配置），供 declared/effective 区分
     try:
         from src.runtime.instances import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
         from src.session_manager import db, db_lock
-        # 查当前场景
+        # 查当前场景（Issue #524: 从 managed_repos.dev_scene 解析，声明配置来源）
         _scene_id = ""
+        try:
+            with db_lock:
+                c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key IN ({}) LIMIT 1".format(_rk_placeholders),
+                          tuple(_repo_keys))
+                _sr = c.fetchone()
+            if _sr and _sr[0]:
+                _scene_id = _sr[0]
+        except Exception:
+            pass
         _uid = user.get("id", 0) if isinstance(user, dict) else 0
         _eids = get_scene_engine_ids(_scene_id, name, repo_key=repo_key, user_id=_uid)
         if _eids:
@@ -366,6 +377,8 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         "backend": session_data.get("instance_name") or session_data.get("backend", ""),
         "backends": [p.get("instance_name") or p.get("name") for p in pool],  # 引擎集合（多选回显）
         "pool": pool,  # 完整集合信息（含 priority/status 等）
+        "declared_runtime_ids": _eids or [],  # Issue #524: 场景声明的引擎集合（声明配置）
+        "effective_runtime_id": session_data.get("runtime_id", 0),  # Issue #524: 实际生效引擎（生效配置）
         "detached_engines": detached_engines,  # 被系统解绑的引擎提示（引擎绑定真实性同步 §4.3）
         "skill": session_data.get("skill", ""),
         "skill_id": session_data.get("skill_id", 0),
