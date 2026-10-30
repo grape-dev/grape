@@ -596,11 +596,14 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         raise HTTPException(status_code=401, detail={"code": 401,
             "message": f"{_reauth_provider} 授权已过期，请重新登录授权", "action": "reauth_required"})
 
-    if not all_repos and cached:
+    if not all_repos and failed_providers and cached:
         # 全部平台都失败 → 用旧缓存兜底
         return {"repos": _filter_repos(user["id"], _filter_by_provider(cached), org_id=_filter_org_id), "_cached": True, "_stale": True}
-    if not all_repos:
+    if not all_repos and failed_providers:
+        # 确有平台拉取失败（且无旧缓存可兜底）→ 502
         raise HTTPException(status_code=502, detail={"code": 502, "message": "加载仓库列表失败，请稍后重试"})
+    # Issue #538: 绑定正常、拉取成功、账号下确无仓库 → 合法空结果，
+    # 走与有结果一致的正常路径（去重→落库空列表→返回空数组），不误判为失败
 
     # 合并后去重（按 repo_key）
     seen_keys = set()
@@ -686,8 +689,10 @@ def sync_repos(user: dict = Depends(require_org_member)):
     # P1-6 软失败: 有结果但某平台需要重新授权 → 继续保存+返回部分结果 + reauth 标记
     _has_reauth = bool(_reauth_provider)
 
-    if not all_repos:
+    if not all_repos and failed_providers:
+        # 确有平台拉取失败 → 502
         raise HTTPException(status_code=502, detail={"code": 502, "message": "同步失败，请稍后重试"})
+    # Issue #538: 拉取成功但账号下无仓库 → 合法空结果，落库空缓存并正常返回同步成功
 
     seen_keys = set()
     deduped = []
