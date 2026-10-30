@@ -290,7 +290,8 @@
                 <div class="ap-nd-hr"></div>
                 <div class="ap-nd-skillbox">
                   <div class="ap-nd-lbl">{{ t('label_skill') }}</div>
-                  <template v-if="node.enabled">
+                  <!-- enabled=null（老场景未存该字段）视为启用，与 off 判定一致 -->
+                  <template v-if="node.enabled !== false">
                     <div
                       v-if="flowEditing"
                       class="dbv-skillpick"
@@ -309,7 +310,7 @@
                 </div>
                 <div class="ap-nd-engbox">
                   <div class="ap-nd-lbl">{{ t('label_engine') }}</div>
-                  <template v-if="node.enabled">
+                  <template v-if="node.enabled !== false">
                     <div v-html="engineBadgeHtml(node)"></div>
                     <button
                       v-if="flowEditing"
