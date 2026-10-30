@@ -2027,6 +2027,42 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
                 "dry_run": False, "trigger": "legacy"}
 
 
+@router.get("/migrate-orgs", operation_id="repos_migrate_orgs",
+            summary="List current user's GitCode orgs for repo migration",
+            description="Returns the GitCode organizations owned by the current user, used to populate the target-org dropdown on the migrate dialog (Issue #543).")
+def list_migrate_orgs(user: dict = Depends(require_no_session_token)):
+    """迁移目标组织下拉框数据源（Issue #543）。
+
+    返回当前登录用户在 GitCode 拥有的组织列表 + 用户个人登录名（仓库可迁到个人名下）。
+    鉴权：require_no_session_token（与 /migrate 同口径）；未登录 401。
+    """
+    from src.user.repo_manager import fetch_user_orgs
+
+    def _fetch(token):
+        return fetch_user_orgs(token)
+
+    try:
+        orgs = with_oauth_token(user, "gitcode", _fetch)
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.warning(f"list_migrate_orgs: fetch_user_orgs failed for user={user.get('id', 0)}: {e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": "无法获取组织列表，请稍后重试"})
+
+    # 追加当前用户个人登录名作为可迁移目标（仓库可迁到个人名下）
+    personal_login = ""
+    try:
+        from src.user.repo_manager import get_user_gitcode_login
+        personal_login = with_oauth_token(user, "gitcode", get_user_gitcode_login) or ""
+    except Exception:
+        personal_login = ""
+
+    result = [{"login": o["login"], "name": o.get("name", "") or o["login"],
+               "avatar_url": o.get("avatar_url", "")} for o in orgs]
+    return {"orgs": result, "personal": personal_login}
+
+
 @router.post("/migrate", operation_id="repos_migrate", summary="Migrate repo to another org", description="Atomically rewrites repo_key and all associated data when a repo is transferred to another org on the VCS side. Does NOT rebuild webhook or re-invite bot — only remaps repo_key.")
 def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_token)):
     """仓库迁移（Issue #540）：原子改写 repo_key 及全部关联数据。

@@ -339,6 +339,45 @@ def get_user_gitcode_login(api_token: str) -> str:
         return ""
 
 
+def fetch_user_orgs(api_token: str) -> list[dict]:
+    """获取当前 token 用户拥有的 GitCode 组织列表（GET /api/v5/user/orgs）。
+
+    Issue #543：迁移目标组织下拉框数据源。
+    返回 [{"login", "name", "avatar_url"}, ...]（login 为组织账号名，用作 target_owner）。
+    失败抛 RuntimeError（由 with_oauth_token 统一处理 401/403 token 失效）。
+    """
+    if not api_token:
+        raise RuntimeError("GitCode API Token 未配置")
+    orgs: list[dict] = []
+    page = 1
+    while True:
+        url = f"{API_BASE}/user/orgs?per_page=50&page={page}"
+        data = _req("GET", url, api_token)
+        items = data if isinstance(data, list) else []
+        if not items and isinstance(data, dict):
+            for key in ("data", "list", "items", "content"):
+                if key in data and isinstance(data[key], list):
+                    items = data[key]
+                    break
+        for o in items:
+            if not isinstance(o, dict):
+                continue
+            login = o.get("login") or o.get("username") or ""
+            if not login:
+                continue
+            orgs.append({
+                "login": login,
+                "name": o.get("name") or o.get("nickname") or login,
+                "avatar_url": o.get("avatar_url") or "",
+            })
+        if len(items) < 50:
+            break
+        page += 1
+        if page > 20:  # 安全上限（1000 组织）
+            break
+    return orgs
+
+
 def create_repo(api_token: str, name: str, description: str = "", private: bool = False) -> dict:
     """在 token 用户个人名下创建一个空仓库（POST /api/v5/user/repos）。
 

@@ -34,10 +34,12 @@ function renderSettings(tab) {
         <div class="cd mt16">
           <div class="cd-h"><h2>${I18N.t('settings.host.migrate_title')}</h2></div>
           <p class="tx t2" style="margin-bottom:8px">${I18N.t('settings.host.migrate_desc')}</p>
-          <div class="srow"><label>${I18N.t('settings.host.migrate_target_owner')}</label><input type="text" id="migrateTargetOwner" placeholder="${I18N.t('settings.host.migrate_owner_placeholder')}"></div>
-          <div class="srow"><label>${I18N.t('settings.host.migrate_target_repo')}</label><input type="text" id="migrateTargetRepo" value="${repo.name}" placeholder="${I18N.t('settings.host.migrate_repo_placeholder')}"></div>
+          <div class="srow"><label>${I18N.t('settings.host.migrate_target_repo')}</label><input type="text" id="migrateTargetRepo" value="${repo.name}" readonly style="background:#f1f5f9;color:var(--t2)" title="${I18N.t('settings.host.migrate_repo_readonly_hint')}"></div>
+          <div class="srow"><label>${I18N.t('settings.host.migrate_target_owner')}</label><select id="migrateTargetOwner" style="background:var(--c)"><option value="">${I18N.t('settings.host.migrate_orgs_loading')}</option></select></div>
           <button class="bt bt-p mt8" onclick="migrateRepoFromSettings('${repo.fullName}')">${I18N.t('settings.host.migrate_btn')}</button>
         </div>`;
+        // Issue #543: 异步拉取当前用户 GitCode 组织列表填充目标组织下拉框
+        _loadMigrateOrgs();
     }).catch(e => { var _sg = document.getElementById('sGitcode'); if (_sg) _sg.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
   } else {
     html += `<div class="ts t2">${current}</div></div>`;
@@ -103,9 +105,39 @@ function unhostFromSettings(fullName) {
   }, {danger: true});
 }
 
+// Issue #543: 拉取当前用户拥有的 GitCode 组织列表，填充迁移目标组织下拉框
+function _loadMigrateOrgs() {
+  var sel = document.getElementById('migrateTargetOwner');
+  if (!sel) return;
+  API.get('/repos/migrate-orgs').then(function (d) {
+    var orgs = (d && d.orgs) || [];
+    var personal = (d && d.personal) || '';
+    // 排除当前仓库所属组织（迁到自身无意义；fullName = owner/repo）
+    var curOwner = (app.currentRepo() || {}).owner || '';
+    var html = '<option value="">' + I18N.t('settings.host.migrate_owner_placeholder') + '</option>';
+    if (personal && personal !== curOwner) {
+      html += '<option value="' + personal + '">' + personal + ' (' + I18N.t('settings.host.migrate_personal') + ')</option>';
+    }
+    for (var i = 0; i < orgs.length; i++) {
+      var o = orgs[i];
+      if (o.login === curOwner) continue;
+      var label = (o.name && o.name !== o.login) ? o.login + ' (' + o.name + ')' : o.login;
+      html += '<option value="' + o.login + '">' + label + '</option>';
+    }
+    if (orgs.length === 0 && !personal) {
+      html = '<option value="">' + I18N.t('settings.host.migrate_orgs_empty') + '</option>';
+    }
+    sel.innerHTML = html;
+  }).catch(function (e) {
+    sel.innerHTML = '<option value="">' + I18N.t('settings.host.migrate_orgs_load_failed') + '</option>';
+    app.showToast(I18N.t('settings.host.migrate_orgs_load_failed'), 'warning');
+  });
+}
+
 function migrateRepoFromSettings(fullName) {
   const ownerEl = document.getElementById('migrateTargetOwner');
   const repoEl = document.getElementById('migrateTargetRepo');
+  // Issue #543: target_repo 固定当前仓库名（只读），target_owner 取下拉选中值
   const targetOwner = (ownerEl && ownerEl.value ? ownerEl.value.trim() : '');
   const targetRepo = (repoEl && repoEl.value ? repoEl.value.trim() : '') || (fullName.split('/')[1] || '');
   if (!targetOwner) {
