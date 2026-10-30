@@ -40,6 +40,12 @@ class CreateRepoBody(BaseModel):
     provider: str = ""  # R26: 用户指定创建到哪个平台
 
 
+class MigrateRepoBody(BaseModel):
+    repo_key: str  # 源 repo_key（带 provider 前缀，如 gitcode:ownerA/repo）
+    target_owner: str  # 目标组织（VCS 侧已转移后的新 owner）
+    target_repo: str = ""  # 目标仓库名（默认与源同名）
+
+
 def _get_user_provider_and_token(username: str, login_provider: str = "", user_id: int = 0) -> tuple[str, str]:
     """根据用户已绑定的令牌自动选择 provider，返回 (provider, token)。
 
@@ -590,11 +596,14 @@ def list_member_repos(user: dict = Depends(require_org_member), provider: str = 
         raise HTTPException(status_code=401, detail={"code": 401,
             "message": f"{_reauth_provider} 授权已过期，请重新登录授权", "action": "reauth_required"})
 
-    if not all_repos and cached:
+    if not all_repos and failed_providers and cached:
         # 全部平台都失败 → 用旧缓存兜底
         return {"repos": _filter_repos(user["id"], _filter_by_provider(cached), org_id=_filter_org_id), "_cached": True, "_stale": True}
-    if not all_repos:
+    if not all_repos and failed_providers:
+        # 确有平台拉取失败（且无旧缓存可兜底）→ 502
         raise HTTPException(status_code=502, detail={"code": 502, "message": "加载仓库列表失败，请稍后重试"})
+    # Issue #538: 绑定正常、拉取成功、账号下确无仓库 → 合法空结果，
+    # 走与有结果一致的正常路径（去重→落库空列表→返回空数组），不误判为失败
 
     # 合并后去重（按 repo_key）
     seen_keys = set()
@@ -680,8 +689,10 @@ def sync_repos(user: dict = Depends(require_org_member)):
     # P1-6 软失败: 有结果但某平台需要重新授权 → 继续保存+返回部分结果 + reauth 标记
     _has_reauth = bool(_reauth_provider)
 
-    if not all_repos:
+    if not all_repos and failed_providers:
+        # 确有平台拉取失败 → 502
         raise HTTPException(status_code=502, detail={"code": 502, "message": "同步失败，请稍后重试"})
+    # Issue #538: 拉取成功但账号下无仓库 → 合法空结果，落库空缓存并正常返回同步成功
 
     seen_keys = set()
     deduped = []
@@ -2014,6 +2025,165 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
         # 事务已回滚：返回空统计（与旧行为一致，不产生半清理）
         return {"tables": 0, "skill_dirs": 0, "workspace_dirs": 0,
                 "dry_run": False, "trigger": "legacy"}
+
+
+@router.post("/migrate", operation_id="repos_migrate", summary="Migrate repo to another org", description="Atomically rewrites repo_key and all associated data when a repo is transferred to another org on the VCS side. Does NOT rebuild webhook or re-invite bot — only remaps repo_key.")
+def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_token)):
+    """仓库迁移（Issue #540）：原子改写 repo_key 及全部关联数据。
+
+    前提：仓库已在 VCS 侧（GitCode/GitHub）完成组织转移；Grape 仅承接换绑。
+    - webhook/bot token 沿用原配置，不重建；
+    - 场景配置 / Issue 关联 / 知识基线随 repo_key 改写跟随；
+    - 工作区目录物理迁移。
+
+    前置校验（失败返回明确错误，不破坏现有托管）：
+    1. 源 repo_key 存在于 managed_repos（404）
+    2. 目标 repo_key 不存在于 managed_repos（409 冲突）
+    3. 源与目标 provider 一致（禁止跨 provider，400）
+    4. 目标仓库在 VCS 侧存在且当前用户有 maintainer 及以上权限（403）
+    """
+    from src.repo_key import to_repo_key, parse_repo_key
+    repo_key = to_repo_key(body.repo_key)
+    provider, src_owner, src_repo = parse_repo_key(repo_key)
+    target_owner = (body.target_owner or "").strip()
+    target_repo = (body.target_repo or "").strip() or src_repo
+    if not target_owner or not target_repo:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "目标组织/仓库名不能为空"})
+    new_key = to_repo_key(f"{target_owner}/{target_repo}", provider=provider)
+
+    # 校验 3：禁止跨 provider
+    new_provider, _, _ = parse_repo_key(new_key)
+    if new_provider != provider:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": f"不支持跨 provider 迁移（{provider}→{new_provider}）"})
+
+    # 校验 1+2：源存在 / 目标不存在
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=?", (repo_key,))
+            src_exists = c.fetchone() is not None
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=?", (new_key,))
+            dst_exists = c.fetchone() is not None
+            db.commit()
+    except Exception as e:
+        log.warning(f"migrate_repo: managed_repos lookup failed: {e}")
+        src_exists = dst_exists = False
+
+    if not src_exists:
+        raise HTTPException(status_code=404, detail={
+            "code": 404, "message": "源仓库未托管，无法迁移"})
+    if dst_exists:
+        raise HTTPException(status_code=409, detail={
+            "code": 409, "message": f"目标仓库 {target_owner}/{target_repo} 已托管，无法迁移（请先解除目标托管或更换目标）"})
+    if new_key == repo_key:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "目标与源相同，无需迁移"})
+
+    # 校验 4：目标仓库在 VCS 侧存在且当前用户有 maintainer 及以上权限
+    # （复用 _check_unmanage_vcs_permission 的权限判定逻辑）
+    _check_migrate_vcs_permission(user, target_owner, target_repo, provider)
+
+    # 执行原子改写
+    from src.repo_migrate import migrate_repo_key, RepoMigrateError
+    try:
+        stats = migrate_repo_key(repo_key, target_owner, target_repo,
+                                 operator_id=user.get("id", 0) or 0)
+    except RepoMigrateError as e:
+        raise HTTPException(status_code=500, detail={
+            "code": 500, "message": f"迁移失败（已回滚，无半改写），请重试: {e}"})
+
+    log.info(f"repos/migrate: {repo_key}->{new_key} by user={user.get('id', 0)}: {stats}")
+    return {
+        "message": "仓库迁移成功",
+        "old_repo_key": repo_key,
+        "new_repo_key": new_key,
+        "stats": stats,
+    }
+
+
+def _check_migrate_vcs_permission(user: dict, owner: str, repo_name: str, repo_provider: str) -> None:
+    """迁移前置校验：目标仓库在 VCS 侧存在且当前用户有 maintainer 及以上权限。
+
+    与 _check_unmanage_vcs_permission 同口径（access_level>=40 或 admin/owner），
+    但校验对象是「目标组织」而非源组织——确认 VCS 侧转移已完成 + 用户在目标组织有权限。
+    """
+    if repo_provider == "github":
+        from src.user.repo_manager import _github_req, get_github_collaborator_permission
+        _GH_API = "https://api.github.com"
+
+        def _get_gh_user(token):
+            return _github_req("GET", f"{_GH_API}/user", token)
+
+        try:
+            user_data = with_oauth_token(user, "github", _get_gh_user)
+        except HTTPException:
+            raise
+        vcs_login = (user_data or {}).get("login", "")
+        if not vcs_login:
+            raise HTTPException(status_code=502, detail={
+                "code": 502, "message": "无法获取当前用户 GitHub 身份"})
+        if vcs_login == owner:
+            return
+
+        def _check_gh_perm(token, _owner=owner, _repo=repo_name, _login=vcs_login):
+            return (get_github_collaborator_permission(token, _owner, _repo, _login) or "").lower()
+
+        try:
+            role = with_oauth_token(user, "github", _check_gh_perm)
+        except HTTPException:
+            raise
+        if role not in ("admin", "maintain"):
+            raise HTTPException(status_code=403, detail={
+                "code": 403,
+                "message": f"迁移目标仓库需要 GitHub maintainer 及以上权限（当前角色：{role or '未知'}），请确认仓库已在 GitHub 完成转移"})
+        return
+
+    # GitCode（默认）
+    from src.user.repo_manager import _req, get_member_permission, _RateLimitedError
+
+    def _get_gc_user(token):
+        return _req("GET", "https://gitcode.com/api/v5/user", token)
+
+    try:
+        user_data = with_oauth_token(user, "gitcode", _get_gc_user)
+    except HTTPException:
+        raise
+    vcs_login = (user_data or {}).get("login", "")
+    if not vcs_login:
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": "无法获取当前用户 GitCode 身份"})
+    if vcs_login == owner:
+        return
+
+    def _check_gc_perm(token, _owner=owner, _repo=repo_name, _login=vcs_login):
+        return get_member_permission(token, _owner, _repo, _login) or {}
+
+    try:
+        data = with_oauth_token(user, "gitcode", _check_gc_perm)
+    except _RateLimitedError:
+        raise HTTPException(status_code=429, detail={
+            "code": 429, "message": "GitCode 权限校验被限流，请稍后重试（未执行迁移）"})
+    except HTTPException:
+        raise
+    if not data:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": "无法校验目标仓库 GitCode 权限（非协作者或仓库尚未转移），请确认仓库已在 GitCode 完成转移"})
+    try:
+        access_level = int(data.get("access_level", 0) or 0)
+    except (TypeError, ValueError):
+        access_level = 0
+    if access_level >= 40:
+        return
+    if str(data.get("permission", "") or "").lower() == "admin":
+        return
+    role_name = str(data.get("role_name", "") or "") or "未知"
+    raise HTTPException(status_code=403, detail={
+        "code": 403,
+        "message": f"迁移目标仓库需要 GitCode maintainer 及以上权限（当前角色：{role_name}，access_level={access_level}），请确认仓库已在 GitCode 完成转移"})
 
 
 @router.post("/remove", operation_id="repos_remove", summary="Remove hosting", description="Removes hosting for a repository (unregisters webhook/bot bindings).")
