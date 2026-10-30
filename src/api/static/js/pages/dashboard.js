@@ -907,23 +907,6 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     container.appendChild(row);
   };
 
-  
-// 2026-10-24（生产同名仓误判修复）：分支接口显式带平台，避免 _detect_repo_provider 被
-// user_repos 里 github: 同名记录带偏（托管仓被误判成 GitHub 同名仓 → 分支只剩 main）。
-window._branchQS = function(owner, repo) {
-  try {
-    var rk = (app.currentRepo() || {}).repoKey || '';
-    if (rk && rk.indexOf(':') > 0) {
-      var bare = rk.replace(/^(gitcode|github):/, '');
-      // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
-      if (!owner || !repo || bare === (owner + '/' + repo)) {
-        return '?repo_key=' + encodeURIComponent(rk);
-      }
-    }
-  } catch (e) {}
-  return '';
-};
-
 window._createNewBranchInline = function(owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
     var refs = (document.getElementById('newBranchRefInline') || {}).value || 'main';
@@ -2156,6 +2139,26 @@ function _enterCreateStandardMode(data, owner, name) {
   };
 };
 
+
+// 2026-10-24（生产同名仓误判修复）：分支接口显式带平台，避免 _detect_repo_provider 被
+// user_repos 里 github: 同名记录带偏（托管仓被误判成 GitHub 同名仓 → 分支只剩 main）。
+// 2026-10-30 修复：原定义误置于 _renderLocalSceneDetailPage 函数体内，导致直接进
+// "添加场景"页（未先访问详情页）时 _branchQS 未定义 → 创建页渲染在分支列表请求处
+// TypeError 中断，_saveCreateScene 等全部按钮处理函数未注册（按钮全失效）。提到顶层
+// （与 _addLinkedRepoInline 同理：创建页与详情页共用，必须在文件加载时定义）。
+window._branchQS = function(owner, repo) {
+  try {
+    var rk = (app.currentRepo() || {}).repoKey || '';
+    if (rk && rk.indexOf(':') > 0) {
+      var bare = rk.replace(/^(gitcode|github):/, '');
+      // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
+      if (!owner || !repo || bare === (owner + '/' + repo)) {
+        return '?repo_key=' + encodeURIComponent(rk);
+      }
+    }
+  } catch (e) {}
+  return '';
+};
 
 // Issue #242/#307: 关联仓库配置（顶层函数，确保添加场景页未先访问详情页时可用）
 window._linkedRepoOptions = [];
