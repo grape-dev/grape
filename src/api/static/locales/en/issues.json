@@ -52,5 +52,12 @@
   "confirm_delete_attach": "Delete attachment?",
   "upload_failed": "Upload failed: {msg}",
   "no_scene_for_pr": "No associated scene for this PR, cannot intervene",
-  "uploading": "Uploading..."
+  "uploading": "Uploading...",
+  "review_status": {
+    "pending_review_hint": "Issue awaits manual confirmation: stage finished ≠ issue/production release done",
+    "sre_result_title": "SRE Acceptance Result",
+    "sre_pending": "SRE acceptance task in flight, no result yet",
+    "sre_unavailable": "No SRE acceptance result (no associated task or result unreadable)",
+    "sre_task_ref": "Acceptance task"
+  }
 }

@@ -918,7 +918,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
 
 
-@router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page.")
+@router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")
 async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_no_session_token)):
     """获取需求关联的流水线信息和事件历史（详情页展示）。"""
     from src.api.event_store import get_events
@@ -929,12 +929,12 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         c = db.cursor()
         # 仓库全部视图下，用户可以看到其他人的 Issue
         # 按 id 查出 Issue，再校验用户是否有该仓库的访问权限
-        c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?",
+        c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=?",
                   (issue_id,))
         row = c.fetchone()
         if not row:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        repo_key, issue_number = row[0], row[1]
+        repo_key, issue_number, _issue_task_status = row[0], row[1], (row[2] or "")
     # 校验仓库访问权限（与"仓库全部"列表接口一致）
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
@@ -964,6 +964,22 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         except Exception:
             pass
 
+    # Issue #539：需求级业务状态（review_status，与「事件执行结束」的节点状态区分）
+    # + SRE 阶段最新任务引用/验收结论（pending_review 时详情页直接可读，引用+摘要不内嵌全量）
+    from src.api.pipeline_status import (derive_review_status, load_segment_task_refs,
+                                         _UNAVAILABLE_TASK_REF, _UNAVAILABLE_RESULT_REF)
+    _task_refs = load_segment_task_refs([repo_key], [e.get("seq") for e in events])
+    _sre_pair = None
+    for _e in reversed(events):
+        if (_e.get("agent_type") or "") == "sre":
+            _sre_pair = _task_refs.get(_e.get("seq"))
+            break
+    if _sre_pair:
+        _sre_result = {"task_ref": _sre_pair[0], "result_ref": _sre_pair[1]}
+    else:
+        _sre_result = {"task_ref": dict(_UNAVAILABLE_TASK_REF),
+                       "result_ref": dict(_UNAVAILABLE_RESULT_REF)}
+
     return {
         "scene_id": _scene_id,
         "scene_name": (pipe_cfg or {}).get("display_name") or (pipe_cfg or {}).get("name", _scene_id),
@@ -974,6 +990,11 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
         "carried_context": _carried_context,
         "source_issue_number": _source_issue_number,
         "has_cross_scene_handoff": _has_cross_scene,
+        # Issue #539: 需求级业务状态（待人工确认等）+ SRE 验收结果引用
+        "issue_stage": _current_stage,
+        "issue_task_status": _issue_task_status,
+        "review_status": derive_review_status(_current_stage, _issue_task_status),
+        "sre_result": _sre_result,
     }
 
 
@@ -1721,6 +1742,13 @@ def get_issue_detail(owner: str, repo: str, number: int,
     base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
     events = group_map.get(num) or []
     pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
+    # Issue #539：详情内嵌 pipeline 同步叠加需求级业务状态与任务/结果引用
+    from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
+                                         enrich_pipeline_business_status, _pipeline_segment_seqs)
+    _biz_stage, _biz_status = load_issue_business_status(repo_keys, num)
+    enrich_pipeline_business_status(
+        pipeline, _biz_stage, _biz_status,
+        load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
     return {**base, "events": events, "pipeline": pipeline}
 
 
@@ -1741,7 +1769,7 @@ def get_issue_events(owner: str, repo: str, number: str,
     return {"events": events, "segments": events, "total": len(events)}
 
 
-@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments.")
+@router.get("/{owner}/{repo}/{number}/pipeline", operation_id="issues_pipeline", summary="Issue pipeline roadmap", description="Pipeline roadmap of an issue: issue + summary + status + segments. Issue #539: top-level `status` means event execution finished (not requirement completion); business status is exposed via optional `issue_stage`/`issue_task_status`/`review_status`, and each segment output carries optional `task_ref`/`result_ref` (explicit enums: available/pending/unavailable; no restricted logs or credentials).")
 def get_issue_pipeline(owner: str, repo: str, number: int,
                        user: dict = Depends(get_current_user_or_api_key)):
     repo_keys = _repo_keys_of(owner, repo)
@@ -1756,4 +1784,11 @@ def get_issue_pipeline(owner: str, repo: str, number: int,
             "issue": {"number": number}, "summary": "", "status": "unknown", "segments": []}
     if not pipeline.get("segments") and num not in _issue_stage_map(repo_keys):
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
+    # Issue #539：叠加需求级业务状态 + 各段任务/结果引用（旧字段语义不变，新增字段可选）
+    from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
+                                         enrich_pipeline_business_status, _pipeline_segment_seqs)
+    _biz_stage, _biz_status = load_issue_business_status(repo_keys, num)
+    enrich_pipeline_business_status(
+        pipeline, _biz_stage, _biz_status,
+        load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
     return pipeline

@@ -52,5 +52,12 @@
   "confirm_delete_attach": "确认删除附件？",
   "upload_failed": "上传失败: {msg}",
   "no_scene_for_pr": "该 PR 无关联场景，无法介入解决",
-  "uploading": "上传中..."
+  "uploading": "上传中...",
+  "review_status": {
+    "pending_review_hint": "需求待人工确认：阶段执行完成 ≠ 需求/生产发布完成",
+    "sre_result_title": "SRE 验收结论",
+    "sre_pending": "SRE 验收任务在途，尚无结论",
+    "sre_unavailable": "暂无 SRE 验收结论（无关联任务或结果不可读）",
+    "sre_task_ref": "验收任务"
+  }
 }
