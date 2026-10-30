@@ -3896,6 +3896,13 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
         "ACCOUNT": evt.get("actor") or exec_account or "",
     }
+    # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
+    # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。
+    # 统一用 split_owner_repo 剥前缀，与入队（484/2829/3134）口径一致，REPO_OWNER/REPO_NAME 无前缀。
+    from src.repo_key import split_owner_repo as _sor_env
+    _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
+    env_extra["REPO_OWNER"] = _repo_owner_env
+    env_extra["REPO_NAME"] = _repo_name_env
     # 注入场景环境变量（scene_id / work_branch / custom_fields；direct 模式同样注入，保持与 worker 模式一致）
     # Issue #427：PR 订阅 direct 派发（evt 带 _pr_sub_scene_id）同样按订阅场景注入
     try:
