@@ -132,6 +132,13 @@ Issue 对象字段：
 | 出参 | `{...Issue 字段, events: Event[], pipeline: Pipeline}` |
 | 返回 | 200 成功；404 Issue 不存在；401 未认证 |
 
+> **`issue_id` 字段与两套 id 体系（Issue #569）**：出参含 `issue_id`（issue 表主键，**平台内部需求卡片 id**），
+> 可直接作 `awaiting-input` / `pending-review` / `review-pass` 等的 `--issue_id`（首选服务端注入的
+> `$GRAPE_ISSUE_ID`，与本字段同源）；`number` 是 **GitCode 侧 Issue 编号**，与内部卡片 id 不同；
+> `grape git-repo issues get` 返回的 `id` 是 **GitCode 侧 id**，与平台内部 id **不可混用**——
+> 严禁把 `number` 或 GitCode 侧 `id` 传入 `--issue_id`（否则 404/403）。无 issue 卡片行（过渡期兜底）时
+> `issue_id` 为 null，此时用 `$GRAPE_ISSUE_ID`。
+
 `events` 结构（seq 升序）：
 
 | 字段 | 类型 | 说明 |
