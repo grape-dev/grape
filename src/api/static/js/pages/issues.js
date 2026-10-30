@@ -655,6 +655,33 @@ function _renderPipelineSection(data) {
     if (_sourceScene) _sourceLabel += '（' + _sourceScene + '）';
     html += `<div style="font-size:11px;color:#0071e3;background:rgba(0,113,227,.06);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">⇄</span><span>${_sourceLabel}</span></div>`;
   }
+  // Issue #539: 需求级业务状态横幅——区分「阶段执行完成」与「待人工确认」
+  // （节点/事件 status 仅表示事件执行结束，不代表需求或生产发布完成）
+  var _reviewStatus = data.review_status || '';
+  if (_reviewStatus === 'pending_review') {
+    html += `<div style="font-size:11px;color:#ff9f0a;background:rgba(255,159,10,.08);border-radius:8px;padding:6px 10px;margin-bottom:10px;display:flex;align-items:center;gap:6px"><span style="font-size:13px">◉</span><span><b>${I18N.t('tasks.status.tag_pending_review')||'待审核'}</b> — ${I18N.t('issues.review_status.pending_review_hint')||'需求待人工确认：阶段执行完成 ≠ 需求/生产发布完成'}</span></div>`;
+  }
+  // Issue #539: SRE 验收结论引用（result_ref 摘要 + 可授权查询任务引用）
+  var _sreResult = data.sre_result || null;
+  if (_sreResult && _sreResult.result_ref) {
+    var _rr = _sreResult.result_ref;
+    var _tr = _sreResult.task_ref || {};
+    var _rrBody = '';
+    if (_rr.status === 'available' && _rr.summary) {
+      _rrBody = '<div style="font-size:12px;color:var(--t2,#3a3a3c);line-height:1.6;background:rgba(0,0,0,.02);border-radius:8px;padding:10px 12px;white-space:pre-wrap">' + esc(String(_rr.summary)) + '</div>';
+    } else if (_rr.status === 'pending') {
+      _rrBody = '<div style="font-size:11px;color:var(--t3,#86868b)">' + (I18N.t('issues.review_status.sre_pending')||'SRE 验收任务在途，尚无结论') + '</div>';
+    } else {
+      _rrBody = '<div style="font-size:11px;color:var(--t3,#86868b)">' + (I18N.t('issues.review_status.sre_unavailable')||'暂无 SRE 验收结论（无关联任务或结果不可读）') + '</div>';
+    }
+    var _trLine = '';
+    if (_tr.task_id) {
+      _trLine = '<div style="font-size:10px;color:var(--t3,#86868b);margin-top:6px">' + (I18N.t('issues.review_status.sre_task_ref')||'验收任务') + ': <b>' + esc(String(_tr.task_id)) + '</b>' + (_tr.task_status ? ' (' + esc(String(_tr.task_status)) + ')' : '') + '</div>';
+    }
+    html += `<div style="margin-bottom:10px">` +
+      `<div style="${_cardTitle}">${I18N.t('issues.review_status.sre_result_title')||'SRE 验收结论'}</div>` +
+      _rrBody + _trLine + `</div>`;
+  }
   // 流水线节点进度条
   if (nodes.length > 0) {
     html += '<div style="display:flex;align-items:center;gap:0;margin-bottom:16px;padding:10px;background:rgba(0,0,0,.02);border-radius:10px">';

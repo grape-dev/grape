@@ -184,7 +184,7 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` / `{number}` |
-| 出参 | `{issue: object, summary: string, status: string, segments: Segment[]}` |
+| 出参 | `{issue: object, summary: string, status: string, segments: Segment[]}` + Issue #539 可选业务状态字段（见下） |
 | 返回 | 200 成功；404 Issue 不存在；401 未认证 |
 
 `segments[].output`：
@@ -196,6 +196,18 @@ Issue 对象字段：
 | `actions` | string[] | 动作清单 |
 | `artifacts` | string[] | 产出/标识 |
 | `issue_summary` | string | 一句话摘要 |
+| `task_ref` | object | Issue #539 可选：阶段关联 runtime 任务引用 `{task_id, task_status, query_path}`；无关联任务 → `{task_id: null, task_status: "unavailable", query_path: ""}` |
+| `result_ref` | object | Issue #539 可选：阶段结果引用 `{status}`，`status` 枚举：`available`（附脱敏 `summary`）/ `pending`（任务在途）/ `unavailable`（无结果或不可读）。`query_path` 指向 `GET /api/runtime/tasks/{task_id}/status`（授权后可查全量） |
+
+**Issue #539 语义澄清与新增顶层字段**：顶层 `status` 仅表示**事件执行结束**（如 `completed` = 最后一个事件执行完毕），不代表需求已确认或生产发布完成。需求级业务状态由以下可选字段独立暴露：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `issue_stage` | string | 需求当前阶段（issue.stage，issue_state 兜底） |
+| `issue_task_status` | string | 需求中心状态（issue.status） |
+| `review_status` | string | 需求级业务状态枚举：`pending_review`（待人工确认）/ `completed`（含生产发布完成）/ `cancelled` / `awaiting_input` / `in_progress`（流水线执行中，生产尚未开始）/ `unknown`（无法判定，显式标注） |
+
+> 典型场景：SRE（末节点）执行完成后需求进入 `pending_review` 待人工确认，此时顶层 `status=completed` 仅表示事件执行结束，`review_status=pending_review` 才表示需求仍等待人审/发布（真实样本 #428）。旧字段语义与结构不变，新增字段均为可选，旧客户端无破坏；摘要仅含脱敏 conclusion，不透出受限日志与凭据。
 
 > 优先读 event.json 档案；无档案时降级由 `events` 重构。
 
@@ -300,10 +312,11 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **user_only**（`grape_`/JWT；`tk_` → 403） |
 | Path | `{issue_id}` int |
-| 出参 | `{"scene_id", "scene_name", "current_stage", "nodes", "events"}`（nodes 含 `node_status` 数值码 0-5 + `latest_event`） |
+| 出参 | `{"scene_id", "scene_name", "current_stage", "nodes", "events"}` + Issue #539 可选：`{"issue_stage", "issue_task_status", "review_status", "sre_result"}`（nodes 含 `node_status` 数值码 0-5 + `latest_event`） |
 | 返回 | 200；403；404 |
 
 > 节点状态由 `compute_node_statuses` 统一计算（与流水线菜单页一致）；`node_status`：0=pending 1=running 2=completed 3=failed 4=cancelled 5=skipped。
+> Issue #539：`review_status` 为需求级业务状态（`pending_review`=待人工确认，节点全 ✓ 仅表示事件执行结束）；`sre_result` = `{task_ref, result_ref}`（SRE 最新任务的引用与脱敏结论摘要，`result_ref.status` 枚举 available/pending/unavailable），供详情页区分「阶段执行完成」与「待人工确认」。
 
 ### GET /api/issues/{issue_id}/clarifications — 澄清历史
 
