@@ -1,7 +1,7 @@
 # Spec: Issue #537 — 自动化升级任务停双主终态误报 failed
 
-> 基线分支：local-liufei | 组合方案：候选 1（主）+ 候选 3（纵深防御）；候选 2（P2 可选）不做（超出代码范围，属 skill 层）
-> 来源：Issue #537 需求 + issue agent Spec（评论 id=197046628）
+> 基线分支：weekly-09 | 组合方案：候选 1（主）+ 候选 3（纵深防御）；候选 2（P2 可选）不做（超出代码范围，属 skill 层）
+> 来源：Issue #537 需求 + issue agent Spec（Issue 评论）
 
 ## 1. 问题
 
@@ -14,7 +14,7 @@
 2. **重启窗口误判**：master 重启期间 worker 心跳断（3 次）→ `_reregister` → 引擎行被标
    offline / zombie recovery 的 `_rt_status != 'online'` 判死 → agent_tasks/autopilot_executions
    被同步 failed，终态定格。之后 worker 侧任务跑完调 complete_task 被终态幂等保护拒绝 →
-   **永败误报**（生产实例：exec #1661，实际升级已完整落地）。
+   **永败误报**（生产实例：某次 exec 任务，实际升级已完整落地）。
 3. **收口只看 status**：autopilot 收口（_poll_dispatched_completion / zombie recovery）只信
    agent_tasks.status，不校验部署类任务的实际落地证据 → 既可能 false-failed（本 Issue）也可能
    false-success（status=completed 但部署实际没落地）。

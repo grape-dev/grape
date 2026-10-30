@@ -1,6 +1,6 @@
 """Issue #537: 停双主时 REMOTE 任务终态误报 failed——pending_self_report 状态机测试。
 
-复现生产事故链路（exec #1661）：
+复现生产事故链路（exec incident case）：
   升级任务（worker-owned REMOTE）执行「停双主」→ master 退出触发
   terminate_active_agents → #404 只跳过留悬空 → 重启窗口 zombie recovery 误判
   failed → worker 侧跑完自报被终态幂等拒绝 → 永败误报。

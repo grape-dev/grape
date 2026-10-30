@@ -89,7 +89,7 @@ def terminate_active_agents(grace_seconds: int = 5):
     # Issue #537 升级（2026-10-30）：#404 的"跳过"留下 running/dispatched 悬空——下游
     # （zombie recovery / 心跳判死 / 活跃计数）无法区分"正常跑"与"等自报"，重启窗口内
     # worker 心跳断 → 引擎被标 offline → zombie recovery 误判 failed → 终态定格（生产
-    # exec #1661 误报实例）。改为显式中间态 pending_self_report + pending_since 落时刻：
+    # exec incident case 误报实例）。改为显式中间态 pending_self_report + pending_since 落时刻：
     #   - worker 继续执行并自报（complete_task/fail_task 从 pending 正常转换，终态幂等
     #     只拦真终态 completed/failed/cancelled/timeout_failed）；
     #   - 超时兜底 = scheduler 每轮扫描的 pending 超时回收（默认 30min → timeout_failed）；

@@ -1154,7 +1154,7 @@ def _reap_zombie_executions() -> None:
     autopilot_executions 卡在 running/dispatched，但 agent_tasks 可能已完成。
     每轮扫描顺带检查并同步终态（幂等自愈）。
 
-    Issue #537 增强（生产 exec #1661 误报根因修复）：
+    Issue #537 增强（生产 exec incident case 误报根因修复）：
     - engine 离线判死加宽限（ZOMBIE_OFFLINE_GRACE_SECONDS，默认 5min）——
       停双主/重启 master 的短暂离线不误判 failed；last_seen 信息缺失也不判死；
     - pending_self_report 不判死（等 worker 自报，超时由 _sweep_pending_self_report_timeouts 兜底）；

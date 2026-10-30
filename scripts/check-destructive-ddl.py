@@ -19,7 +19,7 @@ base 解析（QA QA-Impt 修复）：
 
 用法：
   python3 scripts/check-destructive-ddl.py            # 自动探测 base
-  python3 scripts/check-destructive-ddl.py local-liufei
+  python3 scripts/check-destructive-ddl.py weekly-09
                                                       # 显式指定 base 分支
 
 退出码：0 = 通过；1 = 发现未收口的新增危险 DDL；2 = 环境/用法错误（含 base 不可解析）。

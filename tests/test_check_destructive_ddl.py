@@ -118,8 +118,8 @@ class TestBaseResolution:
         monkeypatch.setenv("CI_MERGE_REQUEST_TARGET_BRANCH_NAME", "dev-branch")
         assert cdd._detect_base() == "dev-branch"
         monkeypatch.delenv("CI_MERGE_REQUEST_TARGET_BRANCH_NAME")
-        monkeypatch.setenv("GRAPE_WORK_BRANCH", "local-liufei")
-        assert cdd._detect_base() == "local-liufei"
+        monkeypatch.setenv("GRAPE_WORK_BRANCH", "weekly-09")
+        assert cdd._detect_base() == "weekly-09"
         monkeypatch.delenv("GRAPE_WORK_BRANCH")
 
     def test_unresolvable_base_fails_closed(self, capsys):

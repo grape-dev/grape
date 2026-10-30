@@ -23,4 +23,4 @@
 ## 收尾
 
 - [x] 自审查（5 轴 + pre-pr 检查）
-- [x] push feat/issue-519 → PR（base=local-liufei）→ Issue 评论 → A2A QA → tasks complete
+- [x] push feat/issue-519 → PR（base=weekly-09）→ Issue 评论 → A2A QA → tasks complete

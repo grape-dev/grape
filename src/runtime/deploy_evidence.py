@@ -2,7 +2,7 @@
 
 背景：autopilot 收口此前仅看 agent_tasks.status —— 停双主/重启 master 场景下
 worker 进程实际完成（双主已拉起、版本已替换）但终态被 master 侧状态清理误判
-failed（生产 exec #1661），也可能出现"进程跑完但实际未落地"的 false-success。
+failed（生产 exec incident case），也可能出现"进程跑完但实际未落地"的 false-success。
 
 本模块在收口写 success 前对部署/升级类任务做**实际落地证据**校验：
 - 版本指纹：agent_runtimes.worker_version（worker 实际运行版本）vs 预期版本
