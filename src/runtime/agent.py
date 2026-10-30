@@ -2009,6 +2009,15 @@ async def _execute_task(client, task, engine_name: str = ""):
             from src.runtime.skill_materialize import materialize_skill_zip_atomic
             raw = _b64.b64decode(skill_zip_b64)
             _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
+            # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
+            # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
+            #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
+            _target_skill = task.get("skill") or ""
+            if _ok_zip and _target_skill and _target_skill not in _skills_ok:
+                _ok_zip = False
+                _reason = (f"target skill '{_target_skill}' not in materialized list "
+                           f"[{', '.join(_skills_ok)}]")
+                log.warning(f"[skill] zip partial success misses target: {_reason}")
             if _ok_zip:
                 env["DEVOPS_SKILLS_DIR"] = skill_dir
                 if _reason:
@@ -2044,13 +2053,17 @@ async def _execute_task(client, task, engine_name: str = ""):
                     skill_files = {}
                 else:
                     log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
-            _ok_files = False
-            _reason = ""
+            # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
+            # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
+            _per_skill = []  # [(skill_name, ok, reason)]
             for _sn, files in skill_files.items():
-                _ok_files, _reason = materialize_skill_files_atomic(skill_dir, _sn, files or {})
-                if not _ok_files:
-                    log.warning(f"[skill] skill_files materialize failed for {_sn}: {_reason}")
-                    break
+                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
+                _per_skill.append((_sn, _ok_s, _r_s))
+                if not _ok_s:
+                    log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
+            _failed = [(_sn, _r) for _sn, _ok_f, _r in _per_skill if not _ok_f]
+            _reason = "; ".join(f"{_sn}: {_r}" for _sn, _r in _failed)
+            _ok_files = not _failed
             if _ok_files:
                 env["DEVOPS_SKILLS_DIR"] = skill_dir
             elif skill_files:

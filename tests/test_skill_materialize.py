@@ -155,6 +155,52 @@ def test_ok_status_primary_success(skills_root):
     assert res["status"] == "ok"
 
 
+# ── zip 部分成功时的目标技能校验（PR #765 审查 Required）────
+
+def _mk_multi_zip():
+    """双技能 zip：other-skill 完整、demo-skill 缺 references（校验失败）。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as zf:
+        zf.writestr("other-skill/SKILL.md", "# no refs\n")
+        zf.writestr("demo-skill/SKILL.md", SKILL_MD)  # 引用 references/ 但缺失
+    return buf.getvalue()
+
+
+def test_zip_partial_success_target_present_ok(skills_root):
+    # 目标技能在 installed 列表 → ok
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "other-skill", lambda: ("zip", _mk_multi_zip()))
+    assert res["status"] == "ok"
+    assert res["skill_dir"] == os.path.join(skills_root, "other-skill")
+    assert os.path.isfile(os.path.join(skills_root, "other-skill", "SKILL.md"))
+
+
+def test_zip_partial_success_target_missing_falls_back(skills_root, official_dir):
+    # 目标技能校验失败 → 不能凭部分成功注入，走官方包回退
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "demo-skill", lambda: ("zip", _mk_multi_zip()))
+    assert res["status"] == "fallback"
+    assert "target skill 'demo-skill' not in materialized list" in res["detail"]
+    # 官方包完整落盘
+    assert os.path.isfile(os.path.join(skills_root, "demo-skill", "references", "extra.md"))
+
+
+def test_zip_partial_success_target_missing_degraded(skills_root, monkeypatch):
+    # 目标技能校验失败且无官方包 → degraded，不静默空注入
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "demo-skill", lambda: ("zip", _mk_multi_zip()))
+    assert res["status"] == "degraded"
+    assert "target skill 'demo-skill' not in materialized list" in res["detail"]
+
+
+def test_zip_full_success_target_present(skills_root):
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "demo-skill", lambda: ("zip", _mk_zip(_mk_files())))
+    assert res["status"] == "ok"
+
+
 # ── 原子性 / 幂等 ─────────────────────────────────────────
 
 def test_atomicity_no_dirty_dir_on_rename_failure(skills_root, monkeypatch):

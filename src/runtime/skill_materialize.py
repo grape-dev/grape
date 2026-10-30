@@ -218,7 +218,14 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary) 
 
     ok, reason = False, ""
     if kind == "zip":
-        ok, _skills, reason = materialize_skill_zip_atomic(skills_root, payload or b"")
+        _zip_ok, _skills, reason = materialize_skill_zip_atomic(skills_root, payload or b"")
+        ok = _zip_ok
+        # Issue #564 review：zip 部分成功（或全成功）都必须确认目标 skill_name
+        # 属于实际 installed 列表，否则视为未物化 → 进入官方包回退链。
+        if ok and skill_name and skill_name not in (_skills or []):
+            ok = False
+            reason = (f"target skill '{skill_name}' not in materialized list "
+                      f"[{', '.join(_skills or [])}]")
         if not ok and not reason:
             reason = "zip materialize failed"
     elif kind == "files":
