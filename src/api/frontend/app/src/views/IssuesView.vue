@@ -2749,7 +2749,7 @@ onBeforeUnmount(function () {
 }
 /* 详情卡（v-html 内容） */
 .isk :deep(.isk-card) {
-  background: color-mix(in srgb, var(--t, #1d1d1f) 2%, transparent);
+  background: rgba(0, 0, 0, 0.02);
   border-radius: 14px;
   border: 0.5px solid var(--b, #e8e8ed);
   padding: 14px 16px;
@@ -2819,7 +2819,7 @@ onBeforeUnmount(function () {
 }
 /* 附件 */
 .isk-attach-card {
-  background: color-mix(in srgb, var(--t, #1d1d1f) 2%, transparent);
+  background: rgba(0, 0, 0, 0.02);
   border-radius: 14px;
   border: 0.5px solid var(--b, #e8e8ed);
   padding: 14px 16px;
@@ -2926,7 +2926,7 @@ onBeforeUnmount(function () {
   align-items: center;
   margin-bottom: 16px;
   padding: 10px;
-  background: color-mix(in srgb, var(--t, #1d1d1f) 2%, transparent);
+  background: rgba(0, 0, 0, 0.02);
   border-radius: 10px;
 }
 .isk :deep(.isk-fnode) {
@@ -3057,7 +3057,7 @@ onBeforeUnmount(function () {
   display: flex;
   align-items: center;
   padding: 10px;
-  background: color-mix(in srgb, var(--t, #1d1d1f) 2%, transparent);
+  background: rgba(0, 0, 0, 0.02);
   border-radius: 10px;
 }
 .isk :deep(.isk-node) {
@@ -3347,7 +3347,7 @@ onBeforeUnmount(function () {
   font-size: 12px;
   color: var(--t2, #3a3a3c);
   line-height: 1.6;
-  background: color-mix(in srgb, var(--t, #1d1d1f) 2%, transparent);
+  background: rgba(0, 0, 0, 0.02);
   border-radius: 8px;
   padding: 10px 12px;
   white-space: pre-wrap;

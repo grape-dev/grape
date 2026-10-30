@@ -482,13 +482,13 @@
           </div>
           <div
             v-if="pipesLoading"
-            style="text-align: center; padding: 24px; color: var(--t3, #86868b); font-size: 13px"
+            style="text-align: center; padding: 24px; color: #86868b; font-size: 13px"
           >
             {{ t('loading') }}
           </div>
           <div
             v-else-if="!scenePipes.length"
-            style="text-align: center; padding: 24px; color: var(--t3, #86868b); font-size: 13px"
+            style="text-align: center; padding: 24px; color: #86868b; font-size: 13px"
           >
             {{ t('no_issues') }}
           </div>
@@ -756,7 +756,7 @@
         <div class="dbv-englist">
           <div
             v-if="!engModalFiltered.length"
-            style="padding: 20px 0; text-align: center; color: var(--t3, #86868b); font-size: 13px"
+            style="padding: 20px 0; text-align: center; color: #86868b; font-size: 13px"
           >
             {{
               engineModal.agentType === 'sre'
@@ -2591,7 +2591,7 @@ onBeforeUnmount(function () {
 }
 /* Hero */
 .ap-hero {
-  background: color-mix(in srgb, var(--c, #fff) 72%, transparent);
+  background: rgba(255, 255, 255, 0.72);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
   border: none;
@@ -2620,12 +2620,12 @@ onBeforeUnmount(function () {
 .ap-hero-title {
   font-size: 17px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   letter-spacing: -0.3px;
 }
 .ap-hero-sub {
   font-size: 12px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-top: 3px;
 }
 .ap-stats {
@@ -2636,7 +2636,7 @@ onBeforeUnmount(function () {
 .ap-stat {
   text-align: center;
   padding: 8px 18px;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   border-radius: 12px;
   min-width: 64px;
 }
@@ -2647,7 +2647,7 @@ onBeforeUnmount(function () {
 }
 .ap-stat .l {
   font-size: 10px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-top: 2px;
 }
 .dbv-rolepill {
@@ -2706,7 +2706,7 @@ onBeforeUnmount(function () {
 /* 市场卡 */
 .dbv-marketcard {
   margin-bottom: 16px;
-  background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
+  background: rgba(255, 255, 255, 0.6);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: none;
@@ -2722,17 +2722,17 @@ onBeforeUnmount(function () {
 .dbv-market-t {
   font-size: 14px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   margin-bottom: 4px;
 }
 .dbv-market-d {
   font-size: 12px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   line-height: 1.5;
 }
 /* 场景卡 */
 .dbv-scenecard {
-  background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
+  background: rgba(255, 255, 255, 0.6);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: none;
@@ -2764,7 +2764,7 @@ onBeforeUnmount(function () {
   align-items: center;
   gap: 16px;
   padding: 16px 20px;
-  background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
+  background: rgba(255, 255, 255, 0.6);
   backdrop-filter: blur(16px);
   border: none;
   border-radius: 18px;
@@ -2775,7 +2775,7 @@ onBeforeUnmount(function () {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 .scn-row:hover {
-  background: color-mix(in srgb, var(--c, #fff) 80%, transparent);
+  background: rgba(255, 255, 255, 0.8);
   box-shadow: 0 3px 16px rgba(0, 0, 0, 0.08);
 }
 .scn-row-icon {
@@ -2793,7 +2793,7 @@ onBeforeUnmount(function () {
 .scn-row-name {
   font-size: 15px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   white-space: nowrap;
   letter-spacing: -0.2px;
 }
@@ -2810,7 +2810,7 @@ onBeforeUnmount(function () {
 }
 .scn-row-desc {
   font-size: 12px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -2871,8 +2871,8 @@ onBeforeUnmount(function () {
 }
 /* 空态 */
 .dbv-emptycard {
-  background: var(--c, #fff);
-  border: 1px solid var(--b, #d2d2d7);
+  background: #fff;
+  border: 1px solid #d2d2d7;
   border-radius: 18px;
   padding: 48px 24px;
   margin-bottom: 16px;
@@ -2886,12 +2886,12 @@ onBeforeUnmount(function () {
 .dbv-empty-t {
   font-size: 15px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   margin-bottom: 6px;
 }
 .dbv-empty-d {
   font-size: 12px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-bottom: 20px;
 }
 /* 头卡（创建/详情） */
@@ -2935,7 +2935,7 @@ onBeforeUnmount(function () {
 }
 .dbv-desc-display {
   font-size: 13px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   cursor: text;
   padding: 2px 6px;
   margin: -2px -6px;
@@ -2946,7 +2946,7 @@ onBeforeUnmount(function () {
   background: rgba(0, 0, 0, 0.04);
 }
 .dbv-desc-ph {
-  color: var(--t3, #c7c7cc);
+  color: #c7c7cc;
   font-style: italic;
 }
 .dbv-name-input {
@@ -2954,23 +2954,23 @@ onBeforeUnmount(function () {
   font-size: 20px;
   font-weight: 700;
   padding: 4px 8px;
-  border: 1px solid var(--b, #d2d2d7);
+  border: 1px solid #d2d2d7;
   border-radius: 6px;
   outline: none;
-  background: var(--c, #fff);
+  background: #fff;
   margin-bottom: 6px;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-desc-input {
   width: 100%;
   font-size: 13px;
   padding: 4px 8px;
-  border: 1px solid var(--b, #d2d2d7);
+  border: 1px solid #d2d2d7;
   border-radius: 6px;
   outline: none;
-  background: var(--c, #fff);
-  color: var(--t3, #86868b);
+  background: #fff;
+  color: #86868b;
   font-family: inherit;
 }
 .dbv-iconpicker {
@@ -2979,7 +2979,7 @@ onBeforeUnmount(function () {
   gap: 6px;
   margin-top: 8px;
   padding: 8px;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   border-radius: 10px;
 }
 .dbv-iconpick {
@@ -2992,7 +2992,7 @@ onBeforeUnmount(function () {
   justify-content: center;
   cursor: pointer;
   transition: all 0.15s;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
 }
 .dbv-iconpick.on {
   background: #0071e3;
@@ -3000,7 +3000,7 @@ onBeforeUnmount(function () {
 }
 /* 详情卡 */
 .det-card-wrap {
-  background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
+  background: rgba(255, 255, 255, 0.6);
   backdrop-filter: blur(16px);
   -webkit-backdrop-filter: blur(16px);
   border: none;
@@ -3033,7 +3033,7 @@ onBeforeUnmount(function () {
   min-width: 0;
   max-width: 260px;
   min-height: 260px;
-  background: color-mix(in srgb, var(--c, #fff) 60%, transparent);
+  background: rgba(255, 255, 255, 0.6);
   backdrop-filter: blur(16px);
   border: none;
   border-radius: 18px;
@@ -3045,7 +3045,7 @@ onBeforeUnmount(function () {
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.05);
 }
 .ap-nd:hover {
-  background: color-mix(in srgb, var(--c, #fff) 80%, transparent);
+  background: rgba(255, 255, 255, 0.8);
   box-shadow: 0 3px 16px rgba(0, 0, 0, 0.08);
 }
 .ap-nd.off {
@@ -3078,7 +3078,7 @@ onBeforeUnmount(function () {
 .ap-nd-name {
   font-size: 14px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   flex: 1;
   min-width: 0;
   overflow: hidden;
@@ -3093,25 +3093,25 @@ onBeforeUnmount(function () {
 }
 .ap-nd-desc {
   font-size: 11px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   line-height: 1.5;
   margin-bottom: 10px;
   font-weight: 400;
 }
 .ap-nd-off-lbl {
   font-size: 10px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-bottom: 8px;
 }
 .ap-nd-hr {
   height: 1px;
-  background: var(--b, #e8e8ed);
+  background: #e8e8ed;
   margin: 8px 0;
 }
 .ap-nd-skillbox,
 .ap-nd-engbox {
-  background: var(--c, #fff);
-  border: 1px solid var(--b, #e8e8ed);
+  background: #fff;
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   padding: 8px 10px;
   display: flex;
@@ -3128,28 +3128,28 @@ onBeforeUnmount(function () {
 }
 .ap-nd-lbl {
   font-size: 8px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   text-transform: uppercase;
   letter-spacing: 0.8px;
   margin-bottom: 3px;
 }
 .ap-nd-none {
   font-size: 11px;
-  color: var(--t3, #86868b);
+  color: #86868b;
 }
 .dbv-skillname {
   font-size: 11px;
   font-weight: 500;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-skillpick {
   width: 100%;
   padding: 6px 10px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 8px;
   font-size: 11px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   cursor: pointer;
   text-align: left;
@@ -3159,15 +3159,15 @@ onBeforeUnmount(function () {
 }
 .dbv-skillpick:hover {
   border-color: #0071e3;
-  background: var(--c, #fff);
+  background: #fff;
 }
 .ap-nd-engbtn {
   font-size: 10px;
   padding: 3px 10px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 8px;
   background: transparent;
-  color: var(--t2, #6e6e73);
+  color: #6e6e73;
   cursor: pointer;
 }
 .ap-nd-engbtn:hover {
@@ -3206,7 +3206,7 @@ onBeforeUnmount(function () {
 }
 .dbv-engbadge.gray {
   background: #86868b14;
-  color: var(--t3, #86868b);
+  color: #86868b;
 }
 /* PR 订阅 */
 .dbv-prsub {
@@ -3218,11 +3218,11 @@ onBeforeUnmount(function () {
 .dbv-prsub-t {
   font-size: 13px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-prsub-d {
   font-size: 11px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-top: 3px;
   line-height: 1.5;
 }
@@ -3230,7 +3230,7 @@ onBeforeUnmount(function () {
   width: 44px;
   height: 26px;
   border-radius: 999px;
-  background: var(--b, #e8e8ed);
+  background: #e8e8ed;
   cursor: pointer;
   transition: background 0.2s;
   position: relative;
@@ -3245,7 +3245,7 @@ onBeforeUnmount(function () {
   width: 22px;
   height: 22px;
   border-radius: 50%;
-  background: var(--c, #fff);
+  background: #fff;
   position: absolute;
   top: 2px;
   left: 2px;
@@ -3266,7 +3266,7 @@ onBeforeUnmount(function () {
 .adv-label {
   font-size: 12px;
   font-weight: 600;
-  color: var(--t3, #86868b);
+  color: #86868b;
   min-width: 80px;
   flex-shrink: 0;
 }
@@ -3274,11 +3274,11 @@ onBeforeUnmount(function () {
   flex: 1;
   max-width: 280px;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 13px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3291,21 +3291,21 @@ onBeforeUnmount(function () {
 .dbv-nb-input {
   flex: 1;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 13px;
   outline: none;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-nb-sel {
   width: 120px;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 13px;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3320,7 +3320,7 @@ onBeforeUnmount(function () {
 .dbv-advsec-t {
   font-size: 12px;
   font-weight: 600;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-bottom: 8px;
 }
 .dbv-advsec-d {
@@ -3343,44 +3343,44 @@ onBeforeUnmount(function () {
 .dbv-cfkey {
   flex: 0 0 140px;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 12px;
   outline: none;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-cfkey-static {
   flex: 0 0 140px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   font-size: 12px;
 }
 .dbv-cfval {
   flex: 1;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 12px;
   outline: none;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .cf-invalid {
   border-color: var(--r, #dc3545) !important;
 }
 .dbv-cfeye {
-  border: 1px solid var(--b, #e8e8ed);
-  background: var(--bg, #f5f5f7);
+  border: 1px solid #e8e8ed;
+  background: #f5f5f7;
   border-radius: 8px;
   width: 28px;
   height: 28px;
   padding: 0;
   font-size: 14px;
   cursor: pointer;
-  color: var(--t3, #86868b);
+  color: #86868b;
   flex-shrink: 0;
 }
 .dbv-cfdel {
@@ -3408,7 +3408,7 @@ onBeforeUnmount(function () {
 }
 .dbv-scope-lbl {
   font-size: 11px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   display: inline-flex;
   align-items: center;
   gap: 2px;
@@ -3428,11 +3428,11 @@ onBeforeUnmount(function () {
 .dbv-lrrepo {
   flex: 0 0 200px;
   padding: 8px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 12px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3440,11 +3440,11 @@ onBeforeUnmount(function () {
 .dbv-lrbranch {
   flex: 1;
   padding: 8px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 12px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   cursor: pointer;
   font-family: inherit;
@@ -3453,7 +3453,7 @@ onBeforeUnmount(function () {
 .pl-stat {
   text-align: center;
   padding: 8px 16px;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   border: none;
   border-radius: 14px;
   min-width: 64px;
@@ -3465,7 +3465,7 @@ onBeforeUnmount(function () {
 }
 .pl-stat .l {
   font-size: 10px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-top: 2px;
 }
 .pl-table {
@@ -3477,7 +3477,7 @@ onBeforeUnmount(function () {
   text-align: left;
   padding: 10px 14px;
   font-weight: 500;
-  color: var(--t3, #86868b);
+  color: #86868b;
   border-bottom: 1px solid rgba(0, 0, 0, 0.04);
   font-size: 10px;
   text-transform: uppercase;
@@ -3500,14 +3500,14 @@ onBeforeUnmount(function () {
   gap: 12px;
   padding: 10px 0;
   font-size: 12px;
-  color: var(--t3, #86868b);
+  color: #86868b;
 }
 /* 技能下拉面板 */
 .dbv-skillpanel {
   position: fixed;
   z-index: 1001;
-  background: var(--c, #fff);
-  border: 1px solid var(--b, #e8e8ed);
+  background: #fff;
+  border: 1px solid #e8e8ed;
   border-radius: 12px;
   box-shadow: 0 8px 28px rgba(0, 0, 0, 0.12);
   padding: 8px;
@@ -3517,11 +3517,11 @@ onBeforeUnmount(function () {
   width: 100%;
   box-sizing: border-box;
   padding: 7px 10px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 8px;
   font-size: 12px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   margin-bottom: 6px;
   font-family: inherit;
@@ -3534,7 +3534,7 @@ onBeforeUnmount(function () {
   margin: 6px 4px 4px;
   font-size: 10px;
   font-weight: 600;
-  color: var(--t3, #86868b);
+  color: #86868b;
   text-transform: uppercase;
   letter-spacing: 0.5px;
 }
@@ -3543,7 +3543,7 @@ onBeforeUnmount(function () {
   border-radius: 8px;
   cursor: pointer;
   font-size: 12px;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -3552,7 +3552,7 @@ onBeforeUnmount(function () {
   background: rgba(0, 113, 227, 0.06);
 }
 .dbv-skillopt.clear {
-  color: var(--t3, #86868b);
+  color: #86868b;
   border-bottom: 1px solid rgba(0, 0, 0, 0.05);
   margin-bottom: 4px;
 }
@@ -3577,7 +3577,7 @@ onBeforeUnmount(function () {
 .dbv-skillnomatch {
   padding: 14px 0;
   text-align: center;
-  color: var(--t3, #86868b);
+  color: #86868b;
   font-size: 12px;
 }
 /* 引擎弹窗 */
@@ -3591,7 +3591,7 @@ onBeforeUnmount(function () {
   justify-content: center;
 }
 .dbv-engmodal {
-  background: color-mix(in srgb, var(--c, #fff) 85%, transparent);
+  background: rgba(255, 255, 255, 0.85);
   backdrop-filter: blur(20px);
   border-radius: 18px;
   padding: 28px;
@@ -3605,12 +3605,12 @@ onBeforeUnmount(function () {
   margin: 0 0 4px;
   font-size: 17px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   letter-spacing: -0.3px;
 }
 .dbv-eng-sub {
   font-size: 12px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-bottom: 12px;
 }
 .dbv-detach {
@@ -3636,9 +3636,9 @@ onBeforeUnmount(function () {
   font-size: 11px;
   padding: 3px 10px;
   border-radius: 999px;
-  border: 1px solid var(--b, #e8e8ed);
-  color: var(--t, #1d1d1f);
-  background: var(--bg, #f5f5f7);
+  border: 1px solid #e8e8ed;
+  color: #1d1d1f;
+  background: #f5f5f7;
   font-weight: 500;
 }
 .dbv-engfilters > span.on {
@@ -3649,7 +3649,7 @@ onBeforeUnmount(function () {
 .dbv-engsep {
   width: 1px;
   height: 14px;
-  background: var(--b, #e8e8ed);
+  background: #e8e8ed;
   margin: 0 4px;
   padding: 0 !important;
   border: none !important;
@@ -3664,8 +3664,8 @@ onBeforeUnmount(function () {
   border: none;
   border-radius: 12px;
   font-size: 13px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   margin-bottom: 12px;
   flex-shrink: 0;
@@ -3684,12 +3684,12 @@ onBeforeUnmount(function () {
   margin-bottom: 4px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--t3, #86868b);
+  color: #86868b;
   text-transform: uppercase;
 }
 .dbv-engpersonalhint {
   font-size: 10px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   font-weight: 400;
   margin-left: 6px;
   text-transform: none;
@@ -3702,7 +3702,7 @@ onBeforeUnmount(function () {
   border: none;
   border-radius: 14px;
   cursor: pointer;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   transition: all 0.2s ease;
 }
 .dbv-engitem.on {
@@ -3721,20 +3721,20 @@ onBeforeUnmount(function () {
 .dbv-engname {
   font-weight: 600;
   font-size: 13px;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   display: flex;
   align-items: center;
   flex-wrap: wrap;
 }
 .dbv-engalias {
   font-size: 10px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   font-weight: 400;
   margin-left: 4px;
 }
 .dbv-engmeta {
   font-size: 10px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-top: 3px;
 }
 .dbv-engtag {
@@ -3759,7 +3759,7 @@ onBeforeUnmount(function () {
 }
 /* 复制/删除弹窗 */
 .dbv-copymodal {
-  background: var(--c, #fff);
+  background: #fff;
   border-radius: 18px;
   padding: 28px;
   min-width: 320px;
@@ -3770,33 +3770,33 @@ onBeforeUnmount(function () {
   margin: 0 0 12px;
   font-size: 17px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-copy-hint {
   margin: 0 0 12px;
   font-size: 13px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   line-height: 1.5;
 }
 .dbv-copy-lbl {
   display: block;
   font-size: 12px;
   font-weight: 600;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-bottom: 6px;
 }
 .dbv-copy-input {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 12px;
   font-size: 13px;
   outline: none;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   margin-bottom: 20px;
   box-sizing: border-box;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-copy-btns {
   display: flex;
@@ -3808,10 +3808,10 @@ onBeforeUnmount(function () {
   width: 680px;
   max-height: 85vh;
   overflow-y: auto;
-  background: color-mix(in srgb, var(--c, #fff) 92%, transparent);
+  background: rgba(255, 255, 255, 0.92);
   backdrop-filter: blur(28px) saturate(200%);
   border-radius: 18px;
-  border: 1px solid color-mix(in srgb, var(--c, #fff) 60%, transparent);
+  border: 1px solid rgba(255, 255, 255, 0.6);
   box-shadow: 0 12px 40px rgba(0, 0, 0, 0.12);
   padding: 28px;
 }
@@ -3836,24 +3836,24 @@ onBeforeUnmount(function () {
 .dbv-rec-t {
   font-size: 13px;
   font-weight: 600;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
   margin-bottom: 8px;
 }
 .dbv-rec-sel {
   width: 100%;
   padding: 8px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 13px;
-  background: var(--bg, #f5f5f7);
-  color: var(--t, #1d1d1f);
+  background: #f5f5f7;
+  color: #1d1d1f;
   outline: none;
   cursor: pointer;
   font-family: inherit;
 }
 .dbv-rec-hint {
   font-size: 11px;
-  color: var(--t3, #86868b);
+  color: #86868b;
   margin-top: 4px;
 }
 .dbv-rec-rules {
@@ -3869,24 +3869,24 @@ onBeforeUnmount(function () {
 .dbv-rec-rowsel {
   flex: 0 0 200px;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 13px;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   outline: none;
   cursor: pointer;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 .dbv-rec-rowinput {
   flex: 1;
   padding: 7px 12px;
-  border: 1px solid var(--b, #e8e8ed);
+  border: 1px solid #e8e8ed;
   border-radius: 10px;
   font-size: 12px;
   outline: none;
-  background: var(--bg, #f5f5f7);
+  background: #f5f5f7;
   font-family: inherit;
-  color: var(--t, #1d1d1f);
+  color: #1d1d1f;
 }
 </style>
