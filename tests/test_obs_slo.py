@@ -23,6 +23,8 @@ NOW = datetime.now(timezone.utc)
 
 
 def _clean():
+    from src.observability import slo_backfill as _SB
+    _SB.reset()
     from src.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
@@ -169,6 +171,11 @@ def test_engine_availability_is_l2_only_and_uses_online_column():
         db.commit()
     slo = S.get_slo(slo["id"]) or slo
     # L2：在线 210/240 = 0.875 < 0.99 → breached
+    # Issue #544 L1：无 rollup 行时先转后台回填（不同步全窗扫），drain 后口径与旧一致
+    from src.observability import slo_backfill as SB
+    l2 = S.compute(slo, ["global"], now=NOW, allow_engine=True)
+    assert l2.get("avail_backfill_pending_hours", 0) > 0, l2
+    SB.drain_for_test()
     l2 = S.compute(slo, ["global"], now=NOW, allow_engine=True)
     assert l2["buckets"] == 4, l2
     assert abs(l2["value"] - (210 / 240)) < 1e-3, l2
@@ -198,11 +205,12 @@ def test_engine_availability_reads_hour_rollup():
 
 
 def test_availability_partial_backfill_fills_missing_hours():
-    """审查修复（Issue #437）：rollup 部分回填期，缺失闭合小时/头部不完整小时不静默丢弃。
+    """Issue #437→#544 演进：部分回填期，缺失闭合小时不再同步 raw-scan，转后台补齐。
 
-    场景：窗口 [start, end) 跨 3+ 小时，rollup 只回了 1 个闭合小时桶；缺失的闭合小时
-    和窗口头部不完整小时都有原始采样 → 逐段回退原始扫描后三类桶齐全。
+    场景：窗口 [start, end) 跨 3+ 小时，rollup 只回了 1 个闭合小时桶；窗口头部不完整
+    小时有界现算；缺失闭合小时（有采样）→ pending 透出 + 后台回填后可查。
     """
+    from src.observability import slo_backfill as SB
     from src.session_manager import db, db_lock
     start = _hour(3) + timedelta(minutes=37)       # 窗口起点落在小时中段
     end = start + timedelta(hours=3)               # 末端同样落在小时中段（含未闭合当前小时）
@@ -223,25 +231,32 @@ def test_availability_partial_backfill_fills_missing_hours():
                       " online) VALUES (9901, 'slo-dev', ?, ?)",
                       ((_hour(1) + timedelta(seconds=k * 60)).isoformat(), 1 if k < 30 else 0))
         db.commit()
-    buckets = S._availability_buckets(start, end)
+    buckets, pending = S._availability_buckets(start, end)
     got = {b: (g, t) for b, g, t in buckets}
-    assert got[S._iso(_hour(3))] == (5.0, 10.0), got      # 头部不完整小时（原始现算）
+    assert pending == 1, "缺失闭合小时应计 pending（Issue #544 L1）"
+    assert got[S._iso(_hour(3))] == (5.0, 10.0), got      # 头部不完整小时（有界现算保留）
     assert got[S._iso(_hour(2))] == (60.0, 60.0), got     # rollup 已回填的小时桶
-    assert got[S._iso(_hour(1))] == (30.0, 60.0), got     # 缺失闭合小时（有界回退原始扫描）
-    assert len(buckets) == 3, buckets
-    # 有序性（审查修复）：窗口起点在小时中段 + 部分回填时，头部小段/回填段与 rollup 行
-    # 合并后必须按桶时间升序返回——burn_series 按序累计，坏桶消耗要落在曲线正确位置
+    assert S._iso(_hour(1)) not in got                    # 缺失闭合小时不同步回填
+    assert len(buckets) == 2, buckets
     keys = [b for b, _, _ in buckets]
     assert keys == sorted(keys), buckets
-    assert keys == [S._iso(_hour(3)), S._iso(_hour(2)), S._iso(_hour(1))], buckets
+    # 后台回填（同步 drain 模拟 worker）后，缺失小时从 rollup 读到
+    SB.drain_for_test()
+    buckets2, pending2 = S._availability_buckets(start, end)
+    got2 = {b: (g, t) for b, g, t in buckets2}
+    assert pending2 == 0
+    assert got2[S._iso(_hour(1))] == (30.0, 60.0), got2   # 回填后可查
+    keys2 = [b for b, _, _ in buckets2]
+    assert keys2 == sorted(keys2), buckets2
 
 
 def test_engine_availability_partial_backfill_keeps_full_window():
-    """审查修复（Issue #437，compute 级）：部分回填期窗口不截断、budget_total 不骤减。
+    """Issue #437→#544 演进（compute 级）：部分回填期不误报 breached，后台补齐后口径复原。
 
-    rollup 只覆盖 1/4 个小时桶时，另外 3 小时从原始采样回填 → buckets=4（而非 1），
-    值与全量口径一致（210/240），错误预算按完整窗口计算。
+    rollup 只覆盖 1/4 个小时桶时：缺失小时 pending 透出、不进预算（防窗口截断误报）；
+    后台回填后 buckets=4，值与全量口径一致（210/240），预算按完整窗口计算。
     """
+    from src.observability import slo_backfill as SB
     slo = _slo(S.SLI_AVAIL)
     from src.session_manager import db, db_lock
     with db_lock:
@@ -263,9 +278,14 @@ def test_engine_availability_partial_backfill_keeps_full_window():
                     {"global": {"engine_avail_online": (60.0, 60),
                                 "engine_avail_total": (60.0, 60)}})
     l2 = S.compute(slo, ["global"], now=NOW, allow_engine=True)
-    assert l2["buckets"] == 4, l2          # 不是 1：缺失小时已回填，窗口未截断
-    assert abs(l2["value"] - (210 / 240)) < 1e-3, l2
-    assert l2["bad_buckets"] == 1 and l2["state"] == S.STATE_BREACHED, l2
+    assert l2["buckets"] == 1 and l2["state"] == S.STATE_OK, l2   # 缺失小时不进预算、不误报
+    assert l2.get("avail_backfill_pending_hours", 0) >= 3, l2     # 缺失数透出（Issue #544 L1）
+    SB.drain_for_test()
+    l2b = S.compute(slo, ["global"], now=NOW, allow_engine=True)
+    assert l2b.get("avail_backfill_pending_hours", 0) == 0, l2b
+    assert l2b["buckets"] == 4, l2b          # 后台补齐后窗口完整
+    assert abs(l2b["value"] - (210 / 240)) < 1e-3, l2b
+    assert l2b["bad_buckets"] == 1 and l2b["state"] == S.STATE_BREACHED, l2b
 
 
 def test_eval_interval_sec_sources(monkeypatch):

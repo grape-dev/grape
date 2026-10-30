@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS events (
     agent_logs MEDIUMTEXT DEFAULT '[]',
     result MEDIUMTEXT DEFAULT '',
     entity_type TEXT DEFAULT '',
+    idempotency_key TEXT DEFAULT NULL,
     created_at TEXT DEFAULT (datetime('now')),
     started_at TEXT DEFAULT '',
     completed_at TEXT DEFAULT ''
@@ -3095,6 +3096,51 @@ def _run_all_migrations():
         _cleanup_dup_chat_config_rows()
     except Exception as _e:
         log.warning(f"Chat config dedup migration failed: {_e}")
+    # ===== Issue #544 L2：A2A 幂等键列 + 唯一索引（幂等）=====
+    try:
+        _migrate_a2a_idempotency_key()
+    except Exception as _e:
+        log.warning(f"A2A idempotency key migration failed: {_e}")
+
+
+def _migrate_a2a_idempotency_key():
+    """Issue #544 L2：events 表幂等键迁移（幂等可重跑）。
+
+    - 加列 `idempotency_key TEXT DEFAULT NULL`（空 = NULL，SQLite/MySQL 下 NULL 均可重复，
+      不影响无键的存量/增量事件）；
+    - 唯一索引 `(repo_key, idempotency_key)`：同仓同键只允许一条事件，
+      服务端据此把重复 A2A 请求去重为"返回已有事件"。
+    """
+    from src.session_manager import db, db_lock
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "events", "idempotency_key", "TEXT DEFAULT NULL")
+        db.commit()
+        if is_mysql:
+            # MySQL 无 CREATE INDEX IF NOT EXISTS：先查 information_schema
+            try:
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics"
+                    " WHERE table_schema = DATABASE()"
+                    " AND table_name = 'events' AND index_name = 'idx_events_idem'")
+                if (c.fetchone()[0] or 0) == 0:
+                    c.execute("CREATE UNIQUE INDEX idx_events_idem ON events(repo_key, idempotency_key)")
+                    db.commit()
+            except Exception as e:
+                log.warning(f"events idempotency index (mysql) failed: {e}")
+        else:
+            try:
+                c.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idem"
+                          " ON events(repo_key, idempotency_key)")
+                db.commit()
+            except Exception as e:
+                log.warning(f"events idempotency index (sqlite) failed: {e}")
 
 
 def _ensure_case_insensitive_indexes():

@@ -1877,6 +1877,18 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # 双路径并行：主路由 agent 正常处理 + 订阅 Agent 独立分派
         _dispatch_subscription_agent(repo_key, evt, event_type, _sub_agent, agent_type)
         log.info(f"Pipeline: subscription double-path -> extra event for '{_sub_agent}' (main='{agent_type}')")
+    if not agent_type and event_type == "pull_request_merged":
+        # Issue #544 L4：merge 订阅兜底推广——所有启用 A2A 的仓库，PR 合并默认 sre 收尾。
+        # 原先仅显式配置 sre 订阅的仓库在 merge 时触发 sre；现无任何路由命中时默认派发
+        # （sre agent 被禁用的仓库除外）。配合 #496 派发级重试 + 断链 Issue 提示，
+        # 消除「merge webhook 一次性投递 + 无兜底 → 收尾断链」。
+        try:
+            from src.api.session_store import is_agent_enabled as _iae_l4
+            if _iae_l4(repo_key, "sre"):
+                agent_type = "sre"
+                log.info(f"Pipeline: merged-PR default sre fallback (Issue #544 L4), repo={repo_key}")
+        except Exception as _l4_e:
+            log.warning(f"Pipeline: merged-PR sre fallback check failed: {_l4_e}")
     if not agent_type:
         _reason = "issue_done" if (event_type in ISSUE_EVENT_TYPES or event_type in PR_EVENT_TYPES) else "no_route"
         log.info(f"Pipeline: no route for type={event_type} ({_reason}), skip")
@@ -2366,16 +2378,25 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # Issue #496：PR merged → sre 收尾链路（merge webhook 一次性投递，无二次触发机会）
         # 保留 #259 即时终态语义的同时追加派发级自动重试（引擎恢复后自动重派）。
         if event_type == "pull_request_merged" and agent_type == "sre":
+            _retry_scheduled = False
             try:
                 from src.api.pr_merged_sre_retry import schedule_pr_merged_sre_retry
-                if schedule_pr_merged_sre_retry(
+                _retry_scheduled = schedule_pr_merged_sre_retry(
                         repo_key, seq, agent_type, backend or "", skill_name or "",
                         skill_id or 0, skill_path or "", evt, issue_id=issue_id or "",
                         runtime_id=runtime_id or 0, scene_id=_issue_scene or "",
-                        scene_uid=_issue_scene_uid or 0):
+                        scene_uid=_issue_scene_uid or 0)
+                if _retry_scheduled:
                     _reason_offline += "；已安排自动重试（引擎恢复后自动重派，Issue #496）"
             except Exception as _e496:
                 log.warning(f"Pipeline: schedule #496 sre merge retry failed: {_e496}")
+            if not _retry_scheduled:
+                # Issue #544 L4：未安排上自动重试（参数不全/异常）→ 断链即时提示 Issue
+                try:
+                    from src.api.pr_merged_sre_retry import _notify_issue_broken_chain
+                    _notify_issue_broken_chain(repo_key, issue_id or "", _reason_offline)
+                except Exception as _ne544:
+                    log.warning(f"Pipeline: #544 broken-chain notify failed: {_ne544}")
         _fail_event(seq, _reason_offline)
         return result
     if engine_id == 0 and is_plugin_mode() and get_execution_mode() != EXEC_MODE_DIRECT:

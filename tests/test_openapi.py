@@ -34,6 +34,8 @@ EXPECTED_PUBLIC = {
     "issues_review-reject": ("post", "/api/issues/{issue_id}/review-reject"),
     # POST /api/tasks/create 已废弃移除（C2）→ 创建走 POST /api/issues/{owner}/{repo}
     "a2a_handoff": ("post", "/api/a2a"),
+    # Issue #544 L3：A2A 交接核对接口（幂等键/指纹查询）
+    "a2a_status": ("get", "/api/a2a/status"),
     # 合并引入的新公开操作（multi-vcs / knowledge detail / profile）
     "auth_profile": ("get", "/api/auth/profile"),
     "auth_logout": ("post", "/api/auth/logout"),
