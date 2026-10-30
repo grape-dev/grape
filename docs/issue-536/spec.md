@@ -10,7 +10,7 @@
 
 ## 需求（用户可见行为）
 
-1. **迁移只跑一遍**：`schema_migrations` 版本表 + Migration 注册表执行器；在线库首启全量跑+盖章，第二次启动 0 pending，启动时间明显缩短；
+1. **迁移只跑一遍**：`grape_t_schema_migrations` 版本表 + Migration 注册表执行器；在线库首启全量跑+盖章，第二次启动 0 pending，启动时间明显缩短；
 2. **kind 分流**：safe（直接执行）/ backfill（分批 LIMIT 1000+每批独立事务，失败跳过不阻断启动）/ cleanup（破坏性 DDL，受 meta 表 `min_code_version` 门槛）/ legacy-stamp（存量 133 处历史迁移首跑全量后一次性盖帽收敛）；
 3. **DDL 安全带**：`_ensure_column` MySQL 侧强制 `ALGORITHM=INSTANT` → 降级重试 `ALGORITHM=INPLACE, LOCK=NONE`，再失败记 ERROR 人工清单，绝不静默 COPY；SQLite 路径不变；
 4. **危险 DDL 唯一入口**：`_destructive_ddl()` 收敛 DROP/RENAME/MODIFY COLUMN 调用点 + meta 表 `min_code_version` 门槛 + CI/pre-commit grep 卡点；

@@ -2,7 +2,7 @@
 
 先写失败测试证明「契约未实现」，再逐切片最小实现转绿。覆盖切片：
 
-- S1 schema_migrations 版本表 + 注册表执行器 + legacy-stamp 盖帽；
+- S1 grape_t_schema_migrations 版本表 + 注册表执行器 + legacy-stamp 盖帽；
 - S2 _ensure_column ALGORITHM=INSTANT → INPLACE,LOCK=NONE 降级链（绝不静默 COPY）；
 - S3 迁移连接 SET SESSION lock_wait_timeout=10 + MDL 超时跳过；
 - S4 _destructive_ddl 收敛 + meta 表 min_code_version 门槛。
@@ -31,15 +31,15 @@ class TestSchemaMigrationsRegistry:
         return db_setup
 
     def test_version_table_ddl_registered(self):
-        """schema_migrations 表必须进入 _NEW_TABLES（全新库自然建出）。"""
+        """grape_t_schema_migrations 表必须进入 _NEW_TABLES（全新库自然建出）。"""
         m = self._load_module()
         names = [n for n, _ in m._NEW_TABLES]
-        assert "schema_migrations" in names, "schema_migrations 未挂入 _NEW_TABLES"
+        assert "grape_t_schema_migrations" in names, "grape_t_schema_migrations 未挂入 _NEW_TABLES"
 
     def test_version_table_columns(self):
         """版本表列：version PK / name / kind / applied_at / duration_ms / checksum。"""
         m = self._load_module()
-        ddl = dict(m._NEW_TABLES)["schema_migrations"]
+        ddl = dict(m._NEW_TABLES)["grape_t_schema_migrations"]
         low = ddl.lower()
         for col in ("version", "name", "kind", "applied_at", "duration_ms", "checksum"):
             assert col in low, f"版本表缺列 {col}"
@@ -87,7 +87,7 @@ class TestRunPendingIdempotence:
         conn = sqlite3.connect(str(tmp_path / "mig.db"))
         conn.execute(db_setup._SCHEMA_MIGRATIONS_DDL)
         conn.execute(
-            "INSERT INTO schema_migrations (version, name, kind, applied_at) "
+            "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
             "VALUES (?, ?, 'legacy-stamp', '2026-10-30 00:00:00')",
             (db_setup._LEGACY_STAMP_VERSION, db_setup._LEGACY_STAMP_NAME))
         conn.commit()
@@ -107,7 +107,7 @@ class TestRunPendingIdempotence:
             )
             assert calls == ["m1", "m2"], "未盖章项未按序执行"
             rows = conn.execute(
-                "SELECT version, kind FROM schema_migrations "
+                "SELECT version, kind FROM grape_t_schema_migrations "
                 "WHERE version != ? ORDER BY version",
                 (db_setup._LEGACY_STAMP_VERSION,)).fetchall()
             assert rows == [("202611010001", "safe"), ("202611010002", "safe")], "未逐条盖章"
@@ -180,7 +180,7 @@ class TestRunPendingIdempotence:
                 ])
             assert done == [1], "backfill 失败阻断了启动（应跳过不阻断）"
             stamped = conn.execute(
-                "SELECT version FROM schema_migrations WHERE version='202611010001'").fetchall()
+                "SELECT version FROM grape_t_schema_migrations WHERE version='202611010001'").fetchall()
             assert stamped == [], "失败的 backfill 不应盖章（下次续跑）"
         finally:
             conn.close()
@@ -197,7 +197,7 @@ class TestRunPendingIdempotence:
             db_setup._run_migrations_with_conn(
                 conn, registry=[db_setup.Migration("202611010001", "bad-safe", "safe", _boom)])
             n = conn.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version='202611010001'"
+                "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE version='202611010001'"
             ).fetchone()[0]
             assert n == 0
         finally:
@@ -286,7 +286,7 @@ class TestLegacyStamp:
             db_setup._run_migrations_with_conn(conn, registry=[])
             assert full_runs == [1], "legacy-stamp 首跑未执行全量迁移"
             stamped = conn.execute(
-                "SELECT kind FROM schema_migrations WHERE kind='legacy-stamp'").fetchall()
+                "SELECT kind FROM grape_t_schema_migrations WHERE kind='legacy-stamp'").fetchall()
             assert stamped == [("legacy-stamp",)], "未盖 legacy-stamp 帽"
 
             # 二跑：已盖帽 → 不再全量
@@ -430,7 +430,7 @@ class TestLockWaitTimeout:
         conn = sqlite3.connect(str(tmp_path / "mdl.db"))
         conn.execute(db_setup._SCHEMA_MIGRATIONS_DDL)
         conn.execute(
-            "INSERT INTO schema_migrations (version, name, kind, applied_at) "
+            "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
             "VALUES (?, ?, 'legacy-stamp', '2026-10-30 00:00:00')",
             (db_setup._LEGACY_STAMP_VERSION, db_setup._LEGACY_STAMP_NAME))
         conn.commit()
@@ -455,7 +455,7 @@ class TestLockWaitTimeout:
             assert any("1205" in r.message or "metadata" in r.message.lower()
                        for r in caplog.records)
             n = conn.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE version='202611010001'"
+                "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE version='202611010001'"
             ).fetchone()[0]
             assert n == 0, "MDL 超时的迁移不应盖章"
         finally:
@@ -555,7 +555,7 @@ class TestMigrationSessionLockTimeout:
         conn = sqlite3.connect(str(tmp_path / "r1.db"))
         conn.execute(db_setup._SCHEMA_MIGRATIONS_DDL)
         conn.execute(
-            "INSERT INTO schema_migrations (version, name, kind, applied_at) "
+            "INSERT INTO grape_t_schema_migrations (version, name, kind, applied_at) "
             "VALUES (?, ?, 'legacy-stamp', '2026-10-30 00:00:00')",
             (db_setup._LEGACY_STAMP_VERSION, db_setup._LEGACY_STAMP_NAME))
         conn.commit()
@@ -686,7 +686,7 @@ class TestLegacyStampSkipNotStamp:
                 db_setup._run_migrations_with_conn(conn, registry=[])
             assert calls == [1], "legacy 首跑未执行"
             stamped = conn.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE kind='legacy-stamp'"
+                "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE kind='legacy-stamp'"
             ).fetchone()[0]
             assert stamped == 0, "门槛拦截时不应打 legacy-stamp 帽"
             assert any("legacy-stamp 不打帽" in r.message for r in caplog.records)
@@ -716,7 +716,7 @@ class TestLegacyStampSkipNotStamp:
             db_setup._run_migrations_with_conn(conn, registry=[])
             assert calls == [1]
             stamped = conn.execute(
-                "SELECT COUNT(*) FROM schema_migrations WHERE kind='legacy-stamp'"
+                "SELECT COUNT(*) FROM grape_t_schema_migrations WHERE kind='legacy-stamp'"
             ).fetchone()[0]
             assert stamped == 1, "门槛放行时应盖 legacy-stamp 帽"
         finally:

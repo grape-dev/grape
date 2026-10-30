@@ -143,7 +143,7 @@ CREATE TABLE IF NOT EXISTS meta (
 # - checksum = fn 源码 sha256 前 16 位，已盖章项漂移只告警不阻断（fail-safe）；
 # - 全新库与在线库统一经 _create_tables 建出，保证两条路径 schema 一致。
 _SCHEMA_MIGRATIONS_DDL = """
-CREATE TABLE IF NOT EXISTS schema_migrations (
+CREATE TABLE IF NOT EXISTS grape_t_schema_migrations (
     version     VARCHAR(32)  NOT NULL,
     name        VARCHAR(128) NOT NULL,
     kind        VARCHAR(16)  NOT NULL,
@@ -866,7 +866,7 @@ CREATE TABLE IF NOT EXISTS admin_accounts (
 _NEW_TABLES = [
     ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
-    ("schema_migrations", _SCHEMA_MIGRATIONS_DDL),
+    ("grape_t_schema_migrations", _SCHEMA_MIGRATIONS_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
     ("task_messages", _TASK_MESSAGES_DDL),
@@ -2933,7 +2933,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     def _applied_versions() -> dict:
         try:
             c = conn.cursor()
-            c.execute("SELECT version, checksum FROM schema_migrations")
+            c.execute("SELECT version, checksum FROM grape_t_schema_migrations")
             return {r[0]: (r[1] or "") for r in c.fetchall()}
         except Exception:
             return {}
@@ -2943,7 +2943,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
     # ── legacy-stamp：版本表无任何盖章行 → 存量库首跑 ──
     if not applied:
         _LEGACY_BLOCKED_DDL.clear()   # 每次首跑前重置，防跨启动残留
-        log.info("schema_migrations 为空：按 legacy-stamp 首跑全量迁移"
+        log.info("grape_t_schema_migrations 为空：按 legacy-stamp 首跑全量迁移"
                  "（行为与历史版本完全一致），完成后一次性盖帽收敛")
         try:
             _run_all_migrations()
@@ -2963,7 +2963,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         try:
             c = conn.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO schema_migrations "
+                "INSERT OR REPLACE INTO grape_t_schema_migrations "
                 "(version, name, kind, applied_at, duration_ms, checksum) "
                 "VALUES (?,?,?,?,?,?)",
                 (_LEGACY_STAMP_VERSION, _LEGACY_STAMP_NAME, "legacy-stamp",
@@ -2983,14 +2983,14 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
             current = _fn_checksum(m.fn)
             if recorded and current and recorded != current:
                 log.warning(
-                    f"schema_migrations checksum 漂移（只告警不阻断）: {m.version} {m.name}"
+                    f"grape_t_schema_migrations checksum 漂移（只告警不阻断）: {m.version} {m.name}"
                     f" recorded={recorded} current={current}")
 
     pending = [m for m in registry if m.version not in applied]
     if not pending:
-        log.info("schema_migrations: 0 pending（全部已盖章，启动迁移段收敛）")
+        log.info("grape_t_schema_migrations: 0 pending（全部已盖章，启动迁移段收敛）")
         return
-    log.info(f"schema_migrations: {len(pending)} pending / {len(registry)} registered")
+    log.info(f"grape_t_schema_migrations: {len(pending)} pending / {len(registry)} registered")
 
     for mig in pending:
         started = _time_mod.monotonic()
@@ -3014,7 +3014,7 @@ def _run_migrations_with_conn(conn, registry: Optional[List[Migration]] = None,
         try:
             c = conn.cursor()
             c.execute(
-                "INSERT OR REPLACE INTO schema_migrations "
+                "INSERT OR REPLACE INTO grape_t_schema_migrations "
                 "(version, name, kind, applied_at, duration_ms, checksum) "
                 "VALUES (?,?,?,?,?,?)",
                 (mig.version, mig.name, mig.kind, _now_iso(), duration_ms,
