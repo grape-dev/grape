@@ -1609,6 +1609,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
     if repo:
         repo_key = _resolve_repo_key(repo)
     else:
+        repo_key = ""
         try:
             _repo = app_current_repo()
             if _repo:
