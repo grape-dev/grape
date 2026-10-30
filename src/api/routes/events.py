@@ -375,8 +375,10 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                 and runtime_execution_kind(_task.get("runtime_id") or 0) == EXEC_MODE_REMOTE
             )
             if _is_worker:
-                cancel_task(task_id)
-                # 事件档案/状态收尾（cancel_task 只更新 task 状态，事件侧需手动补）
+                # Issue #587 审查修复：先详写事件终态（result=用户手动终止）再 cancel_task。
+                # 反序时 cancel_task 内 _cascade_event_terminal 会先把事件置为 cancelled
+                # 并写入通用级联文案，随后 update_event_complete 被终态保护跳过，
+                # 用户可见诊断信息（用户手动终止）丢失。
                 if _task.get("event_seq"):
                     try:
                         from datetime import datetime, timezone
@@ -396,6 +398,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
                         )
                     except Exception as e:
                         log.warning(f"Event terminate: worker cancel event finalize failed: {e}")
+                cancel_task(task_id)
                 cancelled = True
                 log.info(f"Event terminate: seq={seq} task={task_id} cancelled via cancel_task (worker mode)")
             else:

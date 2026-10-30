@@ -46,5 +46,9 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/test_issue_473_range_filter.py tests/test_issue_473_local_engine_range.py -v
+      - name: Event convergence regression tests (issue #587)
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_587_event_convergence.py tests/test_terminate_event.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js

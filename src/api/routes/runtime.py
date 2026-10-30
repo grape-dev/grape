@@ -963,6 +963,14 @@ def converge_event(task_id: str, user: dict = Depends(require_no_session_token))
         raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
     _res = service.converge_event_to_task(task_id)
     log.info(f"converge-event: task={task_id} by={user.get('username', '')} result={_res.get('status')}")
+    # Issue #587 审查修复：补偿收敛同为管理端修复操作，与 terminate/redispatch 一致强制审计留痕
+    if task.get("event_seq"):
+        try:
+            from src.api.routes.events import _audit_admin_action
+            _audit_admin_action(task.get("repo_key", "") or "", int(task["event_seq"]),
+                                "converge-event", user, task_id=task_id)
+        except Exception as _ae:
+            log.warning(f"converge-event: audit failed for task={task_id}: {_ae}")
     return _res
 
 

@@ -116,6 +116,25 @@ class TestTerminalCascade:
         service.update_task_status("task-run-1", "running")
         assert _get_event_status(5806)[0] == "running"
 
+    def test_cascade_releases_event_active_guard(self):
+        """Issue #587 审查修复：级联收敛须同步释放 event_active_guard（不再靠 TTL 兜底）。"""
+        from src.api.event_store import claim_event_guard, update_event_guard_seq
+        _insert_event(5807, status="running")
+        _insert_task("task-guard-1", 5807, status="dispatched")
+        # 模拟派发时占用的活跃守卫（seq=0 占位后回填真实 seq）
+        assert claim_event_guard(REPO, "#587", "coding")
+        update_event_guard_seq(REPO, "#587", "coding", 5807)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM event_active_guard WHERE seq=?", (5807,))
+            assert c.fetchone()[0] == 1, "前置：守卫行存在"
+        service.cancel_task("task-guard-1")
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT COUNT(*) FROM event_active_guard WHERE seq=?", (5807,))
+            assert c.fetchone()[0] == 0, "级联收敛后守卫须即时释放"
+        assert _get_event_status(5807)[0] == "cancelled"
+
 
 class TestConvergeCompensation:
     """补偿收敛入口（converge_event_to_task + 管理端端点）：幂等、可重复调用。"""
@@ -150,6 +169,24 @@ class TestConvergeCompensation:
         res = converge_event("task-ep-1", user={"id": 1, "username": "ops", "auth_type": "session_token"})
         assert res["status"] == "converged"
         assert _get_event_status(5814)[0] == "cancelled"
+
+    def test_endpoint_converge_event_writes_audit_trail(self):
+        """Issue #587 审查修复：补偿收敛端点与 terminate/redispatch 一致强制审计留痕。"""
+        from src.api.routes.runtime import converge_event
+        _insert_event(5815, status="running")
+        _insert_task("task-ep-2", 5815, status="failed", exit_code=1)
+        converge_event("task-ep-2", user={"id": 1, "username": "ops-auditor", "auth_type": "session_token"})
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT actor, payload FROM events WHERE repo_key=? AND event_type='admin_action' "
+                      "AND json_extract(payload, '$.target_event_seq')=?", (REPO, 5815))
+            rows = c.fetchall()
+        assert len(rows) == 1, f"补偿收敛须留痕 1 条审计事件，实际 {len(rows)}"
+        actor, payload = rows[0]
+        assert actor == "ops-auditor"
+        p = json.loads(payload)
+        assert p["action"] == "converge-event"
+        assert p["target_task_id"] == "task-ep-2"
 
     def test_endpoint_404_unknown_task(self):
         from fastapi import HTTPException

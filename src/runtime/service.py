@@ -1804,6 +1804,20 @@ def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int 
             cursor.execute(
                 "UPDATE events SET status='completed', exit_code=0, completed_at=?, result=? WHERE seq=?",
                 (_now, _result, event_seq))
+        # Issue #587 审查修复：级联收敛须同步释放 event_active_guard（与
+        # update_event_status 终态路径语义一致），否则守卫残留只能靠 TTL 30min 兜底。
+        # 在同一事务/游标内完成，避免嵌套获取不可重入的 db_lock。
+        try:
+            _g = cursor.execute(
+                "SELECT repo_key, issue_id, agent_type FROM events WHERE seq=?",
+                (event_seq,)).fetchone()
+            if _g:
+                cursor.execute(
+                    "DELETE FROM event_active_guard WHERE repo_key=? AND issue_id=? "
+                    "AND agent_type=? AND seq=?",
+                    (_g[0], _g[1] or "#0", _g[2] or "", event_seq))
+        except Exception as _ge:
+            log.warning(f"_cascade_event_terminal: guard release failed for seq={event_seq}: {_ge}")
         return True
     except Exception as _e:
         log.warning(f"_cascade_event_terminal: failed for event {event_seq} -> {status}: {_e}")

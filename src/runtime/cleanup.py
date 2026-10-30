@@ -352,11 +352,12 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
             except Exception as _te:
                 log.warning(f"sweeper: terminal task lookup failed: {_te}")
             try:
+                # Nit 修复：import 移出 db_lock 临界区（首次导入不应持锁执行）
+                from src.runtime.service import _cascade_event_terminal
                 with db_lock:
                     _c = db.cursor()
                     _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph2})", dead)
                     _with_task_rows = {r[0] for r in _c.fetchall()}
-                    from src.runtime.service import _cascade_event_terminal
                     _c2 = db.cursor()
                     for s in dead:
                         if s in _terminal_by_seq:

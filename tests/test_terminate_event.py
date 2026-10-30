@@ -132,6 +132,32 @@ class TestTerminateWorkerMode:
             f"事件状态应为 cancelled（#587 级联收敛），实际={row[0] if row else 'None'}"
         )
 
+    def test_worker_event_result_keeps_user_terminate_text(self):
+        """Issue #587 审查修复：worker 终止先详写事件终态再 cancel_task。
+
+        事件 result 须保留「用户手动终止」诊断，不得被 cancel_task 级联的
+        通用文案（任务已取消：级联收敛…）覆盖。
+        """
+        from src.api.routes.events import terminate_event
+
+        _insert_event(seq=103, status="running")
+        rt_id, _ = _insert_remote_runtime()
+        _insert_task("task-worker-4", event_seq=103, runtime_id=rt_id)
+
+        terminate_event(seq=103, user=_TEST_USER)
+
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status, result FROM events WHERE seq=?", (103,))
+            row = c.fetchone()
+        assert row and row[0] == "cancelled"
+        assert row[1] and "用户手动终止" in row[1], (
+            f"事件 result 须保留用户手动终止详情，实际={row[1]!r}"
+        )
+        assert "级联收敛" not in (row[1] or ""), (
+            "worker 模式终止不得被级联通用文案覆盖"
+        )
+
     def test_heartbeat_matches_cancelled_task(self):
         """worker 心跳查询 WHERE status=cancelled 能匹配到新取消的任务。"""
         from src.api.routes.events import terminate_event
