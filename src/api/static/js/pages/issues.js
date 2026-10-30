@@ -703,9 +703,10 @@ function _renderPipelineSection(data) {
       var pulseRing = isCurrent ? '<div style="position:absolute;width:24px;height:24px;border-radius:50%;border:2px solid #0071e3;opacity:0;animation:grapeRing 1.5s ease-out infinite"></div>' : '';
       var innerStyle = isCurrent ? ';position:relative' : '';
       // 节点点击：有事件 seq 则跳转事件详情，否则跳转流水线页面（阻止冒泡到卡片）
+      // Issue #566：failed/cancelled 终态节点也可点击进入事件详情（详情页提供重新派发等操作）
       var nodeSeq = (n.latest_event && n.latest_event.seq) || '';
-      var nodeClick = (isCurrent || isCompleted) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
-      var nodeCursor = (isCurrent || isCompleted) ? ';cursor:pointer' : '';
+      var nodeClick = (isCurrent || isCompleted || isFailed || isCancelled) ? (nodeSeq ? ` onclick="event.stopPropagation();_jumpToNodeEvent(${nodeSeq})"` : ` onclick="event.stopPropagation();_jumpToPipePage()"`) : '';
+      var nodeCursor = (isCurrent || isCompleted || isFailed || isCancelled) ? ';cursor:pointer' : '';
       var nodeIcon = isCompleted ? '✓' : isFailed ? '✕' : isCancelled ? '⊘' : isSkipped ? '–' : (i+1);
       html += `<div style="display:flex;flex-direction:column;align-items:center;gap:4px;flex:1;min-width:0${nodeCursor}"${nodeClick}>`;
       html += `<div style="width:24px;height:24px;border-radius:50%;background:${bg};display:flex;align-items:center;justify-content:center;color:#fff;font-size:11px;font-weight:600;flex-shrink:0${innerStyle}${pulseStyle}">${pulseRing}${nodeIcon}</div>`;

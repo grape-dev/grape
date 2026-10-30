@@ -146,10 +146,12 @@ function _evDurationText(data) {
 
 // 重新派发按钮显示条件（event-redispatch-design.md §3.1）：
 // failed / running>10min / 关联 task 卡在 dispatched
+// Issue #566：cancelled（用户取消）终态与 failed 同权展示重新派发/本机重试按钮
 function _evRedispatchVisible(data) {
   const _ts = data.started_at ? new Date(data.started_at).getTime() : 0;
   const _created = data.created_at ? new Date(data.created_at).getTime() : 0;
   return data.status === 'failed' ||
+    data.status === 'cancelled' ||
     ((data.status === 'running' || data.status === 'pending') &&
       ((_ts && (Date.now() - _ts) > 10 * 60 * 1000) ||
        (!_ts && _created && (Date.now() - _created) > 10 * 60 * 1000))) ||
@@ -163,8 +165,8 @@ function _evStatusText(data) {
   const _a2aRedoVisible =
     data.status === 'completed' &&
     data.issue_id && !String(data.issue_id).startsWith('#pr_');
-  const _statusLabel = data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : (data.status === 'pending' ? (I18N.t('events.status_pending') || '排队中') : I18N.t('events.status_running_prefix') + data.status);
-  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : data.status === 'pending' ? '' : 'ty'}">${_statusLabel}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${(data.status === 'running' || data.status === 'pending') ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
+  const _statusLabel = data.status === 'completed' ? I18N.t('events.status_success') : data.status === 'failed' ? I18N.t('events.status_failed') : data.status === 'cancelled' ? (I18N.t('events.status_cancelled') || '已取消') : (data.status === 'pending' ? (I18N.t('events.status_pending') || '排队中') : I18N.t('events.status_running_prefix') + data.status);
+  return `<span class="${data.status === 'completed' ? 'tgx' : data.status === 'failed' ? 'tr' : data.status === 'cancelled' ? 't3' : data.status === 'pending' ? '' : 'ty'}">${_statusLabel}</span>${_redispatchVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="redispatchEvent(${data.seq})">${I18N.t('events.btn_redispatch')}</button> <button class="bt bt-o bt-s" style="margin-left:4px" onclick="localRetryEvent(${data.seq})">${I18N.t('events.btn_local_retry')}</button>` : ''}${_a2aRedoVisible ? ` <button class="bt bt-o bt-s" style="margin-left:8px" onclick="a2aRedoEvent(${data.seq})">${I18N.t('events.btn_a2a_redo')}</button>` : ''}${(data.status === 'running' || data.status === 'pending') ? ` <button class="bt bt-o bt-s" style="margin-left:8px;color:var(--tr, #e74c3c);border-color:var(--tr, #e74c3c)" onclick="terminateEventTask(${data.seq}, '${(data.task && data.task.task_id) || ''}')" title="${I18N.t('events.terminate_title')}">${I18N.t('events.btn_terminate')}</button>` : ''}`;
 }
 
 // Issue #494：失败态展示错误归因摘要（>200 字符截断 + 展开全文/收起）
