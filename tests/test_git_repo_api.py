@@ -218,6 +218,39 @@ def test_pulls_mapping(gitcode_calls, _client):
     assert gitcode_calls[-1]["url"].endswith("/pulls/9/files")
 
 
+def test_pulls_comments_update_delete(gitcode_calls, _client):
+    """Issue #563：PR 评论 update/delete 透传上游 /pulls/comments/{id}（comment id 全局唯一，不含 PR number）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+
+    r = client.patch(f"{base}/pulls/9/comments/123", json={"body": "corrected"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "PATCH"
+    assert last["url"].endswith("/pulls/comments/123")
+    assert last["body"] == {"body": "corrected"}
+
+    r = client.delete(f"{base}/pulls/9/comments/123")
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "DELETE"
+    assert last["url"].endswith("/pulls/comments/123")
+    assert last["body"] is None
+
+
+def test_pulls_comments_update_delete_contract_operations():
+    """Issue #563：新端点进 OpenAPI 契约且标注 session_only（CLI refresh 后自动获得命令）。"""
+    from src.api.openapi import custom_openapi
+    schema = custom_openapi(app)
+    ops = {(p, m) for p, methods in schema["paths"].items() for m in methods}
+    _cp = "/api/git-repo/{owner}/{repo}/pulls/{number}/comments/{comment_id}"
+    assert (_cp, "patch") in ops
+    assert (_cp, "delete") in ops
+    op = schema["paths"][_cp]["patch"]
+    assert op["operationId"] == "gitrepo_pulls_comments_update"
+    assert op.get("x-token-scope") == "session_only"
+
+
 def test_contents_branches_milestones_labels(gitcode_calls, _client):
     client = _client
     base = f"/api/git-repo/{OWNER}/{REPO}"

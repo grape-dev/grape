@@ -573,6 +573,22 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     return resp
 
 
+@router.patch("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_update", summary="Update PR comment", description="Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments.")
+def update_pull_comment(owner: str, repo: str, number: int, comment_id: int, body: CommentBody,
+                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # 上游 comment id 全局唯一（不含 PR number）：透传 PATCH /pulls/comments/{id}
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+                    _repo_token(owner, repo, user, p), {"body": body.body})
+
+
+@router.delete("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_delete", summary="Delete PR comment", description="Deletes a PR comment by comment id. Issue #563: CLI self-correction for mis-sent PR comments.")
+def delete_pull_comment(owner: str, repo: str, number: int, comment_id: int,
+                        user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # 上游 comment id 全局唯一（不含 PR number）：透传 DELETE /pulls/comments/{id}
+    return _vcs_req(p, "DELETE", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+                    _repo_token(owner, repo, user, p))
+
+
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files", description="Lists files changed in a pull request.")
 def list_pull_files(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
                     p: str = Depends(_provider)):
