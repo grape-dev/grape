@@ -12,8 +12,11 @@
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）。
 > agent 无需清单——当前场景经 env `GRAPE_SCENE_ID` 注入，取详情走 `GET /api/scenes/{scene_id}`。
 > CLI：`grape scenes list`（operation_id=`scenes_list`，命令名 ≠ 路径，见 README「CLI 命令映射」）。
+> Issue #534 口径结论（与 #529 联动）：**维持 user_only 不放开**——`tk_` 是 agent 任务执行凭据，
+> scenes list 是可指定任意 `--repo` 的跨仓库枚举入口，放开超出会话凭据 scope 模型；
+> 会话内取当前场景请用 `GET /api/scenes/{scene_id}`（dual，缺省按会话仓库解析）。
 
-| Query | `repo`（可选；带 repo 时返回仓库级场景，否则 official） |
+| Query | `repo`（可选；带 repo 时返回仓库级场景；缺省按会话/请求上下文解析，Issue #534） |
 | 出参 | 可用场景数组 |
 | 返回 | 200 |
 
@@ -72,7 +75,7 @@
 ## GET /api/scenes/with-pipeline — 场景列表（含流水线）
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| Query | `repo`（可选） |
+| Query | `repo`（可选；缺省按会话/请求上下文解析，Issue #534） |
 | 出参 | `[{scene_id, name, description, display_name, nodes, onboarding, is_active}]` |
 | 返回 | 200 |
 
@@ -206,8 +209,9 @@
 > 会话 token 调用供 agent 按 `GRAPE_SCENE_ID`（env 注入）取当前场景详情（nodes/onboarding 等）。
 
 | Path | `{scene_id}` |
+| Query | `repo`（可选；Issue #534 缺省按会话上下文解析：显式 `repo` 优先 → `tk_` 绑定仓库 → 请求中间件 repo 上下文，权限校验不放松） |
 | 出参 | `{id, name, nodes[], onboarding, scene_type}`（`id`=传入的 scene_id；`nodes`=技能链；`onboarding` 默认 `repo-onboarding`；`scene_type` 默认 `standard`） |
-| 返回 | 200；404 |
+| 返回 | 200；404（报错附「跨仓库场景请附 --repo <owner/repo> 后重试」提示） |
 
 **示例（`default` 场景）**：
 

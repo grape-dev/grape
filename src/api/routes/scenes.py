@@ -29,6 +29,31 @@ def _resolve_repo_key(repo: str) -> str:
     return rk
 
 
+def _resolve_scene_repo_key(repo: str, user: dict) -> str:
+    """解析场景查询的 repo_key（Issue #534）。
+
+    优先级：显式 repo 参数 > 会话级 token（tk_）绑定的 repo_key > 请求中间件 repo_var 上下文。
+    替换失效的 app_current_repo() placeholder（固定返回 None）导致的缺省 repo_key="" 问题。
+    解析结果仍作为 get_scenes / get_pipeline_config 的 repo 作用域入参，走既有归属校验，权限不放松。
+    """
+    if repo:
+        # 显式 --repo 优先（向后兼容，行为不变）
+        return _resolve_repo_key(repo)
+    _u = user or {}
+    if _u.get("auth_type") == "session_token" and _u.get("repo_key"):
+        # 缺省回落 1：会话级 token 绑定的 repo_key（token 绑定仓库，自带前缀）
+        return _u["repo_key"]
+    # 缺省回落 2：请求中间件解析的 repo 上下文（query param / 路径推导）
+    try:
+        from src.config import repo_var
+        _ctx_repo = repo_var.get()
+        if _ctx_repo:
+            return _ctx_repo if ":" in _ctx_repo else _resolve_repo_key(_ctx_repo)
+    except Exception:
+        pass
+    return ""
+
+
 def _load_scenes() -> dict:
     """读取 agent-skill-mapping.json 的场景配置（legacy fallback for apply）"""
     if not os.path.exists(_CONFIG_PATH):
@@ -42,16 +67,7 @@ def _load_scenes() -> dict:
 def list_scenes(user: dict = Depends(require_no_session_token), repo: str = ""):
     """返回所有可用场景列表（repo，不含 official）"""
     from src.api.pipeline_config import get_scenes
-    repo_key = ""
-    if repo:
-        repo_key = _resolve_repo_key(repo)
-    else:
-        try:
-            _repo = app_current_repo()
-            if _repo:
-                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
-        except Exception:
-            pass
+    repo_key = _resolve_scene_repo_key(repo, user)
     scenes = get_scenes(repo_key=repo_key)
     return {"scenes": scenes}
 
@@ -65,16 +81,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     """
     from src.api.pipeline_config import get_scenes, get_pipeline_config
     from src.repo_key import to_repo_key
-    repo_key = ""
-    if repo:
-        repo_key = _resolve_repo_key(repo)
-    else:
-        try:
-            _repo = app_current_repo()
-            if _repo:
-                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
-        except Exception:
-            pass
+    repo_key = _resolve_scene_repo_key(repo, user)
     scene_list = get_scenes(repo_key=repo_key)
 
     # 构建 skill_name → display_name 映射，给每个 node 补 skill_display_name
@@ -1404,24 +1411,7 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
     - 响应 id 恒为解析到的真实 scene_id（cfg['scene_id']），不回显请求值。
     """
     from src.api.pipeline_config import get_pipeline_config
-    repo_key = ""
-    if repo:
-        # 显式 --repo 优先（向后兼容）
-        repo_key = _resolve_repo_key(repo)
-    else:
-        # 缺省回落 1：会话级 token 绑定的 repo_key
-        _u = user or {}
-        if _u.get("auth_type") == "session_token" and _u.get("repo_key"):
-            repo_key = _u["repo_key"]
-        else:
-            # 缺省回落 2：请求中间件解析的 repo 上下文（query param / 路径推导）
-            try:
-                from src.config import repo_var
-                _ctx_repo = repo_var.get()
-                if _ctx_repo:
-                    repo_key = _ctx_repo if ":" in _ctx_repo else _resolve_repo_key(_ctx_repo)
-            except Exception:
-                pass
+    repo_key = _resolve_scene_repo_key(repo, user)
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在（跨仓库场景请附 --repo <owner/repo> 后重试）"})
