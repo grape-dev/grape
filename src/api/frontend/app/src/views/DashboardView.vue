@@ -3183,8 +3183,9 @@ onBeforeUnmount(function () {
   margin: 0 4px;
   flex-shrink: 0;
 }
-/* 引擎徽章 */
-.dbv-engbadge {
+/* 引擎徽章 —— :deep 必须：徽章是 v-html 注入的裸 span，无 scope 属性，
+   scoped 规则 .dbv-engbadge[data-v-xxx] 匹配不上会退化为纯黑文本（胶囊丢失） */
+:deep(.dbv-engbadge) {
   display: inline-flex;
   align-items: center;
   gap: 4px;
@@ -3193,19 +3194,19 @@ onBeforeUnmount(function () {
   padding: 4px 12px;
   border-radius: 999px;
 }
-.dbv-engbadge.green {
+:deep(.dbv-engbadge.green) {
   background: #34c75914;
   color: #34c759;
 }
-.dbv-engbadge.blue {
+:deep(.dbv-engbadge.blue) {
   background: #0071e314;
   color: #0071e3;
 }
-.dbv-engbadge.red {
+:deep(.dbv-engbadge.red) {
   background: #ff3b3014;
   color: #ff3b30;
 }
-.dbv-engbadge.gray {
+:deep(.dbv-engbadge.gray) {
   background: #86868b14;
   color: #86868b;
 }
