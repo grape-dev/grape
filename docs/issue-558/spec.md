@@ -7,6 +7,8 @@
 2. `pulls merge` 补充 `merge_method`（merge/squash/rebase）与 `title` 参数，契约/服务端/Agent 直调全链路透传。
 
 ## 范围
+
+> **冲突解决说明（PR #755 rebase onto weekly-08-mys）**：基线上 #549 已先合入 `UpstreamAPIError`（携带 status_code + 完整 message）。解决冲突时错误透传统一复用 `UpstreamAPIError`，`_vcs_req` 捕获后透传上游状态码与完整 message（去除 [:500] 截断），不再重复引入 `VcsUpstreamError`；其余范围不变，下文 `VcsUpstreamError` 描述按此映射理解。
 - `src/user/repo_manager.py`：新增结构化 `VcsUpstreamError`（携带 status_code + 完整 body）；`_req` / `_req_query` / `_github_req` 上游非 2xx 改抛该异常，去除 [:500] 截断（message 格式保持 `... failed (code): body` 以兼容 `_extract_http_code`）。
 - `src/api/git_repo_api.py`：`_vcs_req` 捕获 `VcsUpstreamError` → 以上游真实状态码抛 `HTTPException`（detail 携带完整 message）；其余异常维持 502。`merge_pull` 增加 `PRMergeBody`（merge_method/title，空值不透传，保证存量行为不变）。
 - `src/vcs/api_client.py`：`merge_pr(pr_number, merge_method="", title="")` 透传参数（gitlab squash 映射 `{"squash": True}`）；`_do_request` 错误 dict 增加 `status_code` 字段，`detail` 保留上游全文。
