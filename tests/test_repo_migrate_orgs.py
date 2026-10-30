@@ -179,7 +179,7 @@ def test_migrate_orgs_upstream_failure_502(monkeypatch):
     token = _jwt(uid, username)
     r = client.get("/api/repos/migrate-orgs",
                    headers={"Authorization": f"Bearer {token}"})
-    assert r.status_code in (401, 502)
-    if r.status_code == 502:
-        detail = r.json().get("detail") or r.json()
-        assert detail.get("code") == 502
+    # mock 用户 token 有效：with_oauth_token 无 401 刷新重试路径，上游 500 应稳定映射 502
+    assert r.status_code == 502, r.text
+    detail = r.json().get("detail") or r.json()
+    assert detail.get("code") == 502

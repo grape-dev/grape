@@ -2051,10 +2051,14 @@ def list_migrate_orgs(user: dict = Depends(require_no_session_token)):
             "code": 502, "message": "无法获取组织列表，请稍后重试"})
 
     # 追加当前用户个人登录名作为可迁移目标（仓库可迁到个人名下）
+    # PR #747 审查 Optional：与上方 orgs 拉取同口径——HTTPException 直接透传（如 401 token
+    # 失效语义不吞掉）；仅其它未知异常降级为空 personal（少一个「个人」选项，不阻塞主列表）
     personal_login = ""
     try:
         from src.user.repo_manager import get_user_gitcode_login
         personal_login = with_oauth_token(user, "gitcode", get_user_gitcode_login) or ""
+    except HTTPException:
+        raise
     except Exception:
         personal_login = ""
 

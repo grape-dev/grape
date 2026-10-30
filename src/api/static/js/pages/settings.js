@@ -106,6 +106,14 @@ function unhostFromSettings(fullName) {
 }
 
 // Issue #543: 拉取当前用户拥有的 GitCode 组织列表，填充迁移目标组织下拉框
+// HTML 转义（与 app.js:1229 _esc / issues.js:177 _escapeHtml 同口径）：
+// 组织名/个人名来自 GitCode API，可能含 <、"、& 等 HTML 特殊字符，
+// 拼进 option 的 value/label 前必须转义，防止存储型 XSS（PR #747 审查 Critical）。
+function _migrateEsc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
 function _loadMigrateOrgs() {
   var sel = document.getElementById('migrateTargetOwner');
   if (!sel) return;
@@ -116,13 +124,15 @@ function _loadMigrateOrgs() {
     var curOwner = (app.currentRepo() || {}).owner || '';
     var html = '<option value="">' + I18N.t('settings.host.migrate_owner_placeholder') + '</option>';
     if (personal && personal !== curOwner) {
-      html += '<option value="' + personal + '">' + personal + ' (' + I18N.t('settings.host.migrate_personal') + ')</option>';
+      var pEsc = _migrateEsc(personal);
+      html += '<option value="' + pEsc + '">' + pEsc + ' (' + I18N.t('settings.host.migrate_personal') + ')</option>';
     }
     for (var i = 0; i < orgs.length; i++) {
       var o = orgs[i];
       if (o.login === curOwner) continue;
-      var label = (o.name && o.name !== o.login) ? o.login + ' (' + o.name + ')' : o.login;
-      html += '<option value="' + o.login + '">' + label + '</option>';
+      var loginEsc = _migrateEsc(o.login);
+      var label = (o.name && o.name !== o.login) ? loginEsc + ' (' + _migrateEsc(o.name) + ')' : loginEsc;
+      html += '<option value="' + loginEsc + '">' + label + '</option>';
     }
     if (orgs.length === 0 && !personal) {
       html = '<option value="">' + I18N.t('settings.host.migrate_orgs_empty') + '</option>';
