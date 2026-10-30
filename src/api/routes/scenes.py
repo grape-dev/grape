@@ -1391,28 +1391,40 @@ def _delete_scene_icon_file(file_key: str):
 
 
 @router.get("/{scene_id}", operation_id="scenes_detail", summary="Get scene detail", description="Scene detail with nodes + engine info. Dual: user (JWT/API key) and session token (tk_, agent reads its current scene pipeline on demand).")
-def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api_key), repo: str = ""):
+def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_current_user_or_api_key)):
     """返回场景详情（nodes + engine 信息）。
 
-    Issue #502 读侧修复：
-    - repo_key 解析优先级 = ?repo= 请求参数 > 会话上下文 app_current_repo()；
+    Issue #533/#534: 未显式传 repo 时按会话上下文解析场景归属——
+    会话级 token（tk_）优先取其绑定 repo_key，其次回落请求中间件的 repo 上下文；
+    显式 --repo 优先、行为不变。解析出的 repo_key 仍走 get_pipeline_config
+    既有 repo 作用域归属校验，权限不放松。
+    Issue #502 读侧修复（weekly-09 侧已在）：
     - 解析不到时返回 404，不再静默回退默认场景并回显请求 id；
+    - 命中 pipelines.json default 兜底（cfg.fallback）同样视为未解析到，禁止静默回退；
     - 响应 id 恒为解析到的真实 scene_id（cfg['scene_id']），不回显请求值。
     """
     from src.api.pipeline_config import get_pipeline_config
     repo_key = ""
     if repo:
+        # 显式 --repo 优先（向后兼容）
         repo_key = _resolve_repo_key(repo)
     else:
-        try:
-            _repo = app_current_repo()
-            if _repo:
-                repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
-        except Exception:
-            pass
+        # 缺省回落 1：会话级 token 绑定的 repo_key
+        _u = user or {}
+        if _u.get("auth_type") == "session_token" and _u.get("repo_key"):
+            repo_key = _u["repo_key"]
+        else:
+            # 缺省回落 2：请求中间件解析的 repo 上下文（query param / 路径推导）
+            try:
+                from src.config import repo_var
+                _ctx_repo = repo_var.get()
+                if _ctx_repo:
+                    repo_key = _ctx_repo if ":" in _ctx_repo else _resolve_repo_key(_ctx_repo)
+            except Exception:
+                pass
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
     if not cfg:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在（跨仓库场景请附 --repo <owner/repo> 后重试）"})
     if cfg.get("fallback"):
         # 命中 pipelines.json default 兜底（与请求 scene_id 不一致）→ 视为未解析到，禁止静默回退
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
@@ -1421,6 +1433,9 @@ def get_scene_detail(scene_id: str, user: dict = Depends(get_current_user_or_api
             "display_name": cfg.get("display_name") or cfg["name"],
             "onboarding": cfg.get("onboarding", ""),
             "scene_type": cfg.get("scene_type", "standard")}
+
+
+
 
 
 @router.get("/skills/{agent_type}", operation_id="scenes_skills_for_agent", summary="List skills for agent type", description="Lists selectable skills for an agent type (search + scope filter + paging).")
