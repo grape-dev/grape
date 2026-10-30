@@ -811,7 +811,9 @@ CREATE TABLE IF NOT EXISTS autopilot_executions (
     created_at      TEXT DEFAULT (datetime('now')),
     -- v3.0 新增字段
     agent_type      TEXT DEFAULT '',                     -- 执行快照
-    findings_json   MEDIUMTEXT DEFAULT ''                -- 问题列表JSON
+    findings_json   MEDIUMTEXT DEFAULT '',               -- findings list JSON
+    -- Feishu subscription notification: terminal-state notify idempotency guard
+    notified        INTEGER NOT NULL DEFAULT 0           -- 0=pending 1=notified (prevents double-send from two terminal hooks)
 )
 """
 
@@ -5001,8 +5003,10 @@ def _backfill_scene_display_names():
             # autopilot_executions 新字段
             _ensure_column(c, "autopilot_executions", "agent_type", "TEXT DEFAULT ''")
             _ensure_column(c, "autopilot_executions", "findings_json", "MEDIUMTEXT DEFAULT ''")
+            # Feishu subscription notification idempotency guard
+            _ensure_column(c, "autopilot_executions", "notified", "INTEGER NOT NULL DEFAULT 0")
             db.commit()
-            log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch ensured")
+            log.info("Autopilot v3.0 schema migration: agent_type/instruction/skill_name/findings_json/custom_fields/work_branch/notified ensured")
     except Exception as e:
         log.warning(f"Autopilot v3.0 schema migration failed: {e}")
 

@@ -556,29 +556,34 @@ class FeishuAsync:
     async def send_card_to_user(self, ctx: BotContext, open_id: str, text: str,
                                 title: str = "DevOps Bot", actions: list | None = None,
                                 template: str = "blue", fields: list | None = None,
-                                note: str | None = None) -> str:
+                                note: str | None = None, card_v2: dict | None = None) -> str:
         """主动发送卡片给用户
 
         template: 头部模板色（blue/wathet/turquoise/green/yellow/orange/red/grey...）。
         fields:   结构化键值对字段元素（{"is_short":...,"text":{...}} 列表），正文后追加 div。
         note:     卡片底部灰色注释（如发送时间戳）。
+        card_v2:  完整卡片 2.0 JSON（schema:"2.0"）——传入时忽略上述参数直接发送 2.0 卡
+                  （autopilot 飞书订阅通知等新卡片用 2.0 排版）。
         """
         token = await self._ensure_token(ctx)
         if not token:
             return ""
         session = await self._get_session()
         url = f"{FEISHU_BASE}/im/v1/messages?receive_id_type=open_id"
-        elements = to_lark_elements(text, 2000)
-        if fields:
-            elements.append({"tag": "div", "fields": fields})
-        if actions:
-            elements.append({"tag": "action", "actions": actions})
-        if note:
-            elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
-        card = {
-            "elements": elements,
-            "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
-        }
+        if card_v2 is not None:
+            card = card_v2
+        else:
+            elements = to_lark_elements(text, 2000)
+            if fields:
+                elements.append({"tag": "div", "fields": fields})
+            if actions:
+                elements.append({"tag": "action", "actions": actions})
+            if note:
+                elements.append({"tag": "note", "elements": [{"tag": "plain_text", "content": note}]})
+            card = {
+                "elements": elements,
+                "header": {"title": {"tag": "plain_text", "content": title}, "template": template},
+            }
         payload = {
             "receive_id": open_id,
             "msg_type": "interactive",
@@ -596,6 +601,36 @@ class FeishuAsync:
             ctx.metrics.messages_failed += 1
             log.warning(f"[{ctx.name}] send_card_to_user failed: {e}")
         return ""
+
+    async def update_card_by_token(self, ctx: BotContext, action_token: str, card: dict) -> bool:
+        """延迟更新卡片（飞书 interactive/v1/card/update）。
+
+        用 card.action.trigger 事件回传的 token 原地更新同一张卡，不产生新消息。
+        限制：token 30 分钟有效、同一 token 只能用 2 次；必须在 3s 内先 ACK 回调。
+        card 为完整卡片 JSON（1.0 或 2.0 均可，飞书按内容自动识别）。
+        """
+        if not action_token:
+            log.warning(f"[{ctx.name}] update_card_by_token: empty token")
+            return False
+        token = await self._ensure_token(ctx)
+        if not token:
+            return False
+        session = await self._get_session()
+        url = f"{FEISHU_BASE}/interactive/v1/card/update"
+        payload = {"token": action_token, "card": card}
+        headers = {"Authorization": f"Bearer {token}"}
+        try:
+            async with session.post(url, json=payload, headers=headers) as resp:
+                data = await resp.json()
+                if data.get("code", -1) == 0:
+                    ctx.metrics.messages_sent += 1
+                    log.info(f"[{ctx.name}] update_card_by_token ok")
+                    return True
+                log.warning(f"[{ctx.name}] update_card_by_token failed: code={data.get('code')} msg={data.get('msg','')[:60]}")
+        except Exception as e:
+            ctx.metrics.messages_failed += 1
+            log.warning(f"[{ctx.name}] update_card_by_token error: {e}")
+        return False
 
     async def send_quick_cmd_card(self, ctx: BotContext, open_id: str) -> str:
             """发送欢迎卡片，包含快捷命令按钮
@@ -927,6 +962,40 @@ def _parse_card_action(event_data: dict) -> dict | None:
         value = json.loads(value_raw) if isinstance(value_raw, str) else (value_raw or {})
     except (json.JSONDecodeError, TypeError):
         value = {}
+    # select_static 组件：选中值优先从 action.option 取（新选中值），
+    # action.value 是 select 组件的当前 value 字段（初始值或上一次选中值）——
+    # 第一次选中时 value 仍是旧值，option 才是真正新选的。
+    _action_tag = action.get("tag", "")
+    if _action_tag == "select_static" or "option" in action or "selected_option" in action:
+        _opt_raw = action.get("option")
+        if isinstance(_opt_raw, str):
+            try:
+                _opt_raw = json.loads(_opt_raw)
+            except (json.JSONDecodeError, TypeError):
+                _opt_raw = None
+        if isinstance(_opt_raw, dict) and _opt_raw.get("cmd"):
+            value = _opt_raw
+        elif isinstance(action.get("selected_option"), dict):
+            _sel = action["selected_option"].get("value", {})
+            if isinstance(_sel, str):
+                try:
+                    _sel = json.loads(_sel)
+                except (json.JSONDecodeError, TypeError):
+                    _sel = None
+            if isinstance(_sel, dict) and _sel.get("cmd"):
+                value = _sel
+    # 卡片 2.0 按钮：回调值在 behaviors[].value（type=callback；不在 action.value）。
+    # 兼容 behaviors[].callback.value 包装形态（部分事件网关会包一层）。
+    if not (value or {}).get("cmd"):
+        for _bh in (action.get("behaviors") or []):
+            if not isinstance(_bh, dict):
+                continue
+            _bv = _bh.get("value")
+            if not (isinstance(_bv, dict) and _bv.get("cmd")):
+                _bv = (_bh.get("callback") or {}).get("value", {})
+            if isinstance(_bv, dict) and _bv.get("cmd"):
+                value = {**value, **_bv} if isinstance(value, dict) else dict(_bv)
+                break
     cmd = (value.get("cmd") or "").strip()
     if not cmd:
         log.info(f"card.action.trigger without cmd: {value_raw}")
@@ -950,6 +1019,9 @@ def _parse_card_action(event_data: dict) -> dict | None:
         "_reply_id": msg_id,  # 真实消息 ID，用于回复
         "message_type": "text",
         "_card_value": value if isinstance(value, dict) else {},  # 按钮附加字段（cmd 之外的 目标上下文）
+        # 延迟更新令牌（interactive/v1/card/update 用，30 分钟有效、每次交互刷新）：
+        # 供"卡片原地状态流转"方案（选问题→选场景→确认 同一张卡）使用
+        "_action_token": str(event.get("token") or "")[:200],
     }
 
 

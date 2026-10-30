@@ -44,19 +44,34 @@ _FINDINGS_PATTERN_LOOSE = re.compile(
 )
 
 _FINDINGS_FORMAT_TEMPLATE = """\
-请在执行结果的末尾输出问题列表，用 HTML 注释标记包裹（必须严格按以下格式，不要在标记头或 JSON 的 key 中插入换行符）：
+请在执行结果的末尾输出任务产出列表，用 HTML 注释标记包裹（必须严格按以下格式，不要在标记头或 JSON 的 key 中插入换行符）：
 
 <!-- autopilot-findings
-{"summary":"本次巡检总结（一句话）","findings":[{"id":"f1","title":"问题标题","severity":"high","category":"security","description":"问题描述和建议","suggested_assignee":"coding","suggested_skill":"implementation"}]}
+{"result":"ok","summary":"执行结论：整体判定 + 关键产出和需关注事项，2-4 句","findings":[{"id":"f1","title":"问题标题","severity":"high","category":"security","description":"问题描述和建议","suggested_assignee":"coding","suggested_skill":"implementation"}]}
 -->
 
 规则：
 - 标记头必须是 <!-- autopilot-findings，中间不能有空格或换行
 - JSON 必须是单行紧凑格式，key 和 value 之间不要加换行符
+- result: ok/warning/error 三档整体判定 —— ok=任务目标达成且无需关注事项；warning=任务完成但存在需要关注的事项；error=任务未能达成目标或发现需立即处理的问题
+- summary 是结论性概览：先给整体判定（对应 result 的中文描述），再概括关键产出和需要关注的事项，2-4 句，不要罗列所有 finding
 - severity: high/medium/low
 - category: security/quality/documentation/performance/other
 - findings 为空数组表示未发现问题
-- 即使未发现问题也要包含空数组：{"summary":"未发现问题","findings":[]}"""
+- 即使未发现问题也要包含空数组：{"result":"ok","summary":"任务执行完成，未发现问题","findings":[]}"""
+
+
+def _strip_trailing_garbage(raw: str) -> str:
+    """剥离 JSON 尾部非 JSON 残余字符。
+
+    ACP 流式 chunk 边界可能在 --> 前留下 - 或 -- 残片，
+    _ensure_closed 只补闭合括号不剥这类垃圾 → json.loads 报 Extra data。
+    策略：从尾部往前扫，跳过空白和 - 字符，找到最后一个 } 为止。
+    """
+    s = raw.rstrip()
+    while s and s[-1] in ('-', ' ', '\t', '\n', '\r'):
+        s = s[:-1].rstrip()
+    return s
 
 
 def _heal_findings_marker(text: str) -> str:
@@ -122,6 +137,9 @@ def parse_findings(agent_output: str) -> dict:
             raw = _ensure_closed(raw)
         except ImportError:
             pass  # hermes_acp 不可用时回退原有容错
+        # 剥离 JSON 尾部残余（流式 chunk 可能在 --> 前留下 - 或 -- 残片，
+        # _ensure_closed 不处理非括号垃圾 → json.loads 报 Extra data）
+        raw = _strip_trailing_garbage(raw)
         data = json.loads(raw)
         # 修复流式输出在 JSON key 中插入的换行符（如 "description\n" → "description"）
         data = {k.replace('\n', '') if isinstance(k, str) else k: v for k, v in data.items()}
@@ -139,6 +157,7 @@ def parse_findings(agent_output: str) -> dict:
             f.setdefault("suggested_skill", "implementation")
             valid.append(f)
         return {
+            "result": data.get("result", ""),
             "summary": data.get("summary", ""),
             "findings": valid,
             "parse_error": "" if valid else "no valid findings"
@@ -526,6 +545,202 @@ def _finalize_autopilot_task(task_id: str, exec_id: int, exit_code: int, final_t
 
     log.info(f"Autopilot exec {exec_id}: completed status={status} findings={len(findings_result['findings'])}")
 
+    # 飞书订阅通知（autopilot-feishu-subscription-design.md §4.4）：终态挂载点①（worker 回调收尾）
+    # 与 _poll_dispatched_completion 挂载点②以 notified 列互斥，先到者发
+    _notify_subscribers(_exec_task_id(exec_id), exec_id, status,
+                        _result_summary, findings_result)
+
+
+# ====== 飞书订阅通知（autopilot-feishu-subscription-design.md §4.4）======
+
+# result 判级 → 卡片模板色（§5.3）；执行失败/取消不查 result 直接红
+_RESULT_TEMPLATE = {"ok": "green", "warning": "yellow", "error": "red", "": "grey"}
+_RESULT_TITLE = {"ok": "✅ 任务执行完成", "warning": "⚠️ 任务执行完成（有需关注事项）",
+                 "error": "❌ 任务执行需处理", "": "✅ 任务执行完成"}
+_SEVERITY_EMOJI = {"high": "🔴", "medium": "🟡", "low": "🟢"}
+
+
+def _autopilot_result_level(status: str, findings_result: dict) -> str:
+    """终态 → 判级：执行失败/取消直接 error；成功取 findings 的 result 字段（旧数据缺省空）。"""
+    if status in ("failed", "cancelled"):
+        return "error"
+    _r = (findings_result or {}).get("result", "")
+    return _r if _r in ("ok", "warning", "error") else ""
+
+
+def build_exec_card(task_name: str, repo_key: str, exec_id: int, status: str,
+                    result_summary: str, findings_result: dict, web_url: str) -> dict:
+    """构建第一段推送卡（§5.1）。
+
+    纯函数：发卡与（未来的）更新共用同一渲染，输入即 findings_json 同源数据。
+    返回 send_card_to_user 参数组（1.0 参数 + 2.0 完整卡，发送侧择优）。
+    """
+    _lvl = _autopilot_result_level(status, findings_result)
+    _findings = (findings_result or {}).get("findings", [])
+    _summary = (result_summary or "").strip() or (findings_result or {}).get("summary", "")
+    # findings 以列表呈现：每条 severity emoji + 类别 + 标题
+    text_parts = []
+    if _summary:
+        text_parts.append(_summary)
+    if _findings:
+        text_parts.append("")
+        text_parts.append("**产出问题**")
+        for f in _findings[:10]:
+            _sev = (f.get("severity") or "medium").lower()
+            text_parts.append(f"{_SEVERITY_EMOJI.get(_sev, '⚪')} **{f.get('title', '')}** "
+                              f"<font color='grey'>{f.get('category', '-')}</font>")
+        if len(_findings) > 10:
+            text_parts.append(f"<font color='grey'>其余 {len(_findings) - 10} 个见详情</font>")
+    notify_text = "\n".join(text_parts) or ("任务执行完成。" if status == "success" else "任务执行失败。")
+    fields = [{"is_short": True, "text": {"tag": "lark_md", "content": f"**仓库**\n{repo_key or '-'}"}},
+              {"is_short": True, "text": {"tag": "lark_md", "content": f"**产出问题**\n{len(_findings)} 个"}}]
+    actions = [{"tag": "button", "text": {"tag": "plain_text", "content": "📋 查看问题详情"},
+                "value": {"cmd": "/finding-list", "exec_id": exec_id}}]
+    if web_url:
+        actions.append({"tag": "button", "text": {"tag": "plain_text", "content": "查看网页详情 ↗"},
+                        "url": web_url})
+    # 卡片 2.0 完整 JSON（2.0 支持 font 灰字；按钮走 behaviors.callback.value，
+    # cmd 同 1.0 解析链）
+    body_elements = (
+        [{"tag": "div", "text": {"tag": "lark_md", "content": _summary or notify_text[:200]}}]
+        + _lark_findings_elements(_findings)
+        + [{"tag": "hr"}]
+        + [{"tag": "div", "fields": [
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**仓库**\n{repo_key or '-'}"}},
+            {"is_short": True, "text": {"tag": "lark_md", "content": f"**产出问题**\n{len(_findings)} 个"}}]}]
+        # 有 findings 时才放「查看问题详情」按钮（空 findings 点进去只看到"无产出"，没意义）
+        + ([{"tag": "button", "text": {"tag": "plain_text", "content": "查看问题详情"},
+             "type": "primary", "behaviors": [{"type": "callback", "value": {
+                 "cmd": "/finding-list", "exec_id": exec_id}}]}] if _findings else [])
+        + ([{"tag": "button", "text": {"tag": "plain_text", "content": "网页详情 ↗"},
+             "behaviors": [{"type": "open_url", "default_url": web_url}]}] if web_url else [])
+        # 有 findings 时才放引导脚注
+        + ([{"tag": "hr"},
+            {"tag": "div", "text": {"tag": "lark_md",
+                                    "content": "<font color='grey'>点击「查看问题详情」可逐条派发为 Issue</font>"}}]
+           if _findings else [])
+    )
+    return {
+        "title": f"{_RESULT_TITLE.get(_lvl, _RESULT_TITLE[''])} · {task_name}",
+        "template": _RESULT_TEMPLATE.get(_lvl, "grey"),
+        "text": notify_text,
+        "actions": actions,
+        "fields": fields,
+        "note": "点击「查看问题详情」可逐条派发为 Issue",
+        "card_v2": {
+            "schema": "2.0",
+            "header": {"title": {"tag": "plain_text",
+                                 "content": f"{_RESULT_TITLE.get(_lvl, _RESULT_TITLE[''])} · {task_name}"},
+                       "template": _RESULT_TEMPLATE.get(_lvl, "grey")},
+            "body": {"elements": body_elements},
+        },
+    }
+
+
+def _lark_findings_elements(findings: list) -> list:
+    """findings → 2.0 卡片元素列表（div 列表——emoji 分级 + 标题 + 灰字类别）。空列表返回空。"""
+    if not findings:
+        return []
+    lines = ["**产出问题**"]
+    for f in findings[:10]:
+        _sev = (f.get("severity") or "medium").lower()
+        _mark = _SEVERITY_EMOJI.get(_sev, "⚪")
+        _cat = f.get("category", "-")
+        lines.append(f"{_mark} **{f.get('title', '')}** <font color='grey'>{_cat}</font>")
+    if len(findings) > 10:
+        lines.append(f"<font color='grey'>其余 {len(findings) - 10} 个见详情</font>")
+    return [{"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(lines)[:1800]}}]
+
+
+async def _run_autopilot_notify(ctx, api, user_id: int, open_id: str,
+                                card: dict, task_id: int, exec_id: int):
+    """单订阅者发送（仅静态卡片，不触发 ChatAgent/LLM）。"""
+    try:
+        if open_id and api and ctx:
+            # 优先 2.0 卡（card_v2 字段）；无则回退 1.0 参数组
+            if card.get("card_v2"):
+                await api.send_card_to_user(ctx, open_id, "", card_v2=card["card_v2"])
+            else:
+                await api.send_card_to_user(
+                    ctx, open_id, card["text"], title=card["title"],
+                    template=card["template"], actions=card["actions"],
+                    fields=card["fields"], note=card.get("note"))
+        else:
+            log.warning(f"[autopilot-notify] skip task={task_id} exec={exec_id} user={user_id} "
+                        f"reason={'no_openid' if not open_id else ('no_ctx' if not ctx else 'no_api')}")
+    except Exception as e:
+        log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} user={user_id} send failed: {e}")
+
+
+def _exec_task_id(exec_id: int) -> int:
+    """exec_id → task_id 反查（通知挂载点用）；查不到返回 0（_notify_subscribers 内 JOIN 不到行 → noop）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT task_id FROM autopilot_executions WHERE id=?",
+                            (exec_id,)).fetchone()
+        return row[0] if row else 0
+    except Exception as e:
+        log.warning(f"Autopilot: exec task id lookup failed {exec_id}: {e}")
+        return 0
+
+
+def _notify_subscribers(task_id: int, exec_id: int, status: str,
+                        result_summary: str, findings_result: dict):
+    """终态通知订阅者（§4.4）。全 try 包裹：任何故障不炸调度循环——通知失败不影响执行结果已落库。
+
+    幂等护栏：autopilot_executions.notified 列，UPDATE ... WHERE notified=0 抢占成功才发
+    （两个终态挂载点先到者发，后到者 noop）。
+    表结构保障：notified/订阅表缺失（迁移失败的极端场景）时 SELECT/UPDATE 抛错 → 记日志跳过，
+    不影响主流程。
+    """
+    try:
+        # 抢占通知权（幂等）：失败=已通知或表缺列
+        with db_lock:
+            c = db.cursor()
+            cur = c.execute("UPDATE autopilot_executions SET notified=1 WHERE id=? AND notified=0",
+                            (exec_id,)).rowcount
+            db.commit()
+        if not cur:
+            return
+        # 查订阅者 + 任务信息（JOIN 取 name/repo_key；订阅表缺失时抛错被外层捕获）
+        with db_lock:
+            c = db.cursor()
+            rows = c.execute(
+                "SELECT s.user_id, t.name, t.repo_key FROM autopilot_subscriptions s "
+                "JOIN autopilot_tasks t ON s.task_id=t.id WHERE s.task_id=?",
+                (task_id,)).fetchall()
+        if not rows:
+            return
+        _task_name = rows[0][1] or f"task-{task_id}"
+        _repo_key = rows[0][2] or ""
+        # Web 详情页 URL（前端 autopilot 页路由）
+        _web_url = ""
+        try:
+            from src.prompt_builder import _resolve_server_url
+            _web_url = f"{_resolve_server_url(0)}/autopilot"
+        except Exception:
+            pass
+        card = build_exec_card(_task_name, _repo_key, exec_id, status,
+                               result_summary, findings_result, _web_url)
+        # 触达链：本人 bot + open_id（复用 issues_center 既有函数，不回落他人 bot）
+        from src.api.issues_center import _get_feishu_open_id_by_user_id, _resolve_user_chat_bot
+        from src.api import main as api_main
+        bm = getattr(api_main, "bot_manager", None)
+        _loop = asyncio.get_event_loop()
+        for user_id, _, _ in rows:
+            try:
+                open_id = _get_feishu_open_id_by_user_id(user_id) or ""
+                ctx = _resolve_user_chat_bot(bm, user_id) if bm else None
+                api = bm.api if bm else None
+                _loop.create_task(_run_autopilot_notify(ctx, api, user_id, open_id,
+                                                        card, task_id, exec_id))
+            except Exception as e:
+                log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} user={user_id} "
+                            f"resolve failed: {e}")
+    except Exception as e:
+        log.warning(f"[autopilot-notify] task={task_id} exec={exec_id} notify failed: {e}")
+
 
 def _update_execution_result(exec_id: int, status: str, result: str = "",
                              error: str = "", findings_json: str = ""):
@@ -700,17 +915,23 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
                 _update_execution_result(exec_id, "success",
                                          result=_result_summary,
                                          findings_json=json.dumps(findings_result, ensure_ascii=False) if findings_result["findings"] else "")
+                _notify_subscribers(_exec_task_id(exec_id), exec_id, "success",
+                                    _result_summary, findings_result)
                 return "success"
             elif _at_status == "cancelled":
                 # 用户杀死：原样同步 cancelled（不翻译成 failed）
                 _update_execution_result(exec_id, "cancelled",
                                          result=_result_text[:5000],
                                          error="用户手动终止")
+                _notify_subscribers(_exec_task_id(exec_id), exec_id, "cancelled",
+                                    _result_text[:500], {})
                 return "cancelled"
             elif _at_status == "failed":
                 _update_execution_result(exec_id, "failed",
                                          result=_result_text[:5000],
                                          error="agent_tasks status=failed")
+                _notify_subscribers(_exec_task_id(exec_id), exec_id, "failed",
+                                    _result_text[:500], {})
                 return "failed"
             elif _at_status == "running":
                 # worker 已认领并开始执行，同步 autopilot_executions 为 running
@@ -721,6 +942,8 @@ async def _poll_dispatched_completion(exec_id: int, timeout: int = 3600) -> str:
 
     # 超时
     _update_execution_result(exec_id, "failed", error=f"worker 执行超时 ({timeout}s)")
+    _notify_subscribers(_exec_task_id(exec_id), exec_id, "failed",
+                        f"worker 执行超时 ({timeout}s)", {})
     return "failed"
 
 
