@@ -624,6 +624,10 @@ window._jumpToPipePage = function() {
 function _renderPipelineSection(data) {
   const el = document.getElementById('_boardPipelineSection');
   if (!el) return;
+  // HTML 转义（与文件内其他渲染函数的局部 esc 定义保持一致；Issue #539 审查修复：
+  // 此前 SRE 结论块引用了本作用域不存在的 esc，pending_review + SRE 结论场景抛
+  // ReferenceError 导致流水线卡片整体不渲染）
+  const esc = (v) => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   // 注入脉冲动画 CSS（仅一次）
   if (!document.getElementById('_grapePulseCSS')) {
     const style = document.createElement('style');
