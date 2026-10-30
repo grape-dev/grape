@@ -332,7 +332,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### GET/POST /api/git-repo/{owner}/{repo}/pulls/{number}/comments
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
-> CLI：`grape git-repo pulls comments list --owner {owner} --repo {repo} --number {number}` / `pulls comments create ... --json '{"body":"LGTM","path":"a.py","line":5}'`（operation_id=`gitrepo_pulls_comments_list` / `gitrepo_pulls_comments_create`）。
+> CLI：`grape git-repo pulls comments list --owner {owner} --repo {repo} --number {number}` / `pulls comments create ... --json '{"body":"LGTM"}'`（operation_id=`gitrepo_pulls_comments_list` / `gitrepo_pulls_comments_create`；create 仅接受 `body`，不支持 `path`/`line` 等行内定位字段）。
 
 - **GET**：返回 PR 行内评论数组 `[{"id":1,"body":"LGTM","path":"a.py","line":5,"user":{"username":"x"},"created_at":"..."}]`
 - **POST**：Body `{body}`（必填）→ 返回（201）评论对象。
