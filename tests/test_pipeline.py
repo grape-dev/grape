@@ -247,3 +247,144 @@ class TestExecutingDerivation:
         with db_lock:
             db.cursor().execute("DELETE FROM events WHERE repo_key='gitcode:org/pipeline-test'")
             db.commit()
+
+
+# ===== Issue #542：_events_by_issue 索引路径 + history 截断 =====
+
+class TestEventsByIssueIndex:
+    """Issue #542：_get_issue_pipeline 走 events_by_issue 索引（O(issues×events) → O(events)）。
+
+    索引路径与线性过滤路径结果必须完全一致（行为兼容）。
+    """
+
+    def _build_index(self, events):
+        idx = {}
+        for e in events:
+            idx.setdefault(e.get("issue_id"), []).append(e)
+        return idx
+
+    def test_index_path_equals_linear_path(self):
+        events = [
+            _ev(1, "#1", "issue_opened", "issue", "Fix login bug", "completed", "grape_bot"),
+            _ev(2, "#1", "a2a_event", "coding", "A2A: coding", "completed", "grape_bot"),
+            _ev(3, "#2", "issue_opened", "issue", "Add gzip support", "completed", "grape_bot"),
+            _ev(4, "#3", "issue_opened", "issue", "Cache branches", "completed", "grape_bot"),
+            _ev(5, "#3", "pull_request_opened", "qa", "PR #3", "running", "grape_bot"),
+        ]
+        with _mock_bots()[0], _mock_bots()[1]:
+            for iid in ("#1", "#2", "#3"):
+                p_linear = _get_issue_pipeline("owner/repo", iid, events)
+                p_index = _get_issue_pipeline("owner/repo", iid, events,
+                                              events_by_issue=self._build_index(events))
+                assert p_linear == p_index, f"index path diverges for {iid}"
+
+    def test_index_missing_issue_returns_none(self):
+        events = [_ev(1, "#1", "issue_opened", "issue", "Fix login bug", "completed", "grape_bot")]
+        with _mock_bots()[0], _mock_bots()[1]:
+            p = _get_issue_pipeline("owner/repo", "#99", events,
+                                    events_by_issue=self._build_index(events))
+        assert p is None
+
+    def test_index_empty_list_returns_none(self):
+        with _mock_bots()[0], _mock_bots()[1]:
+            p = _get_issue_pipeline("owner/repo", "#1", [], events_by_issue={})
+        assert p is None
+
+    def test_pr_title_fallback_via_index(self):
+        """PR 订阅伪 ID 标题兜底：索引路径按索引键匹配同 PR 号事件（不遍历全量 events）。"""
+        events = [
+            # 目标伪 ID：标题为占位符（事件类型名）
+            _ev(1, "#pr_7_scene-a", "note_hook_pr", "qa", "note_hook_pr", "completed", "grape_bot"),
+            # 同 PR 号另一伪 ID：带真实标题 → 兜底应命中
+            _ev(2, "#pr_7", "pull_request_opened", "qa", "Fix CI pipeline", "completed", "grape_bot"),
+            # 无关 issue：不参与兜底
+            _ev(3, "#9", "issue_opened", "issue", "Other issue", "completed", "grape_bot"),
+        ]
+        with _mock_bots()[0], _mock_bots()[1]:
+            p_index = _get_issue_pipeline("owner/repo", "#pr_7_scene-a", events,
+                                          events_by_issue=self._build_index(events))
+            p_linear = _get_issue_pipeline("owner/repo", "#pr_7_scene-a", events)
+        assert p_index is not None and p_linear is not None
+        assert p_index["title"] == "Fix CI pipeline"
+        assert p_index == p_linear
+
+
+class TestHistoryLimit:
+    """Issue #542：pipeline 接口 history 截断（默认最近 history_limit 条，history_total 保留全量数）。"""
+
+    OWNER = "test542p"
+    REPO = "pipe"
+    REPO_KEY = "gitcode:test542p/pipe"
+
+    def _jwt_headers(self):
+        from src.auth import grape_account_db
+        from src.api.jwt_utils import create_access_token
+        from src.auth.grape_account_db import get_token_version
+        uid = grape_account_db.create_grape_account("test_542_pipe", email=None, password="test123")
+        if not uid:
+            uid = grape_account_db.get_grape_account_by_username("test_542_pipe")
+        tok = create_access_token(uid["id"], uid["username"], get_token_version(uid["id"]))
+        return uid, {"Authorization": f"Bearer {tok}"}
+
+    def _seed(self, n_issues):
+        """n 个 issue 各 1 条事件（seq 自动递增，按插入顺序 = 活跃顺序）。"""
+        with db_lock:
+            c = db.cursor()
+            for i in range(1, n_issues + 1):
+                c.execute(
+                    "INSERT INTO events (repo_key, issue_id, event_type, agent_type, title, summary, status, actor, source, created_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,datetime('now'))",
+                    (self.REPO_KEY, f"#{i}", "issue_opened", "issue",
+                     f"Real title {i}", f"Summary {i}", "completed", "alice", "gitcode"))
+            db.commit()
+
+    def _clean(self):
+        with db_lock:
+            db.cursor().execute("DELETE FROM events WHERE repo_key=?", (self.REPO_KEY,))
+            db.cursor().execute("DELETE FROM issue WHERE repo_key=?", (self.REPO_KEY,))
+            db.cursor().execute("DELETE FROM issue_state WHERE repo_key=?", (self.REPO_KEY,))
+            db.cursor().execute("DELETE FROM managed_repos WHERE repo_key=?", (self.REPO_KEY,))
+            db.cursor().execute("DELETE FROM user_repos WHERE repo_key=?", (self.REPO_KEY,))
+            db.commit()
+
+    def setup_method(self):
+        self._clean()
+        self._uid, self._headers = self._jwt_headers()
+        with db_lock:
+            c = db.cursor()
+            c.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, webhook_id) "
+                      "VALUES (?,?,?,?,1)", (self.REPO_KEY, self.OWNER, self.REPO, f"{self.OWNER}/{self.REPO}"))
+            c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, is_join, is_admin) VALUES (?,?,1,1)",
+                      (self._uid["id"], self.REPO_KEY))
+            db.commit()
+
+    def teardown_method(self):
+        self._clean()
+
+    def test_history_truncated_with_total(self):
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        self._seed(6)  # active=最新 1 条，history=5 条
+        client = TestClient(app)
+        r = client.get(f"/api/pipeline/{self.OWNER}/{self.REPO}?history_limit=3", headers=self._headers)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert len(d["history"]) == 3
+        assert d["history_total"] == 5
+        assert d["history_limit"] == 3
+        # 截断保留最近优先：history[0] 应为次新 issue（#5）
+        assert d["history"][0]["issue_id"] == "#5"
+        # 统计口径不变（全量）：today_count 覆盖全部 6 条
+        assert d["today_count"] == 6
+
+    def test_history_limit_default_no_overtruncate(self):
+        from fastapi.testclient import TestClient
+        from src.api.main import app
+        self._seed(4)  # history=3 < 默认 50 → 不截断
+        client = TestClient(app)
+        r = client.get(f"/api/pipeline/{self.OWNER}/{self.REPO}", headers=self._headers)
+        assert r.status_code == 200, r.text
+        d = r.json()
+        assert len(d["history"]) == 3
+        assert d["history_total"] == 3
+        assert d["history_limit"] == 50

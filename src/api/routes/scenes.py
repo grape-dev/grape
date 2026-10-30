@@ -1,5 +1,5 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
-import json, os, re
+import json, os, re, threading, time
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
@@ -8,6 +8,36 @@ from src.config import log
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
+
+# Issue #542：branches 列表进程内 TTL 缓存（分支变更低频，可接受短暂陈旧；
+# TTL 取分析文档建议区间 60~120s 的中值 90s；refresh=1 绕过，建分支主动失效）
+_BRANCHES_CACHE_TTL = 90.0
+_branches_cache: dict = {}
+_branches_cache_lock = threading.Lock()
+
+
+def _branches_cache_key(provider: str, owner: str, repo: str) -> str:
+    return f"{provider}:{owner}/{repo}"
+
+
+def _branches_cache_get(key: str):
+    with _branches_cache_lock:
+        entry = _branches_cache.get(key)
+        if entry and time.time() - entry[0] < _BRANCHES_CACHE_TTL:
+            return entry[1]
+    return None
+
+
+def _branches_cache_put(key: str, payload: dict):
+    with _branches_cache_lock:
+        _branches_cache[key] = (time.time(), payload)
+
+
+def _branches_cache_invalidate(owner: str, repo: str):
+    """按 owner/repo 失效两平台缓存键（建分支后立即可见）。"""
+    with _branches_cache_lock:
+        for prov in ("gitcode", "github"):
+            _branches_cache.pop(_branches_cache_key(prov, owner, repo), None)
 
 
 def _resolve_repo_key(repo: str) -> str:
@@ -868,13 +898,15 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     return "gitcode"
 
 
-@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker). Optional provider/repo_key query param overrides platform detection (2026-10-24: same-name GitHub repos could shadow managed GitCode repos).")
+@router.get("/branches/{owner}/{repo}", operation_id="scenes_branches", summary="List repo branches", description="Lists all repo branches (for the advanced-options work-branch picker). Optional provider/repo_key query param overrides platform detection (2026-10-24: same-name GitHub repos could shadow managed GitCode repos). Issue #542: results are cached in-process for 90s; pass refresh=1 to bypass the cache (response carries a `cached` flag).")
 def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str = "",
+                       refresh: int = Query(0, description="1=绕过缓存强制刷新（手动刷新入口）"),
                        user: dict = Depends(require_no_session_token)):
     """列出仓库所有分支（供高级选项工作分支选择）
 
     provider/repo_key（可选，2026-10-24 新增）：显式指定平台，跳过猜测逻辑。
     前端托管仓场景应直接传（/repos/managed 返回的 repo_key 自带前缀）。
+    Issue #542：TTL 缓存 90s（分支变更低频），refresh=1 强制穿透；仅缓存成功结果。
     """
     from src.user.repo_manager import _req, _github_req
 
@@ -888,6 +920,13 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     else:
         _detected = _detect_repo_provider(owner, repo)
     provider = _detected
+
+    # Issue #542：缓存命中直接返回（不穿透外部 API；响应附 cached 标记）
+    _cache_key = _branches_cache_key(provider, owner, repo)
+    if not refresh:
+        _cached = _branches_cache_get(_cache_key)
+        if _cached is not None:
+            return {**_cached, "cached": True}
 
     if provider == "github":
         from src.user.db import get_github_token
@@ -915,7 +954,9 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         except Exception as e:
             log.warning(f"List branches failed for GitHub {owner}/{repo}: {e}")
             raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
-        return {"branches": branches}
+        payload = {"branches": branches}
+        _branches_cache_put(_cache_key, payload)
+        return {**payload, "cached": False}
 
     # GitCode（原逻辑）
     # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
@@ -945,7 +986,9 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
         log.warning(f"List branches failed for {owner}/{repo}: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"查询分支失败: {e}"})
 
-    return {"branches": branches}
+    payload = {"branches": branches}
+    _branches_cache_put(_cache_key, payload)
+    return {**payload, "cached": False}
 
 
 @router.post("/branches/{owner}/{repo}", operation_id="scenes_branch_create", summary="Create repo branch", description="Creates a new branch in the repo. Optional provider/repo_key query param overrides platform detection (2026-10-24).")
@@ -1003,6 +1046,8 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
                 "sha": sha,
             })
             log.info(f"Branch created: {body.branch_name} in GitHub {owner}/{repo}")
+            # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
+            _branches_cache_invalidate(owner, repo)
             return {"name": body.branch_name.strip(), "message": "分支已创建"}
         except RuntimeError as e:
             err_msg = str(e)
@@ -1034,6 +1079,8 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
             "refs": body.refs or "main",
         })
         log.info(f"Branch created: {body.branch_name} in {owner}/{repo}")
+        # Issue #542：建分支成功后失效 branches 缓存（新分支立即可见）
+        _branches_cache_invalidate(owner, repo)
         return {"name": body.branch_name.strip(), "message": "分支已创建"}
     except RuntimeError as e:
         err_msg = str(e)

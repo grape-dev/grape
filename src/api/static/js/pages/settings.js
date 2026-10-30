@@ -34,10 +34,12 @@ function renderSettings(tab) {
         <div class="cd mt16">
           <div class="cd-h"><h2>${I18N.t('settings.host.migrate_title')}</h2></div>
           <p class="tx t2" style="margin-bottom:8px">${I18N.t('settings.host.migrate_desc')}</p>
-          <div class="srow"><label>${I18N.t('settings.host.migrate_target_owner')}</label><input type="text" id="migrateTargetOwner" placeholder="${I18N.t('settings.host.migrate_owner_placeholder')}"></div>
-          <div class="srow"><label>${I18N.t('settings.host.migrate_target_repo')}</label><input type="text" id="migrateTargetRepo" value="${repo.name}" placeholder="${I18N.t('settings.host.migrate_repo_placeholder')}"></div>
+          <div class="srow"><label>${I18N.t('settings.host.migrate_target_repo')}</label><input type="text" id="migrateTargetRepo" value="${repo.name}" readonly style="background:#f1f5f9;color:var(--t2)" title="${I18N.t('settings.host.migrate_repo_readonly_hint')}"></div>
+          <div class="srow"><label>${I18N.t('settings.host.migrate_target_owner')}</label><select id="migrateTargetOwner" style="background:var(--c)"><option value="">${I18N.t('settings.host.migrate_orgs_loading')}</option></select></div>
           <button class="bt bt-p mt8" onclick="migrateRepoFromSettings('${repo.fullName}')">${I18N.t('settings.host.migrate_btn')}</button>
         </div>`;
+        // Issue #543: 异步拉取当前用户 GitCode 组织列表填充目标组织下拉框
+        _loadMigrateOrgs();
     }).catch(e => { var _sg = document.getElementById('sGitcode'); if (_sg) _sg.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
   } else {
     html += `<div class="ts t2">${current}</div></div>`;
@@ -103,26 +105,61 @@ function unhostFromSettings(fullName) {
   }, {danger: true});
 }
 
+// Issue #543: 拉取当前用户拥有的 GitCode 组织列表，填充迁移目标组织下拉框
+// HTML 转义（与 app.js:1229 _esc / issues.js:177 _escapeHtml 同口径）：
+// 组织名/个人名来自 GitCode API，可能含 <、"、& 等 HTML 特殊字符，
+// 拼进 option 的 value/label 前必须转义，防止存储型 XSS（PR #747 审查 Critical）。
+function _migrateEsc(s) {
+  if (!s) return '';
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function _loadMigrateOrgs() {
+  var sel = document.getElementById('migrateTargetOwner');
+  if (!sel) return;
+  API.get('/repos/migrate-orgs').then(function (d) {
+    var orgs = (d && d.orgs) || [];
+    var personal = (d && d.personal) || '';
+    // 排除当前仓库所属组织（迁到自身无意义；fullName = owner/repo）
+    var curOwner = (app.currentRepo() || {}).owner || '';
+    var html = '<option value="">' + I18N.t('settings.host.migrate_owner_placeholder') + '</option>';
+    if (personal && personal !== curOwner) {
+      var pEsc = _migrateEsc(personal);
+      html += '<option value="' + pEsc + '">' + pEsc + ' (' + I18N.t('settings.host.migrate_personal') + ')</option>';
+    }
+    for (var i = 0; i < orgs.length; i++) {
+      var o = orgs[i];
+      if (o.login === curOwner) continue;
+      var loginEsc = _migrateEsc(o.login);
+      var label = (o.name && o.name !== o.login) ? loginEsc + ' (' + _migrateEsc(o.name) + ')' : loginEsc;
+      html += '<option value="' + loginEsc + '">' + label + '</option>';
+    }
+    if (orgs.length === 0 && !personal) {
+      html = '<option value="">' + I18N.t('settings.host.migrate_orgs_empty') + '</option>';
+    }
+    sel.innerHTML = html;
+  }).catch(function (e) {
+    sel.innerHTML = '<option value="">' + I18N.t('settings.host.migrate_orgs_load_failed') + '</option>';
+    app.showToast(I18N.t('settings.host.migrate_orgs_load_failed'), 'warning');
+  });
+}
+
 function migrateRepoFromSettings(fullName) {
   const ownerEl = document.getElementById('migrateTargetOwner');
-  const repoEl = document.getElementById('migrateTargetRepo');
   const targetOwner = (ownerEl && ownerEl.value ? ownerEl.value.trim() : '');
-  const targetRepo = (repoEl && repoEl.value ? repoEl.value.trim() : '') || (fullName.split('/')[1] || '');
   if (!targetOwner) {
     app.showToast(I18N.t('settings.host.migrate_owner_required'));
     return;
   }
-  // repo_key 带平台前缀（默认 gitcode:）；当前仓库 provider 从 fullName 不可得，默认 gitcode
   const repoKey = 'gitcode:' + fullName;
-  const confirmMsg = I18N.t('settings.host.migrate_confirm', {target: targetOwner + '/' + targetRepo});
+  const confirmMsg = I18N.t('settings.host.migrate_confirm', {target: targetOwner});
   app.showConfirm(confirmMsg, function() {
     API.post('/repos/migrate', {
       repo_key: repoKey,
       target_owner: targetOwner,
-      target_repo: targetRepo
+      target_repo: ''
     }).then(r => {
       app.showToast(I18N.t('settings.host.migrate_done', {newKey: r.new_repo_key || ''}));
-      // 迁移成功后清除旧仓库缓存，刷新侧边栏
       localStorage.removeItem('repo_member_cache');
       sessionStorage.removeItem('currentRepo');
       app.initSidebarRepos();
