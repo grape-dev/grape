@@ -105,3 +105,35 @@
   --glass-highlight: linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
   --btn-primary-shadow: 0 6px 16px rgba(10, 132, 255, 0.35);
 }
+
+/* ═══ Scene-market dark exemption (owner rollback request 2026-10-29) ═══
+ * The owner judged the palette-sweep result WORSE than the original on the
+ * scene-market page. This page keeps its pre-palette dark look: original
+ * accent hue, borderless cards, original glass params. Scope: the .sm page
+ * root and everything inside it, in dark only. Light was never changed.
+ * Selectors are attribute-qualified for specificity over the token blocks. */
+@media (prefers-color-scheme: dark) {
+  [data-theme='apple'][data-theme-mode='auto'] .sm,
+  :root .sm {
+    --a: #0071e3;
+    --ah: #0077ed;
+    --card-border: var(--b);
+    --glass-bg: color-mix(in srgb, var(--c, #fff) 62%, transparent);
+    --glass-bg-strong: color-mix(in srgb, var(--c, #fff) 88%, transparent);
+    --glass-border: color-mix(in srgb, var(--b, #d2d2d7) 70%, transparent);
+    --glass-blur: 16px;
+    --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+    --btn-primary-shadow: none;
+  }
+}
+[data-theme='apple'][data-theme-mode='dark'] .sm {
+  --a: #0071e3;
+  --ah: #0077ed;
+  --card-border: var(--b);
+  --glass-bg: color-mix(in srgb, var(--c, #fff) 62%, transparent);
+  --glass-bg-strong: color-mix(in srgb, var(--c, #fff) 88%, transparent);
+  --glass-border: color-mix(in srgb, var(--b, #d2d2d7) 70%, transparent);
+  --glass-blur: 16px;
+  --shadow-2: 0 4px 16px rgba(0, 0, 0, 0.08);
+  --btn-primary-shadow: none;
+}
