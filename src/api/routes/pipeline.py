@@ -1,5 +1,5 @@
 """Pipeline 路由：Issue 工作流聚合展示"""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from src.api.deps import require_no_session_token
 from src.api.time_utils import normalize_event_time
 
@@ -87,7 +87,8 @@ def _scene_label_for_event(scene_id: str, get_pipe_cfg, repo_key: str, pipe_cfg_
 def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                         title_map: dict = None, stage_map: dict = None,
                         pipe_cfg_cache: dict = None, get_pipe_cfg=None,
-                        bot_usernames: set = None, feishu_name_cache: dict = None) -> dict:
+                        bot_usernames: set = None, feishu_name_cache: dict = None,
+                        events_by_issue: dict = None) -> dict:
     """根据 issue_id 下的事件列表构建单个 Pipeline
 
     参数:
@@ -97,8 +98,13 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
         get_pipe_cfg: 获取场景配置的回调函数（带缓存）
         bot_usernames: 仓库的 bot_username 集合（消除 get_all_bot_usernames N+1）
         feishu_name_cache: 飞书用户名缓存 {gitcode_user: feishu_name}（消除 _resolve_feishu_name N+1）
+        events_by_issue: issue_id → events 列表索引（Issue #542：O(issues×events) 全量线性
+            过滤 → O(1) 索引取数；None 时回退线性过滤兼容旧调用）
     """
-    issue_events = [e for e in events if e.get("issue_id") == issue_id]
+    if events_by_issue is not None:
+        issue_events = events_by_issue.get(issue_id) or []
+    else:
+        issue_events = [e for e in events if e.get("issue_id") == issue_id]
     if not issue_events:
         return None
 
@@ -173,15 +179,22 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     # PR 订阅跨 issue 兜底：同一 PR 号的其他事件可能有真实 PR 标题
     if _is_placeholder(title) and _pr_match:
         _pr_num = _pr_match.group(1)
-        for _e in events:
-            _eid = _e.get("issue_id", "")
-            if _eid == issue_id:
-                continue
-            if _re.match(rf'#pr_{_pr_num}_', _eid) or _eid == f"#pr_{_pr_num}":
-                _et = _e.get("title", "") or ""
-                if not _is_placeholder(_et):
-                    title = _et
-                    break
+        def _e_id(e):
+            return e.get("issue_id", "")
+        if events_by_issue is not None:
+            # Issue #542：索引路径按索引键匹配 PR 伪 ID（O(issues)，避免遍历全量 events）
+            _pr_pool = [e for iid, evts in events_by_issue.items()
+                        if iid != issue_id and (_re.match(rf'#pr_{_pr_num}_', iid) or iid == f'#pr_{_pr_num}')
+                        for e in evts]
+        else:
+            _pr_pool = [e for e in events
+                        if _e_id(e) != issue_id
+                        and (_re.match(rf'#pr_{_pr_num}_', _e_id(e)) or _e_id(e) == f'#pr_{_pr_num}')]
+        for _e in _pr_pool:
+            _et = _e.get("title", "") or ""
+            if not _is_placeholder(_et):
+                title = _et
+                break
     # GitCode API 兜底：tasks/events/payload 都没真实标题 → 调 API 获取并回写 tasks 表
     if _is_placeholder(title):
         try:
@@ -371,8 +384,10 @@ def _running_issue_ids(repo_keys) -> set[str]:
         return set()
 
 
-@router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user.")
-def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
+@router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user. Issue #542: `history_limit` (default 50) caps the returned history items (most recent first); `history_total` carries the untruncated count.")
+def get_pipeline(owner: str, repo: str,
+                 history_limit: int = Query(50, ge=1, le=500, description="history 截断条数（最近优先），默认 50"),
+                 user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
     repo_key = to_repo_key(_owner_repo)
@@ -476,10 +491,11 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
     _events_by_issue = {}
     for e in events:
         _events_by_issue.setdefault(e["issue_id"], []).append(e)
+    # Issue #542：把索引真正传进 _get_issue_pipeline（O(issues×events) → O(events)）
     pipelines = [_get_issue_pipeline(
         repo_key, iid, events,
         _title_map, _stage_map, _pipe_cfg_cache, _get_pipe_cfg,
-        _bot_usernames, _feishu_name_cache
+        _bot_usernames, _feishu_name_cache, _events_by_issue
     ) for iid in issue_ids]
     pipelines = [p for p in pipelines if p is not None]
 
@@ -512,7 +528,10 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
         p["executing"] = (p.get("raw_issue_id") or p["issue_id"]) in running_issues
 
     active = pipelines[0] if pipelines else None
-    history = pipelines[1:] if len(pipelines) > 1 else []
+    # Issue #542：history 截断为最近 history_limit 条（前端本就客户端分页展示），
+    # history_total 保留全量条数；统计口径（today/failed/active_count）仍按全量计算
+    history_total = len(pipelines) - 1 if len(pipelines) > 1 else 0
+    history = pipelines[1:1 + history_limit] if len(pipelines) > 1 else []
 
     # Pipeline config (event-dispatch-redesign-v2.md Phase 2)
     from src.api.pipeline_config import get_pipeline_config
@@ -531,6 +550,8 @@ def get_pipeline(owner: str, repo: str, user: dict = Depends(require_no_session_
         "repo_key": _actual_repo_key,
         "active": active,
         "history": history,
+        "history_total": history_total,
+        "history_limit": history_limit,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,
         "today_count": len(pipelines),
         "failed_count": len([p for p in pipelines if p["result"] == "Failed"]),
