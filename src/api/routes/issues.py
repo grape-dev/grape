@@ -112,6 +112,9 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             _task_status = "cancelled"
         else:
             _task_status = "pending"
+        # Issue #542：qa_history 截最近 50 条（rows 按 seq DESC，最新在前），
+        # 控制响应体积；events_count 仍为全量计数
+        _qa_hist = _pr_history.get(pr_num, [])[:50]
         items.append({
             "id": -pr_num,  # 负数避免跟真实 task id 冲突
             "issue_number": pr_num,
@@ -134,7 +137,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             "repo_key": repo_keys[0] if repo_keys else "",
             "is_pr_event": True,
             "pr_seq": ev["seq"],
-            "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _pr_history.get(pr_num, [])],
+            "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _qa_hist],
             "events_count": sum(1 for r in rows if r[1] and r[1].replace("#pr_", "").split("_", 1)[0] == str(pr_num)),
             "latest_event": {"seq": ev["seq"], "status": ev["status"], "title": ev["title"], "created_at": ev["created_at"]},
             "assignee": ev["actor"],
@@ -165,15 +168,21 @@ def _repo_keys_of(owner: str, repo: str) -> list[str]:
     return keys
 
 
-def _issue_stage_map(repo_keys: list[str]) -> dict:
+def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue number → issue 阶段摘要（stage/owner/scene/assignee/subtask）。
 
     Phase C1/C3：`issue` 单表为权威（已收编 + 停写 issue_state），直接读 issue 卡片行；
     `issue_state` 仅作停写过渡期兜底。
+    numbers（Issue #542）：可选 issue_number 集合，非空时按集合收窄（列表页只富化返回集合）。
     """
     from src.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
+    _num_clause = ""
+    _num_params: list = []
+    if numbers:
+        _num_clause = f" AND issue_number IN ({','.join('?' * len(numbers))})"
+        _num_params = list(numbers)
     # 1. issue 单表（权威）
     try:
         with db_lock:
@@ -181,8 +190,8 @@ def _issue_stage_map(repo_keys: list[str]) -> dict:
             c.execute(
                 f"SELECT issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
                 f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
-                f"FROM issue WHERE repo_key IN ({placeholders})",
-                repo_keys)
+                f"FROM issue WHERE repo_key IN ({placeholders}){_num_clause}",
+                repo_keys + _num_params)
             for r in c.fetchall():
                 n = str(r[0])
                 if not n:
@@ -197,14 +206,20 @@ def _issue_stage_map(repo_keys: list[str]) -> dict:
     except Exception as e:
         log.warning(f"issues: load issue table failed: {e}")
     # 2. issue_state 兜底（无 issue 卡片行但仍有 issue_state 的过渡期数据）
+    _iid_clause = ""
+    _iid_params: list = []
+    if numbers:
+        _iids = [f"#{n}" for n in numbers]
+        _iid_clause = f" AND issue_id IN ({','.join('?' * len(_iids))})"
+        _iid_params = _iids
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
                 f"SELECT issue_id, stage, owner_agent, assignee, a2a_seq, scene_id, "
                 f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
-                f"FROM issue_state WHERE repo_key IN ({placeholders})",
-                repo_keys)
+                f"FROM issue_state WHERE repo_key IN ({placeholders}){_iid_clause}",
+                repo_keys + _iid_params)
             for r in c.fetchall():
                 n = _num_from_issue_id(r[0])
                 if not n or n in out:
@@ -237,16 +252,25 @@ def _task_status_map(repo_keys: list[str]) -> dict:
     return out
 
 
-def _group_events_by_issue(repo_keys: list[str]) -> dict:
+def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
 
     Issue #252: 排除 entity_type='pull_request' 的事件，PR 事件不混入 issue 展示
     （编号相同时 PR 事件与 issue 事件分离，避免关联混淆）。
     向后兼容：旧事件无 entity_type（空串），视为 issue 事件正常分组。
+    numbers（Issue #542）：可选 issue number 集合，非空时 SQL 按 `issue_id IN ('#n',...)`
+    收窄（events 表 issue_id 规范写路径恒为 `#N`；`#pr_` 伪 ID 由
+    _query_pr_subscription_events 独立处理，不受影响）。
     """
     from src.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
+    _num_clause = ""
+    _num_params: list = []
+    if numbers:
+        _iids = [f"#{n}" for n in numbers]
+        _num_clause = f" AND issue_id IN ({','.join('?' * len(_iids))})"
+        _num_params = _iids
     with db_lock:
         c = db.cursor()
         try:
@@ -256,8 +280,8 @@ def _group_events_by_issue(repo_keys: list[str]) -> dict:
                     + (", structured_output, agent_logs" if _has_so else ""))
             c.execute(
                 f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, entity_type "
-                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!='' ORDER BY seq ASC",
-                repo_keys)
+                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
+                repo_keys + _num_params)
             rows = c.fetchall()
         except Exception:
             rows = []
@@ -1631,18 +1655,26 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     return {"issues": issues_out, "sort_order": sort_order, "mode": mode}
 
 
-@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events; paged.")
+@router.get("/{owner}/{repo}", operation_id="issues_list", summary="Repo issue list (stage/status enriched)", description="Repo issue list (unified all view) enriched with stage/status/events. Issue #542 paging: `per_page>0` enables true server-side paging (LIMIT/OFFSET, response carries total/page/per_page/has_more); default `per_page=0` returns the full list with terminal statuses (completed/cancelled) capped to the `recent_terminal` (default 30) most recent (pass `recent_terminal=0` or an explicit `status` filter for the full set).")
 def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                      mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                      assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                     page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
+                     per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
+                     recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
                      user: dict = Depends(require_org_member)):
     """仓库 Issue 列表（归一：收编原 repo/{owner}/{repo}，复用 _query_tasks 富化 + 事件聚合）。
 
     - 按 owner/repo 定位仓库，返回全部卡片富化（scene/stage/is_running/agent_statuses）+ events_count/latest_event
     - 排序按 created_at + 状态优先级（mode 可切换纯时间序）
     - 行为对齐原 issues_list（仓库 public 读聚合，无显式仓库权限门禁）
+    - Issue #542 三种模式：
+      * per_page>0：真分页（COUNT + LIMIT/OFFSET，响应含 total/page/per_page/has_more）
+      * 默认（per_page=0，无 status 过滤，recent_terminal>0）：非终态全量 + 终态最近 N 条
+        （分析文档第一步"数据截断"：前端不改也能先受益，翻页再拉走 per_page）
+      * recent_terminal=0 或显式 status 过滤：legacy 全量返回
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
     from src.user.org_db import is_org_personal
@@ -1668,10 +1700,44 @@ def list_repo_issues(owner: str, repo: str,
         _order_by = (f"CASE WHEN status='active' THEN 0 WHEN status='processing' THEN 1 "
                      f"WHEN status='awaiting_input' THEN 2 WHEN status='pending_review' THEN 3 "
                      f"ELSE 4 END, created_at {_order_dir}")
-    issues = _query_tasks(where, params, _order_by, include_user_id=True)
+
+    _total = None
+    _page_row_count = None
+    if per_page > 0:
+        # ---- 真分页：COUNT + LIMIT/OFFSET ----
+        from src.session_manager import db, db_lock
+        try:
+            with db_lock:
+                c = db.cursor()
+                c.execute(f"SELECT COUNT(*) FROM issue WHERE {where}", params)
+                _total = c.fetchone()[0]
+        except Exception as e:
+            log.warning(f"issues: count failed: {e}")
+            _total = 0
+        issues = _query_tasks(where, params, _order_by, include_user_id=True,
+                              limit=per_page, offset=(page - 1) * per_page)
+        _page_row_count = len(issues)
+    elif status or recent_terminal <= 0:
+        # ---- legacy 全量（显式 status 过滤 = 调用方明确要该状态全量）----
+        issues = _query_tasks(where, params, _order_by, include_user_id=True)
+    else:
+        # ---- 默认截断：非终态全量 + 终态最近 recent_terminal 条 ----
+        # mode=default 的 CASE 优先序（非终态 0-3 < 终态 4）下两段拼接即全局序；
+        # mode=time 时合并后按 created_at 重排
+        _nt_where = where + " AND status IN ('active','processing','awaiting_input','pending_review')"
+        _t_where = where + " AND status NOT IN ('active','processing','awaiting_input','pending_review')"
+        issues = _query_tasks(_nt_where, params, _order_by, include_user_id=True)
+        _terminal = _query_tasks(_t_where, params, f"created_at {_order_dir}", include_user_id=True,
+                                 limit=recent_terminal)
+        issues = issues + _terminal
+        if mode == "time" and issues:
+            issues.sort(key=lambda it: it.get("created_at") or "", reverse=(sort_order == "desc"))
+
     # 事件聚合字段 + number/task_status/owner_agent 等别名（原 issues_list 字段兼容）
-    group_map = _group_events_by_issue(repo_keys)
-    stage_map = _issue_stage_map(repo_keys)
+    # Issue #542：聚合按返回集合收窄（只格式化返回卡片的 events，不扫全仓事件）
+    _numbers = [str(it.get("issue_number")) for it in issues if it.get("issue_number")]
+    group_map = _group_events_by_issue(repo_keys, numbers=_numbers or None)
+    stage_map = _issue_stage_map(repo_keys, numbers=_numbers or None)
     for it in issues:
         _num = it.get("issue_number")
         it["number"] = _num or it.get("number")
@@ -1699,9 +1765,15 @@ def list_repo_issues(owner: str, repo: str,
         it.pop("task_description", None)
 
     # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
+    # Issue #542：分页模式下 PR 卡片只混入第 1 页（避免逐页重复）；has_more 按 issue 行数计算
     pr_items = _query_pr_subscription_events(repo_keys)
-    issues.extend(pr_items)
+    if _total is None or page == 1:
+        issues.extend(pr_items)
 
+    # Issue #542：分页模式返回服务端分页元数据；非分页模式 total 维持 len(issues)（兼容旧语义）
+    if _total is not None:
+        return {"issues": issues, "total": _total, "page": page, "per_page": per_page,
+                "has_more": (page - 1) * per_page + (_page_row_count or 0) < _total}
     return {"issues": issues, "total": len(issues)}
 
 

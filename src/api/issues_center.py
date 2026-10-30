@@ -2134,11 +2134,13 @@ def get_handoff_targets(repo_key: str, issue_number: int, current_scene_id: str 
     return {"targets": targets, "current_scene_id": _cur}
 
 
-def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False) -> list[dict]:
+def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool = False,
+                 limit: int = None, offset: int = 0) -> list[dict]:
     """查询 tasks 并富化（scene / stage / is_running / is_pr）为对外 dict（my_tasks / repo_all_tasks 共享）。
 
     - where / params / order_by 由调用方构造（列与排序方向经白名单，值参数化，防注入）
     - include_user_id: 结果是否包含 user_id（repo_all 需要）
+    - limit/offset（Issue #542）：可选真分页（None=不限，返回全部）
     - issue_state / agent_tasks 均批量查询，避免逐任务 N+1
     - is_pr: 批量查 events 表 event_type 判断是否为 PR 事件（跨仓库 A2A 场景 issue_number 实际是 PR 编号）
     """
@@ -2147,10 +2149,13 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id"
         + (", user_id" if include_user_id else "")
     )
+    _limit_sql = ""
+    if limit is not None and int(limit) > 0:
+        _limit_sql = f" LIMIT {int(limit)} OFFSET {int(offset)}"
     with db_lock:
         c = db.cursor()
         try:
-            c.execute(f"{_select} FROM issue WHERE {where} ORDER BY {order_by}", params)
+            c.execute(f"{_select} FROM issue WHERE {where} ORDER BY {order_by}{_limit_sql}", params)
             rows = c.fetchall()
         except Exception as e:
             log.warning(f"Task query failed: {e}")
