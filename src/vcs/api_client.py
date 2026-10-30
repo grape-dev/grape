@@ -224,18 +224,26 @@ class VcsApiClient:
             self._ledger("pr", extract_content_id(_resp, "issue"), "", body)
         return _resp
 
-    def merge_pr(self, pr_number: int) -> dict:
-        """合并 Pull Request。"""
+    def merge_pr(self, pr_number: int, merge_method: str = "", title: str = "") -> dict:
+        """合并 Pull Request。
+
+        Issue #558：merge_method（merge/squash/rebase）与 title（自定义合并提交标题）
+        可选透传；缺省空值不进 body（存量行为不变）。GitLab 无 merge_method 字段，
+        squash 映射为 {"squash": True}。
+        """
+        _body = {k: v for k, v in {"merge_method": (merge_method or "").strip(),
+                                   "title": (title or "").strip()}.items() if v}
         if self.provider == "gitcode":
             _resp = self._gitcode_request(
-                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", {})
+                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", _body or {})
         elif self.provider == "github":
             _resp = self._github_request(
-                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", {})
+                "PUT", f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/merge", _body or {})
         elif self.provider == "gitlab":
             project_id = f"{self.owner}%2F{self.repo}"
+            _gl_body = {"squash": True} if _body.get("merge_method") == "squash" else {}
             _resp = self._gitlab_request(
-                "PUT", f"/projects/{project_id}/merge_requests/{pr_number}/merge", {})
+                "PUT", f"/projects/{project_id}/merge_requests/{pr_number}/merge", _gl_body)
         else:
             return {"error": f"unsupported provider: {self.provider}"}
         # Issue #453 台账（写点11）：合并 PR 入账——pr_merge 事件回流对账
@@ -328,13 +336,15 @@ class VcsApiClient:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
+            # Issue #558：错误 dict 补 status_code、detail 保留上游全文（不截断），
+            # 供调用方保留上游状态语义；error 键不变保兼容
             err_body = ""
             try:
-                err_body = e.read().decode("utf-8")[:500]
+                err_body = e.read().decode()
             except Exception:
                 pass
             log.warning(f"VcsApiClient: {method} {url} → HTTP {e.code}: {err_body}")
-            return {"error": f"HTTP {e.code}", "detail": err_body}
+            return {"error": f"HTTP {e.code}", "status_code": e.code, "detail": err_body}
         except Exception as e:
             log.warning(f"VcsApiClient: {method} {url} → {e}")
             return {"error": str(e)}
