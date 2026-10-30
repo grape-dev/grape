@@ -199,6 +199,12 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
     if depth != "recursive":
         if not ref:
             ref = _default_ref(p, owner, repo, user)
+        # 分支/引用名含 `/`（如 feat/issue-11）裸拼进 git/trees/{ref} 会被 GitCode 当
+        # 路径分隔符拆成两段 → 404（grape-skills#95）。先解析为无斜杠的 tree/commit sha
+        # 再取树；sha 不含 `/`，彻底免 URL 编码歧义。无斜杠 ref 保持直连（零回归）。
+        if "/" in ref:
+            ref = _ref_to_tree_sha(p, owner, repo, ref, user)
+            log.info(f"gitrepo_tree: slash ref resolved -> tree sha {ref}")
         return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
                         _repo_token(owner, repo, user, p))
     # 递归
@@ -228,6 +234,36 @@ def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
     except Exception as e:
         log.warning(f"gitrepo_tree: resolve default ref failed: {e}")
     return "main"
+
+
+def _ref_to_tree_sha(p: str, owner: str, repo: str, ref: str, user: dict) -> str:
+    """ref 含 `/` 时解析为无斜杠的 tree/commit sha（git-repo-tree-slash-ref-design §3.1）。
+
+    - GitCode：`/commits?sha={ref}`（query 参数形态，urlencode 免斜杠切分）→ commit 的
+      `commit.tree.sha`；与 `_github_tree_sha` 同思路。
+    - GitHub：复用 `_github_tree_sha`（本函数对 github provider 不额外发请求，直接委托）。
+    解析失败 → 保序降级返回原 ref（调用方仍按 `git/trees/{ref}` 透传，行为等同现状，不新增 502）。
+    """
+    if p == "github":
+        return _github_tree_sha(owner, repo, ref, user)
+    try:
+        # GitCode: /commits?sha={ref}&per_page=1 → 首条 commit 的 commit.tree.sha
+        data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/commits", {"sha": ref, "per_page": 1}, p),
+                        _repo_token(owner, repo, user, p))
+        _c = None
+        if isinstance(data, list) and data:
+            _c = data[0]
+        elif isinstance(data, dict):
+            _c = data
+        if _c is not None:
+            _tree = (_c.get("commit") or {}).get("tree") or {}
+            if isinstance(_tree, dict) and _tree.get("sha"):
+                return _tree["sha"]
+            if _c.get("sha"):
+                return _c["sha"]
+    except Exception as e:
+        log.warning(f"gitrepo_tree: resolve tree sha failed for ref={ref}: {e}")
+    return ref
 
 
 def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:
