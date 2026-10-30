@@ -513,6 +513,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         tr = c.fetchone()
         if tr:
             task_id, task_status, _orig_rid = tr[0], tr[1] or "", tr[2] or 0
+    # Issue #521：回执 task_id 一律返回收敛后实际有效任务（queued 复用=原 ID，终态重建=新 ID）
+    _effective_task_id = task_id
 
     # 2.5) local_only：本机重试分支 — 强制使用原 runtime_id，跳过 pick_engine，不换机器
     if local_only:
@@ -544,6 +546,56 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         if _cid > 0 and not _remote_runtime_ready(_orig_rid):
             raise HTTPException(status_code=409, detail={"code": 409,
                 "message": "原执行机器不可用（远端引擎失联），无法本机重试"})
+
+        # Issue #521：旧任务仍为 queued → 同事务原子复用原任务行（同机重派不新建副本，
+        # 避免"旧 queued 行 + 新 queued 行"双可领取副本）。UPDATE 带 status='queued' 守卫，
+        # 窗口期被领取（rowcount=0）则落到下方快照重建分支按新状态处理，不留半状态。
+        if (old.get("status") or "") == "queued":
+            with db_lock:
+                clq = db.cursor()
+                clq.execute(
+                    "UPDATE agent_tasks SET runtime_id=?, started_at=NULL, completed_at=NULL, exit_code=NULL "
+                    "WHERE id=? AND status='queued'",
+                    (_orig_rid, task_id))
+                _lq_reused = clq.rowcount > 0
+                db.commit()
+            if _lq_reused:
+                # 本机 direct 引擎 → 直接触发执行（复用原行，task_id 不变）
+                if _cid == 0:
+                    try:
+                        from src.api.event_pipeline import _execute_agent, start_direct_agent
+                        from src.runtime.engine_select import engine_name as _en
+                        from src.repo_key import from_repo_key as _frk
+                        _be = _en(_orig_rid) or ""
+                        _rk = old.get("repo_key") or ""
+                        _evt_lq = {
+                            "repo_key": _rk,
+                            "repository": _frk(_rk),
+                            "source": (_rk.split(":", 1)[0] if ":" in _rk else "gitcode"),
+                            "issue_id": old.get("issue_id") or "",
+                            "agent_type": old.get("agent_type") or "",
+                            "event_type": old.get("event_type") or "",
+                            "type": old.get("event_type") or "",
+                            "payload": {},
+                        }
+                        start_direct_agent(_execute_agent, (
+                            _rk, seq, old.get("agent_type") or "", _be, old.get("skill") or "",
+                            _evt_lq, _orig_rid, task_id,
+                        ), name=f"redispatch-{seq}")
+                        log.info(f"[redispatch] seq={seq} local_only: queued reuse direct started on rid={_orig_rid}")
+                    except Exception as e:
+                        log.warning(f"[redispatch] seq={seq} local_only: queued reuse direct failed: {e}")
+                from src.api.event_store import reset_event_terminal
+                reset_event_terminal(seq)
+                try:
+                    from src.user.db import set_meta_value
+                    import time as _time
+                    set_meta_value(f"redispatch:{seq}", str(_time.time()))
+                except Exception:
+                    pass
+                log.info(f"[redispatch] seq={seq} local_only: queued task {task_id} reused on rid={_orig_rid} by={user.get('username','')}")
+                return {"status": "redispatched", "task_id": task_id, "event_seq": seq, "local_only": True}
+
 
         # 校验通过 → 复用原 task 快照参数 + 原 runtime_id 新建任务（不调 pick_engine）
         from src.api.event_pipeline import is_plugin_mode as _is_plugin_mode
@@ -779,6 +831,142 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 log.info(f"[redispatch] seq={seq} plugin: pipeline/node/requeued emitted, task={task_id}, tag={evt['agent_type']}")
         except Exception as e:
             log.warning(f"[redispatch] plugin event emit failed: {e}")
+    elif task_id and task_status == "queued":
+        # Issue #521：queued 任务重派 → 同一事务内原子复用原任务行（更新 runtime_id 等派发目标字段）。
+        # 旧实现把 queued 落入"终态/缺失"分支：enqueue 新任务 + 保留旧 queued 行 → 同一事件两个
+        # 可领取副本，且回执仍返回旧 task_id。复用原行天然无双副本、无 ID 漂移；env/prompt/skill/
+        # pool 快照保持首次派发原值不动（queued 行尚未执行，无漂移风险）。
+        old = get_task(task_id)
+        if not old:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "关联任务不存在，无法重派"})
+        try:
+            from src.api.event_pipeline import is_plugin_mode
+            _q_is_plugin = is_plugin_mode()
+        except Exception:
+            _q_is_plugin = False
+        _q_rid = old.get("runtime_id") or 0
+        if _q_is_plugin and (old.get("pool_tag") or ""):
+            # 池任务：按 tag+scope 重新选定在线引擎（与 dispatched/running 重派分支口径一致）；
+            # 选不到 → runtime_id=0 贴证广播，等池内引擎 claim_by_tag 认领（#253 语义，绑定字段不动）
+            _q_pool_eids = []
+            try:
+                import json as _json_q
+                _q_raw = old.get("pool_engine_ids") or ""
+                if _q_raw:
+                    _q_pool_eids = [int(x) for x in _json_q.loads(_q_raw) if x]
+            except Exception:
+                pass
+            _q_repo = old.get("repo_key") or ""
+            _q_uid = old.get("user_id") or 0
+            if _q_pool_eids:
+                _q_ph = ",".join("?" * len(_q_pool_eids))
+                _q_scope_extra = f" AND ar.id IN ({_q_ph})"
+                _q_scope_params = list(_q_pool_eids)
+            else:
+                _q_bare = _q_repo.split(":", 1)[1] if ":" in _q_repo else _q_repo
+                _q_scope_extra = (
+                    " AND (ar.credential_id = 0"
+                    " OR rc.scope = 'global'"
+                    " OR (rc.scope = 'repo' AND (rc.owner_id = ? OR rc.owner_id = ? OR rc.owner_id = ?))"
+                    " OR (rc.scope = 'user' AND rc.owner_name ="
+                    " (SELECT username FROM grape_accounts WHERE id=?)))"
+                )
+                _q_scope_params = [_q_bare, f"gitcode:{_q_bare}", f"github:{_q_bare}", _q_uid]
+            try:
+                with db_lock:
+                    cq = db.cursor()
+                    cq.execute(
+                        "SELECT ar.id FROM agent_runtimes ar "
+                        "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                        "AND (ec.tag=? OR ec.tag='all') "
+                        "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                        "WHERE ar.status='online' AND ar.healthy=1 AND ar.credential_id > 0"
+                        + _q_scope_extra +
+                        " ORDER BY ar.busy_slots ASC LIMIT 1",
+                        (old.get("pool_tag"), *_q_scope_params)
+                    )
+                    _q_row = cq.fetchone()
+                    if not _q_row:
+                        cq.execute(
+                            "SELECT ar.id FROM agent_runtimes ar "
+                            "JOIN engine_capabilities ec ON ec.runtime_id=ar.id AND ec.enabled=1 "
+                            "AND (ec.tag=? OR ec.tag='all') "
+                            "LEFT JOIN runtime_credentials rc ON rc.id = ar.credential_id "
+                            "WHERE ar.status='online' AND ar.healthy=1"
+                            + _q_scope_extra +
+                            " ORDER BY ar.busy_slots ASC LIMIT 1",
+                            (old.get("pool_tag"), *_q_scope_params)
+                        )
+                        _q_row = cq.fetchone()
+                if _q_row:
+                    _q_rid = _q_row[0]
+                else:
+                    _q_rid = 0
+            except Exception:
+                pass
+        else:
+            # 确定路由：fallback 链 task.runtime_id → session 主引擎 → pick_engine（与终态重建分支一致）
+            if not _q_rid:
+                try:
+                    with db_lock:
+                        cqs = db.cursor()
+                        cqs.execute("SELECT runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
+                                    (old.get("repo_key") or "", old.get("agent_type") or ""))
+                        _q_sr = cqs.fetchone()
+                        if _q_sr and _q_sr[0]:
+                            _q_rid = _q_sr[0]
+                except Exception:
+                    pass
+            try:
+                from src.runtime.engine_select import pick_engine
+                _q_rid = pick_engine(old.get("repo_key") or "", old.get("agent_type") or "",
+                                     fallback_runtime_id=_q_rid) or 0
+            except Exception:
+                _q_rid = old.get("runtime_id") or 0
+            if not _q_rid and not _q_is_plugin:
+                raise HTTPException(status_code=409, detail={"code": 409, "message": "无可用引擎，无法重派"})
+        # 原子收敛：单事务校验仍为 queued 并复用原任务行（防领取竞态；被领取 → 409，无半状态）
+        with db_lock:
+            cq = db.cursor()
+            cq.execute(
+                "UPDATE agent_tasks SET runtime_id=?, started_at=NULL, completed_at=NULL, exit_code=NULL "
+                "WHERE id=? AND status='queued'",
+                (_q_rid, task_id))
+            _q_reused = cq.rowcount > 0
+            db.commit()
+        if not _q_reused:
+            raise HTTPException(status_code=409, detail={"code": 409,
+                "message": "任务刚被引擎领取（状态已流转），请稍后重试重派"})
+        log.info(f"[redispatch] seq={seq} queued reuse: task {task_id} reassigned rid={_q_rid}")
+        # 本机 direct 引擎（cid=0 且 rid>0）→ 直接触发执行，复用行无需 worker 认领
+        if _q_rid > 0:
+            try:
+                from src.runtime.service import runtime_credential_id
+                if (runtime_credential_id(_q_rid) or 0) == 0:
+                    from src.api.event_pipeline import _execute_agent, start_direct_agent
+                    from src.runtime.engine_select import engine_name as _en
+                    from src.repo_key import from_repo_key as _frk
+                    _q_be = _en(_q_rid) or ""
+                    _q_rk = old.get("repo_key") or ""
+                    _q_evt = {
+                        "repo_key": _q_rk,
+                        "repository": _frk(_q_rk),
+                        "source": (_q_rk.split(":", 1)[0] if ":" in _q_rk else "gitcode"),
+                        "issue_id": old.get("issue_id") or "",
+                        "agent_type": old.get("agent_type") or "",
+                        "event_type": old.get("event_type") or "",
+                        "type": old.get("event_type") or "",
+                        "payload": {},
+                    }
+                    start_direct_agent(_execute_agent, (
+                        _q_rk, seq, old.get("agent_type") or "", _q_be, old.get("skill") or "",
+                        _q_evt, _q_rid, task_id,
+                    ), name=f"redispatch-{seq}")
+                    log.info(f"[redispatch] seq={seq} queued reuse: direct execution started on rid={_q_rid}")
+            except Exception as e:
+                log.warning(f"[redispatch] seq={seq} queued reuse direct trigger failed: {e}")
+        # 回执返回实际有效任务（复用原行 → 原 task_id）
+        _effective_task_id = task_id
     else:
         # 终态/缺失 → 复用原 task 快照参数新建任务（新 task_id，清空 runtime_session_id）
         from src.api.event_pipeline import is_plugin_mode
@@ -959,6 +1147,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     pool_agent_type=old.get("agent_type") or "" if is_plugin_mode() else "",
                     pool_engine_ids=_pool_253,
                 )
+                # Issue #521：终态重建的实际有效任务 = 新任务，回执不得再返回旧（终态）task_id
+                _effective_task_id = _new_task_id or "(new)"
                 # If local direct engine, trigger direct execution (no worker will claim)
                 # Issue #253 改动1 守卫：_rid=0 时禁止触发直跑。runtime_credential_id(0) 返回 None，
                 # None or 0 → _cid=0 → _is_local_direct 误判 True → 空 engine_id=0 直跑。
@@ -1129,8 +1319,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     except Exception:
         pass
 
-    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={task_id or '(new)'} by={user.get('username','')}")
-    return {"status": "redispatched", "task_id": task_id or "(new)", "event_seq": seq}
+    log.info(f"[redispatch] seq={seq} repo={evt['repo_key']} agent={evt['agent_type']} task={_effective_task_id or '(new)'} by={user.get('username','')}")
+    return {"status": "redispatched", "task_id": _effective_task_id or "(new)", "event_seq": seq}
 
 
 # ====== Event 对话（event-conversation-design.md）======
