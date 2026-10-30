@@ -86,9 +86,15 @@ def terminate_active_agents(grace_seconds: int = 5):
     # 进程活在远端 worker 上，与主控进程生死无关——主控停机不等于任务死了。停机时把它们
     # 标 failed 会在部署类任务停主控时自杀（agent 通过 SSH systemctl stop grape-main →
     # 本函数把任务标 failed → worker 侧进程仍在跑但上报被幂等保护拒绝 → 任务永败）。
-    # REMOTE 任务改为跳过：worker 继续执行并正常上报（complete_task 不受影响）；
-    # 悬空兜底 = worker 侧 recover-orphans（worker 重连时 force_fail）+ scheduler
-    # zombie recovery（引擎离线的 running 任务同步 failed，见 scheduler_loop）。
+    # Issue #537 升级（2026-10-30）：#404 的"跳过"留下 running/dispatched 悬空——下游
+    # （zombie recovery / 心跳判死 / 活跃计数）无法区分"正常跑"与"等自报"，重启窗口内
+    # worker 心跳断 → 引擎被标 offline → zombie recovery 误判 failed → 终态定格（生产
+    # exec #1661 误报实例）。改为显式中间态 pending_self_report + pending_since 落时刻：
+    #   - worker 继续执行并自报（complete_task/fail_task 从 pending 正常转换，终态幂等
+    #     只拦真终态 completed/failed/cancelled/timeout_failed）；
+    #   - 超时兜底 = scheduler 每轮扫描的 pending 超时回收（默认 30min → timeout_failed）；
+    #   - 悬空兜底 = worker 侧 recover-orphans + scheduler zombie recovery（引擎离线
+    #     持续 > 阈值才判死，见 scheduler_loop）。
     # 只有本机 DIRECT 任务（runtime_id=0 或本机引擎 credential_id=0）的子进程确实被
     # 上面的 SIGTERM 杀掉了，照旧标 failed。
     try:
@@ -107,14 +113,26 @@ def terminate_active_agents(grace_seconds: int = 5):
                 "WHERE t.status IN ('running','dispatched')"
             )
             stale_tasks = c.fetchall()
-            _remote_skipped = 0
+            _remote_pending = 0
             for task_id, event_seq, runtime_id, cred_id in stale_tasks:
-                # REMOTE 任务：进程在 worker 上活着，跳过（worker 会继续跑完并上报；
-                # 兜底 = worker recover-orphans + scheduler zombie recovery 引擎离线同步）
+                # REMOTE 任务：进程在 worker 上活着 → 置 pending_self_report 等自报
+                # （不释放 busy 槽——任务仍占 worker 引擎槽；事件保持 running 等自报收口）
                 if runtime_id and cred_id and cred_id > 0:
-                    _remote_skipped += 1
-                    log.info(f"terminate_active_agents: skip REMOTE task {task_id} "
-                             f"(runtime={runtime_id}, worker-owned, will self-report)")
+                    _remote_pending += 1
+                    try:
+                        # pending_since 用 ISO8601（sweep 按数值比较，兼容旧 "%Y-%m-%d %H:%M:%S" 格式）
+                        _now_iso = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.gmtime())
+                        c.execute(
+                            "UPDATE agent_tasks SET status='pending_self_report', "
+                            "pending_since=? WHERE id=? AND status IN ('running','dispatched')",
+                            (_now_iso, task_id)
+                        )
+                        log.info(f"terminate_active_agents: REMOTE task {task_id} "
+                                 f"(runtime={runtime_id}) -> pending_self_report "
+                                 f"(worker-owned, awaiting self-report)")
+                    except Exception as e:
+                        log.warning(f"terminate_active_agents: mark pending_self_report "
+                                    f"failed for task {task_id}: {e}")
                     continue
                 try:
                     c.execute(
@@ -141,8 +159,9 @@ def terminate_active_agents(grace_seconds: int = 5):
                 except Exception as e:
                     log.warning(f"terminate_active_agents: failed to mark task {task_id} as failed: {e}")
             db.commit()
-            if _remote_skipped:
-                log.info(f"terminate_active_agents: skipped {_remote_skipped} REMOTE task(s) (worker-owned, left running)")
+            if _remote_pending:
+                log.info(f"terminate_active_agents: {_remote_pending} REMOTE task(s) "
+                         f"-> pending_self_report (worker-owned, awaiting self-report)")
         if stale_tasks:
             log.info(f"terminate_active_agents: marked {len(stale_tasks)} stale task(s) as failed")
     except Exception as e:

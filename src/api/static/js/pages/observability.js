@@ -2666,8 +2666,8 @@ function renderSessionList(container, sessions, rtName) {
   const running = sessions.filter(s => s.current_task);
   const idle = sessions.filter(s => !s.current_task);
 
-  const taskStatusIcon = { completed: '✅', failed: '❌', cancelled: '⛔', running: '🔄', queued: '⏳', dispatched: '🔄' };
-  const taskStatusColor = { completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)', running: 'var(--a)', queued: 'var(--y)', dispatched: 'var(--a)' };
+  const taskStatusIcon = { completed: '✅', failed: '❌', cancelled: '⛔', running: '🔄', queued: '⏳', dispatched: '🔄', pending_self_report: '⏳', timeout_failed: '⛔' };
+  const taskStatusColor = { completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)', running: 'var(--a)', queued: 'var(--y)', dispatched: 'var(--a)', pending_self_report: 'var(--y)', timeout_failed: 'var(--r)' };
 
   // 运行中 session 表格（显示 agent + 正在执行的 issue#/seq）
   function runningTable(list) {
@@ -2852,8 +2852,8 @@ function renderRuntimeTaskList(container, tasks, rtName) {
     container.innerHTML = '<div class="ts t2" style="padding:20px;text-align:center">' + I18N.t('observability.no_tasks') + '</div>';
     return;
   }
-  const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔' };
-  const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
+  const statusIcon = { queued: '⏳', dispatched: '🔄', running: '🔄', completed: '✅', failed: '❌', cancelled: '⛔', pending_self_report: '⏳', timeout_failed: '⛔' };
+  const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)', pending_self_report: 'var(--y)', timeout_failed: 'var(--r)' };
   let html = `<div style="font-size:11px;color:var(--t3);margin-bottom:8px">${I18N.t('observability.task_list_hint', {name: rtName, count: tasks.length})}</div>`;
   html += '<div class="tw"><table><thead><tr><th>' + I18N.t('observability.col_issue_seq') + '</th><th>' + I18N.t('observability.col_agent_skill') + '</th><th>' + I18N.t('observability.col_repo') + '</th><th>' + I18N.t('observability.col_status') + '</th><th>' + I18N.t('observability.col_token') + '</th><th>' + I18N.t('observability.col_created') + '</th></tr></thead><tbody>';
   tasks.forEach(t => {
@@ -3003,7 +3003,7 @@ function renderTaskTimeline(container, info) {
     const curr = new Date(stages[i].time);
     durations.push(Math.round((curr - prev) / 1000));
   }
-  const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)' };
+  const statusColor = { queued: 'var(--y)', dispatched: 'var(--a)', running: 'var(--a)', completed: 'var(--g)', failed: 'var(--r)', cancelled: 'var(--t3)', pending_self_report: 'var(--y)', timeout_failed: 'var(--r)' };
   let html = '<div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:11px">';
   stages.forEach((s, i) => {
     html += `<div style="display:flex;align-items:center;gap:4px"><span style="width:8px;height:8px;border-radius:50%;background:${s.color}"></span><span style="color:var(--t2)">${s.label}</span><span class="ts t3">${s.time.substring(11,19)}</span></div>`;

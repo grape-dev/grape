@@ -411,10 +411,20 @@ _TASK_COLUMNS = (
     "env_extra, skill_files, server_url, issue_session_id, project_info_files, project_info_meta, "
     "knowledge_files, project_info_file_urls, knowledge_file_urls, attempts, pool_agent_type, affinity_runtime_id, pool_tag, pool_engine_ids, "
     "pool_engine_source, "
-    "status, stream_ended, self_reported, "
+    "status, stream_ended, self_reported, pending_since, "
     "exit_code, result_text, errors, stderr, "
     "usage_json, started_at, completed_at, created_at"
 )
+
+# Issue #537：任务状态机口径（集中定义，防字面量漂移）。
+# - pending_self_report：主控停机/重启时 REMOTE（worker 承载）任务的中间态——
+#   进程活在 worker 上，等待其自报终态（complete_task/fail_task 正常转换）。
+# - timeout_failed：pending_self_report 超时（默认 30min）无自报的**带说明终态**，
+#   区别于 plain failed（下游翻译时须附超时原因）。
+TASK_TERMINAL_STATUSES = ("completed", "failed", "cancelled", "timeout_failed")
+TASK_ACTIVE_STATUSES = ("queued", "dispatched", "running", "pending_self_report")
+TASK_PENDING_SELF_REPORT = "pending_self_report"
+TASK_TIMEOUT_FAILED = "timeout_failed"
 
 _TASK_COLUMNS_LIST = [c.strip() for c in _TASK_COLUMNS.split(",")]
 
@@ -934,6 +944,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
             "pool_engine_source": pool_engine_source or "",
             "status": "queued", "exit_code": None, "result_text": "", "errors": "", "stderr": "",
             "usage_json": "{}", "started_at": None, "completed_at": None,
+            "pending_since": None,
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
         c.execute(
@@ -1702,7 +1713,8 @@ def _real_active_count(cursor, runtime_id: int) -> int:
     """
     cursor.execute(
         "SELECT COUNT(*) FROM agent_tasks "
-        "WHERE runtime_id=? AND status IN ('running','dispatched')", (runtime_id,))
+        "WHERE runtime_id=? AND status IN ('running','dispatched','pending_self_report')",
+        (runtime_id,))
     r = cursor.fetchone()
     return r[0] if r else 0
 
@@ -1757,12 +1769,16 @@ def validate_run_token(task: dict | None, run_token: str = "") -> str:
     """
     if not task or not run_token:
         return "ok"
+    _st = task.get("status")
+    # 终态（含 timeout_failed）优先判定：无论 run_token 是否匹配都算 noop，
+    # 迟到上报不会把超时/失败终态误判成 stale 冲突。
+    if _st in TASK_TERMINAL_STATUSES:
+        return "noop"
     if task.get("started_at") != run_token:
         return "stale"
-    _st = task.get("status")
-    if _st in ("completed", "failed", "cancelled"):
-        return "noop"
-    if _st not in ("running", "dispatched"):
+    # Issue #537：pending_self_report（主控停机等 worker 自报）视同活动态，
+    # worker 完成/失败自报不得被补报守卫当 stale 拒收（否则停双主后自报 409 → 永败）。
+    if _st not in ("running", "dispatched", TASK_PENDING_SELF_REPORT):
         return "stale"  # queued（回炉未认领）/ 其它 → 旧实例
     return "ok"
 
@@ -1775,11 +1791,11 @@ def update_task_status(task_id, status, **kw):
         row = c.fetchone()
         if not row:
             return
-        if row[0] in ("completed", "failed", "cancelled"):
+        if row[0] in TASK_TERMINAL_STATUSES:
             return
         sets = ["status=?"]
         params = [status]
-        if status in ("completed", "failed", "cancelled"):
+        if status in TASK_TERMINAL_STATUSES:
             # 终态才写 completed_at；非终态（running 等）不动它，
             # 否则运行中任务带 completed_at 脏值（2026-08-19 修复：task_start 曾把
             # running 任务写成 completed_at=启动时刻，干扰终态判断/展示）。
@@ -1801,12 +1817,12 @@ def update_task_status(task_id, status, **kw):
                         (_evt_seq[0],))
             except Exception as _e:
                 log.warning(f"update_task_status: sync event running failed for task {task_id}: {_e}")
-        # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态，且任务已绑定引擎 → busy_slots-1
-        if status in ("completed", "failed", "cancelled") and row[1] and row[1] > 0:
+        # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态（含 timeout_failed），且任务已绑定引擎 → busy_slots-1
+        if status in TASK_TERMINAL_STATUSES and row[1] and row[1] > 0:
             release_busy_slot(row[1], cursor=c)
         db.commit()
-    # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
-    if status in ("completed", "failed", "cancelled"):
+    # Issue-45 M2：任务终态（含 timeout_failed）→ 会话级临时 token 即时失效（存在即有效，删除即失效）
+    if status in TASK_TERMINAL_STATUSES:
         try:
             from src.api.auth_token import revoke_session_token
             revoke_session_token(task_id)
@@ -2092,7 +2108,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
     # 跑完调 complete 把 failed 状态覆盖成 completed，2026-08-24 seq#2488 实例）。
     # 例外：如果 result_text 包含完整结构化输出（actions+conclusion），说明任务实际已完成，
     # 即使 exit_code 非 0（如 hermes ACP 进程被 SIGTERM 清理后 proc.returncode=-15）也应覆盖为 completed。
-    if task and task.get("status") in ("failed", "cancelled"):
+    if task and task.get("status") in ("failed", "cancelled", TASK_TIMEOUT_FAILED):
         from src.api.event_store import parse_agent_output_json
         _output = parse_agent_output_json(result_text or "")
         if _output and _output.get("actions") and _output.get("conclusion"):
@@ -2384,7 +2400,7 @@ def finalize_by_stream_end(task_id: str, fallback_text: str = "", exit_code: int
     task = get_task(task_id)
     if not task:
         return False
-    if task.get("status") in ("completed", "failed", "cancelled"):
+    if task.get("status") in TASK_TERMINAL_STATUSES:
         return False
     result_text = fallback_text or ""
     if task.get("self_reported") == 1 and task.get("result_text"):
@@ -2675,6 +2691,11 @@ def fail_task(task_id, error, exit_code=-1):
     # （2026-10-19 补报重放事故：重派后 180ms 被旧任务僵尸上报劫持）。
     if task and task.get("status") == "failed":
         log.info(f"Task {task_id} already failed, skip fail_task (error={str(error)[:60]})")
+        return
+    # Issue #537 幂等保护 3：已 timeout_failed（pending 超时兜底终态）的任务
+    # 不得被迟到的 worker 失败上报覆写为 plain failed（超时说明会被洗掉）。
+    if task and task.get("status") == TASK_TIMEOUT_FAILED:
+        log.info(f"Task {task_id} already timeout_failed, skip fail_task (error={str(error)[:60]})")
         return
     # 过期上报丢弃：同一 event_seq 下已存在更晚创建的任务（redispatch / recover_orphans 重跑），
     # 说明本上报属于被取代的旧执行实例 → 不得回写任务终态，更不得回写事件终态。
@@ -3149,7 +3170,7 @@ async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interva
     deadline = _time.monotonic() + timeout
     while True:
         t = get_task(task_id)
-        if t and t.get("status") in ("completed", "failed", "cancelled"):
+        if t and t.get("status") in TASK_TERMINAL_STATUSES:
             return t
         if _time.monotonic() > deadline:
             raise TimeoutError(f"task {task_id} not finished within {timeout}s")
