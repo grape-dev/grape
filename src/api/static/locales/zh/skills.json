@@ -238,5 +238,11 @@
   "scene_params_hint": "应用场景时需配置，Agent 将通过环境变量读取",
   "hw_creds_hint": "☁ 华为云场景需要 AK/SK 凭证，可在下方直接填写。已配置的凭据不会在页面回显，可在个人设置中管理。",
   "hw_creds_go_settings": "前往设置",
-  "hw_creds_configured": "✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）"
+  "hw_creds_configured": "✓ 已配置 AK/SK（明文不回显，如需使用请在此填写）",
+  "action.update_skill": "上传更新",
+  "action.confirm_update": "确认覆盖更新",
+  "update.title": "上传更新技能",
+  "update.tip": "上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致",
+  "toast.update_success": "技能更新成功",
+  "toast.update_failed": "更新失败: {{msg}}"
 }

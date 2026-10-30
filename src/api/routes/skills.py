@@ -850,6 +850,156 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
     return {"message": f"技能 {skill_name} 已删除"}
 
 
+VALID_SKILL_AGENT_TYPES = {"vod", "issue", "coding", "qa", "sre", "chat", "auto"}
+
+
+@router.post("/by-id/{skill_id}/update", operation_id="skills_update",
+             summary="Update skill by uploading a new ZIP (Issue #561)",
+             description="Overwrites an existing skill's content by uploading a new ZIP. Keeps skill id/scope/owner/scene refs/likes, refreshes content_hash and invalidates both cache levels. official skills cannot be updated; user scope requires ownership; repo scope requires the caller to manage the repo.")
+async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
+                             user: dict = Depends(require_no_session_token),
+                             agent_type: str = Form(""), category_id: str = Form("")):
+    """按 skill_id 上传 ZIP 覆盖更新既有技能（Issue #561：卡片直接更新，免删了重传）。
+
+    权限对齐 delete：official 不允许更新；user 需本人；repo 需当前用户托管该仓库。
+    写序对齐 #444：save 前留存旧对象字节，upsert 失败回滚；成功后两级缓存失效。
+    ZIP 内技能目录名必须与既有 skill_name 一致（upsert 按 (name, scope, owner) 命中
+    原行，保留 id/场景引用/点赞）；不一致返回 400 明确指引。
+    agent_type / category_id 可选，缺省沿用原记录值。
+    """
+    from src.session_manager import db, db_lock
+
+    # 1. 查既有记录（按主键 id 精确）
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT skill_name, scope, owner_id, agent_type, category_id FROM skill WHERE id=? AND is_active=1",
+            (skill_id,)
+        )
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+
+    skill_name, skill_scope, owner_id, cur_agent_type, cur_category_id = row[0], row[1] or "user", row[2] or "", row[3] or "", row[4] or 0
+
+    # 2. 权限校验（对齐 delete）
+    if skill_scope == "official":
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "官方技能不允许更新"})
+    if skill_scope == "user" and owner_id != str(user["id"]):
+        raise HTTPException(status_code=403, detail={"code": 403, "message": "无权更新该技能"})
+    if skill_scope == "repo":
+        from src.user.db import get_user_repos
+        user_repo_keys = {r["repo_key"] for r in (get_user_repos(user["id"]) if user.get("id") else [])}
+        if owner_id not in user_repo_keys:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "无权更新该技能"})
+
+    # 3. 可选字段：缺省沿用原值；提供则校验
+    new_agent_type = (agent_type or "").strip() or cur_agent_type
+    if new_agent_type not in VALID_SKILL_AGENT_TYPES:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"技能类型不合法，可选: {', '.join(sorted(VALID_SKILL_AGENT_TYPES))}"})
+    cat_str = (category_id or "").strip()
+    if cat_str:
+        try:
+            new_category_id = int(cat_str)
+        except ValueError:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "分类 ID 必须为整数"})
+        if new_category_id > 0:
+            from src.user.db import get_skill_category
+            if not get_skill_category(new_category_id):
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"分类 ID {new_category_id} 不存在"})
+    else:
+        new_category_id = int(cur_category_id or 0)
+
+    # 4. ZIP 校验（复用 upload 链：大小/炸弹/结构/SKILL.md）
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 文件不能超过 10MB"})
+
+    tmp_dir = tempfile.mkdtemp()
+    try:
+        zip_path = os.path.join(tmp_dir, file.filename or "skill.zip")
+        with open(zip_path, "wb") as f:
+            f.write(content)
+
+        extract_dir = os.path.join(tmp_dir, "extracted")
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                total = sum((i.file_size or 0) for i in zf.infolist())
+                if total > MAX_EXTRACT_BYTES:
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"ZIP 解压后总大小超过 {MAX_EXTRACT_BYTES // (1024 * 1024)}MB 上限"})
+                zf.extractall(extract_dir)
+                for info in zf.infolist():
+                    mode = info.external_attr >> 16
+                    if mode and not info.is_dir():
+                        p = os.path.join(extract_dir, info.filename)
+                        if os.path.isfile(p):
+                            os.chmod(p, mode & 0o777)
+        except HTTPException:
+            raise
+        except zipfile.BadZipFile:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "不是有效的 ZIP 文件，请上传 .zip 格式"})
+
+        entries = os.listdir(extract_dir)
+        if not entries:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 文件为空"})
+        real_entries = [e for e in entries if e not in ("__MACOSX", ".DS_Store", ".git") and not e.startswith(".")]
+        if not real_entries:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "ZIP 中未找到技能目录"})
+
+        skill_dir = os.path.join(extract_dir, real_entries[0])
+        if not os.path.isdir(skill_dir):
+            skill_dir = extract_dir
+        zip_skill_name = os.path.basename(skill_dir) if os.path.isdir(skill_dir) else real_entries[0]
+
+        # 名称一致性（核心：upsert 按 (name, scope, owner) 命中原行；名称漂移会新建行而非更新）
+        if zip_skill_name != skill_name:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": f"ZIP 内技能目录名「{zip_skill_name}」与既有技能「{skill_name}」不一致，请保持同名目录后重新上传（如需新增技能请使用上传）"})
+
+        errors = validate_custom_skill(skill_dir, skill_name)
+        if errors:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "Skill 校验失败", "errors": errors})
+
+        fm = parse_skill_frontmatter(skill_dir)
+        description = fm.get("description", "") or ""
+
+        # 5. 存储写序（对齐 #444：留存旧字节 → 覆盖 → upsert → 失败回滚 → 缓存失效）
+        from src.config import log
+        from src.storage import get_skill_storage
+        storage = get_skill_storage()
+        if storage is None:
+            raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且本地存储被禁用，技能更新失败。请检查服务端存储配置后重试。"})
+        from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
+        from src.user.db import upsert_skill_obs, get_skill_object_key
+        object_key = get_skill_object_key(skill_id) or skill_key(
+            "custom" if skill_scope == "user" else skill_scope, owner_id, skill_name)
+        try:
+            zip_bytes = _normalize_skill_zip(skill_dir, skill_name)
+            _prev_bytes = storage.read_bytes(object_key)
+            storage.save_bytes(object_key, zip_bytes)
+            content_hash = hashlib.sha256(zip_bytes).hexdigest()
+            new_id = upsert_skill_obs(skill_scope, owner_id, skill_name, new_agent_type,
+                                      description, object_key, str(user["id"]),
+                                      new_category_id, content_hash)
+            if not new_id or int(new_id) != int(skill_id):
+                if _prev_bytes is not None:
+                    storage.save_bytes(object_key, _prev_bytes)  # 回滚旧对象（DB 行未动）
+                raise HTTPException(status_code=409, detail={"code": 409, "message": f"技能 {skill_name} 记录更新失败（并发冲突或同名记录漂移），已回滚，请重试"})
+            zip_cache_put(object_key, zip_bytes, content_hash, int(new_id))
+            mem_cache_invalidate(object_key)
+            log.info(f"skill updated (storage={storage.backend_name()}, key={object_key}, skill_id={skill_id})")
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail={"code": 502, "message": f"技能更新存储失败: {e}"})
+        return {"message": f"技能 {skill_name} 更新成功", "skill_id": int(skill_id), "skill_name": skill_name}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": f"更新失败: {e}"})
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
 class ConvertSkillRequest(BaseModel):
     skill_name: str
     repo: str  # 目标仓库 repo_key（如 Jason7602/skill-evaluator）

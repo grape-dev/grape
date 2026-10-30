@@ -238,5 +238,11 @@
   "scene_params_hint": "Required when applying; Agent reads via env vars",
   "hw_creds_hint": "☁ Huawei Cloud scenes require AK/SK credentials, fill them below. Stored credentials are never echoed on the page; manage them in personal settings.",
   "hw_creds_go_settings": "Go to settings",
-  "hw_creds_configured": "✓ AK/SK configured (plaintext not echoed; fill here to use)"
+  "hw_creds_configured": "✓ AK/SK configured (plaintext not echoed; fill here to use)",
+  "action.update_skill": "Upload Update",
+  "action.confirm_update": "Overwrite & Update",
+  "update.title": "Update Skill",
+  "update.tip": "Upload a new ZIP to overwrite this skill. Skill ID, scene refs and likes are kept; the top folder in the ZIP must match the skill name",
+  "toast.update_success": "Skill updated",
+  "toast.update_failed": "Update failed: {{msg}}"
 }
