@@ -90,7 +90,18 @@
     "unhost_done": "已解除托管",
     "unhost_failed": "解除托管失败: {{msg}}",
     "select_repo_first": "请先选择一个仓库",
-    "select_repo": "选择仓库"
+    "select_repo": "选择仓库",
+    "migrate_title": "迁移到其他组织",
+    "migrate_desc": "将仓库从当前组织迁移到目标组织（适用于仓库已在 GitCode 完成组织转移后换绑）。webhook/bot 配置沿用原配置，不重建；场景/Issue 历史随迁移保留。",
+    "migrate_target_owner": "目标组织",
+    "migrate_target_repo": "目标仓库名",
+    "migrate_owner_placeholder": "目标组织（如 orgB）",
+    "migrate_repo_placeholder": "仓库名（默认与当前同名）",
+    "migrate_btn": "迁移",
+    "migrate_owner_required": "请填写目标组织",
+    "migrate_confirm": "确定要将仓库迁移到 {{target}} 吗？\n\n迁移将原子改写 repo_key 及全部关联数据（托管记录、场景、Issue、知识基线、工作区目录）。webhook/bot 配置沿用原配置不重建。",
+    "migrate_done": "迁移成功：{{newKey}}",
+    "migrate_failed": "迁移失败: {{msg}}"
   },
   "scene": {
     "select_first": "请选择一个场景",

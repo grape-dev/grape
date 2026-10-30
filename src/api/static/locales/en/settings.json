@@ -90,7 +90,18 @@
     "unhost_done": "Unhosted successfully",
     "unhost_failed": "Unhost failed: {{msg}}",
     "select_repo_first": "Please select a repository first",
-    "select_repo": "Select Repository"
+    "select_repo": "Select Repository",
+    "migrate_title": "Migrate to Another Org",
+    "migrate_desc": "Migrate the repo from the current org to a target org (use after the repo has been transferred on GitCode). Webhook/bot config is preserved (not rebuilt); scene/issue history follows the migration.",
+    "migrate_target_owner": "Target Org",
+    "migrate_target_repo": "Target Repo Name",
+    "migrate_owner_placeholder": "Target org (e.g. orgB)",
+    "migrate_repo_placeholder": "Repo name (defaults to current)",
+    "migrate_btn": "Migrate",
+    "migrate_owner_required": "Please enter the target org",
+    "migrate_confirm": "Are you sure you want to migrate the repo to {{target}}?\n\nThis will atomically rewrite repo_key and all associated data (hosting, scenes, issues, knowledge baseline, workspace dir). Webhook/bot config is preserved.",
+    "migrate_done": "Migrated successfully: {{newKey}}",
+    "migrate_failed": "Migration failed: {{msg}}"
   },
   "scene": {
     "select_first": "Please select a scene",

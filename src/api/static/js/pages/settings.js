@@ -30,6 +30,13 @@ function renderSettings(tab) {
           <div class="cd-h"><h2 style="color:var(--r)">${I18N.t('settings.host.unhost_title')}</h2></div>
           <p class="tx t2" style="margin-bottom:8px;color:var(--r)">${I18N.t('settings.host.unhost_warning')}</p>
           <button class="bt" style="background:var(--r);color:#fff;border:none;padding:8px 16px" onclick="unhostFromSettings('${repo.fullName}')">${I18N.t('settings.host.unhost_title')}</button>
+        </div>
+        <div class="cd mt16">
+          <div class="cd-h"><h2>${I18N.t('settings.host.migrate_title')}</h2></div>
+          <p class="tx t2" style="margin-bottom:8px">${I18N.t('settings.host.migrate_desc')}</p>
+          <div class="srow"><label>${I18N.t('settings.host.migrate_target_owner')}</label><input type="text" id="migrateTargetOwner" placeholder="${I18N.t('settings.host.migrate_owner_placeholder')}"></div>
+          <div class="srow"><label>${I18N.t('settings.host.migrate_target_repo')}</label><input type="text" id="migrateTargetRepo" value="${repo.name}" placeholder="${I18N.t('settings.host.migrate_repo_placeholder')}"></div>
+          <button class="bt bt-p mt8" onclick="migrateRepoFromSettings('${repo.fullName}')">${I18N.t('settings.host.migrate_btn')}</button>
         </div>`;
     }).catch(e => { var _sg = document.getElementById('sGitcode'); if (_sg) _sg.innerHTML = I18N.t('settings.common.load_failed', {msg: e.message}); });
   } else {
@@ -94,6 +101,34 @@ function unhostFromSettings(fullName) {
       });
     }).catch(e => app.showToast(I18N.t('settings.host.unhost_failed', {msg: e.message})));
   }, {danger: true});
+}
+
+function migrateRepoFromSettings(fullName) {
+  const ownerEl = document.getElementById('migrateTargetOwner');
+  const repoEl = document.getElementById('migrateTargetRepo');
+  const targetOwner = (ownerEl && ownerEl.value ? ownerEl.value.trim() : '');
+  const targetRepo = (repoEl && repoEl.value ? repoEl.value.trim() : '') || (fullName.split('/')[1] || '');
+  if (!targetOwner) {
+    app.showToast(I18N.t('settings.host.migrate_owner_required'));
+    return;
+  }
+  // repo_key 带平台前缀（默认 gitcode:）；当前仓库 provider 从 fullName 不可得，默认 gitcode
+  const repoKey = 'gitcode:' + fullName;
+  const confirmMsg = I18N.t('settings.host.migrate_confirm', {target: targetOwner + '/' + targetRepo});
+  app.showConfirm(confirmMsg, function() {
+    API.post('/repos/migrate', {
+      repo_key: repoKey,
+      target_owner: targetOwner,
+      target_repo: targetRepo
+    }).then(r => {
+      app.showToast(I18N.t('settings.host.migrate_done', {newKey: r.new_repo_key || ''}));
+      // 迁移成功后清除旧仓库缓存，刷新侧边栏
+      localStorage.removeItem('repo_member_cache');
+      sessionStorage.removeItem('currentRepo');
+      app.initSidebarRepos();
+      app.nav('dash');
+    }).catch(e => app.showToast(I18N.t('settings.host.migrate_failed', {msg: e.message})));
+  });
 }
 
 // ── Theme switching ──
