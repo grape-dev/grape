@@ -1462,9 +1462,36 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             if _create_err is None:
                 pass  # 刷新重试成功，跳过异常分支
             elif _http_code == 403:
+                # Issue #523: 403 不再仅凭状态码断言 assignee 无效——提取上游响应正文（脱敏+截断）按语义分流
+                _up_403_parts = _re.split(r'\(403\):\s*', _err_msg, maxsplit=1)
+                _up_403 = _up_403_parts[1].strip() if len(_up_403_parts) > 1 else ''
+                # 基础脱敏：token/凭据类键值不回显
+                _up_403 = _re.sub(
+                    r'(?i)(access_token|refresh_token|token|password|authorization|api[_-]?key|secret[_-]?key|ak|sk)[=:]\s*\S+',
+                    r'\1=***', _up_403)[:200]
+                _up_403_low = _up_403.lower()
+                if 'prohibited for model repository and dataset repository' in _up_403_low:
+                    # GitCode Space/模型仓/数据集仓能力限制 → 仓库类型不支持建单
+                    raise HTTPException(status_code=403, detail={
+                        "code": 403,
+                        "message": "创建 Issue 失败：当前仓库类型（如 GitCode Space/模型仓/数据集仓）"
+                                   "不支持创建 Issue，请改用普通代码仓发起协作"
+                                   + (f"（上游响应: {_up_403}）" if _up_403 else "")
+                    })
+                if _up_403 and any(kw in _up_403_low for kw in (
+                        'user not found', 'user is not found', 'permission', 'forbidden',
+                        'member', 'privilege', 'unauthorized', 'not authorized')):
+                    # 用户/权限类 403 → 保留 assignee 提示
+                    raise HTTPException(status_code=403, detail={
+                        "code": 403,
+                        "message": f"创建 Issue 失败：处理人无效或无权限（assignee={assignee}），"
+                                   f"请检查 assignee 是否为有效的 {('GitHub' if _is_github else 'GitCode')} 用户名"
+                                   + (f"（上游响应: {_up_403}）" if _up_403 else "")
+                    })
+                # 无法识别的 403 → 通用提示附上游脱敏正文，不猜测归因
                 raise HTTPException(status_code=403, detail={
                     "code": 403,
-                    "message": f"创建 Issue 失败：处理人无效或无权限（assignee={assignee}），请检查 assignee 是否为有效的 {('GitHub' if _is_github else 'GitCode')} 用户名"
+                    "message": f"创建 Issue 失败（上游 403）: {_up_403 or _err_msg[:200]}"
                 })
             elif _http_code == 422:
                 raise HTTPException(status_code=422, detail={
