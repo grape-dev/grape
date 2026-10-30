@@ -11,6 +11,41 @@ from src.token_service import is_auth_401_error
 router = APIRouter(prefix="/api/events", tags=["events"])
 
 
+def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
+                         task_id: str = ""):
+    """Issue #587：管理端终止/重派等可审计操作强制留痕（actor/time/target_event/动作）。
+
+    追加 admin_action 审计事件（status=completed，不参与业务流转，仅留痕）。
+    失败不影响主操作（吞异常 + 日志）。
+    """
+    try:
+        from datetime import datetime, timezone
+        from src.api.event_store import append_event
+        _actor = (user or {}).get("username", "") or "unknown"
+        _ts = datetime.now(timezone.utc).isoformat()
+        append_event(
+            repo_key=repo_key,
+            event_type="admin_action",
+            title=f"Admin {action}: event #{target_seq}",
+            issue_id="",
+            agent_type="",
+            source="admin",
+            actor=_actor,
+            summary=f"管理员 {_actor} 对事件 #{target_seq} 执行 {action}"
+                    + (f"（关联任务 {task_id}）" if task_id else ""),
+            payload={
+                "action": action,
+                "actor": _actor,
+                "time": _ts,
+                "target_event_seq": target_seq,
+                "target_task_id": task_id,
+            },
+            status="completed",
+        )
+    except Exception as e:
+        log.warning(f"_audit_admin_action failed ({action} event #{target_seq}): {e}")
+
+
 @router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
     from src.session_manager import db, db_lock
@@ -388,6 +423,9 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     except Exception as e:
         log.warning(f"Event terminate: update_event_status failed: {e}")
 
+    # Issue #587：终止操作强制审计留痕（actor/time/target_event/动作）
+    _audit_admin_action(row[1] or "", seq, "terminate", user, task_id=task_id)
+
     return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
 
 
@@ -429,6 +467,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     # 1.0）归属校验：仅仓库归属人（managed_repos）可重派
     from src.api.deps import check_repo_access
     check_repo_access(user, evt.get("repo_key", "") or "")
+
+    # Issue #587：重派操作强制审计留痕（actor/time/target_event/动作）
+    _audit_admin_action(evt.get("repo_key", "") or "", seq, "redispatch", user)
 
     # 1.0a）Issue #453 修复点 3：自循环被拦事件禁止重派（S7）——重派不得复活被拦事件。
     # 双源判定：① event_skipped 留痕（self_loop / self_loop_path_b / outbound_ledger_hit，

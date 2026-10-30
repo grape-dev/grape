@@ -83,6 +83,37 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
     return {"status": "repo_deleted", "message": "repository deleted, cascade cleanup done"}
 
 
+def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
+                          scene_id: str | None = None) -> int:
+    """Issue #587：A2A 去重判定键 = 「事件活跃(running/dispatched)」。
+
+    仅同 issue + 同 agent_type 且事件仍处于活跃态才视为重复（返回该事件 seq）；
+    事件已终态（completed/failed/cancelled）不阻断新交接（返回 0）。
+    scene_id 提供时限定跨流水线目标场景。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            if scene_id:
+                c.execute(
+                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
+                    "AND event_type='a2a_event' AND status IN ('running','dispatched') "
+                    "AND scene_id=? ORDER BY seq DESC LIMIT 1",
+                    (repo_key, issue_id, scene_id))
+            else:
+                c.execute(
+                    "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? "
+                    "AND event_type='a2a_event' AND status IN ('running','dispatched') "
+                    "ORDER BY seq DESC LIMIT 1",
+                    (repo_key, issue_id, agent_type))
+            row = c.fetchone()
+        return (row[0] if row else 0)
+    except Exception as _de:
+        log.warning(f"A2A: active-event dedup check failed: {_de}")
+        return 0
+
+
 def _a2a_source_event_seq(session_info) -> int:
     """取 A2A 调用方（源事件）seq：会话 token 的 session_key=调用方任务 id → agent_tasks.event_seq。
 
@@ -523,21 +554,11 @@ def _cross_pipeline_handoff(
         return {"ok": False, "error": "target_scene_missing_node"}
 
     # 2. Duplicate handoff check: same Issue already has a non-terminal event in target scene
-    try:
-        from src.session_manager import db, db_lock
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "SELECT seq FROM events WHERE repo_key=? AND issue_id=? "
-                "AND event_type='a2a_event' AND status IN ('running','dispatched') "
-                "AND scene_id=? ORDER BY seq DESC LIMIT 1",
-                (repo_key, f"#{issue_number}", target_scene_id))
-            _existing = c.fetchone()
-        if _existing:
-            log.info(f"A2A #329: duplicate handoff skip — issue=#{issue_number} already has running event in scene={target_scene_id} seq={_existing[0]}")
-            return {"ok": False, "error": "duplicate_handoff"}
-    except Exception as _de:
-        log.warning(f"A2A #329: duplicate check failed: {_de}")
+    #    Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
+    _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "", scene_id=target_scene_id)
+    if _existing_seq:
+        log.info(f"A2A #329: duplicate handoff skip — issue=#{issue_number} already has running event in scene={target_scene_id} seq={_existing_seq}")
+        return {"ok": False, "error": "duplicate_handoff"}
 
     # 3. Persist carried_context + engine_config on issue_state
     #    Also capture old_assignee BEFORE the UPDATE so the audit trail in step 5
@@ -1081,19 +1102,12 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # 同 issue + 同 agent_type 的未完成 A2A 去重：
         # PR 合并后 QA 和 Issue Agent 可能同时触发 A2A → sre，导致重复创建部署任务。
         # 检查是否已有 running/dispatched 状态的同 agent A2A 事件，有则跳过。
+        # Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
         if issue_number:
-            try:
-                with db_lock:
-                    c = db.cursor()
-                    c.execute(
-                        "SELECT seq FROM events WHERE repo_key=? AND issue_id=? AND agent_type=? AND event_type='a2a_event' AND status IN ('running','dispatched') ORDER BY seq DESC LIMIT 1",
-                        (repo_key, f"#{issue_number}", agent_name))
-                    _existing = c.fetchone()
-                    if _existing:
-                        log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing[0]}")
-                        return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing[0]})
-            except Exception as _de:
-                log.warning(f"A2A: duplicate check failed: {_de}")
+            _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", agent_name)
+            if _existing_seq:
+                log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing_seq}")
+                return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing_seq})
 
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)
