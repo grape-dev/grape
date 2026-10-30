@@ -14,6 +14,7 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
 from src.config import log
+from src.user.repo_manager import UpstreamAPIError
 from src.vcs.providers import (
     translate_inbound,
     translate_query_state,
@@ -147,11 +148,20 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
 
 
 def _vcs_req(provider: str, method: str, url: str, token: str, body: dict | None = None):
-    """按 provider 注册表分发原生 API 调用（新增 provider=加模块）。"""
+    """按 provider 注册表分发原生 API 调用（新增 provider=加模块）。
+
+    Issue #549：上游 Git 平台返回 >=400 时透传真实状态码与 message
+    （404 → 404，403 → 403…），502 仅保留给代理自身故障（连接失败/超时/非上游异常）。
+    """
     try:
         return _PROVIDER_MODULES[provider].request(method, url, token, body)
     except HTTPException:
         raise
+    except UpstreamAPIError as e:
+        log.warning(f"Git repo API {method} {url} upstream error: {e}")
+        msg = (e.message or "")[:500] or f"{provider} API 上游错误 ({e.status_code})"
+        raise HTTPException(status_code=e.status_code,
+                             detail={"code": e.status_code, "message": msg})
     except Exception as e:
         log.warning(f"Git repo API {method} {url} failed: {e}")
         raise HTTPException(status_code=502, detail={"code": 502, "message": f"{provider} API 调用失败: {str(e)[:120]}"})
