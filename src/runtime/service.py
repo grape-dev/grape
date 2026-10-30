@@ -1767,6 +1767,79 @@ def validate_run_token(task: dict | None, run_token: str = "") -> str:
     return "ok"
 
 
+_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
+
+# Issue #587: 任务终态 → 事件终态级联收敛的 result 文案
+_EVENT_CASCADE_RESULTS = {
+    "cancelled": "任务已取消：级联收敛（cancel 不作为业务通过，保留事件独立终态）",
+    "failed": "任务失败：级联收敛（update_task_status 补偿，未收到详写终态回报）",
+    "completed": "任务已完成：级联收敛（回报丢失补偿）",
+}
+
+
+def _cascade_event_terminal(cursor, event_seq: int, status: str, exit_code: int = None):
+    """Issue #587: 任务终态级联事件收敛（事务内，幂等，终态保护）。
+
+    仅当事件仍处于活跃态（pending/running/dispatched）时同步为任务终态；
+    已终态事件不被另一终态覆盖（与 event_store.update_event_status 同语义）。
+    返回 True 表示本次发生收敛。
+    """
+    try:
+        row = cursor.execute("SELECT status FROM events WHERE seq=?", (event_seq,)).fetchone()
+        if not row:
+            return False
+        if row[0] in _TERMINAL_STATUSES:
+            return False
+        _now = datetime.now(timezone.utc).isoformat()
+        _result = _EVENT_CASCADE_RESULTS.get(status, f"级联收敛：任务{status}")
+        if status == "cancelled":
+            cursor.execute(
+                "UPDATE events SET status='cancelled', exit_code=-1, completed_at=?, result=? WHERE seq=?",
+                (_now, _result, event_seq))
+        elif status == "failed":
+            cursor.execute(
+                "UPDATE events SET status='failed', exit_code=COALESCE(?, 1), completed_at=?, result=? WHERE seq=?",
+                (exit_code, _now, _result, event_seq))
+        else:
+            cursor.execute(
+                "UPDATE events SET status='completed', exit_code=0, completed_at=?, result=? WHERE seq=?",
+                (_now, _result, event_seq))
+        return True
+    except Exception as _e:
+        log.warning(f"_cascade_event_terminal: failed for event {event_seq} -> {status}: {_e}")
+        return False
+
+
+def converge_event_to_task(task_id: str) -> dict:
+    """Issue #587: 补偿收敛入口——按任务当前终态强制收敛关联事件（幂等，可重复调用）。
+
+    供管理端补偿重试端点（routes/runtime.py /tasks/{id}/converge-event）与
+    sweeper 兜底使用：任务已终态但事件仍 running/pending（回报丢失）时收敛。
+    """
+    task = get_task(task_id)
+    if not task:
+        return {"status": "not_found", "task_id": task_id}
+    _seq = task.get("event_seq") or 0
+    _task_status = task.get("status") or ""
+    if not _seq:
+        return {"status": "no_event", "task_id": task_id, "task_status": _task_status}
+    if _task_status not in _TERMINAL_STATUSES:
+        return {"status": "task_not_terminal", "task_id": task_id,
+                "task_status": _task_status, "event_seq": _seq}
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM events WHERE seq=?", (_seq,))
+        row = c.fetchone()
+        before = row[0] if row else "(missing)"
+        converged = _cascade_event_terminal(c, _seq, _task_status,
+                                            exit_code=task.get("exit_code"))
+        db.commit()
+    return {"status": "converged" if converged else "noop",
+            "task_id": task_id, "task_status": _task_status, "event_seq": _seq,
+            "event_status_before": before,
+            "event_status_after": _task_status if converged else before}
+
+
 def update_task_status(task_id, status, **kw):
     """终态幂等(重放安全): 已终态则不再更新(见 tech-impl 2.2)."""
     with db_lock:
@@ -1804,6 +1877,20 @@ def update_task_status(task_id, status, **kw):
         # 槽位释放（agent-cluster-design.md §4.2.1）：非终态 → 终态，且任务已绑定引擎 → busy_slots-1
         if status in ("completed", "failed", "cancelled") and row[1] and row[1] > 0:
             release_busy_slot(row[1], cursor=c)
+        # Issue #587：任务终态 → 事件级联收敛（事务内兜底）。
+        # cancel_task / 直接判死路径（pool unreachable 等）此前只写 agent_tasks 不回写 events，
+        # 事件长期 running → A2A 去重无限期阻断同角色新交接。complete_task/fail_task 的
+        # 详写终态路径（update_event_complete 先行）在此为 no-op（事件已终态）。
+        if status in _TERMINAL_STATUSES:
+            try:
+                _evt_row = c.execute("SELECT event_seq FROM agent_tasks WHERE id=?",
+                                     (task_id,)).fetchone()
+                if _evt_row and _evt_row[0]:
+                    if _cascade_event_terminal(c, _evt_row[0], status):
+                        log.info(f"update_task_status: cascaded event {_evt_row[0]} -> "
+                                 f"{status} for task {task_id} (Issue #587 convergence)")
+            except Exception as _ce:
+                log.warning(f"update_task_status: terminal cascade failed for task {task_id}: {_ce}")
         db.commit()
     # Issue-45 M2：任务终态 → 会话级临时 token 即时失效（存在即有效，删除即失效）
     if status in ("completed", "failed", "cancelled"):
@@ -3081,6 +3168,50 @@ def start_report_ingestion_loop(loop=None):
         return None
 
 
+# Issue #587：回报落库失败可观测记录（task 级 errors 结构化追加，含重试计数）
+_REPORT_FAILURE_COUNTS: dict = {}
+
+
+def _record_report_failure(task_id: str, kind: str, reason: str):
+    """回报失败落可见记录（agent_tasks.errors，追加合并 [-5:] 截断，不覆盖既有诊断）。"""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
+            row = c.fetchone()
+            if not row:
+                return
+            _existing = []
+            if row[0]:
+                try:
+                    _existing = json.loads(row[0]) or []
+                except Exception:
+                    _existing = [row[0]]
+            _n = _REPORT_FAILURE_COUNTS.get(f"{task_id}:{kind}", 0) + 1
+            _REPORT_FAILURE_COUNTS[f"{task_id}:{kind}"] = _n
+            _entry = {
+                "error_code": "REPORT_INGESTION_FAILED",
+                "kind": kind,
+                "task_id": task_id,
+                "reason": str(reason)[:300],
+                "retries": _n,
+                "ts": datetime.now(timezone.utc).isoformat(),
+            }
+            # 同类失败记录更新语义：移除旧条目后追加最新（计数/原因/时间刷新）
+            _existing = [e for e in _existing
+                         if not (isinstance(e, dict) and e.get("error_code") == "REPORT_INGESTION_FAILED"
+                                 and e.get("kind") == kind)]
+            _existing = _existing + [_entry]
+            _existing = _existing[-5:]
+            c.execute("UPDATE agent_tasks SET errors=? WHERE id=?",
+                      (json.dumps(_existing, ensure_ascii=False), task_id))
+            db.commit()
+            log.warning(f"report ingestion failed (recorded): task={task_id} kind={kind} "
+                        f"retries={_n} reason={reason}")
+    except Exception as _e:
+        log.warning(f"_record_report_failure failed for {task_id}: {_e}")
+
+
 async def _ingestion_loop():
     """攒批落库：messages/progress/usage 入队，批量写。complete/fail 仍同步（强一致）。"""
     import asyncio
@@ -3105,6 +3236,9 @@ async def _ingestion_loop():
                             report_progress(tid, payload)
                     except Exception as e:
                         log.warning(f"ingestion apply failed: {e}")
+                        # Issue #587：失败落 task 级可观测记录（含原因/重试次数），
+                        # 补偿入口 /tasks/{id}/converge-event + worker 侧补报队列兜底
+                        _record_report_failure(tid, kind, str(e))
                 db.commit()
         except asyncio.CancelledError:
             break

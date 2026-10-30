@@ -336,13 +336,35 @@ def sweep_stuck_events_once(no_start_minutes: int = 10, stale_minutes: int = 30)
             _no_task_txt = "中断：running 超时无任务执行记录，且 agent_tasks 无任何关联行——疑似创建任务失败（create_direct_task/enqueue 未落行，请查服务端日志）"
             _timeout_txt = "中断：running 超时无活跃任务执行记录（sweeper 兜底回收）"
             _with_task_rows = set()
+            # Issue #587：超时探活收敛——最近任务已终态时按任务终态映射收敛
+            # （cancelled 任务 → 事件 cancelled，不再是 failed；保留业务结论语义），
+            # 而非一律标 failed。
+            _terminal_by_seq = {}
+            try:
+                with db_lock:
+                    _tc = db.cursor()
+                    _tc.execute(
+                        f"SELECT event_seq, status, exit_code FROM agent_tasks "
+                        f"WHERE event_seq IN ({ph2}) AND status IN ('completed','failed','cancelled') "
+                        f"ORDER BY created_at ASC", dead)
+                    for _s, _st, _ec in _tc.fetchall():
+                        _terminal_by_seq[_s] = (_st, _ec)
+            except Exception as _te:
+                log.warning(f"sweeper: terminal task lookup failed: {_te}")
             try:
                 with db_lock:
                     _c = db.cursor()
                     _c.execute(f"SELECT DISTINCT event_seq FROM agent_tasks WHERE event_seq IN ({ph2})", dead)
                     _with_task_rows = {r[0] for r in _c.fetchall()}
+                    from src.runtime.service import _cascade_event_terminal
                     _c2 = db.cursor()
                     for s in dead:
+                        if s in _terminal_by_seq:
+                            # 任务已终态 → 级联到任务终态（探活收敛，幂等）
+                            _st, _ec = _terminal_by_seq[s]
+                            if _cascade_event_terminal(_c2, s, _st, exit_code=_ec):
+                                fixed += 1
+                            continue
                         _txt = _timeout_txt if s in _with_task_rows else _no_task_txt
                         _c2.execute(
                             "UPDATE events SET status='failed', exit_code=1, completed_at=?, result=? WHERE seq=?",
