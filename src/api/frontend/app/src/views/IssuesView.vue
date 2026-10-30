@@ -3113,7 +3113,7 @@ onBeforeUnmount(function () {
   flex-direction: column;
   background: transparent;
   border-radius: 14px;
-  border: 0.5px solid var(--card-border, var(--b, #e8e8ed));
+  border: 0.5px solid var(--b, #e8e8ed);
   height: 100%;
   overflow: hidden;
 }
@@ -3165,11 +3165,8 @@ onBeforeUnmount(function () {
   position: relative;
   flex: 0 0 auto;
   min-height: 76px;
-  /* ui-debt #1: in dark the shell card color (#1c1c1e) on pure black page
-   * reads as one wall — consume the elevated glass token (dark: #2c2c2e,
-   * light: falls back to --c) */
-  background: var(--glass-bg-strong, var(--c, #fff));
-  border: 0.5px solid var(--card-border, var(--b, #e5e5ea));
+  background: var(--c, #fff);
+  border: 0.5px solid var(--b, #e5e5ea);
   border-radius: 10px;
   padding: 10px 12px;
   cursor: pointer;
