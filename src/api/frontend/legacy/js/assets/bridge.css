@@ -55,7 +55,7 @@
  * 2026-10-29: aligned with the owner's Apple dark palette spec — the shell's
  * dark accent vars are now spec colors themselves, these mirror them. */
 @media (prefers-color-scheme: dark) {
-  [data-theme='apple'][data-theme-mode='auto'] {
+  :root {
     --c-accent: #0a84ff;
     --c-accent-soft: rgba(10, 132, 255, 0.16);
     --c-danger: #ff375f;
@@ -74,6 +74,7 @@
  * Light mode is untouched: these overrides only apply in dark.
  * 2026-10-29: aligned with the owner's palette spec (glass card / border / shadow). */
 @media (prefers-color-scheme: dark) {
+  :root,
   [data-theme='apple'][data-theme-mode='auto'] {
     /* spec: glass card rgba(28,28,30,.72) blur 20px + top highlight */
     --glass-bg: rgba(28, 28, 30, 0.72);
@@ -112,7 +113,8 @@
  * root and everything inside it, in dark only. Light was never changed.
  * Selectors are attribute-qualified for specificity over the token blocks. */
 @media (prefers-color-scheme: dark) {
-  [data-theme='apple'][data-theme-mode='auto'] .sm {
+  [data-theme='apple'][data-theme-mode='auto'] .sm,
+  :root .sm {
     --a: #0071e3;
     --ah: #0077ed;
     --card-border: var(--b);
