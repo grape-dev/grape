@@ -340,18 +340,30 @@ def get_user_gitcode_login(api_token: str) -> str:
 
 
 def fetch_user_orgs(api_token: str) -> list[dict]:
-    """获取当前 token 用户拥有的 GitCode 组织列表（GET /api/v5/user/orgs）。
+    """获取当前 token 用户拥有的 GitCode 组织列表。
 
     Issue #543：迁移目标组织下拉框数据源。
     返回 [{"login", "name", "avatar_url"}, ...]（login 为组织账号名，用作 target_owner）。
     失败抛 RuntimeError（由 with_oauth_token 统一处理 401/403 token 失效）。
+
+    GitCode 无 /user/orgs 端点（404），需先获取用户 login，
+    再走 /users/{login}/orgs 查组织列表。
     """
     if not api_token:
         raise RuntimeError("GitCode API Token 未配置")
+
+    # 1. 获取当前用户 login
+    user_url = f"{API_BASE}/user"
+    user_data = _req("GET", user_url, api_token)
+    login = user_data.get("login") or user_data.get("username") or ""
+    if not login:
+        raise RuntimeError("无法获取当前用户 login")
+
+    # 2. 查用户组织列表
     orgs: list[dict] = []
     page = 1
     while True:
-        url = f"{API_BASE}/user/orgs?per_page=50&page={page}"
+        url = f"{API_BASE}/users/{urllib.parse.quote(login, safe='')}/orgs?per_page=50&page={page}"
         data = _req("GET", url, api_token)
         items = data if isinstance(data, list) else []
         if not items and isinstance(data, dict):
@@ -362,12 +374,12 @@ def fetch_user_orgs(api_token: str) -> list[dict]:
         for o in items:
             if not isinstance(o, dict):
                 continue
-            login = o.get("login") or o.get("username") or ""
-            if not login:
+            org_login = o.get("login") or o.get("path") or o.get("username") or ""
+            if not org_login:
                 continue
             orgs.append({
-                "login": login,
-                "name": o.get("name") or o.get("nickname") or login,
+                "login": org_login,
+                "name": o.get("name") or o.get("nickname") or org_login,
                 "avatar_url": o.get("avatar_url") or "",
             })
         if len(items) < 50:

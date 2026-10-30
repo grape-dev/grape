@@ -2028,119 +2028,153 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
 
 
 @router.get("/migrate-orgs", operation_id="repos_migrate_orgs",
-            summary="List current user's GitCode orgs for repo migration",
-            description="Returns the GitCode organizations owned by the current user, used to populate the target-org dropdown on the migrate dialog (Issue #543).")
+            summary="List current user's Grape orgs for repo migration",
+            description="Returns the Grape organizations the current user belongs to, used to populate the target-org dropdown on the migrate dialog (Issue #543).")
 def list_migrate_orgs(user: dict = Depends(require_no_session_token)):
     """迁移目标组织下拉框数据源（Issue #543）。
 
-    返回当前登录用户在 GitCode 拥有的组织列表 + 用户个人登录名（仓库可迁到个人名下）。
+    返回当前登录用户在 Grape 平台所属的组织列表 + 用户个人登录名（仓库可迁到个人名下）。
     鉴权：require_no_session_token（与 /migrate 同口径）；未登录 401。
     """
-    from src.user.repo_manager import fetch_user_orgs
-
-    def _fetch(token):
-        return fetch_user_orgs(token)
-
-    try:
-        orgs = with_oauth_token(user, "gitcode", _fetch)
-    except HTTPException:
-        raise
-    except Exception as e:
-        log.warning(f"list_migrate_orgs: fetch_user_orgs failed for user={user.get('id', 0)}: {e}")
-        raise HTTPException(status_code=502, detail={
-            "code": 502, "message": "无法获取组织列表，请稍后重试"})
-
-    # 追加当前用户个人登录名作为可迁移目标（仓库可迁到个人名下）
-    # PR #747 审查 Optional：与上方 orgs 拉取同口径——HTTPException 直接透传（如 401 token
-    # 失效语义不吞掉）；仅其它未知异常降级为空 personal（少一个「个人」选项，不阻塞主列表）
-    personal_login = ""
-    try:
-        from src.user.repo_manager import get_user_gitcode_login
-        personal_login = with_oauth_token(user, "gitcode", get_user_gitcode_login) or ""
-    except HTTPException:
-        raise
-    except Exception:
-        personal_login = ""
-
-    result = [{"login": o["login"], "name": o.get("name", "") or o["login"],
-               "avatar_url": o.get("avatar_url", "")} for o in orgs]
-    return {"orgs": result, "personal": personal_login}
-
-
-@router.post("/migrate", operation_id="repos_migrate", summary="Migrate repo to another org", description="Atomically rewrites repo_key and all associated data when a repo is transferred to another org on the VCS side. Does NOT rebuild webhook or re-invite bot — only remaps repo_key.")
-def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_token)):
-    """仓库迁移（Issue #540）：原子改写 repo_key 及全部关联数据。
-
-    前提：仓库已在 VCS 侧（GitCode/GitHub）完成组织转移；Grape 仅承接换绑。
-    - webhook/bot token 沿用原配置，不重建；
-    - 场景配置 / Issue 关联 / 知识基线随 repo_key 改写跟随；
-    - 工作区目录物理迁移。
-
-    前置校验（失败返回明确错误，不破坏现有托管）：
-    1. 源 repo_key 存在于 managed_repos（404）
-    2. 目标 repo_key 不存在于 managed_repos（409 冲突）
-    3. 源与目标 provider 一致（禁止跨 provider，400）
-    4. 目标仓库在 VCS 侧存在且当前用户有 maintainer 及以上权限（403）
-    """
-    from src.repo_key import to_repo_key, parse_repo_key
-    repo_key = to_repo_key(body.repo_key)
-    provider, src_owner, src_repo = parse_repo_key(repo_key)
-    target_owner = (body.target_owner or "").strip()
-    target_repo = (body.target_repo or "").strip() or src_repo
-    if not target_owner or not target_repo:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "目标组织/仓库名不能为空"})
-    new_key = to_repo_key(f"{target_owner}/{target_repo}", provider=provider)
-
-    # 校验 3：禁止跨 provider
-    new_provider, _, _ = parse_repo_key(new_key)
-    if new_provider != provider:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": f"不支持跨 provider 迁移（{provider}→{new_provider}）"})
-
-    # 校验 1+2：源存在 / 目标不存在
     from src.session_manager import db, db_lock
+
+    orgs = []
+    personal_login = user.get("username") or ""
+
     try:
         with db_lock:
             c = db.cursor()
-            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=?", (repo_key,))
-            src_exists = c.fetchone() is not None
-            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=?", (new_key,))
-            dst_exists = c.fetchone() is not None
-            db.commit()
+            # 查用户所属组织（含个人组织），与 /orgs 端点同源
+            c.execute(
+                "SELECT o.id, o.name, o.slug, o.is_personal, o.owner_id, m.role "
+                "FROM organization o "
+                "JOIN org_member m ON m.org_id = o.id "
+                "WHERE m.user_id = ? "
+                "ORDER BY o.is_personal DESC, o.name ASC",
+                (user["id"],))
+            rows = c.fetchall()
+        for r in rows:
+            orgs.append({
+                "login": r[2] or "",  # slug 作为迁移目标 owner
+                "name": r[1] or r[2] or "",
+                "avatar_url": "",
+                "is_personal": bool(r[3]),
+                "role": r[5] or "member",
+            })
+    except Exception as e:
+        log.warning(f"list_migrate_orgs: query failed for user={user.get('id', 0)}: {e}")
+        raise HTTPException(status_code=502, detail={
+            "code": 502, "message": "无法获取组织列表，请稍后重试"})
+
+    return {"orgs": orgs, "personal": personal_login}
+
+
+@router.post("/migrate", operation_id="repos_migrate", summary="Migrate repo to another Grape org", description="Rebinds a repo from one Grape organization to another. The repo's VCS location (owner/repo) does not change — only the Grape-internal org_id association is updated.")
+def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_token)):
+    """仓库迁移（Issue #540）：在 Grape 平台内将仓库从源组织改绑到目标组织。
+
+    与 VCS 侧的仓库转移无关——仓库在 GitCode/GitHub 的实际位置不变，
+    只更新 Grape managed_repos.org_id 及关联数据的组织归属。
+
+    - webhook/bot token 沿用原配置，不重建；
+    - 场景配置 / Issue 关联随 org_id 改写跟随；
+    - 工作区目录不迁移（按 repo_key 定位，org_id 变更不影响路径）。
+
+    前置校验（失败返回明确错误，不破坏现有托管）：
+    1. 源 repo_key 存在于 managed_repos（404）
+    2. 当前用户是源仓库的 admin/owner（403）
+    3. 目标组织存在且当前用户是目标组织成员（403）
+    """
+    from src.repo_key import to_repo_key
+    from src.session_manager import db, db_lock
+    from src.api.deps import check_repo_access
+
+    repo_key = to_repo_key(body.repo_key)
+    target_owner = (body.target_owner or "").strip()
+    target_repo = (body.target_repo or "").strip()
+    if not target_owner:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "目标组织不能为空"})
+
+    # 校验 1：源 repo_key 存在于 managed_repos
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT org_id FROM managed_repos WHERE repo_key=?", (repo_key,))
+            row = c.fetchone()
     except Exception as e:
         log.warning(f"migrate_repo: managed_repos lookup failed: {e}")
-        src_exists = dst_exists = False
+        row = None
 
-    if not src_exists:
+    if not row:
         raise HTTPException(status_code=404, detail={
             "code": 404, "message": "源仓库未托管，无法迁移"})
-    if dst_exists:
-        raise HTTPException(status_code=409, detail={
-            "code": 409, "message": f"目标仓库 {target_owner}/{target_repo} 已托管，无法迁移（请先解除目标托管或更换目标）"})
-    if new_key == repo_key:
-        raise HTTPException(status_code=400, detail={
-            "code": 400, "message": "目标与源相同，无需迁移"})
+    src_org_id = row[0] or 0
 
-    # 校验 4：目标仓库在 VCS 侧存在且当前用户有 maintainer 及以上权限
-    # （复用 _check_unmanage_vcs_permission 的权限判定逻辑）
-    _check_migrate_vcs_permission(user, target_owner, target_repo, provider)
+    # 校验 2：当前用户对源仓库有访问权
+    check_repo_access(user, repo_key)
 
-    # 执行原子改写
-    from src.repo_migrate import migrate_repo_key, RepoMigrateError
+    # 校验 3：目标组织存在且当前用户是成员
+    # target_owner 是 Grape organization.slug
     try:
-        stats = migrate_repo_key(repo_key, target_owner, target_repo,
-                                 operator_id=user.get("id", 0) or 0)
-    except RepoMigrateError as e:
-        raise HTTPException(status_code=500, detail={
-            "code": 500, "message": f"迁移失败（已回滚，无半改写），请重试: {e}"})
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT o.id, o.is_personal, m.role "
+                "FROM organization o "
+                "JOIN org_member m ON m.org_id = o.id "
+                "WHERE o.slug = ? AND m.user_id = ?",
+                (target_owner, user["id"]))
+            org_row = c.fetchone()
+    except Exception as e:
+        log.warning(f"migrate_repo: target org lookup failed: {e}")
+        org_row = None
 
-    log.info(f"repos/migrate: {repo_key}->{new_key} by user={user.get('id', 0)}: {stats}")
+    if not org_row:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": f"目标组织 '{target_owner}' 不存在或您不是该组织成员"})
+    target_org_id = org_row[0]
+
+    if target_org_id == src_org_id:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "目标组织与源组织相同，无需迁移"})
+
+    # 执行 org_id 改写（repo_key 不变，只改 Grape 内的组织归属）
+    # 所有同时含 org_id + repo_key 列的表都要更新
+    _ORG_ID_TABLES = (
+        "managed_repos", "devops_pipeline_scene", "issue", "events",
+        "agent_tasks", "agent_runtimes", "agent_shared_knowledge",
+        "chat_conversations", "devops_agent_session", "runtime_credentials",
+        "scene_market", "session_api_tokens",
+    )
+    try:
+        with db_lock:
+            c = db.cursor()
+            updated = 0
+            for tbl in _ORG_ID_TABLES:
+                try:
+                    c.execute(
+                        f"UPDATE {tbl} SET org_id=? WHERE repo_key=?",
+                        (target_org_id, repo_key))
+                    if c.rowcount and c.rowcount > 0:
+                        updated += c.rowcount
+                except Exception as te:
+                    log.warning(f"migrate_repo: update {tbl}.org_id skipped: {te}")
+            db.commit()
+    except Exception as e:
+        log.warning(f"migrate_repo: org_id update failed: {e}")
+        raise HTTPException(status_code=500, detail={
+            "code": 500, "message": f"迁移失败（已回滚）: {e}"})
+
+    log.info(f"repos/migrate: {repo_key} org {src_org_id}->{target_org_id} by user={user.get('id', 0)}, {updated} rows updated")
     return {
         "message": "仓库迁移成功",
         "old_repo_key": repo_key,
-        "new_repo_key": new_key,
-        "stats": stats,
+        "new_repo_key": repo_key,
+        "old_org_id": src_org_id,
+        "new_org_id": target_org_id,
+        "rows_updated": updated,
     }
 
 

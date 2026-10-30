@@ -1,8 +1,8 @@
-"""Issue #543：迁移目标组织下拉框 — 组织列表端点与 GitCode V5 封装测试。
+"""Issue #543：迁移目标组织下拉框 — 组织列表端点测试。
 
 覆盖：
-- fetch_user_orgs：GitCode V5 /user/orgs 返回结构、分页、失败抛错；
-- GET /api/repos/migrate-orgs：未鉴权 401、鉴权后返回 orgs 数组、上游失败 502。
+- GET /api/repos/migrate-orgs：未鉴权 401、鉴权后返回 orgs 数组（来自 Grape organization 表）、上游失败 502。
+- 数据源从 Grape 平台 organization + org_member 表查询（不再调 GitCode API）。
 """
 import os
 import sys
@@ -30,8 +30,8 @@ def _jwt(user_id, username):
     return create_access_token(user_id, username, ver)
 
 
-def _ensure_user(username="test_migrate_orgs", gc_token="gc_tok_543"):
-    """创建测试用户并绑定 GitCode token（external_identities）。"""
+def _ensure_user(username="test_migrate_orgs"):
+    """创建测试用户。"""
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM grape_accounts WHERE username=?", (username,))
@@ -45,94 +45,11 @@ def _ensure_user(username="test_migrate_orgs", gc_token="gc_tok_543"):
                 (username, None, hash_password("t123"), username))
             db.commit()
             uid = c.lastrowid
-        c.execute(
-            "INSERT OR REPLACE INTO external_identities "
-            "(grape_user_id, provider, external_id, external_login, access_token) "
-            "VALUES (?, 'gitcode', ?, ?, ?)",
-            (uid, f"{username}_gc", username, gc_token))
-        db.commit()
     return uid, username
 
 
 # ---------------------------------------------------------------------------
-# 1. fetch_user_orgs — GitCode V5 封装
-# ---------------------------------------------------------------------------
-
-def test_fetch_user_orgs_returns_list(monkeypatch):
-    """正常返回：解析 login/name/avatar_url。"""
-    from src.user import repo_manager as rm
-
-    fake = [
-        {"login": "orgA", "name": "Org Alpha", "avatar_url": "https://x/a.png"},
-        {"login": "orgB", "name": "Org Beta", "avatar_url": ""},
-    ]
-
-    def _fake_req(method, url, token="", body=None):
-        assert url.startswith(rm.API_BASE + "/user/orgs")
-        return fake
-
-    monkeypatch.setattr(rm, "_req", _fake_req)
-    orgs = rm.fetch_user_orgs("tok")
-    assert len(orgs) == 2
-    assert orgs[0]["login"] == "orgA"
-    assert orgs[0]["name"] == "Org Alpha"
-    assert orgs[1]["avatar_url"] == ""
-
-
-def test_fetch_user_orgs_dict_wrapper(monkeypatch):
-    """GitCode 偶尔返回 {"data": [...]} 包装 → 也能解析。"""
-    from src.user import repo_manager as rm
-
-    def _fake_req(method, url, token="", body=None):
-        return {"data": [{"login": "wrappedOrg", "username": "wrappedOrg"}]}
-
-    monkeypatch.setattr(rm, "_req", _fake_req)
-    orgs = rm.fetch_user_orgs("tok")
-    assert len(orgs) == 1
-    assert orgs[0]["login"] == "wrappedOrg"
-
-
-def test_fetch_user_orgs_pagination(monkeypatch):
-    """分页：第一页满 50 条 → 继续第二页；第二页不足 → 停止。"""
-    from src.user import repo_manager as rm
-
-    pages = {
-        1: [{"login": f"org{i}"} for i in range(50)],
-        2: [{"login": "org50"}],
-    }
-
-    def _fake_req(method, url, token="", body=None):
-        page = 1
-        if "page=2" in url:
-            page = 2
-        return pages[page]
-
-    monkeypatch.setattr(rm, "_req", _fake_req)
-    orgs = rm.fetch_user_orgs("tok")
-    assert len(orgs) == 51
-
-
-def test_fetch_user_orgs_empty_token():
-    """空 token → 抛 RuntimeError（不调网络）。"""
-    from src.user.repo_manager import fetch_user_orgs
-    with pytest.raises(RuntimeError):
-        fetch_user_orgs("")
-
-
-def test_fetch_user_orgs_failure(monkeypatch):
-    """上游 401/500 → RuntimeError 透传。"""
-    from src.user import repo_manager as rm
-
-    def _boom(method, url, token="", body=None):
-        raise RuntimeError("GitCode API GET failed (401): unauthorized")
-
-    monkeypatch.setattr(rm, "_req", _boom)
-    with pytest.raises(RuntimeError):
-        rm.fetch_user_orgs("tok")
-
-
-# ---------------------------------------------------------------------------
-# 2. GET /api/repos/migrate-orgs — 端点鉴权与返回结构
+# 1. GET /api/repos/migrate-orgs — 端点鉴权与返回结构
 # ---------------------------------------------------------------------------
 
 def test_migrate_orgs_requires_auth():
@@ -141,45 +58,69 @@ def test_migrate_orgs_requires_auth():
     assert r.status_code == 401
 
 
-def test_migrate_orgs_returns_structure(monkeypatch):
-    """鉴权后返回 {"orgs": [...], "personal": "..."}。"""
-    from src.user import repo_manager as rm
-
+def test_migrate_orgs_returns_structure():
+    """鉴权后返回 {"orgs": [...], "personal": "..."}，数据来自 Grape organization 表。"""
     uid, username = _ensure_user()
-
-    def _fake_req(method, url, token="", body=None):
-        if url.endswith("/user") or url == rm.API_BASE + "/user":
-            return {"login": username}
-        if "/user/orgs" in url:
-            return [{"login": "targetOrg", "name": "Target Org", "avatar_url": ""}]
-        return {}
-
-    monkeypatch.setattr(rm, "_req", _fake_req)
     token = _jwt(uid, username)
     r = client.get("/api/repos/migrate-orgs",
                    headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200, r.text
     body = r.json()
     assert "orgs" in body and isinstance(body["orgs"], list)
-    assert len(body["orgs"]) == 1
-    assert body["orgs"][0]["login"] == "targetOrg"
+    assert "personal" in body
     assert body["personal"] == username
+    # 个人组织应在列表中（注册时自动创建）
+    if body["orgs"]:
+        assert "login" in body["orgs"][0]
+        assert "name" in body["orgs"][0]
 
 
-def test_migrate_orgs_upstream_failure_502(monkeypatch):
-    """GitCode 上游故障 → 502 + 友好提示。"""
-    from src.user import repo_manager as rm
-
+def test_migrate_orgs_personal_org_included():
+    """用户有个人组织时，应出现在返回列表中。"""
     uid, username = _ensure_user()
-
-    def _boom(method, url, token="", body=None):
-        raise RuntimeError("GitCode API GET failed (500): server error")
-
-    monkeypatch.setattr(rm, "_req", _boom)
+    # 手动创建个人组织 + org_member 记录（模拟注册时自动创建）
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT id FROM organization WHERE owner_id=? AND is_personal=1", (uid,))
+        if not c.fetchone():
+            c.execute(
+                "INSERT INTO organization (name, slug, owner_id, is_personal) "
+                "VALUES (?, ?, ?, 1)",
+                (f"{username}'s Workspace", f"{username}-personal", uid))
+            org_id = c.lastrowid
+            c.execute("INSERT INTO org_member (org_id, user_id, role) VALUES (?, ?, 'owner')",
+                      (org_id, uid))
+            db.commit()
     token = _jwt(uid, username)
     r = client.get("/api/repos/migrate-orgs",
                    headers={"Authorization": f"Bearer {token}"})
-    # mock 用户 token 有效：with_oauth_token 无 401 刷新重试路径，上游 500 应稳定映射 502
-    assert r.status_code == 502, r.text
-    detail = r.json().get("detail") or r.json()
-    assert detail.get("code") == 502
+    assert r.status_code == 200
+    body = r.json()
+    personal_orgs = [o for o in body["orgs"] if o.get("is_personal")]
+    assert len(personal_orgs) >= 1, f"Expected at least 1 personal org, got {body['orgs']}"
+
+
+def test_migrate_orgs_upstream_failure_502(monkeypatch):
+    """DB 查询故障 → 502 + 友好提示。"""
+    uid, username = _ensure_user()
+    token = _jwt(uid, username)
+
+    # Patch session_manager.db_lock to raise
+    from src import session_manager as sm
+
+    class _BoomLock:
+        def __enter__(self):
+            raise RuntimeError("DB connection lost")
+        def __exit__(self, *a):
+            pass
+
+    original = sm.db_lock
+    sm.db_lock = _BoomLock()
+    try:
+        r = client.get("/api/repos/migrate-orgs",
+                       headers={"Authorization": f"Bearer {token}"})
+        assert r.status_code == 502, r.text
+        detail = r.json().get("detail") or r.json()
+        assert detail.get("code") == 502
+    finally:
+        sm.db_lock = original

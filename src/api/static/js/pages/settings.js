@@ -146,25 +146,20 @@ function _loadMigrateOrgs() {
 
 function migrateRepoFromSettings(fullName) {
   const ownerEl = document.getElementById('migrateTargetOwner');
-  const repoEl = document.getElementById('migrateTargetRepo');
-  // Issue #543: target_repo 固定当前仓库名（只读），target_owner 取下拉选中值
   const targetOwner = (ownerEl && ownerEl.value ? ownerEl.value.trim() : '');
-  const targetRepo = (repoEl && repoEl.value ? repoEl.value.trim() : '') || (fullName.split('/')[1] || '');
   if (!targetOwner) {
     app.showToast(I18N.t('settings.host.migrate_owner_required'));
     return;
   }
-  // repo_key 带平台前缀（默认 gitcode:）；当前仓库 provider 从 fullName 不可得，默认 gitcode
   const repoKey = 'gitcode:' + fullName;
-  const confirmMsg = I18N.t('settings.host.migrate_confirm', {target: targetOwner + '/' + targetRepo});
+  const confirmMsg = I18N.t('settings.host.migrate_confirm', {target: targetOwner});
   app.showConfirm(confirmMsg, function() {
     API.post('/repos/migrate', {
       repo_key: repoKey,
       target_owner: targetOwner,
-      target_repo: targetRepo
+      target_repo: ''
     }).then(r => {
       app.showToast(I18N.t('settings.host.migrate_done', {newKey: r.new_repo_key || ''}));
-      // 迁移成功后清除旧仓库缓存，刷新侧边栏
       localStorage.removeItem('repo_member_cache');
       sessionStorage.removeItem('currentRepo');
       app.initSidebarRepos();
