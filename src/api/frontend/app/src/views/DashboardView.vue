@@ -256,7 +256,8 @@
               v-for="(node, i) in flowEditing ? editNodes : viewNodes"
               :key="node.id + '-' + i"
             >
-              <div :class="['ap-nd', { off: !node.enabled }]">
+              <!-- off 判定用 === false：老场景 nodes 无 enabled 字段（null=启用），!node.enabled 会误判成全灰 -->
+              <div :class="['ap-nd', { off: node.enabled === false }]">
                 <div
                   class="ap-nd-top"
                   :style="{ background: agentColor(node.tag || node.id) }"
