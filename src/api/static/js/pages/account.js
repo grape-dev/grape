@@ -139,8 +139,8 @@ function _accountRenderSecurity() {
     }
     html += '</div>';
 
-    // 卡片2: 邮箱管理（R7: 无邮箱配置时不显示）
-    // email_configured 通过 /auth/providers 获取，此处用 window._emailConfigured 缓存
+    // 卡片2: 邮箱管理（R7 原设计：无邮箱配置时整卡隐藏——但用户会疑惑「为什么没有换邮箱入口」，
+    // #535 用户体验收口：未配置时卡片保留但降级——说明原因 + 配置帮助链接，入口不再凭空消失）
     if (window._emailConfigured !== false) {
       html += '<div class="cd" id="accEmailCard"><div class="cd-h"><h2>' + (I18N.t('app.account.email_label')) + '</h2></div>';
       if (d.email) {
@@ -150,6 +150,11 @@ function _accountRenderSecurity() {
         html += '<p class="tx t2" style="margin-bottom:12px">' + (I18N.t('app.account.email_not_set')) + '</p>';
         html += '<button class="bt bt-o" onclick="_accountShowChangeEmail()">' + (I18N.t('app.account.set_email')) + '</button>';
       }
+      html += '</div>';
+    } else {
+      html += '<div class="cd" id="accEmailCard"><div class="cd-h"><h2>' + (I18N.t('app.account.email_label')) + '</h2></div>';
+      html += '<p class="tx t2" style="margin-bottom:4px">' + (I18N.t('app.account.email_service_not_configured_card')) + '</p>';
+      html += '<p style="font-size:12px"><a href="/static/help.html#/developer/04-storage-and-email" target="_blank" rel="noopener" style="color:var(--a);text-decoration:underline">' + (I18N.t('app.account.email_view_config_help')) + '</a></p>';
       html += '</div>';
     }
 
@@ -336,12 +341,26 @@ function _accountShowChangePassword() {
   );
 }
 
+// ===== 邮箱服务未配置统一提示（#535 P1：主文案 + 可行动指引 + 配置文档链接） =====
+// 三个入口（重置密码/设置密码/换邮箱）共用：主文案说明被什么挡住（contextKey 按
+// 场景区分），副文案给用户可行动的下一步（普通用户=联系管理员，管理员=按文档配置），
+// toast 附「查看配置帮助」深链 help.html 邮件配置章节（§5.2 SMTP/Resend）。
+function _accountShowEmailNotConfiguredToast(contextKey) {
+  var link = I18N.t('app.account.email_view_config_help', null, '查看配置帮助');
+  app.showToast(
+    I18N.t(contextKey, null, I18N.t('app.account.email_not_configured')),
+    I18N.t('app.account.email_not_configured_hint'),
+    6000,
+    { text: link, url: '/static/help.html#/developer/04-storage-and-email' }
+  );
+}
+
 // ===== Reset password (有密码但忘记当前密码——通过邮箱验证码重置) =====
 function _accountShowResetPassword() {
   var hasEmail = _accountProfile && _accountProfile.email;
   if (!hasEmail || window._emailConfigured === false) {
     if (window._emailConfigured === false) {
-      app.showToast(I18N.t('app.account.email_not_configured') || 'Email service not configured, please contact administrator');
+      _accountShowEmailNotConfiguredToast('app.account.reset_pwd_blocked_by_email');
     } else {
       app.showToast(I18N.t('app.account.set_password_needs_email'));
     }
@@ -412,7 +431,7 @@ function _accountDoChangePassword() {
 function _accountShowSetPassword() {
   // 第一层：系统邮件服务配置检查
   if (window._emailConfigured === false) {
-    app.showToast(I18N.t('app.account.email_not_configured') || 'Email service not configured, please contact administrator');
+    _accountShowEmailNotConfiguredToast('app.account.set_pwd_blocked_by_email');
     return;
   }
   // 第二层：用户邮箱检查（系统已配置但用户无邮箱 → 引导绑定）
@@ -464,7 +483,7 @@ function _accountDoSetPassword() {
 // ===== Change email =====
 function _accountShowChangeEmail() {
   if (window._emailConfigured === false) {
-    app.showToast(I18N.t('app.account.email_not_configured') || 'Email service not configured, please contact administrator');
+    _accountShowEmailNotConfiguredToast('app.account.change_email_blocked_by_email');
     return;
   }
   var isZh = _accountIsZh();
@@ -522,9 +541,14 @@ function _accountBindProvider(provider) {
     : I18N.t('app.account.link_platform', {platform: pName});
 
   // R7.4: 检查 OAuth App 是否已配置——未配时只显示手动令牌输入，不显示 OAuth tab
-  var _providersData = _accountProvidersData || { providers: [] };
-  var _providerInfo = (_providersData.providers || []).find(function(p) { return p.provider === provider; });
-  var _oauthConfigured = !!(_providerInfo && _providerInfo.configured);
+  // #535 修复：_accountProvidersData 只在账号安全 tab 被填充——经新手引导页等入口
+  // 进来时缓存为 null，原实现保守猜「未配置」导致已配置场景也只有 token 一个页签。
+  // 现改为：缓存缺失时主动 fetch /auth/providers（唯一权威源）再渲染弹窗，
+  // 彻底消除「依赖某个入口恰好填过缓存」；缓存存在则沿用（省一次请求）。
+  var _providersData = _accountProvidersData;
+  var _renderBindModal = function() {
+    var _providerInfo = (_providersData.providers || []).find(function(p) { return p.provider === provider; });
+    var _oauthConfigured = !!(_providerInfo && _providerInfo.configured);
 
   var html = '<h3 style="display:flex;align-items:center;gap:8px">' + icon + ' ' + titleText + '</h3>';
 
@@ -555,7 +579,24 @@ function _accountBindProvider(provider) {
     html += '</div>';
   }
 
-  _accountShowModal(html);
+    _accountShowModal(html);
+  };
+
+  if (_providersData) {
+    // 缓存已有（账号安全 tab 已填充 / 引导页已写入）→ 直接渲染，零额外请求
+    _renderBindModal();
+  } else {
+    // #535 防御层：缓存缺失（新手引导页等入口）→ 主动拉权威配置再渲染，
+    // 不再保守猜「未配置」；拉取失败才按未配置降级（与旧行为一致）
+    API.get('/auth/providers').then(function(d) {
+      _providersData = d && d.providers ? d : { providers: d && d.providers || [] };
+      _accountProvidersData = _providersData;
+      _renderBindModal();
+    }).catch(function() {
+      _providersData = { providers: [] };
+      _renderBindModal();
+    });
+  }
 }
 
 function _accountSwitchBindTab(tab) {

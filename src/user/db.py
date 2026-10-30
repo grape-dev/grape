@@ -293,9 +293,15 @@ def save_oauth_state(state: str, provider: str, data: dict | None = None):
 # P0-3: exchange_code 一次性交换码——替代 URL 传递 access_token
 def save_exchange_code(code: str, user_id: int, username: str,
                        provider: str, token_version: int, is_new: bool) -> bool:
-    """保存一次性 exchange code（10 秒过期）。
+    """保存一次性 exchange code（60 秒过期）。
 
     P2-1: 懒清理——每次保存时顺带删除过期 exchange_codes。
+    #535 UC14：10s→60s。原 10s 窗口对 SPA 首载（公网无缓存拉全量静态资源
+    经常 >10s）是必然冲突——回调成功→前端加载完才兑票→票已过期→401→
+    被踢回登录页。60s 是缓解（治本为 UC15 内联脚本落地即兑，见 main.py）。
+    安全论证：code 为 sha256(urandom(32)) 高熵值，威胁模型是截获而非枚举；
+    一次性原子消费（validate_exchange_code SELECT+DELETE rowcount）不变；
+    兑换是 POST（链接预取/邮件扫描器只发 GET，不会预消费）。
     """
     import time as _t
     try:
@@ -309,7 +315,7 @@ def save_exchange_code(code: str, user_id: int, username: str,
                     "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (code, user_id, username, provider, token_version,
-                     1 if is_new else 0, _t.time(), _t.time() + 10),
+                     1 if is_new else 0, _t.time(), _t.time() + 60),
                 )
             except Exception as _exc:
                 # FR-CQ-5: 约束冲突时删旧票重试
@@ -326,7 +332,7 @@ def save_exchange_code(code: str, user_id: int, username: str,
                     "(code, user_id, username, provider, token_version, is_new, created_at, expires) "
                     "VALUES (?,?,?,?,?,?,?,?)",
                     (code, user_id, username, provider, token_version,
-                     1 if is_new else 0, _t.time(), _t.time() + 10),
+                     1 if is_new else 0, _t.time(), _t.time() + 60),
                 )
             db.commit()
         return True

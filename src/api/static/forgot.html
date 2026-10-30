@@ -7,7 +7,7 @@
 <link rel="icon" type="image/png" href="/static/logo-64.png">
 <link rel="stylesheet" href="/static/css/app.css?v=85">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
-<link rel="stylesheet" href="/static/css/auth.css?v=6">
+<link rel="stylesheet" href="/static/css/auth.css?v=11">
 <script>
 (function(){var t=localStorage.getItem('grapeTheme');if(!t){t='apple';}if(t==='apple'){document.documentElement.setAttribute('data-theme','apple');var m=localStorage.getItem('grapeThemeMode')||'light';if(m)document.documentElement.setAttribute('data-theme-mode',m);}})();
 (function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='34';})();
@@ -23,7 +23,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 .email-not-configured #forgotNotConfigured { display: block !important; }
 .email-configured #forgotNotConfigured { display: none !important; }
 </style>
-<script src="/static/js/i18n.js?v=17" defer></script>
+<script src="/static/js/i18n.js?v=18" defer></script>
 </head>
 <body>
 
@@ -44,7 +44,7 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 
 <!-- 无邮箱配置提示（预置，避免动态 createElement 闪动） -->
 <div id="forgotNotConfigured" class="auth-panel" style="display:none;text-align:center;padding:40px 20px">
-  <p style="color:var(--t2);font-size:14px;line-height:1.6" data-i18n="app.login.forgot_email_not_configured">邮箱服务未配置，请联系管理员重置密码</p>
+  <p style="color:var(--t2);font-size:14px;line-height:1.6"><span data-i18n="app.login.forgot_email_not_configured">邮箱服务未配置，请联系管理员重置密码</span> <a href="/static/help.html#/developer/04-storage-and-email" target="_blank" rel="noopener" style="color:#4c8bf5;text-decoration:underline" data-i18n="app.login.oauth_view_config_help">查看配置帮助</a></p>
 </div>
 
 <!-- Step 1（有邮箱配置时显示，无邮箱时 JS 同步隐藏） -->

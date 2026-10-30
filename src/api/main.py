@@ -1160,22 +1160,106 @@ var phs=document.querySelectorAll('[data-i18n-placeholder]');for(var i=0;i<phs.l
 document.documentElement.classList.remove('i18n-loading');})();
 </script>'''
 
+    # UC15（#535）：早期兑票内联脚本（治本方案）——见 _inject_email_configured 内注释
+    _EARLY_EXCHANGE_SCRIPT = '''<script>
+(function(){
+  try {
+    var m = location.search.match(/[?&]exchange_code=([0-9a-f]{16,})/);
+    if (!m) return;
+    var code = m[1];
+    // UC15f（#535 竞态修复）：同步置「兑票进行中」标记——app.js init 可能在
+    // 本 fetch 完成前到达（弱网/后端慢），见此标记则等待 flag 落定而非直接
+    // 走默认登录路径（否则 token 已入库但接力 flag 孤立，用户停在登录页）。
+    sessionStorage.setItem('__oauth_inline_pending__', '1');
+    // 立即 strip URL（最小化票在地址栏/历史/Referer 的暴露），成败都不回填
+    if (window.history.replaceState) window.history.replaceState(null, '', location.pathname);
+    // HTML 解析期即发起兑票（不等任何外部 JS）——POST 不会被链接预取触发
+    fetch('/api/auth/exchange', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({code: code}),
+    }).then(function(r){
+      if (!r.ok) {
+        // UC15c（#535）：与 app.js 原兑票分支 R5 同款——解析后端 detail，
+        // 把具体原因（message/error_code）透传给 app.js 失败接力块展示
+        return r.json().catch(function(){ return null; }).then(function(b){
+          var d = (b && b.detail) || {};
+          throw {msg: d.message || d.error_code || ''};
+        });
+      }
+      return r.json();
+    }).then(function(d){
+      try {
+        localStorage.setItem('token', d.token);
+        localStorage.setItem('app_cache_ver', '46');
+        localStorage.removeItem('repo_member_cache');
+        localStorage.removeItem('currentRepo');
+        localStorage.removeItem('current_org_id');
+        sessionStorage.removeItem('currentRepo');
+        sessionStorage.setItem('__oauth_inline_login__', '1');
+        if (d.first_login) sessionStorage.setItem('__oauth_inline_first_login__', '1');
+      } catch (e) {}
+      // 成败终态都要摘「进行中」标记（app.js 等待窗口的退出条件）
+      try { sessionStorage.removeItem('__oauth_inline_pending__'); } catch (e) {}
+    }).catch(function(e){
+      // 失败 flag——app.js init() 兜底：带后端详情的错误 toast + showLogin（原行为）
+      try {
+        sessionStorage.setItem('__oauth_exchange_failed__', '1');
+        var _em = (e && e.msg) || '';
+        if (_em) sessionStorage.setItem('__oauth_exchange_failed_msg__', String(_em));
+      } catch (e2) {}
+      try { sessionStorage.removeItem('__oauth_inline_pending__'); } catch (e2) {}
+    });
+  } catch (e) {}
+})();
+</script>'''
+
     def _inject_email_configured(html: str) -> str:
         """在 </head> 前注入邮箱配置状态 + i18n boost 翻译数据。
         在 </body> 前注入早期翻译 script（零网络延迟，HTML 解析阶段完成翻译）。
         邮箱配置：window.__EMAIL_CONFIGURED__ + html class（CSS 驱动显隐，修复 FOUC）。
-        i18n boost：window.__I18N_BOOST__ + 早期翻译 script（消除首屏闪动）。"""
+        i18n boost：window.__I18N_BOOST__ + 早期翻译 script（消除首屏闪动）。
+        OAuth provider 配置状态（#535 FOUC 修复，复用注册页同一模式）：
+        window.__OAUTH_CONFIGURED__ = {provider: bool}。前端 oauthLogin 前置判断
+        与 CSS 初始置灰直接读它——页面首帧即正确，不再「先常亮后置灰」闪动；
+        renderOAuthButtons 返回后仍会刷新（运行时权威），与注入值不一致时纠正。"""
+        from src.auth.providers import get_provider, list_providers
+        from src.user.db import get_meta_value
         configured = _is_email_configured()
         val = 'true' if configured else 'false'
         cls = 'email-configured' if configured else 'email-not-configured'
         boost_json = _get_i18n_boost()
+        oauth_map = {}
+        for key in list_providers():
+            client_id = get_meta_value(f"oauth_{key}_client_id") or ""
+            oauth_map[key] = bool(client_id)
+        # 未配置的 provider → 注入 html 类 oauth-<provider>-not-configured（按平台粒度）：
+        # CSS 在首帧（defer JS 运行前）即弱化该平台按钮，消除 FOUC。全配置平台不注入类
+        # （无规则 = 无变化）。逐平台而非 all-or-nothing——单平台配置时已配置按钮首帧不误灰。
+        oauth_classes = ' '.join(
+            f'oauth-{key}-not-configured' for key, ok in oauth_map.items() if not ok
+        )
+        # B-1 修复（QA 架构审查）：f-string 内直接 {oauth_map} 走 str(dict)，
+        # 输出 Python 布尔 True/False——JS 中是 ReferenceError，且中止整个 script 块
+        # 导致后续 __I18N_BOOST__ 赋值不执行（非 zh 用户首屏翻译 boost 失效）。
+        # 必须 json.dumps（合法 JS：true/false 小写）。
+        oauth_json = _json_mod.dumps(oauth_map)
         head_inject = (
-            f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls}";'
+            f'<script>window.__EMAIL_CONFIGURED__={val};document.documentElement.className+=" {cls} {oauth_classes}";'
+            f'window.__OAUTH_CONFIGURED__={oauth_json};'
             f'window.__I18N_BOOST__={boost_json};</script>'
         )
         html = html.replace('</head>', head_inject + '</head>', 1)
         # 在 </body> 前注入早期翻译 script（内联，零网络延迟）
         html = html.replace('</body>', _EARLY_TRANSLATE_SCRIPT + '</body>', 1)
+        # UC15（#535 治本）：内联兑票脚本——HTML 解析期（任何 defer JS 下载前）
+        # 就把 URL 里的 exchange_code 兑掉。此前兑票在 app.js init()（全量静态
+        # 资源加载完才执行），慢网络/首载经常 >10s 票已过期（被踢回登录页）。
+        # 设计：成功 → 存 token + 清缓存 + 立即 strip URL（最小化票暴露）+
+        # sessionStorage 留 flag 给 app.js 做 first_login UI / refresh 定时器；
+        # 失败 → sessionStorage 留失败 flag，URL 已 strip——app.js 兜底路径
+        # 弹错误 toast + showLogin（与原行为一致）。无 param 时快速 no-op。
+        html = html.replace('</head>', _EARLY_EXCHANGE_SCRIPT + '</head>', 1)
         return html
 
     def _serve_auth_page(filename: str) -> HTMLResponse:

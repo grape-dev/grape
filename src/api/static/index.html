@@ -8,7 +8,7 @@
 <link rel="stylesheet" href="/static/css/tokens.css?v=20261016-1">
 <link rel="stylesheet" href="/static/css/app.css?v=93">
 <link rel="stylesheet" href="/static/css/apple-theme.css?v=20">
-<link rel="stylesheet" href="/static/css/auth.css?v=6">
+<link rel="stylesheet" href="/static/css/auth.css?v=11">
 <link rel="stylesheet" href="/static/css/vendor/select2.min.css?v=1">
 <script>
 // Early theme application — prevents flash of unstyled content (FOUC).
@@ -19,7 +19,7 @@
 (function(){var p=new URLSearchParams(location.search);if(localStorage.getItem('token')||p.get('token')||p.get('exchange_code'))document.documentElement.setAttribute('data-logged-in','1');})();
 // Early i18n loading — hide [data-i18n] elements until i18n.js applies translations.
 // Only for non-zh users (zh fallback text in HTML is already correct).
-(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='35';})();
+(function(){var lang=localStorage.getItem('grapeLang')||((location.pathname.indexOf('/en')===0)?'en':'zh');if(lang!=='zh')document.documentElement.classList.add('i18n-loading');window.__I18N_CACHE_VER__='39';})();
 // i18n 加载超时兜底：5 秒后强制移除隐藏状态
 setTimeout(function(){document.documentElement.classList.remove('i18n-loading');},5000);
 </script>
@@ -34,7 +34,7 @@ html.i18n-loading [data-i18n]{visibility:hidden}
 html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
 [data-logged-in="1"] .mn{display:flex}
 </style>
-<script src="/static/js/i18n.js?v=20261028-1" defer></script>
+<script src="/static/js/i18n.js?v=20261030-4" defer></script>
 </head>
 <body>
 <div class="auth-page" id="loginView">
@@ -112,6 +112,14 @@ html.i18n-loading [data-i18n-placeholder]::placeholder{color:transparent}
       <svg width="16" height="16" viewBox="0 0 1024 1024" fill="currentColor"><path d="M512 42.666667A464.64 464.64 0 0 0 42.666667 502.186667 460.373333 460.373333 0 0 0 363.52 938.666667c23.466667 4.266667 32-9.813333 32-22.186667v-78.08c-130.56 27.733333-158.293333-61.44-158.293333-61.44a122.026667 122.026667 0 0 0-52.053334-67.413333c-42.666667-28.16 3.413333-27.733333 3.413334-27.733334a98.56 98.56 0 0 1 71.68 47.36 101.12 101.12 0 0 0 136.533333 37.973334 99.413333 99.413333 0 0 1 29.866667-61.44c-104.106667-11.52-213.333333-50.773333-213.333334-226.986667a177.066667 177.066667 0 0 1 47.36-124.16 161.28 161.28 0 0 1 4.693334-121.173333s39.68-12.373333 128 46.933333a455.68 455.68 0 0 1 234.666666 0c89.6-59.306667 128-46.933333 128-46.933333a161.28 161.28 0 0 1 4.693334 121.173333A177.066667 177.066667 0 0 1 810.666667 477.866667c0 176.64-110.08 215.466667-213.333334 226.986666a106.666667 106.666667 0 0 1 32 85.333334v125.866666c0 14.933333 8.533333 26.88 32 22.186667A460.8 460.8 0 0 0 981.333333 502.186667 464.64 464.64 0 0 0 512 42.666667"/></svg>
       <span data-i18n="app.login.github_login">GitHub</span>
     </button>
+  </div>
+  <!-- 未配置常显说明（#535）：预置 DOM + CSS 按注入类首帧显示（注册页同模式，零闪动；
+       全部已配置时 CSS 隐藏，JS 按运行时权威状态再纠正）。data-i18n 随语言切换。
+       预置文案用中性兜底（不点名平台）——JS 到场后按真实未配置名单更新为精确文案，
+       首帧不会出现「点名了错误平台」的短暂不准确（全未配置时两名单一致无感）。 -->
+  <div id="oauthUnconfiguredHint" class="oauth-unconfigured-hint" style="display:none">
+    <span data-i18n="app.login.oauth_needs_config_generic">部分第三方登录需要管理员先配置 OAuth 后才能使用</span>
+    · <a href="/static/help.html#/developer/01-gitcode-integration" target="_blank" rel="noopener"><span data-i18n="app.login.oauth_view_config_help">查看配置帮助</span></a>
   </div>
 </div>
 <!-- 次要链接 -->
@@ -316,7 +324,7 @@ function _toggleAppLang(){
 <script src="/static/vendor/echarts.min.js?v=1" defer></script><!-- 可观测性图表（vendored，不走 CDN） -->
 <script src="/static/js/api.js?v=31" defer></script>
 <script src="/static/js/pwd-blocklist.js?v=3" defer></script><!-- 改密/设密预检消费（复核 #3） -->
-<script src="/static/js/pages/dashboard.js?v=102" defer></script>
+<script src="/static/js/pages/dashboard.js?v=101" defer></script>
 <script src="/static/js/pages/pipeline.js?v=47" defer></script>
 <script src="/static/js/pages/agents.js?v=28" defer></script>
 <script src="/static/js/pages/events.js?v=61" defer></script>
@@ -326,7 +334,7 @@ function _toggleAppLang(){
 <script src="/static/js/pages/templates.js?v=37" defer></script>
 <script src="/static/js/pages/issues.js?v=122" defer></script>
 <script src="/static/js/pages/settings.js?v=34" defer></script>
-<script src="/static/js/pages/account.js?v=46" defer></script>
+<script src="/static/js/pages/account.js?v=48" defer></script>
 <script src="/static/js/pages/scene-market.js?v=50" defer></script>
 <script src="/static/js/pages/skills.js?v=47" defer></script>
 <script src="/static/js/pages/knowledge.js?v=150" defer></script>
@@ -337,7 +345,7 @@ function _toggleAppLang(){
 <script src="/static/js/pages/my_feedback.js?v=6" defer></script>
 <script src="/static/js/pages/my_feedback_detail.js?v=4" defer></script>
 <script src="/static/js/pages/autopilot.js?v=68" defer></script>
-<script src="/static/js/app.js?v=196" defer></script>
+<script src="/static/js/app.js?v=210" defer></script>
 <script src="/static/js/auto-recovery.js?v=2" defer></script>
 <!-- Help Drawer -->
 <div class="help-overlay" id="helpOverlay" onclick="app.closeHelp()"></div>

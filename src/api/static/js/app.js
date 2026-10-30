@@ -167,6 +167,13 @@ const app = (() => {
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
     $('mainView').style.display = 'none';
+    // UC16e（#535 S9）：被踢回登录页时停掉后台轮询定时器——
+    // 此前 doRefresh 失败清 token + showLogin 后，dashboard 30s 轮询
+    // 仍在裸发 401（token 已清走「无 token」静默分支），用户只看到
+    // 数据不动、得不到「请重新登录」的明确引导。showLogin 是所有
+    // 踢人路径（refresh 失败/手动登出/token 失效）的统一收口，在此
+    // 停轮询 = 一次修复覆盖全部入口。
+    if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
     // 清除当前视图状态——退出/过期后重新登录时 _restoreNavAfterLogin 需要重新路由
     window._currentView = '';
     renderOAuthButtons();
@@ -1013,6 +1020,10 @@ function loadAgentTypes() {
     // R7.5: 不过滤 configured——所有平台始终显示，未配 OAuth App 时点击走手动令牌绑定
     API.get('/auth/providers').then(function(d) {
       var providers = d.providers || [];
+      // #535 修复：写入共享缓存 _accountProvidersData——引导页 → bindProvider →
+      // _accountBindProvider 读同一缓存判断 OAuth tab；此前只有账号安全 tab 填充它，
+      // 引导路径缓存为 null 被保守猜成「未配置」（配合 account.js 的 fetch 兜底双保险）
+      if (typeof _accountProvidersData !== 'undefined') _accountProvidersData = d;
       _renderOnboardingShell(providers, isZh, name, avatar);
     }).catch(function() {
       // Fallback: show both platforms
@@ -1307,6 +1318,7 @@ function loadAgentTypes() {
     });
   }
 
+  // UC16e：dashboard 轮询定时器（showLogin 统一收口清理，声明前置避免 TDZ 风险）
   let _refreshTimer = null;
   let _currentParam = null;
   let _hiddenSince = 0;
@@ -1862,12 +1874,90 @@ function loadAgentTypes() {
   function oauthLogin(provider) {
     // 登录场景：全页重定向（业界标准，兼容性最强）
     // 弹窗模式仅用于已登录态的绑定场景（见 account.js _accountDoOauthBind）
+    // B+（Issue #535）：配置状态已知且未配置 → 不发请求直接给出原因+文档入口；
+    // 状态未知（providers 未返回/检测失败）→ 走下方 API 的 A 兜底路径
+    if (_oauthConfiguredMap && _oauthConfiguredMap[provider] === false) {
+      var _nm0 = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _lt0 = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
+      showToast(
+        I18N.t('app.login.oauth_not_configured', {name: _nm0}, _nm0 + ' OAuth 未配置，' + _nm0 + ' 登录暂不可用'),
+        I18N.t('app.login.oauth_not_configured_hint', {name: _nm0}, '请使用用户名+密码注册登录'),
+        6000,
+        {text: _lt0, url: _oauthDocUrl(provider)}
+      );
+      return;
+    }
     API.get('/auth/login/' + provider + '?lang=' + I18N.getLang()).then(function(d) {
       if (d.redirect_url) window.location.href = d.redirect_url;
-    }).catch(function() {
-      // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册后绑定 token
-      showToast(I18N.t('app.login.oauth_not_configured_hint') || I18N.t('app.login.oauth_not_configured') || 'OAuth未配置');
+    }).catch(function(e) {
+      // R7.5 + P0：区分「未配置」与其他失败（网络/限流/5xx），避免误导用户去查配置
+      // - 400 且 detail 含「未配置」→ 未配置文案 + 配置帮助深链
+      // - 其余（网络瞬断 / 429 限流 / 5xx）→ 通用失败提示，不走配置文案
+      var _isNotConfigured = e && e.status === 400 &&
+        /未配置|not configured/i.test(String(e.message || (e.detail && e.detail.message) || ''));
+      if (!_isNotConfigured) {
+        showToast(I18N.t('app.login.oauth_request_failed', null, errMsg(e) || '请求失败，请稍后重试'), '', 4000);
+        return;
+      }
+      // R7.5: 未配 OAuth App 时提示用户用用户名+密码注册；附帮助文档链接（OAuth App 配置指南）
+      var _nm = {gitcode: 'GitCode', github: 'GitHub'}[provider] || provider;
+      var _doc = {
+        gitcode: '/static/help.html#/developer/01-gitcode-integration',
+        github: '/static/help.html#/developer/02-github-integration'
+      }[provider] || '/static/help.html';
+      var _linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
+      showToast(
+        I18N.t('app.login.oauth_not_configured', {name: _nm}, _nm + ' OAuth 未配置，' + _nm + ' 登录暂不可用'),
+        I18N.t('app.login.oauth_not_configured_hint', {name: _nm}, '请使用用户名+密码注册登录'),
+        6000,
+        {text: _linkText, url: _doc}
+      );
     });
+  }
+
+  // B+（Issue #535）：provider 配置状态表——renderOAuthButtons 从 /auth/providers 填充；
+  // 未加载（状态未知）时不置灰、不拦截，点击走 API 的 A 兜底路径
+  var _oauthConfiguredMap = null;
+
+  // FOUC 修复（#535）：服务端在 HTML head 注入 window.__OAUTH_CONFIGURED__（与注册页
+  // __EMAIL_CONFIGURED__ 同模式）。app.js 为 defer——DOM 已就绪，此同步块在首帧渲染
+  // 前执行：预渲染按钮直接带上正确的 aria-disabled + 常显说明行，不出现
+  // 「先常亮 123ms、providers 返回后再置灰」的闪动。已配置场景注入值即为 true，
+  // 按钮保持常亮，无中间态，行为与之前完全一致。
+  // 注意：_oauthConfiguredMap 仍初始为 null——服务端未注入（如本地 file:// 打开、
+  // 或未来新增入口页）时维持 A 兜底，不会误判。
+  (function _applyInjectedOAuthState() {
+    try {
+      var inj = window.__OAUTH_CONFIGURED__;
+      if (!inj || typeof inj !== 'object') return;
+      var container = document.getElementById('oauthBtns');
+      if (!container) return;
+      var anyUnconfigured = false;
+      Object.keys(inj).forEach(function(provider) {
+        var key = "app.oauthLogin('" + provider + "')";
+        var btns = container.querySelectorAll('.oauth-btn');
+        for (var i = 0; i < btns.length; i++) {
+          if ((btns[i].getAttribute('onclick') || '').indexOf(key) >= 0) {
+            if (inj[provider]) btns[i].removeAttribute('aria-disabled');
+            else { btns[i].setAttribute('aria-disabled', 'true'); anyUnconfigured = true; }
+            break;
+          }
+        }
+      });
+      if (anyUnconfigured) {
+        var providers = Object.keys(inj).map(function(k) {
+          return { provider: k, name: {gitcode: 'GitCode', github: 'GitHub'}[k] || k, configured: !!inj[k] };
+        });
+        _renderOAuthUnconfiguredHint(container, providers);
+      }
+    } catch (e) { /* 注入缺失/格式异常 → 维持预渲染常亮 + A 兜底 */ }
+  })();
+
+  function _oauthDocUrl(provider) {
+    return {
+      gitcode: '/static/help.html#/developer/01-gitcode-integration',
+      github: '/static/help.html#/developer/02-github-integration'
+    }[provider] || '/static/help.html';
   }
 
   // OAuth provider 图标 SVG（UX-2 修复：内置已知平台图标，未知平台用首字母降级）
@@ -1889,11 +1979,29 @@ function loadAgentTypes() {
     if (!container) return;
     API.get('/auth/providers').then(function(d) {
       var providers = d.providers || [];
-      // R7.5: 所有平台始终显示（不过滤 configured），未配 OAuth App 时点击弹提示
+      // R7.5: 所有平台始终显示（不过滤 configured）
       if (providers.length === 0) {
         if (section) section.style.display = '';  // 确保可见
         return;
       }
+      // B+（Issue #535）：记录配置状态表——oauthLogin 前置判断用（状态未知=null 不拦截）
+      _oauthConfiguredMap = {};
+      providers.forEach(function(p) {
+        _oauthConfiguredMap[p.provider] = !!p.configured;
+      });
+      // FOUC 修复闭环：head 注入的 oauth-<provider>-not-configured 类是首帧快照，
+      // providers 返回的运行时状态才是权威——不一致时按平台粒度纠正类名（例：注入时
+      // gitcode 未配置、加载间隙管理员已配好 → 移除该类，按钮恢复常亮；反之亦然），
+      // 避免「视觉置灰但实际可登录」/「视觉常亮但点击被拦」的错位。按平台而非
+      // all-or-nothing：单平台配置时另一平台的状态变化互不干扰。
+      var _de = document.documentElement;
+      providers.forEach(function(p) {
+        var _cls = 'oauth-' + p.provider + '-not-configured';
+        if (p.configured) _de.classList.remove(_cls);
+        else _de.classList.add(_cls);
+      });
+      // oauth-configured 类仍由整体状态决定（hint 显隐的语义锚点：全配置=隐藏）
+      _de.classList.toggle('oauth-configured', providers.every(function(p) { return !!p.configured; }));
       // 预渲染按钮已在 HTML 中，只在平台列表不一致时才重新渲染
       var existingBtns = container.querySelectorAll('.oauth-btn');
       var existingNames = Array.prototype.map.call(existingBtns, function(b) {
@@ -1914,12 +2022,63 @@ function loadAgentTypes() {
           var _brandOverride = {gitcode: '#F54A36', github: '#1F2328'};
           var _brandColor = _brandOverride[p.provider] || p.brand_color || '';
           var brandVar = _brandColor ? ' style="--brand:' + _brandColor + '"' : '';
-          return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + brandVar + '>'
+          var ariaVar = p.configured ? '' : ' aria-disabled="true"';
+          return '<button class="oauth-btn" onclick="app.oauthLogin(\'' + p.provider + '\')"' + ariaVar + brandVar + '>'
             + icon + '<span data-i18n="' + i18nKey + '">' + p.name + '</span></button>';
         }).join('');
         if (typeof I18N !== 'undefined' && I18N.apply) I18N.apply();
+      } else {
+        // 预渲染按钮：按 configured 同步 aria-disabled（不用真 disabled，保留点击可解释）
+        providers.forEach(function(p) {
+          var key = "app.oauthLogin('" + p.provider + "')";
+          for (var j = 0; j < existingBtns.length; j++) {
+            if ((existingBtns[j].getAttribute('onclick') || '').indexOf(key) >= 0) {
+              if (p.configured) existingBtns[j].removeAttribute('aria-disabled');
+              else existingBtns[j].setAttribute('aria-disabled', 'true');
+              break;
+            }
+          }
+        });
       }
-    }).catch(function() { /* 预渲染按钮保留，不隐藏 */ });
+      _renderOAuthUnconfiguredHint(container, providers);
+    }).catch(function() { /* 预渲染按钮保留，不隐藏（状态未知=A 兜底） */ });
+  }
+
+  // B+（Issue #535）：未配置平台的常显说明。FOUC 修复后说明行 DOM 预置在
+  // index.html（display:none），CSS 按注入 html 类首帧显示——此函数只负责按
+  // 运行时权威状态更新内容（平台名单/深链）与显隐（全部已配置时隐藏）。
+  // 文本走 data-i18n + data-i18n-vars：I18N 包加载完成 / setLang 时
+  // applyI18nToDOM 自动刷新（语言切换/慢网络包晚到均不残留）。
+  function _renderOAuthUnconfiguredHint(container, providers) {
+    var el = document.getElementById('oauthUnconfiguredHint');
+    if (!el) return;
+    var unconfigured = providers.filter(function(p) { return !p.configured; });
+    if (unconfigured.length === 0) {
+      el.style.display = 'none';
+      return;
+    }
+    var names = unconfigured.map(function(p) {
+      return {gitcode: 'GitCode', github: 'GitHub'}[p.provider] || (p.name || p.provider);
+    }).join(' / ');
+    var linkText = I18N.t('app.login.oauth_view_config_help', null, '查看配置帮助');
+    var hint = I18N.t('app.login.oauth_needs_config', {name: names},
+      names + ' 登录需要管理员先配置 OAuth 后才能使用');
+    // 更新预置 DOM：文案 span（保 data-i18n 结构）+ 深链 href（按第一个未配置平台）
+    var span = el.querySelector('span[data-i18n="app.login.oauth_needs_config"], span[data-i18n="app.login.oauth_needs_config_generic"]');
+    if (span) {
+      // 预置是 generic key（不点名）；拿到真实名单后切到带 {name} 的 key 并设 vars，
+      // 后续语言切换时 applyI18nToDOM 会用新 key + vars 渲染精确文案
+      span.setAttribute('data-i18n', 'app.login.oauth_needs_config');
+      span.setAttribute('data-i18n-vars', JSON.stringify({name: names}));
+      span.textContent = hint;
+    }
+    var a = el.querySelector('a');
+    if (a) {
+      a.setAttribute('href', _oauthDocUrl(unconfigured[0].provider));
+      var ls = a.querySelector('span[data-i18n="app.login.oauth_view_config_help"]');
+      if (ls) ls.textContent = linkText;
+    }
+    el.style.display = '';
   }
 
   // 内测申请表单
@@ -2683,7 +2842,7 @@ function openBetaApply() {
     return I18N.t('common.request_failed', {status: (e && e.status) || 0}) || 'Request failed';
   }
 
-  function showToast(msg, desc, duration) {
+  function showToast(msg, desc, duration, link) {
     // Issue #199: 先移除已有 Toast，避免连续提示叠加
     var existing = document.querySelector('[role="status"].app-toast');
     if (existing) existing.remove();
@@ -2696,8 +2855,15 @@ function openBetaApply() {
     t.classList.add('app-toast');
     // 有描述时显示主文案(粗体) + 描述(小字)
     if (desc) {
+      var _linkHtml = '';
+      if (link && link.url) {
+        // 可选操作链接（如「查看配置帮助」）——挂在 desc 区，点击不关闭 Toast
+        _linkHtml = ' <a href="' + _esc(link.url) + '" target="_blank" rel="noopener" '
+          + 'style="color:#7ab8ff;text-decoration:underline;cursor:pointer" onclick="event.stopPropagation()">'
+          + _esc(link.text || link.url) + '</a>';
+      }
       t.innerHTML = '<div style="font-weight:600">' + _esc(msg) + '</div>'
-        + '<div style="font-size:11px;opacity:.8;margin-top:2px">' + _esc(desc) + '</div>';
+        + '<div style="font-size:11px;opacity:.8;margin-top:2px">' + _esc(desc) + _linkHtml + '</div>';
     } else {
       t.textContent = msg;
     }
@@ -2878,8 +3044,108 @@ function openBetaApply() {
     // 绑定/解绑回调检测（全局，不依赖 nav('account')）
     _checkBindSuccess();
 
+    // UC15d（#535）：popup 登录消息消费方——此前 /login/{provider}?popup=true 的
+    // 回调经 oauth-popup-callback.html postMessage {type:'oauth_result',
+    // action:'login'} 但 app.js 无监听（休眠路径）。此处补齐：成功→用
+    // exchange_code 兑票、存 token、整页重载走回访用户路径；失败→toast。
+    // 默认登录仍是全页重定向（oauthLogin 不带 popup），本监听只激活休眠路径，
+    // 不改变默认 UX。幂等守卫防止 init 重复注册。
+    if (!window.__oauthPopupLoginListener) {
+      window.__oauthPopupLoginListener = true;
+      window.addEventListener('message', function(event) {
+        if (event.origin !== window.location.origin) return;
+        var d = event.data;
+        if (!d || d.type !== 'oauth_result' || d.action !== 'login') return;
+        if (d.success && d.exchange_code) {
+          fetch('/api/auth/exchange', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({code: d.exchange_code}),
+          }).then(function(r) {
+            if (!r.ok) {
+              return r.json().catch(function() { return null; }).then(function(b) {
+                var det = (b && b.detail) || {};
+                throw new Error(det.message || det.error_code || 'exchange_failed');
+              });
+            }
+            return r.json();
+          }).then(function(t) {
+            localStorage.setItem('token', t.token);
+            localStorage.setItem('app_cache_ver', '46');
+            localStorage.removeItem('repo_member_cache');
+            localStorage.removeItem('currentRepo');
+            localStorage.removeItem('current_org_id');
+            sessionStorage.removeItem('currentRepo');
+            // UC15g（外审发现）：保留 /en 语言前缀——硬编码 '/' 会把英文用户
+            // 打回中文首页。与原 exchangeCode 分支 lang0/prefix0 同款逻辑。
+            var _lg = (typeof I18N !== 'undefined') ? I18N.getLang() : (localStorage.getItem('grapeLang') || 'zh');
+            location.replace((_lg === 'en' ? '/en' : '') + '/');
+          }).catch(function(e) {
+            showToast((e && e.message) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+          });
+        } else if (d.error) {
+          showToast(decodeURIComponent((d.error + '').replace(/\+/g, ' ')) || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+        }
+      });
+    }
+
     // P0-3: Check for exchange_code in URL (new secure flow)
     const exchangeCode = p.get('exchange_code');
+    // UC15f（#535 竞态修复）：内联兑票 fetch 进行中而 app.js init 先到——
+    // URL 已被 strip、接力 flag 未落，直接走默认路径会把已入库的 token 孤立
+    // 在登录页。见 pending 标记则轮询等待终态 flag（上限 5s，终态必到：
+    // 内联脚本成败都会摘 pending + 置对应 flag）。
+    if (!exchangeCode && sessionStorage.getItem('__oauth_inline_pending__')) {
+      var _pf = null;
+      var _pfDone = false;  // 双重重入守卫：interval 与 5s 超时都可能触发，只放行一次
+      var _pfReenter = function () {
+        if (_pfDone) return;
+        _pfDone = true;
+        if (_pf) clearInterval(_pf);
+        init();
+      };
+      try { _pf = setInterval(function () {
+        if (sessionStorage.getItem('__oauth_inline_login__') ||
+            sessionStorage.getItem('__oauth_exchange_failed__') ||
+            !sessionStorage.getItem('__oauth_inline_pending__')) {
+          _pfReenter();
+        }
+      }, 100); } catch (e) {}
+      setTimeout(_pfReenter, 5000);
+      return;
+    }
+    // UC15（#535）：内联兑票脚本（main.py 注入，HTML 解析期执行）已抢先兑票并
+    // strip 了 URL——这里到不了 exchangeCode 分支，改由 sessionStorage flag 接力：
+    // token/缓存清理内联脚本已做完，本块补上它做不了的（DOM/I18N/API 模块依赖）。
+    if (!exchangeCode && sessionStorage.getItem('__oauth_inline_login__')) {
+      sessionStorage.removeItem('__oauth_inline_login__');
+      const inlineFirstLogin = sessionStorage.getItem('__oauth_inline_first_login__');
+      if (inlineFirstLogin) {
+        sessionStorage.removeItem('__oauth_inline_first_login__');
+        sessionStorage.removeItem('currentRepo');
+        $('sidebar').style.display = 'none';
+        $('tb').style.display = 'none';
+        $('mainView').style.display = 'flex';
+        $('mainView').style.position = 'fixed';
+        $('mainView').style.inset = '0';
+        $('mainView').style.zIndex = '100';
+        $('pageTitle').textContent = I18N.t('app.current_project');
+      }
+      showApp();
+      API.scheduleProactiveRefresh();
+      return;
+    }
+    // UC15 失败兜底：内联兑票 401（过期/无效）→ 与原 app.js 兑票失败同款 UX；
+    // UC15c：后端 detail（message/error_code）已由内联脚本解析存入
+    // __oauth_exchange_failed_msg__，有则优先展示具体原因，无则回退通用文案
+    if (!exchangeCode && sessionStorage.getItem('__oauth_exchange_failed__')) {
+      sessionStorage.removeItem('__oauth_exchange_failed__');
+      var _exMsg = sessionStorage.getItem('__oauth_exchange_failed_msg__') || '';
+      if (_exMsg) sessionStorage.removeItem('__oauth_exchange_failed_msg__');
+      showToast(_exMsg || I18N.t('app.login.oauth_exchange_failed') || 'OAuth login failed, please retry', 6000);
+      if (typeof app !== 'undefined' && app.showLogin) app.showLogin();
+      return;
+    }
     if (exchangeCode) {
       // 立即清除 URL 参数（不等待响应）
       if (window.history.replaceState) {

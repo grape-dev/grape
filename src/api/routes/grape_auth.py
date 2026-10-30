@@ -1309,7 +1309,8 @@ def _oauth_login_redirect(request: Request, access_token: str, first_login: bool
                           token_version: int = 0, popup: bool = False):
     """P0-3: OAuth 登录成功 → 生成一次性 exchange code → 重定向到前端。
 
-    不再通过 URL 传递 access_token，改为生成 10 秒过期的 exchange code，
+    不再通过 URL 传递 access_token，改为生成 60 秒过期的 exchange code（#535 UC14，
+    原 10s 与 SPA 首载耗时冲突），
     前端用 POST /auth/exchange 换取 JWT。
     refresh_token 仍通过 HttpOnly cookie 传递（调用方设置）。
     popup=True 时重定向到中间页，由中间页 postMessage 通知父窗口。
@@ -1979,7 +1980,7 @@ class ExchangeCodeBody(BaseModel):
 def exchange_token(body: ExchangeCodeBody, request: Request, response: Response):
     """P0-3: 用一次性 exchange_code 换取 JWT access_token。
 
-    exchange_code 由 OAuth 回调生成，10 秒过期，一次性消费（查+删）。
+    exchange_code 由 OAuth 回调生成，60 秒过期（#535 UC14），一次性消费（查+删）。
     防止 access_token 泄露到 URL/日志/Referer。
     """
     # supp-2: IP 限流
