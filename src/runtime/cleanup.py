@@ -809,11 +809,167 @@ def _sweep_stale_workspace_repos() -> int:
 
 
 async def sweep_loop():
-    """服务端后台周期清理（main.py lifespan 挂载）。"""
+    """服务端后台周期清理（main.py lifespan 挂载）。
+
+    三进程拆分（Issue #596）后单进程兼容模式仍用本入口；
+    多进程模式下 B 进程改用 `sweep_events_loop`、C 进程改用
+    `sweep_tasks_loop`（见设计文档 §5）。
+    """
     import asyncio as _aio
     while True:
         try:
             await _aio.to_thread(sweep_once)
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
+        await asyncio.sleep(_SWEEP_INTERVAL)
+
+
+# ===== P2（Issue #596）：sweep_once 按维度拆分为两个独立循环 =====
+# 设计文档 §5：B 进程只回收事件侧（僵尸事件 + IM 实例 + workdir/目录类清理），
+# C 进程只回收任务侧（悬空 agent_tasks）。两者共享 `_SWEEP_INTERVAL`
+# （默认 15min，SWEEPER_INTERVAL_SECONDS 可配）。
+
+def _has_issue_state_tables() -> bool:
+    """worker 端本地 SQLite 可能无 events/issue_state 表——统一检测一次。
+
+    与 sweep_once 同语义：表缺失时跳过 DB 依赖的清理。
+    注意：该检测查 SQLite 的 sqlite_master，MySQL 后端恒为 False
+    （sweep_once 注释的实测结论），因此 MySQL 侧需另行兜底——
+    直接 try/except 每个清理步骤（下方两个循环已按此处理）。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='issue_state'")
+            return c.fetchone() is not None
+    except Exception:
+        return False
+
+
+def sweep_events_once() -> int:
+    """B 维度清理（单次）：僵尸事件回收 + IM 实例清理 + workdir/目录类清理。
+
+    从 sweep_once 拆出（设计文档 §5.2）：
+    - sweep_stuck_events_once：回收卡 running 的 events（B 独占表）；
+    - purge_stale_instances：IM 实例心跳表清理（A/B 共库可清）；
+    - done-issue workdir 清理（读 issue 表 + issue_agent_session，与事件生命周期强相关）；
+    - 僵尸 workdir / chat / feishu / vod / history 目录 TTL 清理；
+    - /tmp 残留与 workspace repo 级清理（本机文件系统操作，B 所在主机执行）。
+    """
+    cleaned = 0
+    try:
+        _has_db_tables = _has_issue_state_tables()
+        # 兜底回收卡 running 僵尸事件（入队/执行失败未更新终态的历史遗留）
+        if _has_db_tables:
+            try:
+                cleaned += sweep_stuck_events_once()
+            except Exception as e:
+                log.warning(f"sweeper stuck-event sweep failed: {e}")
+        # IM 实例心跳表只增不减（每次重启留一行）→ 周期清理 24h 前的行；
+        # 注意不能放进 _has_db_tables 块（MySQL 后端该检测恒 False，实测踩过）。
+        try:
+            from src.im.bot_lease import purge_stale_instances
+            cleaned += purge_stale_instances(older_than_hours=24)
+        except Exception as e:
+            log.debug(f"sweeper im-instance purge skipped: {e}")
+
+        from src.runtime import repogit
+        if _has_db_tables:
+            active = _active_issue_sessions()
+            for repo_key, issue_id in _done_issues():
+                num = str(issue_id or "").lstrip("#")
+                if not num or num == "0":
+                    continue
+                for agent_type in _GIT_AGENTS:
+                    if (repo_key, agent_type, num) in active:
+                        continue
+                    issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
+                    if not os.path.isdir(issue_dir):
+                        continue
+                    try:
+                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
+                        cleaned += 1
+                    except Exception as e:
+                        log.warning(f"sweeper cleanup failed {issue_dir}: {e}")
+        # 僵尸兜底
+        ttl = _ZOMBIE_TTL_DAYS * 86400
+        for p in _zombie_issue_dirs(ttl):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                cleaned += 1
+            except Exception as e:
+                log.warning(f"sweeper zombie cleanup failed {p}: {e}")
+        # chat / feishu / vod / history 目录 TTL 清理
+        session_ttl = _SESSION_DIR_TTL_DAYS * 86400
+        session_cleaned = 0
+        for p in _stale_session_dirs(session_ttl):
+            try:
+                shutil.rmtree(p, ignore_errors=True)
+                session_cleaned += 1
+            except Exception as e:
+                log.warning(f"sweeper session dir cleanup failed {p}: {e}")
+        if session_cleaned:
+            log.info(f"sweeper cleaned {session_cleaned} stale session dir(s)")
+            cleaned += session_cleaned
+        # /tmp 全局兜底清理（见 sweep_once 注释）
+        tmp_cleaned = _sweep_tmp_residuals()
+        if tmp_cleaned:
+            log.info(f"sweeper cleaned {tmp_cleaned} /tmp residual dir(s)/file(s)")
+            cleaned += tmp_cleaned
+        # workspace repo 级别清理：project-info/codebase 目录堆积
+        ws_cleaned = _sweep_stale_workspace_repos()
+        if ws_cleaned:
+            log.info(f"sweeper cleaned {ws_cleaned} stale workspace repo dir(s)")
+            cleaned += ws_cleaned
+        if cleaned:
+            log.info(f"event sweeper cleaned {cleaned} item(s)")
+        return cleaned
+    except Exception as e:
+        log.warning(f"sweep_events_once failed: {e}")
+        return 0
+
+
+def sweep_tasks_once() -> int:
+    """C 维度清理（单次）：悬空 agent_tasks 回收。
+
+    从 sweep_once 拆出（设计文档 §5.2）。回收依赖 C 进程 local_claimer
+    在线认领（回收的 queued 重派需要执行方），故归 C 进程。
+    """
+    cleaned = 0
+    try:
+        cleaned += sweep_stuck_agent_tasks_once()
+    except Exception as e:
+        log.warning(f"sweeper stuck-task sweep failed: {e}")
+    return cleaned
+
+
+async def sweep_events_loop():
+    """B 进程事件回收循环（Issue #596 P2，设计文档 §5.2）。
+
+    僵尸事件回收 + IM 实例清理 + workdir/目录清理；每轮
+    `SWEEPER_INTERVAL_SECONDS`（默认 900s = 15min）。
+    """
+    while True:
+        try:
+            cleaned = await asyncio.to_thread(sweep_events_once)
+            if cleaned:
+                log.info(f"Event sweeper: cleaned {cleaned} items")
+        except Exception as e:
+            log.warning(f"Event sweeper error: {e}")
+        await asyncio.sleep(_SWEEP_INTERVAL)
+
+
+async def sweep_tasks_loop():
+    """C 进程任务回收循环（Issue #596 P2，设计文档 §5.2）。
+
+    悬空 agent_tasks 回收（queued 无认领 / running 僵尸）；
+    每 15min 一轮，与 B 的 sweep_events_loop 同频但互不依赖。
+    """
+    while True:
+        try:
+            cleaned = await asyncio.to_thread(sweep_tasks_once)
+            if cleaned:
+                log.info(f"Task sweeper: cleaned {cleaned} stuck task(s)")
+        except Exception as e:
+            log.warning(f"Task sweeper error: {e}")
         await asyncio.sleep(_SWEEP_INTERVAL)
