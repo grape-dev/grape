@@ -295,6 +295,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                       scene_id_override=evt.get("_pr_sub_scene_id", ""))
     # Issue #242: 注入关联仓库列表（coding agent 读取后初始化多仓库 worktree）
     try:
+        import json
         _linked_repos = _read_scene_linked_repos(repo_key, issue_id)
         if _linked_repos:
             env_extra["GRAPE_LINKED_REPOS"] = json.dumps(_linked_repos, ensure_ascii=False)
@@ -542,6 +543,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         # R21.7.1: agent 完成后立即更新 devops_agent_session status='idle'
         # 缩小 session 兜底误拦窗口（R21.7.4: status=idle → 兜底查询不命中 → 无误拦）
         try:
+            from src.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -596,6 +598,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _exec_err_detail = " ".join(str(e) for e in _exec_done_errors) + " " + str(_exec_done_stderr)
         if _exec_err_detail.strip():
             _err_lower = _exec_err_detail.lower()
+            from src.token_service import is_auth_401_error
             _is_401 = is_auth_401_error(_err_lower)
             if _is_401:
                 try:
@@ -656,6 +659,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 result_text = f"任务失败（exit_code={exit_code}）"
         # 合并而非覆盖：保留 #403 transient retry 等已写入的诊断记录
         try:
+            import json
             _merged = []
             if task_id:
                 from src.runtime.service import _task_errors_json
@@ -714,6 +718,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 log.warning(f"Exec agent: post result to issue failed: {_pe}")
                 if task_id:
                     try:
+                        from src.session_manager import db, db_lock
+                        import json
                         with db_lock:
                             c = db.cursor()
                             c.execute("SELECT errors FROM agent_tasks WHERE id=?", (task_id,))
