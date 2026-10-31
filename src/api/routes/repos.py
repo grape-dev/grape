@@ -2054,6 +2054,10 @@ def list_migrate_orgs(user: dict = Depends(require_no_session_token)):
                 (user["id"],))
             rows = c.fetchall()
         for r in rows:
+            # Issue #593：个人组织由 personal 字段独立返回，orgs 列表跳过 is_personal 条目，
+            # 避免迁移目标组织下拉框出现重复的"个人"项（与右上角"我的组织"口径保持一致）。
+            if r[3]:  # is_personal=True
+                continue
             orgs.append({
                 "login": r[2] or "",  # slug 作为迁移目标 owner
                 "name": r[1] or r[2] or "",
