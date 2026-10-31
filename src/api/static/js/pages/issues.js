@@ -428,6 +428,17 @@ window._openBoardDetail = function(taskId) {
   }).catch(function() {
     document.getElementById('_boardPipelineSection').innerHTML = '';
   });
+  // Issue #600：流水线卡片轮询——重派成功/新终态到达后卡片自动刷新，无手动刷新依赖
+  if (window._taskPipeTimer) { clearInterval(window._taskPipeTimer); window._taskPipeTimer = null; }
+  window._taskPipeTimer = setInterval(function() {
+    if (!document.getElementById('_boardPipelineSection')) {
+      clearInterval(window._taskPipeTimer); window._taskPipeTimer = null;
+      return;
+    }
+    API.get('/issues/' + taskId + '/pipeline').then(function(data) {
+      if (document.getElementById('_boardPipelineSection')) _renderPipelineSection(data);
+    }).catch(function() { /* 静默轮询失败忽略，下轮重试 */ });
+  }, 15000);
 };
 
 // PR 事件详情页

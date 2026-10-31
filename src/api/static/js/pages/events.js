@@ -1047,7 +1047,10 @@ function _doRedispatch(seq) {
   _closeRedispatchGlass();
   API.post('/events/' + seq + '/redispatch').then(d => {
     app.showToast(I18N.t('events.redispatch_toast_success'));
-    app.nav('event', seq);
+    // Issue #600：重派生成新事件（A2A/run_pipeline 路径）时跳转新 seq；
+    // 旧事件已被标记为取消（被接管），跳回旧 seq 会继续显示失败卡片
+    var target = (d && d.event_seq) ? d.event_seq : seq;
+    app.nav('event', target);
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast(I18N.t('events.redispatch_toast_failed', {msg: msg}));
@@ -1240,7 +1243,9 @@ function _doLocalRetry(seq) {
   _closeLocalRetryGlass();
   API.post('/events/' + seq + '/redispatch?local_only=true').then(d => {
     app.showToast(I18N.t('events.local_retry_toast_success'));
-    app.nav('event', seq);
+    // Issue #600：本机重试同事件重跑（event_seq=原 seq）；若后端走了新 seq 接管则跳新事件
+    var target = (d && d.event_seq) ? d.event_seq : seq;
+    app.nav('event', target);
   }).catch(e => {
     const msg = (e.detail && e.detail.message) || e.message || e;
     app.showToast(I18N.t('events.local_retry_toast_failed', {msg: msg}));

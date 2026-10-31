@@ -1817,7 +1817,12 @@ def get_issue_detail(owner: str, repo: str, number: int,
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
     base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
     events = group_map.get(num) or []
-    pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
+    # Issue #600：events 优先（与 /pipeline 端点同口径），archive 兜底。
+    # 旧 archive-first 会在重派成功后仍返回冻结的 event.json 失败态（档案写入已停用）。
+    if events:
+        pipeline = _pipeline_from_events(repo_keys[0], num, events)
+    else:
+        pipeline = _pipeline_from_archive(repo_keys, num) or _pipeline_from_events(repo_keys[0], num, events)
     # Issue #539：详情内嵌 pipeline 同步叠加需求级业务状态与任务/结果引用
     from src.api.pipeline_status import (load_issue_business_status, load_segment_task_refs,
                                          enrich_pipeline_business_status, _pipeline_segment_seqs)
