@@ -3,6 +3,51 @@ let _pipeActiveIdx = 0;
 let _pipePage = 1;
 let _pipeQuery = '';
 const _PIPE_PER_PAGE = 10;
+// Issue #542 前端补齐：流水线 history 增量分页拉取。
+// 后端默认只返回最近 history_limit(50) 条 history（性能截断），history_total 带全量条数。
+// 前端在用户翻到未加载段时按 history_offset 增量拉取并追加，实现全量可翻页。
+let _pipeLoadingMore = false;
+
+// 计算「已加载数据」能覆盖到的最大页码（active 1 条 + 已加载 history N 条）
+function _pipeLoadedPages(allPipes) {
+  return Math.max(1, Math.ceil(allPipes.length / _PIPE_PER_PAGE));
+}
+
+// 翻页越界时增量拉取下一段 history；返回 true 表示数据已齐（可同步渲染），
+// false 表示已发起异步拉取（完成后内部会重渲染，调用方无需再动）
+function _pipeEnsurePage(page) {
+  const data = _pipeData;
+  if (!data || _pipeLoadingMore) return false;
+  const active = data.active;
+  const history = data.history || [];
+  const loaded = (active ? 1 : 0) + history.length;
+  // 该页所需条目已全部加载 → 无需拉取
+  if (page * _PIPE_PER_PAGE <= loaded) return true;
+  // 后端确认没有更早的历史 / 全量已加载 → 无需拉取（当前数据就是全部）
+  if (data.history_has_more === false) return true;
+  if ((data.history_total || 0) > 0 && loaded >= (data.history_total || 0) + (active ? 1 : 0)) return true;
+  const repo = app.currentRepo();
+  if (!repo) return false;
+  _pipeLoadingMore = true;
+  const _offset = history.length;
+  const _limit = 100;
+  API.get('/pipeline/' + repo.owner + '/' + repo.name + '?history_limit=' + _limit + '&history_offset=' + _offset).then(function(d) {
+    _pipeLoadingMore = false;
+    if (window._currentView !== 'pipe') return;
+    if (d && Array.isArray(d.history) && d.history.length) {
+      // 去重追加（按 issue_id）
+      const seen = {};
+      (data.history || []).forEach(function(p) { seen[p.issue_id] = 1; });
+      d.history.forEach(function(p) { if (!seen[p.issue_id]) { (data.history = data.history || []).push(p); seen[p.issue_id] = 1; } });
+    }
+    if (d) data.history_has_more = (d.history_has_more === true);
+    renderPipeline(_pipeData);
+  }).catch(function() {
+    _pipeLoadingMore = false;
+    app.showToast(I18N.t('common.load_failed') || '加载失败');
+  });
+  return false;
+}
 const agentColors = ['var(--pk)','var(--r)','var(--a)','var(--pu)','var(--or)'];
 const agentIds = ['vod','issue','coding','qa','sre'];
 // agentLabels / stageLabels 不在模块顶层缓存 I18N.t()（语言切换后会失效），
@@ -181,6 +226,7 @@ function renderPipeline(data, focusIssueNum) {
 
   const allPipes = active ? [active, ...history] : history;
   const filteredPipes = _filteredPipes(allPipes);
+  const totalPipesUnfiltered = allPipes.length;
   // 当前选中的 Issue（默认 active，点击历史行后切换）
   const displayPipe = allPipes[_pipeActiveIdx] || active;
 
@@ -228,12 +274,23 @@ function renderPipeline(data, focusIssueNum) {
   }
 
   // 分页计算（基于过滤后的列表）
-  const totalPipes = filteredPipes.length;
+  // Issue #542 前端补齐：无搜索过滤时分页总数用全量 history_total（含未加载部分），
+  // 翻页越界时 _pipeEnsurePage 增量拉取；有搜索过滤时只能对已加载数据过滤分页。
+  const _isFiltered = !!_pipeQuery.trim();
+  const totalPipes = _isFiltered
+    ? filteredPipes.length
+    : (data.history_total != null && (data.history_total + (active ? 1 : 0)) > totalPipesUnfiltered
+        ? (data.history_total + (active ? 1 : 0))
+        : totalPipesUnfiltered);
   const totalPages = Math.ceil(totalPipes / _PIPE_PER_PAGE);
-  if (_pipePage > totalPages) _pipePage = 1;
+  if (_pipePage > totalPages) _pipePage = Math.max(1, totalPages);
   if (_pipePage < 1) _pipePage = 1;
   const pipeStart = (_pipePage - 1) * _PIPE_PER_PAGE;
   const pagePipes = filteredPipes.slice(pipeStart, pipeStart + _PIPE_PER_PAGE);
+  // 页面所需数据未加载 → 发起增量拉取（完成后自动重渲染），本轮先按已有数据渲染
+  if (!_isFiltered && pagePipes.length === 0 && totalPipes > 0) {
+    _pipeEnsurePage(_pipePage);
+  }
 
   // 分页控件（流程图下方）
   let pagerHtml = '';
@@ -252,6 +309,7 @@ function renderPipeline(data, focusIssueNum) {
       ${btns}
       ${pBtn('›', _pipePage + 1, _pipePage >= totalPages, false)}
       <span class="ts t3" style="margin-left:8px;font-size:10px">${I18N.t('pipeline.pagination_total', {total: totalPipes, page: _pipePage, pages: totalPages})}</span>
+      ${_pipeLoadingMore ? '<span class="ts t3" style="margin-left:4px;font-size:10px">' + (I18N.t('pipeline.loading_more') || '加载中…') + '</span>' : ''}
     </div>`;
   }
 

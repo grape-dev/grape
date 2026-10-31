@@ -46,5 +46,6 @@
   "prev_page": "Previous",
   "next_page": "Next",
   "cross_scene_handoff": "Cross-Scene Handoff",
-  "no_issues": "No issues"
+  "no_issues": "No issues",
+  "loading_more": "Loading…"
 }
