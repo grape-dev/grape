@@ -1116,9 +1116,11 @@ def _sweep_pending_self_report_timeouts() -> int:
                 "WHERE status='pending_self_report' AND pending_since IS NOT NULL "
                 "AND pending_since != ''"
             )
-            # 数值比较（parse_dt→epoch）：兼容停机写入的 "%Y-%m-%d %H:%M:%S"（executor）与
-            # ISO8601（测试/新写入）混合格式——字符串比较会因 ' '(0x20) < 'T'(0x54)
-            # 把停机写入的 pending 误判为已过期（超时窗口形同虚设）。
+            # 数值比较（parse_dt→epoch）：兼容历史写入的无时区 "%Y-%m-%d %H:%M:%S" 与
+            # 带时区 ISO-8601 UTC（Issue #588 起新写入）混合格式——字符串比较会因
+            # ' '(0x20) < 'T'(0x54) 把停机写入的 pending 误判为已过期（超时窗口形同虚设）。
+            # 带时区值写入/解析同源（UTC），MySQL 后端不再被 parse_dt 的 naive-CST 口径
+            # （Issue #512）误加 28800s；无时区历史值的兼容恢复按 Spec 单独评估，不在此改。
             from src.runtime.health import parse_dt
             for _r in c.fetchall():
                 try:
