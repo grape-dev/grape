@@ -369,6 +369,37 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                            engine_id=int(runtime_id or 0))
     _mu.start()
 
+    # Issue #596 P1-P3 审查修复：direct 模式跨进程终止（状态驱动取消）。
+    # 三进程拆分后 terminate 请求落在 B 进程，cancel_direct_task 只能操作
+    # 本进程 _DIRECT_FUTURES（direct 执行在 C），B 侧 futures 恒为空。
+    # 参照 worker 模式的心跳匹配取消：B 侧 fail_task/update_event_status 先落库，
+    # C 侧执行流周期性探测 DB，发现任务/事件已被外部置终态（failed/cancelled）
+    # 即刻杀引擎子进程并中断流（终态回写有幂等保护，不会翻转状态）。
+    import time as _probe_time
+    _PROBE_INTERVAL = 10.0
+    _last_status_probe = 0.0
+
+    def _external_terminal() -> str:
+        """探测本任务/事件是否已被其它进程（terminate/超时等）置为终态。"""
+        try:
+            from src.session_manager import db as _pdb, db_lock as _pdl
+            if task_id:
+                with _pdl:
+                    c = _pdb.cursor()
+                    c.execute("SELECT status FROM agent_tasks WHERE id=?", (task_id,))
+                    trow = c.fetchone()
+                if trow and trow[0] in ("failed", "cancelled"):
+                    return f"task:{trow[0]}"
+            with _pdl:
+                c = _pdb.cursor()
+                c.execute("SELECT status FROM events WHERE seq=?", (seq,))
+                erow = c.fetchone()
+            if erow and erow[0] in ("failed", "cancelled"):
+                return f"event:{erow[0]}"
+        except Exception as _pe:
+            log.debug(f"direct exec status probe failed (seq={seq}): {_pe}")
+        return ""
+
     try:
         for evt_type, data in stream_devops_agent(
             prompt, ws, session_id=oc_session_id, event_type=evt.get("type", ""),
@@ -386,6 +417,23 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             if _user_token_for_redact:
                 _msg = _msg.replace(_user_token_for_redact, "[REDACTED]")
             agent_logs.append({"time": datetime.utcnow().isoformat(), "type": evt_type, "msg": _msg})
+            # 状态驱动取消探测：周期性查库，外部 terminate 已置终态 → 杀引擎并中断流
+            if evt_type != "done":
+                _now_probe = _probe_time.monotonic()
+                if _now_probe - _last_status_probe >= _PROBE_INTERVAL:
+                    _last_status_probe = _now_probe
+                    _ext_term = _external_terminal()
+                    if _ext_term:
+                        log.warning(
+                            f"Exec agent: seq={seq} externally terminated ({_ext_term}), "
+                            f"killing engine subprocess (state-driven cancel)"
+                        )
+                        try:
+                            from src.runtime.agent import _kill_stale_engine
+                            _kill_stale_engine({"cwd": ws, "id": task_id}, backend)
+                        except Exception as _ke:
+                            log.warning(f"Exec agent: state-driven kill failed (seq={seq}): {_ke}")
+                        break
             # 实时推送：direct 模式复用 worker 的 report_messages（落库 task_messages + fanout SSE）
             # 让前端「实时日志」面板在 hermes 执行期间就能看到逐步输出，不用等执行完成
             _mu.feed(evt_type, data)

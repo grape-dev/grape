@@ -426,8 +426,12 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
         except Exception as e:
             log.warning(f"Event terminate: task cancel/fail failed: {e}")
 
-    # 2) direct 模式 → cancel_direct_task（无论有无 task_id 都尝试，兜底）
-    #    同时取消 worker 模式的 future（direct 模式杀本地子进程）
+    # 2) direct 模式 → cancel_direct_task（仅单进程模式有效，兜底）
+    #    多进程（Issue #596 三进程拆分）下 direct 执行在 C 进程、terminate 落在 B，
+    #    本进程 _DIRECT_FUTURES 恒为空——真正的杀子进程由状态驱动取消完成：
+    #    上面 fail_task/update_event_status 落库后，C 侧执行流周期探测
+    #    task/event 终态（failed/cancelled）→ _kill_stale_engine 杀引擎并中断。
+    #    （单进程模式 terminate 与 direct 执行同进程，cancel_direct_task 仍生效）
     try:
         from src.api.event_pipeline import cancel_direct_task
         dc = cancel_direct_task(seq)
