@@ -357,7 +357,7 @@ function renderEventDetail(data) {
             <div style="font-size:11px;color:var(--t2);line-height:1.8">
               <div><span style="color:var(--t3)">Seq:</span> <b>#${data.seq || '—'}</b></div>
               <div id="evEngineRow">${_evEngineText(data)}</div>
-              <div><span style="color:var(--t3)">Skill:</span> ${data.skill || agent}</div>
+              <div><span style="color:var(--t3)">Skill:</span> ${data.skill_display_name || data.skill || agent}</div>
               <div id="evDurationRow">${_evDurationText(data)}</div>
               <div id="evStatusRow">${_evStatusText(data)}</div>
               <div id="evFailReason">${_evFailReasonText(data)}</div>
