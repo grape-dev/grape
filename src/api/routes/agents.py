@@ -55,7 +55,8 @@ async def _remove_vod_bot(app_id: str) -> None:
     if not app_id:
         return
     try:
-        from src.api.main import bot_manager
+        from src.api.bot_manager_registry import get_bot_manager
+        bot_manager = get_bot_manager()
         if bot_manager and bot_manager.api:
             await bot_manager.remove_bot(app_id)
             log.info(f"VOD IM: removed bot {app_id[:30]} from BotManager (unbind)")
@@ -676,7 +677,8 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # VOD IM：通过 BotManager 动态增删 Bot
     if name == "vod" and body.im_app_id and app_secret:
         try:
-            from src.api.main import bot_manager
+            from src.api.bot_manager_registry import get_bot_manager
+            bot_manager = get_bot_manager()
             if bot_manager and bot_manager.api:
                 if old_app_id and old_app_id != body.im_app_id:
                     await bot_manager.remove_bot(old_app_id)

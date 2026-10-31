@@ -26,7 +26,8 @@ router = APIRouter(prefix="/api/feishu/card-action", tags=["feishu-card"])
 async def handle_card_action(app_id: str, request: Request):
     """接收飞书卡片按钮点击回调（HTTP fallback for WS card.action.trigger）"""
     try:
-        from src.api.main import bot_manager
+        from src.api.bot_manager_registry import get_bot_manager
+        bot_manager = get_bot_manager()
         if bot_manager is None:
             return JSONResponse(
                 status_code=503,
@@ -76,7 +77,8 @@ async def handle_card_action(app_id: str, request: Request):
             ctx._seen_msg_ids.add(msg_id)
 
         # 获取消息处理器
-        from src.api.main import bot_manager as bm  # noqa: F811
+        from src.api.bot_manager_registry import get_bot_manager  # noqa: F811
+        bm = get_bot_manager()
         on_message = bm._on_message if hasattr(bm, '_on_message') else None
         if on_message is None:
             log.warning("[card-callback] no message handler registered")

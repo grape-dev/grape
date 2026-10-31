@@ -1668,7 +1668,8 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
 
     # Chat IM：通过 BotManager 动态增删 Bot
     try:
-        from src.api.main import bot_manager
+        from src.api.bot_manager_registry import get_bot_manager
+        bot_manager = get_bot_manager()
         if bot_manager and bot_manager.api:
             if feishu.get("app_id") and feishu.get("app_id") == app_id:
                 new_secret = kwargs.get("im_app_secret", "")
