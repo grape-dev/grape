@@ -99,9 +99,30 @@ class TestProcessEntries:
             "C must not run task_messages table maintenance (A responsibility)"
 
 
+def _iter_app_routes(app):
+    """产出 app 上全部注册的 APIRoute 对象（兼容 fastapi>=0.141 惰性 _IncludedRouter）。
+
+    fastapi>=0.141：include_router 产生惰性 _IncludedRouter（无 .path），旧写法
+    `[r.path for r in app.routes if hasattr(r, "path")]` 会漏掉全部子路由。
+    展开其 effective_candidates().original_route 取实际注册的 APIRoute
+    （路由确已注册，可用 app.openapi() 交叉验证）。
+    """
+    for r in app.routes:
+        if getattr(r, "path", None):
+            yield r
+            continue
+        try:
+            for cand in r.effective_candidates():
+                orr = getattr(cand, "original_route", None) or cand
+                if getattr(orr, "path", None):
+                    yield orr
+        except Exception:
+            pass
+
+
 def _app_paths(app) -> list[str]:
     """收集 app 上全部注册路由的 path。"""
-    return [r.path for r in app.routes if hasattr(r, "path")]
+    return [r.path for r in _iter_app_routes(app)]
 
 
 # ---------------------------------------------------- P1: runtime_view router
@@ -167,13 +188,13 @@ class TestRuntimeViewRouter:
         view = {(getattr(r, "path", ""), tuple(sorted(getattr(r, "methods", ()))),
                  id(getattr(r, "endpoint", None))) for r in runtime_view.view_router.routes}
         included = {(getattr(r, "path", ""), tuple(sorted(getattr(r, "methods", ()))),
-                     id(getattr(r, "endpoint", None))) for r in grape_server.app.routes}
+                     id(getattr(r, "endpoint", None))) for r in _iter_app_routes(grape_server.app)}
         assert view & included, "A process must include runtime_view router routes"
 
     def test_a_process_excludes_worker_protocol_endpoints(self):
         """A 进程不含 Worker 协议端点（register/heartbeat/claim 归 C 进程）。"""
         from src.api import grape_server
-        a = {(getattr(r, "path", ""), m) for r in grape_server.app.routes
+        a = {(getattr(r, "path", ""), m) for r in _iter_app_routes(grape_server.app)
              for m in getattr(r, "methods", ())}
         for path in ("/api/runtime/register", "/api/runtime/heartbeat",
                      "/api/runtime/tasks/claim"):
@@ -233,7 +254,7 @@ class TestEventsOpsRouter:
                      id(getattr(r, "endpoint", None))) for r in routes}
         ops_ids = _route_ids(events.ops_router.routes)
         full_ids = _route_ids(events.router.routes)
-        included = _route_ids(grape_event_server.app.routes)
+        included = _route_ids(_iter_app_routes(grape_event_server.app))
         assert ops_ids & included, "B process must include events ops_router routes"
         # B 不加载完整 router（含 GET 查看）；ops 与 full 无交集即可判定
         assert not (full_ids - ops_ids) & included, \
@@ -561,3 +582,69 @@ class TestIMOwnership:
     def test_main_registers_bot_manager_to_registry(self):
         content = (REPO_ROOT / "src/api/main.py").read_text(encoding="utf-8")
         assert "set_bot_manager" in content
+
+
+# -------------------------- P1-P3 审查修复（bot_manager 迁移 + 状态驱动取消）
+
+class TestReviewFixBotManagerMigration:
+    """审查 Required #1：多进程下 IM 动态增删 bot 的调用点必须走 registry。"""
+
+    CALL_SITES = [
+        ("src/api/routes/feishu_card.py", 2),
+        ("src/api/routes/feishu_onboard.py", 1),
+        ("src/api/routes/chat.py", 1),
+        ("src/api/routes/agents.py", 2),
+    ]
+
+    def test_no_route_file_imports_bot_manager_from_main(self):
+        for rel, _ in self.CALL_SITES:
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            assert "from src.api.main import bot_manager" not in content, \
+                f"{rel} must not import bot_manager from src.api.main (module-level None in A process)"
+
+    def test_call_sites_use_registry(self):
+        for rel, count in self.CALL_SITES:
+            content = (REPO_ROOT / rel).read_text(encoding="utf-8")
+            got = content.count("from src.api.bot_manager_registry import get_bot_manager")
+            assert got >= count, \
+                f"{rel} must call get_bot_manager() at {count} site(s), found {got}"
+
+    def test_migrated_sites_still_work_with_registry_slot(self):
+        """registry 槽位注入 mock 后，迁移后的调用点语义等价（非 None 透传）。"""
+        from src.api import bot_manager_registry
+
+        class _FakeBM:
+            api = object()
+
+        bm = _FakeBM()
+        bot_manager_registry.set_bot_manager(bm)
+        try:
+            assert bot_manager_registry.get_bot_manager() is bm
+        finally:
+            bot_manager_registry.set_bot_manager(None)
+
+
+class TestReviewFixDirectTerminateStateDriven:
+    """审查 Required #2：direct 模式跨进程终止改为状态驱动取消（C 侧探测杀引擎）。"""
+
+    SRC = REPO_ROOT / "src/runtime/direct_executor.py"
+    EVENTS = REPO_ROOT / "src/api/routes/events.py"
+
+    def test_direct_executor_has_external_terminal_probe(self):
+        src = self.SRC.read_text(encoding="utf-8")
+        assert "_external_terminal" in src, "C-side streaming loop must probe external terminal state"
+        assert "agent_tasks" in src and "events" in src
+        # 周期探测（而非每条事件查库）
+        assert "_PROBE_INTERVAL" in src
+
+    def test_direct_executor_kills_engine_on_terminal(self):
+        src = self.SRC.read_text(encoding="utf-8")
+        assert "_kill_stale_engine" in src, "probe hit must kill engine subprocess"
+        # 探测命中后 break 中断执行流（终态回写幂等，不会翻转状态）
+        assert "externally terminated" in src
+
+    def test_terminate_event_documents_state_driven_cancel(self):
+        src = self.EVENTS.read_text(encoding="utf-8")
+        assert "状态驱动取消" in src, "terminate_event must document state-driven cancel for multi-process"
+        # cancel_direct_task 保留（单进程模式兜底）
+        assert "cancel_direct_task" in src
