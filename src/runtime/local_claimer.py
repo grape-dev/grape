@@ -248,7 +248,7 @@ async def _execute_claimed_locally(task: dict, rid: int):
     task 是已被 claim_by_tag 更新为 running + runtime_id=rid 的现有任务行
     （不另起新行）；状态流转与 worker 路径一致 queued→running→completed。
     """
-    from src.api.event_pipeline import _execute_agent, start_direct_agent
+    from src.runtime.direct_executor import _execute_agent, start_direct_agent  # P0 (Issue #596): migrated
     from src.runtime.engine_select import engine_name
     from src.runtime.instances import runtime_instance_name
 
