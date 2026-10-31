@@ -155,6 +155,24 @@ class TestIssueDetail:
         assert len(d["events"]) == 2
         assert "pipeline" in d
 
+    def test_detail_issue_id_is_internal_card_id(self):
+        # Issue #569：detail 出参 issue_id = issue 表主键（内部卡片 id），
+        # 与 number（GitCode 侧编号）不同，可直接作 awaiting-input --issue_id
+        _mk_issue_state(12, stage="vod", owner="vod", scene="default")
+        with db_lock:
+            c = db.cursor()
+            row = c.execute(
+                "SELECT id FROM issue WHERE repo_key=? AND issue_number=?",
+                (REPO_KEY, 12)).fetchone()
+        assert row, "issue card row missing"
+        resp = client.get(f"/api/issues/{OWNER}/{REPO}/12", headers=_headers)
+        assert resp.status_code == 200
+        d = resp.json()
+        assert d["number"] == 12
+        assert d["issue_id"] == row[0]
+        assert isinstance(d["issue_id"], int)
+        assert d["issue_id"] != d["number"] or d["issue_id"] >= 1
+
     def test_detail_no_issue_state_fallback(self):
         _mk_event(9, "issue_opened", "vod")
         resp = client.get(f"/api/issues/{OWNER}/{REPO}/9", headers=_headers)

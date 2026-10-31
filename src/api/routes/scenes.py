@@ -84,6 +84,71 @@ def _resolve_scene_repo_key(repo: str, user: dict) -> str:
     return ""
 
 
+def _scene_row_exists(scene_id: str, repo_key: str) -> bool:
+    """场景 scene_id 在 repo_key 下是否存在有效 DB 行（Issue #568 二级解析触发判据）。"""
+    if not scene_id:
+        return False
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT 1 FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            return c.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _resolve_session_bound_scene(scene_id: str, user: dict):
+    """会话绑定场景解析（Issue #568：scenes detail 与 a2a handoff 可见性统一的第二级）。
+
+    a2a handoff 的 `_scene_node_check` 以 issue 绑定场景（get_issue_scene）为权威；
+    scenes detail 原仅按 repo 作用域（--repo / 会话 token 绑定 repo_key / repo_var）解析，
+    会话绑定仓库与场景归属仓库不一致（跨流水线/关联仓库信任域会话）时 404，与 a2a
+    409 携带 nodes 的口径分歧。此处补齐同一解析口径：session token →
+    agent_tasks(session_key) → issue_id → get_issue_scene，命中请求 scene_id 时
+    返回其 `get_pipeline_config` 结果（节点集合与 a2a 一致）。
+
+    仅会话级 token 启用；不放宽权限——issue 必须归属会话绑定仓库（agent_tasks.repo_key
+    优先，缺省回落会话绑定 repo_key），显式 --repo 路径不经过本函数。
+    未命中返回 None（调用方维持 404）。
+    """
+    _u = user or {}
+    if _u.get("auth_type") != "session_token" or not _u.get("session_key"):
+        return None
+    _session_key = _u["session_key"]
+    _repo_key = _u.get("repo_key") or ""
+    _issue_id = ""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT issue_id, repo_key FROM agent_tasks WHERE id=? LIMIT 1",
+                (_session_key,))
+            _row = c.fetchone()
+        if _row:
+            _issue_id = _row[0] or ""
+            # agent_tasks 绑定仓库为权威（issue 归属仓库；跨流水线/关联仓库信任域
+            # 会话的 user.repo_key 可能与 issue 归属不一致）
+            _repo_key = _row[1] or _repo_key
+    except Exception:
+        return None
+    if not _issue_id or not _repo_key:
+        return None
+    try:
+        from src.api.session_store import get_issue_scene
+        _bound_scene_id, _ = get_issue_scene(_repo_key, _issue_id)
+    except Exception:
+        return None
+    if not _bound_scene_id or _bound_scene_id != scene_id:
+        return None
+    from src.api.pipeline_config import get_pipeline_config
+    return get_pipeline_config(scene_id, repo_key=_repo_key)
+
+
 def _load_scenes() -> dict:
     """读取 agent-skill-mapping.json 的场景配置（legacy fallback for apply）"""
     if not os.path.exists(_CONFIG_PATH):
@@ -1456,10 +1521,23 @@ def get_scene_detail(scene_id: str, repo: str = "", user: dict = Depends(get_cur
     - 解析不到时返回 404，不再静默回退默认场景并回显请求 id；
     - 命中 pipelines.json default 兜底（cfg.fallback）同样视为未解析到，禁止静默回退；
     - 响应 id 恒为解析到的真实 scene_id（cfg['scene_id']），不回显请求值。
+
+    会话级补充（fix: agent runbook 场景核验 404 断链）：
+    - ?repo= 为空且认证为会话 token（tk_）时，用 token 绑定的 repo_key（session_api_tokens
+      行自带，格式 "gitcode:owner/repo"）——agent 的 `grape scenes detail` 未传 --repo
+      也能解析到本仓库的仓库级场景副本，不再 404；
+    - JWT / grape_ Key（用户侧调用）行为不变：仍需显式 ?repo=，解析不到照旧 404。
     """
     from src.api.pipeline_config import get_pipeline_config
     repo_key = _resolve_scene_repo_key(repo, user)
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+    if not repo and user and user.get("auth_type") == "session_token":
+        # Issue #568: 未显式传 repo 的会话 token，repo 作用域未命中该 scene_id 的 DB 行
+        # （cfg None，或来自 market/pipelines 兜底而非该 scene_id 本身）→ 会话绑定
+        # （issue 绑定场景）二级解析，与 a2a handoff 的场景可见性口径对齐；
+        # 未命中回落原解析结果（含既有兜底/404 行为），权限不放松
+        if cfg is None or not _scene_row_exists(scene_id, repo_key):
+            cfg = _resolve_session_bound_scene(scene_id, user) or cfg
     if not cfg:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在（跨仓库场景请附 --repo <owner/repo> 后重试）"})
     if cfg.get("fallback"):

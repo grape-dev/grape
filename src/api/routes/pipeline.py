@@ -387,6 +387,7 @@ def _running_issue_ids(repo_keys) -> set[str]:
 @router.get("/{owner}/{repo}", operation_id="pipeline_get", summary="Repository pipeline roadmap", description="Repository pipeline roadmap (stage/nodes/events) for the current user. Issue #542: `history_limit` (default 50) caps the returned history items (most recent first); `history_total` carries the untruncated count.")
 def get_pipeline(owner: str, repo: str,
                  history_limit: int = Query(50, ge=1, le=500, description="history 截断条数（最近优先），默认 50"),
+                 history_offset: int = Query(0, ge=0, description="history 偏移量（最近优先起点，0=最新；与 history_limit 组合支持前端增量翻页拉取全量历史）"),
                  user: dict = Depends(require_no_session_token)):
     from src.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
@@ -529,9 +530,15 @@ def get_pipeline(owner: str, repo: str,
 
     active = pipelines[0] if pipelines else None
     # Issue #542：history 截断为最近 history_limit 条（前端本就客户端分页展示），
-    # history_total 保留全量条数；统计口径（today/failed/active_count）仍按全量计算
+    # history_total 保留全量条数；统计口径（today/failed/active_count）仍按全量计算。
+    # history_offset：前端增量翻页拉取（0=最新一段；偏移后 active 不随 offset 重复返回，
+    # has_more 标识是否还有更早的历史可拉）。
     history_total = len(pipelines) - 1 if len(pipelines) > 1 else 0
-    history = pipelines[1:1 + history_limit] if len(pipelines) > 1 else []
+    _offset = min(max(int(history_offset or 0), 0), history_total)
+    _h_start = 1 + _offset
+    _h_end = _h_start + history_limit
+    history = pipelines[_h_start:_h_end] if len(pipelines) > 1 else []
+    _has_more = (_offset + history_limit) < history_total
 
     # Pipeline config (event-dispatch-redesign-v2.md Phase 2)
     from src.api.pipeline_config import get_pipeline_config
@@ -552,6 +559,8 @@ def get_pipeline(owner: str, repo: str,
         "history": history,
         "history_total": history_total,
         "history_limit": history_limit,
+        "history_offset": _offset,
+        "history_has_more": _has_more,
         "active_count": 1 if active and active["result"] in ("Processing", "Pending") else 0,
         "today_count": len(pipelines),
         "failed_count": len([p for p in pipelines if p["result"] == "Failed"]),

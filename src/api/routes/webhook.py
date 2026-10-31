@@ -509,10 +509,15 @@ class A2AHandoffBody(BaseModel):
 def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
     """目标 agent 是否在当前 Issue 场景的 pipeline nodes 内（nodes=单一事实源）。
 
-    解析优先级：项目场景行（`devops_pipeline_scene`，按 repo_key 过滤；nodes 为空也认，视为无节点）
-    → 官方 `pipelines.json[scene_id]` → 官方 `default`。
+    Issue #568: 节点来源统一走 `get_pipeline_config`（与 `scenes detail` 同源：
+    DB 项目场景行 → 市场官方模板 → pipelines.json → default，含进程级缓存），
+    保证「同一 token + 同一 scene_id」在 scenes detail 与 a2a handoff 两路
+    返回一致节点集合（修复 404 vs 409 nodes 口径分歧）。
+    解析优先级：issue 绑定场景（get_issue_scene，与 GRAPE_SCENE_ID 注入同源）
+    → 空时回退 default。
     返回 {"scene_id", "nodes", "in_scene"}。
     """
+    from src.api.pipeline_config import get_pipeline_config
     from src.api.session_store import get_issue_scene
     _scene_id = "default"
     try:
@@ -520,37 +525,56 @@ def _scene_node_check(repo_key: str, issue_number, agent_name: str) -> dict:
         _scene_id = _sid or "default"
     except Exception:
         _scene_id = "default"
-    nodes = None
     try:
-        from src.session_manager import db, db_lock
-        import json as _json
-        with db_lock:
-            _row = db.cursor().execute(
-                "SELECT nodes_json FROM devops_pipeline_scene "
-                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
-                (_scene_id, repo_key)).fetchone()
-        if _row is not None:
-            nodes = _json.loads(_row[0] or "[]") or []
+        _cfg = get_pipeline_config(_scene_id, repo_key=repo_key)
+        nodes = (_cfg or {}).get("nodes") or []
     except Exception:
-        nodes = None
-    if nodes is None:
-        import os as _os, json as _json
-        try:
-            _pipe_path = _os.path.join(
-                _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.dirname(__file__)))),
-                "configs", "pipelines.json")
-            with open(_pipe_path, "r", encoding="utf-8") as _f:
-                _pipes = _json.load(_f)
-            _scene_def = _pipes.get("scenes", {}).get(_scene_id) \
-                or _pipes.get("scenes", {}).get("default") or {}
-            nodes = _scene_def.get("nodes") or []
-        except Exception:
-            nodes = []
+        nodes = []
     return {
         "scene_id": _scene_id,
         "nodes": nodes,
         "in_scene": any(n.get("id") == agent_name for n in nodes),
     }
+
+
+def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_scene_id: str) -> str:
+    """Issue #568: 跨流水线移交后刷新 issue 绑定场景为目标场景有效 ID。
+
+    校验目标场景在 `devops_pipeline_scene` 存在（is_active=1），命中时将 issue
+    绑定场景刷新为 DB 行 scene_id（有效 ID 归一）；后续 agent 任务经
+    `_resolve_scene_id` → `get_issue_scene` 注入的 GRAPE_SCENE_ID 即为该有效 ID，
+    且可通过 `scenes detail` 查询且节点有效。
+
+    返回刷新后的有效 scene_id；目标场景 DB 行不存在时返回空串（软失败——
+    移交主流程已通过 get_pipeline_config 兜底口径校验节点，这里仅收紧
+    DB 作用域的绑定刷新，不阻断移交）。
+    """
+    from src.config import log
+    effective_scene_id = ""
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (target_scene_id, repo_key))
+            row = c.fetchone()
+        if row and row[0]:
+            effective_scene_id = row[0]
+    except Exception as _e:
+        log.warning(f"A2A #568: target scene existence check failed: {_e}")
+        return ""
+    if not effective_scene_id:
+        log.info(f"A2A #568: target scene '{target_scene_id}' has no active DB row under repo={repo_key}, skip scene refresh")
+        return ""
+    try:
+        from src.api.session_store import set_issue_scene
+        set_issue_scene(repo_key, f"#{issue_number}", effective_scene_id)
+        log.info(f"A2A #568: issue scene refreshed to effective scene={effective_scene_id} (issue=#{issue_number})")
+    except Exception as _e:
+        log.warning(f"A2A #568: issue scene refresh failed: {_e}")
+    return effective_scene_id
 
 
 def _cross_pipeline_handoff(
@@ -577,6 +601,11 @@ def _cross_pipeline_handoff(
 
     # 1. Validate target scene exists and contains the target_node
     target_cfg = get_pipeline_config(target_scene_id, repo_key=repo_key)
+    if not target_cfg:
+        # Issue #568: 目标场景不存在（DB/市场/官方兜底均未命中）→ 显式拦截，
+        # 防止移交后注入 GRAPE_SCENE_ID 指向失效场景
+        log.info(f"A2A #568: target scene '{target_scene_id}' not found under repo={repo_key}, handoff rejected")
+        return {"ok": False, "error": "target_scene_not_found"}
     _target_scene_name = target_cfg.get("display_name", target_scene_id) if target_cfg else target_scene_id
     target_nodes = (target_cfg or {}).get("nodes") or []
     target_node_ids = [n.get("id") or n.get("tag") for n in target_nodes]
@@ -609,7 +638,11 @@ def _cross_pipeline_handoff(
             _row = c.fetchone()
         if _row:
             _old_assignee = _row[0] or ""
-        set_issue_scene(repo_key, _issue_key, target_scene_id)
+        # Issue #568: 刷新 issue 绑定场景为目标场景有效 ID（校验 DB 行存在 + scene_id 归一），
+        # 后续注入 GRAPE_SCENE_ID 即有效且可通过 scenes detail 查询；DB 行缺失时回落原值
+        _effective_sid = _refresh_issue_scene_after_handoff(repo_key, issue_number, target_scene_id)
+        if not _effective_sid:
+            set_issue_scene(repo_key, _issue_key, target_scene_id)
         # Update stage to target_node (e.g. vod) to reflect cross-pipeline continuation.
         # owner_agent uses target_node as the responsible agent tag (matches event_pipeline.py pattern).
         set_issue_stage(repo_key, _issue_key, target_node, target_node,

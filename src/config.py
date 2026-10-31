@@ -494,6 +494,28 @@ def get_runtime_task_timeout() -> int:
     return _DEFAULT_TASK_TIMEOUT
 
 
+def get_task_recover_stale_seconds() -> int:
+    """running 任务服务端回收阈值（秒）——Issue #259 双跑防护。
+
+    优先级：env TASK_RECOVER_STALE_SECONDS（显式覆盖，前提须自行保证
+    >= 超时值）> get_runtime_task_timeout()（管理台 meta 实时同步，
+    runtime_task_timeout 改多少回收阈值跟多少，双跑窗口恒为 0）> 默认 3600。
+
+    原实现：service.py 模块级常量启动时读一次 env 写死 3600，管理台调大
+    runtime_task_timeout（如 7200）后服务端仍在 3600s 重派 running 任务
+    → 与 worker 本地执行双跑。改为动态 getter，每次回收循环实时取值。
+    """
+    env = os.environ.get("TASK_RECOVER_STALE_SECONDS", "").strip()
+    if env:
+        try:
+            v = int(float(env))
+            if v > 0:
+                return v
+        except Exception:
+            pass  # 非法 env 不致命——回退跟随超时配置
+    return get_runtime_task_timeout()
+
+
 def get_stuck_threshold_minutes() -> int:
     """stuck 预警派生阈值（分钟）。
 

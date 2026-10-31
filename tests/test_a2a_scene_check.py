@@ -25,12 +25,17 @@ REPO2 = "gitcode:org/b"
 
 @pytest.fixture(autouse=True)
 def _clean():
+    # Issue #568: _scene_node_check 节点来源统一走 get_pipeline_config（进程级缓存），
+    # 原直接 SQL 读取无缓存——种子数据用裸 SQL 写入，需配套失效缓存避免跨用例串扰
+    from src.api.pipeline_config import invalidate_scene_cache
+    invalidate_scene_cache()
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key IN (?,?)", (REPO, REPO2))
         c.execute("DELETE FROM devops_pipeline_scene WHERE repo_key IN (?,?)", (REPO, REPO2))
         db.commit()
     yield
+    invalidate_scene_cache()
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key IN (?,?)", (REPO, REPO2))

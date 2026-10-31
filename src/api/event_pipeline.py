@@ -700,6 +700,79 @@ def resolve_issue_card_id(repo_key: str, issue_number) -> str:
         return ""
 
 
+def _resolve_bot_username(repo_key: str) -> str:
+    """解析仓库 bot 用户名（Issue #573 抽公共 helper，三级兜底与原 coding 逻辑一致）。
+
+    优先级：
+    1. managed_repos.bot_username（repo 级，GitCodeRepoConfig 来源）；
+    2. 全局 bot username（github 走 get_global_github_bot_username，其余 get_global_bot_usernames[0]）；
+    3. Issue #372 路径 B：host_user 的平台用户名（external_login）。
+
+    全部为空 → 返回空串（下游 skill 按空值降级，不注入占位值）。
+    任何异常静默返回空串（与原注入块行为一致，不阻断任务派发）。
+    """
+    try:
+        from src.session_manager import db, db_lock
+        from src.repo_key import to_repo_key
+        _rk = to_repo_key(repo_key)
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
+            row = c.fetchone()
+            _bot_name = row[0] if row else ""
+        if _bot_name:
+            return _bot_name
+        # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
+        # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
+        from src.repo_key import parse_repo_key
+        _prov, _o, _r = parse_repo_key(_rk)
+        if _prov == "github":
+            from src.user.db import get_global_github_bot_username
+            _bot_name = get_global_github_bot_username()
+        else:
+            from src.user.db import get_global_bot_usernames
+            _us = get_global_bot_usernames()
+            _bot_name = _us[0] if _us else ""
+        if _bot_name:
+            return _bot_name
+        # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
+        from src.user.db import get_host_user_id
+        _hid = get_host_user_id(_rk)
+        if _hid > 0:
+            try:
+                from src.auth.grape_account_db import get_user_identities
+                for _ident in get_user_identities(_hid):
+                    if _ident.get("provider") == _prov:
+                        return _ident.get("external_login") or ""
+            except Exception:
+                pass
+        return ""
+    except Exception:
+        return ""
+
+
+def _inject_bot_agent_env(env_extra: dict, repo_key: str, agent_type: str) -> None:
+    """Issue #573：BOT_USERNAME / AGENT_NAME 注入全部 devops agent 任务 env。
+
+    原实现仅 `agent_type == "coding"` 注入 BOT_USERNAME（create_skill_pr.sh 审查人用），
+    issue agent（issue-runbook Step 4 机器人接管 assignee）等其余 agent 拿不到值；
+    AGENT_NAME 仅 direct 模式经 stream_devops_agent 参数注入，worker 模式 env 取自
+    env_extra 快照从未写入。本 helper 三个注入点统一调用：
+    - BOT_USERNAME：_resolve_bot_username(repo_key)（可能为空串，空值时 skill 侧降级）
+    - AGENT_NAME：get_agent_display_name(agent_type)（agent runtime 显示名）
+
+    幂等：env_extra 已显式设置（上层调用方手工调参）时不覆盖。
+    """
+    try:
+        env_extra.setdefault("BOT_USERNAME", _resolve_bot_username(repo_key))
+    except Exception:
+        pass
+    try:
+        env_extra.setdefault("AGENT_NAME", get_agent_display_name(agent_type))
+    except Exception:
+        pass
+
+
 def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     """Issue #528：ISSUE_NUMBER/PR_NUMBER 仅注入纯数字值。
 
@@ -3031,45 +3104,9 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     _evt_ext = evt.get("_env_extra") or {}
     if isinstance(_evt_ext, dict):
         env_extra.update(_evt_ext)
-    # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
-    if agent_type == "coding":
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            _rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
-                _bot_name = row[0] if row else ""
-            if not _bot_name:
-                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
-                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-                from src.repo_key import parse_repo_key
-                _prov, _o, _r = parse_repo_key(_rk)
-                if _prov == "github":
-                    from src.user.db import get_global_github_bot_username
-                    _bot_name = get_global_github_bot_username()
-                else:
-                    from src.user.db import get_global_bot_usernames
-                    _us = get_global_bot_usernames()
-                    _bot_name = _us[0] if _us else ""
-                # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-                if not _bot_name:
-                    from src.user.db import get_host_user_id
-                    _hid = get_host_user_id(_rk)
-                    if _hid > 0:
-                        try:
-                            from src.auth.grape_account_db import get_user_identities
-                            for _ident in get_user_identities(_hid):
-                                if _ident.get("provider") == _prov:
-                                    _bot_name = _ident.get("external_login") or ""
-                                    break
-                        except Exception:
-                            pass
-            env_extra["BOT_USERNAME"] = _bot_name
-        except Exception:
-            pass
+    # Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME，
+    # issue-runbook Step 4 机器人接管 assignee 拿不到值）；源/兜底见 _inject_bot_agent_env。
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
     _inject_issue_pr_env(env_extra, evt, repo_key)
 
     # 方案 D 防御：有关联 Issue 时，Issue 级会话指针不得指向其他 Issue 的 workdir（防 cwd/session 错位回归）
@@ -3286,7 +3323,7 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
 
     与正常入队的差异（调用方已持有或无意义的不重复注入）：
     - ISSUE_NUMBER/PR_NUMBER：参数传入则注入
-    - BOT_USERNAME（coding）：与正常入队同逻辑
+    - BOT_USERNAME/AGENT_NAME（Issue #573）：与正常入队同逻辑（全部 devops agent）
     - evt._env_extra 事件级扩展：重派无 evt，无法还原（快照已在 prompt 里），不注入
     - scene_id_override（Issue #427）：重派 PR 订阅任务时传旧任务/事件的订阅场景，
       防止 env 被重新解析回 Issue 场景；空串回退 issue_id 解析（普通任务零破坏）。
@@ -3320,45 +3357,8 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
             _inject_linked_repo_tokens(env, env["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
-    # ── coding 注入 BOT_USERNAME（审查人）──
-    if agent_type == "coding":
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            _rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
-                _bot_name = row[0] if row else ""
-            if not _bot_name:
-                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
-                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-                from src.repo_key import parse_repo_key
-                _prov, _o, _r = parse_repo_key(_rk)
-                if _prov == "github":
-                    from src.user.db import get_global_github_bot_username
-                    _bot_name = get_global_github_bot_username()
-                else:
-                    from src.user.db import get_global_bot_usernames
-                    _us = get_global_bot_usernames()
-                    _bot_name = _us[0] if _us else ""
-                # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-                if not _bot_name:
-                    from src.user.db import get_host_user_id
-                    _hid = get_host_user_id(_rk)
-                    if _hid > 0:
-                        try:
-                            from src.auth.grape_account_db import get_user_identities
-                            for _ident in get_user_identities(_hid):
-                                if _ident.get("provider") == _prov:
-                                    _bot_name = _ident.get("external_login") or ""
-                                    break
-                        except Exception:
-                            pass
-            env["BOT_USERNAME"] = _bot_name
-        except Exception:
-            pass
+    # ── Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME）──
+    _inject_bot_agent_env(env, repo_key, agent_type)
     # ── issue/pr 编号（Issue #528：仅注入纯数字，伪 id/占位值不注入）──
     _in = str(issue_number or "").lstrip("#")
     if _in.isdigit():
@@ -3392,8 +3392,6 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
     任一步失败仅告警并跳过（不抛异常、不阻断执行），保留其它占位符继续替换。
     """
-    import shutil as _shutil
-
     _issue = issue_id or evt.get("issue_id", "") or (evt.get("payload") or {}).get("issue_number", "") or ""
 
     # 1) project-info + knowledge 物化（Issue #95：统一调 collect_knowledge_files）
@@ -3429,50 +3427,63 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
     except Exception as e:
         log.warning(f"direct knowledge materialize failed for {repo_key}: {e}")
 
-    # 2) skill 物化（OBS zip 解压 / 本地技能 copytree 到 ws/.skills/{skill_name}/）
+    # 2) skill 物化（OBS zip / 本地技能目录 / skill_path → ws/.skills/{skill_name}/）
+    #    Issue #564：原子物化（tmp+rename）+ 完整性校验（SKILL.md+references 按定义清单）
+    #    + 官方技能包回退 + 降级标注（evt._skill_materialize / prompt 降级说明），不静默空注入。
     skill_dir = os.path.join(ws, ".skills")
     try:
-        _skill_local = ""  # 本地技能根目录（非空则 copytree）
-        from src.user.db import get_skill_by_id, get_skill_path
-        _skill_id = evt.get("_skill_id") or 0
-        if _skill_id:
-            _sk = get_skill_by_id(_skill_id)
-            if _sk:
-                _okey = _sk.get("file_path") or ""
-                if _okey:
-                    # OBS 技能：zip 根 = {skill_name}/，解压到 ws/.skills/
-                    from src.storage import get_skill_zip_bytes
-                    _zip = get_skill_zip_bytes(_okey)
-                    if _zip:
-                        import zipfile as _zf, io as _io
-                        os.makedirs(skill_dir, exist_ok=True)
-                        with _zf.ZipFile(_io.BytesIO(_zip)) as zf:
-                            zf.extractall(skill_dir)
-                else:
+        def _skill_primary():
+            _skill_local = ""  # 本地技能根目录（非空则 copytree）
+            from src.user.db import get_skill_by_id, get_skill_path
+            _skill_id = evt.get("_skill_id") or 0
+            if _skill_id:
+                _sk = get_skill_by_id(_skill_id)
+                if _sk:
+                    _okey = _sk.get("file_path") or ""
+                    if _okey:
+                        # OBS 技能：zip 根 = {skill_name}/，原子解压到 ws/.skills/
+                        from src.storage import get_skill_zip_bytes
+                        _zip = get_skill_zip_bytes(_okey)
+                        if _zip:
+                            return ("zip", _zip)
+                        return ("none", f"skill zip unavailable: {_okey}")
                     _full = get_skill_path(_skill_id)
                     if _full and os.path.exists(_full):
                         _skill_local = os.path.dirname(_full)
-        else:
-            from src.config import resolve_official_skill_path as _resolve_skill_path
-            _real_skill_md = _resolve_skill_path(skill_name or "")
-            if not _real_skill_md:
-                _sp = evt.get("_skill_path", "") or ""
-                if _sp and os.path.isfile(_sp):
-                    _real_skill_md = _sp
-                elif _sp and os.path.isfile(os.path.join(_sp, "SKILL.md")):
-                    _real_skill_md = os.path.join(_sp, "SKILL.md")
-            if _real_skill_md:
-                _skill_local = os.path.dirname(_real_skill_md)
-        if _skill_local and skill_name and os.path.isdir(_skill_local):
-            _dst = os.path.join(skill_dir, skill_name)
-            if not os.path.isdir(_dst):
-                try:
-                    _shutil.copytree(_skill_local, _dst)
-                except Exception:
-                    pass
+            else:
+                from src.config import resolve_official_skill_path as _resolve_skill_path
+                _real_skill_md = _resolve_skill_path(skill_name or "")
+                if not _real_skill_md:
+                    _sp = evt.get("_skill_path", "") or ""
+                    if _sp and os.path.isfile(_sp):
+                        _real_skill_md = _sp
+                    elif _sp and os.path.isfile(os.path.join(_sp, "SKILL.md")):
+                        _real_skill_md = os.path.join(_sp, "SKILL.md")
+                if _real_skill_md:
+                    _skill_local = os.path.dirname(_real_skill_md)
+            if _skill_local and skill_name and os.path.isdir(_skill_local):
+                return ("dir", _skill_local)
+            return ("none", f"skill source not found for {skill_name}")
+
+        if skill_name:
+            from src.runtime.skill_materialize import materialize_skill_with_fallback
+            _mat = materialize_skill_with_fallback(skill_dir, skill_name, _skill_primary)
+            # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
+            evt["_skill_materialize"] = _mat
+            if _mat.get("status") in ("fallback", "degraded"):
+                _note = (f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                         f"({_mat.get('status')}): {_mat.get('detail')}. "
+                         f"If skill files under this path are missing, fetch the skill via "
+                         f"`grape skills detail` or the platform skills API before proceeding.")
+                prompt += _note
+                log.warning(f"direct skill materialize {skill_name}: {_mat.get('status')} "
+                            f"({_mat.get('detail')})")
+            else:
+                log.info(f"direct skill materialize {skill_name}: ok")
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
+        evt["_skill_materialize"] = {"status": "degraded", "detail": str(e), "skill_dir": ""}
 
     return prompt
 
@@ -3978,6 +3989,17 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     _exec_done_stderr = ""
     tool_uses = []
     agent_logs = []
+    # Issue #564：技能物化降级标注落入事件 agent_logs（不静默空注入）
+    try:
+        _sk_mat = evt.get("_skill_materialize") or {}
+        if _sk_mat.get("status") in ("fallback", "degraded"):
+            agent_logs.append({
+                "time": datetime.utcnow().isoformat(),
+                "type": "skill_materialize",
+                "msg": f"skill materialize {_sk_mat.get('status')}: {_sk_mat.get('detail')}",
+            })
+    except Exception:
+        pass
     env_extra = {
         "REPO_FULL_NAME": repository,
         "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
@@ -4011,45 +4033,9 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _inject_linked_repo_tokens(env_extra, env_extra["GRAPE_LINKED_REPOS"])
     except Exception:
         pass
-    # coding agent 注入 BOT_USERNAME（create_skill_pr.sh 设置审查人用）
-    if agent_type == "coding":
-        try:
-            from src.session_manager import db, db_lock
-            from src.repo_key import to_repo_key
-            _rk = to_repo_key(repo_key)
-            with db_lock:
-                c = db.cursor()
-                c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? AND bot_username!='' LIMIT 1", (_rk,))
-                row = c.fetchone()
-                _bot_name = row[0] if row else ""
-            if not _bot_name:
-                # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
-                # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-                from src.repo_key import parse_repo_key
-                _prov, _o, _r = parse_repo_key(_rk)
-                if _prov == "github":
-                    from src.user.db import get_global_github_bot_username
-                    _bot_name = get_global_github_bot_username()
-                else:
-                    from src.user.db import get_global_bot_usernames
-                    _us = get_global_bot_usernames()
-                    _bot_name = _us[0] if _us else ""
-                # Issue #372: 路径 B 无全局 bot username → 用 host_user 的平台用户名
-                if not _bot_name:
-                    from src.user.db import get_host_user_id
-                    _hid = get_host_user_id(_rk)
-                    if _hid > 0:
-                        try:
-                            from src.auth.grape_account_db import get_user_identities
-                            for _ident in get_user_identities(_hid):
-                                if _ident.get("provider") == _prov:
-                                    _bot_name = _ident.get("external_login") or ""
-                                    break
-                        except Exception:
-                            pass
-            env_extra["BOT_USERNAME"] = _bot_name
-        except Exception:
-            pass
+    # Issue #573：BOT_USERNAME/AGENT_NAME 注入全部 devops agent（原仅 coding 注 BOT_USERNAME）；
+    # direct 路径 agent_name 参数仍同步传 stream_devops_agent（幂等同值）。
+    _inject_bot_agent_env(env_extra, repo_key, agent_type)
     # 事件级扩展环境变量（如 onboarding 的 ONBOARDING_RESULT / ONBOARDING_TARGET）
     _ext = evt.get("_env_extra") or {}
     if isinstance(_ext, dict):

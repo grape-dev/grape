@@ -15,7 +15,6 @@ if sys.version_info < (3, 10):
 
 import asyncio, json, os, random, re, time
 import base64 as _b64
-import zipfile as _zf
 import urllib.request as _urllib
 import shutil as _shutil
 
@@ -1952,6 +1951,28 @@ async def _execute_task(client, task, engine_name: str = ""):
     elif int(task.get("_grape_resume_attempt") or 0) >= 2:
         log.info(f"task {tid}: retry without usable checkpoint, running from scratch")
     try:
+        # Issue #564：技能物化降级/回退的 prompt 降级说明（追加在 prompt 尾部，Agent 可见）
+        _skill_notes = []
+
+        def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
+            """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。"""
+            _skill_name = _task.get("skill") or ""
+            try:
+                from src.config import resolve_official_skill_path
+                _official = resolve_official_skill_path(_skill_name)
+            except Exception as _e:
+                log.warning(f"[skill] official resolve failed: {_e}")
+                _official = ""
+            if _official and os.path.isfile(_official):
+                from src.runtime.skill_materialize import materialize_skill_dir_atomic
+                _ok, _r = materialize_skill_dir_atomic(
+                    _skill_dir, _skill_name, os.path.dirname(_official))
+                if _ok:
+                    _env["DEVOPS_SKILLS_DIR"] = _skill_dir
+                    return {"status": "fallback", "detail": "official skill package materialized"}
+                return {"status": "degraded", "detail": f"official fallback failed: {_r}"}
+            return {"status": "degraded", "detail": "official skill package not found"}
+
         # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
         # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
         # ② 失败 → 服务端代拉（POST /tasks/{id}/skill-zip，复用 zip_cache）
@@ -1980,29 +2001,41 @@ async def _execute_task(client, task, engine_name: str = ""):
                     _OBS_FAIL_STREAK = 0
                     log.warning("[skill] OBS 直连不稳定，降级为服务端代拉（prefer_fallback）")
         if skill_zip_b64:
-            # ===== zip 物化（直连/代拉获取的 zip → 解压 → 恢复权限）=====
-            # 见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
-            # Unix 权限位，手动按 external_attr 恢复；剥离 setuid/setgid/sticky 防提权）
+            # ===== zip 物化（直连/代拉获取的 zip → 原子解压 + 完整性校验 → 恢复权限）=====
+            # Issue #564：tmp + 原子 rename（不留半写 .skills）、按 zip 名单校验
+            # SKILL.md/references、失败回退官方技能包、仍失败降级标注（不静默空注入）。
+            # 权限恢复见 obs-skill-storage-design.md §5.7（Python 3.12+ zipfile 不再自动恢复
+            # Unix 权限位；剥离 setuid/setgid/sticky 防提权）
+            from src.runtime.skill_materialize import materialize_skill_zip_atomic
             raw = _b64.b64decode(skill_zip_b64)
-            tmp_zip = _os.path.join(skill_dir, "_skill_delivery.zip")
-            _os.makedirs(skill_dir, exist_ok=True)
-            with open(tmp_zip, "wb") as f:
-                f.write(raw)
-            with _zf.ZipFile(tmp_zip, "r") as zf:
-                zf.extractall(skill_dir)  # zip 根 = {skill_name}/，落地 .skills/{skill_name}/
-                for info in zf.infolist():
-                    mode = info.external_attr >> 16
-                    if mode and not info.is_dir():
-                        p = _os.path.join(skill_dir, info.filename)
-                        if _os.path.isfile(p):
-                            _os.chmod(p, mode & 0o777)
-            try:
-                _os.remove(tmp_zip)
-            except Exception:
-                pass
-            env["DEVOPS_SKILLS_DIR"] = skill_dir
+            _ok_zip, _skills_ok, _reason = materialize_skill_zip_atomic(skill_dir, raw)
+            # Issue #564 review：部分成功也必须校验目标技能是否实际落盘——
+            # 多技能 zip 且目标技能校验失败时，不能仅凭部分成功就注入 DEVOPS_SKILLS_DIR
+            #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
+            _target_skill = task.get("skill") or ""
+            if _ok_zip and _target_skill and _target_skill not in _skills_ok:
+                _ok_zip = False
+                _reason = (f"target skill '{_target_skill}' not in materialized list "
+                           f"[{', '.join(_skills_ok)}]")
+                log.warning(f"[skill] zip partial success misses target: {_reason}")
+            if _ok_zip:
+                env["DEVOPS_SKILLS_DIR"] = skill_dir
+                if _reason:
+                    log.warning(f"[skill] partial zip materialize: {_reason}")
+            else:
+                log.warning(f"[skill] zip materialize failed: {_reason}")
+                _fb_status = _fallback_official_skill(skill_dir, task, env)
+                _skill_notes.append(
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                    f"({_fb_status.get('status')}): zip materialize failed ({_reason}); "
+                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
+                    f"missing, fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
         else:
             # ===== 旧格式：skill_files 文本物化（老任务/老 worker 兼容）=====
+            # Issue #564：原子写盘 + 完整性校验 + 官方包回退；仅物化成功才注入
+            # DEVOPS_SKILLS_DIR（杜绝"有路径无内容"的空注入）。
+            from src.runtime.skill_materialize import materialize_skill_files_atomic
             skill_files = json.loads(task.get("skill_files") or "{}")
             # Issue #463 P2 扩展（2026-10-27）：引用单写格式 {"<skill>": {"__obs_key__": ...}}
             # —— 内容不内联 DB，按对象键现拉原始 zip（含二进制，优于文本物化）。
@@ -2020,14 +2053,29 @@ async def _execute_task(client, task, engine_name: str = ""):
                     skill_files = {}
                 else:
                     log.warning(f"[skill] __obs_key__ 拉取失败, task={task.get('id')} key={_ref_key[:60]}")
+            # Issue #564 review：按技能粒度收集物化结果，避免逐技能覆盖、
+            # 首个失败 break 后丢失其余技能的失败原因（早先成功者已落盘）。
+            _per_skill = []  # [(skill_name, ok, reason)]
             for _sn, files in skill_files.items():
-                for rel, content in (files or {}).items():
-                    dest = _os.path.join(skill_dir, _sn, rel)
-                    _os.makedirs(_os.path.dirname(dest), exist_ok=True)
-                    with open(dest, "w", encoding="utf-8") as f:
-                        f.write(content)
-            if skill_files:
+                _ok_s, _r_s = materialize_skill_files_atomic(skill_dir, _sn, files or {})
+                _per_skill.append((_sn, _ok_s, _r_s))
+                if not _ok_s:
+                    log.warning(f"[skill] skill_files materialize failed for {_sn}: {_r_s}")
+            _failed = [(_sn, _r) for _sn, _ok_f, _r in _per_skill if not _ok_f]
+            _reason = "; ".join(f"{_sn}: {_r}" for _sn, _r in _failed)
+            _ok_files = not _failed
+            if _ok_files:
                 env["DEVOPS_SKILLS_DIR"] = skill_dir
+            elif skill_files:
+                _fb_status = _fallback_official_skill(skill_dir, task, env)
+                _skill_notes.append(
+                    f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                    f"({_fb_status.get('status')}): skill_files materialize failed ({_reason}); "
+                    f"{_fb_status.get('detail', '')}. If skill files under this path are "
+                    f"missing, fetch the skill via `grape skills detail` or the platform "
+                    f"skills API before proceeding.")
+        if _skill_notes:
+            prompt += "".join(_skill_notes)
     except Exception as e:
         log.warning(f"skill materialize failed: {e}")
     # project-info 落地（repo 全局共享，见 multi-issue-isolation-design.md §2.4）
