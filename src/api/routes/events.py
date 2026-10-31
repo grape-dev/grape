@@ -102,6 +102,21 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #574：Skill 展示改 display_name（与场景选择处同款查询条件；display_name 为空时前端回退 Skill ID）
+    _skill_display_name = ""
+    try:
+        if row[13]:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                    (row[13],))
+                _sr = _c.fetchone()
+            if _sr and _sr[0]:
+                _skill_display_name = _sr[0]
+    except Exception:
+        pass
+    result["skill_display_name"] = _skill_display_name
     # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
     _structured_raw = row[20] if len(row) > 20 else None
     _structured = None
@@ -1054,9 +1069,19 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             from src.api.event_pipeline import _fail_scene_all_offline
                             _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
                                                     context="Redispatch", repo_key=old.get("repo_key") or "")
+                            # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
+                            _msg_541 = "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"
+                            try:
+                                from src.runtime.engine_select import scene_dispatch_failure_reason
+                                _msg_541 = scene_dispatch_failure_reason(
+                                    _scene_253, old.get("agent_type") or "",
+                                    repo_key=old.get("repo_key") or "",
+                                    user_id=_scene_uid_253) or _msg_541
+                            except Exception:
+                                pass
                             raise HTTPException(status_code=409, detail={
                                 "code": 409,
-                                "message": "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"})
+                                "message": _msg_541})
                         _pool_253 = _rp_253 or ""
                         _pool_253_authoritative = True
                 except HTTPException:

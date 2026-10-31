@@ -207,7 +207,14 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
         _reason = (f"绑定的 {len(_engine_names)} 台引擎（{', '.join(_engine_names)}）全部离线，"
                    f"任务无法派发（scene={scene_id}, agent={agent_type}）")
     else:
+        # Issue #541：无引擎名可反查 → 用统一原因判定区分「场景仓内不存在 /
+        # 场景未绑定引擎 / 引擎全部离线」，不再笼统报「全部离线」
         _reason = f"场景绑定的引擎全部离线，任务无法派发（scene={scene_id}, agent={agent_type}）"
+        try:
+            from src.runtime.engine_select import scene_dispatch_failure_reason
+            _reason = scene_dispatch_failure_reason(scene_id, agent_type, repo_key=repo_key) or _reason
+        except Exception as _e541:
+            log.warning(f"_fail_scene_all_offline: failure reason lookup failed: {_e541}")
     _fail_event(seq, _reason)
 
 def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
@@ -2493,7 +2500,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
                             skill_path, skill_id, evt, issue_id, runtime_id or 0)
+        # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
         _reason_offline = f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态"
+        try:
+            from src.runtime.engine_select import scene_dispatch_failure_reason
+            _reason_offline = scene_dispatch_failure_reason(
+                _issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid) or _reason_offline
+        except Exception as _e541:
+            log.warning(f"Pipeline: scene dispatch failure reason lookup failed: {_e541}")
         # Issue #496：PR merged → sre 收尾链路（merge webhook 一次性投递，无二次触发机会）
         # 保留 #259 即时终态语义的同时追加派发级自动重试（引擎恢复后自动重派）。
         if event_type == "pull_request_merged" and agent_type == "sre":

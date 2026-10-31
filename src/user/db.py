@@ -1526,9 +1526,19 @@ def set_repo_scene(repo_key: str, scene_id: str):
     """写入仓库开发场景（managed_repos.dev_scene），幂等。
 
     issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
+    Issue #541：写前做仓内存在性校验——scene_id 仓内查不到（如误写模板场景名）
+    时告警不阻断（兼容显式直写场景名等历史路径，派发侧另有防线兜底）。
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import scene_exists_in_repo
+            if not scene_exists_in_repo(scene_id, repo_key):
+                log.warning(f"Set repo scene: scene '{scene_id}' not found in repo {repo_key} "
+                            f"(possible template-name misbinding, Issue #541)")
+        except Exception as _e:
+            log.warning(f"Set repo scene: existence check failed: {_e}")
     try:
         with db_lock:
             c = db.cursor()

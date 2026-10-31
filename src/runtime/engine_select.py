@@ -507,6 +507,19 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     if not user_id:
         user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
     if scene_id:
+        # Issue #541：仓内存在性兜底——scene_id 在该仓库查不到（如误绑模板场景名）
+        # 时不静默回退全局模板行。SRE 直接按派发失败处理（None，调用方按
+        # 「场景仓内不存在」报错）；非 SRE 维持全量广播原行为（仅告警留痕）。
+        if repo_key:
+            try:
+                from src.api.pipeline_config import scene_exists_in_repo
+                if not scene_exists_in_repo(scene_id, repo_key):
+                    log.warning(f"get_scene_pool_engine_ids: scene={scene_id} not found in repo "
+                                f"{repo_key}, skip global template fallback for dispatch (Issue #541)")
+                    if _sre_no_broadcast(agent_type):
+                        return None
+            except Exception as _e541:
+                log.warning(f"get_scene_pool_engine_ids: repo existence check failed: {_e541}")
         try:
             from src.api.pipeline_config import get_scene_engine_ids
             ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
@@ -530,6 +543,37 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
         except Exception as e:
             log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
     return ""
+
+
+def scene_dispatch_failure_reason(scene_id: str, agent_type: str, repo_key: str = "",
+                                  user_id: int = 0, issue_creator: str = "") -> str:
+    """Issue #541：场景派发失败原因判定（调用方在 get_scene_pool_engine_ids 返回 None 后使用）。
+
+    区分三类失败（此前统一报「场景绑定的引擎全部离线」，无法定位真实原因）：
+    1. 场景仓内不存在：scene_id 未绑定到该仓库（典型为误绑模板场景名，
+       回退全局模板行后无引擎）→ 提示重新应用场景
+    2. 场景未绑定引擎：仓内场景存在但该 Agent 节点 engine_runtime_ids 为空
+    3. 引擎全部离线：节点声明了引擎但池判定全灭（在线状态/心跳不健康）
+    """
+    if not scene_id:
+        return f"场景未绑定引擎（scene=空, agent={agent_type}），请先为任务绑定场景"
+    if repo_key:
+        try:
+            from src.api.pipeline_config import scene_exists_in_repo
+            if not scene_exists_in_repo(scene_id, repo_key):
+                return (f"场景 {scene_id} 仓内不存在（仓库 {repo_key}，可能绑定了模板场景名"
+                        f"而非仓内副本，Issue #541），请重新应用场景后再派发（agent={agent_type}）")
+        except Exception as _e:
+            log.warning(f"scene_dispatch_failure_reason: repo existence check failed: {_e}")
+    try:
+        from src.api.pipeline_config import get_scene_engine_ids
+        ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id) or []
+    except Exception as _e:
+        log.warning(f"scene_dispatch_failure_reason: engine ids lookup failed: {_e}")
+        ids = []
+    if not ids:
+        return f"场景未绑定引擎（scene={scene_id}, agent={agent_type}），请在场景中为该 Agent 配置引擎"
+    return f"场景绑定的引擎全部离线（scene={scene_id}, agent={agent_type}），请检查引擎在线状态"
 
 
 def resolve_local_engine(user_id: int = 0) -> int | None:
@@ -703,6 +747,11 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         if agent_type:
             tags_str = r[10] or ""
             tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+            # Issue #592：本机直连历史行（默认 'all' 标签机制引入前创建）无 capabilities 行
+            # → tags 为空被过滤出弹窗列表（数量偏少）。本机直连按注册默认值 'all' 兜底
+            # （与 save_agent_runtimes 新建默认标签及广播派发语义对齐；远端行仍按标签过滤）。
+            if not tags and scope == "local":
+                tags = ["all"]
             if agent_type not in tags and "all" not in tags:
                 continue
         # scene_tags（r[12] = JSON 字符串，如 '["default","iac"]'；空则回退 ["default"]）

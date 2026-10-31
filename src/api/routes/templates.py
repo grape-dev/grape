@@ -39,6 +39,28 @@ def _find_template(template_id: str) -> dict | None:
     return None
 
 
+def _apply_template_scene(repo_key: str, tpl_scene_id: str, user_id: int = 0) -> str:
+    """把模板自带场景应用到仓库并写 managed_repos.dev_scene，返回仓内副本真实 scene_id。
+
+    Issue #541：dev_scene 必须写 apply_market_scene_by_name 回传的真实 ID
+    （custom-{uuid}），不能再写模板场景名——否则 onboarding Issue 绑定到
+    仓内不存在的场景，派发侧回退全局模板行（无引擎）→ SRE 派发失败。
+    应用失败（模板名查不到/应用被拒）返回空串并保留托管时已应用的默认场景。
+    """
+    from src.api.pipeline_config import apply_market_scene_by_name
+    real_scene_id = apply_market_scene_by_name(repo_key, tpl_scene_id, user_id) or ""
+    if not real_scene_id:
+        log.warning(f"template scene override: apply '{tpl_scene_id}' to {repo_key} failed, "
+                    f"keep default scene")
+        return ""
+    # 写入 managed_repos.dev_scene，供 onboarding 读取并绑定到 Issue
+    from src.user.db import set_repo_scene
+    set_repo_scene(repo_key, real_scene_id)
+    log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key} "
+             f"(dev_scene={real_scene_id})")
+    return real_scene_id
+
+
 def _load_global_bot_config(provider: str = "gitcode") -> tuple[str, str]:
     """Read global bot config, return (bot_token, bot_username). Token and username
     are both selected by provider.
@@ -289,12 +311,7 @@ async def create_from_template(body: CreateTemplateRequest,
         tpl_scene_id = tpl.get("scene_id") or ctx.get("scene_id") or ""
         if tpl_scene_id and tpl_scene_id != "default":
             try:
-                from src.api.pipeline_config import apply_market_scene_by_name
-                apply_market_scene_by_name(repo_key, tpl_scene_id, user.get("id", 0))
-                # 写入 managed_repos.dev_scene，供 onboarding 读取并绑定到 Issue
-                from src.user.db import set_repo_scene
-                set_repo_scene(repo_key, tpl_scene_id)
-                log.info(f"template scene override: applied '{tpl_scene_id}' to {repo_key} (dev_scene updated)")
+                _apply_template_scene(repo_key, tpl_scene_id, user.get("id", 0))
             except Exception as e:
                 log.warning(f"template scene override failed for '{tpl_scene_id}': {e}")
 
