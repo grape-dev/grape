@@ -1266,7 +1266,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
                            + query_engines(repo_key, "repo", agent_type=atype)
                            + query_engines(repo_key, "local", agent_type=atype, username=_uname))
             _scope_labels = {"global": "全局", "user": "个人", "repo": "仓库", "local": "本机"}
-            from src.runtime.health import derive_runtime_health
+            from src.runtime.health import derive_runtime_health, derive_local_runtime_health
             import time as _time
             _now = _time.time()
             _seen_ids = set()
@@ -1283,7 +1283,13 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
             agent_engines[atype] = [{"id": e["runtime_id"],
                                      "name": instance_name(e["name"], e.get("device_name", ""), e.get("credential_id", 0)),
                                      "device": e.get("device_name", ""), "cred_name": e.get("owner_name", ""),
-                                     "status": derive_runtime_health(e["status"], e.get("last_seen_at"), _now),
+                                     # Issue #592：本机直连（credential_id=0）不参与 worker 心跳，
+                                     # last_seen_at 仅由 10min 周期重探刷新——统一走远端心跳口径
+                                     # 会把探活间隔内的本机引擎误判 recently_lost（全显失联）。
+                                     # 本机直连按探活结果派生（与引擎页 _engine_health 口径一致）。
+                                     "status": (derive_local_runtime_health(bool(e.get("installed")), bool(e.get("healthy")))
+                                                if (e.get("credential_id") or 0) == 0
+                                                else derive_runtime_health(e["status"], e.get("last_seen_at"), _now)),
                                      "tags": e.get("tags", []),
                                      "scene_tags": e.get("scene_tags", ["default"]),
                                      "scope": e.get("scope", "global"),
