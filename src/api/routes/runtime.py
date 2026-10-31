@@ -951,6 +951,29 @@ def cancel_task(task_id: str, user: dict = Depends(require_no_session_token)):
     return {"message": f"任务 {task_id} 已取消", "status": "cancelled"}
 
 
+@router.post("/tasks/{task_id}/converge-event", operation_id="runtime_task_converge_event",
+             summary="Converge event state to task terminal state",
+             description="Issue #587 compensation entry: task already terminal (completed/failed/cancelled) "
+                         "but associated event stuck running/pending (report lost). Converges event to the "
+                         "task's terminal status. Idempotent; safe to call repeatedly.")
+def converge_event(task_id: str, user: dict = Depends(require_no_session_token)):
+    """Issue #587：回报丢失补偿重试入口——按任务终态强制收敛关联事件（幂等）。"""
+    task = service.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "任务不存在"})
+    _res = service.converge_event_to_task(task_id)
+    log.info(f"converge-event: task={task_id} by={user.get('username', '')} result={_res.get('status')}")
+    # Issue #587 审查修复：补偿收敛同为管理端修复操作，与 terminate/redispatch 一致强制审计留痕
+    if task.get("event_seq"):
+        try:
+            from src.api.routes.events import _audit_admin_action
+            _audit_admin_action(task.get("repo_key", "") or "", int(task["event_seq"]),
+                                "converge-event", user, task_id=task_id)
+        except Exception as _ae:
+            log.warning(f"converge-event: audit failed for task={task_id}: {_ae}")
+    return _res
+
+
 @router.get("/runtimes/{runtime_id}/tasks", operation_id="runtime_tasks_list", summary="List runtime tasks", description="Tasks of a device (front-end device view).")
 def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_token),
                              status: str = "",
