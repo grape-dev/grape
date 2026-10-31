@@ -71,6 +71,21 @@ if (-not $Server) {
 $Server = $Server.TrimEnd('/')
 
 if (-not $Device) {
+    # 已有安装记录过设备名就沿用。auto-upgrade 重跑本脚本时不带 -Device，
+    # 若在此回落到「worker-<主机名>」，设备名与引擎实例名会漂移，
+    # 服务端按实例名派发随之失效（任务卡在 runtime_id=None）。
+    $existingEnvFile = Join-Path (Join-Path $HOME ".grape") "runtime.env"
+    if (Test-Path $existingEnvFile) {
+        $existingDevice = (Select-String -Path $existingEnvFile -Pattern '^RUNTIME_DEVICE_NAME=(.+)$' -ErrorAction SilentlyContinue |
+                           Select-Object -First 1)
+        if ($existingDevice) {
+            $Device = $existingDevice.Matches[0].Groups[1].Value.Trim()
+            if ($Device) { Log "Reusing existing device name from runtime.env: $Device" }
+        }
+    }
+}
+
+if (-not $Device) {
     $rawHost = $env:COMPUTERNAME
     if (-not $rawHost) { $rawHost = [System.Net.Dns]::GetHostName() }
     $Device = "worker-" + ($rawHost.ToLower() -replace '[^a-z0-9]','-' -replace '-+','-' -replace '^-|-$','')
@@ -170,11 +185,44 @@ function restore_upgrade_backup {
     return $false
 }
 
+# 解压前记录当前版本 + 从主控取目标版本，供解压后做「版本内容」校验
+# （旧实现只 Test-Path 判 VERSION/src 是否存在，升级场景下这两者恒存在，
+#   会把「一个文件都没解压出来」的失败误判为成功）
+$preVersion = ""
+if (Test-Path $versionFilePath) {
+    $preVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+}
+$expectedVersion = ""
+try {
+    $lvi = Invoke-RestMethod -Uri "$Server/api/runtime/install/latest" -TimeoutSec 15 -UseBasicParsing -ErrorAction Stop
+    $expectedVersion = ("" + $lvi.version).Trim()
+    if ($expectedVersion) { Log "Target worker version from controller: $expectedVersion" }
+} catch {
+    Log "Warning: cannot fetch target version from $Server/api/runtime/install/latest - will fall back to changed-or-not check"
+}
+
 Log "Extracting runtime package to $Dir"
 try {
     # Windows 没有 tar 命令时用 .NET System.IO.Compression
-    $tarCmd = Get-Command tar -ErrorAction SilentlyContinue
-    if ($tarCmd) {
+    # 优先使用 Windows 自带 bsdtar（%SystemRoot%\System32\tar.exe）。
+    # 装了 MSYS/git 的节点（如 Hermes 自带的 git）PATH 里会有一个 GNU tar，
+    # 它把 `C:\...` 当作「远端主机:路径」解析，报
+    #   tar: Cannot connect to C: resolve failed
+    # 并以 exit 2 结束、解压出 0 个文件；而旧校验只看 VERSION/src 是否存在，
+    # 于是这种静默失败被当成成功 → 拿旧代码走完安装 → 版本不变 → 升级死循环。
+    $tarCmd = $null
+    $sysTar = Join-Path $env:SystemRoot "System32\tar.exe"
+    if (Test-Path $sysTar) {
+        $tarCmd = Get-Command $sysTar -ErrorAction SilentlyContinue
+    }
+    if (-not $tarCmd) {
+        $tarCmd = Get-Command tar -All -ErrorAction SilentlyContinue |
+                  Where-Object { $_.Source -notmatch '\\git\\usr\\bin\\|\\usr\\bin\\|\\msys|\\mingw' } |
+                  Select-Object -First 1
+    }
+    # 注意：必须按解析出的路径调用，不能写 `& tar` —— 那样仍会命中 PATH 里的 MSYS tar
+    $tarExe = if ($tarCmd) { $tarCmd.Source } else { $null }
+    if ($tarExe) {
         # tar -xzf --strip-components=1（Windows 10+ 自带 bsdtar）
         # Windows tar 遇到符号链接会报错——$ErrorActionPreference="Stop" 会将 stderr 当作异常
         # 临时切换为 Continue，让 tar 正常返回退出码
@@ -182,29 +230,39 @@ try {
         $prevEAP = $ErrorActionPreference
         $ErrorActionPreference = "Continue"
         try {
-            & tar -xzf $TmpPkg -C $Dir --strip-components=1 2>&1 | Out-Null
+            & $tarExe -xzf $TmpPkg -C $Dir --strip-components=1 2>&1 | Out-Null
         } catch {
             $tarErr = $_
         }
         $ErrorActionPreference = $prevEAP
-        if ($LASTEXITCODE -ne 0 -or $tarErr) {
-            # 检查是否只是符号链接错误（关键文件已解压即可继续）
-            $hasVersion = Test-Path (Join-Path $Dir "VERSION")
-            $hasSrc = Test-Path (Join-Path $Dir "src")
-            if (-not ($hasVersion -and $hasSrc)) {
-                # 关键文件缺失——回退不带 strip 重试
-                $tmpExtract = Join-Path $env:TEMP "grape-extract-$(Get-Random)"
-                $ErrorActionPreference = "Continue"
-                try {
-                    & tar -xzf $TmpPkg -C $tmpExtract 2>&1 | Out-Null
-                } catch {}
-                $ErrorActionPreference = $prevEAP
-                if (Test-Path (Join-Path $tmpExtract "grape-worker")) {
-                    Copy-Item -Path (Join-Path $tmpExtract "grape-worker\*") -Destination $Dir -Recurse -Force
-                    Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
-                }
-            } else {
+        $postVersion = ""
+        if (Test-Path $versionFilePath) {
+            $postVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+        }
+        # 成功判据是「VERSION 内容换成了新版本」，不是「文件还在」：升级场景下
+        # VERSION/src 本来就在，只看存在性会把「没解压出任何文件」误判为成功。
+        $versionChanged = ($postVersion -and $postVersion -ne $preVersion)
+        if ($LASTEXITCODE -ne 0 -or $tarErr -or -not $versionChanged) {
+            # 关键文件缺失 / 版本未变——回退不带 strip 重试
+            $tmpExtract = Join-Path $env:TEMP "grape-extract-$(Get-Random)"
+            $ErrorActionPreference = "Continue"
+            try {
+                & $tarExe -xzf $TmpPkg -C $tmpExtract 2>&1 | Out-Null
+            } catch {}
+            $ErrorActionPreference = $prevEAP
+            if (Test-Path (Join-Path $tmpExtract "grape-worker")) {
+                Copy-Item -Path (Join-Path $tmpExtract "grape-worker\*") -Destination $Dir -Recurse -Force
+                Remove-Item $tmpExtract -Recurse -Force -ErrorAction SilentlyContinue
+            }
+            $postVersion = ""
+            if (Test-Path $versionFilePath) {
+                $postVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+            }
+            $versionChanged = ($postVersion -and $postVersion -ne $preVersion)
+            if ($versionChanged) {
                 Log "tar exit code non-zero (possible symlink error), key files extracted, continuing"
+            } else {
+                Log "Warning: fallback extraction also produced no new VERSION (still '$postVersion')"
             }
         }
     } else {
@@ -232,6 +290,22 @@ with tarfile.open(tmp) as t:
     Fail "Extract failed: $_"
 }
 Remove-Item $TmpPkg -ErrorAction SilentlyContinue
+
+# ===== 解压后最终校验：目标版本没落地就明确失败 =====
+# 宁可让本次安装报错并留下日志，也不要用旧代码继续走完安装流程 ——
+# 那会让 worker 以旧版本重启，下一轮又发现版本不一致，形成无限升级循环。
+$finalVersion = ""
+if (Test-Path $versionFilePath) {
+    $finalVersion = ((Get-Content $versionFilePath -Raw -ErrorAction SilentlyContinue) -replace '\s', '')
+}
+if ($expectedVersion) {
+    if ($finalVersion -ne $expectedVersion) {
+        Fail "Extract verification failed: expected VERSION=$expectedVersion but got '$finalVersion'. Extraction did not land - check that PATH does not shadow tar with MSYS/git (tar -xzf on C:\ paths exits 2)."
+    }
+    Log "Extract verified: VERSION=$finalVersion"
+} elseif ($finalVersion -and $finalVersion -eq $preVersion) {
+    Fail "Extract verification failed: VERSION unchanged ('$finalVersion') after extraction."
+}
 
 if (-not (Test-Path $CfgDir)) {
     New-Item -ItemType Directory -Path $CfgDir -Force | Out-Null

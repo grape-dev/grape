@@ -64,6 +64,122 @@ _ACP_PROMPT_TIMEOUT = 30  # hermes ACP prompt 超时（模型推理需要更长�
 # Issue #423: _read_response 防御性行数上限（保险丝，防失控流）。真正终止条件是 deadline；
 # 会话通知量是动态值（三步探活实测 prompt 响应前 36 行），行数上限不得与其耦合。
 _ACP_READ_MAX_LINES = 500
+
+# ===== Windows ACP 探测兼容层（os.set_blocking 为 POSIX-only；Windows 管道不支持 select）=====
+# 探测原有实现：fd 置非阻塞 + select + os.read。这两个能力在 Windows 上都不存在
+# （os.set_blocking 属性缺失 / select.select 仅支持 socket），导致 hermes/hwcloud
+# ACP 探活必然 AttributeError 立即失败 → 引擎被判 unhealthy，服务端不派任务。
+# 兼容层：后台读线程把字节推进队列，_read_response 侧带 deadline 消费，语义与原实现一致。
+_win_acp_pumps: dict = {}
+
+
+def _win_acp_queue(proc):
+    """按进程惰性启动读线程，返回字节队列（EOF 时投递 b"" 哨兵）。"""
+    import queue as _queue
+    import threading as _threading
+
+    key = id(proc)
+    q = _win_acp_pumps.get(key)
+    if q is not None:
+        return q
+    q = _queue.Queue()
+    _win_acp_pumps[key] = q
+
+    def _pump():
+        try:
+            while True:
+                chunk = proc.stdout.read(65536)
+                if not chunk:
+                    break
+                q.put(chunk)
+        except Exception:
+            pass
+        finally:
+            q.put(b"")
+
+    _threading.Thread(target=_pump, daemon=True, name="acp-probe-pump").start()
+    return q
+
+
+def _win_acp_read_response(proc, send, buf, req_id: int, timeout: float):
+    """JSON-RPC 行读取（Windows 版）：deadline 驱动 + 队列消费，语义对齐 POSIX 实现。"""
+    import json as _json
+    import queue as _queue
+
+    q = _win_acp_queue(proc)
+    deadline = _time_mod.time() + timeout
+    _lines = 0
+    while _time_mod.time() < deadline and _lines < _ACP_READ_MAX_LINES:
+        _remaining = max(deadline - _time_mod.time(), 0.0)
+        try:
+            _chunk = q.get(timeout=_remaining) if _remaining > 0 else q.get_nowait()
+        except _queue.Empty:
+            if proc.poll() is not None:
+                return None
+            continue
+        if not _chunk:
+            return None  # EOF
+        buf.extend(_chunk)
+        while buf:
+            _nl = buf.find(b"\n")
+            if _nl < 0:
+                if _time_mod.time() >= deadline:
+                    return None
+                break
+            _raw = bytes(buf[:_nl])
+            del buf[:_nl + 1]
+            _lines += 1
+            _line = _raw.strip().decode("utf-8", errors="replace")
+            if not _line.startswith("{"):
+                continue
+            try:
+                _msg = _json.loads(_line)
+            except _json.JSONDecodeError:
+                continue
+            if "id" not in _msg or "method" in _msg:
+                if "method" in _msg and "id" in _msg:
+                    try:
+                        send({"jsonrpc": "2.0", "id": _msg["id"], "result": {"optionId": ""}})
+                    except Exception:
+                        pass
+                continue
+            if _msg.get("id") == req_id and ("result" in _msg or "error" in _msg):
+                return _msg
+    return None
+
+
+_win_acp_stderr: dict = {}
+
+
+def _win_acp_drain_stderr(proc):
+    """Windows：hermes/hwcloud ACP 启动时向 stderr 大量刷日志，管道缓冲（≈4KB）写满后
+    子进程阻塞在 write，探针再也等不到响应（实测 session/new 15s 超时、initialize 正常）。
+    Linux 下 PIPE 缓冲大且不影响本次探活，Windows 必须后台抽干。仅保留尾部 16KB 供诊断。"""
+    import threading as _threading
+
+    key = id(proc)
+    buf = _win_acp_stderr.get(key)
+    if buf is not None:
+        return buf
+    buf = bytearray()
+    _win_acp_stderr[key] = buf
+
+    def _drain():
+        try:
+            while True:
+                chunk = proc.stderr.read(65536)
+                if not chunk:
+                    return
+                buf.extend(chunk)
+                if len(buf) > 16384:
+                    del buf[:-16384]
+        except Exception:
+            return
+
+    _threading.Thread(target=_drain, daemon=True, name="acp-probe-stderr").start()
+    return buf
+
+
 _PROBE_INTERVAL = int(os.environ.get("RUNTIME_PROBE_INTERVAL", "600"))  # 引擎探测间隔，默认 600s（10 分钟），可通过 runtime.env 配置
 
 # Issue #378: 按 agent_type 差异化静默超时阈值（coding/qa 放宽到 1200s，其余默认 300s）。
@@ -119,6 +235,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
             bufsize=0,
             start_new_session=True,
         )
+        if os.name == "nt":
+            _win_acp_drain_stderr(proc)
 
         import select as _sel
 
@@ -133,7 +251,8 @@ def _probe_hermes_acp(cli_path: str) -> dict:
         # 每轮 select/read 后都重检 deadline。（用 os.set_blocking 而非 os.fcntl：
         # 部分 Python 构建无 os.fcntl 顶层别名，set_blocking 为标准可移植接口。）
         _fd = proc.stdout.fileno()
-        os.set_blocking(_fd, False)
+        if os.name != "nt":
+            os.set_blocking(_fd, False)
         _buf = bytearray()
 
         def _read_response(req_id: int, timeout: float) -> dict | None:
@@ -146,6 +265,9 @@ def _probe_hermes_acp(cli_path: str) -> dict:
             非阻塞 fd + os.read 小块读 + 行缓冲：半行数据不会卡住 read 系统调用，
             deadline 在每一轮 select 与 read 之后都被重新检查。
             """
+            # Windows：无 os.set_blocking，且 select 不支持管道 → 读线程 + 队列
+            if os.name == "nt":
+                return _win_acp_read_response(proc, _send, _buf, req_id, timeout)
             deadline = _time_mod.time() + timeout
             _lines = 0
             while _time_mod.time() < deadline and _lines < _ACP_READ_MAX_LINES:
@@ -322,6 +444,8 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
             bufsize=0,
             start_new_session=True,
         )
+        if os.name == "nt":
+            _win_acp_drain_stderr(proc)
 
         import select as _sel
 
@@ -335,10 +459,14 @@ def _probe_hwcloud_acp(cli_path: str) -> dict:
         # 标准可移植接口）+ os.read 小块读 + 行缓冲拼行，每轮 select/read 后重检
         # deadline，半行悬置到 deadline 即返回。
         _fd = proc.stdout.fileno()
-        os.set_blocking(_fd, False)
+        if os.name != "nt":
+            os.set_blocking(_fd, False)
         _probe_buf = bytearray()
 
         def _read_response(req_id: int, timeout: float) -> dict | None:
+            # Windows：无 os.set_blocking，且 select 不支持管道 → 读线程 + 队列
+            if os.name == "nt":
+                return _win_acp_read_response(proc, _send, _probe_buf, req_id, timeout)
             # Issue #423 同步审查：本实现已是 deadline 驱动（while deadline，无固定行数上限），
             # 无 hermes 同款 10 行 bug；仅补 _ACP_READ_MAX_LINES 防御上限保持同构。
             deadline = _time_mod.time() + timeout
@@ -898,7 +1026,9 @@ def _discover_local_runtimes() -> list[dict]:
         if cli:
             try:
                 import subprocess
-                res = subprocess.run([cli, "--version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5)
+                # Windows 冷启动慢（hermes.exe 实测 8s+，注册表/WMI/插件扫描），5s 会误判
+                # healthy=False → 服务端 engine_select 不派任务。放宽到 20s（仍远小于探活超时）。
+                res = subprocess.run([cli, "--version"], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=20)
                 healthy = res.returncode == 0
                 if healthy:
                     version = (res.stdout or "").strip().split("\n")[0][:60]
@@ -2902,7 +3032,10 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
                              f"(attempt {upgrade_fail_count + 1})")
                 _upgrade_ok = await _perform_upgrade(
                     os.environ.get("RUNTIME_SERVER_URL", ""),
-                    os.environ.get("RUNTIME_TOKEN", "")
+                    os.environ.get("RUNTIME_TOKEN", ""),
+                    # 透传设备名：不透传时安装脚本会回落到「worker-<主机名>」，
+                    # 设备名/引擎实例名漂移会让服务端按实例名的派发失效。
+                    os.environ.get("RUNTIME_DEVICE_NAME", "")
                 )
                 if not _upgrade_ok:
                     upgrade_fail_count += 1
@@ -3011,7 +3144,7 @@ def _normalize_worker_version(ver: str) -> str:
     return ver
 
 
-async def _perform_upgrade(server: str, token: str) -> bool:
+async def _perform_upgrade(server: str, token: str, device_name: str = "") -> bool:
     """下载并执行安装脚本升级 worker（跨平台）。
 
     成功时 worker 被安装脚本重启（本进程被杀，不会返回）。
@@ -3078,7 +3211,8 @@ async def _perform_upgrade(server: str, token: str) -> bool:
             result = await asyncio.to_thread(
                 subprocess.run,
                 ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", tmp_script,
-                 "-Token", token, "-Server", server, "-Dir", _install_dir],
+                 "-Token", token, "-Server", server, "-Dir", _install_dir]
+                + (["-Device", device_name] if device_name else []),
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600, env=_upgrade_env
             )
         else:
