@@ -120,8 +120,11 @@ def terminate_active_agents(grace_seconds: int = 5):
                 if runtime_id and cred_id and cred_id > 0:
                     _remote_pending += 1
                     try:
-                        # pending_since 用 ISO8601（sweep 按数值比较，兼容旧 "%Y-%m-%d %H:%M:%S" 格式）
-                        _now_iso = _time.strftime("%Y-%m-%dT%H:%M:%S", _time.gmtime())
+                        # pending_since 写带时区的 ISO-8601 UTC（Issue #588）：
+                        # 无时区值在 MySQL 后端经 health.parse_dt 按 UTC+08:00 解释
+                        # （Issue #512 存储层口径），刚写入即被误判 1800s 超时；
+                        # 带时区后写入与解析同源，双后端均按真实 UTC 计算 elapsed。
+                        _now_iso = _time.strftime("%Y-%m-%dT%H:%M:%S+00:00", _time.gmtime())
                         c.execute(
                             "UPDATE agent_tasks SET status='pending_self_report', "
                             "pending_since=? WHERE id=? AND status IN ('running','dispatched')",
