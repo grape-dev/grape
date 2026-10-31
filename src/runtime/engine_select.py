@@ -703,6 +703,11 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
         if agent_type:
             tags_str = r[10] or ""
             tags = [t.strip() for t in tags_str.split(",") if t.strip()]
+            # Issue #592：本机直连历史行（默认 'all' 标签机制引入前创建）无 capabilities 行
+            # → tags 为空被过滤出弹窗列表（数量偏少）。本机直连按注册默认值 'all' 兜底
+            # （与 save_agent_runtimes 新建默认标签及广播派发语义对齐；远端行仍按标签过滤）。
+            if not tags and scope == "local":
+                tags = ["all"]
             if agent_type not in tags and "all" not in tags:
                 continue
         # scene_tags（r[12] = JSON 字符串，如 '["default","iac"]'；空则回退 ["default"]）
