@@ -2453,3 +2453,61 @@ def list_events(owner: str, repo: str,
             return {"events": [], "total": 0, "page": page, "page_size": page_size}
 
     return {"events": events, "total": total, "page": page, "page_size": page_size}
+
+
+# ===== Issue #596 P1：B 进程操作端点子路由（ops_router） =====
+# 三进程拆分（grape-three-process-split-design.md §4.1.2 / §2.2）：
+# - GET 查看端点（detail/thread/task status/stream/list、a2a-redo/scene）归 A 进程
+#   （grape_server.py 加载本文件完整 `router`）；
+# - 操作端点（terminate/redispatch/a2a-redo/chat 发送/knowledge 写入/flow reset 等
+#   直接触发事件处理层的 POST/DELETE）归 B 进程（grape_event_server.py 加载
+#   `ops_router`）——重派类操作调用 run_pipeline / enqueue，属 B 的入队职责。
+# 单进程兼容模式（main.py）加载完整 `router`（A+B 全量），行为不变。
+#
+# 实现方式：与 runtime_view.py 同款「原函数对象复用注册」——单一实现源，
+# 改一处两端生效；路径/operation_id 与原定义一致。
+
+ops_router = APIRouter(prefix="/api/events", tags=["events"])
+
+_EVENTS_OPS_ENDPOINTS = [
+    # (method, path, function_name, kwargs)
+    ("post", "/{seq}/terminate", "terminate_event", dict(
+        operation_id="events_terminate", summary="Terminate event",
+        description="Forcefully terminates a running event task. Worker mode cancels the task (cancelled); direct mode fail_task + cancels the subprocess. The event is marked failed.")),
+    ("post", "/{seq}/redispatch", "redispatch_event", dict(
+        operation_id="events_redispatch", summary="Redispatch event",
+        description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")),
+    ("post", "/{seq}/a2a-redo", "a2a_redo_event", dict(
+        operation_id="events_a2a_redo", summary="A2A redo (manual handoff)",
+        description="Manually re-sends a downstream A2A handoff for a completed event whose agent did not actually hand off. Does NOT touch the original event/task (unlike redispatch); simply creates a new a2a_event via the standard A2A path.")),
+    ("delete", "/{seq}/chat", "delete_event_thread", dict(
+        operation_id="events_chat_delete", summary="Delete event conversation thread",
+        description="Clears the event conversation thread records.")),
+    ("delete", "/{seq}/knowledge/{scope}", "delete_event_knowledge", dict(
+        operation_id="events_knowledge_delete", summary="Delete issue knowledge",
+        description="Deletes agent knowledge produced for the event (file + DB + refs).")),
+    ("post", "/{seq}/chat", "send_conversation", dict(
+        operation_id="events_chat_send", summary="Send event conversation",
+        description="Sends a message into the event conversation (non-streaming).")),
+    ("post", "/{seq}/chat/stream", "stream_conversation", dict(
+        operation_id="events_chat_stream", summary="Event conversation SSE",
+        description="SSE streaming conversation. Direct mode streams live; queue mode returns a single done.")),
+    ("post", "/{seq}/chat/submit", "submit_conversation", dict(
+        operation_id="events_chat_submit", summary="Submit event conversation (async)",
+        description="Submits a conversation query and immediately returns a task_id; the agent executes in the background.")),
+    ("post", "/{seq}/knowledge", "add_knowledge", {}),
+    ("post", "/{seq}/flow/reset", "flow_reset", {}),
+]
+
+
+def _register_ops_routes() -> None:
+    import src.api.routes.events as _self
+    for method, path, func_name, kwargs in _EVENTS_OPS_ENDPOINTS:
+        fn = getattr(_self, func_name, None)
+        if fn is None:
+            continue  # 原函数被重命名/删除时跳过（防御）
+        decorator = getattr(ops_router, method)
+        decorator(path, **kwargs)(fn)
+
+
+_register_ops_routes()
