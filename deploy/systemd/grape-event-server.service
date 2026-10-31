@@ -1,0 +1,22 @@
+# Grape Event Server (B process — Webhook + Event pipeline, port 38081)
+# Issue #596 P1: three-process split, design doc §9.1
+# Install: cp deploy/systemd/grape-event-server.service /etc/systemd/system/ && systemctl daemon-reload
+[Unit]
+Description=Grape Event Server (Webhook + Event Pipeline)
+After=network.target grape-server.service
+
+[Service]
+User=grape
+WorkingDirectory=/opt/grape
+Environment=PYTHONUNBUFFERED=1
+Environment=GRAPE_PROCESS_ROLE=event
+Environment=GRAPE_PORT=38081
+Environment=OBS_LOG_DB=0
+EnvironmentFile=-/etc/grape/grape.env
+ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_event_server:app \
+    --host 0.0.0.0 --port 38081 --proxy-headers --forwarded-allow-ips=* --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

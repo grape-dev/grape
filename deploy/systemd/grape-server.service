@@ -1,0 +1,21 @@
+# Grape Server (A process — Workbench API, port 38080)
+# Issue #596 P1: three-process split, design doc §9.1
+# Install: cp deploy/systemd/grape-server.service /etc/systemd/system/ && systemctl daemon-reload
+[Unit]
+Description=Grape Server (Workbench API)
+After=network.target
+
+[Service]
+User=grape
+WorkingDirectory=/opt/grape
+Environment=PYTHONUNBUFFERED=1
+Environment=GRAPE_PROCESS_ROLE=server
+Environment=GRAPE_PORT=38080
+EnvironmentFile=-/etc/grape/grape.env
+ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_server:app \
+    --host 0.0.0.0 --port 38080 --proxy-headers --forwarded-allow-ips=* --workers 2
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
