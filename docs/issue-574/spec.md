@@ -1,6 +1,6 @@
 # Spec: Issue #574 — 事件信息中 Skill 展示改为场景选择时的显示名称
 
-> 需求文档（基于 Issue Agent 已发布 Spec 落地，2026-10-30 | 目标分支: local-liufei）
+> 需求文档（基于 Issue Agent 已发布 Spec 落地，2026-10-30 | 目标分支: weekly-09）
 
 ## Objective
 - **要构建什么**：将事件信息卡片中 Skill 字段从裸 Skill ID（如 `vod-cli-crossrepo`）改为场景选择时的显示名称（display_name），覆盖 vod/issue/coding/qa/sre 五类事件

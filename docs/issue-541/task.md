@@ -9,4 +9,4 @@
 - [x] T4 红：测试——repair_scene_bindings 存量改绑 dev_scene 与 issue.scene_id（幂等）
 - [x] T4 绿：scene_binding_repair.py 新模块 + main.py lifespan 挂载
 - [x] 回归：python3 -m pytest 相关测试全绿
-- [x] 自审查（5 轴 + pre-pr 增量检查）→ 建 PR（base=local-liufei）→ Issue 评论 → A2A QA
+- [x] 自审查（5 轴 + pre-pr 增量检查）→ 建 PR（base=weekly-09）→ Issue 评论 → A2A QA

@@ -1,6 +1,6 @@
 # Plan: Issue #541
 
-## 根因链路（已在 local-liufei 核实）
+## 根因链路（已在开发分支核实）
 1. `templates.py:292-296` 模板覆盖：`apply_market_scene_by_name(...)` 返回 bool 被丢弃，`set_repo_scene(repo_key, tpl_scene_id)` 把模板名（如 `hello-world`）写进 `managed_repos.dev_scene`。
 2. `pipeline_config.py:648` `apply_market_scene_by_name` 内部调 `scenes.apply_market_scene`（返回 `{"message", "scene_id": custom-{uuid}}`），但未提取 scene_id 回传。
 3. onboarding 读 `dev_scene` 绑定 Issue → 派发侧 `get_pipeline_config(scene_id, repo_key)` 仓内未命中回退全局模板行（无引擎）→ SRE `_sre_no_broadcast` 空 ids → None → 统一报「场景绑定的引擎全部离线」。
