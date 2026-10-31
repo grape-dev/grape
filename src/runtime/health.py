@@ -51,3 +51,15 @@ def derive_runtime_health(status: str, last_seen_at: str | None, now: float | No
     if offline_for > 6 * 24 * 3600:
         return "about_to_gc"
     return "offline"
+
+
+def derive_local_runtime_health(installed: bool, healthy: bool) -> str:
+    """本机直连引擎（credential_id=0）健康态：按探活结果（installed/healthy）派生。
+
+    本机直连引擎不参与远端 worker 心跳（15s），仅由主控机周期重探
+    （main.py _local_probe_loop，默认 10min，local-direct-health-probe-design）刷新
+    last_seen_at/healthy——若误用 derive_runtime_health 的心跳新鲜度阈值
+    （_STALE_SECONDS=100s）判定，探活间隔内会被误判为 recently_lost（失联）。
+    Issue #592：引擎选择弹窗全显失联的根因；与 settings._engine_health 口径统一。
+    """
+    return "online" if (installed and healthy) else "offline"

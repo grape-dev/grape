@@ -1181,12 +1181,11 @@ def _runtime_health(rt: dict, now: float) -> str:
     - credential_id>0（远端边端）：status+last_seen 四态
     - credential_id=0（本地引擎）：installed/healthy 派生（就绪=online，未装=offline）
     """
-    from src.runtime.health import derive_runtime_health
+    from src.runtime.health import derive_runtime_health, derive_local_runtime_health
     if rt.get("credential_id"):
         return derive_runtime_health(rt.get("status") or "offline", rt.get("last_seen_at"), now)
-    if rt.get("installed") and rt.get("healthy"):
-        return "online"
-    return "offline"
+    # Issue #592：本机直连口径收敛到 health.py（与 dashboard 弹窗共用，防两处漂移）
+    return derive_local_runtime_health(bool(rt.get("installed")), bool(rt.get("healthy")))
 
 
 _DEVICE_ONLINE_WINDOW = 60  # 心跳间隔 15s，容差 60s 内视为在线
