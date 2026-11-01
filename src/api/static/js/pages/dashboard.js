@@ -73,11 +73,67 @@ function _clearDashEditMode() {
 }
 
 // ── 主入口：渲染场景中心（Hero + 场景卡片网格）──
+// Issue #501 深审四：openEngineModal 顶层定义（脚本加载即存在，渲染函数只写 _engineModalCtx）。
+// 上下文缺失时静默降级（理论上仅在同帧渲染前点击可触发，实际不可达）。
+window.openEngineModal = function(agentType) {
+  var c = window._engineModalCtx;
+  if (!c) { app.showToast && app.showToast(I18N.t('dashboard.scene_engine_ctx_missing') || '请先进入场景编辑页'); return; }
+  _openEngineModalImpl(agentType, c.editNodes, c.agents, c.agentEngines, c.owner, c.name, c.sceneId, c.saveDraftCb);
+};
+
+// Issue #501: 场景列表翻页——优先局部重载（仅重拉当前页数据，不整页切换视图），
+// _sceneReload 由 app.js 的 loadDash 成功后挂载；兜底走 nav('dash') 整页刷新
+window._sceneGotoPage = function(p) {
+  if (!p || p < 1) return;
+  window._sceneListPage = p;
+  if (typeof window._sceneReload === 'function' && window._currentView === 'dash') {
+    window._sceneReload();
+  } else {
+    app.nav('dash');
+  }
+};
+// Issue #501 增量：场景检索（头部搜索框）——输入防抖 300ms 局部重载，回车立即检索，
+// ✕/清空恢复全量。输入即触发 page 归位（检索结果集页边界与全量不同）。
+window._sceneSearchInput = function(input) {
+  var clearBtn = document.getElementById('sceneSearchClear');
+  if (clearBtn) clearBtn.style.display = input.value ? 'inline' : 'none';
+  clearTimeout(window._sceneSearchTimer);
+  window._sceneSearchTimer = setTimeout(function() {
+    window._sceneSearchCommit(input.value);
+  }, 300);
+};
+window._sceneSearchCommit = function(val) {
+  clearTimeout(window._sceneSearchTimer);
+  var q = (val || '').trim();
+  if (q === (window._sceneListQ || '')) return;
+  window._sceneListQ = q;
+  window._sceneListPage = 1;
+  // 深审四 Fix1：防抖期间用户可能已切走页面（300ms 窗口）——游离提交不得把用户
+  // 强拉回 dash。非 dash 视图时只静默更新搜索状态（切回 dash 时 loadDash 自然带上）。
+  if (typeof window._sceneReload === 'function' && window._currentView === 'dash') {
+    window._sceneSearchFocus = true;  // 重渲染后保持焦点（输入中不丢光标）
+    window._sceneReload();
+  } else if (window._currentView === 'dash') {
+    app.nav('dash');
+  }
+};
 function renderDashboard(data) {
   try { app._checkEngineBanner(); } catch (e) {}  // 时序链：进仓库后无引擎 → 引导添加设备
   const el = document.getElementById('pageContent');
   if (!el) return;
   const scenes = data._scenes || [];
+  // Issue #501: 分页 total（老后端无 total 时回退当前页条数）
+  const sceneTotal = (typeof data._scenesTotal === 'number') ? data._scenesTotal : scenes.length;
+  // Issue #501 全流程审查补漏：他人删除场景后总页数收缩，当前页可能越界
+  // （空列表 + 分页条显示 "3 / 2"）。空页且后面还有数据时自动收敛到末页重拉。
+  if (scenes.length === 0 && sceneTotal > 0) {
+    const _ps = window._sceneListPageSize || 20;
+    const _last = Math.ceil(sceneTotal / _ps) || 1;
+    if ((window._sceneListPage || 1) > _last) {
+      window._sceneGotoPage(_last);
+      return;
+    }
+  }
   const repo = data.repo || '';
   const role = data.role || 'Member';
   const m = data.metrics || {};
@@ -94,6 +150,12 @@ function renderDashboard(data) {
   window._dashboardData = data;
   window._dashOwner = owner;
   window._dashName = name;
+
+  // Issue #501 增量：搜索框焦点保持——重渲染（防抖检索/30s 自动刷新/翻页局部重载）
+  // 会重建 DOM，输入中光标会被打断。渲染前记录焦点态，渲染后恢复。
+  const _searchFocused = !!(document.activeElement && document.activeElement.id === 'sceneSearch');
+  const _keepFocus = _searchFocused || window._sceneSearchFocus;
+  window._sceneSearchFocus = false;
 
   // dev_scene 为空或已删除 → 自动选中第一个场景
   const currentScene = (data.dev_scene && scenes.find(s => s.id === data.dev_scene))
@@ -134,9 +196,9 @@ function renderDashboard(data) {
           <div class="ap-hero-sub">${I18N.t('dashboard.webhook_ok')}</div>
         </div>
         <div class="ap-stats">
-          <div class="ap-stat"><div class="v" style="color:#34c759">${m.active_agents || 0}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
-          <div class="ap-stat"><div class="v" style="color:#ff3b30">${m.failed_events || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
-          <div class="ap-stat"><div class="v" style="color:#0071e3">${m.total_issues || 0}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
+          <div class="ap-stat"><div class="v" id="dashStatActive" style="color:#34c759">${m.active_agents || 0}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
+          <div class="ap-stat"><div class="v" id="dashStatFailed" style="color:#ff3b30">${m.failed_events || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
+          <div class="ap-stat"><div class="v" id="dashStatTotal" style="color:#0071e3">${m.total_issues || 0}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
         </div>
       </div>
     </div>
@@ -151,10 +213,15 @@ function renderDashboard(data) {
       </div>
     </div>
     <div class="ap-empty-card">
-      <div class="ap-empty-icon">📋</div>
-      <div class="ap-empty-title">${I18N.t('dashboard.no_scene_title')}</div>
-      <div class="ap-empty-desc">${I18N.t('dashboard.no_scene_desc')}</div>
-      <button class="ap-btn" onclick="_enterCreateFromEmpty()">➕ ${I18N.t('dashboard.no_scene_create')}</button>
+      ${(window._sceneListQ || '').trim()
+        ? `<div class="ap-empty-icon">🔍</div>
+           <div class="ap-empty-title">${I18N.t('dashboard.scene_search_no_hit') || '无匹配场景'}</div>
+           <div class="ap-empty-desc">"${(window._sceneListQ || '').trim()}" ${I18N.t('dashboard.scene_search_no_hit_desc') || '未命中任何场景（按名称/描述检索）'}</div>
+           <button class="ap-btn" onclick="window._sceneSearchCommit('')">${I18N.t('dashboard.scene_search_clear') || '清除搜索'}</button>`
+        : `<div class="ap-empty-icon">📋</div>
+           <div class="ap-empty-title">${I18N.t('dashboard.no_scene_title')}</div>
+           <div class="ap-empty-desc">${I18N.t('dashboard.no_scene_desc')}</div>
+           <button class="ap-btn" onclick="_enterCreateFromEmpty()">➕ ${I18N.t('dashboard.no_scene_create')}</button>`}
     </div>`;
     // Issue #407 R2: 零场景分支同样走创建模式自动恢复检查（F5/idle 后回填草稿），
     // 与 _renderSceneCards 渲染路径的恢复逻辑保持一致，否则空态仓库无法恢复创建界面
@@ -167,8 +234,19 @@ function renderDashboard(data) {
   }
 
   // 并行加载所有场景的 pipeline_config（用于卡片上的 Agent 技能链展示）
+  // Issue #501 A 方案：app.js 的 loadDash 已用 with-pipeline 单一来源并附 _pipelines 映射——
+  // 有现成映射时直接消费（少 1 请求）；无映射时兜底自取（老调用路径/防御）。
   const _loadPipelines = () => {
-    API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name)).then(d => {
+    if (data._pipelines && Object.keys(data._pipelines).length) {
+      _dashScenePipelines = data._pipelines;
+      _renderSceneCards();
+      return;
+    }
+    const _q2 = (window._sceneListQ || '').trim();
+    const _q2Param = _q2 ? '&q=' + encodeURIComponent(_q2) : '';
+    const _sort2 = window._sceneListSort || 'id';
+    const _sort2Param = _sort2 !== 'id' ? '&sort=' + encodeURIComponent(_sort2) : '';
+    API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name) + '&page=' + (window._sceneListPage || 1) + '&page_size=' + (window._sceneListPageSize || 20) + _q2Param + _sort2Param).then(d => {
       _dashScenePipelines = {};
       (d.scenes || []).forEach(s => {
         _dashScenePipelines[s.id] = s.pipeline || {};
@@ -183,6 +261,30 @@ function renderDashboard(data) {
   // ── 渲染 Hero + 场景卡片网格 ──
   function _renderSceneCards() {
     const scenesData = scenes;
+    // Issue #501 深审五（DOM 级局部刷新）：30s 自动刷新/翻页/搜索重载时，页面 DOM 已是
+    // 场景页（#dash-scenes 存在）且列表非空——只更新卡片行/角标/分页条/hero 统计，
+    // 不整页 innerHTML 重建（hero/市场卡片/搜索框不动，焦点与滚动天然保持）。
+    // 首次进入（DOM 未建）与空态/创建页（DOM 已换）自动走全量渲染路径。
+    const _partialTarget = document.getElementById('dash-scenes');
+    // 深审五补漏：删除模式挂起时 30s 局部刷新不得重建卡片行（会冲掉行上叉号/选中态）。
+    // 全量重建路径同样受 _dashboardEditing 守卫（编辑中不覆盖 UI），此处对齐。
+    if (_partialTarget && scenes.length > 0 && !(window._dashDeleteMode)) {
+      let _rows = '';
+      scenesData.forEach((s, idx) => { _rows += _renderLocalSceneCard(s, s.id === currentScene, idx); });
+      _partialTarget.innerHTML = _rows;
+      const _badge = document.getElementById('sceneCountBadge');
+      if (_badge) _badge.textContent = String(sceneTotal);
+      const _pager = document.getElementById('scenePagerWrap');
+      if (_pager) _pager.innerHTML = _renderScenePager();
+      const _sa = document.getElementById('dashStatActive');
+      if (_sa) _sa.textContent = String(m.active_agents || 0);
+      const _sf = document.getElementById('dashStatFailed');
+      if (_sf) _sf.textContent = String(m.failed_events || 0);
+      const _st = document.getElementById('dashStatTotal');
+      if (_st) _st.textContent = String(m.total_issues || 0);
+      window._dashboardData = data;
+      return;
+    }
     let html = `<style>
       .ap-hero{background:rgba(255,255,255,.72);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);border:none;border-radius:18px;padding:24px 32px;margin-bottom:16px;box-shadow:0 1px 3px rgba(0,0,0,.04)}
       .ap-hero-row{display:flex;align-items:center;gap:16px}
@@ -241,9 +343,9 @@ function renderDashboard(data) {
           <div class="ap-hero-sub">${role === 'Maintainer' ? I18N.t('dashboard.hero_maintainer') : I18N.t('dashboard.hero_member')} · ${I18N.t('dashboard.webhook_ok')}</div>
         </div>
         <div class="ap-stats">
-          <div class="ap-stat"><div class="v" style="color:#34c759">${m.active_agents || 0}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
-          <div class="ap-stat"><div class="v" style="color:#ff3b30">${m.failed_events || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
-          <div class="ap-stat"><div class="v" style="color:#0071e3">${m.total_issues || 0}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
+          <div class="ap-stat"><div class="v" id="dashStatActive" style="color:#34c759">${m.active_agents || 0}</div><div class="l">${I18N.t('pipeline.stat_active')||'活跃'}</div></div>
+          <div class="ap-stat"><div class="v" id="dashStatFailed" style="color:#ff3b30">${m.failed_events || 0}</div><div class="l">${I18N.t('pipeline.stat_failed')||'失败'}</div></div>
+          <div class="ap-stat"><div class="v" id="dashStatTotal" style="color:#0071e3">${m.total_issues || 0}</div><div class="l">${I18N.t('dashboard.stat_total')||'总数'}</div></div>
         </div>
       </div>
     </div>`;
@@ -262,9 +364,19 @@ function renderDashboard(data) {
 
     // 场景列表（列表式，每行一个场景）
     html += `<div class="apple-card" style="background:rgba(255,255,255,.6);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border:none;border-radius:18px;box-shadow:0 1px 4px rgba(0,0,0,.05)">
-      <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
-        <h2>${I18N.t('dashboard.scene_center_title')} <span style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${scenesData.length}</span></h2>
-        <div style="display:flex;gap:8px">
+      <div class="cd-h" style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;flex-wrap:wrap;gap:8px">
+        <h2>${I18N.t('dashboard.scene_center_title')} <span id="sceneCountBadge" style="font-size:10px;font-weight:400;color:var(--t2);background:var(--bg);padding:2px 8px;border-radius:8px;margin-left:4px">${sceneTotal}</span></h2>
+        <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap">
+          <span id="sceneSearchWrap" style="position:relative;display:inline-flex;align-items:center">
+            <span style="position:absolute;left:9px;font-size:12px;color:var(--t2);pointer-events:none">🔍</span>
+            <input id="sceneSearch" type="text" value="${(window._sceneListQ || '').replace(/"/g, '&quot;')}"
+              placeholder="${I18N.t('dashboard.scene_search_placeholder') || '搜索场景名称/描述'}"
+              oninput="window._sceneSearchInput(this)"
+              onkeydown="if(event.key==='Enter'){window._sceneSearchCommit(this.value)}"
+              style="width:210px;padding:7px 26px 7px 28px;border-radius:10px;border:1px solid #d2d2d7;font-size:12px;outline:none;background:#fff" />
+            <span id="sceneSearchClear" style="position:absolute;right:8px;font-size:13px;color:#86868b;cursor:pointer;display:${(window._sceneListQ || '') ? 'inline' : 'none'}"
+              onclick="window._sceneSearchCommit('')">✕</span>
+          </span>
           <button class="ap-btn" onclick="_openSceneRecommendModal('${owner}/${name}')">${I18N.t('dashboard.scene_recommend_rules')||'智能推荐规则'}</button>
           <button class="ap-btn" onclick="enterCreateMode()">＋ ${I18N.t('dashboard.add_scene')||'添加场景'}</button>
         </div>
@@ -276,9 +388,19 @@ function renderDashboard(data) {
     });
 
     html += `</div>
+    <div id="scenePagerWrap">${_renderScenePager()}</div>
     </div>`;
 
     el.innerHTML = html;
+
+    // Issue #501 增量：搜索框焦点恢复（光标置尾，不打断连续输入）
+    if (_keepFocus) {
+      const inp = document.getElementById('sceneSearch');
+      if (inp) {
+        inp.focus();
+        try { inp.setSelectionRange(inp.value.length, inp.value.length); } catch (e) {}
+      }
+    }
 
     // Issue #407: Auto-enter create mode from sessionStorage (F5/idle recovery)
     var _autoEdit = _getDashEditMode();
@@ -288,10 +410,29 @@ function renderDashboard(data) {
     }
   }
 
+  // Issue #501: 场景分页条——total 超过单页容量才渲染，单页时不占 UI
+  function _renderScenePager() {
+    const _ps = window._sceneListPageSize || 20;
+    const _cur = window._sceneListPage || 1;
+    if (sceneTotal <= _ps) return '';
+    const _pages = Math.ceil(sceneTotal / _ps);
+    const _prev = _cur > 1 ? `onclick="window._sceneGotoPage(${_cur - 1})"` : 'disabled style="opacity:.4;cursor:default"';
+    const _next = _cur < _pages ? `onclick="window._sceneGotoPage(${_cur + 1})"` : 'disabled style="opacity:.4;cursor:default"';
+    return `<div style="display:flex;align-items:center;justify-content:center;gap:10px;padding:12px 0 4px;font-size:12px;color:var(--t2)">
+      <button class="ap-btn" ${_prev}>←</button>
+      <span>${_cur} / ${_pages}</span>
+      <button class="ap-btn" ${_next}>→</button>
+    </div>`;
+  }
+
   // 删除模式切换
-  let _deleteModeActive = false;
+  // 全量渲染（首次进入/视图切回，DOM 为空）= 新行无删除标记 → 删除模式复位；
+  // 局部刷新（30s/翻页，#dash-scenes 仍存在）→ 保持当前模式。
+  if (!document.getElementById('dash-scenes')) window._dashDeleteMode = false;
+  let _deleteModeActive = window._dashDeleteMode || false;
   window._toggleDeleteMode = function() {
     _deleteModeActive = !_deleteModeActive;
+    window._dashDeleteMode = _deleteModeActive;
     _deleteMode = _deleteModeActive;
     const btn = document.getElementById('deleteModeBtn');
     if (_deleteModeActive) {
@@ -349,8 +490,21 @@ function renderDashboard(data) {
       API.del('/scenes/' + encodeURIComponent(sceneId) + '?repo=' + encodeURIComponent(owner + '/' + name)).then(() => {
         overlay.remove();
         app.showToast(I18N.t('dashboard.scene_deleted')||'场景已删除');
-        // 重新加载
-        API.get('/dashboard/' + owner + '/' + name).then(renderDashboard).catch(() => {});
+        // 重新加载（深审五补漏：原只拉 /dashboard 不带场景列表，renderDashboard 拿不到
+        // _scenes 会误渲染"暂无场景"空态页。改为 A 方案同款双请求并附 _pipelines；
+        // 删除后 total 收缩导致当前页越界时，renderDashboard 的末页收敛逻辑接管。）
+        const _dq = (window._sceneListQ || '').trim();
+        const _dqParam = _dq ? '&q=' + encodeURIComponent(_dq) : '';
+        Promise.all([
+          API.get('/dashboard/' + owner + '/' + name),
+          API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name) + '&page=' + (window._sceneListPage || 1) + '&page_size=' + (window._sceneListPageSize || 20) + _dqParam),
+        ]).then(([dd, sd]) => {
+          dd._scenes = sd.scenes || [];
+          dd._scenesTotal = (typeof sd.total === 'number') ? sd.total : (sd.scenes || []).length;
+          dd._pipelines = {};
+          (sd.scenes || []).forEach(function(x) { dd._pipelines[x.id] = x.pipeline || {}; });
+          renderDashboard(dd);
+        }).catch(() => {});
       }).catch(err => { overlay.remove(); app.showToast(I18N.t('dashboard.delete_failed', {msg: (err.detail?.message || err.message)})); });
     };
   };
@@ -835,6 +989,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
   window._toggleFlowEdit = function(sceneId, owner, name) {
     API.get('/dashboard/' + owner + '/' + name).then(dashData => {
       dashData._scenes = window._dashboardData?._scenes || [];
+      dashData._scenesTotal = window._dashboardData?._scenesTotal;  // Issue #501: 保留跨页总数给分页条/角标
       window._dashboardData = dashData;
       window._currentSceneId = sceneId;
       // 获取当前场景的 pipeline nodes 传给编辑模式
@@ -1272,7 +1427,7 @@ function _renderFlowCards(nodes, agents, agentEngines, agentOrder, agentLabels, 
     const enabled = editMode ? (en ? en.enabled : true) : (node.enabled !== false);
 
     if (editMode) {
-      // 编辑模式：用 renderAgentCards 渲染
+      // 编辑模式：执行流程卡片渲染
       return;
     }
 
@@ -1399,10 +1554,10 @@ function _renderSceneEditMode(sceneId, dashData, owner, name, originalNodes) {
     _saveEditDraft();
   };
 
-  window.openEngineModal = function(agentType) {
-    // Issue #407 R1: 传入编辑模式草稿保存函数，引擎确认后持久化 engine_runtime_ids
-    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, sceneId, _saveEditDraft);
-  };
+  // Issue #501 深审四：openEngineModal 顶层化（_branchQS 事故同构）——
+  // 原在渲染函数体内赋值，函数一旦中途抛错赋值永不执行，点引擎按钮报 undefined。
+  // 改为：渲染时只写上下文注册表，处理器在脚本加载即存在（见文件顶部顶层定义）。
+  window._engineModalCtx = { editNodes, agents, agentEngines, owner, name, sceneId, saveDraftCb: _saveEditDraft };
 
   // 保存编辑 — 只刷新执行流程区域
   window._saveSceneEdit = function(sceneId, owner, name) {
@@ -2035,10 +2190,7 @@ function _enterCreateStandardMode(data, owner, name) {
     _saveCreateDraft();
   };
 
-  window.openEngineModal = function(agentType) {
-    // Issue #407 R1: 传入创建模式草稿保存函数，引擎确认后持久化 engine_runtime_ids
-    _openEngineModalImpl(agentType, editNodes, agents, agentEngines, owner, name, '', _saveCreateDraft);
-  };
+  window._engineModalCtx = { editNodes, agents, agentEngines, owner, name, sceneId: '', saveDraftCb: _saveCreateDraft };
 
   window._toggleNewBranchInline = function() {
     var el2 = document.getElementById('newBranchInputInline');
@@ -2138,8 +2290,25 @@ function _enterCreateStandardMode(data, owner, name) {
         app.showToast(I18N.t('dashboard.scene_created')||'场景创建成功');
         // 刷新 dashboard 数据后跳项目场景
         API.get('/dashboard/' + owner + '/' + name).then(dashData => {
-          return API.get('/scenes?repo=' + encodeURIComponent(owner + '/' + name)).then(scenesData => {
+          // Issue #501 A 方案：创建成功刷新也走 with-pipeline 单一来源（附 _pipelines）
+          var _attachScenes = function(scenesData) {
             dashData._scenes = scenesData.scenes || [];
+            dashData._scenesTotal = (typeof scenesData.total === 'number') ? scenesData.total : (scenesData.scenes || []).length;
+            dashData._pipelines = {};
+            (scenesData.scenes || []).forEach(function(s) { dashData._pipelines[s.id] = s.pipeline || {}; });
+            return dashData;
+          };
+          return API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name) + '&page=' + (window._sceneListPage || 1) + '&page_size=' + (window._sceneListPageSize || 20)).then(scenesData => {
+            // Issue #501 深审 P2：新场景 id 最大排在末页，用户停在非末页时看不到
+            // 刚创建的卡片（像"创建失败"）。total 到手后跳末页重拉一次。
+            var _ps = window._sceneListPageSize || 20;
+            var _last = Math.ceil(((typeof scenesData.total === 'number') ? scenesData.total : 0) / _ps) || 1;
+            if ((window._sceneListPage || 1) !== _last) {
+              window._sceneListPage = _last;
+              return API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(owner + '/' + name) + '&page=' + _last + '&page_size=' + _ps).then(_attachScenes);
+            }
+            return _attachScenes(scenesData);
+          }).then(dashData => {
             dashData._owner = owner;
             dashData._name = name;
             window._dashboardData = dashData;
@@ -2401,77 +2570,6 @@ window._saveSceneDeployUrl = function() {
     });
 };
 // ═══════════════════════════ Issue #461 END ═══════════════════════════
-
-function renderAgentCards(a, agentOrder, agentLabels, colors, descs, agentEngines, isCustom, editMode, editNodes, engineMode) {
-  let html = '';
-  agentOrder.forEach((at, i) => {
-    const ag = a.find(x => x.agent_type === at) || {};
-    const meta = _AGENT_TYPES[at] || {};
-    const isEditing = editMode || engineMode;
-    const node = isEditing ? editNodes.find(n => n.id === at) : null;
-    const enabled = node ? node.enabled : (ag.enabled_in_scene !== false);
-    const skill = node ? (node.skill || '') : (ag.skill || '');
-    const skillDisplay = node ? (node.skill_display_name || node.skill || ag.skill_display_name || ag.skill || '') : (ag.skill_display_name || ag.skill || '');
-    const badgeHtml = window._engineBadgeHtml(node ? (node.engine_runtime_ids || []) : (ag.engine_runtime_ids || []), agentEngines, at);
-    const accentColor = meta.color || colors[at] || '#86868b';
-    // 语言包优先于后端 description（后端返回中文时英文模式用前端翻译）
-    const desc = descs[at] || meta.description || '';
-    // PR 订阅场景下 QA 不可禁用，标准场景下 VOD/Issue 不可禁用
-    var _racIsPRSub = false;
-    if (window._currentSceneId && window._dashboardData && window._dashboardData._scenes) {
-      var _racScn = window._dashboardData._scenes.find(function(s) { return s.id === window._currentSceneId; });
-      if (_racScn && _racScn.pr_subscription_enabled) _racIsPRSub = true;
-    }
-    const canToggle = at !== 'vod' && at !== 'issue';
-
-    let toggleBtn = '';
-    if (editMode && canToggle) {
-      toggleBtn = `<span onclick="event.stopPropagation();toggleAgentInScene('${at}')" style="cursor:pointer;font-size:14px;color:${enabled ? '#ff3b30' : '#34c759'};margin-left:auto;padding:2px 6px" title="${enabled ? I18N.t('dashboard.disable_agent') : I18N.t('dashboard.enable_agent')}">${enabled ? '✕' : '✓'}</span>`;
-    }
-
-    let skillHtml;
-    if (editMode && enabled) {
-      skillHtml = `<button type="button" class="ap-skill-select" data-current="${_skillEsc(skill || '')}" onclick="event.stopPropagation();_openSkillDropdown('${at}', this)" style="width:100%;padding:6px 10px;border:1px solid #e8e8ed;border-radius:8px;font-size:11px;background:#f5f5f7;color:${skillDisplay ? '#1d1d1f' : '#86868b'};outline:none;cursor:pointer;transition:all .15s;text-align:left;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" onfocus="this.style.borderColor='#0071e3';this.style.background='#fff'" onblur="this.style.borderColor='#e8e8ed';this.style.background='#f5f5f7'">${skillDisplay ? _skillEsc(skillDisplay) : I18N.t('dashboard.select_skill')}</button>`;
-    } else if (enabled && skill) {
-      skillHtml = `<span class="ap-nd-val">${skillDisplay}</span>`;
-    } else {
-      skillHtml = `<span style="font-size:11px;color:#86868b">none</span>`;
-    }
-
-    // Engine 区域 — 居中药丸标签 + 编辑按钮
-    let engineHtml;
-    if ((editMode || engineMode) && enabled) {
-      engineHtml = `<div class="ap-nd-eng" style="gap:6px">
-        ${badgeHtml}
-        <button onclick="openEngineModal('${at}')" style="font-size:10px;padding:3px 10px;border:1px solid #d2d2d7;border-radius:8px;background:transparent;color:#6e6e73;cursor:pointer;transition:all .15s" onmouseover="this.style.borderColor='#0071e3';this.style.color='#0071e3'" onmouseout="this.style.borderColor='#d2d2d7';this.style.color='#6e6e73'">${I18N.t('dashboard.change_engine')}</button>
-      </div>`;
-    } else if (enabled) {
-      engineHtml = `<div class="ap-nd-eng">${badgeHtml}</div>`;
-    } else {
-      engineHtml = `<div class="ap-nd-eng"><span style="font-size:11px;color:#86868b">none</span></div>`;
-    }
-
-    html += `<div class="ap-nd" style="${enabled ? '' : 'opacity:.35;filter:grayscale(1)'}">
-      <div class="ap-nd-top" style="background:${accentColor}"></div>
-      <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
-        <span style="width:22px;height:22px;border-radius:6px;background:${accentColor}22;color:${accentColor};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex-shrink:0">${i + 1}</span>
-        <span style="font-size:14px;font-weight:600;color:#1d1d1f;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${meta.display_name || agentLabels[i]}</span>
-        ${toggleBtn}
-      </div>
-      ${enabled ? `<div class="ap-nd-desc">${desc}</div>` : `<div style="font-size:10px;color:#86868b;margin-bottom:8px">${I18N.t('dashboard.not_needed_in_scene')}</div>`}
-      <div style="height:1px;background:#e8e8ed;margin:8px 0"></div>
-      <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;margin-bottom:8px;display:flex;flex-direction:column;align-items:center">
-        <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_skill')}</div>
-        ${skillHtml}
-      </div>
-      <div style="background:#fff;border:1px solid #e8e8ed;border-radius:10px;padding:8px 10px;flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center">
-        <div style="font-size:8px;color:#86868b;text-transform:uppercase;letter-spacing:.8px;margin-bottom:3px">${I18N.t('dashboard.label_engine')}</div>
-        ${engineHtml}
-      </div>
-    </div>`;
-  });
-  return html;
-}
 
 // 方案 F-3：托管自愈（告警横幅「重检修复」按钮）
 window._repairHost = function () {

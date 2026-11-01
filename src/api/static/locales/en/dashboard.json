@@ -106,6 +106,10 @@
   "no_scene_title": "No Scene",
   "no_scene_desc": "No dev scene configured. Please create a new scene.",
   "no_scene_create": "Create New Scene",
+  "scene_search_placeholder": "Search scene name / description",
+  "scene_search_no_hit": "No Matching Scene",
+  "scene_search_no_hit_desc": "no scene matched (searched by name / description)",
+  "scene_search_clear": "Clear Search",
   "skill_empty_warning": "The following agents have no skill selected: {{agents}}",
   "edit_info": "Edit Info",
   "current_applied": "Current",
@@ -163,5 +167,6 @@
   "sre_aksk_saved": "AK/SK saved",
   "sre_aksk_required": "Please enter Access Key and Secret Key",
   "sre_add_device_title": "Add device",
-  "scene_detail": "Scene Detail"
+  "scene_detail": "Scene Detail",
+  "scene_engine_ctx_missing": "Scene context not ready, open scene edit first"
 }
