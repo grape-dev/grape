@@ -87,6 +87,21 @@ class LabelCreateBody(BaseModel):
     color: str = "#d73a4a"
 
 
+class MilestoneCreateBody(BaseModel):
+    """Issue #632：创建里程碑（对齐 #577 Spec）。title 必填；description/due_on 可选。"""
+    title: str
+    description: str = ""
+    due_on: str = ""
+
+
+class MilestoneUpdateBody(BaseModel):
+    """Issue #632：更新里程碑。全字段可选（空值不透传，存量行为不受影响）。"""
+    title: str = ""
+    description: str = ""
+    due_on: str = ""
+    state: str = ""
+
+
 class CommentBody(BaseModel):
     body: str
 
@@ -356,6 +371,25 @@ def list_milestones(owner: str, repo: str, state: str = Query("all"),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     return _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", {"state": state}, p),
                     _repo_token(owner, repo, user, p))
+
+
+@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with id.")
+def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
+                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #632（对齐 #577）：GitHub/GitCode milestones 字段语义一致 → 直调透传（同 labels 模式）
+    payload = {k: v for k, v in {"title": body.title, "description": body.description,
+                                 "due_on": body.due_on}.items() if v != ""}
+    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/milestones", None, p),
+                    _repo_token(owner, repo, user, p), payload)
+
+
+@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough.")
+def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBody,
+                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    payload = {k: v for k, v in {"title": body.title, "description": body.description,
+                                 "due_on": body.due_on, "state": body.state}.items() if v != ""}
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/milestones/{number}", None, p),
+                    _repo_token(owner, repo, user, p), payload)
 
 
 # ===================== Issues =====================

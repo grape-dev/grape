@@ -371,6 +371,36 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
     assert last["method"] == "POST" and last["body"]["name"] == "bug" and last["body"]["color"] == "#d73a4a"
 
 
+def test_milestones_create_update(gitcode_calls, _client):
+    """Issue #632：POST/PATCH milestones 透传（provider 直调，空值字段过滤）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+
+    # create：title 必填，description/due_on 透传
+    r = client.post(f"{base}/milestones", json={"title": "v1.0", "description": "first release",
+                                                "due_on": "2026-12-01T00:00:00Z"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "POST" and last["url"].endswith("/milestones")
+    assert last["body"] == {"title": "v1.0", "description": "first release",
+                            "due_on": "2026-12-01T00:00:00Z"}
+
+    # create 缺 title → 422（契约校验）
+    assert client.post(f"{base}/milestones", json={"description": "no title"}).status_code == 422
+
+    # update：PATCH /milestones/{number}，空值字段不透传
+    r = client.patch(f"{base}/milestones/3", json={"title": "v1.1", "state": "closed"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "PATCH" and last["url"].endswith("/milestones/3")
+    assert last["body"] == {"title": "v1.1", "state": "closed"}
+
+    # update：全空 body → 空对象透传（不炸）
+    r = client.patch(f"{base}/milestones/3", json={})
+    assert r.status_code == 200
+    assert gitcode_calls[-1]["body"] == {}
+
+
 def test_no_token_502(monkeypatch, _client):
     monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
     client = _client
