@@ -1011,10 +1011,11 @@ def _discover_local_runtimes() -> list[dict]:
     """本机 CLI 列表（复用 discover_runtimes，补齐 version/healthy）。
 
     hermes 额外做 ACP 依赖自举（hermes-acp-auto-bootstrap-design.md）：
-    --version 探测不出 ACP 依赖缺失（可选 extra），必须 `hermes acp --check`
-    才能暴露；缺失时自动补装 agent-client-protocol==0.9.0，补装失败则
-    healthy=False（引擎照常注册，但服务端 engine_select 只挑 healthy，
-    不会再把任务派到一台调不通的机器上）。
+    --version 探测不出 ACP 依赖缺失（可选 extra），须对 `hermes acp` 做真实
+    ACP 握手探测才能暴露（`acp --check` 子命令在 hermes v0.9.0 起不存在，
+    Issue #613）；缺失时自动补装 agent-client-protocol（版本经兼容性判断，
+    不硬钉），补装失败则 healthy=False（引擎照常注册，但服务端 engine_select
+    只挑 healthy，不会再把任务派到一台调不通的机器上）。
     """
     from src.runtime.registry import discover_runtimes
     from src.runtime.acp_bootstrap import _ensure_hermes_acp

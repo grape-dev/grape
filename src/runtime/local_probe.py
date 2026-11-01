@@ -15,23 +15,33 @@ LOCAL_PROBE_MAX_TOTAL = 25       # 全量探测总上限（秒）
 def _probe_one(eng: dict) -> dict:
     """探测单个引擎：跑 [cli, --version]（可用 probe_args 覆盖），healthy=returncode==0。
 
-    hermes 用 probe_args 覆盖为 [acp, --check]：--version 探测不出 ACP 依赖
-    缺失（可选 extra 不被触碰），见 hermes-acp-auto-bootstrap-design.md。
+    hermes 标记 acp_probe：--version 探测不出 ACP 依赖缺失（可选 extra 不被
+    触碰），须对 `hermes acp` 做真实 ACP 握手探测（acp_bootstrap._acp_check，
+    Issue #613：`acp --check` 子命令在 hermes v0.9.0 起不存在）。
     """
     cli = eng.get("cli_path") or ""
     if not cli or not eng.get("installed"):
         return {**eng, "version": "", "healthy": False}
+    out = {**eng}
+    out.pop("probe_args", None)
+    acp_probe = out.pop("acp_probe", None)
     try:
+        if acp_probe:
+            # hermes：版本走 --version，健康走真实 ACP 握手（与 worker 注册口径一致）
+            from src.runtime.acp_bootstrap import _acp_check
+            res = subprocess.run([cli, "--version"], capture_output=True, text=True,
+                                 timeout=LOCAL_PROBE_TIMEOUT)
+            version = (res.stdout or "").strip().split("\n")[0][:60] if res.returncode == 0 else ""
+            out.update({"version": version, "healthy": _acp_check(cli)})
+            return out
         args = eng.get("probe_args") or ["--version"]
         res = subprocess.run([cli] + args, capture_output=True, text=True, timeout=LOCAL_PROBE_TIMEOUT)
         healthy = res.returncode == 0
         version = (res.stdout or "").strip().split("\n")[0][:60] if healthy else ""
-        out = {**eng, "version": version, "healthy": healthy}
-        out.pop("probe_args", None)
+        out.update({"version": version, "healthy": healthy})
         return out
     except Exception:
-        out = {**eng, "version": "", "healthy": False}
-        out.pop("probe_args", None)
+        out.update({"version": "", "healthy": False})
         return out
 
 
@@ -39,16 +49,17 @@ def probe_local_engines(engines: list | None = None) -> list[dict]:
     """探测本机已安装引擎，返回 [{name, version, healthy, cli_path, installed, ...}]。
 
     engines 缺省 = `discover_backends()`（含 cli_path/installed）。
-    hermes 自动带 probe_args=["acp", "--check"]（ACP 依赖缺失 → healthy=False，
-    与 worker 注册口径一致，见 hermes-acp-auto-bootstrap-design.md）。
+    hermes 自动带 acp_probe=True（真实 ACP 握手探测，ACP 依赖缺失 →
+    healthy=False，与 worker 注册口径一致，见 hermes-acp-auto-bootstrap-design.md
+    与 Issue #613）。
     线程池并发 + 单引擎 5s 超时 + 总时长 ≤ LOCAL_PROBE_MAX_TOTAL（超时未完成引擎置 healthy=False）。
     """
     if engines is None:
         from src.agent.executor import discover_backends
         engines = discover_backends()
     engines = [
-        {**e, "probe_args": ["acp", "--check"]}
-        if (e.get("name") or "").lower() == "hermes" and e.get("installed") and not e.get("probe_args")
+        {**e, "acp_probe": True}
+        if (e.get("name") or "").lower() == "hermes" and e.get("installed") and not e.get("acp_probe")
         else e
         for e in engines
     ]
