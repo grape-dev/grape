@@ -30,6 +30,8 @@ except Exception:  # pragma: no cover
 
 TMP_PREFIX = ".tmp"
 
+FALLBACK_FILENAME = "FALLBACK.md"
+
 
 def _rmtree_safe(path: str):
     try:
@@ -201,6 +203,54 @@ def materialize_skill_dir_atomic(skills_root: str, skill_name: str, src_dir: str
     except Exception as e:
         _rmtree_safe(tmp_dir)
         return False, f"local skill materialize failed: {e}"
+
+
+def write_skill_fallback(skills_root: str, skill_name: str,
+                         reason: str = "", stage: str = "") -> bool:
+    """Issue #607：技能物化失败兜底——向 ``skills_root/<skill>/FALLBACK.md`` 写降级指引。
+
+    worker（runtime/agent.py _execute_task）与 direct（api/event_pipeline.py
+    _materialize_direct_workdir）两侧共用（单一实现两端复用）。
+
+    语义：
+    - 目录已有 SKILL.md 时不写（物化成功/官方包回退成功路径不受影响）；
+    - 写入成功 → log.warning 结构化留痕（tag=skill、技能名、stage、原因），
+      供统计间歇性物化失败率；
+    - 自身失败仅 log.error 静默降级，绝不影响主任务执行；
+    - 指引口径与任务下发头 [Skill Materialization Notice] 一致
+      （均为 ``grape skills detail`` 权威取回）。
+    """
+    if not skill_name:
+        return False
+    dst = os.path.join(skills_root, skill_name)
+    try:
+        if os.path.isfile(os.path.join(dst, "SKILL.md")):
+            return False
+        os.makedirs(dst, exist_ok=True)
+        content = (
+            "# Skill Materialization Fallback Notice\n\n"
+            "This is NOT a SKILL.md - it is a degraded-delivery notice (Issue #607).\n"
+            "Skill materialization failed and this directory has no skill content.\n\n"
+            f"- Skill name: {skill_name}\n"
+            f"- Failed stage: {stage or 'unknown'}\n"
+            f"- Failure reason: {reason or 'unknown'}\n"
+            f"- Local directory: {dst}\n\n"
+            "## How to recover\n\n"
+            "Fetch the authoritative skill content with:\n\n"
+            f"    grape skills detail --skill {skill_name}\n\n"
+            "(or call the platform skills API), then follow the retrieved SKILL.md\n"
+            "instructions. This matches the [Skill Materialization Notice] in the\n"
+            "task prompt, which refers to the same `grape skills detail` path.\n"
+        )
+        with open(os.path.join(dst, FALLBACK_FILENAME), "w", encoding="utf-8") as f:
+            f.write(content)
+        _log.warning(f"[skill] fallback file written: skill={skill_name} "
+                     f"stage={stage or 'unknown'} dir={dst} reason={reason or 'unknown'}")
+        return True
+    except Exception as e:
+        _log.error(f"[skill] fallback file write failed: skill={skill_name} "
+                   f"stage={stage}: {e}")
+        return False
 
 
 def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,

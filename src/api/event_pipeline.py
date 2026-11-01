@@ -3493,7 +3493,8 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             return ("none", f"skill source not found for {skill_name}")
 
         if skill_name:
-            from src.runtime.skill_materialize import materialize_skill_with_fallback
+            from src.runtime.skill_materialize import (materialize_skill_with_fallback,
+                                                        write_skill_fallback)
 
             def _agent_type_checker_resolver(at):
                 # Issue #617：按名未命中 → 按 agent_type 回退官方检查器（DB 侧解析）
@@ -3529,12 +3530,24 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                 prompt += _note
                 log.warning(f"direct skill materialize {skill_name}: {_mat.get('status')} "
                             f"({_mat.get('detail')})")
+                # Issue #607：官方包回退也失败（degraded）→ 写 FALLBACK.md 降级指引，
+                # 与 worker 端兜底口径一致（grape skills detail 权威取回）。
+                if _mat.get("status") == "degraded":
+                    write_skill_fallback(skill_dir, skill_name,
+                                         _mat.get("detail", ""), stage="direct")
             else:
                 log.info(f"direct skill materialize {skill_name}: ok")
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
         evt["_skill_materialize"] = {"status": "degraded", "detail": str(e), "skill_dir": ""}
+        # Issue #607：direct 端物化异常分支同样写 FALLBACK.md 降级指引 + 留痕
+        try:
+            from src.runtime.skill_materialize import write_skill_fallback
+            write_skill_fallback(skill_dir, skill_name,
+                                 f"direct materialize exception: {e}", stage="direct")
+        except Exception:
+            pass
 
     return prompt
 
