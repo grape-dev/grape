@@ -3494,14 +3494,38 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
 
         if skill_name:
             from src.runtime.skill_materialize import materialize_skill_with_fallback
-            _mat = materialize_skill_with_fallback(skill_dir, skill_name, _skill_primary)
+
+            def _agent_type_checker_resolver(at):
+                # Issue #617：按名未命中 → 按 agent_type 回退官方检查器（DB 侧解析）
+                try:
+                    from src.user.db import resolve_official_checker_skill, get_skill_path
+                    _fb = resolve_official_checker_skill(at)
+                    if not _fb:
+                        return None
+                    _p = get_skill_path(_fb.get("id")) or _fb.get("skill_path") or ""
+                    _d = os.path.dirname(_p) if _p and os.path.isfile(_p) else ""
+                    if not _d:
+                        return None
+                    return {"skill_name": _fb.get("skill_name"),
+                            "skill_id": _fb.get("id") or 0, "skill_dir": _d}
+                except Exception:
+                    return None
+
+            _mat = materialize_skill_with_fallback(
+                skill_dir, skill_name, _skill_primary,
+                agent_type=agent_type, agent_type_fallback=_agent_type_checker_resolver)
             # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
             evt["_skill_materialize"] = _mat
             if _mat.get("status") in ("fallback", "degraded"):
+                _id_hint = ""
+                if _mat.get("skill_id"):
+                    _id_hint = (f" (fallback checker: "
+                                f"`grape skills detail --skill_id {_mat.get('skill_id')}`)")
                 _note = (f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
-                         f"({_mat.get('status')}): {_mat.get('detail')}. "
+                         f"({_mat.get('status')}): {_mat.get('detail')}.{_id_hint} "
                          f"If skill files under this path are missing, fetch the skill via "
-                         f"`grape skills detail` or the platform skills API before proceeding.")
+                         f"`grape skills detail --skill_id <id>` or the platform skills API "
+                         f"before proceeding.")
                 prompt += _note
                 log.warning(f"direct skill materialize {skill_name}: {_mat.get('status')} "
                             f"({_mat.get('detail')})")

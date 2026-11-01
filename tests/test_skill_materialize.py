@@ -267,3 +267,80 @@ def test_direct_materialize_ok_no_notice(skills_root, tmp_path, monkeypatch):
     mat = evt.get("_skill_materialize") or {}
     assert mat.get("status") == "ok"
     assert "[Skill Materialization Notice]" not in out
+
+
+# ── Issue #617：按名未命中 → 按 agent_type 回退官方检查器 ──
+
+def _mk_checker_dir(tmp_path, name="grape-skill-validator"):
+    d = tmp_path / "official" / name
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("# checker skill without references\n", encoding="utf-8")
+    return str(d)
+
+
+def test_agent_type_fallback_success(skills_root, tmp_path, monkeypatch):
+    # 按名未命中 + 官方包未找到 → agent_type 检查器回退成功，detail 含 skills detail --skill_id
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    checker = _mk_checker_dir(tmp_path)
+    resolver = lambda at: ({"skill_name": "grape-skill-validator", "skill_id": 2789,
+                            "skill_dir": checker} if at == "qa" else None)
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "skill-batch-validator", lambda: ("none", "skill source not found"),
+        agent_type="qa", agent_type_fallback=resolver)
+    assert res["status"] == "fallback"
+    assert res["skill_id"] == 2789
+    assert "grape skills detail --skill_id 2789" in res["detail"]
+    assert os.path.isfile(os.path.join(skills_root, "grape-skill-validator", "SKILL.md"))
+    # 原错误名不落盘（不产生半写/错名目录）
+    assert not os.path.isdir(os.path.join(skills_root, "skill-batch-validator"))
+
+
+def test_agent_type_fallback_resolver_miss_still_degraded(skills_root, tmp_path, monkeypatch):
+    # resolver 未命中（无检查器）→ 仍 degraded，不静默空注入
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "skill-batch-validator", lambda: ("none", "skill source not found"),
+        agent_type="qa", agent_type_fallback=lambda at: None)
+    assert res["status"] == "degraded"
+    assert "skill source not found" in res["detail"]
+    assert not os.path.isdir(os.path.join(skills_root, "skill-batch-validator"))
+
+
+def test_agent_type_fallback_no_resolver_degraded(skills_root, monkeypatch):
+    # 未注入 resolver（老调用方）→ 行为与旧版一致
+    import src.config as cfg
+    monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
+    res = sm.materialize_skill_with_fallback(
+        skills_root, "skill-batch-validator", lambda: ("none", "skill zip unavailable"))
+    assert res["status"] == "degraded"
+    assert "skill zip unavailable" in res["detail"]
+
+
+def test_direct_materialize_agent_type_fallback(skills_root, tmp_path, monkeypatch):
+    # direct 端接线：按名未命中 → 检查器回退，prompt 提示含 --skill_id
+    import src.config as cfg
+    checker = _mk_checker_dir(tmp_path)
+    monkeypatch.setattr(cfg, "resolve_official_skill_path",
+                        lambda name: str(tmp_path / "official" / name / "SKILL.md")
+                        if name == "grape-skill-validator" else "")
+    import src.user.db as udb
+    monkeypatch.setattr(udb, "resolve_official_checker_skill",
+                        lambda at: ({"id": 2789, "skill_name": "grape-skill-validator",
+                                     "skill_path": str(checker), "file_path": ""} if at == "qa"
+                                    else None))
+    monkeypatch.setattr(udb, "get_skill_path",
+                        lambda sid: (os.path.join(checker, "SKILL.md") if sid == 2789 else ""))
+    from src.api.event_pipeline import _materialize_direct_workdir
+    evt = {"_skill_id": 0, "_skill_path": ""}
+    out = _materialize_direct_workdir(tmp_path, "gitcode:acme/repo", "qa",
+                                      "skill-batch-validator", evt, "",
+                                      "{{SKILL_DIR}}/skill-batch-validator/SKILL.md")
+    mat = evt.get("_skill_materialize") or {}
+    assert mat.get("status") == "fallback"
+    assert mat.get("skill_id") == 2789
+    assert "grape skills detail --skill_id 2789" in out
+    assert os.path.isfile(os.path.join(str(tmp_path), ".skills",
+                                       "grape-skill-validator", "SKILL.md"))
+    assert "{{SKILL_DIR}}" not in out

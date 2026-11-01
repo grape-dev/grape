@@ -203,14 +203,21 @@ def materialize_skill_dir_atomic(skills_root: str, skill_name: str, src_dir: str
         return False, f"local skill materialize failed: {e}"
 
 
-def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary) -> tuple:
+def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary,
+                                     agent_type: str = "",
+                                     agent_type_fallback=None) -> tuple:
     """主渠道物化 + 官方技能包回退 + 降级状态。
 
     primary: 闭包，返回 (kind, payload)：
         ("zip", bytes) / ("files", dict) / ("dir", path) / ("none", reason)
-    返回 dict {"status": ok|fallback|degraded, "detail": str, "skill_dir": str}。
+    agent_type_fallback（Issue #617，可选）: 闭包 agent_type →
+        {"skill_name": str, "skill_id": int, "skill_dir": str} 或 None。
+        按名未命中（官方库无该技能名）时按 agent_type 回退官方检查器；
+        本模块零 DB 依赖，resolver 由服务端调用方注入。
+    返回 dict {"status": ok|fallback|degraded, "detail": str, "skill_dir": str,
+               "skill_id": int}（skill_id 为回退检查器技能 id，0=未知）。
     """
-    result = {"status": "degraded", "detail": "", "skill_dir": ""}
+    result = {"status": "degraded", "detail": "", "skill_dir": "", "skill_id": 0}
     try:
         kind, payload = primary() if callable(primary) else ("none", "no primary source")
     except Exception as e:
@@ -259,6 +266,29 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary) 
         _fb_reason = f"{_fb_reason}; official fallback failed ({reason2})"
     else:
         _fb_reason = f"{_fb_reason}; official skill package not found"
+
+    # Issue #617：按名未命中 → 按 agent_type 回退官方检查器（resolver 由服务端注入）
+    if agent_type and callable(agent_type_fallback):
+        _fb_skill = {}
+        try:
+            _fb_skill = agent_type_fallback(agent_type) or {}
+        except Exception as e:
+            _log.warning(f"agent_type fallback resolve failed for {agent_type}: {e}")
+        _fb_name = str(_fb_skill.get("skill_name") or "")
+        _fb_dir = str(_fb_skill.get("skill_dir") or "")
+        _fb_id = int(_fb_skill.get("skill_id") or 0)
+        if _fb_name and _fb_dir and os.path.isfile(os.path.join(_fb_dir, "SKILL.md")):
+            ok3, reason3 = materialize_skill_dir_atomic(skills_root, _fb_name, _fb_dir)
+            if ok3:
+                result["status"] = "fallback"
+                result["skill_dir"] = os.path.join(skills_root, _fb_name)
+                result["skill_id"] = _fb_id
+                result["detail"] = (
+                    f"skill '{skill_name}' not found ({_fb_reason}); materialized official "
+                    f"checker '{_fb_name}' for agent_type '{agent_type}' instead "
+                    f"(fetch via `grape skills detail --skill_id {_fb_id}`)")
+                return result
+            _fb_reason = f"{_fb_reason}; agent_type checker fallback failed ({reason3})"
 
     result["status"] = "degraded"
     result["detail"] = _fb_reason
