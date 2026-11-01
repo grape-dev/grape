@@ -7,7 +7,7 @@ M3：/api/runtime/* 协议端点（register/heartbeat/claim/report），仅 rta_
 import hashlib, json, os, threading
 from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from src.api.deps import require_no_session_token, require_org_member
 from src.config import log
 from src.api.time_utils import normalize_event_time
@@ -446,6 +446,32 @@ class RuntimeClaimBody(BaseModel):
     """v3.0：worker 能力动态声明（零落库）——claim 每次携带"""
     supports_obs_url: bool = False   # 本 worker 支持 OBS 直连（启动探测结果）
     prefer_fallback: bool = False    # 直连不稳，服务端直接给代拉模式
+    # Issue #520 bound claim：expected_task_id + expected_event_seq 成对可选字段。
+    # 二者必须成对提供（只传其一 → 422 明确拒绝）；提供时服务端在 db_lock 临界区内
+    # 原子校验目标任务身份，未命中返回无任务，绝不回退 FIFO。
+    expected_task_id: str = ""
+    expected_event_seq: int = 0
+
+    @model_validator(mode="after")
+    def _expected_pair(self):
+        if bool(self.expected_task_id) != bool(self.expected_event_seq):
+            raise ValueError(
+                "expected_task_id and expected_event_seq must be provided together")
+        return self
+
+
+def _require_runtime_owned(runtime_id: int, credential_id: int) -> None:
+    """Issue #520：校验 runtime 归属当前 rta_ 凭据（agent_runtimes.credential_id）。
+
+    他人 runtime_id → 403（fail-closed，不泄露任务信息）。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT 1 FROM agent_runtimes WHERE id=? AND credential_id=?",
+                  (runtime_id, credential_id))
+        if not c.fetchone():
+            raise HTTPException(status_code=403, detail={
+                "code": 403, "message": "runtime not owned by this credential"})
 
 
 def _attach_skill_obs(task: dict) -> None:
@@ -496,8 +522,16 @@ def runtime_claim(runtime_id: int, body: RuntimeClaimBody | None = None,
     v3.0：能力声明（supports_obs_url/prefer_fallback）动态携带；
     任务附 skill_obs_url（claim 现签预签名 URL）——prefer_fallback
     worker 直接给 mode=server-fetch（跳过 URL 直连尝试）。
+
+    Issue #520：body 成对携带 expected_task_id/expected_event_seq 时透传服务层，
+    在 db_lock 临界区内原子校验目标身份（未命中返回无任务，不回退 FIFO）；
+    未提供 expected 保持原 FIFO 路径零改动（旧客户端零影响）。
     """
-    task = service.claim(runtime_id)
+    task = service.claim(
+        runtime_id,
+        expected_task_id=(body.expected_task_id or None) if body else None,
+        expected_event_seq=(body.expected_event_seq or None) if body else None,
+    )
     # 检查是否有 pending skill scan 指令
     scan_request = False
     if not task:
@@ -569,8 +603,15 @@ def runtime_claim_by_tag(runtime_id: int, tag: str,
     """Claim task by tag + scope isolation (event-dispatch-redesign-v2.md 2.4).
 
     Workers with engine tags can claim tasks matching their tag and scope.
+
+    Issue #520：body 成对携带 expected_task_id/expected_event_seq 时透传服务层
+    原子校验（未命中无任务，不回退 FIFO）；未提供保持 FIFO。
     """
-    task = service.claim_by_tag(tag, runtime_id)
+    task = service.claim_by_tag(
+        tag, runtime_id,
+        expected_task_id=(body.expected_task_id or None) if body else None,
+        expected_event_seq=(body.expected_event_seq or None) if body else None,
+    )
     # 检查是否有 pending skill scan 指令（与 claim 端点一致）
     scan_request = False
     if not task:
@@ -590,6 +631,111 @@ def runtime_claim_by_tag(runtime_id: int, tag: str,
         else:
             _attach_skill_obs(task)
     return {"task": task, "scan_request": scan_request}
+
+
+# ===== Issue #520：bound claim / 能力协商 / 许可对号 lookup（四件套，fail-closed）=====
+
+def _pending_scan_request(runtime_id: int, credential_id: int) -> bool:
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT pending_skill_scan FROM agent_runtimes WHERE id=? AND credential_id=?",
+                  (runtime_id, credential_id))
+        _row = c.fetchone()
+        return bool(_row and _row[0])
+
+
+@router.post("/runtimes/{runtime_id}/tasks/claim-bound")
+def runtime_claim_bound(runtime_id: int, body: RuntimeClaimBody,
+                        credential_id: int = Depends(_require_credential)):
+    """Issue #520 bound claim：按 expected_task_id + expected_event_seq 原子领取指定任务。
+
+    - 鉴权：rta_ 凭据 + runtime 归属校验（他人 runtime → 403）。
+    - body 必须成对携带 expected 字段（缺 → 400；只传其一由模型校验 422 拒绝）。
+    - 未匹配返回 {"task": null}，不领取/不修改任何其他任务，绝不回退 FIFO。
+    - 未部署节点对本路径 404 → 客户端保持许可关闭（不回退通用 claim）。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    if not body.expected_task_id or not body.expected_event_seq:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "claim-bound requires expected_task_id and expected_event_seq"})
+    task = service.claim(runtime_id,
+                         expected_task_id=body.expected_task_id,
+                         expected_event_seq=body.expected_event_seq)
+    scan_request = False
+    if not task:
+        scan_request = _pending_scan_request(runtime_id, credential_id)
+    else:
+        if body.prefer_fallback:
+            task["mode"] = "server-fetch"
+        else:
+            _attach_skill_obs(task)
+    return {"task": task, "scan_request": scan_request}
+
+
+@router.post("/runtimes/{runtime_id}/tasks/claim-by-tag-bound/{tag}")
+def runtime_claim_by_tag_bound(runtime_id: int, tag: str,
+                               body: RuntimeClaimBody,
+                               credential_id: int = Depends(_require_credential)):
+    """Issue #520 bound claim（tag 版）：tag + scope 条件不变，追加 expected 原子校验。
+
+    未匹配返回 {"task": null}，不回退 FIFO；归属校验同 claim-bound。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    if not body.expected_task_id or not body.expected_event_seq:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "claim-by-tag-bound requires expected_task_id and expected_event_seq"})
+    task = service.claim_by_tag(tag, runtime_id,
+                                expected_task_id=body.expected_task_id,
+                                expected_event_seq=body.expected_event_seq)
+    scan_request = False
+    if not task:
+        scan_request = _pending_scan_request(runtime_id, credential_id)
+    else:
+        if body.prefer_fallback:
+            task["mode"] = "server-fetch"
+        else:
+            _attach_skill_obs(task)
+    return {"task": task, "scan_request": scan_request}
+
+
+@router.get("/runtimes/{runtime_id}/tasks/claim-capabilities")
+def runtime_claim_capabilities(runtime_id: int,
+                               credential_id: int = Depends(_require_credential)):
+    """Issue #520 能力协商（只读）：客户端 POST bound claim 前确认服务端能力。
+
+    能力位：bound_claim（claim-bound / claim-by-tag-bound）+ task_lookup（lookup）。
+    未部署节点 404 → 客户端保持许可关闭，不回退通用 claim。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    return {
+        "runtime_id": runtime_id,
+        "capabilities": {
+            "bound_claim": True,
+            "task_lookup": True,
+        },
+    }
+
+
+@router.get("/runtimes/{runtime_id}/tasks/lookup")
+def runtime_task_lookup(runtime_id: int,
+                        expected_event_seq: int = 0,
+                        credential_id: int = Depends(_require_credential)):
+    """Issue #520 许可对号 lookup：按 expected_event_seq 精确查询许可目标任务。
+
+    - 鉴权：与 /runtimes/{id}/tags 同款（rta_ + 归属校验，他人 runtime → 403）。
+    - expected_event_seq 缺失或 <=0 → 400（旧任务 event_seq 空/0 不支持）。
+    - 纯验证性 SELECT：命中返回身份字段 {task_id, issue_id, event_seq, agent_type,
+      created_at}；未命中 {"task": null}（许可保留，等待目标入队）。
+    """
+    _require_runtime_owned(runtime_id, credential_id)
+    if not expected_event_seq or expected_event_seq <= 0:
+        raise HTTPException(status_code=400, detail={
+            "code": 400,
+            "message": "lookup requires a positive expected_event_seq"})
+    task = service.lookup_task_by_event_seq(runtime_id, expected_event_seq)
+    return {"task": task}
 
 
 @router.post("/tasks/{task_id}/skill-zip")
