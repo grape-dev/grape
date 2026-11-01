@@ -1129,6 +1129,44 @@ def get_skill_by_id(skill_id) -> dict | None:
         return None
 
 
+def resolve_official_checker_skill(agent_type: str) -> dict | None:
+    """Issue #617：按 agent_type 回退官方检查器技能（skill 按名未命中时的兜底）。
+
+    场景节点引用了官方库不存在的技能名（如 skill-batch-validator）时，materialize
+    按名必然失败。此处按节点 agent_type 在 skill 表取 is_active=1 且 scope='official'
+    的官方技能兜底：
+    - 优先取技能名含 validator/check/review/lint/inspect 的“检查器”技能（id 最小）；
+    - 否则取该 agent_type 下 id 最小的官方技能。
+    返回技能 dict（含 id/skill_name/skill_path/file_path）或 None。
+    """
+    if not agent_type:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
+                "file_path, scope, owner_id, content_hash FROM skill "
+                "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
+                (agent_type,))
+            rows = c.fetchall()
+        if not rows:
+            return None
+        pick = next((r for r in rows
+                     if re.search(r"valid|check|review|lint|inspect", r[1] or "", re.IGNORECASE)),
+                    rows[0])
+        return {
+            "id": pick[0], "skill_name": pick[1], "display_name": pick[2] or pick[1],
+            "description": pick[3] or "", "agent_type": pick[4] or "",
+            "skill_path": pick[5] or pick[1], "file_path": pick[6] or "",
+            "scope": pick[7] or "official", "owner_id": pick[8] or "",
+            "content_hash": pick[9] or "",
+        }
+    except Exception as e:
+        log.warning(f"resolve_official_checker_skill failed for {agent_type}: {e}")
+        return None
+
+
 def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
     """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
     返回 (id, content_hash, file_path)，id=0 表示不存在。
