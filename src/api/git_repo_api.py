@@ -10,7 +10,7 @@
 出参结构 = gitcode 平台实际结构（与技能 `gitcode-api-reference.md` 一致，见 docs/openapi/10-git-repos.md）。
 """
 from fastapi import APIRouter, Depends, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from src.api.deps import get_current_user_or_api_key
 from src.config import log
@@ -59,10 +59,26 @@ class IssueCreateBody(BaseModel):
 
 
 class IssueUpdateBody(BaseModel):
+    """Issue #621：state 契约对齐后端语义（GitHub state_event：reopen/close）。
+
+    - 仅 schema 层收紧（enum/description/example），运行时校验行为不变（非法值仍由后端 400 拒绝）。
+    - 请求示例见 model_config json_schema_extra（CLI help / openapi.json 随契约同步）。
+    """
+    model_config = ConfigDict(
+        json_schema_extra={"examples": [{"state": "reopen"}]},
+    )
+
     labels: str = ""
     assignee: str = ""
     milestone_id: int = 0
-    state: str = ""
+    state: str = Field(
+        "",
+        title="Issue state event",
+        description="State transition to apply (aligns with GitHub `state_event`): "
+                    "accepts only 'reopen' or 'close'. Any other value is rejected by the backend with 400.",
+        examples=["reopen"],
+        json_schema_extra={"enum": ["reopen", "close"]},
+    )
     body: str = ""
 
 

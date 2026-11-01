@@ -254,7 +254,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | `labels` | string/array | 标签 |
 | `assignee` | string | 责任人 |
 | `milestone_id` | int | 里程碑 id |
-| `state` | string | `"open"`（打开）/ `"close"`、`"closed"`（关闭，同义）——平台值归一由服务端处理 |
+| `state` | string | Issue 状态迁移（对齐 GitHub `state_event`）：仅接受 `"reopen"` / `"close"`，其他取值后端返回 400 |
 | `body` | string | Issue 正文（空值忽略，不影响其他字段） |
 
 **返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
@@ -395,7 +395,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | GET/issues | `grape git-repo issues --owner Jason7602 --repo hello --state open` |
 | POST/issues | `grape git-repo issues create --owner Jason7602 --repo hello --json '{"title":"bug: 列表为空","body":"复现步骤...","assignee":"Jason7602"}'` |
 | GET/issues/{number} | `grape git-repo issues get --owner Jason7602 --repo hello --number 5` |
-| PATCH/issues/{number} | `grape git-repo issues update --owner Jason7602 --repo hello --number 5 --json '{"state":"closed","labels":"bug"}'` |
+| PATCH/issues/{number} | `grape git-repo issues update --owner Jason7602 --repo hello --number 5 --json '{"state":"reopen","labels":"bug"}'` |
 | POST/issues/{number}/close | `grape git-repo issues close --owner Jason7602 --repo hello --number 5` |
 | GET/issues comments | `grape git-repo issues comments list --owner Jason7602 --repo hello --number 5` |
 | POST/issues comments | `grape git-repo issues comments create --owner Jason7602 --repo hello --number 5 --json '{"body":"已定位原因"}'` |
