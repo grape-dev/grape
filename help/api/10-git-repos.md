@@ -343,7 +343,8 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 > CLI：`grape git-repo pulls comments update --owner {owner} --repo {repo} --number {number} --comment_id {id} --json '{"body":"修正后的内容"}'` / `grape git-repo pulls comments delete --owner {owner} --repo {repo} --number {number} --comment_id {id}`（operation_id=`gitrepo_pulls_comments_update` / `gitrepo_pulls_comments_delete`；comment_id 取 list 返回的评论 id，上游全局唯一，PR number 仅作上下文）。
 
 - **PATCH**：Body `{body}`（必填）→ 透传 `PATCH /pulls/comments/{id}` 改写评论正文 → 返回更新后的评论对象。
-- **DELETE**：透传 `DELETE /pulls/comments/{id}` 删除评论（误发评论自纠，Issue #563）。
+  - **Issue #623 契约说明**：`--comment_id` 支持**数字 note_id（推荐，list 响应中的 `id`）**与 **create 响应返回的十六进制 `id`（兼容形态，服务端自动映射为 note_id）**——直接回用 create 响应主键不再 422；其余非法形态返回 422（明确错误信息）。十六进制识别规则：全 hex 字符且含 a-f 字母（纯数字串按 note_id 直传，向后兼容）。
+- **DELETE**：透传 `DELETE /pulls/comments/{id}` 删除评论（误发评论自纠，Issue #563；delete 的 comment_id 仍为数字 note_id）。
 - **create --json @file 读取失败**：CLI ≥0.3.3 已显式报错 `cannot read --json file '...'` 并以非零码退出，不再静默。
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}/files

@@ -592,11 +592,80 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     return resp
 
 
-@router.patch("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_update", summary="Update PR comment", description="Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments.")
-def update_pull_comment(owner: str, repo: str, number: int, comment_id: int, body: CommentBody,
+def _resolve_pull_comment_note_id(p: str, owner: str, repo: str, number: int,
+                                  comment_id: str, token: str) -> str:
+    """Issue #623：pulls comments update 的 comment_id 兼容十六进制 id 与 note_id。
+
+    - 纯数字串 → 数字 note_id，直传既有更新逻辑（向后兼容，行为不变）。
+    - 十六进制串（全 hex 字符且含 a-f 字母）→ create 响应同源主键：先经上游
+      GET /pulls/comments/{id}（该端点 id 为 string 形态）取数字 note_id；
+      失败再回退 GET /pulls/{number}/comments 按 discussion_id 匹配同一评论对象。
+    - 其余非法形态 → 422（明确错误信息，便于调用方自纠）。
+    """
+    import re
+    cid = (comment_id or "").strip()
+    if not cid:
+        raise HTTPException(status_code=422, detail={"code": 422, "message": "comment_id 不能为空"})
+    if cid.isdigit():
+        return cid
+    # 严格十六进制识别：全 hex 字符且至少含一个字母，避免纯数字串误判
+    if not re.fullmatch(r"[0-9a-fA-F]+", cid) or not re.search(r"[a-fA-F]", cid):
+        raise HTTPException(status_code=422, detail={
+            "code": 422,
+            "message": "comment_id 非法：仅支持 note_id（数字，推荐）或 create 响应返回的十六进制 id（兼容形态）"})
+
+    def _first_digit_id(obj) -> str | None:
+        if not isinstance(obj, dict):
+            return None
+        rid = obj.get("id")
+        if isinstance(rid, bool):
+            return None
+        if isinstance(rid, int):
+            return str(rid)
+        if isinstance(rid, str) and rid.isdigit():
+            return rid
+        return None
+
+    # ① 上游单评论查询（id 路径参数为 string 形态，可透传十六进制 id）
+    try:
+        resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/comments/{cid}", None, p), token)
+        note_id = _first_digit_id(resp)
+        if note_id:
+            return note_id
+    except HTTPException as e:
+        if e.status_code in (401, 403):
+            raise
+        log.warning(f"Issue #623 hex comment_id single lookup failed ({cid}): {e.detail}")
+    # ② 回退：PR 评论列表按 discussion_id（十六进制同源键）匹配同一评论对象
+    try:
+        items = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p), token)
+        if isinstance(items, list):
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                if str(it.get("discussion_id") or "").lower() == cid.lower():
+                    note_id = _first_digit_id(it)
+                    if note_id:
+                        return note_id
+    except HTTPException as e:
+        log.warning(f"Issue #623 hex comment_id list fallback failed ({cid}): {e.detail}")
+    raise HTTPException(status_code=422, detail={
+        "code": 422,
+        "message": f"comment_id={cid} 无法解析为 note_id：请改用列表响应中的数字 note_id（update --comment_id 支持数字 note_id 与 create 响应的十六进制 id）"})
+
+
+@router.patch("/{owner}/{repo}/pulls/{number}/comments/{comment_id}", operation_id="gitrepo_pulls_comments_update",
+              summary="Update PR comment",
+              description="Updates a PR comment body by comment id (body required). Issue #563: CLI self-correction for mis-sent PR comments. "
+                          "Issue #623 contract: comment_id accepts the numeric note_id (recommended) or the hex id returned by the create/list comment "
+                          "response (compat form, auto-mapped to note_id server-side); other forms return 422.")
+def update_pull_comment(owner: str, repo: str, number: int, comment_id: str, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # 上游 comment id 全局唯一（不含 PR number）：透传 PATCH /pulls/comments/{id}
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{comment_id}", None, p),
+    # Issue #623：comment_id 兼容十六进制 id——解析为数字 note_id 后走既有更新逻辑
+    note_id = _resolve_pull_comment_note_id(p, owner, repo, number, comment_id,
+                                            _repo_token(owner, repo, user, p))
+    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/comments/{note_id}", None, p),
                     _repo_token(owner, repo, user, p), {"body": body.body})
 
 
