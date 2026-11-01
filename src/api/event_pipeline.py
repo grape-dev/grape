@@ -3018,6 +3018,19 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         else:
             _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
             return
+    # Issue #630：技能物化完整性校验门禁（enqueue 前，fail-fast）——配置了技能但
+    # 内容源全缺失（空壳技能行，如 sid=3276 vod-cli-crossrepo）时显式告警并阻断派发，
+    # 不静默降级；技能未配置（推荐模式/无 skill）不阻断，official 内置包兜底放行。
+    if skill_name:
+        from src.runtime.service import verify_skill_materializable
+        _gate_ok, _gate_reason, _gate_sid = verify_skill_materializable(
+            skill_name, skill_id=skill_id or 0, repo_key=repo_key, user_id=user_id)
+        if not _gate_ok:
+            log.warning(f"Pipeline skill gate BLOCKED seq={seq} agent={agent_type} "
+                        f"skill={skill_name} sid={_gate_sid}: {_gate_reason}")
+            _fail_event(seq, f"技能物化校验未通过，已阻断派发（skill={skill_name}）: "
+                             f"{_gate_reason[:200]}")
+            return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。

@@ -765,6 +765,79 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
     return {"project_info": _pif, "meta": _pim, "knowledge": _know}
 
 
+def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "",
+                                user_id: str | int = "") -> tuple:
+    """Issue #630：技能物化完整性校验（Pipeline enqueue 前门禁）。
+
+    校验「配置了技能」时是否存在可完整物化的内容源（SKILL.md + references）：
+      ① skill_id / 名称解析命中 skill 表（resolve_skill_id user→repo→official）；
+      ② OBS 对象键（file_path）可读 → worker 端按 sid 整包拉取 zip 物化；
+      ③ 本地技能目录完整（validate_skill_dir：SKILL.md + references）；
+      ④ sid=0 时允许官方内置包（resolve_official_skill_path，部署随包分发）。
+    返回 (ok, reason, sid)。
+
+    空壳技能行（legacy create_skill/迁移注册、file_path 空 + 本地目录无 SKILL.md，
+    如 sid=3276 vod-cli-crossrepo）→ (False, ...)，调用方显式阻断派发不静默降级。
+    技能未配置（skill 为空）恒 (True, ...)，不误伤未配置场景（Spec 风险表）。
+    """
+    skill = (skill or "").strip()
+    if not skill:
+        return True, "skill not configured", 0
+    from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path, get_skill_object_key
+    sid = int(skill_id or 0)
+    if not sid:
+        try:
+            sid = int(resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or 0)
+        except Exception:
+            sid = 0
+    if sid:
+        _sk = None
+        try:
+            _sk = get_skill_by_id(sid)
+        except Exception:
+            _sk = None
+        if not _sk:
+            return False, f"skill '{skill}' (sid={sid}) not found or inactive", sid
+        _okey = (_sk.get("file_path") or "").strip() or get_skill_object_key(sid)
+        if _okey:
+            _st = None
+            try:
+                from src.storage import get_skill_storage
+                _st = get_skill_storage()
+            except Exception:
+                _st = None
+            if _st is None or _st.read_bytes(_okey) is not None:
+                return True, f"obs object ok (key={_okey})", sid
+        # 本地目录完整性（SKILL.md + references）
+        try:
+            _full = get_skill_path(sid)
+        except Exception:
+            _full = ""
+        if _full:
+            from src.runtime.skill_materialize import validate_skill_dir
+            ok, missing = validate_skill_dir(os.path.dirname(_full))
+            if ok:
+                return True, "local skill dir ok", sid
+            return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
+                           f"no readable obs object"
+                           + (f" (key={_okey})" if _okey else " (file_path empty)")
+                           + f", local dir incomplete (missing: {', '.join(missing[:5])}); "
+                           f"re-upload the skill package to fix"), sid
+        return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
+                       f"no obs file_path and no local skill dir; "
+                       f"re-upload the skill package to fix"), sid
+    # sid=0：官方内置包兜底（worker 端 official fallback 可完整物化，非静默换技能）
+    try:
+        from src.config import resolve_official_skill_path
+        _official = resolve_official_skill_path(skill)
+        if _official and os.path.isfile(_official):
+            return True, "official skill bundle ok", 0
+    except Exception:
+        pass
+    return False, (f"skill '{skill}' unresolvable (no skill row, no official bundle); "
+                   f"check scene skill binding or upload the skill first"), 0
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", user_gitcode_token="", env_extra=None,
