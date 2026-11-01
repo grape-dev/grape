@@ -505,6 +505,24 @@ def _attach_skill_obs(task: dict) -> None:
             _sid = resolve_skill_id(skill, repo_key=_task_repo, user_id=_task_uid)
             _okey = get_skill_object_key(_sid) if _sid else ""
         if not _okey:
+            # Issue #617：skill 按名未命中 → 按 agent_type 回退官方检查器（worker 无库，
+            # 服务端解析后以 skill_fallback 下发：名字 + id，worker 物化其 zip 并提示
+            # `grape skills detail --skill_id <id>`）
+            try:
+                from src.user.db import resolve_official_checker_skill
+                _fb = resolve_official_checker_skill(task.get("agent_type") or "")
+                if _fb and _fb.get("file_path"):
+                    _okey = _fb.get("file_path")
+                    task["skill_fallback"] = {
+                        "skill_name": _fb.get("skill_name"),
+                        "skill_id": _fb.get("id") or 0,
+                    }
+                    log.info(f"claim skill fallback: '{skill}' not found, agent_type="
+                             f"{task.get('agent_type')} -> official checker "
+                             f"'{_fb.get('skill_name')}' (id={_fb.get('id')})")
+            except Exception as _fb_e:
+                log.warning(f"claim skill fallback resolve failed: {_fb_e}")
+        if not _okey:
             return
         ttl = int(os.environ.get("RUNTIME_SKILL_URL_TTL", "1800"))
         task["skill_key"] = _okey

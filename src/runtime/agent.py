@@ -2086,23 +2086,49 @@ async def _execute_task(client, task, engine_name: str = ""):
         _skill_notes = []
 
         def _fallback_official_skill(_skill_dir, _task, _env) -> dict:
-            """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。"""
+            """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。
+
+            Issue #617：按名未命中时优先用服务端 claim 下发的 skill_fallback
+            （agent_type 对应官方检查器，worker 无库不自行解析），提示带
+            `grape skills detail --skill_id <id>`。
+            """
             _skill_name = _task.get("skill") or ""
+            _fb_info = _task.get("skill_fallback") or {}
+            _fb_name = str(_fb_info.get("skill_name") or "")
+            _fb_id = int(_fb_info.get("skill_id") or 0)
             try:
                 from src.config import resolve_official_skill_path
                 _official = resolve_official_skill_path(_skill_name)
             except Exception as _e:
                 log.warning(f"[skill] official resolve failed: {_e}")
                 _official = ""
+            if not _official and _fb_name:
+                # 按名未命中 → agent_type 官方检查器（skill_fallback）回退
+                try:
+                    from src.config import resolve_official_skill_path as _resolve
+                    _official = _resolve(_fb_name)
+                except Exception as _e:
+                    log.warning(f"[skill] checker resolve failed: {_e}")
+                    _official = ""
             if _official and os.path.isfile(_official):
                 from src.runtime.skill_materialize import materialize_skill_dir_atomic
+                # 官方目录名即落盘技能名（checker 回退时为 _fb_name，同名回退为 _skill_name）
+                _dst_name = os.path.basename(os.path.dirname(_official)) or _skill_name
                 _ok, _r = materialize_skill_dir_atomic(
-                    _skill_dir, _skill_name, os.path.dirname(_official))
+                    _skill_dir, _dst_name, os.path.dirname(_official))
                 if _ok:
                     _env["DEVOPS_SKILLS_DIR"] = _skill_dir
+                    if _dst_name != _skill_name:
+                        return {"status": "fallback", "detail": (
+                            f"skill '{_skill_name}' not found; materialized official checker "
+                            f"'{_dst_name}' (fetch via `grape skills detail --skill_id {_fb_id}`) "
+                            f"at DEVOPS_SKILLS_DIR/{_dst_name}")}
                     return {"status": "fallback", "detail": "official skill package materialized"}
                 return {"status": "degraded", "detail": f"official fallback failed: {_r}"}
-            return {"status": "degraded", "detail": "official skill package not found"}
+            return {"status": "degraded", "detail": (
+                f"official skill package not found"
+                + (f"; checker '{_fb_name}' unavailable (fetch via "
+                   f"`grape skills detail --skill_id {_fb_id}`)" if _fb_name else ""))}
 
         # ===== v3.0：技能获取直连 OBS（降级链见 _fetch_skill_zip）=====
         # ① skill_obs_url（claim 现签预签名 URL）→ worker 直连 OBS
@@ -2145,10 +2171,24 @@ async def _execute_task(client, task, engine_name: str = ""):
             #（构成"有路径无内容"的静默空注入），需走官方包回退 + 降级标注。
             _target_skill = task.get("skill") or ""
             if _ok_zip and _target_skill and _target_skill not in _skills_ok:
-                _ok_zip = False
-                _reason = (f"target skill '{_target_skill}' not in materialized list "
-                           f"[{', '.join(_skills_ok)}]")
-                log.warning(f"[skill] zip partial success misses target: {_reason}")
+                # Issue #617：目标技能名未命中但官方检查器已物化（skill_fallback）→
+                # 视为回退成功，提示读检查器 SKILL.md（含 skills detail --skill_id 路径）
+                _fb_info = task.get("skill_fallback") or {}
+                _fb_hit = str(_fb_info.get("skill_name") or "")
+                if _fb_hit and _fb_hit in _skills_ok:
+                    log.info(f"[skill] target '{_target_skill}' miss, checker '{_fb_hit}' materialized")
+                    _skill_notes.append(
+                        f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
+                        f"(fallback): skill '{_target_skill}' not found; materialized official "
+                        f"checker '{_fb_hit}' for agent_type '{task.get('agent_type', '')}' "
+                        f"instead (fetch via `grape skills detail --skill_id "
+                        f"{_fb_info.get('skill_id', 0)}`). Read "
+                        f"DEVOPS_SKILLS_DIR/{_fb_hit}/SKILL.md instead.")
+                else:
+                    _ok_zip = False
+                    _reason = (f"target skill '{_target_skill}' not in materialized list "
+                               f"[{', '.join(_skills_ok)}]")
+                    log.warning(f"[skill] zip partial success misses target: {_reason}")
             if _ok_zip:
                 env["DEVOPS_SKILLS_DIR"] = skill_dir
                 if _reason:
