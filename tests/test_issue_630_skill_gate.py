@@ -116,6 +116,49 @@ class TestVerifySkillMaterializable:
             ok, _reason, sid = verify_skill_materializable("some_official_like_630")
         assert ok and sid == 0
 
+    def test_storage_unavailable_with_filepath_and_no_local_dir_blocked(self):
+        """PR #797 审查修复：storage 不可用 + file_path 有值 + 本地目录缺失 → 阻断。
+
+        原 fail-open 缺陷：get_skill_storage 返回 None 时直接放行且 reason 误标
+        "obs object ok"，worker 端拉取会静默失败。
+        """
+        sname = f"stfail630_{uuid.uuid4().hex[:6]}"
+        sid = _mk_skill_row(scope="user", owner="8", sname=sname,
+                            file_path="skills/custom/8/%s.zip" % sname)
+        try:
+            with patch("src.storage.get_skill_storage", return_value=None):
+                ok, reason, _ = verify_skill_materializable(sname, skill_id=sid)
+            assert not ok, "storage 不可用时不得 fail-open 放行"
+            assert "storage unavailable" in reason, reason
+            assert "obs object ok" not in reason, reason
+        finally:
+            with db_lock:
+                db.cursor().execute("DELETE FROM skill WHERE id=?", (sid,))
+                db.commit()
+
+    def test_storage_unavailable_with_complete_local_dir_passes(self):
+        """storage 不可用但本地目录完整（SKILL.md + references）→ 放行（不误伤可物化技能）。"""
+        sname = f"stlocal630_{uuid.uuid4().hex[:6]}"
+        _dir = os.path.join(user_db.SKILL_DIR, "9", sname)
+        os.makedirs(os.path.join(_dir, "references"), exist_ok=True)
+        with open(os.path.join(_dir, "SKILL.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: %s\n---\nsee references/run.md\n" % sname)
+        with open(os.path.join(_dir, "references", "run.md"), "w", encoding="utf-8") as f:
+            f.write("# run")
+        try:
+            sid = _mk_skill_row(scope="user", owner="9", sname=sname,
+                                file_path="skills/custom/9/%s.zip" % sname)
+            with patch("src.storage.get_skill_storage", return_value=None):
+                ok, reason, _ = verify_skill_materializable(sname, skill_id=sid)
+            assert ok, reason
+            assert "local skill dir ok" in reason
+        finally:
+            import shutil
+            shutil.rmtree(_dir, ignore_errors=True)
+            with db_lock:
+                db.cursor().execute("DELETE FROM skill WHERE id=?", (sid,))
+                db.commit()
+
 
 class TestSkillsByIdNameResolution:
     """GET /api/skills/by-id/{name}：name→sid 解析（Issue #630 反馈②，422→200）。"""

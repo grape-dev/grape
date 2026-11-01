@@ -799,6 +799,10 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
         if not _sk:
             return False, f"skill '{skill}' (sid={sid}) not found or inactive", sid
         _okey = (_sk.get("file_path") or "").strip() or get_skill_object_key(sid)
+        # Issue #630 审查修复：storage 不可用（get_skill_storage 返回 None/异常）时
+        # 不再 fail-open 放行——file_path 有值但对象不可读，worker 端整包拉取仍会
+        # 静默失败。继续 fallthrough 本地目录校验链，阻断时 reason 标注 storage unavailable。
+        _storage_unavailable = False
         if _okey:
             _st = None
             try:
@@ -806,7 +810,9 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
                 _st = get_skill_storage()
             except Exception:
                 _st = None
-            if _st is None or _st.read_bytes(_okey) is not None:
+            if _st is None:
+                _storage_unavailable = True
+            elif _st.read_bytes(_okey) is not None:
                 return True, f"obs object ok (key={_okey})", sid
         # 本地目录完整性（SKILL.md + references）
         try:
@@ -818,14 +824,17 @@ def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "
             ok, missing = validate_skill_dir(os.path.dirname(_full))
             if ok:
                 return True, "local skill dir ok", sid
+            _src = (f"obs storage unavailable (key={_okey})" if _storage_unavailable else
+                    (f"no readable obs object (key={_okey})" if _okey else "file_path empty"))
             return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
-                           f"no readable obs object"
-                           + (f" (key={_okey})" if _okey else " (file_path empty)")
+                           f"{_src}"
                            + f", local dir incomplete (missing: {', '.join(missing[:5])}); "
                            f"re-upload the skill package to fix"), sid
+        _src = (f"obs storage unavailable (key={_okey})" if _storage_unavailable else
+                ("no obs file_path and no local skill dir" if not _okey else
+                 f"no readable obs object (key={_okey})"))
         return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
-                       f"no obs file_path and no local skill dir; "
-                       f"re-upload the skill package to fix"), sid
+                       f"{_src}; re-upload the skill package to fix"), sid
     # sid=0：官方内置包兜底（worker 端 official fallback 可完整物化，非静默换技能）
     try:
         from src.config import resolve_official_skill_path
