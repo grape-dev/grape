@@ -1373,9 +1373,23 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
                           (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
             db.commit()
             if scope == "repo":
-                ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
+                _dir = ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
             else:
-                ensure_skill_dir(user_id, skill_name)
+                _dir = ensure_skill_dir(user_id, skill_name)
+            # Issue #630：发布链路落盘断点修复——legacy 注册路径只写 DB 行 + 空目录，
+            # 若注册后无内容源（file_path 空 + 本地无 SKILL.md），该行为「空壳技能」，
+            # 派发侧 verify_skill_materializable 门禁会显式阻断（如 sid=3276）。此处
+            # 显式告警留审计痕迹，提示发布者补齐内容（/api/skills/upload 或 save_skill_md）。
+            if not os.path.isfile(os.path.join(_dir, "SKILL.md")):
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT file_path FROM skill WHERE skill_name=? AND scope=? AND owner_id=?",
+                              (skill_name, scope, owner_id or str(user_id)))
+                    _row = c.fetchone()
+                if not (_row and (_row[0] or "").strip()):
+                    log.warning(f"create_skill: '{skill_name}' (scope={scope}, owner={owner_id or user_id}) "
+                                f"registered WITHOUT materialization source (no SKILL.md, no obs file_path); "
+                                f"save content before dispatching tasks with this skill (Issue #630)")
             return True
     except Exception as e:
         log.warning(f"Create skill failed: {e}")
