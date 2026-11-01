@@ -762,6 +762,26 @@ window._generateCopySceneName = function(want, existing) {
   return finalName;
 };
 
+// 2026-10-24（生产同名仓误判修复）：分支接口显式带平台，避免 _detect_repo_provider 被
+// user_repos 里 github: 同名记录带偏（托管仓被误判成 GitHub 同名仓 → 分支只剩 main）。
+// 2026-11-01 修复：原定义被误塞进 _renderLocalSceneDetailPage 函数体内，导致直接进
+// "新建场景"时 _branchQS 未注册、渲染在 dashboard.js 分支加载处 TypeError 中断，
+// 新建页所有交互函数（toggleAgentInScene/selectAgentSkill/openEngineModal 等）未注册
+// ——整页按钮点不动。移到顶层，加载即注册。
+window._branchQS = function(owner, repo) {
+  try {
+    var rk = (app.currentRepo() || {}).repoKey || '';
+    if (rk && rk.indexOf(':') > 0) {
+      var bare = rk.replace(/^(gitcode|github):/, '');
+      // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
+      if (!owner || !repo || bare === (owner + '/' + repo)) {
+        return '?repo_key=' + encodeURIComponent(rk);
+      }
+    }
+  } catch (e) {}
+  return '';
+};
+
 function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isApplied, isCustomScene, pipeData, owner, name, metrics, dashData) {
   const el = document.getElementById('pageContent');
   if (!el) return;
@@ -1061,23 +1081,6 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
       (preset ? '<input type="hidden" class="adv-kv-preset" value="1">' : '');
     container.appendChild(row);
   };
-
-  
-// 2026-10-24（生产同名仓误判修复）：分支接口显式带平台，避免 _detect_repo_provider 被
-// user_repos 里 github: 同名记录带偏（托管仓被误判成 GitHub 同名仓 → 分支只剩 main）。
-window._branchQS = function(owner, repo) {
-  try {
-    var rk = (app.currentRepo() || {}).repoKey || '';
-    if (rk && rk.indexOf(':') > 0) {
-      var bare = rk.replace(/^(gitcode|github):/, '');
-      // 只在 repo_key 与查询的 owner/repo 一致时携带，防止跨仓页面注入错误平台
-      if (!owner || !repo || bare === (owner + '/' + repo)) {
-        return '?repo_key=' + encodeURIComponent(rk);
-      }
-    }
-  } catch (e) {}
-  return '';
-};
 
 window._createNewBranchInline = function(owner, name) {
     var branchName = (document.getElementById('newBranchNameInline') || {}).value || '';
