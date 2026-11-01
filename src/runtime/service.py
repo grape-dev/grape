@@ -439,6 +439,30 @@ _TABLE_COLS_CACHE: dict = {}
 _TABLE_COLS_CACHE_DB_ID = id(db)   # db 对象身份标记（测试 monkeypatch 换库 → 缓存自动失效）
 
 
+# Issue #605：引擎不在 pool_engine_ids 名单 → 认领静默跳过，此前无任何日志，
+# 导致 hermes 0 派发无法从服务端解释。补取证日志（60s 去重防 claim 轮询刷屏）。
+_pool_skip_log_cache: dict = {}
+_POOL_SKIP_LOG_INTERVAL = 60.0
+
+
+def _log_pool_skip_once(task_id, runtime_id: int, allowed):
+    """记录一次「引擎被 pool 名单挡在门外」的取证日志（每 task+engine 60s 至多一条）。"""
+    key = (task_id, runtime_id)
+    now = time.time()
+    try:
+        if _pool_skip_log_cache.get(key, 0.0) + _POOL_SKIP_LOG_INTERVAL > now:
+            return
+    except Exception:
+        pass
+    _pool_skip_log_cache[key] = now
+    if len(_pool_skip_log_cache) > 1000:   # 防泄漏：粗剪枝
+        _stale = [k for k, v in _pool_skip_log_cache.items() if v + _POOL_SKIP_LOG_INTERVAL < now]
+        for k in _stale:
+            _pool_skip_log_cache.pop(k, None)
+    log.info(f"claim pool filter: engine {runtime_id} not in pool_engine_ids={allowed} "
+             f"of task {task_id}, skip (Issue #605)")
+
+
 def _table_columns(table: str) -> set:
     """表实际存在的列（PRAGMA，进程内缓存）。
 
@@ -1380,6 +1404,8 @@ def claim(runtime_id, expected_task_id=None, expected_event_seq=None) -> dict | 
                                 _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
                                 return None
                             _skip = True
+                            # Issue #605：引擎不在广播名单被静默跳过 → 取证日志（60s 去重）
+                            _log_pool_skip_once(task_id, runtime_id, _allowed)
                     except Exception:
                         pass
                 if not _skip:
@@ -1749,6 +1775,8 @@ def claim_by_tag(tag: str, runtime_id: int,
                                 _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
                                 return None
                             _skip = True
+                            # Issue #605：引擎不在广播名单被静默跳过 → 取证日志（60s 去重）
+                            _log_pool_skip_once(task_id, runtime_id, _allowed)
                     except Exception:
                         pass
                 if not _skip:

@@ -117,6 +117,129 @@ def _health_ok(m: dict) -> bool:
     return True
 
 
+# ===== 派发决策可观测性（Issue #605）=====
+# engine_select 的候选构建 / 过滤 / 选中全部是静默的：hermes 持续 0 派发（Issue #605）
+# 无法从服务端日志解释 17004 是否在候选、被什么条件过滤。以下三件套补齐取证能力：
+# - _decision_log：单行 JSON 结构化决策日志（event + 候选 + 过滤原因 + 选中理由）
+# - _candidate_reject_reasons：与 _apply_filters/_filter_by_tags/_filter_by_health
+#   同一把尺子的「原因口径」（只读，不改过滤行为）
+# - explain_engine_selection：主控侧取证入口（dashboard 只读接口数据源）
+
+
+def _decision_log(event: str, **fields) -> None:
+    """engine_select 决策结构化日志（Issue #605）：单行 JSON，便于 grep/采集。"""
+    try:
+        payload = {"event": event}
+        payload.update(fields)
+        log.info("engine_select_decision " + json.dumps(payload, ensure_ascii=False, default=str))
+    except Exception:
+        pass
+
+
+def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
+    """计算单个候选引擎会被过滤掉的原因列表（与实际过滤链同一口径，只读不改行为）。
+
+    覆盖 _apply_filters（enabled/installed/healthy/_health_ok/本机已知引擎名）、
+    _filter_by_tags（engine_capabilities 标签）、_filter_by_health（健康分）三层。
+    返回空列表 = 该候选可通过全部过滤。
+    """
+    reasons = []
+    f = cfg.get("filters") or {}
+    if not m.get("enabled", True):
+        reasons.append("disabled")
+    if f.get("only_installed") and not m.get("installed"):
+        reasons.append("not_installed")
+    if f.get("only_healthy") and not m.get("healthy"):
+        reasons.append("healthy=0")
+    if f.get("only_online") and not _health_ok(m):
+        if (m.get("status") or "") != "online":
+            reasons.append(f"status={m.get('status') or 'offline'}")
+        else:
+            reasons.append(f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s")
+    if (m.get("credential_id") or 0) == 0:
+        try:
+            from src.user.db import is_known_engine_name
+            if not is_known_engine_name(m.get("name") or ""):
+                reasons.append("unknown_local_engine")
+        except Exception:
+            pass
+    rid = m.get("runtime_id") or 0
+    if rid and agent_type:
+        try:
+            db, lock = _db()
+            with lock:
+                c = db.cursor()
+                c.execute("SELECT tag FROM engine_capabilities WHERE runtime_id=? AND enabled=1", (rid,))
+                tags = [r[0] for r in c.fetchall()]
+        except Exception:
+            tags = []
+        if agent_type not in tags and "all" not in tags:
+            reasons.append(f"tag_mismatch({','.join(tags) or 'none'})")
+    if rid:
+        try:
+            from src.runtime.health_scorer import is_healthy as _score_ok
+            if not _score_ok(rid):
+                reasons.append("health_score_below_threshold")
+        except Exception:
+            pass
+    return reasons
+
+
+def explain_engine_selection(repo_key: str, agent_type: str, scene_id: str = "",
+                             user_id: int = 0, issue_creator: str = "") -> dict:
+    """主控侧取证入口（Issue #605）：解释某 (repo, agent_type, scene) 的引擎候选与过滤全景。
+
+    返回：
+    - mode：plugin（广播）/ legacy
+    - bound_engine_ids：场景 node 绑定的 engine_runtime_ids
+    - candidates：候选全集（含 scope/priority/healthy/last_seen_at/tags），每个候选带
+      reasons（会被过滤的具体原因，空 = 可通过全部过滤）
+    - pool_engine_ids：广播名单（get_scene_pool_engine_ids 实际结果，None = 全灭）
+    - selected：legacy 模式实际会选中的 runtime_id（None = engine_unavailable）
+    """
+    out = {"repo": _norm_repo(repo_key), "agent_type": agent_type, "scene_id": scene_id,
+           "mode": "legacy", "bound_engine_ids": [], "candidates": [],
+           "pool_engine_ids": "", "selected": None}
+    try:
+        from src.api.event_pipeline import is_plugin_mode
+        if is_plugin_mode():
+            out["mode"] = "plugin"
+    except Exception:
+        pass
+    cfg = load_engine_selection()
+    repo = _norm_repo(repo_key)
+    if not user_id:
+        user_id = _repo_user_id(repo_key, issue_creator=issue_creator)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import get_scene_engine_ids
+            engine_ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo, user_id=user_id)
+        except Exception:
+            engine_ids = []
+    else:
+        engine_ids = []
+    out["bound_engine_ids"] = list(engine_ids or [])
+    if engine_ids:
+        members = dedupe_engines(_engines_by_ids(list(engine_ids), repo, cfg))
+        for m in members:
+            out["candidates"].append({
+                "runtime_id": m.get("runtime_id"), "name": m.get("name") or "",
+                "instance": engine_unique_key(m), "scope": m.get("scope") or "",
+                "priority": m.get("priority"), "status": m.get("status") or "",
+                "healthy": bool(m.get("healthy")), "installed": bool(m.get("installed")),
+                "last_seen_at": m.get("last_seen_at") or "",
+                "credential_id": m.get("credential_id") or 0,
+                "reasons": _candidate_reject_reasons(m, cfg, agent_type),
+            })
+    if scene_id:
+        out["pool_engine_ids"] = get_scene_pool_engine_ids(
+            scene_id, agent_type, repo_key=repo_key, user_id=user_id, issue_creator=issue_creator)
+    if out["mode"] == "legacy":
+        out["selected"] = pick_engine(repo_key, agent_type, fallback_runtime_id=0,
+                                      scene_id=scene_id, user_id=user_id, issue_creator=issue_creator)
+    return out
+
+
 def _apply_filters(members: list[dict], cfg: dict) -> list[dict]:
     f = cfg.get("filters") or {}
     out = []
@@ -406,12 +529,16 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     """
     cfg = load_engine_selection()
     if not cfg.get("enabled", True):
+        _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                      result="engine_selection_disabled")
         return None
     # Plugin 模式：统一广播，engine_runtime_ids 由 get_scene_pool_engine_ids 写入 pool_engine_ids
     # （SRE 的空列表/非个人级约束在 get_scene_pool_engine_ids 内生效——那里是广播范围的唯一收口）
     try:
         from src.api.event_pipeline import is_plugin_mode
         if is_plugin_mode():
+            _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                          result="plugin_broadcast")
             return 0
     except Exception:
         pass
@@ -427,10 +554,23 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
             engine_ids = []
     else:
         engine_ids = []
+    # Issue #605：候选/过滤决策留痕——bound 集合 + 每候选被过滤原因（只读口径，不改行为）
+    _bound_ids = list(engine_ids or [])
+    _cand_trace = []
+    if _bound_ids:
+        for m in dedupe_engines(_engines_by_ids(_bound_ids, repo, cfg)):
+            _cand_trace.append({
+                "rid": m.get("runtime_id"), "name": m.get("name") or "",
+                "scope": m.get("scope") or "", "status": m.get("status") or "",
+                "reasons": _candidate_reject_reasons(m, cfg, agent_type),
+            })
     # SRE 派发层约束（sre-repo-worker-relax §1.1）：允许 user+repo 两档（user 优先，
     # 个人机器环境有登录态优先复用，repo 档作协作兜底）；空 = 无引擎不回退不广播
     if _sre_no_broadcast(agent_type):
         if not engine_ids:
+            _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                          bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                          result="sre_no_bound_engines")
             return None
         members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
         members = _filter_by_tags(members, agent_type)
@@ -443,8 +583,21 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
             if not cand:
                 continue
             if cfg.get("rule") == "order":
-                return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-            return random.choice(cand)["runtime_id"]
+                _sel = min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+                _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                              bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                              result="selected", selected=_sel,
+                              reason=f"sre scope={_scope} rule=order")
+                return _sel
+            _sel = random.choice(cand)["runtime_id"]
+            _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                          bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                          result="selected", selected=_sel,
+                          reason=f"sre scope={_scope} rule=random")
+            return _sel
+        _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                      bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                      result="sre_no_healthy_engine")
         return None
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
@@ -461,19 +614,43 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                 if not cand:
                     continue  # 该档位全不健康，尝试下一档位
                 if cfg.get("rule") == "order":
-                    return min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
-                return random.choice(cand)["runtime_id"]
+                    _sel = min(cand, key=lambda r: (r["priority"], r["runtime_id"]))["runtime_id"]
+                    _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                                  bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                                  result="selected", selected=_sel,
+                                  reason=f"scope={scope} rule=order")
+                    return _sel
+                _sel = random.choice(cand)["runtime_id"]
+                _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                              bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                              result="selected", selected=_sel,
+                              reason=f"scope={scope} rule=random")
+                return _sel
             # 所有档位均无健康引擎 → 降级兜底：取所有候选中健康分最高的
             all_cand = _apply_filters(members, cfg)
             if all_cand:
                 _best = _best_health_fallback(all_cand)
                 if _best:
                     log.info(f"pick_engine: all scopes unhealthy, fallback to best={_best}")
+                    _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                                  bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                                  result="fallback_best_health", selected=_best,
+                                  reason="all_scopes_unhealthy")
                     return _best
+            _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                          bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                          result="no_healthy_member")
             return None     # 集合存在但无健康成员 → engine_unavailable
     # engine_runtime_ids 为空 → 回退会话主引擎（legacy）
     if fallback_runtime_id:
+        _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                      bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                      result="fallback_session_engine", selected=int(fallback_runtime_id),
+                      reason="empty_scene_binding")
         return int(fallback_runtime_id)
+    _decision_log("pick_engine", repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                  bound_engine_ids=_bound_ids, candidates=_cand_trace,
+                  result="engine_unavailable")
     return None
 
 
@@ -535,10 +712,27 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                     members = [m for m in members if m.get("scope") in ("user", "repo")]
                     if len(members) < _before:
                         log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
+                # Issue #605：广播名单过滤留痕——每个被过滤引擎的 rid/name 与原因（stale 心跳/离线等）
+                _dropped = []
+                for m in members:
+                    if not _health_ok(m):
+                        if (m.get("status") or "") != "online":
+                            _why = f"status={m.get('status') or 'offline'}"
+                        else:
+                            _why = f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s"
+                        _dropped.append({"rid": m.get("runtime_id"), "name": m.get("name") or "", "reason": _why})
                 healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
                 if healthy_ids:
+                    _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
+                                  scene_id=scene_id, bound_engine_ids=ids,
+                                  healthy_ids=healthy_ids, dropped=_dropped,
+                                  result="healthy_pool")
                     return json.dumps(healthy_ids)
                 # 配了引擎但全灭 → None（方案A：调用方报错，不放开广播）
+                _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
+                              scene_id=scene_id, bound_engine_ids=ids,
+                              healthy_ids=[], dropped=_dropped,
+                              result="all_offline")
                 return None
         except Exception as e:
             log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
