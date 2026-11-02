@@ -39,7 +39,16 @@ class PRCreateBody(BaseModel):
 class PRUpdateBody(BaseModel):
     title: str = ""
     body: str = ""
-    labels: str = ""
+    # Issue #581: labels 放宽为 str|list（CLI --json 数组直传不再与 Pydantic 冲突）。
+    # 通道格式差异：GitHub 原生要求字符串数组（逗号分隔字符串会被 422），GitCode 维持
+    # 逗号分隔字符串透传；归一化入口见 _normalize_labels，通道适配见 _provider_labels。
+    labels: str | list = Field(
+        "",
+        title="PR labels",
+        description="Comma-separated label string or label array. "
+                    "GitHub channel forwards an array; GitCode channel forwards a comma-separated string.",
+        examples=["bug,P1", ["bug", "P1"]],
+    )
 
 
 class PRMergeBody(BaseModel):
@@ -68,7 +77,13 @@ class IssueUpdateBody(BaseModel):
         json_schema_extra={"examples": [{"state": "reopen"}]},
     )
 
-    labels: str = ""
+    labels: str | list = Field(
+        "",
+        title="Issue labels",
+        description="Comma-separated label string or label array. "
+                    "GitHub channel forwards an array; GitCode channel forwards a comma-separated string.",
+        examples=["bug,P1", ["bug", "P1"]],
+    )
     assignee: str = ""
     milestone_id: int = 0
     state: str = Field(
@@ -105,6 +120,42 @@ class MilestoneUpdateBody(BaseModel):
 
 class CommentBody(BaseModel):
     body: str
+
+
+def _normalize_labels(value: str | list | None) -> str | list[str]:
+    """Issue #581：labels 归一化入口（str|list → list[str]）。
+
+    - str：按逗号 split、逐项 strip、丢弃空项（GitHub 逗号分隔字符串在此转数组）。
+    - list：逐项 str 化 + strip + 丢弃空项（CLI --json 数组直传）。
+    - 空值/归一化后为空 → 返回 ""（保持 apply_rules / payload 过滤的空值跳过语义）。
+    """
+    if value is None or value == "":
+        return ""
+    if isinstance(value, str):
+        items = [s.strip() for s in value.split(",")]
+    elif isinstance(value, list):
+        items = [str(s).strip() for s in value]
+    else:
+        return ""
+    items = [s for s in items if s]
+    return items or ""
+
+
+def _provider_labels(provider: str, value: str | list | None) -> str | list[str]:
+    """Issue #581：labels 通道适配（issues/pulls update 共用）。
+
+    - GitHub：归一化为字符串数组（GitHub PATCH /issues 的 labels 要求 array，
+      逗号分隔字符串透传会 422）。
+    - GitCode：维持逗号分隔字符串透传（存量行为零变更）；数组入参兜底 join 为逗号字符串。
+    """
+    if value is None or value == "":
+        return ""
+    if provider == "github":
+        return _normalize_labels(value)
+    if isinstance(value, list):
+        normalized = _normalize_labels(value)
+        return ",".join(normalized) if normalized else ""
+    return value
 
 
 def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
@@ -444,7 +495,8 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     neutral = {
-        "labels": body.labels,
+        # Issue #581：labels 双通道适配（GitHub→数组 / GitCode→逗号字符串透传）
+        "labels": _provider_labels(p, body.labels),
         "assignee": body.assignee,
         "milestone_id": body.milestone_id or None,
         "state": body.state,
@@ -572,7 +624,9 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
     _body = body.body or ""
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
-    payload = {k: v for k, v in {"title": body.title, "body": _body, "labels": body.labels}.items() if v != ""}
+    # Issue #581：labels 双通道适配（GitHub→数组 / GitCode→逗号字符串透传）；空值过滤语义不变
+    payload = {k: v for k, v in {"title": body.title, "body": _body,
+                                  "labels": _provider_labels(p, body.labels)}.items() if v != ""}
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 台账（S25，第十一轮补漏）：agent 改 PR → pull_request_updated 回声对账
