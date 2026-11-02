@@ -1155,6 +1155,41 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
     return None
 
 
+def _gitcode_assignee_member_check(api_token: str, owner: str, repo: str, username: str) -> str:
+    """Issue #649: 校验 assignee 是否为 GitCode 仓库成员（GET /collaborators/{u}/permission）。
+
+    返回三态：
+    - "member"     确认是成员（有协作者权限记录，可被指派）
+    - "not_member" 确认非成员（上游 404）
+    - "unknown"    无法判定（403/429/网络等）——放行交给上游 create 最终裁决，
+                   避免「查询接口本身无权限」被误判成非成员而阻断合法请求。
+    """
+    import urllib.parse as _up
+    import urllib.request as _ur
+    import urllib.error as _uerr
+    if not username or not api_token:
+        return "unknown"
+    _url = (f"https://gitcode.com/api/v5/repos/{owner}/{_up.quote(repo, safe='')}"
+            f"/collaborators/{_up.quote(username, safe='')}/permission?access_token={api_token}")
+    _req = _ur.Request(_url, headers={"Accept": "application/json"}, method="GET")
+    try:
+        with _ur.urlopen(_req, timeout=15) as _resp:
+            _raw = _resp.read().decode(errors="replace")
+        import json as _json
+        _data = _json.loads(_raw) if _raw.strip() else {}
+        # Gitee 系返回 {access_level, permission, role_name...}；access_level<=10 视为无实质权限
+        _lvl = int(_data.get("access_level") or 0)
+        return "member" if _lvl >= 20 else "not_member"
+    except _uerr.HTTPError as e:
+        if e.code == 404:
+            return "not_member"
+        log.warning(f"assignee member check undetermined (HTTP {e.code}): {username} @ {owner}/{repo}")
+        return "unknown"
+    except Exception as e:
+        log.warning(f"assignee member check failed: {e}")
+        return "unknown"
+
+
 def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
                         body_text: str = "", assignee: str = "") -> dict:
     """创建 GitCode Issue（v5 实测：必须 access_token query + form-encoded，勿用 Bearer+JSON body）。
@@ -1360,22 +1395,24 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     # 是否使用「用户自己的 GitCode token」：用于 401 时区分「用户登录失效」（引导重新绑定）
     # 与「仓库 bot token 失效」（提示检查仓库 Bot Token 配置）两套文案。
     _using_user_token = (not _preauth_token) and (not _is_github)
-    # Issue #343: assignee 优先用 GitCode/GitHub 登录名（external_login），
-    # 而非 grape 平台 username——GitCode 侧 assignee 必须是平台登录名
-    if body.assignee and body.assignee.strip():
-        assignee = body.assignee.strip()
-    else:
-        assignee = user["username"]  # 默认 fallback
-        # 尝试从 external_identities 查真实 GitCode/GitHub 登录名
-        try:
-            from src.auth.grape_account_db import get_user_identities
-            _provider_name = "github" if _is_github else "gitcode"
-            for ident in get_user_identities(user["id"]):
-                if ident.get("provider") == _provider_name and ident.get("external_login"):
-                    assignee = ident["external_login"]
-                    break
-        except Exception:
-            pass  # 查不到就用 grape username fallback
+    # Issue #649: assignee 不再默认填创建者——非成员默认指派会触发上游 403，
+    # 误导排查方向。不传 assignee 时留空，由仓库方后续分派；显式传入时走下方成员资格预校验。
+    assignee = (body.assignee or "").strip()
+    # 内部流程（场景归属 issue_creator / pipeline 事件创建人）仍需要创建者的平台登录名，
+    # 单独解析 _creator_login，绝不回填到 assignee（Issue #343: external_login 优先）。
+    _creator_login = user["username"]
+    try:
+        from src.auth.grape_account_db import get_user_identities
+        _provider_name = "github" if _is_github else "gitcode"
+        for ident in get_user_identities(user["id"]):
+            if ident.get("provider") == _provider_name and ident.get("external_login"):
+                _creator_login = ident["external_login"]
+                break
+    except Exception:
+        pass  # 查不到就用 grape username fallback
+    # Issue #649: 本次建单请求级 trace_id（错误响应附带，便于排查定位）
+    import uuid as _uuid
+    _trace_id = f"tr_{_uuid.uuid4().hex[:16]}"
     # 1) 幂等：同 title open issue 已存在 → 提示用户任务已存在
     # Issue #343: 查重失败（token 失效）时给明确提示，不静默放行导致重复建单
     try:
@@ -1415,6 +1452,19 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                                                      "message": f"任务已存在（Issue #{issue_num}），请输入新的任务标题",
                                                      "issue_number": issue_num})
     if issue_num is None:
+        # Issue #649: 显式 assignee + GitCode → 上游创建前预校验成员资格；
+        # 非成员直接给出「非成员」语义错误（含 trace_id），不再无谓打上游 403 再误报。
+        if (not _is_github) and assignee:
+            _member_state = _gitcode_assignee_member_check(api_token, owner, rname, assignee)
+            if _member_state == "not_member":
+                raise HTTPException(status_code=403, detail={
+                    "code": 403,
+                    "message": f"创建 Issue 失败：assignee {assignee} 不是仓库 {owner}/{rname} 的成员，"
+                               f"无法被指派。可不传 assignee（留空由仓库方分派），或改填该仓库成员。",
+                    "trace_id": _trace_id,
+                    "upstream_detail": f"member precheck: collaborator permission lookup returned 404 "
+                                       f"for assignee '{assignee}' on {owner}/{rname}",
+                })
         # 拼接 Task Center 上传的附件到 issue body
         _desc_with_attach = (body.description or "").strip()
         _pending_attachments = _attach_list(owner, rname, "pending")
@@ -1481,12 +1531,22 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _up_403 and any(kw in _up_403_low for kw in (
                         'user not found', 'user is not found', 'permission', 'forbidden',
                         'member', 'privilege', 'unauthorized', 'not authorized')):
-                    # 用户/权限类 403 → 保留 assignee 提示
+                    # Issue #649: 上游 403 权限/成员类 → 归类为「非成员/无权指派」语义错误，
+                    # 主文案指向真实原因（成员资格），不再误报「assignee 用户名无效」误导排查；
+                    # trace_id + 上游脱敏原文作为辅助字段（detail，非主文案）保留可追溯。
+                    if assignee:
+                        raise HTTPException(status_code=403, detail={
+                            "code": 403,
+                            "message": f"创建 Issue 失败：无权指派 assignee（assignee={assignee}，"
+                                       f"非仓库 {owner}/{rname} 成员或无指派权限）。"
+                                       f"可不传 assignee（留空由仓库方分派）后重试。",
+                            "trace_id": _trace_id,
+                            "upstream_detail": _up_403,
+                        })
+                    # assignee 为空的权限类 403（创建者自身无权限等）→ 通用提示附上游脱敏正文
                     raise HTTPException(status_code=403, detail={
                         "code": 403,
-                        "message": f"创建 Issue 失败：处理人无效或无权限（assignee={assignee}），"
-                                   f"请检查 assignee 是否为有效的 {('GitHub' if _is_github else 'GitCode')} 用户名"
-                                   + (f"（上游响应: {_up_403}）" if _up_403 else "")
+                        "message": f"创建 Issue 失败（上游 403）: {_up_403}"
                     })
                 # 无法识别的 403 → 通用提示附上游脱敏正文，不猜测归因
                 raise HTTPException(status_code=403, detail={
@@ -1581,7 +1641,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         if _scene_to_write:
             # Issue #343 问题十一修复: issue_creator 必须是 GitCode/GitHub 登录名（external_login），
             # 不能用平台名 user["username"]——_repo_user_id 查的是 unified_user_mapping.gitcode_user
-            scene_uid = _repo_user_id(repo_key, issue_creator=assignee) or 0
+            scene_uid = _repo_user_id(repo_key, issue_creator=_creator_login) or 0
             set_issue_scene(repo_key, f"#{issue_num}", _scene_to_write, scene_user_id=scene_uid)
             log.info(f"create_task: scene={_scene_to_write} set for #{issue_num}"
                      + ("" if (body.scene_id and body.scene_id != "vod-auto") else " (repo default fallback)"))
@@ -1648,10 +1708,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 使补发事件与对应平台真实 webhook 形态一致（可读性/排查 + 去重指纹一致），
             # 不再对 GitCode 也发 GitHub 格式合成 payload 造成「GitHub 事件」误判。
             import json as _pipe_json
-            # Issue #343 问题十一修复: pipeline 创建人必须用 external_login（assignee），不能 fallback 到平台名
-            # assignee 此时已经是 external_login（1257-1272 行从 external_identities 查到）或用户传入的值
-            # assignee 为空时不填创建人字段，让 pipeline 降级用 owner
-            _assign = assignee or ""
+            # Issue #343/#649: pipeline 创建人 = 创建者 external_login（_creator_login），
+            # 与 assignee 解耦——不传 assignee 时创建人字段仍正确，不再回填 assignee
+            _assign = _creator_login or ""
             if _is_github:
                 _pipe_payload = {
                     "action": "opened",
