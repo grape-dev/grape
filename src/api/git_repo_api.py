@@ -42,7 +42,7 @@ class PRUpdateBody(BaseModel):
     # Issue #581: labels 放宽为 str|list（CLI --json 数组直传不再与 Pydantic 冲突）。
     # 通道格式差异：GitHub 原生要求字符串数组（逗号分隔字符串会被 422），GitCode 维持
     # 逗号分隔字符串透传；归一化入口见 _normalize_labels，通道适配见 _provider_labels。
-    labels: str | list = Field(
+    labels: str | list[str] = Field(
         "",
         title="PR labels",
         description="Comma-separated label string or label array. "
@@ -77,7 +77,7 @@ class IssueUpdateBody(BaseModel):
         json_schema_extra={"examples": [{"state": "reopen"}]},
     )
 
-    labels: str | list = Field(
+    labels: str | list[str] = Field(
         "",
         title="Issue labels",
         description="Comma-separated label string or label array. "
@@ -122,7 +122,7 @@ class CommentBody(BaseModel):
     body: str
 
 
-def _normalize_labels(value: str | list | None) -> str | list[str]:
+def _normalize_labels(value: str | list[str] | None) -> list[str] | str:
     """Issue #581：labels 归一化入口（str|list → list[str]）。
 
     - str：按逗号 split、逐项 strip、丢弃空项（GitHub 逗号分隔字符串在此转数组）。
@@ -141,7 +141,7 @@ def _normalize_labels(value: str | list | None) -> str | list[str]:
     return items or ""
 
 
-def _provider_labels(provider: str, value: str | list | None) -> str | list[str]:
+def _provider_labels(provider: str, value: str | list[str] | None) -> str | list[str]:
     """Issue #581：labels 通道适配（issues/pulls update 共用）。
 
     - GitHub：归一化为字符串数组（GitHub PATCH /issues 的 labels 要求 array，
@@ -624,11 +624,21 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
     _body = body.body or ""
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
-    # Issue #581：labels 双通道适配（GitHub→数组 / GitCode→逗号字符串透传）；空值过滤语义不变
+    # Issue #581：labels 双通道适配（GitHub→数组 / GitCode→逗号字符串透传）；空值过滤语义不变。
+    # GitHub "Update a pull request" 端点不接受 labels 字段（真实调用 422），PR 标签
+    # 必须走 PATCH /issues/{n}（GitHub PR 复用 issue 元数据端点）——labels 单独拆分请求。
+    _labels = _provider_labels(p, body.labels)
+    _gh_labels = _labels if p == "github" else ""
     payload = {k: v for k, v in {"title": body.title, "body": _body,
-                                  "labels": _provider_labels(p, body.labels)}.items() if v != ""}
+                                  "labels": "" if p == "github" else _labels}.items() if v != ""}
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
+    if _gh_labels != "":
+        # GitHub 通道：labels 走 issue 元数据端点（数组格式），结果并入返回体
+        _labels_resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                                _repo_token(owner, repo, user, p), {"labels": _gh_labels})
+        if isinstance(resp, dict) and isinstance(_labels_resp, dict):
+            resp = {**resp, "labels": _labels_resp.get("labels", _gh_labels)}
     # Issue #453 台账（S25，第十一轮补漏）：agent 改 PR → pull_request_updated 回声对账
     try:
         from src.outbound_ledger import record_outbound, content_hash_md5

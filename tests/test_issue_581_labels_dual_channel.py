@@ -127,12 +127,26 @@ def test_github_issues_update_labels_array_direct(github_calls, _client):
 
 
 def test_github_pulls_update_labels_string_to_array(github_calls, _client):
+    """GitHub "Update a pull request" 端点不接受 labels（422）——PR 标签必须走
+    PATCH /issues/{n} 且为数组；/pulls payload 不得携带 labels 字段。"""
     _override_user(f"github:{OWNER}/{REPO}")
     r = _client.patch(f"/api/git-repo/{OWNER}/{REPO}/pulls/9", json={"labels": "bug,P1"})
     assert r.status_code == 200
-    last = github_calls[-1]
-    assert last["method"] == "PATCH" and last["url"].endswith("/pulls/9")
-    assert last["body"]["labels"] == ["bug", "P1"]
+    assert len(github_calls) == 2
+    pulls_call, issue_call = github_calls
+    assert pulls_call["method"] == "PATCH" and pulls_call["url"].endswith("/pulls/9")
+    assert "labels" not in pulls_call["body"]
+    assert issue_call["method"] == "PATCH" and issue_call["url"].endswith("/issues/9")
+    assert issue_call["body"] == {"labels": ["bug", "P1"]}
+
+
+def test_github_pulls_update_title_only_no_issue_call(github_calls, _client):
+    """仅改 title/body 时不得额外触发 /issues labels 请求。"""
+    _override_user(f"github:{OWNER}/{REPO}")
+    r = _client.patch(f"/api/git-repo/{OWNER}/{REPO}/pulls/9", json={"title": "t"})
+    assert r.status_code == 200
+    assert len(github_calls) == 1
+    assert github_calls[0]["url"].endswith("/pulls/9")
 
 
 def test_github_empty_labels_omitted_from_payload(github_calls, _client):
@@ -180,3 +194,7 @@ def test_model_rejects_other_types():
     from pydantic import ValidationError
     with pytest.raises(ValidationError):
         IssueUpdateBody(labels=123)
+    with pytest.raises(ValidationError):
+        IssueUpdateBody(labels=["bug", 123])
+    with pytest.raises(ValidationError):
+        PRUpdateBody(labels=["bug", 123])
