@@ -673,7 +673,7 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
         return ""
 
 
-@router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Developer confirms the requirement is done: status -> completed, stage -> done (idempotent in terminal state).")
+@router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Manual confirmation of issue done: status -> completed, stage -> done (idempotent in terminal state). Issue #656: since the pipeline auto-finalizes an issue when its last node completes with no blockers (all nodes completed, no failed events), this endpoint is ONLY for explicit confirmation scenarios: issue in pending_review (agent-set review point, e.g. failed-node fallback or issue closed awaiting review), or user-side early closure of a still-open issue. Do not use it for routine pipeline completion.")
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
     from src.api.session_store import set_issue_stage

@@ -2522,30 +2522,20 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                                   completed_at=datetime.now(timezone.utc).isoformat(),
                                   result=_result_show,
                                   structured_output=output or None)
-            # Issue #51: 最后节点完成后 → 设 stage=pending_review 等待开发者审核
-            # 统一处理：检查 agent 是否是 pipeline 最后节点（非 done 的 next=done）
+            # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
+            # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
+            # failed 阻断回退 pending_review 保留人工 confirm done 路径）
             if status == "completed" and task.get("issue_id"):
                 try:
-                    _ag = task.get("agent_type") or ""
-                    _rk = task.get("repo_key") or ""
-                    _iid = task.get("issue_id") or ""
-                    if _ag and _rk and _iid:
-                        from src.api.session_store import get_issue_stage, get_issue_scene, set_issue_stage
-                        from src.api.pipeline_config import get_pipeline_config
-                        _st = get_issue_stage(_rk, _iid)
-                        _cur_stage = (_st or {}).get("stage", "") if _st else ""
-                        if _cur_stage == _ag:  # 当前 stage 就是完成的 agent → 检查是否最后节点
-                            _scene_tuple = get_issue_scene(_rk, _iid)
-                            _scene_id = (_scene_tuple[0] if _scene_tuple and _scene_tuple[0] else "") or "default"
-                            _pipe_cfg = get_pipeline_config(_scene_id, repo_key=_rk)
-                            _nodes = (_pipe_cfg or {}).get("nodes", [])
-                            for _n in _nodes:
-                                if _n.get("id") == _ag and _n.get("next") == "done":
-                                    set_issue_stage(_rk, _iid, "pending_review", _ag)
-                                    log.info(f"Last node {_ag} completed → pending_review issue={_iid}")
-                                    break
+                    from src.api.issues_center import auto_finalize_issue_on_last_node
+                    _fin = auto_finalize_issue_on_last_node(
+                        task.get("repo_key") or "", task.get("issue_id") or "",
+                        task.get("agent_type") or "", source="complete_task")
+                    if _fin not in ("noop:not_last_node", "noop:not_issue", "noop:terminal"):
+                        log.info(f"complete_task: issue finalize result={_fin} "
+                                 f"issue={task.get('issue_id')}")
                 except Exception as _e:
-                    log.warning(f"complete_task: pending_review check failed: {_e}")
+                    log.warning(f"complete_task: issue auto-finalize failed: {_e}")
         except Exception as e:
             log.warning(f"complete_task finalize failed: {e}")
     # 疑似提前结束：标记落到 agent_tasks.errors（任务详情可见）；状态仍是 completed。

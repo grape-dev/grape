@@ -24,7 +24,10 @@
 >   `status`（用户可读，active/processing/awaiting_input/pending_review/completed/cancelled）由 `stage` 映射同步，
 >   但 `awaiting_input / completed / cancelled` 可由用户操作直接设置（更高优先级）。两者同存 `issue` 表。
 > - **task complete ≠ Issue 完结**：`POST /api/tasks/complete` 完成的是某次引擎执行（对应 Event 的 `event_seq`），
->   不代表需求完结；需求完结以「最后节点 complete → pending_review → 审核 → done」判断（`confirm-done` / `status` 操作）。
+>   不代表需求完结。**Issue #656 起需求完结默认自动化**：流水线**末节点完成且无阻断**（全部节点最新事件
+>   completed、无 failed）时服务端自动结单——`stage=done`、`status=completed`、`completed_at` 落库，并联动
+>   关闭 VCS Issue（bot token，降级不阻断）；存在 failed 阻断时回退 `pending_review`。人工确认
+>   （`confirm-done` / `status` 操作）仅用于显式待确认场景（见下方 confirm-done 说明）。
 > - 接口中的 `task_status` 字段即 `issue.status`（需求中心状态）。
 
 ---
@@ -286,6 +289,12 @@ Issue 对象字段：
 | 返回 | 200；400 已取消；403；404 |
 
 > 任意阶段可确认完成（stage→done）；开发者确认需求完结。
+
+> **Issue #656 人工确认触发条件**：末节点完成且无阻断的 Issue 已由流水线**自动结单**（无需本接口）。
+> `confirm done` 仅用于以下显式需人工确认场景：
+> 1. issue 处于 `pending_review`（Agent 显式审核点 / 末节点 failed 阻断回退 / Issue 关闭待审核）；
+> 2. 用户侧提前收口仍处 active/processing/awaiting_input 的 Issue（如 PR 已合入、卡流转）。
+> 幂等：已 completed 再次调用返回 `already_done`，不重复关闭 VCS Issue。
 
 ### POST /api/issues/{issue_id}/cancel — 取消
 

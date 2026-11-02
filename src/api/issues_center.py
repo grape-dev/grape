@@ -580,6 +580,196 @@ def _complete_issue_done(repo_key: str, issue_number: int, evidence: str,
     return _changed
 
 
+# Issue #656: 自动结单完成原因（区别于 review_passed/user_confirmed 人工确认路径）
+_AUTO_FINALIZED_REASON = "auto_finalized"
+
+
+def _pipeline_last_node_check(repo_key: str, issue_number: int, agent_type: str) -> bool:
+    """完成的 agent 是否为该 issue 流水线末节点（next=='done' 或 next 无下游节点）。"""
+    try:
+        from src.api.session_store import get_issue_stage, get_issue_scene
+        from src.api.pipeline_config import get_pipeline_config
+        _issue_id = f"#{issue_number}"
+        _st = get_issue_stage(repo_key, _issue_id) or {}
+        _cur = (_st.get("stage") or "").strip()
+        if _cur != agent_type:
+            return False
+        _scene = get_issue_scene(repo_key, _issue_id)
+        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _cfg = get_pipeline_config(_scene_id, repo_key=repo_key) or {}
+        _nodes = _cfg.get("nodes") or []
+        _ids = {(_n.get("id") or _n.get("tag") or "").strip() for _n in _nodes}
+        for _n in _nodes:
+            _nid = (_n.get("id") or _n.get("tag") or "").strip()
+            if _nid == agent_type:
+                _next = (_n.get("next") or "").strip()
+                return _next == "done" or _next == "" or _next not in _ids
+        return False
+    except Exception as _e:
+        log.warning(f"pipeline last-node check failed {repo_key}/#{issue_number}: {_e}")
+        return False
+
+
+def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
+    """Issue #656: 服务端自动结单后联动关闭 VCS Issue（bot token，降级不阻断）。
+
+    幂等：VCS 侧已 closed → skipped。返回 "success" / "skipped" / "failed"（失败仅记日志，
+    不影响本地已完成状态，与 confirm-done 的降级语义一致）。
+    """
+    if not issue_number:
+        return "skipped"
+    try:
+        from src.repo_key import parse_repo_key
+        provider, owner, repo = parse_repo_key(repo_key)
+        if not owner or not repo:
+            return "skipped"
+        token = ""
+        if provider == "github":
+            from src.user.db import get_github_token as _get_gh
+            token = _get_gh(repo_key=repo_key) or ""
+        else:
+            from src.user.db import get_repo_bot_token as _get_gc
+            token = _get_gc(repo_key=repo_key) or ""
+        if not token:
+            log.info(f"auto-finalize: no bot token for {repo_key}, skip VCS close")
+            return "skipped"
+        from src.vcs.api_client import VcsApiClient
+        client = VcsApiClient(provider, token, owner, repo)
+        try:
+            if client.get_issue_state(issue_number) == "closed":
+                return "skipped"
+        except Exception as _se:
+            log.warning(f"auto-finalize: get_issue_state {repo_key}#{issue_number} failed: {_se}")
+        resp = client.close_issue(issue_number)
+        if isinstance(resp, dict) and "error" not in resp:
+            log.info(f"auto-finalize: closed VCS issue {repo_key}#{issue_number}")
+            return "success"
+        log.warning(f"auto-finalize: close_issue {repo_key}#{issue_number} -> {resp}")
+        return "failed"
+    except Exception as _e:
+        log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
+        return "failed"
+
+
+def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dict:
+    """该 issue 每个 agent_type 的最新事件状态（seq 最大者），用于「全部节点 completed」检测。
+
+    兼容 events.issue_id 带/不带 `#` 两种历史形态（同一 issue 归并后取全局最新）。
+    """
+    out = {}
+    _num_s = (issue_id_tag or "").strip().lstrip("#")
+    if not _num_s:
+        return out
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT agent_type, status, seq FROM events e WHERE repo_key=? "
+                "AND issue_id IN (?, ?) "
+                "AND seq = (SELECT MAX(seq) FROM events e2 "
+                "WHERE e2.repo_key=e.repo_key AND e2.issue_id IN (?, ?) "
+                "AND e2.agent_type=e.agent_type)",
+                (repo_key, f"#{_num_s}", _num_s, f"#{_num_s}", _num_s))
+            for _ag, _st, _seq in c.fetchall():
+                if _ag:
+                    _st = _st or ""
+                    _prev = out.get(_ag)
+                    # 极端双形态并存时按 seq 最大者取
+                    if _prev is None or _seq >= _prev[1]:
+                        out[_ag] = (_st, _seq)
+        return {k: v[0] for k, v in out.items()}
+    except Exception as _e:
+        log.warning(f"auto-finalize: latest event status query failed {repo_key}/{issue_id_tag}: {_e}")
+        return out
+
+
+def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: str,
+                                     source: str = "pipeline") -> str:
+    """Issue #656: 末节点完成后 issue 级自动收尾迁移（自动结单）。
+
+    触发条件（全部满足才自动结单）：
+    - 完成的 agent == issue 当前 stage，且该节点为流水线末节点（next=='done' 或无下游）；
+    - 该 issue 全部流水线节点最新事件均 completed（无 running/dispatched），且无 failed 阻断；
+    - issue.status 非 pending_review（显式待人工确认场景不自动结单，保留 confirm done 人工路径）。
+
+    迁移：status→completed、completed_reason='auto_finalized'、completed_at 落库（#368）、
+    stage→done，并联动关闭 VCS（GitCode/GitHub）Issue（bot token，降级不阻断，幂等）。
+
+    有 failed 阻断时回退 stage=pending_review（保留 Issue #51 人工确认语义）。
+
+    返回："auto_done" / "pending_review_fallback" / "noop:<reason>"（幂等可重入）。
+    """
+    try:
+        _num_s = (issue_id or "").strip().lstrip("#")
+        if not _num_s.isdigit() or _num_s == "0":
+            return "noop:not_issue"          # PR 订阅伪 issue_id（#pr_...）等非真实 Issue
+        _num = int(_num_s)
+        _tag = f"#{_num}"
+
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                      (repo_key, _num))
+            _row = c.fetchone()
+        _status = (_row[0] if _row else "") or ""
+        if not _row:
+            return "noop:no_issue_row"
+        if _status in ("completed", "cancelled"):
+            return "noop:terminal"
+        if _status == "pending_review":
+            return "noop:pending_review"      # 显式待人工确认（confirm done 路径），不自动结单
+
+        if not _pipeline_last_node_check(repo_key, _num, agent_type):
+            return "noop:not_last_node"
+
+        # 「全部节点 completed + 无阻断」检测：每个流水线节点的最新事件
+        from src.api.session_store import get_issue_scene
+        from src.api.pipeline_config import get_pipeline_config
+        _scene = get_issue_scene(repo_key, _tag)
+        _scene_id = (_scene[0] if _scene and _scene[0] else "") or "default"
+        _nodes = (get_pipeline_config(_scene_id, repo_key=repo_key) or {}).get("nodes") or []
+        _node_ids = [(_n.get("id") or _n.get("tag") or "").strip() for _n in _nodes]
+        _node_ids = [n for n in _node_ids if n]
+        _latest = _issue_latest_event_status_by_agent(repo_key, _tag)
+        for _nid in _node_ids:
+            _st = _latest.get(_nid)
+            if _st in ("running", "dispatched", "pending"):
+                return f"noop:node_running:{_nid}"
+            if _st == "failed":
+                # 阻断 → 回退 pending_review，等待人工确认（Issue #51 语义保留给异常场景）
+                from src.api.session_store import set_issue_stage
+                set_issue_stage(repo_key, _tag, "pending_review", agent_type)
+                log.info(f"Issue #656: node {_nid} failed → pending_review "
+                         f"(manual confirm path) {repo_key}/{_tag}")
+                return "pending_review_fallback"
+            if _st != "completed":
+                return f"noop:node_pending:{_nid}"
+
+        # 条件齐备 → issue 级收尾迁移（幂等：仅可变状态放行）
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET status='completed', completed_reason=?, completed_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND status IN ('active','processing','awaiting_input')",
+                (_AUTO_FINALIZED_REASON, repo_key, _num))
+            db.commit()
+            _changed = c.rowcount > 0
+        if not _changed:
+            return "noop:not_mutable"
+        try:
+            from src.api.session_store import set_issue_stage
+            set_issue_stage(repo_key, _tag, "done", source or "pipeline")
+        except Exception as _se:
+            log.warning(f"auto-finalize stage=done failed {repo_key}/{_tag}: {_se}")
+        _closed = _close_vcs_issue_auto(repo_key, _num)
+        log.info(f"Issue #656: auto-finalized {repo_key}/{_tag} by {source} "
+                 f"(agent={agent_type}, vcs_close={_closed})")
+        return "auto_done"
+    except Exception as _e:
+        log.warning(f"auto-finalize failed {repo_key}/{issue_id}: {_e}")
+        return "noop:error"
+
+
 def _review_pass(repo_key: str, issue_number: int, target: str = "processing",
                  evidence: str = "") -> str:
     """Agent 判定用户通过审核（幂等）。

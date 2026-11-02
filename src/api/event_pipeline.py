@@ -4658,17 +4658,18 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as _e:
             log.warning(f"scene deploy_url register failed: {_e}")
 
-    # Issue #51: SRE（最后节点）完成后 → 设 stage=pending_review 等待开发者审核
-    if new_status == "completed" and agent_type == "sre" and issue_id:
+    # Issue #656: 末节点完成后 → issue 级自动结单（全部节点 completed + 无阻断
+    # → stage=done / status=completed / completed_at 落库 + 联动关闭 VCS Issue；
+    # failed 阻断回退 pending_review 保留人工 confirm done 路径）。
+    # 泛化原 Issue #51 仅 sre 硬编码的收尾入口：函数自带 stage/末节点守卫，非末节点 noop。
+    if new_status == "completed" and issue_id and agent_type:
         try:
-            from src.api.session_store import get_issue_stage, set_issue_stage
-            _st = get_issue_stage(repo_key, issue_id)
-            _cur_stage = (_st or {}).get("stage", "") if _st else ""
-            if _cur_stage == "sre":
-                set_issue_stage(repo_key, issue_id, "pending_review", "sre")
-                log.info(f"SRE completed → pending_review (awaiting user review) issue={issue_id}")
+            from src.api.issues_center import auto_finalize_issue_on_last_node
+            _fin = auto_finalize_issue_on_last_node(repo_key, issue_id, agent_type, source="exec")
+            if _fin not in ("noop:not_last_node", "noop:not_issue", "noop:terminal"):
+                log.info(f"Exec agent: issue finalize result={_fin} issue={issue_id}")
         except Exception as _e:
-            log.warning(f"SRE → pending_review failed: {_e}")
+            log.warning(f"Exec agent: issue auto-finalize failed: {_e}")
 
     # 子任务 SRE 完成后 → 登记完成情况到父 Issue
     if new_status == "completed" and agent_type == "sre" and issue_id:
