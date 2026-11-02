@@ -215,7 +215,53 @@ def test_pulls_mapping(gitcode_calls, _client):
     assert gitcode_calls[-1]["method"] == "PUT" and gitcode_calls[-1]["url"].endswith("/pulls/9/merge")
 
     assert _get(client, f"{base}/pulls/9/files").status_code == 200
-    assert gitcode_calls[-1]["url"].endswith("/pulls/9/files")
+    assert gitcode_calls[-1]["url"].split("?")[0].endswith("/pulls/9/files")
+    # Issue #585：默认透传分页参数（page=1, per_page=100）
+    assert "page=1" in gitcode_calls[-1]["url"] and "per_page=100" in gitcode_calls[-1]["url"]
+
+
+def test_pulls_files_pagination_passthrough(gitcode_calls, _client):
+    """Issue #585 Bug 2：pulls files 透传 page/per_page 分页参数（默认 30 截断修复）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+
+    r = _get(client, f"{base}/pulls/9/files", params={"page": 2, "per_page": 50})
+    assert r.status_code == 200
+    url = gitcode_calls[-1]["url"]
+    assert url.split("?")[0].endswith("/pulls/9/files")
+    assert "page=2" in url and "per_page=50" in url
+
+    # 非法分页参数 → 422（不触达上游）
+    r = _get(client, f"{base}/pulls/9/files", params={"per_page": 101})
+    assert r.status_code == 422
+    r = _get(client, f"{base}/pulls/9/files", params={"page": 0})
+    assert r.status_code == 422
+
+
+def test_create_pull_comment_github_uses_issue_comments_endpoint(_client, github_calls):
+    """Issue #585 Bug 1：GitHub 通道 PR 评论改走 /issues/{n}/comments（仅需 body），
+    不再误用 inline review comment 端点 /pulls/{n}/comments（422 Validation Failed）。"""
+    _override_user(f"github:{OWNER}/{REPO}")
+    r = _client.post(f"/api/git-repo/{OWNER}/{REPO}/pulls/9/comments",
+                     json={"body": "LGTM"})
+    assert r.status_code == 200
+    last = github_calls[-1]
+    assert last["method"] == "POST"
+    assert last["url"].split("?")[0].endswith(f"/repos/{OWNER}/{REPO}/issues/9/comments")
+    assert "/pulls/9/comments" not in last["url"]
+    assert "<!-- grape-auto-comment -->" in last["body"]["body"]
+
+
+def test_create_pull_comment_gitcode_keeps_pulls_endpoint(gitcode_calls, _client):
+    """Issue #585 Bug 1：GitCode 通道保持 /pulls/{n}/comments（行为不变，向后兼容）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    r = client.post(f"{base}/pulls/9/comments", json={"body": "LGTM"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "POST"
+    assert last["url"].split("?")[0].endswith("/pulls/9/comments")
+    assert last["body"]["body"].endswith("\n<!-- grape-auto-comment -->")
 
 
 def test_pulls_comments_update_delete(gitcode_calls, _client):

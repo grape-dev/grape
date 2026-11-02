@@ -92,6 +92,8 @@ grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" -
 | 现象 | 处理 |
 |------|------|
 | `pulls files` 无 patch 字段 | 大 diff 被截断 → 用 `git-repo contents --ref {head_sha}` 拉全文；仍缺 → 标「需人工复核」 |
+| `pulls files` 文件清单不全 | Issue #585：`--page`/`--per-page` 翻页拉全（默认 per_page=100，GitHub 上游曾默认 30 截断）；超大 PR 用 `git-repo tree --depth recursive` 兜底 |
+| `pulls comments create` 返回 422 | GitHub 通道已改走 issues 评论端点（Issue #585 修复）；仍失败 → 降级 `git-repo issues comments create --number {PR_NUMBER}`（PR=issue 语义等价） |
 | `commits` 未含 PR head | 用 `pulls get` 的 head sha 过滤；per_page 不足加大分页 |
 | 5xx | 用 `grape tasks wait` / 内置退避重试，不 sleep 固定时长 |
 | 401/403 | 按安全硬约束处理，不换 token |

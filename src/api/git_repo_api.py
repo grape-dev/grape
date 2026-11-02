@@ -684,14 +684,22 @@ def list_pull_comments(owner: str, repo: str, number: int, user: dict = Depends(
                     _repo_token(owner, repo, user, p))
 
 
-@router.post("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_create", summary="Create PR comment", description="Creates a PR comment (body required).")
+@router.post("/{owner}/{repo}/pulls/{number}/comments", operation_id="gitrepo_pulls_comments_create", summary="Create PR comment",
+             description="Creates a PR comment (body required). Issue #585: the GitHub provider routes this through "
+                         "POST /issues/{number}/comments (a PR is an issue; that endpoint only needs body), because "
+                         "GitHub's /pulls/{n}/comments is the inline review comment endpoint which requires "
+                         "commit_id/path/line and returns 422 for body-only payloads. GitCode keeps /pulls/{n}/comments.")
 def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 R4.1: PR 评论同样追加标记
     _body = body.body or ""
     if "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
-    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, f"/pulls/{number}/comments", None, p),
+    # Issue #585 Bug 1: GitHub POST /pulls/{n}/comments 是 inline review comment 端点
+    # （必填 commit_id/path/line），仅传 body 必然 422；PR 本身是 issue，改用
+    # /issues/{n}/comments 发普通 PR 评论（仅需 body），与 GitCode 行为对齐。
+    _comments_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
+    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _comments_path, None, p),
                     _repo_token(owner, repo, user, p), {"body": _body})
     # Issue #453 台账（S29-G1，网关 PR 端点族补全）：PR 评论入账——系统内部发 PR 评论
     # 走 event_pipeline 裸 urllib 路径（已入账），此网关端点原先漏账，仅剩外部 API 调用者
@@ -793,8 +801,14 @@ def delete_pull_comment(owner: str, repo: str, number: int, comment_id: int,
                     _repo_token(owner, repo, user, p))
 
 
-@router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files", description="Lists files changed in a pull request.")
-def list_pull_files(owner: str, repo: str, number: int, user: dict = Depends(get_current_user_or_api_key),
-                    p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files", None, p),
+@router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files",
+            description="Lists files changed in a pull request. Issue #585: page/per_page pass through to the provider "
+                        "(GitHub default per_page=30 silently truncated large PRs; default here is per_page=100). "
+                        "For changed_files>100 PRs, page through manually; tree --depth recursive is a fallback for huge PRs.")
+def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=1),
+                    per_page: int = Query(100, ge=1, le=100),
+                    user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #585 Bug 2: 未透传分页参数时 GitHub 默认 per_page=30，>30 文件的 PR 被静默截断
+    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
+                                       {"page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
