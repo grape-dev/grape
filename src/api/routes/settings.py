@@ -1816,26 +1816,45 @@ def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(
         #   判断走 from_repo_key(owner_id) in user_repos，owner_id 为空 → 同仓库其他成员永远看不到）；
         # - user scope：owner_id 清空（user scope 注册时按 owner_name 从 grape_accounts 重算，不依赖此字段）。
         _new_owner_id = repo_key if (scope == "repo" and repo_key) else ""
+        # Issue #654：user scope 引擎行 owner_id 与 register 同源（按 owner_name 解析
+        # grape_accounts.id），消除「切换置空、注册重算」两条路径的语义漂移；
+        # 解析不到回退空串（兼容老数据，register 侧同样回退）。
+        _engine_owner_id = _new_owner_id
+        if scope == "user" and _owner:
+            try:
+                c.execute("SELECT id FROM grape_accounts WHERE LOWER(username)=LOWER(?) LIMIT 1", (_owner,))
+                _urow = c.fetchone()
+                if _urow:
+                    _engine_owner_id = str(_urow[0])
+            except Exception as _e:
+                log.warning(f"change_credential_scope: resolve owner_id for user scope failed: {_e}")
         c.execute("UPDATE runtime_credentials SET scope=?, repo_key=?, owner_id=?, org_id=? WHERE id=?",
                   (scope, repo_key or None, _new_owner_id, _new_org_id, cid))
-        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）
-        # 先删除 offline 重复行（只保留每个引擎名最新的一行），再 UPDATE 剩余行
-        c.execute(
-            "DELETE FROM engine_capabilities WHERE runtime_id IN ("
-            "SELECT id FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
-            "SELECT MAX(id) FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)))",
-            (cid, cid)
-        )
-        c.execute(
-            "DELETE FROM agent_runtimes WHERE credential_id=? AND id NOT IN ("
-            "SELECT max_id FROM (SELECT MAX(id) as max_id FROM agent_runtimes WHERE credential_id=? GROUP BY lower(name)) t)",
-            (cid, cid)
-        )
+        # 切换 scope 后同步更新引擎行（保留引擎信息，避免 worker 需要重新注册）。
+        # Issue #654：先按 (credential_id, lower(name)) 去重合并（保留 MAX(id)）：
+        # 被替换行的 engine_capabilities / tags_user_set 迁移到存活行（priority/标签不回默认），
+        # 引用旧引擎 id 的配置（场景 engine_runtime_ids / agent backend）由 remap 改指向存活行。
+        from src.runtime.engine_select import merge_duplicate_engine_rows, remap_engine_references
+        _rid_map = merge_duplicate_engine_rows(cid, c)
         c.execute(
             "UPDATE agent_runtimes SET scope=?, owner_id=?, org_id=?, repo_key=? WHERE credential_id=?",
-            (scope, _new_owner_id, _new_org_id, repo_key or None, cid)
+            (scope, _engine_owner_id, _new_org_id, repo_key or None, cid)
         )
         db.commit()
+    # Issue #654：引擎行替换时统一 remap 引用（自身事务，锁外执行避免交叉提交），
+    # 并输出结构化变更事件（cid、影响引擎数、旧→新 id 映射）。
+    if _rid_map:
+        try:
+            remap_engine_references(_rid_map, cid, reason="credential_scope_change")
+        except Exception as _e:
+            log.warning(f"change_credential_scope: remap references failed: {_e}")
+    import json as _json654
+    log.info("engine_change_event: " + _json654.dumps({
+        "event": "credential_scope_changed", "credential_id": cid, "scope": scope,
+        "repo_key": repo_key, "org_id": _new_org_id,
+        "engines_affected": len(_rid_map),
+        "id_mapping": {str(k): v for k, v in _rid_map.items()},
+    }, ensure_ascii=False))
     log.info(f"Credential scope changed: cid={cid} scope={scope} repo_key={repo_key} org_id={_new_org_id}")
     return {"scope": scope, "repo_key": repo_key}
 
