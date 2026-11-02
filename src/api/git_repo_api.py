@@ -539,12 +539,19 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             try:
                 _info = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                                  _repo_token(owner, repo, user, p))
-                payload["title"] = str(_info.get("title") or "") if isinstance(_info, dict) else ""
+                _title = str(_info.get("title") or "").strip() if isinstance(_info, dict) else ""
             except HTTPException:
                 raise
             except Exception as _e:
-                log.warning(f"gitcode title backfill (update_issue #{number}) failed: {_e}")
-                payload["title"] = ""
+                raise HTTPException(status_code=502, detail={
+                    "code": 502,
+                    "message": f"GitCode PATCH 必填 title 回取失败（update_issue #{number}）：{_e}"})
+            if not _title:
+                # Issue #640 审查意见：title 必填非空，回取为空仍发空串会被上游 400 拒绝 → 明确报错
+                raise HTTPException(status_code=502, detail={
+                    "code": 502,
+                    "message": f"GitCode PATCH 必填 title 回取为空（update_issue #{number}），无法补齐必填字段"})
+            payload["title"] = _title
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
@@ -562,19 +569,22 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
         log.warning(f"outbound_ledger record (update_issue) failed: {_e}")
     # Issue #640：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
     # 仅当请求含 milestone_id 且 provider=gitcode 时执行一次 GET 回读：
-    #   - 未落库 → 返回明确 502 结构化错误（不再是 200 假成功）
-    #   - 已落库 → 响应回显 milestone（上游 PATCH 响应可能不回显，以回读值为准）
+    #   - 未落库或落库值 number ≠ 请求的 milestone_id（如原挂旧里程碑、新值被上游静默忽略）
+    #     → 返回明确 502 结构化错误（不再是 200 假成功、不回显错误值）
+    #   - 一致 → 响应回显 milestone（上游 PATCH 响应可能不回显，以回读值为准）
     if p == "gitcode" and _want_milestone and isinstance(resp, dict) and "error" not in resp:
         try:
             _after = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                               _repo_token(owner, repo, user, p))
             _ms = _after.get("milestone") if isinstance(_after, dict) else None
-            if not _ms:
+            _ms_num = _ms.get("number") if isinstance(_ms, dict) else _ms
+            if _ms_num is None or int(_ms_num) != int(body.milestone_id):
+                _cur = _ms_num if _ms_num is not None else "空"
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
                     "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "
-                               f"milestone 仍为空（里程碑 number 可能无效或上游不支持），"
-                               f"请用 milestones list 核对里程碑 number 后重试"})
+                               f"milestone={_cur}（原值/空，与请求不一致——新值可能被上游静默忽略或 "
+                               f"里程碑 number 无效），请用 milestones list 核对里程碑 number 后重试"})
             resp = dict(resp)
             resp["milestone"] = _ms
         except HTTPException:

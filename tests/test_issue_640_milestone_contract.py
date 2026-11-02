@@ -81,6 +81,43 @@ def test_update_issue_gitcode_milestone_not_applied_raises_502(monkeypatch):
     assert "milestone_id=999999" in ei.value.detail["message"]
 
 
+def test_update_issue_gitcode_stale_milestone_ignored_raises_502(monkeypatch):
+    """审查 Required 用例：Issue 原挂旧里程碑（number=111），新值 850012 被上游静默忽略——
+    回读非空但 number ≠ 请求的 milestone_id → 502（不得 200 假成功并回显错误值）。"""
+    _patch_transport(
+        monkeypatch,
+        get_resp={"title": "issue title", "milestone": {"number": 111, "title": "old-weekly"}},
+        patch_resp={"number": 640, "state": "open"},
+    )
+    with pytest.raises(HTTPException) as ei:
+        gra.update_issue(
+            "grape-dev", "grape", 640,
+            gra.IssueUpdateBody(milestone_id=850012),
+            user={"auth_type": "session_token"}, p="gitcode",
+        )
+    assert ei.value.status_code == 502
+    assert "milestone_id=850012" in ei.value.detail["message"]
+    assert "111" in ei.value.detail["message"]
+
+
+def test_update_issue_gitcode_title_backfill_empty_raises_502(monkeypatch):
+    """审查 Minor 用例：GitCode PATCH 必填 title 回取为空 → 明确 502，而非以空串回填后被上游 400。"""
+    calls = _patch_transport(
+        monkeypatch,
+        get_resp={"title": "", "milestone": None},
+        patch_resp={"number": 640, "state": "open"},
+    )
+    with pytest.raises(HTTPException) as ei:
+        gra.update_issue(
+            "grape-dev", "grape", 640,
+            gra.IssueUpdateBody(state="close"),
+            user={"auth_type": "session_token"}, p="gitcode",
+        )
+    assert ei.value.status_code == 502
+    assert "title" in ei.value.detail["message"]
+    assert [c for c in calls if c[0] == "PATCH"] == []  # 补齐失败即中止，未发出 PATCH
+
+
 def test_update_issue_gitcode_no_milestone_no_readback(monkeypatch):
     """不带 milestone_id：不做回读校验（无额外 GET-after-PATCH），行为保持存量。"""
     calls = _patch_transport(

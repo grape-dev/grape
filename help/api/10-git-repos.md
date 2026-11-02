@@ -261,8 +261,10 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 > **里程碑（#640）**：
 > - GitCode：`milestone_id` 服务端映射为上游 `milestone`（int，取 `milestones list` 的 number）；PATCH 必填
->   `repo`+`title` 由服务端自动补齐（title 缺失时 GET 回取），**仅传 `milestone_id` 也不会被上游 400 拒绝**。
-> - 写后回读校验：PATCH 返回 200 但回读 `milestone` 为空 → 返回 **502**（明确错误，不再是假成功）；
+>   `repo`+`title` 由服务端自动补齐（title 缺失时 GET 回取，回取失败/为空返回 502），**仅传 `milestone_id`
+>   也不会被上游 400 拒绝**。
+> - 写后回读校验：PATCH 返回 200 但回读 `milestone` 为空、或回读 number 与请求的 `milestone_id` 不一致
+>   （如 Issue 原挂其它里程碑且新值被上游静默忽略）→ 返回 **502**（明确错误，不再是假成功）；
 >   成功时响应回显 `milestone`（`issues get` 同样回显上游 milestone 字段）。
 > - GitHub：`milestone_id` 语义不变（透传上游同名参数）。
 

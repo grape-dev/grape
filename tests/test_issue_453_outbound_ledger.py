@@ -536,7 +536,8 @@ def test_update_issue_meta_and_edit_branches():
     _clean()
     from src.api import git_repo_api as gra
     import src.vcs.providers as _vp
-    with patch.object(gra, "_vcs_req", return_value={"number": 5}), \
+    # Issue #640：gitcode PATCH 自动补齐必填 title，mock GET 需带回 title（回取为空会 502 中止）
+    with patch.object(gra, "_vcs_req", return_value={"number": 5, "title": "t"}), \
          patch.object(gra, "_repo_token", return_value="t"), \
          patch.object(gra, "_provider", return_value="gitcode"), \
          patch.object(_vp, "translate_inbound", return_value={}):

@@ -54,7 +54,8 @@ def gitcode_calls(monkeypatch):
 
     def _fake_req(method, url, token="", body=None):
         recorded.append({"method": method, "url": url, "token": token, "body": body})
-        return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
+        # "title"：gitcode issues update PATCH 必填 title 自动回取（#640），回取为空会 502
+        return {"ok": True, "echo": {"method": method, "url": url, "body": body}, "title": "t"}
 
     monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
     return recorded
