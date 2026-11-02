@@ -1192,30 +1192,40 @@ function _detailHtml(t) {
     </div>`;
 }
 
-function _loadTaskAttachments(taskId) {
-  API.get('/issues/' + taskId + '/attachments').then(function(data) {
-    var list = document.getElementById('_taskAttachmentsList');
-    if (!list) return;
-    var atts = data.attachments || [];
-    if (atts.length === 0) {
-      list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无附件</div>';
-      return;
-    }
-    list.innerHTML = atts.map(function(a) {
-      var del = '<button onclick="_deleteTaskAttach(' + taskId + ',\'' + a.filename + '\')" style="margin-left:6px;font-size:11px;color:#ff3b30;background:none;border:none;cursor:pointer;padding:2px 4px">删除</button>';
-      if (a.is_image) {
-        return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
-          + '<img src="' + a.url + '" style="width:32px;height:32px;object-fit:cover;border-radius:6px;margin-right:8px">'
-          + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
-          + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
-          + del + '</div>';
-      }
+function _renderTaskAttachments(taskId, atts) {
+  var list = document.getElementById('_taskAttachmentsList');
+  if (!list) return;
+  if (!atts || atts.length === 0) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无附件</div>';
+    return;
+  }
+  list.innerHTML = atts.map(function(a) {
+    var del = '<button onclick="_deleteTaskAttach(' + taskId + ',\'' + a.filename + '\')" style="margin-left:6px;font-size:11px;color:#ff3b30;background:none;border:none;cursor:pointer;padding:2px 4px">删除</button>';
+    if (a.is_image) {
       return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
-        + '<span style="margin-right:8px">📎</span>'
+        + '<img src="' + a.url + '" style="width:32px;height:32px;object-fit:cover;border-radius:6px;margin-right:8px">'
         + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
         + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
         + del + '</div>';
-    }).join('');
+    }
+    return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
+      + '<span style="margin-right:8px">📎</span>'
+      + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
+      + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
+      + del + '</div>';
+  }).join('');
+}
+
+function _loadTaskAttachments(taskId, forceRefresh) {
+  // Issue #648：详情卡片自带 attachments 字段（详情/统一列表 API 新增）时直接渲染，
+  // 免二次请求；上传/删除后 forceRefresh=true 强制走端点刷新拿最新清单。
+  var t = window._currentDetailTask;
+  if (!forceRefresh && t && Array.isArray(t.attachments)) {
+    _renderTaskAttachments(taskId, t.attachments);
+    return;
+  }
+  API.get('/issues/' + taskId + '/attachments').then(function(data) {
+    _renderTaskAttachments(taskId, data.attachments || []);
   }).catch(function() {
     var list = document.getElementById('_taskAttachmentsList');
     if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">加载失败</div>';
@@ -1235,11 +1245,11 @@ function _onTaskAttachSelect(fileInput, taskId) {
   var list = document.getElementById('_taskAttachmentsList');
   if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">' + I18N.t('issues.uploading') + '</div>';
   API.upload('/issues/' + taskId + '/attachments', formData).then(function() {
-    _loadTaskAttachments(taskId);
+    _loadTaskAttachments(taskId, true);
   }).catch(function(e) {
     if (e && e.name === 'AbortError' && e.silent) return;
     if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">' + I18N.t('issues.upload_failed', {msg: e.message}) + '</div>';
-    _loadTaskAttachments(taskId);
+    _loadTaskAttachments(taskId, true);
   });
   fileInput.value = '';
 }
@@ -1248,7 +1258,7 @@ function _deleteTaskAttach(taskId, filename) {
   app.showConfirm(I18N.t('issues.confirm_delete_attach'), function() {
     // Issue #175: 走 API.js 获得超时保护
     API.del('/issues/' + taskId + '/attachments/' + filename).then(function() {
-      _loadTaskAttachments(taskId);
+      _loadTaskAttachments(taskId, true);
     }).catch(function(e) {
       if (e && e.name === 'AbortError' && e.silent) return;
       app.showToast(I18N.t('tasks.operation_failed', {msg: (e && e.detail && e.detail.message || e && e.message || String(e))}));

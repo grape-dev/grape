@@ -179,6 +179,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
             "agent_statuses": [],
             "repo_key": repo_keys[0] if repo_keys else "",
             "is_pr_event": True,
+            "attachments": [],
             "pr_seq": ev["seq"],
             "qa_history": [{**qa, "scene_name": _get_scene_name(qa.get("scene_id", ""))} for qa in _qa_hist],
             "events_count": sum(1 for r in rows if r[1] and r[1].replace("#pr_", "").split("_", 1)[0] == str(pr_num)),
@@ -395,6 +396,29 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
         "events_count": len(events),
         "latest_event": latest,
     }
+
+
+def _issue_attachments(repo_keys: list[str], issue_number) -> list[dict]:
+    """Issue #648：聚合 issue 附件（复用 issues_center._attach_list，不新建存储）。
+
+    只取已建单附件目录（str(issue_number)），pending 为建单前临时目录不入 issue 维度，
+    避免跨 issue 污染。按 repo_key 顺序探测，首个命中即返回；异常/无附件降级为空列表，
+    不阻塞详情/列表主流程。
+    """
+    if issue_number is None or str(issue_number).strip() == "":
+        return []
+    from src.api.issues_center import _attach_list
+    from src.repo_key import split_owner_repo
+    for rk in repo_keys or []:
+        try:
+            owner, rname = split_owner_repo(rk)
+            atts = _attach_list(owner, rname, str(issue_number))
+        except Exception as e:
+            log.warning(f"issues: list attachments failed repo={rk} #{issue_number}: {e}")
+            continue
+        if atts:
+            return atts
+    return []
 
 
 def _pipeline_from_archive(repo_keys: list[str], number: str) -> dict | None:
@@ -1604,6 +1628,16 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
     dir_name = str(issue_number) if issue_number else "pending"
     url = _attach_save(owner, rname, dir_name, safe_name, content)
     log.info(f"Issue attachment uploaded: issue={issue_id} file={original_name} -> {safe_name} ({len(content)} bytes)")
+    # Issue #648：已建单附件（issue_number 目录）同步「## 附件」链接清单评论到 VCS issue（best-effort 过渡方案）
+    if issue_number:
+        try:
+            from src.api.issues_center import (_ATTACH_IMAGE_EXTS,
+                                               sync_issue_attachment_comment)
+            sync_issue_attachment_comment(
+                repo_key, issue_number,
+                {"filename": original_name, "url": url, "is_image": ext in _ATTACH_IMAGE_EXTS})
+        except Exception as e:
+            log.warning(f"Issue attachment sync comment failed: issue={issue_id} file={original_name}: {e}")
     return {"url": url, "filename": original_name, "size": len(content)}
 
 
@@ -1851,10 +1885,17 @@ def list_repo_issues(owner: str, repo: str,
         # P1-E: Remove heavy fields not needed in list view (detail page has /issues/{id}/pipeline)
         it.pop("agent_statuses", None)
         it.pop("task_description", None)
+        # Issue #648：统一列表卡片带附件清单（无附件为 []，前端附件区直接消费）
+        # PR 订阅伪卡片（is_pr_event）编号与 GitCode PR 对应，不是 issue 附件目录编号；
+        # PR 号与同仓 issue 号重合时会命中错误附件目录，显式置 [] 防错配
+        it["attachments"] = [] if it.get("is_pr_event") else _issue_attachments([it.get("repo_key") or ""], _num)
 
     # PR 订阅事件：从 events 表查 issue_id LIKE '#pr_%' 的记录，构造伪卡片混入列表
     # Issue #542：分页模式下 PR 卡片只混入第 1 页（避免逐页重复）；has_more 按 issue 行数计算
     pr_items = _query_pr_subscription_events(repo_keys)
+    # Issue #648：PR 伪卡片 attachments 兜底恒为 []（PR 号非 issue 附件目录编号，防错配）
+    for _pit in pr_items:
+        _pit.setdefault("attachments", [])
     if _total is None or page == 1:
         issues.extend(pr_items)
 
@@ -1924,7 +1965,8 @@ def get_issue_detail(owner: str, repo: str, number: int,
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
-    out = {**base, "events": events, "pipeline": pipeline}
+    out = {**base, "events": events, "pipeline": pipeline,
+           "attachments": _issue_attachments(repo_keys, number)}
     if _fallback_synced:
         out["synced_by_fallback"] = True
     return out

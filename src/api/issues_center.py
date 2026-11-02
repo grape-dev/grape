@@ -1729,19 +1729,12 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                     "upstream_detail": f"member precheck: collaborator permission lookup returned 404 "
                                        f"for assignee '{assignee}' on {owner}/{rname}",
                 })
-        # 拼接 Task Center 上传的附件到 issue body
+        # 拼接 Task Center 上传的附件到 issue body（Issue #648：拼装逻辑抽为可复用函数）
         _desc_with_attach = (body.description or "").strip()
         _pending_attachments = _attach_list(owner, rname, "pending")
-        if _pending_attachments:
-            _attachments = []
-            for _att in _pending_attachments:
-                _ext = os.path.splitext(_att["filename"])[1].lower()
-                if _ext in ('.png', '.jpg', '.jpeg', '.gif', '.webp'):
-                    _attachments.append(f"![{_att['filename']}]({_att['url']})")
-                else:
-                    _attachments.append(f"[{_att['filename']}]({_att['url']})")
-            if _attachments:
-                _desc_with_attach += "\n\n## 附件\n" + "\n".join(_attachments)
+        _attach_md = _attachments_markdown_block(_pending_attachments)
+        if _attach_md:
+            _desc_with_attach += _attach_md
         # Issue #343 问题十一修复: 捕获建单 API 403/422，转成友好报错而非 500
         try:
             if _is_github:
@@ -2017,6 +2010,9 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             "message": "任务已创建，Issue 已同步" if created else "任务已创建（复用已有 Issue）"}
 
 _ATTACH_IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"}
+# Issue #648：GitCode 同步评论是永久评论，不能写 7 天签名 URL（到期失效）；
+# 同步时重新签发长效链接（10 年）作为永久可访问 URL 的过渡方案
+_ATTACH_SYNC_URL_EXPIRES = 10 * 365 * 24 * 3600
 _ATTACH_DOC_EXTS = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".md", ".txt", ".csv", ".json", ".yaml", ".yml", ".xml", ".html"}
 _ATTACH_CODE_EXTS = {".py", ".js", ".ts", ".java", ".go", ".rs", ".c", ".cpp", ".h", ".sh", ".sql", ".tf", ".dockerfile"}
 _ATTACH_ARCHIVE_EXTS = {".zip", ".tar", ".gz", ".tgz", ".bz2", ".7z"}
@@ -2111,6 +2107,76 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
                 "is_image": ext in _ATTACH_IMAGE_EXTS,
             })
     return result
+
+
+def _attachments_markdown_block(attachments) -> str:
+    """Issue #648：把附件清单拼为「## 附件」markdown 链接清单（GitCode 同步过渡方案）。
+
+    图片用 ![]()（可直接预览），其余用 []()（下载链接）；
+    空清单/无效条目返回空串（调用方按需追加）。
+    """
+    lines = []
+    for _att in attachments or []:
+        if not isinstance(_att, dict):
+            continue
+        _fname = str(_att.get("filename") or "").strip()
+        _url = str(_att.get("url") or "").strip()
+        if not _fname or not _url:
+            continue
+        if _att.get("is_image"):
+            lines.append(f"![{_fname}]({_url})")
+        else:
+            lines.append(f"[{_fname}]({_url})")
+    if not lines:
+        return ""
+    return "\n\n## 附件\n" + "\n".join(lines)
+
+
+def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict) -> bool:
+    """Issue #648 过渡方案：附件上传后向 VCS issue 同步「## 附件」链接清单评论。
+
+    best-effort：token 获取 / VCS 调用失败仅记日志并返回 False，不影响上传主流程。
+    仅支持 gitcode（GitHub 附件同步不在本次范围）。
+    """
+    try:
+        from src.repo_key import parse_repo_key
+        _prov, owner, rname = parse_repo_key(repo_key)
+        if _prov != "gitcode":
+            return False
+        _att = dict(attachment) if isinstance(attachment, dict) else {}
+        _url = str(_att.get("url") or "")
+        # Issue #648：传入 url 是 OBS 7 天签名 URL，GitCode 评论永久存在会到期失效；
+        # OBS 后端启用时按对象键重新签发长效链接（本地降级路径 URL 本身永久，无需处理）
+        if _url:
+            try:
+                from src.storage import get_storage
+                _storage = get_storage()
+                if _storage:
+                    _safe_name = _url.rsplit("/", 1)[-1].split("?")[0]
+                    if _safe_name:
+                        _att["url"] = _storage.temporary_url(
+                            _attach_obs_key(owner, rname, issue_number, _safe_name),
+                            expires=_ATTACH_SYNC_URL_EXPIRES)
+            except Exception as e:
+                log.warning(f"attachment sync comment long-url resign failed "
+                            f"repo={repo_key} #{issue_number}: {e}")
+        _md = _attachments_markdown_block([_att])
+        if not _md:
+            return False
+        from src.user.db import get_gitcode_token
+        token = get_gitcode_token(repo_key=repo_key) or ""
+        if not token:
+            log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
+            return False
+        from src.vcs.api_client import VcsApiClient
+        client = VcsApiClient("gitcode", token, owner, rname)
+        client.post_issue_comment(int(issue_number), _md.strip())
+        log.info(f"attachment sync comment posted: repo={repo_key} issue=#{issue_number}"
+                 f" file={(attachment or {}).get('filename')}")
+        return True
+    except Exception as e:
+        log.warning(f"attachment sync comment failed repo={repo_key} #{issue_number}: {e}")
+        return False
 
 
 def _attach_cleanup_dir(owner: str, repo: str, issue_number):
