@@ -1330,6 +1330,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 # Issue #329: pass through cross-pipeline fields for downstream agents
                 "carried_context": carried_context if (target_scene_id or carried_context) else {},
                 "engine_config": engine_config if (target_scene_id or engine_config) else None,
+                # Issue #627: production release binding context pass-through
             },
         }
 
@@ -1583,7 +1584,14 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     except Exception:
                         from src.api.event_store import update_event_status
                         update_event_status(seq, "failed")
-                return {"status": "failed", "seq": seq, "agent": agent_name, "error": "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"}
+                _err541 = "场景绑定的引擎全部离线，任务未派发，请按失败降级流程处理"
+                try:
+                    from src.runtime.engine_select import scene_dispatch_failure_reason
+                    _err541 = scene_dispatch_failure_reason(
+                        _a2a_scene, agent_name, repo_key=repo_key or "", user_id=_a2a_scene_uid) or _err541
+                except Exception:
+                    pass
+                return {"status": "failed", "seq": seq, "agent": agent_name, "error": _err541}
             _enqueue_pipeline_task(repo_key, seq, agent_name, _be,
                                    skill_name or agent_name, evt,
                                    skill_id, skill_path or "", engine_id,

@@ -391,6 +391,44 @@ def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
         return [{"issue_id": "#" + str(r[0]), "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
 
 
+def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict]:
+    """查询源需求下的发布子单列表（方案 C：子单为 issue 行，release_target_env 非空即发布子单）。
+
+    返回最新在前，含绑定要素 / 生命周期状态 / 结果三分支 / 失败原因。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, issue_number, title, status, stage, "
+            "release_candidate_sha, release_target_env, release_evidence_ref, "
+            "release_result, release_failure_reason, release_approved_by, release_approved_at, "
+            "created_at, completed_at "
+            "FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
+            "ORDER BY id DESC",
+            (repo_key, int(parent_issue_number)),
+        )
+        out = []
+        for r in c.fetchall():
+            out.append({
+                "issue_id": r[0],
+                "sub_issue_number": r[1],
+                "parent_issue_number": int(parent_issue_number),
+                "title": r[2] or "",
+                "status": r[3] or "active",
+                "stage": r[4] or "vod",
+                "candidate_sha": r[5] or "",
+                "target_env": r[6] or "",
+                "evidence_ref": r[7] or "",
+                "result": r[8] or "",
+                "failure_reason": r[9] or "",
+                "approved_by": r[10] or 0,
+                "approved_at": r[11] or "",
+                "created_at": r[12] or "",
+                "completed_at": r[13] or "",
+            })
+        return out
+
+
 def get_or_create_agent_session(repo_key: str, agent_type: str,
                                  backend: str = "", runtime_id: int = 0) -> dict:
     """获取或创建 Agent 会话，每个 (repo_key, agent_type) 独立（backend 无字面默认，见 engine-selection-design.md v2）。

@@ -16,7 +16,7 @@ import re
 import asyncio
 
 from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
 from src.config import log
@@ -988,6 +988,98 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
                 log.warning(f"Issue #{issue_id} resume re-dispatch failed: {_e}")
     log.info(f"Issue #{issue_id} resumed by user")
     return {"ok": True, "issue_id": issue_id, "status": "processing"}
+
+
+class _ProductionReleaseBody(BaseModel):
+    candidate_sha: str = ""
+    target_env: str = ""
+    # PR #799 R3：与 target_env（≤64）宽严一致，验收证据引用限长（防超大 payload 直接落库）
+    evidence_ref: str = Field(default="", max_length=512)
+    approved_at: str = ""
+
+
+@router.post("/{issue_id}/production-release", operation_id="issues_production_release",
+             summary="Create production release task for a completed issue (Issue #627)",
+             description="User-authorized production continuation (release) entry for done/completed "
+                         "issues: creates a unique release task bound to (issue, repo, full candidate "
+                         "SHA, acceptance evidence, target env, approval source), then dispatches a "
+                         "controlled sre a2a_event carrying the binding context. Validation chain: "
+                         "auth -> terminal-state -> SRE acceptance -> candidate consistency -> target "
+                         "env -> approval TTL -> uniqueness. Rejections preserve original acceptance "
+                         "evidence (zero writes on reject paths). Result is backfilled separately "
+                         "(deployed_success / deploy_failed / not_executed) — stage completed never "
+                         "implies release success. Does NOT modify _TASK_STATUS_FLOWS terminal "
+                         "semantics (bypass model). User-only: session token (tk_) -> 403.")
+def create_production_release_endpoint(issue_id: int, body: _ProductionReleaseBody,
+                                       user: dict = Depends(require_no_session_token)):
+    """Issue #627: 已完成需求的生产续接（发布）子单入口（用户身份授权，方案 C）。
+
+    创建「发布子单」（复用现有子任务机制：parent_issue_id + is_subtask_mode=1，绑定
+    repo/候选SHA/目标环境/验收引用，parent=本需求），子单 stage=sre 直通标准流水线
+    到 sre 执行部署，子单终态 release_result 即发布结果三分支；零状态机改动、零平行表。
+
+    PR #799 R4 保留：本端点为同步 def（FastAPI 自动调度线程池执行）——派发链路
+    （a2a_endpoint，60s 超时）不再阻塞事件循环，派发慢时全站 API 不受影响。
+    """
+    from src.api.issues_center import create_release_subissue, ProductionReleaseError
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, user_id, status FROM issue WHERE id=? "
+                  "AND (user_id=? OR user_id=0)", (issue_id, user["id"]))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    _repo_key, _issue_num, _owner_uid, _status = row[0], row[1], row[2], row[3]
+    # 平台建单 token：优先仓库 bot token，其次用户 GitCode token（测试环境可为空，由建单失败兜底）
+    _api_token = ""
+    try:
+        from src.user.db import get_repo_token_with_refresh
+        _api_token = get_repo_token_with_refresh(_repo_key) or ""
+    except Exception:
+        _api_token = ""
+    if not _api_token:
+        try:
+            from src.api.deps import get_user_token_with_refresh
+            _api_token = get_user_token_with_refresh(user.get("username") or "", user_id=user.get("id") or 0) or ""
+        except Exception:
+            _api_token = ""
+    try:
+        out = create_release_subissue(
+            repo_key=_repo_key, issue_number=_issue_num,
+            candidate_sha=body.candidate_sha or "",
+            target_env=body.target_env or "",
+            evidence_ref=body.evidence_ref or "",
+            approved_by=int(user.get("id") or 0),
+            approved_at=body.approved_at or "",
+            api_token=_api_token)
+    except ProductionReleaseError as _e:
+        raise HTTPException(status_code=_e.status, detail={"code": _e.status, "message": _e.message,
+                                                           "error_code": _e.code})
+    out["issue_id"] = issue_id
+    return out
+
+
+@router.get("/{issue_id}/production-release", operation_id="issues_production_release_list",
+            summary="Query production release tasks of an issue (Issue #627)",
+            description="Lists production release tasks for the issue with status, result branch "
+                        "(deployed_success/deploy_failed/not_executed), failure reason and binding "
+                        "elements (candidate SHA / target env / evidence / approval source).")
+async def list_production_releases(issue_id: int, user: dict = Depends(require_no_session_token)):
+    """Issue #627: 查询发布子单列表（状态/结果三分支/失败原因/绑定要素随行返回）。"""
+    from src.api.session_store import list_release_subissues
+    from src.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT repo_key, issue_number, user_id FROM issue WHERE id=? "
+                  "AND (user_id=? OR user_id=0)", (issue_id, user["id"]))
+        row = c.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
+    _repo_key, _issue_num = row[0], row[1]
+    releases = list_release_subissues(_repo_key, _issue_num)
+    return {"issue_id": issue_id, "issue_number": _issue_num, "repo_key": _repo_key,
+            "releases": releases, "total": len(releases)}
 
 
 @router.get("/{issue_id}/pipeline", operation_id="issues_pipeline_detail", summary="Issue pipeline roadmap (by issue.id)", description="Returns the issue pipeline info and event history for the detail page. Issue #539: adds optional business status fields (`issue_stage`/`issue_task_status`/`review_status`, pending_review = awaiting human confirmation) and `sre_result` (task_ref + result_ref with explicit enums) so the detail page distinguishes 'stage execution finished' from 'awaiting review'.")

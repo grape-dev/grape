@@ -1348,6 +1348,472 @@ def resume_issue_task(repo_key: str, issue_number: int):
     return affected
 
 
+# ===== Issue #627: 已完成需求的生产续接（发布）子单（方案 C：复用现有子任务机制）=====
+# 发布子单 = issue 行自身（parent_issue_id + is_subtask_mode=1 + release_* 绑定/结果字段），
+# 创建后 stage=sre 直通标准 a2a 派发；子单终态 release_result 即发布结果三分支。
+# 零平行表、不穿透 _TASK_STATUS_FLOWS 终态语义。
+
+class ProductionReleaseError(Exception):
+    """发布校验链拒绝（detail 携带 code/message）。"""
+
+    def __init__(self, code: str, message: str, status: int = 400):
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.status = status
+
+
+_PRODUCTION_RELEASE_APPROVAL_TTL = int(
+    os.environ.get("PRODUCTION_RELEASE_APPROVAL_TTL") or 24 * 3600)
+
+_SHA40_RE = None  # lazy import re
+
+
+def _is_full_sha(candidate_sha: str) -> bool:
+    """候选提交须为完整 40 位十六进制 SHA（短 SHA 不足以钉住候选版本）。"""
+    global _SHA40_RE
+    if _SHA40_RE is None:
+        import re
+        _SHA40_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+    return bool(_SHA40_RE.match(candidate_sha or ""))
+
+
+def _latest_sre_acceptance(repo_key: str, issue_number: int) -> dict | None:
+    """取该需求最近一条已完成 sre 事件（验收证据锚点）。
+
+    返回 {seq, payload}；无已完成 sre 事件返回 None（未验收）。
+    """
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT seq, payload FROM events WHERE repo_key=? AND issue_id=? "
+                "AND agent_type='sre' AND status='completed' ORDER BY seq DESC LIMIT 1",
+                (repo_key, f"#{int(issue_number)}"))
+            row = c.fetchone()
+        if not row:
+            return None
+        try:
+            payload = _json.loads(row[1] or "{}")
+        except Exception:
+            payload = {}
+        return {"seq": row[0], "payload": payload if isinstance(payload, dict) else {}}
+    except Exception as _e:
+        log.warning(f"_latest_sre_acceptance failed: {_e}")
+        return None
+
+
+def is_release_subissue(repo_key: str, issue_number) -> bool:
+    """判断 issue 是否为发布子单（release_target_env 非空即发布子单，普通 issue 恒 False）。
+
+    PR #818 审查修复（Optional-3 回声竞态兜底）：
+    - 兼容 "#N" 形态的 issue_id（webhook 回声 resolve_issue_id 返回带 # 前缀）；
+    - 绑定字段落库前的竞态窗口内，标题前缀 `发布子单：` 作为兜底识别
+      （该前缀为本入口专属命名，普通 issue 不会命中）。
+    """
+    try:
+        _num = str(issue_number or "").lstrip("#").strip()
+        _num = int(_num)
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT 1 FROM issue WHERE repo_key=? AND issue_number=? "
+                "AND (release_target_env != '' OR title LIKE '发布子单：%') LIMIT 1",
+                (repo_key, _num))
+            return c.fetchone() is not None
+    except Exception:
+        return False
+
+
+def _release_subissue_title(issue_number: int, target_env: str, candidate_sha: str) -> str:
+    """发布子单标题：`发布子单：需求 #{N} → {env} @ {sha12}`（平台 Issue 标题，可辨识）。"""
+    _sha_short = (candidate_sha or "")[:12]
+    _env = (target_env or "").strip()
+    _title = f"发布子单：需求 #{issue_number} → {_env} @ {_sha_short}"
+    return _title[:200]
+
+
+def _release_subissue_body(repo_key: str, issue_number: int, candidate_sha: str,
+                           target_env: str, evidence_ref: str,
+                           approved_by: int, approved_at: str) -> str:
+    """发布子单 body：`## 父任务`（现有子任务识别机制）+ `## 发布绑定`（绑定要素落平台）。"""
+    from src.repo_key import from_repo_key
+    _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
+    _lines = [
+        f"## 父任务",
+        f"- 关联父任务：{_repository}#{int(issue_number)}",
+        "",
+        "## 发布绑定",
+        f"- 源需求：{int(issue_number)}",
+        f"- 候选提交：{candidate_sha}",
+        f"- 目标环境：{target_env}",
+        f"- 验收证据：{evidence_ref or '（见源需求 SRE 验收事件）'}",
+        f"- 批准来源：user_id={int(approved_by or 0)}（{approved_at or ''}）",
+    ]
+    return "\n".join(_lines)
+
+
+def _sync_release_fields(repo_key: str, issue_number: int, parent_issue_number: int,
+                         candidate_sha: str, target_env: str, evidence_ref: str,
+                         approved_by: int, approved_at: str) -> None:
+    """将父任务关联（parent_issue_id/parent_issue_number/is_subtask_mode）+ 发布绑定要素
+    写回发布子单 issue 行（创建时仅此一次；拒绝路径零写入）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE issue SET parent_issue_id=?, parent_issue_number=?, is_subtask_mode=1, "
+            "release_candidate_sha=?, release_target_env=?, release_evidence_ref=?, "
+            "release_approved_by=?, release_approved_at=?, updated_at=datetime('now') "
+            "WHERE repo_key=? AND issue_number=?",
+            (f"#{int(parent_issue_number)}", int(parent_issue_number),
+             candidate_sha, target_env, evidence_ref or "", int(approved_by or 0),
+             approved_at or "", repo_key, int(issue_number)))
+        db.commit()
+
+
+def create_release_subissue(repo_key: str, issue_number: int, candidate_sha: str,
+                            target_env: str, evidence_ref: str = "",
+                            approved_by: int = 0, approved_at: str = "",
+                            api_token: str = "", dispatch: bool = True) -> dict:
+    """为 done/completed 终态需求创建「发布子单」（方案 C：复用现有子任务机制）。
+
+    校验链（按序，任一失败抛 ProductionReleaseError，**拒绝路径零写入**——
+    不建平台 Issue、不动 issue 行、不增删 events，原验收证据天然保留）：
+    1. 终态前置：源需求 issue.status 必须为 completed（非终态走正常流水线，拒绝）；
+    2. SRE 验收前置：无已完成 sre 事件 → 拒绝（未验收不能发布）；
+    3. 候选一致性：candidate_sha 须为完整 40 位 SHA 且与 sre 验收 payload 中的
+       candidate_sha（如有记录）一致；
+    4. 目标环境：非空且 ≤64 字符；
+    5. 批准时效：approved_at 距今 ≤ TTL（默认 24h）；
+    6. 唯一性：同（源需求+候选SHA+目标环境）已存在发布子单（任意终态）→ 409 duplicate。
+
+    成功路径：平台创建真实子任务 Issue（标题/body 含 `## 父任务` 链接，复用现有子任务
+    识别机制）→ issue 行建档（is_subtask_mode=1 + parent_issue_id=源需求）+ release_*
+    绑定字段 → stage=sre（直通 sre，不经 vod/issue/coding/qa）→ dispatch=True 时服务内
+    直调 a2a_endpoint 派发 sre 执行部署。子单终态 release_result 即发布结果三分支。
+    """
+    from src.repo_key import to_repo_key, split_owner_repo, parse_repo_key
+    repo_key = to_repo_key(repo_key)
+    # PR #799 R1 语义保留：落库前统一小写——唯一绑定与验收记录对照口径一致，
+    # 大小写变体不得绕过唯一性重复创建发布子单
+    candidate_sha = (candidate_sha or "").strip().lower()
+    target_env = (target_env or "").strip()
+    evidence_ref = (evidence_ref or "").strip()
+
+    # 1) 终态前置
+    with db_lock:
+        c = db.cursor()
+        c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=?",
+                  (repo_key, int(issue_number)))
+        _row = c.fetchone()
+    if not _row:
+        raise ProductionReleaseError("issue_not_found", "需求不存在", status=404)
+    if (_row[0] or "") != "completed":
+        raise ProductionReleaseError(
+            "not_terminal",
+            f"需求当前状态为 {_row[0] or '(空)'}，非 completed 终态：生产续接仅适用于已完成需求"
+            f"（进行中需求请走正常流水线，不使用发布入口）")
+
+    # 2) SRE 验收前置
+    _sre_ev = _latest_sre_acceptance(repo_key, issue_number)
+    if not _sre_ev:
+        raise ProductionReleaseError(
+            "no_sre_acceptance",
+            "该需求无已完成的 SRE 验收事件：缺少验收证据，拒绝创建发布子单")
+
+    # 3) 候选一致性（格式 + 与验收记录对照）
+    if not _is_full_sha(candidate_sha):
+        raise ProductionReleaseError(
+            "invalid_candidate_sha",
+            "candidate_sha 必须为完整 40 位十六进制提交 SHA（短 SHA 不足以钉住候选版本）")
+    _accepted_sha = str(_sre_ev["payload"].get("candidate_sha") or "").strip()
+    if _accepted_sha and _accepted_sha.lower() != candidate_sha.lower():
+        raise ProductionReleaseError(
+            "candidate_mismatch",
+            f"候选提交与 SRE 验收记录不一致：验收记录 candidate_sha={_accepted_sha}，"
+            f"请求 candidate_sha={candidate_sha}（候选变更拒绝发布）")
+
+    # 4) 目标环境
+    if not target_env or len(target_env) > 64:
+        raise ProductionReleaseError(
+            "invalid_target", "target_env 必填且不超过 64 字符（指定生产环境标识）")
+
+    # 5) 批准时效
+    from datetime import datetime, timezone as _tz
+    _approved_at = (approved_at or "").strip()
+    _parsed = None
+    if _approved_at:
+        try:
+            _parsed = datetime.fromisoformat(_approved_at.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            _parsed = None
+    if not _parsed:
+        _parsed = datetime.now(_tz.utc)
+        _approved_at = _parsed.isoformat()
+    if _parsed.tzinfo is None:
+        _parsed = _parsed.replace(tzinfo=_tz.utc)
+    _age = (datetime.now(_tz.utc) - _parsed).total_seconds()
+    if _age > _PRODUCTION_RELEASE_APPROVAL_TTL or _age < -_PRODUCTION_RELEASE_APPROVAL_TTL:
+        raise ProductionReleaseError(
+            "approval_expired",
+            f"批准已过期：approved_at={_approved_at} 距今 {_age / 3600:.1f}h，"
+            f"超过有效期 {_PRODUCTION_RELEASE_APPROVAL_TTL / 3600:.0f}h")
+
+    # 6) 唯一性（显式查询前置；拒绝路径发生在平台建单之前——零外部写入）
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, issue_number, release_result FROM issue "
+            "WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
+            "AND release_candidate_sha=? AND release_target_env=? ORDER BY id DESC LIMIT 1",
+            (repo_key, int(issue_number), candidate_sha, target_env))
+        _dup = c.fetchone()
+    if _dup:
+        raise ProductionReleaseError(
+            "duplicate",
+            f"该绑定已存在发布子单（sub_issue_number={_dup[1]}，result={_dup[2] or '-'}）："
+            f"同（需求+候选SHA+目标环境）禁止重复提交", status=409)
+
+    # 平台建单：真实子任务 Issue（复用现有子任务机制——body 含 `## 父任务` 链接）
+    _owner, _rname = split_owner_repo(repo_key)
+    _provider, _, _ = parse_repo_key(repo_key)
+    _title = _release_subissue_title(issue_number, target_env, candidate_sha)
+    _body_txt = _release_subissue_body(repo_key, issue_number, candidate_sha,
+                                       target_env, evidence_ref, approved_by, _approved_at)
+    _sub_num = 0
+    try:
+        if _provider == "github":
+            _resp = _post_github_issue(api_token or "", _owner, _rname, _title,
+                                       _body_txt, assignee="")
+        else:
+            _resp = _post_gitcode_issue(api_token or "", _owner, _rname, _title,
+                                        _body_txt, assignee="")
+        if isinstance(_resp, dict):
+            _sub_num = int(_resp.get("number") or _resp.get("iid") or 0)
+    except Exception as _e:
+        raise ProductionReleaseError(
+            "release_create_failed",
+            f"创建发布子单 Issue 失败：{str(_e)[:200]}", status=502)
+    if not _sub_num:
+        raise ProductionReleaseError(
+            "release_create_failed",
+            "创建发布子单 Issue 失败（平台响应无 issue number）", status=502)
+    # Issue #453 代发台账：建单入账（webhook 回声对账）
+    try:
+        from src.outbound_ledger import record_outbound, content_hash_md5
+        record_outbound(_provider, repo_key, "issue", str(_sub_num),
+                        issue_number=str(_sub_num),
+                        content_hash=content_hash_md5(_body_txt))
+    except Exception as _le:
+        log.warning(f"outbound_ledger record (release subissue) failed: {_le}")
+
+    # issue 行建档（复用现有子任务机制：is_subtask_mode=1 + parent_issue_id=源需求）
+    try:
+        # 建档时即声明子任务模式（ensure_issue_task 写入 is_subtask_mode）
+        _task_id = ensure_issue_task(
+            repo_key, _sub_num, title=_title, description=_body_txt,
+            assignee="", event_type="production_release",
+            subtask_mode=1, owner_user_id=int(approved_by or 0))
+    except Exception as _e:
+        log.warning(f"release subissue ensure_issue_task failed: {_e}")
+        raise ProductionReleaseError(
+            "release_archive_failed", f"发布子单建档失败：{str(_e)[:200]}", status=500)
+    if not _task_id:
+        raise ProductionReleaseError("release_archive_failed", "发布子单建档失败", status=500)
+    # 父任务关联 + 绑定要素落库（parent_issue_id/number + is_subtask_mode + release_* 一次写入）
+    # PR #818 审查修复（R2 部分失败显式上报）：绑定/置阶段失败不再静默——
+    # 子单缺 release 绑定会导致 webhook 回声进 vod 二次派发、回填钩子不识别、
+    # 唯一性查询不计数；失败即抛 release_archive_failed（与建档失败路径一致）。
+    # 唯一索引冲突（并发双提交绕过前置查询的兜底命中）映射 409 duplicate。
+    try:
+        _sync_release_fields(repo_key, _sub_num, int(issue_number), candidate_sha, target_env,
+                             evidence_ref, approved_by, _approved_at)
+    except Exception as _e:
+        _err_txt = str(_e)
+        if "unique" in _err_txt.lower() or "1062" in _err_txt:
+            raise ProductionReleaseError(
+                "duplicate",
+                f"该绑定已存在发布子单（并发提交命中唯一约束，sub_issue_number={_sub_num}）",
+                status=409)
+        raise ProductionReleaseError(
+            "release_archive_failed",
+            f"发布子单绑定要素落库失败（sub_issue_number={_sub_num}，平台 Issue 已创建，"
+            f"请人工核对）：{str(_e)[:200]}", status=500)
+    # 直通 sre：设 stage=sre（跨过 vod/issue/coding/qa）
+    try:
+        from src.api.session_store import set_issue_stage
+        set_issue_stage(repo_key, f"#{_sub_num}", "sre", "sre")
+    except Exception as _e:
+        raise ProductionReleaseError(
+            "release_archive_failed",
+            f"发布子单置 stage=sre 失败（sub_issue_number={_sub_num}，绑定要素已落库，"
+            f"请人工核对阶段路由）：{str(_e)[:200]}", status=500)
+    log.info(f"release subissue created: sub=#{_sub_num} parent=#{int(issue_number)} "
+             f"repo={repo_key} sha={candidate_sha[:12]} env={target_env} approved_by={approved_by}")
+
+    out = {"ok": True, "sub_issue_number": _sub_num, "issue_id": _task_id,
+           "repo_key": repo_key, "parent_issue_number": int(issue_number),
+           "candidate_sha": candidate_sha, "target_env": target_env,
+           "evidence_ref": evidence_ref or "", "status": "sre", "seq": 0}
+
+    if not dispatch:
+        return out
+
+    # 标准 A2A 派发 sre（服务内直调 a2a_endpoint，与 handoff_issue 同模式：
+    # jwt 分支内部再校验 managed_repos，双保险；绑定上下文随 context/events.payload 持久化）
+    _seq = _dispatch_release_sre(
+        repo_key, int(issue_number), _sub_num, candidate_sha,
+        target_env, evidence_ref or "", approved_by=int(approved_by or 0))
+    if _seq:
+        out["seq"] = _seq
+    else:
+        out["dispatch_error"] = "sre 派发未成功（事件未创建或被拦截），发布子单保留 stage=sre，可人工处理"
+        log.warning(f"release subissue #{_sub_num}: sre dispatch returned no seq")
+    return out
+
+
+def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: int,
+                          candidate_sha: str, target_env: str, evidence_ref: str,
+                          approved_by: int = 0) -> int:
+    """为发布子单派发携带发布上下文的 sre a2a_event，返回事件 seq（失败返回 0）。
+
+    复用标准 /api/a2a 链路（鉴权、场景节点校验、去重、事件落库、引擎选择全保留）。
+    事件挂子单 issue 时间线（issue_id=#{sub_issue_number}），payload 携带
+    parent_issue/is_subtask_mode/context（不再需要旁路 production_release 锚点——
+    回填按 task.issue_id 反查 issue 行即可）。
+    """
+    import json as _json
+    from src.repo_key import from_repo_key
+    from src.api.routes.webhook import a2a_endpoint, A2AHandoffBody
+    _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
+    _account = _repository.split("/", 1)[0] if "/" in _repository else ""
+    _context = (f"发布子单 #{sub_issue_number}：源需求 #{issue_number} 已完成 SRE 验收并经用户批准"
+                f"发布到指定环境。候选提交 {candidate_sha}，目标环境 {target_env}，"
+                f"验收证据 {evidence_ref or '（见源需求 SRE 验收事件）'}。"
+                f"请按生产发布流程执行部署，并在完成后回填实际部署结果"
+                f"（部署成功/失败/未执行三分支）。")
+    _a2a_body = A2AHandoffBody(agent="sre", payload={
+        "repository": _repository,
+        "account": _account,
+        "issue_number": sub_issue_number,
+        "pr_number": "",
+        "context": _context,
+        "is_subtask_mode": True,
+        "parent_issue": f"#{int(issue_number)}",
+    })
+    _user = {"id": int(approved_by or 0), "username": "", "auth_type": "jwt"}
+    # a2a_endpoint 为 async：创建端点为同步 def（线程池执行，无运行中 loop），直接
+    # asyncio.run；若未来出现 async 调用方，用独立线程跑新 loop 兜底，避免嵌套 loop 报错。
+    _res = None
+    try:
+        import asyncio as _aio2
+        try:
+            _loop = _aio2.get_running_loop()
+        except RuntimeError:
+            _loop = None
+        if _loop and _loop.is_running():
+            import concurrent.futures as _cf
+            with _cf.ThreadPoolExecutor(max_workers=1) as _ex:
+                _res = _ex.submit(lambda: _aio2.run(a2a_endpoint(None, _a2a_body, _user))).result(
+                    timeout=60)
+        else:
+            _res = _aio2.run(a2a_endpoint(None, _a2a_body, _user))
+    except Exception as _e:
+        log.warning(f"_dispatch_release_sre failed: {_e}")
+        return 0
+    if isinstance(_res, dict):
+        _seq = int(_res.get("seq") or 0)
+        if _seq > 0:
+            return _seq
+    _body_txt = ""
+    try:
+        _raw = getattr(_res, "body", b"") or b""
+        if isinstance(_raw, memoryview):
+            _raw = _raw.tobytes()
+        _parsed = _json.loads(bytes(_raw).decode("utf-8"))
+        _body_txt = str(_parsed)
+    except Exception:
+        pass
+    log.warning(f"_dispatch_release_sre: a2a returned no seq (res={_body_txt[:200] or _res})")
+    return 0
+
+
+def _has_deploy_url(result_text: str) -> bool:
+    """从 sre 结果文本提取部署证据（与 _extract_deploy_url 同口径：artifacts/issue_summary 含 deploy_url）。"""
+    import re as _re
+    _txt = (result_text or "").strip()
+    if not _txt:
+        return False
+    try:
+        import json as _json
+        _parsed = _json.loads(_txt)
+        if isinstance(_parsed, dict):
+            for _key in ("artifacts", "issue_summary"):
+                _val = _parsed.get(_key)
+                _cands = [str(x) for x in _val] if isinstance(_val, list) else (
+                    [_val] if isinstance(_val, str) else [])
+                if any(_re.search(r"deploy_url:\s*https?://\S+", _c) for _c in _cands):
+                    return True
+    except (ValueError, TypeError):
+        pass
+    return bool(_re.search(r"deploy_url:\s*https?://\S+", _txt))
+
+
+def _backfill_release_subissue_result(repo_key: str, issue_number: int,
+                                      exit_code: int, result_text: str = "") -> bool:
+    """发布子单终态回填（结果三分支，幂等）。
+
+    - exit_code != 0 → deploy_failed（release_failure_reason 取 result_text 摘要）；
+    - exit_code == 0 且结构化产出携带 deploy_url 证据 → deployed_success；
+    - exit_code == 0 但无部署证据 → not_executed（阶段 completed 不视为发布成功）。
+    已回填（release_result 非空）不再覆盖；非发布子单（release_target_env 空）零影响。
+    """
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT release_target_env, release_result FROM issue "
+                "WHERE repo_key=? AND issue_number=?",
+                (repo_key, int(issue_number)))
+            row = c.fetchone()
+        if not row or not (row[0] or ""):
+            return False   # 非发布子单
+        if row[1]:
+            return True    # 幂等：已回填
+    except Exception as _e:
+        log.warning(f"_backfill_release_subissue_result lookup failed: {_e}")
+        return False
+    if exit_code != 0:
+        _result = "deploy_failed"
+        _reason = ((result_text or "").strip() or "sre 任务失败（exit_code != 0）")[:500]
+    elif _has_deploy_url(result_text or ""):
+        _result = "deployed_success"
+        _reason = ""
+    else:
+        _result = "not_executed"
+        _reason = ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "UPDATE issue SET release_result=?, release_failure_reason=?, "
+                "status='completed', completed_reason='release_' || ?, "
+                "stage='done', owner_agent='sre', completed_at=datetime('now'), "
+                "updated_at=datetime('now') "
+                "WHERE repo_key=? AND issue_number=? AND (release_result IS NULL OR release_result='')",
+                (_result, _reason, _result, repo_key, int(issue_number)))
+            _changed = c.rowcount > 0
+            db.commit()
+        if _changed:
+            log.info(f"release subissue #{issue_number} backfilled: result={_result} "
+                     f"repo={repo_key} exit={exit_code}")
+        return _changed
+    except Exception as _e:
+        log.warning(f"_backfill_release_subissue_result write failed: {_e}")
+        return False
+
+
 def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
                              provider: str = "gitcode") -> int | None:
     """幂等查找：同仓库已存在同名 open Issue → 返回其 number（避免重复建 issue）。

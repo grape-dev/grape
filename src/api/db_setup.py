@@ -3219,6 +3219,80 @@ def _migrate_a2a_idempotency_key():
                 log.warning(f"events idempotency index (sqlite) failed: {e}")
 
 
+def _migrate_release_subissue_unique_index():
+    """Issue #627 方案 C 审查修复（R1）：发布子单唯一性 DB 兜底（部分唯一索引）。
+
+    前置显式查询防重复存在并发窗口（双提交可同时通过前置查询各建一张子单），
+    DB 层唯一约束兜底：同 (repo_key, parent_issue_number, release_candidate_sha,
+    release_target_env) 只允许一行发布子单；普通 issue（release_target_env 空）不参与。
+
+    - SQLite：部分唯一索引 WHERE release_target_env != ''；
+    - MySQL：生成列 NULLIF(release_target_env, '')（空串转 NULL 不参与唯一）+ 唯一索引。
+    建索引幂等（IF NOT EXISTS / information_schema 检查）；存量脏数据冲突时记
+    WARNING 不阻塞启动（前置查询仍兜一层）。
+    """
+    from src.session_manager import db, db_lock
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    with db_lock:
+        c = db.cursor()
+        _ensure_column(c, "issue", "release_candidate_sha", "TEXT DEFAULT ''")
+        _ensure_column(c, "issue", "release_target_env", "TEXT DEFAULT ''")
+        db.commit()
+        if is_mysql:
+            try:
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                    "AND COLUMN_NAME='release_bind_env'")
+                if (c.fetchone()[0] or 0) == 0:
+                    c.execute(
+                        "ALTER TABLE issue ADD COLUMN release_bind_env VARCHAR(64) "
+                        "AS (NULLIF(release_target_env, '')) STORED")
+                    db.commit()
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.statistics "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                    "AND INDEX_NAME='uq_issue_release_bind'")
+                if (c.fetchone()[0] or 0) == 0:
+                    c.execute(
+                        "CREATE UNIQUE INDEX uq_issue_release_bind ON issue"
+                        "(repo_key, parent_issue_number, release_candidate_sha, release_bind_env)")
+                    db.commit()
+            except Exception as e:
+                log.warning(f"release subissue unique index (mysql) failed: {e}")
+        else:
+            try:
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_release_subissue ON issue"
+                    "(repo_key, parent_issue_number, release_candidate_sha, release_target_env) "
+                    "WHERE release_target_env != ''")
+                db.commit()
+            except Exception as e:
+                log.warning(f"release subissue unique index (sqlite) failed: {e}")
+
+
+def _mig_issue627_drop_legacy_production_release():
+    """Issue #627 方案 C 审查修复（Optional-4）：DROP 旧库遗留旁路表（代码已无引用）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.execute("DROP TABLE IF EXISTS production_release")
+        db.commit()
+    log.info("Dropped legacy production_release table (Issue #627 Plan C)")
+
+
+register_migration(
+    "202611020001", "issue627_release_subissue_unique_index", "safe",
+    _migrate_release_subissue_unique_index)
+register_migration(
+    "202611020002", "issue627_drop_legacy_production_release", "cleanup",
+    _mig_issue627_drop_legacy_production_release)
+
+
 def _ensure_case_insensitive_indexes():
     """Issue #348: 大小写不敏感唯一约束（DB 层纵深防御）。
 
@@ -5201,6 +5275,16 @@ def _migrate_tables():
             _ensure_column(c, "issue", "updated_at", "TEXT DEFAULT ''")
             # Issue #329: cross-pipeline handoff carried context
             _ensure_column(c, "issue", "carried_context", "TEXT DEFAULT ''")
+            # Issue #627 方案 C：发布子单（复用现有子任务机制）——绑定与结果字段落在子单 issue 行
+            # 自身（替代 PR #799 旁路 production_release 表；零平行表、零状态机改动）。
+            # release_result 三分支：deployed_success / deploy_failed / not_executed（空=未完成）。
+            _ensure_column(c, "issue", "release_candidate_sha", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_target_env", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_evidence_ref", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_approved_by", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "release_approved_at", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_result", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_failure_reason", "TEXT DEFAULT ''")
             db.commit()
     except Exception as e:
         log.warning(f"Phase B2 issue 收编字段补列失败: {e}")

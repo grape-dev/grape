@@ -1993,6 +1993,19 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 3. 路由判定（D9 阶段矩阵 + 非 Issue 静态映射，替代 agent_type.subscribe_events，见 vod-skill-upgrade-plan §3.0.4）
     _is_scene_recommend = False  # 智能推荐模式标记
     if event_type == "issue_opened":
+        # Issue #627 方案 C：发布子单由发布入口直通 sre（创建时已 stage=sre + 派发 sre a2a），
+        # 平台 webhook 回声不再路由 vod/智能推荐，避免二次派发污染子单时间线。
+        _rel_rid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+        if _rel_rid:
+            try:
+                from src.api.issues_center import is_release_subissue
+                if is_release_subissue(repo_key, _rel_rid):
+                    log.info(f"Pipeline: release sub-issue {_rel_rid} skip vod (direct sre dispatch, Issue #627 Plan C)")
+                    from src.api.event_store import append_skipped_event
+                    append_skipped_event(repo_key, event_type, "release_subissue", issue_id=_rel_rid)
+                    return result
+            except Exception as _rel_e:
+                log.warning(f"Pipeline: release sub-issue check failed, fallback to vod: {_rel_e}")
         agent_type = "vod"
         log.info(f"Pipeline: issue_opened -> VOD (stage init)")
         # 判断是否需要推荐：issue_state 有 scene_id → 用户已选场景，跳过推荐
