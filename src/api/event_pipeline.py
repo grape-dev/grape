@@ -509,9 +509,12 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # env_extra
     repository = evt.get("repository", "")
     from src.repo_key import split_owner_repo as _sor
+    from src.repo_key import from_repo_key as _frk
     _owner, _repo_name = _sor(repository)
     env_extra = {
-        "REPO_FULL_NAME": repository,
+        # Issue #721: REPO_FULL_NAME 归一（剥 provider 前缀），保证下游 runbook
+        # clone URL（https://gitcode.com/$REPO_FULL_NAME.git）拼接正确；无前缀幂等。
+        "REPO_FULL_NAME": _frk(repository) or repository,
         "REPO_OWNER": _owner,
         "REPO_NAME": _repo_name,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
@@ -3273,9 +3276,11 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
 
     from src.prompt_builder import _resolve_server_url
     from src.repo_key import split_owner_repo as _sor2
+    from src.repo_key import from_repo_key as _frk2
     _owner2, _repo_name2 = _sor2(repository)
     env_extra = {
-        "REPO_FULL_NAME": repository,
+        # Issue #721: REPO_FULL_NAME 归一（剥 provider 前缀），与 REPO_OWNER/REPO_NAME 口径一致。
+        "REPO_FULL_NAME": _frk2(repository) or repository,
         "REPO_OWNER": _owner2,
         "REPO_NAME": _repo_name2,
         "ACCOUNT": evt.get("actor") or evt.get("account") or "",
@@ -4241,8 +4246,12 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             })
     except Exception:
         pass
+    # Issue #721: REPO_FULL_NAME 统一 from_repo_key 归一（剥 provider 前缀），与下方
+    # REPO_OWNER/REPO_NAME（#94 split_owner_repo）口径一致，保证下游 runbook clone URL
+    # （https://gitcode.com/$REPO_FULL_NAME.git）不会拼出 gitcode:owner/repo 形式的错误地址。
+    from src.repo_key import from_repo_key as _frk721
     env_extra = {
-        "REPO_FULL_NAME": repository,
+        "REPO_FULL_NAME": _frk721(repository) or repository,
         "REPO_OWNER": (exec_account or repository).split("/", 1)[0],
         "REPO_NAME": (exec_account or repository).rsplit("/", 1)[-1],
         "ACCOUNT": evt.get("actor") or exec_account or "",

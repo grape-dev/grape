@@ -27,7 +27,7 @@ GitCode 事件（Issue/PR/评论）
 | `GRAPE_SERVER_URL` | Grape 服务端地址（skill 调 API 用） | 全部 | `_execute_agent` / agent.py 本机修正 |
 | `GRAPE_SESSION_TOKEN` | 会话级临时 token（`tk_`，task 生命周期内有效，终态失效） | 全部 | `service.py` `issue_session_token` |
 | `GRAPE_CLI_MODE` | CLI 命令过滤模式：`WORKER` = 只显示会话 token（`tk_`）可用的命令（dual + session_only），隐藏 user_only（agent 持 `tk_` 打了也 403） | 全部（注入 session token 的任务） | 随 `GRAPE_SESSION_TOKEN` 注入（`service.py` / `event_pipeline.py`） |
-| `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义） | 全部（devops 事件） | `_execute_agent` |
+| `REPO_FULL_NAME` | `owner/repo` 仓库全名（服务端注入，原始语义）。**格式契约（#721）**：形如 `GTDTeam/CodeArts`——**无 host 前缀、无 provider 前缀（`gitcode:`/`github:`）、无 `.git` 后缀**；注入侧统一 `from_repo_key` 归一（幂等），runbook 拼接 clone URL 前仍应做一次归一兜底（见下「runbook clone URL 模板」） | 全部（devops 事件） | `_execute_agent` |
 | `REPO_OWNER` | **仓库属主（owner，组织或个人的泛化概念）**；从 repository 拆分，始终不含 `/repo` | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `REPO_NAME` | 仓库名（repo，如 `grape`，即 `${REPO_FULL_NAME#*/}`） | 全部（devops 事件） | `_execute_agent`（`split_owner_repo`） |
 | `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
@@ -104,7 +104,51 @@ Chat 任务  → 只注入 USER_GITCODE_TOKEN（用户身份；不用 bot token 
 7. **token 安全**：`BOT_GITCODE_TOKEN`/`USER_GITCODE_TOKEN` 是敏感变量——**不要 printenv 打印/写入日志**；
    平台已有脱敏（[REDACTED]）。token 仅在进程内有效、删除即失效（GRAPE_SESSION_TOKEN 生命周期=任务）。
 
-### 五.1 技能如何使用自定义场景变量
+### 五.1 runbook clone URL 模板（规范写法，#721）
+
+runbook 需要本地 clone 仓库时，**先归一再拼接**，禁止把 `$REPO_FULL_NAME` 直通进 URL
+（直通在注入值带 provider 前缀/为空时会拼出错误地址，见用户反馈 488 / Issue #721）：
+
+```bash
+# 1) 归一 + 校验（owner/repo 两段、无前缀、无 .git）
+REPO_URL_PATH="$(printf '%s' "${REPO_FULL_NAME:-}" | sed 's#^[a-z]*:##; s#\.git$##')"
+case "$REPO_URL_PATH" in */*) : ;; *) echo "REPO_FULL_NAME 非法（应为 owner/repo）: ${REPO_URL_PATH:-<空>}" >&2; exit 1 ;; esac
+
+# 2) 拼接（host 按仓库 provider 选择；gitcode 仓库固定如下）
+CLONE_URL="https://gitcode.com/${REPO_URL_PATH}.git"
+
+# 3) clone（不要 2>/dev/null 吞错；也不要 clone 失败后盲目 || git pull 掩盖根因）
+grape git clone "$CLONE_URL" "$repo_dir" || { echo "clone 失败: $CLONE_URL" >&2; exit 1; }
+```
+
+### 五.2 clone 失败排查指引（#721）
+
+**第一步：校验变量值**（只回显非敏感仓库变量）：
+
+```bash
+echo "REPO_FULL_NAME=[${REPO_FULL_NAME:-}] REPO_OWNER=[${REPO_OWNER:-}] REPO_NAME=[${REPO_NAME:-}]"
+test -n "$REPO_FULL_NAME" && test -n "$REPO_OWNER" && test -n "$REPO_NAME" || echo "存在空值：漏注入（同族 #584 BOT_USERNAME / #595 PR_NUMBER），如实报错勿猜"
+```
+
+**常见错误模式对照**：
+
+| 症状 | 典型错误 URL | 根因 | 处理 |
+|------|--------------|------|------|
+| clone 404 / repository not found | `https://gitcode.com/gitcode:owner/repo.git` | `$REPO_FULL_NAME` 带 provider 前缀直通拼接 | 按五.1 归一后再拼；上报注入侧异常 |
+| clone 404 / repository not found | `https://gitcode.com/.git` | `$REPO_FULL_NAME` 为空（漏注入） | 排查任务 env_extra；勿猜仓库名 |
+| 404 / repository not found | `https://gitcode.com/owner/repo`（缺 `.git`） | 模板漏 `.git` 后缀 | 模板补 `.git`（部分 provider 必需） |
+| Could not resolve host | `https://gitcode.com/owner/repo.git` 用于 GitHub 仓库 | host 与 provider 不匹配 | GitHub 仓用 `https://github.com/owner/repo.git` |
+| Authentication failed | URL 正确 | 凭据/权限（401 token 失效；403 需维护者权限） | 401 说明凭据失效；403 需管理员配置，不换 token |
+| 拼接正确仍 clone 失败 | — | 网络/远端临时故障 | 重试 1 次，仍失败如实报错（附手工命令） |
+
+**同族一致性核对结论（#584/#595/#721）**：三者的根因形态一致——「runbook 依赖的环境变量与实际注入值/格式不匹配」。
+`BOT_USERNAME`（#584，`_resolve_bot_username`）、`PR_NUMBER`（#595，`_inject_issue_pr_env`）、
+`REPO_FULL_NAME`（#721，`from_repo_key` 归一）均已纳入注入侧统一口径与保留名清单
+（`src/scene_custom_env.py` `_RESERVED_ENV_NAMES`，场景自定义变量不可覆盖）；
+测试见 `tests/test_issue_573_bot_agent_env_injection.py`、`tests/test_issue_528_pr_sub_env_injection.py`、
+`tests/test_issue_721_repo_full_name_env.py`。
+
+### 五.3 技能如何使用自定义场景变量
 
 场景高级选项 `custom_fields`（`[{name, value, is_secret?, scope?}, ...]`）**以变量名直接注入**——`name` 即环境变量名，技能直接读取，无序号/映射。
 
