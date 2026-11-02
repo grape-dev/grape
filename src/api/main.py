@@ -1373,6 +1373,18 @@ async def global_exception_handler(request: Request, exc: Exception):
     return JSONResponse(status_code=500, content={"code": 500, "message": "服务器内部错误，请稍后重试", "request_id": rid})
 
 
+# Issue #683: 422 校验错误转统一 {code, message} 信封，message 携带字段名 + 合法值枚举
+from fastapi.exceptions import RequestValidationError
+from src.api.errors import validation_error_response
+
+
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    from src.config import log
+    log.info(f"Validation error ({request.url.path}): {exc.errors()}")
+    return validation_error_response(exc)
+
+
 # ===== 三层健康检查（参考 multica health.go）=====
 
 import os as _os_mod
