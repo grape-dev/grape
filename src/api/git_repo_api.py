@@ -704,6 +704,12 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
     related = list(body.related_issue_nums or [])
+    # Issue #728：自动关联走上下文过滤层——调用方未显式传 related_issue_nums 且
+    # body 非空时，剥离代码块/行内反引号/引用块后提取 Issue 号（非语义语境的 #N
+    # 不再被自动关联捕获；显式 related_issue_nums 优先，不受过滤影响）。
+    if not related and _body:
+        from src.vcs.issue_ref_filter import extract_related_issue_nums
+        related = extract_related_issue_nums(_body)
     neutral = {
         "title": body.title,
         "head": body.head,
@@ -767,6 +773,45 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
     except Exception as _e:
         log.warning(f"outbound_ledger record (update_pull) failed: {_e}")
     return resp
+
+
+@router.delete("/{owner}/{repo}/pulls/{number}/issues/{issue_number}", operation_id="gitrepo_pulls_issues_unlink",
+               summary="Unlink issue from pull request",
+               description="Removes the PR-Issue association (Issue #728). Explicit dual path params: PR number + issue number. "
+                           "GitCode: verifies the association exists (GET PR issues list) before rewriting inner_issue_nums via PATCH; "
+                           "missing association is an idempotent no-op returning unlinked=false. "
+                           "GitHub: no native PR-Issue association store, always an idempotent no-op.")
+def unlink_pull_issue(owner: str, repo: str, number: int, issue_number: int,
+                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
+    # Issue #728：关联解除端点（幂等、双参数显式校验——PR 号 + Issue 号均为路径参数）。
+    _token = _repo_token(owner, repo, user, p)
+    if p != "gitcode":
+        # GitHub 等无原生 PR↔Issue 关联存储（其关联仅为 body 文本引用），幂等 no-op。
+        return {"unlinked": False, "pr_number": number, "issue_number": issue_number,
+                "reason": f"provider {p} has no native PR-Issue association"}
+    # 1. GET PR 详情，校验关联存在（不存在 → 幂等成功，不发 PATCH）
+    pr = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _token)
+    _issues = pr.get("issues") if isinstance(pr, dict) else None
+    _nums = [it.get("number") for it in _issues
+             if isinstance(it, dict) and isinstance(it.get("number"), int)] if isinstance(_issues, list) else []
+    if issue_number not in _nums:
+        return {"unlinked": False, "pr_number": number, "issue_number": issue_number,
+                "reason": "association not found"}
+    # 2. PATCH 剩余关联（inner_issue_nums 复用 gitcode 关联编码 o/r#N；清空传空串）
+    _remaining = [n for n in _nums if n != issue_number]
+    _inner = ",".join(f"{owner}/{repo}#{n}" for n in _remaining)
+    resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/pulls/{number}", None, p), _token,
+                    {"inner_issue_nums": _inner})
+    # Issue #453 台账（对齐 update_pull：PR 变更入账，best-effort 不阻断）
+    try:
+        from src.outbound_ledger import record_outbound
+        from src.repo_key import to_repo_key
+        record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", str(number),
+                        issue_number=str(issue_number))
+    except Exception as _e:
+        log.warning(f"outbound_ledger record (unlink_pull_issue) failed: {_e}")
+    return {"unlinked": True, "pr_number": number, "issue_number": issue_number,
+            "remaining_issue_nums": _remaining, "pr": resp}
 
 
 @router.put("/{owner}/{repo}/pulls/{number}/merge", operation_id="gitrepo_pulls_merge",

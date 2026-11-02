@@ -415,3 +415,17 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | PUT/pulls/{number}/merge | `grape git-repo pulls merge --owner Jason7602 --repo hello --number 7` |
 | GET/POST pulls comments | `grape git-repo pulls comments list --owner Jason7602 --repo hello --number 7` / `... comments create ... --json '{"body":"LGTM","path":"a.py","line":5}'` |
 | GET/pulls/{number}/files | `grape git-repo pulls files --owner Jason7602 --repo hello --number 7` |
+| DELETE/pulls/{number}/issues/{issue_number} | `grape git-repo pulls issues unlink --owner Jason7602 --repo hello --number 7 --issue-number 5` |
+
+### PR body 提及 Issue 号的规避写法（Issue #728）
+
+`pulls create` 在调用方未显式传 `related_issue_nums` 时，会从 body 自动提取 Issue 号建立 PR↔Issue 关联。提取前有**上下文过滤**：代码块（\`\`\` 围栏）、行内反引号、引用块（`>` 行）内的 `#N` 属非语义语境，不会被捕获；正文自然语言 `#N` 与 `Closes #` / `Related #` / `关联 #` 显式写法正常关联。
+
+- 想在 body 里**提及但不关联**某个 Issue：把编号放进代码块或用反引号包裹，如 `` `#123` ``。
+- 想确保**一定关联**：正文显式写 `Closes #N` / `Related #N` / `关联 #N`，或 create 时直接传 `related_issue_nums`（显式参数优先，不受过滤影响）。
+- 已误建立的关联可用 unlink 命令解除（幂等，重复调用安全）：
+  ```bash
+  grape git-repo pulls issues unlink --owner Jason7602 --repo hello --number 7 --issue-number 5
+  # {"unlinked": true, "pr_number": 7, "issue_number": 5, "remaining_issue_nums": [...]}
+  ```
+  关联不存在时返回 `unlinked=false`（幂等 no-op）；GitHub 通道无原生 PR↔Issue 关联存储，恒为 no-op。
