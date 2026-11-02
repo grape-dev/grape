@@ -1711,6 +1711,22 @@ def set_host_status(repo_key: str, status: str = ""):
         log.warning(f"Set host status failed: {e}")
 
 
+def managed_repo_exists(repo_key: str) -> bool:
+    """判定 repo_key 是否已存在于 managed_repos（Issue #671：A2A 回退/自愈链路共用）。"""
+    from src.repo_key import to_repo_key
+    repo_key = to_repo_key(repo_key)
+    if not repo_key:
+        return False
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
+            return bool(c.fetchone())
+    except Exception as e:
+        log.warning(f"Managed repo exists check failed: {e}")
+        return False
+
+
 def get_host_status(repo_key: str) -> str:
     """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
     from src.repo_key import to_repo_key

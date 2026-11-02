@@ -820,6 +820,15 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
         webhook_url = get_webhook_url()
         if not webhook_url:
             # Issue #372: webhook_url 未配置时不阻断创建，只跳过托管
+            # Issue #671: 托管未完成也兜底注册最小 managed_repos 行（幂等），
+            # 保证新仓库进入注册链路（repair-host / A2A / 事件可见），不再悬空。
+            try:
+                _repo_key = to_repo_key(full_name, provider=provider)
+                user_db.add_managed_repo(_repo_key, owner, repo_name)
+                user_db.mark_user_repo_join(user["id"], _repo_key, is_join=True, is_admin=True)
+                user_db.set_host_status(_repo_key, "webhook_missing")
+            except Exception as _reg_e:
+                log.warning(f"create_new_repo: fallback registration failed: {_reg_e}")
             try:
                 _fetch_and_cache(user["id"], api_token, provider)
             except Exception:
@@ -893,6 +902,15 @@ def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_sessio
             from src.api.session_store import ensure_default_agent_sessions
             ensure_default_agent_sessions(repo_key)
         except Exception as e:
+            # Issue #671: 托管失败也兜底注册最小 managed_repos 行（幂等）+ 标记 partial，
+            # 保证仓库进入注册链路，用户可经 repair-host 自愈（未注册仓 repair-host 会 403）。
+            try:
+                _repo_key = to_repo_key(full_name, provider=provider)
+                user_db.add_managed_repo(_repo_key, owner, repo_name)
+                user_db.mark_user_repo_join(user["id"], _repo_key, is_join=True, is_admin=True)
+                user_db.set_host_status(_repo_key, "partial")
+            except Exception as _reg_e:
+                log.warning(f"create_new_repo: fallback registration failed: {_reg_e}")
             return {"repo": repo_info, "full_name": full_name, "owner": owner, "name": repo_name, "hosted": False, "message": f"仓库已创建，但托管失败: {e}"}
 
         try:
@@ -1441,20 +1459,39 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
-    check_repo_access(user, repo_key)
-
-    _provider, _, _ = parse_repo_key(repo_key)
-    _cfg = get_hosting_provider_config(_provider)
-    bot_token = _cfg["bot_token"]
-    bot_username = _cfg["bot_username"]
+    from src.user.db import managed_repo_exists
 
     # owner token 按 provider 分流
+    _provider, _, _ = parse_repo_key(repo_key)
     if _provider == "github":
         api_token = get_user_github_token_with_refresh(user["username"], user_id=user["id"])
     else:
         api_token = get_user_token_with_refresh(user["username"], user.get("id", 0))
     if not api_token:
         raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "缺少用户 API Token，请重新登录"})
+
+    # Issue #671：未注册仓（托管链路缺口）自证放行——check_repo_access 依赖
+    # managed_repos/user_repos（未注册仓直接 403，自愈入口对缺口仓不可达）。
+    # 未注册时改用调用者用户 token 做 VCS 可达性校验，通过即视同具备修复权限。
+    try:
+        check_repo_access(user, repo_key)
+    except HTTPException:
+        if managed_repo_exists(repo_key):
+            raise
+        _self_ok = False
+        try:
+            from src.vcs.api_client import VcsApiClient
+            _info = VcsApiClient(_provider, api_token, owner, repo).get_repo_info() or {}
+            _self_ok = not str(_info.get("error", "") or "")
+        except Exception as _ve:
+            log.warning(f"repair_host: unregistered repo VCS self-check failed: {_ve}")
+        if not _self_ok:
+            raise
+        log.info(f"repair_host: unregistered repo {repo_key} passed VCS self-check, allow repair")
+
+    _cfg = get_hosting_provider_config(_provider)
+    bot_token = _cfg["bot_token"]
+    bot_username = _cfg["bot_username"]
 
     # Issue #372: 路径 B——无全局 bot token 时用用户 token 修复 webhook
     _use_path_b = not bot_token

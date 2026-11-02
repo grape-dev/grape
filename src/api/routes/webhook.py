@@ -899,6 +899,86 @@ async def a2a_status_endpoint(request: Request,
             "idempotency_key": idempotency_key or "", "events": events}
 
 
+def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> str:
+    """Issue #671：A2A 归属校验回退——GitCode/GitHub 可达性校验（与 git-repo 透传端点同源口径）。
+
+    managed_repos 未命中时调用（仅认证调用方）。token 解析与 git_repo_api._repo_token
+    口径对齐：TokenResolver 策略链（会话/仓库 bot/全局 bot/host 用户）→ 会话用户 token
+    （user_hint 提供 user_id/username 时按用户身份取）。
+
+    返回 verdict：
+    - "ok"            仓库存在且 token 可达（放行 + 幂等补录）
+    - "not_found"     上游 404（仓库不存在/拼写错误）
+    - "no_permission" 上游 403（仓库存在但无权限）
+    - "unreachable"   网络/上游异常（无法判定）
+    - "no_token"      无可用平台 token（无法判定）
+    - "unsupported"   repo_key 前缀不支持
+    """
+    from src.repo_key import parse_repo_key
+    _provider, _owner, _name = parse_repo_key(repo_key)
+    if _provider not in ("gitcode", "github") or not _owner or not _name:
+        return "unsupported"
+
+    token = ""
+    try:
+        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        token = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
+    except Exception as _te:
+        log.warning(f"A2A fallback: token resolver failed for {repo_key}: {_te}")
+
+    if not token and user_hint:
+        try:
+            _uid = int(user_hint.get("id") or user_hint.get("user_id") or 0)
+            _username = user_hint.get("username") or ""
+            if not _username and _uid > 0:
+                from src.auth.grape_account_db import get_grape_account_by_id
+                _username = (get_grape_account_by_id(_uid) or {}).get("username", "")
+            if _username or _uid > 0:
+                from src.token_resolver import create_provider_from_repo_key
+                token = create_provider_from_repo_key(repo_key).fetch_user_token(_username, _uid) or ""
+        except Exception as _ue:
+            log.warning(f"A2A fallback: user token fetch failed for {repo_key}: {_ue}")
+
+    if not token:
+        return "no_token"
+
+    try:
+        from src.vcs.api_client import VcsApiClient
+        _info = VcsApiClient(_provider, token, _owner, _name).get_repo_info() or {}
+    except Exception as _ve:
+        log.warning(f"A2A fallback: repo info probe failed for {repo_key}: {_ve}")
+        return "unreachable"
+    _err = str(_info.get("error", "") or "")
+    if not _err:
+        return "ok"
+    _status = _info.get("status_code") or 0
+    if _status == 404 or "404" in _err:
+        return "not_found"
+    if _status == 403 or "403" in _err:
+        return "no_permission"
+    return "unreachable"
+
+
+def _a2a_register_repo(repo_key: str) -> bool:
+    """Issue #671：回退放行后幂等补录 managed_repos（最小行，INSERT OR IGNORE，不覆盖既有配置）。"""
+    from src.repo_key import parse_repo_key
+    _provider, _owner, _name = parse_repo_key(repo_key)
+    try:
+        from src.session_manager import db as _reg_db, db_lock as _reg_lock
+        with _reg_lock:
+            _reg_c = _reg_db.cursor()
+            _reg_c.execute(
+                "INSERT OR IGNORE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
+                "VALUES (?,?,?,?)",
+                (repo_key, _owner, _name, f"{_owner}/{_name}"))
+            _reg_db.commit()
+        log.info(f"A2A: fallback registered managed_repos row: {repo_key}")
+        return True
+    except Exception as _e:
+        log.warning(f"A2A: fallback registration failed for {repo_key}: {_e}")
+        return False
+
+
 @router.post("/api/a2a", operation_id="a2a_handoff", tags=["a2a"], summary="Hand off to another agent (A2A)", description="Agent-to-Agent handoff: dispatches a new event to the target agent. Accepts JWT/session token/API key (public) plus internal bot-token.")
 async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None = Depends(get_user_or_none)):
     """Agent-to-Agent 协议端点：对外安全路由（JWT/会话 token/API Key）+ 内部 bot-token 兼容。"""
@@ -943,18 +1023,21 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     log.info(f"A2A: agent={agent_name}, repo={repository}")
 
     # ── 仓库真实性校验（a2a-input-validation-fix 第4条，防假仓库）：
-    # repo_key 必须存在于 managed_repos（本平台真实托管）。假仓库/拼错的仓库直接 400 拒绝，
-    # 不让错误内容流入鉴权后的异步派发链路。查表异常时跳过（依赖下游场景节点检查兜底），
+    # Issue #671 方案 B：注册表优先 + GitCode 可达性回退。
+    # repo_key 在 managed_repos（本平台真实托管）→ 快路径放行；未命中 → 不再直接
+    # 400，标记 _repo_unregistered，待鉴权通过后走 _a2a_repo_fallback_check
+    # （GitCode/GitHub 可达性校验 + 幂等补录），保证同一 repo_key 与 git-repo
+    # 命令两链路判定一致。查表异常时跳过（依赖下游场景节点检查兜底），
     # 避免表结构问题阻断正常 A2A。
+    _repo_unregistered = False
     try:
         from src.session_manager import db as _mr_db, db_lock as _mr_lock
         with _mr_lock:
             _mr_c = _mr_db.cursor()
             _mr_c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
             if not _mr_c.fetchone():
-                raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
-    except HTTPException:
-        raise
+                _repo_unregistered = True
+                log.info(f"A2A: repo not in managed_repos, defer to GitCode reachability fallback: {repo_key}")
     except Exception as _mr_e:
         log.warning(f"A2A: managed_repos existence check failed, skip: {_mr_e}")
 
@@ -1030,6 +1113,32 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         else:
             # 会话 token（repo 作用域）或 仓库 bot token（兼容存量 worker）
             _a2a_session_info = _authorize_a2a(request, repo_key)
+
+        # Issue #671：注册表未命中 → GitCode 可达性回退（鉴权之后执行，
+        # 未认证调用方不触发外呼，维持原 400 not hosted 拒绝语义）。
+        # 仅以下认证形态触发回退：JWT/API Key 用户、或会话 token 有效
+        # （_authorize_a2a 返回 session info）。bot token / 未认证 defer 形态不回退。
+        if _repo_unregistered:
+            _fb_hint = None
+            if user and user.get("auth_type") in ("jwt", "api_key"):
+                _fb_hint = user
+            elif _a2a_session_info:
+                _fb_hint = {"user_id": _a2a_session_info.get("user_id") or 0,
+                            "username": _a2a_session_info.get("username") or ""}
+            if _fb_hint is not None:
+                _verdict = _a2a_repo_fallback_check(repo_key, _fb_hint)
+                if _verdict == "ok":
+                    # 放行 + 幂等补录（自愈注册缺口，重复调用不产生重复行）
+                    _a2a_register_repo(repo_key)
+                elif _verdict == "not_found":
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' not found on the Git platform (repo_key={repo_key}): 仓库不存在或 owner/repo 拼写错误，请校正后重试"})
+                elif _verdict == "no_permission":
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' exists but the server has no access to it (repo_key={repo_key}): 请检查仓库权限或先在平台上托管该仓库"})
+                else:
+                    # no_token / unreachable / unsupported：无法判定可达性 → 维持「未托管」安全默认
+                    raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
+            else:
+                raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
 
         # Issue #544 审查修正①：幂等命中查询在鉴权之后——未认证调用方不得
         # 凭已有幂等键探测/获取事件信息（seq/status/issue_id）。
