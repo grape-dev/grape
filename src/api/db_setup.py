@@ -1832,7 +1832,7 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
-def _ensure_column(c, tbl: str, col: str, ddl: str):
+def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
@@ -1843,6 +1843,10 @@ def _ensure_column(c, tbl: str, col: str, ddl: str):
        做不到就报错而非默默锁全表）；
     3. 再失败 → 记 ERROR 进人工处理清单，**绝不静默降级到 COPY**；
        列未建成，下次启动幂等重试。
+
+    allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
+    补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
+    不加此开关时会被安全策略挡下导致列永远建不出来。
     """
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col in cols:
@@ -1871,6 +1875,17 @@ def _ensure_column(c, tbl: str, col: str, ddl: str):
         if _is_mdl_timeout(_inplace_err):
             _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
             raise _MdlWaitTimeout(str(_inplace_err))
+        if allow_copy:
+            try:
+                c.execute(base_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
+                log.info(f"_ensure_column({tbl}.{col}) INPLACE 不支持 → 已按默认算法(COPY)补列")
+                return
+            except Exception as _copy_err:
+                entry = (f"{tbl}.{col}: INSTANT/INPLACE/默认算法(COPY) 均失败 "
+                         f"({_copy_err})——需人工处理")
+                _DDL_MANUAL_REVIEW.append(entry)
+                log.error(f"_ensure_column MANUAL REVIEW: {entry}")
+                return
         entry = (f"{tbl}.{col}: INSTANT 与 INPLACE,LOCK=NONE 均失败 "
                  f"(INPLACE err={_inplace_err})——需人工处理，未静默 COPY")
         _DDL_MANUAL_REVIEW.append(entry)
@@ -3240,8 +3255,19 @@ def _migrate_release_subissue_unique_index():
         pass
     with db_lock:
         c = db.cursor()
-        _ensure_column(c, "issue", "release_candidate_sha", "TEXT DEFAULT ''")
-        _ensure_column(c, "issue", "release_target_env", "TEXT DEFAULT ''")
+        # B5（本地集成修复）：release_* 字段此前只在 legacy 全量首跑路径补列，已盖章库
+        # 从未建过；且带 DEFAULT 的 TEXT 列 MySQL 无法 INSTANT/INPLACE，安全策略会挡下
+        # 导致列永远建不出来 → 此处统一补全部 7 列并允许默认算法（issue 表百级行，COPY 安全）。
+        for _col, _ddl in (
+            ("release_candidate_sha", "TEXT DEFAULT ''"),
+            ("release_target_env", "TEXT DEFAULT ''"),
+            ("release_evidence_ref", "TEXT DEFAULT ''"),
+            ("release_approved_by", "INTEGER DEFAULT 0"),
+            ("release_approved_at", "TEXT DEFAULT ''"),
+            ("release_result", "TEXT DEFAULT ''"),
+            ("release_failure_reason", "TEXT DEFAULT ''"),
+        ):
+            _ensure_column(c, "issue", _col, _ddl, allow_copy=True)
         db.commit()
         if is_mysql:
             try:
