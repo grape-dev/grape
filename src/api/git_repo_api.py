@@ -26,6 +26,9 @@ router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 # provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
 _SUPPORTED_PROVIDERS = set(_PROVIDER_MODULES)
 
+# Issue #707：issues update `state` 合法中性集合（入口层前置校验；strip/lower 归一后匹配）
+_UPDATE_STATE_NEUTRAL = {"open", "opened", "reopen", "closed", "close"}
+
 
 class PRCreateBody(BaseModel):
     title: str = ""
@@ -72,6 +75,8 @@ class IssueUpdateBody(BaseModel):
 
     - 仅 schema 层收紧（enum/description/example），运行时校验行为不变（非法值仍由后端 400 拒绝）。
     - 请求示例见 model_config json_schema_extra（CLI help / openapi.json 随契约同步）。
+    - Issue #707：入口层前置校验（update_issue）对非法 state 本地 400，文案指向 `state` 字段；
+      中性别名（open/opened/closed）被接受并映射到 reopen/close。
     """
     model_config = ConfigDict(
         json_schema_extra={"examples": [{"state": "reopen"}]},
@@ -90,7 +95,9 @@ class IssueUpdateBody(BaseModel):
         "",
         title="Issue state event",
         description="State transition to apply (aligns with GitHub `state_event`): "
-                    "accepts only 'reopen' or 'close'. Any other value is rejected by the backend with 400.",
+                    "accepts only 'reopen' or 'close'. Any other value is rejected by the backend with 400. "
+                    "Neutral aliases 'open'/'opened' map to 'reopen', 'closed' maps to 'close' "
+                    "(Issue #707: invalid values get a local 400 naming the `state` field).",
         examples=["reopen"],
         json_schema_extra={"enum": ["reopen", "close"]},
     )
@@ -520,12 +527,23 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     _body = body.body or ""
     if _body and "<!-- grape-auto-comment -->" not in _body:
         _body = _body + "\n<!-- grape-auto-comment -->"
+    # Issue #707：state 非法值前置校验 + 归一——本地 400 文案指向契约字段 `state`
+    # （合法取值 reopen/close，中性别名 open/opened/closed），不再透传上游
+    # `state_event` 字样的 400 误导文案
+    _state = body.state or ""
+    if _state:
+        _state = str(_state).strip().lower()
+        if _state not in _UPDATE_STATE_NEUTRAL:
+            raise HTTPException(status_code=400, detail={
+                "code": 400,
+                "message": f"'state': input must in [reopen, close] "
+                           f"(aliases: open, opened, closed are accepted and mapped)"})
     neutral = {
         # Issue #581：labels 双通道适配（GitHub→数组 / GitCode→逗号字符串透传）
         "labels": _provider_labels(p, body.labels),
         "assignee": body.assignee,
         "milestone_id": body.milestone_id or None,
-        "state": body.state,
+        "state": _state,
         "body": _body,
     }
     payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
