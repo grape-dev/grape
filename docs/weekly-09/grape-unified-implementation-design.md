@@ -1,6 +1,6 @@
 # Grape 融合实施方案 — 三域四进程 + 分 Schema + Monorepo
 
-> **版本**：v2.0（Insight 独立进程版）
+> **版本**：v2.1（GSB 统一服务通信框架 + 跨语言接入版）
 > **日期**：2026-11-02
 > **基础仓**：`/home/grape/grape-new-version2`
 > **融合来源**：grape-three-schema-split-design.md、grape-three-process-split-design.md、grape-monorepo-design.md、grape-three-dimension-analysis.md
@@ -55,7 +55,7 @@ Grape 系统按职责划分为三个域，每域一个独立进程组：
 |------|------|
 | **分 Schema 不分库** | 三个 schema 在同一 MySQL 实例，跨 schema 事务可用。SQLite 用表前缀模拟 |
 | **DB 驱动协作** | 进程间通信通过 DB 表状态流转完成（B 写 `agent_tasks.queued` → C `claim` 抢单 → C `complete` 回写），不引入额外 RPC |
-| **契约接口** | 跨域数据访问通过 `src/domains/contracts/` 接口，当前实现为同实例跨 schema SQL，未来可替换为 HTTP API |
+| **契约接口双模式** | 跨域数据访问通过 `src/domains/contracts/` 接口定义，支持 LocalProvider（跨 schema SQL）和 RemoteProvider（HTTP API）双模式，由 GRAPE_MODE/GRAPE_PROVIDER_MODE 环境变量切换，业务代码无感。 |
 | **单机零依赖** | SQLite + 表前缀，四进程同主机，无 Redis/Kafka/etcd |
 | **渐进式** | Phase 0-6 逐步演进，每阶段可独立验证和回滚 |
 | **不引入消息中间件** | `agent_tasks` 表即任务队列，`claim_by_tag` 即消费端抢单 |
@@ -1112,139 +1112,1538 @@ from src.domains.runtime.engine.direct_executor import _execute_agent, start_dir
 
 ## 7. 域间契约接口
 
-### 7.1 MgmtService 接口
+### 7.1 设计理念：双模式 Provider
+
+域间契约接口采用 **Provider 抽象模式**——同一接口定义，两种实现可切换：
+
+- **LocalProvider**（同实例模式）：直接执行跨 schema SQL，适用于单机/同实例部署
+- **RemoteProvider**（HTTP API 模式）：通过 HTTP 调用目标域进程的 `/internal/*` 端点，适用于分库/跨实例部署
+
+通过 `GRAPE_MODE` 环境变量 + 配置自动选择 Provider，业务代码无感切换：
+
+```python
+# src/kernel/provider.py
+"""域间通信 Provider 工厂——根据部署模式自动选择实现"""
+
+import os
+from src.config import log
+
+GRAPE_MODE = os.environ.get("GRAPE_MODE", "single")  # single | cluster
+
+def get_mgmt_service():
+    """获取 MgmtService 实现"""
+    if GRAPE_MODE == "cluster":
+        from src.domains.contracts.remote.mgmt_remote import MgmtServiceRemote
+        return MgmtServiceRemote()
+    else:
+        from src.domains.contracts.local.mgmt_local import MgmtServiceLocal
+        return MgmtServiceLocal()
+
+def get_runtime_service():
+    """获取 RuntimeService 实现"""
+    if GRAPE_MODE == "cluster":
+        from src.domains.contracts.remote.runtime_remote import RuntimeServiceRemote
+        return RuntimeServiceRemote()
+    else:
+        from src.domains.contracts.local.runtime_local import RuntimeServiceLocal
+        return RuntimeServiceLocal()
+
+def get_insight_service():
+    """获取 InsightService 实现"""
+    if GRAPE_MODE == "cluster":
+        from src.domains.contracts.remote.insight_remote import InsightServiceRemote
+        return InsightServiceRemote()
+    else:
+        from src.domains.contracts.local.insight_local import InsightServiceLocal
+        return InsightServiceLocal()
+```
+
+### 7.2 目录结构
+
+```
+src/domains/contracts/
+├── __init__.py
+├── mgmt_service.py              # MgmtService 抽象接口（Protocol）
+├── runtime_service.py           # RuntimeService 抽象接口（Protocol）
+├── insight_service.py           # InsightService 抽象接口（Protocol）
+├── event_types.py               # 领域事件类型定义
+├── local/                       # LocalProvider 实现（跨 schema SQL）
+│   ├── __init__.py
+│   ├── mgmt_local.py            # MgmtServiceLocal
+│   ├── runtime_local.py         # RuntimeServiceLocal
+│   └── insight_local.py         # InsightServiceLocal
+└── remote/                      # RemoteProvider 实现（HTTP API）
+    ├── __init__.py
+    ├── mgmt_remote.py           # MgmtServiceRemote
+    ├── runtime_remote.py        # RuntimeServiceRemote
+    ├── insight_remote.py        # InsightServiceRemote
+    └── http_client.py           # 共享 HTTP 客户端（连接池、超时、重试）
+```
+
+### 7.3 MgmtService 接口定义
 
 ```python
 # src/domains/contracts/mgmt_service.py
 """管理域服务接口——供 Runtime 域调用"""
+from typing import Protocol
 
-class MgmtService:
-    """当前实现：同实例跨 schema SQL 查询
-    未来实现：HTTP API 调用 Mgmt 进程"""
+class MgmtService(Protocol):
+    """管理域服务接口——LocalProvider 走跨 schema SQL，RemoteProvider 走 HTTP API"""
 
     def get_repo_webhook_config(self, repo_key: str) -> dict:
         """B 校验 webhook 时调用——返回 webhook_token, bot_username, org_id"""
-        # → SELECT * FROM grape_mgmt.managed_repos WHERE repo_key=?
+        ...
 
     def get_agent_session(self, repo_key: str, agent_type: str) -> dict:
         """B 路由判定时调用——返回 runtime_id, skill, skill_id"""
-        # → SELECT * FROM grape_mgmt.devops_agent_session WHERE repo_key=? AND agent_type=?
+        ...
 
     def get_scene_config(self, repo_key: str) -> list:
         """B 读取场景节点——返回 nodes_json, work_branch"""
-        # → SELECT * FROM grape_mgmt.devops_pipeline_scene WHERE repo_key=?
+        ...
 
     def get_scene_pool_engine_ids(self, scene_id: str) -> list:
         """C 引擎选择时调用——返回场景绑定的引擎 ID 列表"""
-        # → SELECT engine_runtime_ids FROM grape_mgmt.devops_pipeline_scene WHERE scene_id=?
+        ...
 
     def verify_session_token(self, token_hash: str) -> dict:
         """C Worker 鉴权时调用——返回 credential_id, scope, owner_id"""
-        # → SELECT * FROM grape_mgmt.session_api_tokens WHERE token_hash=?
+        ...
 
     def get_bot_config(self, repo_key: str) -> dict:
         """B/C 读取 Bot 配置——bot_token, bot_username"""
-        # → SELECT bot_gitcode_token, bot_username FROM grape_mgmt.managed_repos WHERE repo_key=?
+        ...
 ```
 
-### 7.2 RuntimeService 接口
+#### LocalProvider 实现
+
+```python
+# src/domains/contracts/local/mgmt_local.py
+"""MgmtService LocalProvider——同实例跨 schema SQL 实现"""
+from src.kernel.db import t_mgmt
+from src.kernel.session_manager import db, db_lock
+
+class MgmtServiceLocal:
+    """同实例模式：直接查 grape_mgmt schema（SQLite 用 mgmt_ 前缀）"""
+
+    def get_repo_webhook_config(self, repo_key: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT repo_key, webhook_token, bot_username, org_id "
+                f"FROM {t_mgmt('managed_repos')} WHERE repo_key=?",
+                (repo_key,)
+            )
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_agent_session(self, repo_key: str, agent_type: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT runtime_id, skill, skill_id "
+                f"FROM {t_mgmt('devops_agent_session')} "
+                f"WHERE repo_key=? AND agent_type=?",
+                (repo_key, agent_type)
+            )
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_scene_config(self, repo_key: str) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT scene_id, nodes_json, work_branch, deploy_url "
+                f"FROM {t_mgmt('devops_pipeline_scene')} WHERE repo_key=?",
+                (repo_key,)
+            )
+            return [dict(r) for r in c.fetchall()]
+
+    def get_scene_pool_engine_ids(self, scene_id: str) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT engine_runtime_ids "
+                f"FROM {t_mgmt('devops_pipeline_scene')} WHERE scene_id=?",
+                (scene_id,)
+            )
+            row = c.fetchone()
+            return row[0] if row else []
+
+    def verify_session_token(self, token_hash: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT credential_id, scope, owner_id, expires_at "
+                f"FROM {t_mgmt('session_api_tokens')} WHERE token_hash=?",
+                (token_hash,)
+            )
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_bot_config(self, repo_key: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT bot_gitcode_token, bot_username "
+                f"FROM {t_mgmt('managed_repos')} WHERE repo_key=?",
+                (repo_key,)
+            )
+            row = c.fetchone()
+            return dict(row) if row else {}
+```
+
+#### RemoteProvider 实现
+
+```python
+# src/domains/contracts/remote/mgmt_remote.py
+"""MgmtService RemoteProvider——HTTP API 调用 Mgmt 进程"""
+from src.domains.contracts.remote.http_client import ServiceHttpClient
+
+class MgmtServiceRemote:
+    """集群模式：通过 HTTP API 调用 Mgmt 进程的 /internal/* 端点"""
+
+    def __init__(self):
+        self.client = ServiceHttpClient("mgmt", base_url="${GRAPE_MGMT_URL}")
+
+    def get_repo_webhook_config(self, repo_key: str) -> dict:
+        return self.client.get(f"/internal/repos/{repo_key}/webhook-config")
+
+    def get_agent_session(self, repo_key: str, agent_type: str) -> dict:
+        return self.client.get(f"/internal/sessions/{repo_key}/{agent_type}")
+
+    def get_scene_config(self, repo_key: str) -> list:
+        return self.client.get(f"/internal/scenes/{repo_key}")
+
+    def get_scene_pool_engine_ids(self, scene_id: str) -> list:
+        return self.client.get(f"/internal/scenes/{scene_id}/engine-ids")
+
+    def verify_session_token(self, token_hash: str) -> dict:
+        return self.client.post("/internal/tokens/verify", {"token_hash": token_hash})
+
+    def get_bot_config(self, repo_key: str) -> dict:
+        return self.client.get(f"/internal/repos/{repo_key}/bot-config")
+```
+
+### 7.4 RuntimeService 接口定义
 
 ```python
 # src/domains/contracts/runtime_service.py
 """运行域服务接口——供 Mgmt 域和 Insight 域调用"""
+from typing import Protocol, Iterator
 
-class RuntimeService:
-    """当前实现：同实例跨 schema SQL 查询
-    未来实现：HTTP API 调用 Runtime 进程"""
+class RuntimeService(Protocol):
+    """运行域服务接口——LocalProvider 走跨 schema SQL，RemoteProvider 走 HTTP API"""
 
     def get_tasks(self, repo_key: str, filters: dict) -> list:
         """A 用户面任务列表"""
-        # → SELECT * FROM grape_runtime.agent_tasks WHERE repo_key=? AND ...
+        ...
 
     def get_task_detail(self, task_id: str) -> dict:
         """A 任务详情"""
-        # → SELECT * FROM grape_runtime.agent_tasks WHERE id=?
+        ...
 
     def get_task_messages(self, task_id: str, limit: int) -> list:
         """A 任务消息"""
-        # → SELECT * FROM grape_runtime.task_messages WHERE task_id=? LIMIT ?
+        ...
+
+    def stream_task_messages(self, task_id: str) -> Iterator[dict]:
+        """A SSE 流式读取任务消息"""
+        ...
 
     def get_events(self, repo_key: str, filters: dict) -> list:
         """A 事件列表"""
-        # → SELECT * FROM grape_runtime.events WHERE repo_key=? AND ...
+        ...
 
     def get_event_detail(self, seq: int) -> dict:
         """A 事件详情"""
-        # → SELECT * FROM grape_runtime.events WHERE seq=?
+        ...
 
     def get_issues(self, repo_key: str, filters: dict) -> list:
         """A 需求列表"""
-        # → SELECT * FROM grape_runtime.issue WHERE repo_key=? AND ...
+        ...
 
     def get_issue_state(self, repo_key: str, issue_id: str) -> dict:
         """A Issue 状态"""
-        # → SELECT * FROM grape_runtime.issue_state WHERE repo_key=? AND issue_id=?
+        ...
 
     def get_runtimes(self, org_id: int) -> list:
         """A 引擎列表"""
-        # → SELECT * FROM grape_runtime.agent_runtimes WHERE org_id=?
+        ...
 
     def get_pipeline_instances(self, repo_key: str) -> list:
         """A 流水线实例"""
-        # → SELECT * FROM grape_runtime.pipeline_instances WHERE repo_key=?
+        ...
 
     def confirm_issue_done(self, issue_id: int, user_id: int) -> dict:
-        """A 确认需求完成——写 grape_runtime.issue + grape_runtime.issue_state"""
+        """A 确认需求完成"""
+        ...
 
     def cancel_issue(self, issue_id: int, user_id: int) -> dict:
-        """A 取消需求——写 grape_runtime.issue"""
+        """A 取消需求"""
+        ...
 
     def terminate_event(self, seq: int, user_id: int) -> dict:
-        """A 终止事件——写 grape_runtime.events"""
+        """A 终止事件"""
+        ...
 
     def redispatch_event(self, seq: int, user_id: int) -> dict:
-        """A 重派事件——写 grape_runtime.events + grape_runtime.agent_tasks"""
+        """A 重派事件"""
+        ...
 ```
 
-### 7.3 InsightService 接口
+#### LocalProvider 实现
+
+```python
+# src/domains/contracts/local/runtime_local.py
+"""RuntimeService LocalProvider——同实例跨 schema SQL 实现"""
+from src.kernel.db import t_runtime
+from src.kernel.session_manager import db, db_lock
+
+class RuntimeServiceLocal:
+    """同实例模式：直接查 grape_runtime schema（SQLite 用 rt_ 前缀）"""
+
+    def get_tasks(self, repo_key: str, filters: dict) -> list:
+        with db_lock:
+            c = db.cursor()
+            # 构建 WHERE 子句
+            conditions = ["repo_key=?"]
+            params = [repo_key]
+            if "status" in filters:
+                conditions.append("status=?")
+                params.append(filters["status"])
+            sql = f"SELECT * FROM {t_runtime('agent_tasks')} WHERE {' AND '.join(conditions)} ORDER BY created_at DESC LIMIT 100"
+            c.execute(sql, params)
+            return [dict(r) for r in c.fetchall()]
+
+    def get_task_detail(self, task_id: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT * FROM {t_runtime('agent_tasks')} WHERE id=?", (task_id,))
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_task_messages(self, task_id: str, limit: int = 50) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM {t_runtime('task_messages')} "
+                f"WHERE task_id=? ORDER BY seq ASC LIMIT ?",
+                (task_id, limit)
+            )
+            return [dict(r) for r in c.fetchall()]
+
+    def stream_task_messages(self, task_id: str) -> Iterator[dict]:
+        """SSE 流——LocalProvider 直接查 DB 轮询新消息"""
+        import time
+        last_seq = 0
+        deadline = time.time() + 300  # 5 分钟超时
+        while time.time() < deadline:
+            with db_lock:
+                c = db.cursor()
+                c.execute(
+                    f"SELECT * FROM {t_runtime('task_messages')} "
+                    f"WHERE task_id=? AND seq>? ORDER BY seq ASC",
+                    (task_id, last_seq)
+                )
+                rows = c.fetchall()
+            for row in rows:
+                yield dict(row)
+                last_seq = row["seq"]
+            time.sleep(1)  # 1s 轮询
+
+    def get_events(self, repo_key: str, filters: dict) -> list:
+        with db_lock:
+            c = db.cursor()
+            conditions = ["repo_key=?"]
+            params = [repo_key]
+            if "status" in filters:
+                conditions.append("status=?")
+                params.append(filters["status"])
+            sql = f"SELECT * FROM {t_runtime('events')} WHERE {' AND '.join(conditions)} ORDER BY seq DESC LIMIT 100"
+            c.execute(sql, params)
+            return [dict(r) for r in c.fetchall()]
+
+    def get_event_detail(self, seq: int) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(f"SELECT * FROM {t_runtime('events')} WHERE seq=?", (seq,))
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_issues(self, repo_key: str, filters: dict) -> list:
+        with db_lock:
+            c = db.cursor()
+            conditions = ["repo_key=?"]
+            params = [repo_key]
+            if "status" in filters:
+                conditions.append("status=?")
+                params.append(filters["status"])
+            sql = f"SELECT * FROM {t_runtime('issue')} WHERE {' AND '.join(conditions)} ORDER BY created_at DESC"
+            c.execute(sql, params)
+            return [dict(r) for r in c.fetchall()]
+
+    def get_issue_state(self, repo_key: str, issue_id: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM {t_runtime('issue_state')} "
+                f"WHERE repo_key=? AND issue_id=?",
+                (repo_key, issue_id)
+            )
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_runtimes(self, org_id: int) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM {t_runtime('agent_runtimes')} WHERE org_id=?",
+                (org_id,)
+            )
+            return [dict(r) for r in c.fetchall()]
+
+    def get_pipeline_instances(self, repo_key: str) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM {t_runtime('pipeline_instances')} WHERE repo_key=?",
+                (repo_key,)
+            )
+            return [dict(r) for r in c.fetchall()]
+
+    def confirm_issue_done(self, issue_id: int, user_id: int) -> dict:
+        """写 grape_runtime.issue + issue_state"""
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE {t_runtime('issue')} SET status='completed' "
+                f"WHERE issue_id=? AND (user_id=? OR user_id=0)",
+                (issue_id, user_id)
+            )
+            c.execute(
+                f"UPDATE {t_runtime('issue_state')} SET stage='done' "
+                f"WHERE issue_id=?",
+                (issue_id,)
+            )
+            db.commit()
+            return {"ok": True, "issue_id": issue_id}
+
+    def cancel_issue(self, issue_id: int, user_id: int) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE {t_runtime('issue')} SET status='cancelled' WHERE issue_id=?",
+                (issue_id,)
+            )
+            db.commit()
+            return {"ok": True, "issue_id": issue_id}
+
+    def terminate_event(self, seq: int, user_id: int) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"UPDATE {t_runtime('events')} SET status='terminated' WHERE seq=?",
+                (seq,)
+            )
+            db.commit()
+            return {"ok": True, "seq": seq}
+
+    def redispatch_event(self, seq: int, user_id: int) -> dict:
+        """重派事件——写 events + agent_tasks"""
+        with db_lock:
+            c = db.cursor()
+            # 读取原事件
+            c.execute(f"SELECT * FROM {t_runtime('events')} WHERE seq=?", (seq,))
+            evt = c.fetchone()
+            if not evt:
+                return {"ok": False, "error": "event not found"}
+            # 创建新事件 + 入队（简化版，实际逻辑更复杂）
+            # ...
+            db.commit()
+            return {"ok": True, "seq": seq}
+```
+
+#### RemoteProvider 实现
+
+```python
+# src/domains/contracts/remote/runtime_remote.py
+"""RuntimeService RemoteProvider——HTTP API 调用 Runtime 进程"""
+from src.domains.contracts.remote.http_client import ServiceHttpClient
+
+class RuntimeServiceRemote:
+    """集群模式：通过 HTTP API 调用 Runtime 进程的 /internal/* 端点"""
+
+    def __init__(self):
+        self.client = ServiceHttpClient("runtime", base_url="${GRAPE_RUNTIME_URL}")
+
+    def get_tasks(self, repo_key: str, filters: dict) -> list:
+        return self.client.get(f"/internal/tasks", params={"repo_key": repo_key, **filters})
+
+    def get_task_detail(self, task_id: str) -> dict:
+        return self.client.get(f"/internal/tasks/{task_id}")
+
+    def get_task_messages(self, task_id: str, limit: int = 50) -> list:
+        return self.client.get(f"/internal/tasks/{task_id}/messages", params={"limit": limit})
+
+    def stream_task_messages(self, task_id: str) -> Iterator[dict]:
+        """SSE 流——RemoteProvider 代理 Runtime 进程的 SSE 端点"""
+        return self.client.stream_sse(f"/internal/tasks/{task_id}/stream")
+
+    def get_events(self, repo_key: str, filters: dict) -> list:
+        return self.client.get(f"/internal/events", params={"repo_key": repo_key, **filters})
+
+    def get_event_detail(self, seq: int) -> dict:
+        return self.client.get(f"/internal/events/{seq}")
+
+    def get_issues(self, repo_key: str, filters: dict) -> list:
+        return self.client.get(f"/internal/issues", params={"repo_key": repo_key, **filters})
+
+    def get_issue_state(self, repo_key: str, issue_id: str) -> dict:
+        return self.client.get(f"/internal/issues/{repo_key}/{issue_id}/state")
+
+    def get_runtimes(self, org_id: int) -> list:
+        return self.client.get(f"/internal/runtimes", params={"org_id": org_id})
+
+    def get_pipeline_instances(self, repo_key: str) -> list:
+        return self.client.get(f"/internal/pipelines/{repo_key}")
+
+    def confirm_issue_done(self, issue_id: int, user_id: int) -> dict:
+        return self.client.post(f"/internal/issues/{issue_id}/confirm-done", {"user_id": user_id})
+
+    def cancel_issue(self, issue_id: int, user_id: int) -> dict:
+        return self.client.post(f"/internal/issues/{issue_id}/cancel", {"user_id": user_id})
+
+    def terminate_event(self, seq: int, user_id: int) -> dict:
+        return self.client.post(f"/internal/events/{seq}/terminate", {"user_id": user_id})
+
+    def redispatch_event(self, seq: int, user_id: int) -> dict:
+        return self.client.post(f"/internal/events/{seq}/redispatch", {"user_id": user_id})
+```
+
+### 7.5 InsightService 接口定义
 
 ```python
 # src/domains/contracts/insight_service.py
 """数据域服务接口——供 Mgmt 域和 Runtime 域调用"""
+from typing import Protocol
 
-class InsightService:
-    """当前实现：同实例跨 schema SQL 查询
-    未来实现：HTTP API 调用 Insight 进程"""
+class InsightService(Protocol):
+    """数据域服务接口——LocalProvider 走跨 schema SQL，RemoteProvider 走 HTTP API"""
 
     def get_dashboard_overview(self, repo_key: str) -> dict:
         """A 仪表盘"""
-        # → SELECT FROM grape_insight + grape_runtime 聚合
+        ...
 
     def get_slo(self, repo_key: str) -> list:
         """A SLO 面板"""
+        ...
 
     def get_alerts(self, org_id: int) -> list:
         """A 告警列表"""
+        ...
 
-    def log_obs(self, source: str, level: str, msg: str, **extra):
+    def log_obs(self, source: str, level: str, msg: str, **extra) -> None:
         """Runtime 写日志"""
-        # → INSERT INTO grape_insight.obs_log
+        ...
 
-    def report_latency(self, data: dict):
+    def report_latency(self, data: dict) -> None:
         """A 前端延迟上报"""
-        # → INSERT INTO grape_insight.api_latency_log
+        ...
 
     def get_llm_usage(self, filters: dict) -> dict:
         """A LLM 用量查询"""
-        # → SELECT FROM grape_insight.obs_llm_usage
+        ...
 ```
 
-### 7.4 当前实现 vs 未来实现
+#### LocalProvider 实现
 
-| 阶段 | 实现方式 | 说明 |
-|------|---------|------|
-| **当前** | 同实例跨 schema SQL | 契约接口实现类直接执行 `SELECT * FROM grape_runtime.agent_tasks` 语法。MySQL 跨 schema 事务可用：`BEGIN; UPDATE grape_mgmt.managed_repos ...; INSERT INTO grape_runtime.events ...; COMMIT;` |
-| **未来** | HTTP API 调用各域进程 | 契约接口实现类改为 HTTP API 调用。各域进程暴露 `/internal/*` 端点供其他域调用。事务改为 saga/outbox 模式 |
+```python
+# src/domains/contracts/local/insight_local.py
+"""InsightService LocalProvider——同实例跨 schema SQL 实现"""
+from src.kernel.db import t_insight
+from src.kernel.session_manager import db, db_lock
+
+class InsightServiceLocal:
+    """同实例模式：直接查 grape_insight schema（SQLite 用 ins_ 前缀）"""
+
+    def get_dashboard_overview(self, repo_key: str) -> dict:
+        with db_lock:
+            c = db.cursor()
+            # 聚合查询：obs_log + obs_metric_rollup + grape_runtime 数据
+            c.execute(
+                f"SELECT COUNT(*) as total, "
+                f"SUM(CASE WHEN level='ERROR' THEN 1 ELSE 0 END) as errors "
+                f"FROM {t_insight('obs_log')} WHERE repo_key=? "
+                f"AND created_at > datetime('now', '-24 hours')",
+                (repo_key,)
+            )
+            row = c.fetchone()
+            return dict(row) if row else {}
+
+    def get_slo(self, repo_key: str) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM {t_insight('obs_slo')} WHERE repo_key=?",
+                (repo_key,)
+            )
+            return [dict(r) for r in c.fetchall()]
+
+    def get_alerts(self, org_id: int) -> list:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT * FROM {t_insight('obs_alert_events')} "
+                f"WHERE org_id=? AND status='active' ORDER BY created_at DESC",
+                (org_id,)
+            )
+            return [dict(r) for r in c.fetchall()]
+
+    def log_obs(self, source: str, level: str, msg: str, **extra) -> None:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"INSERT INTO {t_insight('obs_log')} (source, level, message, extra) "
+                f"VALUES (?, ?, ?, ?)",
+                (source, level, msg, str(extra))
+            )
+            db.commit()
+
+    def report_latency(self, data: dict) -> None:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"INSERT INTO {t_insight('api_latency_log')} "
+                f"(endpoint, method, latency_ms, status_code) VALUES (?, ?, ?, ?)",
+                (data.get("endpoint"), data.get("method"),
+                 data.get("latency_ms"), data.get("status_code"))
+            )
+            db.commit()
+
+    def get_llm_usage(self, filters: dict) -> dict:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                f"SELECT model, SUM(prompt_tokens) as prompt, "
+                f"SUM(completion_tokens) as completion "
+                f"FROM {t_insight('obs_llm_usage')} "
+                f"WHERE created_at > datetime('now', '-30 days') "
+                f"GROUP BY model"
+            )
+            return {"usage": [dict(r) for r in c.fetchall()]}
+```
+
+#### RemoteProvider 实现
+
+```python
+# src/domains/contracts/remote/insight_remote.py
+"""InsightService RemoteProvider——HTTP API 调用 Insight 进程"""
+from src.domains.contracts.remote.http_client import ServiceHttpClient
+
+class InsightServiceRemote:
+    """集群模式：通过 HTTP API 调用 Insight 进程的 /internal/* 端点"""
+
+    def __init__(self):
+        self.client = ServiceHttpClient("insight", base_url="${GRAPE_INSIGHT_URL}")
+
+    def get_dashboard_overview(self, repo_key: str) -> dict:
+        return self.client.get(f"/internal/dashboard/{repo_key}")
+
+    def get_slo(self, repo_key: str) -> list:
+        return self.client.get(f"/internal/slo/{repo_key}")
+
+    def get_alerts(self, org_id: int) -> list:
+        return self.client.get(f"/internal/alerts", params={"org_id": org_id})
+
+    def log_obs(self, source: str, level: str, msg: str, **extra) -> None:
+        self.client.post("/internal/logs", {
+            "source": source, "level": level, "message": msg, **extra
+        })
+
+    def report_latency(self, data: dict) -> None:
+        self.client.post("/internal/latency", data)
+
+    def get_llm_usage(self, filters: dict) -> dict:
+        return self.client.get("/internal/llm-usage", params=filters)
+```
+
+### 7.6 共享 HTTP 客户端
+
+```python
+# src/domains/contracts/remote/http_client.py
+"""RemoteProvider 共享 HTTP 客户端——连接池、超时、重试"""
+import os
+import httpx
+from src.config import log
+
+class ServiceHttpClient:
+    """域间 HTTP API 客户端"""
+
+    def __init__(self, service_name: str, base_url: str = None):
+        self.service_name = service_name
+        # 解析环境变量（如 ${GRAPE_MGMT_URL} → http://mgmt:38080）
+        if base_url and base_url.startswith("${"):
+            env_key = base_url[2:-1]
+            self.base_url = os.environ.get(env_key, f"http://localhost:3808{service_name[0]}")
+        else:
+            self.base_url = base_url or f"http://localhost:38080"
+        self.client = httpx.Client(
+            base_url=self.base_url,
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            transport=httpx.HTTPTransport(retries=2),
+            headers={"X-Internal-Call": "true", "X-Service": service_name},
+        )
+        log.info(f"ServiceHttpClient({service_name}) → {self.base_url}")
+
+    def get(self, path: str, params: dict = None) -> dict | list:
+        r = self.client.get(path, params=params)
+        r.raise_for_status()
+        return r.json()
+
+    def post(self, path: str, json: dict = None) -> dict:
+        r = self.client.post(path, json=json)
+        r.raise_for_status()
+        return r.json()
+
+    def stream_sse(self, path: str) -> 'SSEIterator':
+        """SSE 流式读取"""
+        return SSEIterator(self.client, path)
+
+
+class SSEIterator:
+    """SSE 流迭代器——用于 task_messages 流式读取"""
+
+    def __init__(self, client: httpx.Client, path: str):
+        self.client = client
+        self.path = path
+
+    def __iter__(self):
+        with self.client.stream("GET", self.path) as response:
+            for line in response.iter_lines():
+                if line.startswith("data: "):
+                    import json
+                    yield json.loads(line[6:])
+```
+
+### 7.7 /internal/* 端点定义
+
+每个域进程需要暴露 `/internal/*` 端点供 RemoteProvider 调用（集群模式才加载）：
+
+```python
+# src/domains/runtime/routes/internal.py
+"""Runtime 进程内部端点——仅供其他域 RemoteProvider 调用"""
+from fastapi import APIRouter, Header
+
+router = APIRouter(prefix="/internal")
+
+@router.get("/tasks")
+async def list_tasks(repo_key: str, status: str = None):
+    """供 MgmtService.get_tasks() 调用"""
+    from src.kernel.provider import get_runtime_service
+    svc = get_runtime_service()  # Runtime 进程内走 Local
+    return svc.get_tasks(repo_key, {"status": status} if status else {})
+
+@router.get("/tasks/{task_id}")
+async def get_task(task_id: str):
+    return get_runtime_service().get_task_detail(task_id)
+
+@router.get("/tasks/{task_id}/messages")
+async def get_messages(task_id: str, limit: int = 50):
+    return get_runtime_service().get_task_messages(task_id, limit)
+
+@router.get("/tasks/{task_id}/stream")
+async def stream_messages(task_id: str):
+    """SSE 流"""
+    from fastapi.responses import StreamingResponse
+    import json
+    def generate():
+        for msg in get_runtime_service().stream_task_messages(task_id):
+            yield f"data: {json.dumps(msg)}\n\n"
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+@router.get("/events")
+async def list_events(repo_key: str, status: str = None):
+    return get_runtime_service().get_events(repo_key, {"status": status} if status else {})
+
+@router.get("/events/{seq}")
+async def get_event(seq: int):
+    return get_runtime_service().get_event_detail(seq)
+
+@router.post("/events/{seq}/terminate")
+async def terminate_event(seq: int, user_id: int = None):
+    return get_runtime_service().terminate_event(seq, user_id)
+
+@router.post("/events/{seq}/redispatch")
+async def redispatch_event(seq: int, user_id: int = None):
+    return get_runtime_service().redispatch_event(seq, user_id)
+
+@router.get("/issues")
+async def list_issues(repo_key: str, status: str = None):
+    return get_runtime_service().get_issues(repo_key, {"status": status} if status else {})
+
+@router.post("/issues/{issue_id}/confirm-done")
+async def confirm_done(issue_id: int, user_id: int = None):
+    return get_runtime_service().confirm_issue_done(issue_id, user_id)
+
+@router.post("/issues/{issue_id}/cancel")
+async def cancel_issue(issue_id: int, user_id: int = None):
+    return get_runtime_service().cancel_issue(issue_id, user_id)
+
+@router.get("/runtimes")
+async def list_runtimes(org_id: int):
+    return get_runtime_service().get_runtimes(org_id)
+
+@router.get("/pipelines/{repo_key}")
+async def get_pipelines(repo_key: str):
+    return get_runtime_service().get_pipeline_instances(repo_key)
+```
+
+### 7.8 Grape Service Bus (GSB)——统一服务通信框架
+
+域间通信采用自研轻量框架 GSB（Grape Service Bus），基于 FastAPI + httpx + DB 注册表，不引入任何新依赖。新增服务只需 3 步。
+
+#### 7.8.1 设计理念
+
+| 设计点 | 选择 | 理由 |
+|--------|------|------|
+| 通信协议 | HTTP + JSON | 与 FastAPI 原生集成，curl 可调试，无编译链 |
+| 契约定义 | Python Protocol | IDE 类型提示，无 .proto 编译 |
+| 服务发现 | DB 表（gsb_service_registry） | 零外部依赖，单机模式天然支持 |
+| 认证 | HMAC-SHA256 服务令牌 | 短期 TTL 防重放，常量时间比较防时序攻击 |
+| Provider 切换 | Local/Remote 双模式 | GRAPE_MODE 环境变量驱动，业务代码无感 |
+| 新增服务 | 3 步（Protocol + Provider + GsbService） | 低扩展成本 |
+| 对比 gRPC | 不采用 | gRPC 留给未来引擎接入层（Phase 3 远期万级设备），域间通信是低频管理操作，不需要 gRPC 的双向流和强类型 |
+
+#### 7.8.2 GSB 目录结构
+
+```
+src/kernel/gsb/                    # Grape Service Bus
+├── __init__.py
+├── registry.py                    # 服务注册表（DB 驱动）
+├── client.py                      # GsbClient（httpx + 发现 + 认证 + 重试）
+├── router.py                      # GsbService 基类（注册 + 心跳 + 中间件）
+├── provider.py                    # Provider 工厂（Local/Remote 切换）
+└── health.py                      # 服务健康检查端点
+```
+
+#### 7.8.3 服务注册表（DB 驱动，零外部依赖）
+
+```python
+# src/kernel/gsb/registry.py
+"""Grape Service Bus——服务注册表（DB 驱动）"""
+
+import time
+from src.kernel.session_manager import db, db_lock
+
+_REGISTRY_DDL = """
+CREATE TABLE IF NOT EXISTS gsb_service_registry (
+    service_name   TEXT PRIMARY KEY,    -- mgmt / runtime / insight / future-service
+    base_url       TEXT NOT NULL,        -- http://mgmt:38080
+    health_url     TEXT,                 -- /api/health
+    version        TEXT DEFAULT '1',     -- 服务版本
+    status         TEXT DEFAULT 'online',-- online / offline / draining
+    last_heartbeat REAL DEFAULT 0,       -- Unix timestamp
+    metadata       TEXT DEFAULT '{}'     -- JSON: {description, endpoints, ...}
+);
+"""
+
+def register_service(name: str, base_url: str, health_url: str = "/api/health",
+                     metadata: dict = None):
+    """服务启动时注册自己"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(_REGISTRY_DDL)
+        c.execute(
+            "INSERT OR REPLACE INTO gsb_service_registry "
+            "(service_name, base_url, health_url, status, last_heartbeat, metadata) "
+            "VALUES (?, ?, ?, 'online', ?, ?)",
+            (name, base_url, health_url, time.time(), str(metadata or {}))
+        )
+        db.commit()
+
+def heartbeat_service(name: str):
+    """定时心跳更新（30s）"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE gsb_service_registry SET last_heartbeat=?, status='online' "
+            "WHERE service_name=?",
+            (time.time(), name)
+        )
+        db.commit()
+
+def discover_service(name: str) -> dict:
+    """发现服务地址——带健康检查"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT * FROM gsb_service_registry WHERE service_name=? AND status='online'",
+            (name,)
+        )
+        row = c.fetchone()
+        if not row:
+            return {}
+        # 心跳超时检查（90s = 3 个心跳周期）
+        if time.time() - row["last_heartbeat"] > 90:
+            return {}
+        return dict(row)
+
+def list_services() -> list:
+    """列出所有在线服务"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT * FROM gsb_service_registry WHERE status='online' "
+            "AND last_heartbeat > ? ORDER BY service_name",
+            (time.time() - 90,)
+        )
+        return [dict(r) for r in c.fetchall()]
+
+def deregister_service(name: str):
+    """服务关闭时注销"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE gsb_service_registry SET status='offline' WHERE service_name=?",
+            (name,)
+        )
+        db.commit()
+```
+
+#### 7.8.4 统一服务客户端
+
+```python
+# src/kernel/gsb/client.py
+"""Grape Service Bus——统一服务客户端"""
+
+import os
+import time
+import httpx
+from src.kernel.gsb.registry import discover_service
+from src.kernel.auth_sdk.service_token import generate_service_token
+from src.config import log
+
+# 环境变量优先级高于 DB 注册表（支持静态配置）
+_ENV_URL_MAP = {
+    "mgmt": "GRAPE_MGMT_URL",
+    "runtime": "GRAPE_RUNTIME_URL",
+    "insight": "GRAPE_INSIGHT_URL",
+}
+
+class GsbClient:
+    """统一域间通信客户端——自动服务发现 + 令牌认证 + 重试"""
+
+    def __init__(self, service_name: str, caller_name: str = ""):
+        self.service_name = service_name
+        self.caller_name = caller_name or os.environ.get("GRAPE_SERVICE_NAME", "unknown")
+        self._cached_url = None
+        self._cached_at = 0
+        self._http = httpx.Client(
+            timeout=httpx.Timeout(10.0, connect=5.0),
+            transport=httpx.HTTPTransport(retries=2),
+        )
+
+    def _resolve_url(self) -> str:
+        """解析服务地址——环境变量优先，DB 注册表兜底，单机回退 localhost"""
+        if self._cached_url and time.time() - self._cached_at < 30:
+            return self._cached_url
+
+        # 1. 环境变量
+        env_key = _ENV_URL_MAP.get(self.service_name)
+        if env_key:
+            url = os.environ.get(env_key)
+            if url:
+                self._cached_url, self._cached_at = url, time.time()
+                return url
+
+        # 2. DB 服务注册表
+        svc = discover_service(self.service_name)
+        if svc:
+            self._cached_url, self._cached_at = svc["base_url"], time.time()
+            return svc["base_url"]
+
+        # 3. 单机模式回退
+        port_map = {"mgmt": 38080, "runtime": 38081, "insight": 38083}
+        fallback = f"http://localhost:{port_map.get(self.service_name, 38080)}"
+        self._cached_url, self._cached_at = fallback, time.time()
+        return fallback
+
+    def _headers(self) -> dict:
+        """认证头——每次请求重新生成令牌（TTL 60s）"""
+        return {
+            "X-Internal-Call": "true",
+            "X-Service": self.caller_name,
+            "X-Service-Token": generate_service_token(self.caller_name),
+        }
+
+    def get(self, path: str, params: dict = None) -> dict | list:
+        url = self._resolve_url()
+        r = self._http.get(f"{url}{path}", params=params, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
+
+    def post(self, path: str, json: dict = None) -> dict:
+        url = self._resolve_url()
+        r = self._http.post(f"{url}{path}", json=json, headers=self._headers())
+        r.raise_for_status()
+        return r.json()
+
+    def stream_sse(self, path: str):
+        """SSE 流式读取"""
+        url = self._resolve_url()
+        with self._http.stream("GET", f"{url}{path}", headers=self._headers()) as resp:
+            for line in resp.iter_lines():
+                if line.startswith("data: "):
+                    import json
+                    yield json.loads(line[6:])
+```
+
+#### 7.8.5 统一服务路由基类
+
+```python
+# src/kernel/gsb/router.py
+"""Grape Service Bus——统一服务路由基类"""
+
+from fastapi import APIRouter, FastAPI
+from src.kernel.gsb.registry import register_service, heartbeat_service, deregister_service
+from src.kernel.auth_sdk.internal_middleware import InternalAuthMiddleware
+from src.config import log
+import asyncio
+
+class GsbService:
+    """服务基类——每个域进程继承此类，自动获得注册/心跳/认证能力"""
+
+    def __init__(self, name: str, port: int, app: FastAPI):
+        self.name = name
+        self.port = port
+        self.app = app
+        self.base_url = f"http://localhost:{port}"
+        app.add_middleware(InternalAuthMiddleware)
+        self.internal_router = APIRouter(prefix="/internal")
+
+    def mount(self):
+        """启动时调用：注册服务 + 挂载内部路由 + 启动心跳"""
+        self.app.include_router(self.internal_router)
+        register_service(
+            name=self.name, base_url=self.base_url,
+            health_url="/api/health", metadata=self._metadata()
+        )
+
+        @self.app.on_event("startup")
+        async def _start_heartbeat():
+            asyncio.create_task(self._heartbeat_loop())
+
+        @self.app.on_event("shutdown")
+        async def _deregister():
+            deregister_service(self.name)
+
+        log.info(f"GSB service '{self.name}' mounted at {self.base_url}")
+
+    async def _heartbeat_loop(self):
+        """30s 心跳"""
+        while True:
+            try:
+                heartbeat_service(self.name)
+            except Exception as e:
+                log.warning(f"GSB heartbeat failed: {e}")
+            await asyncio.sleep(30)
+
+    def _metadata(self) -> dict:
+        return {"description": self.name, "version": "1"}
+```
+
+#### 7.8.6 Provider 工厂（动态注册，支持未来新增服务）
+
+```python
+# src/kernel/gsb/provider.py
+"""Grape Service Bus——Provider 工厂"""
+
+import os
+
+_PROVIDERS = {}
+
+def register_provider(name: str, local_cls, remote_cls=None):
+    """注册服务的 Local/Remote Provider。
+    
+    在模块加载时调用（如 src/kernel/gsb/__init__.py）。
+    新增服务时在自己的模块中调用此函数注册。
+    """
+    _PROVIDERS[name] = {"local": local_cls, "remote": remote_cls}
+
+def get_service(name: str):
+    """获取服务实现——根据部署模式自动选择 Local 或 Remote"""
+    if name not in _PROVIDERS:
+        raise ValueError(f"Unknown service: {name}. Did you register_provider('{name}', ...)?")
+    provider_mode = os.environ.get("GRAPE_PROVIDER_MODE", "")
+    use_remote = (provider_mode == "remote"
+                  or (os.environ.get("GRAPE_MODE") == "cluster"
+                      and _PROVIDERS[name]["remote"] is not None))
+    if use_remote:
+        return _PROVIDERS[name]["remote"]()
+    return _PROVIDERS[name]["local"]()
+
+# 便捷函数——预注册的三个域
+def get_mgmt_service():
+    return get_service("mgmt")
+
+def get_runtime_service():
+    return get_service("runtime")
+
+def get_insight_service():
+    return get_service("insight")
+```
+
+#### 7.8.7 HTTP API 安全保障
+
+RemoteProvider 模式下，域间通信通过 HTTP API 调用，需要完整的安全保障体系：
+
+##### 服务令牌（Service Token）
+
+每个域进程在启动时生成或从配置加载一个服务令牌，用于域间互信：
+
+```python
+# src/kernel/auth_sdk/service_token.py
+"""域间服务令牌——用于 /internal/* 端点互信认证"""
+
+import os, hmac, hashlib, time
+
+SERVICE_SECRET = os.environ.get("GRAPE_SERVICE_SECRET", "")
+
+def generate_service_token(service_name: str, target_service: str = "") -> str:
+    """生成短期服务令牌（TTL 60s）。
+    格式：{source}.{target}.{timestamp}.{hmac_sha256}
+    """
+    if not SERVICE_SECRET:
+        return ""
+    ts = str(int(time.time()))
+    payload = f"{service_name}.{target_service}.{ts}"
+    sig = hmac.new(SERVICE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return f"{payload}.{sig}"
+
+def verify_service_token(token: str, expected_target: str = "") -> bool:
+    """验证服务令牌（TTL 60s + HMAC + 常量时间比较）"""
+    if not SERVICE_SECRET:
+        return True  # 单机模式跳过
+    if not token or token.count(".") != 3:
+        return False
+    source, target, ts, sig = token.split(".")
+    try:
+        age = time.time() - int(ts)
+    except ValueError:
+        return False
+    if age > 60 or age < -5:  # 60s TTL + 5s 时钟漂移
+        return False
+    if expected_target and target != expected_target:
+        return False
+    payload = f"{source}.{target}.{ts}"
+    expected_sig = hmac.new(SERVICE_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return hmac.compare_digest(sig, expected_sig)
+```
+
+##### /internal/* 认证中间件
+
+```python
+# src/kernel/auth_sdk/internal_middleware.py
+from fastapi import Request, HTTPException
+from starlette.middleware.base import BaseHTTPMiddleware
+from src.kernel.auth_sdk.service_token import verify_service_token, SERVICE_SECRET
+
+class InternalAuthMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if not request.url.path.startswith("/internal/"):
+            return await call_next(request)
+        if not SERVICE_SECRET:  # 单机模式跳过
+            return await call_next(request)
+        token = request.headers.get("X-Service-Token", "")
+        source = request.headers.get("X-Service", "")
+        if not verify_service_token(token):
+            raise HTTPException(401, {"code": "SERVICE_TOKEN_INVALID"})
+        request.state.service_caller = source
+        return await call_next(request)
+```
+
+##### 网络层隔离
+
+```nginx
+# nginx——/internal/* 端点不对外暴露
+location /internal/ {
+    deny all;
+    return 404;
+}
+```
+
+```yaml
+# docker-compose——域间通信走内部网络
+networks:
+  grape-internal:
+    driver: bridge
+    internal: true  # 不可路由到外部
+```
+
+##### 安全保障总表
+
+| 安全层 | 机制 | 说明 |
+|--------|------|------|
+| 服务令牌认证 | HMAC-SHA256 + TTL 60s | 防重放，`GRAPE_SERVICE_SECRET` 不硬编码 |
+| 签名校验 | `hmac.compare_digest` | 常量时间比较，防时序攻击 |
+| 时钟漂移容忍 | -5s ~ +60s | 防多机时钟不同步 |
+| 目标校验 | expected_target | 防令牌被用于非预期域 |
+| 认证中间件 | InternalAuthMiddleware | `/internal/*` 强制认证，单机自动跳过 |
+| 网络隔离 | Docker internal network | `/internal/*` 外部不可达 |
+| nginx 拒绝 | `deny all` | 双保险 |
+| 来源标记 | `X-Service` 头 | 审计日志追踪 |
+| 单机降级 | SERVICE_SECRET 为空跳过 | 零配置 |
+
+##### 部署配置
+
+```bash
+# 单机模式——无需服务令牌
+GRAPE_MODE=single
+# GRAPE_SERVICE_SECRET 不设置
+
+# 集群-共库模式——可选
+GRAPE_MODE=cluster
+GRAPE_SERVICE_SECRET=""  # 共库走 Local，不走 HTTP
+
+# 集群-分库模式——必须
+GRAPE_MODE=cluster
+GRAPE_PROVIDER_MODE=remote
+GRAPE_SERVICE_SECRET="$(openssl rand -hex 32)"
+GRAPE_MGMT_URL=http://mgmt:38080
+GRAPE_RUNTIME_URL=http://runtime:38081
+GRAPE_INSIGHT_URL=http://insight:38083
+```
+
+#### 7.8.8 新增服务只需 3 步
+
+以未来新增 "grape-notify" 通知服务为例：
+
+```python
+# 步骤 1：定义契约接口（src/domains/contracts/notify_service.py）
+from typing import Protocol
+
+class NotifyService(Protocol):
+    def send_notification(self, user_id: int, title: str, body: str) -> dict: ...
+    def get_notifications(self, user_id: int, limit: int = 20) -> list: ...
+    def mark_read(self, notification_id: int) -> dict: ...
+
+
+# 步骤 2：实现 Local + Remote Provider
+# src/domains/contracts/local/notify_local.py
+class NotifyServiceLocal:
+    def send_notification(self, user_id, title, body):
+        # 直接写 DB
+        ...
+
+# src/domains/contracts/remote/notify_remote.py
+class NotifyServiceRemote:
+    def __init__(self):
+        self.client = GsbClient("notify", caller_name="mgmt")
+    def send_notification(self, user_id, title, body):
+        return self.client.post("/internal/notifications", {
+            "user_id": user_id, "title": title, "body": body
+        })
+
+
+# 步骤 3：创建服务进程（apps/notify/main.py）
+class NotifyServiceApp(GsbService):
+    def __init__(self):
+        app = FastAPI(title="Grape Notify Server")
+        super().__init__("notify", 38084, app)
+
+        @self.internal_router.post("/notifications")
+        async def send(user_id: int, title: str, body: str):
+            return NotifyServiceLocal().send_notification(user_id, title, body)
+
+        @app.get("/api/notifications")
+        async def list_notifications(user_id: int):
+            return NotifyServiceLocal().get_notifications(user_id)
+
+        # 注册 Provider
+        from src.kernel.gsb.provider import register_provider
+        register_provider("notify", NotifyServiceLocal, NotifyServiceRemote)
+
+app = NotifyServiceApp().app
+```
+
+其他域调用新服务：
+
+```python
+from src.kernel.gsb.provider import get_service
+notify = get_service("notify")  # 自动 Local 或 Remote
+notify.send_notification(user_id=1, title="部署完成", body="PR #123 已合并")
+```
+
+#### 7.8.9 模式切换与配置
+
+| 模式 | GRAPE_MODE | Provider | 通信方式 | 事务 | 适用场景 |
+|------|-----------|----------|---------|-----|---------|
+| 单机 | single | LocalProvider | 跨 schema SQL | 跨 schema 事务 | 开发/测试/小规模 |
+| 集群-共库 | cluster | LocalProvider | 跨 schema SQL | 跨 schema 事务 | 中规模（MySQL 三 schema 同实例） |
+| 集群-分库 | cluster | RemoteProvider | GSB HTTP API | saga/outbox | 大规模（各域独立 DB） |
+
+`GRAPE_PROVIDER_MODE=remote` 优先级高于 `GRAPE_MODE`，允许在共库场景下提前切换到 HTTP API 模式进行测试。
+
+#### 7.8.10 GSB 对比 gRPC 的取舍
+
+| 维度 | GSB（推荐） | gRPC |
+|------|------------|------|
+| 新依赖 | 无 | grpcio + protobuf + 编译工具链 |
+| 契约定义 | Python Protocol | .proto 文件（需 protoc 编译） |
+| 单机降级 | LocalProvider 天然支持 | 需额外适配 |
+| SSE 流 | httpx.stream | gRPC 双向流（更强但更复杂） |
+| 调试 | HTTP + JSON（curl 可调） | 需 gRPC 工具 |
+| 新增服务 | 3 步 | 5 步 |
+| 与 FastAPI 集成 | 原生 | 需 grpc-gateway 或双端口 |
+| 适用场景 | 域间低频管理调用 | 引擎接入层高频实时流 |
+
+gRPC 留给 grape架构演进分析报告.html Phase 3 中"万级引擎 gRPC 双向流"的远期目标，不用于域间通信。域间调用是低频管理操作（查任务、查事件、写日志），GSB 足够。
+
+#### 7.8.11 跨语言服务接入
+
+GSB 的核心通信层（HTTP + JSON + DB 注册表 + HMAC 令牌）是语言无关的。只有契约定义层（Python Protocol）和路由基类（GsbService）是 Python 特有的。其他语言只需实现相同的通信协议即可接入。
+
+##### 跨语言兼容矩阵
+
+| GSB 组件 | Python 实现 | Java（grape-admin） | Go | Node.js/TS |
+|----------|------------|---------------------|-----|------------|
+| 服务注册表 | DB INSERT/SELECT（registry.py） | JDBC INSERT/SELECT | database/sql | pg/mysql2 |
+| 服务发现 | DB SELECT + 30s 缓存 | JDBC + Caffeine 缓存 | sqlx + sync.Map | mysql2 + lru-cache |
+| 服务令牌 | hmac.new(SHA256) | javax.crypto.Mac(SHA256) | crypto/hmac | crypto.createHmac |
+| HTTP 客户端 | httpx | OkHttp / Java HttpClient | net/http | fetch / axios |
+| 认证中间件 | FastAPI Middleware | Spring Filter / Interceptor | middleware func | Express middleware |
+| 契约定义 | Python Protocol | OpenAPI codegen Java 接口 | oapi-codegen | openapi-typescript |
+| 路由基类 | GsbService class | @RestController + @Component | http.ServeMux | Express router |
+
+##### Java 接入示例（grape-admin）
+
+```java
+// 1. 服务注册 + 心跳
+@Component
+public class GsbRegistry {
+    @Value("${grape.service.name:admin}")
+    private String serviceName;
+    @Value("${grape.service.url:http://admin:38085}")
+    private String baseUrl;
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+
+    @PostConstruct
+    public void register() {
+        jdbcTemplate.update(
+            "INSERT OR REPLACE INTO gsb_service_registry " +
+            "(service_name, base_url, health_url, status, last_heartbeat) " +
+            "VALUES (?, ?, '/api/health', 'online', ?)",
+            serviceName, baseUrl, System.currentTimeMillis() / 1000
+        );
+    }
+
+    @Scheduled(fixedRate = 30000)  // 30s 心跳
+    public void heartbeat() {
+        jdbcTemplate.update(
+            "UPDATE gsb_service_registry SET last_heartbeat=?, status='online' " +
+            "WHERE service_name=?",
+            System.currentTimeMillis() / 1000, serviceName
+        );
+    }
+
+    @PreDestroy
+    public void deregister() {
+        jdbcTemplate.update(
+            "UPDATE gsb_service_registry SET status='offline' WHERE service_name=?",
+            serviceName
+        );
+    }
+}
+
+// 2. 服务令牌——与 Python service_token.py 完全一致的 HMAC-SHA256
+@Component
+public class GsbTokenService {
+    @Value("${grape.service.secret:}")
+    private String serviceSecret;
+
+    public String generateToken(String serviceName) {
+        if (serviceSecret.isEmpty()) return "";
+        String ts = String.valueOf(System.currentTimeMillis() / 1000);
+        String payload = serviceName + "." + ts;
+        String sig = hmacSha256(serviceSecret, payload);
+        return serviceName + "." + ts + "." + sig;
+    }
+
+    public boolean verifyToken(String token) {
+        if (serviceSecret.isEmpty()) return true;
+        if (token == null || token.split("\\.").length != 3) return false;
+        String[] parts = token.split("\\.");
+        long age = System.currentTimeMillis() / 1000 - Long.parseLong(parts[1]);
+        if (age > 60 || age < -5) return false;
+        String payload = parts[0] + "." + parts[1];
+        String expected = hmacSha256(serviceSecret, payload);
+        return MessageDigest.isEqual(expected.getBytes(), parts[2].getBytes());
+    }
+
+    private String hmacSha256(String secret, String payload) {
+        try {
+            Mac mac = Mac.getInstance("HmacSHA256");
+            mac.init(new SecretKeySpec(secret.getBytes(), "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(payload.getBytes()));
+        } catch (Exception e) { throw new RuntimeException(e); }
+    }
+}
+
+// 3. 认证过滤器——拦截 /internal/*
+@Component
+public class GsbAuthFilter implements Filter {
+    @Autowired
+    private GsbTokenService tokenService;
+
+    @Override
+    public void doFilter(ServletRequest req, ServletResponse res, FilterChain chain)
+            throws IOException, ServletException {
+        HttpServletRequest request = (HttpServletRequest) req;
+        if (!request.getRequestURI().startsWith("/internal/")) {
+            chain.doFilter(req, res);
+            return;
+        }
+        String token = request.getHeader("X-Service-Token");
+        if (!tokenService.verifyToken(token)) {
+            HttpServletResponse resp = (HttpServletResponse) res;
+            resp.setStatus(401);
+            resp.setContentType("application/json");
+            resp.getWriter().write("{\"code\":\"SERVICE_TOKEN_INVALID\"}");
+            return;
+        }
+        chain.doFilter(req, res);
+    }
+}
+
+// 4. 调用其他域服务——服务发现 + 令牌 + HTTP
+@Service
+public class GsbClient {
+    @Autowired
+    private JdbcTemplate jdbcTemplate;
+    @Autowired
+    private GsbTokenService tokenService;
+
+    private final HttpClient httpClient = HttpClient.newBuilder()
+        .connectTimeout(Duration.ofSeconds(5)).build();
+    private final Map<String, String> urlCache = new ConcurrentHashMap<>();
+
+    public Map<String, Object> callService(String serviceName, String path, String method,
+                                           Map<String, Object> body) {
+        String baseUrl = resolveUrl(serviceName);
+        String token = tokenService.generateToken("admin");
+        HttpRequest.Builder builder = HttpRequest.newBuilder()
+            .uri(URI.create(baseUrl + path))
+            .header("X-Service", "admin")
+            .header("X-Service-Token", token)
+            .header("Content-Type", "application/json");
+
+        if ("POST".equals(method)) {
+            builder.POST(BodyPublishers.ofString(new ObjectMapper().writeValueAsString(body)));
+        } else {
+            builder.GET();
+        }
+
+        HttpResponse<String> resp = httpClient.send(builder.build(),
+            BodyHandlers.ofString());
+        return new ObjectMapper().readValue(resp.body(), Map.class);
+    }
+
+    private String resolveUrl(String serviceName) {
+        return urlCache.computeIfAbsent(serviceName, name -> {
+            // DB 服务发现
+            try {
+                return jdbcTemplate.queryForObject(
+                    "SELECT base_url FROM gsb_service_registry " +
+                    "WHERE service_name=? AND status='online' " +
+                    "AND last_heartbeat > ?",
+                    String.class, name, System.currentTimeMillis() / 1000 - 90
+                );
+            } catch (EmptyResultDataAccessException e) {
+                // 回退到环境变量或 localhost
+                String envUrl = System.getenv("GRAPE_" + name.toUpperCase() + "_URL");
+                return envUrl != null ? envUrl : "http://localhost:38080";
+            }
+        });
+    }
+}
+
+// 5. 使用示例
+@RestController
+@RequestMapping("/api/admin")
+public class AdminController {
+    @Autowired
+    private GsbClient gsbClient;
+
+    @GetMapping("/dashboard/{repoKey}")
+    public Map<String, Object> dashboard(@PathVariable String repoKey) {
+        // 调用 Runtime 域获取任务列表
+        return gsbClient.callService("runtime",
+            "/internal/tasks?repo_key=" + repoKey, "GET", null);
+    }
+}
+```
+
+##### OpenAPI 契约桥接
+
+Python Protocol 契约通过 FastAPI 自动生成 OpenAPI schema，其他语言通过 codegen 生成类型安全的客户端：
+
+```bash
+# 1. 导出 OpenAPI schema（Python 侧）
+python -c "from src.api.main import app; import json; print(json.dumps(app.openapi()))" > openapi.json
+
+# 2. Java 客户端生成
+openapi-generator-cli generate \
+  -i openapi.json \
+  -g java-client \
+  -o grape-admin/src/generated/gsb-client \
+  --additional-properties=library=okhttp,dateLibrary=java8
+
+# 3. Go 客户端生成
+oapi-codegen -package gsb -o grape-cli/gsb/client.go openapi.json
+
+# 4. TypeScript 客户端生成
+openapi-typescript openapi.json --output grape-admin/frontend/src/gsb-client.ts
+```
+
+生成的 Java 客户端使用示例：
+
+```java
+// 自动生成的类型安全客户端——不需要手写 HTTP 调用
+GsbClient client = new GsbClientBuilder().basePath("http://runtime:38081").build();
+RuntimeServiceApi api = client.getRuntimeServiceApi();
+
+// 类型安全的方法调用
+List<Task> tasks = api.listTasks("gitcode:grape-dev/grape", null);
+TaskDetail detail = api.getTaskDetail("12345");
+api.confirmIssueDone(678, 1);
+```
+
+##### 跨语言接入清单
+
+非 Python 服务接入 GSB 需要实现的 5 个组件：
+
+| # | 组件 | 必须实现 | 说明 |
+|---|------|---------|------|
+| 1 | 服务注册 | 是 | 启动时 INSERT gsb_service_registry，30s 心跳 UPDATE，关闭时 UPDATE status=offline |
+| 2 | 令牌生成 | 是 | HMAC-SHA256，格式 `{source}.{timestamp}.{hmac}`，TTL 60s |
+| 3 | 令牌验证 | 是（暴露 /internal/* 时） | 验证 X-Service-Token 头，常量时间比较 |
+| 4 | 服务发现 | 是（调用其他域时） | SELECT gsb_service_registry WHERE status=online AND last_heartbeat > now-90s |
+| 5 | HTTP 客户端 | 是 | 携带 X-Service + X-Service-Token 头，10s 超时，2 次重试 |
+
+契约定义可选——非 Python 语言可以用 OpenAPI codegen 生成类型安全客户端，也可以直接用 HTTP + JSON 手写调用。
+
+##### grape-admin 接入路线
+
+grape-admin（Spring Boot + Vue3）是最先需要接入的非 Python 服务：
+
+1. 在 grape-admin 后端实现 GsbRegistry（服务注册 + 心跳）
+2. 实现 GsbTokenService（令牌生成 + 验证）
+3. 实现 GsbAuthFilter（/internal/* 认证过滤器）
+4. 实现 GsbClient（服务发现 + HTTP 调用）
+5. 从 Python 侧导出 OpenAPI schema，Java 侧 codegen 生成客户端
+6. grape-admin 的 RuntimeCredentialService.java 从直读 grape DB 表改为通过 GSB 调用 Runtime 域 /internal/* 端点
 
 ---
 
