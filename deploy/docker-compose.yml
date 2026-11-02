@@ -1,6 +1,8 @@
 services:
   backend:
-    build: .
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
     container_name: grape-backend
     ports:
       - "80:3000"
@@ -13,14 +15,15 @@ services:
     # 审查修复: 移除 bind mount ./.env:/app/.env（宿主无 .env 时 compose 失败）
     # 容器内 /app/.env 由 Dockerfile COPY .env.example .env 提供；
     # 宿主 .env（如存在）通过 env_file 注入为环境变量，覆盖容器内默认值
+    # 注：compose 文件在 deploy/ 目录，相对路径指向 repo root (..)
     env_file:
-      - path: .env
+      - path: ../.env
         required: false
     volumes:
       - grape-data:/app/data
-      - ./configs:/app/configs
-      - ./skills:/app/skills
-      - ./examples:/app/examples
+      - ../configs:/app/configs
+      - ../.grape/skills:/app/.grape/skills
+      - ../examples:/app/examples
     restart: unless-stopped
     logging:
       driver: json-file
