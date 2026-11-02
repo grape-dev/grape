@@ -136,6 +136,22 @@ def _autopilot_exec_cols() -> list:
         return [r[1] for r in c.fetchall()]
 
 
+def _skill_display_name(skill_name: str) -> str:
+    """skill 表 display_name（与场景选择处同款查询条件）；无/空返回空串由前端回退 Skill ID。"""
+    if not skill_name:
+        return ""
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                (skill_name,))
+            row = c.fetchone()
+        return (row[0] or "") if row else ""
+    except Exception:
+        return ""
+
+
 def _row_to_task(row) -> dict:
     """将 DB 行转为 API 响应 dict。"""
     import json as _json
@@ -159,6 +175,7 @@ def _row_to_task(row) -> dict:
         "agent_type": row[3],
         "instruction": row[4],
         "skill_name": row[5],
+        "display_name": _skill_display_name(row[5] if len(row) > 5 else ""),
         "cron": row[6],
         "max_retry": row[7],
         "enabled": bool(row[8]),

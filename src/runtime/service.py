@@ -439,6 +439,30 @@ _TABLE_COLS_CACHE: dict = {}
 _TABLE_COLS_CACHE_DB_ID = id(db)   # db 对象身份标记（测试 monkeypatch 换库 → 缓存自动失效）
 
 
+# Issue #605：引擎不在 pool_engine_ids 名单 → 认领静默跳过，此前无任何日志，
+# 导致 hermes 0 派发无法从服务端解释。补取证日志（60s 去重防 claim 轮询刷屏）。
+_pool_skip_log_cache: dict = {}
+_POOL_SKIP_LOG_INTERVAL = 60.0
+
+
+def _log_pool_skip_once(task_id, runtime_id: int, allowed):
+    """记录一次「引擎被 pool 名单挡在门外」的取证日志（每 task+engine 60s 至多一条）。"""
+    key = (task_id, runtime_id)
+    now = time.time()
+    try:
+        if _pool_skip_log_cache.get(key, 0.0) + _POOL_SKIP_LOG_INTERVAL > now:
+            return
+    except Exception:
+        pass
+    _pool_skip_log_cache[key] = now
+    if len(_pool_skip_log_cache) > 1000:   # 防泄漏：粗剪枝
+        _stale = [k for k, v in _pool_skip_log_cache.items() if v + _POOL_SKIP_LOG_INTERVAL < now]
+        for k in _stale:
+            _pool_skip_log_cache.pop(k, None)
+    log.info(f"claim pool filter: engine {runtime_id} not in pool_engine_ids={allowed} "
+             f"of task {task_id}, skip (Issue #605)")
+
+
 def _table_columns(table: str) -> set:
     """表实际存在的列（PRAGMA，进程内缓存）。
 
@@ -765,6 +789,88 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
     return {"project_info": _pif, "meta": _pim, "knowledge": _know}
 
 
+def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "",
+                                user_id: str | int = "") -> tuple:
+    """Issue #630：技能物化完整性校验（Pipeline enqueue 前门禁）。
+
+    校验「配置了技能」时是否存在可完整物化的内容源（SKILL.md + references）：
+      ① skill_id / 名称解析命中 skill 表（resolve_skill_id user→repo→official）；
+      ② OBS 对象键（file_path）可读 → worker 端按 sid 整包拉取 zip 物化；
+      ③ 本地技能目录完整（validate_skill_dir：SKILL.md + references）；
+      ④ sid=0 时允许官方内置包（resolve_official_skill_path，部署随包分发）。
+    返回 (ok, reason, sid)。
+
+    空壳技能行（legacy create_skill/迁移注册、file_path 空 + 本地目录无 SKILL.md，
+    如 sid=3276 vod-cli-crossrepo）→ (False, ...)，调用方显式阻断派发不静默降级。
+    技能未配置（skill 为空）恒 (True, ...)，不误伤未配置场景（Spec 风险表）。
+    """
+    skill = (skill or "").strip()
+    if not skill:
+        return True, "skill not configured", 0
+    from src.user.db import resolve_skill_id, get_skill_by_id, get_skill_path, get_skill_object_key
+    sid = int(skill_id or 0)
+    if not sid:
+        try:
+            sid = int(resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or 0)
+        except Exception:
+            sid = 0
+    if sid:
+        _sk = None
+        try:
+            _sk = get_skill_by_id(sid)
+        except Exception:
+            _sk = None
+        if not _sk:
+            return False, f"skill '{skill}' (sid={sid}) not found or inactive", sid
+        _okey = (_sk.get("file_path") or "").strip() or get_skill_object_key(sid)
+        # Issue #630 审查修复：storage 不可用（get_skill_storage 返回 None/异常）时
+        # 不再 fail-open 放行——file_path 有值但对象不可读，worker 端整包拉取仍会
+        # 静默失败。继续 fallthrough 本地目录校验链，阻断时 reason 标注 storage unavailable。
+        _storage_unavailable = False
+        if _okey:
+            _st = None
+            try:
+                from src.storage import get_skill_storage
+                _st = get_skill_storage()
+            except Exception:
+                _st = None
+            if _st is None:
+                _storage_unavailable = True
+            elif _st.read_bytes(_okey) is not None:
+                return True, f"obs object ok (key={_okey})", sid
+        # 本地目录完整性（SKILL.md + references）
+        try:
+            _full = get_skill_path(sid)
+        except Exception:
+            _full = ""
+        if _full:
+            from src.runtime.skill_materialize import validate_skill_dir
+            ok, missing = validate_skill_dir(os.path.dirname(_full))
+            if ok:
+                return True, "local skill dir ok", sid
+            _src = (f"obs storage unavailable (key={_okey})" if _storage_unavailable else
+                    (f"no readable obs object (key={_okey})" if _okey else "file_path empty"))
+            return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
+                           f"{_src}"
+                           + f", local dir incomplete (missing: {', '.join(missing[:5])}); "
+                           f"re-upload the skill package to fix"), sid
+        _src = (f"obs storage unavailable (key={_okey})" if _storage_unavailable else
+                ("no obs file_path and no local skill dir" if not _okey else
+                 f"no readable obs object (key={_okey})"))
+        return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
+                       f"{_src}; re-upload the skill package to fix"), sid
+    # sid=0：官方内置包兜底（worker 端 official fallback 可完整物化，非静默换技能）
+    try:
+        from src.config import resolve_official_skill_path
+        _official = resolve_official_skill_path(skill)
+        if _official and os.path.isfile(_official):
+            return True, "official skill bundle ok", 0
+    except Exception:
+        pass
+    return False, (f"skill '{skill}' unresolvable (no skill row, no official bundle); "
+                   f"check scene skill binding or upload the skill first"), 0
+
+
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
                  runtime_session_id="", event_type="", account="", user_id=0,
                  repo_gitcode_token="", user_gitcode_token="", env_extra=None,
@@ -1051,8 +1157,13 @@ def _issue_num(issue_id) -> int:
     return int(m.group(1)) if m else 0
 
 
-def claim(runtime_id) -> dict | None:
+def claim(runtime_id, expected_task_id=None, expected_event_seq=None) -> dict | None:
     """原子抢单 + 串行槽（见 multi-issue-isolation-design.md §3.3 / concurrency-design.md §2.3）。
+
+    Issue #520 bound claim：expected_task_id + expected_event_seq 成对提供时，
+    在同一 db_lock 临界区内对目标任务做原子身份校验（owner/runtime/池/状态/串行槽
+    条件与 FIFO 完全一致 + expected 精确匹配），未命中返回 None——绝不回退 FIFO
+    领取其他任务（一次性许可 fail-closed）。未提供 expected 时保持原 FIFO 路径零改动。
 
     串行粒度（M2）：任务带 issue_session_id → 同 Issue 严格串行（跨 Issue 并行）；
     issue_session_id 为空（旧任务/#0 事件）→ 回退按 agent_session_id 串行（现状语义）。
@@ -1169,54 +1280,90 @@ def claim(runtime_id) -> dict | None:
             except Exception as _e:
                 log.warning(f"recover stale dispatched failed: {_e}")
 
-            # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
-            # pool_engine_ids 为空或包含本引擎即可领；
-            # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
-            #
-            # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
-            # 避免标签不匹配的机器通过兜底渠道抢到任务。
-            c.execute("""
-                SELECT id FROM agent_tasks
-                WHERE runtime_id=? AND status='queued'
-                  AND NOT EXISTS (
-                    SELECT 1 FROM agent_tasks a2
-                    WHERE a2.status IN ('dispatched','running')
-                      AND (
-                        (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                        OR
-                        (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
-                      )
-                  )
-                ORDER BY created_at ASC LIMIT 1
-            """, (runtime_id,))
-            row = c.fetchone()
-            if not row:
-                _is_plugin = False
-                try:
-                    from src.api.event_pipeline import is_plugin_mode
-                    _is_plugin = is_plugin_mode()
-                except Exception:
-                    pass
-                if not _is_plugin:
-                    c.execute("""
-                        SELECT id FROM agent_tasks
-                        WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
-                          AND NOT EXISTS (
-                            SELECT 1 FROM agent_tasks a2
-                            WHERE a2.status IN ('dispatched','running')
-                              AND (
-                                (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
-                                OR
-                                (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
-                              )
+            if expected_task_id is not None:
+                # Issue #520 bound claim：expected 身份在 db_lock 临界区内原子校验。
+                # 候选骨架与 FIFO 完全一致（定向 runtime_id / 共享池 / 串行槽 / queued）
+                # + expected 精确匹配；未命中 → 无任务，绝不回退 FIFO 领其他任务。
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE id=? AND event_seq=? AND status='queued'
+                      AND (runtime_id=? OR (runtime_id=0 AND pool_agent_type != ''))
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
                           )
-                        ORDER BY created_at ASC LIMIT 1
-                    """)
-                    row = c.fetchone()
-            if not row:
-                db.commit()
-                return None
-            task_id = row[0]
+                      )
+                    LIMIT 1
+                """, (expected_task_id, expected_event_seq, runtime_id))
+                row = c.fetchone()
+                if not row:
+                    db.commit()
+                    return None
+                # pool_engine_ids 广播范围守卫：目标任务不含本引擎 → fail-closed（不尝试其他任务）
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (row[0],))
+                _pe_row = c.fetchone()
+                if _pe_row and _pe_row[0]:
+                    try:
+                        _allowed = json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            db.commit()
+                            return None
+                    except Exception:
+                        pass
+                task_id = row[0]
+            else:
+                # 确定路由：① 定向任务（runtime_id=?）② 池任务（runtime_id=0 + pool_agent_type，
+                # pool_engine_ids 为空或包含本引擎即可领；
+                # 回收逻辑会把 dispatched 超时任务归零转池任务，claim 必须兼容，否则永久死任务）
+                #
+                # 插件模式：广播任务只能走 claim_by_tag（标签匹配），legacy claim 不认领广播任务，
+                # 避免标签不匹配的机器通过兜底渠道抢到任务。
+                c.execute("""
+                    SELECT id FROM agent_tasks
+                    WHERE runtime_id=? AND status='queued'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM agent_tasks a2
+                        WHERE a2.status IN ('dispatched','running')
+                          AND (
+                            (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                            OR
+                            (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                          )
+                      )
+                    ORDER BY created_at ASC LIMIT 1
+                """, (runtime_id,))
+                row = c.fetchone()
+                if not row:
+                    _is_plugin = False
+                    try:
+                        from src.api.event_pipeline import is_plugin_mode
+                        _is_plugin = is_plugin_mode()
+                    except Exception:
+                        pass
+                    if not _is_plugin:
+                        c.execute("""
+                            SELECT id FROM agent_tasks
+                            WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
+                              AND NOT EXISTS (
+                                SELECT 1 FROM agent_tasks a2
+                                WHERE a2.status IN ('dispatched','running')
+                                  AND (
+                                    (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                                    OR
+                                    (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                                  )
+                              )
+                            ORDER BY created_at ASC LIMIT 1
+                        """)
+                        row = c.fetchone()
+                if not row:
+                    db.commit()
+                    return None
+                task_id = row[0]
 
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
             # 修复（2026-08-29）：原代码 return None 会阻塞队列——与 claim_by_tag 同一 bug。
@@ -1224,6 +1371,8 @@ def claim(runtime_id) -> dict | None:
             _tried_ids = [task_id]
             _max_tries = 20
             while True:
+                if expected_task_id is not None:
+                    break  # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），不进入 FIFO 跳过循环
                 c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
                 _pe_row = c.fetchone()
                 _skip = False
@@ -1255,6 +1404,8 @@ def claim(runtime_id) -> dict | None:
                                 _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
                                 return None
                             _skip = True
+                            # Issue #605：引擎不在广播名单被静默跳过 → 取证日志（60s 去重）
+                            _log_pool_skip_once(task_id, runtime_id, _allowed)
                     except Exception:
                         pass
                 if not _skip:
@@ -1426,12 +1577,57 @@ def get_task(task_id) -> dict | None:
     return dict(zip(_cols, row)) if row else None
 
 
-def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
+def lookup_task_by_event_seq(runtime_id: int, event_seq: int) -> dict | None:
+    """许可对号 lookup（Issue #520 Spec v2 §4，XOcto 补充设计）。
+
+    纯验证性 SELECT，零副作用（不翻状态、不 UPDATE、不返回 payload/env/凭据）：
+    按 expected_event_seq 精确匹配，候选 WHERE 骨架与 claim 定向分支完全一致
+    （runtime_id 精确匹配 + 共享池 runtime_id=0 AND pool_agent_type != '' +
+    串行槽 NOT EXISTS + status='queued'）。命中返回身份字段
+    {task_id, issue_id, event_seq, agent_type, created_at}，未命中返回 None。
+    仅支持 event_seq > 0 的新鲜任务（旧任务 event_seq 为空/0 不支持）。
+    """
+    if not event_seq or int(event_seq) <= 0:
+        return None
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("""
+                SELECT id, issue_id, event_seq, agent_type, created_at FROM agent_tasks
+                WHERE event_seq=? AND status='queued'
+                  AND (runtime_id=? OR (runtime_id=0 AND pool_agent_type != ''))
+                  AND NOT EXISTS (
+                    SELECT 1 FROM agent_tasks a2
+                    WHERE a2.status IN ('dispatched','running')
+                      AND (
+                        (agent_tasks.issue_session_id != '' AND a2.issue_session_id = agent_tasks.issue_session_id)
+                        OR
+                        (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)
+                      )
+                  )
+                LIMIT 1
+            """, (int(event_seq), runtime_id))
+            row = c.fetchone()
+        except Exception as e:
+            log.warning(f"lookup_task_by_event_seq failed: {e}")
+            return None
+    if not row:
+        return None
+    return {"task_id": row[0], "issue_id": row[1], "event_seq": row[2],
+            "agent_type": row[3], "created_at": row[4]}
+
+
+def claim_by_tag(tag: str, runtime_id: int,
+                 expected_task_id=None, expected_event_seq=None) -> dict | None:
     """按标签认领任务 + scope 隔离（event-dispatch-redesign-v2.md §2.4）
 
     scope=global → 可认领所有仓库的 queued 任务
     scope=repo   → 只认领 owner_id 对应仓库的 queued 任务
     scope=user   → 只认领该用户创建的 queued 任务
+
+    Issue #520 bound claim：expected_task_id + expected_event_seq 成对提供时，
+    在同一 db_lock 临界区内对目标任务做原子身份校验（tag/scope/串行槽条件与
+    FIFO 完全一致 + expected 精确匹配）；未命中返回 None，绝不回退 FIFO。
     """
     with db_lock:
         c = db.cursor()
@@ -1510,11 +1706,33 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                     "    OR (agent_tasks.issue_session_id = '' AND a2.agent_session_id = agent_tasks.agent_session_id)"
                     "  )) ORDER BY created_at ASC LIMIT 1"
                 )
-            c.execute(sql, tuple(params))
-            task_row = c.fetchone()
-            if not task_row:
-                return None
-            task_id = task_row[0]
+            if expected_task_id is not None:
+                # Issue #520 bound claim（tag 版）：expected 身份 + 原有 tag/scope/串行槽
+                # 条件在同一 db_lock 临界区原子校验（scope SQL 与 FIFO 完全同源，仅在
+                # WHERE 尾部追加 expected 精确匹配）；未命中 → 无任务，绝不回退 FIFO。
+                c.execute(
+                    sql.replace(" ORDER BY", " AND id=? AND event_seq=? ORDER BY"),
+                    tuple(list(params) + [expected_task_id, expected_event_seq]))
+                task_row = c.fetchone()
+                if not task_row:
+                    return None
+                task_id = task_row[0]
+                # pool_engine_ids 广播范围守卫：目标不含本引擎 → fail-closed（不尝试其他任务）
+                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                _pe_row = c.fetchone()
+                if _pe_row and _pe_row[0]:
+                    try:
+                        _allowed = json.loads(_pe_row[0])
+                        if _allowed and runtime_id not in _allowed:
+                            return None
+                    except Exception:
+                        pass
+            else:
+                c.execute(sql, tuple(params))
+                task_row = c.fetchone()
+                if not task_row:
+                    return None
+                task_id = task_row[0]
 
             # pool_engine_ids 限定广播范围：非空时只有列表中的引擎能认领
             # 修复（2026-08-29）：原代码 return None 会阻塞队列——队首任务如果不匹配，
@@ -1524,6 +1742,8 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
             _tried_ids = [task_id]
             _max_tries = 20  # 防止全表扫描
             while True:
+                if expected_task_id is not None:
+                    break  # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），不进入 FIFO 跳过/健康检查循环
                 c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
                 _pe_row = c.fetchone()
                 _skip = False
@@ -1555,6 +1775,8 @@ def claim_by_tag(tag: str, runtime_id: int) -> dict | None:
                                 _fail_task_pool_unreachable(c, task_id, _allowed, _task_tag)
                                 return None
                             _skip = True
+                            # Issue #605：引擎不在广播名单被静默跳过 → 取证日志（60s 去重）
+                            _log_pool_skip_once(task_id, runtime_id, _allowed)
                     except Exception:
                         pass
                 if not _skip:

@@ -213,6 +213,8 @@ const app = (() => {
     // 踢人路径（refresh 失败/手动登出/token 失效）的统一收口，在此
     // 停轮询 = 一次修复覆盖全部入口。
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // Issue #600：离开/被踢时停掉流水线卡片轮询
+    if (typeof stopPipePolling === 'function') stopPipePolling();
     // 清除当前视图状态——退出/过期后重新登录时 _restoreNavAfterLogin 需要重新路由
     window._currentView = '';
     renderOAuthButtons();
@@ -1774,6 +1776,8 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      // Issue #600：流水线卡片轮询——重派成功/新终态到达后自动刷新，无手动刷新依赖
+      if (typeof startPipePolling === 'function') startPipePolling();
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }

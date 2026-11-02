@@ -312,6 +312,33 @@ grapecli git diff --repo Jason7602/hello
 
 **错误**：401 / 403 / 404。
 
+### POST /api/git-repo/{owner}/{repo}/milestones
+
+**入参 Body（JSON）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `title` | string | ✅ | 里程碑标题 |
+| `description` | string | 否 | 描述（空值不透传） |
+| `due_on` | string | 否 | 截止时间 ISO 时间戳（空值不透传） |
+
+**返回（200/201）**：创建后的里程碑对象（含 `id`，可挂接 `issues update --milestone_id`）。
+**错误**：400（缺 title 等上游校验）/ 422（title 缺失的契约校验）/ 401 / 403 / 409（标题重复）。
+provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
+
+### PATCH /api/git-repo/{owner}/{repo}/milestones/{number}
+
+**入参 Body（JSON）**：全字段可选（空值不透传，不影响其他字段）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `title` | string | 里程碑标题 |
+| `description` | string | 描述 |
+| `due_on` | string | 截止时间 ISO 时间戳 |
+| `state` | string | `open`/`closed` |
+
+**返回（200）**：更新后的里程碑对象。**错误**：400 / 401 / 403 / 404。
+
 ---
 
 ## 7. Issues

@@ -1457,7 +1457,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _be = backend or "opencode"
             _pool_eids = get_scene_pool_engine_ids(_a2a_scene, agent_name, repo_key=repo_key, user_id=_a2a_scene_uid)
             if _pool_eids is None:
-                # Issue #259 方案A：场景绑定的引擎全部离线 → 不入队，事件置 failed 并明确提示
+                # Issue #259 方案A：场景派发失败 → 不入队，事件置 failed 并明确提示
+                # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
                 log.warning(f"A2A: scene={_a2a_scene} agent={agent_name} engines all offline, skip (Issue #259)")
                 # 引擎绑定真实性同步：改走统一 helper，人话原因落 events.result/agent_tasks.errors
                 try:

@@ -102,6 +102,21 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
         "completed_at": normalize_event_time(row[18] or ""),
         "result": row[19] or "",
     }
+    # Issue #574：Skill 展示改 display_name（与场景选择处同款查询条件；display_name 为空时前端回退 Skill ID）
+    _skill_display_name = ""
+    try:
+        if row[13]:
+            with db_lock:
+                _c = db.cursor()
+                _c.execute(
+                    "SELECT display_name FROM skill WHERE skill_name=? AND is_active=1 AND scope='official'",
+                    (row[13],))
+                _sr = _c.fetchone()
+            if _sr and _sr[0]:
+                _skill_display_name = _sr[0]
+    except Exception:
+        pass
+    result["skill_display_name"] = _skill_display_name
     # weekly-05：优先读 events.structured_output（替代 event.json seg.output）；无则回退 archive 文件
     _structured_raw = row[20] if len(row) > 20 else None
     _structured = None
@@ -432,6 +447,21 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     return {"message": f"事件 {seq} 终止请求已发送", "cancelled": cancelled}
 
 
+def _mark_event_redispatched(seq: int, new_seq, channel: str):
+    """Issue #600：重派接管后原事件标记为 cancelled（被新事件取代），而非 failed。
+
+    failed 属于失败终态，会永久残留为流水线卡片的红色失败段（重派成功后旧失败
+    仍未被覆盖）。cancelled 语义为「已被新 seq 接管」，不参与 any_failed 聚合，
+    流水线节点状态随新事件（同 agent 最新 seq）刷新。经 reset_event_terminal
+    重置后写入，绕开终态保护，与既有 redispatch 语义一致。
+    """
+    from src.api.event_store import reset_event_terminal, update_event_complete
+    reset_event_terminal(seq)
+    update_event_complete(
+        seq, "cancelled", exit_code=None,
+        result=f"事件已重新派发（{channel} 新 seq={new_seq} 接管，原事件已取消）")
+
+
 @router.post("/{seq}/redispatch", operation_id="events_redispatch", summary="Redispatch event", description="Manually redispatches an event task (for tasks stuck running>10min or failed). Non-terminal tasks are requeued; terminal/missing tasks are marked failed and re-enqueued. local_only forces the original runtime.")
 def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(require_no_session_token)):
     """手动重新派发事件任务（卡死 running>10min / failed 时人工收敛）。
@@ -447,7 +477,6 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     import json as _json
     from src.session_manager import db, db_lock
     from src.runtime.service import requeue_task, get_task, enqueue_task, update_task_status
-    from src.api.event_store import update_event_status
 
     # 1) 幂等：30s 内已重派过则拒绝
     try:
@@ -530,11 +559,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
         log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
         _res = retry_onboarding_task(evt.get("repo_key", "") or "", _owner, _onb_target)
-        # 原 seq 标记 failed（保持历史记录），新 seq 接管
-        # Issue #476：显式 reason，避免 redispatch 产生空 result 无头失败
+        # Issue #600：原事件标记 cancelled（被新任务接管，非失败态），避免流水线卡片残留失败
         try:
-            update_event_status(seq, "failed",
-                                result="事件已重新派发（onboarding 重建任务，原事件标记 failed）")
+            _mark_event_redispatched(seq, "(new)", "onboarding 重建任务")
         except Exception:
             pass
         try:
@@ -1054,9 +1081,19 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                             from src.api.event_pipeline import _fail_scene_all_offline
                             _fail_scene_all_offline(seq, _scene_253, old.get("agent_type") or "",
                                                     context="Redispatch", repo_key=old.get("repo_key") or "")
+                            # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
+                            _msg_541 = "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"
+                            try:
+                                from src.runtime.engine_select import scene_dispatch_failure_reason
+                                _msg_541 = scene_dispatch_failure_reason(
+                                    _scene_253, old.get("agent_type") or "",
+                                    repo_key=old.get("repo_key") or "",
+                                    user_id=_scene_uid_253) or _msg_541
+                            except Exception:
+                                pass
                             raise HTTPException(status_code=409, detail={
                                 "code": 409,
-                                "message": "场景绑定的引擎全部离线，无法重派（请检查引擎在线状态）"})
+                                "message": _msg_541})
                         _pool_253 = _rp_253 or ""
                         _pool_253_authoritative = True
                 except HTTPException:
@@ -1287,9 +1324,9 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _a2a_result.get("status") == "ok":
                         _new_seq = _a2a_result.get("seq", 0)
                         log.info(f"[redispatch] seq={seq} a2a re-dispatch ok, new seq={_new_seq}")
-                        update_event_status(
-                            seq, "failed",
-                            result=f"事件已重新派发（A2A 新 seq={_new_seq} 接管，原事件标记 failed）")
+                        # Issue #600：原事件标记 cancelled（被新事件接管，非失败态），
+                        # 避免流水线卡片/segments 长期残留失败红卡片
+                        _mark_event_redispatched(seq, _new_seq, "A2A")
                         try:
                             from src.user.db import set_meta_value as _smv
                             import time as _tm
@@ -1329,11 +1366,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                                  account=evt.get("account", ""), repo_key_override=evt.get("repo_key", ""))
                 if _rp_result.get("ok"):
                     log.info(f"[redispatch] seq={seq} re-run_pipeline ok, new seq={_rp_result.get('seq')}")
-                    # 原 seq 事件标记 failed（保持历史记录），新 seq 接管执行
-                    # Issue #476：显式 reason，避免 redispatch 产生空 result 无头失败
-                    update_event_status(
-                        seq, "failed",
-                        result=f"事件已重新派发（run_pipeline 新 seq={_rp_result.get('seq', 0)} 接管，原事件标记 failed）")
+                    # Issue #600：原事件标记 cancelled（被新事件接管，非失败态）
+                    _mark_event_redispatched(seq, _rp_result.get("seq", 0), "run_pipeline")
                     try:
                         from src.user.db import set_meta_value as _smv
                         import time as _tm

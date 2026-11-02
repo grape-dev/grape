@@ -1129,6 +1129,44 @@ def get_skill_by_id(skill_id) -> dict | None:
         return None
 
 
+def resolve_official_checker_skill(agent_type: str) -> dict | None:
+    """Issue #617：按 agent_type 回退官方检查器技能（skill 按名未命中时的兜底）。
+
+    场景节点引用了官方库不存在的技能名（如 skill-batch-validator）时，materialize
+    按名必然失败。此处按节点 agent_type 在 skill 表取 is_active=1 且 scope='official'
+    的官方技能兜底：
+    - 优先取技能名含 validator/check/review/lint/inspect 的“检查器”技能（id 最小）；
+    - 否则取该 agent_type 下 id 最小的官方技能。
+    返回技能 dict（含 id/skill_name/skill_path/file_path）或 None。
+    """
+    if not agent_type:
+        return None
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT id, skill_name, display_name, description, agent_type, skill_path, "
+                "file_path, scope, owner_id, content_hash FROM skill "
+                "WHERE agent_type=? AND is_active=1 AND scope='official' ORDER BY id",
+                (agent_type,))
+            rows = c.fetchall()
+        if not rows:
+            return None
+        pick = next((r for r in rows
+                     if re.search(r"valid|check|review|lint|inspect", r[1] or "", re.IGNORECASE)),
+                    rows[0])
+        return {
+            "id": pick[0], "skill_name": pick[1], "display_name": pick[2] or pick[1],
+            "description": pick[3] or "", "agent_type": pick[4] or "",
+            "skill_path": pick[5] or pick[1], "file_path": pick[6] or "",
+            "scope": pick[7] or "official", "owner_id": pick[8] or "",
+            "content_hash": pick[9] or "",
+        }
+    except Exception as e:
+        log.warning(f"resolve_official_checker_skill failed for {agent_type}: {e}")
+        return None
+
+
 def get_skill_content_hash(skill_name: str, scope: str = "official") -> tuple[int, str, str]:
     """读取技能的主键 id、content_hash 和 file_path（变更检测用）。
     返回 (id, content_hash, file_path)，id=0 表示不存在。
@@ -1373,9 +1411,23 @@ def create_skill(user_id: int, skill_name: str, agent_type: str = "", descriptio
                           (skill_name, skill_name, description, agent_type, skill_name, str(user_id), cb, cb))
             db.commit()
             if scope == "repo":
-                ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
+                _dir = ensure_repo_skill_dir(owner_id or str(user_id), skill_name)
             else:
-                ensure_skill_dir(user_id, skill_name)
+                _dir = ensure_skill_dir(user_id, skill_name)
+            # Issue #630：发布链路落盘断点修复——legacy 注册路径只写 DB 行 + 空目录，
+            # 若注册后无内容源（file_path 空 + 本地无 SKILL.md），该行为「空壳技能」，
+            # 派发侧 verify_skill_materializable 门禁会显式阻断（如 sid=3276）。此处
+            # 显式告警留审计痕迹，提示发布者补齐内容（/api/skills/upload 或 save_skill_md）。
+            if not os.path.isfile(os.path.join(_dir, "SKILL.md")):
+                with db_lock:
+                    c = db.cursor()
+                    c.execute("SELECT file_path FROM skill WHERE skill_name=? AND scope=? AND owner_id=?",
+                              (skill_name, scope, owner_id or str(user_id)))
+                    _row = c.fetchone()
+                if not (_row and (_row[0] or "").strip()):
+                    log.warning(f"create_skill: '{skill_name}' (scope={scope}, owner={owner_id or user_id}) "
+                                f"registered WITHOUT materialization source (no SKILL.md, no obs file_path); "
+                                f"save content before dispatching tasks with this skill (Issue #630)")
             return True
     except Exception as e:
         log.warning(f"Create skill failed: {e}")
@@ -1526,9 +1578,19 @@ def set_repo_scene(repo_key: str, scene_id: str):
     """写入仓库开发场景（managed_repos.dev_scene），幂等。
 
     issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
+    Issue #541：写前做仓内存在性校验——scene_id 仓内查不到（如误写模板场景名）
+    时告警不阻断（兼容显式直写场景名等历史路径，派发侧另有防线兜底）。
     """
     from src.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
+    if scene_id:
+        try:
+            from src.api.pipeline_config import scene_exists_in_repo
+            if not scene_exists_in_repo(scene_id, repo_key):
+                log.warning(f"Set repo scene: scene '{scene_id}' not found in repo {repo_key} "
+                            f"(possible template-name misbinding, Issue #541)")
+        except Exception as _e:
+            log.warning(f"Set repo scene: existence check failed: {_e}")
     try:
         with db_lock:
             c = db.cursor()

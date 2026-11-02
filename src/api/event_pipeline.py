@@ -207,7 +207,14 @@ def _fail_scene_all_offline(seq: int, scene_id: str, agent_type: str, context: s
         _reason = (f"绑定的 {len(_engine_names)} 台引擎（{', '.join(_engine_names)}）全部离线，"
                    f"任务无法派发（scene={scene_id}, agent={agent_type}）")
     else:
+        # Issue #541：无引擎名可反查 → 用统一原因判定区分「场景仓内不存在 /
+        # 场景未绑定引擎 / 引擎全部离线」，不再笼统报「全部离线」
         _reason = f"场景绑定的引擎全部离线，任务无法派发（scene={scene_id}, agent={agent_type}）"
+        try:
+            from src.runtime.engine_select import scene_dispatch_failure_reason
+            _reason = scene_dispatch_failure_reason(scene_id, agent_type, repo_key=repo_key) or _reason
+        except Exception as _e541:
+            log.warning(f"_fail_scene_all_offline: failure reason lookup failed: {_e541}")
     _fail_event(seq, _reason)
 
 def _scene_qa_skill(repo_key: str, scene_id: str, matches: list) -> str:
@@ -2493,7 +2500,14 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: scene={_issue_scene} agent={agent_type} engines all offline, skip (Issue #259)")
         _create_failed_task(repo_key, seq, agent_type, backend or "", skill_name,
                             skill_path, skill_id, evt, issue_id, runtime_id or 0)
+        # Issue #541：报错区分「场景仓内不存在 / 未绑定引擎 / 引擎全部离线」
         _reason_offline = f"场景绑定的引擎全部离线（scene={_issue_scene}, agent={agent_type}），请检查引擎在线状态"
+        try:
+            from src.runtime.engine_select import scene_dispatch_failure_reason
+            _reason_offline = scene_dispatch_failure_reason(
+                _issue_scene, agent_type, repo_key=repo_key, user_id=_issue_scene_uid) or _reason_offline
+        except Exception as _e541:
+            log.warning(f"Pipeline: scene dispatch failure reason lookup failed: {_e541}")
         # Issue #496：PR merged → sre 收尾链路（merge webhook 一次性投递，无二次触发机会）
         # 保留 #259 即时终态语义的同时追加派发级自动重试（引擎恢复后自动重派）。
         if event_type == "pull_request_merged" and agent_type == "sre":
@@ -3004,6 +3018,19 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         else:
             _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
             return
+    # Issue #630：技能物化完整性校验门禁（enqueue 前，fail-fast）——配置了技能但
+    # 内容源全缺失（空壳技能行，如 sid=3276 vod-cli-crossrepo）时显式告警并阻断派发，
+    # 不静默降级；技能未配置（推荐模式/无 skill）不阻断，official 内置包兜底放行。
+    if skill_name:
+        from src.runtime.service import verify_skill_materializable
+        _gate_ok, _gate_reason, _gate_sid = verify_skill_materializable(
+            skill_name, skill_id=skill_id or 0, repo_key=repo_key, user_id=user_id)
+        if not _gate_ok:
+            log.warning(f"Pipeline skill gate BLOCKED seq={seq} agent={agent_type} "
+                        f"skill={skill_name} sid={_gate_sid}: {_gate_reason}")
+            _fail_event(seq, f"技能物化校验未通过，已阻断派发（skill={skill_name}）: "
+                             f"{_gate_reason[:200]}")
+            return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -3466,24 +3493,61 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
             return ("none", f"skill source not found for {skill_name}")
 
         if skill_name:
-            from src.runtime.skill_materialize import materialize_skill_with_fallback
-            _mat = materialize_skill_with_fallback(skill_dir, skill_name, _skill_primary)
+            from src.runtime.skill_materialize import (materialize_skill_with_fallback,
+                                                        write_skill_fallback)
+
+            def _agent_type_checker_resolver(at):
+                # Issue #617：按名未命中 → 按 agent_type 回退官方检查器（DB 侧解析）
+                try:
+                    from src.user.db import resolve_official_checker_skill, get_skill_path
+                    _fb = resolve_official_checker_skill(at)
+                    if not _fb:
+                        return None
+                    _p = get_skill_path(_fb.get("id")) or _fb.get("skill_path") or ""
+                    _d = os.path.dirname(_p) if _p and os.path.isfile(_p) else ""
+                    if not _d:
+                        return None
+                    return {"skill_name": _fb.get("skill_name"),
+                            "skill_id": _fb.get("id") or 0, "skill_dir": _d}
+                except Exception:
+                    return None
+
+            _mat = materialize_skill_with_fallback(
+                skill_dir, skill_name, _skill_primary,
+                agent_type=agent_type, agent_type_fallback=_agent_type_checker_resolver)
             # 降级标注写入 evt（_execute_agent_inner 落事件 agent_logs）
             evt["_skill_materialize"] = _mat
             if _mat.get("status") in ("fallback", "degraded"):
+                _id_hint = ""
+                if _mat.get("skill_id"):
+                    _id_hint = (f" (fallback checker: "
+                                f"`grape skills detail --skill_id {_mat.get('skill_id')}`)")
                 _note = (f"\n\n[Skill Materialization Notice] DEVOPS_SKILLS_DIR={skill_dir} "
-                         f"({_mat.get('status')}): {_mat.get('detail')}. "
+                         f"({_mat.get('status')}): {_mat.get('detail')}.{_id_hint} "
                          f"If skill files under this path are missing, fetch the skill via "
-                         f"`grape skills detail` or the platform skills API before proceeding.")
+                         f"`grape skills detail --skill_id <id>` or the platform skills API "
+                         f"before proceeding.")
                 prompt += _note
                 log.warning(f"direct skill materialize {skill_name}: {_mat.get('status')} "
                             f"({_mat.get('detail')})")
+                # Issue #607：官方包回退也失败（degraded）→ 写 FALLBACK.md 降级指引，
+                # 与 worker 端兜底口径一致（grape skills detail 权威取回）。
+                if _mat.get("status") == "degraded":
+                    write_skill_fallback(skill_dir, skill_name,
+                                         _mat.get("detail", ""), stage="direct")
             else:
                 log.info(f"direct skill materialize {skill_name}: ok")
         prompt = prompt.replace("{{SKILL_DIR}}", skill_dir)
     except Exception as e:
         log.warning(f"direct skill materialize failed for {skill_name}: {e}")
         evt["_skill_materialize"] = {"status": "degraded", "detail": str(e), "skill_dir": ""}
+        # Issue #607：direct 端物化异常分支同样写 FALLBACK.md 降级指引 + 留痕
+        try:
+            from src.runtime.skill_materialize import write_skill_fallback
+            write_skill_fallback(skill_dir, skill_name,
+                                 f"direct materialize exception: {e}", stage="direct")
+        except Exception:
+            pass
 
     return prompt
 

@@ -721,11 +721,14 @@ def delete_custom_scene(scene_id: str, repo_key: str):
         pass
 
 
-def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0) -> bool:
-    """按场景名从 scene_market 查 market_id 并应用到仓库。
+def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0) -> Optional[str]:
+    """按场景名从 scene_market 查 market_id 并应用到仓库，返回仓内副本真实 scene_id。
 
-    供模板创建流程按模板 scene_id 覆盖默认场景使用。
+    供模板创建流程按模板 scene_id 覆盖默认场景使用（Issue #541：回传真实 ID，
+    调用方写 managed_repos.dev_scene 时不再误写模板场景名）。
     幂等：仓库已有同 market_scene_id 的场景则不重复创建。
+    返回 None 表示失败（market 模板名查不到 / repo_key 无效 / 应用被拒）；
+    truthiness 语义与旧 bool 返回兼容（session_store 布尔用法不受影响）。
     """
     from src.repo_key import from_repo_key
 
@@ -740,7 +743,7 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
         row = c.fetchone()
     if not row:
         log.warning(f"apply_market_scene_by_name: market scene '{scene_name}' not found for {repo_key}")
-        return False
+        return None
     market_id = row[0]
 
     # 从 repo_key 拆 owner/repo（apply_market_scene 需要这两个参数）
@@ -748,15 +751,49 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
     parts = full_name.split("/", 1)
     if len(parts) != 2:
         log.warning(f"apply_market_scene_by_name: invalid repo_key '{repo_key}'")
-        return False
+        return None
     owner, repo_name = parts
 
     # 调 apply_market_scene，走场景中心完整逻辑
     # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
     from src.api.routes.scenes import apply_market_scene
-    result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
+    try:
+        result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
+    except Exception as _e:
+        # apply_market_scene 以 HTTPException 表达业务拒绝（如技能缺失/重名 409）
+        log.warning(f"apply_market_scene_by_name: apply market scene {market_id} ({scene_name}) "
+                    f"to {repo_key} rejected: {_e}")
+        return None
     log.info(f"apply_market_scene_by_name: applied market scene {market_id} ({scene_name}) to {repo_key}: {result}")
-    return True
+    # Issue #541：提取仓内副本真实 scene_id（weekly-09：每次应用生成 custom-{uuid}）
+    real_scene_id = ""
+    if isinstance(result, dict):
+        real_scene_id = str(result.get("scene_id") or "")
+    if not real_scene_id:
+        log.warning(f"apply_market_scene_by_name: no scene_id in apply result for {repo_key}: {result}")
+        return None
+    return real_scene_id
+
+
+def scene_exists_in_repo(scene_id: str, repo_key: str) -> bool:
+    """校验 scene_id 是否为该仓库内已存在的场景副本（devops_pipeline_scene 行）。
+
+    Issue #541 派发侧/写侧共用兜底：仓内查不到的 scene_id 不应被静默当作
+    有效绑定（模板名误写场景的判定依据）。空值返回 False。
+    """
+    if not scene_id or not repo_key:
+        return False
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT 1 FROM devops_pipeline_scene WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            return c.fetchone() is not None
+        except Exception as e:
+            log.warning(f"scene_exists_in_repo: query failed: {e}")
+            return False
 
 
 def _query_official_scene_ids() -> set[str]:

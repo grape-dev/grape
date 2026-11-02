@@ -138,6 +138,17 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             log.warning(f"Templates: startup check failed: {e}")
 
+        # Issue #541：存量场景错误绑定幂等修复——dev_scene / issue.scene_id 曾误写
+        # 模板场景名，扫描后按 market_scene_id 改绑仓内副本真实 scene_id（可安全重跑）
+        try:
+            from src.api.scene_binding_repair import repair_scene_bindings
+            _rep_541 = repair_scene_bindings()
+            if _rep_541["repos_fixed"] or _rep_541["issues_fixed"]:
+                log.info(f"Scene binding repair: fixed {_rep_541['repos_fixed']} repos, "
+                         f"{_rep_541['issues_fixed']} issues (Issue #541)")
+        except Exception as e:
+            log.warning(f"Scene binding repair failed: {e}")
+
         # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
         try:
             from src.help_page_gen import generate as _generate_help_page

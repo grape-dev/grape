@@ -528,13 +528,27 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用且技能对象缺失，下载失败。请检查服务端存储配置后重试。"})
 
 
-@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
+@router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller. Since #630 the {skill_id} path param also accepts a skill name (user scope first, then repo, then official).")
+def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key),
                                  repo: str = ""):
     """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
 
     权限校验：official 可见；user 需本人；repo 需当前用户托管该仓库。
+    Issue #630：路径参数支持技能名（非数字时按 resolve_skill_id 解析 user→repo→official，
+    user scope 优先本人，与派发侧口径一致），使 `grape skills detail --skill_id <名称>` 可用。
     """
+    # Issue #630：name→sid 解析（复用 resolve_skill_id 的 user scope 逻辑）
+    _raw = str(skill_id or "").strip()
+    if not _raw.isdigit():
+        from src.user.db import resolve_skill_id
+        _repo_key = _resolve_repo_key(repo) if repo else ""
+        _sid = resolve_skill_id(_raw, repo_key=_repo_key, user_id=str(user.get("id", "")))
+        if not _sid:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
+        skill_id = _sid
+    else:
+        skill_id = int(_raw)
+
     from src.session_manager import db, db_lock
     from src.config import SKILLS_DIR
 

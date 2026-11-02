@@ -626,6 +626,29 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     }
 
 
+@router.get("/ops/engine-select-explain", operation_id="dashboard_ops_engine_select_explain",
+            summary="Engine selection explain", description="Issue #605: explain engine dispatch candidates "
+            "for a (repo, agent_type, scene) — bound engines, per-candidate filter reasons, "
+            "broadcast pool and legacy selection result. Read-only.")
+def get_engine_select_explain(repo: str = "", agent_type: str = "vod", scene_id: str = "",
+                              user: dict = Depends(require_org_member)):
+    """主控侧取证接口（Issue #605）：解释引擎派发候选与过滤原因（只读）。
+
+    - repo：仓库 repo_key（如 gitcode:owner/repo 或 owner/repo）
+    - agent_type：agent 角色（vod/coding/qa/sre/issue）
+    - scene_id：场景 ID（空则无场景绑定口径）
+    返回 explain_engine_selection 结果：bound_engine_ids / candidates（含 reasons）/
+    pool_engine_ids / selected。库内字段（healthy/online/last_seen）与 console 展示
+    不一致的核对可由 candidates 字段直接完成。
+    """
+    from src.runtime.engine_select import explain_engine_selection
+    try:
+        return {"ok": True, **explain_engine_selection(repo, agent_type, scene_id=scene_id)}
+    except Exception as e:
+        log.warning(f"Dashboard: engine-select-explain failed: {e}")
+        return {"ok": False, "error": str(e)[:200]}
+
+
 @router.get("/ops/probe-now", operation_id="dashboard_ops_probe_now")
 def probe_engines_now(user: dict = Depends(require_org_member)):
     """需登录：组织成员可见。手动触发引擎探测（60s 防抖：窗口内重复请求返回上次结果，不重新探测）。"""

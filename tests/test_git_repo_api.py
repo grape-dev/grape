@@ -238,6 +238,95 @@ def test_pulls_comments_update_delete(gitcode_calls, _client):
     assert last["body"] is None
 
 
+def test_pulls_comments_update_hex_id_compat(monkeypatch, _client):
+    """Issue #623：update comment_id 兼容十六进制 id——单评论查询取数字 note_id 后透传 PATCH。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    recorded = []
+
+    def _fake_req(method, url, token="", body=None):
+        recorded.append({"method": method, "url": url, "body": body})
+        if method == "GET" and "/pulls/comments/" in url:
+            return {"id": 421, "body": "old"}
+        return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
+
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+
+    r = client.patch(f"{base}/pulls/9/comments/0df1a2", json={"body": "corrected"})
+    assert r.status_code == 200
+    assert recorded[0]["method"] == "GET"
+    assert recorded[0]["url"].endswith("/pulls/comments/0df1a2")
+    last = recorded[-1]
+    assert last["method"] == "PATCH"
+    assert last["url"].endswith("/pulls/comments/421")
+    assert last["body"] == {"body": "corrected"}
+
+
+def test_pulls_comments_update_hex_id_fallback_list(monkeypatch, _client):
+    """Issue #623：单评论查询无 note_id 时回退 PR 评论列表按 discussion_id 匹配。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    recorded = []
+
+    def _fake_req(method, url, token="", body=None):
+        recorded.append({"method": method, "url": url, "body": body})
+        if method == "GET" and "/pulls/comments/" in url:
+            return {"ok": True}
+        if method == "GET" and url.endswith("/pulls/9/comments"):
+            return [{"id": 77, "discussion_id": "0df1a2", "body": "old"},
+                    {"id": 78, "discussion_id": "00ff00", "body": "other"}]
+        return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
+
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+
+    r = client.patch(f"{base}/pulls/9/comments/0df1a2", json={"body": "corrected"})
+    assert r.status_code == 200
+    last = recorded[-1]
+    assert last["method"] == "PATCH"
+    assert last["url"].endswith("/pulls/comments/77")
+
+
+def test_pulls_comments_update_invalid_id_422(gitcode_calls, _client):
+    """Issue #623：非法 comment_id（非数字/非十六进制）返回 422 且不触达上游。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    r = client.patch(f"{base}/pulls/9/comments/zz-9x!", json={"body": "x"})
+    assert r.status_code == 422
+    assert "note_id" in r.json()["detail"]["message"]
+    assert gitcode_calls == []
+
+
+def test_pulls_comments_update_hex_id_unresolvable_422(monkeypatch, _client):
+    """Issue #623：十六进制 id 解析不到 note_id（上游查无此评论）返回明确 422。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+
+    def _fake_req(method, url, token="", body=None):
+        if method == "GET" and "/pulls/comments/" in url:
+            return {"ok": True}
+        if method == "GET" and url.endswith("/pulls/9/comments"):
+            return []
+        return {"ok": True}
+
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+
+    r = client.patch(f"{base}/pulls/9/comments/abcdef", json={"body": "x"})
+    assert r.status_code == 422
+    assert "note_id" in r.json()["detail"]["message"]
+
+
+def test_pulls_comments_update_numeric_id_passthrough(gitcode_calls, _client):
+    """Issue #623：数字 note_id 直传行为保持不变（向后兼容）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    r = client.patch(f"{base}/pulls/9/comments/123", json={"body": "same"})
+    assert r.status_code == 200
+    assert len(gitcode_calls) == 1
+    last = gitcode_calls[-1]
+    assert last["method"] == "PATCH"
+    assert last["url"].endswith("/pulls/comments/123")
+
+
 def test_pulls_comments_update_delete_contract_operations():
     """Issue #563：新端点进 OpenAPI 契约且标注 session_only（CLI refresh 后自动获得命令）。"""
     from src.api.openapi import custom_openapi
@@ -280,6 +369,36 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
     assert r.status_code == 200
     last = gitcode_calls[-1]
     assert last["method"] == "POST" and last["body"]["name"] == "bug" and last["body"]["color"] == "#d73a4a"
+
+
+def test_milestones_create_update(gitcode_calls, _client):
+    """Issue #632：POST/PATCH milestones 透传（provider 直调，空值字段过滤）。"""
+    client = _client
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+
+    # create：title 必填，description/due_on 透传
+    r = client.post(f"{base}/milestones", json={"title": "v1.0", "description": "first release",
+                                                "due_on": "2026-12-01T00:00:00Z"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "POST" and last["url"].endswith("/milestones")
+    assert last["body"] == {"title": "v1.0", "description": "first release",
+                            "due_on": "2026-12-01T00:00:00Z"}
+
+    # create 缺 title → 422（契约校验）
+    assert client.post(f"{base}/milestones", json={"description": "no title"}).status_code == 422
+
+    # update：PATCH /milestones/{number}，空值字段不透传
+    r = client.patch(f"{base}/milestones/3", json={"title": "v1.1", "state": "closed"})
+    assert r.status_code == 200
+    last = gitcode_calls[-1]
+    assert last["method"] == "PATCH" and last["url"].endswith("/milestones/3")
+    assert last["body"] == {"title": "v1.1", "state": "closed"}
+
+    # update：全空 body → 空对象透传（不炸）
+    r = client.patch(f"{base}/milestones/3", json={})
+    assert r.status_code == 200
+    assert gitcode_calls[-1]["body"] == {}
 
 
 def test_no_token_502(monkeypatch, _client):
