@@ -804,6 +804,45 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
         log.info(f"Pipeline env: non-numeric pr_number '{_pr_num}', skip PR_NUMBER injection (Issue #528)")
 
 
+def _norm_issue_id(s) -> str:
+    """Issue #680: issue_id 规范化——入口/出口统一调用。
+
+    修复双井号拼接缺陷：payload/标题里的编号可能已带 `#`（如 `#274`），
+    旧逻辑直接 `f"#{num}"` 会拼出 `##274`。规范化规则：
+    去首尾空白 → 剥掉全部前导 `#` → 仅保留纯数字 → 统一单 `#` 前缀；
+    非数字 / 编号为 0 / 空值 → 返回 ""。
+    """
+    if s is None:
+        return ""
+    t = str(s).strip().lstrip("#").strip()
+    if not t.isdigit() or t == "0":
+        return ""
+    return f"#{t}"
+
+
+def _max_issue_from_issues(issues, exclude_num: str = "") -> str:
+    """Issue #680: issues 关联列表取编号最大（原"取第一个"会误取正文背景引用的旧 issue）。
+
+    GitCode pull_request_* payload 的 issues 列表同时含闭环目标与背景引用（如
+    [#282, #274]），第一个未必是闭环目标；编号最大者为最新闭环目标。
+    exclude_num：PR 自身编号（issues 列表里可能混入 PR 号，跳过）。
+    """
+    best = 0
+    if isinstance(issues, list):
+        for it in issues:
+            if not isinstance(it, dict):
+                continue
+            norm = _norm_issue_id(it.get("number", it.get("iid", "")))
+            if not norm:
+                continue
+            n = int(norm.lstrip("#"))
+            if exclude_num and n == int(exclude_num):
+                continue
+            if n > best:
+                best = n
+    return f"#{best}" if best else ""
+
+
 def resolve_issue_id(payload: dict) -> str:
     """从事件 payload 提取 Issue 编号。
 
@@ -813,19 +852,22 @@ def resolve_issue_id(payload: dict) -> str:
     Issue #89 修复：Issue Hook payload 可能含 issues 交叉引用键（父任务），
     旧逻辑先查 issues 列表 → 返回父任务编号而非当前 Issue。
     修正：非 PR 事件优先查 object_attributes，issues 列表仅作 PR 事件兜底。
+
+    Issue #680：issues 兜底段改"取编号最大"（原取第一个，同型歧义一并收敛）；
+    出口统一过 _norm_issue_id（修 ##274 双井号拼接缺陷）。
     """
     if not isinstance(payload, dict):
         return ""
     # A2A payload 用 issue_number 字段
     num = payload.get("issue_number", "")
     if num:
-        return f"#{num}"
+        return _norm_issue_id(num)
     # Issue 类事件（issue_comment 等）顶层 issue 对象
     obj = payload.get("issue", {})
     if isinstance(obj, dict):
         num = obj.get("number", obj.get("iid", ""))
         if num:
-            return f"#{num}"
+            return _norm_issue_id(num)
     # Issue #89: 非 PR 事件优先查 object_attributes（当前 Issue 编号）
     # 旧逻辑先查 issues 列表 → 对含交叉引用的 Issue Hook 返回父任务编号
     _is_pr = _is_pr_payload(payload)
@@ -834,62 +876,69 @@ def resolve_issue_id(payload: dict) -> str:
         if isinstance(obj, dict):
             num = obj.get("number", obj.get("iid", obj.get("noteable_iid", "")))
             if num:
-                return f"#{num}"
-    # PR payload 中显式关联的 issues 列表（GitCode pull_request_*）
+                return _norm_issue_id(num)
+    # PR payload 中显式关联的 issues 列表（GitCode pull_request_*）：
+    # Issue #680 —— 取编号最大（闭环目标为最新 Issue，背景引用的旧 Issue 编号更小）
     issues = payload.get("issues")
     if isinstance(issues, list):
-        for it in issues:
-            if isinstance(it, dict):
-                num = it.get("number", it.get("iid", ""))
-                if num:
-                    return f"#{num}"
+        _max = _max_issue_from_issues(issues)
+        if _max:
+            return _max
     # PR 事件的 object_attributes 不查（其 iid 是 PR 号，会误当 issue_id）
     return ""
 
 
 def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") -> str:
     """从 PR 事件 payload 解析关联的 Issue 编号。
-    优先级：payload 标题 #N → 分支名 issue-N → 同步调 PR 详情 API。
+
+    Issue #680 优先级重排（原 title → issues 第一个 → 分支 → API 会误取正文
+    背景引用的旧 issue，如 #274 而非闭环目标 #282）：
+    1. 分支名 issue-N（强信号：开发分支即闭环目标）
+    2. PR 标题 #N
+    3. issues 列表取编号最大（[#282, #274] → #282）
+    4. PR 详情 API 兜底（同规则：head.ref 分支 → title → issues 最大）
 
     Issue #252: 当 issue 与 PR 编号相同时，通过 entity_type 区分——
-    从文本提取编号时检查 URL 路径：/pulls/N 是 PR 自引用（跳过），/issues/N 是关联 Issue（采用）。
+    从文本提取编号时检查 URL 路径：/pulls/N 是 PR 自引用（跳过），/issues/N 是关联 Issue（采用）；
+    issues 列表里混入 PR 自身编号时同样跳过。
+    Issue #680: 出口统一过 _norm_issue_id（修 ##274 双井号拼接缺陷）。
     """
     import re, json, urllib.request
     from src.api.event_store import _extract_issue_id_from_text, _extract_entity_type_from_text
+
+    if not isinstance(payload, dict):
+        return ""
 
     # PR 自身编号（用于自引用检测）
     obj = payload.get("object_attributes", {}) or {}
     pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
     _pr_self_num = str(obj.get("iid", obj.get("number", "")) or pr_obj.get("number", "")).lstrip("#")
 
-    # 1. 从 object_attributes / pull_request 的 title 提取 #N
+    # 1. 分支名 issue-N（Issue #680 强信号，最优先）
+    branch = obj.get("source_branch", "") or obj.get("ref", "")
+    if not branch and isinstance(pr_obj.get("head"), dict):
+        branch = (pr_obj.get("head") or {}).get("ref", "")
+    m = re.search(r'issue[-_](\d+)', str(branch))
+    if m and m.group(1) != "0":
+        return f"#{m.group(1)}"
+
+    # 2. 从 object_attributes / pull_request 的 title 提取 #N
     title = obj.get("title", "") or pr_obj.get("title", "")
     issue = _extract_issue_id_from_text(title)
     if issue:
         _et = _extract_entity_type_from_text(title)
         _issue_num = issue.lstrip("#")
         # Issue #252: 跳过 PR 自引用（编号==PR自身编号 + URL路径为 /pulls/）
-        if _et == "pull_request" and _issue_num == _pr_self_num:
-            pass  # 自引用，继续找下一个
-        else:
-            return issue
+        if not (_et == "pull_request" and _issue_num == _pr_self_num):
+            return _norm_issue_id(issue)
 
-    # 1.5 从 payload.issues 关联列表提取（GitCode pull_request_* 直接给出关联 Issue）
-    issues = payload.get("issues")
-    if isinstance(issues, list):
-        for it in issues:
-            if isinstance(it, dict):
-                _num = it.get("number", it.get("iid", ""))
-                if _num and str(_num) != "0":
-                    return f"#{_num}"
+    # 3. 从 payload.issues 关联列表提取（GitCode pull_request_*）：
+    # Issue #680 —— 取编号最大（原取第一个会误取背景引用的旧 issue），跳过 PR 自身编号
+    issue = _max_issue_from_issues(payload.get("issues"), exclude_num=_pr_self_num)
+    if issue:
+        return issue
 
-    # 2. 从分支名提取 issue-N
-    branch = obj.get("source_branch", "") or obj.get("ref", "") or pr_obj.get("head", {}).get("ref", "") if isinstance(pr_obj.get("head"), dict) else (obj.get("source_branch", "") or obj.get("ref", ""))
-    m = re.search(r'issue[-_](\d+)', str(branch))
-    if m and m.group(1) != "0":
-        return f"#{m.group(1)}"
-
-    # 3. 同步调 PR 详情 API
+    # 4. 同步调 PR 详情 API（同规则：head.ref 分支 → title → issues 最大）
     pr_number = obj.get("iid", obj.get("number", "")) or pr_obj.get("number", "")
     if pr_number and api_token:
         repo_path = payload.get("project", {}).get("path_with_namespace", "") if isinstance(payload.get("project"), dict) else ""
@@ -909,24 +958,65 @@ def resolve_pr_issue_id(payload: dict, api_token: str = "", repo_key: str = "") 
                     hdrs = {"Authorization": f"Bearer {api_token}"}
                 req = urllib.request.Request(url, headers=hdrs)
                 data = json.loads(urllib.request.urlopen(req, timeout=10).read())
-                # title / head.ref
+                # 4.1 head.ref 分支名 issue-N（同规则优先）
+                head = data.get("head", {}) or {}
+                m = re.search(r'issue[-_](\d+)', str(head.get("ref", "")))
+                if m and m.group(1) != "0":
+                    return f"#{m.group(1)}"
+                # 4.2 title #N（含 Issue #252 自引用跳过）
                 _api_title = str(data.get("title", ""))
                 issue = _extract_issue_id_from_text(_api_title)
                 if issue:
                     _et = _extract_entity_type_from_text(_api_title)
                     _issue_num = issue.lstrip("#")
-                    # Issue #252: 跳过 PR 自引用
-                    if _et == "pull_request" and _issue_num == _pr_self_num:
-                        pass
-                    else:
-                        return issue
-                head = data.get("head", {}) or {}
-                m = re.search(r'issue[-_](\d+)', str(head.get("ref", "")))
-                if m and m.group(1) != "0":
-                    return f"#{m.group(1)}"
+                    if not (_et == "pull_request" and _issue_num == _pr_self_num):
+                        return _norm_issue_id(issue)
+                # 4.3 issues 列表取最大（GitHub API 无此字段，GitCode 有则同规则）
+                issue = _max_issue_from_issues(data.get("issues"), exclude_num=_pr_self_num)
+                if issue:
+                    return issue
             except Exception:
                 return ""
     return ""
+
+
+def _resolve_event_issue_id(evt: dict, repo_key: str, api_token: str = "") -> str:
+    """Issue #680: 事件级 issue_id 统一解析入口（每事件只解析一次）。
+
+    背景：原 7 处调用点各自调 resolve_pr_issue_id / resolve_issue_id，带 token
+    与不带 token 的口径分裂（issues 列表"取第一个"时不同调用点可能解析出不同
+    issue），导致场景校验与 SRE 推进用的编号不一致。本入口把结果挂在
+    evt["_resolved_issue_id"]，全链复用同一值：
+
+    - PR 类事件：resolve_pr_issue_id（分支 → 标题 → issues 最大 → PR 详情 API）→ resolve_issue_id 兜底
+    - Issue 类/其它事件：resolve_issue_id（object_attributes/issue_number 等）
+    - 最终兜底 evt["issue_id"]（归一化层已解析的值）
+
+    token 补偿：首次无 token 解析为空、后续调用带 token 时允许补一次 PR 详情
+    API 兜底（非空结果一经产生即锁定，不再重算）——"只计算一次"指非空结果
+    单一来源；全空场景的 API 兜底是唯一例外且结果同样写回缓存。
+    """
+    if not isinstance(evt, dict):
+        return ""
+    cached = evt.get("_resolved_issue_id")
+    if cached:
+        return cached
+    # 已带 token 尝试过仍为空 → 不再重算（避免重复 PR 详情 API 调用）
+    if evt.get("_resolved_issue_id_token_tried"):
+        return ""
+    event_type = evt.get("type", "") or ""
+    payload = evt.get("payload", {}) or {}
+    issue_id = ""
+    if event_type in PR_EVENT_TYPES:
+        issue_id = resolve_pr_issue_id(payload, api_token, repo_key=repo_key) or resolve_issue_id(payload) or ""
+    else:
+        issue_id = resolve_issue_id(payload) or ""
+    if not issue_id:
+        issue_id = str(evt.get("issue_id", "") or "")
+    if api_token:
+        evt["_resolved_issue_id_token_tried"] = True
+    evt["_resolved_issue_id"] = issue_id or ""
+    return evt["_resolved_issue_id"]
 
 
 # L2 阶段分派映射表（Issue #49 §5.3）：stage × 事件类型 → Agent
@@ -947,7 +1037,7 @@ _STAGE_EVENT_AGENT_MAP = {
 
 
 def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
-                               default_agent: str) -> str:
+                               default_agent: str, evt: dict = None) -> str:
     """阶段矩阵路由（D9，见 vod-skill-upgrade-plan.md §3.0.3）——表驱动（Issue #49 §5.3）。
 
     - issue_opened 恒给 vod（D8）
@@ -964,8 +1054,10 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
     if event_type not in ISSUE_EVENT_TYPES and event_type not in PR_EVENT_TYPES:
         return default_agent
 
-    # 解析关联 issue_id：PR 类事件优先用 title/分支提取（无需 token），Issue 类用 payload 字段
-    if event_type in PR_EVENT_TYPES:
+    # 解析关联 issue_id：Issue #680 —— 统一入口（一次解析存 evt["_resolved_issue_id"]，全链同值）
+    if evt is not None:
+        issue_id = _resolve_event_issue_id(evt, repo_key)
+    elif event_type in PR_EVENT_TYPES:
         issue_id = resolve_pr_issue_id(payload, repo_key=repo_key) or resolve_issue_id(payload) or ""
     else:
         issue_id = resolve_issue_id(payload) or ""
@@ -1351,22 +1443,22 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             if not skill_name:
                 log.warning(f"Pipeline subscription: no skill for agent={agent_type}, skip extra dispatch")
                 from src.api.event_store import append_skipped_event
-                _sub_skip_iid = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+                _sub_skip_iid = _resolve_event_issue_id(evt, repo_key)
                 append_skipped_event(repo_key, evt.get("type", ""), "subscription_no_skill", agent_type,
-                                     issue_id=_sub_skip_iid)
+                                      issue_id=_sub_skip_iid)
                 return
         # Agent 启用检查
         from src.api.session_store import is_agent_enabled
         if not is_agent_enabled(repo_key, agent_type):
             log.info(f"Pipeline subscription: agent={agent_type} disabled, skip extra dispatch")
             from src.api.event_store import append_skipped_event
-            _sub_skip_iid2 = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "")
+            _sub_skip_iid2 = _resolve_event_issue_id(evt, repo_key)
             append_skipped_event(repo_key, evt.get("type", ""), "subscription_agent_disabled", agent_type,
                                  issue_id=_sub_skip_iid2)
             return
         # 创建事件
         from src.api.event_store import append_event
-        issue_id = resolve_issue_id(evt.get("payload", {})) or evt.get("issue_id", "") or "#0"
+        issue_id = _resolve_event_issue_id(evt, repo_key) or "#0"
         # 从 tasks 表获取 Issue 真实标题（避免 Pipeline 列表显示 "A2A (订阅): xxx"）
         _sub_title = ""
         _sub_iss_num = str(issue_id).lstrip("#")
@@ -1440,12 +1532,8 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     log.info(f"Pipeline: start, raw_type={event_header}, source={source}, repo={evt['repository']}")
 
     # Issue #89: 提前解析 issue_id 供 skipped 事件审计（所有提前 return 路径共用）
-    _pre_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
-    if not _pre_issue_id and event_type in PR_EVENT_TYPES:
-        try:
-            _pre_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""
-        except Exception:
-            pass
+    # Issue #680: 改走统一入口（一次解析存 evt["_resolved_issue_id"]，7 处调用点全链同值）
+    _pre_issue_id = _resolve_event_issue_id(evt, repo_key)
 
     if not evt["repository"] or event_type == "unknown":
         log.info(f"Pipeline skipped: repository='{evt['repository']}' or event_type='{event_type}' not recognized")
@@ -1917,7 +2005,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             _default = "issue"          # Issue 类事件无关联 issue 时默认 Issue Agent（审视）
         else:
             _default = NON_ISSUE_EVENT_ROUTE.get(event_type, "")
-        agent_type = _resolve_issue_stage_agent(repo_key, event_type, evt.get("payload", {}) or {}, _default)
+        agent_type = _resolve_issue_stage_agent(repo_key, event_type, evt.get("payload", {}) or {}, _default, evt=evt)
         log.info(f"Pipeline: routing result -> agent_type='{agent_type}'")
     # 仓库级事件订阅匹配（提前，供 fallback 与双路径共用）：
     # - 主路由为空 → 订阅兜底（现状）
@@ -2055,17 +2143,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             log.info(f"Pipeline: issue_state init vod for {_rid2}")
     # PR merged 跳过 QA 直接路由 SRE：补推 stage qa→sre（原由 QA A2A handoff 推进）
     if event_type == "pull_request_merged" and agent_type == "sre":
-        # 与 1606 行路由处一致的 PR 感知解析链：merge payload 的 object_attributes.iid
-        # 是 PR 号，resolve_issue_id 会跳过（其 docstring 自警告此陷阱）→ 必须先用
-        # resolve_pr_issue_id（title #N / 分支 issue-N / issues 列表 / PR 详情 API 兜底）。
+        # Issue #680: 改走统一入口（一次解析全链同值）；带 repo token 触发
+        # PR 详情 API 兜底（分支/标题/issues 列表全空时）。merge payload 的
+        # object_attributes.iid 是 PR 号，resolve_issue_id 会跳过（其 docstring
+        # 自警告此陷阱）→ PR 类事件必须先走 resolve_pr_issue_id 规则链。
         try:
             from src.user.db import get_repo_token_with_refresh
             _sre_api_token = get_repo_token_with_refresh(repo_key) or ""
-            _rid_sre = resolve_pr_issue_id(evt.get("payload", {}) or {}, _sre_api_token, repo_key=repo_key) \
-                or resolve_issue_id(evt.get("payload", {}) or {}) \
-                or evt.get("issue_id", "")
         except Exception:
-            _rid_sre = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
+            _sre_api_token = ""
+        _rid_sre = _resolve_event_issue_id(evt, repo_key, api_token=_sre_api_token)
         if _rid_sre:
             from src.api.session_store import get_issue_stage as _gis
             _st_sre = _gis(repo_key, _rid_sre)
@@ -2176,11 +2263,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         log.warning(f"Pipeline: agent session lookup failed: {e}")
 
     # 提前解析 issue_id + 场景（所有路径都需要，pick_engine 用 _issue_scene 选引擎）
+    # Issue #680: 改走统一入口（一次解析全链同值）
     _issue_scene = "default"
     _issue_scene_uid = 0
-    _early_issue_id = resolve_issue_id(evt.get("payload", {}) or {}) or evt.get("issue_id", "")
-    if not _early_issue_id and event_type in PR_EVENT_TYPES:
-        _early_issue_id = resolve_pr_issue_id(evt.get("payload", {}) or {}, repo_key=repo_key) or ""
+    _early_issue_id = _resolve_event_issue_id(evt, repo_key)
     if _early_issue_id:
         try:
             from src.api.session_store import get_issue_scene
@@ -2288,24 +2374,23 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     # 4. 查找 Agent 配置（backend + skill），找不到则不处理
     payload = evt.get("payload", {})
     if event_type in ("note_hook_pr", "pull_request_opened", "pull_request_updated", "pull_request_merged"):
-        # PR 类事件：仅用 resolve_pr_issue_id（title/分支/issues 列表/PR 详情 API）。
+        # PR 类事件：仅用 resolve_pr_issue_id 规则链（分支/标题/issues 最大/PR 详情 API）。
         # 不用 resolve_issue_id——GitCode MR payload 的 object_attributes.iid 是 PR 号，
         # 会误当 issue_id（_is_pr_payload 只识别带 pull_request/issues 键的 payload）。
+        # Issue #680: 改走统一入口（一次解析全链同值）；带 repo token 触发 PR 详情 API 兜底。
         try:
             from src.user.db import get_repo_token_with_refresh
             _pr_api_token = get_repo_token_with_refresh(repo_key) or ""
-            _pr_issue = resolve_pr_issue_id(payload, _pr_api_token, repo_key=repo_key)
-            if _pr_issue:
-                issue_id = _pr_issue
-                log.info(f"Pipeline: PR 关联 Issue -> {issue_id}")
-            else:
-                issue_id = evt.get("issue_id", "")
-                log.info(f"Pipeline: PR 无关联 Issue，issue_id={issue_id or '(none)'}")
         except Exception as e:
-            log.warning(f"Pipeline: resolve PR issue failed: {e}")
-            issue_id = evt.get("issue_id", "")
+            log.warning(f"Pipeline: get repo token failed: {e}")
+            _pr_api_token = ""
+        issue_id = _resolve_event_issue_id(evt, repo_key, api_token=_pr_api_token)
+        if issue_id:
+            log.info(f"Pipeline: PR 关联 Issue -> {issue_id}")
+        else:
+            log.info(f"Pipeline: PR 无关联 Issue，issue_id={(evt.get('issue_id') or '(none)')}")
     else:
-        issue_id = resolve_issue_id(payload) or evt.get("issue_id", "")
+        issue_id = _resolve_event_issue_id(evt, repo_key)
     # PR 订阅：用 PR 号 + scene_id 构造伪 issue_id 参与去重（区分不同场景）
     if not issue_id and evt.get("_pr_sub_scene_id"):
         pr_obj = payload.get("pull_request", {}) or payload.get("merge_request", {}) or {}
