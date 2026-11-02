@@ -23,7 +23,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
@@ -34,7 +34,7 @@ _headers = {}
 
 def setup_module():
     global _uid, _headers
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()
@@ -171,7 +171,7 @@ class TestCredentialsReveal:
 
     def test_reveal_high_frequency_alert(self):
         # 高频取回告警：窗口内取回次数达到阈值 → 429 + 不再返回明文
-        from src.api.routes.settings import _REVEAL_WINDOW_SECONDS, _REVEAL_MAX_PER_WINDOW
+        from src.domains.mgmt.routes.settings import _REVEAL_WINDOW_SECONDS, _REVEAL_MAX_PER_WINDOW
         user_db.set_credential(_uid["id"], "huawei_cloud", {"ak": "real_ak_474", "sk": "real_sk_474"})
         try:
             # 预填窗口内成功取回记录（模拟高频）

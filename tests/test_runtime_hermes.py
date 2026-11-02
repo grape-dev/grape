@@ -10,9 +10,9 @@ os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
 from unittest.mock import patch  # noqa: E402
 
-from src.runtime.hermes import HermesRuntime  # noqa: E402
-from src.runtime.agent import _backend_for_engine  # noqa: E402
-from src.agent.executor import _BACKENDS, get_backend, discover_backends  # noqa: E402
+from src.domains.runtime.engine.hermes import HermesRuntime  # noqa: E402
+from src.domains.runtime.engine.agent import _backend_for_engine  # noqa: E402
+from src.domains.runtime.agents.executor import _BACKENDS, get_backend, discover_backends  # noqa: E402
 
 
 class TestHermesRuntime:

@@ -31,7 +31,7 @@ client = TestClient(app)
 
 def _jwt(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -41,7 +41,7 @@ def _setup():
     from src.api.db_setup import init_database
     init_database()
     # init_database 不再 seed skill，手动同步测试数据
-    from src.storage.skill_sync import _sync_skills_to_db
+    from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
     import json as _json
     import os as _os
     _json_path = _os.path.join(_os.path.dirname(__file__), "..", "configs", "skill-description.json")
@@ -132,7 +132,7 @@ class TestCategoryQueries:
     """list_skill_categories / get_skill_category"""
 
     def test_list_skill_categories(self):
-        from src.user.db import list_skill_categories
+        from src.domains.mgmt.user.db import list_skill_categories
         cats = list_skill_categories()
         assert len(cats) == 15
         assert all("id" in c and "name" in c and "slug" in c for c in cats)
@@ -141,13 +141,13 @@ class TestCategoryQueries:
         assert order_nums == sorted(order_nums)
 
     def test_get_skill_category(self):
-        from src.user.db import get_skill_category
+        from src.domains.mgmt.user.db import get_skill_category
         cat = get_skill_category(1)
         assert cat is not None
         assert cat["slug"] == "ai-coding-review"
 
     def test_get_skill_category_not_found(self):
-        from src.user.db import get_skill_category
+        from src.domains.mgmt.user.db import get_skill_category
         cat = get_skill_category(9999)
         assert cat is None
 
@@ -156,7 +156,7 @@ class TestSyncSkillsToDb:
     """_sync_skills_to_db 写入 category_id + 变更检测"""
 
     def test_sync_returns_count(self):
-        from src.storage.skill_sync import _sync_skills_to_db
+        from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
         config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "skill-description.json")
         with open(config_path) as f:
             data = json.load(f)
@@ -164,7 +164,7 @@ class TestSyncSkillsToDb:
         assert count > 0
 
     def test_sync_writes_category_id(self):
-        from src.storage.skill_sync import _sync_skills_to_db
+        from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
         config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "skill-description.json")
         with open(config_path) as f:
             data = json.load(f)
@@ -179,7 +179,7 @@ class TestSyncSkillsToDb:
 
     def test_sync_no_updated_at_change_when_data_unchanged(self):
         """数据没变时 updated_at 不应该被刷新"""
-        from src.storage.skill_sync import _sync_skills_to_db
+        from src.domains.runtime.storage.skill_sync import _sync_skills_to_db
         config_path = os.path.join(os.path.dirname(__file__), "..", "configs", "skill-description.json")
         with open(config_path) as f:
             data = json.load(f)
@@ -203,7 +203,7 @@ class TestUpsertSkillObs:
     """upsert_skill_obs 写入 category_id"""
 
     def test_upsert_with_category_id(self):
-        from src.user.db import upsert_skill_obs
+        from src.domains.mgmt.user.db import upsert_skill_obs
         ok = upsert_skill_obs(
             scope="user", owner="test_179", skill_name="test-skill-179",
             agent_type="coding", description="test", object_key="test-key",
@@ -227,7 +227,7 @@ class TestApiEndpoints:
     """API 接口测试"""
 
     def _headers(self):
-        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_username
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_grape_account_by_username
         uid = create_grape_account("test_issue179", email=None, password="test123")
         if not uid:
             uid = get_grape_account_by_username("test_issue179")
@@ -307,14 +307,14 @@ class TestUploadCategoryValidation:
     """upload category_id 存在性校验"""
 
     def _headers(self):
-        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_username
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_grape_account_by_username
         uid = create_grape_account("test_issue179", email=None, password="test123")
         if not uid:
             user = get_grape_account_by_username("test_issue179")
             uid = int(user["id"]) if user else 1
         uid = int(uid)
         from src.kernel.auth_sdk.jwt_utils import create_access_token
-        from src.auth.grape_account_db import get_token_version
+        from src.domains.mgmt.auth.grape_account_db import get_token_version
         token = create_access_token(uid, "test_issue179", get_token_version(uid))
         return {"Authorization": f"Bearer {token}"}
 
@@ -341,7 +341,7 @@ class TestConvertSkillCategory:
 
     def test_list_skills_returns_category_id_for_convert(self):
         """list_skills 返回 category_id 字段（convert_skill 依赖）"""
-        from src.user.db import list_skills
+        from src.domains.mgmt.user.db import list_skills
         skills = list_skills(2)
         if skills:
             assert "category_id" in skills[0], "list_skills missing category_id field"

@@ -35,7 +35,7 @@ class TestLoadProjectInfo:
     def test_loads_files_and_meta(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
         _write_project_info(tmp_path, meta={"last_commit_sha": "abc123", "last_updated": "2026-08-09"})
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         files, meta = service.load_project_info("gitcode:org/test")
         assert files["project-graph.md"] == "graph"
         assert files["project-capabilities.md"] == "caps"
@@ -44,14 +44,14 @@ class TestLoadProjectInfo:
 
     def test_no_baseline_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         files, meta = service.load_project_info("gitcode:org/none")
         assert files == {} and meta == {}
 
     def test_missing_one_file_ok(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
         _write_project_info(tmp_path)
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         files, _ = service.load_project_info("gitcode:org/test")
         # 删除 capabilities 后只打包存在的文件
         import os
@@ -64,7 +64,7 @@ class TestLoadProjectInfo:
     def test_repo_key_without_prefix(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
         _write_project_info(tmp_path)
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         files, _ = service.load_project_info("org/test")
         assert "project-graph.md" in files
 
@@ -73,7 +73,7 @@ class TestEnqueueProjectInfo:
     def test_enqueue_packs_project_info(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
         _write_project_info(tmp_path, meta={"last_commit_sha": "deadbeef"})
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         tid = service.enqueue_task(
             agent_session_id="sess-1", runtime_id=1, prompt="p", event_seq=1,
             issue_id="#5", repo_key="gitcode:org/test", agent_type="issue",
@@ -87,7 +87,7 @@ class TestEnqueueProjectInfo:
 
     def test_enqueue_without_baseline_no_error(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         tid = service.enqueue_task(
             agent_session_id="sess-1", runtime_id=1, prompt="p", event_seq=1,
             issue_id="#5", repo_key="gitcode:org/none", agent_type="issue",
@@ -99,7 +99,7 @@ class TestEnqueueProjectInfo:
 
     def test_explicit_project_info_override(self, tmp_path, monkeypatch):
         monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         tid = service.enqueue_task(
             agent_session_id="sess-1", runtime_id=1, prompt="p", event_seq=1,
             issue_id="#5", repo_key="gitcode:org/test", agent_type="issue",

@@ -15,8 +15,8 @@ sys.path.insert(0, ROOT)
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime import agent as ra
-import src.agent.hermes_acp as ha
+from src.domains.runtime.engine import agent as ra
+import src.domains.runtime.agents.hermes_acp as ha
 
 
 # ══════════════════════════════════════════════════════════════════════
@@ -189,8 +189,8 @@ class TestExecutorSilentWindowEnvDict:
 
     def test_env_extra_agent_silent_window_picked_up(self, monkeypatch):
         """env_extra 含 AGENT_SILENT_WINDOW=1200 → _silent_window=1200 → 不被静默超时杀（exit != -9）。"""
-        from src.runtime.executor import stream_agent
-        import src.agent.executor as _ex
+        from src.domains.runtime.engine.executor import stream_agent
+        import src.domains.runtime.agents.executor as _ex
         import subprocess
 
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _AliveSilentProc())
@@ -214,8 +214,8 @@ class TestExecutorSilentWindowEnvDict:
 
     def test_default_silent_window_kills_fast(self, monkeypatch):
         """对比：默认 _silent_window=min(300,0.1)=0.1 → 0.2s 静默超时强杀 exit -9。"""
-        from src.runtime.executor import stream_agent
-        import src.agent.executor as _ex
+        from src.domains.runtime.engine.executor import stream_agent
+        import src.domains.runtime.agents.executor as _ex
         import subprocess
 
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _AliveSilentProc())
@@ -237,8 +237,8 @@ class TestExecutorSilentWindowEnvDict:
 
     def test_os_environ_fallback_when_env_extra_empty(self, monkeypatch):
         """env_extra 不含 AGENT_SILENT_WINDOW → 回退读 os.environ（兼容手动调参）。"""
-        from src.runtime.executor import stream_agent
-        import src.agent.executor as _ex
+        from src.domains.runtime.engine.executor import stream_agent
+        import src.domains.runtime.agents.executor as _ex
         import subprocess
 
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _AliveSilentProc())

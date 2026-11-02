@@ -36,42 +36,42 @@ class TestGetRepoTokenWithRefresh:
 
     def test_level1_devops_agent_session_hits(self):
         """第一级：devops_agent_session.repo_gitcode_token 有值 → 直接返回。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value="SESSION_TOKEN"), \
              patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "SESSION_TOKEN"
 
     def test_level2_managed_repos_hits(self):
         """第二级：managed_repos.bot_gitcode_token 有值 → 直接返回。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="REPO_BOT_TOKEN"), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
 
     def test_level3_global_bot_hits(self):
         """第三级：全局 bot token 有值 → 直接返回。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "GLOBAL_BOT"
 
     def test_level4_user_token_fallback(self):
         """第四级：三级全空 → 降级到用户 token。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value=""), \
-             patch("src.user.db.get_host_user_id", return_value=42), \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser"}), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser"}), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="USER_OAUTH_TOKEN") as m:
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "USER_OAUTH_TOKEN"
@@ -79,17 +79,17 @@ class TestGetRepoTokenWithRefresh:
 
     def test_all_empty_returns_empty_string(self):
         """四级全空 → 返回空字符串。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
              patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value=""), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == ""
 
     def test_empty_repo_key_returns_empty(self):
         """空 repo_key → 返回空字符串。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         result = get_repo_token_with_refresh("")
         assert result == ""
 
@@ -103,23 +103,23 @@ class TestGetGitcodeTokenCompat:
 
     def test_repo_key_delegates(self):
         """有 repo_key → 调 get_repo_token_with_refresh。"""
-        from src.user.db import get_gitcode_token
-        with patch("src.user.db.get_repo_token_with_refresh", return_value="TOKEN") as m:
+        from src.domains.mgmt.user.db import get_gitcode_token
+        with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="TOKEN") as m:
             result = get_gitcode_token(repo_key="gitcode:owner/repo")
             assert result == "TOKEN"
             m.assert_called_once_with("gitcode:owner/repo")
 
     def test_user_id_returns_user_token(self):
         """有 user_id 无 repo_key → 走用户 token 路径。"""
-        from src.user.db import get_gitcode_token
-        with patch("src.user.db.get_user_gitcode_token", return_value="USER_TOKEN") as m:
+        from src.domains.mgmt.user.db import get_gitcode_token
+        with patch("src.domains.mgmt.user.db.get_user_gitcode_token", return_value="USER_TOKEN") as m:
             result = get_gitcode_token(user_id=42)
             assert result == "USER_TOKEN"
             m.assert_called_once_with(42)
 
     def test_empty_returns_empty(self):
         """空参数 → 返回空字符串。"""
-        from src.user.db import get_gitcode_token
+        from src.domains.mgmt.user.db import get_gitcode_token
         result = get_gitcode_token()
         assert result == ""
 
@@ -133,10 +133,10 @@ class TestHasRefreshToken:
 
     def test_has_refresh_token_true(self):
         """有 refresh_token → True（OAuth 场景）。"""
-        from src.auth.grape_account_db import _has_refresh_token
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.grape_account_db._safe_decrypt", return_value="rt_abc123"):
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.grape_account_db._safe_decrypt", return_value="rt_abc123"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_rt",)
             mock_db.cursor.return_value = cursor
@@ -144,10 +144,10 @@ class TestHasRefreshToken:
 
     def test_no_refresh_token_false(self):
         """无 refresh_token → False（PAT 场景）。"""
-        from src.auth.grape_account_db import _has_refresh_token
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.grape_account_db._safe_decrypt", return_value=""):
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.grape_account_db._safe_decrypt", return_value=""):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("",)
             mock_db.cursor.return_value = cursor
@@ -155,9 +155,9 @@ class TestHasRefreshToken:
 
     def test_no_identity_returns_false(self):
         """无绑定记录 → False。"""
-        from src.auth.grape_account_db import _has_refresh_token
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"):
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = None
             mock_db.cursor.return_value = cursor
@@ -175,7 +175,7 @@ class TestGetUserTokenWithRefreshPAT:
         """PAT（无 refresh_token）→ 直接返回 token，不触发刷新。"""
         from src.api.deps import get_user_token_with_refresh
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="PAT_TOKEN"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=False), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=False), \
              patch("src.api.deps.try_refresh_gitcode_token") as m_refresh:
             result = get_user_token_with_refresh("testuser", user_id=42)
             assert result == "PAT_TOKEN"
@@ -187,7 +187,7 @@ class TestGetUserTokenWithRefreshPAT:
         # token_expires_at=0 + fetched_at=0 → 走降级 → age=now-0 > 1800 → need_refresh
         mock_cred = {"token_expires_at": 0, "fetched_at": 0, "access_token": "OAUTH_TOKEN"}
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="OAUTH_TOKEN"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=True), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=True), \
              patch("src.api.deps._get_gitcode_credential_by_gitcode_id", return_value=mock_cred), \
              patch("src.api.deps.try_refresh_gitcode_token", return_value="REFRESHED_TOKEN") as m_refresh:
             result = get_user_token_with_refresh("testuser", user_id=42)
@@ -204,8 +204,8 @@ class TestGetWebhookTokenByRepo:
 
     def test_webhook_secret_takes_priority(self):
         """有 webhook_secret → 返回 webhook_secret（路径 B）。"""
-        from src.user.db import get_webhook_token_by_repo
-        with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("SECRET_123", "OLD_TOKEN", "")
             mock_db.cursor.return_value = cursor
@@ -214,8 +214,8 @@ class TestGetWebhookTokenByRepo:
 
     def test_fallback_to_gitcode_webhook_token(self):
         """无 webhook_secret → fallback 到 gitcode_webhook_token（路径 A）。"""
-        from src.user.db import get_webhook_token_by_repo
-        with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("", "OLD_BOT_TOKEN", "")
             mock_db.cursor.return_value = cursor
@@ -224,8 +224,8 @@ class TestGetWebhookTokenByRepo:
 
     def test_empty_repo_returns_empty(self):
         """无记录 → 空字符串。"""
-        from src.user.db import get_webhook_token_by_repo
-        with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = None
             mock_db.cursor.return_value = cursor
@@ -250,7 +250,7 @@ class TestSelfLoopDetection:
         标记检测在自循环检测之后，但仍然有效——自循环检测不命中非 bot actor。
         """
         # 验证 pipeline 中自循环检测（handler.is_self_loop_actor）在标记检测之前
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         source = open(ep.__file__).read()
         handler_pos = source.find("handler.is_self_loop_actor")
         marker_pos = source.find("2.0a 系统回帖标记检测")
@@ -269,30 +269,30 @@ class TestIsEmailConfigured:
 
     def test_smtp_configured_returns_true(self):
         """配了 SMTP → True（有邮箱场景）。"""
-        from src.auth.email_service import is_email_configured
-        with patch("src.auth.email_service._smtp_host", return_value="smtp.example.com"):
+        from src.domains.mgmt.auth.email_service import is_email_configured
+        with patch("src.domains.mgmt.auth.email_service._smtp_host", return_value="smtp.example.com"):
             assert is_email_configured() is True
 
     def test_resend_configured_returns_true(self):
         """配了 Resend API → True（有邮箱场景）。"""
-        from src.auth.email_service import is_email_configured
-        with patch("src.auth.email_service._smtp_host", return_value=""), \
-             patch("src.auth.email_service._resend_api_key", return_value="re_abc123"):
+        from src.domains.mgmt.auth.email_service import is_email_configured
+        with patch("src.domains.mgmt.auth.email_service._smtp_host", return_value=""), \
+             patch("src.domains.mgmt.auth.email_service._resend_api_key", return_value="re_abc123"):
             assert is_email_configured() is True
 
     def test_nothing_configured_returns_false(self):
         """什么都没配 → False（无邮箱场景）。"""
-        from src.auth.email_service import is_email_configured
-        with patch("src.auth.email_service._smtp_host", return_value=""), \
-             patch("src.auth.email_service._resend_api_key", return_value=""):
+        from src.domains.mgmt.auth.email_service import is_email_configured
+        with patch("src.domains.mgmt.auth.email_service._smtp_host", return_value=""), \
+             patch("src.domains.mgmt.auth.email_service._resend_api_key", return_value=""):
             assert is_email_configured() is False
 
     def test_dev_verification_code_not_counted(self):
         """dev_verification_code 不算邮箱已配置。"""
-        from src.auth.email_service import is_email_configured
-        with patch("src.auth.email_service._smtp_host", return_value=""), \
-             patch("src.auth.email_service._resend_api_key", return_value=""), \
-             patch("src.auth.email_service._dev_verification_code", return_value="123456"):
+        from src.domains.mgmt.auth.email_service import is_email_configured
+        with patch("src.domains.mgmt.auth.email_service._smtp_host", return_value=""), \
+             patch("src.domains.mgmt.auth.email_service._resend_api_key", return_value=""), \
+             patch("src.domains.mgmt.auth.email_service._dev_verification_code", return_value="123456"):
             assert is_email_configured() is False
 
 
@@ -311,9 +311,9 @@ class TestRegisterEmailScenarios:
         """有邮箱配置 → 校验验证码。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=True), \
-             patch("src.api.routes.grape_auth.auth_verification.verify_code") as m_verify, \
-             patch("src.api.routes.grape_auth.create_grape_account") as m_create:
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=True), \
+             patch("src.domains.mgmt.routes.grape_auth.auth_verification.verify_code") as m_verify, \
+             patch("src.domains.mgmt.routes.grape_auth.create_grape_account") as m_create:
             m_verify.return_value = {"ok": False, "message": "验证码错误"}
             m_create.return_value = {"id": 1, "username": "testuser"}
             resp = client.post("/api/auth/register/verify", json={
@@ -327,15 +327,15 @@ class TestRegisterEmailScenarios:
         """无邮箱配置 → 跳过验证码，直接创建账号。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=False), \
-             patch("src.api.routes.grape_auth.auth_verification.verify_code") as m_verify, \
-             patch("src.api.routes.grape_auth.create_grape_account") as m_create, \
-             patch("src.api.routes.grape_auth.is_username_taken", return_value=False), \
-             patch("src.api.routes.grape_auth._ensure_personal_org"), \
-             patch("src.api.routes.grape_auth.get_token_version", return_value=1), \
-             patch("src.api.routes.grape_auth._issue_jwt", return_value=("access", "refresh")), \
-             patch("src.api.routes.grape_auth.update_last_login_at"), \
-             patch("src.api.routes.grape_auth.auth_audit.log_audit"):
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=False), \
+             patch("src.domains.mgmt.routes.grape_auth.auth_verification.verify_code") as m_verify, \
+             patch("src.domains.mgmt.routes.grape_auth.create_grape_account") as m_create, \
+             patch("src.domains.mgmt.routes.grape_auth.is_username_taken", return_value=False), \
+             patch("src.domains.mgmt.routes.grape_auth._ensure_personal_org"), \
+             patch("src.domains.mgmt.routes.grape_auth.get_token_version", return_value=1), \
+             patch("src.domains.mgmt.routes.grape_auth._issue_jwt", return_value=("access", "refresh")), \
+             patch("src.domains.mgmt.routes.grape_auth.update_last_login_at"), \
+             patch("src.domains.mgmt.routes.grape_auth.auth_audit.log_audit"):
             m_create.return_value = {"id": 1, "username": "testuser"}
             resp = client.post("/api/auth/register/verify", json={
                 "username": "testuser", "email": "",
@@ -348,11 +348,11 @@ class TestRegisterEmailScenarios:
         """有邮箱配置 → 正常发送验证码。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=True), \
-             patch("src.api.routes.grape_auth.is_username_taken", return_value=False), \
-             patch("src.api.routes.grape_auth.is_email_registered", return_value=False), \
-             patch("src.api.routes.grape_auth.signup_policy.check_signup_allowed", return_value=True), \
-             patch("src.api.routes.grape_auth.auth_verification.send_code") as m_send:
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=True), \
+             patch("src.domains.mgmt.routes.grape_auth.is_username_taken", return_value=False), \
+             patch("src.domains.mgmt.routes.grape_auth.is_email_registered", return_value=False), \
+             patch("src.domains.mgmt.routes.grape_auth.signup_policy.check_signup_allowed", return_value=True), \
+             patch("src.domains.mgmt.routes.grape_auth.auth_verification.send_code") as m_send:
             m_send.return_value = {"ok": True, "message": ""}
             resp = client.post("/api/auth/register/send-code", json={
                 "username": "testuser", "email": "test@example.com", "password": "Test1234!"
@@ -363,8 +363,8 @@ class TestRegisterEmailScenarios:
         """无邮箱配置 → 返回提示，不发验证码。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=False), \
-             patch("src.api.routes.grape_auth.auth_verification.send_code") as m_send:
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=False), \
+             patch("src.domains.mgmt.routes.grape_auth.auth_verification.send_code") as m_send:
             resp = client.post("/api/auth/register/send-code", json={
                 "username": "testuser", "email": "test@example.com", "password": "Test1234!"
             })
@@ -383,7 +383,7 @@ class TestForgotPasswordEmailScenarios:
         """无邮箱配置 → 返回 503。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=False):
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=False):
             resp = client.post("/api/auth/forgot-password/send-code", json={
                 "email": "test@example.com"
             })
@@ -393,10 +393,10 @@ class TestForgotPasswordEmailScenarios:
         """有邮箱配置 → 正常流程。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=True), \
-             patch("src.api.routes.grape_auth.auth_verification.send_code") as m_send, \
-             patch("src.api.routes.grape_auth.auth_verification.check_rate_limit", return_value={"ok": True}), \
-             patch("src.api.routes.grape_auth.is_email_registered", return_value=True):
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=True), \
+             patch("src.domains.mgmt.routes.grape_auth.auth_verification.send_code") as m_send, \
+             patch("src.domains.mgmt.routes.grape_auth.auth_verification.check_rate_limit", return_value={"ok": True}), \
+             patch("src.domains.mgmt.routes.grape_auth.is_email_registered", return_value=True):
             m_send.return_value = {"ok": True, "message": ""}
             resp = client.post("/api/auth/forgot-password/send-code", json={
                 "email": "test@example.com"
@@ -417,7 +417,7 @@ class TestProvidersEmailConfigured:
         """有邮箱配置 → email_configured=True。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=True):
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=True):
             resp = client.get("/api/auth/providers")
             assert resp.status_code == 200
             data = resp.json()
@@ -428,7 +428,7 @@ class TestProvidersEmailConfigured:
         """无邮箱配置 → email_configured=False。"""
         from src.api.main import app
         client = TestClient(app)
-        with patch("src.auth.email_service.is_email_configured", return_value=False):
+        with patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=False):
             resp = client.get("/api/auth/providers")
             assert resp.status_code == 200
             data = resp.json()
@@ -452,11 +452,11 @@ class TestBindingScenarios:
 
     def test_oauth_bind_stores_refresh_token(self):
         """场景一：OAuth 授权 → 存入 refresh_token + token_expires_at。"""
-        from src.auth.grape_account_db import create_external_identity
+        from src.domains.mgmt.auth.grape_account_db import create_external_identity
         import time as _time_module
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.credential_crypto.encrypt", return_value="encrypted"), \
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"), \
              patch.object(_time_module, "time", return_value=1000000), \
              patch.object(_time_module, "strftime", return_value="2026-01-01 00:00:00"):
             cursor = MagicMock()
@@ -480,7 +480,7 @@ class TestBindingScenarios:
         # token 5 分钟后过期 → 距过期不足 10 分钟 → need_refresh=True
         mock_cred = {"token_expires_at": now + 300, "fetched_at": now, "access_token": "OAUTH_TOKEN"}
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="OAUTH_TOKEN"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=True), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=True), \
              patch("src.api.deps._get_gitcode_credential_by_gitcode_id", return_value=mock_cred), \
              patch("src.api.deps.try_refresh_gitcode_token", return_value="REFRESHED_TOKEN") as m:
             result = get_user_token_with_refresh("testuser", user_id=1)
@@ -495,7 +495,7 @@ class TestBindingScenarios:
         # token 1 小时后过期 → 距过期 > 10 分钟 → need_refresh=False
         mock_cred = {"token_expires_at": now + 3600, "fetched_at": now, "access_token": "OAUTH_TOKEN"}
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="OAUTH_TOKEN"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=True), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=True), \
              patch("src.api.deps._get_gitcode_credential_by_gitcode_id", return_value=mock_cred), \
              patch("src.api.deps.try_refresh_gitcode_token") as m:
             result = get_user_token_with_refresh("testuser", user_id=1)
@@ -506,11 +506,11 @@ class TestBindingScenarios:
 
     def test_pat_bind_stores_no_refresh_token(self):
         """场景二：PAT 绑定 → 存入 access_token，无 refresh_token，无 token_expires_at。"""
-        from src.auth.grape_account_db import create_external_identity
+        from src.domains.mgmt.auth.grape_account_db import create_external_identity
         import time as _time_module
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.credential_crypto.encrypt", return_value="encrypted"), \
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"), \
              patch.object(_time_module, "time", return_value=1000000), \
              patch.object(_time_module, "strftime", return_value="2026-01-01 00:00:00"):
             cursor = MagicMock()
@@ -528,7 +528,7 @@ class TestBindingScenarios:
         """场景二：PAT token → 无 refresh_token → 跳过刷新，直接返回。"""
         from src.api.deps import get_user_token_with_refresh
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="PAT_TOKEN"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=False), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=False), \
              patch("src.api.deps.try_refresh_gitcode_token") as m:
             result = get_user_token_with_refresh("testuser", user_id=1)
             m.assert_not_called()
@@ -536,10 +536,10 @@ class TestBindingScenarios:
 
     def test_pat_token_never_expires(self):
         """场景二：PAT token → 不过期（无 token_expires_at，无 refresh_token）。"""
-        from src.auth.grape_account_db import _has_refresh_token
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.grape_account_db._safe_decrypt", return_value=""):
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.grape_account_db._safe_decrypt", return_value=""):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_empty",)
             mock_db.cursor.return_value = cursor
@@ -553,7 +553,7 @@ class TestBindingScenarios:
         from src.api.deps import get_user_token_with_refresh
         # 即使 OAuth App 已配置，用户选 PAT 绑定后 refresh_token 为空
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="PAT_TOKEN"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=False), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=False), \
              patch("src.api.deps.try_refresh_gitcode_token") as m:
             result = get_user_token_with_refresh("testuser", user_id=1)
             m.assert_not_called()
@@ -561,11 +561,11 @@ class TestBindingScenarios:
 
     def test_pat_overwrites_oauth_binding(self):
         """场景三：OAuth 绑定后再绑 PAT → 覆盖更新（create_external_identity UPDATE 分支）。"""
-        from src.auth.grape_account_db import create_external_identity
+        from src.domains.mgmt.auth.grape_account_db import create_external_identity
         import time as _time_module
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.credential_crypto.encrypt", return_value="encrypted"), \
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="encrypted"), \
              patch.object(_time_module, "time", return_value=1000000), \
              patch.object(_time_module, "strftime", return_value="2026-01-01 00:00:00"):
             cursor = MagicMock()
@@ -639,15 +639,15 @@ class TestAddManagedRepoSignature:
     def test_new_params_have_defaults(self):
         """host_user_id 和 webhook_secret 有默认值。"""
         import inspect
-        from src.user.db import add_managed_repo
+        from src.domains.mgmt.user.db import add_managed_repo
         sig = inspect.signature(add_managed_repo)
         assert sig.parameters["host_user_id"].default == 0
         assert sig.parameters["webhook_secret"].default == ""
 
     def test_old_call_without_new_params_works(self):
         """不传新参数 → 不报错（向前兼容）。"""
-        from src.user.db import add_managed_repo
-        with patch("src.user.db.db") as mock_db, patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import add_managed_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             mock_db.cursor.return_value = cursor
             # 只传旧参数
@@ -664,30 +664,30 @@ class TestGetTaskToken:
 
     def test_task_with_repo_gitcode_token(self):
         """task 有 repo_gitcode_token → 直接返回。"""
-        from src.runtime.agent import _get_task_token
+        from src.domains.runtime.engine.agent import _get_task_token
         task = {"repo_gitcode_token": "BOT_TOKEN", "repo_key": "gitcode:owner/repo"}
         assert _get_task_token(task) == "BOT_TOKEN"
 
     def test_task_empty_token_falls_back(self):
         """task 无 repo_gitcode_token → 调 get_repo_token_with_refresh。"""
-        from src.runtime.agent import _get_task_token
+        from src.domains.runtime.engine.agent import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": "gitcode:owner/repo"}
-        with patch("src.user.db.get_repo_token_with_refresh", return_value="FALLBACK_TOKEN") as m:
+        with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="FALLBACK_TOKEN") as m:
             result = _get_task_token(task)
             assert result == "FALLBACK_TOKEN"
             m.assert_called_once_with("gitcode:owner/repo")
 
     def test_task_github_empty_token_falls_back_to_get_github_token(self):
         """task 无 repo_gitcode_token + github: 前缀 → 调 get_github_token（P1-1 修复）。"""
-        from src.runtime.agent import _get_task_token
+        from src.domains.runtime.engine.agent import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": "github:owner/repo"}
-        with patch("src.user.db.get_github_token", return_value="GH_TOKEN") as m:
+        with patch("src.domains.mgmt.user.db.get_github_token", return_value="GH_TOKEN") as m:
             result = _get_task_token(task)
             assert result == "GH_TOKEN"
             m.assert_called_once_with(repo_key="github:owner/repo")
 
     def test_task_no_repo_key_returns_empty(self):
         """task 无 repo_key → 空字符串。"""
-        from src.runtime.agent import _get_task_token
+        from src.domains.runtime.engine.agent import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": ""}
         assert _get_task_token(task) == ""

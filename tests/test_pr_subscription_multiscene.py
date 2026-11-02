@@ -68,7 +68,7 @@ def _seed(scenes):
 
 
 def _run_hook(actor, action="open", oldrev=None):
-    import src.api.event_pipeline as ep
+    import src.domains.runtime.pipeline.event_pipeline as ep
     attrs = {"action": action, "target_branch": "branch-1", "iid": 88,
              "title": "simms", "source_branch": "dev"}
     if oldrev:
@@ -79,9 +79,9 @@ def _run_hook(actor, action="open", oldrev=None):
         "user": {"username": actor},
         "commits": ([{"id": "c1", "message": "new"}] if oldrev else []),
     }).encode()
-    with patch("src.runtime.engine_select.pick_engine", return_value=None), \
-         patch("src.user.db.get_agent_bot_token", return_value=""), \
-         patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None), \
+         patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+         patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         ep.run_pipeline(raw, {"X-GitCode-Event": "Merge Request Hook"},
                         account="XOcto/simms-repo")
 

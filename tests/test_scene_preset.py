@@ -62,7 +62,7 @@ _PRESET_JSON = json.dumps([
 
 
 def test_merge_preset_appends_missing_only():
-    from src.api.routes.scenes import _merge_preset_custom_fields
+    from src.domains.mgmt.routes.scenes import _merge_preset_custom_fields
     _seed_scene("s1")  # 初始 advanced_options={}
     _merge_preset_custom_fields("s1", RK, _PRESET_JSON)
     ao = _read_ao()
@@ -73,7 +73,7 @@ def test_merge_preset_appends_missing_only():
 
 
 def test_merge_preset_does_not_overwrite_user_config():
-    from src.api.routes.scenes import _merge_preset_custom_fields
+    from src.domains.mgmt.routes.scenes import _merge_preset_custom_fields
     _seed_scene("s1", json.dumps({
         "custom_fields": [{"name": "AI_MODEL", "value": "user-chosen", "is_secret": False, "scope": ["all"], "preset": False}],
     }))
@@ -85,7 +85,7 @@ def test_merge_preset_does_not_overwrite_user_config():
 
 
 def test_get_advanced_options_returns_preset_flag():
-    from src.api.routes.scenes import get_advanced_options
+    from src.domains.mgmt.routes.scenes import get_advanced_options
     _seed_scene("s1", json.dumps({
         "custom_fields": [
             {"name": "AI_MODEL", "value": "gpt", "is_secret": False, "scope": ["all"], "preset": True},
@@ -99,7 +99,7 @@ def test_get_advanced_options_returns_preset_flag():
 
 
 def test_save_preset_protected_fields():
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_scene("s1", json.dumps({
         "custom_fields": [
             {"name": "AI_MODEL", "value": "gpt", "is_secret": False, "scope": ["all"], "preset": True},
@@ -131,7 +131,7 @@ def test_save_preset_protected_fields():
 
 
 def test_save_preset_cannot_be_deleted():
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_scene("s1", json.dumps({
         "custom_fields": [
             {"name": "AI_API_KEY", "value": "secret-1", "is_secret": True, "scope": ["coding"], "preset": True},
@@ -150,7 +150,7 @@ def test_save_preset_cannot_be_deleted():
 
 
 def test_merge_preset_default_value_applied():
-    from src.api.routes.scenes import _merge_preset_custom_fields
+    from src.domains.mgmt.routes.scenes import _merge_preset_custom_fields
     preset = json.dumps([
         {"name": "AI_BASE_URL", "is_secret": False, "scope": ["all"], "default_value": "http://localhost:8080"},
     ])
@@ -163,7 +163,7 @@ def test_merge_preset_default_value_applied():
 
 def test_description_persisted_and_locked():
     """description 透传：merge 入库、get 返回、save 以声明锁定（忽略前端篡改）。"""
-    from src.api.routes.scenes import _merge_preset_custom_fields, get_advanced_options, save_advanced_options
+    from src.domains.mgmt.routes.scenes import _merge_preset_custom_fields, get_advanced_options, save_advanced_options
     preset = json.dumps([
         {"name": "AI_MODEL", "is_secret": False, "scope": ["all"], "default_value": "", "description": "模型名称，如 gpt-4o"},
     ])

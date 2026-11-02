@@ -17,7 +17,7 @@ class TestPipelineSceneIdFallback:
         """验证 get_issue_scene 返回 (scene_id, scene_user_id) tuple"""
         from src.api.session_store import get_issue_scene
         with patch("src.api.session_store.get_issue_stage", return_value=None):
-            with patch("src.user.db.get_repo_scene", return_value="default-scene"):
+            with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="default-scene"):
                 result = get_issue_scene("gitcode:test/repo", "#123")
                 assert isinstance(result, tuple)
                 assert len(result) == 2
@@ -29,7 +29,7 @@ class TestPipelineSceneIdFallback:
         """验证无场景且仓库无默认场景时返回 ("", 0) tuple"""
         from src.api.session_store import get_issue_scene
         with patch("src.api.session_store.get_issue_stage", return_value=None):
-            with patch("src.user.db.get_repo_scene", return_value=""):
+            with patch("src.domains.mgmt.user.db.get_repo_scene", return_value=""):
                 result = get_issue_scene("gitcode:test/repo", "#123")
                 assert isinstance(result, tuple)
                 assert result == ("", 0)
@@ -40,7 +40,7 @@ class TestPipelineSceneIdFallback:
 
         # 模拟 issue_state 无 scene_id，仓库有 dev_scene → 回退仓库默认场景
         with patch("src.api.session_store.get_issue_stage", return_value=None):
-            with patch("src.user.db.get_repo_scene", return_value="dev-scene"):
+            with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="dev-scene"):
                 # 验证 get_issue_scene 回退到 dev_scene
                 scene_tuple = get_issue_scene("gitcode:test/repo", "#123")
                 assert scene_tuple[0] == "dev-scene"
@@ -56,7 +56,7 @@ class TestPipelineFailedCount:
 
     def test_failed_count_field_exists(self):
         """验证 get_pipeline 返回包含 failed_count 字段"""
-        from src.api.routes.pipeline import get_pipeline
+        from src.domains.runtime.routes.pipeline import get_pipeline
 
         # 模拟空 events（无流水线数据），验证字段存在
         with patch("src.api.deps.require_no_session_token", return_value={"user_id": "test"}):

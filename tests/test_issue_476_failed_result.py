@@ -123,7 +123,7 @@ class TestHandoffListenerFailEvent:
     def test_failed_result_writes_diag(self):
         """dispatch_node 返回 failed → 事件 result 含错误与 target，payload 含诊断上下文。"""
         from unittest.mock import patch
-        from src.api.routes.webhook import _on_handoff_dispatch
+        from src.domains.runtime.routes.webhook import _on_handoff_dispatch
         seq = _mk_event(status="running")
         ev = self._handoff_event(seq)
         with patch("src.api.pipeline_executor.dispatch_node",
@@ -147,7 +147,7 @@ class TestHandoffListenerFailEvent:
     def test_exception_writes_diag(self):
         """dispatch_node 抛异常 → 事件 failed，result 含异常信息，code=a2a_dispatch_exception。"""
         from unittest.mock import patch
-        from src.api.routes.webhook import _on_handoff_dispatch
+        from src.domains.runtime.routes.webhook import _on_handoff_dispatch
         seq = _mk_event(status="running")
         ev = self._handoff_event(seq, target="qa")
         with patch("src.api.pipeline_executor.dispatch_node",
@@ -175,7 +175,7 @@ class TestFailEventDiag:
         _clean()
 
     def test_result_code_prefix_and_payload_diag(self):
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         _fail_event(seq, "交办失败测试", diag={
             "code": "a2a_dispatch_failed", "target_stage": "qa",
@@ -188,7 +188,7 @@ class TestFailEventDiag:
         assert diag["target_stage"] == "qa" and diag["phase"] == "dispatch" and diag["ref_seq"] == 42
 
     def test_diag_not_overwritten_on_terminal(self):
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         _fail_event(seq, "第一次", diag={"code": "c1", "target_stage": "qa",
                                         "phase": "dispatch", "ref_seq": 1})
@@ -256,7 +256,7 @@ def setup_module():
 
 
 def _jwt(user_id, username):
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -276,7 +276,7 @@ def _grant_access(uid, repo_key=_REPO):
 
 
 from fastapi.testclient import TestClient  # noqa: E402
-from src.auth import grape_account_db  # noqa: E402
+from src.domains.mgmt.auth import grape_account_db  # noqa: E402
 
 
 def test_list_events_fields():
@@ -300,7 +300,7 @@ def test_failed_result_gap_route():
     _clean()
     from src.api.deps import require_org_member
     from src.api.main import app
-    from src.observability.overview import visible_repo_keys
+    from src.domains.insight.observability.overview import visible_repo_keys
     UID = 47601
     USER = {"id": UID, "username": "ev476-obs", "org_id": 0, "org_role": "owner"}
     with db_lock:

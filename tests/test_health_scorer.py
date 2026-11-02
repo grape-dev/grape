@@ -16,8 +16,8 @@ import pytest
 from unittest.mock import patch, MagicMock
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import health_scorer
-from src.runtime.engine_select import pick_engine, _filter_by_health, _best_health_fallback
+from src.domains.runtime.engine import health_scorer
+from src.domains.runtime.engine.engine_select import pick_engine, _filter_by_health, _best_health_fallback
 
 
 # ===== 健康分计算测试 =====
@@ -293,13 +293,13 @@ class TestBroadcastNoRegression:
 
     def test_plugin_mode_returns_zero(self):
         """plugin 模式下 pick_engine 返回 0（广播），健康度过滤不干扰。"""
-        with patch("src.api.event_pipeline.is_plugin_mode", return_value=True):
+        with patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True):
             result = pick_engine("owner/repo", "coding")
         assert result == 0  # 广播模式返回 0
 
     def test_plugin_mode_not_affected_by_health(self):
         """plugin 模式下即使所有引擎不健康，仍返回 0（广播不被过滤）。"""
-        with patch("src.api.event_pipeline.is_plugin_mode", return_value=True), \
+        with patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True), \
              patch.object(health_scorer, 'is_healthy', return_value=False):
             result = pick_engine("owner/repo", "coding")
         assert result == 0  # 广播不受健康度过滤影响
@@ -332,7 +332,7 @@ class TestBroadcastNoRegression:
 
         try:
             # mock 健康度：900001 不健康（低分），900002 更健康
-            with patch("src.api.event_pipeline.is_plugin_mode", return_value=False), \
+            with patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=False), \
                  patch.object(health_scorer, 'is_healthy', return_value=False), \
                  patch.object(health_scorer, 'best_fallback', return_value=900002), \
                  patch.object(health_scorer, 'get_health_score') as mock_score:
@@ -359,7 +359,7 @@ class TestResourceStackHealth:
 
     def test_get_engine_health(self):
         """get_engine_health 返回健康度数据。"""
-        from src.runtime.resource_stack import TaskResourceStack
+        from src.domains.runtime.engine.resource_stack import TaskResourceStack
         res = TaskResourceStack(task_id="test", cwd="/tmp")
         with patch.object(health_scorer, 'get_health_score') as mock:
             mock.return_value = {"health_score": 85, "total_tasks": 10}
@@ -368,14 +368,14 @@ class TestResourceStackHealth:
 
     def test_is_engine_healthy(self):
         """is_engine_healthy 返回布尔。"""
-        from src.runtime.resource_stack import TaskResourceStack
+        from src.domains.runtime.engine.resource_stack import TaskResourceStack
         res = TaskResourceStack(task_id="test", cwd="/tmp")
         with patch.object(health_scorer, 'is_healthy', return_value=True):
             assert res.is_engine_healthy(1) is True
 
     def test_filter_healthy_engines(self):
         """filter_healthy_engines 返回过滤后列表。"""
-        from src.runtime.resource_stack import TaskResourceStack
+        from src.domains.runtime.engine.resource_stack import TaskResourceStack
         res = TaskResourceStack(task_id="test", cwd="/tmp")
         with patch.object(health_scorer, 'filter_or_fallback', return_value=[1, 3]):
             result = res.filter_healthy_engines([1, 2, 3])
@@ -383,7 +383,7 @@ class TestResourceStackHealth:
 
     def test_filter_healthy_engines_exception(self):
         """filter_healthy_engines 异常时返回原列表（不阻塞派发）。"""
-        from src.runtime.resource_stack import TaskResourceStack
+        from src.domains.runtime.engine.resource_stack import TaskResourceStack
         res = TaskResourceStack(task_id="test", cwd="/tmp")
         with patch.object(health_scorer, 'filter_or_fallback', side_effect=RuntimeError("boom")):
             result = res.filter_healthy_engines([1, 2, 3])

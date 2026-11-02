@@ -37,7 +37,7 @@ class TestBToACompatGetRepoTokenWithRefresh:
 
     def test_t8_01_path_b_skips_global_bot(self):
         """T8-01: 路径 B 仓库（host_user_id > 0）在全局 bot token 配置后返回用户 token（非全局 bot token）。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="USER_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "USER_TOKEN"
@@ -45,14 +45,14 @@ class TestBToACompatGetRepoTokenWithRefresh:
 
     def test_t8_02_path_a_unaffected(self):
         """T8-02: 路径 A 仓库（bot_gitcode_token 非空）返回 bot_gitcode_token（回归保护）。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
 
     def test_t8_03_new_repo_global_bot_works(self):
         """T8-03: 新仓库全局 bot token 层正常生效。"""
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="GLOBAL_BOT"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "GLOBAL_BOT"
@@ -70,7 +70,7 @@ class TestBToACompatGetRepoBotToken:
 
         R18 改造后委托 TokenResolver.get_token()（跳过第 1 级 session）。
         """
-        from src.user.db import get_repo_bot_token
+        from src.domains.mgmt.user.db import get_repo_bot_token
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="USER_TOKEN"):
             result = get_repo_bot_token("gitcode:owner/repo")
             assert result == "USER_TOKEN"
@@ -89,7 +89,7 @@ class TestBToACompatGetGithubToken:
 
         R18 改造后委托 TokenResolver.get_token()（GitHubProvider）。
         """
-        from src.user.db import get_github_token
+        from src.domains.mgmt.user.db import get_github_token
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="GH_USER_TOKEN"), \
              patch("src.kernel.token_resolver.create_provider_from_repo_key", return_value=MagicMock(provider_name="github")):
             result = get_github_token("github:owner/repo")
@@ -109,7 +109,7 @@ class TestBToAAfterRepair:
 
         R18 改造后委托 TokenResolver.get_token()，mock 返回 REPO_BOT_TOKEN。
         """
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
@@ -127,13 +127,13 @@ class TestSaveConfigAutoUpgrade:
 
         验证：get_meta_value 查到旧值为空 → auto_upgrade_path_b_repos 被调用（通过 threading.Thread target）。
         """
-        from src.admin.config_store import save_config
-        with patch("src.user.db.set_meta_value"), \
-             patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._invalidate_global_bot_cache"), \
-             patch("src.user.db.get_global_bot_usernames", return_value=["bot_user"]), \
-             patch("src.user.db.auto_upgrade_path_b_repos") as mock_upgrade, \
-             patch("src.admin.config_store.read_public_config", return_value={}), \
+        from src.domains.mgmt.admin.config_store import save_config
+        with patch("src.domains.mgmt.user.db.set_meta_value"), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["bot_user"]), \
+             patch("src.domains.mgmt.user.db.auto_upgrade_path_b_repos") as mock_upgrade, \
+             patch("src.domains.mgmt.admin.config_store.read_public_config", return_value={}), \
              patch("threading.Thread") as mock_thread:
             save_config({"gitcode_api_token": "NEW_BOT_TOKEN"})
             # 确认 Thread 被创建，target 是 auto_upgrade_path_b_repos
@@ -148,13 +148,13 @@ class TestSaveConfigAutoUpgrade:
 
     def test_t8_08_github_token_from_empty_triggers_upgrade(self):
         """T8-08: save_config 写入 github_bot_token（从无到有）时触发异步升级。"""
-        from src.admin.config_store import save_config
-        with patch("src.user.db.set_meta_value"), \
-             patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._invalidate_global_bot_cache"), \
-             patch("src.user.db.get_global_github_bot_username", return_value="gh_bot"), \
-             patch("src.user.db.auto_upgrade_path_b_repos") as mock_upgrade, \
-             patch("src.admin.config_store.read_public_config", return_value={}), \
+        from src.domains.mgmt.admin.config_store import save_config
+        with patch("src.domains.mgmt.user.db.set_meta_value"), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"), \
+             patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value="gh_bot"), \
+             patch("src.domains.mgmt.user.db.auto_upgrade_path_b_repos") as mock_upgrade, \
+             patch("src.domains.mgmt.admin.config_store.read_public_config", return_value={}), \
              patch("threading.Thread") as mock_thread:
             save_config({"github_bot_token": "NEW_GH_BOT_TOKEN"})
             mock_thread.assert_called_once()
@@ -170,14 +170,14 @@ class TestSaveConfigAutoUpgrade:
         所以 Thread 会被调用——但 target 是 swap_wrapper，不是 auto_upgrade_path_b_repos。
         验证 auto_upgrade_path_b_repos 未被调用（swap 是独立流程）。
         """
-        from src.admin.config_store import save_config
-        with patch("src.user.db.set_meta_value"), \
-             patch("src.user.db.get_meta_value", return_value="OLD_BOT_TOKEN"), \
-             patch("src.user.db._invalidate_global_bot_cache"), \
-             patch("src.user.db.auto_upgrade_path_b_repos") as mock_upgrade, \
-             patch("src.user.db.get_global_bot_usernames", return_value=["bot_user"]), \
-             patch("src.admin.config_store.global_bot_token_swap"), \
-             patch("src.admin.config_store.read_public_config", return_value={}), \
+        from src.domains.mgmt.admin.config_store import save_config
+        with patch("src.domains.mgmt.user.db.set_meta_value"), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="OLD_BOT_TOKEN"), \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"), \
+             patch("src.domains.mgmt.user.db.auto_upgrade_path_b_repos") as mock_upgrade, \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["bot_user"]), \
+             patch("src.domains.mgmt.admin.config_store.global_bot_token_swap"), \
+             patch("src.domains.mgmt.admin.config_store.read_public_config", return_value={}), \
              patch("threading.Thread"):
             save_config({"gitcode_api_token": "NEW_BOT_TOKEN"})
             # auto_upgrade 不触发（有→有不是从无到有）
@@ -185,12 +185,12 @@ class TestSaveConfigAutoUpgrade:
 
     def test_t8_09b_empty_token_no_upgrade(self):
         """T8-09b: save_config 写入空 gitcode_api_token（清除 token）时不触发升级。"""
-        from src.admin.config_store import save_config
-        with patch("src.user.db.set_meta_value"), \
-             patch("src.user.db.get_meta_value", return_value="OLD_BOT_TOKEN"), \
-             patch("src.user.db._invalidate_global_bot_cache"), \
-             patch("src.user.db.auto_upgrade_path_b_repos"), \
-             patch("src.admin.config_store.read_public_config", return_value={}), \
+        from src.domains.mgmt.admin.config_store import save_config
+        with patch("src.domains.mgmt.user.db.set_meta_value"), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="OLD_BOT_TOKEN"), \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"), \
+             patch("src.domains.mgmt.user.db.auto_upgrade_path_b_repos"), \
+             patch("src.domains.mgmt.admin.config_store.read_public_config", return_value={}), \
              patch("threading.Thread") as mock_thread:
             save_config({"gitcode_api_token": ""})
             mock_thread.assert_not_called()
@@ -205,9 +205,9 @@ class TestAutoUpgradePathBRepos:
 
     def test_t8_12_query_path_b_repos_filters(self):
         """T8-12: _query_path_b_repos 只返回 bot_gitcode_token 空 + host_user_id > 0 的仓库。"""
-        from src.user.db import _query_path_b_repos
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import _query_path_b_repos
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             cursor.fetchall.return_value = [
                 ("gitcode:owner1/repo1", "owner1", "repo1", 10),
@@ -221,15 +221,15 @@ class TestAutoUpgradePathBRepos:
 
     def test_t8_10_upgrade_invites_bot_and_writes_token(self):
         """T8-10: 自动升级遍历路径 B 仓库，邀 bot + 写 bot_gitcode_token。"""
-        from src.user.db import auto_upgrade_path_b_repos
-        with patch("src.user.db._query_path_b_repos", return_value=[
+        from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
+        with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[
             {"repo_key": "gitcode:owner/repo", "repo_owner": "owner", "repo_name": "repo", "host_user_id": 10}
         ]), \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN"), \
-             patch("src.user.repo_manager.add_collaborator", return_value=(True, None)), \
-             patch("src.user.repo_manager.accept_invite_for_repo"), \
-             patch("src.user.db._update_repo_bot_token") as mock_update, \
+             patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(True, None)), \
+             patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo"), \
+             patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update, \
              patch("time.sleep"):
             auto_upgrade_path_b_repos("gitcode", "BOT_TOKEN", "bot_user")
             mock_update.assert_called_once()
@@ -242,13 +242,13 @@ class TestAutoUpgradePathBRepos:
 
     def test_t8_11_upgrade_skips_failed_repo(self):
         """T8-11: 自动升级失败的仓库（host token 过期）跳过，不阻断。"""
-        from src.user.db import auto_upgrade_path_b_repos
-        with patch("src.user.db._query_path_b_repos", return_value=[
+        from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
+        with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[
             {"repo_key": "gitcode:owner/repo", "repo_owner": "owner", "repo_name": "repo", "host_user_id": 10}
         ]), \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
              patch("src.api.deps.get_user_token_with_refresh", return_value=""), \
-             patch("src.user.db._update_repo_bot_token") as mock_update, \
+             patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update, \
              patch("time.sleep"):
             # host token 过期返回空 → 跳过，不调 _update_repo_bot_token
             auto_upgrade_path_b_repos("gitcode", "BOT_TOKEN", "bot_user")

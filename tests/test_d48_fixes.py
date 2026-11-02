@@ -55,12 +55,12 @@ def _mock_sm_db(rows):
 
 class TestUnbindWarehouseCheck:
 
-    @patch("src.api.routes.grape_auth.auth_audit.log_audit")
-    @patch("src.api.routes.grape_auth.get_user_identities", return_value=[])
-    @patch("src.api.routes.grape_auth.delete_external_identity", return_value=True)
-    @patch("src.api.routes.grape_auth.has_password", return_value=True)
-    @patch("src.api.routes.grape_auth.count_user_identities", return_value=2)
-    @patch("src.user.db.delete_credential")
+    @patch("src.domains.mgmt.routes.grape_auth.auth_audit.log_audit")
+    @patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[])
+    @patch("src.domains.mgmt.routes.grape_auth.delete_external_identity", return_value=True)
+    @patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True)
+    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2)
+    @patch("src.domains.mgmt.user.db.delete_credential")
     def test_unbind_no_active_warehouses(self, mock_del_cred, mock_count, mock_has_pwd,
                                           mock_delete, mock_identities, mock_audit, client):
         """无正在使用仓库时直接解绑成功。"""
@@ -71,9 +71,9 @@ class TestUnbindWarehouseCheck:
         assert r.status_code == 200
         assert "解绑成功" in r.json()["message"]
 
-    @patch("src.api.routes.grape_auth.has_password", return_value=True)
-    @patch("src.api.routes.grape_auth.count_user_identities", return_value=2)
-    @patch("src.user.db.delete_credential")
+    @patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True)
+    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2)
+    @patch("src.domains.mgmt.user.db.delete_credential")
     def test_unbind_with_active_warehouses_returns_409(self, mock_del_cred, mock_count, mock_has_pwd, client):
         """有正在使用仓库时返回 409 + 仓库列表。"""
         mock_db, mock_lock = _mock_sm_db([
@@ -88,12 +88,12 @@ class TestUnbindWarehouseCheck:
         assert d["need_confirm"] is True
         assert len(d["warehouses"]) == 2
 
-    @patch("src.api.routes.grape_auth.auth_audit.log_audit")
-    @patch("src.api.routes.grape_auth.get_user_identities", return_value=[])
-    @patch("src.api.routes.grape_auth.delete_external_identity", return_value=True)
-    @patch("src.api.routes.grape_auth.has_password", return_value=True)
-    @patch("src.api.routes.grape_auth.count_user_identities", return_value=2)
-    @patch("src.user.db.delete_credential")
+    @patch("src.domains.mgmt.routes.grape_auth.auth_audit.log_audit")
+    @patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[])
+    @patch("src.domains.mgmt.routes.grape_auth.delete_external_identity", return_value=True)
+    @patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True)
+    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities", return_value=2)
+    @patch("src.domains.mgmt.user.db.delete_credential")
     def test_unbind_confirm_bypasses_warehouse_check(self, mock_del_cred, mock_count, mock_has_pwd,
                                                        mock_delete, mock_identities, mock_audit, client):
         """带 confirm=true 跳过仓库检查直接解绑。"""
@@ -111,10 +111,10 @@ class TestUnbindWarehouseCheck:
 
 class TestAdminCannotDisableSelf:
 
-    @patch("src.auth.grape_account_db.get_grape_account_by_id")
-    @patch("src.admin.db.disable_grape_user")
+    @patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id")
+    @patch("src.domains.mgmt.admin.db.disable_grape_user")
     @patch("src.api.deps.invalidate_user_cache")
-    @patch("src.auth.audit.log_audit")
+    @patch("src.domains.mgmt.auth.audit.log_audit")
     def test_disable_self_returns_400(self, mock_audit, mock_cache, mock_disable, mock_get, client):
         """管理员禁用同用户名的 Grape 账号返回 400。"""
         mock_get.return_value = {"id": 1, "username": "admin", "email": "admin@test.com"}
@@ -123,10 +123,10 @@ class TestAdminCannotDisableSelf:
         assert "不可禁用自己的账号" in r.json()["detail"]["message"]
         assert not mock_disable.called
 
-    @patch("src.auth.grape_account_db.get_grape_account_by_id")
-    @patch("src.admin.db.disable_grape_user", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id")
+    @patch("src.domains.mgmt.admin.db.disable_grape_user", return_value=True)
     @patch("src.api.deps.invalidate_user_cache")
-    @patch("src.auth.audit.log_audit")
+    @patch("src.domains.mgmt.auth.audit.log_audit")
     def test_disable_other_user_succeeds(self, mock_audit, mock_cache, mock_disable, mock_get, client):
         """管理员禁用其他用户成功。"""
         mock_get.return_value = {"id": 5, "username": "otheruser", "email": "other@test.com"}
@@ -141,11 +141,11 @@ class TestAdminCannotDisableSelf:
 
 class TestRestoreSendsNotification:
 
-    @patch("src.auth.grape_account_db.get_grape_account_by_id")
-    @patch("src.admin.db.restore_grape_user", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id")
+    @patch("src.domains.mgmt.admin.db.restore_grape_user", return_value=True)
     @patch("src.api.deps.invalidate_user_cache")
-    @patch("src.auth.audit.log_audit")
-    @patch("src.auth.email_service.get_email_service")
+    @patch("src.domains.mgmt.auth.audit.log_audit")
+    @patch("src.domains.mgmt.auth.email_service.get_email_service")
     def test_restore_sends_email_when_user_has_email(self, mock_email_svc, mock_audit,
                                                        mock_cache, mock_restore, mock_get, client):
         """恢复有邮箱的用户后发送通知邮件。"""
@@ -157,11 +157,11 @@ class TestRestoreSendsNotification:
         mock_svc.send_notification.assert_called_once()
         assert mock_svc.send_notification.call_args[0][0] == "user5@test.com"
 
-    @patch("src.auth.grape_account_db.get_grape_account_by_id")
-    @patch("src.admin.db.restore_grape_user", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id")
+    @patch("src.domains.mgmt.admin.db.restore_grape_user", return_value=True)
     @patch("src.api.deps.invalidate_user_cache")
-    @patch("src.auth.audit.log_audit")
-    @patch("src.auth.email_service.get_email_service")
+    @patch("src.domains.mgmt.auth.audit.log_audit")
+    @patch("src.domains.mgmt.auth.email_service.get_email_service")
     def test_restore_no_email_no_notification(self, mock_email_svc, mock_audit,
                                                 mock_cache, mock_restore, mock_get, client):
         """恢复无邮箱的用户不发送通知。"""
@@ -172,11 +172,11 @@ class TestRestoreSendsNotification:
         assert r.status_code == 200
         mock_svc.send_notification.assert_not_called()
 
-    @patch("src.auth.grape_account_db.get_grape_account_by_id")
-    @patch("src.admin.db.restore_grape_user", return_value=True)
+    @patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id")
+    @patch("src.domains.mgmt.admin.db.restore_grape_user", return_value=True)
     @patch("src.api.deps.invalidate_user_cache")
-    @patch("src.auth.audit.log_audit")
-    @patch("src.auth.email_service.get_email_service")
+    @patch("src.domains.mgmt.auth.audit.log_audit")
+    @patch("src.domains.mgmt.auth.email_service.get_email_service")
     def test_restore_email_failure_does_not_block(self, mock_email_svc, mock_audit,
                                                     mock_cache, mock_restore, mock_get, client):
         """通知邮件发送失败不影响恢复操作。"""
@@ -196,14 +196,14 @@ class TestLockMessage:
 
     def test_lock_message_contains_failure_count(self):
         """锁定提示包含 error_code、锁定时长。邮箱验证码解锁提示根据邮箱配置动态显示。"""
-        from src.auth.login_throttle import (
+        from src.domains.mgmt.auth.login_throttle import (
             ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_DURATION, check_throttle,
         )
-        with patch("src.auth.login_throttle.get_failure_count",
+        with patch("src.domains.mgmt.auth.login_throttle.get_failure_count",
                     return_value=ACCOUNT_LOCK_THRESHOLD), \
-             patch("src.auth.login_throttle._get_lock_until",
+             patch("src.domains.mgmt.auth.login_throttle._get_lock_until",
                     return_value=9999999999.0), \
-             patch("src.auth.login_throttle.get_ip_failure_count", return_value=0):
+             patch("src.domains.mgmt.auth.login_throttle.get_ip_failure_count", return_value=0):
             result = check_throttle("testuser", "127.0.0.1")
         assert not result["allowed"]
         assert result["locked"] is True

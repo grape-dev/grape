@@ -35,7 +35,7 @@ def setup_module():
         pass
     global _uid_creator, _uid_default
     from src.kernel.session_manager import db, db_lock
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM grape_accounts WHERE username LIKE 'attr_%'")

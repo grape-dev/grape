@@ -128,7 +128,7 @@ class TestDedupMigration:
 class TestUnbindCleansGroupBinding:
     def test_ut08_unbind_removes_group_binding(self):
         """UT-08：解绑（_purge_chat_im_binding）后，该 bot 名下的群绑定一并删除。"""
-        from src.api.routes.chat import _purge_chat_im_binding
+        from src.domains.runtime.routes.chat import _purge_chat_im_binding
         _seed_group_binding("app_9001")
         _seed_group_binding("app_9001", repo_key="gitcode:owner/other", im_chat_id="oc_test_grp2")  # 同一 bot 多个群绑定
         _purge_chat_im_binding(9001, "gitcode:owner", "app_9001")
@@ -139,7 +139,7 @@ class TestUnbindCleansGroupBinding:
 
     def test_ut08b_other_bot_binding_kept(self):
         """UT-08b：其他 bot 的群绑定不受影响。"""
-        from src.api.routes.chat import _purge_chat_im_binding
+        from src.domains.runtime.routes.chat import _purge_chat_im_binding
         _seed_group_binding("app_9001")
         _seed_group_binding("other_app")  # 另一 bot 的绑定，保持
         _purge_chat_im_binding(9001, "gitcode:owner", "app_9001")
@@ -150,7 +150,7 @@ class TestUnbindCleansGroupBinding:
 
     def test_ut08c_unbind_clears_seen_messages(self):
         """UT-08c：解绑后 bot_seen_messages 该 app 记录一并清空（其他 app 保留）。"""
-        from src.api.routes.chat import _purge_chat_im_binding
+        from src.domains.runtime.routes.chat import _purge_chat_im_binding
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO bot_seen_messages (app_id, message_id, seen_at) VALUES ('app_9001','m1',100)")
@@ -166,7 +166,7 @@ class TestUnbindCleansGroupBinding:
 
     def test_ut08d_unbind_clears_onboard_task(self):
         """UT-08d：解绑后 feishu_onboard_task 该 app 记录一并清空（其他 app 保留）。"""
-        from src.api.routes.chat import _purge_chat_im_binding
+        from src.domains.runtime.routes.chat import _purge_chat_im_binding
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO feishu_onboard_task (task_id, bot_type, repo_key, user_id, status, app_id) "

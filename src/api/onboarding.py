@@ -24,23 +24,23 @@ _DEFAULT_TITLES = {
 
 
 def _is_onboarded(repo_key: str) -> bool:
-    from src.user.db import get_meta_value
+    from src.domains.mgmt.user.db import get_meta_value
     return get_meta_value(f"onboarded:{repo_key}") == "1"
 
 
 def _mark_onboarding_started(repo_key: str):
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value(f"onboarded:{repo_key}", "1")
 
 
 def _mark_task_done(repo_key: str, task_type: str):
     """按任务 type 记录完成态（稳定键，不随标题变更丢失）。"""
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value(f"onboarded_task:{repo_key}:{task_type}", "1")
 
 
 def _task_done(repo_key: str, task_type: str) -> bool:
-    from src.user.db import get_meta_value
+    from src.domains.mgmt.user.db import get_meta_value
     return get_meta_value(f"onboarded_task:{repo_key}:{task_type}") == "1"
 
 
@@ -282,7 +282,7 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     - 完成层自愈：仅创建 `onboarded_task:{repo}:{type}` 未完成的任务；全部成功后置位总闸
     - 全部任务同步创建（同请求内完成），每个任务仅 1 条任务上下文消息
     """
-    from src.api.routes.tasks import create_standard_task
+    from src.domains.runtime.routes.tasks import create_standard_task
     task_defs = _load_onboarding_template(repo_key, template_id=template_id)
     if not task_defs:
         log.info(f"[Onboarding|repo:{repo_key}] 无 onboarding 任务模板，跳过")
@@ -300,14 +300,14 @@ def _create_onboarding_tasks(repo_key: str, owner: str, template_id: str = ""):
     # 读取仓库当前场景（managed_repos.dev_scene），用于绑定到每个 onboarding Issue
     _repo_scene = ""
     try:
-        from src.user.db import get_repo_scene
+        from src.domains.mgmt.user.db import get_repo_scene
         _repo_scene = get_repo_scene(repo_key) or ""
     except Exception:
         pass
     # 解析 scene_user_id（owner → user_id）
     _scene_uid = 0
     try:
-        from src.api.routes.tasks import _get_user_id_by_gitcode
+        from src.domains.runtime.routes.tasks import _get_user_id_by_gitcode
         _scene_uid = _get_user_id_by_gitcode(owner, repo_key) or 0
     except Exception:
         pass
@@ -363,7 +363,7 @@ def retry_onboarding_task(repo_key: str, owner: str, task_type: str) -> dict:
         return {"ok": False, "reason": f"task type not in template: {task_type}"}
     if _task_done(repo_key, task_type):
         return {"ok": True, "reason": "task already complete, no retry needed"}
-    from src.api.routes.tasks import create_standard_task
+    from src.domains.runtime.routes.tasks import create_standard_task
     from src.kernel.repo import Repo
     bot_token = Repo(repo_key).bot_token
     if not bot_token:

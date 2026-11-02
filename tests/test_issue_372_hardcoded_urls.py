@@ -23,7 +23,7 @@ class TestSettingsNoLocalhostFallback:
         """T10-01: webhook_url 为空时 settings 返回空字符串（非 localhost:8080）。"""
         # 验证代码中不再有 localhost:8080 兜底
         import inspect
-        from src.api.routes import settings
+        from src.domains.mgmt.routes import settings
         src = inspect.getsource(settings)
         # 查找 get_webhook_url() or "http://localhost:8080" 模式
         assert 'get_webhook_url() or "http://localhost:8080' not in src, \
@@ -43,7 +43,7 @@ class TestA2ARedispatchUrl:
     def test_t10_02_no_hardcoded_localhost_8000(self):
         """T10-02: events.py A2A re-dispatch 不再硬编码 localhost:8000。"""
         import inspect
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         src = inspect.getsource(events)
         # 不应有硬编码 http://localhost:8000/api/a2a
         assert '"http://localhost:8000/api/a2a"' not in src, \
@@ -54,9 +54,9 @@ class TestA2ARedispatchUrl:
 
     def test_t10_03_a2a_url_uses_server_base_url(self):
         """T10-03: get_server_base_url() 有值时 A2A URL 含正确地址。"""
-        from src.user.db import get_server_base_url
+        from src.domains.mgmt.user.db import get_server_base_url
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value="http://1.2.3.4:3000"):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://1.2.3.4:3000"):
             base = get_server_base_url()
             assert base == "http://1.2.3.4:3000"
             a2a_url = f"{base}/api/a2a"
@@ -64,9 +64,9 @@ class TestA2ARedispatchUrl:
 
     def test_t10_04_fallback_to_localhost(self):
         """T10-04: get_server_base_url() 为空时 fallback 到 localhost（兼容本地开发）。"""
-        from src.user.db import get_server_base_url
+        from src.domains.mgmt.user.db import get_server_base_url
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             base = get_server_base_url()
             # get_server_base_url 最终 fallback 到 localhost:8080（原有兜底）
             # events.py 中 `or "http://localhost:8000"` 是额外 fallback
@@ -93,7 +93,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_05_forwarded_host_used_for_redirect_uri(self):
         """T10-05: nginx 代理场景，X-Forwarded-Host 含公网域名 → 用公网域名（需设 TRUSTED_HOSTS）。"""
-        from src.auth.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         # R11.1: 未设 TRUSTED_HOSTS 时不读 X-Forwarded-Host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}, clear=False):
             req = self._mock_request(host="127.0.0.1:3000", fwd_host="grape.example.com")
@@ -102,7 +102,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_06_fallback_to_host_when_no_forwarded(self):
         """T10-06: 无 X-Forwarded-Host 时 fallback 到 Host 头。"""
-        from src.auth.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="1.2.3.4:3000", fwd_host="")
@@ -111,7 +111,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_07_trusted_hosts_validates_forwarded(self):
         """T10-07: TRUSTED_HOSTS 白名单校验 X-Forwarded-Host 的值（不在白名单 → 用 fallback）。"""
-        from src.auth.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "trusted.com"}):
             req = self._mock_request(host="127.0.0.1:3000", fwd_host="evil.com")
             result = _get_trusted_host(req)
@@ -120,7 +120,7 @@ class TestGetTrustedHostForwarded:
 
     def test_t10_08_localhost_forwarded_excluded(self):
         """T10-08: X-Forwarded-Host 是 localhost 时排除，fallback 到 Host 头。"""
-        from src.auth.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="1.2.3.4:3000", fwd_host="localhost")
@@ -130,7 +130,7 @@ class TestGetTrustedHostForwarded:
 
     def test_both_localhost_returns_host(self):
         """两个都是 localhost 时保持原行为（开发环境）。"""
-        from src.auth.providers import _get_trusted_host
+        from src.domains.mgmt.auth.providers import _get_trusted_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             req = self._mock_request(host="localhost:8080", fwd_host="127.0.0.1:3000")
@@ -197,9 +197,9 @@ class TestRemainingLocalhostFallback:
 
     def test_t10_12_get_server_base_url_fallback_not_8080(self):
         """T10-12: get_server_base_url() 所有来源为空时返回 http://localhost:3000（非 8080）。"""
-        from src.user.db import get_server_base_url
+        from src.domains.mgmt.user.db import get_server_base_url
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GRAPE_PORT", None)
             result = get_server_base_url()
@@ -208,9 +208,9 @@ class TestRemainingLocalhostFallback:
 
     def test_t10_13_get_server_base_url_fallback_grape_port(self):
         """T10-13: get_server_base_url() fallback 端口从 GRAPE_PORT 读取。"""
-        from src.user.db import get_server_base_url
+        from src.domains.mgmt.user.db import get_server_base_url
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {"GRAPE_PORT": "4000"}):
             result = get_server_base_url()
             assert "4000" in result, f"fallback should use GRAPE_PORT=4000, got: {result}"
@@ -230,7 +230,7 @@ class TestRemainingLocalhostFallback:
     def test_t10_15_providers_host_default_empty(self):
         """T10-15: providers.py Host header default 为空字符串（非 localhost:80）。"""
         import inspect
-        from src.auth import providers
+        from src.domains.mgmt.auth import providers
         src = inspect.getsource(providers)
         # 不应有 localhost:80 作为 default
         assert '"localhost:80"' not in src, \

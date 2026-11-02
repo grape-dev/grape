@@ -8,7 +8,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from src.api.routes import latency
+from src.domains.insight.routes import latency
 from src.api import db_setup
 
 

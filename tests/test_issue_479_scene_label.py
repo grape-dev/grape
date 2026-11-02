@@ -145,7 +145,7 @@ class TestBackendSceneNameContract:
     def test_t3_01_renamed_default_scene_returns_real_name(self):
         """UC7: default 场景改名后，get_pipeline 响应 scene_name 必须是改名后的名称。"""
         from src.api.pipeline_config import invalidate_scene_cache
-        from src.api.routes.pipeline import get_pipeline
+        from src.domains.runtime.routes.pipeline import get_pipeline
 
         invalidate_scene_cache()  # 清 60s 进程级场景缓存，避免与库内其他用例互扰
         raw = get_pipeline(
@@ -174,7 +174,7 @@ class TestBackendSceneNameContract:
         徽章永远只显示「跨场景移交」不带目标场景名。
         """
         from src.api.pipeline_config import invalidate_scene_cache
-        from src.api.routes.pipeline import get_pipeline
+        from src.domains.runtime.routes.pipeline import get_pipeline
 
         invalidate_scene_cache()
         raw = get_pipeline(

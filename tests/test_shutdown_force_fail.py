@@ -88,7 +88,7 @@ def _fixture():
 
 class TestShutdownForceFail:
     def test_local_fail_reason_in_task_and_event(self):
-        from src.agent.executor import terminate_active_agents
+        from src.domains.runtime.agents.executor import terminate_active_agents
         """本机任务 force-fail：errors 注明系统重启中断，events.result 同步写入。"""
         _seed_runtime(RT_LOCAL, 0, busy=1)
         _seed_task_and_event("t_shdn_local", RT_LOCAL, 9001)
@@ -101,7 +101,7 @@ class TestShutdownForceFail:
         assert EV_REASON in (ev[1] or ""), "events.result 未写入，前端将兜底 summary 显示无意义文案"
 
     def test_local_releases_busy_slot(self):
-        from src.agent.executor import terminate_active_agents
+        from src.domains.runtime.agents.executor import terminate_active_agents
         """force-fail 的本机任务统一释放 busy 槽（busy=1 → 0）。"""
         _seed_runtime(RT_LOCAL, 0, busy=1)
         _seed_task_and_event("t_shdn_busy", RT_LOCAL, 9002)
@@ -110,7 +110,7 @@ class TestShutdownForceFail:
         assert _busy(RT_LOCAL) == 0, "停机路径漏释放 busy 槽"
 
     def test_remote_skipped(self):
-        from src.agent.executor import terminate_active_agents
+        from src.domains.runtime.agents.executor import terminate_active_agents
         """REMOTE（worker 承载）任务跳过：状态不变、busy 不变、event 不变。"""
         _seed_runtime(RT_REMOTE, CRED_REMOTE, busy=1)
         _seed_task_and_event("t_shdn_remote", RT_REMOTE, 9003)

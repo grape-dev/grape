@@ -16,8 +16,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import alerts as al            # noqa: E402
-from src.observability import events_view as ev        # noqa: E402
+from src.domains.insight.observability import alerts as al            # noqa: E402
+from src.domains.insight.observability import events_view as ev        # noqa: E402
 
 UID = 7801
 OTHER_UID = 7802
@@ -276,7 +276,7 @@ def test_state_repo_and_limit_filters():
 
 
 def test_repo_out_of_scope_raises():
-    from src.observability.overview import RepoNotVisible
+    from src.domains.insight.observability.overview import RepoNotVisible
     with pytest.raises(RepoNotVisible):
         ev.unified_events(USER, repo="org/ev-theirs", limit=10)
 

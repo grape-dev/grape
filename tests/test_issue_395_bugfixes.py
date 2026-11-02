@@ -38,7 +38,7 @@ _headers = {}
 
 def setup_module():
     global _uid, _headers
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()
@@ -109,7 +109,7 @@ class TestKnowledgePagination422:
 
     def _ensure_repo_member(self):
         """预置测试用户对 gitcode:org/test 的成员关系（越界校验 422 应先于业务 403）。"""
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -199,7 +199,7 @@ class TestOrgWriteAuthBoundToPath:
             if row:
                 other_owner = {"id": row[0]}
             else:
-                from src.auth.password import hash_password
+                from src.domains.mgmt.auth.password import hash_password
                 c.execute(
                     "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
                     "VALUES (?,?,?,?,1,0)",
@@ -223,7 +223,7 @@ class TestOrgWriteAuthBoundToPath:
         other_owner = None
         with db_lock:
             c = db.cursor()
-            from src.auth.password import hash_password
+            from src.domains.mgmt.auth.password import hash_password
             c.execute(
                 "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
                 "VALUES (?,?,?,?,1,0)",
@@ -248,7 +248,7 @@ class TestOrgWriteAuthBoundToPath:
         # owner 是别人（占位），自己是 member
         with db_lock:
             c = db.cursor()
-            from src.auth.password import hash_password
+            from src.domains.mgmt.auth.password import hash_password
             c.execute(
                 "INSERT INTO grape_accounts (username, email, password_hash, nickname, status, token_version) "
                 "VALUES (?,?,?,?,1,0)",
@@ -345,7 +345,7 @@ class TestHostRepoUpstreamErrorMapping:
     """host_repo：上游 404 → 404；上游 401/403 → 403；上游 5xx → 5xx 固定文案不泄露"""
 
     def _host(self, upstream_exc):
-        import src.api.routes.repos as repos_mod
+        import src.domains.mgmt.routes.repos as repos_mod
 
         class FakeBody:
             full_name = "at_none/at_none"
@@ -355,14 +355,14 @@ class TestHostRepoUpstreamErrorMapping:
 
         with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
              patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
-             patch("src.user.db.get_global_gitcode_bot_token", return_value="bot_tok"), \
-             patch("src.user.db.get_global_bot_usernames", return_value=["hwc-dev-bot"]), \
-             patch("src.user.db.get_meta_value", return_value="http://webhook"), \
+             patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="bot_tok"), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["hwc-dev-bot"]), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://webhook"), \
              patch.object(repos_mod, "get_user_token_with_refresh", return_value="user_tok"), \
              patch.object(repos_mod, "get_user_github_token_with_refresh", return_value=""), \
              patch.object(repos_mod, "_get_user_provider_and_token",
                           return_value=("gitcode", "user_tok")), \
-             patch("src.user.repo_manager._req", side_effect=upstream_exc), \
+             patch("src.domains.mgmt.user.repo_manager._req", side_effect=upstream_exc), \
              patch.object(repos_mod, "with_oauth_token",
                           side_effect=lambda user, provider, fn, *a, **kw: fn("user_tok", *a, **kw)), \
              patch("builtins.open", MagicMock()) as mock_open:

@@ -14,7 +14,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 
 def _make_ctx(app_id="cli_feishu"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="feishu-test")
 
 
@@ -24,7 +24,7 @@ def _make_api_with_session():
     session 用 MagicMock（非 AsyncMock）：其 .post/.get 调用返回普通对象，
     可被 `async with` 正常处理；响应对象由 _http_response 提供 async CM。
     """
-    from src.im.feishu_async import FeishuAsync
+    from src.domains.runtime.im.feishu_async import FeishuAsync
     api = FeishuAsync()
     session = MagicMock()
     api._get_session = AsyncMock(return_value=session)
@@ -43,7 +43,7 @@ def _http_response(payload):
 class TestGetTenantToken:
     def test_fetches_token_with_cache(self):
         """首次获取 token，二次命中 ctx.token 缓存。"""
-        from src.im.feishu_async import FEISHU_BASE
+        from src.domains.runtime.im.feishu_async import FEISHU_BASE
         api, session = _make_api_with_session()
         ctx = _make_ctx()
         session.post.return_value = _http_response(

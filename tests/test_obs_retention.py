@@ -14,9 +14,9 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import alerts as al          # noqa: E402
-from src.observability import llm_usage as lu       # noqa: E402
-from src.observability import loops as lp           # noqa: E402
+from src.domains.insight.observability import alerts as al          # noqa: E402
+from src.domains.insight.observability import llm_usage as lu       # noqa: E402
+from src.domains.insight.observability import loops as lp           # noqa: E402
 
 UID = 7788
 REPO = "gitcode:org/ret-mine"

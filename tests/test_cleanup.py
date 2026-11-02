@@ -5,7 +5,7 @@ import pytest
 from datetime import datetime, timezone, timedelta
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import cleanup
+from src.domains.runtime.engine import cleanup
 
 
 def test_sweep_once_purges_stale_im_instances():
@@ -58,7 +58,7 @@ def _cleanup_env(tmp_path, monkeypatch):
 
 
 def _mk_workdir(repo_key, agent_type, num):
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     d = repogit.issue_dir_for(repo_key, agent_type, num)
     os.makedirs(d, exist_ok=True)
     open(os.path.join(d, "scratch.txt"), "w", encoding="utf-8").write("x")
@@ -107,7 +107,7 @@ class TestSweeper:
 
 
 def repogit_dir(repo_key, agent_type, num):
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     return repogit.issue_dir_for(repo_key, agent_type, num)
 
 

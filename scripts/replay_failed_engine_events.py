@@ -7,7 +7,7 @@ Only re-runs events whose issue is still pending (no later success for that issu
 import sys, json
 sys.path.insert(0, '/opt/grape')
 import pymysql
-from src.api.event_pipeline import run_pipeline
+from src.domains.runtime.pipeline.event_pipeline import run_pipeline
 
 cfg = json.load(open('/opt/grape/configs/db-backend.json'))['mysql']
 conn = pymysql.connect(host=cfg['host'], port=cfg['port'], user=cfg['user'],

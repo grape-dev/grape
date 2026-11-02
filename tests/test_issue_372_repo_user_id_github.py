@@ -23,7 +23,7 @@ def test_github_actor_matches_github_login():
 
     FR-18.1: 按 provider 分列查询，GitHub 仓库查 github_login 列。
     """
-    from src.runtime.engine_select import _repo_user_id
+    from src.domains.runtime.engine.engine_select import _repo_user_id
 
     mock_cursor = MagicMock()
     # Step 1: unified_user_mapping query returns user_id=14
@@ -31,7 +31,7 @@ def test_github_actor_matches_github_login():
     mock_db = MagicMock()
     mock_db.cursor.return_value = mock_cursor
 
-    with patch("src.runtime.engine_select._db", return_value=(mock_db, MagicMock())):
+    with patch("src.domains.runtime.engine.engine_select._db", return_value=(mock_db, MagicMock())):
         result = _repo_user_id("github:owner/test-repo", issue_creator="yangaiwu")
 
     assert result == 14, (
@@ -46,14 +46,14 @@ def test_github_actor_matches_github_login():
 
 def test_gitcode_actor_still_matches_gitcode_user():
     """T19-02: GitCode actor 仍查 gitcode_user（不受影响）。"""
-    from src.runtime.engine_select import _repo_user_id
+    from src.domains.runtime.engine.engine_select import _repo_user_id
 
     mock_cursor = MagicMock()
     mock_cursor.fetchone.return_value = (7,)  # gitcode_user match → user_id=7
     mock_db = MagicMock()
     mock_db.cursor.return_value = mock_cursor
 
-    with patch("src.runtime.engine_select._db", return_value=(mock_db, MagicMock())):
+    with patch("src.domains.runtime.engine.engine_select._db", return_value=(mock_db, MagicMock())):
         result = _repo_user_id("gitcode:owner/test-repo", issue_creator="gc_user_123")
 
     assert result == 7, f"GitCode actor 应通过 gitcode_user 命中 user_id=7，实际 {result}"
@@ -70,7 +70,7 @@ def test_sql_query_uses_provider_split():
     FR-CQ-1: 重构后用 um_column_for_repo 统一列名选择，不再 inline if/else。
     """
     import inspect
-    from src.runtime.engine_select import _repo_user_id
+    from src.domains.runtime.engine.engine_select import _repo_user_id
 
     src = inspect.getsource(_repo_user_id)
     assert "um_column_for_repo" in src, (

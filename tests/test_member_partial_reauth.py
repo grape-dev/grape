@@ -46,10 +46,10 @@ _saved_repos = {}
 def client():
     from src.api.main import app
     from src.api.deps import get_current_user, get_current_user_or_api_key
-    from src.api.routes import repos as repos_route
-    from src.user import db as user_db
+    from src.domains.mgmt.routes import repos as repos_route
+    from src.domains.mgmt.user import db as user_db
 
-    from src.auth import grape_account_db as acct_db
+    from src.domains.mgmt.auth import grape_account_db as acct_db
 
     def _fake_identities(uid):
         return [{"provider": "gitcode"}, {"provider": "github"}]
@@ -87,7 +87,7 @@ def client():
 
 
 def test_member_partial_reauth_saves_cache(client, monkeypatch):
-    from src.api.routes import repos as repos_route
+    from src.domains.mgmt.routes import repos as repos_route
     from src.api.oauth_token import with_oauth_token
     from fastapi import HTTPException
 

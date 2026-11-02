@@ -1,2 +1,4 @@
-"""CodeArts 后端实现（兼容转发层，M0 后迁至 src.runtime.codearts）"""
-from src.runtime.codearts import CodeArtsRuntime as CodeArtsBackend
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.runtime.agents.codearts"""
+import src.domains.runtime.agents.codearts as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

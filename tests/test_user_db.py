@@ -10,12 +10,12 @@ import uuid
 import pytest
 from unittest.mock import patch
 
-from src.user import db as udb
+from src.domains.mgmt.user import db as udb
 from src.kernel.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.user.db import get_token_version
+    from src.domains.mgmt.user.db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -232,7 +232,7 @@ class TestManagedRepos:
             # 仓库级 token
             assert udb.get_gitcode_token(repo_key=rk) == "repo_bt"
             # 全局兜底
-            with patch("src.user.db._get_global_bot_token", return_value="global_bt"):
+            with patch("src.domains.mgmt.user.db._get_global_bot_token", return_value="global_bt"):
                 assert udb.get_gitcode_token(repo_key="gitcode:org/no-repo") == "global_bt"
             # 空 repo + 无 user → ""
             assert udb.get_gitcode_token() == ""
@@ -468,7 +468,7 @@ class TestAgentRuntimes:
     def test_local_engine_info_and_ensure_default(self):
         self._clean()
         try:
-            with patch("src.agent.executor.discover_backends", return_value=[
+            with patch("src.domains.runtime.agents.executor.discover_backends", return_value=[
                     {"name": "opencode", "installed": True, "cli_path": "/x"}]):
                 installed, cli = udb._local_engine_info("opencode")
                 assert installed is True and cli == "/x"
@@ -478,7 +478,7 @@ class TestAgentRuntimes:
                 # 已存在 → 复用
                 assert udb.ensure_default_runtime("opencode") == rid
             # 未知引擎 → 拒绝创建
-            with patch("src.agent.executor.discover_backends", return_value=[]):
+            with patch("src.domains.runtime.agents.executor.discover_backends", return_value=[]):
                 assert udb.ensure_default_runtime("ghost_engine") is None
         finally:
             self._clean()

@@ -2,7 +2,7 @@
 import json
 
 from src.api.event_rule import evaluate_event_action
-from src.vcs.gitcode import GitCodeBackend
+from src.domains.runtime.vcs.gitcode import GitCodeBackend
 
 BACKEND = GitCodeBackend()
 
@@ -72,7 +72,7 @@ def test_close_review_reopen_taxonomy():
 
 def test_pr_update_commit_gate(monkeypatch):
     _inject_rules(monkeypatch)
-    monkeypatch.setattr("src.user.db.get_all_bot_usernames", lambda: {"grape_bot"})
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_all_bot_usernames", lambda: {"grape_bot"})
     # user + 有 commit → allow（重新审查）
     r = evaluate_event_action("pull_request_updated", _payload("update", with_commits=True, username="dev"))
     assert r["decision"] == "allow"
@@ -86,7 +86,7 @@ def test_pr_update_commit_gate(monkeypatch):
 
 def test_pr_open_allowed_reopen_skipped(monkeypatch):
     _inject_rules(monkeypatch)
-    monkeypatch.setattr("src.user.db.get_all_bot_usernames", lambda: set())
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_all_bot_usernames", lambda: set())
     assert evaluate_event_action("pull_request_updated", _payload("open"))["decision"] == "allow"
     assert evaluate_event_action("pull_request_updated", _payload("close"))["decision"] == "skip"
     assert evaluate_event_action("pull_request_updated", _payload("reopen"))["decision"] == "skip"

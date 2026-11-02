@@ -36,7 +36,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import _create_tables
-from src.auth.grape_account_db import (
+from src.domains.mgmt.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_id,
     get_grape_account_by_identifier, is_username_taken, is_email_registered,
     get_token_version, increment_token_version, update_password,
@@ -44,13 +44,13 @@ from src.auth.grape_account_db import (
     delete_external_identity, count_user_identities, has_password,
     get_external_identity, update_external_identity_tokens,
 )
-from src.auth.password import hash_password, verify_password, needs_upgrade
-from src.auth.verification import generate_code, send_code, verify_code, SCENES
-from src.auth.audit import log_audit, mask_email, mask_identifier, EVENT_TYPES
-from src.auth.signup_policy import check_signup_allowed
-from src.auth.login_throttle import record_failure, check_throttle, clear_failures
-from src.auth.providers import _DEFAULT_PROVIDERS, get_provider, list_providers
-from src.auth.email_service import is_production_env, is_dev_verification_code
+from src.domains.mgmt.auth.password import hash_password, verify_password, needs_upgrade
+from src.domains.mgmt.auth.verification import generate_code, send_code, verify_code, SCENES
+from src.domains.mgmt.auth.audit import log_audit, mask_email, mask_identifier, EVENT_TYPES
+from src.domains.mgmt.auth.signup_policy import check_signup_allowed
+from src.domains.mgmt.auth.login_throttle import record_failure, check_throttle, clear_failures
+from src.domains.mgmt.auth.providers import _DEFAULT_PROVIDERS, get_provider, list_providers
+from src.domains.mgmt.auth.email_service import is_production_env, is_dev_verification_code
 
 # 初始化表
 _create_tables()
@@ -60,11 +60,11 @@ _create_tables()
 @pytest.fixture(autouse=True)
 def _mock_email_service():
     """mock 邮件服务，send_verification_code 和 send_notification 均返回 True。"""
-    with patch("src.auth.email_service.EmailService.send_verification_code", return_value=True), \
-         patch("src.auth.email_service.EmailService.send_notification", return_value=True), \
-         patch("src.auth.email_service.EmailService._send_smtp", return_value=True), \
-         patch("src.auth.email_service.EmailService._send_resend", return_value=True), \
-         patch("src.auth.email_service.is_email_configured", return_value=True):
+    with patch("src.domains.mgmt.auth.email_service.EmailService.send_verification_code", return_value=True), \
+         patch("src.domains.mgmt.auth.email_service.EmailService.send_notification", return_value=True), \
+         patch("src.domains.mgmt.auth.email_service.EmailService._send_smtp", return_value=True), \
+         patch("src.domains.mgmt.auth.email_service.EmailService._send_resend", return_value=True), \
+         patch("src.domains.mgmt.auth.email_service.is_email_configured", return_value=True):
         yield
 
 
@@ -75,8 +75,8 @@ _TEST_DEV_CODE = "888888"
 @pytest.fixture(autouse=True)
 def _mock_dev_code():
     """mock is_dev_verification_code，测试环境固定验证码 888888 直接通过。"""
-    with patch("src.auth.verification.is_dev_verification_code", side_effect=lambda code: code == _TEST_DEV_CODE), \
-         patch("src.auth.email_service.is_dev_verification_code", side_effect=lambda code: code == _TEST_DEV_CODE):
+    with patch("src.domains.mgmt.auth.verification.is_dev_verification_code", side_effect=lambda code: code == _TEST_DEV_CODE), \
+         patch("src.domains.mgmt.auth.email_service.is_dev_verification_code", side_effect=lambda code: code == _TEST_DEV_CODE):
         yield
 
 
@@ -111,7 +111,7 @@ class TestRegister:
     def test_register_send_code_success(self):
         """发送注册验证码成功。"""
         # P1-3: 默认关闭注册，测试需手动开启
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         set_meta_value("allow_signup", "1")
         try:
             username = "test_reg_" + uuid.uuid4().hex[:6]
@@ -170,7 +170,7 @@ class TestRegister:
     def test_register_verify_success(self):
         """完整注册流程：发送验证码 → 验证 → 创建账号。"""
         # P1-3: 默认关闭注册，测试需手动开启
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("allow_signup", "1")
         try:
             username = "test_verify_" + uuid.uuid4().hex[:6]
@@ -426,7 +426,7 @@ class TestSignupPolicy:
     def test_default_allow(self):
         """P1-3: 默认关闭注册（无白名单 + 未配置 allow_signup）。"""
         # 确保 allow_signup 未配置
-        from src.user.db import set_meta_value, get_meta_value
+        from src.domains.mgmt.user.db import set_meta_value, get_meta_value
         set_meta_value("allow_signup", "")
         assert not check_signup_allowed("anyone@example.com")
 
@@ -456,32 +456,32 @@ class TestAllowSignupValueConsistency:
 
     def test_meta_true_normalizes_to_1(self):
         """meta="true" → config 返回 "1"。"""
-        from src.user.db import set_meta_value
-        from src.admin.config_store import read_public_config
+        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.admin.config_store import read_public_config
         set_meta_value("allow_signup", "true")
         cfg = read_public_config()
         assert cfg["allow_signup"] == "1", f'Expected "1", got "{cfg["allow_signup"]}"'
 
     def test_meta_1_normalizes_to_1(self):
         """meta="1" → config 返回 "1"。"""
-        from src.user.db import set_meta_value
-        from src.admin.config_store import read_public_config
+        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.admin.config_store import read_public_config
         set_meta_value("allow_signup", "1")
         cfg = read_public_config()
         assert cfg["allow_signup"] == "1", f'Expected "1", got "{cfg["allow_signup"]}"'
 
     def test_meta_empty_normalizes_to_0(self):
         """meta="" → config 返回 "0"。"""
-        from src.user.db import set_meta_value
-        from src.admin.config_store import read_public_config
+        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.admin.config_store import read_public_config
         set_meta_value("allow_signup", "")
         cfg = read_public_config()
         assert cfg["allow_signup"] == "0", f'Expected "0", got "{cfg["allow_signup"]}"'
 
     def test_meta_yes_normalizes_to_1(self):
         """meta="yes" → config 返回 "1"（兼容旧值）。"""
-        from src.user.db import set_meta_value
-        from src.admin.config_store import read_public_config
+        from src.domains.mgmt.user.db import set_meta_value
+        from src.domains.mgmt.admin.config_store import read_public_config
         set_meta_value("allow_signup", "yes")
         cfg = read_public_config()
         assert cfg["allow_signup"] == "1", f'Expected "1", got "{cfg["allow_signup"]}"'
@@ -635,7 +635,7 @@ class TestEmailService:
     def test_dev_code_mock_via_verification_module(self):
         """D46: mock dev code 通过 verification 模块调用时生效。
 
-        mock patch 在 src.auth.verification.is_dev_verification_code 上，
+        mock patch 在 src.domains.mgmt.auth.verification.is_dev_verification_code 上，
         所以通过 verify_code() 调用路径会走 mock。
         直接调 email_service.is_dev_verification_code 不走 mock（测试原始函数行为）。
         """

@@ -16,7 +16,7 @@ import os
 import time
 import pytest
 
-from src.runtime import agent as runtime_agent
+from src.domains.runtime.engine import agent as runtime_agent
 
 
 class _SlowClient:
@@ -88,7 +88,7 @@ class TestEventLoopBlock:
         修复后：迭代中 await asyncio.sleep(0) 让出，heartbeat 持续增长。
         """
         # patch stream_runtime 为慢同步生成器
-        monkeypatch.setattr("src.runtime.executor.stream_runtime", _slow_stream_runtime)
+        monkeypatch.setattr("src.domains.runtime.engine.executor.stream_runtime", _slow_stream_runtime)
 
         client = _SlowClient()
         task = self._build_task(monkeypatch)
@@ -122,7 +122,7 @@ class TestEventLoopBlock:
 
     def test_task_start_and_complete_called(self, monkeypatch):
         """慢生成器执行完后，task_start 应被调用且 _execute_task 返回 done 事件。"""
-        monkeypatch.setattr("src.runtime.executor.stream_runtime", _slow_stream_runtime)
+        monkeypatch.setattr("src.domains.runtime.engine.executor.stream_runtime", _slow_stream_runtime)
         client = _SlowClient()
         task = self._build_task(monkeypatch)
         result = asyncio.run(runtime_agent._execute_task(client, task))
@@ -137,7 +137,7 @@ class TestEventLoopBlock:
         方案 1（await sleep(0)）在生成器停在 readline 上时失效（无 yield 无让出点）；
         方案 2（线程化 _stream_runtime_async）把 readline() 阻塞移到后台线程，事件循环保持调度。
         """
-        monkeypatch.setattr("src.runtime.executor.stream_runtime", _silent_long_stream_runtime)
+        monkeypatch.setattr("src.domains.runtime.engine.executor.stream_runtime", _silent_long_stream_runtime)
         client = _SlowClient()
         task = self._build_task(monkeypatch)
 
@@ -180,7 +180,7 @@ class TestEventLoopBlock:
         调用时 cwd 的 .skills 尚未被写入。
         """
         import json as _json
-        from src.runtime import agent as ra
+        from src.domains.runtime.engine import agent as ra
 
         # 构造 coding 任务（git agent + 有关联 issue + issue_session_id）
         task = self._build_task(monkeypatch)
@@ -202,8 +202,8 @@ class TestEventLoopBlock:
             seen["skills_existed_at_worktree_call"] = os.path.isdir(os.path.join(cwd, ".skills"))
             return os.path.join(cwd, ".worktree")  # 假 worktree 路径
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_issue_worktree", _fake_ensure_worktree)
-        monkeypatch.setattr("src.runtime.executor.stream_runtime", _slow_stream_runtime)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_issue_worktree", _fake_ensure_worktree)
+        monkeypatch.setattr("src.domains.runtime.engine.executor.stream_runtime", _slow_stream_runtime)
 
         client = _SlowClient()
         asyncio.run(runtime_agent._execute_task(client, task))

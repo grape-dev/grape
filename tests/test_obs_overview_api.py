@@ -17,7 +17,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import overview as ov  # noqa: E402
+from src.domains.insight.observability import overview as ov  # noqa: E402
 
 
 # ------------------------------------------------------------------ 夹具

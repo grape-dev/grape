@@ -39,7 +39,7 @@ def _route(stage="vod", owner="", cancelled=False):
                 "UPDATE issue SET status='cancelled' WHERE repo_key=? AND issue_number=?",
                 (REPO, NUM))
             db.commit()
-    from src.api.event_pipeline import _resolve_issue_stage_agent
+    from src.domains.runtime.pipeline.event_pipeline import _resolve_issue_stage_agent
     return _resolve_issue_stage_agent(REPO, "issue_comment",
                                       {"issue": {"number": NUM}}, "issue")
 

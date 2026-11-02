@@ -17,7 +17,7 @@ T7 _fetch_task_stats 归一化：DB 返回 Decimal 时 result 为 int
 from decimal import Decimal
 from unittest.mock import patch
 
-from src.runtime.health_scorer import (
+from src.domains.runtime.engine.health_scorer import (
     _compute_health_score,
     _consecutive_failure_penalty,
     _fetch_task_stats,
@@ -75,8 +75,8 @@ class TestDecimalCrashFix:
             def cursor(self):
                 return _FakeCursor()
 
-        with patch("src.runtime.health_scorer._db", return_value=_FakeDb()), \
-             patch("src.runtime.health_scorer._effective_window_start", return_value="2026-10-16T00:00:00"):
+        with patch("src.domains.runtime.engine.health_scorer._db", return_value=_FakeDb()), \
+             patch("src.domains.runtime.engine.health_scorer._effective_window_start", return_value="2026-10-16T00:00:00"):
             stats = _fetch_task_stats(1)
         assert stats["total"] == 20 and isinstance(stats["total"], int)
         assert stats["failed"] == 6 and isinstance(stats["failed"], int)

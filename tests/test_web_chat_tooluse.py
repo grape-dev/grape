@@ -64,7 +64,7 @@ class TestWebChatToolUseRegression:
     def test_send_stream_handles_dict_tool_use(self, client):
         """send/stream：agent 产出 dict tool_use 时不应崩溃，回复应送达。"""
         _seed_local_engine()
-        with patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
+        with patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
         body = r.text
@@ -74,7 +74,7 @@ class TestWebChatToolUseRegression:
     def test_send_handles_dict_tool_use(self, client):
         """send（非流式）：同样不应因 dict tool_use 崩溃，reply 应返回。"""
         _seed_local_engine()
-        with patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
+        with patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
         data = r.json()
@@ -82,7 +82,7 @@ class TestWebChatToolUseRegression:
 
     def test_tool_use_logging_uses_str(self):
         """日志对 dict 用 str(data)[:N]（修复点：不能 data[:N] 直接切片 dict）。"""
-        from src.api.routes import chat as chat_mod
+        from src.domains.runtime.routes import chat as chat_mod
         import inspect
         src = inspect.getsource(chat_mod)
         # 断言不再存在对 tool_use 的裸切片
@@ -110,12 +110,12 @@ class TestWebChatToolUseRegression:
             db.commit()
         from src.kernel.session_manager import set_chat_config
         set_chat_config(99901, backend="opencode-wt-dev")
-        with patch("src.runtime.service.enqueue_task", return_value="t_q") as m_enq, \
-             patch("src.runtime.service.wait_task_terminal",
+        with patch("src.domains.runtime.engine.service.enqueue_task", return_value="t_q") as m_enq, \
+             patch("src.domains.runtime.engine.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
                                                "result_text": "QUEUE_OK",
                                                "usage_json": '{"session_id": "ses_q"}'})), \
-             patch("src.runtime.executor.stream_chat_agent") as m_sa:
+             patch("src.domains.runtime.engine.executor.stream_chat_agent") as m_sa:
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
 
         assert r.status_code == 200
@@ -150,8 +150,8 @@ class TestWebChatToolUseRegression:
             c.execute("INSERT INTO chat_agent_session (id, user_id, runtime_id, runtime, created_at, last_active_at) "
                       "VALUES ('sess-cfg-99901', 99901, ?, 'opencode', datetime('now'), datetime('now'))", (local_rid,))
             db.commit()
-        with patch("src.runtime.service.enqueue_task") as m_enq, \
-             patch("src.runtime.service.wait_task_terminal") as m_wait:
+        with patch("src.domains.runtime.engine.service.enqueue_task") as m_enq, \
+             patch("src.domains.runtime.engine.service.wait_task_terminal") as m_wait:
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
         # SSE 文本经 json.dumps(ensure_ascii) 转义，须解析 done 事件取 text 判断
@@ -185,7 +185,7 @@ class TestWebChatToolUseRegression:
 
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
         _seed_local_engine()
-        with patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
+        with patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = client.post("/api/chat/send/stream", json={"message": "测试", "repo_key": ""})
         assert r.status_code == 200
         assert _done_text(r.text) == "联通成功"

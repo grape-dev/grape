@@ -6,7 +6,7 @@ import uuid
 
 import pytest
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 REPO = 'test_handoff/repo'
 

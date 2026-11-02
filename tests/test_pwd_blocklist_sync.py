@@ -24,7 +24,7 @@ HEADER = (
 
 
 def _expected_content() -> str:
-    from src.auth.password import _WEAK_PASSWORDS
+    from src.domains.mgmt.auth.password import _WEAK_PASSWORDS
     words = sorted(_WEAK_PASSWORDS)
     return (
         HEADER

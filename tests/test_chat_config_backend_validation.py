@@ -26,7 +26,7 @@ USERNAME = "issue508_tester"
 def _client():
     """隔离：快照并清空 agent_runtimes（含 conftest 种子），用例内确定性构造引擎；
     teardown 恢复快照，避免影响同批其他测试（模式同 test_chat_config_engine_selection）。"""
-    from src.runtime.engine_select import _resolve_local_cache
+    from src.domains.runtime.engine.engine_select import _resolve_local_cache
     _resolve_local_cache.clear()
     with db_lock:
         cur = db.cursor()

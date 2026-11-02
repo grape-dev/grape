@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.runtime import agent as ra
+from src.domains.runtime.engine import agent as ra
 
 
 # ===== 服务端测试 =====
@@ -98,8 +98,8 @@ class TestWorkerAutoUpgrade:
             "status": "ok", "cancelled_tasks": [],
             "latest_version": "git-newversion-w123-p456"
         }
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
              patch("random.uniform", return_value=0):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
@@ -115,8 +115,8 @@ class TestWorkerAutoUpgrade:
             "status": "ok", "cancelled_tasks": [],
             "latest_version": "git-sameversion-w123-p456"
         }
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-sameversion-w123-p456"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="git-sameversion-w123-p456"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
             m_upgrade.assert_not_awaited()
@@ -131,8 +131,8 @@ class TestWorkerAutoUpgrade:
             "status": "ok", "cancelled_tasks": [],
             "latest_version": "git-newversion-w123-p456"
         }
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
                 _test_active_tasks={"busy-tid": "busy-session"})))
@@ -148,8 +148,8 @@ class TestWorkerAutoUpgrade:
             "status": "ok", "cancelled_tasks": [],
             "latest_version": ""
         }
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="git-oldversion"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
             m_upgrade.assert_not_awaited()
@@ -164,8 +164,8 @@ class TestWorkerAutoUpgrade:
             "status": "ok", "cancelled_tasks": [],
             "latest_version": "git-newversion-w123-p456"
         }
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="git-oldversion-w111-p222"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
              patch("random.uniform", return_value=0):
             try:
                 asyncio.run(self._drive(ra._run_loop(
@@ -190,9 +190,9 @@ class TestWorkerAutoUpgrade:
             return _hb_responses[min(_call_count["n"], len(_hb_responses) - 1)]
 
         client.heartbeat.side_effect = _fake_hb
-        with patch("src.runtime.agent._read_local_worker_version", return_value="git-old-w111-p222"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="git-old-w111-p222"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
              patch("random.uniform", return_value=0):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.02, max_concurrent=4),
@@ -254,10 +254,10 @@ class TestWorkerAutoUpgrade:
         client.reset_session = AsyncMock()
         client.latest_version.return_value = "h-sameversion"
         client.get_task_state.return_value = "running"
-        with patch("src.runtime.agent._read_local_worker_version", return_value="h-sameversion"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])), \
-             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d):
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-sameversion"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=[1])), \
+             patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
             m_upgrade.assert_not_awaited()
@@ -276,10 +276,10 @@ class TestWorkerAutoUpgrade:
         client.reset_session = AsyncMock()
         client.latest_version.return_value = "h-newversion1234"
         client.get_task_state.return_value = "running"
-        with patch("src.runtime.agent._read_local_worker_version", return_value="h-oldversion1234"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
-             patch("src.runtime.agent._reregister", new=AsyncMock(return_value=[1])), \
-             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)) as m_upgrade, \
+             patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=[1])), \
+             patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else d), \
              patch("random.uniform", return_value=0):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4),
@@ -317,11 +317,11 @@ class TestZombieTaskReclamation:
         client.fail = AsyncMock()
         # 模拟一个已经超龄的僵尸任务（claim_time 设为极小值，阈值 1s → loop.time() - 0.001 > 1）
         _zombie_task = {"id": "zombie-tid", "_engine_name": "opencode", "_claim_time": 0.001}
-        with patch("src.runtime.agent._read_local_worker_version", return_value="h-oldversion1234"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
-             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (1.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)), \
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
+             patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (1.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)), \
              patch("random.uniform", return_value=0), \
-             patch("src.runtime.agent._kill_stale_engine"):
+             patch("src.domains.runtime.engine.agent._kill_stale_engine"):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
                 _test_active_tasks={"zombie-tid": "zombie-session"},
@@ -341,9 +341,9 @@ class TestZombieTaskReclamation:
         }
         client.get_task_state.return_value = "running"
         client.fail = AsyncMock()
-        with patch("src.runtime.agent._read_local_worker_version", return_value="h-oldversion1234"), \
-             patch("src.runtime.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
-             patch("src.runtime.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (999999.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)):
+        with patch("src.domains.runtime.engine.agent._read_local_worker_version", return_value="h-oldversion1234"), \
+             patch("src.domains.runtime.engine.agent._perform_upgrade", new=AsyncMock(return_value=False)), \
+             patch("src.domains.runtime.engine.agent._env_float", side_effect=lambda k, d: 0.01 if k == "RUNTIME_REREGISTER_INTERVAL" else (999999.0 if k == "RUNTIME_ZOMBIE_TASK_THRESHOLD" else d)):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4,
                 _test_active_tasks={"fresh-tid": "fresh-session"})))
@@ -396,7 +396,7 @@ class TestReadLocalWorkerVersion:
 
     def test_root_reads_etc_grape(self):
         """root 模式读取 /etc/grape/worker.version。"""
-        with patch("src.runtime.agent.os.geteuid", return_value=0), \
+        with patch("src.domains.runtime.engine.agent.os.geteuid", return_value=0), \
              patch("builtins.open", create=True) as m_open:
             m_open.return_value.__enter__.return_value.read.return_value = "git-root-ver\n"
             result = ra._read_local_worker_version()
@@ -405,8 +405,8 @@ class TestReadLocalWorkerVersion:
 
     def test_non_root_reads_home_grape(self):
         """非 root 模式读取 $HOME/.grape/worker.version。"""
-        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
-             patch("src.runtime.agent.os.path.expanduser", return_value="/home/testuser"), \
+        with patch("src.domains.runtime.engine.agent.os.geteuid", return_value=1000), \
+             patch("src.domains.runtime.engine.agent.os.path.expanduser", return_value="/home/testuser"), \
              patch("builtins.open", create=True) as m_open:
             m_open.return_value.__enter__.return_value.read.return_value = "git-user-ver\n"
             result = ra._read_local_worker_version()
@@ -416,7 +416,7 @@ class TestReadLocalWorkerVersion:
     def test_root_mode_env_override(self):
         """RUNTIME_ROOT_MODE=1 时读取 /etc/grape/worker.version（即使非 root）。"""
         with patch.dict("os.environ", {"RUNTIME_ROOT_MODE": "1"}), \
-             patch("src.runtime.agent.os.geteuid", return_value=1000), \
+             patch("src.domains.runtime.engine.agent.os.geteuid", return_value=1000), \
              patch("builtins.open", create=True) as m_open:
             m_open.return_value.__enter__.return_value.read.return_value = "git-root-ver\n"
             result = ra._read_local_worker_version()
@@ -443,17 +443,17 @@ class TestReadLocalWorkerVersion:
                 raise FileNotFoundError(path)
             return _real_open(path, *a, **k)
 
-        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
+        with patch("src.domains.runtime.engine.agent.os.geteuid", return_value=1000), \
              patch("builtins.open", side_effect=_fake_open), \
-             patch("src.runtime.agent.os.getcwd", return_value=str(tmp_path)):
+             patch("src.domains.runtime.engine.agent.os.getcwd", return_value=str(tmp_path)):
             assert ra._read_local_worker_version() == "h-abc123"
 
     def test_stamp_takes_priority_over_package_version(self, tmp_path):
         """戳文件在位时以戳为准（包内 VERSION 只是兜底，不参与正常路径）。"""
         (tmp_path / "VERSION").write_text("h-abc123\n", encoding="utf-8")
-        with patch("src.runtime.agent.os.geteuid", return_value=1000), \
-             patch("src.runtime.agent.os.path.expanduser", return_value=str(tmp_path)), \
-             patch("src.runtime.agent.os.getcwd", return_value="/nowhere"):
+        with patch("src.domains.runtime.engine.agent.os.geteuid", return_value=1000), \
+             patch("src.domains.runtime.engine.agent.os.path.expanduser", return_value=str(tmp_path)), \
+             patch("src.domains.runtime.engine.agent.os.getcwd", return_value="/nowhere"):
             (tmp_path / ".grape").mkdir()
             (tmp_path / ".grape" / "worker.version").write_text("h-realstamp\n", encoding="utf-8")
             assert ra._read_local_worker_version() == "h-realstamp"

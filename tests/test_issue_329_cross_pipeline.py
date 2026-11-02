@@ -25,7 +25,7 @@ import pytest
 
 from src.api.db_setup import init_database
 from src.kernel.session_manager import db, db_lock
-from src.api.routes.webhook import _cross_pipeline_handoff
+from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
 from src.api.event_store import append_event
 
 init_database()
@@ -210,7 +210,7 @@ def test_event_type_names_includes_cross_scene():
     the pipeline module can be imported and the event types are valid strings
     that won't cause issues when processed.
     """
-    import src.api.routes.pipeline as pipe_mod
+    import src.domains.runtime.routes.pipeline as pipe_mod
     # Verify module loads correctly with the new event types
     assert hasattr(pipe_mod, 'router')
     # The _EVENT_TYPE_NAMES is defined inside a function body; we verify it indirectly

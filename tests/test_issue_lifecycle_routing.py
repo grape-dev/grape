@@ -6,7 +6,7 @@ from unittest.mock import patch as _p
 from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
 from src.api import session_store as ss
-from src.api.event_pipeline import _resolve_issue_stage_agent
+from src.domains.runtime.pipeline.event_pipeline import _resolve_issue_stage_agent
 
 
 @pytest.fixture(autouse=True)
@@ -153,7 +153,7 @@ class TestIssueAssigneeAndStage:
 
     def test_pipeline_stage_field(self):
         """_get_issue_pipeline 返回 stage（来自 issue_state.stage）。"""
-        from src.api.routes.pipeline import _get_issue_pipeline
+        from src.domains.runtime.routes.pipeline import _get_issue_pipeline
         ss.set_issue_stage(RK, "#5", "qa", "qa", assignee="grape_bot")
         events = [
             {"seq": 1, "issue_id": "#5", "event_type": "issue_opened", "agent_type": "vod", "title": "T", "status": "completed", "actor": "alice"},
@@ -166,7 +166,7 @@ class TestIssueAssigneeAndStage:
 
     def test_pipeline_stage_default_vod(self):
         """无 issue_state 记录时 stage 默认 vod。"""
-        from src.api.routes.pipeline import _get_issue_pipeline
+        from src.domains.runtime.routes.pipeline import _get_issue_pipeline
         events = [{"seq": 1, "issue_id": "#5", "event_type": "issue_opened", "agent_type": "vod", "title": "T", "status": "completed", "actor": "alice"}]
         p = _get_issue_pipeline(RK, "#5", events)
         assert p is not None
@@ -194,10 +194,10 @@ class TestOnboardingWebhookPipeline:
 
         # 广播（plugin）模式：is_plugin_mode→True、pick_engine→0、enqueue_task 记 pool_tag
         captured = {"enqueued": []}
-        with _p("src.api.event_pipeline.is_plugin_mode", return_value=True), \
-             _p("src.runtime.engine_select.pick_engine", return_value=0), \
-             _p("src.runtime.service.get_execution_mode", return_value="queue_remote"), \
-             _p("src.runtime.service.enqueue_task",
+        with _p("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True), \
+             _p("src.domains.runtime.engine.engine_select.pick_engine", return_value=0), \
+             _p("src.domains.runtime.engine.service.get_execution_mode", return_value="queue_remote"), \
+             _p("src.domains.runtime.engine.service.enqueue_task",
                 side_effect=lambda **kw: captured["enqueued"].append(kw) or "t_onb_demo"):
             r = ep.run_pipeline(raw, {"X-GitCode-Event": "Issue Hook"},
                                 account="owner/repo", repo_key_override="test/repo")
@@ -222,8 +222,8 @@ class TestOnboardingWebhookPipeline:
             "_onboarding": {"target": "explore", "skill": "repo-onboarding", "skill_id": 0,
                             "scene": "default", "result_path": "/tmp/onboarding-result-explore.json"},
         }).encode()
-        with _p("src.api.event_pipeline.is_plugin_mode", return_value=False), \
-             _p("src.runtime.engine_select.pick_engine", return_value=None):
+        with _p("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=False), \
+             _p("src.domains.runtime.engine.engine_select.pick_engine", return_value=None):
             r = ep.run_pipeline(raw, {"X-GitCode-Event": "Issue Hook"},
                                 account="owner/repo", repo_key_override="test/repo")
         with db_lock:

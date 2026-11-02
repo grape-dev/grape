@@ -8,7 +8,7 @@ import io
 
 import pytest
 
-from src.runtime import skill_materialize as sm
+from src.domains.runtime.engine import skill_materialize as sm
 
 
 SKILL_MD = """---
@@ -236,7 +236,7 @@ def test_empty_target_dir_replaced(skills_root):
 def test_direct_materialize_marks_degradation(skills_root, tmp_path, monkeypatch):
     import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     prompt = "Skill file: {{SKILL_DIR}}/demo-skill/SKILL.md"
     out = _materialize_direct_workdir(tmp_path, "gitcode:acme/repo", "issue",
@@ -260,7 +260,7 @@ def test_direct_materialize_ok_no_notice(skills_root, tmp_path, monkeypatch):
     (official / "references" / "extra.md").write_text("# e", encoding="utf-8")
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(official / "SKILL.md"))
-    from src.api.event_pipeline import _materialize_direct_workdir
+    from src.domains.runtime.pipeline.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
     out = _materialize_direct_workdir(tmp_path, "gitcode:acme/repo", "issue",
                                       "demo-skill", evt, "", "{{SKILL_DIR}}/demo-skill/SKILL.md")

@@ -9,14 +9,14 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.api.routes import tasks as tasks_mod
+from src.domains.runtime.routes import tasks as tasks_mod
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -221,7 +221,7 @@ class TestNotify:
                 issue_number=5, cfg={"backend": "opencode"})
 
         # 断言：不调用 consume_stream_async、不产生 agent LLM 回复（静态模板消息落会话）
-        with patch("src.runtime.executor.consume_stream_async") as m_evict, \
+        with patch("src.domains.runtime.engine.executor.consume_stream_async") as m_evict, \
              patch("src.api.issues_center.add_message") as m_add:
             _aio.run(_run())
         m_evict.assert_not_called(), "notify 不得触发 LLM/opencode 执行"

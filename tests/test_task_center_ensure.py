@@ -11,7 +11,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from unittest.mock import patch
 
-from src.api.routes import tasks as tasks_mod
+from src.domains.runtime.routes import tasks as tasks_mod
 from src.api import issues_center as ic
 from src.kernel.session_manager import db, db_lock
 

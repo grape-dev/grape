@@ -5,10 +5,10 @@
 """
 import json
 import pytest
-from src.vcs.gitcode import GitCodeBackend
-from src.vcs.github import GitHubBackend
-from src.vcs.gitlab import GitLabBackend
-from src.vcs.event_types import (
+from src.domains.runtime.vcs.gitcode import GitCodeBackend
+from src.domains.runtime.vcs.github import GitHubBackend
+from src.domains.runtime.vcs.gitlab import GitLabBackend
+from src.domains.runtime.vcs.event_types import (
     ISSUE_OPENED, ISSUE_UPDATED, ISSUE_CLOSED, ISSUE_REOPENED,
     ISSUE_ASSIGNED, ISSUE_LABELED, ISSUE_COMMENT,
     PR_OPENED, PR_UPDATED, PR_CLOSED, PR_MERGED, PR_COMMENT,

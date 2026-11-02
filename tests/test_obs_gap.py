@@ -18,8 +18,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import alerts as al          # noqa: E402
-from src.observability import gap as gmod           # noqa: E402
+from src.domains.insight.observability import alerts as al          # noqa: E402
+from src.domains.insight.observability import gap as gmod           # noqa: E402
 
 UID = 7799
 REPO = "gitcode:org/gap-mine"
@@ -263,7 +263,7 @@ def test_evaluate_rules_returns_gap_stats():
 
 def test_runtime_gap_visibility_and_silence():
     """设备维度事件：看得见该设备才看得见它的事件；越权设备看不见也静默不了。"""
-    from src.observability.overview import RepoNotVisible      # noqa: F401  (口径同源)
+    from src.domains.insight.observability.overview import RepoNotVisible      # noqa: F401  (口径同源)
     mine = _mk_runtime(RT_GLOBAL, scope="global", last_seen=_now() - timedelta(minutes=30))
     theirs = _mk_runtime(RT_FOREIGN, scope="user", owner_name="stranger",
                          last_seen=_now() - timedelta(minutes=30))

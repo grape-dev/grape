@@ -1,2 +1,4 @@
-"""Hermes 后端实现（兼容转发层，M0 后迁至 src.runtime.hermes）"""
-from src.runtime.hermes import HermesRuntime as HermesBackend
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.runtime.agents.hermes"""
+import src.domains.runtime.agents.hermes as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

@@ -9,8 +9,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime import acp_bootstrap as ab
-from src.runtime import agent as ra
+from src.domains.runtime.engine import acp_bootstrap as ab
+from src.domains.runtime.engine import agent as ra
 
 
 def _run_ok(returncode=0, stdout="ok", stderr=""):
@@ -114,39 +114,39 @@ class TestPipInstallInto:
 class TestDiscoverLocalRuntimesIntegration:
     def test_hermes_acp_fail_marks_unhealthy(self):
         """hermes --version 通过但 ACP 失败 → healthy=False；其他引擎不受影响。"""
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "hermes", "cli_path": "/bin/hermes", "installed": True},
                 {"name": "opencode", "cli_path": "/bin/opencode", "installed": True}]), \
              patch("subprocess.run", return_value=_run_ok(0, stdout="1.0")), \
-             patch("src.runtime.acp_bootstrap._ensure_hermes_acp", return_value=False):
+             patch("src.domains.runtime.engine.acp_bootstrap._ensure_hermes_acp", return_value=False):
             out = {r["name"]: r for r in ra._discover_local_runtimes()}
         assert out["hermes"]["healthy"] is False
         assert out["opencode"]["healthy"] is True
 
     def test_hermes_acp_ok_stays_healthy(self):
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "hermes", "cli_path": "/bin/hermes", "installed": True}]), \
              patch("subprocess.run", return_value=_run_ok(0, stdout="1.0")), \
-             patch("src.runtime.acp_bootstrap._ensure_hermes_acp", return_value=True) as ens:
+             patch("src.domains.runtime.engine.acp_bootstrap._ensure_hermes_acp", return_value=True) as ens:
             out = ra._discover_local_runtimes()
         assert out[0]["healthy"] is True
         ens.assert_called_once_with("/bin/hermes")
 
     def test_non_hermes_engine_skips_acp(self):
         """opencode 引擎不触发 ACP 自举。"""
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "opencode", "cli_path": "/bin/opencode", "installed": True}]), \
              patch("subprocess.run", return_value=_run_ok(0, stdout="1.0")), \
-             patch("src.runtime.acp_bootstrap._ensure_hermes_acp") as ens:
+             patch("src.domains.runtime.engine.acp_bootstrap._ensure_hermes_acp") as ens:
             ra._discover_local_runtimes()
         ens.assert_not_called()
 
     def test_uninstalled_hermes_skips_acp(self):
         """--version 都失败的 hermes（healthy 已 False）不再做 ACP 检查。"""
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "hermes", "cli_path": "/bin/hermes", "installed": True}]), \
              patch("subprocess.run", side_effect=FileNotFoundError), \
-             patch("src.runtime.acp_bootstrap._ensure_hermes_acp") as ens:
+             patch("src.domains.runtime.engine.acp_bootstrap._ensure_hermes_acp") as ens:
             out = ra._discover_local_runtimes()
         assert out[0]["healthy"] is False
         ens.assert_not_called()
@@ -154,8 +154,8 @@ class TestDiscoverLocalRuntimesIntegration:
 
 class TestLocalProbeHermesArgs:
     def test_hermes_probe_args_overridden(self):
-        from src.runtime.local_probe import probe_local_engines
-        with patch("src.runtime.local_probe._probe_one",
+        from src.domains.runtime.engine.local_probe import probe_local_engines
+        with patch("src.domains.runtime.engine.local_probe._probe_one",
                    side_effect=lambda e: {**e, "version": "x", "healthy": True}) as p:
             probe_local_engines([{"name": "hermes", "cli_path": "/bin/hermes", "installed": True},
                                  {"name": "opencode", "cli_path": "/bin/opencode", "installed": True}])

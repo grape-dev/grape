@@ -4,8 +4,8 @@ import pytest
 
 from fastapi.testclient import TestClient
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
-from src.runtime.health import derive_runtime_health
+from src.domains.runtime.engine import service
+from src.domains.runtime.engine.health import derive_runtime_health
 
 
 def _make_token(name="CI-Worker-01"):
@@ -245,7 +245,7 @@ class TestMultiInstanceCleanup:
             db.cursor().execute(
                 "INSERT INTO agent_runtimes (credential_id, name, display_name, installed, version, healthy, pip_package, scope, owner_id) VALUES (0,'codearts','Codearts',1,'1.0',1,'codearts-cli','global','')")
             db.commit()
-        from src.user.db import save_agent_runtimes
+        from src.domains.mgmt.user.db import save_agent_runtimes
         save_agent_runtimes([{"name": "opencode", "installed": True, "cli_path": "/usr/bin/opencode",
                               "version": "1.0", "healthy": True}])
         with db_lock:
@@ -458,7 +458,7 @@ class TestRuntimeAdminViews:
                          json={"runtimes": [{"name": "opencode"}, {"name": "codearts"}]},
                          headers={"Authorization": f"Bearer {t}"})
         rids = [x["id"] for x in r.json()["runtimes"]]
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         from src.kernel.session_manager import db, db_lock
         for rid in rids:
             service.enqueue_task(agent_session_id="s-agg", runtime_id=rid, prompt="p", repo_key="t/r", agent_type="issue", skill="issue")
@@ -497,7 +497,7 @@ class TestRuntimeAdminViews:
         token = r.json()["token"]
         c.post("/api/runtime/register", json={"device_name": "zoe-dev", "runtimes": [{"name": "opencode"}]},
                headers={"Authorization": f"Bearer {token}"})
-        from src.user.db import save_agent_runtimes
+        from src.domains.mgmt.user.db import save_agent_runtimes
         # 真实安装（installed=True）→ 生成 credential_id=0 本机直连行
         save_agent_runtimes([{"name": "opencode", "installed": True, "cli_path": "/local", "version": "9", "healthy": True}])
         from src.kernel.session_manager import db, db_lock
@@ -522,7 +522,7 @@ class TestGhostEnginePrevention:
     """
 
     def test_is_known_engine_name(self):
-        from src.user.db import is_known_engine_name
+        from src.domains.mgmt.user.db import is_known_engine_name
         assert is_known_engine_name("opencode") is True
         assert is_known_engine_name("codearts") is True
         assert is_known_engine_name("Default") is False   # 前端回退项文本，大小写不敏感
@@ -530,7 +530,7 @@ class TestGhostEnginePrevention:
 
     def test_ensure_default_runtime_rejects_unknown(self):
         """未知引擎名（'default'）不再创建 credential_id=0 占位行。"""
-        from src.user.db import ensure_default_runtime
+        from src.domains.mgmt.user.db import ensure_default_runtime
         rid = ensure_default_runtime("default")
         assert rid is None, "未知引擎名不应创建 runtime"
         with db_lock:
@@ -538,14 +538,14 @@ class TestGhostEnginePrevention:
         assert cnt == 0, "不得生成 default-cred0 幽灵占位行"
 
     def test_ensure_default_runtime_allows_known(self):
-        from src.user.db import ensure_default_runtime
+        from src.domains.mgmt.user.db import ensure_default_runtime
         rid = ensure_default_runtime("opencode")
         assert rid is not None, "已知引擎名应正常创建/复用"
 
     def test_set_chat_config_default_backend_no_ghost(self):
         """set_chat_config(backend='Default') 不得创建幽灵行；get_chat_config 回退空（无引擎，不隐式 opencode）。"""
         from src.kernel.session_manager import set_chat_config, get_chat_config
-        from src.user.db import is_known_engine_name
+        from src.domains.mgmt.user.db import is_known_engine_name
         set_chat_config(9999, backend="Default")
         cfg = get_chat_config(9999)
         assert cfg["backend"] == "", "未配置已知引擎时 backend 应为空（engine-selection-design.md v2）"
@@ -591,23 +591,23 @@ class TestRuntimeInstanceName:
         return rid
 
     def test_resolves_credential_bound(self):
-        from src.runtime.instances import runtime_instance_name
+        from src.domains.runtime.engine.instances import runtime_instance_name
         rid = self._seed_bound_runtime(device="worker-123249", ename="opencode")
         assert runtime_instance_name(rid) == "opencode-worker-123249"
 
     def test_another_device_and_type(self):
-        from src.runtime.instances import runtime_instance_name
+        from src.domains.runtime.engine.instances import runtime_instance_name
         rid = self._seed_bound_runtime(device="grape-server", ename="codearts")
         assert runtime_instance_name(rid) == "codearts-grape-server"
 
     def test_zero_and_unknown_empty(self):
-        from src.runtime.instances import runtime_instance_name
+        from src.domains.runtime.engine.instances import runtime_instance_name
         assert runtime_instance_name(0) == ""
         assert runtime_instance_name(999999) == ""
 
     def test_enqueue_claim_works_with_bound_runtime(self):
         """绑定凭据的 runtime 入队 + claim 功能正常（日志带实例名，此处验证不崩）"""
-        from src.runtime import service as svc
+        from src.domains.runtime.engine import service as svc
         rid = self._seed_bound_runtime(device="grape-server", ename="opencode")
         tid = svc.enqueue_task(agent_session_id="sess-inst", runtime_id=rid, prompt="p",
                                event_seq=1, issue_id="#5", repo_key="test/repo",
@@ -842,7 +842,7 @@ class TestRepoKeyNormalization:
 
     def test_repo_scope_visible_to_repo_member(self):
         """repo scope 凭据对同仓库成员可见（from_repo_key 统一比对）。"""
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         app = self._admin_user("alice", uid=10)
         c = TestClient(app)
         try:

@@ -56,7 +56,7 @@ def _deploy_url():
 
 
 def _register(result_text):
-    from src.api.event_pipeline import register_sre_deploy_url
+    from src.domains.runtime.pipeline.event_pipeline import register_sre_deploy_url
     return register_sre_deploy_url(REPO, result_text)
 
 
@@ -128,7 +128,7 @@ def test_empty_result_text_noop():
 
 
 def test_unknown_repo_key_returns_empty():
-    from src.api.event_pipeline import register_sre_deploy_url
+    from src.domains.runtime.pipeline.event_pipeline import register_sre_deploy_url
     assert register_sre_deploy_url("gitcode:nobody/none", "http://x.example.com") == ""
 
 
@@ -156,17 +156,17 @@ def _seed_task(agent_type="sre"):
 @pytest.fixture()
 def _quiet_remote_hooks(monkeypatch):
     """屏蔽 complete_task 远程钩子中的外呼副作用（回帖/评论同步），只保留登记钩子。"""
-    monkeypatch.setattr("src.api.event_pipeline._post_result_to_issue", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline._sync_issue_comments_to_conversation", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline._post_subtask_completion_to_parent", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline._post_all_subtasks_done", lambda *a, **k: None)
-    monkeypatch.setattr("src.runtime.service._handle_vod_recommend_complete", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_result_to_issue", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._sync_issue_comments_to_conversation", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_subtask_completion_to_parent", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_all_subtasks_done", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.engine.service._handle_vod_recommend_complete", lambda *a, **k: None)
     monkeypatch.setattr("src.kernel.token_resolver.create_provider_from_repo_key", lambda *a, **k: None)
 
 
 def test_complete_task_sre_registers(_quiet_remote_hooks):
     import json as _json
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("sre")
     complete_task(TASK, _json.dumps({
         "actions": ["deploy"],
@@ -177,21 +177,21 @@ def test_complete_task_sre_registers(_quiet_remote_hooks):
 
 
 def test_complete_task_sre_regex_fallback(_quiet_remote_hooks):
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("sre")
     complete_task(TASK, "部署完成 http://r.example.com:9000/p/q.html", exit_code=0)
     assert _deploy_url() == "http://r.example.com:9000/p/q.html"
 
 
 def test_complete_task_non_sre_no_register(_quiet_remote_hooks):
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("vod")
     complete_task(TASK, "分析完成，参考 https://doc.example.com/a/b/c", exit_code=0)
     assert _deploy_url() == ""
 
 
 def test_complete_task_sre_failed_no_register(_quiet_remote_hooks):
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("sre")
     complete_task(TASK, "部署失败 deploy_url: https://should-not-register.example.com/", exit_code=1)
     assert _deploy_url() == ""

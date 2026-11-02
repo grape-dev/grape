@@ -138,18 +138,18 @@ class TestResolveIssueIdPR:
                 "issues": issues or []}
 
     def test_pr_number_not_used_as_issue_id(self):
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         p = self._pr_payload(pr_number=114)
         assert resolve_issue_id(p) == "", "PR 事件不应把 PR 号当 issue_id"
 
     def test_pr_linked_issues_extracted(self):
-        from src.api.event_pipeline import resolve_issue_id, resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id, resolve_pr_issue_id
         p = self._pr_payload(pr_number=114, issues=[{"number": 23, "iid": 23}])
         assert resolve_issue_id(p) == "#23", resolve_issue_id(p)
         assert resolve_pr_issue_id(p) == "#23", resolve_pr_issue_id(p)
 
     def test_issue_event_still_extracts_issue(self):
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         assert resolve_issue_id({"issue": {"number": 21, "iid": 21}}) == "#21"
         # Issue 类 webhook：object_attributes.iid = Issue 号（非 PR payload）
         assert resolve_issue_id({"object_attributes": {"iid": 20, "number": 20}}) == "#20"

@@ -11,7 +11,7 @@
 
 Mock 策略（对齐 test_issue444_skill_cache_sync，不触真实外部依赖）：
 - DB：临时 SQLite（skill/scene_skill_ref/skill_likes 表，SQL 本身是测试对象）
-- 存储：内存 dict 后端（monkeypatch src.storage.get_skill_storage）
+- 存储：内存 dict 后端（monkeypatch src.domains.runtime.storage.get_skill_storage）
 - 缓存：目录隔离 + 清空内存缓存
 - 路由直调（async 函数 + UploadFile 构造），权限依赖由 user dict 直接传入
 """
@@ -102,7 +102,7 @@ def wdb(monkeypatch):
     db_lock = threading.Lock()
 
     import src.kernel.session_manager as sm
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
     monkeypatch.setattr(sm, "db", db_obj)
     monkeypatch.setattr(sm, "db_lock", db_lock)
     monkeypatch.setattr(user_db, "db", db_obj)
@@ -110,7 +110,7 @@ def wdb(monkeypatch):
 
     # 存储与缓存隔离
     storage = _MemStorage()
-    import src.storage as storage_mod
+    import src.domains.runtime.storage as storage_mod
     monkeypatch.setattr(storage_mod, "get_skill_storage", lambda: storage)
     monkeypatch.setattr(storage_mod, "ZIP_CACHE_DIR", os.path.join(tmp, "zipcache"))
     monkeypatch.setattr(storage_mod, "ZIP_CACHE_INDEX", os.path.join(tmp, "zipcache", "index.json"))
@@ -135,7 +135,7 @@ def _seed_user_skill(wdb, user_id=7, name="my-skill", content="# v1", with_refs=
     conn = wdb["conn"]
     zip_bytes = _make_zip(name, content)
     h = hashlib.sha256(zip_bytes).hexdigest()
-    from src.storage import skill_key
+    from src.domains.runtime.storage import skill_key
     key = skill_key("custom", str(user_id), name)
     cur = conn.execute(
         "INSERT INTO skill (skill_name, display_name, description, agent_type, file_path, scope, owner_id, is_active, content_hash) "
@@ -152,7 +152,7 @@ def _seed_user_skill(wdb, user_id=7, name="my-skill", content="# v1", with_refs=
 
 
 def _call_update(wdb, skill_id, zip_bytes, zip_name="s.zip", user_id=7, agent_type="", category_id=""):
-    from src.api.routes.skills import update_skill_by_id
+    from src.domains.mgmt.routes.skills import update_skill_by_id
     from fastapi import UploadFile
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=zip_name)
     user = {"id": user_id, "auth_type": "api_key"}
@@ -184,7 +184,7 @@ def test_u1_update_success_keeps_id_refs_likes(wdb):
     assert wdb["storage"].objects[key] != old_bytes, "存储对象应被覆盖"
 
     # 两级缓存失效：zip 缓存读回新字节 + 新 hash
-    from src.storage import zip_cache_get_with_hash
+    from src.domains.runtime.storage import zip_cache_get_with_hash
     data, chash, csid = zip_cache_get_with_hash(key)
     assert data == stored and chash == row[0] and csid == sid
 
@@ -216,8 +216,8 @@ def test_u3_user_not_owner_forbidden(wdb):
 
 
 def test_u3_repo_not_managed_forbidden(wdb):
-    from src.user.db import get_user_repos as _gur
-    import src.user.db as user_db
+    from src.domains.mgmt.user.db import get_user_repos as _gur
+    import src.domains.mgmt.user.db as user_db
     monkey = pytest.MonkeyPatch()
     monkey.setattr(user_db, "get_user_repos", lambda uid: [])
     try:
@@ -232,12 +232,12 @@ def test_u3_repo_not_managed_forbidden(wdb):
 
 
 def test_u6_repo_managed_success(wdb):
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
     monkey = pytest.MonkeyPatch()
     monkey.setattr(user_db, "get_user_repos", lambda uid: [{"repo_key": "gitcode:o/r"}])
     try:
         conn = wdb["conn"]
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         key = skill_key("repo", "gitcode:o/r", "r-1")
         zip_bytes = _make_zip("r-1", "# v1")
         cur = conn.execute(
@@ -290,7 +290,7 @@ def test_u5_upsert_failure_rollback(wdb, monkeypatch):
     sid, key = _seed_user_skill(wdb)
     old_bytes = wdb["storage"].objects[key]
 
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
 
     def _broken(*a, **kw):
         return None

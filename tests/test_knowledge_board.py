@@ -11,12 +11,12 @@ import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -256,10 +256,10 @@ class TestInjection:
         assert r.status_code == 200, r.text
         kid = r.json()["id"]
         client.post(f"/api/knowledge/{kid}/refs/batch", json={"agent_types": ["vod"]}, headers=_headers)
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         tid = enqueue_task(agent_session_id="sess-kb", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task = service.get_task(tid)
         # Issue #95: member 知识在 project_info_files 里（不在 knowledge_files 里）
         pif = json.loads(task["project_info_files"] or "{}")
@@ -296,10 +296,10 @@ class TestAgentScopedUpload:
             client.post(f"/api/knowledge/{kid}/refs/batch", json={
                 "scene_ids": [], "agent_types": ["coding"]
             }, headers=_headers)
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         tid = enqueue_task(agent_session_id="sess-a1", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         task = service.get_task(tid)
         pif = json.loads(task["project_info_files"] or "{}")
         assert any(rel.startswith("member/") for rel in pif), f"应含 member 文档: {list(pif)}"
@@ -343,8 +343,8 @@ class TestProjectScopedShared:
 
     def test_enqueue_packs_member_docs_all_agents(self):
         self._seed_member_doc_with_ref(agent_type="coding")
-        from src.runtime.service import enqueue_task
-        from src.runtime import service
+        from src.domains.runtime.engine.service import enqueue_task
+        from src.domains.runtime.engine import service
         tid = enqueue_task(agent_session_id="sess-coding", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
         task = service.get_task(tid)
@@ -353,8 +353,8 @@ class TestProjectScopedShared:
 
     def test_member_key_is_pi_relative(self):
         self._seed_member_doc_with_ref(agent_type="coding")
-        from src.runtime.service import enqueue_task
-        from src.runtime import service
+        from src.domains.runtime.engine.service import enqueue_task
+        from src.domains.runtime.engine import service
         tid = enqueue_task(agent_session_id="sess-m", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="coding", issue_id="#5")
         task = service.get_task(tid)

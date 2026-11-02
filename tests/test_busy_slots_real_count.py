@@ -23,7 +23,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "sess
 @pytest.fixture
 def env(monkeypatch):
     """复用项目真实 DB，插入独立测试数据（id 高段避免与其它测试撞车）。"""
-    import src.runtime.service as svc
+    import src.domains.runtime.engine.service as svc
     from src.kernel.session_manager import db, db_lock
     monkeypatch.setattr(svc, "db", db)
     monkeypatch.setattr(svc, "db_lock", db_lock)
@@ -77,7 +77,7 @@ def _count_real(env, statuses=("running", "dispatched")):
 
 def test_engine_busy_reads_real_count_not_column(env):
     """busy_slots 列故意置 999（僵尸残留），但真实 running=0 → 引擎不忙，可认领。"""
-    import src.runtime.local_claimer as lc
+    import src.domains.runtime.engine.local_claimer as lc
     db, rid, _ = env
     with db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.kernel.session_manager", fromlist=["db_lock"]).db_lock:
         c = db.cursor()
@@ -89,7 +89,7 @@ def test_engine_busy_reads_real_count_not_column(env):
 
 def test_engine_busy_real_count_full(env):
     """真实 running=max_concurrent=4，busy_slots 列残留 0 → 引擎忙。"""
-    import src.runtime.local_claimer as lc
+    import src.domains.runtime.engine.local_claimer as lc
     db, rid, tasks = env
     for i, tid in enumerate(tasks[:4]):
         _seed_task(db, db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.kernel.session_manager", fromlist=["db_lock"]).db_lock,
@@ -104,7 +104,7 @@ def test_engine_busy_real_count_full(env):
 
 def test_claim_rejected_when_real_count_full(env):
     """busy_slots 列残留 0，但真实 running=4 → claim_by_tag 应拒绝（决策看真实 COUNT）。"""
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
     import src.kernel.session_manager as sm
     db, rid, tasks = env
     for i, tid in enumerate(tasks[:4]):
@@ -122,7 +122,7 @@ def test_claim_rejected_when_real_count_full(env):
 
 def test_claim_allowed_when_real_count_spare(env):
     """busy_slots 列残留 999（僵尸），但真实 running=1 < 4 → claim_by_tag 放行。"""
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
     import src.kernel.session_manager as sm
     db, rid, tasks = env
     _seed_task(db, sm.db_lock, tasks[0], "running", rid, sess="d-sess-0")
@@ -140,7 +140,7 @@ def test_claim_allowed_when_real_count_spare(env):
 
 def test_leaked_busy_no_longer_blocks_claim(env):
     """模拟「完成但漏 release_busy_slot」：任务置终态（真实 running 归零）后立即能再认领。"""
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
     import src.kernel.session_manager as sm
     db, rid, tasks = env
     # 先占用 1 槽（running）
@@ -168,8 +168,8 @@ def test_snapshot_reconcile_busy_slots(env):
     """展示快照重算：busy_slots 列 = 真实 running 数。"""
     import src.kernel.session_manager as sm
     db, rid, tasks = env
-    # 快照函数（方案 D 新增）：stub 先验证行为，生产实现放到 src.runtime.service.refresh_busy_snapshot
-    from src.runtime.service import refresh_busy_snapshot as fn
+    # 快照函数（方案 D 新增）：stub 先验证行为，生产实现放到 src.domains.runtime.engine.service.refresh_busy_snapshot
+    from src.domains.runtime.engine.service import refresh_busy_snapshot as fn
     _seed_task(db, sm.db_lock, tasks[0], "running", rid, sess="d-sess-0")
     _seed_task(db, sm.db_lock, tasks[1], "running", rid, sess="d-sess-1")
     with sm.db_lock:

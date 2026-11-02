@@ -49,9 +49,9 @@ db_lock = _DbLockProxy()
 # 模块级捕获 session_manager.db/db_lock 的已知模块（run_pipeline 写侧链路）：
 # 函数级 import 的模块自动经 session_manager 取到 mock，无需列举。
 _PATCH_DB_MODULES = (
-    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
-    "src.user.db", "src.api.session_store", "src.api.issues_center",
-    "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
+    "src.kernel.session_manager", "src.api.event_store", "src.domains.runtime.pipeline.event_pipeline",
+    "src.domains.mgmt.user.db", "src.api.session_store", "src.api.issues_center",
+    "src.api.db_setup", "src.domains.runtime.routes.events", "src.api.token_resolver",
 )
 
 
@@ -167,7 +167,7 @@ class TestS1SessionLevelBotComment:
 
     def test_s1_1_bot_issue_comment_skipped(self):
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
              patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
@@ -183,7 +183,7 @@ class TestS1SessionLevelBotComment:
 
     def test_s1_2_bot_pr_comment_skipped(self):
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()):
             _run(_pr_comment_payload("grape_bot"), "Note Hook")
@@ -196,7 +196,7 @@ class TestS1SessionLevelBotComment:
 
     def test_s1_3_user_comment_not_intercepted(self):
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()):
             _run(_issue_comment_payload("alice"), "Note Hook")
@@ -211,7 +211,7 @@ class TestS2RepoBotLevelRegression:
         from src.kernel.token_resolver import TokenResult
         _bot_level = TokenResult(token="REPO_BOT", level="repo_bot",
                                  provider=MagicMock(), repo_key=RK)
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _bot_level):
             _run(_issue_comment_payload("grape_bot"), "Note Hook")
@@ -219,7 +219,7 @@ class TestS2RepoBotLevelRegression:
 
     def test_s2_2_repo_bot_level_user_comment_not_skipped(self):
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()):
             _run(_issue_comment_payload("bob"), "Note Hook")
@@ -232,7 +232,7 @@ class TestS3NonCommentEvents:
     def test_s3_1_bot_subtask_issue_opened_allowed(self):
         """bot 创建的「## 父任务」issue_opened 必须放行（豁免保留）。"""
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
              patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
@@ -249,7 +249,7 @@ class TestS3NonCommentEvents:
             "object_attributes": {"iid": 3, "action": "open", "title": "PR"},
             "user": {"username": "grape_bot"},
         }
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
              patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
@@ -264,14 +264,14 @@ class TestS5GuardEdges:
     def test_s5_1_empty_actor_no_intercept_no_crash(self):
         _clean()
         payload = _issue_comment_payload("")
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             _run(payload, "Note Hook")
         assert _skipped_rows("self_loop") == 0
 
     def test_s5_3_empty_bot_usernames_degrades_to_no_intercept(self):
         """bot 用户名查询返回空（DB 异常降级）→ 不拦截，走原 handler 链。"""
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=[]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=[]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
              patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",

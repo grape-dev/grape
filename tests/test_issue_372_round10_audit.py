@@ -18,13 +18,13 @@ class TestT38GetBotTokenByRepoGuard:
 
     def test_t38_01_path_b_returns_empty(self):
         """T38-01: 路径 B 仓库（host_user_id > 0）调 get_bot_token_by_repo 返回空"""
-        from src.user.db import get_bot_token_by_repo
+        from src.domains.mgmt.user.db import get_bot_token_by_repo
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = ("bot_token_value",)
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor), \
-             patch("src.user.db.get_host_user_id", return_value=42):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42):
             result = get_bot_token_by_repo("owner", "repo")
             # 路径 B 仓库 → 守卫返回空，不查 DB
             assert result == ""
@@ -33,25 +33,25 @@ class TestT38GetBotTokenByRepoGuard:
 
     def test_t38_02_path_a_returns_token(self):
         """T38-02: 路径 A 仓库（host_user_id=0）正常返回 bot token"""
-        from src.user.db import get_bot_token_by_repo
+        from src.domains.mgmt.user.db import get_bot_token_by_repo
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = ("bot_token_value",)
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_bot_token_by_repo("owner", "repo")
             assert result == "bot_token_value"
 
     def test_t38_03_unmanaged_repo_returns_empty(self):
         """T38-03: 未托管仓库（host_user_id=0, bot_token 空）返回空"""
-        from src.user.db import get_bot_token_by_repo
+        from src.domains.mgmt.user.db import get_bot_token_by_repo
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = None
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             result = get_bot_token_by_repo("owner", "repo")
             assert result == ""
 
@@ -66,7 +66,7 @@ class TestT38bGetRepoBotTokenNoGlobalGuard:
         DevopsAgentSessionToken._fetch 有 host_user_id 守卫（R22.2.4）跳过 session token。
         测试 mock TokenResolver.read_stored_token 返回用户 token。
         """
-        from src.user.db import get_repo_bot_token_no_global
+        from src.domains.mgmt.user.db import get_repo_bot_token_no_global
         with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value="user_token"):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == "user_token"

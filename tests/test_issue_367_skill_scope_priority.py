@@ -14,7 +14,7 @@ import uuid
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
-from src.user import db as udb
+from src.domains.mgmt.user import db as udb
 from src.kernel.prompt_builder import build_general_chat_prompt
 from src.kernel.session_manager import db, db_lock
 

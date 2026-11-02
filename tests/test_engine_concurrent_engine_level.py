@@ -35,7 +35,7 @@ def backup_restore():
 def test_env(monkeypatch):
     """用项目真实 DB，测试前清理 + 插入测试数据，测试后恢复。"""
     from src.kernel.session_manager import db, db_lock
-    import src.runtime.service as svc
+    import src.domains.runtime.engine.service as svc
     monkeypatch.setattr(svc, "db", db)
     monkeypatch.setattr(svc, "db_lock", db_lock)
 
@@ -74,7 +74,7 @@ def test_env(monkeypatch):
 
 def test_claim_by_tag_uses_engine_level_max_concurrent(test_env):
     """busy_slots=0 < max_concurrent=4，应能 claim。"""
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
     result = claim_by_tag(tag='coding', runtime_id=999)
     assert result is not None, "busy_slots=0 < max_concurrent=4，应能 claim"
 
@@ -95,7 +95,7 @@ def test_claim_by_tag_rejected_when_busy_slots_full(test_env):
                 (9000 + i, f"full-sess-{i}", f"full-issue-{i}", now))
         db.commit()
 
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
     result = claim_by_tag(tag='coding', runtime_id=999)
     assert result is None, "真实 running=4 >= max_concurrent=4，应拒绝 claim（即使 busy_slots 列残留任意值）"
 
@@ -124,6 +124,6 @@ def test_claim_by_tag_ignores_engine_capabilities_max_concurrent(test_env):
         )
         db.commit()
 
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
     result = claim_by_tag(tag='coding', runtime_id=999)
     assert result is not None, "engine_capabilities.max_concurrent=1 应被忽略，busy_slots=2 < max_concurrent=4 应能 claim"

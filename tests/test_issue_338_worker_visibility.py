@@ -102,7 +102,7 @@ class TestWorkerDeviceVisibility:
 
     def test_own_worker_device_visible_in_personal_org(self):
         """songspace 在个人组织视图：runtime-devices 列出其名下 user scope worker 设备。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         d = get_runtime_devices(user=_songspace(), page=1, page_size=100)
         names = {dev["name"] for dev in d["devices"]}
         assert _DEV_NAME in names, f"个人归属 worker 设备被滤掉: {names}"
@@ -112,7 +112,7 @@ class TestWorkerDeviceVisibility:
 
     def test_own_worker_engine_visible_in_personal_org(self):
         """songspace 在个人组织视图：agent-runtimes 引擎列表可见其 worker 承载引擎。"""
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         d = get_agent_runtimes(user=_songspace())
         engine_names = {rt["name"] for rt in d["runtimes"]}
         assert "t338-opencode" in engine_names, f"worker 承载引擎被滤掉: {engine_names}"
@@ -121,7 +121,7 @@ class TestWorkerDeviceVisibility:
 
     def test_global_engine_not_regressed(self):
         """个人组织视图：global scope 设备/引擎仍可见（行为不回退）。"""
-        from src.api.routes.settings import get_runtime_devices, get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_runtime_devices, get_agent_runtimes
         d = get_runtime_devices(user=_songspace(), page=1, page_size=100)
         assert _GLOBAL_DEV in {dev["name"] for dev in d["devices"]}, d
         r = get_agent_runtimes(user=_songspace())
@@ -129,7 +129,7 @@ class TestWorkerDeviceVisibility:
 
     def test_other_user_cannot_see_user_scope_device(self):
         """bob（另一用户）个人组织视图：看不到 songspace 的 user scope 设备（无权限放大）。"""
-        from src.api.routes.settings import get_runtime_devices, get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_runtime_devices, get_agent_runtimes
         d = get_runtime_devices(user=_bob(), page=1, page_size=100)
         assert _DEV_NAME not in {dev["name"] for dev in d["devices"]}, d
         r = get_agent_runtimes(user=_bob())
@@ -141,7 +141,7 @@ class TestWorkerDeviceVisibility:
         songspace 的 user scope 凭据 org_id=公司组织 A；换到另一家非个人组织 B
         的上下文时，该凭据（org_id=A ≠ B）按严格隔离不可见。
         """
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         user = {"id": 77, "username": "songspace", "auth_type": "jwt",
                 "org_id": _ORG_COMPANY_OTHER}
         d = get_runtime_devices(user=user, page=1, page_size=100)

@@ -21,7 +21,7 @@ from unittest.mock import patch, MagicMock
 
 import pytest
 
-from src.runtime import os_adapter
+from src.domains.runtime.engine import os_adapter
 
 
 _is_win = sys.platform == "win32"
@@ -97,10 +97,10 @@ class TestFindCli:
 
     def test_find_cli_windows_search_paths(self):
         with patch.object(os_adapter, "_IS_WINDOWS", True):
-            with patch("src.runtime.os_adapter.which", return_value=""):
+            with patch("src.domains.runtime.engine.os_adapter.which", return_value=""):
                 fake_path = r"C:\Users\test\AppData\Roaming\npm\opencode.cmd"
                 with patch("os.path.isfile", return_value=True):
-                    with patch("src.runtime.os_adapter.engine_search_paths",
+                    with patch("src.domains.runtime.engine.os_adapter.engine_search_paths",
                                return_value=[fake_path]):
                         result = os_adapter.find_cli("opencode")
                         assert result == fake_path

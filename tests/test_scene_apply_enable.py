@@ -15,7 +15,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db")
 
 from src.kernel.session_manager import db, db_lock  # noqa: E402
-from src.api.routes.scenes import apply_scene, ApplySceneRequest  # noqa: E402
+from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest  # noqa: E402
 from src.api.session_store import (  # noqa: E402
     get_agent_type_enable,
     get_or_create_agent_session,

@@ -102,7 +102,7 @@ class TestHermesProbeSessionNew:
     def test_ok_and_prompt_uses_real_session_id(self, tmp_path):
         """T1 happy path：请求序列 initialize → session/new → session/prompt，
         且 prompt 的 sessionId == session/new 返回的真实值（非空字符串）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         log = tmp_path / "requests.jsonl"
         cli = _make_fake_cli(tmp_path, request_log=log, stop="end_turn")
         result = _probe_hermes_acp(cli)
@@ -117,7 +117,7 @@ class TestHermesProbeSessionNew:
 
     def test_session_new_silent_reports_fail(self, tmp_path, monkeypatch):
         """T2 session/new 无响应（引擎异常）→ fail，错误前缀 ACP session/new。"""
-        from src.runtime import agent as _agent_mod
+        from src.domains.runtime.engine import agent as _agent_mod
         monkeypatch.setattr(_agent_mod, "_ACP_PROBE_TIMEOUT", 1)
         log = tmp_path / "requests.jsonl"
         cli = _make_fake_cli(tmp_path, request_log=log, new_behavior="silent")
@@ -130,7 +130,7 @@ class TestHermesProbeSessionNew:
 
     def test_session_new_error_reports_fail(self, tmp_path):
         """T3 session/new 返回 JSON-RPC error → fail（引擎不可用正确归类）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         log = tmp_path / "requests.jsonl"
         cli = _make_fake_cli(tmp_path, request_log=log, new_behavior="error")
         result = _probe_hermes_acp(cli)
@@ -140,7 +140,7 @@ class TestHermesProbeSessionNew:
 
     def test_session_new_missing_session_id_reports_fail(self, tmp_path):
         """T4 session/new 成功但响应缺 sessionId → fail（不把空 sessionId 带进 prompt）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         log = tmp_path / "requests.jsonl"
         cli = _make_fake_cli(tmp_path, request_log=log, new_behavior="missing_sid")
         result = _probe_hermes_acp(cli)
@@ -151,7 +151,7 @@ class TestHermesProbeSessionNew:
 
     def test_refusal_still_marked_refused(self, tmp_path):
         """T5 stopReason=refusal → refused（#423 口径保持，不软化）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         log = tmp_path / "requests.jsonl"
         cli = _make_fake_cli(tmp_path, request_log=log, stop="refusal")
         result = _probe_hermes_acp(cli)
@@ -163,7 +163,7 @@ class TestHermesProbeSessionNew:
 
     def test_new_notes_stream_still_ok(self, tmp_path):
         """T6 session/new 前后 34 行通知 → 仍 ok（#423 deadline 驱动不回归）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         log = tmp_path / "requests.jsonl"
         cli = _make_fake_cli(tmp_path, request_log=log, new_notes=34, prompt_notes=5,
                              stop="end_turn")

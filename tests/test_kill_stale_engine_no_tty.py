@@ -18,7 +18,7 @@ import time
 
 import pytest
 
-from src.runtime import agent as ra
+from src.domains.runtime.engine import agent as ra
 
 _is_win = sys.platform == "win32"
 
@@ -27,7 +27,7 @@ _CHILD_CODE = textwrap.dedent(
     """
     import os, subprocess, sys, time
     sys.path.insert(0, {repo_root!r})
-    from src.runtime import agent as ra
+    from src.domains.runtime.engine import agent as ra
 
     victim = subprocess.Popen(
         [sys.executable, "-c", "import time; time.sleep(120)", "opencode", "run"],

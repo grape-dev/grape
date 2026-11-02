@@ -20,7 +20,7 @@ import pytest
 def setup_db(monkeypatch, tmp_path):
     """独立测试库：agent_tasks / agent_runtimes / runtime_credentials / engine_capabilities / events / task_messages。"""
     import sqlite3
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
 
     test_db = sqlite3.connect(":memory:", check_same_thread=False)
     test_db.execute("PRAGMA foreign_keys=OFF")
@@ -98,7 +98,7 @@ def _mk_engine(c, rid, name, status="online", healthy=1, cred=63, seen="now", ta
 # ===== UT-1：claim_by_tag 认领时绑定引擎全不可达 → 任务 failed，不放行 =====
 
 def test_ut1_pool_all_unreachable_fails_task(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     # codex(10907) 离线；hermes(1129) 在线带 all 标签（#253 事故配置）
     _mk_engine(c, 10907, "codex", status="offline", healthy=0, tag="coding")
@@ -125,7 +125,7 @@ def test_ut1_pool_all_unreachable_fails_task(setup_db):
 # ===== UT-2：绑定引擎在线时，池外引擎无法认领 =====
 
 def test_ut2_outside_engine_cannot_claim_bound_task(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     import datetime as _dt
     _now = _dt.datetime.now(_dt.timezone.utc).isoformat()
@@ -149,7 +149,7 @@ def test_ut2_outside_engine_cannot_claim_bound_task(setup_db):
 # ===== UT-3：_check_stale_queued_tasks 三档收敛 =====
 
 def test_ut3_stale_queued_three_tiers(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     import datetime as _dt
     _old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=300)).isoformat()
@@ -197,7 +197,7 @@ def test_ut3_stale_queued_three_tiers(setup_db):
 # ===== UT-4：人话原因 + 事件终态同步（helper 直测）=====
 
 def test_ut4_failure_reason_and_event_sync(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 10907, "codex", tag="coding")
     c.execute("INSERT INTO agent_tasks (id, status, runtime_id, pool_tag, pool_engine_ids, "
@@ -223,7 +223,7 @@ def test_ut4_failure_reason_and_event_sync(setup_db):
 # ===== UT-5：空绑定任务不受收敛影响（回归保护）=====
 
 def test_ut5_empty_binding_unaffected(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     import datetime as _dt
     _old = (_dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=300)).isoformat()
@@ -251,7 +251,7 @@ def test_ut6_redispatch_no_direct_on_rid_zero(setup_db):
     完整 redispatch 路由测试依赖 FastAPI TestClient + 全套 DB，此处直测守卫表达式
     （事件重建分支中 direct 触发条件 = _is_local_direct and _new_task_id and _rid > 0）。
     """
-    from src.runtime.service import runtime_credential_id
+    from src.domains.runtime.engine.service import runtime_credential_id
     # runtime_credential_id(0) → None（原陷阱）→ None or 0 = 0 → _is_local_direct=True
     cid = runtime_credential_id(0)
     assert cid is None, "runtime_credential_id(0) 应返回 None（守卫前提）"

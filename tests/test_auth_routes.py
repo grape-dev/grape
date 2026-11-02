@@ -10,12 +10,12 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from src.api.main import app
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.kernel.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -39,7 +39,7 @@ def _cleanup(username: str, gitcode_id: str):
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user=?", (username,))
         db.commit()
     # D32: 清理 grape_accounts + external_identities
-    from src.auth.grape_account_db import get_grape_account_by_username, soft_delete_account, delete_external_identity
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username, soft_delete_account, delete_external_identity
     acc = get_grape_account_by_username(username)
     if acc:
         delete_external_identity(acc["id"], "gitcode")
@@ -62,14 +62,14 @@ def _gid():
 
 class TestOAuthLogin:
     def test_missing_client_id_400(self):
-        with patch("src.user.db.get_meta_value", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             r = client.get("/api/auth/login/gitcode")
         assert r.status_code == 400
         assert "不支持" in r.json()["detail"]["message"] or "未配置" in r.json()["detail"]["message"]
 
     def test_success_builds_authorize_url(self, monkeypatch):
         # 需求 11：redirect_uri 从 provider 配置读取
-        import src.auth.providers as _prov
+        import src.domains.mgmt.auth.providers as _prov
         _orig_get_provider = _prov.get_provider
         def _mock_get_provider(name):
             cfg = _orig_get_provider(name)
@@ -78,7 +78,7 @@ class TestOAuthLogin:
                 cfg["redirect_uri"] = "https://grape.test/cb"
             return cfg
         monkeypatch.setattr(_prov, "get_provider", _mock_get_provider)
-        with patch("src.user.db.get_meta_value", return_value="cli_test"):
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="cli_test"):
             r = client.get("/api/auth/login/gitcode")
         assert r.status_code == 200
         url = r.json()["redirect_url"]
@@ -96,7 +96,7 @@ class TestOAuthLogin:
                 return "cli_x"
             return ""
 
-        with patch("src.user.db.get_meta_value", side_effect=fake):
+        with patch("src.domains.mgmt.user.db.get_meta_value", side_effect=fake):
             r = client.get("/api/auth/login/gitcode", headers={"Host": "grape.test:8000"})
         assert r.status_code == 200
         url = r.json()["redirect_url"]
@@ -133,7 +133,7 @@ class TestOAuthCallback:
 
     def test_token_fetch_exception_redirect(self):
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", side_effect=OSError("net down")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
@@ -141,7 +141,7 @@ class TestOAuthCallback:
 
     def test_no_access_token_redirect(self):
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"refresh_token": "rt"})):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
@@ -149,7 +149,7 @@ class TestOAuthCallback:
 
     def test_user_info_exception_redirect(self):
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", side_effect=OSError("user api down")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
@@ -158,7 +158,7 @@ class TestOAuthCallback:
 
     def test_whitelist_denies_new_user_redirect(self):
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": 777777, "login": "whitelist_denied_user",
@@ -173,7 +173,7 @@ class TestOAuthCallback:
         uname = "oauth_new_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
@@ -186,7 +186,7 @@ class TestOAuthCallback:
 
     def test_success_existing_user_keeps_repo_selection(self):
         """已绑定用户 → 直接登录，first_login=0。"""
-        from src.auth.grape_account_db import create_grape_account, create_external_identity
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, create_external_identity
         uname = "oauth_exist_" + uuid.uuid4().hex[:6]
         gid = _gid()
         # D32: 测试用 grape_accounts 而非 user_accounts
@@ -201,7 +201,7 @@ class TestOAuthCallback:
                       "VALUES (?, ?, 'o', 'r', 1, 1)", (u["id"], rk))
             db.commit()
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at2", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "旧名"})):
@@ -217,7 +217,7 @@ class TestOAuthCallback:
 
     def test_no_gitcode_id_redirect(self):
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"login": "no_id_user"})):
@@ -230,12 +230,12 @@ class TestOAuthCallback:
         uname = "oauth_fail_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True), \
-             patch("src.user.db.create_user", return_value=None):
+             patch("src.domains.mgmt.user.db.create_user", return_value=None):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
         # grape_auth callback 未绑定用户走 _oauth_associate_redirect（302），不走 create_user
@@ -246,7 +246,7 @@ class TestOAuthCallback:
         uname = "oauth_map_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state()
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
@@ -260,7 +260,7 @@ class TestOAuthCallback:
 
 class TestProfileLogout:
     def _auth_headers(self):
-        from src.auth.grape_account_db import create_grape_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account
         uname = "auth_prof_" + uuid.uuid4().hex[:6]
         u = create_grape_account(username=uname, email="", password="pw")
         tok = _jwt_access_token(u["id"], u["username"])
@@ -275,7 +275,7 @@ class TestProfileLogout:
             assert data["username"] == u["username"]
             assert "managed_repos" in data and "gitcode_bound" in data
         finally:
-            from src.auth.grape_account_db import soft_delete_account
+            from src.domains.mgmt.auth.grape_account_db import soft_delete_account
             soft_delete_account(u["id"])
 
     def test_logout_clears_token(self):
@@ -289,5 +289,5 @@ class TestProfileLogout:
             r2 = client.get("/api/auth/profile", headers=h)
             assert r2.status_code == 401  # logout 后 token_version+1 → token 失效
         finally:
-            from src.auth.grape_account_db import soft_delete_account
+            from src.domains.mgmt.auth.grape_account_db import soft_delete_account
             soft_delete_account(u["id"])

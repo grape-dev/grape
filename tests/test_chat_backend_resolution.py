@@ -99,7 +99,7 @@ def test_unknown_backend_does_not_crash():
 def test_local_direct_is_direct_mode():
     """E04：本机直连 runtime 走 EXEC_MODE_DIRECT，不入队远端"""
     _seed_runtimes()
-    from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT
+    from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
     assert runtime_execution_kind(R_LOCAL_DIRECT) == EXEC_MODE_DIRECT
     _clean()
 

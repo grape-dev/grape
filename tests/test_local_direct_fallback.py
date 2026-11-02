@@ -171,7 +171,7 @@ def test_pool_only_local_direct_mixed_remotes_still_local():
 def test_enqueue_broadcast_self_run_when_only_local():
     from src.api import event_pipeline as ep
     from src.api import event_archive as ea
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     from src.kernel.prompt_builder import build_devops_agent_prompt as _bdap
 
     fake_tid = "t_selftest"

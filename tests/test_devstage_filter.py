@@ -8,8 +8,8 @@ import json
 import pytest
 from unittest.mock import patch
 
-from src.api.routes import devstage as ds_route
-from src.im import devstage_client as ds_client
+from src.domains.mgmt.routes import devstage as ds_route
+from src.domains.runtime.im import devstage_client as ds_client
 
 GRAPE_TPL = "4ef59a2b4d3d4909aacd80f6007c00b2"
 OTHER_TPL = "ffffffffffffffffffffffffffffffff"

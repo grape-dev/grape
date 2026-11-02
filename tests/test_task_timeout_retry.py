@@ -18,7 +18,7 @@ sys.path.insert(0, ROOT)
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime import agent as agent_mod
+from src.domains.runtime.engine import agent as agent_mod
 
 
 @pytest.fixture(autouse=True)

@@ -3,7 +3,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from fastapi import FastAPI
-from src.api.routes.webhook import router as webhook_router
+from src.domains.runtime.routes.webhook import router as webhook_router
 from src.api.db_setup import init_database
 from src.kernel.config import _load_accounts, log
 

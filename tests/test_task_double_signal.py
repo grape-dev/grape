@@ -18,7 +18,7 @@ from src.api import auth_token
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import init_database
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 init_database()
 

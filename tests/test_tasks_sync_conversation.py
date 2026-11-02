@@ -10,8 +10,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.kernel.session_manager import db, db_lock, get_messages, create_conversation, add_message
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 
 _uid = None
 _conv_id = ""
@@ -45,7 +45,7 @@ def setup_module():
 
 def test_post_result_does_not_write_conversation():
     """Issue #46：_post_result_to_issue 只发 GitCode 评论，不再写 task conversation（单写）。"""
-    from src.api.event_pipeline import _post_result_to_issue
+    from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
     def _fake_urlopen(req, timeout=15):
         class _R:
             def read(self): return b'{"id":1}'
@@ -70,7 +70,7 @@ def test_post_result_syncs_to_conversation_via_exec_tail():
 
 def test_post_result_no_conversation_no_error():
     """无关联 conversation 时不报错（优雅跳过）。"""
-    from src.api.event_pipeline import _post_result_to_issue
+    from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
     def _fake_urlopen(req, timeout=15):
         class _R:
             def read(self): return b'{}'

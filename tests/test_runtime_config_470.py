@@ -43,7 +43,7 @@ def _clean_env(monkeypatch):
     monkeypatch.delenv("GRAPE_DEVSTAGE_FLAVOR_ID", raising=False)
     monkeypatch.delenv("GRAPE_DEVSTAGE_CORES", raising=False)
     monkeypatch.delenv("GRAPE_DEVSTAGE_MEMORY", raising=False)
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value("runtime_task_timeout", "")
     set_meta_value("devstage_template_id", "")
     set_meta_value("devstage_flavor_id", "")
@@ -114,20 +114,20 @@ class TestMetaSource:
     """管理台值（DB meta）单独生效，且 文件 < meta（验收：管理台优先级）。"""
 
     def test_timeout_from_meta(self):
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("runtime_task_timeout", "5400")
         invalidate_runtime_config_cache()
         assert get_runtime_task_timeout() == 5400
 
     def test_meta_overrides_file(self):
         _write_runtime_config_for_test({"runtime_task_timeout": 1800})
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("runtime_task_timeout", "5400")
         invalidate_runtime_config_cache()
         assert get_runtime_task_timeout() == 5400
 
     def test_devstage_from_meta(self):
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("devstage_template_id", "tpl-meta")
         set_meta_value("devstage_cores", "4")
         set_meta_value("devstage_memory", "8")
@@ -142,7 +142,7 @@ class TestEnvPriority:
 
     def test_env_overrides_all(self, monkeypatch):
         _write_runtime_config_for_test({"runtime_task_timeout": 1800})
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("runtime_task_timeout", "5400")
         invalidate_runtime_config_cache()
         monkeypatch.setenv("RUNTIME_TASK_TIMEOUT", "900")
@@ -161,13 +161,13 @@ class TestInvalidFallback:
 
     def test_invalid_meta_falls_back_to_file(self):
         _write_runtime_config_for_test({"runtime_task_timeout": 1800})
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("runtime_task_timeout", "not-a-number")
         invalidate_runtime_config_cache()
         assert get_runtime_task_timeout() == 1800
 
     def test_invalid_env_falls_back_to_meta(self, monkeypatch):
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("runtime_task_timeout", "5400")
         invalidate_runtime_config_cache()
         monkeypatch.setenv("RUNTIME_TASK_TIMEOUT", "garbage")

@@ -18,9 +18,9 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
-from src.observability import alerts
-from src.observability import metric_rollup as mr
+from src.domains.runtime.engine import service
+from src.domains.insight.observability import alerts
+from src.domains.insight.observability import metric_rollup as mr
 
 
 @pytest.fixture(autouse=True)

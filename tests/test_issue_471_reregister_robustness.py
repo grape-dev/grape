@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.runtime import agent as ra
+from src.domains.runtime.engine import agent as ra
 
 
 def _mk_engine(name, cli="/bin/x"):

@@ -4,7 +4,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
 import pytest
-from src.api.routes.repos import _cleanup_repo_data
+from src.domains.mgmt.routes.repos import _cleanup_repo_data
 
 REPO = "owner/cleanup-test"
 
@@ -128,11 +128,11 @@ class TestCleanupRepoData:
         (skills / "repo" / "owner" / "other-repo" / "y").mkdir(parents=True)
 
         # 记录真实 WORKSPACE_DIR/SKILL_DIR 并替换
-        import src.api.routes.repos as repos_mod
+        import src.domains.mgmt.routes.repos as repos_mod
         real_ws = None
         real_skill = None
         with patch("src.kernel.config.WORKSPACE_DIR", str(ws)), \
-             patch("src.user.db.SKILL_DIR", str(skills / "custom")):
+             patch("src.domains.mgmt.user.db.SKILL_DIR", str(skills / "custom")):
             _cleanup_repo_data("owner/cleanup-test", "owner", "cleanup-test")
 
         # 目标仓库的目录应被删除

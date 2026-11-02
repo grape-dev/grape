@@ -13,11 +13,11 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
-from src.runtime.codex import CodexRuntime
-from src.runtime import get_runtime
-from src.runtime import CodexRuntime as ExportedCodexRuntime
-from src.agent.codex import CodexBackend
-from src.agent.executor import _BACKENDS, discover_backends
+from src.domains.runtime.engine.codex import CodexRuntime
+from src.domains.runtime.engine import get_runtime
+from src.domains.runtime.engine import CodexRuntime as ExportedCodexRuntime
+from src.domains.runtime.agents.codex import CodexBackend
+from src.domains.runtime.agents.executor import _BACKENDS, discover_backends
 
 
 class TestCodexRuntimeRegistration:
@@ -60,16 +60,16 @@ class TestDiscoverBackends:
 
 class TestIsKnownEngineName:
     def test_codex_known(self):
-        from src.user.db import is_known_engine_name
+        from src.domains.mgmt.user.db import is_known_engine_name
         assert is_known_engine_name("codex") is True
 
     def test_codex_case_insensitive(self):
-        from src.user.db import is_known_engine_name
+        from src.domains.mgmt.user.db import is_known_engine_name
         assert is_known_engine_name("CODEX") is True
         assert is_known_engine_name("Codex") is True
 
     def test_unknown_still_false(self):
-        from src.user.db import is_known_engine_name
+        from src.domains.mgmt.user.db import is_known_engine_name
         assert is_known_engine_name("default") is False
         assert is_known_engine_name("") is False
 

@@ -142,6 +142,6 @@ class TestHealthResetAPI:
         """health_scorer.reset_health 失败（返回 None）→ 503。"""
         cid = _mk_cred("hr_fail", scope="user", owner_name="me", status="active")
         rid = _mk_runtime(cid, name="hr_fail_rt", scope="user")
-        with patch("src.runtime.health_scorer.reset_health", return_value=None):
+        with patch("src.domains.runtime.engine.health_scorer.reset_health", return_value=None):
             r = org_client.post(f"/api/settings/agent-runtimes/{rid}/health-reset")
         assert r.status_code == 503, r.text

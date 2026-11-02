@@ -33,9 +33,9 @@ class PersonalPoolIdentityTests(unittest.TestCase):
         self.db.execute("INSERT INTO grape_accounts VALUES (123,'fixture-owner')")
         repo = ModuleType('src.kernel.repo_key')
         repo.from_repo_key = lambda value: value.removeprefix('gitcode:')
-        health = ModuleType('src.runtime.health')
+        health = ModuleType('src.domains.runtime.engine.health')
         health.parse_dt = lambda value: datetime.fromisoformat(value).timestamp()
-        modules = patch.dict(sys.modules, {'src.kernel.repo_key': repo, 'src.runtime.health': health})
+        modules = patch.dict(sys.modules, {'src.kernel.repo_key': repo, 'src.domains.runtime.engine.health': health})
         modules.start()
         self.addCleanup(modules.stop)
         source = Path(__file__).resolve().parents[1] / 'src/runtime/service.py'

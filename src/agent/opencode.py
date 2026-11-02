@@ -1,2 +1,4 @@
-"""Opencode 后端实现（兼容转发层，M0 后迁至 src.runtime.opencode）"""
-from src.runtime.opencode import OpencodeRuntime as OpencodeBackend
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.runtime.agents.opencode"""
+import src.domains.runtime.agents.opencode as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

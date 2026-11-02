@@ -25,8 +25,8 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 
 import pytest
 
-from src.storage.skill_sync import sync_official_skills_to_obs, _compute_skill_hash
-from src.storage import StorageBackend
+from src.domains.runtime.storage.skill_sync import sync_official_skills_to_obs, _compute_skill_hash
+from src.domains.runtime.storage import StorageBackend
 
 
 class FakeStorage(StorageBackend):
@@ -130,8 +130,8 @@ class TestSyncOfficialSkillsToObs:
         )
 
         # 模块级 import：from src.kernel.config import SKILLS_DIR, CONFIG_DIR
-        monkeypatch.setattr("src.storage.skill_sync.CONFIG_DIR", str(config_dir))
-        monkeypatch.setattr("src.storage.skill_sync.SKILLS_DIR", str(skills_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.SKILLS_DIR", str(skills_dir))
 
         return {
             "skill_name": skill_name,
@@ -145,29 +145,29 @@ class TestSyncOfficialSkillsToObs:
         """上传新 zip → zip_cache_put + mem_cache_invalidate 各调用一次，
         且 zip_cache_put 的数据与 OBS 上传数据完全一致。"""
         fake = FakeStorage()
-        monkeypatch.setattr("src.storage.get_storage", lambda: fake)
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: fake)
 
         zip_calls = []
 
         def _track_zip_put(object_key, data, content_hash="", skill_id=0):
             zip_calls.append((object_key, data, content_hash))
 
-        monkeypatch.setattr("src.storage.zip_cache_put", _track_zip_put)
+        monkeypatch.setattr("src.domains.runtime.storage.zip_cache_put", _track_zip_put)
 
         mem_calls = []
 
         def _track_mem_invalidate(skill_name):
             mem_calls.append(skill_name)
 
-        monkeypatch.setattr("src.storage.mem_cache_invalidate", _track_mem_invalidate)
+        monkeypatch.setattr("src.domains.runtime.storage.mem_cache_invalidate", _track_mem_invalidate)
 
         # DB mock：返回旧 hash（与当前不同）+ 空 file_path → 进入上传分支
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
+            "src.domains.mgmt.user.db.get_skill_content_hash",
             lambda skill_name, scope="official": (1, "old-different-hash", ""),
         )
         monkeypatch.setattr(
-            "src.user.db.update_skill_content_hash",
+            "src.domains.mgmt.user.db.update_skill_content_hash",
             lambda skill_id, content_hash, file_path="": True,
         )
 
@@ -210,21 +210,21 @@ class TestSyncOfficialSkillsToObs:
         """hash 未变且 file_path 已存在时走 skip 分支，
         不调用 zip_cache_put / mem_cache_invalidate（防无条件调用的退化修复）。"""
         fake = FakeStorage()
-        monkeypatch.setattr("src.storage.get_storage", lambda: fake)
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: fake)
 
         zip_calls = []
 
         def _track_zip_put(object_key, data, content_hash="", skill_id=0):
             zip_calls.append((object_key, data, content_hash))
 
-        monkeypatch.setattr("src.storage.zip_cache_put", _track_zip_put)
+        monkeypatch.setattr("src.domains.runtime.storage.zip_cache_put", _track_zip_put)
 
         mem_calls = []
 
         def _track_mem_invalidate(skill_name):
             mem_calls.append(skill_name)
 
-        monkeypatch.setattr("src.storage.mem_cache_invalidate", _track_mem_invalidate)
+        monkeypatch.setattr("src.domains.runtime.storage.mem_cache_invalidate", _track_mem_invalidate)
 
         # 计算真实 hash，让 db_hash == current_hash → 进入 skip 判断
         real_hash = _compute_skill_hash(skill_env["skill_dir"])
@@ -232,12 +232,12 @@ class TestSyncOfficialSkillsToObs:
 
         # DB mock：hash 相同 + file_path 非空 → skip（storage 非 None 且 db_file_path 非空）
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
+            "src.domains.mgmt.user.db.get_skill_content_hash",
             lambda skill_name, scope="official": (1, real_hash, "grape/prod/skills/official/existing.zip"),
         )
         # update_skill_content_hash 不应被调用，但 mock 以防意外
         monkeypatch.setattr(
-            "src.user.db.update_skill_content_hash",
+            "src.domains.mgmt.user.db.update_skill_content_hash",
             lambda skill_id, content_hash, file_path="": True,
         )
 
@@ -267,8 +267,8 @@ class TestSyncOfficialSkillsToObs:
         config_dir.mkdir()
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
-        monkeypatch.setattr("src.storage.skill_sync.CONFIG_DIR", str(config_dir))
-        monkeypatch.setattr("src.storage.skill_sync.SKILLS_DIR", str(skills_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.SKILLS_DIR", str(skills_dir))
 
         result = asyncio.run(sync_official_skills_to_obs())
         assert result == {"added": 0, "updated": 0, "skipped": 0}, result
@@ -287,9 +287,9 @@ class TestSyncOfficialSkillsToObs:
             json.dumps({"ghost-skill": {"path": "ghost-skill"}}, ensure_ascii=False),
             encoding="utf-8",
         )
-        monkeypatch.setattr("src.storage.skill_sync.CONFIG_DIR", str(config_dir))
-        monkeypatch.setattr("src.storage.skill_sync.SKILLS_DIR", str(skills_dir))
-        monkeypatch.setattr("src.storage.get_storage", lambda: FakeStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.SKILLS_DIR", str(skills_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: FakeStorage())
 
         result = asyncio.run(sync_official_skills_to_obs())
         assert result == {"added": 0, "updated": 0, "skipped": 0}, result
@@ -303,21 +303,21 @@ class TestSyncOfficialSkillsToObs:
             def save_bytes(self, key, data):
                 raise RuntimeError("OBS simulated failure")
 
-        monkeypatch.setattr("src.storage.get_storage", lambda: _BrokenStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _BrokenStorage())
 
         zip_calls = []
-        monkeypatch.setattr("src.storage.zip_cache_put",
+        monkeypatch.setattr("src.domains.runtime.storage.zip_cache_put",
                             lambda object_key, data, content_hash="": zip_calls.append((object_key, data, content_hash)))
         mem_calls = []
-        monkeypatch.setattr("src.storage.mem_cache_invalidate",
+        monkeypatch.setattr("src.domains.runtime.storage.mem_cache_invalidate",
                             lambda skill_name: mem_calls.append(skill_name))
 
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
+            "src.domains.mgmt.user.db.get_skill_content_hash",
             lambda skill_name, scope="official": (1, "old-hash", ""),
         )
         monkeypatch.setattr(
-            "src.user.db.update_skill_content_hash",
+            "src.domains.mgmt.user.db.update_skill_content_hash",
             lambda skill_id, content_hash, file_path="": True,
         )
 
@@ -333,16 +333,16 @@ class TestSyncOfficialSkillsToObs:
     def test_new_skill_added_count(self, skill_env, monkeypatch):
         """DB 中不存在该 skill（id=0, db_hash=""）→ 上传后 added +1。"""
         fake = FakeStorage()
-        monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
-        monkeypatch.setattr("src.storage.mem_cache_invalidate", lambda skill_name: None)
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: fake)
+        monkeypatch.setattr("src.domains.runtime.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
+        monkeypatch.setattr("src.domains.runtime.storage.mem_cache_invalidate", lambda skill_name: None)
 
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
+            "src.domains.mgmt.user.db.get_skill_content_hash",
             lambda skill_name, scope="official": (0, "", ""),
         )
         monkeypatch.setattr(
-            "src.user.db.update_skill_content_hash",
+            "src.domains.mgmt.user.db.update_skill_content_hash",
             lambda skill_id, content_hash, file_path="": True,
         )
 
@@ -359,19 +359,19 @@ class TestSyncOfficialSkillsToObs:
     def test_file_path_synced_count(self, skill_env, monkeypatch):
         """hash 未变但 file_path 为空且 OBS 模式 → 不 skip，上传补 file_path，updated +1。"""
         fake = FakeStorage()
-        monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
-        monkeypatch.setattr("src.storage.mem_cache_invalidate", lambda skill_name: None)
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: fake)
+        monkeypatch.setattr("src.domains.runtime.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
+        monkeypatch.setattr("src.domains.runtime.storage.mem_cache_invalidate", lambda skill_name: None)
 
         real_hash = _compute_skill_hash(skill_env["skill_dir"])
         assert real_hash, "skill hash should not be empty"
 
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
+            "src.domains.mgmt.user.db.get_skill_content_hash",
             lambda skill_name, scope="official": (1, real_hash, ""),
         )
         monkeypatch.setattr(
-            "src.user.db.update_skill_content_hash",
+            "src.domains.mgmt.user.db.update_skill_content_hash",
             lambda skill_id, content_hash, file_path="": True,
         )
 
@@ -401,24 +401,24 @@ class TestSyncOfficialSkillsToObs:
             json.dumps({skill_name: {"path": skill_name, "agent_type": "chat"}}, ensure_ascii=False),
             encoding="utf-8")
 
-        monkeypatch.setattr("src.storage.skill_sync.CONFIG_DIR", str(config_dir))
-        monkeypatch.setattr("src.storage.skill_sync.SKILLS_DIR", str(skills_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.CONFIG_DIR", str(config_dir))
+        monkeypatch.setattr("src.domains.runtime.storage.skill_sync.SKILLS_DIR", str(skills_dir))
         # mock resolve 返回 fallback 目录下的 SKILL.md
         monkeypatch.setattr(
-            "src.storage.skill_sync.resolve_official_skill_path",
+            "src.domains.runtime.storage.skill_sync.resolve_official_skill_path",
             lambda name: str(fallback_dir / "SKILL.md") if name == skill_name else "",
         )
 
         fake = FakeStorage()
-        monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-        monkeypatch.setattr("src.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
-        monkeypatch.setattr("src.storage.mem_cache_invalidate", lambda skill_name: None)
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: fake)
+        monkeypatch.setattr("src.domains.runtime.storage.zip_cache_put", lambda object_key, data, content_hash="", skill_id=0: None)
+        monkeypatch.setattr("src.domains.runtime.storage.mem_cache_invalidate", lambda skill_name: None)
         monkeypatch.setattr(
-            "src.user.db.get_skill_content_hash",
+            "src.domains.mgmt.user.db.get_skill_content_hash",
             lambda skill_name, scope="official": (0, "", ""),
         )
         monkeypatch.setattr(
-            "src.user.db.update_skill_content_hash",
+            "src.domains.mgmt.user.db.update_skill_content_hash",
             lambda skill_id, content_hash, file_path="": True,
         )
 
@@ -433,7 +433,7 @@ class TestSyncOfficialSkillsToObs:
 # Issue #254：skill_md_content 缓存命中校验 content_hash 回源
 # ==================================================================
 
-from src.storage import (
+from src.domains.runtime.storage import (
     skill_md_content, mem_cache_put, mem_cache_get, mem_cache_get_with_hash,
     mem_cache_invalidate, zip_cache_put, zip_cache_get, zip_cache_get_with_hash,
     zip_cache_invalidate, reset_storage, _mem_cache,
@@ -496,9 +496,9 @@ class TestZipCacheHash:
 
     def test_put_get_with_hash(self, tmp_path, monkeypatch):
         """zip_cache_put 传入 content_hash → get_with_hash 返回 (data, hash)。"""
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
-        from src.storage import skill_key
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        from src.domains.runtime.storage import skill_key
         k = skill_key("custom", "123", "hash-test-skill")
         zip_cache_put(k, b"zip-data-v1", "content-hash-v1")
         result = zip_cache_get_with_hash(k)
@@ -509,9 +509,9 @@ class TestZipCacheHash:
 
     def test_put_without_hash_backward_compat(self, tmp_path, monkeypatch):
         """zip_cache_put 不传 content_hash → hash 默认空串，get 仍返回纯 bytes（向后兼容）。"""
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
-        from src.storage import skill_key
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        from src.domains.runtime.storage import skill_key
         k = skill_key("custom", "123", "no-hash-skill")
         zip_cache_put(k, b"zip-data")
         # 向后兼容：zip_cache_get 返回纯 bytes
@@ -524,9 +524,9 @@ class TestZipCacheHash:
 
     def test_overwrite_updates_hash(self, tmp_path, monkeypatch):
         """同 key 覆盖写入 → hash 更新为新值。"""
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
-        from src.storage import skill_key
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        from src.domains.runtime.storage import skill_key
         k = skill_key("custom", "123", "overwrite-skill")
         zip_cache_put(k, b"v1-data", "hash-v1")
         zip_cache_put(k, b"v2-data", "hash-v2")
@@ -542,10 +542,10 @@ class TestSkillMdContentHashVerification:
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):
         """隔离缓存环境。"""
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
         # 清理内存缓存（Issue #444：object_key 口径）
-        from src.storage import skill_key as _sk
+        from src.domains.runtime.storage import skill_key as _sk
         _okey = _sk("official", "", "hash-verify-skill")
         mem_cache_invalidate(_okey)
         # 重置 storage 单例
@@ -556,21 +556,21 @@ class TestSkillMdContentHashVerification:
     def test_hash_match_returns_cached_fast_path(self, monkeypatch):
         """缓存命中 + DB hash 一致 → 走快路径，不回源 OBS。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（带 hash）
         mem_cache_put(object_key, "cached content", "hash-v1")
         # DB hash 一致
         monkeypatch.setattr(
-            "src.user.db.get_skill_hash_by_key",
+            "src.domains.mgmt.user.db.get_skill_hash_by_key",
             lambda sn, scope="official", owner_id="": (1, "hash-v1", "file_path", 1),
         )
         # OBS 不应被调用
         class _NoCallStorage:
             def read_bytes(self, key):
                 raise AssertionError("OBS read_bytes should NOT be called on hash match (fast path)")
-        monkeypatch.setattr("src.storage.get_storage", lambda: _NoCallStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _NoCallStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert result == "cached content"
@@ -578,14 +578,14 @@ class TestSkillMdContentHashVerification:
     def test_hash_mismatch_invalidates_and_refetches(self, monkeypatch):
         """缓存命中 + DB hash 不一致 → 失效缓存回源 OBS 获取最新内容。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（旧 hash）
         mem_cache_put(object_key, "old content", "hash-old")
         # DB hash 不同（内容已更新）
         monkeypatch.setattr(
-            "src.user.db.get_skill_hash_by_key",
+            "src.domains.mgmt.user.db.get_skill_hash_by_key",
             lambda sn, scope="official", owner_id="": (1, "hash-new", "file_path", 1),
         )
 
@@ -594,7 +594,7 @@ class TestSkillMdContentHashVerification:
         class _RefetchStorage:
             def read_bytes(self, key):
                 return new_zip
-        monkeypatch.setattr("src.storage.get_storage", lambda: _RefetchStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _RefetchStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert "new skill md with updated content" in result, f"expected new content, got: {result}"
@@ -606,7 +606,7 @@ class TestSkillMdContentHashVerification:
     def test_zip_cache_hash_mismatch_refetches(self, monkeypatch):
         """磁盘缓存命中 + hash 不一致 → 失效磁盘缓存回源 OBS。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 清内存缓存（强制走磁盘路径，object_key 口径）
@@ -616,7 +616,7 @@ class TestSkillMdContentHashVerification:
         zip_cache_put(object_key, old_zip, "hash-old")
         # DB hash 不同
         monkeypatch.setattr(
-            "src.user.db.get_skill_hash_by_key",
+            "src.domains.mgmt.user.db.get_skill_hash_by_key",
             lambda sn, scope="official", owner_id="": (1, "hash-new", "file_path", 1),
         )
 
@@ -625,7 +625,7 @@ class TestSkillMdContentHashVerification:
         class _RefetchStorage:
             def read_bytes(self, key):
                 return new_zip
-        monkeypatch.setattr("src.storage.get_storage", lambda: _RefetchStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _RefetchStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert "new skill md with updated content" in result, f"expected new content, got: {result}"
@@ -633,7 +633,7 @@ class TestSkillMdContentHashVerification:
     def test_zip_cache_hash_match_uses_cache(self, monkeypatch):
         """磁盘缓存命中 + hash 一致 → 不回源 OBS。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 清内存缓存（强制走磁盘路径，object_key 口径）
@@ -643,14 +643,14 @@ class TestSkillMdContentHashVerification:
         zip_cache_put(object_key, zip_data, "hash-v1")
         # DB hash 一致
         monkeypatch.setattr(
-            "src.user.db.get_skill_hash_by_key",
+            "src.domains.mgmt.user.db.get_skill_hash_by_key",
             lambda sn, scope="official", owner_id="": (1, "hash-v1", "file_path", 1),
         )
         # OBS 不应被调用
         class _NoCallStorage:
             def read_bytes(self, key):
                 raise AssertionError("OBS should NOT be called on zip cache hash match")
-        monkeypatch.setattr("src.storage.get_storage", lambda: _NoCallStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _NoCallStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert "old skill md" in result, f"expected cached content, got: {result}"
@@ -658,7 +658,7 @@ class TestSkillMdContentHashVerification:
     def test_no_hash_in_cache_skip_verification(self, monkeypatch):
         """缓存无 hash（旧数据）→ 不校验，直接返回缓存（向后兼容）。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（无 hash）
@@ -667,7 +667,7 @@ class TestSkillMdContentHashVerification:
         class _NoCallStorage:
             def read_bytes(self, key):
                 raise AssertionError("OBS should NOT be called when cache has no hash (backward compat)")
-        monkeypatch.setattr("src.storage.get_storage", lambda: _NoCallStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _NoCallStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert result == "legacy cached content"
@@ -675,21 +675,21 @@ class TestSkillMdContentHashVerification:
     def test_db_hash_empty_skip_verification(self, monkeypatch):
         """DB hash 为空（技能未同步过）→ 不校验，走缓存快路径。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 预填内存缓存（带 hash）
         mem_cache_put(object_key, "cached content", "some-hash")
         # DB hash 为空（技能不存在或未同步）
         monkeypatch.setattr(
-            "src.user.db.get_skill_hash_by_key",
+            "src.domains.mgmt.user.db.get_skill_hash_by_key",
             lambda sn, scope="official", owner_id="": (0, "", ""),
         )
         # OBS 不应被调用
         class _NoCallStorage:
             def read_bytes(self, key):
                 raise AssertionError("OBS should NOT be called when DB hash is empty")
-        monkeypatch.setattr("src.storage.get_storage", lambda: _NoCallStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _NoCallStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert result == "cached content"
@@ -697,7 +697,7 @@ class TestSkillMdContentHashVerification:
     def test_refetch_updates_cache_with_db_hash(self, monkeypatch):
         """回源后缓存写入时带最新 DB hash（供后续命中校验）。"""
         skill_name = "hash-verify-skill"
-        from src.storage import skill_key
+        from src.domains.runtime.storage import skill_key
         object_key = skill_key("official", "", skill_name)
 
         # 清所有缓存（object_key 口径）
@@ -705,7 +705,7 @@ class TestSkillMdContentHashVerification:
         zip_cache_invalidate(object_key)
         # DB hash
         monkeypatch.setattr(
-            "src.user.db.get_skill_hash_by_key",
+            "src.domains.mgmt.user.db.get_skill_hash_by_key",
             lambda sn, scope="official", owner_id="": (1, "db-hash-abc", "file_path", 1),
         )
 
@@ -713,7 +713,7 @@ class TestSkillMdContentHashVerification:
         class _RefetchStorage:
             def read_bytes(self, key):
                 return new_zip
-        monkeypatch.setattr("src.storage.get_storage", lambda: _RefetchStorage())
+        monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: _RefetchStorage())
 
         result = skill_md_content(object_key, skill_name)
         assert "new skill md" in result

@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api import auth_token, openapi
 from src.kernel.auth_sdk.jwt_utils import create_access_token
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)

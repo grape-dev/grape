@@ -23,7 +23,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
@@ -34,7 +34,7 @@ _headers = {}
 
 def setup_module():
     global _uid, _headers
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()

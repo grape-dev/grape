@@ -14,12 +14,12 @@ from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
 from src.kernel.config import log
-from src.user.repo_manager import UpstreamAPIError
-from src.vcs.providers import (
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError
+from src.domains.runtime.vcs.providers import (
     translate_inbound,
     translate_query_state,
 )
-from src.vcs.providers import _MODULES as _PROVIDER_MODULES
+from src.domains.runtime.vcs.providers import _MODULES as _PROVIDER_MODULES
 
 router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 
@@ -118,7 +118,7 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
             uid = user.get("id") or 0
             username = user.get("username") or ""
             if not username and uid > 0:
-                from src.auth.grape_account_db import get_grape_account_by_id
+                from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
                 username = (get_grape_account_by_id(uid) or {}).get("username", "")
             return mod.user_token(username, uid) or ""
         except Exception:
@@ -424,7 +424,7 @@ def close_issue(owner: str, repo: str, number: int, user: dict = Depends(get_cur
     - GitHub：PATCH {"state": "closed"}
     - GitCode：PATCH body 必填 repo+title、state 值为 close（reopen/close），title 需先 GET 取回。
     """
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     client = VcsApiClient(p, _repo_token(owner, repo, user, p), owner, repo)
     resp = client.close_issue(number)
     if isinstance(resp, dict) and resp.get("error"):

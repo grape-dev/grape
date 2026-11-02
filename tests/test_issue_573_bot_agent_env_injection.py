@@ -17,8 +17,8 @@ import inspect
 
 import pytest
 
-import src.api.event_pipeline as ep
-from src.api.event_pipeline import (
+import src.domains.runtime.pipeline.event_pipeline as ep
+from src.domains.runtime.pipeline.event_pipeline import (
     _inject_bot_agent_env,
     _resolve_bot_username,
     build_task_env,
@@ -42,7 +42,7 @@ class TestResolveBotUsername:
                 "VALUES ('gitcode:octo/issue573','octo','issue573','octo/issue573',"
                 "0,'','','','repo_bot','','')")
 
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
         monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot"])
         try:
             assert _resolve_bot_username("gitcode:octo/issue573") == "repo_bot"
@@ -52,22 +52,22 @@ class TestResolveBotUsername:
 
     def test_global_gitcode_fallback(self, monkeypatch):
         """repo 级缺省 → 全局 bot username（gitcode 分流取第一个）"""
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
         monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot", "other"])
         monkeypatch.setattr(udb, "get_global_github_bot_username", lambda: "gh_bot")
         assert _resolve_bot_username("gitcode:octo/issue573b") == "global_bot"
 
     def test_global_github_fallback(self, monkeypatch):
         """github 仓库 repo 级缺省 → get_global_github_bot_username"""
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
         monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: ["global_bot"])
         monkeypatch.setattr(udb, "get_global_github_bot_username", lambda: "gh_bot")
         assert _resolve_bot_username("github:octo/issue573") == "gh_bot"
 
     def test_host_user_fallback(self, monkeypatch):
         """全局为空 → host_user 平台用户名（Issue #372 路径 B）"""
-        import src.user.db as udb
-        import src.auth.grape_account_db as gdb
+        import src.domains.mgmt.user.db as udb
+        import src.domains.mgmt.auth.grape_account_db as gdb
         monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: [])
         monkeypatch.setattr(udb, "get_global_github_bot_username", lambda: "")
         monkeypatch.setattr(udb, "get_host_user_id", lambda rk: 42)
@@ -81,7 +81,7 @@ class TestResolveBotUsername:
 
     def test_all_empty_returns_empty_string(self, monkeypatch):
         """三级兜底全空 → 空串（不注入占位值，skill 按空值降级）"""
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
         monkeypatch.setattr(udb, "get_global_bot_usernames", lambda: [])
         monkeypatch.setattr(udb, "get_global_github_bot_username", lambda: "")
         monkeypatch.setattr(udb, "get_host_user_id", lambda rk: 0)

@@ -4,19 +4,19 @@
 见 src/api/static/grape-task-logs-analysis.md。
 """
 import asyncio
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 import json
 
 import pytest
 from fastapi.testclient import TestClient
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
-from src.runtime.task_log_stream import subscribe, unsubscribe, fanout, _subscribers
+from src.domains.runtime.engine import service
+from src.domains.runtime.engine.task_log_stream import subscribe, unsubscribe, fanout, _subscribers
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -45,7 +45,7 @@ def _make_task(task_id="t1", status="running"):
 
 def _mk_user_token():
     import uuid
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     u = grape_account_db.create_grape_account(f"tasklog_{uuid.uuid4().hex[:8]}", email=None, password="pw123456")
     return _jwt_access_token(u["id"], u["username"])
 
@@ -128,7 +128,7 @@ class TestFanout:
 
     def test_fanout_payload_carries_seq(self):
         """fanout 载荷透传 seq（report_messages 落库后传入，前端按 seq 去重）。"""
-        from src.runtime.task_log_stream import _to_payload
+        from src.domains.runtime.engine.task_log_stream import _to_payload
         # 带 seq 的消息（report_messages 落库后构造）
         p1 = _to_payload({"type": "text", "data": "hi", "seq": 42})
         assert p1 is not None and p1.get("seq") == 42
@@ -163,7 +163,7 @@ class TestReportMessagesSeq:
         """
         _make_task("t2")
         async def main():
-            from src.runtime.task_log_stream import subscribe, unsubscribe
+            from src.domains.runtime.engine.task_log_stream import subscribe, unsubscribe
             q = await subscribe("t2")
             # 在另一个线程/同步调用 report_messages（模拟同主快路径）
             service.report_messages("t2", [{"type": "text", "data": "hello"}])
@@ -202,11 +202,11 @@ class TestCrossMasterTail:
             _db.commit()
 
         # 驱动 SSE gen：用尾随周期补发
-        from src.api.routes.task_logs import _TAIL_POLL_S
+        from src.domains.runtime.routes.task_logs import _TAIL_POLL_S
         async def main():
-            from src.runtime.task_log_stream import subscribe, unsubscribe, sse_frame
+            from src.domains.runtime.engine.task_log_stream import subscribe, unsubscribe, sse_frame
             import json as _json
-            from src.runtime.service import list_task_messages
+            from src.domains.runtime.engine.service import list_task_messages
             # 模拟 gen() 的尾随逻辑（不经过 HTTP，直接测补发逻辑）
             last_seq = base_seq
             tailed = list_task_messages("t2", since=last_seq)
@@ -262,7 +262,7 @@ class TestCrossMasterTail:
             mock_request = MagicMock()
             # 前 N 次 is_disconnected 返回 False（允许尾随执行），之后返回 True（退出）
             mock_request.is_disconnected = AsyncMock(side_effect=[False] * 20 + [True])
-            import src.api.routes.task_logs as _tl
+            import src.domains.runtime.routes.task_logs as _tl
             _orig_poll = _tl._TAIL_POLL_S
             _tl._TAIL_POLL_S = 0.1
             try:

@@ -211,7 +211,7 @@ class TestTicketTwoPhase:
     """票据校验/消费拆分（真实 SQLite 测试库）。"""
 
     def _save_ticket(self, initiating_user_id=300, original_user_id=299):
-        from src.auth.grape_account_db import save_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import save_binding_ticket
         ticket = save_binding_ticket(
             initiating_user_id=initiating_user_id,
             provider="gitcode",
@@ -224,7 +224,7 @@ class TestTicketTwoPhase:
 
     def test_validate_without_consume_keeps_ticket(self):
         """consume=False 只校验不删——票据可再次校验。"""
-        from src.auth.grape_account_db import validate_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import validate_binding_ticket
         ticket = self._save_ticket()
         d1 = validate_binding_ticket(ticket, 300, consume=False)
         assert d1 is not None and d1["external_id"] == "gc_issue376"
@@ -233,7 +233,7 @@ class TestTicketTwoPhase:
 
     def test_consume_binding_ticket_deletes(self):
         """consume_binding_ticket 删除票据；再校验返回 None。"""
-        from src.auth.grape_account_db import validate_binding_ticket, consume_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import validate_binding_ticket, consume_binding_ticket
         ticket = self._save_ticket(initiating_user_id=301, original_user_id=299)
         assert validate_binding_ticket(ticket, 301, consume=False) is not None
         assert consume_binding_ticket(ticket) is True
@@ -241,19 +241,19 @@ class TestTicketTwoPhase:
 
     def test_consume_nonexistent_ticket_returns_false(self):
         """删除不存在的票据返回 False（幂等）。"""
-        from src.auth.grape_account_db import consume_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import consume_binding_ticket
         assert consume_binding_ticket("nonexistent_issue376") is False
 
     def test_validate_default_consume_still_works(self):
         """默认 consume=True 保持旧行为（查+删一次性消费）。"""
-        from src.auth.grape_account_db import validate_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import validate_binding_ticket
         ticket = self._save_ticket(initiating_user_id=302, original_user_id=299)
         assert validate_binding_ticket(ticket, 302) is not None
         assert validate_binding_ticket(ticket, 302) is None
 
     def test_validate_user_mismatch_no_consume(self):
         """用户不匹配返回 None 且不消费（重试方仍可用自己的会话）。"""
-        from src.auth.grape_account_db import validate_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import validate_binding_ticket
         ticket = self._save_ticket(initiating_user_id=303)
         assert validate_binding_ticket(ticket, 999, consume=False) is None
         assert validate_binding_ticket(ticket, 303, consume=False) is not None
@@ -279,7 +279,7 @@ class TestTransferBindRetry:
     def _make_client(self):
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.routes.grape_auth import require_jwt_only
+        from src.domains.mgmt.routes.grape_auth import require_jwt_only
         from src.kernel.session_manager import db, db_lock
 
         with db_lock:
@@ -293,7 +293,7 @@ class TestTransferBindRetry:
         return TestClient(app)
 
     def _real_ticket(self):
-        from src.auth.grape_account_db import save_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import save_binding_ticket
         ticket = save_binding_ticket(
             initiating_user_id=400,
             provider="gitcode",
@@ -303,14 +303,14 @@ class TestTransferBindRetry:
         assert ticket is not None
         return ticket
 
-    @patch("src.api.routes.grape_auth.get_grape_account_by_id")
-    @patch("src.api.routes.grape_auth.transfer_business_data")
-    @patch("src.api.routes.grape_auth.transfer_external_identity_in_tx")
-    @patch("src.api.routes.grape_auth.has_password")
-    @patch("src.api.routes.grape_auth.count_user_identities")
-    @patch("src.api.routes.grape_auth.get_user_identities")
-    @patch("src.api.routes.grape_auth.auth_audit")
-    @patch("src.api.routes.grape_auth._clear_user_repos_cache")
+    @patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id")
+    @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
+    @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
+    @patch("src.domains.mgmt.routes.grape_auth.has_password")
+    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.routes.grape_auth.get_user_identities")
+    @patch("src.domains.mgmt.routes.grape_auth.auth_audit")
+    @patch("src.domains.mgmt.routes.grape_auth._clear_user_repos_cache")
     def test_failure_then_retry_same_ticket(
         self, mock_clear, mock_audit, mock_idents, mock_count, mock_has_pwd,
         mock_transfer_in_tx, mock_transfer_biz, mock_get_account,
@@ -319,7 +319,7 @@ class TestTransferBindRetry:
 
         Issue #376 验收标准 2：失败重试不再必然 410。
         """
-        from src.auth.grape_account_db import validate_binding_ticket, consume_binding_ticket
+        from src.domains.mgmt.auth.grape_account_db import validate_binding_ticket, consume_binding_ticket
 
         mock_get_account.return_value = {"email_is_placeholder": 1, "created_by_oauth": 1}
         mock_has_pwd.return_value = False
@@ -357,14 +357,14 @@ class TestTransferBindRetry:
         from src.api.main import app
         app.dependency_overrides.clear()
 
-    @patch("src.api.routes.grape_auth.get_grape_account_by_id")
-    @patch("src.api.routes.grape_auth.transfer_business_data")
-    @patch("src.api.routes.grape_auth.transfer_external_identity_in_tx")
-    @patch("src.api.routes.grape_auth.has_password")
-    @patch("src.api.routes.grape_auth.count_user_identities")
-    @patch("src.api.routes.grape_auth.get_user_identities")
-    @patch("src.api.routes.grape_auth.auth_audit")
-    @patch("src.api.routes.grape_auth._clear_user_repos_cache")
+    @patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id")
+    @patch("src.domains.mgmt.routes.grape_auth.transfer_business_data")
+    @patch("src.domains.mgmt.routes.grape_auth.transfer_external_identity_in_tx")
+    @patch("src.domains.mgmt.routes.grape_auth.has_password")
+    @patch("src.domains.mgmt.routes.grape_auth.count_user_identities")
+    @patch("src.domains.mgmt.routes.grape_auth.get_user_identities")
+    @patch("src.domains.mgmt.routes.grape_auth.auth_audit")
+    @patch("src.domains.mgmt.routes.grape_auth._clear_user_repos_cache")
     def test_success_consumes_ticket_no_replay(
         self, mock_clear, mock_audit, mock_idents, mock_count, mock_has_pwd,
         mock_transfer_in_tx, mock_transfer_biz, mock_get_account,

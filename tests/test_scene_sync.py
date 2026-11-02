@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db")
 
-from src.storage.scene_sync import (
+from src.domains.runtime.storage.scene_sync import (
     _load_config,
     _get_sync_token,
     _compute_scene_hash,
@@ -353,7 +353,7 @@ class TestDownloadRepoZip:
         GitHub 源的匿名行为由 test_r31_p45_p46.py::test_github_download_sends_no_auth_header 覆盖。
         """
         async def _run():
-            import src.storage.scene_sync as _ss
+            import src.domains.runtime.storage.scene_sync as _ss
             zip_data = _make_zip_bytes()
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
@@ -408,7 +408,7 @@ class TestSyncOfficialScenes:
     def test_no_token_skips(self):
         """无 token 时跳过同步"""
         async def _run():
-            with patch("src.storage.scene_sync._get_sync_token", return_value=""):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value=""):
                 result = await sync_official_scenes()
                 assert result is None
         _run_async(_run())
@@ -416,8 +416,8 @@ class TestSyncOfficialScenes:
     def test_zip_download_failure_skips(self):
         """ZIP 下载失败时跳过同步，不执行下架"""
         async def _run():
-            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._download_repo_zip", new=AsyncMock(side_effect=Exception("download error"))):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value="fake_token"):
+                with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=AsyncMock(side_effect=Exception("download error"))):
                     result = await sync_official_scenes()
                     assert result is None
         _run_async(_run())
@@ -433,8 +433,8 @@ class TestSyncOfficialScenes:
             mock_resp = MagicMock()
             mock_resp.raise_for_status = MagicMock()
             mock_resp.content = zip_data
-            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._download_repo_zip", new=AsyncMock(return_value="/tmp/fake_nonexistent")):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value="fake_token"):
+                with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=AsyncMock(return_value="/tmp/fake_nonexistent")):
                     result = await sync_official_scenes()
                     assert result is None
         _run_async(_run())
@@ -484,15 +484,15 @@ class TestSyncOfficialScenes:
             mock_db.cursor = MagicMock(return_value=mock_cursor)
             mock_db.commit = MagicMock()
 
-            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._download_repo_zip", new=mock_download_zip):
-                    with patch("src.storage.scene_sync._refresh_cat_cache"):
-                        with patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
-                            with patch("src.storage.scene_sync._check_skills_exist", return_value=[]):
-                                with patch("src.storage.scene_sync.db_lock"):
-                                    with patch("src.storage.scene_sync.db", mock_db):
-                                        with patch("src.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
-                                            with patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value="fake_token"):
+                with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=mock_download_zip):
+                    with patch("src.domains.runtime.storage.scene_sync._refresh_cat_cache"):
+                        with patch.dict("src.domains.runtime.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
+                            with patch("src.domains.runtime.storage.scene_sync._check_skills_exist", return_value=[]):
+                                with patch("src.domains.runtime.storage.scene_sync.db_lock"):
+                                    with patch("src.domains.runtime.storage.scene_sync.db", mock_db):
+                                        with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                            with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
                                                 result = await sync_official_scenes()
 
             # 验证：INSERT 路径被触发（execute 调用中含 INSERT 关键字）
@@ -547,15 +547,15 @@ class TestSyncOfficialScenes:
             mock_db.cursor = MagicMock(return_value=mock_cursor)
             mock_db.commit = MagicMock()
 
-            with patch("src.storage.scene_sync._get_sync_token", return_value="fake_token"):
-                with patch("src.storage.scene_sync._download_repo_zip", new=mock_download_zip):
-                    with patch("src.storage.scene_sync._refresh_cat_cache"):
-                        with patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
-                            with patch("src.storage.scene_sync._check_skills_exist", return_value=[]):
-                                with patch("src.storage.scene_sync.db_lock"):
-                                    with patch("src.storage.scene_sync.db", mock_db):
-                                        with patch("src.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
-                                            with patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value="fake_token"):
+                with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=mock_download_zip):
+                    with patch("src.domains.runtime.storage.scene_sync._refresh_cat_cache"):
+                        with patch.dict("src.domains.runtime.storage.scene_sync._cat_cache", {"general": 1}, clear=False):
+                            with patch("src.domains.runtime.storage.scene_sync._check_skills_exist", return_value=[]):
+                                with patch("src.domains.runtime.storage.scene_sync.db_lock"):
+                                    with patch("src.domains.runtime.storage.scene_sync.db", mock_db):
+                                        with patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"):
+                                            with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
                                                 await sync_official_scenes()
 
             # 找到 UPDATE 调用

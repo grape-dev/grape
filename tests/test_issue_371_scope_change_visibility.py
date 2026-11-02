@@ -163,7 +163,7 @@ class TestChangeCredentialScopeSyncsOrgId:
 
     def test_user_to_repo_syncs_org_id_to_repo_org(self):
         """user→repo 切换：org_id 对齐到仓库所属组织（managed_repos.org_id）。"""
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_user_scope_cred()
         # 切换前：org_id=公司组织
         assert _get_cred_row(cid)["org_id"] == _ORG_COMPANY
@@ -179,7 +179,7 @@ class TestChangeCredentialScopeSyncsOrgId:
 
     def test_repo_to_user_syncs_org_id_to_operator_org(self):
         """repo→user 切换：org_id 对齐到操作者所在组织（设备在操作组织下可见）。"""
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_repo_scope_cred()
         # 切换前：org_id=仓库所属组织
         assert _get_cred_row(cid)["org_id"] == _ORG_REPO_OWNER
@@ -194,7 +194,7 @@ class TestChangeCredentialScopeSyncsOrgId:
 
     def test_repo_scope_owner_id_not_wiped(self):
         """Issue #371 改动 1B：repo scope 切换后 owner_id 不再被无条件清空（line 1288 bug 修复）。"""
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_user_scope_cred()
         change_credential_scope(cid, CredScopeBody(scope="repo", repo_key=_REPO_FULL), user=_user_in_company())
         row = _get_cred_row(cid)
@@ -204,7 +204,7 @@ class TestChangeCredentialScopeSyncsOrgId:
 
     def test_scope_change_updates_engine_rows(self):
         """切换 scope 后引擎行被更新（不删除，保留引擎信息）。"""
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_user_scope_cred()
         # 切换前有 1 条 user scope 引擎行
         with db_lock:
@@ -227,7 +227,7 @@ class TestRepoScopeVisibleInNonPersonalOrg:
 
     def test_repo_scope_engine_visible_in_non_personal_org(self):
         """社区博客团队（非个人组织）视图：repo scope 引擎可见（切换后 org_id=仓库组织 ≠ 当前组织）。"""
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         _create_repo_scope_cred()  # org_id=仓库所属组织（≠ _ORG_COMPANY）
         d = get_agent_runtimes(user=_user_in_company())
         engine_names = {rt["name"] for rt in d["runtimes"]}
@@ -235,7 +235,7 @@ class TestRepoScopeVisibleInNonPersonalOrg:
 
     def test_repo_scope_device_visible_in_non_personal_org(self):
         """社区博客团队视图：runtime-devices 列出 repo scope 设备。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         _create_repo_scope_cred()
         d = get_runtime_devices(user=_user_in_company(), page=1, page_size=100)
         names = {dev["name"] for dev in d["devices"]}
@@ -243,7 +243,7 @@ class TestRepoScopeVisibleInNonPersonalOrg:
 
     def test_repo_scope_visible_after_scope_change(self):
         """端到端：user→repo 切换后刷新 Workers 设备页引擎可见（Issue #371 核心验收场景）。"""
-        from src.api.routes.settings import change_credential_scope, CredScopeBody, get_agent_runtimes, get_runtime_devices
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody, get_agent_runtimes, get_runtime_devices
         cid = _create_user_scope_cred()
         # 切换前：user scope 引擎在公司组织视图可见
         d_before = get_agent_runtimes(user=_user_in_company())
@@ -276,7 +276,7 @@ class TestRegression338PersonalOrgVisibility:
 
     def test_own_user_worker_visible_in_personal_org(self):
         """个人组织视图：user scope 且 owner=当前用户的设备/引擎可见。"""
-        from src.api.routes.settings import get_runtime_devices, get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_runtime_devices, get_agent_runtimes
         _create_user_scope_cred()
         d = get_runtime_devices(user=_user_in_personal(), page=1, page_size=100)
         assert "t371-worker-user" in {dev["name"] for dev in d["devices"]}, d
@@ -295,7 +295,7 @@ class TestIssue430RepoScopeVisibleInPersonalOrg:
 
     def test_repo_scope_device_visible_in_personal_org(self):
         """个人组织视图：runtime-devices 列出 repo scope 设备。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         _create_repo_scope_cred()
         d = get_runtime_devices(user=_user_in_personal(), page=1, page_size=100)
         names = {dev["name"] for dev in d["devices"]}
@@ -303,7 +303,7 @@ class TestIssue430RepoScopeVisibleInPersonalOrg:
 
     def test_non_member_cannot_see_repo_scope_in_personal_org(self):
         """不越权对照：非仓库成员的另一个账号在个人组织视图看不到 repo scope 设备。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         _create_repo_scope_cred()
         user_other = {"id": 88, "username": "bob", "auth_type": "jwt", "org_id": _ORG_PERSONAL}
         d = get_runtime_devices(user=user_other, page=1, page_size=100)
@@ -316,7 +316,7 @@ class TestRegression277RepoIsolation:
 
     def test_repo_scope_isolated_by_repo_filter(self):
         """repo_filter 非空时，repo scope 仅允许当前仓库（#277 核心场景不回退）。"""
-        from src.api.routes.settings import _make_visible_credential_fn
+        from src.domains.mgmt.routes.settings import _make_visible_credential_fn
         # 用户可访问 repo-a，但凭据绑定 repo-b → 不可见
         user_repos = {"songspace/repo-a"}
         vis = _make_visible_credential_fn(_USER_NAME, user_repos, repo_filter="songspace/repo-a")
@@ -328,7 +328,7 @@ class TestRegression277RepoIsolation:
 
     def test_non_member_cannot_see_repo_scope_device(self):
         """非仓库成员在非个人组织视图看不到 repo scope 设备（_visible_credential 收敛，不越权）。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         _create_repo_scope_cred()
         # 用户在另一家非个人组织（非仓库成员，user_repos 为空）
         user_other = {"id": 88, "username": "bob", "auth_type": "jwt", "org_id": _ORG_COMPANY_OTHER}
@@ -338,7 +338,7 @@ class TestRegression277RepoIsolation:
 
     def test_other_org_strict_isolation_kept(self):
         """另一家非个人组织视图：org_id 不匹配的非 repo scope 引擎仍严格隔离。"""
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         # user scope 引擎 org_id=公司组织 A，换到公司组织 B 视图应不可见
         _create_user_scope_cred()
         user_b = {"id": _USER_ID, "username": _USER_NAME, "auth_type": "jwt", "org_id": _ORG_COMPANY_OTHER}

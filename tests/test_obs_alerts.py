@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import alerts as al  # noqa: E402
+from src.domains.insight.observability import alerts as al  # noqa: E402
 
 UID = 7788
 REPO = "gitcode:org/alert-mine"
@@ -111,7 +111,7 @@ def _setup():
     for _n in ("runtime_silent", "repo_silent", "task_success_rate_drop"):
         _set_rule(_n, enabled=0, repeat_sec=0, aggregate_mode="none", aggregate_window_sec=0,
                   notify_window_json="", escalate_json="")
-    from src.observability.alert_policy import AGGREGATOR
+    from src.domains.insight.observability.alert_policy import AGGREGATOR
     AGGREGATOR.clear()
     al._pending.clear()
     yield
@@ -366,7 +366,7 @@ def test_user_events_survive_visible_device_dims():
 
 
 def test_events_for_invisible_repo_are_404_and_not_silenceable():
-    from src.observability.overview import RepoNotVisible
+    from src.domains.insight.observability.overview import RepoNotVisible
     _task("t_alrt_theirs2", OTHER, "running", started_min_ago=40)
     al.evaluate_rules()
     user = {"id": UID, "username": "u", "org_id": 0}
@@ -436,7 +436,7 @@ def _unbind_open_id(uid):
 
 def test_notify_skips_when_no_channel_configured():
     """notify_channels 为空 → 只记录不推送（种子默认如此，避免误打扰）。"""
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     import asyncio
     _set_rule("task_stuck", notify_channels="")
     stats = asyncio.get_event_loop().run_until_complete(
@@ -448,7 +448,7 @@ def test_notify_skips_when_no_channel_configured():
 def test_notify_feishu_uses_recipients_own_bot(monkeypatch=None):
     """配了 feishu → 用收件人本人的 chat bot 发私聊；收件人取该仓库成员。"""
     import asyncio
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     import src.api.main as api_main
 
     _bind_open_id(UID, "ou_test_open_id")
@@ -486,7 +486,7 @@ def test_notify_feishu_uses_recipients_own_bot(monkeypatch=None):
 def test_notify_send_failure_counted_not_raised():
     """飞书返回空 message_id（token/权限问题）→ 计 failed，不影响求值。"""
     import asyncio
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     import src.api.main as api_main
     import src.api.issues_center as ic
 
@@ -518,7 +518,7 @@ def test_notify_send_failure_counted_not_raised():
 def test_notify_skips_silenced_event():
     import asyncio
     from datetime import datetime, timedelta, timezone
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     _set_rule("task_stuck", notify_channels="feishu")
     future = (datetime.now(timezone.utc) + timedelta(minutes=30)).isoformat()
     stats = asyncio.get_event_loop().run_until_complete(
@@ -531,7 +531,7 @@ def test_notify_skips_silenced_event():
 def test_test_notification_reports_reason():
     """测试通道：未绑定 open_id / 未配 bot 要给出**可操作的原因**，不能只说失败。"""
     import asyncio
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     import src.api.issues_center as ic
     import src.api.main as api_main
 
@@ -603,7 +603,7 @@ def test_pool_usage_uses_configured_limit_not_high_water_mark():
 
     实测踩坑：74/78=93.6% 触发告警，而真实上限 8000 → 占用 0.93%，永久误报。
     """
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     # 真实场景：74 连接 / 上限 8000
     assert abs(al2._pool_usage(74, 8000) - 0.00925) < 1e-6
     assert al2._pool_usage(74, 8000) < 0.8, "配置上限口径下不该触发 80% 阈值"
@@ -619,7 +619,7 @@ def test_pool_usage_uses_configured_limit_not_high_water_mark():
 
 def test_platform_metrics_pool_usage_is_sane_on_real_db():
     """真库上取数：使用率应远低于阈值（本机 max_connections=8000）。"""
-    from src.observability import alerts as al2
+    from src.domains.insight.observability import alerts as al2
     m = al2._platform_metrics()
     if "db_pool_usage" not in m:
         return  # SQLite 后端（无 SHOW STATUS）跳过
@@ -629,7 +629,7 @@ def test_platform_metrics_pool_usage_is_sane_on_real_db():
 
 def test_gauge_for_configured_limit_is_exposed():
     """新增 grape_db_max_connections 指标（外部 Prometheus 也要能用正确分母）。"""
-    from src.observability import DB_MAX_CONNECTIONS, DB_MAX_USED_CONNECTIONS
+    from src.domains.insight.observability import DB_MAX_CONNECTIONS, DB_MAX_USED_CONNECTIONS
     assert DB_MAX_CONNECTIONS._name == "grape_db_max_connections"
     assert DB_MAX_USED_CONNECTIONS._name == "grape_db_max_used_connections"
     assert "NOT the configured limit" in DB_MAX_USED_CONNECTIONS._documentation
@@ -641,7 +641,7 @@ def test_metrics_endpoint_triggers_scrape_hook():
     实测踩坑（2026-10-17）：on_metrics_scrape 定义了但**零调用点** → 9090 上的
     grape_db_threads_connected / max_connections 全是 0，L3 外部面形同虚设。
     """
-    import src.observability as o
+    import src.domains.insight.observability as o
     called = {"n": 0}
     orig = o.on_metrics_scrape
     o.on_metrics_scrape = lambda: called.__setitem__("n", called["n"] + 1)
@@ -656,7 +656,7 @@ def test_metrics_endpoint_triggers_scrape_hook():
 def test_mysql_metrics_collector_sets_gauge_when_available():
     """MySQL 后端下采集器应把配置上限写进 gauge（SQLite 后端跳过）。"""
     from prometheus_client import generate_latest
-    import src.observability as o
+    import src.domains.insight.observability as o
     o.collect_mysql_metrics()
     text = generate_latest(o.registry).decode()
     assert "grape_db_max_connections" in text, "缺少配置上限指标"
@@ -886,7 +886,7 @@ def test_deferred_event_is_resent_only_inside_window():
 def test_notify_repeat_suppression_and_state_writeback():
     """repeat_sec=0：只通知一次（第二次跳过）；成功后写 notify_count/last_notified_at。"""
     import asyncio
-    from src.observability.alert_policy import AGGREGATOR
+    from src.domains.insight.observability.alert_policy import AGGREGATOR
     import src.api.main as api_main
     import src.api.issues_center as ic
 
@@ -934,7 +934,7 @@ def test_notify_repeat_suppression_and_state_writeback():
 def test_notify_aggregate_buffers_then_flushes_summary():
     """聚合规则：不发单条 → 进缓冲；窗口到期 → 一条汇总（含维度与最大当前值）。"""
     import asyncio
-    from src.observability.alert_policy import AGGREGATOR
+    from src.domains.insight.observability.alert_policy import AGGREGATOR
     import src.api.main as api_main
     import src.api.issues_center as ic
     from datetime import timedelta as _td

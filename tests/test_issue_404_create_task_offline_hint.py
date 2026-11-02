@@ -34,10 +34,10 @@ def _patch_scenes_module(monkeypatch, scene_list, pool_results):
 
     get_scenes / get_pipeline_config 在路由函数体内 import，须 patch 源模块
     src.api.pipeline_config；engine_select 判定函数同样在函数体内 import，
-    patch src.runtime.engine_select。
+    patch src.domains.runtime.engine.engine_select。
     """
     import src.api.pipeline_config as pc
-    import src.runtime.engine_select as es
+    import src.domains.runtime.engine.engine_select as es
 
     monkeypatch.setattr(pc, "get_scenes", lambda repo_key="": scene_list)
     monkeypatch.setattr(pc, "get_pipeline_config",
@@ -63,7 +63,7 @@ def test_all_offline_scene_flagged(monkeypatch):
     _patch_scenes_module(monkeypatch, scene_list,
                          {("scene_dead", "coding"): None, ("scene_dead", "qa"): None})
 
-    import src.api.routes.scenes as scenes_mod
+    import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
     s = res["scenes"][0]
     assert s["all_offline"] is True
@@ -80,7 +80,7 @@ def test_partial_offline_node_not_flagged_when_pool_ok(monkeypatch):
     }]
     _patch_scenes_module(monkeypatch, scene_list,
                          {("scene_ok", "coding"): "[1]"})
-    import src.api.routes.scenes as scenes_mod
+    import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
     s = res["scenes"][0]
     assert s["all_offline"] is False
@@ -96,7 +96,7 @@ def test_no_engine_binding_node_skipped(monkeypatch):
         "nodes": [{"tag": "coding", "skill": "s1"}],
     }]
     _patch_scenes_module(monkeypatch, scene_list, {})
-    import src.api.routes.scenes as scenes_mod
+    import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
     s = res["scenes"][0]
     assert s["all_offline"] is False
@@ -114,7 +114,7 @@ def test_disabled_node_skipped(monkeypatch):
     }]
     _patch_scenes_module(monkeypatch, scene_list,
                          {("scene_dis", "coding"): None})
-    import src.api.routes.scenes as scenes_mod
+    import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
     s = res["scenes"][0]
     assert s["all_offline"] is False
@@ -135,7 +135,7 @@ def test_sre_unbound_flagged(monkeypatch):
     }]
     _patch_scenes_module(monkeypatch, scene_list,
                          {("scene_sre", "coding"): "[1]"})
-    import src.api.routes.scenes as scenes_mod
+    import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")
     s = res["scenes"][0]
     assert s["sre_unbound"] is True
@@ -151,14 +151,14 @@ def test_pool_check_exception_degrades(monkeypatch):
         "scene_type": "standard", "pr_subscription_enabled": 0, "linked_repos": [],
         "nodes": [{"tag": "coding", "skill": "s1", "engine_runtime_ids": [1]}],
     }]
-    import src.runtime.engine_select as es
+    import src.domains.runtime.engine.engine_select as es
 
     def _boom(*a, **kw):
         raise RuntimeError("db down")
 
     monkeypatch.setattr(es, "get_scene_pool_engine_ids", _boom)
     import src.api.pipeline_config as pc
-    import src.api.routes.scenes as scenes_mod
+    import src.domains.mgmt.routes.scenes as scenes_mod
     monkeypatch.setattr(pc, "get_scenes", lambda repo_key="": scene_list)
     monkeypatch.setattr(pc, "get_pipeline_config",
                         lambda scene_id, repo_key="": None)

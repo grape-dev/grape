@@ -110,7 +110,7 @@ class TestRepoLevelSessionPointerDeprecated:
     def test_complete_task_no_repo_level_write(self):
         """complete_task 收尾不得写 devops_agent_session.runtime_session_id。"""
         import inspect
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         src = self._trim_docstring(inspect.getsource(service.complete_task))
         forbidden = "UPDATE devops_agent_session SET runtime_session_id"
         critical_forbidden = [ln for ln in src.splitlines() if forbidden in ln]

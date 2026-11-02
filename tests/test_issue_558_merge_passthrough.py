@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
-from src.user.repo_manager import UpstreamAPIError
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError
 
 UID = 98755
 OWNER = "o"
@@ -32,7 +32,7 @@ def _client(monkeypatch):
         "id": UID, "username": "merge_tester", "auth_type": "session_token",
         "agent_type": "vod", "user_id": 0, "session_key": "s558",
         "repo_key": f"gitcode:{OWNER}/{REPO}"}
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -45,7 +45,7 @@ def test_upstream_405_passthrough(monkeypatch, _client):
     """上游 405（不可自动合并）→ 透传 405 + 完整 message，非 502、不截断。"""
     def _fake_req(method, url, token="", body=None):
         raise UpstreamAPIError(method, url, 405, _LONG_MSG)
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _merge(_client)
     assert r.status_code == 405
     detail = r.json()["detail"]
@@ -57,7 +57,7 @@ def test_upstream_generic_error_keeps_502(monkeypatch, _client):
     """代理自身异常（超时/连接失败类 RuntimeError）→ 仍 502（网关自身故障语义）。"""
     def _fake_req(method, url, token="", body=None):
         raise RuntimeError("Cannot reach GitCode API: connection timed out")
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _merge(_client)
     assert r.status_code == 502
 
@@ -70,7 +70,7 @@ def test_merge_params_passthrough(monkeypatch, _client):
         recorded.update({"method": method, "url": url, "body": body})
         return {"merged": True, "sha": "abc123"}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _merge(_client, merge_method="squash", title="chore: squash merge")
     assert r.status_code == 200
     assert recorded["method"] == "PUT" and recorded["url"].endswith("/pulls/9/merge")
@@ -85,7 +85,7 @@ def test_merge_default_keeps_legacy_body(monkeypatch, _client):
         recorded.update({"method": method, "url": url, "body": body})
         return {"merged": True, "sha": "abc123"}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     assert _merge(_client).status_code == 200  # 无 JSON body
     assert recorded["body"] is None
     assert _merge(_client, merge_method="", title="").status_code == 200  # 全空字段
@@ -96,7 +96,7 @@ def test_merge_success_regression(monkeypatch, _client):
     """上游 2xx 合并成功路径回归：merged/sha 返回不变。"""
     def _fake_req(method, url, token="", body=None):
         return {"merged": True, "sha": "deadbeef"}
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _merge(_client)
     assert r.status_code == 200
     assert r.json() == {"merged": True, "sha": "deadbeef"}
@@ -112,7 +112,7 @@ class _FakeResp:
 
 def test_req_raises_vcs_upstream_error_with_full_body(monkeypatch):
     """_req 上游非 2xx → UpstreamAPIError(status_code, 完整 message)。"""
-    import src.user.repo_manager as m
+    import src.domains.mgmt.user.repo_manager as m
     monkeypatch.setattr(m._requests, "put",
                         lambda *a, **k: _FakeResp(405, _LONG_MSG))
     with pytest.raises(UpstreamAPIError) as ei:
@@ -127,7 +127,7 @@ def test_req_raises_vcs_upstream_error_with_full_body(monkeypatch):
 # ===================== VcsApiClient.merge_pr 参数透传 =====================
 
 def _make_client(provider="gitcode"):
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     return VcsApiClient(provider, BOT, OWNER, REPO)
 
 
@@ -187,8 +187,8 @@ def test_client_do_request_error_keeps_status(monkeypatch):
     def _fake_urlopen(req, timeout=30):
         raise _Err()
 
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen", _fake_urlopen)
-    from src.vcs.api_client import VcsApiClient
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen", _fake_urlopen)
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     resp = VcsApiClient._do_request("https://x", "PUT", {})
     assert resp["error"] == "HTTP 405"
     assert resp["status_code"] == 405

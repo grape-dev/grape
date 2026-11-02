@@ -34,8 +34,8 @@ _saved_repos = {}
 def client():
     from src.api.main import app
     from src.api.deps import get_current_user, get_current_user_or_api_key
-    from src.user import db as user_db
-    from src.auth import grape_account_db as acct_db
+    from src.domains.mgmt.user import db as user_db
+    from src.domains.mgmt.auth import grape_account_db as acct_db
 
     def _fake_identities(uid):
         return [{"provider": "gitcode"}]
@@ -68,7 +68,7 @@ def client():
 
 
 def test_member_empty_repos_returns_200(client, monkeypatch):
-    from src.api.routes import repos as repos_route
+    from src.domains.mgmt.routes import repos as repos_route
 
     monkeypatch.setattr(repos_route, "with_oauth_token",
                         lambda user, provider, fn, *a, **kw: [])
@@ -85,7 +85,7 @@ def test_member_empty_repos_returns_200(client, monkeypatch):
 
 
 def test_sync_empty_repos_returns_200(client, monkeypatch):
-    from src.api.routes import repos as repos_route
+    from src.domains.mgmt.routes import repos as repos_route
 
     monkeypatch.setattr(repos_route, "with_oauth_token",
                         lambda user, provider, fn, *a, **kw: [])
@@ -102,7 +102,7 @@ def test_sync_empty_repos_returns_200(client, monkeypatch):
 
 
 def test_member_fetch_failure_still_502(client, monkeypatch):
-    from src.api.routes import repos as repos_route
+    from src.domains.mgmt.routes import repos as repos_route
 
     def _boom(user, provider, fn, *a, **kw):
         raise RuntimeError("network down")
@@ -114,7 +114,7 @@ def test_member_fetch_failure_still_502(client, monkeypatch):
 
 
 def test_sync_fetch_failure_still_502(client, monkeypatch):
-    from src.api.routes import repos as repos_route
+    from src.domains.mgmt.routes import repos as repos_route
 
     def _boom(user, provider, fn, *a, **kw):
         raise RuntimeError("network down")

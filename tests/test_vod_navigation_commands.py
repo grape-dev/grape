@@ -8,9 +8,9 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.im.feishu_async import BotContext
+from src.domains.runtime.im.feishu_async import BotContext
 from src.kernel.session_manager import db, db_lock
-from src.im.vod_handler_async import process_vod_async
+from src.domains.runtime.im.vod_handler_async import process_vod_async
 
 CHAT = "vod_chat"
 APP = "cli_vod"
@@ -26,7 +26,7 @@ def _clean():
         c.execute("DELETE FROM vod_conversations WHERE im_chat_id=?", (CHAT,))
         c.execute("DELETE FROM devops_agent_session WHERE id LIKE 'sess-vod-%' OR repo_key LIKE 'gitcode:owner/vod-repo-%'")
         db.commit()
-    from src.im.handler_async import _clear_pending_selection
+    from src.domains.runtime.im.handler_async import _clear_pending_selection
     _clear_pending_selection(CHAT)
 
 
@@ -57,7 +57,7 @@ def _card(api):
 
 
 def _pending():
-    from src.im.handler_async import _get_pending_selection
+    from src.domains.runtime.im.handler_async import _get_pending_selection
     return _get_pending_selection(CHAT)
 
 
@@ -145,11 +145,11 @@ def test_v09_clean_no_longer_special():
 
 def test_v10_chat_vod_pending_independent():
     _seed(["gitcode:owner/vod-repo-a", "gitcode:owner/vod-repo-b"])
-    from src.im.handler_async import _set_pending_selection
+    from src.domains.runtime.im.handler_async import _set_pending_selection
     _set_pending_selection("other_chat", {"action": "chat", "items": [{"id": "x"}], "page": 1})
     _run("/repo")
     assert _pending() is not None and _pending()["action"] == "vod_repo"
-    from src.im.handler_async import _get_pending_selection as _g
+    from src.domains.runtime.im.handler_async import _get_pending_selection as _g
     assert _g("other_chat")["action"] == "chat"
     _clean()
 

@@ -86,17 +86,17 @@ def _assert_no_platform_tokens(env):
 
 def _run_stream(user_token="", bot_token="", user_id=0, db_user_token="", event_type="chat",
                 repo_key="gitcode:owner/repo"):
-    # 经 src.runtime.executor 导入可绕开 agent→runtime 循环导入（与 tests 同款用法）
-    from src.runtime.executor import stream_agent
+    # 经 src.domains.runtime.engine.executor 导入可绕开 agent→runtime 循环导入（与 tests 同款用法）
+    from src.domains.runtime.engine.executor import stream_agent
 
     fake_popen = _FakePopen()
-    with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
-         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
-         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
-         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
-         mock.patch("src.user.db.get_credentials", return_value=[]), \
-         mock.patch("src.user.db.get_user_gitcode_token", return_value=db_user_token):
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_FakeBackend()), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]), \
+         mock.patch("src.domains.mgmt.user.db.get_user_gitcode_token", return_value=db_user_token):
         list(stream_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type=event_type,
             backend_name="fake", account="u", user_id=user_id,
@@ -151,16 +151,16 @@ def test_mechanism_metadata_kept():
 
 def _run_chat_fn(user_token="", bot_token="", user_id=0):
     """直接调 stream_chat_agent（签名无 bot_token）"""
-    from src.runtime.executor import stream_chat_agent
+    from src.domains.runtime.engine.executor import stream_chat_agent
 
     fake_popen = _FakePopen()
-    with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
-         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
-         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
-         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
-         mock.patch("src.user.db.get_credentials", return_value=[]), \
-         mock.patch("src.user.db.get_user_gitcode_token", return_value="DBUSR"):
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_FakeBackend()), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]), \
+         mock.patch("src.domains.mgmt.user.db.get_user_gitcode_token", return_value="DBUSR"):
         list(stream_chat_agent(
             prompt="hi", cwd="/tmp", session_id="", backend_name="fake",
             account="u", user_id=user_id, user_token=user_token, max_exec_seconds=60,
@@ -171,16 +171,16 @@ def _run_chat_fn(user_token="", bot_token="", user_id=0):
 
 def _run_devops_fn(bot_token="", user_token="", repo_user_id=0):
     """直接调 stream_devops_agent（签名无 user_token）"""
-    from src.runtime.executor import stream_devops_agent
+    from src.domains.runtime.engine.executor import stream_devops_agent
 
     fake_popen = _FakePopen()
-    with mock.patch("src.agent.executor.get_backend", return_value=_FakeBackend()), \
-         mock.patch("src.agent.executor.subprocess.Popen", fake_popen), \
-         mock.patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/fake"), \
-         mock.patch("src.agent.executor._track_proc", lambda *a, **kw: None), \
-         mock.patch("src.agent.executor._untrack_proc", lambda *a, **kw: None), \
-         mock.patch("src.user.db.get_credentials", return_value=[]), \
-         mock.patch("src.user.db.get_user_gitcode_token", return_value="DBUSR"):
+    with mock.patch("src.domains.runtime.agents.executor.get_backend", return_value=_FakeBackend()), \
+         mock.patch("src.domains.runtime.agents.executor.subprocess.Popen", fake_popen), \
+         mock.patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/fake"), \
+         mock.patch("src.domains.runtime.agents.executor._track_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.runtime.agents.executor._untrack_proc", lambda *a, **kw: None), \
+         mock.patch("src.domains.mgmt.user.db.get_credentials", return_value=[]), \
+         mock.patch("src.domains.mgmt.user.db.get_user_gitcode_token", return_value="DBUSR"):
         list(stream_devops_agent(
             prompt="hi", cwd="/tmp", session_id="", event_type="issue_opened",
             backend_name="fake", account="u", repo_user_id=repo_user_id,

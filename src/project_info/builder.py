@@ -145,7 +145,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
     """
     import hashlib
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         storage = get_storage()
         content_hash = hashlib.sha256(content.encode("utf-8")).hexdigest()[:64]
         file_path = os.path.relpath(os.path.join(_pi_dir(repo_key), name), WORKSPACE_DIR)
@@ -227,14 +227,14 @@ def _ensure_analysis_worktree(repo_key: str, token: str = "", default_branch: st
     base = _repo_base_dir(repo_key)
     # Issue #200: 每次都刷新 bare mirror refs（ensure_repo_base 内部幂等：已存在只 fetch）
     try:
-        from src.runtime.repogit import ensure_repo_base
+        from src.domains.runtime.engine.repogit import ensure_repo_base
         base = ensure_repo_base(repo_key, token or "")
     except Exception as e:
         log.warning(f"project-info ensure_repo_base failed {repo_key}: {e}")
     if not base or not os.path.isdir(base):
         return None
     work = _analysis_dir(repo_key)
-    from src.runtime.repogit import _run_git
+    from src.domains.runtime.engine.repogit import _run_git
     # 候选默认分支（去重保序）
     _cand = []
     if default_branch:

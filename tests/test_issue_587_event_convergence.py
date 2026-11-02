@@ -14,7 +14,7 @@ from datetime import datetime, timezone, timedelta
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)
@@ -163,7 +163,7 @@ class TestConvergeCompensation:
         assert _get_event_status(5813)[0] == "running"
 
     def test_endpoint_converge_event(self):
-        from src.api.routes.runtime import converge_event
+        from src.domains.runtime.routes.runtime import converge_event
         _insert_event(5814, status="running")
         _insert_task("task-ep-1", 5814, status="cancelled", exit_code=None)
         res = converge_event("task-ep-1", user={"id": 1, "username": "ops", "auth_type": "session_token"})
@@ -172,7 +172,7 @@ class TestConvergeCompensation:
 
     def test_endpoint_converge_event_writes_audit_trail(self):
         """Issue #587 审查修复：补偿收敛端点与 terminate/redispatch 一致强制审计留痕。"""
-        from src.api.routes.runtime import converge_event
+        from src.domains.runtime.routes.runtime import converge_event
         _insert_event(5815, status="running")
         _insert_task("task-ep-2", 5815, status="failed", exit_code=1)
         converge_event("task-ep-2", user={"id": 1, "username": "ops-auditor", "auth_type": "session_token"})
@@ -190,7 +190,7 @@ class TestConvergeCompensation:
 
     def test_endpoint_404_unknown_task(self):
         from fastapi import HTTPException
-        from src.api.routes.runtime import converge_event
+        from src.domains.runtime.routes.runtime import converge_event
         with pytest.raises(HTTPException) as exc:
             converge_event("no-such-task", user={"id": 1, "username": "ops", "auth_type": "session_token"})
         assert exc.value.status_code == 404
@@ -200,36 +200,36 @@ class TestA2ADedupActiveKey:
     """A2A 去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接。"""
 
     def test_terminal_event_does_not_block(self):
-        from src.api.routes.webhook import _has_active_a2a_event
+        from src.domains.runtime.routes.webhook import _has_active_a2a_event
         for i, st in enumerate(("completed", "failed", "cancelled")):
             _insert_event(5820 + i, status=st)
             assert _has_active_a2a_event(REPO, "#587", "coding") == 0, \
                 f"{st} 事件不应阻断新交接"
 
     def test_running_event_blocks(self):
-        from src.api.routes.webhook import _has_active_a2a_event
+        from src.domains.runtime.routes.webhook import _has_active_a2a_event
         _insert_event(5821, status="running")
         assert _has_active_a2a_event(REPO, "#587", "coding") == 5821
 
     def test_dispatched_event_blocks(self):
-        from src.api.routes.webhook import _has_active_a2a_event
+        from src.domains.runtime.routes.webhook import _has_active_a2a_event
         _insert_event(5822, status="dispatched")
         assert _has_active_a2a_event(REPO, "#587", "coding") == 5822
 
     def test_different_agent_does_not_block(self):
-        from src.api.routes.webhook import _has_active_a2a_event
+        from src.domains.runtime.routes.webhook import _has_active_a2a_event
         _insert_event(5823, status="running", agent_type="qa")
         assert _has_active_a2a_event(REPO, "#587", "coding") == 0
 
     def test_scene_scoped_dedup(self):
-        from src.api.routes.webhook import _has_active_a2a_event
+        from src.domains.runtime.routes.webhook import _has_active_a2a_event
         _insert_event(5824, status="running", scene_id="scene-a")
         assert _has_active_a2a_event(REPO, "#587", "", scene_id="scene-a") == 5824
         assert _has_active_a2a_event(REPO, "#587", "", scene_id="scene-b") == 0
 
     def test_cascaded_cancel_releases_dedup_block(self):
         """端到端语义：卡 running 事件经任务 cancel 级联收敛后不再阻断。"""
-        from src.api.routes.webhook import _has_active_a2a_event
+        from src.domains.runtime.routes.webhook import _has_active_a2a_event
         _insert_event(5825, status="running")
         _insert_task("task-e2e-1", 5825, status="dispatched")
         assert _has_active_a2a_event(REPO, "#587", "coding") == 5825
@@ -283,7 +283,7 @@ class TestAdminActionAudit:
             return c.fetchall()
 
     def test_terminate_writes_audit_trail(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
         _insert_event(5840, status="running", event_type="issue_comment")
         _insert_task("task-term-1", 5840, status="dispatched")
         terminate_event(5840, user={"id": 1, "username": "ops-auditor", "auth_type": "session_token"})
@@ -299,7 +299,7 @@ class TestAdminActionAudit:
         assert status == "completed", "审计事件不参与业务流转"
 
     def test_redispatch_writes_audit_trail(self):
-        from src.api.routes.events import redispatch_event
+        from src.domains.runtime.routes.events import redispatch_event
         _insert_event(5841, status="failed", event_type="issue_comment")
         rows_before = len(self._audit_events(5841))
         try:
@@ -316,7 +316,7 @@ class TestSweeperTerminalMapping:
     """sweeper 超时探活：最近任务已终态 → 事件按任务终态映射收敛。"""
 
     def test_sweeper_maps_cancelled_task_to_cancelled_event(self):
-        from src.runtime.cleanup import sweep_stuck_events_once
+        from src.domains.runtime.engine.cleanup import sweep_stuck_events_once
         # 事件 running 超时 + 最近任务已 cancelled → 事件收敛 cancelled（非 failed）
         _old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         with db_lock:
@@ -332,7 +332,7 @@ class TestSweeperTerminalMapping:
         assert row[0] == "cancelled", f"终态任务(cancelled)的超时事件应映射收敛为 cancelled，实际={row[0]}"
 
     def test_sweeper_failed_task_converges_failed(self):
-        from src.runtime.cleanup import sweep_stuck_events_once
+        from src.domains.runtime.engine.cleanup import sweep_stuck_events_once
         _old = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
         with db_lock:
             c = db.cursor()

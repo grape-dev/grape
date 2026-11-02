@@ -16,7 +16,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.auth.password import hash_password
+from src.domains.mgmt.auth.password import hash_password
 from src.kernel.auth_sdk.jwt_utils import create_access_token
 
 client = TestClient(app)

@@ -57,7 +57,7 @@ def _seed_scene(scene_id, advanced_options=None):
 
 
 def _inject(issue_id="5", agent_type="", scene_id_override=""):
-    from src.api.event_pipeline import _inject_scene_env
+    from src.domains.runtime.pipeline.event_pipeline import _inject_scene_env
     env_extra = {}
     if scene_id_override:
         _inject_scene_env(env_extra, RK, issue_id, agent_type,
@@ -119,7 +119,7 @@ def test_secret_masked_from_get_but_injected():
 
 def test_save_advanced_options_validates_uppercase_and_reserved():
     from fastapi import HTTPException
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
 
@@ -155,7 +155,7 @@ def test_save_advanced_options_validates_uppercase_and_reserved():
 
 def test_secret_blank_value_preserves_old_value():
     from fastapi import HTTPException
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
 
@@ -178,7 +178,7 @@ def test_secret_blank_value_preserves_old_value():
 
 def test_unchecking_secret_keeps_value_and_returns_plaintext():
     """取消密钥（is_secret=false）：值保留、get 返回明文 value。"""
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
 
@@ -205,7 +205,7 @@ def test_unchecking_secret_keeps_value_and_returns_plaintext():
 def test_secret_suffix_name_explicit_false_stays_plain():
     """_KEY 后缀名显式取消密钥后保持明文（防前端自动兜底识别回退）。"""
     from src.kernel.scene_custom_env import normalize_custom_field
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
 
@@ -253,7 +253,7 @@ def test_scene_with_work_branch_only_sets_scene_id():
 
 
 def test_resolve_scene_id_helper():
-    from src.api.event_pipeline import _resolve_scene_id
+    from src.domains.runtime.pipeline.event_pipeline import _resolve_scene_id
     assert _resolve_scene_id(RK, "5") == ""          # 无场景
     _seed_issue(5, "devops-scene")
     assert _resolve_scene_id(RK, "#5") == "devops-scene"   # issue 场景（# 前缀兼容）
@@ -299,7 +299,7 @@ def test_scope_empty_and_unspecified_normalize_to_all():
 
 def test_scope_invalid_all_400():
     from fastapi import HTTPException
-    from src.api.routes.scenes import save_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
 
@@ -319,7 +319,7 @@ def test_scope_invalid_all_400():
 
 def test_scope_persisted_through_get_for_refill():
     """保存带 scope 的字段后，get 必须原样返回 scope（看护回填丢失 bug）。"""
-    from src.api.routes.scenes import save_advanced_options, get_advanced_options
+    from src.domains.mgmt.routes.scenes import save_advanced_options, get_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
 
@@ -415,7 +415,7 @@ def test_427_build_task_env_scene_override_redispatch_path():
     对照：不传 override 时 issue_id=#419 被解析回 Issue 场景（重派丢订阅变量的 bug 形态）。
     """
     _seed_427()
-    from src.api.event_pipeline import build_task_env
+    from src.domains.runtime.pipeline.event_pipeline import build_task_env
 
     # 修复后：events.py redispatch 从事件行取 scene_id 作为 override 传入
     env = build_task_env(RK, "qa", "#419", runtime_id=0, account="org/sceneenv",
@@ -443,7 +443,7 @@ def test_427_redispatch_event_row_scene_id_passed_as_override():
     scene_id_override=evt.get("scene_id") or ""，断言最终 env 带订阅场景变量。
     """
     _seed_427()
-    from src.api.event_pipeline import build_task_env
+    from src.domains.runtime.pipeline.event_pipeline import build_task_env
 
     # _load_event 返回的事件行（PR 订阅事件：issue_id 为真实关联 Issue 编号，
     # scene_id 列写入的是订阅场景 _scene_id_for_event）

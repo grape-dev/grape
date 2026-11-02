@@ -13,13 +13,13 @@ os.environ.setdefault("GRAPE_PIPELINE_MODE", "legacy")  # 测试用 legacy 模�
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
-from src.auth import grape_account_db
-from src.runtime import service
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
+from src.domains.runtime.engine import service
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -142,7 +142,7 @@ class TestConversation:
     def test_chat_writes_thread_and_reuses_issue_session(self):
         seq = _seed_event()
         _seed_issue_state("coding")
-        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_stream):
+        with patch("src.domains.runtime.engine.executor.consume_stream_async", side_effect=_fake_stream):
             r = client.post(f"/api/events/{seq}/chat", json={"message": "为什么这样处理？"}, headers=_headers)
         assert r.status_code == 200, r.text
         body = r.json()
@@ -160,7 +160,7 @@ class TestConversation:
     def test_thread_get_returns_messages(self):
         seq = _seed_event()
         _seed_issue_state("coding")
-        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_stream):
+        with patch("src.domains.runtime.engine.executor.consume_stream_async", side_effect=_fake_stream):
             client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
         r = client.get(f"/api/events/{seq}/thread", headers=_headers)
         assert len(r.json()["messages"]) == 2
@@ -175,10 +175,10 @@ class TestConversation:
             captured["cwd"] = cwd
             return _fake_stream(prompt=prompt, cwd=cwd, **k)
 
-        with patch("src.runtime.executor.consume_stream_async", side_effect=_capture):
+        with patch("src.domains.runtime.engine.executor.consume_stream_async", side_effect=_capture):
             r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
         assert r.status_code == 200, r.text
-        from src.api.event_pipeline import get_agent_workdir
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
         assert captured["cwd"] == get_agent_workdir(_REPO_KEY, "vod", "#5")
 
     def test_direct_stuck_resets_session_and_retries(self):
@@ -201,8 +201,8 @@ class TestConversation:
                 return _stuck()
             return _fake_stream(prompt=prompt, cwd=cwd, **k)
 
-        with patch("src.runtime.executor.consume_stream_async", side_effect=_stuck_then_ok), \
-             patch("src.api.routes.events._CONV_NO_OUTPUT_TIMEOUT", 0.2):
+        with patch("src.domains.runtime.engine.executor.consume_stream_async", side_effect=_stuck_then_ok), \
+             patch("src.domains.runtime.routes.events._CONV_NO_OUTPUT_TIMEOUT", 0.2):
             r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
         assert r.status_code == 200, r.text
         assert r.json()["reply"] == "模拟 agent 回复"
@@ -325,7 +325,7 @@ class TestSseStream:
     def test_stream_returns_sse_events(self):
         seq = _seed_event()
         _seed_issue_state("coding")
-        with patch("src.runtime.executor.consume_stream_async", side_effect=_fake_stream):
+        with patch("src.domains.runtime.engine.executor.consume_stream_async", side_effect=_fake_stream):
             r = client.post(f"/api/events/{seq}/chat/stream", json={"message": "hi"}, headers=_headers)
         assert r.status_code == 200
         assert "text/event-stream" in (r.headers.get("content-type") or "")
@@ -361,7 +361,7 @@ class TestKnowledgeFilesDelivery:
     def test_enqueue_packs_knowledge_files(self):
         seq = _seed_event(issue_id="#5")
         client.post(f"/api/events/{seq}/knowledge", json={"scope": "issue", "content": "验收标准 = 接口可跑通"}, headers=_bot_headers())
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         tid = enqueue_task(agent_session_id="sess-2", runtime_id=1, prompt="p",
                            repo_key=_REPO_KEY, agent_type="vod", issue_id="#5")
         task = service.get_task(tid)
@@ -409,7 +409,7 @@ class TestConversationQueueMode:
         seq = _seed_event()
         _seed_issue_state("coding")
         self._seed_agent_session()
-        with patch("src.runtime.service.wait_task_terminal", side_effect=self._fake_done):
+        with patch("src.domains.runtime.engine.service.wait_task_terminal", side_effect=self._fake_done):
             r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
         assert r.status_code == 200, r.text
         assert r.json()["reply"] == "模拟回复"
@@ -430,7 +430,7 @@ class TestConversationQueueMode:
         async def _raise(*a, **k):
             raise TimeoutError("timeout")
 
-        with patch("src.runtime.service.wait_task_terminal", side_effect=_raise):
+        with patch("src.domains.runtime.engine.service.wait_task_terminal", side_effect=_raise):
             r = client.post(f"/api/events/{seq}/chat", json={"message": "hi"}, headers=_headers)
         assert r.status_code == 200, r.text
         assert "超时" in r.json()["reply"]
@@ -471,11 +471,11 @@ class TestRedispatchRuntimeZero:
                 (_REPO_KEY, seq, _REPO_KEY))
             db.commit()
 
-        from src.api.event_pipeline import get_agent_workdir
+        from src.domains.runtime.pipeline.event_pipeline import get_agent_workdir
         expected_cwd = get_agent_workdir(_REPO_KEY, "vod", "#5")
 
         # 覆盖 30s 幂等：直接调内部逻辑不方便，改用真实端点但清掉幂等 meta
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
@@ -532,7 +532,7 @@ class TestRedispatchRuntimeZero:
                 (_REPO_KEY, _rid, seq, _REPO_KEY))
             db.commit()
 
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         r = client.post(f"/api/events/{seq}/redispatch", headers=_headers)
@@ -559,7 +559,7 @@ class TestRedispatchRuntimeZero:
 
     def test_fail_task_clears_dead_session(self):
         """连续 3 次 fail（exit_code < 0）→ 清空 runtime_session_id（smart-session-recovery-design.md §2.3）。"""
-        from src.runtime.service import fail_task, get_task
+        from src.domains.runtime.engine.service import fail_task, get_task
         from src.api.session_store import update_issue_session, get_issue_session as _get_iss
         # 1) seed issue_agent_session + 3 个 failed task
         with db_lock:
@@ -605,7 +605,7 @@ class TestRedispatchOnboarding:
                 (_REPO_KEY,))
             seq = c.lastrowid
             db.commit()
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         # 断言：重派 onboarding 事件 → 调用 onboarding.retry_onboarding_task(repo, owner, explore)
@@ -678,11 +678,11 @@ class TestLocalRetry:
             db.commit()
         _rid, _tid = self._setup_engine_and_task(seq)
 
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         # patch pick_engine 确保不被调用
-        with patch("src.runtime.engine_select.pick_engine") as _mock_pe:
+        with patch("src.domains.runtime.engine.engine_select.pick_engine") as _mock_pe:
             r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
             assert not _mock_pe.called, "local_only=True 不应调用 pick_engine"
 
@@ -708,7 +708,7 @@ class TestLocalRetry:
             db.commit()
         _rid, _tid = self._setup_engine_and_task(seq, runtime_healthy=False)
 
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
@@ -727,7 +727,7 @@ class TestLocalRetry:
             db.commit()
         _rid, _tid = self._setup_engine_and_task(seq, runtime_status="offline")
 
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
@@ -746,7 +746,7 @@ class TestLocalRetry:
             db.commit()
         _rid, _tid = self._setup_engine_and_task(seq, runtime_id_override=0)
 
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)
@@ -764,7 +764,7 @@ class TestLocalRetry:
             seq = c.lastrowid
             db.commit()
 
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value(f"redispatch:{seq}", "")
 
         r = client.post(f"/api/events/{seq}/redispatch?local_only=true", headers=_headers)

@@ -1,1 +1,4 @@
-"""用户系统：DB、认证、技能校验"""
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.mgmt.user"""
+import src.domains.mgmt.user as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

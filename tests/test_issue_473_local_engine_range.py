@@ -75,7 +75,7 @@ def _user():
 def _mk_local_engine(name, owner_id):
     """插入本机直连引擎行（credential_id=0），owner_id 取引擎自身 DB 值。
 
-    对齐 src.user.db.save_agent_runtimes 的本机行写入口径：
+    对齐 src.domains.mgmt.user.db.save_agent_runtimes 的本机行写入口径：
     INSERT ... (name, ..., scope, owner_id, host_name) VALUES (..., 'global', owner_id, host)。
     """
     with db_lock:
@@ -94,7 +94,7 @@ class TestRangeUserLocalEngine:
     def test_own_local_engine_visible_in_user_range(self):
         """本人本机引擎（cid=0、owner_id=本人）→ range=user 可见。"""
         _mk_local_engine("t473f-opencode", _USER_NAME)
-        from src.api.routes.settings import get_agent_runtimes, get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_agent_runtimes, get_runtime_devices
         d = get_agent_runtimes(user=_user(), range="user")
         names = {rt["name"] for rt in d["runtimes"]}
         assert "t473f-opencode" in names, f"本人本机引擎应可见: {names}"
@@ -106,7 +106,7 @@ class TestRangeUserLocalEngine:
     def test_other_user_local_engine_hidden_in_user_range(self):
         """他人本机引擎（cid=0、owner_id=bob）→ range=user 不可见。"""
         _mk_local_engine("t473f-aishell", _OTHER_NAME)
-        from src.api.routes.settings import get_agent_runtimes, get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_agent_runtimes, get_runtime_devices
         d = get_agent_runtimes(user=_user(), range="user")
         names = {rt["name"] for rt in d["runtimes"]}
         assert "t473f-aishell" not in names, f"他人本机引擎不应出现在个人范围: {names}"
@@ -117,7 +117,7 @@ class TestRangeUserLocalEngine:
     def test_unowned_local_engine_not_in_user_range(self):
         """无主遗留本机引擎（owner_id 空）→ 不误入个人范围（保持既有全量可见口径）。"""
         rid = _mk_local_engine("t473f-hermes", "")
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         d = get_agent_runtimes(user=_user(), range="user")
         names = {rt["name"] for rt in d["runtimes"]}
         assert "t473f-hermes" not in names, "无主本机引擎不应误入个人范围"

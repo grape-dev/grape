@@ -2225,7 +2225,7 @@ def _ensure_whitelist_columns():
     检查列是否存在，不存在则 ALTER TABLE 添加。新增平台无需手动建列。
     """
     try:
-        from src.auth.providers import list_providers, get_provider
+        from src.domains.mgmt.auth.providers import list_providers, get_provider
         with db_lock:
             c = db.cursor()
             cols = [r[1] for r in c.execute("PRAGMA table_info(login_whitelist)").fetchall()]
@@ -2260,7 +2260,7 @@ def _init_scene_category_data():
     技术方案 §2.1：通用/移动开发/基础设施/技能开发/AI应用/内容创作
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         if get_meta_value("scene_category_seeded") == "1":
             return
         categories = [
@@ -2293,7 +2293,7 @@ def _init_skill_category_data():
     Issue #222: 新增 code-hosting/browser-verify/meeting/other 4 个分类。
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         if get_meta_value("skill_category_seeded_v2") == "1":
             return
         categories = [
@@ -2355,7 +2355,7 @@ def _init_scene_market_data():
     技术方案 §3.2：从现有 devops_pipeline_scene official 场景复制 nodes_json + 补充展示字段。
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         if get_meta_value("scene_market_seeded") == "1":
             return
         with db_lock:
@@ -2423,7 +2423,7 @@ def _init_scene_skill_ref():
     幂等：已有记录补填 skill_id（旧数据可能 skill_id=0）。
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         with db_lock:
             c = db.cursor()
             # 回填：已有记录中 skill_id=0 的，从 skill 表查 id 补上
@@ -2488,7 +2488,7 @@ def _init_skill_featured():
     4 个技能设 is_featured=1（vod/issue-advance/implementation/pr）。
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         if get_meta_value("skill_featured_seeded") == "1":
             return
         featured_skills = [
@@ -2521,7 +2521,7 @@ def _seed_admin_accounts():
     - admin 账号与 user_accounts 完全独立，不影响用户登录
     """
     import hashlib
-    from src.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
     _default_pwd = os.environ.get("GRAPE_ADMIN_PASSWORD") or "admin123"
     try:
         with db_lock:
@@ -2756,7 +2756,7 @@ def _set_meta_value_conn(conn, key: str, value: str) -> None:
 def get_min_code_version() -> str:
     """meta 表 min_code_version（空串=未设置，cleanup 不受门槛约束）。"""
     try:
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.user.db import get_meta_value
         return get_meta_value("min_code_version") or ""
     except Exception:
         return ""
@@ -2765,7 +2765,7 @@ def get_min_code_version() -> str:
 def set_min_code_version(value: str) -> None:
     """部署脚本在全部集群升级完成后写入（与 DB 状态同源，多节点读到同一值）。"""
     try:
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("min_code_version", value)
     except Exception as e:
         log.warning(f"set_min_code_version failed: {e}")
@@ -3235,7 +3235,7 @@ def _migrate_allow_signup_default():
     新部署也会插入 admin 账号导致 admin_count>0 误判为升级。
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         # get_meta_value 在 key 不存在时返回 ""（非 None），用 truthy 检查
         existing = get_meta_value("allow_signup")
         if existing:
@@ -3568,7 +3568,7 @@ def _migrate_knowledge_dedup_and_ref():
 
         # 4. content_hash 回填——OBS 模式下 obs_key 非空但 hash 为空的老数据
         try:
-            from src.storage import get_storage
+            from src.domains.runtime.storage import get_storage
             _storage = get_storage()
             if _storage is not None:
                 import hashlib as _hashlib
@@ -3645,7 +3645,7 @@ def _migrate_knowledge():
     最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
     """
     from src.kernel.session_manager import db, db_lock
-    from src.user.db import get_meta_value, set_meta_value
+    from src.domains.mgmt.user.db import get_meta_value, set_meta_value
     from src.kernel.repo_key import parse_repo_key, knowledge_obs_prefix
     from src.kernel.lock import acquire_lock, release_lock
 
@@ -3687,7 +3687,7 @@ def _migrate_knowledge():
 
     # ===== 归一化 obs_key（新格式含 provider 前缀）=====
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         _storage = get_storage()
         with db_lock:
             rows = db.cursor().execute(
@@ -3855,7 +3855,7 @@ def _cleanup_chat_shared_worker_runtime():
     # 每次重启覆盖管理员/用户改绑(2026-08-18 实测 sess-cfg-* 全被重置为 1),跳过;
     # direct 模式保留原防劫持语义.
     try:
-        from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
+        from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_REMOTE
         if get_execution_mode() == EXEC_MODE_REMOTE:
             return
     except Exception:
@@ -4048,7 +4048,7 @@ def _migrate_global_bot_token_to_db():
     if not acquire_lock("migrate_global_bot_token", ttl=60):
         return  # 其他实例正在迁移，跳过
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         # 用独立标记 key 判断是否已迁移，不用 token 值的 truthiness
         # （admin 可能把 token 清空，空值不应触发重新迁移覆盖）
         if get_meta_value("global_bot_token_migrated") == "1":
@@ -4403,7 +4403,7 @@ def _migrate_tables():
     try:
         with db_lock:
             c = db.cursor()
-            from src.user.db import ensure_default_backend, get_backend_id_by_name
+            from src.domains.mgmt.user.db import ensure_default_backend, get_backend_id_by_name
             # 预置 opencode 默认 backend
             default_id = ensure_default_backend("opencode") or 0
             # devops_agent_session
@@ -4514,7 +4514,7 @@ def _migrate_tables():
     # 清理历史 bot_username 占位值 + 纠正跨平台回填错误
     # Issue #345: 按 repo_key 前缀分流——github: 取 github_bot_username，其余取 GitCode bot name
     try:
-        from src.user.db import get_global_bot_usernames, get_global_github_bot_username
+        from src.domains.mgmt.user.db import get_global_bot_usernames, get_global_github_bot_username
         _us = get_global_bot_usernames()
         _gitcode_bot_name = _us[0] if _us else ""
         _github_bot_name = get_global_github_bot_username()
@@ -5475,7 +5475,7 @@ def _seed_official_scene_market_from_pipelines():
     这里把官方场景作为模板种入 scene_market(source='official')，供场景市场展示与仓库应用复刻。
     """
     try:
-        from src.user.db import get_meta_value, set_meta_value
+        from src.domains.mgmt.user.db import get_meta_value, set_meta_value
         if get_meta_value("scene_market_seeded") == "1":
             return
         _pp = os.path.join(_CONFIG_DIR, "pipelines.json")

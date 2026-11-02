@@ -38,7 +38,7 @@ def _client():
         for tid in [t for t, tk in ChatTaskManager._tasks.items()
                     if tk.conv_id and tk.conv_id.startswith("rcxm-")]:
             del ChatTaskManager._tasks[tid]
-    from src.api.routes.chat import _CHAT_ENQUEUE_MAP
+    from src.domains.runtime.routes.chat import _CHAT_ENQUEUE_MAP
     _CHAT_ENQUEUE_MAP.clear()
     with db_lock:
         cur = db.cursor()
@@ -96,10 +96,10 @@ class TestCrossMasterRecall:
         from src.api.chat_task_manager import ChatTaskManager
         rid = _local_engine_id()
         cid = _new_conv()
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                    return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_long_stream_agent), \
-             patch("src.api.routes.chat._push_reply_to_feishu", new=_no_push()):
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_long_stream_agent), \
+             patch("src.domains.runtime.routes.chat._push_reply_to_feishu", new=_no_push()):
             r = _client.post("/api/chat/submit", json={"message": "长回答", "conversation_id": cid})
             assert r.status_code == 200, r.text
             d = r.json()
@@ -133,16 +133,16 @@ class TestCrossMasterRecall:
     def test_remote_mode_owner_loop_cancels_task_when_recalled(self, _client):
         """remote 模式（跨主控）：归属主控的轮询循环感知撤回 → service.cancel_task(enqueue_tid)。"""
         cid = _new_conv()
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                    return_value={"backend": "opencode", "runtime_id": 4321}), \
-             patch("src.api.routes.chat._push_reply_to_feishu", new=_no_push()), \
-             patch("src.runtime.service.runtime_execution_kind", return_value="remote"), \
-             patch("src.runtime.service.runtime_credential_id", return_value=777), \
-             patch("src.runtime.service._remote_runtime_ready", return_value=True), \
-             patch("src.runtime.service.enqueue_task", return_value="t_rcxm12345"), \
-             patch("src.runtime.service.get_task", return_value=None), \
-             patch("src.runtime.service.cancel_task", return_value=True) as mock_cancel, \
-             patch("src.api.routes.chat.is_task_recalled", return_value=True):
+             patch("src.domains.runtime.routes.chat._push_reply_to_feishu", new=_no_push()), \
+             patch("src.domains.runtime.engine.service.runtime_execution_kind", return_value="remote"), \
+             patch("src.domains.runtime.engine.service.runtime_credential_id", return_value=777), \
+             patch("src.domains.runtime.engine.service._remote_runtime_ready", return_value=True), \
+             patch("src.domains.runtime.engine.service.enqueue_task", return_value="t_rcxm12345"), \
+             patch("src.domains.runtime.engine.service.get_task", return_value=None), \
+             patch("src.domains.runtime.engine.service.cancel_task", return_value=True) as mock_cancel, \
+             patch("src.domains.runtime.routes.chat.is_task_recalled", return_value=True):
             r = _client.post("/api/chat/submit", json={"message": "远端长任务", "conversation_id": cid})
             assert r.status_code == 200, r.text
 
@@ -165,7 +165,7 @@ class TestCrossMasterRecall:
         的分支 → 永远不会打印（死代码）。本用例锁死该行为。
         """
         from unittest.mock import MagicMock
-        from src.api.routes import chat as chat_mod
+        from src.domains.runtime.routes import chat as chat_mod
 
         cid = _new_conv()
         tid = "chat_" + uuid.uuid4().hex[:8]

@@ -24,7 +24,7 @@ def _clear_chat_caches():
     except Exception:
         pass
     try:
-        from src.runtime.engine_select import _resolve_local_cache
+        from src.domains.runtime.engine.engine_select import _resolve_local_cache
         _resolve_local_cache.clear()
     except Exception:
         pass
@@ -38,13 +38,13 @@ def _clear_chat_caches():
 
 
 def _make_ctx(app_id="cli_chat"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-test")
 
 
 def _drive_inner(api=None, ctx=None, text="测试执行", monkeypatch=None, **kwargs):
     """驱动 _process_chat_inner_async 到直接执行，返回 (api, session_manager 可查用的 conv_id)。"""
-    from src.im.handler_async import _process_chat_inner_async
+    from src.domains.runtime.im.handler_async import _process_chat_inner_async
     ctx = ctx or _make_ctx()
     api = api or AsyncMock()
     parsed = {
@@ -101,10 +101,10 @@ def _fake_consume_done(final="LOCAL_OK", exit_code=0, with_segments=True):
 class TestStep1TaskId:
     def test_direct_writes_user_and_agent_task_id(self, monkeypatch):
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.runtime.service.enqueue_task") as m_enq, \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.engine.service.enqueue_task") as m_enq, \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             api = _drive_inner(monkeypatch=monkeypatch)
 
         m_enq.assert_not_called(), "direct 模式不应入队"
@@ -120,9 +120,9 @@ class TestStep1TaskId:
         """失败且无文本产出：不写 agent 消息（与现有 SKIP/空回复语义一致）；
         有文本但 exit≠0 时应 gen_status=3。"""
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async",
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async",
                    side_effect=_fake_consume_done(final="SOME_OUTPUT", exit_code=1)):
             api = _drive_inner(monkeypatch=monkeypatch)
         a = _last_agent_msg()
@@ -131,13 +131,13 @@ class TestStep1TaskId:
 
     def test_remote_writes_agent_task_id(self, monkeypatch):
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
-        with patch("src.runtime.service.enqueue_task", return_value="t_x") as m_enq, \
-             patch("src.runtime.service.wait_task_terminal",
+        with patch("src.domains.runtime.engine.service.enqueue_task", return_value="t_x") as m_enq, \
+             patch("src.domains.runtime.engine.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
                                                "result_text": "HELLO_QUEUE",
                                                "usage_json": '{"session_id": "ses_q"}'})) as m_wait, \
-             patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"):
+             patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"):
             api = _drive_inner(monkeypatch=monkeypatch)
         m_enq.assert_called_once()
         u = _last_user_msg()
@@ -153,9 +153,9 @@ class TestStep2ChatTaskBuffer:
     def test_direct_events_land_in_chattask(self, monkeypatch):
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
         from src.api.chat_task_manager import ChatTaskManager
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             api = _drive_inner(monkeypatch=monkeypatch)
         u = _last_user_msg()
         tid = u["task_id"]
@@ -171,9 +171,9 @@ class TestStep2ChatTaskBuffer:
     def test_direct_no_duplicate_reply(self, monkeypatch):
         """direct 默认关闭 Step3：不发送占位卡、无增量更新，仅终态卡一次 + OK 表情受理。"""
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             api = _drive_inner(monkeypatch=monkeypatch)
         # Step3 默认关闭 → 无占位 / 无增量，仅终态卡 1 次（绝无重复）
         assert api.send_card_to_user.call_count == 0, "默认不应发送占位卡"
@@ -194,9 +194,9 @@ class TestStep3FeishuDynamicCardDisabledByDefault:
         """默认关闭：direct 不发占位卡、不 update_message；仅终态单卡 + OK 表情受理恰一次。"""
         monkeypatch.delenv("FEISHU_CHAT_DYNAMIC_CARD", raising=False)
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             api = _drive_inner(monkeypatch=monkeypatch)
         assert api.send_card_to_user.call_count == 0
         assert api.update_message.call_count == 0
@@ -209,7 +209,7 @@ class TestStep3FeishuDynamicCardDisabledByDefault:
     def test_no_ack_bubble_in_source(self):
         """不再有独立「⏳」受理气泡（reply_text(msg_id,'⏳')）——与 OK 表情重复；也不残留未撤回的占位。"""
         import inspect
-        import src.im.handler_async as h
+        import src.domains.runtime.im.handler_async as h
         src = inspect.getsource(h)
         assert 'reply_text(ctx, msg_id, "⏳")' not in src, "独立 ⏳ 气泡已移除，仅 OK 表情受理"
         assert "FEISHU_CHAT_DYNAMIC_CARD" in src, "Step3 开关需存在（默认关闭，env=1 可开）"
@@ -219,9 +219,9 @@ class TestStep3FeishuDynamicCardEnabled:
     def test_placeholder_then_update_then_terminal(self, monkeypatch):
         _enable_dynamic(monkeypatch)
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             api = _drive_inner(monkeypatch=monkeypatch)
         # 占位卡片发送给 open_id（send_card_to_user(ctx, open_id, text)）
         assert api.send_card_to_user.call_count >= 1
@@ -238,9 +238,9 @@ class TestStep3FeishuDynamicCardEnabled:
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
         api = AsyncMock()
         api.update_message.return_value = False  # 更新失败
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             _drive_inner(api=api, monkeypatch=monkeypatch)
         # 失败不中断：终态卡片照常
         assert api.send_card_to_chat.call_count == 1
@@ -258,9 +258,9 @@ class TestStep3FeishuDynamicCardEnabled:
                 yield ("text", big[i:i + 500])
             yield ("done", {"exit_code": 0, "text": big, "oc_session_id": "ses_new"})
 
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_long):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_long):
             api = _drive_inner(monkeypatch=monkeypatch)
         assert api.send_card_to_chat.call_count == 1
         args = api.send_card_to_chat.call_args[0]
@@ -273,9 +273,9 @@ class TestStep3FeishuDynamicCardEnabled:
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "direct")
         api = AsyncMock()
         api.send_card_to_user.return_value = ""  # 拿不到 message_id
-        with patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
+        with patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume_done()):
             _drive_inner(api=api, monkeypatch=monkeypatch)
         api.update_message.assert_not_called()
         assert api.send_card_to_chat.call_count == 1

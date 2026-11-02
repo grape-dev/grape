@@ -14,7 +14,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import logs as lg  # noqa: E402
+from src.domains.insight.observability import logs as lg  # noqa: E402
 
 UID = 9911
 REPO = "gitcode:org/log-mine"

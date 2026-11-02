@@ -102,37 +102,37 @@ class TestPRSubscriptionDedup:
 
     def test_non_bot_actor_no_early_dispatch(self):
         """人类用户 PR：1.5 预匹配不预派发"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         raw = _make_pr_opened_raw("human_user", target_branch="mys-local")
         headers = {"X-GitCode-Event": "Merge Request Hook"}
-        with patch("src.api.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
-             patch("src.runtime.engine_select.pick_engine", return_value=None), \
-             patch("src.user.db.get_agent_bot_token", return_value=""), \
-             patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with patch("src.domains.runtime.pipeline.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None), \
+             patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             ep.run_pipeline(raw, headers, account="owner/repo")
         assert mock_dispatch.call_count == 0, \
             "非 bot actor 不应走 1.5 预派发（应延迟到主路由单次派发）"
 
     def test_bot_actor_early_dispatch(self):
         """bot 用户 PR：1.5 预匹配仍预派发（不回归 f06732b14）"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         raw = _make_pr_opened_raw("grape_bot", target_branch="mys-local")
         headers = {"X-GitCode-Event": "Merge Request Hook"}
-        with patch("src.api.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
-             patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with patch("src.domains.runtime.pipeline.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
+             patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             ep.run_pipeline(raw, headers, account="owner/repo")
         assert mock_dispatch.call_count >= 1, \
             "bot actor 应走 1.5 预派发（绕过自循环检测触发 QA）"
 
     def test_non_bot_actor_single_event(self):
         """人类用户 PR：仅产生一条事件（主路由单次派发，无双重）"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         raw = _make_pr_opened_raw("human_user", target_branch="mys-local")
         headers = {"X-GitCode-Event": "Merge Request Hook"}
-        with patch("src.api.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
-             patch("src.runtime.engine_select.pick_engine", return_value=None), \
-             patch("src.user.db.get_agent_bot_token", return_value=""), \
-             patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with patch("src.domains.runtime.pipeline.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None), \
+             patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             ep.run_pipeline(raw, headers, account="owner/repo")
         with db_lock:
             count = db.cursor().execute(
@@ -143,11 +143,11 @@ class TestPRSubscriptionDedup:
 
     def test_bot_actor_no_main_route_event(self):
         """bot 用户 PR：主路由不执行（自循环检测 return），无 pull_request_opened 主事件"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         raw = _make_pr_opened_raw("grape_bot", target_branch="mys-local")
         headers = {"X-GitCode-Event": "Merge Request Hook"}
-        with patch("src.api.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
-             patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with patch("src.domains.runtime.pipeline.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
+             patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             ep.run_pipeline(raw, headers, account="owner/repo")
         with db_lock:
             count = db.cursor().execute(
@@ -158,7 +158,7 @@ class TestPRSubscriptionDedup:
 
     def test_non_bot_actor_pr_updated_with_commit(self):
         """人类用户 PR updated（有新 commit）：同样仅主路由单次派发"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         raw = json.dumps({
             "object_attributes": {
                 "action": "update",
@@ -171,10 +171,10 @@ class TestPRSubscriptionDedup:
             "user": {"username": "human_user"},
         }).encode()
         headers = {"X-GitCode-Event": "Merge Request Hook"}
-        with patch("src.api.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
-             patch("src.runtime.engine_select.pick_engine", return_value=None), \
-             patch("src.user.db.get_agent_bot_token", return_value=""), \
-             patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with patch("src.domains.runtime.pipeline.event_pipeline._dispatch_pr_subscription_extra") as mock_dispatch, \
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None), \
+             patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             ep.run_pipeline(raw, headers, account="owner/repo")
         assert mock_dispatch.call_count == 0, \
             "非 bot actor PR updated 也不应走 1.5 预派发"

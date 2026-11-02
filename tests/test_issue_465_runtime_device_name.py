@@ -56,7 +56,7 @@ def _cleanup(cid: int, rids):
 
 
 def _overview_runtimes():
-    from src.api.routes.dashboard import get_ops_overview
+    from src.domains.insight.routes.dashboard import get_ops_overview
     user = {"id": 1, "username": "tester", "org_id": 0}
     data = get_ops_overview(repo="", user=user)
     return {rt["id"]: rt for rt in data["runtimes"]["list"]}

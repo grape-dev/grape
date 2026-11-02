@@ -15,7 +15,7 @@ UTC ISO（+00:00）同表混存，导致 last_seen_at 超前 UTC 约 8h、健康
 
 ⚠️ db/db_lock 一律在测试函数内导入（与 test_issue357_health.py / test_issue463 同约定）：
 conftest 会话级 fixture 重建 session_manager.db，模块级绑定会拿到失效/分裂连接；
-被测模块 src.user.db 在收集期捕获的 db 引用可能与其他模块收集期重绑的分裂
+被测模块 src.domains.mgmt.user.db 在收集期捕获的 db 引用可能与其他模块收集期重绑的分裂
 （写 A 库读 B 库），故用 _align_db 对齐到当前 session_manager 单例。
 """
 from datetime import datetime, timezone, timedelta
@@ -23,18 +23,18 @@ from unittest.mock import patch
 
 import pytest
 
-from src.user import db as udb
+from src.domains.mgmt.user import db as udb
 
 
 def _align_user_db():
-    """把被测模块 src.user.db 的 db/db_lock 对齐到当前 session_manager 单例。
+    """把被测模块 src.domains.mgmt.user.db 的 db/db_lock 对齐到当前 session_manager 单例。
 
     混跑时其他测试模块（如 test_issue_337_list_handoff）会在收集期重绑全局 db 且不恢复，
     收集期捕获引用的模块会与之分裂（写 A 库读 B 库）；先例见 test_issue463_table_governance。
     """
     import importlib
     from src.kernel.session_manager import db as _sm_db, db_lock as _sm_lock
-    mod = importlib.import_module("src.user.db")
+    mod = importlib.import_module("src.domains.mgmt.user.db")
     mod.db = _sm_db
     mod.db_lock = _sm_lock
 
@@ -59,7 +59,7 @@ def _db_aligned():
         _ensure_column(c, "runtime_credentials", "org_id", "INTEGER DEFAULT 0")
         db.commit()
     # 被污染/部分 schema 的测试库可能缺 user_repos（读取路由 user_db.get_user_repos 依赖），
-    # 对齐后幂等补齐（与 src.user.db 模块导入时行为一致）
+    # 对齐后幂等补齐（与 src.domains.mgmt.user.db 模块导入时行为一致）
     udb.init_user_repos_table()
     yield
 
@@ -93,9 +93,9 @@ class TestSaveAgentRuntimesUtcCaliber:
 
     def test_insert_path_writes_utc_iso(self):
         from src.kernel.session_manager import db, db_lock
-        import src.user.db as _u
+        import src.domains.mgmt.user.db as _u
         # 维护方评审意见①：原 4 行 DEBUG print 改为断言
-        assert _u.db is db, "src.user.db.db 应与 src.kernel.session_manager.db 为同一连接"
+        assert _u.db is db, "src.domains.mgmt.user.db.db 应与 src.kernel.session_manager.db 为同一连接"
         try:
             _cols = [r[1] for r in db.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
         except Exception:
@@ -261,7 +261,7 @@ class TestAgentRuntimesReadOutletNormalized:
                 "scope, owner_id, last_seen_at, updated_at) VALUES (?,?,0,'online',1,1,'global','',?,?)",
                 ("t512_read", "T512 Read", _naive_cst_now(), _naive_cst_now()))
             db.commit()
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         now = datetime.now(timezone.utc)
         try:
             with patch("src.api.time_utils._db_backend", return_value="mysql"):

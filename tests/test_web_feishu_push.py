@@ -4,7 +4,7 @@ from unittest import mock
 
 import pytest
 
-from src.api.routes.chat import _dispatch_push_to_main_loop
+from src.domains.runtime.routes.chat import _dispatch_push_to_main_loop
 
 
 class _BM:

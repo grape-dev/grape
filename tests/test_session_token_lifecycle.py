@@ -11,7 +11,7 @@ import uuid
 from unittest.mock import patch
 
 from src.api import auth_token
-from src.runtime.service import enqueue_task, update_task_status, complete_task, cancel_task
+from src.domains.runtime.engine.service import enqueue_task, update_task_status, complete_task, cancel_task
 from src.kernel.session_manager import db, db_lock
 
 
@@ -128,7 +128,7 @@ def test_direct_mode_issues_and_revokes():
         yield ("done", {"exit_code": 0, "text": "ok"})
 
     with patch("src.kernel.prompt_builder.build_devops_agent_prompt", return_value="prompt"), \
-         patch("src.runtime.executor.stream_devops_agent", side_effect=_fake_stream):
+         patch("src.domains.runtime.engine.executor.stream_devops_agent", side_effect=_fake_stream):
         event_pipeline._execute_agent(
             "gitcode:o/r", 424242, "vod", "opencode", "m2skill",
             {"repository": "o/r", "type": "vod_signal", "issue_id": "#0"},

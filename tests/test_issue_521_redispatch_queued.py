@@ -25,7 +25,7 @@ def setup_db(monkeypatch):
     """独立内存库：agent_tasks / agent_runtimes / runtime_credentials /
     engine_capabilities / events / devops_agent_session。"""
     import sqlite3
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
 
     test_db = sqlite3.connect(":memory:", check_same_thread=False)
     test_db.execute("PRAGMA foreign_keys=OFF")
@@ -113,12 +113,12 @@ _EVT = {"seq": 9401, "repo_key": RK, "issue_id": "5", "event_type": "push",
 
 def _common_patches(monkeypatch, plugin):
     from unittest.mock import MagicMock
-    from src.api.routes import events as ev
+    from src.domains.runtime.routes import events as ev
     from src.api import event_pipeline as epl
     from src.api import event_store as est
     from src.api import deps as _deps
-    from src.user import db as udb
-    from src.runtime import service as svc
+    from src.domains.mgmt.user import db as udb
+    from src.domains.runtime.engine import service as svc
 
     monkeypatch.setattr(ev, "_load_event", lambda s: dict(_EVT))
     monkeypatch.setattr(_deps, "check_repo_access", lambda *a, **k: None)
@@ -169,7 +169,7 @@ def test_ut2_terminal_rebuild_receipt_returns_new_task_id(setup_db, monkeypatch)
     ev, svc = _common_patches(monkeypatch, plugin=False)
     monkeypatch.setattr(ev, "_load_event", lambda s: dict(_EVT, seq=9402))
     import src.api.session_store as sst
-    from src.runtime import engine_select as esel
+    from src.domains.runtime.engine import engine_select as esel
     monkeypatch.setattr(sst, "get_issue_scene", lambda *a, **k: ("", 0))
     monkeypatch.setattr(esel, "pick_engine", lambda *a, **k: 501)
 

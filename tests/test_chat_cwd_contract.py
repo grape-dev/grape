@@ -4,7 +4,7 @@ import os
 import sqlite3
 from unittest import mock
 
-from src.api.routes.chat import _get_chat_cwd
+from src.domains.runtime.routes.chat import _get_chat_cwd
 from src.kernel.repo_key import parse_repo_key
 
 
@@ -14,7 +14,7 @@ def test_send_path_and_feishu_use_same_cwd(tmp_path):
     user_id = 7
     conv_id = "518a373d-1c77-4457-aac0-274253fdef7e"
 
-    with mock.patch("src.api.routes.chat.WORKSPACE_DIR", str(tmp_path)), \
+    with mock.patch("src.domains.runtime.routes.chat.WORKSPACE_DIR", str(tmp_path)), \
          mock.patch("src.kernel.config.WORKSPACE_DIR", str(tmp_path)):
         web_cwd = _get_chat_cwd(user_id, repo_key, conv_id)
         # 飞书侧（handler_async 重构后）应产生相同推导结果（相同 workspace_repo_dir 规则）
@@ -50,7 +50,7 @@ def test_migrate_session_directory_new_structure(tmp_path):
 def test_stream_agent_receives_get_chat_cwd(tmp_path):
     # stream_agent 收到的 cwd 必须等于 _get_chat_cwd 的结果（同 repo_key/user/conv）
     repo_key = "a/b"
-    with mock.patch("src.api.routes.chat.WORKSPACE_DIR", str(tmp_path)), \
+    with mock.patch("src.domains.runtime.routes.chat.WORKSPACE_DIR", str(tmp_path)), \
          mock.patch("src.kernel.config.WORKSPACE_DIR", str(tmp_path)):
         expected = _get_chat_cwd(1, repo_key, "conv1")
     # "a/b" 无前缀 → provider 默认 gitcode → {tmp_path}/gitcode/a/b/chat/1/conv1

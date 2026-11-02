@@ -73,7 +73,7 @@ class TestMiddlewareHealsServerBaseUrl:
     def _run_middleware_logic(self, meta_values: dict):
         """按 main.py 中间件的实际代码路径执行（逐行翻译，非引用真函数，
         真函数依赖 Request 对象；此处以等价 mock 驱动验证写入决策）。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         host = "workspace.example.com"
         fwd_host, fwd_proto = "", "https"
         writes = {}
@@ -117,7 +117,7 @@ class TestMiddlewareHealsServerBaseUrl:
 
     def test_local_host_not_written(self):
         """Host 头本身是本地地址（本地开发直连 127.0.0.1:3000）→ 不写入。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         candidate = detect_webhook_from_host("127.0.0.1:3000", "", "")
         assert candidate == ""  # 现有安全约束：本地 Host 不推导
 
@@ -166,7 +166,7 @@ _WORKSPACE_HOST = "workspace.example.com"
 
 def _build_client(meta_values: dict):
     """最小应用挂真实中间件，patch DB 与 JWT 解析，返回 (client, writes)。"""
-    import src.user.db as db_mod
+    import src.domains.mgmt.user.db as db_mod
     import src.kernel.auth_sdk.jwt_utils as jwt_mod
     import src.api.main as main_mod
 

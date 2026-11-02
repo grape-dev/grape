@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient
 from src.api import auth_token
 from src.api.deps import get_current_user_or_api_key
 from src.kernel.auth_sdk.jwt_utils import create_access_token
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 
 @pytest.fixture(autouse=True)
@@ -56,7 +56,7 @@ def _make_user(username: str = "tester") -> dict:
     # 唯一用户名：避免 Windows 下测试库文件被占用未能删除导致的跨运行 UNIQUE 冲突
     import uuid
     # OMIT-4 修复：D32 后业务代码只查 grape_accounts，需用 create_grape_account 创建
-    from src.auth.grape_account_db import create_grape_account
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account
     return create_grape_account(f"{username}_{uuid.uuid4().hex[:8]}", "", "pw")
 
 

@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.runtime import local_claimer
+from src.domains.runtime.engine import local_claimer
 from src.kernel.session_manager import db, db_lock
 
 

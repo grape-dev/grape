@@ -19,12 +19,12 @@ from unittest.mock import patch
 
 import pytest
 
-from src.runtime import os_adapter
-from src.runtime.base import AgentRuntime
-from src.runtime.opencode import OpencodeRuntime
-from src.runtime.codex import CodexRuntime
-from src.runtime.hermes import HermesRuntime
-from src.runtime.codearts import CodeArtsRuntime
+from src.domains.runtime.engine import os_adapter
+from src.domains.runtime.engine.base import AgentRuntime
+from src.domains.runtime.engine.opencode import OpencodeRuntime
+from src.domains.runtime.engine.codex import CodexRuntime
+from src.domains.runtime.engine.hermes import HermesRuntime
+from src.domains.runtime.engine.codearts import CodeArtsRuntime
 
 
 MULTILINE_PROMPT = "\n".join([
@@ -155,7 +155,7 @@ class _CmdShellBackend(_StdinEchoBackend):
 
 
 def _register(backend):
-    from src.agent.executor import _BACKENDS
+    from src.domains.runtime.agents.executor import _BACKENDS
     _BACKENDS[backend.name] = backend
     return backend.name
 
@@ -163,7 +163,7 @@ def _register(backend):
 class TestStdinMultilinePrompt:
     def test_multiline_prompt_arrives_intact_via_stdin(self):
         """多行提示词经 stdin 完整到达子进程（Windows 冒烟核心用例）。"""
-        from src.agent.executor import stream_agent
+        from src.domains.runtime.agents.executor import stream_agent
         name = _register(_StdinEchoBackend())
         events = list(stream_agent(
             MULTILINE_PROMPT, os.getcwd(), "",
@@ -176,7 +176,7 @@ class TestStdinMultilinePrompt:
     def test_cmd_suffix_emits_warn(self, tmp_path, caplog):
         """cli_path 以 .cmd 结尾时启动前输出 WARN（cmd 兜底降级为告警）。"""
         import logging
-        from src.agent.executor import stream_agent
+        from src.domains.runtime.agents.executor import stream_agent
         # Linux 上 .cmd 后缀的 shebang 脚本可 exec（扩展名仅命名），真实走启动路径
         fake_cmd = tmp_path / "opencode.cmd"
         fake_cmd.write_text(
@@ -187,7 +187,7 @@ class TestStdinMultilinePrompt:
         )
         fake_cmd.chmod(fake_cmd.stat().st_mode | stat.S_IEXEC)
         name = _register(_CmdShellBackend())
-        with patch("src.runtime.os_adapter.which", return_value=str(fake_cmd)):
+        with patch("src.domains.runtime.engine.os_adapter.which", return_value=str(fake_cmd)):
             with caplog.at_level(logging.WARNING):
                 events = list(stream_agent(
                     "p", os.getcwd(), "", backend_name=name, max_exec_seconds=60,

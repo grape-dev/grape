@@ -33,64 +33,64 @@ class TestVerifyBotToken:
     """Per-platform token verification tests."""
 
     def test_gitcode_healthy(self):
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value="valid_gc_token"), \
-             patch("src.user.repo_manager._req", return_value={"login": "bot"}):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="valid_gc_token"), \
+             patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "bot"}):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is True
         assert result["error_type"] == ""
 
     def test_github_healthy(self):
-        with patch("src.user.db.get_global_github_bot_token", return_value="valid_gh_token"), \
-             patch("src.user.repo_manager._github_req", return_value={"login": "bot"}):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="valid_gh_token"), \
+             patch("src.domains.mgmt.user.repo_manager._github_req", return_value={"login": "bot"}):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is True
         assert result["error_type"] == ""
 
     def test_gitcode_401(self):
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value="bad_token"), \
-             patch("src.user.repo_manager._req", side_effect=RuntimeError("failed (401): Unauthorized")):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="bad_token"), \
+             patch("src.domains.mgmt.user.repo_manager._req", side_effect=RuntimeError("failed (401): Unauthorized")):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
         assert result["error_type"] == "auth"
 
     def test_github_401(self):
-        with patch("src.user.db.get_global_github_bot_token", return_value="bad_gh_token"), \
-             patch("src.user.repo_manager._github_req", side_effect=RuntimeError("failed (401): Bad credentials")):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="bad_gh_token"), \
+             patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=RuntimeError("failed (401): Bad credentials")):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
         assert result["error_type"] == "auth"
 
     def test_gitcode_network_error(self):
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value="valid_token"), \
-             patch("src.user.repo_manager._req", side_effect=RuntimeError("Cannot reach GitCode API: timeout")):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="valid_token"), \
+             patch("src.domains.mgmt.user.repo_manager._req", side_effect=RuntimeError("Cannot reach GitCode API: timeout")):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
         assert result["error_type"] == "network"
 
     def test_github_network_error(self):
-        with patch("src.user.db.get_global_github_bot_token", return_value="valid_gh_token"), \
-             patch("src.user.repo_manager._github_req", side_effect=RuntimeError("Cannot reach GitHub API: timeout")):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="valid_gh_token"), \
+             patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=RuntimeError("Cannot reach GitHub API: timeout")):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
         assert result["error_type"] == "network"
 
     def test_gitcode_not_configured(self):
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value=""):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("gitcode")
         assert result["healthy"] is False
         assert result["error_type"] == "config"
         assert "GitCode" in result["error"]
 
     def test_github_not_configured(self):
-        with patch("src.user.db.get_global_github_bot_token", return_value=""):
-            from src.runtime.bot_token_health import _verify_bot_token
+        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""):
+            from src.domains.runtime.engine.bot_token_health import _verify_bot_token
             result = _verify_bot_token("github")
         assert result["healthy"] is False
         assert result["error_type"] == "config"
@@ -102,9 +102,9 @@ class TestVerifyGlobalBotToken:
 
     def test_both_healthy(self):
         """Both platforms healthy → platforms dict has both with healthy=True."""
-        with patch("src.runtime.bot_token_health._verify_bot_token") as mock_verify:
+        with patch("src.domains.runtime.engine.bot_token_health._verify_bot_token") as mock_verify:
             mock_verify.side_effect = lambda p: {"healthy": True, "error": "", "error_type": ""}
-            from src.runtime.bot_token_health import _verify_global_bot_token
+            from src.domains.runtime.engine.bot_token_health import _verify_global_bot_token
             result = _verify_global_bot_token()
         assert "platforms" in result
         assert result["platforms"]["gitcode"]["healthy"] is True
@@ -116,8 +116,8 @@ class TestVerifyGlobalBotToken:
             if provider == "gitcode":
                 return {"healthy": True, "error": "", "error_type": ""}
             return {"healthy": False, "error": "401", "error_type": "auth"}
-        with patch("src.runtime.bot_token_health._verify_bot_token", side_effect=mock_verify):
-            from src.runtime.bot_token_health import _verify_global_bot_token
+        with patch("src.domains.runtime.engine.bot_token_health._verify_bot_token", side_effect=mock_verify):
+            from src.domains.runtime.engine.bot_token_health import _verify_global_bot_token
             result = _verify_global_bot_token()
         assert result["platforms"]["gitcode"]["healthy"] is True
         assert result["platforms"]["github"]["healthy"] is False
@@ -129,8 +129,8 @@ class TestVerifyGlobalBotToken:
             if provider == "gitcode":
                 return {"healthy": False, "error": "timeout", "error_type": "network"}
             return {"healthy": False, "error": "401", "error_type": "auth"}
-        with patch("src.runtime.bot_token_health._verify_bot_token", side_effect=mock_verify):
-            from src.runtime.bot_token_health import _verify_global_bot_token
+        with patch("src.domains.runtime.engine.bot_token_health._verify_bot_token", side_effect=mock_verify):
+            from src.domains.runtime.engine.bot_token_health import _verify_global_bot_token
             result = _verify_global_bot_token()
         assert result["platforms"]["gitcode"]["error_type"] == "network"
         assert result["platforms"]["github"]["error_type"] == "auth"
@@ -141,8 +141,8 @@ class TestVerifyGlobalBotToken:
             if provider == "gitcode":
                 return {"healthy": True, "error": "", "error_type": ""}
             return {"healthy": False, "error": "GitHub token not configured", "error_type": "config"}
-        with patch("src.runtime.bot_token_health._verify_bot_token", side_effect=mock_verify):
-            from src.runtime.bot_token_health import _verify_global_bot_token
+        with patch("src.domains.runtime.engine.bot_token_health._verify_bot_token", side_effect=mock_verify):
+            from src.domains.runtime.engine.bot_token_health import _verify_global_bot_token
             result = _verify_global_bot_token()
         assert result["platforms"]["gitcode"]["healthy"] is True
         assert result["platforms"]["github"]["error_type"] == "config"
@@ -157,9 +157,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": True, "error": "", "error_type": ""},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=None), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=None), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert status["overall"] == "healthy"
@@ -172,9 +172,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=None), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=None), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         # R17: auth 401 首次失败 → failures=1 → github unhealthy
@@ -197,9 +197,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "timeout", "error_type": "network"},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=prev), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert status["platforms"]["github"]["consecutive_failures"] == 3
@@ -219,9 +219,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=prev), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         # R17: auth 失败递增 failures，两个平台都 → failures=3 → unhealthy
@@ -244,9 +244,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=prev), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert status["platforms"]["github"]["consecutive_failures"] == 3
@@ -265,9 +265,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": True, "error": "", "error_type": ""},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=prev), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert status["overall"] == "healthy"
@@ -279,9 +279,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": False, "error": "GitHub token not configured", "error_type": "config"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=None), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=None), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert "github" not in status["platforms"]
@@ -294,9 +294,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "GitHub token not configured", "error_type": "config"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=None), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=None), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert "github" not in status["platforms"]
@@ -314,9 +314,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "GitHub token not configured", "error_type": "config"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=prev), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert "github" not in status["platforms"]
@@ -331,9 +331,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "GitCode token not configured", "error_type": "config"},
             "github": {"healthy": False, "error": "GitHub token not configured", "error_type": "config"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=None), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=None), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert status["platforms"] == {}
@@ -351,9 +351,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "401", "error_type": "auth"},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=prev), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=prev), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         # R17: auth 失败递增 failures — gitcode 1→2, github 0→1
@@ -370,9 +370,9 @@ class TestUpdateHealthStatus:
             "gitcode": {"healthy": False, "error": "timeout", "error_type": "network"},
             "github": {"healthy": False, "error": "401", "error_type": "auth"},
         }}
-        with patch("src.runtime.bot_token_health._get_health_status", return_value=None), \
-             patch("src.user.db.set_meta_value") as mock_set:
-            from src.runtime.bot_token_health import _update_health_status
+        with patch("src.domains.runtime.engine.bot_token_health._get_health_status", return_value=None), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
+            from src.domains.runtime.engine.bot_token_health import _update_health_status
             _update_health_status(result)
             status = json.loads(mock_set.call_args[0][1])
         assert status["platforms"]["gitcode"]["error_type"] == "network"
@@ -393,24 +393,24 @@ class TestVerifyRepoBotTokensAsync:
     async def test_started_log_with_repo_count(self, caplog):
         """检查启动时打 started 日志（含仓库数）。"""
         import logging
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         verify_mock = MagicMock()
         with caplog.at_level(logging.INFO, logger="devops-bot"), \
              patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock):
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", verify_mock):
             await bth._verify_repo_bot_tokens()
         assert any("started" in rec.message and "25" in rec.message for rec in caplog.records)
 
     @pytest.mark.asyncio
     async def test_covers_all_repos_in_batches(self):
         """25 个仓库全被验证，分 3 批（10/10/5）。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         verify_mock = MagicMock()
         with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock), \
-             patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", verify_mock), \
+             patch("src.domains.runtime.engine.bot_token_health.REPO_BATCH_INTERVAL", 0):
             await bth._verify_repo_bot_tokens()
         assert verify_mock.call_count == 25
         called = {c.args[0] for c in verify_mock.call_args_list}
@@ -419,7 +419,7 @@ class TestVerifyRepoBotTokensAsync:
     @pytest.mark.asyncio
     async def test_batch_interval_uses_asyncio_sleep(self):
         """3 批 → 批间隔 asyncio.sleep 调 2 次，time.sleep 0 次。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         verify_mock = MagicMock()
         sleeps = []
 
@@ -428,8 +428,8 @@ class TestVerifyRepoBotTokensAsync:
 
         with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock), \
-             patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0.01), \
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", verify_mock), \
+             patch("src.domains.runtime.engine.bot_token_health.REPO_BATCH_INTERVAL", 0.01), \
              patch("asyncio.sleep", side_effect=_track_sleep), \
              patch("time.sleep") as mock_time_sleep:
             await bth._verify_repo_bot_tokens()
@@ -440,7 +440,7 @@ class TestVerifyRepoBotTokensAsync:
     @pytest.mark.asyncio
     async def test_batch_concurrency(self):
         """批内 10 个验证并发执行（重叠），整体耗时显著小于串行。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         import threading
         lock = threading.Lock()
         state = {"active": 0, "max_active": 0}
@@ -456,8 +456,8 @@ class TestVerifyRepoBotTokensAsync:
         t0 = time.monotonic()
         with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", side_effect=slow_verify), \
-             patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", side_effect=slow_verify), \
+             patch("src.domains.runtime.engine.bot_token_health.REPO_BATCH_INTERVAL", 0):
             await bth._verify_repo_bot_tokens()
         elapsed = time.monotonic() - t0
         assert state["max_active"] > 1  # 批内并发（串行恒为 1）
@@ -467,7 +467,7 @@ class TestVerifyRepoBotTokensAsync:
     @pytest.mark.asyncio
     async def test_event_loop_not_blocked(self):
         """检查运行期间事件循环可并发处理其他任务（无长阻塞）。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
 
         def slow_verify(repo_key, provider):
             time.sleep(0.05)  # 线程池中同步阻塞
@@ -483,8 +483,8 @@ class TestVerifyRepoBotTokensAsync:
         hb = asyncio.create_task(heartbeat())
         with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", side_effect=slow_verify), \
-             patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", side_effect=slow_verify), \
+             patch("src.domains.runtime.engine.bot_token_health.REPO_BATCH_INTERVAL", 0):
             await bth._verify_repo_bot_tokens()
         await hb
         # 心跳共 20 拍 × 20ms ≈ 0.4s；若事件循环被同步检查阻塞（旧实现 25×50ms=1.25s），
@@ -495,7 +495,7 @@ class TestVerifyRepoBotTokensAsync:
     @pytest.mark.asyncio
     async def test_no_time_sleep_in_function(self):
         """_verify_repo_bot_tokens 函数体内不得出现 time.sleep（防回退）。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         src = inspect.getsource(bth._verify_repo_bot_tokens)
         assert "time.sleep" not in src
         assert "asyncio.sleep" in src
@@ -503,7 +503,7 @@ class TestVerifyRepoBotTokensAsync:
     @pytest.mark.asyncio
     async def test_loop_awaits_repo_check(self):
         """bot_token_health_loop 以 await 调用 _verify_repo_bot_tokens。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
 
         async def _mock_sleep(seconds):
             raise asyncio.CancelledError()
@@ -515,10 +515,10 @@ class TestVerifyRepoBotTokensAsync:
         repo_check = AsyncMock()
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock"), \
-             patch("src.runtime.bot_token_health._verify_global_bot_token",
+             patch("src.domains.runtime.engine.bot_token_health._verify_global_bot_token",
                    return_value=verify_result), \
-             patch("src.runtime.bot_token_health._update_health_status"), \
-             patch("src.runtime.bot_token_health._verify_repo_bot_tokens", repo_check), \
+             patch("src.domains.runtime.engine.bot_token_health._update_health_status"), \
+             patch("src.domains.runtime.engine.bot_token_health._verify_repo_bot_tokens", repo_check), \
              patch("asyncio.sleep", side_effect=_mock_sleep):
             with pytest.raises(asyncio.CancelledError):
                 await bth.bot_token_health_loop()
@@ -528,7 +528,7 @@ class TestVerifyRepoBotTokensAsync:
     async def test_single_repo_token_error_isolated(self, caplog):
         """单仓验证抛异常不影响其他仓库（异常隔离，整轮不中断）。"""
         import logging
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         repos = [(f"gitcode:org/repo{i}", "gitcode") for i in range(3)]
 
         def flaky_verify(repo_key, provider):
@@ -540,8 +540,8 @@ class TestVerifyRepoBotTokensAsync:
         with caplog.at_level(logging.WARNING, logger="devops-bot"), \
              patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in repos])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock), \
-             patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", verify_mock), \
+             patch("src.domains.runtime.engine.bot_token_health.REPO_BATCH_INTERVAL", 0):
             # 不抛出 = 异常被隔离
             await bth._verify_repo_bot_tokens()
         assert verify_mock.call_count == 3  # 其余仓库照常验证
@@ -550,11 +550,11 @@ class TestVerifyRepoBotTokensAsync:
     @pytest.mark.asyncio
     async def test_empty_repos_no_verify(self):
         """无仓库级 token 时直接返回，不打 started 日志、不验证。"""
-        from src.runtime import bot_token_health as bth
+        from src.domains.runtime.engine import bot_token_health as bth
         verify_mock = MagicMock()
         with patch("src.kernel.session_manager.db", _fake_db([])), \
              patch("src.kernel.session_manager.db_lock", MagicMock()), \
-             patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock):
+             patch("src.domains.runtime.engine.bot_token_health._verify_single_repo_token", verify_mock):
             await bth._verify_repo_bot_tokens()
         verify_mock.assert_not_called()
 
@@ -573,11 +573,11 @@ class TestHealthLoop:
         }}
         with patch("src.kernel.lock.acquire_lock", return_value=True) as mock_acquire, \
              patch("src.kernel.lock.release_lock") as mock_release, \
-             patch("src.runtime.bot_token_health._verify_global_bot_token",
+             patch("src.domains.runtime.engine.bot_token_health._verify_global_bot_token",
                    return_value=verify_result), \
-             patch("src.runtime.bot_token_health._update_health_status") as mock_update, \
+             patch("src.domains.runtime.engine.bot_token_health._update_health_status") as mock_update, \
              patch("asyncio.sleep", side_effect=_mock_sleep):
-            from src.runtime.bot_token_health import bot_token_health_loop
+            from src.domains.runtime.engine.bot_token_health import bot_token_health_loop
             with pytest.raises(asyncio.CancelledError):
                 await bot_token_health_loop()
 
@@ -594,9 +594,9 @@ class TestHealthLoop:
 
         with patch("src.kernel.lock.acquire_lock", return_value=False), \
              patch("src.kernel.lock.release_lock") as mock_release, \
-             patch("src.runtime.bot_token_health._verify_global_bot_token") as mock_verify, \
+             patch("src.domains.runtime.engine.bot_token_health._verify_global_bot_token") as mock_verify, \
              patch("asyncio.sleep", side_effect=_mock_sleep):
-            from src.runtime.bot_token_health import bot_token_health_loop
+            from src.domains.runtime.engine.bot_token_health import bot_token_health_loop
             with pytest.raises(asyncio.CancelledError):
                 await bot_token_health_loop()
 
@@ -611,10 +611,10 @@ class TestHealthLoop:
 
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock") as mock_release, \
-             patch("src.runtime.bot_token_health._verify_global_bot_token",
+             patch("src.domains.runtime.engine.bot_token_health._verify_global_bot_token",
                    side_effect=Exception("DB error")), \
              patch("asyncio.sleep", side_effect=_mock_sleep):
-            from src.runtime.bot_token_health import bot_token_health_loop
+            from src.domains.runtime.engine.bot_token_health import bot_token_health_loop
             with pytest.raises(asyncio.CancelledError):
                 await bot_token_health_loop()
 
@@ -628,7 +628,7 @@ class TestStartBotTokenHealth:
     @pytest.mark.asyncio
     async def test_idempotent_start(self):
         """已有同协程任务时不重复启动。"""
-        from src.runtime.bot_token_health import start_bot_token_health, bot_token_health_loop
+        from src.domains.runtime.engine.bot_token_health import start_bot_token_health, bot_token_health_loop
         loop = asyncio.get_running_loop()
         t1 = loop.create_task(bot_token_health_loop(), name="bot-token-health")
         try:

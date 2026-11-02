@@ -6,7 +6,7 @@ import asyncio
 import os
 from unittest.mock import AsyncMock, patch
 
-from src.im.vod_handler_async import _execute_vod_agent
+from src.domains.runtime.im.vod_handler_async import _execute_vod_agent
 
 
 def _args():
@@ -20,14 +20,14 @@ def _args():
 class TestVodHandlerQueueMode:
     def test_queue_mode_enqueues(self, monkeypatch):
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
-        with patch("src.runtime.service.enqueue_task", return_value="t_v") as m_enq, \
-             patch("src.runtime.service.wait_task_terminal",
+        with patch("src.domains.runtime.engine.service.enqueue_task", return_value="t_v") as m_enq, \
+             patch("src.domains.runtime.engine.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
                                                "result_text": "VOD_QUEUE_OK",
                                                "usage_json": "{}"})), \
-             patch("src.runtime.engine_select.pick_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.vod_handler_async.consume_stream_async") as m_consume:
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.vod_handler_async.consume_stream_async") as m_consume:
             reply = asyncio.run(_execute_vod_agent(*_args()))
 
         assert reply == "VOD_QUEUE_OK"
@@ -43,10 +43,10 @@ class TestVodHandlerQueueMode:
         async def _fake_consume(*a, **k):
             yield ("done", {"exit_code": 0, "text": "VOD_LOCAL_OK", "oc_session_id": "ses_v"})
 
-        with patch("src.runtime.service.enqueue_task") as m_enq, \
-             patch("src.runtime.engine_select.pick_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.vod_handler_async.consume_stream_async", side_effect=_fake_consume):
+        with patch("src.domains.runtime.engine.service.enqueue_task") as m_enq, \
+             patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.vod_handler_async.consume_stream_async", side_effect=_fake_consume):
             reply = asyncio.run(_execute_vod_agent(*_args()))
 
         assert reply == "VOD_LOCAL_OK"

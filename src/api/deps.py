@@ -2,7 +2,7 @@
 import time
 import threading
 from fastapi import Header, HTTPException, Request, Depends
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.kernel.config import log
 
 
@@ -101,7 +101,7 @@ def get_user_status_cached(uid: int) -> tuple[int, int, str]:
     if cached and cached[3] > now:
         return cached[0], cached[1], cached[2]
     # 缓存未命中，查库
-    from src.auth.grape_account_db import get_status_and_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_status_and_token_version
     info = get_status_and_token_version(uid)
     if info is not None:
         status, db_ver, username = info
@@ -172,7 +172,7 @@ def get_current_user_or_api_key(request: Request) -> dict:
             _user_status_cache.pop(uid, None)
             raise HTTPException(status_code=401, detail={"code": 401, "error_code": "ACCOUNT_DISABLED", "message": "账号已被禁用"})
         # D32: 从 grape_accounts 读 username
-        from src.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
         acc = get_grape_account_by_id(uid) or {}
         mark_user_active(uid)
         return {
@@ -223,7 +223,7 @@ def require_admin(authorization: str = Header(None)) -> dict:
     token_ver = int(payload.get("ver", 0))
     if not uid:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "USER_NOT_FOUND", "message": "User not found"})
-    from src.admin.db import get_admin_token_version
+    from src.domains.mgmt.admin.db import get_admin_token_version
     db_ver = get_admin_token_version(uid)
     if token_ver != db_ver:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "SESSION_REVOKED", "message": "Session revoked"})
@@ -264,7 +264,7 @@ def require_org_member(request: Request, user: dict = Depends(get_current_user_o
     未指定时回退到用户的个人组织（兼容现有 API 行为）。
     """
     from src.api.org_context import resolve_org_context
-    from src.user.org_db import get_member_role
+    from src.domains.mgmt.user.org_db import get_member_role
     org_id = resolve_org_context(request, user.get("id") or 0)
     role = get_member_role(user.get("id") or 0, org_id)
     return {**user, "org_id": org_id, "org_role": role}
@@ -281,7 +281,7 @@ def require_path_org_member(user_id: int, org_id: int) -> str:
     修复前缺陷：PUT/DELETE /api/orgs/{org_id} 用 resolve_org_context 回退个人组织
     鉴权（读 403、写 200 语义矛盾，且可越权写任意组织）。
     """
-    from src.user.org_db import get_org, get_member_role
+    from src.domains.mgmt.user.org_db import get_org, get_member_role
     if get_org(org_id) is None:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "组织不存在"})
     role = get_member_role(user_id, org_id)
@@ -318,7 +318,7 @@ def _get_gitcode_credential_by_gitcode_id(username: str) -> dict:
     """
     import json as _json
     try:
-        from src.auth.grape_account_db import get_grape_account_by_username
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
         from src.kernel.session_manager import db, db_lock
         acc = get_grape_account_by_username(username)
         if not acc:
@@ -358,15 +358,15 @@ def _get_oauth_token_from_identity(username: str, provider: str) -> str:
     返回 token 或空字符串。
     """
     try:
-        from src.auth.grape_account_db import get_grape_account_by_username
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
         acc = get_grape_account_by_username(username)
         if not acc:
             return ""
-        from src.auth.grape_account_db import get_external_identity
+        from src.domains.mgmt.auth.grape_account_db import get_external_identity
         # external_identities 按 grape_user_id + provider 查
         # get_external_identity 是按 provider + external_id 查的，不能直接用
         from src.kernel.session_manager import db, db_lock
-        from src.auth.credential_crypto import decrypt
+        from src.domains.mgmt.auth.credential_crypto import decrypt
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -409,7 +409,7 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
 
     if token and user_id > 0:
         # R11.8: 无 refresh_token 的 PAT/导入 token 不会过期，跳过刷新
-        from src.auth.grape_account_db import _has_refresh_token
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
         if not _has_refresh_token(user_id, "github"):
             return token
         cred = user_db.get_credential(user_id, "github_oauth")
@@ -431,7 +431,7 @@ def get_user_github_token_with_refresh(username: str, user_id: int = 0) -> str:
                 new_token = _try_refresh_github_token(user_id)
                 if not new_token:
                     # FR-7.1: 刷新失败标记 expired（对齐 R25.3 status=4 范式）
-                    from src.auth.grape_account_db import mark_identity_expired
+                    from src.domains.mgmt.auth.grape_account_db import mark_identity_expired
                     try:
                         mark_identity_expired(user_id, "github")
                     except Exception:
@@ -484,7 +484,7 @@ def try_refresh_gitcode_token(user_id: int) -> str | None:
             # R20.27.2: 读最新 access_token（其他实例可能已刷新）
             try:
                 from src.kernel.session_manager import db, db_lock
-                from src.auth.credential_crypto import decrypt
+                from src.domains.mgmt.auth.credential_crypto import decrypt
                 with db_lock:
                     c = db.cursor()
                     c.execute(
@@ -525,7 +525,7 @@ def _try_refresh_github_token(user_id: int) -> str | None:
             _t.sleep(1)
             try:
                 from src.kernel.session_manager import db, db_lock
-                from src.auth.credential_crypto import decrypt
+                from src.domains.mgmt.auth.credential_crypto import decrypt
                 with db_lock:
                     c = db.cursor()
                     c.execute(
@@ -570,7 +570,7 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
     if token and user_id > 0:
         # Issue #372 R2: 无 refresh_token 的凭据（如 PAT/导入 token）不会过期，直接返回。
         # 用 _has_refresh_token 判断——避免对永久 token 误触发刷新（刷新会失败且浪费时间）。
-        from src.auth.grape_account_db import _has_refresh_token
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
         if not _has_refresh_token(user_id, "gitcode"):
             return token
         # 检查 token 是否临近过期
@@ -592,7 +592,7 @@ def get_user_token_with_refresh(username: str, user_id: int = 0) -> str:
                 new_token = try_refresh_gitcode_token(user_id)
                 if not new_token:
                     # FR-7.1: 刷新失败标记 expired（对齐 R25.3 status=4 范式）
-                    from src.auth.grape_account_db import mark_identity_expired
+                    from src.domains.mgmt.auth.grape_account_db import mark_identity_expired
                     try:
                         mark_identity_expired(user_id, "gitcode")
                     except Exception:
@@ -613,7 +613,7 @@ def get_bot_token(repo_owner: str = "", repo_name: str = "") -> str:
     R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token）。
     """
     if repo_owner and repo_name:
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         from src.kernel.repo_key import to_repo_key
         return get_repo_token_with_refresh(to_repo_key(f"{repo_owner}/{repo_name}")) or ""
     return ""

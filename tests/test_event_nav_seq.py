@@ -58,7 +58,7 @@ class TestPrevNextSeqRepoKeyFilter:
         _insert_event(101, _REPO_A, "vod")
         _insert_event(102, _REPO_A, "vod")
 
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
         result = get_event_detail(seq=101, user=_TEST_USER)
         assert result["prev_seq"] == 100
         assert result["next_seq"] == 102
@@ -69,7 +69,7 @@ class TestPrevNextSeqRepoKeyFilter:
         _insert_event(101, _REPO_B, "vod")
         _insert_event(102, _REPO_A, "vod")
 
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
         result = get_event_detail(seq=102, user=_TEST_USER)
         assert result["prev_seq"] == 100
         assert result["next_seq"] == 0
@@ -80,7 +80,7 @@ class TestPrevNextSeqRepoKeyFilter:
         _insert_event(201, _REPO_B, "vod")
         _insert_event(202, _REPO_A, "vod")
 
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
         result = get_event_detail(seq=200, user=_TEST_USER)
         assert result["prev_seq"] == 0
         assert result["next_seq"] == 202
@@ -91,7 +91,7 @@ class TestPrevNextSeqRepoKeyFilter:
         _insert_event(301, _REPO_A, "coding")
         _insert_event(302, _REPO_A, "vod")
 
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
         result = get_event_detail(seq=302, user=_TEST_USER)
         assert result["prev_seq"] == 300
         assert result["next_seq"] == 0
@@ -100,7 +100,7 @@ class TestPrevNextSeqRepoKeyFilter:
         """仅一个事件 → prev_seq=0, next_seq=0。"""
         _insert_event(400, _REPO_A, "vod")
 
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
         result = get_event_detail(seq=400, user=_TEST_USER)
         assert result["prev_seq"] == 0
         assert result["next_seq"] == 0
@@ -112,7 +112,7 @@ class TestPrevNextSeqRepoKeyFilter:
         _insert_event(502, _REPO_A, "vod")
         _insert_event(503, _REPO_B, "vod")
 
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
 
         result_a = get_event_detail(seq=502, user=_TEST_USER)
         assert result_a["prev_seq"] == 500

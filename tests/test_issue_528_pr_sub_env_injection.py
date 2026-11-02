@@ -12,7 +12,7 @@ PR 订阅（PR 无关联 Issue）触发任务时，事件 issue_id 为伪 id（#
 """
 import inspect
 
-from src.api.event_pipeline import (
+from src.domains.runtime.pipeline.event_pipeline import (
     _inject_issue_pr_env,
     build_task_env,
     resolve_issue_card_id,
@@ -112,7 +112,7 @@ class TestInjectionCallSitesUseHelper:
     """两个 env 注入点（入队/直连执行）必须统一走 _inject_issue_pr_env，防旁路注入回归"""
 
     def test_enqueue_pipeline_task_uses_helper(self):
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         src_enqueue = inspect.getsource(ep._enqueue_pipeline_task)
         assert "_inject_issue_pr_env(" in src_enqueue, \
             "_enqueue_pipeline_task 应调用 _inject_issue_pr_env（Issue #528）"
@@ -120,7 +120,7 @@ class TestInjectionCallSitesUseHelper:
         assert 'env_extra["ISSUE_NUMBER"] = str(_issue_num)' not in src_enqueue
 
     def test_execute_agent_inner_uses_helper(self):
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         src_exec = inspect.getsource(ep._execute_agent_inner)
         assert "_inject_issue_pr_env(" in src_exec, \
             "_execute_agent_inner 应调用 _inject_issue_pr_env（Issue #528）"

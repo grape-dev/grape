@@ -241,7 +241,7 @@ def _resolve_issue_org_id(repo_key: str, explicit_org: int = 0) -> int:
     - 无托管记录 / 无显式 org → 0（个人视图豁免 org 过滤，创建者仍可见）。
     """
     if repo_key:
-        from src.user.org_db import get_org_id_by_repo_key
+        from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
         return get_org_id_by_repo_key(repo_key) or 0
     return explicit_org or 0
 
@@ -296,7 +296,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # org 归属 = 仓库托管组织（repo 关联需求的唯一权威，issue-244-org-attribution-fix-design.md 方案 B）。
     # 不再信任调用方传入的任意 org_id（如请求上下文 user.org_id），杜绝 #244 式串货漂移；
     # 调用方传入的 org_id 仅与仓库值比对，不一致时告警并校准为仓库值。
-    from src.user.org_db import get_org_id_by_repo_key
+    from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
     _repo_org = get_org_id_by_repo_key(repo_key) or 0
     if org_id and org_id != _repo_org:
         log.warning(f"ensure_issue_task: org drift rejected repo={repo_key} issue=#{issue_number} "
@@ -1097,7 +1097,7 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
     import urllib.parse as _ul
     if provider == "github":
         # Issue #344: 改用 GitHub Search API 精确匹配 title，不再分页遍历
-        from src.user.repo_manager import _github_req
+        from src.domains.mgmt.user.repo_manager import _github_req
         try:
             _q = _ul.quote(f'{title} in:title repo:{owner}/{repo} is:issue is:open')
             data = _github_req("GET",
@@ -1123,7 +1123,7 @@ def _find_open_issue_by_title(api_token: str, owner: str, repo: str, title: str,
         return None
     # GitCode — Issue #344: 取消 10 页上限，while True 靠末页终止
     # 安全阀：最多遍历 1000 页（50000 条），防止 API 异常时无限循环
-    from src.user.repo_manager import _req
+    from src.domains.mgmt.user.repo_manager import _req
     page = 1
     _max_pages = 1000
     while page <= _max_pages:
@@ -1189,7 +1189,7 @@ def _post_gitcode_issue(api_token: str, owner: str, repo: str, title: str,
 def _post_github_issue(api_token: str, owner: str, repo: str, title: str,
                        body_text: str = "", assignee: str = "") -> dict:
     """创建 GitHub Issue（POST /repos/{owner}/{repo}/issues，JSON body + Bearer token）。"""
-    from src.user.repo_manager import _github_req
+    from src.domains.mgmt.user.repo_manager import _github_req
     body = {"title": title}
     if body_text:
         body["body"] = body_text
@@ -1225,7 +1225,7 @@ def _patch_issue_body(api_token: str, owner: str, repo: str, issue_num: int, bod
 
 def _patch_github_issue_body(api_token: str, owner: str, repo: str, issue_num: int, body_text: str):
     """PATCH Issue body（GitHub 版）。"""
-    from src.user.repo_manager import _github_req
+    from src.domains.mgmt.user.repo_manager import _github_req
     _out = _github_req("PATCH", f"https://api.github.com/repos/{owner}/{repo}/issues/{issue_num}",
                        api_token, {"body": body_text})
     # Issue #453 台账（S21，第六轮补漏）：GitHub 多任务模式 patch issue body → issue_edit 记账
@@ -1343,7 +1343,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         api_token = _preauth_token
     elif _is_github:
         # Issue #343: GitHub 写操作同样走仓库 bot token
-        from src.user.db import get_github_token
+        from src.domains.mgmt.user.db import get_github_token
         api_token = get_github_token(repo_key=repo_key)
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库 GitHub Bot Token 未配置"})
@@ -1368,7 +1368,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         assignee = user["username"]  # 默认 fallback
         # 尝试从 external_identities 查真实 GitCode/GitHub 登录名
         try:
-            from src.auth.grape_account_db import get_user_identities
+            from src.domains.mgmt.auth.grape_account_db import get_user_identities
             _provider_name = "github" if _is_github else "gitcode"
             for ident in get_user_identities(user["id"]):
                 if ident.get("provider") == _provider_name and ident.get("external_login"):
@@ -1382,7 +1382,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
         issue_num = _find_open_issue_by_title(api_token, owner, rname, body.title.strip(),
                                               provider="github" if _is_github else "gitcode")
     except RuntimeError as _dedup_err:
-        from src.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
+        from src.domains.runtime.vcs.token_error import is_auth_error_exc, BOT_TOKEN_INVALID_MSG, GITCODE_USER_TOKEN_INVALID_MSG
         if is_auth_error_exc(_dedup_err) and _using_user_token:
             # 用户自己的 GitCode token 401 → 主动刷新一次并重试；仍失败给「重新登录」引导
             _renewed = _refresh_user_gitcode_token(user)
@@ -1503,13 +1503,13 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
                 if _using_user_token:
                     # 用户自己的 GitCode token 401 且刷新失败 → 401 + reauth_required，
                     # 前端自动跳 GitCode OAuth 授权页强制重新授权（用户登录凭据已失效）
-                    from src.vcs.token_error import GITCODE_USER_TOKEN_INVALID_MSG
+                    from src.domains.runtime.vcs.token_error import GITCODE_USER_TOKEN_INVALID_MSG
                     raise HTTPException(status_code=401, detail={
                         "code": 401,
                         "message": f"创建 Issue 失败：{GITCODE_USER_TOKEN_INVALID_MSG}",
                         "action": "reauth_required",
                     })
-                from src.vcs.token_error import BOT_TOKEN_INVALID_MSG
+                from src.domains.runtime.vcs.token_error import BOT_TOKEN_INVALID_MSG
                 raise HTTPException(status_code=502, detail={
                     "code": 502,
                     "message": f"创建 Issue 失败：{BOT_TOKEN_INVALID_MSG}",
@@ -1537,7 +1537,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             log.warning(f"outbound_ledger record (create issue) failed: {_le}")
         created = True
         # 附件从 pending 迁移到实际 issue_number（OBS: copy + delete old; 本地: rename）
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         _storage = get_storage()
         _pending_atts = _attach_list(owner, rname, "pending")
         if _pending_atts:
@@ -1566,14 +1566,14 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
     #    保证对话通道创建的 Issue 详情页「流水线场景」不显示 --。
     try:
         from src.api.session_store import set_issue_scene
-        from src.runtime.engine_select import _repo_user_id
+        from src.domains.runtime.engine.engine_select import _repo_user_id
         _scene_to_write = ""
         if body.scene_id and body.scene_id != "vod-auto":
             _scene_to_write = body.scene_id
         else:
             # 无显式场景 → 仓库默认场景兜底（未配置则保持空，走智能推荐）
             try:
-                from src.user.db import get_repo_scene
+                from src.domains.mgmt.user.db import get_repo_scene
                 _scene_to_write = get_repo_scene(repo_key) or ""
             except Exception as _re:
                 log.warning(f"create_task: get_repo_scene failed: {_re}")
@@ -1679,7 +1679,7 @@ async def create_task_via_issue(body: TaskCreateBody, user: dict = Depends(get_c
             # 审查 P0-1 修正：run_pipeline 调用移回 if/else 之外（两平台共用）——
             # 原版本误缩进进 else（GitCode）分支，GitHub 建单后不再同步触发流水线。
             _pipe_payload["_grape_internal_trigger"] = True
-            from src.api.event_pipeline import run_pipeline
+            from src.domains.runtime.pipeline.event_pipeline import run_pipeline
             _pipe_result = run_pipeline(_pipe_json.dumps(_pipe_payload).encode(), _pipe_headers,
                                         account=repo_key, repo_key_override=repo_key)
             _log.info(f"create_task: triggered pipeline for #{issue_num}, seq={_pipe_result.get('seq', 0)}")
@@ -1715,7 +1715,7 @@ def _attach_base_dir(owner: str, repo: str, issue_number) -> str:
 
 def _attach_save(owner: str, repo: str, issue_number, filename: str, content: bytes) -> str:
     """保存附件。OBS 启用时上传到 OBS，否则写本地磁盘。返回可访问 URL。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         key = _attach_obs_key(owner, repo, issue_number, filename)
@@ -1729,14 +1729,14 @@ def _attach_save(owner: str, repo: str, issue_number, filename: str, content: by
     fpath = os.path.join(attach_dir, filename)
     with open(fpath, "wb") as f:
         f.write(content)
-    from src.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     return f"{_base_url}/static/issue_attachments/{owner}/{repo}/{issue_number}/{filename}"
 
 
 def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
     """删除单个附件。OBS 启用时删 OBS 对象，否则删本地文件。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         key = _attach_obs_key(owner, repo, issue_number, filename)
@@ -1750,12 +1750,12 @@ def _attach_delete(owner: str, repo: str, issue_number, filename: str) -> bool:
 
 def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     """列出附件。返回 [{filename, url, size, is_image}]。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
         items, _ = storage.list_objects_with_meta(prefix_key)
-        from src.user.db import get_meta_value as _gmv
+        from src.domains.mgmt.user.db import get_meta_value as _gmv
         result = []
         for item in items:
             fname = item["key"].rsplit("/", 1)[-1]
@@ -1772,7 +1772,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
     # 本地降级
     attach_dir = _attach_base_dir(owner, repo, issue_number)
     # Issue #471 E1：附件 URL 是浏览器面地址——走 browser_callback_url
-    from src.user.db import get_browser_callback_url as _bcb
+    from src.domains.mgmt.user.db import get_browser_callback_url as _bcb
     _base_url = (_bcb() or "").rstrip("/")
     result = []
     if os.path.isdir(attach_dir):
@@ -1792,7 +1792,7 @@ def _attach_list(owner: str, repo: str, issue_number) -> list[dict]:
 
 def _attach_cleanup_dir(owner: str, repo: str, issue_number):
     """删除整个 issue 的附件目录。任务完成/取消时调用。"""
-    from src.storage import get_storage
+    from src.domains.runtime.storage import get_storage
     storage = get_storage()
     if storage:
         prefix_key = _attach_obs_key(owner, repo, issue_number, "")
@@ -1833,7 +1833,7 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
         {"ok": [{"filename", "url", "size"}], "failed": [{"url", "reason"}]}
         顶层异常不外抛（返回带 error 字段的降级结果），绝不阻塞 prompt 组装主流程。
     """
-    from src.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
+    from src.domains.runtime.vcs.api_client import (extract_gitcode_user_image_urls, USER_IMAGE_MAX_COUNT)
     result: dict = {"ok": [], "failed": []}
     try:
         urls: list[str] = []
@@ -1853,7 +1853,7 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
         repo_key = repo_key or f"gitcode:{owner}/{repo}"
         token = ""
         try:
-            from src.user.db import get_gitcode_token
+            from src.domains.mgmt.user.db import get_gitcode_token
             token = get_gitcode_token(repo_key=repo_key) or ""
         except Exception:
             token = ""
@@ -1862,7 +1862,7 @@ def _collect_issue_user_images(owner: str, repo: str, issue_number, texts, repo_
                 result["failed"].append({"url": u, "reason": "no repo token"})
             return result
 
-        from src.vcs.api_client import create_client
+        from src.domains.runtime.vcs.api_client import create_client
         client = create_client(repo_key, token)
         seq = 0
         for u in urls:
@@ -1940,7 +1940,7 @@ def _batch_fetch_pr_issue_keys(keys: list) -> set:
     ② 不算 PR——否则需求流转到待审核/已完成时详情页 Issue 行错标成 PR。
     只有"存在 PR 事件且从无 issue 生命周期事件"的编号才判为 ①。
     """
-    from src.vcs.event_types import ALL_PR_EVENTS, ALL_ISSUE_EVENTS
+    from src.domains.runtime.vcs.event_types import ALL_PR_EVENTS, ALL_ISSUE_EVENTS
     _pr_types = tuple(ALL_PR_EVENTS)
     _issue_types = tuple(ALL_ISSUE_EVENTS)
     out: set = set()
@@ -2036,7 +2036,7 @@ def _batch_fetch_agent_statuses(keys: list) -> dict:
     Returns:
         {(repo_key, issue_id): [{agent, label, status, status_num, latest_seq, latest_title}, ...]}
     """
-    from src.api.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
+    from src.domains.runtime.routes.pipeline import AGENT_ORDER, AGENT_LABELS, STAGE_STATUS_MAP
 
     out: dict = {}
     if not keys:
@@ -2179,7 +2179,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
         if _rk in _repo_default_scene:
             continue
         try:
-            from src.user.db import get_repo_scene
+            from src.domains.mgmt.user.db import get_repo_scene
             _repo_default_scene[_rk] = get_repo_scene(_rk) or ""
         except Exception:
             _repo_default_scene[_rk] = ""

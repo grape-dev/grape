@@ -23,7 +23,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 # 使用同一个 db 连接对象。全量 collection 时其他测试模块的 os.environ 改写
 # 不会影响已导入的 db 引用，但可能导致 session_manager.db 被重绑为新连接，
 # 如果测试从 session_manager 导入 db 会拿到新连接，与 event_pipeline 的旧连接不一致。
-from src.api.event_pipeline import db, db_lock
+from src.domains.runtime.pipeline.event_pipeline import db, db_lock
 
 REPO = "gitcode:owner/test-issue372-pool-engine-source"
 
@@ -62,7 +62,7 @@ def _get_task_row(seq):
 
 def test_task_columns_list_contains_pool_engine_source():
     """T8-06: _TASK_COLUMNS_LIST 必须包含 pool_engine_source（防列清单漂移）。"""
-    from src.runtime.service import _TASK_COLUMNS_LIST
+    from src.domains.runtime.engine.service import _TASK_COLUMNS_LIST
     assert "pool_engine_source" in _TASK_COLUMNS_LIST, (
         "pool_engine_source 必须在 _TASK_COLUMNS_LIST 中——"
         "若移除该列需同步更新 _create_direct_task / _create_failed_task 的 _task_insert_row 调用"

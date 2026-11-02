@@ -21,7 +21,7 @@ import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
-from src.auth import grape_account_db  # noqa: E402
+from src.domains.mgmt.auth import grape_account_db  # noqa: E402
 from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 _TEST_REPO = "issue502/demo"

@@ -29,7 +29,7 @@ def setup():
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     time.sleep(5)
     _sql(f"import sys; sys.path.insert(0, r'{ROOT}'); "
-         "from src.user import db as udb; print(udb.create_user('uitest','test123'))")
+         "from src.domains.mgmt.user import db as udb; print(udb.create_user('uitest','test123'))")
     yield
     if _SERVER: _SERVER.terminate(); _SERVER.wait()
 
@@ -60,7 +60,7 @@ def login(page, tk):
 def join_repo(tk):
     # 「加入」endpoint 已下线：改为 DB 直插托管登记（与 join 行为等价：managed_repos + is_join）
     _sql("import sys;sys.path.insert(0,r'EXTRA');"
-         "from src.user import db as udb;"
+         "from src.domains.mgmt.user import db as udb;"
          "u=udb.get_user_account('uitest');"
          "udb.add_managed_repo('gitcode:org/test-repo','org','test-repo',webhook_id=0);"
          "udb.mark_user_repo_join(u['id'],'gitcode:org/test-repo',is_join=True)".replace("EXTRA", ROOT))

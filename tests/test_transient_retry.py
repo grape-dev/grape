@@ -12,8 +12,8 @@ import pytest
 import re
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service as svc
-from src.runtime import transient_retry as tr
+from src.domains.runtime.engine import service as svc
+from src.domains.runtime.engine import transient_retry as tr
 
 TID = "t_403_retry"
 REPO = "gitcode:issue403/test"
@@ -284,8 +284,8 @@ def _run_direct(repo_key: str, tid: str, seq: int, events, agent_type: str = "is
         "type": "issue_opened", "repository": "issue403/test",
         "issue_id": "#403", "account": "issue403", "actor": "issue403",
     }
-    with patch("src.runtime.executor.stream_devops_agent", _fake_stream(events)), \
-         patch("src.observability.master_usage.for_task", _FakeUsage), \
+    with patch("src.domains.runtime.engine.executor.stream_devops_agent", _fake_stream(events)), \
+         patch("src.domains.insight.observability.master_usage.for_task", _FakeUsage), \
          patch.object(event_pipeline, "_materialize_direct_workdir",
                       side_effect=lambda ws, rk, at, sk, e, iid, p: p), \
          patch.object(event_pipeline, "_cleanup_direct_workdir", lambda *a, **k: None):
@@ -834,7 +834,7 @@ def test_do_requeue_clears_prior_round_errors():
 def test_check_running_task_counts_queued():
     """UC7-10：退避窗口内任务 queued → check_running_task 视为活跃，
     防同 issue 双实例并发、双份评论。"""
-    from src.api.event_pipeline import check_running_task
+    from src.domains.runtime.pipeline.event_pipeline import check_running_task
     _seed_task()
     with db_lock:
         c = db.cursor()

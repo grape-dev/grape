@@ -4,8 +4,8 @@
 """
 import pytest
 
-from src.vcs import providers
-from src.vcs.providers import translate_inbound, translate_query_state
+from src.domains.runtime.vcs import providers
+from src.domains.runtime.vcs.providers import translate_inbound, translate_query_state
 
 OWNER_REPO = "o/r"
 

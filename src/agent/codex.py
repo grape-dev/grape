@@ -1,2 +1,4 @@
-"""Codex 后端实现（兼容转发层，M0 后迁至 src.runtime.codex）"""
-from src.runtime.codex import CodexRuntime as CodexBackend
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.runtime.agents.codex"""
+import src.domains.runtime.agents.codex as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

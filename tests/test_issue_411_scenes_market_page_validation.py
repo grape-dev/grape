@@ -22,7 +22,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
-from src.auth import grape_account_db  # noqa: E402
+from src.domains.mgmt.auth import grape_account_db  # noqa: E402
 from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 client = TestClient(app)
@@ -33,7 +33,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 

@@ -24,7 +24,7 @@ from src.kernel.config import _write_runtime_config_for_test, RUNTIME_CONFIG_PAT
 def _clean(monkeypatch):
     monkeypatch.delenv("RUNTIME_TASK_TIMEOUT", raising=False)
     monkeypatch.delenv("SWEEPER_LONG_RUNNING_MINUTES", raising=False)
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value("runtime_task_timeout", "")
     if os.path.exists(RUNTIME_CONFIG_PATH):
         os.remove(RUNTIME_CONFIG_PATH)
@@ -39,12 +39,12 @@ class TestObservabilityStuck:
     """observability 采样器 stuck 阈值跟随统一配置。"""
 
     def test_default_22(self):
-        import src.observability as obs
+        import src.domains.insight.observability as obs
         assert obs._stuck_minutes() == 22
 
     def test_scales_with_timeout(self):
         _write_runtime_config_for_test({"runtime_task_timeout": 7200})
-        import src.observability as obs
+        import src.domains.insight.observability as obs
         assert obs._stuck_minutes() == 44
 
 
@@ -52,12 +52,12 @@ class TestDashboardStuck:
     """dashboard ops overview 的 stuck 口径跟随统一配置。"""
 
     def test_default_22(self):
-        from src.api.routes.dashboard import _stuck_minutes
+        from src.domains.insight.routes.dashboard import _stuck_minutes
         assert _stuck_minutes() == 22
 
     def test_scales_with_timeout(self):
         _write_runtime_config_for_test({"runtime_task_timeout": 7200})
-        from src.api.routes.dashboard import _stuck_minutes
+        from src.domains.insight.routes.dashboard import _stuck_minutes
         assert _stuck_minutes() == 44
 
 
@@ -65,16 +65,16 @@ class TestCleanupOrphan:
     """cleanup sweeper 孤儿阈值：统一配置派生 + SWEEPER env 兜底优先保留。"""
 
     def test_default_360(self):
-        from src.runtime.cleanup import _long_running_minutes
+        from src.domains.runtime.engine.cleanup import _long_running_minutes
         assert _long_running_minutes() == 360
 
     def test_scales_with_timeout(self):
         _write_runtime_config_for_test({"runtime_task_timeout": 7200})
-        from src.runtime.cleanup import _long_running_minutes
+        from src.domains.runtime.engine.cleanup import _long_running_minutes
         assert _long_running_minutes() == 720
 
     def test_sweeper_env_still_overrides(self, monkeypatch):
         """既有 SWEEPER_LONG_RUNNING_MINUTES env 兜底语义保留（优先级高于派生值）。"""
         monkeypatch.setenv("SWEEPER_LONG_RUNNING_MINUTES", "120")
-        from src.runtime.cleanup import _long_running_minutes
+        from src.domains.runtime.engine.cleanup import _long_running_minutes
         assert _long_running_minutes() == 120

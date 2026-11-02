@@ -15,7 +15,7 @@ sys.path.insert(0, ROOT)
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime import task_timeout as tt
+from src.domains.runtime.engine import task_timeout as tt
 
 
 @pytest.fixture(autouse=True)

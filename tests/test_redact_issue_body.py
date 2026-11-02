@@ -21,7 +21,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import pytest
 from unittest.mock import patch
 
-from src.observability.redact_issue_body import redact_issue_text
+from src.domains.insight.observability.redact_issue_body import redact_issue_text
 
 
 # ---------- R1：内网 IPv4 + 端口 ----------
@@ -142,7 +142,7 @@ def test_r7_submit_pre_redacts_fail_summary(monkeypatch):
     """
     import sqlite3
     import threading
-    from src.api.routes import feedback as fb_mod
+    from src.domains.mgmt.routes import feedback as fb_mod
 
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     lock = threading.RLock()
@@ -190,7 +190,7 @@ def test_r7_submit_pre_redacts_fail_summary(monkeypatch):
         attachment_name = ""
         feedback_kind = ""
 
-    from src.api.routes.feedback import submit_feedback
+    from src.domains.mgmt.routes.feedback import submit_feedback
 
     from unittest.mock import patch
     with patch.object(fb_mod, "_collect_feedback_context", return_value=_Ctx()):

@@ -7,7 +7,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime.executor import (
+from src.domains.runtime.engine.executor import (
     _track_proc, _untrack_proc, _active_procs, _active_procs_lock, terminate_active_agents,
 )
 

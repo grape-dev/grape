@@ -4,7 +4,7 @@ import pytest
 from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
 from src.api import session_store as ss
-from src.api.event_pipeline import _resolve_issue_stage_agent, _STAGE_EVENT_AGENT_MAP
+from src.domains.runtime.pipeline.event_pipeline import _resolve_issue_stage_agent, _STAGE_EVENT_AGENT_MAP
 
 
 _CLEAN_PATTERNS = "test_% OR gitcode:test_% OR gitcode:org/% OR org/% OR gitcode:owner/% OR owner/% OR gitcode:tc_% OR gitcode:o/r OR o/r OR gitcode:a/% OR a/b OR gitcode:b/% OR gitcode:x/% OR gitcode:new/% OR gitcode:empty/% OR gitcode:navuser/% OR gitcode:nonexistent/% OR gitcode:repair/% OR gitcode:ghost/% OR gitcode:iso/% OR gitcode:iac/% OR gitcode:Jason7602/% OR gitcode:evapi/% OR gitcode:sweep/% OR gitcode:no-% OR other/% OR github:org/% OR github:other/% OR gitcode:chat:%"

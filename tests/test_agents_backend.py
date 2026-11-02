@@ -1,6 +1,6 @@
 """agents 后端直写会话 + Save 全量提交的回归测试。"""
 import os
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 import sys
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -28,14 +28,14 @@ def teardown_function():
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
 def test_backend_onchange_writes_current_session():
     """PUT /api/agents/{name}/{owner}/{repo} 写入 agent session（backends 解析为 runtime_id）。"""
     from fastapi.testclient import TestClient
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
 
     _clean()
     uid = grape_account_db.create_grape_account("test_agents_be", email=None, password="test123")

@@ -14,7 +14,7 @@ os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
 import pytest
 
-from src.api.routes import settings as settings_routes
+from src.domains.mgmt.routes import settings as settings_routes
 
 
 @pytest.mark.atomic

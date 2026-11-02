@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.kernel.session_manager import db, db_lock, get_chat_config
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 UID = 99001
 USERNAME = "chat_tester"
@@ -145,7 +145,7 @@ class TestSend:
         assert r.status_code == 404
 
     def test_no_backend_reply(self, _client):
-        with patch("src.api.routes.chat._get_chat_config", return_value={"backend": ""}):
+        with patch("src.domains.runtime.routes.chat._get_chat_config", return_value={"backend": ""}):
             r = _client.post("/api/chat/send", json={"message": "hi"})
         assert r.status_code == 200
         assert "无可用引擎" in r.json()["reply"]
@@ -153,9 +153,9 @@ class TestSend:
     def test_direct_mode_streams(self, _client):
         rid = _local_engine_id()
         cid = _new_conv(_client)
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
         assert r.json()["reply"] == "联通成功"
@@ -168,9 +168,9 @@ class TestSend:
             c.execute("INSERT INTO chat_conversations (id, user_id, repo_key, conv_type, issue_number) "
                       "VALUES (?, ?, 'gitcode:org/x', 'task', 5)", (cid, UID))
             db.commit()
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent), \
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent), \
              patch("src.kernel.prompt_builder.build_issue_chat_prompt", return_value="task-prompt") as m_build:
             _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         m_build.assert_called()
@@ -178,9 +178,9 @@ class TestSend:
     def test_queue_mode_enqueues(self, _client):
         rid = _remote_engine_id()
         cid = _new_conv(_client)
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                           return_value={"backend": "chat_rt", "runtime_id": rid}), \
-             patch("src.runtime.service.enqueue_task", return_value="t1") as m_enq:
+             patch("src.domains.runtime.engine.service.enqueue_task", return_value="t1") as m_enq:
             r = _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
         data = r.json()
@@ -194,7 +194,7 @@ class TestSend:
 class TestSendStream:
     def test_no_backend_done_event(self, _client):
         cid = _new_conv(_client)
-        with patch("src.api.routes.chat._get_chat_config", return_value={"backend": ""}):
+        with patch("src.domains.runtime.routes.chat._get_chat_config", return_value={"backend": ""}):
             r = _client.post("/api/chat/send/stream", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
         assert "无可用引擎" in _sse_done_text(r.text)
@@ -202,9 +202,9 @@ class TestSendStream:
     def test_direct_streams_events(self, _client):
         rid = _local_engine_id()
         cid = _new_conv(_client)
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent):
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent):
             r = _client.post("/api/chat/send/stream", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200
         assert "联通成功" in _sse_done_text(r.text)
@@ -227,9 +227,9 @@ class TestSendStream:
             yield ("text", "重试后的回复内容")
             yield ("done", {"exit_code": 0, "text": "重试后的回复内容", "oc_session_id": "ses_brand_new"})
 
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_with_new_session):
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_with_new_session):
             # 客户端在读 SSE 流前就 abort：仅发出请求即关闭连接（testclient 用 stream=True 断开前读第一段）
             with _client.stream("POST", "/api/chat/send/stream", json={"message": "hi", "conversation_id": cid}) as resp:
                 assert resp.status_code == 200
@@ -457,13 +457,13 @@ class TestHelpers:
         assert "帮我看看" in prompt
 
     def test_resolve_token_returns_user_token(self):
-        from src.api.routes.chat import _resolve_gitcode_token
+        from src.domains.runtime.routes.chat import _resolve_gitcode_token
         # Issue #344: no conv cache, user_token non-empty → return directly
         assert _resolve_gitcode_token("new_tok") == "new_tok"
 
     def test_resolve_token_fallback_repo_token(self):
         # user_token empty + repo_key → repo bot token fallback
-        from src.api.routes.chat import _resolve_gitcode_token
+        from src.domains.runtime.routes.chat import _resolve_gitcode_token
         with patch("src.kernel.repo.Repo") as m_repo:
             m_repo.return_value.bot_token = "repo_tok"
             assert _resolve_gitcode_token("", "owner/repo") == "repo_tok"
@@ -473,11 +473,11 @@ class TestHelpers:
             assert _resolve_gitcode_token("", "owner/repo") == ""
 
     def test_push_to_feishu_no_channel(self):
-        from src.api.routes.chat import _push_reply_to_feishu
+        from src.domains.runtime.routes.chat import _push_reply_to_feishu
         asyncio.run(_push_reply_to_feishu({"id": "c1", "im_channel_id": ""}, {"id": 1, "username": "u"}, "text"))
 
     def test_push_to_feishu_with_channel(self):
-        from src.api.routes.chat import _push_reply_to_feishu
+        from src.domains.runtime.routes.chat import _push_reply_to_feishu
         with db_lock:
             db.cursor().execute("INSERT OR REPLACE INTO chat_agent_session (id, user_id, im_app_id) VALUES ('push-1', 1, 'cli_push')")
             db.commit()

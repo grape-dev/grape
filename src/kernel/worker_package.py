@@ -22,17 +22,18 @@ GRAPE_CLI_REPO = os.environ.get("GRAPE_CLI_REPO", "https://gitcode.com/grape-dev
 UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/share/uv/python"))
 
 # worker 运行闭包清单（整目录粒度，含运行时懒加载模块）。
-# 依据：src.runtime.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
+# 依据：src.domains.runtime.engine.agent 的 import 闭包（含 repogit/cleanup 等运行时 import）。
 # src/api/ 只列 worker 实际引用的模块：time_utils/event_store/event_archive/
 # session_store/knowledge/routing（顶层或懒加载）。曾因漏列 time_utils 导致
 # worker 包缺文件启动即崩（ModuleNotFoundError，2026-08-17）；勿整目录引入
 # main.py/run.py 等服务端专用文件（test_build_package_contents 守卫）。
 MANIFEST = [
     "src/__init__.py",
-    # Issue #699 Phase 1: canonical kernel layer (real code). Old entries below
+    # Issue #699 Phase 1: canonical layers (real code). Old entries below
     # remain as re-export shims for the worker entrypoint (python -m
     # src.runtime.agent) and inline imports in install-worker.sh.
     "src/kernel/",
+    "src/domains/",
     "src/config.py",
     "src/repo_key.py",
     "src/prompt_builder.py",

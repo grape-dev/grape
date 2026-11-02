@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from src.vcs.github import GitHubBackend
+from src.domains.runtime.vcs.github import GitHubBackend
 
 
 def _make_payload(event_type: str, overrides: dict = None) -> tuple[bytes, dict]:

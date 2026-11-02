@@ -58,7 +58,7 @@ def _get_event():
 
 
 def test_stream_end_uses_self_report_structured():
-    from src.runtime.service import finalize_by_stream_end
+    from src.domains.runtime.engine.service import finalize_by_stream_end
     structured = json.dumps({
         "actions": [{"cmd": "x"}], "conclusion": "结构化自报结论", "artifacts": ["a1"],
         "next_step": "issue", "issue_summary": "s7",
@@ -74,7 +74,7 @@ def test_stream_end_uses_self_report_structured():
 
 
 def test_stream_end_fallback_stream_text():
-    from src.runtime.service import finalize_by_stream_end
+    from src.domains.runtime.engine.service import finalize_by_stream_end
     _seed_event(status="running")
     _seed_task(self_reported=0, result_text="")
     ok = finalize_by_stream_end("t_direct1", "普通流文本结论", 0)
@@ -84,7 +84,7 @@ def test_stream_end_fallback_stream_text():
 
 
 def test_late_self_report_attaches_to_completed():
-    from src.runtime.service import set_task_signal, enrich_task_on_late_report
+    from src.domains.runtime.engine.service import set_task_signal, enrich_task_on_late_report
     structured = json.dumps({"actions": [{"cmd": "y"}], "conclusion": "晚到自报", "artifacts": []}, ensure_ascii=False)
     # 流结束已定案：completed 但无结构化产出
     _seed_event(status="completed")
@@ -101,7 +101,7 @@ def test_late_self_report_attaches_to_completed():
 
 
 def test_late_self_report_promotes_placeholder_failed():
-    from src.runtime.service import set_task_signal, enrich_task_on_late_report
+    from src.domains.runtime.engine.service import set_task_signal, enrich_task_on_late_report
     structured = json.dumps({"actions": [], "conclusion": "占位失败的补报", "artifacts": []}, ensure_ascii=False)
     _seed_event(status="failed")
     _seed_task(status="failed", self_reported=0, result_text="", exit_code=0)
@@ -115,7 +115,7 @@ def test_late_self_report_promotes_placeholder_failed():
 
 
 def test_no_promote_on_real_crash():
-    from src.runtime.service import set_task_signal, enrich_task_on_late_report
+    from src.domains.runtime.engine.service import set_task_signal, enrich_task_on_late_report
     structured = json.dumps({"actions": [], "conclusion": "crash 后补报", "artifacts": []}, ensure_ascii=False)
     _seed_event(status="failed")
     _seed_task(status="failed", self_reported=0, result_text="", exit_code=1)

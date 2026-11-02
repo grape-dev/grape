@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from src.kernel.auth_sdk.jwt_utils import (create_access_token, verify_access_token,
                                create_refresh_token, verify_refresh_token)
-from src.api.routes.repos import _get_user_provider_and_token
+from src.domains.mgmt.routes.repos import _get_user_provider_and_token
 
 
 class TestCreateAccessTokenLoginProvider:
@@ -54,71 +54,71 @@ class TestGetUserProviderAndToken:
 
     def test_gitcode_login_prefers_gitcode_token(self):
         """login_provider=gitcode + 双平台 token 共存 → 返回 gitcode"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
             provider, token = _get_user_provider_and_token("alice", login_provider="gitcode")
         assert provider == "gitcode"
         assert token == "gc_tok"
 
     def test_github_login_prefers_github_token(self):
         """login_provider=github + 双平台 token 共存 → 返回 github"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
             provider, token = _get_user_provider_and_token("bob", login_provider="github")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_no_login_provider_fallback_github_first(self):
         """无 login_provider → fallback 现有逻辑（github 优先）"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
             provider, token = _get_user_provider_and_token("carol")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_gitcode_login_but_no_gitcode_token_fallback(self):
         """login_provider=gitcode 但无 gitcode token → fallback 到 github"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value=""):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value=""):
             provider, token = _get_user_provider_and_token("dave", login_provider="gitcode")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_github_login_but_no_github_token_fallback(self):
         """login_provider=github 但无 github token → fallback 到 gitcode"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value=""), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value=""), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
             provider, token = _get_user_provider_and_token("eve", login_provider="github")
         assert provider == "gitcode"
         assert token == "gc_tok"
 
     def test_no_tokens_returns_empty(self):
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value=""), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value=""):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value=""), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value=""):
             provider, token = _get_user_provider_and_token("frank", login_provider="gitcode")
         assert provider == ""
         assert token == ""
 
     def test_gitcode_login_only_gitcode_token(self):
         """login_provider=gitcode + 仅 gitcode token → 返回 gitcode"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value=""), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value=""), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
             provider, token = _get_user_provider_and_token("grace", login_provider="gitcode")
         assert provider == "gitcode"
         assert token == "gc_tok"
 
     def test_github_login_only_github_token(self):
         """login_provider=github + 仅 github token → 返回 github"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value=""):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value=""):
             provider, token = _get_user_provider_and_token("henry", login_provider="github")
         assert provider == "github"
         assert token == "gh_tok"
 
     def test_unknown_login_provider_fallback(self):
         """未知 login_provider 值 → fallback 到现有逻辑"""
-        with patch("src.api.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
+        with patch("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", return_value="gh_tok"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="gc_tok"):
             provider, token = _get_user_provider_and_token("ivan", login_provider="gitlab")
         assert provider == "github"
         assert token == "gh_tok"
@@ -129,7 +129,7 @@ class TestGetCurrentUserLoginProvider:
 
     def test_jwt_with_login_provider_extracted(self):
         from src.api.deps import get_current_user
-        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "lp_test_" + uuid.uuid4().hex[:6]
         u = create_grape_account(username=uname, email="", password="pw")
@@ -143,7 +143,7 @@ class TestGetCurrentUserLoginProvider:
 
     def test_jwt_without_login_provider_defaults_empty(self):
         from src.api.deps import get_current_user
-        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "lp_noprov_" + uuid.uuid4().hex[:6]
         u = create_grape_account(username=uname, email="", password="pw")
@@ -202,7 +202,7 @@ class TestRefreshEndpointLoginProvider:
         """POST /auth/refresh 从旧 refresh_token 提取 login_provider 传给新 access_token"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "refresh_lp_" + uuid.uuid4().hex[:6]
         u = create_grape_account(username=uname, email="", password="pw")
@@ -231,7 +231,7 @@ class TestRefreshEndpointLoginProvider:
         """旧 refresh_token 无 login_provider（密码登录）→ 新 access_token 也无（不伪造）"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_token_version, soft_delete_account
 
         uname = "refresh_nolp_" + uuid.uuid4().hex[:6]
         u = create_grape_account(username=uname, email="", password="pw")

@@ -94,7 +94,7 @@ def claimer_env(tmp_path, monkeypatch):
     # monkeypatch session_manager 的 db 为内存库
     import src.kernel.session_manager as sm
     monkeypatch.setattr(sm, "db", conn, raising=False)
-    import src.runtime.service as svc
+    import src.domains.runtime.engine.service as svc
     monkeypatch.setattr(svc, "db", conn, raising=False)
     # service 的 db_lock 直接沿用（RLock 可重入）
     yield conn
@@ -114,8 +114,8 @@ def _enqueue(cur, tid, pool_engine_ids="", source="", tag="vod", repo="gitcode:o
 class TestLocalClaimer:
     def test_ut01_whitelist_isolation(self, claimer_env, monkeypatch):
         """UT-01 白名单隔离（事故场景回归）：白名单 [15249]（远端健康）时本机 246 抢不到。"""
-        from src.runtime import local_claimer as lc
-        from src.runtime.service import claim_by_tag
+        from src.domains.runtime.engine import local_claimer as lc
+        from src.domains.runtime.engine.service import claim_by_tag
         cur = claimer_env.cursor()
         _enqueue(cur, "t_ut01", pool_engine_ids=json.dumps([15249]), source="scene")
         # 本机引擎发现应包含 246/247
@@ -130,7 +130,7 @@ class TestLocalClaimer:
 
     def test_ut02_local_in_whitelist(self, claimer_env):
         """UT-02 本机在白名单：正常认领，状态流转 + busy_slots 正确。"""
-        from src.runtime.service import claim_by_tag
+        from src.domains.runtime.engine.service import claim_by_tag
         cur = claimer_env.cursor()
         _enqueue(cur, "t_ut02", pool_engine_ids=json.dumps([246]), source="scene")
         task = claim_by_tag("all", 246)
@@ -146,7 +146,7 @@ class TestLocalClaimer:
         方案 D（2026-10-18）：以 agent_tasks 真实 running/dispatched COUNT 为事实源，
         busy_slots 列降级为展示快照——先把列写满也不判别为忙，真实数才决定。
         """
-        from src.runtime import local_claimer as lc
+        from src.domains.runtime.engine import local_claimer as lc
         cur = claimer_env.cursor()
         # busy_slots 列残留 20（僵尸），但真实 active=0 → 不忙
         cur.execute("UPDATE agent_runtimes SET busy_slots=20, max_concurrent=20 WHERE id=246")
@@ -168,22 +168,22 @@ class TestLocalClaimer:
 
     def test_ut04_unhealthy_blocked(self, claimer_env, monkeypatch):
         """UT-04 低分不抢：health_scorer 判不健康时本机引擎 claim 返回 None（与远端同约束）。"""
-        from src.runtime.service import claim_by_tag
+        from src.domains.runtime.engine.service import claim_by_tag
         cur = claimer_env.cursor()
         _enqueue(cur, "t_ut04", pool_engine_ids=json.dumps([246]), source="scene")
-        import src.runtime.health_scorer as hs
+        import src.domains.runtime.engine.health_scorer as hs
         monkeypatch.setattr(hs, "is_healthy", lambda rid: False)
         task = claim_by_tag("all", 246)
         assert task is None
 
     def test_ut05_degrade_by_source(self, claimer_env, monkeypatch):
         """UT-05 降级-source 区分：auto 全灭 → 清白名单重入队（degraded）；scene → failed。"""
-        from src.runtime import service as svc
+        from src.domains.runtime.engine import service as svc
         cur = claimer_env.cursor()
         # 健康全灭：把引擎拉离线 + 健康分 0
         cur.execute("UPDATE agent_runtimes SET status='offline', healthy=0 WHERE id=15249")
         claimer_env.commit()
-        import src.runtime.health_scorer as hs
+        import src.domains.runtime.engine.health_scorer as hs
         monkeypatch.setattr(hs, "is_healthy", lambda rid: False)
 
         # auto 任务：超时后降级放行
@@ -199,7 +199,7 @@ class TestLocalClaimer:
 
     def test_ut05b_degrade_only_once(self, claimer_env, monkeypatch):
         """UT-05b 降级只做一次：degraded 任务不再被重复降级/失败（pool_engine_ids 已空不进扫描）。"""
-        from src.runtime import service as svc
+        from src.domains.runtime.engine import service as svc
         cur = claimer_env.cursor()
         _enqueue(cur, "t_ut05c", pool_engine_ids="", source="degraded", created_off=600)
         svc._check_stale_queued_tasks()
@@ -214,7 +214,7 @@ class TestLocalClaimer:
         所以"第二认领者"可能拿到的是队列里的其他任务——原子性验证点在于
         同一个 task_id 不会被认领两次。
         """
-        from src.runtime.service import claim_by_tag
+        from src.domains.runtime.engine.service import claim_by_tag
         cur = claimer_env.cursor()
         # 只放一个任务（白名单含双机）→ 双机先后认领，同一 task 只成功一次
         _enqueue(cur, "t_ut06", pool_engine_ids=json.dumps([246, 247]), source="scene")
@@ -231,7 +231,7 @@ class TestLocalClaimer:
 
     def test_ut07_evt_rebuild(self, claimer_env):
         """UT-07 evt 重建：events 表按 seq 还原 payload/type/actor（供 direct 执行 prompt 重建）。"""
-        from src.runtime import local_claimer as lc
+        from src.domains.runtime.engine import local_claimer as lc
         cur = claimer_env.cursor()
         cur.execute(
             "INSERT INTO events (seq, repo_key, issue_id, event_type, source, actor, payload, title) "
@@ -250,7 +250,7 @@ class TestLocalClaimer:
         """开关：GRAPE_LOCAL_CLAIMER=0 时 start_local_claimer 不启动。"""
         monkeypatch.setenv("GRAPE_LOCAL_CLAIMER", "0")
         import importlib
-        from src.runtime import local_claimer as lc
+        from src.domains.runtime.engine import local_claimer as lc
         importlib.reload(lc)
         assert lc.CLAIMER_ENABLED is False
         async def _run():

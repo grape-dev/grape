@@ -19,7 +19,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 # 从 event_pipeline 导入 db（与生产代码使用同一连接对象，避免全量 collection 污染）
-from src.api.event_pipeline import db, db_lock
+from src.domains.runtime.pipeline.event_pipeline import db, db_lock
 
 REPO_PREFIX = "gitcode:owner/test-fallback-bot-token"
 
@@ -63,7 +63,7 @@ def test_path_a_fallback_bot_token_empty():
     修复前：bot_gitcode_token=global_bot_token（非空）→ 403。
     修复后：bot_gitcode_token="" → get_repo_token_with_refresh 跳过第 2 级 → 走用户 token。
     """
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     import uuid
 
     repo_key = f"{REPO_PREFIX}-fallback-{uuid.uuid4().hex[:6]}"
@@ -91,7 +91,7 @@ def test_path_a_fallback_bot_token_empty():
 
 def test_path_a_normal_bot_token_written():
     """T11-02: 路径 A 正常（未降级）→ bot_gitcode_token 为全局 bot token。"""
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     import uuid
 
     repo_key = f"{REPO_PREFIX}-normal-{uuid.uuid4().hex[:6]}"
@@ -117,7 +117,7 @@ def test_path_a_normal_bot_token_written():
 
 def test_path_b_from_start_bot_token_empty():
     """T11-03: 路径 B 从一开始（无全局 bot token）→ bot_gitcode_token 为空。"""
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     import uuid
 
     repo_key = f"{REPO_PREFIX}-pathb-{uuid.uuid4().hex[:6]}"

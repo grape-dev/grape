@@ -84,12 +84,12 @@ def install_mock_db(monkeypatch, mock_db):
     target_modules = [
         "src.kernel.session_manager",
         "src.api.session_store",
-        "src.api.event_pipeline",
+        "src.domains.runtime.pipeline.event_pipeline",
         "src.api.event_store",
-        "src.api.routes.feishu_onboard",
-        "src.api.routes.grape_auth",
-        "src.user.db",
-        "src.auth.grape_account_db",
+        "src.domains.mgmt.routes.feishu_onboard",
+        "src.domains.mgmt.routes.grape_auth",
+        "src.domains.mgmt.user.db",
+        "src.domains.mgmt.auth.grape_account_db",
     ]
     for mod_name in target_modules:
         mod = importlib.import_module(mod_name)

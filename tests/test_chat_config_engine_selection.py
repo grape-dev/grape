@@ -22,7 +22,7 @@ USERNAME = "issue400_tester"
 def _client():
     """隔离：快照并清空 agent_runtimes / runtime_credentials（含 conftest 种子），
     用例内确定性构造引擎；teardown 恢复快照，避免影响同批其他测试。"""
-    from src.runtime.engine_select import _resolve_local_cache
+    from src.domains.runtime.engine.engine_select import _resolve_local_cache
     _resolve_local_cache.clear()
     with db_lock:
         cur = db.cursor()
@@ -102,7 +102,7 @@ def _set_cfg_runtime_id(rid):
 
 def _get_cfg_repr(cfg):
     """与 route 内 _chat_selected_engine 相同入参：cfg dict + backends 列表"""
-    from src.api.routes.chat import _chat_selected_engine
+    from src.domains.runtime.routes.chat import _chat_selected_engine
     return _chat_selected_engine(cfg, [])
 
 
@@ -184,14 +184,14 @@ class TestChatSelectedEngineHelper:
         cfg = {"runtime_id": 7, "backend": "opencode"}
         backends = [{"runtime_id": 7, "name": "opencode-my-mac", "scope": "user"},
                     {"runtime_id": 3, "name": "opencode", "scope": "local"}]
-        from src.api.routes.chat import _chat_selected_engine
+        from src.domains.runtime.routes.chat import _chat_selected_engine
         sel = _chat_selected_engine(cfg, backends)
         assert sel["runtime_id"] == 7 and sel["name"] == "opencode-my-mac"
 
     def test_no_runtime_id_exact_name_match(self):
         cfg = {"runtime_id": 0, "backend": "opencode"}
         backends = [{"runtime_id": 3, "name": "opencode", "scope": "local"}]
-        from src.api.routes.chat import _chat_selected_engine
+        from src.domains.runtime.routes.chat import _chat_selected_engine
         sel = _chat_selected_engine(cfg, backends)
         assert sel is not None and sel["runtime_id"] == 3
 
@@ -200,14 +200,14 @@ class TestChatSelectedEngineHelper:
         cfg = {"runtime_id": 0, "backend": "opencode"}
         backends = [{"runtime_id": 5, "name": "opencode-fff", "scope": "user"},
                     {"runtime_id": 6, "name": "opencode", "scope": "local"}]
-        from src.api.routes.chat import _chat_selected_engine
+        from src.domains.runtime.routes.chat import _chat_selected_engine
         sel = _chat_selected_engine(cfg, backends)
         assert sel is not None and sel["runtime_id"] == 6, "精确匹配应命中本机直连，而非前缀同名的个人实例"
 
 
 class TestChatDedupeBackends:
     def test_merge_duplicate_entries(self):
-        from src.api.routes.chat import _chat_dedupe_backends
+        from src.domains.runtime.routes.chat import _chat_dedupe_backends
         backends = [
             {"name": "opencode", "scope": "local", "runtime_id": 1},
             {"name": "opencode", "scope": "local", "runtime_id": 2},  # 同键 → 合并
@@ -219,7 +219,7 @@ class TestChatDedupeBackends:
         assert rids == [1, 3]
 
     def test_local_vs_user_instance_kept_separate(self):
-        from src.api.routes.chat import _chat_dedupe_backends
+        from src.domains.runtime.routes.chat import _chat_dedupe_backends
         backends = [
             {"name": "opencode", "scope": "local", "runtime_id": 1},
             {"name": "opencode-my-mac", "scope": "user", "runtime_id": 2},

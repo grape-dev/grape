@@ -21,7 +21,7 @@ def _clean_mapping():
 
 
 def _make_ctx(app_id="cli_p2ptest"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     ctx = BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="p2p-test")
     return ctx
 
@@ -29,7 +29,7 @@ def _make_ctx(app_id="cli_p2ptest"):
 def _seed_user_and_bot(username, app_id, user_id):
     """创建 grape_accounts 用户 + chat_agent_session 关联 app_id（用真实 user id）"""
     from src.kernel.session_manager import db, db_lock
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
     with db_lock:
         c = db.cursor()
@@ -53,7 +53,7 @@ def _seed_user_and_bot(username, app_id, user_id):
 
 
 async def _send(parsed, app_id="cli_p2ptest"):
-    from src.im.handler_async import process_chat_async
+    from src.domains.runtime.im.handler_async import process_chat_async
     ctx = _make_ctx(app_id)
     api = AsyncMock()
     await process_chat_async(ctx, api, parsed)

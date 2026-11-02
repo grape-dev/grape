@@ -21,7 +21,7 @@ import urllib.error
 import urllib.request
 from unittest.mock import patch
 
-from src.api.routes.repos import _probe_stale_repos
+from src.domains.mgmt.routes.repos import _probe_stale_repos
 
 GH_USER_TOKEN = "gh-user-token"
 BOT_TOKEN = "bot-token"
@@ -71,9 +71,9 @@ def _urlopen_factory(user_routes, bot_routes=None):
 def _run_probe(user_id, repo_key, user_routes, bot_routes=None):
     """跑一轮探活，mock 掉 DB / 用户 GitHub token / 网络层，返回 user_db mock。"""
     owner, name = repo_key.split(":")[1].split("/")
-    with patch("src.api.routes.repos.user_db") as udb, \
+    with patch("src.domains.mgmt.routes.repos.user_db") as udb, \
          patch("src.api.deps.get_user_github_token_with_refresh", return_value=GH_USER_TOKEN), \
-         patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "t"}), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "t"}), \
          patch("urllib.request.urlopen", side_effect=_urlopen_factory(user_routes, bot_routes)):
         udb.get_managed_repos.return_value = [{
             "repo_key": repo_key, "repo_owner": owner, "repo_name": name,

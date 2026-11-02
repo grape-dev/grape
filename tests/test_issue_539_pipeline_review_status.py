@@ -22,7 +22,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 from src.kernel.session_manager import db, db_lock
 
 OWNER = "test539"
@@ -32,7 +32,7 @@ REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 

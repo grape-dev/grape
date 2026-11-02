@@ -8,7 +8,7 @@ import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
-from src.api.event_pipeline import (
+from src.domains.runtime.pipeline.event_pipeline import (
     _match_repo_subscription,
     resolve_pr_target_branch,
     run_pipeline,

@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)
@@ -99,7 +99,7 @@ class TestTerminateWorkerMode:
     """worker 模式终止 → cancel_task（status=cancelled）。"""
 
     def test_worker_task_cancelled(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=100, status="running")
         rt_id, _ = _insert_remote_runtime()
@@ -114,7 +114,7 @@ class TestTerminateWorkerMode:
         )
 
     def test_worker_event_status_cancelled(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=101, status="running")
         rt_id, _ = _insert_remote_runtime()
@@ -138,7 +138,7 @@ class TestTerminateWorkerMode:
         事件 result 须保留「用户手动终止」诊断，不得被 cancel_task 级联的
         通用文案（任务已取消：级联收敛…）覆盖。
         """
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=103, status="running")
         rt_id, _ = _insert_remote_runtime()
@@ -160,7 +160,7 @@ class TestTerminateWorkerMode:
 
     def test_heartbeat_matches_cancelled_task(self):
         """worker 心跳查询 WHERE status=cancelled 能匹配到新取消的任务。"""
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=102, status="running")
         rt_id, cred_id = _insert_remote_runtime()
@@ -185,7 +185,7 @@ class TestTerminateDirectMode:
     """direct 模式终止 → fail_task（status=failed，保留原语义）。"""
 
     def test_direct_task_failed(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=200, status="running")
         # runtime_id=0 → direct 模式
@@ -200,7 +200,7 @@ class TestTerminateDirectMode:
         )
 
     def test_direct_event_status_failed(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=201, status="running")
         _insert_task("task-direct-2", event_seq=201, runtime_id=0)
@@ -215,7 +215,7 @@ class TestTerminateDirectMode:
 
     def test_local_engine_task_failed(self):
         """本机引擎（credential_id=0）也走 fail_task。"""
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=202, status="running")
         rt_id = _insert_local_runtime()
@@ -233,7 +233,7 @@ class TestTerminateEdgeCases:
     """边界情况。"""
 
     def test_event_not_found(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
         from fastapi import HTTPException
 
         with pytest.raises(HTTPException) as exc:
@@ -241,7 +241,7 @@ class TestTerminateEdgeCases:
         assert exc.value.status_code == 404
 
     def test_event_already_completed(self):
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
         from fastapi import HTTPException
 
         _insert_event(seq=300, status="completed")
@@ -251,7 +251,7 @@ class TestTerminateEdgeCases:
 
     def test_no_task_id_still_works(self):
         """事件无关联 task → 仅 cancel_direct_task + 事件状态回写。"""
-        from src.api.routes.events import terminate_event
+        from src.domains.runtime.routes.events import terminate_event
 
         _insert_event(seq=400, status="running")
         result = terminate_event(seq=400, user=_TEST_USER)

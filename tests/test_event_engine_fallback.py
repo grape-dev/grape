@@ -88,7 +88,7 @@ def test_db(tmp_path, monkeypatch):
     monkeypatch.setattr(_sm, "db", _conn)
     monkeypatch.setattr(_sm, "db_lock", threading.Lock())
 
-    import src.api.routes.events as _ev
+    import src.domains.runtime.routes.events as _ev
     monkeypatch.setattr(_ev, "db", _conn, raising=False)
     monkeypatch.setattr(_ev, "db_lock", threading.Lock(), raising=False)
 
@@ -136,7 +136,7 @@ def _seed_session(conn, repo_key, agent_type, runtime_id):
 def _detail(conn, monkeypatch, seq):
     """调用 get_event_detail 并返回结果 dict。"""
     from unittest.mock import patch
-    from src.api.routes.events import get_event_detail
+    from src.domains.runtime.routes.events import get_event_detail
     user = {"username": "test", "managed_repos": [RK]}
     with patch("src.api.deps.check_repo_access", return_value=None):
         return get_event_detail(seq, user)

@@ -62,15 +62,15 @@ def _merged_payload(iid=92):
 
 
 def _run(monkeypatch):
-    import src.api.event_pipeline as ep
-    import src.runtime.engine_select as es
+    import src.domains.runtime.pipeline.event_pipeline as ep
+    import src.domains.runtime.engine.engine_select as es
     import src.api.pr_merged_sre_retry as retry_mod
     monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
     monkeypatch.setattr(es, "get_scene_pool_engine_ids", lambda *a, **kw: None)
     monkeypatch.setattr(retry_mod, "schedule_pr_merged_sre_retry", lambda *a, **kw: True)
     from unittest.mock import patch as _patch
-    with _patch("src.user.db.get_agent_bot_token", return_value=""), \
-         _patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with _patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+         _patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         ep.run_pipeline(_merged_payload(), {"X-GitCode-Event": "Merge Request Hook"},
                         account="XOcto/i544-repo")
 
@@ -115,8 +115,8 @@ class TestMergeSREDefault:
     def test_T3_exhausted_retry_posts_issue_comment(self, monkeypatch):
         """重试耗尽（断链收口）→ 向关联 Issue 发提示评论。"""
         import src.api.pr_merged_sre_retry as mod
-        import src.runtime.engine_select as es
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
         from src.api.event_store import append_event
         _seed_repo()
         seq = append_event(_REPO, "pull_request_merged", title="fix: #544 t",
@@ -126,7 +126,7 @@ class TestMergeSREDefault:
                            entity_type="pull_request")
         monkeypatch.setattr(es, "get_scene_pool_engine_ids", lambda *a, **kw: None)
         monkeypatch.setattr(es, "pick_engine", lambda *a, **kw: 0)
-        import src.user.db as udb
+        import src.domains.mgmt.user.db as udb
         monkeypatch.setattr(udb, "get_repo_token_with_refresh", lambda rk: "tok-544")
         posted = []
         monkeypatch.setattr(ep, "_post_result_to_issue",
@@ -147,8 +147,8 @@ class TestMergeSREDefault:
     def test_T4_pseudo_issue_no_comment(self, monkeypatch):
         """伪 issue（#pr_...）→ 不发 Issue 评论。"""
         import src.api.pr_merged_sre_retry as mod
-        import src.runtime.engine_select as es
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
         from src.api.event_store import append_event
         _seed_repo()
         seq = append_event(_REPO, "pull_request_merged", title="PR 订阅",

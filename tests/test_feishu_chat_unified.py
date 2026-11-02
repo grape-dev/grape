@@ -144,7 +144,7 @@ def test_conversation_list_carries_type_and_issue():
 # ---- T11/T12/T13：web→飞书推送守卫与发送 ----
 
 def _import_push():
-    from src.api.routes.chat import _push_reply_to_feishu
+    from src.domains.runtime.routes.chat import _push_reply_to_feishu
     return _push_reply_to_feishu
 
 
@@ -252,7 +252,7 @@ def test_push_sends_card_to_feishu():
 # ---- token resolution: Issue #344 removed session cache ----
 
 def _import_resolve():
-    from src.api.routes.chat import _resolve_gitcode_token
+    from src.domains.runtime.routes.chat import _resolve_gitcode_token
     return _resolve_gitcode_token
 
 

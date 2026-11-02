@@ -20,13 +20,13 @@ os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 from src.kernel.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -95,7 +95,7 @@ async def _fake_success(**kwargs):
 
 def _await_run(bot_type, repo_key="", patched=None):
     """直接 await 后台协程（同步测试辅助），确保状态已落库。"""
-    from src.api.routes import feishu_onboard as f
+    from src.domains.mgmt.routes import feishu_onboard as f
     task_id = uuid.uuid4().hex
     f._create_task(task_id, bot_type, repo_key, _uid["id"])
     with patched:
@@ -132,7 +132,7 @@ class TestStart:
 
     def test_start_concurrency_409(self):
         _clean_tasks()
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         # 先插入一条进行中的任务
         with db_lock:
             c = db.cursor()
@@ -179,7 +179,7 @@ class TestStart:
     def test_start_stale_waiting_confirm_auto_expires_and_allows_new(self):
         """UT-04：旧 waiting_confirm 任务超过 STALE_TTL → 自动置 failed 并放行新任务。"""
         _clean_tasks()
-        from src.api.routes.feishu_onboard import _STATUS_FAILED, _STATUS_PENDING
+        from src.domains.mgmt.routes.feishu_onboard import _STATUS_FAILED, _STATUS_PENDING
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -199,7 +199,7 @@ class TestStart:
                 assert r.json().get("status") == "pending"
                 assert r.json().get("task_id")
                 m.assert_awaited()
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             stale = f._get_task("ut04_stale_task")
             assert stale["status"] == _STATUS_FAILED, f"stale 任务应被自动作废为 failed，got {stale['status']}"
             assert "stale" in stale["error"].lower(), f"error 应标注 stale，got {stale['error']}"
@@ -249,7 +249,7 @@ class TestStart:
                 r = client.post("/api/feishu/onboard/start", json={"bot_type": "chat_bot"}, headers=_headers)
                 assert r.status_code == 200, r.text
                 m.assert_awaited()
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             assert f._get_task("ut04_stale_pending")["status"] == "failed"
         finally:
             with db_lock:
@@ -264,7 +264,7 @@ class TestStatusFlow:
         """on_qr_code 触发后任务置 waiting_confirm 且 qr_url 落库。"""
         _clean_tasks()
         task_id = _await_run("chat_bot", patched=_patch_register(_fake_success))
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         t = f._get_task(task_id)
         assert t["status"] == "connected"
         assert t["qr_url"] == QR_URL
@@ -295,7 +295,7 @@ class TestStatusFlow:
         _clean_tasks()
         from src.kernel.repo_key import to_repo_key
         repo_key = to_repo_key(f"repo_{_uid['id']}")  # 与 _apply_vod_credentials 归一化后一致
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         # 预建 devops_agent_session 行（vod）
         import datetime
         with db_lock:
@@ -306,7 +306,7 @@ class TestStatusFlow:
             )
             db.commit()
         with _patch_register(_fake_success) as patched:
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             # 改用 vod 专用返回
             async def _fake_vod(**kwargs):
                 kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
@@ -335,7 +335,7 @@ class TestStatusFlow:
         repo_key = f"owner{_uid['id']}/sample-repo"
         from src.kernel.repo_key import to_repo_key
         with _patch_register(_fake_success) as patched:
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             async def _fake_vod(**kwargs):
                 kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
                 return _result()
@@ -376,7 +376,7 @@ class TestStatusFlow:
             )
             db.commit()
         with _patch_register(_fake_success) as patched:
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             async def _fake_vod(**kwargs):
                 kwargs.get("on_qr_code")({"url": QR_URL, "expire_in": 300})
                 return _result()
@@ -404,7 +404,7 @@ class TestStatusFlow:
             raise AppAccessDeniedError("access_denied", "user denied")
 
         task_id = _await_run("chat_bot", patched=_patch_register(_denied))
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         t = f._get_task(task_id)
         assert t["status"] == "failed"
         _clean_tasks()
@@ -418,7 +418,7 @@ class TestStatusFlow:
             raise AppExpiredError("expired_token", "polling timed out")
 
         task_id = _await_run("chat_bot", patched=_patch_register(_expired))
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         t = f._get_task(task_id)
         assert t["status"] == "failed"
         assert "expired" in t["error"].lower()
@@ -432,7 +432,7 @@ class TestStatusFlow:
             raise RuntimeError("network down")
 
         task_id = _await_run("chat_bot", patched=_patch_register(_boom))
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         t = f._get_task(task_id)
         assert t["status"] == "failed"
         assert "network down" in t["error"]
@@ -487,7 +487,7 @@ class TestCancel:
         try:
             r = client.post("/api/feishu/onboard/cancel", json={"task_id": "cancel_task"}, headers=_headers)
             assert r.status_code == 200, r.text
-            from src.api.routes import feishu_onboard as f
+            from src.domains.mgmt.routes import feishu_onboard as f
             t = f._get_task("cancel_task")
             assert t["status"] == "failed"
             assert "取消" in t["error"]
@@ -504,7 +504,7 @@ class TestCancel:
         r = client.post("/api/feishu/onboard/cancel", json={"task_id": task_id}, headers=_headers)
         assert r.status_code == 200
         assert r.json()["status"] == "connected"
-        from src.api.routes import feishu_onboard as f
+        from src.domains.mgmt.routes import feishu_onboard as f
         t = f._get_task(task_id)
         assert t["status"] == "connected"
         _clean_tasks()
@@ -525,7 +525,7 @@ class TestAddonsSchema:
 
     def test_addons_top_level_keys_allowed(self):
         """_ADDONS 顶层键必须 ⊆ SDK 允许集 {scopes, events, callbacks}。"""
-        from src.api.routes.feishu_onboard import _ADDONS
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
         allowed = {"scopes", "events", "callbacks"}
         unknown = set(_ADDONS) - allowed
         assert not unknown, f"addons 含 SDK 不支持的键: {unknown}"
@@ -536,7 +536,7 @@ class TestAddonsSchema:
         直接调用 SDK 校验函数，等于模拟 aregister_app 内部首个校验步骤；
         若校验抛错则说明 schema 与 SDK 版本不兼容，扫码必失败。
         """
-        from src.api.routes.feishu_onboard import _ADDONS
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
         from lark_oapi.scene.registration import _normalize_addons
         normalized = _normalize_addons(_ADDONS)
         assert "scopes" in normalized
@@ -547,14 +547,14 @@ class TestAddonsSchema:
 
     def test_addons_encode_addons_no_error(self):
         """_ADDONS 必须能通过 SDK 完整编码（gzip+base64），模拟真实调用路径。"""
-        from src.api.routes.feishu_onboard import _ADDONS
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
         from lark_oapi.scene.registration import _encode_addons
         encoded = _encode_addons(_ADDONS)
         assert encoded, "addons 编码结果不应为空"
 
     def test_addons_has_required_scopes_and_event(self):
         """关键依赖：发送消息 scope + im.message.receive_v1 事件不可缺失。"""
-        from src.api.routes.feishu_onboard import _ADDONS
+        from src.domains.mgmt.routes.feishu_onboard import _ADDONS
         tenant_scopes = _ADDONS["scopes"]["tenant"]
         assert "im:message:send_as_bot" in tenant_scopes
         assert "im:chat:readonly" in tenant_scopes

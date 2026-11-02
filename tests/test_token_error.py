@@ -1,6 +1,6 @@
 """Issue #345 方向3：token_error 公共 401 识别函数测试。"""
 import pytest
-from src.vcs.token_error import (
+from src.domains.runtime.vcs.token_error import (
     BOT_TOKEN_INVALID_MSG,
     extract_http_status_from_exc,
     extract_http_status_from_result,

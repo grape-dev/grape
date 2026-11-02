@@ -17,7 +17,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)
@@ -180,7 +180,7 @@ class TestFormatChatFailureText:
     """QA-07~08：chat 展示点输出友好文案，绝不空尾。"""
 
     def test_failure_non_empty_suffix(self):
-        from src.api.routes.chat import _format_chat_failure_text
+        from src.domains.runtime.routes.chat import _format_chat_failure_text
         _insert_event(685, status="running")
         _insert_task("t_cv", 685, status="running", created_offset_s=-5)
         service.fail_task(
@@ -197,7 +197,7 @@ class TestFormatChatFailureText:
         assert "；" in text and text.split("；")[-1].strip(), "必须带行动建议"
 
     def test_unknown_task_id_has_stable_message(self):
-        from src.api.routes.chat import _format_chat_failure_text
+        from src.domains.runtime.routes.chat import _format_chat_failure_text
         text = _format_chat_failure_text("t_does_not_exist")
         assert text.startswith("查询失败：")
         assert text.rstrip("：") != "查询失败"
@@ -216,6 +216,6 @@ class TestFormatChatFailureText:
         assert f["result_text"] == "结论：任务完成，PR #5 已合入"
         assert f["exit_code"] == 0
         # 展示层 completed 分支直接透传 result_text，不拼接「查询失败」前缀
-        from src.api.routes.chat import _format_chat_failure_text
+        from src.domains.runtime.routes.chat import _format_chat_failure_text
         tk = service.get_task("t_ok")
         assert not (tk or {}).get("result_text", "").startswith("查询失败")

@@ -65,7 +65,7 @@ def with_oauth_token(user: dict, provider: str, api_call_fn, *args, **kwargs):
     返回 api_call_fn 的结果，或抛 HTTPException。
     """
     from fastapi import HTTPException
-    from src.user.db import refresh_oauth_token
+    from src.domains.mgmt.user.db import refresh_oauth_token
 
     user_id = user["id"]
     username = user["username"]

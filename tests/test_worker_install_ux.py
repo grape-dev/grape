@@ -60,7 +60,7 @@ class TestNoEngineInstallHints:
 
     def test_engine_autodiscover_unaffected(self):
         """引擎自动发现机制保留：runtime 侧 discover_backends 四引擎不受影响。"""
-        from src.agent.executor import discover_backends
+        from src.domains.runtime.agents.executor import discover_backends
         names = {r.get("name") for r in discover_backends()}
         for engine in ("opencode", "hermes", "codearts", "codex"):
             assert engine in names, f"{engine} missing from discover_backends"

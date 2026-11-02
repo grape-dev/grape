@@ -16,7 +16,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.kernel.session_manager import db, db_lock
-from src.auth.grape_account_db import (
+from src.domains.mgmt.auth.grape_account_db import (
     create_external_identity,
     get_user_identities_with_tokens,
     mark_identity_expired,

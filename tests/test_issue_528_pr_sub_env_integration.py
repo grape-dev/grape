@@ -90,7 +90,7 @@ def _make_pr_opened_raw(actor_username, pr_num=257, target_branch="mys-local", t
 
 def _run_hook(actor, pr_num=257, title="feature update", resolve_pr_issue=None):
     """走 run_pipeline 主路由 → _enqueue_pipeline_task，捕获 enqueue_task 的 env_extra。"""
-    import src.api.event_pipeline as ep
+    import src.domains.runtime.pipeline.event_pipeline as ep
     captured = []
 
     def _fake_enqueue(**kwargs):
@@ -99,17 +99,17 @@ def _run_hook(actor, pr_num=257, title="feature update", resolve_pr_issue=None):
 
     raw = _make_pr_opened_raw(actor, pr_num=pr_num, title=title)
     _patches = [
-        patch("src.runtime.engine_select.pick_engine", return_value=0),
-        patch("src.runtime.engine_select.engine_name", return_value="opencode"),
-        patch("src.runtime.engine_select.get_scene_pool_engine_ids", return_value=""),
-        patch("src.api.event_pipeline.is_plugin_mode", return_value=True),
-        patch("src.runtime.service.get_execution_mode", return_value="remote"),
-        patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue),
-        patch("src.user.db.get_agent_bot_token", return_value=""),
-        patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
+        patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0),
+        patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
+        patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),
+        patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True),
+        patch("src.domains.runtime.engine.service.get_execution_mode", return_value="remote"),
+        patch("src.domains.runtime.engine.service.enqueue_task", side_effect=_fake_enqueue),
+        patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""),
+        patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
     ]
     if resolve_pr_issue is not None:
-        _patches.append(patch("src.api.event_pipeline.resolve_pr_issue_id", return_value=resolve_pr_issue))
+        _patches.append(patch("src.domains.runtime.pipeline.event_pipeline.resolve_pr_issue_id", return_value=resolve_pr_issue))
     raw = _make_pr_opened_raw(actor, pr_num=pr_num, title=title)
     from contextlib import ExitStack
     with ExitStack() as stack:

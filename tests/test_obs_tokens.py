@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 
-from src.observability import tokens as T  # noqa: E402
+from src.domains.insight.observability import tokens as T  # noqa: E402
 
 UID = 7801
 REPO = "gitcode:org/tok-x"

@@ -6,7 +6,7 @@ import json, os
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 class TestA2AQueue:
@@ -153,14 +153,14 @@ class TestA2AQueue:
             row = c.execute("SELECT seq, issue_id, agent_type FROM events WHERE seq=?", (t["event_seq"],)).fetchone()
         assert row, "event_seq 应存在对应 event"
         assert row[2] == "coding"
-        from src.user.db import get_server_base_url
+        from src.domains.mgmt.user.db import get_server_base_url
         assert t["server_url"] == get_server_base_url()
 
     # T5: worker 消费后 events 回写 completed
     def test_t5_worker_complete_writes_event(self):
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.runtime import service as svc
+        from src.domains.runtime.engine import service as svc
         self._clean()
         self._seed_managed_repo()
         self._seed_engine_and_session()
@@ -196,7 +196,7 @@ class TestA2AQueue:
     def test_t7_pipeline_executing(self):
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.api.routes.pipeline import _running_issue_ids
+        from src.domains.runtime.routes.pipeline import _running_issue_ids
         self._clean()
         self._seed_managed_repo()
         self._seed_engine_and_session()
@@ -210,7 +210,7 @@ class TestA2AQueue:
     def test_t8_webhook_still_enqueues(self):
         from fastapi.testclient import TestClient
         from src.api.main import app
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         self._clean()
         self._seed_engine_and_session(agent="issue")
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"

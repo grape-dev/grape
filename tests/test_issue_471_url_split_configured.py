@@ -24,61 +24,61 @@ class TestConfiguredSplit:
 
     def test_split_only_counts_as_configured(self):
         """QA Required 场景：只配双拆分项 → 不得再报 server_base_url 未配置。"""
-        from src.user.db import is_server_base_url_configured
+        from src.domains.mgmt.user.db import is_server_base_url_configured
         with patch("src.kernel.config.read_server_config", return_value=dict(_SPLIT_ONLY)), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             assert is_server_base_url_configured() is True
 
     def test_warning_empty_when_split_only(self):
-        from src.user.db import get_server_base_url_warning
+        from src.domains.mgmt.user.db import get_server_base_url_warning
         with patch("src.kernel.config.read_server_config", return_value=dict(_SPLIT_ONLY)), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             assert get_server_base_url_warning() == ""
 
     def test_warning_empty_via_meta_split_only(self):
         """meta 双写来源同样生效（server-config.json 缺失时）。"""
-        from src.user.db import get_server_base_url_warning
+        from src.domains.mgmt.user.db import get_server_base_url_warning
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value",
+             patch("src.domains.mgmt.user.db.get_meta_value",
                    side_effect=lambda k: _SPLIT_ONLY.get(k, "")):
             assert get_server_base_url_warning() == ""
 
     def test_browser_face_loopback_still_warns(self):
         """浏览器面拆分项指向回环 → 告警（含 browser_callback_url 字样与回环提示）。"""
-        from src.user.db import get_server_base_url_warning
+        from src.domains.mgmt.user.db import get_server_base_url_warning
         with patch("src.kernel.config.read_server_config",
                    return_value={"browser_callback_url": "http://localhost:3000",
                                  "worker_connect_url": "https://worker.grape.example.com"}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             w = get_server_base_url_warning()
             assert "browser_callback_url" in w
             assert "回环" in w or "localhost" in w
 
     def test_worker_face_loopback_still_warns(self):
         """worker 面拆分项指向回环 → 告警（含 worker_connect_url 字样）。"""
-        from src.user.db import get_server_base_url_warning
+        from src.domains.mgmt.user.db import get_server_base_url_warning
         with patch("src.kernel.config.read_server_config",
                    return_value={"browser_callback_url": "https://grape.example.com",
                                  "worker_connect_url": "http://127.0.0.1:3000"}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             w = get_server_base_url_warning()
             assert "worker_connect_url" in w
 
     def test_all_unconfigured_still_warns(self):
         """全未配置（含 server_base_url）→ 保留原「未配置」告警（回归看护）。"""
-        from src.user.db import is_server_base_url_configured, get_server_base_url_warning
+        from src.domains.mgmt.user.db import is_server_base_url_configured, get_server_base_url_warning
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             assert is_server_base_url_configured() is False
             w = get_server_base_url_warning()
             assert "未配置" in w or "server_base_url" in w
 
     def test_legacy_loopback_without_split_still_warns(self):
         """只配回环 server_base_url、无拆分项 → 保留回环告警（Issue #455 回归）。"""
-        from src.user.db import is_server_base_url_configured, get_server_base_url_warning
+        from src.domains.mgmt.user.db import is_server_base_url_configured, get_server_base_url_warning
         with patch("src.kernel.config.read_server_config",
                    return_value={"server_base_url": "http://localhost:3000"}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             assert is_server_base_url_configured() is False
             w = get_server_base_url_warning()
             assert "回环" in w or "localhost" in w
@@ -89,13 +89,13 @@ class TestHealthSplitConfigured:
 
     def test_health_no_false_warning_when_split_only(self):
         from fastapi.testclient import TestClient
-        from src.api.routes.health import router
+        from src.domains.insight.routes.health import router
         from fastapi import FastAPI
         app = FastAPI()
         app.include_router(router)
         client = TestClient(app)
         with patch("src.kernel.config.read_server_config", return_value=dict(_SPLIT_ONLY)), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             data = client.get("/api/health").json()
         assert data["server_base_url_configured"] is True
         assert data["server_base_url_warning"] == ""
@@ -104,13 +104,13 @@ class TestHealthSplitConfigured:
 
     def test_health_warns_when_all_unconfigured(self):
         from fastapi.testclient import TestClient
-        from src.api.routes.health import router
+        from src.domains.insight.routes.health import router
         from fastapi import FastAPI
         app = FastAPI()
         app.include_router(router)
         client = TestClient(app)
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             data = client.get("/api/health").json()
         assert data["server_base_url_configured"] is False
         assert data["server_base_url_warning"]
@@ -125,7 +125,7 @@ class TestRuntimeServerUrlWorkerFace:
         assert "def _server_url" in src
 
     def test_runtime_server_url_value(self):
-        from src.api.routes.runtime import _server_url
+        from src.domains.runtime.routes.runtime import _server_url
         with patch("src.kernel.config.read_server_config",
                    return_value={"worker_connect_url": "https://worker.grape.example.com",
                                  "server_base_url": "https://grape.example.com"}):

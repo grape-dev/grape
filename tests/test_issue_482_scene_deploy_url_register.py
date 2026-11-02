@@ -74,7 +74,7 @@ def _scene_url(sid=SCENE):
 
 
 def _register(result_text, issue_key=f"#{ISSUE_NUM}"):
-    from src.api.event_pipeline import register_scene_deploy_url
+    from src.domains.runtime.pipeline.event_pipeline import register_scene_deploy_url
     return register_scene_deploy_url(REPO, issue_key, result_text)
 
 
@@ -110,7 +110,7 @@ def test_idempotent_reregister_overwrites():
 # ===== 无场景绑定 / 校验拒绝 =====
 
 def test_no_scene_binding_noop():
-    from src.api.event_pipeline import register_scene_deploy_url
+    from src.domains.runtime.pipeline.event_pipeline import register_scene_deploy_url
     # issue 未种 scene_id（issue 表无行）→ 无绑定，不登记不报错
     assert register_scene_deploy_url(REPO, "#999999", "deploy_url: https://none.example.com/") == ""
     assert _scene_url() == ""
@@ -133,7 +133,7 @@ def test_empty_result_text_noop():
 
 
 def test_unknown_scene_id_noop():
-    from src.api.event_pipeline import register_scene_deploy_url
+    from src.domains.runtime.pipeline.event_pipeline import register_scene_deploy_url
     # 场景行不存在（rowcount=0）→ 不写库返回空
     assert register_scene_deploy_url(REPO, "#482", "x") == ""
     _seed_issue_scene("scene-not-exists")
@@ -162,11 +162,11 @@ def _seed_task(agent_type="sre"):
 @pytest.fixture()
 def _quiet_remote_hooks(monkeypatch):
     """屏蔽 complete_task 远程钩子中的外呼副作用（回帖/评论同步），只保留登记钩子。"""
-    monkeypatch.setattr("src.api.event_pipeline._post_result_to_issue", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline._sync_issue_comments_to_conversation", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline._post_subtask_completion_to_parent", lambda *a, **k: None)
-    monkeypatch.setattr("src.api.event_pipeline._post_all_subtasks_done", lambda *a, **k: None)
-    monkeypatch.setattr("src.runtime.service._handle_vod_recommend_complete", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_result_to_issue", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._sync_issue_comments_to_conversation", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_subtask_completion_to_parent", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.pipeline.event_pipeline._post_all_subtasks_done", lambda *a, **k: None)
+    monkeypatch.setattr("src.domains.runtime.engine.service._handle_vod_recommend_complete", lambda *a, **k: None)
     monkeypatch.setattr("src.kernel.token_resolver.create_provider_from_repo_key", lambda *a, **k: None)
 
 
@@ -179,7 +179,7 @@ def _repo_url():
 
 
 def test_complete_task_sre_registers_scene_and_repo(_quiet_remote_hooks):
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("sre")
     complete_task(TASK, json.dumps({
         "artifacts": ["deploy_url: https://remote482.example.com/t/x"],
@@ -190,7 +190,7 @@ def test_complete_task_sre_registers_scene_and_repo(_quiet_remote_hooks):
 
 
 def test_complete_task_sre_failed_no_register(_quiet_remote_hooks):
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("sre")
     complete_task(TASK, "部署失败 deploy_url: https://should-not.example.com/", exit_code=1)
     assert _scene_url() == ""
@@ -198,7 +198,7 @@ def test_complete_task_sre_failed_no_register(_quiet_remote_hooks):
 
 
 def test_complete_task_non_sre_no_register(_quiet_remote_hooks):
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     _seed_task("vod")
     complete_task(TASK, "参考 https://doc.example.com/a/b", exit_code=0)
     assert _scene_url() == ""
@@ -207,7 +207,7 @@ def test_complete_task_non_sre_no_register(_quiet_remote_hooks):
 # ===== 双路径调用点源码检查（防遗漏回归）=====
 
 def test_direct_path_calls_scene_register():
-    from src.api.event_pipeline import _execute_agent_inner, register_scene_deploy_url
+    from src.domains.runtime.pipeline.event_pipeline import _execute_agent_inner, register_scene_deploy_url
     src = inspect.getsource(_execute_agent_inner)
     assert "register_scene_deploy_url" in src, (
         "_execute_agent_inner must call register_scene_deploy_url (Issue #482 direct path)")
@@ -215,7 +215,7 @@ def test_direct_path_calls_scene_register():
 
 
 def test_remote_path_calls_scene_register():
-    from src.runtime.service import complete_task
+    from src.domains.runtime.engine.service import complete_task
     src = inspect.getsource(complete_task)
     assert "register_scene_deploy_url" in src, (
         "complete_task must call register_scene_deploy_url (Issue #482 remote path)")

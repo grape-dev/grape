@@ -10,7 +10,7 @@ import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
-from src.auth.password import _WEAK_PASSWORDS  # noqa: E402
+from src.domains.mgmt.auth.password import _WEAK_PASSWORDS  # noqa: E402
 
 words = sorted(_WEAK_PASSWORDS)
 out = ROOT / "src/api/static/js/pwd-blocklist.js"

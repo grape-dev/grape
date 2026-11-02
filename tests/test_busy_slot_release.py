@@ -7,7 +7,7 @@
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service as svc
+from src.domains.runtime.engine import service as svc
 
 RT = 9001
 
@@ -141,21 +141,21 @@ class TestAutopilotFinalizeReleasesSlot:
     """
 
     def test_autopilot_fail_releases_slot(self):
-        from src.runtime.scheduler import _finalize_autopilot_task
+        from src.domains.runtime.engine.scheduler import _finalize_autopilot_task
         _seed_runtime(busy=1)
         _seed_task("t_busy_auto_fail", "running")
         _finalize_autopilot_task("t_busy_auto_fail", 0, exit_code=1, final_text="boom")
         assert _busy() == 0, "autopilot failed 终态后 busy_slots 应释放"
 
     def test_autopilot_success_releases_slot(self):
-        from src.runtime.scheduler import _finalize_autopilot_task
+        from src.domains.runtime.engine.scheduler import _finalize_autopilot_task
         _seed_runtime(busy=1)
         _seed_task("t_busy_auto_ok", "running")
         _finalize_autopilot_task("t_busy_auto_ok", 0, exit_code=0, final_text="ok")
         assert _busy() == 0, "autopilot success 终态后 busy_slots 应释放"
 
     def test_autopilot_finalize_sets_terminal(self):
-        from src.runtime.scheduler import _finalize_autopilot_task
+        from src.domains.runtime.engine.scheduler import _finalize_autopilot_task
         _seed_runtime(busy=1)
         _seed_task("t_busy_auto_t", "running")
         _finalize_autopilot_task("t_busy_auto_t", 0, exit_code=1, final_text="x")
@@ -172,7 +172,7 @@ class TestSweeperRecycleReleasesSlot:
     """
 
     def test_sweeper_running_recycle_releases(self):
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         rid = 9002
         _seed_running_with_rid("t_busy_swp1", rid)
         with db_lock:
@@ -189,7 +189,7 @@ class TestSweeperRecycleReleasesSlot:
 
     def test_sweeper_queued_task_no_release(self):
         """queued（runtime_id=0）任务不占槽 → 回收时不得把 0 减成负数/误减。"""
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         rid = 9003
         _seed_runtime(busy=1)  # RT=9001 占槽 1
         with db_lock:

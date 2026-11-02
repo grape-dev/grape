@@ -11,7 +11,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.api import onboarding as ob_mod
 from src.api.session_store import get_issue_stage
 
@@ -131,7 +131,7 @@ def test_submit_webhook_body_carries_onboarding_context():
         captured["override"] = repo_key_override
         return {"seq": 3001, "ok": True}
 
-    with patch("src.api.event_pipeline.run_pipeline", side_effect=_fake_run_pipeline), \
+    with patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline", side_effect=_fake_run_pipeline), \
          patch.object(ob_mod, "_await_event_and_finalize"):
         seq = ob_mod._submit_onboarding_webhook(
             "gitcode:owner/repo", "owner", "default", "repo-onboarding",

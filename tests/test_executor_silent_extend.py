@@ -44,8 +44,8 @@ def _terminate_now(proc, label="", grace_seconds=10.0):
 class TestSilentExtension:
     def test_alive_process_not_killed_until_extend_cap(self, monkeypatch):
         """进程存活 + 无输出：延长窗口（不立即 -9）；累积超过硬上限才强杀。"""
-        from src.runtime.executor import stream_agent
-        import src.agent.executor as _ex
+        from src.domains.runtime.engine.executor import stream_agent
+        import src.domains.runtime.agents.executor as _ex
         monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _AliveProc())
         monkeypatch.setattr(_ex, "_terminate_proc", _terminate_now)
         monkeypatch.setenv("AGENT_SILENT_EXTEND_CAP", "0.5")  # 硬上限 0.5s（max_exec 0.1s 的 5 倍）
@@ -62,8 +62,8 @@ class TestSilentExtension:
 
     def test_dead_process_fails_fast(self, monkeypatch):
         """进程已退出但无 done（异常）：不延长，直接强杀。"""
-        from src.runtime.executor import stream_agent
-        import src.agent.executor as _ex
+        from src.domains.runtime.engine.executor import stream_agent
+        import src.domains.runtime.agents.executor as _ex
 
         class _DeadProc(_AliveProc):
             def poll(self):

@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import alert_policy as p  # noqa: E402
+from src.domains.insight.observability import alert_policy as p  # noqa: E402
 
 CST = timezone(timedelta(hours=8))
 UTC = timezone.utc

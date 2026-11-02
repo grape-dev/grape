@@ -89,7 +89,7 @@ def load_event_action_rule(force=False) -> dict:
 
 def _get_actor(payload: dict) -> str:
     """从 payload 判断操作者类型：user / bot / unknown。"""
-    from src.user.db import get_all_bot_usernames
+    from src.domains.mgmt.user.db import get_all_bot_usernames
     actor_name = ""
     for key in ("user_name", "actor"):
         if payload.get(key):

@@ -80,7 +80,7 @@ class TestJwtSecretHardening:
         assert jwt_utils.validate_jwt_secret() is True
 
     def test_production_without_key_refuses_startup(self, monkeypatch):
-        import src.auth.security_config as sc
+        import src.domains.mgmt.auth.security_config as sc
         monkeypatch.setattr(sc, "_config", {"env": "production"})
         monkeypatch.setattr(jwt_utils, "JWT_SECRET", "")
         monkeypatch.setattr(jwt_utils, "_SIGNING_SECRET", "")
@@ -124,7 +124,7 @@ class TestJwtSecretHardening:
 class TestVerificationHashKey:
 
     def test_hash_code_uses_effective_secret(self):
-        from src.auth import verification as v
+        from src.domains.mgmt.auth import verification as v
         hashed = v._hash_code("000000")
         assert isinstance(hashed, str) and len(hashed) == 64
 
@@ -139,9 +139,9 @@ class TestGithubWebhookAuth:
     def _setup(self, monkeypatch):
         _install_managed_gh_repo()
         self.called = []
-        monkeypatch.setattr("src.api.routes.webhook.run_pipeline",
+        monkeypatch.setattr("src.domains.runtime.routes.webhook.run_pipeline",
                             lambda *a, **k: self.called.append((a, k)))
-        monkeypatch.setattr("src.api.routes.webhook._handle_repo_deleted",
+        monkeypatch.setattr("src.domains.runtime.routes.webhook._handle_repo_deleted",
                             lambda *a, **k: {"status": "repo_deleted", "message": "ok"})
         yield
 

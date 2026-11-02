@@ -19,8 +19,8 @@ from fastapi import HTTPException
 
 from src.api.db_setup import init_database
 from src.kernel.session_manager import db, db_lock
-from src.api.routes.events import a2a_redo_event, A2ARedoBody
-from src.api.routes.webhook import _scene_node_check
+from src.domains.runtime.routes.events import a2a_redo_event, A2ARedoBody
+from src.domains.runtime.routes.webhook import _scene_node_check
 
 init_database()
 
@@ -87,7 +87,7 @@ def test_repo_access_rejected():
     """非归属人（jwt 用户 get_managed_repos 无该仓库）→ 403。"""
     from unittest.mock import patch
     seq = _mk_event()
-    with patch("src.user.db.get_managed_repos", return_value=[]):
+    with patch("src.domains.mgmt.user.db.get_managed_repos", return_value=[]):
         with pytest.raises(HTTPException) as ei:
             _run(seq, "qa")
     assert ei.value.status_code == 403

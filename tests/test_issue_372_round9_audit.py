@@ -68,15 +68,15 @@ class TestT29AutoUpgradeAccept:
 
     def test_t29_01_github_calls_accept_github_invite(self):
         """T29-01: auto_upgrade GitHub 分支调 accept_github_invite"""
-        from src.user.db import auto_upgrade_path_b_repos
-        with patch("src.user.db._query_path_b_repos", return_value=[
+        from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
+        with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[
             {"repo_key": "github:test/repo", "repo_owner": "test", "repo_name": "repo", "host_user_id": 1}
         ]), \
              patch("src.api.deps.get_user_github_token_with_refresh", return_value="ghp_token"), \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
-             patch("src.user.repo_manager.add_github_collaborator", return_value=True) as mock_add, \
-             patch("src.user.repo_manager.accept_github_invite", return_value=True) as mock_accept, \
-             patch("src.user.db._update_repo_bot_token") as mock_update:
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
+             patch("src.domains.mgmt.user.repo_manager.add_github_collaborator", return_value=True) as mock_add, \
+             patch("src.domains.mgmt.user.repo_manager.accept_github_invite", return_value=True) as mock_accept, \
+             patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update:
             auto_upgrade_path_b_repos("github", "bot_token", "bot_user")
             mock_add.assert_called_once()
             mock_accept.assert_called_once()
@@ -84,15 +84,15 @@ class TestT29AutoUpgradeAccept:
 
     def test_t29_02_gitcode_accept_returns_false_skips(self):
         """T29-02: GitCode accept_invite_for_repo 返回 False 时不写 token"""
-        from src.user.db import auto_upgrade_path_b_repos
-        with patch("src.user.db._query_path_b_repos", return_value=[
+        from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
+        with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[
             {"repo_key": "gitcode:test/repo", "repo_owner": "test", "repo_name": "repo", "host_user_id": 1}
         ]), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="gct_token"), \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
-             patch("src.user.repo_manager.add_collaborator", return_value=(True, "")) as mock_add, \
-             patch("src.user.repo_manager.accept_invite_for_repo", return_value=False) as mock_accept, \
-             patch("src.user.db._update_repo_bot_token") as mock_update:
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
+             patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(True, "")) as mock_add, \
+             patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo", return_value=False) as mock_accept, \
+             patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update:
             auto_upgrade_path_b_repos("gitcode", "bot_token", "bot_user")
             mock_add.assert_called_once()
             mock_accept.assert_called_once()
@@ -101,15 +101,15 @@ class TestT29AutoUpgradeAccept:
 
     def test_t29_03_github_accept_returns_false_skips(self):
         """T29-03: GitHub accept_github_invite 返回 False 时不写 token"""
-        from src.user.db import auto_upgrade_path_b_repos
-        with patch("src.user.db._query_path_b_repos", return_value=[
+        from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
+        with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[
             {"repo_key": "github:test/repo", "repo_owner": "test", "repo_name": "repo", "host_user_id": 1}
         ]), \
              patch("src.api.deps.get_user_github_token_with_refresh", return_value="ghp_token"), \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
-             patch("src.user.repo_manager.add_github_collaborator", return_value=True), \
-             patch("src.user.repo_manager.accept_github_invite", return_value=False), \
-             patch("src.user.db._update_repo_bot_token") as mock_update:
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"id": 1, "username": "user"}), \
+             patch("src.domains.mgmt.user.repo_manager.add_github_collaborator", return_value=True), \
+             patch("src.domains.mgmt.user.repo_manager.accept_github_invite", return_value=False), \
+             patch("src.domains.mgmt.user.db._update_repo_bot_token") as mock_update:
             auto_upgrade_path_b_repos("github", "bot_token", "bot_user")
             mock_update.assert_not_called()
 
@@ -124,12 +124,12 @@ class TestT32WebhookNoSignatureRejection:
     def test_t32_01_no_signature_no_token_returns_401(self):
         """T32-01: 无签名无 token 头 → 401（weekly-08 安全加固标准，R12.5 对齐）"""
         import asyncio
-        from src.api.routes.webhook import _process_github_webhook
+        from src.domains.runtime.routes.webhook import _process_github_webhook
 
         body = b'{"repository": {"full_name": "test/repo"}, "action": "opened"}'
         headers = {"X-GitHub-Event": "issues"}  # 无 X-Hub-Signature-256, 无 X-GitHub-Token
 
-        with patch("src.user.db.get_webhook_token_by_repo", return_value="webhook_secret"):
+        with patch("src.domains.mgmt.user.db.get_webhook_token_by_repo", return_value="webhook_secret"):
             result = asyncio.run(_process_github_webhook(body, headers))
             # 应该返回 401 JSONResponse
             assert hasattr(result, 'status_code'), f"expected JSONResponse, got {type(result)}"
@@ -175,12 +175,12 @@ class TestT37GetWebhookTokenOrderBy:
 
     def test_t37_01_sql_has_order_by(self):
         """T37-01: SQL 含 ORDER BY webhook_secret DESC"""
-        from src.user.db import get_webhook_token_by_repo
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
         mock_cursor = MagicMock()
         mock_cursor.fetchone.return_value = None
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor):
             get_webhook_token_by_repo("test/repo")
             sql = mock_cursor.execute.call_args[0][0]
             assert "ORDER BY" in sql

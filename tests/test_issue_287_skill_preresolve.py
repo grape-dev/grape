@@ -15,9 +15,9 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest
 from unittest.mock import patch
 
-from src.user import db as user_db
-from src.auth import grape_account_db
-from src.runtime import scheduler
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
+from src.domains.runtime.engine import scheduler
 from src.kernel.session_manager import db, db_lock
 
 
@@ -56,7 +56,7 @@ class TestAutopilotSkillPreResolve:
 
         statuses = []
 
-        with patch("src.runtime.service.enqueue_task", side_effect=_fake_enqueue),              patch("src.api.session_store.get_or_create_agent_session",
+        with patch("src.domains.runtime.engine.service.enqueue_task", side_effect=_fake_enqueue),              patch("src.api.session_store.get_or_create_agent_session",
                    return_value={"id": "sess-287"}),              patch("src.kernel.prompt_builder._resolve_server_url", return_value="http://srv"),              patch.object(scheduler, "_update_execution_result",
                           side_effect=lambda *a, **k: statuses.append(a)):
             scheduler._execute_autopilot_remote(

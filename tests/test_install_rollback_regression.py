@@ -7,7 +7,7 @@ QA 审查发现：restore_upgrade_backup() nohup 分支（被注册超时路径 
 本用例为最小回归：从 scripts/install-worker.sh 提取 restore_upgrade_backup 函数体，
 在隔离 sandbox 中以 mock pgrep/pkill/nohup/setsid 运行 nohup 回滚路径，断言：
 - pkill 先于 nohup 启动旧版执行（顺序正确）；
-- pkill 使用限域模式（含 $VENV/bin/python 前缀）而非裸 "python -m src.runtime.agent"。
+- pkill 使用限域模式（含 $VENV/bin/python 前缀）而非裸 "python -m src.domains.runtime.engine.agent"。
 """
 import os
 import subprocess
@@ -85,7 +85,7 @@ restore_upgrade_backup nohup
         nohup_idx = next(i for i, ln in enumerate(calls) if ln.startswith("NOHUP "))
         assert pkill_idx < nohup_idx, f"pkill 必须先于 nohup 起旧版: {calls}"
         # ② 限域模式：pkill 模式含本安装目录 venv python 绝对路径（点已被 sed 转义为 \.），
-        # 而非裸 "python -m src.runtime.agent"
+        # 而非裸 "python -m src.domains.runtime.engine.agent"
         pat = pkill_lines[0]
         assert f"{install_dir}/.venv/bin/python".replace(".", r"\.") in pat, f"pkill 应为限域模式: {pat}"
         assert "-m src\\.runtime\\.agent" in pat

@@ -43,7 +43,7 @@ def client():
 @pytest.fixture(autouse=True)
 def _seed(client):
     """托管仓库 + 归属关系 + 两个测试场景。"""
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     from src.kernel.session_manager import db, db_lock
 
     user_db.add_managed_repo(ALICE_REPO, "alice", "repo1")

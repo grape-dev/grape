@@ -12,30 +12,30 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 def _clear_caches():
     """每个测试前清除引擎缓存 + repo 绑定缓存，防止跨测试污染。"""
     try:
-        from src.runtime.engine_select import _resolve_local_cache
+        from src.domains.runtime.engine.engine_select import _resolve_local_cache
         _resolve_local_cache.clear()
     except Exception:
         pass
     try:
-        from src.im.handler_async import _repo_bind_cache
+        from src.domains.runtime.im.handler_async import _repo_bind_cache
         _repo_bind_cache.clear()
     except Exception:
         pass
     yield
     try:
-        from src.runtime.engine_select import _resolve_local_cache
+        from src.domains.runtime.engine.engine_select import _resolve_local_cache
         _resolve_local_cache.clear()
     except Exception:
         pass
 
 
 def _make_ctx(app_id="cli_chat"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="chat-test")
 
 
 async def _run(text, parsed_extra=None, api=None, ctx=None):
-    from src.im.handler_async import process_chat_async
+    from src.domains.runtime.im.handler_async import process_chat_async
     ctx = ctx or _make_ctx()
     api = api or AsyncMock()
     parsed = {
@@ -53,7 +53,7 @@ class TestProcessChatAsync:
     def test_non_message_returns(self):
         """Non-message type should return immediately."""
         import asyncio
-        from src.im.handler_async import process_chat_async
+        from src.domains.runtime.im.handler_async import process_chat_async
         ctx = _make_ctx()
         api = AsyncMock()
         asyncio.run(process_chat_async(ctx, api, {"type": "event"}))
@@ -63,15 +63,15 @@ class TestProcessChatAsync:
     def test_command_routing(self):
         """/command should route to async process_command."""
         import asyncio
-        with patch("src.im.handler_async.process_command_async", new=AsyncMock(return_value="/status result")) as mock_pc:
+        with patch("src.domains.runtime.im.handler_async.process_command_async", new=AsyncMock(return_value="/status result")) as mock_pc:
             asyncio.run(_run("/status"))
             mock_pc.assert_called_once()
 
     def test_unbound_repo_shows_help(self):
         """Message with no bound repo should show binding help."""
         import asyncio
-        with patch("src.im.handler_async.resolve_repo", return_value=""):
-            with patch("src.im.handler_async.get_user_id_by_app_id", return_value=None):
+        with patch("src.domains.runtime.im.handler_async.resolve_repo", return_value=""):
+            with patch("src.domains.runtime.im.handler_async.get_user_id_by_app_id", return_value=None):
                 api = asyncio.run(_run("check issue"))
         assert api.reply_text.call_count >= 1
         args = api.reply_text.call_args[0]
@@ -80,13 +80,13 @@ class TestProcessChatAsync:
     def test_bind_intent_detected(self):
         """Natural language bind intent should bind repo directly (no /bind cmd) + card confirm."""
         import asyncio
-        from src.im.handler_async import db
+        from src.domains.runtime.im.handler_async import db
         from src.kernel.session_manager import db_lock
         with db_lock:
             db.cursor().execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='chat_1'")
             db.commit()
-        with patch("src.im.handler_async.detect_bind_intent", return_value="owner/repo"):
-            with patch("src.im.handler_async._send_card_reply", new=AsyncMock(return_value=True)) as m_card:
+        with patch("src.domains.runtime.im.handler_async.detect_bind_intent", return_value="owner/repo"):
+            with patch("src.domains.runtime.im.handler_async._send_card_reply", new=AsyncMock(return_value=True)) as m_card:
                 api = asyncio.run(_run("绑定到 owner/repo"))
                 m_card.assert_called_once()
         with db_lock:
@@ -100,8 +100,8 @@ class TestProcessChatAsync:
     def test_clean_intent_called(self):
         """'清除会话缓存' should route to /clean command."""
         import asyncio
-        with patch("src.im.handler_async.detect_clean_intent", return_value=True):
-            with patch("src.im.handler_async.process_command_async", new=AsyncMock(return_value="✅ 已清除")) as mock_pc:
+        with patch("src.domains.runtime.im.handler_async.detect_clean_intent", return_value=True):
+            with patch("src.domains.runtime.im.handler_async.process_command_async", new=AsyncMock(return_value="✅ 已清除")) as mock_pc:
                 asyncio.run(_run("清除会话缓存"))
                 mock_pc.assert_called_once()
 
@@ -112,7 +112,7 @@ def _run_inner_execute():
     执行模式由调用方通过 monkeypatch 设置 DEVOPS_EXECUTION_MODE。
     """
     import asyncio
-    from src.im.handler_async import _process_chat_inner_async
+    from src.domains.runtime.im.handler_async import _process_chat_inner_async
     ctx = _make_ctx()
     api = AsyncMock()
     parsed = {
@@ -134,14 +134,14 @@ class TestChatHandlerQueueMode:
 
     def test_queue_mode_enqueues_and_replies(self, monkeypatch):
         monkeypatch.setenv("DEVOPS_EXECUTION_MODE", "queue_remote")
-        with patch("src.runtime.service.enqueue_task", return_value="t_x") as m_enq, \
-             patch("src.runtime.service.wait_task_terminal",
+        with patch("src.domains.runtime.engine.service.enqueue_task", return_value="t_x") as m_enq, \
+             patch("src.domains.runtime.engine.service.wait_task_terminal",
                    new=AsyncMock(return_value={"status": "completed", "exit_code": 0,
                                                "result_text": "HELLO_QUEUE",
                                                "usage_json": '{"session_id": "ses_q"}'})) as m_wait, \
-             patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async") as m_consume:
+             patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async") as m_consume:
             api = _run_inner_execute()
 
         m_enq.assert_called_once()
@@ -161,10 +161,10 @@ class TestChatHandlerQueueMode:
         async def _fake_consume(*a, **k):
             yield ("done", {"exit_code": 0, "text": "LOCAL_OK", "oc_session_id": "ses_new"})
 
-        with patch("src.runtime.service.enqueue_task") as m_enq, \
-             patch("src.runtime.engine_select.resolve_local_engine", return_value=1), \
-             patch("src.runtime.engine_select.engine_name", return_value="opencode"), \
-             patch("src.im.handler_async.consume_stream_async", side_effect=_fake_consume):
+        with patch("src.domains.runtime.engine.service.enqueue_task") as m_enq, \
+             patch("src.domains.runtime.engine.engine_select.resolve_local_engine", return_value=1), \
+             patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"), \
+             patch("src.domains.runtime.im.handler_async.consume_stream_async", side_effect=_fake_consume):
             api = _run_inner_execute()
 
         m_enq.assert_not_called(), "direct 模式不应入队"

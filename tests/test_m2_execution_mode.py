@@ -4,7 +4,7 @@ import pytest
 
 from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline
-from src.runtime import service
+from src.domains.runtime.engine import service
 from src.api.event_store import append_event
 
 
@@ -50,7 +50,7 @@ class TestExecutionModeSwitch:
         """queue_remote：run_pipeline 应入队 agent_tasks，不 spawn 线程就地执行（queue_local 已废除）。"""
         self._clean()
         os.environ["DEVOPS_EXECUTION_MODE"] = "queue_remote"
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         # 构造最小可路由事件（issue_opened → issue agent）
         raw = json.dumps(_evt_body()).encode()
         headers = {"X-GitCode-Event": "Issue Hook"}

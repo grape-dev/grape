@@ -8,7 +8,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.kernel.session_manager import db, db_lock
-from src.api.routes.tasks import _resolve_user_chat_bot
+from src.domains.runtime.routes.tasks import _resolve_user_chat_bot
 
 
 def _mk_bot(app_id, bot_type="chat_bot"):

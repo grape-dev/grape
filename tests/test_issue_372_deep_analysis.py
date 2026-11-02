@@ -33,21 +33,21 @@ class TestA2ABotTokenPathB:
 
     def test_get_repo_bot_token_no_global_path_b_returns_host_user_token(self):
         """路径 B 仓库（无 bot token，有 host_user_id）→ get_repo_bot_token_no_global 降级返回 host 用户 token。"""
-        from src.user.db import get_repo_bot_token_no_global
+        from src.domains.mgmt.user.db import get_repo_bot_token_no_global
         with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value="USER_TOKEN"):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == "USER_TOKEN"
 
     def test_get_repo_bot_token_no_global_path_a_returns_bot_token(self):
         """路径 A 仓库（有 bot token）→ get_repo_bot_token_no_global 返回 bot token，不触发 host 用户降级。"""
-        from src.user.db import get_repo_bot_token_no_global
+        from src.domains.mgmt.user.db import get_repo_bot_token_no_global
         with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value="BOT_TOKEN"):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == "BOT_TOKEN"
 
     def test_get_repo_bot_token_no_global_path_b_no_host_user_returns_empty(self):
         """路径 B 仓库无 host_user_id → 返回空。"""
-        from src.user.db import get_repo_bot_token_no_global
+        from src.domains.mgmt.user.db import get_repo_bot_token_no_global
         with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value=""):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == ""
@@ -63,12 +63,12 @@ class TestBotUsernamePathB:
     def test_bot_username_fallback_to_host_user_external_login(self):
         """全局 bot username 为空 → fallback 到 host_user 的 external_login。"""
         # 模拟 event_pipeline 中 BOT_USERNAME 注入逻辑
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.get_global_bot_usernames", return_value=[]), \
-             patch("src.user.db.get_global_github_bot_username", return_value=""), \
-             patch("src.user.db.get_host_user_id", return_value=42), \
-             patch("src.auth.grape_account_db.get_user_identities",
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]), \
+             patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
+             patch("src.domains.mgmt.auth.grape_account_db.get_user_identities",
                    return_value=[{"provider": "gitcode", "external_login": "host_gc_user"}]):
             cursor = MagicMock()
             cursor.fetchone.return_value = None  # managed_repos.bot_username empty
@@ -84,16 +84,16 @@ class TestBotUsernamePathB:
                 _bot_name = ""
 
             # 全局 bot username 为空
-            from src.user.db import get_global_bot_usernames
+            from src.domains.mgmt.user.db import get_global_bot_usernames
             _us = get_global_bot_usernames()
             _bot_name = _us[0] if _us else ""
 
             # 路径 B fallback
             if not _bot_name:
-                from src.user.db import get_host_user_id
+                from src.domains.mgmt.user.db import get_host_user_id
                 _hid = get_host_user_id(_rk)
                 if _hid > 0:
-                    from src.auth.grape_account_db import get_user_identities
+                    from src.domains.mgmt.auth.grape_account_db import get_user_identities
                     for _ident in get_user_identities(_hid):
                         if _ident.get("provider") == _prov:
                             _bot_name = _ident.get("external_login") or ""
@@ -103,8 +103,8 @@ class TestBotUsernamePathB:
 
     def test_bot_username_uses_global_when_available(self):
         """有全局 bot username → 不 fallback 到 host_user。"""
-        with patch("src.user.db.get_global_bot_usernames", return_value=["global_bot"]):
-            from src.user.db import get_global_bot_usernames
+        with patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["global_bot"]):
+            from src.domains.mgmt.user.db import get_global_bot_usernames
             _us = get_global_bot_usernames()
             _bot_name = _us[0] if _us else ""
             assert _bot_name == "global_bot"
@@ -119,11 +119,11 @@ class TestStatus4TokenAccess:
 
     def test_get_oauth_token_returns_token_for_status_4(self):
         """status=4（token 过期）时 _get_oauth_token_from_identity 仍返回 token。"""
-        with patch("src.auth.grape_account_db.get_grape_account_by_username",
+        with patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_username",
                    return_value={"id": 1}), \
              patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"), \
-             patch("src.auth.credential_crypto.decrypt", return_value="EXPIRED_TOKEN"):
+             patch("src.domains.mgmt.auth.credential_crypto.decrypt", return_value="EXPIRED_TOKEN"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_token", 4)  # status=4
             mock_db.cursor.return_value = cursor
@@ -133,11 +133,11 @@ class TestStatus4TokenAccess:
 
     def test_get_oauth_token_returns_token_for_status_1(self):
         """status=1（活跃）时正常返回 token。"""
-        with patch("src.auth.grape_account_db.get_grape_account_by_username",
+        with patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_username",
                    return_value={"id": 1}), \
              patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"), \
-             patch("src.auth.credential_crypto.decrypt", return_value="ACTIVE_TOKEN"):
+             patch("src.domains.mgmt.auth.credential_crypto.decrypt", return_value="ACTIVE_TOKEN"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_token", 1)
             mock_db.cursor.return_value = cursor
@@ -147,7 +147,7 @@ class TestStatus4TokenAccess:
 
     def test_get_oauth_token_returns_empty_for_status_0(self):
         """status=0（解绑）时不返回 token。"""
-        with patch("src.auth.grape_account_db.get_grape_account_by_username",
+        with patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_username",
                    return_value={"id": 1}), \
              patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"):
@@ -168,9 +168,9 @@ class TestAddManagedRepoHostUserIdPreserved:
 
     def test_update_preserves_existing_host_user_id(self):
         """已有记录（host_user_id=42）→ UPDATE 时调用方传 host_user_id=0 → 保留 42。"""
-        from src.user.db import add_managed_repo
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
+        from src.domains.mgmt.user.db import add_managed_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
              patch("src.kernel.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
              patch("src.kernel.repo_key.from_repo_key", return_value="owner/repo"):
             cursor = MagicMock()
@@ -189,9 +189,9 @@ class TestAddManagedRepoHostUserIdPreserved:
 
     def test_update_overwrites_when_caller_passes_nonzero(self):
         """已有记录（host_user_id=42）→ 调用方传 host_user_id=99 → 用 99。"""
-        from src.user.db import add_managed_repo
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
+        from src.domains.mgmt.user.db import add_managed_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
              patch("src.kernel.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
              patch("src.kernel.repo_key.from_repo_key", return_value="owner/repo"):
             cursor = MagicMock()
@@ -206,9 +206,9 @@ class TestAddManagedRepoHostUserIdPreserved:
 
     def test_insert_when_no_existing_record(self):
         """无已有记录 → INSERT。"""
-        from src.user.db import add_managed_repo
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
+        from src.domains.mgmt.user.db import add_managed_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
              patch("src.kernel.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
              patch("src.kernel.repo_key.from_repo_key", return_value="owner/repo"):
             cursor = MagicMock()
@@ -293,8 +293,8 @@ class TestWebhookUrlValidation:
         from src.api.deps import require_no_session_token
         app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "test"}
         client = TestClient(app)
-        with patch("src.user.db.get_webhook_url", return_value=""), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="token"):
+        with patch("src.domains.mgmt.user.db.get_webhook_url", return_value=""), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="token"):
             resp = client.post("/api/repos/host",
                                json={"full_name": "test/repo"},
                                headers={"Authorization": "Bearer test"})
@@ -307,7 +307,7 @@ class TestWebhookUrlValidation:
         """repair_host webhook_url 为空 → 400 + error_code=WEBHOOK_URL_NOT_CONFIGURED。
         repair_host 的 webhook_url 校验逻辑与 host_repo 完全相同（同一行代码模式），
         host_repo 测试已覆盖端到端验证。此处验证代码中 repair_host 包含校验。"""
-        import src.api.routes.repos as repos_mod
+        import src.domains.mgmt.routes.repos as repos_mod
         import inspect
         # 验证 repair_host 函数源码包含 webhook_url 空值校验
         source = inspect.getsource(repos_mod.repair_host)
@@ -324,9 +324,9 @@ class TestHostingProviderConfig:
 
     def test_github_provider_config_returns_github_bot_token(self):
         """provider='github' → 返回 get_global_github_bot_token + GitHub webhook 函数。"""
-        with patch("src.user.db.get_global_github_bot_token", return_value="GH_BOT_TOKEN"), \
-             patch("src.user.db.get_global_github_bot_username", return_value="gh_bot"):
-            from src.user.repo_manager import get_hosting_provider_config
+        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value="GH_BOT_TOKEN"), \
+             patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value="gh_bot"):
+            from src.domains.mgmt.user.repo_manager import get_hosting_provider_config
             cfg = get_hosting_provider_config("github")
             assert cfg["bot_token"] == "GH_BOT_TOKEN"
             assert cfg["bot_username"] == "gh_bot"
@@ -336,9 +336,9 @@ class TestHostingProviderConfig:
 
     def test_gitcode_provider_config_returns_gitcode_bot_token(self):
         """provider='gitcode' → 返回 get_global_gitcode_bot_token + GitCode webhook 函数。"""
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value="GC_BOT_TOKEN"), \
-             patch("src.user.db.get_global_bot_usernames", return_value=["gc_bot"]):
-            from src.user.repo_manager import get_hosting_provider_config
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="GC_BOT_TOKEN"), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["gc_bot"]):
+            from src.domains.mgmt.user.repo_manager import get_hosting_provider_config
             cfg = get_hosting_provider_config("gitcode")
             assert cfg["bot_token"] == "GC_BOT_TOKEN"
             assert cfg["bot_username"] == "gc_bot"
@@ -348,11 +348,11 @@ class TestHostingProviderConfig:
 
     def test_github_provider_config_uses_github_webhook_functions(self):
         """GitHub config 的 find/setup/remove webhook 函数是 GitHub 版本。"""
-        from src.user.repo_manager import get_hosting_provider_config, \
+        from src.domains.mgmt.user.repo_manager import get_hosting_provider_config, \
             find_existing_github_webhook, setup_github_webhook, remove_github_webhook, \
             find_existing_webhook, setup_webhook, remove_webhook
-        with patch("src.user.db.get_global_github_bot_token", return_value=""), \
-             patch("src.user.db.get_global_github_bot_username", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_global_github_bot_username", return_value=""):
             cfg = get_hosting_provider_config("github")
             assert cfg["find_webhook"] == find_existing_github_webhook
             assert cfg["setup_webhook"] == setup_github_webhook
@@ -360,11 +360,11 @@ class TestHostingProviderConfig:
 
     def test_gitcode_provider_config_uses_gitcode_webhook_functions(self):
         """GitCode config 的 find/setup/remove webhook 函数是 GitCode 版本。"""
-        from src.user.repo_manager import get_hosting_provider_config, \
+        from src.domains.mgmt.user.repo_manager import get_hosting_provider_config, \
             find_existing_github_webhook, setup_github_webhook, remove_github_webhook, \
             find_existing_webhook, setup_webhook, remove_webhook
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value=""), \
-             patch("src.user.db.get_global_bot_usernames", return_value=[]):
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]):
             cfg = get_hosting_provider_config("gitcode")
             assert cfg["find_webhook"] == find_existing_webhook
             assert cfg["setup_webhook"] == setup_webhook
@@ -380,12 +380,12 @@ class TestR10TokenExpiryDetection:
 
     def test_mark_identity_expired_sets_status_4(self):
         """mark_identity_expired 将 status 从 1 改为 4。"""
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"):
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"):
             cursor = MagicMock()
             cursor.rowcount = 1
             mock_db.cursor.return_value = cursor
-            from src.auth.grape_account_db import mark_identity_expired
+            from src.domains.mgmt.auth.grape_account_db import mark_identity_expired
             result = mark_identity_expired(42, "gitcode")
             assert result is True
             executed_sql = cursor.execute.call_args[0][0]
@@ -394,34 +394,34 @@ class TestR10TokenExpiryDetection:
 
     def test_is_identity_expired_true_for_status_4(self):
         """is_identity_expired 检测 status=4 返回 True。"""
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"):
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = (4,)
             mock_db.cursor.return_value = cursor
-            from src.auth.grape_account_db import is_identity_expired
+            from src.domains.mgmt.auth.grape_account_db import is_identity_expired
             assert is_identity_expired(42, "gitcode") is True
 
     def test_is_identity_expired_false_for_status_1(self):
         """is_identity_expired 检测 status=1 返回 False。"""
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"):
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = (1,)
             mock_db.cursor.return_value = cursor
-            from src.auth.grape_account_db import is_identity_expired
+            from src.domains.mgmt.auth.grape_account_db import is_identity_expired
             assert is_identity_expired(42, "gitcode") is False
 
     def test_create_external_identity_restores_status_4_to_1(self):
         """create_external_identity 恢复 status=4 记录到 status=1。"""
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.credential_crypto.encrypt", return_value="enc"):
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.credential_crypto.encrypt", return_value="enc"):
             cursor = MagicMock()
             # 先查 status=1 → 无；再查 status IN (0,4) → 有
             cursor.fetchone.side_effect = [None, (123,)]  # existing_active=None, existing_status_04=123
             mock_db.cursor.return_value = cursor
-            from src.auth.grape_account_db import create_external_identity
+            from src.domains.mgmt.auth.grape_account_db import create_external_identity
             result = create_external_identity(
                 grape_user_id=42, provider="gitcode",
                 external_id="99999", external_login="testuser",
@@ -437,23 +437,23 @@ class TestR10TokenExpiryDetection:
         R18 改造后 fail_task 委托 TokenResolver.detect_and_mark_expired()，
         测试 mock detect_and_mark_expired 返回 TOKEN_EXPIRED（等价于内部标记了 status=4）。
         """
-        from src.runtime.service import fail_task
-        with patch("src.runtime.service.get_task", return_value={
+        from src.domains.runtime.engine.service import fail_task
+        with patch("src.domains.runtime.engine.service.get_task", return_value={
             "repo_key": "gitcode:owner/repo", "issue_id": "#123",
             "event_seq": 1, "issue_session_id": "", "status": "running",
             "agent_type": "coding", "started_at": "2026-01-01T00:00:00",
             "repo_gitcode_token": ""
         }), \
-             patch("src.runtime.service.update_task_status") as m_update, \
+             patch("src.domains.runtime.engine.service.update_task_status") as m_update, \
              patch("src.kernel.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"), \
              patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=MagicMock(level="user", token="", issue_id="#123")), \
              patch("src.kernel.token_resolver.create_action_handler", return_value=None), \
-             patch("src.runtime.service.db") as mock_db, \
-             patch("src.runtime.service.db_lock"), \
+             patch("src.domains.runtime.engine.service.db") as mock_db, \
+             patch("src.domains.runtime.engine.service.db_lock"), \
              patch("src.api.event_store.update_event_complete"), \
              patch("src.api.event_archive.finalize_event_archive"), \
-             patch("src.observability.record_task_terminal", side_effect=lambda *a, **kw: None), \
-             patch("src.observability.record_task_failed", side_effect=lambda *a, **kw: None):
+             patch("src.domains.insight.observability.record_task_terminal", side_effect=lambda *a, **kw: None), \
+             patch("src.domains.insight.observability.record_task_failed", side_effect=lambda *a, **kw: None):
             cursor = MagicMock()
             mock_db.cursor.return_value = cursor
             fail_task("task-1", "HTTP 401 Unauthorized", exit_code=-1)
@@ -474,11 +474,11 @@ class TestErrorCodeI18n:
         from src.api.deps import require_no_session_token
         app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "test"}
         client = TestClient(app)
-        with patch("src.api.routes.grape_auth.get_grape_account_by_id",
+        with patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id",
                    return_value={"username": "test", "email": "", "nickname": "", "avatar_url": ""}), \
-             patch("src.api.routes.grape_auth.has_password", return_value=True), \
-             patch("src.api.routes.grape_auth.get_user_identities", return_value=[]), \
-             patch("src.auth.grape_account_db.is_identity_expired", return_value=True):
+             patch("src.domains.mgmt.routes.grape_auth.has_password", return_value=True), \
+             patch("src.domains.mgmt.routes.grape_auth.get_user_identities", return_value=[]), \
+             patch("src.domains.mgmt.auth.grape_account_db.is_identity_expired", return_value=True):
             resp = client.get("/api/auth/me", headers={"Authorization": "Bearer test"})
             assert resp.status_code == 200
             data = resp.json()
@@ -511,10 +511,10 @@ class TestErrorCodeI18n:
         from src.api.deps import require_no_session_token
         app.dependency_overrides[require_no_session_token] = lambda: {"id": 1, "username": "test"}
         client = TestClient(app)
-        with patch("src.user.db.get_webhook_url", return_value="https://example.com/webhook/gitcode"), \
-             patch("src.api.routes.repos.get_user_token_with_refresh", return_value="token"), \
-             patch("src.api.routes.repos.with_oauth_token", side_effect=lambda u, p, fn: fn("token")), \
-             patch("src.user.repo_manager._req", return_value={"login": "notowner"}):
+        with patch("src.domains.mgmt.user.db.get_webhook_url", return_value="https://example.com/webhook/gitcode"), \
+             patch("src.domains.mgmt.routes.repos.get_user_token_with_refresh", return_value="token"), \
+             patch("src.domains.mgmt.routes.repos.with_oauth_token", side_effect=lambda u, p, fn: fn("token")), \
+             patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "notowner"}):
             resp = client.post("/api/repos/host",
                                json={"full_name": "test/repo"},
                                headers={"Authorization": "Bearer test"})
@@ -534,50 +534,50 @@ class TestIsUserTokenRepo:
 
     def test_is_user_token_repo_true_when_all_bot_empty_and_host_user_exists(self):
         """前三级全空 + host_user_id > 0 → True。"""
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db._get_global_bot_token", return_value=""), \
-             patch("src.user.db.get_host_user_id", return_value=42):
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db._get_global_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42):
             cursor = MagicMock()
             cursor.fetchone.return_value = None  # 所有 DB 查询返回空
             mock_db.cursor.return_value = cursor
-            from src.user.db import _is_user_token_repo
+            from src.domains.mgmt.user.db import _is_user_token_repo
             assert _is_user_token_repo("gitcode:owner/repo") is True
 
     def test_is_user_token_repo_false_when_global_bot_exists(self):
         """前三级全空 + host_user_id=0 + 全局 bot token 存在 → False。"""
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db._get_global_bot_token", return_value="GLOBAL_BOT"), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db._get_global_bot_token", return_value="GLOBAL_BOT"), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             cursor = MagicMock()
             cursor.fetchone.return_value = None
             mock_db.cursor.return_value = cursor
-            from src.user.db import _is_user_token_repo
+            from src.domains.mgmt.user.db import _is_user_token_repo
             assert _is_user_token_repo("gitcode:owner/repo") is False
 
     def test_is_user_token_repo_true_when_path_b_with_global_bot(self):
         """R12.11: 路径 B 仓库（host_user_id > 0）即使全局 bot token 存在也返回 True。"""
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db._get_global_bot_token", return_value="GLOBAL_BOT"), \
-             patch("src.user.db.get_host_user_id", return_value=42):
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db._get_global_bot_token", return_value="GLOBAL_BOT"), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42):
             cursor = MagicMock()
             cursor.fetchone.return_value = None
             mock_db.cursor.return_value = cursor
-            from src.user.db import _is_user_token_repo
+            from src.domains.mgmt.user.db import _is_user_token_repo
             assert _is_user_token_repo("gitcode:owner/repo") is True
 
     def test_is_user_token_repo_false_when_no_host_user(self):
         """前三级全空 + host_user_id=0 → False。"""
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db._get_global_bot_token", return_value=""), \
-             patch("src.user.db.get_host_user_id", return_value=0):
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db._get_global_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0):
             cursor = MagicMock()
             cursor.fetchone.return_value = None
             mock_db.cursor.return_value = cursor
-            from src.user.db import _is_user_token_repo
+            from src.domains.mgmt.user.db import _is_user_token_repo
             assert _is_user_token_repo("gitcode:owner/repo") is False
 
 
@@ -598,7 +598,7 @@ class TestGetTaskRepoToken:
         _mock_result.token = "BOT_TOKEN"
         _mock_result.level = "repo_bot"
         with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
-            from src.api.event_pipeline import _get_task_repo_token
+            from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("gitcode:owner/repo")
             assert result == "BOT_TOKEN"
 
@@ -609,7 +609,7 @@ class TestGetTaskRepoToken:
         _mock_result.token = "USER_TOKEN"
         _mock_result.level = "user"
         with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
-            from src.api.event_pipeline import _get_task_repo_token
+            from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("gitcode:owner/repo")
             assert result == ""
 
@@ -619,11 +619,11 @@ class TestGetTaskRepoToken:
         _mock_result.token = "GH_USER_TOKEN"
         _mock_result.level = "user"
         with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
-            from src.api.event_pipeline import _get_task_repo_token
+            from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("github:owner/repo")
             assert result == ""
 
     def test_empty_repo_key_returns_empty(self):
         """空 repo_key → 空字符串。"""
-        from src.api.event_pipeline import _get_task_repo_token
+        from src.domains.runtime.pipeline.event_pipeline import _get_task_repo_token
         assert _get_task_repo_token("") == ""

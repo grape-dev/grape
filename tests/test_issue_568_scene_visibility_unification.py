@@ -30,7 +30,7 @@ from src.api.db_setup import init_database  # noqa: E402
 
 init_database()
 
-from src.api.routes.webhook import _scene_node_check, _refresh_issue_scene_after_handoff  # noqa: E402
+from src.domains.runtime.routes.webhook import _scene_node_check, _refresh_issue_scene_after_handoff  # noqa: E402
 from src.api.pipeline_config import invalidate_scene_cache  # noqa: E402
 
 REPO_A = "gitcode:i568/repo-a"   # issue 归属仓库（场景归属）
@@ -223,7 +223,7 @@ def test_refresh_issue_scene_after_handoff_updates_binding():
     effective = _refresh_issue_scene_after_handoff(REPO_A, str(ISSUE_NO), SID)
     assert effective == SID
     # _resolve_scene_id（event_pipeline GRAPE_SCENE_ID 注入源）读到新场景
-    from src.api.event_pipeline import _resolve_scene_id
+    from src.domains.runtime.pipeline.event_pipeline import _resolve_scene_id
     assert _resolve_scene_id(REPO_A, f"#{ISSUE_NO}") == SID
     # 刷新后的 scene_id 可查且节点有效
     from src.api.pipeline_config import get_pipeline_config
@@ -235,7 +235,7 @@ def test_refresh_issue_scene_after_handoff_no_row_no_refresh():
     """目标场景无有效 DB 行 → 不刷新（返回空串，软失败不阻断移交）。"""
     _seed_issue(REPO_A, ISSUE_NO, SID)
     assert _refresh_issue_scene_after_handoff(REPO_A, str(ISSUE_NO), "nope-i568-scene") == ""
-    from src.api.event_pipeline import _resolve_scene_id
+    from src.domains.runtime.pipeline.event_pipeline import _resolve_scene_id
     assert _resolve_scene_id(REPO_A, f"#{ISSUE_NO}") == SID  # 原绑定不被破坏
 
 
@@ -243,7 +243,7 @@ def test_refresh_issue_scene_after_handoff_no_row_no_refresh():
 
 def test_cross_pipeline_handoff_target_scene_not_found():
     """目标场景不存在（DB/市场/官方兜底均未命中）→ target_scene_not_found 拦截。"""
-    from src.api.routes.webhook import _cross_pipeline_handoff
+    from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
     with patch("src.api.pipeline_config.get_pipeline_config", return_value=None):
         res = _cross_pipeline_handoff(
             REPO_A, str(ISSUE_NO), "nope-i568-scene", "vod",
@@ -253,15 +253,15 @@ def test_cross_pipeline_handoff_target_scene_not_found():
 
 def test_cross_pipeline_handoff_refreshes_issue_scene():
     """移交主流程：issue 绑定场景被刷新为目标场景有效 ID（软失败不阻断移交）。"""
-    from src.api.routes.webhook import _cross_pipeline_handoff
+    from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
     _seed_scene(REPO_A, SID, NODES)
     _seed_issue(REPO_A, ISSUE_NO, "stale-i568-scene")
     with patch("src.api.event_store.append_event", return_value=1), \
          patch("src.api.event_bus.get_event_bus", side_effect=RuntimeError("no bus in test")), \
-         patch("src.api.event_pipeline.run_pipeline", side_effect=None):
+         patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline", side_effect=None):
         res = _cross_pipeline_handoff(
             REPO_A, str(ISSUE_NO), SID, "vod",
             {}, "", None, "", "i568/repo-a", "i568")
     assert res.get("ok") is True, res
-    from src.api.event_pipeline import _resolve_scene_id
+    from src.domains.runtime.pipeline.event_pipeline import _resolve_scene_id
     assert _resolve_scene_id(REPO_A, f"#{ISSUE_NO}") == SID

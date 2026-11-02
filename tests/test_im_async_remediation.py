@@ -12,7 +12,7 @@ D 组（纯逻辑）见 tests/test_feishu_pure_logic.py；
   其验收用例同步移除。）
 """
 import asyncio
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 import json
 import os
 import sys
@@ -23,12 +23,12 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 
 def _make_ctx(app_id="cli_remed"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     return BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="remed-test")
 
 
 def _make_api_with_session():
-    from src.im.feishu_async import FeishuAsync
+    from src.domains.runtime.im.feishu_async import FeishuAsync
     api = FeishuAsync()
     session = MagicMock()
     api._get_session = AsyncMock(return_value=session)
@@ -49,20 +49,20 @@ def _http_response(payload):
 class TestSyncRepoFeishuMapping:
     async def _run(self, members, collabs, bot_token="bot_tok"):
         """执行 sync_repo_feishu_mapping：mock 群成员 + 协作者拉取。"""
-        from src.im.feishu_async import FeishuAsync
+        from src.domains.runtime.im.feishu_async import FeishuAsync
         api = FeishuAsync()
         ctx = _make_ctx()
         api.get_chat_members = AsyncMock(return_value=members)
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         with patch.object(user_db, "get_bot_token_by_repo", return_value=bot_token):
-            with patch("src.im.feishu_async._fetch_gitcode_collaborators", return_value=collabs):
+            with patch("src.domains.runtime.im.feishu_async._fetch_gitcode_collaborators", return_value=collabs):
                 matched = await api.sync_repo_feishu_mapping(ctx, "gitcode:owner/repo", "oc_b")
         return matched, api
 
     def test_b1_nickname_match_writes_mapping(self):
         """B1: 群成员昵称匹配 GitCode 协作者，写入 unified_user_mapping。"""
         from src.kernel.session_manager import db, db_lock
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         # 预置 user_accounts 用户（set_feishu_open_id 需要真实 user_id 才写入）
         grape_account_db.get_grape_account_by_username('zhangsan') or grape_account_db.create_grape_account('zhangsan', email=None, password='pw')
         with db_lock:
@@ -89,15 +89,15 @@ class TestSyncRepoFeishuMapping:
 
     def test_b3_no_bot_token_returns_zero(self):
         """B3: 无 bot token（含全局兜底失败）时返回 0。"""
-        from src.im.feishu_async import FeishuAsync
+        from src.domains.runtime.im.feishu_async import FeishuAsync
         api = FeishuAsync()
         ctx = _make_ctx()
         api.get_chat_members = AsyncMock(return_value=[{"name": "张三", "open_id": "ou_b3"}])
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         with patch.object(user_db, "get_bot_token_by_repo", return_value=""):
             with patch("builtins.open") as mock_open:
                 mock_open.side_effect = FileNotFoundError  # 全局兜底文件不存在
-                with patch("src.im.feishu_async._fetch_gitcode_collaborators") as mock_fetch:
+                with patch("src.domains.runtime.im.feishu_async._fetch_gitcode_collaborators") as mock_fetch:
                     matched = asyncio.run(api.sync_repo_feishu_mapping(ctx, "gitcode:owner/repo", "oc_b3"))
         assert matched == 0
         mock_fetch.assert_not_called()
@@ -111,7 +111,7 @@ class TestSyncRepoFeishuMapping:
     def test_b5_writes_gitcode_nickname(self):
         """B5: 匹配时写入 gitcode_nickname（覆盖 B1，此处单独断言昵称）。"""
         from src.kernel.session_manager import db, db_lock
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         grape_account_db.get_grape_account_by_username('lisi') or grape_account_db.create_grape_account('lisi', email=None, password='pw')
         with db_lock:
             db.cursor().execute("DELETE FROM unified_user_mapping WHERE gitcode_user='lisi'")

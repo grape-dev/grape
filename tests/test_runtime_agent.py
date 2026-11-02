@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.runtime import agent as ra
+from src.domains.runtime.engine import agent as ra
 
 _is_win = sys.platform == "win32"
 
@@ -128,7 +128,7 @@ class TestWorkerVersion:
 
 class TestDiscoverLocalRuntimes:
     def test_success(self):
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "opencode", "cli_path": "/usr/bin/opencode", "installed": True}]):
             with patch("subprocess.run", return_value=MagicMock(returncode=0, stdout="opencode 1.0\n")):
                 out = ra._discover_local_runtimes()
@@ -137,7 +137,7 @@ class TestDiscoverLocalRuntimes:
         assert out[0]["version"] == "opencode 1.0"
 
     def test_unhealthy(self):
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "opencode", "cli_path": "/usr/bin/opencode", "installed": True}]):
             with patch("subprocess.run", side_effect=FileNotFoundError):
                 out = ra._discover_local_runtimes()
@@ -145,7 +145,7 @@ class TestDiscoverLocalRuntimes:
         assert out[0]["version"] == ""
 
     def test_no_cli_path(self):
-        with patch("src.runtime.registry.discover_runtimes", return_value=[
+        with patch("src.domains.runtime.engine.registry.discover_runtimes", return_value=[
                 {"name": "opencode", "cli_path": "", "installed": False}]):
             out = ra._discover_local_runtimes()
         assert out[0]["healthy"] is False
@@ -258,7 +258,7 @@ class TestStreamRuntimeAsync:
         return [evt async for evt in agen]
 
     def test_bridges_events_from_producer(self):
-        with patch("src.runtime.executor.stream_runtime",
+        with patch("src.domains.runtime.engine.executor.stream_runtime",
                    return_value=iter([("step_start", "s"), ("text", "hi"), ("done", {"exit_code": 0})])):
             events = asyncio.run(self._collect(ra._stream_runtime_async("prompt", "/w")))
         assert events == [("step_start", "s"), ("text", "hi"), ("done", {"exit_code": 0})]
@@ -267,7 +267,7 @@ class TestStreamRuntimeAsync:
         def _boom(*a, **k):
             raise RuntimeError("opencode crashed")
 
-        with patch("src.runtime.executor.stream_runtime", side_effect=_boom):
+        with patch("src.domains.runtime.engine.executor.stream_runtime", side_effect=_boom):
             events = asyncio.run(self._collect(ra._stream_runtime_async("prompt", "/w")))
         assert events == []
 
@@ -304,9 +304,9 @@ class TestExecuteTaskTokenInjection:
     async def _run(self, task):
         client = AsyncMock()
         fake, holder = self._fake_stream()
-        with patch("src.runtime.agent._stream_runtime_async", new=fake), \
+        with patch("src.domains.runtime.engine.agent._stream_runtime_async", new=fake), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN_ABC") as m_ut, \
-             patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser", "id": 7}):
+             patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser", "id": 7}):
             await ra._execute_task(client, task, "hermes-worker-1")
         return holder["last_kwargs"], m_ut
 
@@ -344,7 +344,7 @@ class TestRunLoop:
         client.claim_by_tag.return_value = None
         client.claim.return_value = None
         client.heartbeat.return_value = {"status": "ok", "cancelled_tasks": []}
-        with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=([1], {}, []))) as m_rr:
+        with patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=([1], {}, []))) as m_rr:
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.05, max_concurrent=4)))
         m_rr.assert_awaited()
@@ -395,7 +395,7 @@ class TestRunLoop:
         client.claim.return_value = None
         client.heartbeat.return_value = None
         client.reset_session = AsyncMock()
-        with patch("src.runtime.agent._reregister", new=AsyncMock(return_value=([1], {}, []))):
+        with patch("src.domains.runtime.engine.agent._reregister", new=AsyncMock(return_value=([1], {}, []))):
             asyncio.run(self._drive(ra._run_loop(
                 client, [1], poll_interval=0.01, heartbeat_interval=0.01, max_concurrent=4)))
         client.reset_session.assert_awaited()

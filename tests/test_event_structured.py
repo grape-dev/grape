@@ -10,7 +10,7 @@
 - STOP-03 读侧兼容：手工构造 event.json 仍可回退读
 """
 import os, sys, json
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
@@ -82,9 +82,9 @@ def test_update_event_complete_writes_structured_output():
 def _detail(seq):
     from fastapi.testclient import TestClient
     from src.api.main import app
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     from unittest.mock import patch
     uid = grape_account_db.create_grape_account("evstruct_user", email=None, password="pwd")
     if not uid:
@@ -140,11 +140,11 @@ def test_event_detail_no_data_no_crash():
 # ── LOG-01：report_messages 落 events.agent_logs ──
 
 def test_report_messages_writes_to_events_agent_logs():
-    from src.runtime import service
+    from src.domains.runtime.engine import service
     _seed_event(8260, "#9")
     # 构造最小 task（只依赖 event_seq/repo_key/issue_id/repo_gitcode_token）
     from unittest.mock import patch as _p
-    with _p("src.runtime.service.get_task", return_value={
+    with _p("src.domains.runtime.engine.service.get_task", return_value={
         "id": "t_log", "event_seq": 8260, "repo_key": RK,
         "issue_id": "#9", "repo_gitcode_token": "", "agent_type": "vod",
     }):

@@ -9,7 +9,7 @@ os.environ.setdefault("GRAPE_DB_BACKEND", "sqlite")
 
 class TestSreNoBroadcast(unittest.TestCase):
     def test_sre_flag(self):
-        from src.runtime.engine_select import _sre_no_broadcast
+        from src.domains.runtime.engine.engine_select import _sre_no_broadcast
         self.assertTrue(_sre_no_broadcast("sre"))
         self.assertTrue(_sre_no_broadcast("SRE"))
         self.assertTrue(_sre_no_broadcast(" sre "))
@@ -39,7 +39,7 @@ class TestValidateSceneEngineIds(unittest.TestCase):
 
     def _validate(self, nodes, username="alice", repo_key="gitcode:org/repo"):
         from fastapi import HTTPException
-        from src.api.routes.scenes import _validate_scene_engine_ids
+        from src.domains.mgmt.routes.scenes import _validate_scene_engine_ids
         try:
             _validate_scene_engine_ids(nodes, repo_key, username)
             return None

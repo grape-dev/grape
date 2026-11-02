@@ -147,7 +147,7 @@ def test_list_without_repo_resolves_request_context(jwt_client):
     `_resolve_scene_repo_key` 做单元断言（与路由调用同一函数，行为等价），
     端到端显式 repo 路径由 test_list_explicit_repo_unchanged 覆盖。
     """
-    from src.api.routes.scenes import _resolve_scene_repo_key
+    from src.domains.mgmt.routes.scenes import _resolve_scene_repo_key
     # 无 repo + JWT 用户 + repo_var 上下文 → 解析为该 repo_key
     token = repo_var.set(REPO_A)
     try:

@@ -15,8 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
-from src.runtime import codearts as rc
-from src.runtime import agent as ra
+from src.domains.runtime.engine import codearts as rc
+from src.domains.runtime.engine import agent as ra
 
 
 class TestWriteTrustSettings:

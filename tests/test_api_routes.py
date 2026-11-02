@@ -7,9 +7,9 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.kernel.session_manager import db, db_lock
-from src.auth.grape_account_db import (
+from src.domains.mgmt.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_username,
     get_token_version as grape_get_token_version,
     update_profile as grape_update_profile,
@@ -35,7 +35,7 @@ _headers = {}
 def setup_module():
     global _uid, _token, _headers
     # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM grape_accounts WHERE username='test_api'")
@@ -267,7 +267,7 @@ class TestRepos:
     @staticmethod
     def _mock_vcs_perm(access_level):
         """mock get_member_permission 返回指定 access_level（测试环境无真实 VCS 凭据）"""
-        from src.user import repo_manager
+        from src.domains.mgmt.user import repo_manager
         def _fake(token, owner, repo, username, **kw):
             return {"access_level": access_level, "role_name": "mocked", "permission": "write"}
         return monkeypatch_fn(repo_manager, "get_member_permission", _fake)
@@ -340,38 +340,38 @@ class TestRepos:
         1) 项目所有者 → 直接通过（无需网络）
         2) 非所有者 → 按 /collaborators/{user}/permission 的 admin 权限判定
         """
-        from src.user.repo_manager import _check_collaborator_admin
+        from src.domains.mgmt.user.repo_manager import _check_collaborator_admin
         from unittest.mock import patch
 
         # 1) 所有者直接通过，不触发网络调用
-        with patch("src.user.repo_manager._req") as mock_req:
+        with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "owner_user") is True
             mock_req.assert_not_called()
 
         # 2) 非所有者：permission.admin=True → 通过
-        with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": True}}):
+        with patch("src.domains.mgmt.user.repo_manager._req", return_value={"permissions": {"admin": True}}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
 
         # 2b) 真实 GitCode 格式：维护者 access_level=40（注意 permissions.admin 恒为 false，
         #     真实权限看 access_level / 单数 permission）→ 通过
-        with patch("src.user.repo_manager._req", return_value={
+        with patch("src.domains.mgmt.user.repo_manager._req", return_value={
                 "access_level": 40, "role_name": "Maintainer",
                 "permissions": {"admin": False}, "permission": "admin"}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is True
 
         # 2c) 真实 GitCode 格式：开发者 access_level=30 → 拒绝
-        with patch("src.user.repo_manager._req", return_value={
+        with patch("src.domains.mgmt.user.repo_manager._req", return_value={
                 "access_level": 30, "role_name": "Developer",
                 "permissions": {"admin": False}, "permission": "write"}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
 
         # 3) 非所有者：permission.admin=False → 拒绝
-        with patch("src.user.repo_manager._req", return_value={"permissions": {"admin": False}}):
+        with patch("src.domains.mgmt.user.repo_manager._req", return_value={"permissions": {"admin": False}}):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
 
         # 4) 空用户 / API 异常 → 拒绝
         assert _check_collaborator_admin("tok", "owner_user", "repo1", "") is False
-        with patch("src.user.repo_manager._req", side_effect=RuntimeError("boom")):
+        with patch("src.domains.mgmt.user.repo_manager._req", side_effect=RuntimeError("boom")):
             assert _check_collaborator_admin("tok", "owner_user", "repo1", "somebody") is False
 
     def test_sync_endpoint(self):
@@ -405,7 +405,7 @@ class TestRepos:
 
     def test_user_repos_table_operations(self):
         """验证 user_repos 表的读写函数"""
-        from src.user.db import save_user_repos, get_user_repos, has_user_repos, clear_user_repos
+        from src.domains.mgmt.user.db import save_user_repos, get_user_repos, has_user_repos, clear_user_repos
 
         test_repos = [
             {"full_name": "org/test-a", "owner": "org", "name": "test-a",
@@ -439,7 +439,7 @@ class TestRepos:
 
     def test_user_repos_synced_at(self):
         """save_user_repos 后 synced_at 应写入时间戳，get_user_repos_synced_at 应能读取"""
-        from src.user.db import save_user_repos, clear_user_repos, get_user_repos_synced_at
+        from src.domains.mgmt.user.db import save_user_repos, clear_user_repos, get_user_repos_synced_at
         uid = 10001
         clear_user_repos(uid)
         assert get_user_repos_synced_at(uid) == "", "No cache -> empty synced_at"
@@ -781,7 +781,7 @@ class TestChat:
                           "VALUES ('opencode','opencode',0,1,1,'online','global','')")
             db.commit()
         # D32: 直接用 SQL 创建 grape_accounts 用户
-        from src.auth.password import hash_password as _hp
+        from src.domains.mgmt.auth.password import hash_password as _hp
         _chat_uname = "chat_def_" + _uuid.uuid4().hex[:6]
         with db_lock:
             c = db.cursor()
@@ -834,7 +834,7 @@ class TestChat:
         assert r.json()["im"]["feishu"]["app_id"] == app_a
 
         # 用户 B（新用户，无配置）读不到 A 的 app_id
-        from src.auth.password import hash_password as _hp2
+        from src.domains.mgmt.auth.password import hash_password as _hp2
         with db_lock:
             c = db.cursor()
             c.execute("SELECT id FROM grape_accounts WHERE username='chat_iso_b'")
@@ -874,7 +874,7 @@ class TestChat:
         assert r.status_code == 200, f"A save failed: {r.text[:200]}"
 
         # 用户 B 尝试绑定同一 app_id → 400
-        from src.auth.password import hash_password as _hp3
+        from src.domains.mgmt.auth.password import hash_password as _hp3
         with db_lock:
             c = db.cursor()
             c.execute("SELECT id FROM grape_accounts WHERE username='chat_uniq_b'")
@@ -1506,7 +1506,7 @@ class TestSkills:
 
     def setup_method(self):
         """为每个测试方法创建 FakeStorage mock（仅 OBS 依赖测试需要）。"""
-        from src.storage import StorageBackend
+        from src.domains.runtime.storage import StorageBackend
         class FakeStorage(StorageBackend):
             def backend_name(self): return "fake"
             def save_bytes(self, key, data): return key
@@ -1525,7 +1525,7 @@ class TestSkills:
         TestSkills._fake_storage = FakeStorage()
         # autouse: 全局 patch get_storage，OBS 依赖测试自动走 fake
         from unittest.mock import patch as _patch
-        self._storage_patch = _patch("src.storage.get_storage", return_value=TestSkills._fake_storage)
+        self._storage_patch = _patch("src.domains.runtime.storage.get_storage", return_value=TestSkills._fake_storage)
         self._storage_patch.__enter__()
 
     def teardown_method(self):
@@ -1646,7 +1646,7 @@ class TestSkills:
         """scope=repo 通过 form 提交时应正确落到仓库技能目录（此前无 Form() 标注会被当成 query 参数而失效）"""
         import tempfile, zipfile, os, shutil
         from src.kernel.session_manager import db, db_lock
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         # 自隔离：清除历史残留（含 gitcode: 前缀变体行 + 磁盘目录），保证本用例独占
         with db_lock:
             c = db.cursor()
@@ -1705,7 +1705,7 @@ class TestSkills:
         """个人技能复制为仓库技能：目录复制 + DB 记录 + 原个人技能保留"""
         import uuid, os, shutil
         from src.kernel.session_manager import db, db_lock
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
 
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"convskill{uniq}"
@@ -1933,7 +1933,7 @@ class TestTokenLayers:
         assert isinstance(token, str)
 
     def test_webhook_token_fallback(self):
-        from src.user.db import get_webhook_token_by_repo
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
         token = get_webhook_token_by_repo("org/nonexistent")
         # 未托管仓库应返回空串（无 webhook token）
         assert isinstance(token, str)

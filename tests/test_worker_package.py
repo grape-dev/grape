@@ -112,13 +112,13 @@ class TestWorkerPackage:
         """import 闭包守卫：包解压后必须在干净子进程里可 import（防 MANIFEST 漏文件）。
 
         背景（2026-10-14 五台 worker 心跳全断事故）：8908cadb1 给 src/config.py 加了
-        顶层 ``from src.auth.security_config import ...``，config.py 在 worker 包里但
+        顶层 ``from src.domains.mgmt.auth.security_config import ...``，config.py 在 worker 包里但
         src/auth/ 不在 → runtime-agent 启动即 ModuleNotFoundError，systemd 无限重启。
         当时的 test_build_package_contents 只防"多打文件"（服务端泄露），不防"漏打
         文件"（import 失败）——本测试补上后半边。
 
         实现要点：必须用 subprocess 干净隔离。曾实测：主进程 sys.path 带着仓库路径时，
-        src.auth 会从仓库（而非包内）解析成功，产生假阳性（import OK 但 worker 实崩）。
+        src.domains.mgmt.auth 会从仓库（而非包内）解析成功，产生假阳性（import OK 但 worker 实崩）。
         """
         import subprocess
         from src.kernel.worker_package import build_package
@@ -132,7 +132,7 @@ class TestWorkerPackage:
             "import sys\n"
             "sys.path.insert(0, sys.argv[1])\n"
             "import src.kernel.config\n"           # 启动链第一环（事故死因）
-            "import src.runtime.agent\n"    # worker 主模块全量闭包
+            "import src.domains.runtime.engine.agent\n"    # worker 主模块全量闭包
             "print('IMPORT_CLOSURE_OK')\n"
         )
         r = subprocess.run(

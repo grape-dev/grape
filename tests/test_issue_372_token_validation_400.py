@@ -28,13 +28,13 @@ def _get_client():
 
 def _create_test_user(client):
     """创建测试用户并登录，返回 auth headers。"""
-    from src.auth.grape_account_db import create_grape_account
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account
     import uuid
 
     username = "test_tokval_" + uuid.uuid4().hex[:6]
     account = create_grape_account(username, f"{username}@test.com", "TestPass123!")
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_status_and_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_status_and_token_version
     _status, _tv, _uname = get_status_and_token_version(account["id"])
     token = create_access_token(account["id"], username, _tv)
     return {"Authorization": f"Bearer {token}"}, account["id"], username

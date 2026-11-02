@@ -16,7 +16,7 @@ os.environ.setdefault("DEVOPS_DB_PATH",
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 client = TestClient(app)
 
@@ -51,7 +51,7 @@ def _set_scene(repo_key, scene_id):
 
 def setup_module():
     global _uid, _token, _headers
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM grape_accounts WHERE username='sr_test'")

@@ -206,7 +206,7 @@ def build_issue_context(repo_key, issue_num, max_chars=4000) -> str:
     lines = [f"## Issue #{issue_num} 档案摘要"]
     gathered = False
     try:
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         rk = repo_key or ""
         keys = [rk]
         if ":" in rk:

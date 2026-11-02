@@ -57,7 +57,7 @@ class TestPostCommentViaProviderAgentType:
             provider_name = "gitcode"
 
         with patch("src.kernel.repo_key.from_repo_key", return_value="test/repo"), \
-             patch("src.api.event_pipeline._is_github_repo", return_value=False), \
+             patch("src.domains.runtime.pipeline.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_comment_via_provider(
                 _FakeProvider(), "gitcode:test/repo", "42",
@@ -77,7 +77,7 @@ class TestPostCommentViaProviderAgentType:
             provider_name = "gitcode"
 
         with patch("src.kernel.repo_key.from_repo_key", return_value="test/repo"), \
-             patch("src.api.event_pipeline._is_github_repo", return_value=False), \
+             patch("src.domains.runtime.pipeline.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_comment_via_provider(
                 _FakeProvider(), "gitcode:test/repo", "42",
@@ -95,7 +95,7 @@ class TestPostResultToIssueConclusion:
 
     def test_structured_json_conclusion_extracted(self):
         """result_text 含结构化 JSON conclusion 时正常提取。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         result_text = json.dumps({
             "actions": ["fixed bug"],
@@ -109,7 +109,7 @@ class TestPostResultToIssueConclusion:
 
     def test_plain_text_result_preserved(self):
         """result_text 为纯文本时保留为 conclusion，不以占位文案覆盖。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         result_text = "已修复 bug，测试通过。"
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
@@ -120,7 +120,7 @@ class TestPostResultToIssueConclusion:
 
     def test_empty_result_uses_clean_fallback(self):
         """result_text 为空时兜底文案为简洁「任务已完成。」，不含「（agent agent）」。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_result_to_issue("test/repo", "5", "", "fake_token", "vod")
@@ -133,7 +133,7 @@ class TestPostResultToIssueConclusion:
 
     def test_json_without_conclusion_uses_fallback(self):
         """result_text 为 JSON 但无 conclusion 字段时用兜底文案。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         result_text = '{"foo": "bar"}'
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
@@ -145,7 +145,7 @@ class TestPostResultToIssueConclusion:
 
     def test_marker_stripped_from_conclusion(self):
         """result_text 含预附 marker 时，marker 不出现在 conclusion 中（避免双重 marker）。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         result_text = "修复完成\n<!-- grape-auto-comment -->"
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
@@ -165,7 +165,7 @@ class TestPostResultToIssueDedup:
 
     def test_skip_when_agent_already_posted(self):
         """Issue 已有含 agent_type tag 的评论时，系统不补发。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         existing = [
             {"body": "[VOD Agent] 已完成需求分析，详见 spec。"},
@@ -177,7 +177,7 @@ class TestPostResultToIssueDedup:
 
     def test_post_when_agent_did_not_post(self):
         """Issue 已有其它 Agent 评论但无目标 Agent 评论时，系统补发一条。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         existing = [
             {"body": "[issue agent] 已完成可开发性分析，详见 spec。"},
@@ -189,7 +189,7 @@ class TestPostResultToIssueDedup:
 
     def test_skip_when_no_existing_comments(self):
         """Issue 无任何评论时，系统补发一条。"""
-        from src.api.event_pipeline import _post_result_to_issue
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue
         captured = {}
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured, [])):
             _post_result_to_issue("test/repo", "5", "done", "fake_token", "coding")
@@ -207,7 +207,7 @@ class TestCompleteTaskFallback:
     def test_fallback_text_no_agent_agent(self):
         """complete_task 传给 post_issue_comment 的兜底文案为「任务已完成。」。"""
         import inspect
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         src = inspect.getsource(complete_task)
         # 兜底文案应使用简洁形式，不含「（{agent_type} agent）」
         assert "任务已完成（" not in src, \

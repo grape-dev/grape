@@ -37,7 +37,7 @@ _headers = {}
 
 def setup_module():
     global _uid, _headers
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()

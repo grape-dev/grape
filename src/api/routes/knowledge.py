@@ -65,7 +65,7 @@ def _check_repo_member(user: dict, repo_key: str):
         if _tok_owner and (_tok_prov, _tok_owner, _tok_repo) == (_req_prov, _req_owner, _req_repo):
             return
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无权访问此仓库的知识库（仓库作用域不匹配）"})
-    from src.user.db import get_user_repos
+    from src.domains.mgmt.user.db import get_user_repos
     user_id = user.get("id")
     if not user_id:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "无法识别用户身份"})
@@ -338,7 +338,7 @@ def _check_ref_permission(knowledge_id: int, user: dict):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "仅创建者可管理关联"})
     else:
         # system/agent 知识——仓库托管者可管理
-        from src.user.db import get_user_repos
+        from src.domains.mgmt.user.db import get_user_repos
         user_id = user.get("id")
         repo_key = row.get("repo_key", "")
         try:
@@ -369,7 +369,7 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     obs_key = row.get("obs_key", "")
     content_hash = ""
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         storage = get_storage()
         if storage is not None and obs_key:
             with open(full, "rb") as f:
@@ -396,7 +396,7 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
     obs_key = row.get("obs_key", "")
     if obs_key:
         try:
-            from src.storage import get_storage
+            from src.domains.runtime.storage import get_storage
             storage = get_storage()
             if storage is not None:
                 storage.delete_object(obs_key)
@@ -487,7 +487,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
 
     obs_key = ""
     try:
-        from src.storage import get_storage
+        from src.domains.runtime.storage import get_storage
         storage = get_storage()
         if storage is not None:
             obs_key = f"{knowledge_obs_prefix(repo_key)}/member/{username}/{filename}"
@@ -544,7 +544,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
             pass
         if obs_key:
             try:
-                from src.storage import get_storage
+                from src.domains.runtime.storage import get_storage
                 storage = get_storage()
                 if storage is not None:
                     storage.delete_object(obs_key)

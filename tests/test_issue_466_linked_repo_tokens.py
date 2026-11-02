@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.api.event_pipeline import _inject_linked_repo_tokens
+from src.domains.runtime.pipeline.event_pipeline import _inject_linked_repo_tokens
 
 
 _LINKED = [

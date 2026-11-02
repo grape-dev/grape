@@ -30,7 +30,7 @@ class TestT21DetectWebhookFromHost:
         """T21-01: TRUSTED_HOSTS 未设时 X-Forwarded-Host 被忽略"""
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="1.2.3.4:3000",
                 forwarded_host="evil.com",
@@ -42,7 +42,7 @@ class TestT21DetectWebhookFromHost:
     def test_t21_02_trusted_hosts_set_accepts_forwarded_host(self):
         """T21-02: TRUSTED_HOSTS 设定时 X-Forwarded-Host 在白名单内被接受"""
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "example.com"}, clear=False):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="127.0.0.1:3000",
                 forwarded_host="example.com",
@@ -54,7 +54,7 @@ class TestT21DetectWebhookFromHost:
     def test_t21_03_trusted_hosts_set_rejects_unlisted_forwarded_host(self):
         """T21-03: TRUSTED_HOSTS 设定时 X-Forwarded-Host 不在白名单被拒绝"""
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "example.com"}, clear=False):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="1.2.3.4:3000",
                 forwarded_host="evil.com",
@@ -64,7 +64,7 @@ class TestT21DetectWebhookFromHost:
 
     def test_t21_04_rejects_localhost(self):
         """T21-04: detect_webhook_from_host 不接受 localhost / 127.0.0.1"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         for host in ("localhost", "127.0.0.1", "0.0.0.0", "::1"):
             result = detect_webhook_from_host(host=host, forwarded_host="", forwarded_proto="http")
             assert result == "", f"localhost variant {host} should be rejected"
@@ -81,7 +81,7 @@ class TestT21bGetTrustedHost:
             class MockRequest:
                 headers = {"Host": "1.2.3.4:3000", "X-Forwarded-Host": "evil.com"}
 
-            from src.auth.providers import _get_trusted_host
+            from src.domains.mgmt.auth.providers import _get_trusted_host
             result = _get_trusted_host(MockRequest())
             assert "evil.com" not in result
             assert "1.2.3.4" in result
@@ -96,11 +96,11 @@ class TestT22UpdateRepoBotToken:
 
     def test_t22_01_gitcode_upgrade_clears_webhook_secret(self):
         """T22-01: GitCode B→A 升级后 webhook_secret 被清空"""
-        from src.user.db import _update_repo_bot_token
+        from src.domains.mgmt.user.db import _update_repo_bot_token
         mock_cursor = MagicMock()
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor):
             _update_repo_bot_token("gitcode:test/repo", "new_bot_token", provider="gitcode")
             # 验证 SQL 含 webhook_secret=''
             sql_arg = mock_cursor.execute.call_args[0][0]
@@ -109,11 +109,11 @@ class TestT22UpdateRepoBotToken:
 
     def test_t22_02_github_upgrade_clears_webhook_secret(self):
         """T22-02: GitHub B→A 升级也清空 webhook_secret"""
-        from src.user.db import _update_repo_bot_token
+        from src.domains.mgmt.user.db import _update_repo_bot_token
         mock_cursor = MagicMock()
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor):
             _update_repo_bot_token("github:test/repo", "new_gh_token", provider="github")
             sql_arg = mock_cursor.execute.call_args[0][0]
             assert "webhook_secret=''" in sql_arg
@@ -129,24 +129,24 @@ class TestT24QueryPathBReposPrefixFilter:
 
     def test_t24_01_gitcode_query_has_prefix_filter(self):
         """T24-01: gitcode 查询包含 NOT LIKE 'github:%' 过滤"""
-        from src.user.db import _query_path_b_repos
+        from src.domains.mgmt.user.db import _query_path_b_repos
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = []
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor):
             _query_path_b_repos("gitcode")
             sql_arg = mock_cursor.execute.call_args[0][0]
             assert "NOT LIKE 'github:%'" in sql_arg
 
     def test_t24_02_github_query_has_prefix_filter(self):
         """T24-02: github 查询包含 LIKE 'github:%' 过滤"""
-        from src.user.db import _query_path_b_repos
+        from src.domains.mgmt.user.db import _query_path_b_repos
         mock_cursor = MagicMock()
         mock_cursor.fetchall.return_value = []
-        with patch("src.user.db.db"), \
-             patch("src.user.db.db_lock"), \
-             patch("src.user.db.db.cursor", return_value=mock_cursor):
+        with patch("src.domains.mgmt.user.db.db"), \
+             patch("src.domains.mgmt.user.db.db_lock"), \
+             patch("src.domains.mgmt.user.db.db.cursor", return_value=mock_cursor):
             _query_path_b_repos("github")
             sql_arg = mock_cursor.execute.call_args[0][0]
             assert "LIKE 'github:%'" in sql_arg
@@ -163,7 +163,7 @@ class TestT25GithubPatGuard:
         """T25-01: GitHub PAT（无 refresh_token）不触发 refresh_oauth_token"""
         from src.api.deps import get_user_github_token_with_refresh
         with patch("src.api.deps._get_oauth_token_from_identity", return_value="ghp_PATTOKEN123"), \
-             patch("src.auth.grape_account_db._has_refresh_token", return_value=False), \
+             patch("src.domains.mgmt.auth.grape_account_db._has_refresh_token", return_value=False), \
              patch("src.api.deps.user_db.get_credential") as mock_get_cred, \
              patch("src.api.deps.user_db.refresh_oauth_token") as mock_refresh:
             token = get_user_github_token_with_refresh("testuser", user_id=1)
@@ -182,20 +182,20 @@ class TestT26GetTaskTokenPublic:
 
     def test_t26_01_returns_repo_gitcode_token_if_present(self):
         """T26-01: task 行有 repo_gitcode_token 时直接返回"""
-        from src.user.db import get_task_token
+        from src.domains.mgmt.user.db import get_task_token
         task = {"repo_gitcode_token": "bot_token_123", "repo_key": "gitcode:test/repo"}
         assert get_task_token(task) == "bot_token_123"
 
     def test_t26_02_returns_empty_for_empty_task(self):
         """T26-02: 空 task 返回空串"""
-        from src.user.db import get_task_token
+        from src.domains.mgmt.user.db import get_task_token
         assert get_task_token({}) == ""
 
     def test_t26_03_agent_and_service_import_same_function(self):
-        """T26-03: agent.py 和 service.py 都从 src.user.db 导入 get_task_token"""
-        import src.runtime.agent as agent_mod
-        import src.runtime.service as service_mod
-        from src.user.db import get_task_token
+        """T26-03: agent.py 和 service.py 都从 src.domains.mgmt.user.db 导入 get_task_token"""
+        import src.domains.runtime.engine.agent as agent_mod
+        import src.domains.runtime.engine.service as service_mod
+        from src.domains.mgmt.user.db import get_task_token
         # 两个模块的 _get_task_token 应该指向 user.db.get_task_token
         assert agent_mod._get_task_token is get_task_token
         assert service_mod._get_task_token is get_task_token

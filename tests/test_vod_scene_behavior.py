@@ -91,7 +91,7 @@ def _parse_vod_and_update(repo_key, issue_id, final_text, allow_override=True):
     """复刻 event_pipeline VOD done 场景处理逻辑（含宽松 JSON 兜底），校验最终 issue_state.scene_id。"""
     import re as _re
     from src.api.session_store import set_scene_override_flag, get_scene_override_flag, set_issue_scene, get_issue_scene
-    from src.runtime.engine_select import _repo_user_id
+    from src.domains.runtime.engine.engine_select import _repo_user_id
     from src.api.event_store import parse_agent_output_json
     set_scene_override_flag(repo_key, issue_id, allow_override)
     if not get_scene_override_flag(repo_key, issue_id):
@@ -124,7 +124,7 @@ class TestVodDoneScene:
     def test_vod_recommended_uses_repo_scene(self):
         """T15：VOD 推荐仓库场景时写入该场景。"""
         _add_repo_scene("gitcode:o/r", "custom-abc", "grape需求")
-        from src.user.db import add_managed_repo
+        from src.domains.mgmt.user.db import add_managed_repo
         add_managed_repo("gitcode:o/r", "o", "r")
         out = _parse_vod_and_update(
             "gitcode:o/r", "#1",
@@ -133,7 +133,7 @@ class TestVodDoneScene:
 
     def test_vod_terminate_no_scene(self):
         """T16：VOD 输出 terminate=未配置场景 → scene 清空。"""
-        from src.user.db import add_managed_repo
+        from src.domains.mgmt.user.db import add_managed_repo
         add_managed_repo("gitcode:o/r", "o", "r")
         out = _parse_vod_and_update(
             "gitcode:o/r", "#1",
@@ -142,7 +142,7 @@ class TestVodDoneScene:
 
     def test_vod_default_never_written(self):
         """T17：VOD 输出 recommended_scene=default → 不覆写 scene_id。"""
-        from src.user.db import add_managed_repo, set_repo_scene
+        from src.domains.mgmt.user.db import add_managed_repo, set_repo_scene
         add_managed_repo("gitcode:o/r", "o", "r")
         set_repo_scene("gitcode:o/r", "custom-keep")
         out = _parse_vod_and_update(

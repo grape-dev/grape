@@ -10,7 +10,7 @@
 - T7 官方同步口径回归（update_skill_content_hash 按主键 + official 行校验）
 
 Mock 策略（不触任何真实外部依赖）：
-- DB 读路径：monkeypatch `src.user.db.get_skill_hash_by_key` 为内存 dict 替身
+- DB 读路径：monkeypatch `src.domains.mgmt.user.db.get_skill_hash_by_key` 为内存 dict 替身
   （读时校验只经过这一个查询入口，对齐 test_skill_sync_obs 的 mock 模式）
 - OBS/local 存储：内存 dict 后端 `_MemStorage`（monkeypatch get_skill_storage/get_storage）
 - zip 磁盘缓存 / 内存缓存：目录与 dict 隔离（monkeypatch ZIP_CACHE_DIR 等 + clear）
@@ -132,7 +132,7 @@ def env(monkeypatch):
     tmp = tempfile.mkdtemp(prefix="issue444-")
 
     # 1. DB 读路径 mock：内存 dict 替身（读时校验唯一查询入口，含 P1-1 name-scope 查询）
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
     fake_rows = _FakeSkillRows()
     monkeypatch.setattr(user_db, "get_skill_hash_by_key", fake_rows)
     monkeypatch.setattr(user_db, "get_skill_hashes_by_name_scope", fake_rows.by_name_scope)
@@ -140,7 +140,7 @@ def env(monkeypatch):
 
     # 2. 存储后端 mock（不触 OBS/磁盘权威存储）
     storage = _MemStorage()
-    import src.storage as storage_mod
+    import src.domains.runtime.storage as storage_mod
     monkeypatch.setattr(storage_mod, "get_skill_storage", lambda: storage)
     monkeypatch.setattr(storage_mod, "get_storage", lambda: None)
 
@@ -174,7 +174,7 @@ def wdb(monkeypatch):
     db_lock = threading.Lock()
 
     import src.kernel.session_manager as sm
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
     monkeypatch.setattr(sm, "db", db_obj)
     monkeypatch.setattr(sm, "db_lock", db_lock)
     monkeypatch.setattr(user_db, "db", db_obj)
@@ -185,11 +185,11 @@ def wdb(monkeypatch):
     conn.close()
 
 
-from src.storage import (  # noqa: E402
+from src.domains.runtime.storage import (  # noqa: E402
     skill_key, zip_cache_get_with_hash, zip_cache_put, mem_cache_put,
     mem_cache_invalidate, mem_cache_get_with_hash, skill_md_content,
 )
-from src.user.db import upsert_skill_obs, get_skill_hash_by_key  # noqa: E402
+from src.domains.mgmt.user.db import upsert_skill_obs, get_skill_hash_by_key  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -223,7 +223,7 @@ def test_t1_write_side_hash(wdb):
 
 def test_upsert_failure_returns_none(wdb, monkeypatch):
     """DB 异常 → 返回 None（falsy），既有 `if not ok` 分支语义不变。"""
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
 
     class _Broken:
         def cursor(self):
@@ -300,7 +300,7 @@ def test_t3_scope_isolation(env):
         assert skill_md_content(k_repo, "my-skill") == "# repo ver"
         assert skill_md_content(k_off, "my-skill") == "# official ver"
 
-    from src.storage import _mem_cache
+    from src.domains.runtime.storage import _mem_cache
     assert len([k for k in _mem_cache if k.endswith("my-skill.zip")]) == 3, \
         "三个 object_key 应有三个独立缓存条目（无串键）"
 
@@ -386,7 +386,7 @@ def test_t4_convert_hash_reuse(env):
 
 def test_t4_convert_source_without_hash(env):
     """源缓存无 hash（存量）→ 对回源拿到的 src_zip 现算 sha256。"""
-    from src.storage import get_skill_zip_bytes
+    from src.domains.runtime.storage import get_skill_zip_bytes
     src_key = skill_key("custom", "7", "legacy-skill")
     src_zip = _make_zip("legacy-skill", "# legacy")
     env["storage"].objects[src_key] = src_zip  # 无 zip 缓存条目（miss → 回源字节）
@@ -435,7 +435,7 @@ def test_p1_1_all_provider_prefixes(env):
     - 新格式键（provider 段显式）：github/gitlab/gitcode 各自独立键 + 三元组精确查询；
     - 旧格式键（存量行 file_path 无 provider 段）：全行扫描去前缀比对（兼容分支）。
     """
-    from src.storage import _mem_cache, zip_cache_invalidate
+    from src.domains.runtime.storage import _mem_cache, zip_cache_invalidate
     # --- 新格式：每个 provider 独立键（skill_key 含 provider 段），精确查询路径 ---
     for provider in ("github", "gitlab", "gitcode"):
         key = skill_key("repo", f"{provider}:acme/web", "my-skill")
@@ -471,8 +471,8 @@ def test_p1_1_repo_row_lookup_helper(env):
 
     #444 根治后本分支仅服务旧格式键（存量行 file_path 无 provider 段）。
     """
-    from src.user.db import get_skill_hashes_by_name_scope
-    from src.storage import _db_hash_for_object_key
+    from src.domains.mgmt.user.db import get_skill_hashes_by_name_scope
+    from src.domains.runtime.storage import _db_hash_for_object_key
     k_gitcode = skill_key("repo", "gitcode:acme/web", "my-skill").replace(
         "/skills/repo/gitcode/", "/skills/repo/")   # 旧格式键（无 provider 段）
     k_github = k_gitcode                            # 旧格式下两 provider 共享同键（存量歧义）
@@ -493,7 +493,7 @@ def test_p1_1_repo_row_lookup_helper(env):
 
 def test_p3_1_invalidate_skill_caches_both_layers(env):
     """UC4-2：invalidate_skill_caches 同时清两层缓存（object_key 口径）。"""
-    from src.storage import invalidate_skill_caches, zip_cache_get_with_hash, _mem_cache
+    from src.domains.runtime.storage import invalidate_skill_caches, zip_cache_get_with_hash, _mem_cache
     key = skill_key("custom", "7", "del-skill")
     _seed(env, key, "user", "7", "# to delete", skill="del-skill")
     assert skill_md_content(key, "del-skill") == "# to delete"   # 两层缓存已填充
@@ -534,7 +534,7 @@ def test_p1_1_cross_provider_same_key_coexistence(env):
     file_path 均为旧格式（无 provider 段）→ 共享同键。#444 根治后新写不再产生此
     状态；本测试锁住存量数据的安全退化行为（helper 命中任一匹配行 hash）。
     """
-    from src.storage import _db_hash_for_object_key, _mem_cache, zip_cache_invalidate
+    from src.domains.runtime.storage import _db_hash_for_object_key, _mem_cache, zip_cache_invalidate
     key = skill_key("repo", "gitcode:acme/web", "my-skill").replace(
         "/skills/repo/gitcode/", "/skills/repo/")          # 旧格式键：两行共享
     h_gitcode = _seed(env, key, "repo", "gitcode:acme/web", "# stored content")[1]
@@ -558,7 +558,7 @@ def test_p1_1_cross_provider_same_key_coexistence(env):
 
 def test_anchor_refetch_writes_sid_into_caches(env):
     """冷读回源 → 两级缓存条目携带 sid（skill_id），后续校验走锚点路径。"""
-    from src.storage import _mem_cache, zip_cache_get_with_hash
+    from src.domains.runtime.storage import _mem_cache, zip_cache_get_with_hash
     key = skill_key("custom", "7", "my-skill")
     _seed(env, key, "user", "7", "# v1", sid=41)
     assert skill_md_content(key, "my-skill") == "# v1"
@@ -572,14 +572,14 @@ def test_anchor_refetch_writes_sid_into_caches(env):
 
 
 def _mem_cache_lookup(key):
-    from src.storage import _mem_cache
+    from src.domains.runtime.storage import _mem_cache
     hit = _mem_cache.get(key)
     return (hit[0], hit[2], hit[3]) if hit else (None, "", 0)
 
 
 def test_anchor_path_no_by_key_lookup_after_warm(env, monkeypatch):
     """sid 锚定后，命中校验不再走 by_key 定位（只按主键查）——架构分层的直接证据。"""
-    from src.storage import _db_hash_for_object_key
+    from src.domains.runtime.storage import _db_hash_for_object_key
     key = skill_key("custom", "7", "my-skill")
     _seed(env, key, "user", "7", "# v1", sid=41)
     assert skill_md_content(key, "my-skill") == "# v1"   # 冷读，定位层被调用
@@ -589,7 +589,7 @@ def test_anchor_path_no_by_key_lookup_after_warm(env, monkeypatch):
     def _counting(*a, **k):
         calls["n"] += 1
         return _orig(*a, **k)
-    monkeypatch.setattr("src.storage._db_hash_for_object_key", _counting)
+    monkeypatch.setattr("src.domains.runtime.storage._db_hash_for_object_key", _counting)
     assert skill_md_content(key, "my-skill") == "# v1"   # 热读，应只走锚点
     assert calls["n"] == 0, "sid 锚定后的命中校验不应再调 by_key 定位层"
 
@@ -624,7 +624,7 @@ def test_anchor_soft_deleted_skill_forces_invalidation(env):
 
 def test_anchor_legacy_entry_falls_back_to_by_key(env):
     """旧格式缓存条目（无 sid）：降级走 by_key 定位，行为与修复前一致（向后兼容）。"""
-    from src.storage import _mem_cache, mem_cache_put
+    from src.domains.runtime.storage import _mem_cache, mem_cache_put
     key = skill_key("custom", "7", "my-skill")
     _seed(env, key, "user", "7", "# v1", sid=41)
     # 手工塞一个旧格式条目（三元组，无 sid）
@@ -715,7 +715,7 @@ def test_s12_uc12_4_repo_cold_read_anchored(env):
     精确查询，锚点在 repo 冷读路径即建立；原 sid=0 未锚定）。
     对照：旧格式键（存量行 file_path）冷读仍 sid=0（兼容降级，与基线一致）。
     """
-    from src.storage import zip_cache_get_with_hash
+    from src.domains.runtime.storage import zip_cache_get_with_hash
     key = skill_key("repo", "gitcode:acme/web", "my-skill")
     _seed(env, key, "repo", "gitcode:acme/web", "# v1", sid=51)
     assert skill_md_content(key, "my-skill") == "# v1"   # 冷读回源
@@ -739,7 +739,7 @@ def test_s12_uc12_5_legacy_key_compat(env):
     单 provider 存量行：冷读 v1 → 缓存命中 v1 → 另一进程覆盖（hash+存储换新）
     → 不重启再读 v2（兼容分支的去前缀匹配命中唯一行）。零回退、零更糟。
     """
-    from src.storage import _mem_cache, zip_cache_invalidate
+    from src.domains.runtime.storage import _mem_cache, zip_cache_invalidate
     k_legacy = skill_key("repo", "gitcode:acme/web", "my-skill").replace(
         "/skills/repo/gitcode/", "/skills/repo/")   # 存量行 file_path（无 provider 段）
     _seed(env, k_legacy, "repo", "gitcode:acme/web", "# legacy v1")
@@ -757,7 +757,7 @@ def test_s12_uc12_6_strict_repo_ambiguity(wdb):
     对照三条：strict 歧义报错 / 非 strict 保持原行为 / 带前缀输入直通。
     """
     from fastapi import HTTPException
-    from src.api.routes.skills import _resolve_repo_key
+    from src.domains.mgmt.routes.skills import _resolve_repo_key
     conn = wdb["conn"]
     conn.execute("CREATE TABLE IF NOT EXISTS managed_repos (repo_key TEXT PRIMARY KEY)")
     conn.execute("INSERT INTO managed_repos (repo_key) VALUES ('gitcode:acme/web')")
@@ -797,7 +797,7 @@ def test_pa_zip_bytes_cross_process_invalidate(env):
     修复前：磁盘缓存命中即返回，零校验——任务物化链路（runtime/service、
     event_pipeline、runtime claim）在双主部署下解压旧 zip。
     """
-    from src.storage import get_skill_zip_bytes, _mem_cache
+    from src.domains.runtime.storage import get_skill_zip_bytes, _mem_cache
     key = skill_key("repo", "gitcode:acme/web", "my-skill")
     v1_zip, h1 = _seed(env, key, "repo", "gitcode:acme/web", "# v1", sid=71)
     got = get_skill_zip_bytes(key, "my-skill")
@@ -816,7 +816,7 @@ def test_pa_zip_bytes_cross_process_invalidate(env):
 
 def test_pa_zip_bytes_degrade_semantics(env):
     """P-A 降级兼容：缓存条目无 hash / DB 无行 / DB 异常 → 不校验直接返回。"""
-    from src.storage import get_skill_zip_bytes
+    from src.domains.runtime.storage import get_skill_zip_bytes
     # a) 缓存条目无 hash（存量旧格式条目）→ 不校验直接命中，零回源
     key = skill_key("custom", "7", "old-skill")
     legacy_zip = _make_zip("old-skill", "# legacy")
@@ -837,7 +837,7 @@ def test_pb_upload_409_restores_previous_object(wdb, monkeypatch):
     直接驱动 upload 的存储分支核心序列：read(旧) → save(新) → upsert 失败 →
     恢复(旧)。断言存储对象回到旧字节、DB 行未动。
     """
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
     key = skill_key("custom", "7", "race-skill")
     old_zip = _make_zip("race-skill", "# owner-a version")
     new_zip = _make_zip("race-skill", "# owner-b version")
@@ -863,7 +863,7 @@ def test_pb_upload_409_restores_previous_object(wdb, monkeypatch):
         raise _sq.OperationalError("simulated concurrent conflict")
     monkeypatch.setattr(user_db, "upsert_skill_obs", _fail_upsert)
 
-    from src.api.routes.skills import _resolve_repo_key  # noqa: F401  (确保模块可导入)
+    from src.domains.mgmt.routes.skills import _resolve_repo_key  # noqa: F401  (确保模块可导入)
     _prev = store.read_bytes(key)
     store.save_bytes(key, new_zip)
     skill_id = None
@@ -894,9 +894,9 @@ def test_route_upload_409_restores_previous_object(monkeypatch, wdb):
     存储分支序列：read 旧 → save 新 → upsert 失败 → 恢复旧），路由函数是
     async 且依赖 UploadFile，此处以与路由逐行相同的顺序驱动 storage 分支。
     """
-    import src.user.db as user_db
-    from src.storage import skill_key as _sk
-    from src.user.db import upsert_skill_obs, get_skill_hash_by_key
+    import src.domains.mgmt.user.db as user_db
+    from src.domains.runtime.storage import skill_key as _sk
+    from src.domains.mgmt.user.db import upsert_skill_obs, get_skill_hash_by_key
     key = _sk("custom", "7", "route-409-skill")
     old_zip = _make_zip("route-409-skill", "# owner-a v1")
     new_zip = _make_zip("route-409-skill", "# owner-b CONFLICT")
@@ -942,7 +942,7 @@ def test_route_convert_overwrite_cross_process(env):
     此前 test_t4_convert_dst_overwrite_no_restart 只测 helper，本用例按 convert
     路由 skills.py:927-940 的实际顺序驱动。
     """
-    from src.storage import get_skill_zip_bytes, zip_cache_get_with_hash
+    from src.domains.runtime.storage import get_skill_zip_bytes, zip_cache_get_with_hash
     src_key = skill_key("custom", "7", "route-conv-skill")
     dst_key = skill_key("repo", "gitcode:acme/web", "route-conv-skill")
     src_zip, src_h = _seed(env, src_key, "user", "7", "# src v1", skill="route-conv-skill", sid=81)
@@ -976,7 +976,7 @@ def test_route_convert_overwrite_cross_process(env):
 def test_route_upload_new_key_and_sid_flow(env):
     """UC12-11（路由核心逻辑级）：上传路由 storage 分支完整序列——新格式键 +
     hash 落 DB + 缓存 (hash, sid) 锚点 + mem 失效（skills.py:746-764 逐行同序）。"""
-    from src.user.db import upsert_skill_obs, get_skill_hash_by_key, get_skill_hash_by_id
+    from src.domains.mgmt.user.db import upsert_skill_obs, get_skill_hash_by_key, get_skill_hash_by_id
     key = skill_key("repo", "gitcode:acme/web", "route-up-skill")
     zip_bytes = _make_zip("route-up-skill", "# route upload")
     content_hash = hashlib.sha256(zip_bytes).hexdigest()

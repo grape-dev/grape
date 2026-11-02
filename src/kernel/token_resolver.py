@@ -113,7 +113,7 @@ class GitCodeProvider(VCSProvider):
         return "gitcode"
 
     def verify_token(self, token: str) -> dict:
-        from src.user.repo_manager import _req
+        from src.domains.mgmt.user.repo_manager import _req
         return _req("GET", f"{self.API_BASE}/user", token)
 
     def get_user_login(self, token: str) -> str:
@@ -121,12 +121,12 @@ class GitCodeProvider(VCSProvider):
         return data.get("login", "") or ""
 
     def add_collaborator(self, api_token, owner, repo, username, permission="maintainer"):
-        from src.user.repo_manager import add_collaborator
+        from src.domains.mgmt.user.repo_manager import add_collaborator
         ok, _err = add_collaborator(api_token, owner, repo, username, permission)
         return ok
 
     def remove_collaborator(self, api_token, owner, repo, username):
-        from src.user.repo_manager import remove_collaborator
+        from src.domains.mgmt.user.repo_manager import remove_collaborator
         try:
             remove_collaborator(api_token, owner, repo, username)
             return True
@@ -134,11 +134,11 @@ class GitCodeProvider(VCSProvider):
             return False
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        from src.user.repo_manager import setup_webhook
+        from src.domains.mgmt.user.repo_manager import setup_webhook
         return setup_webhook(api_token, owner, repo, webhook_url, webhook_password=webhook_secret)
 
     def remove_webhook(self, api_token, owner, repo, hook_id):
-        from src.user.repo_manager import remove_webhook
+        from src.domains.mgmt.user.repo_manager import remove_webhook
         try:
             remove_webhook(api_token, owner, repo, int(hook_id))
             return True
@@ -178,19 +178,19 @@ class GitHubProvider(VCSProvider):
         return "github"
 
     def verify_token(self, token: str) -> dict:
-        from src.user.repo_manager import _github_req
+        from src.domains.mgmt.user.repo_manager import _github_req
         return _github_req("GET", f"{self.API_BASE}/user", token)
 
     def get_user_login(self, token: str) -> str:
-        from src.user.repo_manager import get_user_github_login
+        from src.domains.mgmt.user.repo_manager import get_user_github_login
         return get_user_github_login(token)
 
     def add_collaborator(self, api_token, owner, repo, username, permission="push"):
-        from src.user.repo_manager import add_github_collaborator
+        from src.domains.mgmt.user.repo_manager import add_github_collaborator
         return add_github_collaborator(api_token, owner, repo, username, permission)
 
     def remove_collaborator(self, api_token, owner, repo, username):
-        from src.user.repo_manager import remove_github_collaborator
+        from src.domains.mgmt.user.repo_manager import remove_github_collaborator
         try:
             remove_github_collaborator(api_token, owner, repo, username)
             return True
@@ -198,11 +198,11 @@ class GitHubProvider(VCSProvider):
             return False
 
     def setup_webhook(self, api_token, owner, repo, webhook_url, webhook_secret=""):
-        from src.user.repo_manager import setup_github_webhook
+        from src.domains.mgmt.user.repo_manager import setup_github_webhook
         return setup_github_webhook(api_token, owner, repo, webhook_url, webhook_secret=webhook_secret)
 
     def remove_webhook(self, api_token, owner, repo, hook_id):
-        from src.user.repo_manager import remove_github_webhook
+        from src.domains.mgmt.user.repo_manager import remove_github_webhook
         try:
             remove_github_webhook(api_token, owner, repo, int(hook_id))
             return True
@@ -304,7 +304,7 @@ class TokenStrategy:
 
     def _get_host_user_id(self, repo_key: str) -> int:
         """获取 host_user_id。子类复用避免重复 import。"""
-        from src.user.db import get_host_user_id
+        from src.domains.mgmt.user.db import get_host_user_id
         return get_host_user_id(repo_key)
 
     @abstractmethod
@@ -530,7 +530,7 @@ class GlobalBotToken(TokenStrategy):
             return ""
         # 复用现有 _cached_get_meta 缓存逻辑
         meta_key = self.provider.global_bot_meta_key()
-        from src.user.db import _cached_get_meta, _read_gbt_file_field
+        from src.domains.mgmt.user.db import _cached_get_meta, _read_gbt_file_field
         if self.provider.provider_name == "github":
             return _cached_get_meta(meta_key,
                                     file_fallback_fn=lambda: _read_gbt_file_field("github_bot_token"))
@@ -539,7 +539,7 @@ class GlobalBotToken(TokenStrategy):
 
     def _is_expired(self, repo_key: str) -> bool:
         status_key = self.provider.global_bot_status_meta_key()
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.user.db import get_meta_value
         try:
             return get_meta_value(status_key) == "expired"
         except Exception:
@@ -547,7 +547,7 @@ class GlobalBotToken(TokenStrategy):
 
     def mark_expired(self, repo_key: str):
         status_key = self.provider.global_bot_status_meta_key()
-        from src.user.db import set_meta_value, _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
         try:
             set_meta_value(status_key, "expired")
             _invalidate_global_bot_cache()
@@ -556,7 +556,7 @@ class GlobalBotToken(TokenStrategy):
 
     def clear_expired(self, repo_key: str):
         status_key = self.provider.global_bot_status_meta_key()
-        from src.user.db import set_meta_value, _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import set_meta_value, _invalidate_global_bot_cache
         try:
             set_meta_value(status_key, "")
             _invalidate_global_bot_cache()
@@ -582,7 +582,7 @@ class UserToken(TokenStrategy):
         return "user"
 
     def _fetch(self, repo_key: str) -> str:
-        from src.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
         host_user_id = self._get_host_user_id(repo_key)
         if host_user_id == 0:
             return ""  # 路径 A 不走用户 token
@@ -599,9 +599,9 @@ class UserToken(TokenStrategy):
 
         供 read_stored_token() 调用——A2A 鉴权 / session 写入只需原始值。
         """
-        from src.auth.grape_account_db import get_grape_account_by_id
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_id
         from src.kernel.session_manager import db, db_lock
-        from src.auth.credential_crypto import decrypt
+        from src.domains.mgmt.auth.credential_crypto import decrypt
         host_user_id = self._get_host_user_id(repo_key)
         if host_user_id == 0:
             return ""
@@ -635,13 +635,13 @@ class UserToken(TokenStrategy):
         host_user_id = self._get_host_user_id(repo_key)
         if host_user_id == 0:
             return False  # 路径 A 仓库不走用户 token
-        from src.auth.grape_account_db import is_identity_expired
+        from src.domains.mgmt.auth.grape_account_db import is_identity_expired
         return is_identity_expired(host_user_id, self.provider.provider_name)
 
     def mark_expired(self, repo_key: str):
         host_user_id = self._get_host_user_id(repo_key)
         if host_user_id > 0:
-            from src.auth.grape_account_db import mark_identity_expired
+            from src.domains.mgmt.auth.grape_account_db import mark_identity_expired
             mark_identity_expired(host_user_id, self.provider.provider_name)
 
     def clear_expired(self, repo_key: str):
@@ -795,7 +795,7 @@ class TokenResolver:
         R21.3.5: 区分 401 和超时/5xx——只对 401 标记过期。
         R21.3.3: 原 R18.5.10 "超时视为验证失败" 设计取消。
         """
-        from src.vcs.token_error import extract_http_status_from_exc
+        from src.domains.runtime.vcs.token_error import extract_http_status_from_exc
         for strategy in self.strategies:
             token = strategy._fetch(repo_key)  # 不检查过期标记，查原始值
             if token:
@@ -909,7 +909,7 @@ class RepoBotTokenHandler(TokenActionHandler):
         # 仓库级 bot 过期 → fallback 到全局 bot
         if result.provider:
             try:
-                from src.user.db import _get_global_bot_token, get_global_github_bot_token
+                from src.domains.mgmt.user.db import _get_global_bot_token, get_global_github_bot_token
                 if result.provider.provider_name == "github":
                     return get_global_github_bot_token() or ""
                 return _get_global_bot_token() or ""
@@ -942,10 +942,10 @@ class GlobalBotTokenHandler(TokenActionHandler):
             return False
         try:
             if result.provider.provider_name == "github":
-                from src.user.db import get_global_github_bot_username
+                from src.domains.mgmt.user.db import get_global_github_bot_username
                 _bot_name = get_global_github_bot_username()
             else:
-                from src.user.db import get_global_bot_usernames
+                from src.domains.mgmt.user.db import get_global_bot_usernames
                 _bot_names = get_global_bot_usernames()
                 return actor in _bot_names if _bot_names else False
             return actor == _bot_name if _bot_name else False
@@ -1001,14 +1001,14 @@ class UserTokenHandler(TokenActionHandler):
         # 条件 1: 路径 B 仓库（通过 result.level == "user" 已确认）
         # 条件 2: actor == host_vcs_username
         try:
-            from src.user.db import get_host_vcs_username
+            from src.domains.mgmt.user.db import get_host_vcs_username
             host_vcs_username = get_host_vcs_username(result.repo_key, result.provider.provider_name if result.provider else "")
             if not host_vcs_username or actor != host_vcs_username:
                 return False
         except Exception:
             return False
         # 条件 4: 该 issue 有正在执行的 task
-        from src.api.event_pipeline import check_running_task
+        from src.domains.runtime.pipeline.event_pipeline import check_running_task
         return check_running_task(result.repo_key, result.issue_id or "")
 
     def get_comment_token(self, result):
@@ -1025,7 +1025,7 @@ class UserTokenHandler(TokenActionHandler):
         # 用户 token 完全不可用 → fallback 全局 bot token
         if result.provider:
             try:
-                from src.user.db import _get_global_bot_token, get_global_github_bot_token
+                from src.domains.mgmt.user.db import _get_global_bot_token, get_global_github_bot_token
                 if result.provider.provider_name == "github":
                     return get_global_github_bot_token() or ""
                 return _get_global_bot_token() or ""
@@ -1079,7 +1079,7 @@ def _post_comment_via_provider(provider: VCSProvider, repo_key: str,
     if not token or not repo_key or not issue_num:
         return False
     try:
-        from src.api.event_pipeline import _post_result_to_issue, _is_github_repo
+        from src.domains.runtime.pipeline.event_pipeline import _post_result_to_issue, _is_github_repo
         from src.kernel.repo_key import from_repo_key
         _repo = from_repo_key(repo_key)
         if not _repo:

@@ -24,10 +24,10 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest  # noqa: E402
 
 from fastapi import HTTPException  # noqa: E402
-from src.api.routes.skills import (  # noqa: E402
+from src.domains.mgmt.routes.skills import (  # noqa: E402
     list_sub_skills, read_sub_skill, package_sub_skill)
 from src.kernel.session_manager import db, db_lock  # noqa: E402
-from src.storage import StorageBackend, zip_cache_invalidate  # noqa: E402
+from src.domains.runtime.storage import StorageBackend, zip_cache_invalidate  # noqa: E402
 
 SKILL = "obs-sub-test-skill"
 OBJECT_KEY = "skills/user/1001/obs-sub-test-skill.zip"
@@ -118,7 +118,7 @@ def obs_env(monkeypatch):
     zip_cache_invalidate(OBJECT_KEY)
     fake = FakeStorage()
     fake.objects[OBJECT_KEY] = _make_pkg_zip()
-    monkeypatch.setattr("src.storage.get_skill_storage", lambda: fake)
+    monkeypatch.setattr("src.domains.runtime.storage.get_skill_storage", lambda: fake)
     yield fake
     with db_lock:
         db.execute("DELETE FROM skill WHERE skill_name LIKE 'obs-sub-test%'")
@@ -189,7 +189,7 @@ def test_storage_disabled_503(monkeypatch):
         db.execute("DELETE FROM skill WHERE skill_name LIKE 'obs-sub-test%'")
         db.commit()
     sid = _insert_skill(SKILL, "user", "1001", "skills/user/1001/x.zip", OBJECT_KEY)
-    monkeypatch.setattr("src.storage.get_skill_storage", lambda: None)
+    monkeypatch.setattr("src.domains.runtime.storage.get_skill_storage", lambda: None)
     with pytest.raises(HTTPException) as exc:
         list_sub_skills(sid, user={"id": "1001"})
     assert exc.value.status_code == 503
@@ -204,7 +204,7 @@ def test_legacy_user_skill_without_object_key_empty(monkeypatch):
         db.execute("DELETE FROM skill WHERE skill_name LIKE 'obs-sub-test%'")
         db.commit()
     sid = _insert_skill("obs-sub-test-legacy", "user", "1001", "some/local/path", "")
-    monkeypatch.setattr("src.storage.get_skill_storage", lambda: None)
+    monkeypatch.setattr("src.domains.runtime.storage.get_skill_storage", lambda: None)
     result = list_sub_skills(sid, user={"id": "1001"})
     assert result == {"skill_name": "obs-sub-test-legacy", "sub_skills": []}
     with db_lock:

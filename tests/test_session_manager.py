@@ -24,7 +24,7 @@ def _restore_shared_session_manager():
     import src.kernel.session_manager as _sm_orig
     _orig_db = _sm_orig.db
     _orig_db_lock = _sm_orig.db_lock
-    import src.auth.grape_account_db as _gad_orig
+    import src.domains.mgmt.auth.grape_account_db as _gad_orig
     _orig_gad_db = _gad_orig.db
     _orig_gad_db_lock = _gad_orig.db_lock
     yield
@@ -37,9 +37,9 @@ def _restore_shared_session_manager():
     _sm.db = _orig_db
     _sm.db_lock = _orig_db_lock
     # 同步 grape_account_db（也可能被 _import_session_manager 修改过）
-    _gad = _sys.modules.get("src.auth.grape_account_db")
+    _gad = _sys.modules.get("src.domains.mgmt.auth.grape_account_db")
     if _gad is None:
-        import src.auth.grape_account_db as _gad
+        import src.domains.mgmt.auth.grape_account_db as _gad
     _gad.db = _orig_gad_db
     _gad.db_lock = _orig_gad_db_lock
 
@@ -134,7 +134,7 @@ def _import_session_manager(tmp_path):
     # D32-补丁：同步 grape_account_db 的 db/db_lock 引用指向临时库
     # 否则 grape_account_db 仍缓存全局 DB 引用，查 grape_accounts/external_identities 找不到临时库中的表
     try:
-        import src.auth.grape_account_db as _gad
+        import src.domains.mgmt.auth.grape_account_db as _gad
         _gad.db = sm.db
         _gad.db_lock = sm.db_lock
     except Exception:

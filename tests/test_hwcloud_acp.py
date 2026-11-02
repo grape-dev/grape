@@ -11,8 +11,8 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import src.runtime.registry  # noqa: E402,F401 先触发（绕开 src.agent.__init__ 循环导入）
-from src.agent.hwcloud_acp import (  # noqa: E402
+import src.domains.runtime.engine.registry  # noqa: E402,F401 先触发（绕开 src.domains.runtime.agents.__init__ 循环导入）
+from src.domains.runtime.agents.hwcloud_acp import (  # noqa: E402
     HwcloudACPBackend,
     _ACPSimpleClient,
     _build_task_settings,
@@ -281,8 +281,8 @@ class TestPermissionAutoApprove:
     def test_initialize_declares_fs_capabilities(self):
         """initialize 必须声明 fs read/write（否则 agent 侧工具被 gate 裁掉）。"""
         import inspect
-        import src.runtime.registry  # noqa: F401
-        from src.agent import hwcloud_acp as mod
+        import src.domains.runtime.engine.registry  # noqa: F401
+        from src.domains.runtime.agents import hwcloud_acp as mod
         src_text = inspect.getsource(mod)
         assert '"fs": {"readTextFile": True, "writeTextFile": True}' in src_text
 
@@ -437,14 +437,14 @@ class TestAIShellDisplayRename:
     内部标识（name/binary/路由键）不动，仅 instance_name 派生前缀与 display_name 变。"""
 
     def test_instance_name_uses_display_name(self):
-        from src.runtime.instances import instance_name
+        from src.domains.runtime.engine.instances import instance_name
         assert instance_name("hwcloud", "worker-dev-0006", 6) == "aishell-worker-dev-0006"
         # 其他引擎不受影响
         assert instance_name("opencode", "dev-0005", 0) == "opencode-dev-0005"
         assert instance_name("hermes", "dev-0005", 0) == "hermes-dev-0005"
 
     def test_engine_display_name_mapping(self):
-        from src.runtime.instances import engine_display_name
+        from src.domains.runtime.engine.instances import engine_display_name
         assert engine_display_name("hwcloud") == "aishell"
         assert engine_display_name("HWCLOUD") == "aishell"  # 大小写不敏感
         assert engine_display_name("opencode") == "opencode"  # 未映射原样
@@ -454,7 +454,7 @@ class TestAIShellDisplayRename:
 
         用 monkeypatch 模拟 DB 行（name=hwcloud）验证 resolve_instance_id 两个名字都命中。
         """
-        import src.runtime.instances as inst
+        import src.domains.runtime.engine.instances as inst
         rows = [(271, "hwcloud", 31, "worker-2b8e99ce470a455597b5b1dafb0bcf7b", "active")]
 
         class _FakeCursor:
@@ -487,7 +487,7 @@ class TestAIShellDisplayRename:
     def test_backend_for_engine_accepts_aishell_prefix(self):
         """seq#552 同款坑守护：instance_name 变 aishell-worker-* 后，
         _backend_for_engine 仍路由到 hwcloud 后端（不能掉默认 opencode）。"""
-        from src.runtime.agent import _backend_for_engine
+        from src.domains.runtime.engine.agent import _backend_for_engine
         assert _backend_for_engine("aishell-worker-ecs-grape-de-0006") == "hwcloud"
         assert _backend_for_engine("hwcloud-worker-ecs-grape-de-0006") == "hwcloud"  # 旧名也认
         assert _backend_for_engine("opencode-worker-x") == "opencode"
@@ -501,12 +501,12 @@ class TestBackendRegistration:
         assert b.prompt_via_stdin is False
 
     def test_registered_in_backend_dict(self):
-        import src.runtime.registry as r
+        import src.domains.runtime.engine.registry as r
         assert "hwcloud" in r._RUNTIMES
         assert r.get_runtime("hwcloud").name == "hwcloud"
 
     def test_discover_reports_installed_state(self):
-        from src.agent.executor import discover_backends
+        from src.domains.runtime.agents.executor import discover_backends
         hw = [x for x in discover_backends() if x["name"] == "hwcloud"]
         assert len(hw) == 1
         # installed 状态与 PATH 中是否有 hwcloud 一致（不硬编码 True）

@@ -13,10 +13,10 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(ROOT, "data", "test_sessions.db")
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.api.routes import templates as templates_mod
-from src.user import db as user_db
+from src.domains.mgmt.routes import templates as templates_mod
+from src.domains.mgmt.user import db as user_db
 from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
-from src.auth.grape_account_db import (
+from src.domains.mgmt.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_username,
     get_token_version as grape_get_token_version,
 )
@@ -44,7 +44,7 @@ CONFIG_PATH = os.path.join(ROOT, "configs", "project-templates.json")
 def setup_module():
     global _uid, _token, _headers
     # D32: 直接用 SQL 创建 grape_accounts 用户
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     with sm_lock:
         c = sm_db.cursor()
         c.execute("SELECT id FROM grape_accounts WHERE username='test_tmpl'")
@@ -179,7 +179,7 @@ class TestCreate:
     def test_no_token(self):
         """无 GitCode token 用户 → 400"""
         # D32: 直接用 SQL 创建 grape_accounts 用户
-        from src.auth.password import hash_password
+        from src.domains.mgmt.auth.password import hash_password
         with sm_lock:
             c = sm_db.cursor()
             c.execute("SELECT id FROM grape_accounts WHERE username='test_tmpl_notok'")
@@ -216,8 +216,8 @@ class TestCreate:
              patch.object(templates_mod, "get_user_gitcode_login", return_value="test_tmpl"), \
              patch.object(templates_mod, "create_repo", return_value={"full_name": "test_tmpl/hello-skill"}), \
              patch.object(templates_mod, "push_template_to_repo", return_value=True), \
-             patch("src.api.routes.repos.host_repo", new=_fake_host), \
-             patch("src.api.routes.scenes.apply_scene", new=_fake_apply_scene):
+             patch("src.domains.mgmt.routes.repos.host_repo", new=_fake_host), \
+             patch("src.domains.mgmt.routes.scenes.apply_scene", new=_fake_apply_scene):
             r = client.post("/api/project-templates/create",
                             json={"template_id": "hello-skill", "repo_name": ""},
                             headers=_headers)
@@ -238,7 +238,7 @@ class TestCreate:
              patch.object(templates_mod, "get_user_gitcode_login", return_value="test_tmpl"), \
              patch.object(templates_mod, "create_repo", return_value={"full_name": "test_tmpl/hello-skill"}), \
              patch.object(templates_mod, "push_template_to_repo", return_value=True), \
-             patch("src.api.routes.repos.host_repo", side_effect=RuntimeError("webhook boom")):
+             patch("src.domains.mgmt.routes.repos.host_repo", side_effect=RuntimeError("webhook boom")):
             r = client.post("/api/project-templates/create",
                             json={"template_id": "hello-skill", "repo_name": ""},
                             headers=_headers)
@@ -260,8 +260,8 @@ def _fake_apply_scene(owner, repo, body, user):
 # ===================== repo_manager 新函数 =====================
 class TestRepoManager:
     def test_create_repo_calls_api(self):
-        from src.user.repo_manager import create_repo
-        with patch("src.user.repo_manager._req") as mock_req:
+        from src.domains.mgmt.user.repo_manager import create_repo
+        with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
             mock_req.return_value = {"full_name": "me/myrepo", "name": "myrepo"}
             result = create_repo("tok", "myrepo", "desc", private=False)
             url = mock_req.call_args[0][1]
@@ -272,8 +272,8 @@ class TestRepoManager:
             assert result["full_name"] == "me/myrepo"
 
     def test_create_repo_no_token(self):
-        from src.user.repo_manager import create_repo
-        with patch("src.user.repo_manager._req") as mock_req:
+        from src.domains.mgmt.user.repo_manager import create_repo
+        with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
             try:
                 create_repo("", "repo")
                 assert False, "应抛错"
@@ -282,18 +282,18 @@ class TestRepoManager:
             mock_req.assert_not_called()
 
     def test_get_user_gitcode_login(self):
-        from src.user.repo_manager import get_user_gitcode_login
-        with patch("src.user.repo_manager._req") as mock_req:
+        from src.domains.mgmt.user.repo_manager import get_user_gitcode_login
+        with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
             mock_req.return_value = {"login": "grape_dev"}
             assert get_user_gitcode_login("tok") == "grape_dev"
 
     def test_push_local_template(self):
         """local 模板：复制本地目录并执行 git init/add/commit/push"""
-        from src.user.repo_manager import push_template_to_repo
+        from src.domains.mgmt.user.repo_manager import push_template_to_repo
         tpl = {"id": "hello-skill", "source": "local"}
-        with patch("src.user.repo_manager._run_git") as mock_git, \
-             patch("src.user.repo_manager._run_git_has_origin", return_value=False), \
-             patch("src.user.repo_manager._git_has_changes", return_value=True):
+        with patch("src.domains.mgmt.user.repo_manager._run_git") as mock_git, \
+             patch("src.domains.mgmt.user.repo_manager._run_git_has_origin", return_value=False), \
+             patch("src.domains.mgmt.user.repo_manager._git_has_changes", return_value=True):
             mock_git.side_effect = [""] * 20  # init/add/branch/commit/push 等
             ok = push_template_to_repo(tpl, "me", "hello-skill", "user_tok", bot_token="")
             assert ok is True
@@ -303,12 +303,12 @@ class TestRepoManager:
 
     def test_push_git_template_falls_back_to_user_token(self):
         """git 模板：无 bot token 时回退用户 token，push URL 含 user token，不应抛错。"""
-        from src.user.repo_manager import push_template_to_repo
+        from src.domains.mgmt.user.repo_manager import push_template_to_repo
         tpl = {"id": "micro-svc", "source": "git", "source_repo": "devops-bot/cloud-native-microsvc"}
-        with patch("src.user.repo_manager._run_git") as mock_git, \
-             patch("src.user.repo_manager._run_git_has_origin", return_value=False), \
-             patch("src.user.repo_manager._git_has_changes", return_value=True), \
-             patch("src.user.repo_manager._download_gitcode_tarball"):
+        with patch("src.domains.mgmt.user.repo_manager._run_git") as mock_git, \
+             patch("src.domains.mgmt.user.repo_manager._run_git_has_origin", return_value=False), \
+             patch("src.domains.mgmt.user.repo_manager._git_has_changes", return_value=True), \
+             patch("src.domains.mgmt.user.repo_manager._download_gitcode_tarball"):
             mock_git.side_effect = [""] * 20
             ok = push_template_to_repo(tpl, "me", "repo", "user_tok", bot_token="")
             assert ok is True

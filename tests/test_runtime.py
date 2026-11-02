@@ -3,7 +3,7 @@ import json, threading
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)
@@ -331,7 +331,7 @@ class TestMultiInstanceRouting:
             db.commit()
 
     def test_pick_online_instance(self):
-        from src.user.db import get_runtime_id_by_name
+        from src.domains.mgmt.user.db import get_runtime_id_by_name
         self._seed_runtimes([
             {"credential_id": 1, "name": "opencode", "status": "offline", "last_seen_at": None},
             {"credential_id": 2, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
@@ -343,7 +343,7 @@ class TestMultiInstanceRouting:
         assert st == "online", f"应优先选 online 实例, got id={rid} status={st}"
 
     def test_fallback_when_all_offline(self):
-        from src.user.db import get_runtime_id_by_name
+        from src.domains.mgmt.user.db import get_runtime_id_by_name
         self._seed_runtimes([
             {"credential_id": 1, "name": "opencode", "status": "offline", "last_seen_at": None},
             {"credential_id": 2, "name": "opencode", "status": "offline", "last_seen_at": None},
@@ -351,7 +351,7 @@ class TestMultiInstanceRouting:
         assert get_runtime_id_by_name("opencode") is not None, "全 offline 应回退任意实例保证可入队"
 
     def test_ensure_default_no_dup(self):
-        from src.user.db import ensure_default_runtime
+        from src.domains.mgmt.user.db import ensure_default_runtime
         self._seed_runtimes([
             {"credential_id": 1, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
         ])

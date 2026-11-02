@@ -76,7 +76,7 @@ class TestPRMergedSRERetry:
     def test_T1_exhausted_marks_result_keeps_failed(self, monkeypatch):
         """引擎持续离线 → 耗尽后 result 追加终止说明，状态保持 failed。"""
         import src.api.pr_merged_sre_retry as mod
-        import src.runtime.engine_select as es
+        import src.domains.runtime.engine.engine_select as es
         seq = _mk_event()
         monkeypatch.setattr(es, "get_scene_pool_engine_ids",
                             lambda *a, **kw: None)
@@ -92,9 +92,9 @@ class TestPRMergedSRERetry:
     def test_T2_recovery_redispatches(self, monkeypatch):
         """引擎恢复 → 事件复位 running 并重新入队。"""
         import src.api.pr_merged_sre_retry as mod
-        import src.runtime.engine_select as es
-        import src.runtime.service as svc
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.engine.service as svc
+        import src.domains.runtime.pipeline.event_pipeline as ep
         seq = _mk_event()
         monkeypatch.setattr(es, "get_scene_pool_engine_ids",
                             lambda *a, **kw: json.dumps([7]))
@@ -128,8 +128,8 @@ class TestPRMergedSRERetry:
     def test_T4_taken_over_skips_redispatch(self, monkeypatch):
         """事件已复位 running（被人工重派等）→ 不重复派发。"""
         import src.api.pr_merged_sre_retry as mod
-        import src.runtime.engine_select as es
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
         seq = _mk_event(status="running", result="")
         monkeypatch.setattr(es, "get_scene_pool_engine_ids",
                             lambda *a, **kw: json.dumps([7]))
@@ -143,8 +143,8 @@ class TestPRMergedSRERetry:
 
     def test_T5_run_pipeline_offline_schedules_retry(self, monkeypatch):
         """集成：PR merged → sre、场景引擎全灭 → failed + result 带自动重试标记。"""
-        import src.api.event_pipeline as ep
-        import src.runtime.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
+        import src.domains.runtime.engine.engine_select as es
         scheduled = []
 
         _seed_stage_qa()
@@ -172,8 +172,8 @@ class TestPRMergedSRERetry:
             "user": {"username": "human_user"},
         }).encode()
         from unittest.mock import patch as _patch
-        with _patch("src.user.db.get_agent_bot_token", return_value=""), \
-             _patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+        with _patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""), \
+             _patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
             ep.run_pipeline(raw, {"X-GitCode-Event": "Merge Request Hook"},
                             account="XOcto/i496-repo")
 
@@ -205,8 +205,8 @@ class TestPRMergedSRERetry:
         """T7 审查修复回归：plugin 广播 + engine_id=0 + backend 为空 →
         兜底 "opencode" 入队，不 raise（与 run_pipeline 广播分支语义一致）。"""
         import src.api.pr_merged_sre_retry as mod
-        import src.runtime.engine_select as es
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.engine.engine_select as es
+        import src.domains.runtime.pipeline.event_pipeline as ep
         seq = _mk_event()
         monkeypatch.setattr(es, "get_scene_pool_engine_ids",
                             lambda *a, **kw: json.dumps([]))

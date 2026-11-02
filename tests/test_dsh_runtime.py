@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from src.runtime.dsh import DshRuntime
+from src.domains.runtime.engine.dsh import DshRuntime
 
 
 @pytest.fixture()

@@ -19,14 +19,14 @@ import sys as _sys
 _is_win = _sys.platform == "win32"
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
-from src.user import db as user_db
-from src.auth import grape_account_db  # noqa: E402
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db  # noqa: E402
 from src.kernel.session_manager import db, db_lock  # noqa: E402
-from src.storage import StorageBackend  # noqa: E402
+from src.domains.runtime.storage import StorageBackend  # noqa: E402
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -41,7 +41,7 @@ def setup_module():
     # grape_accounts，旧 user_db.create_user 写死表 user_accounts 导致全用例 401。
     # 改用 create_grape_account；唯一后缀避免跨运行 UNIQUE 冲突。
     import uuid as _uuid
-    from src.auth.grape_account_db import create_grape_account, get_grape_account_by_username
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_grape_account_by_username
     _uname = f"test_obs_{_uuid.uuid4().hex[:8]}"
     _uid = create_grape_account(_uname, "", "test123") or get_grape_account_by_username(_uname)
     if not _uid:
@@ -49,7 +49,7 @@ def setup_module():
     # grape_accounts 不再存平台 token（D32：平台字段移 external_identities），
     # 本文件用例不依赖 gitcode_api_token，无需回写。
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version as _get_tv
+    from src.domains.mgmt.auth.grape_account_db import get_token_version as _get_tv
     _token = create_access_token(_uid["id"], _uid["username"], _get_tv(_uid["id"]))
     _headers = {"Authorization": f"Bearer {_token}"}
 
@@ -130,8 +130,8 @@ class FakeStorage(StorageBackend):
 def _obs_env(monkeypatch):
     """启用 OBS 分支：monkeypatch get_storage 返回 FakeStorage，并清理缓存状态。"""
     fake = FakeStorage()
-    monkeypatch.setattr("src.storage.get_storage", lambda: fake)
-    from src.storage import reset_storage
+    monkeypatch.setattr("src.domains.runtime.storage.get_storage", lambda: fake)
+    from src.domains.runtime.storage import reset_storage
     reset_storage()
     # 清理本用例的测试技能记录
     with db_lock:
@@ -279,7 +279,7 @@ class TestSkillsObs:
                 "SELECT file_path FROM skill WHERE skill_name='obs-script-ok' AND scope='user'").fetchone()
         assert row and row[0]
         # zip 内脚本存在（权限位由打包链路保留，worker 物化恢复）
-        from src.storage import get_skill_zip_bytes
+        from src.domains.runtime.storage import get_skill_zip_bytes
         zdata = get_skill_zip_bytes(row[0])
         import io as _io, zipfile as _zf
         with _zf.ZipFile(_io.BytesIO(zdata)) as zf:
@@ -464,7 +464,7 @@ class TestSkillsObs:
                 "SELECT file_path FROM skill WHERE skill_name='obs-mjs-ok' AND scope='user'").fetchone()
         assert row and row[0], "DB 记录缺失"
         # zip 内 .mjs 脚本存在（权限位由打包链路保留）
-        from src.storage import get_skill_zip_bytes
+        from src.domains.runtime.storage import get_skill_zip_bytes
         import io as _io, zipfile as _zf
         zdata = get_skill_zip_bytes(row[0])
         with _zf.ZipFile(_io.BytesIO(zdata)) as zf:

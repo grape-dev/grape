@@ -17,11 +17,11 @@ class TestHealthCheckConfig:
     """R17.2.1: 健康检查配置。"""
 
     def test_check_interval_is_3600(self):
-        from src.runtime.bot_token_health import CHECK_INTERVAL
+        from src.domains.runtime.engine.bot_token_health import CHECK_INTERVAL
         assert CHECK_INTERVAL == 3600, "R17.2.1: CHECK_INTERVAL should be 3600 (1 hour)"
 
     def test_failure_threshold_is_1(self):
-        from src.runtime.bot_token_health import FAILURE_THRESHOLD
+        from src.domains.runtime.engine.bot_token_health import FAILURE_THRESHOLD
         assert FAILURE_THRESHOLD == 1, "R21.3.4: FAILURE_THRESHOLD should be 1 (1x 401 marks expired)"
 
 
@@ -30,33 +30,33 @@ class TestGlobalTokenHealthCheck:
 
     def test_401_marks_expired(self):
         """R17.2.2: 401 → 标记 per-provider 过期 key。"""
-        from src.runtime.bot_token_health import _update_global_token_status
-        with patch("src.user.db.set_meta_value") as mock_set, \
-             patch("src.user.db._invalidate_global_bot_cache"):
+        from src.domains.runtime.engine.bot_token_health import _update_global_token_status
+        with patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"):
             _update_global_token_status("gitcode", {"healthy": False, "error_type": "auth", "error": "401"})
             mock_set.assert_called_with("global_gitcode_bot_token_status", "expired")
 
     def test_200_clears_expired(self):
         """R17.2.3: 200 → 清除过期标记。"""
-        from src.runtime.bot_token_health import _update_global_token_status
-        with patch("src.user.db.set_meta_value") as mock_set, \
-             patch("src.user.db._invalidate_global_bot_cache"):
+        from src.domains.runtime.engine.bot_token_health import _update_global_token_status
+        with patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"):
             _update_global_token_status("github", {"healthy": True, "error_type": "", "error": ""})
             mock_set.assert_called_with("global_github_bot_token_status", "")
 
     def test_network_error_does_not_mark(self):
         """R21.3.7: 超时/5xx → 不改变标记状态。"""
-        from src.runtime.bot_token_health import _update_global_token_status
-        with patch("src.user.db.set_meta_value") as mock_set, \
-             patch("src.user.db._invalidate_global_bot_cache"):
+        from src.domains.runtime.engine.bot_token_health import _update_global_token_status
+        with patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"):
             _update_global_token_status("gitcode", {"healthy": False, "error_type": "network", "error": "timeout"})
             mock_set.assert_not_called()
 
     def test_per_provider_keys(self):
         """R21.2: GitCode 和 GitHub 使用不同的 per-provider key。"""
-        from src.runtime.bot_token_health import _update_global_token_status
-        with patch("src.user.db.set_meta_value") as mock_set, \
-             patch("src.user.db._invalidate_global_bot_cache"):
+        from src.domains.runtime.engine.bot_token_health import _update_global_token_status
+        with patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
+             patch("src.domains.mgmt.user.db._invalidate_global_bot_cache"):
             _update_global_token_status("gitcode", {"healthy": False, "error_type": "auth", "error": "401"})
             _update_global_token_status("github", {"healthy": False, "error_type": "auth", "error": "401"})
             keys_called = [c.args[0] for c in mock_set.call_args_list]
@@ -69,11 +69,11 @@ class TestRepoTokenHealthCheck:
 
     def test_repo_401_marks_expired(self):
         """R17.2.5: 仓库级 401 → 标记 bot_token_status=expired。"""
-        from src.runtime.bot_token_health import _verify_single_repo_token
+        from src.domains.runtime.engine.bot_token_health import _verify_single_repo_token
         with patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"), \
              patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("failed (401)")), \
-             patch("src.runtime.bot_token_health._set_repo_bot_token_status") as mock_set_status:
+             patch("src.domains.runtime.engine.bot_token_health._set_repo_bot_token_status") as mock_set_status:
             _cursor = MagicMock()
             _cursor.fetchone.return_value = ("bot_token_value",)
             mock_db.cursor.return_value = _cursor
@@ -82,11 +82,11 @@ class TestRepoTokenHealthCheck:
 
     def test_repo_200_clears_expired(self):
         """R17.2.6: 仓库级 200 → 清除过期标记。"""
-        from src.runtime.bot_token_health import _verify_single_repo_token
+        from src.domains.runtime.engine.bot_token_health import _verify_single_repo_token
         with patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"), \
              patch("src.kernel.token_resolver.GitCodeProvider.verify_token", return_value={"login": "bot"}), \
-             patch("src.runtime.bot_token_health._set_repo_bot_token_status") as mock_set_status:
+             patch("src.domains.runtime.engine.bot_token_health._set_repo_bot_token_status") as mock_set_status:
             _cursor = MagicMock()
             _cursor.fetchone.return_value = ("bot_token_value",)
             mock_db.cursor.return_value = _cursor
@@ -95,11 +95,11 @@ class TestRepoTokenHealthCheck:
 
     def test_repo_network_error_does_not_mark(self):
         """R21.3.7: 仓库级超时/5xx → 不标记。"""
-        from src.runtime.bot_token_health import _verify_single_repo_token
+        from src.domains.runtime.engine.bot_token_health import _verify_single_repo_token
         with patch("src.kernel.session_manager.db") as mock_db, \
              patch("src.kernel.session_manager.db_lock"), \
              patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("timeout")), \
-             patch("src.runtime.bot_token_health._set_repo_bot_token_status") as mock_set_status:
+             patch("src.domains.runtime.engine.bot_token_health._set_repo_bot_token_status") as mock_set_status:
             _cursor = MagicMock()
             _cursor.fetchone.return_value = ("bot_token_value",)
             mock_db.cursor.return_value = _cursor

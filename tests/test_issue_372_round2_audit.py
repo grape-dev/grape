@@ -85,10 +85,10 @@ class TestR7EmailVerified:
 
     def test_t2_03_no_email_config_email_verified_false(self):
         """T2-03: create_grape_account(email_verified=False) 写入 email_verified=0。"""
-        from src.auth.grape_account_db import create_grape_account
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.grape_account_db.hash_password", return_value="hash"):
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.grape_account_db.hash_password", return_value="hash"):
             cursor = MagicMock()
             cursor.lastrowid = 1
             mock_db.cursor.return_value = cursor
@@ -100,10 +100,10 @@ class TestR7EmailVerified:
 
     def test_t2_04_with_email_config_email_verified_true(self):
         """T2-04: create_grape_account(email_verified=True) 写入 email_verified=1（回归保护）。"""
-        from src.auth.grape_account_db import create_grape_account
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.grape_account_db.hash_password", return_value="hash"):
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.grape_account_db.hash_password", return_value="hash"):
             cursor = MagicMock()
             cursor.lastrowid = 1
             mock_db.cursor.return_value = cursor
@@ -139,9 +139,9 @@ class TestWebhookSecretFallback:
 
     def test_t2_06_get_webhook_token_fallback_to_old_token(self):
         """T2-06: get_webhook_token_by_repo 在 webhook_secret 为空时 fallback 到 gitcode_webhook_token。"""
-        from src.user.db import get_webhook_token_by_repo
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             # webhook_secret='', gitcode_webhook_token='old_bot_token', github_webhook_token=''
             cursor.fetchone.return_value = ("", "old_bot_token", "")
@@ -159,19 +159,19 @@ class TestServiceGetTaskToken:
 
     def test_t2_07_get_task_token_path_b_realtime_fetch(self):
         """T2-07: _get_task_token 路径 B（task 行 repo_gitcode_token 为空）能实时获取用户 token。"""
-        from src.runtime.service import _get_task_token
+        from src.domains.runtime.engine.service import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": "gitcode:owner/repo"}
-        with patch("src.user.db.get_repo_token_with_refresh", return_value="USER_TOKEN_ABC") as m:
+        with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="USER_TOKEN_ABC") as m:
             result = _get_task_token(task)
             assert result == "USER_TOKEN_ABC"
             m.assert_called_once_with("gitcode:owner/repo")
 
     def test_t2_08_get_task_token_github_dispatch(self):
         """T2-08: _get_task_token GitHub 分流 + 路径 D 实时获取（与 agent._get_task_token 行为等价）。"""
-        from src.runtime.service import _get_task_token
+        from src.domains.runtime.engine.service import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": "github:owner/repo"}
-        with patch("src.user.db.get_github_token", return_value="GH_TOKEN_XYZ") as m_gh, \
-             patch("src.user.db.get_repo_token_with_refresh") as m_gc:
+        with patch("src.domains.mgmt.user.db.get_github_token", return_value="GH_TOKEN_XYZ") as m_gh, \
+             patch("src.domains.mgmt.user.db.get_repo_token_with_refresh") as m_gc:
             result = _get_task_token(task)
             assert result == "GH_TOKEN_XYZ"
             m_gh.assert_called_once_with(repo_key="github:owner/repo")
@@ -190,7 +190,7 @@ class TestRepairHostGithubBotInvite:
         # 验证修复后的代码结构：if not bot_ok 在 if/else 同级，GitHub 有邀请逻辑
         # 用源码检查方式验证（因为 repair_host 是 FastAPI 路由，mock 太多）
         import inspect
-        from src.api.routes.repos import repair_host
+        from src.domains.mgmt.routes.repos import repair_host
         source = inspect.getsource(repair_host)
         # 验证 add_github_collaborator 在 repair_host 中被引用
         assert "add_github_collaborator" in source, "repair_host should call add_github_collaborator for GitHub"
@@ -214,7 +214,7 @@ class TestRepairHostGithubBotInvite:
         Issue #372 §16.2: repair_host bot_ok=False 时降级到路径 B，不再 return error。
         """
         import inspect
-        from src.api.routes.repos import repair_host
+        from src.domains.mgmt.routes.repos import repair_host
         source = inspect.getsource(repair_host)
         # 不应再返回 bot_missing error（改为降级）
         assert 'return {"status": "error", "host_status": "bot_missing"' not in source, \
@@ -233,10 +233,10 @@ class TestHasRefreshTokenStatus4:
 
     def test_t2_11_has_refresh_token_true_for_status_4(self):
         """T2-11: status=4（token 过期）且 refresh_token 非空时返回 True。"""
-        from src.auth.grape_account_db import _has_refresh_token
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"), \
-             patch("src.auth.grape_account_db._safe_decrypt", return_value="refresh_token_value"):
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"), \
+             patch("src.domains.mgmt.auth.grape_account_db._safe_decrypt", return_value="refresh_token_value"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_refresh_token",)
             mock_db.cursor.return_value = cursor
@@ -250,9 +250,9 @@ class TestHasRefreshTokenStatus4:
 
     def test_t2_12_has_refresh_token_false_for_status_0(self):
         """T2-12: status=0（解绑）时返回 False（不在 IN (1,4) 范围内）。"""
-        from src.auth.grape_account_db import _has_refresh_token
-        with patch("src.auth.grape_account_db.db") as mock_db, \
-             patch("src.auth.grape_account_db.db_lock"):
+        from src.domains.mgmt.auth.grape_account_db import _has_refresh_token
+        with patch("src.domains.mgmt.auth.grape_account_db.db") as mock_db, \
+             patch("src.domains.mgmt.auth.grape_account_db.db_lock"):
             cursor = MagicMock()
             # status=0 不在 IN (1,4) 范围内 → fetchone 返回 None
             cursor.fetchone.return_value = None
@@ -301,7 +301,7 @@ class TestTokenNotBoundErrorCode:
     def test_t2_15_host_repo_no_token_has_error_code(self):
         """T2-15: host_repo 无 api_token 时返回 400 + error_code=TOKEN_NOT_BOUND。"""
         import inspect
-        from src.api.routes.repos import host_repo
+        from src.domains.mgmt.routes.repos import host_repo
         source = inspect.getsource(host_repo)
         # 验证 TOKEN_NOT_BOUND error_code 在 host_repo 源码中
         assert "TOKEN_NOT_BOUND" in source, "host_repo should have TOKEN_NOT_BOUND error_code"
@@ -325,7 +325,7 @@ class TestBuildRetryEnvBotUsername:
     def test_t2_17_retry_env_path_b_bot_username_from_host_user(self):
         """T2-17: build_task_env 路径 B 时 BOT_USERNAME 注入 host_user 的 external_login。"""
         import inspect
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         source = inspect.getsource(build_task_env)
         # 验证 build_task_env 中包含 host_user_id fallback 逻辑
         assert "get_host_user_id" in source, "build_task_env should call get_host_user_id for path B fallback"
@@ -335,7 +335,7 @@ class TestBuildRetryEnvBotUsername:
     def test_t2_18_retry_env_path_a_uses_global_bot_username(self):
         """T2-18: build_task_env 路径 A 时 BOT_USERNAME 注入全局 bot username（回归保护）。"""
         import inspect
-        from src.api.event_pipeline import build_task_env
+        from src.domains.runtime.pipeline.event_pipeline import build_task_env
         source = inspect.getsource(build_task_env)
         # 验证全局 bot username 逻辑仍在
         assert "get_global_github_bot_username" in source or "get_global_bot_usernames" in source, \
@@ -384,7 +384,7 @@ class TestCreateNewRepoGithubPathB:
     def test_t2_20_create_new_repo_github_with_global_bot_uses_path_a(self):
         """T2-20: create_new_repo GitHub 有全局 GitHub bot token 时 _use_path_b=False。"""
         import inspect
-        from src.api.routes.repos import create_new_repo
+        from src.domains.mgmt.routes.repos import create_new_repo
         source = inspect.getsource(create_new_repo)
         # 验证不再硬编码 _use_path_b = True
         assert "_use_path_b = True" not in source or "_use_path_b = not" in source, \
@@ -396,7 +396,7 @@ class TestCreateNewRepoGithubPathB:
     def test_t2_21_create_new_repo_github_without_global_bot_uses_path_b(self):
         """T2-21: create_new_repo GitHub 无全局 GitHub bot token 时 _use_path_b=True。"""
         import inspect
-        from src.api.routes.repos import create_new_repo
+        from src.domains.mgmt.routes.repos import create_new_repo
         source = inspect.getsource(create_new_repo)
         # 验证 _use_path_b = not _create_global_bot_token 的逻辑
         assert "_use_path_b = not" in source, \
@@ -415,21 +415,21 @@ class TestGithubUserTokenWorktreePr:
 
     def test_github_user_token_get_task_token_dispatches_to_get_github_token(self):
         """GitHub 路径 B task 行 token 为空时，_get_task_token 调 get_github_token（非 get_repo_token_with_refresh）。"""
-        from src.runtime.agent import _get_task_token as _agent_get
-        from src.runtime.service import _get_task_token as _svc_get
+        from src.domains.runtime.engine.agent import _get_task_token as _agent_get
+        from src.domains.runtime.engine.service import _get_task_token as _svc_get
 
         task = {"repo_gitcode_token": "", "repo_key": "github:owner/repo"}
         # agent._get_task_token
-        with patch("src.user.db.get_github_token", return_value="GH_USER_TOKEN") as m_gh, \
-             patch("src.user.db.get_repo_token_with_refresh") as m_gc:
+        with patch("src.domains.mgmt.user.db.get_github_token", return_value="GH_USER_TOKEN") as m_gh, \
+             patch("src.domains.mgmt.user.db.get_repo_token_with_refresh") as m_gc:
             result = _agent_get(task)
             assert result == "GH_USER_TOKEN"
             m_gh.assert_called_once_with(repo_key="github:owner/repo")
             m_gc.assert_not_called()
 
         # service._get_task_token — 行为等价
-        with patch("src.user.db.get_github_token", return_value="GH_USER_TOKEN") as m_gh, \
-             patch("src.user.db.get_repo_token_with_refresh") as m_gc:
+        with patch("src.domains.mgmt.user.db.get_github_token", return_value="GH_USER_TOKEN") as m_gh, \
+             patch("src.domains.mgmt.user.db.get_repo_token_with_refresh") as m_gc:
             result = _svc_get(task)
             assert result == "GH_USER_TOKEN"
             m_gh.assert_called_once_with(repo_key="github:owner/repo")
@@ -437,20 +437,20 @@ class TestGithubUserTokenWorktreePr:
 
     def test_github_user_token_not_mixed_with_gitcode_token(self):
         """GitHub 仓库路径 B 不会拿到 GitCode token（审查 P1-1 核心场景）。"""
-        from src.runtime.agent import _get_task_token
+        from src.domains.runtime.engine.agent import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": "github:myorg/myrepo"}
-        with patch("src.user.db.get_github_token", return_value="GH_TOKEN_123") as m_gh, \
-             patch("src.user.db.get_repo_token_with_refresh", return_value="GC_TOKEN_456") as m_gc:
+        with patch("src.domains.mgmt.user.db.get_github_token", return_value="GH_TOKEN_123") as m_gh, \
+             patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="GC_TOKEN_456") as m_gc:
             result = _get_task_token(task)
             assert result == "GH_TOKEN_123", f"should get GitHub token, not GitCode: {result}"
             m_gc.assert_not_called()
 
     def test_gitcode_repo_does_not_call_get_github_token(self):
         """GitCode 仓库路径 B 不会调 get_github_token（反向回归保护）。"""
-        from src.runtime.agent import _get_task_token
+        from src.domains.runtime.engine.agent import _get_task_token
         task = {"repo_gitcode_token": "", "repo_key": "gitcode:owner/repo"}
-        with patch("src.user.db.get_repo_token_with_refresh", return_value="GC_TOKEN") as m_gc, \
-             patch("src.user.db.get_github_token") as m_gh:
+        with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="GC_TOKEN") as m_gc, \
+             patch("src.domains.mgmt.user.db.get_github_token") as m_gh:
             result = _get_task_token(task)
             assert result == "GC_TOKEN"
             m_gh.assert_not_called()
@@ -462,7 +462,7 @@ class TestExistingWebhookRemoveFailSecret:
     def test_host_repo_gitcode_remove_fail_writes_empty_webhook_secret(self):
         """host_repo GitCode 路径 B 删旧 webhook 失败时 webhook_secret 清空。"""
         import inspect
-        from src.api.routes.repos import host_repo
+        from src.domains.mgmt.routes.repos import host_repo
         source = inspect.getsource(host_repo)
         # 验证 GitCode 分支有删失败时清空 _webhook_secret 的逻辑
         assert 'host_repo GitCode: remove old webhook failed' in source
@@ -481,7 +481,7 @@ class TestExistingWebhookRemoveFailSecret:
     def test_host_repo_github_remove_fail_writes_empty_webhook_secret(self):
         """host_repo GitHub 路径 B 删旧 webhook 失败时 webhook_secret 清空。"""
         import inspect
-        from src.api.routes.repos import host_repo
+        from src.domains.mgmt.routes.repos import host_repo
         source = inspect.getsource(host_repo)
         assert 'host_repo GitHub: remove old webhook failed' in source
         lines = source.split("\n")
@@ -497,7 +497,7 @@ class TestExistingWebhookRemoveFailSecret:
     def test_create_new_repo_remove_fail_writes_empty_webhook_secret(self):
         """create_new_repo 路径 B 删旧 webhook 失败时 webhook_secret 清空。"""
         import inspect
-        from src.api.routes.repos import create_new_repo
+        from src.domains.mgmt.routes.repos import create_new_repo
         source = inspect.getsource(create_new_repo)
         assert 'create_new_repo: remove old webhook failed' in source
         lines = source.split("\n")
@@ -513,7 +513,7 @@ class TestExistingWebhookRemoveFailSecret:
     def test_repair_host_remove_fail_writes_empty_webhook_secret(self):
         """repair_host 路径 B 删旧 webhook 失败时 webhook_secret 清空。"""
         import inspect
-        from src.api.routes.repos import repair_host
+        from src.domains.mgmt.routes.repos import repair_host
         source = inspect.getsource(repair_host)
         assert 'repair_host: remove old webhook failed' in source
         lines = source.split("\n")
@@ -528,9 +528,9 @@ class TestExistingWebhookRemoveFailSecret:
 
     def test_webhook_token_by_repo_empty_secret_fallback_to_old_token(self):
         """get_webhook_token_by_repo webhook_secret 为空时 fallback 到 gitcode_webhook_token。"""
-        from src.user.db import get_webhook_token_by_repo
-        with patch("src.user.db.db") as mock_db, \
-             patch("src.user.db.db_lock"):
+        from src.domains.mgmt.user.db import get_webhook_token_by_repo
+        with patch("src.domains.mgmt.user.db.db") as mock_db, \
+             patch("src.domains.mgmt.user.db.db_lock"):
             cursor = MagicMock()
             # webhook_secret='', gitcode_webhook_token='OLD_BOT_TOKEN'
             cursor.fetchone.return_value = ("", "OLD_BOT_TOKEN", "")
@@ -594,7 +594,7 @@ class TestR10IssueCommentDedup:
     def test_t2_22_r10_dedup_checks_existing_comments(self):
         """T2-22: fail_task R10 发帖前查 issue 已有评论是否含"Token 已过期"关键词。"""
         import inspect
-        from src.runtime.service import fail_task
+        from src.domains.runtime.engine.service import fail_task
         source = inspect.getsource(fail_task)
         # 验证去重逻辑存在
         assert "Token 已过期" in source, \
@@ -634,7 +634,7 @@ class TestR10IssueCommentDedup:
     def test_t4_04_fetch_issue_comments_provider_dispatch(self):
         """T4-04: _fetch_issue_comments 按 provider 分流（GitHub → _github_req，GitCode → urllib）。"""
         import inspect
-        from src.runtime.service import _fetch_issue_comments
+        from src.domains.runtime.engine.service import _fetch_issue_comments
         source = inspect.getsource(_fetch_issue_comments)
         # GitHub 分支用 _github_req
         assert "_github_req" in source, "_fetch_issue_comments should use _github_req for GitHub"
@@ -645,12 +645,12 @@ class TestR10IssueCommentDedup:
 
     def test_t4_05_fetch_issue_comments_failure_returns_empty_list(self):
         """T4-05: _fetch_issue_comments 查询失败返回空列表（不抛异常）。"""
-        from src.runtime.service import _fetch_issue_comments
+        from src.domains.runtime.engine.service import _fetch_issue_comments
         with patch("urllib.request.urlopen", side_effect=Exception("network error")):
             result = _fetch_issue_comments("gitcode:owner/repo", "owner/repo", "42", "token")
             assert result == [], f"should return [] on failure, got {result}"
         # GitHub 路径也测一下
-        with patch("src.user.repo_manager._github_req", side_effect=Exception("API error")):
+        with patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=Exception("API error")):
             result = _fetch_issue_comments("github:owner/repo", "owner/repo", "42", "token")
             assert result == [], f"should return [] on GitHub failure, got {result}"
 
@@ -665,7 +665,7 @@ class TestClaimTokenInjection:
     def test_t5_01_claim_injects_token_for_path_d(self):
         """T5-01: claim 返回的 task dict 在路径 D（repo_gitcode_token 为空）时被注入新鲜 token。"""
         import inspect
-        from src.runtime.service import claim
+        from src.domains.runtime.engine.service import claim
         source = inspect.getsource(claim)
         # 验证 claim 中有 token 注入逻辑
         assert "_get_task_token" in source, "claim should call _get_task_token to inject token"
@@ -676,7 +676,7 @@ class TestClaimTokenInjection:
     def test_t5_02_claim_injection_does_not_persist_to_db(self):
         """T5-02: claim 注入 token 不落库（注入只发生在内存 task dict，不 UPDATE agent_tasks）。"""
         import inspect
-        from src.runtime.service import claim
+        from src.domains.runtime.engine.service import claim
         source = inspect.getsource(claim)
         # 找到注入逻辑的位置
         inject_idx = source.find("_get_task_token")
@@ -688,12 +688,12 @@ class TestClaimTokenInjection:
 
     def test_t5_03_claim_injection_uses_get_task_token_dispatch(self):
         """T5-03: claim 注入 token 调 _get_task_token（内含 GitHub/GitCode 分流）。"""
-        from src.runtime.service import _get_task_token
+        from src.domains.runtime.engine.service import _get_task_token
         # 验证 _get_task_token 有 github: 前缀分流（claim 依赖此函数）
         task_gitcode = {"repo_gitcode_token": "", "repo_key": "gitcode:owner/repo"}
         task_github = {"repo_gitcode_token": "", "repo_key": "github:owner/repo"}
-        with patch("src.user.db.get_repo_token_with_refresh", return_value="GC_TOKEN") as m_gc, \
-             patch("src.user.db.get_github_token", return_value="GH_TOKEN") as m_gh:
+        with patch("src.domains.mgmt.user.db.get_repo_token_with_refresh", return_value="GC_TOKEN") as m_gc, \
+             patch("src.domains.mgmt.user.db.get_github_token", return_value="GH_TOKEN") as m_gh:
             assert _get_task_token(task_gitcode) == "GC_TOKEN"
             assert _get_task_token(task_github) == "GH_TOKEN"
             m_gc.assert_called_once_with("gitcode:owner/repo")
@@ -712,7 +712,7 @@ class TestR10CommentTokenGithubDispatch:
         R18.6.9: 评论 token 通过 handler.get_comment_token() 获取，不再内联 if-else 分流。
         """
         import inspect
-        from src.runtime.service import fail_task
+        from src.domains.runtime.engine.service import fail_task
         source = inspect.getsource(fail_task)
         # R18: 验证 detect_and_mark_expired 调用
         assert "detect_and_mark_expired" in source, "R18: fail_task should call detect_and_mark_expired"
@@ -727,7 +727,7 @@ class TestR10CommentTokenGithubDispatch:
         R18.6.9: 评论 token 通过 handler.get_comment_token() 获取，不再内联 if-else 分流。
         """
         import inspect
-        from src.runtime.service import fail_task
+        from src.domains.runtime.engine.service import fail_task
         source = inspect.getsource(fail_task)
         # R18.6.9: 验证通过 handler.get_comment_token() 获取评论 token
         assert "get_comment_token" in source, "R18.6.9: fail_task should call handler.get_comment_token()"

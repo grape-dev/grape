@@ -21,7 +21,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.runtime.client import CredentialRevokedError, RuntimeClient
+from src.domains.runtime.engine.client import CredentialRevokedError, RuntimeClient
 
 
 class TestCredentialRevokedError(unittest.TestCase):
@@ -107,7 +107,7 @@ class TestWorkerExitOnRevoke(unittest.TestCase):
 
     def test_credential_revoked_event_exists(self):
         """全局 _credential_revoked Event 存在且可置位。"""
-        from src.runtime import agent as ra
+        from src.domains.runtime.engine import agent as ra
         self.assertIsInstance(ra._credential_revoked, asyncio.Event)
         ra._credential_revoked.set()
         self.assertTrue(ra._credential_revoked.is_set())
@@ -115,7 +115,7 @@ class TestWorkerExitOnRevoke(unittest.TestCase):
 
     def test_reregister_revoked_raises(self):
         """_reregister 遇 401 应上抛 CredentialRevokedError（不放回退避循环）。"""
-        from src.runtime import agent as ra
+        from src.domains.runtime.engine import agent as ra
         client = MagicMock()
         client.reset_session = AsyncMock()
         client.register = AsyncMock(side_effect=CredentialRevokedError("/register"))
@@ -125,7 +125,7 @@ class TestWorkerExitOnRevoke(unittest.TestCase):
 
     def test_reregister_network_error_returns_none(self):
         """普通网络错误仍返回 None 走退避（回归：吊销才上抛）。"""
-        from src.runtime import agent as ra
+        from src.domains.runtime.engine import agent as ra
         client = MagicMock()
         client.reset_session = AsyncMock()
         client.register = AsyncMock(side_effect=OSError("network down"))

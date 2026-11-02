@@ -65,7 +65,7 @@ class TestA2ATraceAndLookup:
         """建事件前异常 → 失败留痕事件（含指纹）+ 500 响应带指纹。"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        import src.api.routes.webhook as wh
+        import src.domains.runtime.routes.webhook as wh
         self._clean()
         self._seed()
         # 在 append_event 之前制造异常：锁 _authorize_a2a 之后必然经过的内部函数

@@ -49,10 +49,10 @@ db = _DbProxy()
 db_lock = _DbLockProxy()
 
 _PATCH_DB_MODULES = (
-    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
-    "src.user.db", "src.api.session_store", "src.api.issues_center",
-    "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
-    "src.runtime.service",
+    "src.kernel.session_manager", "src.api.event_store", "src.domains.runtime.pipeline.event_pipeline",
+    "src.domains.mgmt.user.db", "src.api.session_store", "src.api.issues_center",
+    "src.api.db_setup", "src.domains.runtime.routes.events", "src.api.token_resolver",
+    "src.domains.runtime.engine.service",
 )
 
 
@@ -166,20 +166,20 @@ def _dispatch_patches(handler_self_loop=True):
         return None
 
     return captured, [
-        patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
+        patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
         patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
               side_effect=lambda rk: _session_level_result()),
         patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
               return_value=handler_self_loop),
-        patch("src.runtime.engine_select.pick_engine", return_value=0),
-        patch("src.runtime.engine_select.engine_name", return_value="opencode"),
-        patch("src.runtime.engine_select.get_scene_pool_engine_ids", return_value=""),
-        patch("src.runtime.engine_select._repo_user_id", return_value=1),
-        patch("src.api.event_pipeline.is_plugin_mode", return_value=True),
-        patch("src.runtime.service.get_execution_mode", return_value="remote"),
-        patch("src.api.event_pipeline._enqueue_pipeline_task",
+        patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0),
+        patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
+        patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),
+        patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=1),
+        patch("src.domains.runtime.pipeline.event_pipeline.is_plugin_mode", return_value=True),
+        patch("src.domains.runtime.engine.service.get_execution_mode", return_value="remote"),
+        patch("src.domains.runtime.pipeline.event_pipeline._enqueue_pipeline_task",
               side_effect=_fake_enqueue),
-        patch("src.user.db.get_agent_bot_token", return_value=""),
+        patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""),
         patch("src.project_info.builder.maybe_refresh_project_info", lambda *a, **k: None),
     ]
 
@@ -223,14 +223,14 @@ class TestT1BotIssueOpenedRecommends:
                 (RK,))
             db.commit()
         redispatch_calls = []
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.runtime.engine_select._repo_user_id", return_value=1), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+             patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=1), \
              patch("src.api.pipeline_config.get_first_node",
                    return_value={"skill": "vod", "tag": "vod"}), \
-             patch("src.api.event_pipeline._redispatch_vod_after_recommend",
+             patch("src.domains.runtime.pipeline.event_pipeline._redispatch_vod_after_recommend",
                    side_effect=lambda rk, iid, skill, evt, rid:
                        redispatch_calls.append(dict(evt=evt))):
-            from src.runtime.service import _handle_vod_recommend_complete
+            from src.domains.runtime.engine.service import _handle_vod_recommend_complete
             _handle_vod_recommend_complete(RK, "#201", '{"scene_id": "scene-i565"}',
                                            "t565-1", {"runtime_id": 0, "account": "test/i565"})
         from src.api.session_store import get_issue_scene
@@ -280,7 +280,7 @@ class TestT4BotCommentStillIntercepted:
     def test_t4_bot_issue_comment_still_self_loop(self):
         """T4: bot 的 issue_comment → 仍被 self_loop 拦截（评论族闸门不动，回归保护）。"""
         _clean()
-        with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+        with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
              patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
              patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",

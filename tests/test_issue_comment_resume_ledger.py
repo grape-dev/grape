@@ -46,9 +46,9 @@ db = _DbProxy()
 db_lock = _DbLockProxy()
 
 _PATCH_DB_MODULES = (
-    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
-    "src.user.db", "src.api.session_store", "src.api.issues_center",
-    "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
+    "src.kernel.session_manager", "src.api.event_store", "src.domains.runtime.pipeline.event_pipeline",
+    "src.domains.mgmt.user.db", "src.api.session_store", "src.api.issues_center",
+    "src.api.db_setup", "src.domains.runtime.routes.events", "src.api.token_resolver",
 )
 
 
@@ -232,8 +232,8 @@ def _post_comment_via_git_repo(agent_type: str, body: str = "测试评论", num:
     def _fake_req(method, url, token="", body=None):
         return {"id": 90099, "ok": True}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "bot_tok")
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "bot_tok")
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "user_tok")
 
     client = TestClient(app)

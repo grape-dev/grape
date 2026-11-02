@@ -6,8 +6,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.kernel.session_manager import db, db_lock, get_messages, create_conversation, add_message
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 
 _uid = None
 _conv_id = ""
@@ -79,7 +79,7 @@ def _make_fake_resp(comments):
 
 def test_sync_issue_comments_writes_agent_comments():
     """_sync_issue_comments_to_conversation 将 Issue 上 agent 评论同步到会话"""
-    from src.api.event_pipeline import _sync_issue_comments_to_conversation
+    from src.domains.runtime.pipeline.event_pipeline import _sync_issue_comments_to_conversation
 
     before = len(get_messages(_conv_id, limit=100))
     with patch('urllib.request.urlopen', return_value=_make_fake_resp(_fake_gitcode_comments())):
@@ -98,7 +98,7 @@ def test_sync_issue_comments_writes_agent_comments():
 
 def test_sync_issue_comments_dedup():
     """重复调用不产生重复消息（去重）"""
-    from src.api.event_pipeline import _sync_issue_comments_to_conversation
+    from src.domains.runtime.pipeline.event_pipeline import _sync_issue_comments_to_conversation
 
     before = len(get_messages(_conv_id, limit=100))
     with patch('urllib.request.urlopen', return_value=_make_fake_resp(_fake_gitcode_comments())):
@@ -111,7 +111,7 @@ def test_sync_issue_comments_dedup():
 
 def test_sync_issue_comments_case_insensitive():
     """agent 评论前缀大小写不敏感匹配（[issue agent] 小写也能匹配）"""
-    from src.api.event_pipeline import _sync_issue_comments_to_conversation
+    from src.domains.runtime.pipeline.event_pipeline import _sync_issue_comments_to_conversation
 
     # 新 Issue 号避免和前面测试数据冲突
     conv_id2 = create_conversation(_uid, "gitcode:tc_sync_issue/demo", title="Issue #88")
@@ -152,7 +152,7 @@ def test_sync_issue_comments_case_insensitive():
 
 def test_sync_issue_comments_no_conversation():
     """无关联 conversation 时不报错"""
-    from src.api.event_pipeline import _sync_issue_comments_to_conversation
+    from src.domains.runtime.pipeline.event_pipeline import _sync_issue_comments_to_conversation
 
     with patch('urllib.request.urlopen', return_value=_make_fake_resp([])):
         _sync_issue_comments_to_conversation(

@@ -25,9 +25,9 @@ def _hermes_installed():
 
 def _call_onboarding(discover_result, runtime_rows, username="alice", repo=""):
     """直接调用路由函数，mock get_meta_value / discover_backends / DB。"""
-    import src.user.db as db_mod
-    import src.agent.executor as executor_mod
-    from src.api.routes.runtime import runtime_engine_onboarding
+    import src.domains.mgmt.user.db as db_mod
+    import src.domains.runtime.agents.executor as executor_mod
+    from src.domains.runtime.routes.runtime import runtime_engine_onboarding
 
     cursor = MagicMock()
     cursor.fetchall.return_value = runtime_rows
@@ -36,8 +36,8 @@ def _call_onboarding(discover_result, runtime_rows, username="alice", repo=""):
 
     with patch.object(db_mod, "get_server_base_url", return_value=_BASE), \
          patch.object(executor_mod, "discover_backends", return_value=discover_result), \
-         patch("src.api.routes.runtime.db_lock"), \
-         patch("src.api.routes.runtime.db") as db_fake:
+         patch("src.domains.runtime.routes.runtime.db_lock"), \
+         patch("src.domains.runtime.routes.runtime.db") as db_fake:
         db_fake.cursor.return_value = cursor
         return runtime_engine_onboarding(repo=repo, user={"username": username})
 
@@ -67,7 +67,7 @@ class TestEngineOnboarding:
         """E2b（评审修正语义）：needs_worker 按用户视角判定——global（任何人加，
         全员免提示）+ 本人名下一切 scope（含自己的 repo-scope，不限当前 repo）。
         他人 user-scope / 他人 repo-scope 不计入本人的 needs_worker。"""
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         import inspect
         src = inspect.getsource(rt.runtime_engine_onboarding)
         # 判定 SQL（列名修复后形态；weekly-09 变基后为 LOWER 大小写归一形态）：
@@ -88,9 +88,9 @@ class TestEngineOnboarding:
         repo 参数契约：只接受规范带前缀形态；裸形态视为无仓库上下文（E2e）。
         """
         import sqlite3, tempfile, os
-        from src.api.routes.runtime import runtime_engine_onboarding
-        import src.user.db as db_mod
-        import src.agent.executor as executor_mod
+        from src.domains.runtime.routes.runtime import runtime_engine_onboarding
+        import src.domains.mgmt.user.db as db_mod
+        import src.domains.runtime.agents.executor as executor_mod
 
         tmp = tempfile.mktemp(suffix=".db")
         conn = sqlite3.connect(tmp)
@@ -117,8 +117,8 @@ class TestEngineOnboarding:
 
         with patch.object(db_mod, "get_server_base_url", return_value=_BASE), \
              patch.object(executor_mod, "discover_backends", return_value=_none_installed()), \
-             patch("src.api.routes.runtime.db_lock", _Lock()), \
-             patch("src.api.routes.runtime.db", conn):
+             patch("src.domains.runtime.routes.runtime.db_lock", _Lock()), \
+             patch("src.domains.runtime.routes.runtime.db", conn):
             # 仓库上下文（契约：规范带前缀形态）
             # bob 视角（repo 上下文）：本人 repo worker 计入判定与展示
             r_repo = runtime_engine_onboarding(repo="gitcode:owner/myrepo", user={"username": "bob", "id": 8})
@@ -142,7 +142,7 @@ class TestEngineOnboarding:
         """E2e 契约：裸 owner/repo 形态不做前缀猜测——视为无仓库上下文走全局
         判定（保守：宁可多引导，不可误判可用；查表猜前缀在双平台同名仓库时
         命中不确定，是 IN 撒网的换皮）。"""
-        from src.api.routes.runtime import engine_onboarding_repo_key
+        from src.domains.runtime.routes.runtime import engine_onboarding_repo_key
         assert engine_onboarding_repo_key("gitcode:owner/myrepo") == "gitcode:owner/myrepo"
         assert engine_onboarding_repo_key("github:owner/myrepo") == "github:owner/myrepo"
         assert engine_onboarding_repo_key("owner/myrepo") == "", "E2e: 裸形态不猜前缀"
@@ -158,7 +158,7 @@ class TestEngineOnboarding:
     def test_e4_requires_auth(self):
         """E4 无有效登录态 → 鉴权依赖拒绝（require_org_member 挂在签名上）。"""
         import inspect
-        from src.api.routes import runtime as rt
+        from src.domains.runtime.routes import runtime as rt
         sig = inspect.signature(rt.runtime_engine_onboarding)
         dep = sig.parameters["user"].default
         assert dep is not None, "engine-onboarding 缺少鉴权依赖"
@@ -167,7 +167,7 @@ class TestEngineOnboarding:
     def test_structure_install_commands_reference_existing_endpoints(self):
         """结构守卫：install_cmd 引用的端点真实存在（防漂移到不存在路由）。"""
         import inspect
-        from src.api.routes import runtime as rt
+        from src.domains.runtime.routes import runtime as rt
         src = inspect.getsource(rt.runtime_engine_onboarding)
         assert "/api/runtime/install" in src
         assert "/api/settings/runtime-credentials" in src

@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from fastapi import Request, HTTPException
 
-from src.user.org_db import (
+from src.domains.mgmt.user.org_db import (
     get_org_by_slug, get_member_role, get_personal_org_id, is_org_member,
 )
 

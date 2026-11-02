@@ -51,7 +51,7 @@ def _user(org_id):
 
 
 def _list(user, repo="", scope=""):
-    from src.api.routes.skills import list_skills
+    from src.domains.mgmt.routes.skills import list_skills
     return list_skills(user, repo=repo, scope=scope)
 
 

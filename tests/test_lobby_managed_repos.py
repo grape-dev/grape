@@ -17,8 +17,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
-from src.api.routes import repos as repos_mod
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.routes import repos as repos_mod
 
 
 def _clean():
@@ -221,7 +221,7 @@ def test_filter_repos_prefix_isolates_across_platforms():
 def test_api_responses_strip_prefix():
     """/repos/member 响应的 full_name 无前缀（前端契约）"""
     _clean()
-    from src.user.repo_manager import fetch_repos_with_role
+    from src.domains.mgmt.user.repo_manager import fetch_repos_with_role
     payload = [
         {"full_name": "me/own", "name": "own", "owner": {"login": "me"},
          "permission": {"admin": True, "push": True, "pull": True}},
@@ -232,7 +232,7 @@ def test_api_responses_strip_prefix():
         if "/user/repos" in url:
             return payload
         return {}
-    with patch("src.user.repo_manager._req", side_effect=fake_req):
+    with patch("src.domains.mgmt.user.repo_manager._req", side_effect=fake_req):
         fetched = fetch_repos_with_role("tok")
     out = _filter(1, fetched)
     assert out and out[0]["full_name"] == "me/own"

@@ -48,11 +48,11 @@ def _run_is_user_allowed(meta_value, table_count, whitelist_rows, column, login)
 
     # Patch src.kernel.config's internal references (already imported at module level)
     # src.kernel.config does: from src.kernel.session_manager import db, db_lock (inside function)
-    # and: from src.user.db import get_meta_value (inside function)
+    # and: from src.domains.mgmt.user.db import get_meta_value (inside function)
     # So we patch at the source module level
     with patch('src.kernel.session_manager.db', mock_db), \
          patch('src.kernel.session_manager.db_lock', mock_lock), \
-         patch('src.user.db.get_meta_value', return_value=meta_value):
+         patch('src.domains.mgmt.user.db.get_meta_value', return_value=meta_value):
         _reset_whitelist_cache()
         from src.kernel.config import is_user_allowed
         return is_user_allowed(column, login)

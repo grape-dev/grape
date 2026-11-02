@@ -14,8 +14,8 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from fastapi.testclient import TestClient
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 from src.kernel.auth_sdk.jwt_utils import create_access_token
 
 
@@ -35,7 +35,7 @@ def _seed(seq, repo_key, issue, agent, status="completed", structured=None, logs
 
 
 def _jwt(user_id, username):
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 

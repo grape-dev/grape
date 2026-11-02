@@ -185,7 +185,7 @@ def _seed_scene(scene_id, linked_repos=None, advanced_options=None):
 
 def test_read_scene_linked_repos_from_column():
     """_read_scene_linked_repos 优先读独立列。"""
-    from src.api.event_pipeline import _read_scene_linked_repos
+    from src.domains.runtime.pipeline.event_pipeline import _read_scene_linked_repos
     _seed_repo("lr-scene")
     _seed_issue(10, "lr-scene")
     linked = [{"repo_key": "gitcode:org/repo-a", "branch": "main"}]
@@ -196,7 +196,7 @@ def test_read_scene_linked_repos_from_column():
 
 def test_read_scene_linked_repos_fallback_to_advanced_options():
     """独立列为空时回退读 advanced_options JSON。"""
-    from src.api.event_pipeline import _read_scene_linked_repos
+    from src.domains.runtime.pipeline.event_pipeline import _read_scene_linked_repos
     _seed_repo("lr-scene-ao")
     _seed_issue(11, "lr-scene-ao")
     linked = [{"repo_key": "gitcode:org/repo-b", "branch": "dev"}]
@@ -216,14 +216,14 @@ def test_read_scene_linked_repos_fallback_to_advanced_options():
 
 def test_read_scene_linked_repos_empty_when_no_scene():
     """无场景时返回空列表。"""
-    from src.api.event_pipeline import _read_scene_linked_repos
+    from src.domains.runtime.pipeline.event_pipeline import _read_scene_linked_repos
     result = _read_scene_linked_repos(RK, "#999")
     assert result == []
 
 
 def test_inject_linked_repos_env():
     """_enqueue_pipeline_task 注入 GRAPE_LINKED_REPOS（通过 _read_scene_linked_repos 验证）。"""
-    from src.api.event_pipeline import _read_scene_linked_repos
+    from src.domains.runtime.pipeline.event_pipeline import _read_scene_linked_repos
     _seed_repo("lr-scene-env")
     _seed_issue(12, "lr-scene-env")
     linked = [{"repo_key": "gitcode:org/repo-c", "branch": "feature"}]
@@ -239,7 +239,7 @@ def test_inject_linked_repos_env():
 
 def test_repogit_ensure_repo_base_multi_exists():
     """ensure_repo_base_multi 函数存在且可调用。"""
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     assert callable(repogit.ensure_repo_base_multi)
     # 空列表返回空 dict
     result = repogit.ensure_repo_base_multi([], token="")
@@ -248,7 +248,7 @@ def test_repogit_ensure_repo_base_multi_exists():
 
 def test_repogit_ensure_linked_repo_worktrees_exists():
     """ensure_linked_repo_worktrees 函数存在且可调用。"""
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     assert callable(repogit.ensure_linked_repo_worktrees)
     # 非法 agent_type 返回空列表
     result = repogit.ensure_linked_repo_worktrees([], "invalid-agent", "999", token="")
@@ -257,7 +257,7 @@ def test_repogit_ensure_linked_repo_worktrees_exists():
 
 def test_repogit_ensure_linked_repo_worktrees_non_git_agent():
     """非 git agent 类型返回空列表（is_git_agent 守卫）。"""
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     linked = [{"repo_key": "gitcode:org/repo-a", "branch": "main"}]
     result = repogit.ensure_linked_repo_worktrees(linked, "issue", "999", token="")
     assert result == []
@@ -267,13 +267,13 @@ def test_repogit_ensure_linked_repo_worktrees_non_git_agent():
 
 def test_create_pr_for_repo_exists():
     """create_pr_for_repo 函数存在且可调用。"""
-    from src.vcs.api_client import create_pr_for_repo
+    from src.domains.runtime.vcs.api_client import create_pr_for_repo
     assert callable(create_pr_for_repo)
 
 
 def test_vcs_api_client_class_intact():
     """VcsApiClient 类方法完整（api_client.py 结构完整性回归）。"""
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     client = VcsApiClient("gitcode", "fake-token", "owner", "repo")
     # 验证所有方法存在（防止类被意外拆分）
     assert hasattr(client, "create_pr")
@@ -293,7 +293,7 @@ def test_vcs_api_client_class_intact():
 
 def test_create_scene_request_has_linked_repos():
     """CreateSceneRequest 模型含 linked_repos 字段。"""
-    from src.api.routes.scenes import CreateSceneRequest
+    from src.domains.mgmt.routes.scenes import CreateSceneRequest
     req = CreateSceneRequest(name="test", nodes=[])
     assert hasattr(req, "linked_repos")
     assert req.linked_repos == []
@@ -301,7 +301,7 @@ def test_create_scene_request_has_linked_repos():
 
 def test_update_scene_request_has_linked_repos():
     """UpdateSceneRequest 模型含 linked_repos 字段。"""
-    from src.api.routes.scenes import UpdateSceneRequest
+    from src.domains.mgmt.routes.scenes import UpdateSceneRequest
     req = UpdateSceneRequest()
     assert hasattr(req, "linked_repos")
     assert req.linked_repos is None  # 默认 None=不更新
@@ -309,7 +309,7 @@ def test_update_scene_request_has_linked_repos():
 
 def test_advanced_options_request_has_linked_repos():
     """AdvancedOptionsRequest 模型含 linked_repos 字段。"""
-    from src.api.routes.scenes import AdvancedOptionsRequest
+    from src.domains.mgmt.routes.scenes import AdvancedOptionsRequest
     req = AdvancedOptionsRequest()
     assert hasattr(req, "linked_repos")
     assert req.linked_repos == []
@@ -317,14 +317,14 @@ def test_advanced_options_request_has_linked_repos():
 
 def test_create_market_scene_request_has_linked_repos():
     """CreateMarketSceneRequest 模型含 linked_repos 字段。"""
-    from src.api.routes.scenes import CreateMarketSceneRequest
+    from src.domains.mgmt.routes.scenes import CreateMarketSceneRequest
     req = CreateMarketSceneRequest(name="test", nodes=[])
     assert hasattr(req, "linked_repos")
 
 
 def test_update_market_scene_request_has_linked_repos():
     """UpdateMarketSceneRequest 模型含 linked_repos 字段。"""
-    from src.api.routes.scenes import UpdateMarketSceneRequest
+    from src.domains.mgmt.routes.scenes import UpdateMarketSceneRequest
     req = UpdateMarketSceneRequest()
     assert hasattr(req, "linked_repos")
 
@@ -333,13 +333,13 @@ def test_update_market_scene_request_has_linked_repos():
 
 def test_submit_linked_repo_prs_function_exists():
     """_submit_linked_repo_prs 函数存在且可调用。"""
-    from src.runtime.agent import _submit_linked_repo_prs
+    from src.domains.runtime.engine.agent import _submit_linked_repo_prs
     assert callable(_submit_linked_repo_prs)
 
 
 def test_submit_linked_repo_prs_non_coding_agent():
     """非 coding agent 直接返回，不处理。"""
-    from src.runtime.agent import _submit_linked_repo_prs
+    from src.domains.runtime.engine.agent import _submit_linked_repo_prs
     task = {"agent_type": "qa", "issue_id": "#42", "repo_gitcode_token": "fake"}
     env = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/wt-a"}]'}
     _submit_linked_repo_prs(task, env)
@@ -348,7 +348,7 @@ def test_submit_linked_repo_prs_non_coding_agent():
 
 def test_submit_linked_repo_prs_no_linked_worktrees_env():
     """GRAPE_LINKED_WORKTREES 为空时直接返回。"""
-    from src.runtime.agent import _submit_linked_repo_prs
+    from src.domains.runtime.engine.agent import _submit_linked_repo_prs
     task = {"agent_type": "coding", "issue_id": "#42", "repo_gitcode_token": "fake"}
     env = {}
     _submit_linked_repo_prs(task, env)
@@ -357,7 +357,7 @@ def test_submit_linked_repo_prs_no_linked_worktrees_env():
 
 def test_submit_linked_repo_prs_no_issue_num():
     """issue_id 为空时跳过（无法确定分支名）。"""
-    from src.runtime.agent import _submit_linked_repo_prs
+    from src.domains.runtime.engine.agent import _submit_linked_repo_prs
     task = {"agent_type": "coding", "issue_id": "#0", "repo_gitcode_token": "fake"}
     env = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/wt-a"}]'}
     _submit_linked_repo_prs(task, env)
@@ -366,7 +366,7 @@ def test_submit_linked_repo_prs_no_issue_num():
 
 def test_submit_linked_repo_prs_invalid_json():
     """GRAPE_LINKED_WORKTREES 非法 JSON 时不崩溃。"""
-    from src.runtime.agent import _submit_linked_repo_prs
+    from src.domains.runtime.engine.agent import _submit_linked_repo_prs
     task = {"agent_type": "coding", "issue_id": "#42", "repo_gitcode_token": "fake"}
     env = {"GRAPE_LINKED_WORKTREES": "not-json{"}
     _submit_linked_repo_prs(task, env)
@@ -375,7 +375,7 @@ def test_submit_linked_repo_prs_invalid_json():
 
 def test_submit_linked_repo_prs_nonexistent_worktree_dir():
     """worktree 目录不存在时跳过该仓库，不崩溃。"""
-    from src.runtime.agent import _submit_linked_repo_prs
+    from src.domains.runtime.engine.agent import _submit_linked_repo_prs
     task = {"agent_type": "coding", "issue_id": "#42", "repo_gitcode_token": "fake"}
     env = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/nonexistent-wt-12345"}]'}
     _submit_linked_repo_prs(task, env)
@@ -389,13 +389,13 @@ def test_submit_linked_repo_prs_nonexistent_worktree_dir():
 
 def test_submit_direct_linked_prs_function_exists():
     """_submit_direct_linked_prs 函数存在且可调用。"""
-    from src.api.event_pipeline import _submit_direct_linked_prs
+    from src.domains.runtime.pipeline.event_pipeline import _submit_direct_linked_prs
     assert callable(_submit_direct_linked_prs)
 
 
 def test_submit_direct_linked_prs_no_linked_worktrees():
     """GRAPE_LINKED_WORKTREES 为空时直接返回。"""
-    from src.api.event_pipeline import _submit_direct_linked_prs
+    from src.domains.runtime.pipeline.event_pipeline import _submit_direct_linked_prs
     env_extra = {}
     # 不应抛异常
     _submit_direct_linked_prs(env_extra, "gitcode:org/main", "#42", "fake-token")
@@ -403,14 +403,14 @@ def test_submit_direct_linked_prs_no_linked_worktrees():
 
 def test_submit_direct_linked_prs_invalid_json():
     """GRAPE_LINKED_WORKTREES 非法 JSON 时不崩溃。"""
-    from src.api.event_pipeline import _submit_direct_linked_prs
+    from src.domains.runtime.pipeline.event_pipeline import _submit_direct_linked_prs
     env_extra = {"GRAPE_LINKED_WORKTREES": "not-json{"}
     _submit_direct_linked_prs(env_extra, "gitcode:org/main", "#42", "fake-token")
 
 
 def test_submit_direct_linked_prs_nonexistent_dir():
     """worktree 目录不存在时跳过，不崩溃。"""
-    from src.api.event_pipeline import _submit_direct_linked_prs
+    from src.domains.runtime.pipeline.event_pipeline import _submit_direct_linked_prs
     env_extra = {"GRAPE_LINKED_WORKTREES": '[{"repo_key":"gitcode:org/repo-a","branch":"main","dir":"/tmp/nonexistent-wt-direct-99999"}]'}
     # 不应抛异常，目录不存在 → skip
     _submit_direct_linked_prs(env_extra, "gitcode:org/main", "#42", "fake-token")
@@ -425,5 +425,5 @@ def test_repogit_submit_linked_repo_prs_removed():
     event_pipeline._submit_direct_linked_prs（direct）两个路径实现，
     repogit.py 中的 submit_linked_repo_prs 从未被调用，已移除。
     """
-    from src.runtime import repogit
+    from src.domains.runtime.engine import repogit
     assert not hasattr(repogit, "submit_linked_repo_prs")

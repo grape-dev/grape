@@ -14,10 +14,10 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.api.routes import issues as issues_mod
+from src.domains.runtime.routes import issues as issues_mod
 from src.kernel.session_manager import db, db_lock, get_messages
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -256,11 +256,11 @@ class TestResolveIssueCardId:
 
     def test_returns_card_id(self):
         card_id = _seed_issue(issue_number=77, repo_key="gitcode:org/test")
-        from src.api.event_pipeline import resolve_issue_card_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_card_id
         assert resolve_issue_card_id("gitcode:org/test", "77") == str(card_id)
         assert resolve_issue_card_id("gitcode:org/test", 77) == str(card_id)
 
     def test_missing_returns_empty(self):
-        from src.api.event_pipeline import resolve_issue_card_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_card_id
         assert resolve_issue_card_id("gitcode:org/test", 9999) == ""
         assert resolve_issue_card_id("gitcode:org/test", "") == ""

@@ -1,6 +1,6 @@
 """Pipeline status must represent the latest stage, not any prior success."""
 import pytest
-from src.api.routes.issues import _pipeline_from_events
+from src.domains.runtime.routes.issues import _pipeline_from_events
 
 
 @pytest.mark.parametrize('current', ['queued', 'running', 'failed', 'cancelled', 'completed'])

@@ -48,9 +48,9 @@ db_lock = _DbLockProxy()
 # 模块级捕获 session_manager.db/db_lock 的已知模块（run_pipeline 写侧链路）：
 # 函数级 import 的模块自动经 session_manager 取到 mock，无需列举。
 _PATCH_DB_MODULES = (
-    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
-    "src.user.db", "src.api.session_store", "src.api.issues_center",
-    "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
+    "src.kernel.session_manager", "src.api.event_store", "src.domains.runtime.pipeline.event_pipeline",
+    "src.domains.mgmt.user.db", "src.api.session_store", "src.api.issues_center",
+    "src.api.db_setup", "src.domains.runtime.routes.events", "src.api.token_resolver",
 )
 
 
@@ -195,13 +195,13 @@ def test_ledger_hit_bot_name_drift():
     _clean()
     # 名单外 bot 名 + 该评论 cid 已入台账
     ol.record_outbound("gitcode", RK, "issue_comment", "99904", issue_number="5")
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_dev_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_dev_bot"]):
         res = _run(_comment_payload("grape_bot", note="[Issue Agent] 子任务 #5 已处理完毕", cid=99904), "Note Hook")
     assert "outbound_ledger_hit" in _skipped_reasons(), _skipped_reasons()
     assert _no_dispatch()
     # 反向兜底核对：同 actor、cid 不在台账 → 放行（名单 miss 时不误拦，靠后续防线）
     _clean()
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_dev_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_dev_bot"]):
         res = _run(_comment_payload("grape_bot", note="另一条评论", cid=99905), "Note Hook")
     assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
 
@@ -430,7 +430,7 @@ def test_subtask_comment_ledgered():
 def test_vcs_client_post_comment_ledgered():
     """S17-8：VcsApiClient.post_issue_comment 响应带 id → 入账（第二评论客户端收口）。"""
     _clean()
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     client = VcsApiClient("gitcode", "tok", "test", "i453led")
     with patch.object(client, "_gitcode_request", return_value={"id": 666001, "body": "c"}):
         resp = client.post_issue_comment(5, "评论内容")
@@ -440,7 +440,7 @@ def test_vcs_client_post_comment_ledgered():
 def test_vcs_client_close_issue_ledgered():
     """S17-10：VcsApiClient.close_issue → issue_close 入账（issue_closed 事件对账）。"""
     _clean()
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     client = VcsApiClient("gitcode", "tok", "test", "i453led")
     with patch.object(client, "_gitcode_request", return_value={"number": 5, "state": "close"}), \
          patch.object(client, "get_issue", return_value={"number": 5, "title": "t"}):
@@ -451,7 +451,7 @@ def test_vcs_client_close_issue_ledgered():
 def test_vcs_client_pr_ops_ledgered():
     """S17-11：create_pr（响应取 number）与 merge_pr（传参编号）入账。"""
     _clean()
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     client = VcsApiClient("gitcode", "tok", "test", "i453led")
     with patch.object(client, "_gitcode_request", return_value={"number": 33, "id": 99}):
         client.create_pr("t", "h", "b", "body")
@@ -535,7 +535,7 @@ def test_update_issue_meta_and_edit_branches():
     FastAPI router 装饰不包装函数，gra.update_issue 即原函数；patch 掉 Depends 与翻译层。"""
     _clean()
     from src.api import git_repo_api as gra
-    import src.vcs.providers as _vp
+    import src.domains.runtime.vcs.providers as _vp
     with patch.object(gra, "_vcs_req", return_value={"number": 5}), \
          patch.object(gra, "_repo_token", return_value="t"), \
          patch.object(gra, "_provider", return_value="gitcode"), \
@@ -572,7 +572,7 @@ def test_github_clarify_comment_ledgered():
     """S19-4：GitHub 澄清评论（issues.py _github_req POST 分支）响应带 comment id → 入账。
     直调该分支代码路径：mock _github_req 返回 GitHub 评论响应。"""
     _clean()
-    from src.user import repo_manager as rm
+    from src.domains.mgmt.user import repo_manager as rm
     _gh_resp = {"id": 991001, "body": "💬 **开发者澄清**", "user": {"login": "u"}}
     with patch.object(rm, "_github_req", return_value=_gh_resp):
         # 复刻 issues.py GitHub 分支的入账逻辑（与产品代码同构）
@@ -630,7 +630,7 @@ def test_multitask_patch_body_ledgered_github():
     """S21-1：GitHub 版 _patch_github_issue_body 同样入账（provider=github）。"""
     _clean()
     from src.api import issues_center as ic
-    from src.user import repo_manager as rm
+    from src.domains.mgmt.user import repo_manager as rm
     with patch.object(rm, "_github_req", return_value={"number": 6, "body": "y"}):
         ic._patch_github_issue_body("tok", "test", "i453led", 6, "正文+标记")
     _h = ol.content_hash_md5("正文+标记")
@@ -642,7 +642,7 @@ def test_multitask_patch_body_ledgered_github():
 def test_redispatch_blocked_for_ledger_hit_event():
     """S7-1 变体：重投事件内容在台账（我们代发）→ 409 拒绝，不重新入队。"""
     _clean()
-    from src.api.routes import events as ev
+    from src.domains.runtime.routes import events as ev
     from fastapi import HTTPException
     # 我们代发的评论入账
     ol.record_outbound("gitcode", RK, "issue_comment", "99921", issue_number="5")
@@ -673,7 +673,7 @@ def test_redispatch_blocked_for_ledger_hit_event():
 def test_redispatch_blocked_for_self_loop_skipped_event():
     """S7-1：事件曾被 self_loop 拦截（event_skipped 留痕）→ 409 拒绝。"""
     _clean()
-    from src.api.routes import events as ev
+    from src.domains.runtime.routes import events as ev
     from fastapi import HTTPException
     with db_lock:
         c = db.cursor()
@@ -695,7 +695,7 @@ def test_redispatch_blocked_for_self_loop_skipped_event():
 def test_redispatch_normal_event_allows():
     """S7-3：正常用户事件（无留痕、无台账）→ 不被 409 拦（后续流程正常走）。"""
     _clean()
-    from src.api.routes import events as ev
+    from src.domains.runtime.routes import events as ev
     from fastapi import HTTPException
     _payload = _comment_payload("realuser05", note="用户评论", cid=99922)
     _evt = {"seq": 2, "repo_key": RK, "issue_id": "5", "event_type": "issue_comment",
@@ -704,7 +704,7 @@ def test_redispatch_normal_event_allows():
     with patch.object(ev, "_load_event", return_value=_evt), \
          patch("src.api.deps.check_repo_access", return_value=None), \
          patch("src.api.event_store.update_event_status", return_value=None), \
-         patch("src.runtime.service.requeue_task", side_effect=RuntimeError("stop-here")):
+         patch("src.domains.runtime.engine.service.requeue_task", side_effect=RuntimeError("stop-here")):
         # 后续派发路径用 RuntimeError 截断（只验证 1.0a 不 409 拦截）
         try:
             ev.redispatch_event(2, user={"username": "admin"})
@@ -766,7 +766,7 @@ def test_confirm_done_close_echo_blocked():
     """S23-1：聊天/卡片"确认完成"→confirm_issue_done→VcsApiClient.close_issue（入账）
     →webhook 回流 issue_closed→台账命中拦。整条链路用真实 close_issue 客户端走。"""
     _clean()
-    from src.vcs.api_client import VcsApiClient
+    from src.domains.runtime.vcs.api_client import VcsApiClient
     # 卡片/聊天链的执行层：VcsApiClient.close_issue（mock HTTP 层，客户端层记账真实执行）
     client = VcsApiClient("gitcode", "tok", "test", "i453led")
     with patch.object(client, "_gitcode_request", return_value={"number": 9, "state": "close"}), \
@@ -803,7 +803,7 @@ def test_bot_pr_opened_exempt_from_ledger():
     # 我们建的 PR 入账
     ol.record_outbound("gitcode", RK, "pr", "33")
     # bot actor 的 PR opened 回流——须放行（不产生 outbound_ledger_hit）
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -833,7 +833,7 @@ def test_update_pull_and_merge_pull_gateway_ledgered():
     （pr_merge 键）。此前两网关 PATCH/PUT 端点漏埋（URL 扫描常只匹配 POST）。"""
     _clean()
     from src.api import git_repo_api as gra
-    import src.vcs.providers as _vp
+    import src.domains.runtime.vcs.providers as _vp
     _pu = gra.PRUpdateBody()
     _pu.body = "更新后的 PR 描述"
     with patch.object(gra, "_vcs_req", return_value={"number": 21}), \
@@ -858,7 +858,7 @@ def test_user_pr_opened_allows_flow():
     """S26-1 / V4 前半：用户自己提的 PR（台账无记录）→ 放行进流水线——
     最该处理的场景一次都不能漏。验证不产生任何拦截留痕。"""
     _clean()
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -907,7 +907,7 @@ def test_pr_update_with_commit_flows_to_qa_review():
     → 台账命中但放行——qa 复审流转不断（Issue #46 QA↔coding 回流闭环）。"""
     _clean()
     ol.record_outbound("gitcode", RK, "pr", "61")
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -922,7 +922,7 @@ def test_pr_update_text_only_edit_blocked():
     """S13：agent 改 PR 标题/正文（无新 commit，纯文本编辑）→ 台账命中拦——回声不流转。"""
     _clean()
     ol.record_outbound("gitcode", RK, "pr", "62")
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -940,7 +940,7 @@ def test_pr_update_user_text_edit_allows():
     判定链是"台账命中才看 commit，台账无记录直接放"，文本编辑拦截只对系统回声生效，
     绝不能做成无条件规则误伤用户。"""
     _clean()
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -958,7 +958,7 @@ def test_bot_command_comment_not_executed():
     _clean()
     _executed = []
     import src.api.issues_center as ic
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
          patch.object(ic, "confirm_issue_done", side_effect=lambda *a, **k: _executed.append(a)):
         _run(_comment_payload("grape_bot", note="确认完成", num=15, cid=99931), "Note Hook")
     assert _executed == [], "bot 评论不得执行 confirm_issue_done"
@@ -969,7 +969,7 @@ def test_bot_command_echo_quoted_not_executed():
     _clean()
     _executed = []
     import src.api.issues_center as ic
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
          patch.object(ic, "cancel_issue_task", side_effect=lambda *a, **k: _executed.append(a)):
         _run(_comment_payload("grape_bot", note="> 用户说：/cancel\n好的我来处理", num=16, cid=99932), "Note Hook")
     assert _executed == [], "引用回声不得执行 cancel_issue_task"
@@ -980,7 +980,7 @@ def test_user_command_comment_executed():
     _clean()
     _executed = []
     import src.api.issues_center as ic
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
          patch.object(ic, "confirm_issue_done", side_effect=lambda *a, **k: _executed.append(a)):
         _run(_comment_payload("realuser11", note="确认完成", num=17, cid=99933), "Note Hook")
     assert len(_executed) == 1, "用户指令必须执行一次"
@@ -990,7 +990,7 @@ def test_pr_updated_real_event_name_blocked():
     """审查 D2 回归：真实事件名 pull_request_updated（非 pr_updated 假名）进台账判定段。"""
     _clean()
     ol.record_outbound("gitcode", RK, "pr", "71")
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -1004,7 +1004,7 @@ def test_redispatch_event_type_scoped():
     """审查 D3 / S7-3：同 issue 历史上有 bot 评论留痕（self_loop），但重派的是
     另一类型的正常事件（issue_updated）→ 不受留痕影响，放行重派。"""
     _clean()
-    from src.api.routes import events as ev
+    from src.domains.runtime.routes import events as ev
     from fastapi import HTTPException
     # 该 issue 有 bot 评论被拦的留痕（issue_comment 类型）
     with db_lock:
@@ -1018,8 +1018,8 @@ def test_redispatch_event_type_scoped():
     with patch.object(ev, "_load_event", return_value=_evt), \
          patch("src.api.deps.check_repo_access", return_value=None), \
          patch("src.api.event_store.update_event_status", return_value=None), \
-         patch("src.runtime.service.requeue_task", side_effect=RuntimeError("stop-here")), \
-         patch("src.api.event_pipeline.run_pipeline", return_value={"seq": 9, "ok": True}):
+         patch("src.domains.runtime.engine.service.requeue_task", side_effect=RuntimeError("stop-here")), \
+         patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline", return_value={"seq": 9, "ok": True}):
         try:
             ev.redispatch_event(3, user={"username": "admin"})
             blocked = False
@@ -1117,7 +1117,7 @@ def test_gateway_create_pull_ledgered():
     已入账，此端点原先漏账。外部用户建的 PR 回流命中 → 拦（bot 场景豁免见下一用例）。"""
     _clean()
     from src.api import git_repo_api as gra
-    import src.vcs.providers as _vp
+    import src.domains.runtime.vcs.providers as _vp
     _pb = gra.PRCreateBody()
     _pb.title = "外部建 PR"
     _pb.body = "PR 描述"
@@ -1134,7 +1134,7 @@ def test_gateway_create_pull_bot_exempt():
     （放行给 QA）——入账不得破坏 E2 红线。"""
     _clean()
     ol.record_outbound("gitcode", RK, "pr", "41")
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "merge_request",
             "project": {"path_with_namespace": "test/i453led"},
@@ -1149,7 +1149,7 @@ def test_gateway_pr_write_idempotent_on_missing_id():
     端点响应/行为零变化（兜底回落基线行为，不抛错不改返回值）。"""
     _clean()
     from src.api import git_repo_api as gra
-    import src.vcs.providers as _vp
+    import src.domains.runtime.vcs.providers as _vp
     _pb = gra.PRCreateBody()
     _pb.title = "无 ID 响应"
     with patch.object(gra, "_vcs_req", return_value={"html_url": "x"}), \
@@ -1171,7 +1171,7 @@ def test_redispatch_ledger_hit_trail_blocks_after_retention():
     """S29-UC5（G3）：台账 30 天保留期过后记录已清，但 outbound_ledger_hit 留痕
     （event_skipped 无保留期）仍拒绝该事件重派——路径 B 回声 30 天后也无法复活。"""
     _clean()
-    from src.api.routes import events as ev
+    from src.domains.runtime.routes import events as ev
     from fastapi import HTTPException
     # 历史留痕：该事件曾被台账拦（留痕永久保留，流水线真实形态 issue_id 带 # 前缀）；
     # 台账侧模拟已清理（无记录）
@@ -1236,7 +1236,7 @@ def test_issue_close_recent_hit_blocks():
     """S30-UC1：我们关 issue（窗口内入账）→ issue_closed 回声 → 编号+窗口双命中 → 拦。"""
     _clean()
     _seed_ledger_row("issue_close", "301", minutes_ago=2)
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "issue",
             "project": {"path_with_namespace": "test/i453led"},
@@ -1250,7 +1250,7 @@ def test_issue_meta_recent_hit_blocks():
     """S30-UC2：我们改 assignee（窗口内入账）→ issue_assigned 回声 → 双命中 → 拦。"""
     _clean()
     _seed_ledger_row("issue_meta", "302", minutes_ago=2)
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "issue",
             "project": {"path_with_namespace": "test/i453led"},
@@ -1266,7 +1266,7 @@ def test_issue_close_stale_record_allows_user():
     回声放行——归档动作不再被旧记录误拦（原实现误拦 30 天）。"""
     _clean()
     _seed_ledger_row("issue_close", "303", minutes_ago=31)
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "issue",
             "project": {"path_with_namespace": "test/i453led"},
@@ -1280,7 +1280,7 @@ def test_issue_meta_stale_record_allows_user():
     """S30-UC5：窗口外旧 meta 记录不误拦用户改 assignee/reopen。"""
     _clean()
     _seed_ledger_row("issue_meta", "304", minutes_ago=31)
-    with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
+    with patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]):
         _run({
             "object_kind": "issue",
             "project": {"path_with_namespace": "test/i453led"},

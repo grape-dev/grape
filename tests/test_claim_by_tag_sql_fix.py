@@ -3,7 +3,7 @@ import pytest
 import sys
 sys.path.insert(0, '/opt/grape')
 
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)
@@ -105,7 +105,7 @@ def setup_db(tmp_path, monkeypatch):
     # Issue #259：claim_by_tag 的健康分检查（health_scorer）经 session_manager.db
     # 引用真实库，须一并替换到测试库；否则引擎 76 查不到 → 失联 → score=0 → claim 拒绝。
     import src.kernel.session_manager as _sm
-    import src.runtime.health_scorer as _hs
+    import src.domains.runtime.engine.health_scorer as _hs
     monkeypatch.setattr(_sm, 'db', test_db)
     monkeypatch.setattr(_sm, 'db_lock', __import__('threading').Lock())
     _hs._cache.clear()
@@ -152,7 +152,7 @@ def test_claim_by_tag_global_scope_skip_loop_passes_params(setup_db):
 
 def test_claim_by_tag_all_tag_still_works(setup_db):
     """tag='all' 广播模式不受影响（params=[] 时 tuple(params)=() 无占位符）"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     # 先插入一个 pool_tag='qa' 的任务让 'all' 标签能匹配
     svc.db.execute("""
         INSERT INTO agent_tasks (id, status, runtime_id, pool_tag, pool_engine_ids, agent_session_id, issue_session_id, created_at, agent_type)
@@ -169,7 +169,7 @@ def test_claim_by_tag_all_tag_still_works(setup_db):
 
 def test_claim_by_tag_repo_scope_prefix_mismatch(setup_db):
     """repo scope: owner_id 无前缀 vs agent_tasks.repo_key 带前缀，IN (?, ?) 必须两种都匹配"""
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     # 注册一个 repo scope 的 worker（owner_id 无前缀）
     svc.db.execute("INSERT INTO agent_runtimes (id, name, status, credential_id, last_seen_at) VALUES (173, 'opencode', 'online', 167, ?)", (
         __import__('datetime').datetime.now(__import__('datetime').timezone.utc).isoformat(),))

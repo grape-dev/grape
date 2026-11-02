@@ -40,7 +40,7 @@ class TestDetectStaleOfficialScenes:
 
     def test_reports_stale_zero_writes(self):
         """UC9-1: 仓库已删场景 → warning + 计数；DB 零写（只有 SELECT，无 UPDATE/DELETE）"""
-        from src.storage.scene_sync import _detect_stale_official_scenes
+        from src.domains.runtime.storage.scene_sync import _detect_stale_official_scenes
         mock_db, mock_cursor = self._mock_db([(1, "api-skill-dev"), (2, "skill-dev"), (3, "hello-world")])
         with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_scenes({"hello-world"}, traversal_complete=True)
@@ -52,7 +52,7 @@ class TestDetectStaleOfficialScenes:
 
     def test_guard_skips_on_incomplete_traversal(self):
         """UC9-4: 遍历不完整 → 跳过本轮检测（零查询、零报告）"""
-        from src.storage.scene_sync import _detect_stale_official_scenes
+        from src.domains.runtime.storage.scene_sync import _detect_stale_official_scenes
         mock_db, mock_cursor = self._mock_db([(1, "api-skill-dev")])
         with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_scenes({"whatever"}, traversal_complete=False)
@@ -61,7 +61,7 @@ class TestDetectStaleOfficialScenes:
 
     def test_no_stale_no_warning(self):
         """仓库与 DB 一致 → 0，正常路径"""
-        from src.storage.scene_sync import _detect_stale_official_scenes
+        from src.domains.runtime.storage.scene_sync import _detect_stale_official_scenes
         mock_db, _ = self._mock_db([(1, "hello-world")])
         with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_scenes({"hello-world"}, traversal_complete=True)
@@ -73,7 +73,7 @@ class TestDetectStaleOfficialScenes:
 class TestDetectStaleOfficialSkills:
     def test_reports_stale_zero_writes(self):
         """UC11-1: json 已移除的 skill → 计数；DB 零写"""
-        from src.storage.skill_sync import _detect_stale_official_skills
+        from src.domains.runtime.storage.skill_sync import _detect_stale_official_skills
         mock_cursor = MagicMock()
         mock_cursor.fetchall = MagicMock(return_value=[(1, "vod"), (2, "removed-skill")])
         mock_cursor.execute = MagicMock(return_value=mock_cursor)
@@ -87,7 +87,7 @@ class TestDetectStaleOfficialSkills:
 
     def test_guard_skips_on_incomplete(self):
         """UC11-2: json 解析失败/写入中断 → 跳过检测，不出具误报名单"""
-        from src.storage.skill_sync import _detect_stale_official_skills
+        from src.domains.runtime.storage.skill_sync import _detect_stale_official_skills
         mock_db = MagicMock()
         with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_skills({"vod"}, traversal_complete=False)
@@ -100,7 +100,7 @@ class TestDetectStaleOfficialSkills:
 class TestPrecheckScopeUnification:
     def test_user_scope_skill_reports_missing(self):
         """UC9-3: user-scope skill 不再通过预检（与 ref 重建同口径）"""
-        from src.storage.scene_sync import _query_active_skill_names
+        from src.domains.runtime.storage.scene_sync import _query_active_skill_names
         mock_cursor = MagicMock()
         # 模拟查询结果：user-scope 的 my-skill 不在 active official/repo 集合内
         mock_cursor.fetchall = MagicMock(return_value=[("vod",)])
@@ -119,7 +119,7 @@ class TestPrecheckScopeUnification:
 class TestNetworkRetry:
     def test_transient_failure_heals(self):
         """UC12-1: 首次 TransportError → 5s 退避 → 第二次成功（退避缩短为 0 加速测试）"""
-        from src.storage.scene_sync import _download_repo_zip_with_retry
+        from src.domains.runtime.storage.scene_sync import _download_repo_zip_with_retry
         calls = {"n": 0}
 
         async def flaky(client, token):
@@ -128,8 +128,8 @@ class TestNetworkRetry:
                 raise __import__("httpx").TransportError("connection reset")
             return "/tmp/ok"
 
-        with patch("src.storage.scene_sync._download_repo_zip", new=flaky), \
-             patch("src.storage.scene_sync.asyncio.sleep", new=AsyncMock()):
+        with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=flaky), \
+             patch("src.domains.runtime.storage.scene_sync.asyncio.sleep", new=AsyncMock()):
             result = _run_async(_download_repo_zip_with_retry(MagicMock(), "t"))
         assert result == "/tmp/ok"
         assert calls["n"] == 2
@@ -137,7 +137,7 @@ class TestNetworkRetry:
     def test_4xx_fails_fast(self):
         """UC12-3: 401 快速失败，不重试"""
         import httpx
-        from src.storage.scene_sync import _download_repo_zip_with_retry
+        from src.domains.runtime.storage.scene_sync import _download_repo_zip_with_retry
 
         resp = MagicMock()
         resp.status_code = 401
@@ -147,7 +147,7 @@ class TestNetworkRetry:
             calls["n"] += 1
             raise httpx.HTTPStatusError("unauthorized", request=MagicMock(), response=resp)
 
-        with patch("src.storage.scene_sync._download_repo_zip", new=always_401):
+        with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=always_401):
             with pytest.raises(httpx.HTTPStatusError):
                 _run_async(_download_repo_zip_with_retry(MagicMock(), "bad-token"))
         assert calls["n"] == 1  # 未重试
@@ -155,7 +155,7 @@ class TestNetworkRetry:
     def test_persistent_5xx_exhausts_and_raises(self):
         """UC12-2: 持续 5xx → 3 次退避后放弃"""
         import httpx
-        from src.storage.scene_sync import _download_repo_zip_with_retry
+        from src.domains.runtime.storage.scene_sync import _download_repo_zip_with_retry
 
         resp = MagicMock()
         resp.status_code = 503
@@ -165,8 +165,8 @@ class TestNetworkRetry:
             calls["n"] += 1
             raise httpx.HTTPStatusError("unavailable", request=MagicMock(), response=resp)
 
-        with patch("src.storage.scene_sync._download_repo_zip", new=always_503), \
-             patch("src.storage.scene_sync.asyncio.sleep", new=AsyncMock()):
+        with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=always_503), \
+             patch("src.domains.runtime.storage.scene_sync.asyncio.sleep", new=AsyncMock()):
             with pytest.raises(httpx.HTTPStatusError):
                 _run_async(_download_repo_zip_with_retry(MagicMock(), "t"))
         assert calls["n"] == 4  # 初次 + 3 次重试
@@ -177,7 +177,7 @@ class TestNetworkRetry:
 class TestTempDirCleanup:
     def test_standalone_cleanup_removes_parent(self):
         """standalone 模式 finally 清理删除父目录（不残留 scene_sync_zip_XXXX 空壳）"""
-        from src.storage.scene_sync import sync_official_scenes
+        from src.domains.runtime.storage.scene_sync import sync_official_scenes
 
         # 构造含无效 scenes/ 的目录结构：repo_root = parent/top_dir，scenes/ 缺失走早退
         parent = tempfile.mkdtemp(prefix="scene_sync_zip_test_")
@@ -188,9 +188,9 @@ class TestTempDirCleanup:
             return top
 
         try:
-            with patch("src.storage.scene_sync._get_sync_token", return_value="t"), \
-                 patch("src.storage.scene_sync._download_repo_zip", new=mock_download), \
-                 patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value="t"), \
+                 patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=mock_download), \
+                 patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
                 _run_async(sync_official_scenes())
             # P45+§4.5: 父目录也被清理（原 bug：tmp_dir 未赋值完全不清理；窄修复会残留空父目录）
             assert not os.path.exists(parent), f"parent dir leaked: {parent}"
@@ -200,14 +200,14 @@ class TestTempDirCleanup:
 
     def test_provided_repo_root_not_cleaned_by_scene(self):
         """R31 caller 注入模式：scene 同步不动 caller 的临时目录（由 caller 清理）"""
-        from src.storage.scene_sync import sync_official_scenes
+        from src.domains.runtime.storage.scene_sync import sync_official_scenes
 
         parent = tempfile.mkdtemp(prefix="caller_owned_")
         top = os.path.join(parent, "grape-skills-main")
         os.makedirs(top, exist_ok=True)
 
         try:
-            with patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+            with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
                 _run_async(sync_official_scenes(repo_root=top))
             # caller 提供的 repo_root 仍存在（清理责任在 caller）
             assert os.path.exists(parent)
@@ -217,7 +217,7 @@ class TestTempDirCleanup:
 
     def test_early_return_fallback_called(self):
         """UC9-2: scenes/ 缺失早退也调用 _init_featured_scenes_if_empty（兜底一致）"""
-        from src.storage.scene_sync import sync_official_scenes
+        from src.domains.runtime.storage.scene_sync import sync_official_scenes
 
         parent = tempfile.mkdtemp(prefix="early_ret_")
         top = os.path.join(parent, "grape-skills-main")
@@ -225,7 +225,7 @@ class TestTempDirCleanup:
 
         fallback = MagicMock()
         try:
-            with patch("src.storage.scene_sync._init_featured_scenes_if_empty", new=fallback):
+            with patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty", new=fallback):
                 _run_async(sync_official_scenes(repo_root=top))
             fallback.assert_called_once()  # 早退路径执行了兜底
         finally:
@@ -235,7 +235,7 @@ class TestTempDirCleanup:
     def test_scene_failure_isolated_and_cleaned(self):
         """UC4-1: 单场景处理异常被隔离（failed 计数、不影响其他场景与整体返回），
         且 standalone 模式下临时目录仍被清理（whole-body finally 兜底）"""
-        from src.storage.scene_sync import sync_official_scenes
+        from src.domains.runtime.storage.scene_sync import sync_official_scenes
         import json as _json
 
         # 两个场景：一个 scene.json 损坏（触发逐场景 except），一个正常但 skill 缺失（failed 路径）
@@ -259,14 +259,14 @@ class TestTempDirCleanup:
 
         import shutil
         try:
-            with patch("src.storage.scene_sync._get_sync_token", return_value="t"), \
-                 patch("src.storage.scene_sync._download_repo_zip", new=mock_download), \
-                 patch("src.storage.scene_sync._refresh_cat_cache"), \
-                 patch.dict("src.storage.scene_sync._cat_cache", {"general": 1}, clear=False), \
-                 patch("src.storage.scene_sync.db_lock"), \
-                 patch("src.storage.scene_sync.db", mock_db), \
-                 patch("src.storage.scene_sync._rebuild_scene_skill_ref_by_name"), \
-                 patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+            with patch("src.domains.runtime.storage.scene_sync._get_sync_token", return_value="t"), \
+                 patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=mock_download), \
+                 patch("src.domains.runtime.storage.scene_sync._refresh_cat_cache"), \
+                 patch.dict("src.domains.runtime.storage.scene_sync._cat_cache", {"general": 1}, clear=False), \
+                 patch("src.domains.runtime.storage.scene_sync.db_lock"), \
+                 patch("src.domains.runtime.storage.scene_sync.db", mock_db), \
+                 patch("src.domains.runtime.storage.scene_sync._rebuild_scene_skill_ref_by_name"), \
+                 patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
                 _run_async(sync_official_scenes())  # 不应抛异常（broken 被逐场景 except 隔离）
             # standalone 模式：mock_download 返回的 top 视为自建 → finally 清理父目录
             # （真实 _download_repo_zip 返回 mkdtemp/top，dirname 即父目录；此处对齐该形态）
@@ -277,7 +277,7 @@ class TestTempDirCleanup:
 class TestObsoleteIntervalKey:
     def test_obsolete_key_warned_not_fatal(self):
         """R31 决策 A 兼容：废弃 interval 键/环境变量被容忍并告警，不影响 repo 解析"""
-        from src.storage.scene_sync import _load_config
+        from src.domains.runtime.storage.scene_sync import _load_config
         os.environ["GRAPESKILLS_REPO_URL"] = "https://example.com/a/b"
         os.environ["GRAPESKILLS_REPO_BRANCH"] = "dev"
         os.environ["SCENE_SYNC_INTERVAL"] = "600"  # 废弃
@@ -297,7 +297,7 @@ class TestLockStepCodeQuality:
         """UC14-1 代码质量：scene 步骤的 renew/acquire/release 三处锁操作统一走
         asyncio.to_thread（第五复审 4.2：renew 曾与旁边 acquire/release 风格分裂）"""
         import inspect
-        from src.storage import skill_sync
+        from src.domains.runtime.storage import skill_sync
         src = inspect.getsource(skill_sync.sync_official_skills)
         # 步骤 4 区块内：renw/acquire/release 三者都必须经 to_thread
         step4 = src[src.index("# 4. R31"):src.index("except Exception as e:\n            logger.exception(f\"skill sync: scene sync failed")]
@@ -312,7 +312,7 @@ class TestLockStepCodeQuality:
         """第五复审 4.1 回归防护：步骤 4 不得引入赋值后未读取的死变量"""
         import inspect
         import ast
-        from src.storage import skill_sync
+        from src.domains.runtime.storage import skill_sync
         src = inspect.getsource(skill_sync.sync_official_skills)
         fn = ast.parse(src).body[0]  # the async def
         assigned, loaded = set(), set()
@@ -332,28 +332,28 @@ class TestLockStepCodeQuality:
 class TestMultiPlatformRepoSource:
     def test_github_resolves_to_codeload(self):
         """UC16-1/UC16-4: github URL → codeload 基址 + 干净的 owner/repo（防 BadZipFile 回归）"""
-        from src.storage.scene_sync import _parse_repo_host_path
+        from src.domains.runtime.storage.scene_sync import _parse_repo_host_path
         base, path = _parse_repo_host_path("https://github.com/grape-dev/grape-skills")
         assert base == "https://codeload.github.com"
         assert path == "grape-dev/grape-skills"
 
     def test_gitcode_resolves_to_raw(self):
         """UC16-2: gitcode URL → raw 基址（历史行为不变）"""
-        from src.storage.scene_sync import _parse_repo_host_path
+        from src.domains.runtime.storage.scene_sync import _parse_repo_host_path
         base, path = _parse_repo_host_path("https://gitcode.com/grape-dev/grape-skills")
         assert base == "https://raw.gitcode.com"
         assert path == "grape-dev/grape-skills"
 
     def test_trailing_slash_and_subdomain_tolerated(self):
         """URL 容差：尾斜杠、大小写不破坏解析"""
-        from src.storage.scene_sync import _parse_repo_host_path
+        from src.domains.runtime.storage.scene_sync import _parse_repo_host_path
         base, path = _parse_repo_host_path("https://GitHub.com/grape-dev/grape-skills/")
         assert base == "https://codeload.github.com"
         assert path == "grape-dev/grape-skills"
 
     def test_unknown_host_falls_back_to_gitcode_semantics(self):
         """UC16-3: 未识别 host 回退 gitcode 语义，不崩溃"""
-        from src.storage.scene_sync import _parse_repo_host_path
+        from src.domains.runtime.storage.scene_sync import _parse_repo_host_path
         base, path = _parse_repo_host_path("https://gitee.com/foo/bar")
         assert base == "https://raw.gitcode.com"  # 回退基址
         # 未识别 host 的 path 按旧剥前缀逻辑处理（不含 host 前缀垃圾）
@@ -363,7 +363,7 @@ class TestMultiPlatformRepoSource:
         """下载 URL 形态按 host 分流（codeload 用 zip/、gitcode 用 archive/）——
         防止历史缺陷回归：字符串手术曾产生 raw.gitcode.com/https://github.com/..."""
         import inspect
-        from src.storage import scene_sync
+        from src.domains.runtime.storage import scene_sync
         src = inspect.getsource(scene_sync._download_repo_zip)
         assert 'codeload.github.com' in src or '_DL_BASE' in src
         assert '/zip/refs/heads/' in src
@@ -374,7 +374,7 @@ class TestMultiPlatformRepoSource:
     def test_github_download_sends_no_auth_header(self):
         """UC16-1 P0 修复回归：GitHub 源即使有 token 也必须匿名请求——
         GitHub codeload 对任何 Bearer header 一律 404（实测），GitCode PAT 对 GitHub 致命"""
-        from src.storage import scene_sync
+        from src.domains.runtime.storage import scene_sync
         with patch.object(scene_sync, "_DL_BASE", "https://codeload.github.com"), \
              patch.object(scene_sync, "_OWNER_REPO", "grape-dev/grape-skills"), \
              patch.object(scene_sync, "_REPO_BRANCH", "main"):
@@ -412,7 +412,7 @@ class TestMultiPlatformRepoSource:
 
     def test_gitcode_download_sends_token_when_present(self):
         """UC16-2 对照：gitcode 源有 token 时正常携带（私仓认证行为不变）"""
-        from src.storage import scene_sync
+        from src.domains.runtime.storage import scene_sync
         with patch.object(scene_sync, "_DL_BASE", "https://raw.gitcode.com"), \
              patch.object(scene_sync, "_OWNER_REPO", "grape-dev/grape-skills"), \
              patch.object(scene_sync, "_REPO_BRANCH", "main"):
@@ -466,7 +466,7 @@ class TestStandaloneWorkerRemoval:
 class TestMergedPath:
     def test_repo_root_mode_skips_download(self):
         """R31: repo_root 注入时不发起下载（复用 caller 的 ZIP）"""
-        from src.storage.scene_sync import sync_official_scenes
+        from src.domains.runtime.storage.scene_sync import sync_official_scenes
 
         parent = tempfile.mkdtemp(prefix="merged_")
         top = os.path.join(parent, "grape-skills-main")
@@ -479,8 +479,8 @@ class TestMergedPath:
             return top
 
         try:
-            with patch("src.storage.scene_sync._download_repo_zip", new=spy_download), \
-                 patch("src.storage.scene_sync._init_featured_scenes_if_empty"):
+            with patch("src.domains.runtime.storage.scene_sync._download_repo_zip", new=spy_download), \
+                 patch("src.domains.runtime.storage.scene_sync._init_featured_scenes_if_empty"):
                 _run_async(sync_official_scenes(repo_root=top))
             assert download_called["n"] == 0  # 未下载（scenes/ 缺失早退，但也不该下载）
         finally:

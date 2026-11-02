@@ -18,9 +18,9 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
-from src.auth import grape_account_db
-from src.vcs.api_client import VcsApiClient
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
+from src.domains.runtime.vcs.api_client import VcsApiClient
 
 client = TestClient(app)
 
@@ -30,7 +30,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username="test209"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -152,7 +152,7 @@ class TestConfirmDoneCloseIssues:
         """confirm-done 响应含 issue_closed 字段"""
         _clean()
         tid = _insert_task(status='processing', issue_number=301)
-        with patch("src.api.routes.issues._close_vcs_issues",
+        with patch("src.domains.runtime.routes.issues._close_vcs_issues",
                    return_value={"gitcode": "success", "github": "skipped"}) as m:
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
@@ -169,7 +169,7 @@ class TestConfirmDoneCloseIssues:
         """VCS 关闭失败时本地状态仍 completed"""
         _clean()
         tid = _insert_task(status='processing', issue_number=302)
-        with patch("src.api.routes.issues._close_vcs_issues",
+        with patch("src.domains.runtime.routes.issues._close_vcs_issues",
                    return_value={"gitcode": "failed", "github": "failed"}):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
@@ -186,7 +186,7 @@ class TestConfirmDoneCloseIssues:
         """已 completed 的 Issue 再次 confirm-done 不调用关闭 API"""
         _clean()
         tid = _insert_task(status='completed', issue_number=303)
-        with patch("src.api.routes.issues._close_vcs_issues") as m:
+        with patch("src.domains.runtime.routes.issues._close_vcs_issues") as m:
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -197,7 +197,7 @@ class TestConfirmDoneCloseIssues:
 
     def test_close_vcs_issues_no_issue_number(self):
         """无 issue_number 时两侧均 skipped"""
-        from src.api.routes.issues import _close_vcs_issues
+        from src.domains.runtime.routes.issues import _close_vcs_issues
         result = _close_vcs_issues("gitcode:org/repo", None, {"id": 1, "username": "u"})
         assert result == {"gitcode": "skipped", "github": "skipped"}
 
@@ -218,7 +218,7 @@ class TestConfirmDoneCloseIssues:
         tid = _insert_task(status='processing', issue_number=305)
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "closed"
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -233,7 +233,7 @@ class TestConfirmDoneCloseIssues:
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "open"
         mock_client.close_issue.return_value = {"state": "closed", "number": 306}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200
@@ -247,7 +247,7 @@ class TestConfirmDoneCloseIssues:
         mock_client = MagicMock()
         mock_client.get_issue_state.return_value = "open"
         mock_client.close_issue.return_value = {"error": "HTTP 403"}
-        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.vcs.api_client.VcsApiClient", return_value=mock_client):
+        with patch("src.api.deps.get_user_token_with_refresh", return_value="fake-token"),              patch("src.domains.runtime.vcs.api_client.VcsApiClient", return_value=mock_client):
             r = client.post(f"/api/issues/{tid}/confirm-done", headers=_headers,
                             json={"confirmation": "user_confirmed"})
         assert r.status_code == 200

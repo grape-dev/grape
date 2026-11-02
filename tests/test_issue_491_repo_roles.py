@@ -35,8 +35,8 @@ class TestCheckGitcodeAdminRoleName:
 
     def test_custom_admin_role_name_admin(self):
         """#491 复现形态：自定义管理员角色 role_name=Admin / access_level=20 / custom → admin。"""
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_gitcode_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=20, permission="custom",
                                              role_name="Admin")):
@@ -44,8 +44,8 @@ class TestCheckGitcodeAdminRoleName:
 
     def test_role_name_admin_with_developer_level(self):
         """role_name=Admin 但 access_level=30 → admin（角色名权威）。"""
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_gitcode_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=30, permission="write",
                                              role_name="Admin")):
@@ -53,8 +53,8 @@ class TestCheckGitcodeAdminRoleName:
 
     def test_role_name_developer_not_admin(self):
         """role_name=Developer → 非 admin（安全边界）。"""
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_gitcode_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=30, permission="write",
                                              role_name="Developer")):
@@ -62,8 +62,8 @@ class TestCheckGitcodeAdminRoleName:
 
     def test_role_name_maintainer_not_admin(self):
         """#393 终审口径回归：Maintainer(40) 不是 admin（payload 对齐 #393 先例：permission=write）。"""
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_gitcode_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=40, permission="write",
                                              role_name="Maintainer")):
@@ -71,8 +71,8 @@ class TestCheckGitcodeAdminRoleName:
 
     def test_role_name_case_insensitive(self):
         """role_name 大小写不敏感："admin" → admin。"""
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_gitcode_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=20, permission="custom",
                                              role_name="admin")):
@@ -80,8 +80,8 @@ class TestCheckGitcodeAdminRoleName:
 
     def test_no_role_name_fallback_access_level(self):
         """无 role_name（旧形态）→ 回退 access_level>=50 判定（兜底不破坏）。"""
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_gitcode_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin
         with patch.object(repo_manager, "_req",
                           return_value=_perm(access_level=50, permission="write")):
             assert _check_gitcode_admin("t", "org", "repo", "u") is True
@@ -94,8 +94,8 @@ class TestGithubPathUnchanged:
     """GitHub 路径回归：role_name==admin 既有口径不受影响。"""
 
     def test_github_role_name_admin(self):
-        from src.user import repo_manager
-        from src.auth.repo_roles import _check_github_admin
+        from src.domains.mgmt.user import repo_manager
+        from src.domains.mgmt.auth.repo_roles import _check_github_admin
         with patch.object(repo_manager, "get_github_collaborator_permission",
                           return_value="admin"):
             assert _check_github_admin("t", "org", "repo", "u") is True

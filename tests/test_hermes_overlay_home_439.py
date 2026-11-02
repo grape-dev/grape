@@ -17,8 +17,8 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
-from src.agent import hermes_acp  # noqa: E402
+from src.domains.runtime.engine.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
+from src.domains.runtime.agents import hermes_acp  # noqa: E402
 
 
 def _mk_src_home(tmp_path, entries):

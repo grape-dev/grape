@@ -25,7 +25,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 from fastapi import HTTPException  # noqa: E402
 
 from src.kernel.session_manager import db, db_lock  # noqa: E402
-from src.api.routes.scenes import apply_scene, ApplySceneRequest  # noqa: E402
+from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest  # noqa: E402
 from src.api.pipeline_config import create_custom_scene  # noqa: E402
 from src.api.session_store import get_or_create_agent_session  # noqa: E402
 
@@ -258,7 +258,7 @@ class TestAgentDetailDeclaredVsEffective:
 
     def test_detail_returns_declared_and_effective(self):
         """detail 返回体同时携带场景声明引擎集合与 session 实际生效引擎。"""
-        from src.api.routes.agents import get_agent_detail
+        from src.domains.mgmt.routes.agents import get_agent_detail
         owner, repo = "s524owner", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{uuid.uuid4().hex[:8]}"
@@ -267,7 +267,7 @@ class TestAgentDetailDeclaredVsEffective:
         try:
             _bind_session(repo_key, "issue", rid_a)
             # 仓库当前应用场景 = scene_id（agents detail 声明配置来源）
-            from src.user.db import add_managed_repo, set_repo_scene
+            from src.domains.mgmt.user.db import add_managed_repo, set_repo_scene
             add_managed_repo(repo_key, owner, repo)
             set_repo_scene(repo_key, scene_id)
             _create_scene(scene_id, repo_key, [

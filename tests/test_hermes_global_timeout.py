@@ -25,8 +25,8 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
-from src.runtime.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
-import src.agent.hermes_acp as ha  # noqa: E402
+from src.domains.runtime.engine.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
+import src.domains.runtime.agents.hermes_acp as ha  # noqa: E402
 
 
 # ── 单元用例：_global_timeout_for 取值逻辑 ──────────────────────────────
@@ -311,6 +311,6 @@ class TestTextSilentCompletion:
 class TestPrematureMarkerVisibility:
     def test_marker_has_single_source_of_truth(self):
         """适配器与 service 必须共用同一个标记串，禁止两边各写一份字面量。"""
-        from src.runtime import service as svc
+        from src.domains.runtime.engine import service as svc
         assert svc.premature_end_marker() == ha.PREMATURE_END_MARKER
         assert ha.PREMATURE_END_MARKER == "[PREMATURE_END_TURN]"

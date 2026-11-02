@@ -8,11 +8,11 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")  # 兼容旧测试；token 现经 prompt 注入
 
-from src.runtime import (
+from src.domains.runtime.engine import (
     OpencodeRuntime, CodeArtsRuntime, get_runtime,
     AgentRuntime, stream_runtime, stream_opencode
 )
-from src.runtime.executor import _redact, stream_agent
+from src.domains.runtime.engine.executor import _redact, stream_agent
 
 
 class TestOpencodeRuntime:
@@ -208,8 +208,8 @@ class TestRedact:
                 return b""
 
         fake_proc = FakeStream()
-        with patch("src.agent.executor.subprocess.Popen", return_value=fake_proc), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/fake/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", return_value=fake_proc), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/fake/opencode"):
             events = list(stream_runtime("prompt", os.getcwd(), "", "issue",
                                        bot_token="BOTTOK", user_token="USERTOK"))
         combined = " ".join(str(d) for _, d in events)
@@ -261,7 +261,7 @@ class TestStreamAgentTimeout:
             monkeypatch.delenv(_k, raising=False)
 
     def _register(self, backend):
-        from src.agent.executor import register_backend, _BACKENDS
+        from src.domains.runtime.agents.executor import register_backend, _BACKENDS
         _BACKENDS[backend.name] = backend
         return backend.name
 
@@ -269,7 +269,7 @@ class TestStreamAgentTimeout:
         """完全无输出的 agent，超过 max_exec_seconds 后被优雅终止，返回 done(exit_code=-9)"""
         self._clear_silent_env(monkeypatch)
         name = self._register(_SleepBackend())
-        from src.agent.executor import stream_agent
+        from src.domains.runtime.agents.executor import stream_agent
         events = list(stream_agent("p", os.getcwd(), "", backend_name=name, max_exec_seconds=1))
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == -9
@@ -287,7 +287,7 @@ class TestStreamAgentTimeout:
         """持续有输出的 agent 不被超时杀掉，正常走完并返回 done(exit_code=0)"""
         self._clear_silent_env(monkeypatch)
         name = self._register(_ChatterBackend())
-        from src.agent.executor import stream_agent
+        from src.domains.runtime.agents.executor import stream_agent
         events = list(stream_agent("p", os.getcwd(), "", backend_name=name, max_exec_seconds=0.4))
         done = [d for et, d in events if et == "done"][0]
         assert done["exit_code"] == 0, done
@@ -305,7 +305,7 @@ class TestTerminateProc:
         if not hasattr(os, "killpg"):
             import pytest
             pytest.skip("POSIX process groups not available on this platform")
-        from src.agent.executor import _terminate_proc
+        from src.domains.runtime.agents.executor import _terminate_proc
 
         class FakeProc:
             pid = 12345
@@ -326,15 +326,15 @@ class TestTerminateProc:
         fp = FakeProc()
         # 生产路径：agent 经 start_new_session=True 启动，getpgid 必然成功；
         # 此处补 getpgid mock，避免 FakeProc.pid 不存在导致走 terminate/kill 兜底分支。
-        with patch("src.agent.executor.os.killpg") as mock_killpg, \
-             patch("src.agent.executor.os.getpgid", return_value=fp.pid):
+        with patch("src.domains.runtime.agents.executor.os.killpg") as mock_killpg, \
+             patch("src.domains.runtime.agents.executor.os.getpgid", return_value=fp.pid):
             _terminate_proc(fp, "test")
         # 第一次 SIGTERM 进程组，第二次 SIGKILL 进程组
         sigs = [c.args[1] for c in mock_killpg.call_args_list]
         assert sigs == [_signal.SIGTERM, _signal.SIGKILL]
 
     def test_already_exited_returns_early(self):
-        from src.agent.executor import _terminate_proc
+        from src.domains.runtime.agents.executor import _terminate_proc
         class ExitedProc:
             pid = 1
             def poll(self):
@@ -346,7 +346,7 @@ class TestConsumeStreamAsync:
     def test_bridges_events(self):
         """consume_stream_async 在线程池消费 stream_agent，逐事件回传。"""
         import asyncio
-        from src.agent.executor import consume_stream_async
+        from src.domains.runtime.agents.executor import consume_stream_async
         name = _register_tmp(_ChatterBackend())
 
         async def main():
@@ -362,7 +362,7 @@ class TestConsumeStreamAsync:
 
 
 def _register_tmp(backend):
-    from src.agent.executor import _BACKENDS
+    from src.domains.runtime.agents.executor import _BACKENDS
     _BACKENDS[backend.name] = backend
     return backend.name
 
@@ -409,7 +409,7 @@ class TestStreamAgentSessionAutoRetry:
     def test_retries_without_session_on_session_not_found(self):
         """首次带死 session 失败（Session not found），应自动重跑并成功"""
         from unittest.mock import patch
-        from src.agent import stream_agent
+        from src.domains.runtime.agents import stream_agent
 
         success_stdout = (
             '{"type":"step_start","sessionID":"ses_new_abc","part":{"type":"step-start"}}\n'
@@ -420,8 +420,8 @@ class TestStreamAgentSessionAutoRetry:
             {"returncode": 0, "stdout": success_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead_old", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -436,7 +436,7 @@ class TestStreamAgentSessionAutoRetry:
     def test_single_done_event_when_retry(self):
         """重跑场景下，调用方只应收到一个 done 事件（避免重复 done 破坏上层逻辑）"""
         from unittest.mock import patch
-        from src.agent import stream_agent
+        from src.domains.runtime.agents import stream_agent
 
         success_stdout = (
             '{"type":"text","part":{"type":"text","text":"OK"}}\n'
@@ -446,8 +446,8 @@ class TestStreamAgentSessionAutoRetry:
             {"returncode": 0, "stdout": success_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead", backend_name="opencode"))
 
         done_events = [et for et, d in events if et == "done"]
@@ -456,7 +456,7 @@ class TestStreamAgentSessionAutoRetry:
     def test_no_retry_when_session_valid(self):
         """会话有效（正常成功）时不触发重跑，仅一次 Popen"""
         from unittest.mock import patch
-        from src.agent import stream_agent
+        from src.domains.runtime.agents import stream_agent
 
         success_stdout = (
             '{"type":"text","part":{"type":"text","text":"NORMAL"}}\n'
@@ -465,8 +465,8 @@ class TestStreamAgentSessionAutoRetry:
             {"returncode": 0, "stdout": success_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_good", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -477,14 +477,14 @@ class TestStreamAgentSessionAutoRetry:
     def test_no_retry_on_unrelated_error(self):
         """非会话类错误（如权限失败）不重跑，保持单次 done 且透传错误"""
         from unittest.mock import patch
-        from src.agent import stream_agent
+        from src.domains.runtime.agents import stream_agent
 
         calls = [
             {"returncode": 1, "stdout": "", "stderr": "Error: something else failed\n"},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_any", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -500,7 +500,7 @@ class TestStreamAgentSessionAutoRetry:
         修复点：executor 对含 'session not found' 的 raw 行计入 error_events。
         """
         from unittest.mock import patch
-        from src.agent import stream_agent
+        from src.domains.runtime.agents import stream_agent
 
         success_stdout = (
             '{"type":"step_start","sessionID":"ses_new_xyz","part":{"type":"step-start"}}\n'
@@ -512,8 +512,8 @@ class TestStreamAgentSessionAutoRetry:
             {"returncode": 0, "stdout": success_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_dead", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -527,14 +527,14 @@ class TestStreamAgentSessionAutoRetry:
     def test_no_retry_when_stdout_raw_unrelated_error(self):
         """stdout 原始行不含 session not found（如权限错误）→ 不重跑，单次 Popen"""
         from unittest.mock import patch
-        from src.agent import stream_agent
+        from src.domains.runtime.agents import stream_agent
 
         calls = [
             {"returncode": 1, "stdout": "Error: permission denied\n", "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_raw_any", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -584,9 +584,9 @@ class TestExecutorPipeInvocation:
             captured["stdout"] = k.get("stdout")
             return FakeProc(cmd, *a, **k)
 
-        with patch("src.agent.executor.subprocess.Popen", side_effect=fake_popen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
-             patch("src.agent.sandbox.build_bwrap_cmd", return_value=None):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", side_effect=fake_popen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
+             patch("src.domains.runtime.agents.sandbox.build_bwrap_cmd", return_value=None):
             list(stream_runtime("p", os.getcwd(), "", "issue"))
 
         assert captured["cmd"][0] == "/usr/bin/opencode", "命令应为直接 agent CLI，不得是 script 包装"
@@ -638,14 +638,14 @@ class TestAbnormalExitRecovery:
         """场景1（空 stderr 补采）：exit=1、stderr 空、stdout 仅裸行报错（parsed=0）
         → 不重跑，但 errors 补采 stdout 尾部摘要。"""
         from unittest.mock import patch
-        from src.runtime import stream_runtime
+        from src.domains.runtime.engine import stream_runtime
 
         calls = [
             {"returncode": 1, "stdout": "Error: permission denied\n", "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -658,7 +658,7 @@ class TestAbnormalExitRecovery:
     def test_abrupt_exit_retries_once_and_recovers(self):
         """场景3（重试）：exit=1、stderr 空、已有解析事件（result 截断形态）→ 自动重跑一次并成功。"""
         from unittest.mock import patch
-        from src.runtime import stream_runtime
+        from src.domains.runtime.engine import stream_runtime
 
         truncated_stdout = (
             '{"type":"step_start","sessionID":"ses_trunc","part":{"type":"step-start"}}\n'
@@ -672,8 +672,8 @@ class TestAbnormalExitRecovery:
             {"returncode": 0, "stdout": success_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done_events = [(et, d) for et, d in events if et == "done"]
@@ -689,7 +689,7 @@ class TestAbnormalExitRecovery:
         """场景3（重试幂等）：首跑与重跑均异常退出 → 恰好重试一次（不叠加）、单一 done、
         最终 errors 含第二次运行的遗言尾部。"""
         from unittest.mock import patch
-        from src.runtime import stream_runtime
+        from src.domains.runtime.engine import stream_runtime
 
         truncated_stdout = (
             '{"type":"text","part":{"type":"text","text":"PARTIAL"}}\n'
@@ -699,8 +699,8 @@ class TestAbnormalExitRecovery:
             {"returncode": 1, "stdout": truncated_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done_events = [(et, d) for et, d in events if et == "done"]
@@ -716,7 +716,7 @@ class TestAbnormalExitRecovery:
         """场景3（重试幂等）：session 失效重跑后仍异常退出 → 不再叠加第二次重试
         （每流最多一次重试额度共享）。"""
         from unittest.mock import patch
-        from src.runtime import stream_runtime
+        from src.domains.runtime.engine import stream_runtime
 
         stale_stdout = (
             '{"type":"step_start","sessionID":"ses_a","part":{"type":"step-start"}}\n'
@@ -728,8 +728,8 @@ class TestAbnormalExitRecovery:
             {"returncode": 1, "stdout": stale_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
             events = list(stream_runtime("p", os.getcwd(), session_id="ses_dead",
                                          backend_name="opencode"))
 
@@ -741,7 +741,7 @@ class TestAbnormalExitRecovery:
     def test_oom_sigkill_marked_suspected_oom(self):
         """场景2（OOM 标记）：returncode=-9 且系统日志有 oom-killer 证据 → suspected OOM。"""
         from unittest.mock import patch
-        from src.runtime import stream_runtime
+        from src.domains.runtime.engine import stream_runtime
 
         partial_stdout = (
             '{"type":"text","part":{"type":"text","text":"WORKING"}}\n'
@@ -754,9 +754,9 @@ class TestAbnormalExitRecovery:
             {"returncode": 0, "stdout": success_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
-             patch("src.agent.executor._oom_kill_evidence", return_value=True):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
+             patch("src.domains.runtime.agents.executor._oom_kill_evidence", return_value=True):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]
@@ -768,7 +768,7 @@ class TestAbnormalExitRecovery:
     def test_oom_sigkill_no_evidence_marked(self):
         """场景2（OOM 标记）：returncode=-9 但系统日志无证据 → SIGKILL 无证据标记，非 OOM。"""
         from unittest.mock import patch
-        from src.runtime import stream_runtime
+        from src.domains.runtime.engine import stream_runtime
 
         partial_stdout = (
             '{"type":"text","part":{"type":"text","text":"WORKING"}}\n'
@@ -778,9 +778,9 @@ class TestAbnormalExitRecovery:
             {"returncode": -9, "stdout": partial_stdout, "stderr": ""},
         ]
         FakePopen = self._make_popen(calls)
-        with patch("src.agent.executor.subprocess.Popen", FakePopen), \
-             patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
-             patch("src.agent.executor._oom_kill_evidence", return_value=False):
+        with patch("src.domains.runtime.agents.executor.subprocess.Popen", FakePopen), \
+             patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"), \
+             patch("src.domains.runtime.agents.executor._oom_kill_evidence", return_value=False):
             events = list(stream_runtime("p", os.getcwd(), session_id="", backend_name="opencode"))
 
         done = [d for et, d in events if et == "done"][0]

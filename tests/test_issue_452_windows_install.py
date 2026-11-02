@@ -74,7 +74,7 @@ class TestOpenEncodingFix:
 
     def test_executor_py_source_has_encoding(self):
         """验证 src/agent/executor.py 源码中 open() 包含 encoding 参数"""
-        executor_path = os.path.join(_PROJECT_ROOT, "src", "agent", "executor.py")
+        executor_path = os.path.join(_PROJECT_ROOT, "src", "domains", "runtime", "agents", "executor.py")
         with open(executor_path, "r", encoding="utf-8") as f:
             source = f.read()
         # 至少在 _cfg_path 的 open 调用中应有 encoding
@@ -82,7 +82,7 @@ class TestOpenEncodingFix:
 
     def test_image_understanding_source_has_encoding(self):
         """验证 src/agent/image_understanding.py 源码中 open() 包含 encoding 参数"""
-        iu_path = os.path.join(_PROJECT_ROOT, "src", "agent", "image_understanding.py")
+        iu_path = os.path.join(_PROJECT_ROOT, "src", "domains", "runtime", "agents", "image_understanding.py")
         with open(iu_path, "r", encoding="utf-8") as f:
             source = f.read()
         assert 'encoding="utf-8"' in source, "image_understanding.py 的 open() 应包含 encoding=utf-8"
@@ -220,7 +220,7 @@ class TestHealthEndpoint:
 
     def test_health_has_agent_runtime(self):
         """/api/health 端点返回 agent_runtime 字段"""
-        health_path = os.path.join(_PROJECT_ROOT, "src", "api", "routes", "health.py")
+        health_path = os.path.join(_PROJECT_ROOT, "src", "domains", "insight", "routes", "health.py")
         with open(health_path, "r", encoding="utf-8") as f:
             source = f.read()
         assert "agent_runtime" in source, "health.py 应包含 agent_runtime 字段"

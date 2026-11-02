@@ -80,7 +80,7 @@ class TestPipelineTasksWithoutEvents:
         from fastapi.testclient import TestClient
         from src.api.main import app
         from src.api.deps import get_current_user, get_current_user_or_api_key
-        from src.api.routes import tasks as tasks_mod
+        from src.domains.runtime.routes import tasks as tasks_mod
 
         # 在 tasks 表插入一条任务，但不创建 events
         with patch.object(ic, "_get_user_id_by_gitcode", return_value=1), \
@@ -107,7 +107,7 @@ class TestPipelineTasksWithoutEvents:
         from src.api.main import app
         from src.api.deps import get_current_user, get_current_user_or_api_key
         from src.api.event_store import append_event
-        from src.api.routes import tasks as tasks_mod
+        from src.domains.runtime.routes import tasks as tasks_mod
 
         with patch.object(ic, "_get_user_id_by_gitcode", return_value=1), \
              patch.object(ic, "_get_issue_title", return_value="Test Task 2"):
@@ -144,7 +144,7 @@ class TestCreateTaskTriggersEvent:
         app.dependency_overrides[get_current_user] = lambda: {"id": 1, "username": "tester", "auth_type": "session_token"}
         app.dependency_overrides[get_current_user_or_api_key] = lambda: {"id": 1, "username": "tester"}
         try:
-            with patch("src.api.routes.tasks.get_user_token", return_value="fake_token"), \
+            with patch("src.domains.runtime.routes.tasks.get_user_token", return_value="fake_token"), \
                  patch("src.api.deps.get_user_token_with_refresh", return_value="fake_token"), \
                  patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
                  patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 200}), \
@@ -178,7 +178,7 @@ class TestCreateTaskTriggersEvent:
 class TestResolveIssueIdSubtask:
     def test_issue_hook_with_issues_key_still_resolves(self):
         """GitCode Issue Hook payload 含 issues 交叉引用键 → resolve_issue_id 仍能解析"""
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         # 模拟 GitCode Issue Hook payload（子任务 Issue 创建时）
         payload = {
             "object_attributes": {
@@ -195,7 +195,7 @@ class TestResolveIssueIdSubtask:
 
     def test_issue_hook_noteable_type_issue(self):
         """Note Hook noteable_type=Issue → resolve_issue_id 正确解析"""
-        from src.api.event_pipeline import resolve_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_issue_id
         payload = {
             "object_attributes": {
                 "noteable_type": "Issue",
@@ -212,7 +212,7 @@ class TestResolveIssueIdSubtask:
 class TestIsPrPayloadFix:
     def test_issue_hook_with_issues_key_not_pr(self):
         """Issue Hook 含 issues 键但无 PR 特有字段 → 不是 PR payload"""
-        from src.api.event_pipeline import _is_pr_payload
+        from src.domains.runtime.pipeline.event_pipeline import _is_pr_payload
         payload = {
             "object_attributes": {"iid": 55, "action": "open"},
             "issues": [{"number": 50}],
@@ -221,7 +221,7 @@ class TestIsPrPayloadFix:
 
     def test_pr_with_merge_request_key_is_pr(self):
         """PR 事件含 merge_request 键 → 是 PR payload"""
-        from src.api.event_pipeline import _is_pr_payload
+        from src.domains.runtime.pipeline.event_pipeline import _is_pr_payload
         payload = {
             "object_attributes": {"iid": 10, "source_branch": "feat/x"},
             "merge_request": {"iid": 10},
@@ -230,7 +230,7 @@ class TestIsPrPayloadFix:
 
     def test_pr_with_source_branch_is_pr(self):
         """object_attributes 含 source_branch → 是 PR payload"""
-        from src.api.event_pipeline import _is_pr_payload
+        from src.domains.runtime.pipeline.event_pipeline import _is_pr_payload
         payload = {
             "object_attributes": {"iid": 10, "source_branch": "feat/x", "target_branch": "main"},
         }
@@ -238,7 +238,7 @@ class TestIsPrPayloadFix:
 
     def test_note_hook_issue_not_pr(self):
         """Note Hook noteable_type=Issue → 不是 PR payload"""
-        from src.api.event_pipeline import _is_pr_payload
+        from src.domains.runtime.pipeline.event_pipeline import _is_pr_payload
         payload = {
             "object_attributes": {"noteable_type": "Issue", "noteable_iid": 77},
         }

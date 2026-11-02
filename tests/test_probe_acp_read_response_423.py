@@ -110,7 +110,7 @@ class TestHermesProbeReadResponse:
 
         旧版 for _ in range(10) 在第 10 行耗尽额度返回 None → 误报「无响应」。
         """
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, prompt_notes=34, stop="end_turn")
         result = _probe_hermes_acp(cli)
         assert result["status"] == "ok"
@@ -118,14 +118,14 @@ class TestHermesProbeReadResponse:
 
     def test_ok_with_exactly_10_notifications(self, tmp_path):
         """10 行（旧上限边界）通知 + 响应 → ok。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, prompt_notes=10, stop="end_turn")
         result = _probe_hermes_acp(cli)
         assert result["status"] == "ok"
 
     def test_refusal_marked_refused_not_fail(self, tmp_path):
         """stopReason=refusal → 独立 refused 标记，与链路不通的 fail 区分。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, prompt_notes=5, stop="refusal")
         result = _probe_hermes_acp(cli)
         assert result["status"] == "refused"
@@ -133,7 +133,7 @@ class TestHermesProbeReadResponse:
 
     def test_eof_after_initialize_reports_fail(self, tmp_path):
         """EOF（进程退出）→ 立即返回 None → fail（不空等到 deadline）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, exit_after_init=True)
         result = _probe_hermes_acp(cli)
         assert result["status"] == "fail"
@@ -141,7 +141,7 @@ class TestHermesProbeReadResponse:
 
     def test_defensive_line_cap_returns_none(self, tmp_path):
         """超过 _ACP_READ_MAX_LINES（500）防御上限 → None → fail（防失控流保险丝）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, prompt_notes=600, stop="end_turn")
         result = _probe_hermes_acp(cli)
         assert result["status"] == "fail"
@@ -149,7 +149,7 @@ class TestHermesProbeReadResponse:
 
     def test_deadline_no_response_reports_fail(self, tmp_path, monkeypatch):
         """无任何响应 → deadline 驱动超时返回 None → fail（缩短超时避免慢测）。"""
-        from src.runtime import agent as _agent_mod
+        from src.domains.runtime.engine import agent as _agent_mod
         monkeypatch.setattr(_agent_mod, "_ACP_PROBE_TIMEOUT", 1)
         monkeypatch.setattr(_agent_mod, "_ACP_PROMPT_TIMEOUT", 1)
         result = _agent_mod._probe_hermes_acp(_make_fake_cli(tmp_path, silent=True))
@@ -163,7 +163,7 @@ class TestHermesProbeReadResponse:
         旧实现（readline）在此形态实测 >10s 不返回（deadline=2s），探测线程永久
         停摆；修复后（非阻塞 fd + os.read 小块读）必须在 deadline 附近返回 fail。
         """
-        from src.runtime import agent as _agent_mod
+        from src.domains.runtime.engine import agent as _agent_mod
         monkeypatch.setattr(_agent_mod, "_ACP_PROBE_TIMEOUT", 1)
         monkeypatch.setattr(_agent_mod, "_ACP_PROMPT_TIMEOUT", 1)
         cli = _make_fake_cli(tmp_path, half_line=True)
@@ -180,7 +180,7 @@ class TestHermesProbeReadResponse:
 
         os.read 小块读改造后，一行可能跨多个 read chunk；行缓冲必须完整拼行。
         """
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, chunked=True, stop="end_turn")
         result = _probe_hermes_acp(cli)
         assert result["status"] == "ok"
@@ -192,7 +192,7 @@ class TestHwcloudProbeReadResponse:
 
     def test_three_step_ok_with_notifications(self, tmp_path):
         """三步全流程（initialize → session/new → prompt）含 35 行通知 → ok。"""
-        from src.runtime.agent import _probe_hwcloud_acp
+        from src.domains.runtime.engine.agent import _probe_hwcloud_acp
         cli = _make_fake_cli(tmp_path, init_notes=1, new_notes=34, prompt_notes=0,
                              stop="end_turn")
         result = _probe_hwcloud_acp(cli)
@@ -201,7 +201,7 @@ class TestHwcloudProbeReadResponse:
 
     def test_refusal_marked_refused_not_fail(self, tmp_path):
         """stopReason=refusal → refused 独立标记（与 hermes 同构）。"""
-        from src.runtime.agent import _probe_hwcloud_acp
+        from src.domains.runtime.engine.agent import _probe_hwcloud_acp
         cli = _make_fake_cli(tmp_path, new_notes=12, stop="refusal")
         result = _probe_hwcloud_acp(cli)
         assert result["status"] == "refused"
@@ -209,7 +209,7 @@ class TestHwcloudProbeReadResponse:
 
     def test_defensive_line_cap_returns_none(self, tmp_path):
         """防御上限（500 行）对 hwcloud 同样生效。"""
-        from src.runtime.agent import _probe_hwcloud_acp
+        from src.domains.runtime.engine.agent import _probe_hwcloud_acp
         cli = _make_fake_cli(tmp_path, new_notes=600, stop="end_turn")
         result = _probe_hwcloud_acp(cli)
         assert result["status"] == "fail"
@@ -220,7 +220,7 @@ class TestHwcloudProbeReadResponse:
         修复后（非阻塞 fd + os.read）半行悬置数据必须在 deadline 附近返回 fail，
         不得阻塞探测线程。
         """
-        from src.runtime import agent as _agent_mod
+        from src.domains.runtime.engine import agent as _agent_mod
         monkeypatch.setattr(_agent_mod, "_ACP_PROBE_TIMEOUT", 1)
         monkeypatch.setattr(_agent_mod, "_ACP_PROMPT_TIMEOUT", 1)
         cli = _make_fake_cli(tmp_path, half_line=True)
@@ -233,7 +233,7 @@ class TestHwcloudProbeReadResponse:
 
     def test_chunked_response_lines_assembled(self, tmp_path):
         """行缓冲拼行回归（hwcloud 同构）：分块响应 → 拼行正确。"""
-        from src.runtime.agent import _probe_hwcloud_acp
+        from src.domains.runtime.engine.agent import _probe_hwcloud_acp
         cli = _make_fake_cli(tmp_path, chunked=True, stop="end_turn")
         result = _probe_hwcloud_acp(cli)
         assert result["status"] == "ok"
@@ -244,12 +244,12 @@ class TestRefusedNotCountedAsRemoval:
     """refused 语义：服务端心跳落库对非 ok/fail 状态不计入连败摘除（既有逻辑，回归锚定）。"""
 
     def test_read_max_lines_constant(self):
-        from src.runtime.agent import _ACP_READ_MAX_LINES
+        from src.domains.runtime.engine.agent import _ACP_READ_MAX_LINES
         assert _ACP_READ_MAX_LINES == 500
 
     def test_refused_is_neither_ok_nor_fail(self, tmp_path):
         """refused 必须既非 ok 也非 fail——保证走服务端 else 分支（不动 healthy）。"""
-        from src.runtime.agent import _probe_hermes_acp
+        from src.domains.runtime.engine.agent import _probe_hermes_acp
         cli = _make_fake_cli(tmp_path, stop="refusal")
         result = _probe_hermes_acp(cli)
         assert result["status"] not in ("ok", "fail")

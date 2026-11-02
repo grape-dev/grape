@@ -612,7 +612,7 @@ class TestUC16JwtSecretPersistence:
         import subprocess, sys, os
         venv_py = sys.executable
         code = (
-            "from src.auth import security_config as sc\n"
+            "from src.domains.mgmt.auth import security_config as sc\n"
             "sc._config = {'env': 'production'}\n"
             "from src.api import jwt_utils\n"
             "jwt_utils._SECRET_KEYS = {}\n"
@@ -632,7 +632,7 @@ class TestUC16JwtSecretPersistence:
         import subprocess, sys, os
         venv_py = sys.executable
         code = (
-            "from src.auth import security_config as sc\n"
+            "from src.domains.mgmt.auth import security_config as sc\n"
             "sc._config = {'env': 'production'}\n"
             "from src.api import jwt_utils\n"
             "import sys\n"

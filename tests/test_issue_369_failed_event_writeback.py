@@ -18,7 +18,7 @@ import pytest
 @pytest.fixture()
 def setup_db(monkeypatch, tmp_path):
     import sqlite3
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
 
     test_db = sqlite3.connect(":memory:", check_same_thread=False)
     test_db.execute("PRAGMA foreign_keys=OFF")
@@ -104,7 +104,7 @@ def _mk_event(c, seq, status="running"):
 # ===== UT-A：认领判死 → 事件诊断字段完整 =====
 
 def test_ut_a_claim_pool_unreachable_writes_event_diagnostics(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 10907, "codex", status="offline", healthy=0)
     _mk_task(c, "t_369a", 9401)
@@ -125,7 +125,7 @@ def test_ut_a_claim_pool_unreachable_writes_event_diagnostics(setup_db):
 # ===== UT-B：健康分不足超时判死 → 事件诊断字段完整 =====
 
 def test_ut_b_pool_unhealthy_writes_event_diagnostics(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_engine(c, 10907, "codex", healthy=0, probe="fail")
     _mk_task(c, "t_369b", 9402)
@@ -146,7 +146,7 @@ def test_ut_b_pool_unhealthy_writes_event_diagnostics(setup_db):
 # ===== UT-C：_sync_event_failed 直接覆盖回收超限等其余判死路径 =====
 
 def test_ut_c_sync_event_failed_full_fields(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_event(c, 9403)
     setup_db.commit()
@@ -163,7 +163,7 @@ def test_ut_c_sync_event_failed_full_fields(setup_db):
 # ===== UT-D：终态保护——已 completed 的事件不被 failed 覆盖（幂等/双主安全）=====
 
 def test_ut_d_terminal_completed_not_overwritten(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_event(c, 9404, status="completed")
     c.execute("UPDATE events SET result='done ok', exit_code=0, completed_at='2026-10-19T00:00:00+00:00' "
@@ -181,7 +181,7 @@ def test_ut_d_terminal_completed_not_overwritten(setup_db):
 # ===== UT-E：已 failed 的事件重复回写幂等、不报错 =====
 
 def test_ut_e_repeated_failed_writeback_idempotent(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     c = setup_db
     _mk_event(c, 9405)
     setup_db.commit()
@@ -200,7 +200,7 @@ def test_ut_e_repeated_failed_writeback_idempotent(setup_db):
 # ===== UT-F：空 seq / 异常安全 =====
 
 def test_ut_f_zero_seq_noop(setup_db):
-    from src.runtime import service as svc
+    from src.domains.runtime.engine import service as svc
     svc._sync_event_failed(0, "no event")  # 不抛异常即可
     svc._sync_event_failed(None, "no event")
 
@@ -208,8 +208,8 @@ def test_ut_f_zero_seq_noop(setup_db):
 # ===== UT-G：停机清理判死（executor.terminate_active_agents DIRECT 任务）→ 事件字段完整 =====
 
 def test_ut_g_terminate_active_agents_writes_event_diagnostics(setup_db):
-    from src.runtime import service as svc
-    from src.agent import executor
+    from src.domains.runtime.engine import service as svc
+    from src.domains.runtime.agents import executor
     c = setup_db
     _mk_engine(c, 10907, "codex", cred=0)  # credential_id=0 → DIRECT，停机判死
     c.execute(
@@ -233,7 +233,7 @@ def test_ut_g_terminate_active_agents_writes_event_diagnostics(setup_db):
 # ===== UT-H：recover-orphans attempts 封顶判死 → 事件字段完整 =====
 
 def test_ut_h_recover_orphans_cap_writes_event_diagnostics(setup_db, monkeypatch):
-    from src.api.routes import runtime as rr
+    from src.domains.runtime.routes import runtime as rr
     c = setup_db
     monkeypatch.setattr(rr, "db", setup_db)
     monkeypatch.setattr(rr, "db_lock", __import__("threading").Lock())

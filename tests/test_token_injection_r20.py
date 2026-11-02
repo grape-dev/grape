@@ -16,7 +16,7 @@ class TestGitAskpassFallback:
 
     def test_github_askpass_includes_user_token(self):
         """R20.24.3: GitHub GIT_ASKPASS fallback 链含 USER_GITHUB_TOKEN"""
-        from src.runtime.repogit import _write_askpass
+        from src.domains.runtime.engine.repogit import _write_askpass
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write_askpass(tmpdir, "github:owner/repo")
@@ -27,7 +27,7 @@ class TestGitAskpassFallback:
 
     def test_gitcode_askpass_includes_user_token(self):
         """R20.24.3: GitCode GIT_ASKPASS fallback 链含 USER_GITCODE_TOKEN"""
-        from src.runtime.repogit import _write_askpass
+        from src.domains.runtime.engine.repogit import _write_askpass
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write_askpass(tmpdir, "gitcode:owner/repo")
@@ -38,7 +38,7 @@ class TestGitAskpassFallback:
 
     def test_github_fallback_order(self):
         """R20.24.3: GitHub fallback 顺序 BOT → USER → BOT_TOKEN → BOT_GITCODE"""
-        from src.runtime.repogit import _write_askpass
+        from src.domains.runtime.engine.repogit import _write_askpass
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write_askpass(tmpdir, "github:owner/repo")
@@ -49,7 +49,7 @@ class TestGitAskpassFallback:
 
     def test_gitcode_fallback_order(self):
         """R20.24.3: GitCode fallback 顺序 BOT → USER → BOT_TOKEN → BOT_GITHUB"""
-        from src.runtime.repogit import _write_askpass
+        from src.domains.runtime.engine.repogit import _write_askpass
         import tempfile, os
         with tempfile.TemporaryDirectory() as tmpdir:
             path = _write_askpass(tmpdir, "gitcode:owner/repo")
@@ -103,7 +103,7 @@ class TestTokenRedaction:
     def test_event_pipeline_has_user_token_redaction(self):
         """R20.25.4: event_pipeline.py 中有 user_token 脱敏逻辑"""
         import inspect
-        from src.api.event_pipeline import _execute_agent_inner
+        from src.domains.runtime.pipeline.event_pipeline import _execute_agent_inner
         source = inspect.getsource(_execute_agent_inner)
         # R20.25.1: result_text 脱敏覆盖 user_token
         assert "_user_token_for_redact" in source, \
@@ -118,7 +118,7 @@ class TestTokenRedaction:
     def test_agent_logs_redacts_user_token(self):
         """R20.25.2: agent_logs 脱敏覆盖 user_token"""
         import inspect
-        from src.api.event_pipeline import _execute_agent_inner
+        from src.domains.runtime.pipeline.event_pipeline import _execute_agent_inner
         source = inspect.getsource(_execute_agent_inner)
         # 找到 agent_logs 脱敏位置
         idx = source.find("_msg = _msg.replace")

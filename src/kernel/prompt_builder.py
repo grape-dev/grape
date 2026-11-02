@@ -51,7 +51,7 @@ def _resolve_server_url(runtime_id: int = 0) -> str:
     判定本地：credential_id == 0（本机直连引擎）或 credential.last_ip == 127.0.0.1（本机 worker）。
     """
     try:
-        from src.user.db import get_worker_connect_url
+        from src.domains.mgmt.user.db import get_worker_connect_url
         public_url = get_worker_connect_url()
         if runtime_id and runtime_id > 0:
             from src.kernel.session_manager import db, db_lock
@@ -93,7 +93,7 @@ def _build_project_info_section(repo_key: str, agent_type: str = "",
     - 无基线 → 明确允许降级分析
     """
     try:
-        from src.runtime.service import load_project_info
+        from src.domains.runtime.engine.service import load_project_info
         files, meta = load_project_info(repo_key)
     except Exception:
         files, meta = {}, {}
@@ -715,7 +715,7 @@ def build_devops_agent_prompt(evt, history, oc_session_id, skills, feishu_ctx=No
         if note:
             parts.append(f'Comment: {json.dumps(note, ensure_ascii=False)[:1000]}')
             # 检测是否 @ 了 Bot
-            if any(f"@{u}" in note for u in __import__("src.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
+            if any(f"@{u}" in note for u in __import__("src.domains.mgmt.user.db", fromlist=["get_all_bot_usernames"]).get_all_bot_usernames()):
                 parts.append("(User @mentioned the bot)")
         if number is None:
             parts.append(f"\n⚠️ This comment event does not carry an Issue number. You MUST locate which Issue this comment belongs to via the {_vcs} API:")
@@ -910,7 +910,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
         parts.append(f"Runtime engine: {backend_name}")
     elif runtime_id:
         try:
-            from src.runtime.engine_select import engine_name
+            from src.domains.runtime.engine.engine_select import engine_name
             _be = engine_name(runtime_id) or ""
             if _be:
                 parts.append(f"Runtime engine: {_be}")
@@ -944,7 +944,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
         _skill_scope = ""
         if skill_id:
             try:
-                from src.user.db import get_skill_by_id
+                from src.domains.mgmt.user.db import get_skill_by_id
                 _ski = get_skill_by_id(skill_id)
                 if _ski:
                     _skill_scope = _ski.get("scope") or ""
@@ -952,7 +952,7 @@ def build_general_chat_prompt(message: str, repo_key: str = "", history: list = 
                 _skill_scope = ""
         if skill_id and (_skill_scope in ("user", "repo")
                          or (not _skill_scope and not resolve_official_skill_path(_sn))):
-            from src.user.db import get_skill_path
+            from src.domains.mgmt.user.db import get_skill_path
             _abs = get_skill_path(skill_id)
             skill_path = _abs or os.path.join(SKILLS_DIR, _sn, "SKILL.md")
             parts.append(f"\n## Current Skill: {_sn or skill_id}\nSkill file: {skill_path}\nRead this file and follow its instructions.")
@@ -993,7 +993,7 @@ def build_issue_chat_prompt(user_text: str, repo_key: str, history: list, conv: 
     # 注入当前执行的 runtime 引擎信息；403 是正常安全限制（D3 借鉴）
     if runtime_id:
         try:
-            from src.runtime.engine_select import engine_name
+            from src.domains.runtime.engine.engine_select import engine_name
             _be = engine_name(runtime_id) or ""
             if _be:
                 parts.append(f"Runtime engine: {_be} (runtime_id={runtime_id})")
@@ -1153,7 +1153,7 @@ def _load_scene_recommend_config(repo_key: str) -> dict:
     读取时兜底过滤：规则中 scene_id 不在当前场景列表中的直接丢弃。
     """
     try:
-        from src.user.db import get_scene_recommend_config
+        from src.domains.mgmt.user.db import get_scene_recommend_config
         config = get_scene_recommend_config(repo_key)
         fallback = config.get("fallback_scene", "") or ""
         rules = config.get("rules", []) or []
@@ -1174,7 +1174,7 @@ def _sanitize_recommend_config(repo_key: str) -> dict | None:
     在场景删除时主动调用。返回修复后的 config（已写回 DB），或 None（无需修复）。
     """
     from src.api.pipeline_config import get_scenes
-    from src.user.db import get_scene_recommend_config, set_scene_recommend_config
+    from src.domains.mgmt.user.db import get_scene_recommend_config, set_scene_recommend_config
 
     scenes = get_scenes(repo_key=repo_key)
     valid_ids = {s["id"] for s in scenes}

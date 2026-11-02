@@ -230,7 +230,7 @@ class TestTaskLock:
     def test_lock_acquired_runs_body(self):
         """When lock is acquired, the body runs and lock is released."""
         import asyncio
-        from src.runtime.task_lock import run_with_distributed_lock
+        from src.domains.runtime.engine.task_lock import run_with_distributed_lock
 
         body_ran = False
 
@@ -250,7 +250,7 @@ class TestTaskLock:
     def test_lock_not_acquired_skips_body(self):
         """When lock is not acquired (another worker holds it), body is skipped."""
         import asyncio
-        from src.runtime.task_lock import run_with_distributed_lock
+        from src.domains.runtime.engine.task_lock import run_with_distributed_lock
 
         body_ran = False
 
@@ -272,7 +272,7 @@ class TestTaskLock:
 class TestTableMaintenance:
     def test_cleanup_old_agent_tasks_fields(self):
         """cleanup_old_agent_tasks_fields nullifies old completed task fields."""
-        from src.runtime.table_maintenance import cleanup_old_agent_tasks_fields
+        from src.domains.runtime.engine.table_maintenance import cleanup_old_agent_tasks_fields
         from src.kernel.session_manager import db, db_lock
 
         # Insert a completed task with old timestamp
@@ -303,7 +303,7 @@ class TestTableMaintenance:
 
     def test_cleanup_old_task_messages(self):
         """cleanup_old_task_messages deletes old messages."""
-        from src.runtime.table_maintenance import cleanup_old_task_messages
+        from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
         from src.kernel.session_manager import db, db_lock
 
         # Insert an old task message (type column, not role)

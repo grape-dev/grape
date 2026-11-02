@@ -191,7 +191,7 @@ def cascade_cleanup_repo_data(repo_key: str, owner: str, repo: str,
 
 def _audit(repo_key: str, trigger: str, operator_id: int, detail: dict) -> None:
     try:
-        from src.auth import audit as auth_audit
+        from src.domains.mgmt.auth import audit as auth_audit
         auth_audit.log_audit(
             "repo_cascade_cleanup",
             user_id=operator_id,
@@ -220,7 +220,7 @@ def _cleanup_files(keys: list[str], owner: str, repo: str, stats: dict) -> None:
 
     # 1. 仓库 skill 目录（skills/repo/{repo_key}/）
     try:
-        from src.user.db import SKILL_DIR
+        from src.domains.mgmt.user.db import SKILL_DIR
         _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")
         for k in keys:
             _dir = os.path.join(_repo_skills_base, k)
@@ -296,7 +296,7 @@ def retry_pending_file_cleanups() -> int:
         log.warning(f"Retry pending cleanups: read meta failed: {e}")
         return -1
 
-    from src.user.db import SKILL_DIR
+    from src.domains.mgmt.user.db import SKILL_DIR
     from src.kernel.config import WORKSPACE_DIR
     from src.kernel.repo_key import parse_repo_key, split_owner_repo, workspace_repo_dir
     _repo_skills_base = os.path.join(os.path.dirname(SKILL_DIR), "repo")

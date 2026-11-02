@@ -97,12 +97,12 @@ class TestClaimGuardAndDeadSession:
 
     def _claim(self, engine_rid):
         """plugin 模式下走 claim_by_tag（与真实 worker 一致）。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         return service.claim_by_tag("all", engine_rid)
 
     def _setup_task(self, runtime_id, ptr_engine, sid="ses_op_1"):
         """入队一个带 issue_session 指针的任务，返回 task_id。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         s = session_store.get_or_create_issue_session("gitcode:org/g2", "coding", "#9")
         session_store.update_issue_session(s["id"], runtime_session_id=sid, session_engine=ptr_engine)
         service.enqueue_task(
@@ -122,7 +122,7 @@ class TestClaimGuardAndDeadSession:
         return row[0], s["id"]
 
     def test_claim_drops_cross_engine_pointer(self):
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         # 广播任务被 hermes 引擎（runtime_id=2142）领取，指针是 opencode 的
         task_id, _ = self._setup_task(runtime_id=0, ptr_engine="opencode")
         task = self._claim(2142)
@@ -130,7 +130,7 @@ class TestClaimGuardAndDeadSession:
         assert task["runtime_session_id"] == "", "claim 应置空跨引擎指针"
 
     def test_claim_keeps_same_engine_pointer(self):
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         # 指针是 hermes 的，hermes 引擎（2142）领取 → 同家保留
         task_id, _ = self._setup_task(runtime_id=0, ptr_engine="hermes")
         task = self._claim(2142)
@@ -138,7 +138,7 @@ class TestClaimGuardAndDeadSession:
         assert task["runtime_session_id"] == "ses_op_1", "同家引擎指针应保留"
 
     def test_claim_keeps_unknown_engine_pointer(self):
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         # 存量脏指针（engine 空）→ 放行（fail-safe）
         task_id, _ = self._setup_task(runtime_id=0, ptr_engine="")
         task = self._claim(2142)
@@ -146,7 +146,7 @@ class TestClaimGuardAndDeadSession:
         assert task["runtime_session_id"] == "ses_op_1", "引擎未知应放行"
 
     def test_dead_session_clears_pointer_and_engine(self):
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         # 建会话 + 指针，并拿 issue_session_id
         s = session_store.get_or_create_issue_session("gitcode:org/g2", "coding", "#9")
         self._isid = s["id"]

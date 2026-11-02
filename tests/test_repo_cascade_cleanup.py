@@ -246,7 +246,7 @@ class TestPlatformUnhostCascade:
 
 class TestWebhookRepoDeletedCascade:
     def test_is_repo_delete_event_variants(self):
-        from src.api.routes.webhook import _is_repo_delete_event
+        from src.domains.runtime.routes.webhook import _is_repo_delete_event
         # GitCode 头
         assert _is_repo_delete_event("repo.destroyed", {}) is True
         assert _is_repo_delete_event("Repository Deleted", {}) is True
@@ -266,7 +266,7 @@ class TestWebhookRepoDeletedCascade:
                 ["repo_key", "repo_owner", "repo_name", "full_name", "webhook_id",
                  "dev_scene", "gitcode_webhook_token", "bot_username"],
                 (REPO_KEY, "owner", "issue340-repo", REPO, 0, "default", "wt-340", "bot"))
-        from src.api.routes.webhook import _handle_repo_deleted
+        from src.domains.runtime.routes.webhook import _handle_repo_deleted
         result = _handle_repo_deleted(REPO, "gitcode", "event=repo.destroyed")
         assert result["status"] == "repo_deleted"
         # 等价清理完成
@@ -280,7 +280,7 @@ class TestWebhookRepoDeletedCascade:
         assert _count("audit_logs", "detail LIKE '%issue340-repo%'", ()) >= 1
 
     def test_github_delete_event_header_path(self):
-        from src.api.routes.webhook import _is_repo_delete_event
+        from src.domains.runtime.routes.webhook import _is_repo_delete_event
         assert _is_repo_delete_event("repository", {"action": "deleted"}) is True
         assert _is_repo_delete_event("repository", {"action": "transferred"}) is False
 

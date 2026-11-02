@@ -11,8 +11,8 @@ import tempfile
 
 import pytest
 
-from src.runtime import worker_report_queue as wrq
-from src.runtime import service as svc
+from src.domains.runtime.engine import worker_report_queue as wrq
+from src.domains.runtime.engine import service as svc
 
 
 @pytest.fixture()
@@ -96,7 +96,7 @@ class TestRuntimeClientAck:
 
     @staticmethod
     def _client(monkeypatch, resp):
-        from src.runtime.client import RuntimeClient
+        from src.domains.runtime.engine.client import RuntimeClient
         c = RuntimeClient.__new__(RuntimeClient)  # 绕过构造/网络
         calls = []
 

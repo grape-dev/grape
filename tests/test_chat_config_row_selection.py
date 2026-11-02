@@ -34,7 +34,7 @@ def _reset_engine_cache():
     断言到 1 而不是它种的 902）。每个用例前后都清一次。
     """
     try:
-        from src.runtime import engine_select
+        from src.domains.runtime.engine import engine_select
         engine_select._resolve_local_cache.clear()
     except Exception:
         pass

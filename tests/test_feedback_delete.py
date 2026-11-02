@@ -15,12 +15,12 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 from src.kernel.session_manager import db, db_lock
 
 from src.kernel.auth_sdk.jwt_utils import create_access_token
-from src.auth.grape_account_db import get_token_version
+from src.domains.mgmt.auth.grape_account_db import get_token_version
 
 
 def _jwt(user_id, username):
@@ -30,7 +30,7 @@ def _jwt(user_id, username):
 def _admin_jwt():
     """插入 admin_accounts + 签发 role=admin JWT（admin-only 端点测试用）。"""
     import uuid
-    from src.admin.db import get_admin_token_version
+    from src.domains.mgmt.admin.db import get_admin_token_version
     name = f"adm_del_{uuid.uuid4().hex[:6]}"
     with db_lock:
         c = db.cursor()

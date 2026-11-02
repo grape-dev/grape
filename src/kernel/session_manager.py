@@ -963,7 +963,7 @@ def _chat_config_row_engine(c, runtime_id: int):
         # runtime_id 指向的引擎行已不存在（被删除）：视为未绑定，走本机直连兜底
         log.warning(f"get_chat_config: runtime_id={runtime_id} 不存在（引擎行已删除），按未配置处理")
         return "", False
-    from src.user.db import is_known_engine_name
+    from src.domains.mgmt.user.db import is_known_engine_name
     _n = (brow[0] or "").strip().lower()
     if not is_known_engine_name(_n):
         # 幽灵/未知引擎（如历史遗留 'default'）：视为未绑定，走本机直连/空兜底
@@ -1043,7 +1043,7 @@ def _chat_config_with_local_backend(backend, runtime_id, skill, skill_id,
     """
     if not backend and not runtime_id:
         try:
-            from src.runtime.engine_select import resolve_local_engine, engine_name
+            from src.domains.runtime.engine.engine_select import resolve_local_engine, engine_name
             _rid = resolve_local_engine(user_id) or 0
             if _rid:
                 backend = engine_name(_rid) or ""
@@ -1064,13 +1064,13 @@ def _resolve_chat_runtime_id(backend: str) -> int:
     """
     if not backend:
         return 0
-    from src.user.db import ensure_default_backend, get_runtime_id_by_name, get_local_direct_runtime_id
-    from src.runtime.instances import resolve_instance_id, scope_of_runtime
+    from src.domains.mgmt.user.db import ensure_default_backend, get_runtime_id_by_name, get_local_direct_runtime_id
+    from src.domains.runtime.engine.instances import resolve_instance_id, scope_of_runtime
     _rid = resolve_instance_id(backend, scope="user")
     if _rid is not None and scope_of_runtime(_rid) == "user":
         return _rid
     if "-" not in backend:
-        from src.runtime.service import get_execution_mode, EXEC_MODE_REMOTE
+        from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_REMOTE
         if get_execution_mode() != EXEC_MODE_REMOTE:
             _local = get_local_direct_runtime_id(backend)
             if _local:
@@ -1113,7 +1113,7 @@ def set_chat_config(user_id: int, **kwargs):
         runtime_id = _resolve_chat_runtime_id(data.get("backend") or "")
     # skill name → skill_id（若未显式传 skill_id）
     if data.get("skill") and not data.get("skill_id"):
-        from src.user.db import resolve_skill_id
+        from src.domains.mgmt.user.db import resolve_skill_id
         data["skill_id"] = resolve_skill_id(data["skill"], user_id=user_id)
     _write_chat_config_row(user_id, runtime_id=runtime_id, skill=data["skill"],
                            skill_id=data.get("skill_id", 0), im_app_id=data["im_app_id"],

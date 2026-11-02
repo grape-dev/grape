@@ -27,7 +27,7 @@ from mock_db import MockDB, install_mock_db
 
 @pytest.fixture()
 def app_and_client(monkeypatch):
-    from src.api.routes.grape_auth import router, unbind_provider
+    from src.domains.mgmt.routes.grape_auth import router, unbind_provider
     from src.api.deps import require_jwt_only
 
     app = FastAPI()
@@ -49,23 +49,23 @@ def _mock_unbind_db(monkeypatch, *, path_a_rows=(), path_b_rows=(), count_rows=(
     install_mock_db(monkeypatch, db)
 
     calls = {}
-    import src.auth.grape_account_db as gad
+    import src.domains.mgmt.auth.grape_account_db as gad
     monkeypatch.setattr(gad, "delete_external_identity",
                         lambda uid, p, **kw: calls.setdefault("deleted", []).append((uid, p)) or ident_deleted)
     monkeypatch.setattr(gad, "count_user_identities", lambda uid: ident_count)
     monkeypatch.setattr(gad, "has_password", lambda uid: has_pwd)
     monkeypatch.setattr(gad, "get_user_identities", lambda uid: [])
     monkeypatch.setattr(gad, "clear_placeholder_email", lambda uid, p: True)
-    # 路由内 from src.user import db as user_db 后调用 delete_credential
-    import src.user.db as udb
+    # 路由内 from src.domains.mgmt.user import db as user_db 后调用 delete_credential
+    import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "delete_credential", lambda uid, key: None)
-    import src.api.routes.grape_auth as ga
+    import src.domains.mgmt.routes.grape_auth as ga
     monkeypatch.setattr(ga, "delete_external_identity", gad.delete_external_identity)
     monkeypatch.setattr(ga, "count_user_identities", gad.count_user_identities)
     monkeypatch.setattr(ga, "has_password", gad.has_password)
     monkeypatch.setattr(ga, "get_user_identities", gad.get_user_identities)
     # 审计桩
-    import src.auth.audit as audit
+    import src.domains.mgmt.auth.audit as audit
     monkeypatch.setattr(audit, "log_audit", lambda *a, **kw: calls.setdefault("audit", []).append((a, kw)))
     return db, calls
 

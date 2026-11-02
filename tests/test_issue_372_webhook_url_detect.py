@@ -28,7 +28,7 @@ class TestDetectWebhookFromHost:
 
     def test_t9_01_excludes_localhost(self):
         """T9-01: localhost / 127.0.0.1 / 0.0.0.0 被排除（本地开发不自动发现）。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         assert detect_webhook_from_host("localhost") == ""
         assert detect_webhook_from_host("127.0.0.1") == ""
         assert detect_webhook_from_host("0.0.0.0") == ""
@@ -38,30 +38,30 @@ class TestDetectWebhookFromHost:
 
     def test_t9_02_public_ip_derives_webhook_url(self):
         """T9-02: 公网 IP 推导出正确的 webhook_url。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host("1.2.3.4")
         assert result == "http://1.2.3.4/webhook/gitcode"
 
     def test_t9_03_anonymous_not_handled_by_function(self):
         """T9-03: detect_webhook_from_host 本身不做认证判断——认证由中间件 _uid 守卫保证。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         assert detect_webhook_from_host("evil.com") == "http://evil.com/webhook/gitcode"
 
     def test_t9_07_non_standard_port(self):
         """T9-07: Host 头含非标准端口（如 1.2.3.4:3000）→ 推导的 webhook_url 含端口。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host("1.2.3.4:3000")
         assert result == "http://1.2.3.4:3000/webhook/gitcode"
 
     def test_empty_host_returns_empty(self):
         """空 host 返回空串。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         assert detect_webhook_from_host("") == ""
         assert detect_webhook_from_host(None) == ""
 
     def test_domain_name_works(self):
         """域名也支持推导。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host("grape.example.com")
         assert result == "http://grape.example.com/webhook/gitcode"
 
@@ -69,7 +69,7 @@ class TestDetectWebhookFromHost:
         """T9-09: nginx 代理场景，X-Forwarded-Host 含端口 → 推导的 webhook_url 含正确端口。"""
         # R11.1: 需设 TRUSTED_HOSTS 才读 X-Forwarded-Host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="127.0.0.1:3000",
                 forwarded_host="grape.example.com:8080",
@@ -79,7 +79,7 @@ class TestDetectWebhookFromHost:
     def test_t9_10_nginx_forwarded_proto_https(self):
         """T9-10: nginx 代理场景，X-Forwarded-Proto: https → 推导的 webhook_url 用 https 协议。"""
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="127.0.0.1:3000",
                 forwarded_host="grape.example.com",
@@ -89,14 +89,14 @@ class TestDetectWebhookFromHost:
 
     def test_t9_11_public_ip_direct_access(self):
         """T9-11: 公网 IP 直连访问（无 nginx）→ Host 头含 `公网IP:端口` → webhook_url 正确推导。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         # 用户直接访问 http://公网IP:3000
         result = detect_webhook_from_host("100.200.300.400:3000")
         assert result == "http://100.200.300.400:3000/webhook/gitcode"
 
     def test_t9_13_nginx_standard_port_80(self):
         """T9-13: nginx 代理标准 80 端口（Host 头只有域名无端口）→ 推导 http://域名/webhook/gitcode。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         # nginx listen 80, proxy_set_header Host $host; → Host 只有域名
         result = detect_webhook_from_host("grape.example.com")
         assert result == "http://grape.example.com/webhook/gitcode"
@@ -104,7 +104,7 @@ class TestDetectWebhookFromHost:
     def test_forwarded_host_takes_priority_over_host(self):
         """X-Forwarded-Host 优先于 Host 头（需设 TRUSTED_HOSTS）。"""
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "public.example.com"}):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="10.0.0.1:3000",
                 forwarded_host="public.example.com",
@@ -113,14 +113,14 @@ class TestDetectWebhookFromHost:
 
     def test_falls_back_to_host_when_no_forwarded(self):
         """无 X-Forwarded-Host 时 fallback 到 Host 头。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host("1.2.3.4:3000", forwarded_host="", forwarded_proto="")
         assert result == "http://1.2.3.4:3000/webhook/gitcode"
 
     def test_localhost_in_forwarded_host_excluded(self):
         """X-Forwarded-Host 是 localhost 时排除。"""
         # R11.1: 未设 TRUSTED_HOSTS → 不读 forwarded_host，用 host=1.2.3.4
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host(
             host="1.2.3.4",
             forwarded_host="localhost",
@@ -130,20 +130,20 @@ class TestDetectWebhookFromHost:
 
     def test_invalid_proto_defaults_to_http(self):
         """X-Forwarded-Proto 无效值时默认 http。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host("1.2.3.4", forwarded_proto="ftp")
         assert result == "http://1.2.3.4/webhook/gitcode"
 
     def test_t9_14_domain_direct_access_with_port(self):
         """T9-14: 域名直连访问（无 nginx）→ Host 头含 `域名:端口` → 推导正确。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         result = detect_webhook_from_host("grape.example.com:3000")
         assert result == "http://grape.example.com:3000/webhook/gitcode"
 
     def test_t9_15_domain_https_via_nginx(self):
         """T9-15: 域名 + https（nginx 代理 + SSL）→ X-Forwarded-Proto: https + X-Forwarded-Host: 域名。"""
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="127.0.0.1:3000",
                 forwarded_host="grape.example.com",
@@ -154,7 +154,7 @@ class TestDetectWebhookFromHost:
     def test_t9_16_domain_non_standard_port_via_nginx(self):
         """T9-16: 域名 + 非标准端口（nginx 代理 8080）→ X-Forwarded-Host: `域名:8080`。"""
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "grape.example.com"}):
-            from src.user.db import detect_webhook_from_host
+            from src.domains.mgmt.user.db import detect_webhook_from_host
             result = detect_webhook_from_host(
                 host="127.0.0.1:3000",
                 forwarded_host="grape.example.com:8080",
@@ -171,24 +171,24 @@ class TestGetWebhookUrlCompat:
 
     def test_t9_05_explicit_config_skips_detection(self):
         """T9-05: 显式配置存在时 get_webhook_url 返回显式配置，不触发探测。"""
-        from src.user.db import get_webhook_url
+        from src.domains.mgmt.user.db import get_webhook_url
         with patch("src.kernel.config.read_server_config", return_value={"webhook_url": "https://my.grape.io/webhook/gitcode"}):
             result = get_webhook_url()
             assert result == "https://my.grape.io/webhook/gitcode"
 
     def test_meta_fallback(self):
         """server-config.json 无值时 fallback 到 meta.webhook_url。"""
-        from src.user.db import get_webhook_url
+        from src.domains.mgmt.user.db import get_webhook_url
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value="http://10.0.0.1/webhook/gitcode"):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://10.0.0.1/webhook/gitcode"):
             result = get_webhook_url()
             assert result == "http://10.0.0.1/webhook/gitcode"
 
     def test_empty_when_no_config(self):
         """无任何配置时返回空串。"""
-        from src.user.db import get_webhook_url
+        from src.domains.mgmt.user.db import get_webhook_url
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             result = get_webhook_url()
             assert result == ""
 
@@ -257,7 +257,7 @@ class TestMiddlewareHostDetection:
         """T9-06: meta 已有 webhook_url 时中间件跳过（幂等，不重复写）。"""
         # 验证逻辑：中间件检查 `if not get_meta_value("webhook_url")` → 有值时跳过
         # 这里测试 detect_webhook_from_host 不会被调用
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         # 如果 meta 有值，中间件的 `if not get_meta_value("webhook_url")` 为 False
         # detect_webhook_from_host 不会被调用——这是中间件代码的结构保证
         # 这里验证函数本身是纯函数，中间件逻辑由集成测试覆盖
@@ -276,7 +276,7 @@ class TestMiddlewareHostDetection:
         #     if get_meta_value("webhook_url_detect_failed"):
         #         set_meta_value("webhook_url_detect_failed", "")
         # 逻辑正确——探测成功时清除标记
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         # 验证函数返回非空时，中间件会执行写入+清除逻辑
         candidate = detect_webhook_from_host("5.6.7.8")
         assert candidate == "http://5.6.7.8/webhook/gitcode"
@@ -304,7 +304,7 @@ class TestMiddlewareJwtParsing:
         assert payload is not None
         assert str(payload.get("sub")) == "42"  # JWT sub 是字符串
         # validate_token 查不到（JWT 不在 _user_tokens 内存缓存）
-        from src.user.db import validate_token
+        from src.domains.mgmt.user.db import validate_token
         result = validate_token(token)
         assert result is None  # JWT 不在内存缓存 → None
         # 这就是 bug 的根因：中间件用 validate_token → None → _uid 为空
@@ -339,7 +339,7 @@ class TestMiddlewareJwtParsing:
         for i, line in enumerate(lines):
             if 'from src.kernel.auth_sdk.jwt_utils import verify_access_token' in line:
                 jwt_line = i
-            if 'from src.user.db import validate_token' in line:
+            if 'from src.domains.mgmt.user.db import validate_token' in line:
                 validate_line = i
         assert jwt_line is not None, "verify_access_token import not found"
         assert validate_line is not None, "validate_token import not found"
@@ -364,7 +364,7 @@ class TestDetectServerBaseFailureVisibility:
         with patch("urllib.request.urlopen", side_effect=Exception("Connection refused")), \
              patch("socket.gethostname", return_value="localhost"), \
              patch("socket.gethostbyname", return_value="127.0.0.1"), \
-             patch("src.user.db.set_meta_value") as mock_set:
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
             # 模拟 _detect_server_base 的失败路径
             import urllib.request, socket
             from src.kernel.config import log
@@ -385,6 +385,6 @@ class TestDetectServerBaseFailureVisibility:
                 except Exception:
                     pass
             if all_failed:
-                from src.user.db import set_meta_value
+                from src.domains.mgmt.user.db import set_meta_value
                 set_meta_value("webhook_url_detect_failed", "1")
                 mock_set.assert_called_once_with("webhook_url_detect_failed", "1")

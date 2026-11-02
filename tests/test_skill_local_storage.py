@@ -3,7 +3,7 @@
 覆盖：LocalStorage 后端往返、get_skill_storage 选择器、OBS 未启用时 upload/download/detail 本地成功。
 """
 import io
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 import os
 import sys
 import zipfile
@@ -23,7 +23,7 @@ from src.api.db_setup import init_database
 from src.api.main import app
 from src.kernel.config import SKILL_STORAGE_DIR
 from src.kernel.session_manager import db, db_lock
-from src.storage import get_storage, get_skill_storage, reset_skill_storage
+from src.domains.runtime.storage import get_storage, get_skill_storage, reset_skill_storage
 
 init_database()
 
@@ -43,7 +43,7 @@ def _session_token(repo_key=REPO, agent_type="sre"):
 
 def _user_headers():
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     if not _UID:
         return {"Authorization": f"Bearer {_BOT_TOKEN}"}
     tok = create_access_token(_UID, "skill_local_user", get_token_version(_UID))
@@ -55,7 +55,7 @@ _UID = None
 
 def setup_module():
     global _UID
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     _USER = grape_account_db.create_grape_account("skill_local_user", email=None, password="pw123")
     if not _USER:
         _USER = grape_account_db.get_grape_account_by_username("skill_local_user")
@@ -100,7 +100,7 @@ def _clean():
 
 class TestLocalStorage:
     def test_roundtrip(self, tmp_path):
-        from src.storage.local import LocalStorage
+        from src.domains.runtime.storage.local import LocalStorage
         s = LocalStorage(str(tmp_path))
         key = "grape/prod/skills/repo/org/u-local/my-skill/my-skill.zip"
         assert s.save_bytes(key, b"data") == key
@@ -117,7 +117,7 @@ class TestLocalStorage:
         assert s.temporary_url(key) == ""
 
     def test_bad_key_rejected(self, tmp_path):
-        from src.storage.local import LocalStorage
+        from src.domains.runtime.storage.local import LocalStorage
         s = LocalStorage(str(tmp_path))
         with pytest.raises(ValueError):
             s.save_bytes("/abs", b"x")

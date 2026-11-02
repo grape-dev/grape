@@ -15,7 +15,7 @@ os.environ["OBS_PREFIX"] = "grape/test"
 
 import pytest  # noqa: E402
 
-from src.storage import (  # noqa: E402
+from src.domains.runtime.storage import (  # noqa: E402
     skill_key, parse_skill_key, skill_tag_from_key, extract_skill_md, skill_md_content,
     zip_cache_get, zip_cache_put, zip_cache_invalidate, invalidate_skill_caches,
     mem_cache_invalidate, get_skill_zip_bytes, reset_storage,
@@ -132,9 +132,9 @@ class TestExtract:
 class TestZipCache:
     def test_put_get(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OBS_LOCAL_CACHE", str(tmp_path))
-        from src.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        from src.domains.runtime.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
         k = skill_key("custom", "123", "hello", 1)
         zip_cache_put(k, b"data-v1")
         assert zip_cache_get(k) == b"data-v1"
@@ -144,9 +144,9 @@ class TestZipCache:
 
     def test_invalidate(self, tmp_path, monkeypatch):
         monkeypatch.setenv("OBS_LOCAL_CACHE", str(tmp_path))
-        from src.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        from src.domains.runtime.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
         k = skill_key("custom", "123", "hello", 1)
         zip_cache_put(k, b"data")
         zip_cache_invalidate(k)
@@ -155,15 +155,15 @@ class TestZipCache:
     def test_versions_capped(self, tmp_path, monkeypatch):
         # v2.4 固定 key：同技能同一 key，重复 put 覆盖，缓存仅 1 条（无版本累积）
         monkeypatch.setenv("OBS_LOCAL_CACHE", str(tmp_path))
-        from src.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
-        monkeypatch.setattr("src.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
-        monkeypatch.setattr("src.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
+        from src.domains.runtime.storage import ZIP_CACHE_DIR, ZIP_CACHE_INDEX
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_DIR", str(tmp_path / "zips"))
+        monkeypatch.setattr("src.domains.runtime.storage.ZIP_CACHE_INDEX", str(tmp_path / "zips" / "index.json"))
         key = skill_key("custom", "123", "hello")
         zip_cache_put(key, b"v1")
         zip_cache_put(key, b"v2")  # 同 key 覆盖
         assert zip_cache_get(key) == b"v2"
         # 同技能仅 1 条缓存条目（固定 key 覆盖语义）
-        from src.storage import _zip_index
+        from src.domains.runtime.storage import _zip_index
         idx = _zip_index()
         same_tag = [k for k in idx if idx[k].get("tag") == skill_tag_from_key(key)]
         assert len(same_tag) == 1, f"固定 key 覆盖后同技能缓存应仅 1 条: {idx}"
@@ -178,7 +178,7 @@ class TestObsStorageMock:
 
     def test_sdk_call_contract(self, monkeypatch):
         """ObsStorage 调用 esdk-obs-python 的参数契约（bucket/对象键前缀）。"""
-        import src.storage.obs as obs_mod
+        import src.domains.runtime.storage.obs as obs_mod
 
         calls = {}
 

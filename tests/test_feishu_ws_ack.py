@@ -55,7 +55,7 @@ def _make_event_frame(message_id="om_test_001", text="你好"):
 
 
 def _make_ctx(app_id="cli_acktest"):
-    from src.im.feishu_async import BotContext
+    from src.domains.runtime.im.feishu_async import BotContext
     ctx = BotContext(app_id=app_id, app_secret="s", bot_type="chat_bot", name="ack-test")
     return ctx
 
@@ -69,7 +69,7 @@ def _frame_from_bytes(data: bytes):
 
 async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
     """在 run_bot 的简化环境中消费一条 EVENT 帧，返回 ws.send 的调用记录。"""
-    from src.im.feishu_async import _parse_event
+    from src.domains.runtime.im.feishu_async import _parse_event
     ctx = ctx or _make_ctx()
     api = api or AsyncMock()
 
@@ -89,7 +89,7 @@ async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
     ft = FrameType(parsed_frame.method)
     assert ft == FrameType.DATA
     hs = parsed_frame.headers
-    from src.im.feishu_async import _get_header, _build_ack_frame, _parse_event as pe
+    from src.domains.runtime.im.feishu_async import _get_header, _build_ack_frame, _parse_event as pe
     type_ = _get_header(hs, "type")
     assert type_ == MessageType.EVENT.value
     event_data = json.loads(parsed_frame.payload.decode("utf-8"))
@@ -101,7 +101,7 @@ async def _run_single_event(frame_bytes, ctx=None, api=None, on_message=None):
 
 def test_ack_frame_payload_is_ok():
     """ack 帧 payload 应为 {"code":200}，且 message_id header 保留。"""
-    from src.im.feishu_async import _build_ack_frame
+    from src.domains.runtime.im.feishu_async import _build_ack_frame
     from lark_oapi.ws.enum import FrameType
 
     frame = _make_event_frame("om_ack_1")
@@ -112,7 +112,7 @@ def test_ack_frame_payload_is_ok():
     # payload 为 {"code":200}
     assert json.loads(ack.payload.decode("utf-8")) == {"code": 200}
     # headers 保留 message_id
-    from src.im.feishu_async import _get_header
+    from src.domains.runtime.im.feishu_async import _get_header
     assert _get_header(ack.headers, "message_id") == "om_ack_1"
     assert _get_header(ack.headers, "type") == "event"
 
@@ -120,7 +120,7 @@ def test_ack_frame_payload_is_ok():
 def test_run_bot_acks_event_frame():
     """run_bot 收到 EVENT 帧后应回传 ack 帧。"""
     import asyncio
-    from src.im.feishu_async import _build_ack_frame
+    from src.domains.runtime.im.feishu_async import _build_ack_frame
 
     frame = _make_event_frame("om_ack_2", "你好")
     raw = frame.SerializeToString()
@@ -142,12 +142,12 @@ def test_run_bot_acks_event_frame():
 
 def test_ack_on_unknown_event():
     """非消息事件（如已读回执）也应 ack，防止飞书重推。"""
-    from src.im.feishu_async import _parse_event
+    from src.domains.runtime.im.feishu_async import _parse_event
     # 事件类型不是 im.message.receive_v1 → _parse_event 返回 None，但仍须 ack
     event_data = {"header": {"event_type": "im.message.read"}}
     assert _parse_event(event_data) is None
     # ack 构造不依赖事件内容，仅依赖 frame
     frame = _make_event_frame("om_ack_3")
-    from src.im.feishu_async import _build_ack_frame
+    from src.domains.runtime.im.feishu_async import _build_ack_frame
     ack = _frame_from_bytes(_build_ack_frame(frame))
     assert json.loads(ack.payload.decode("utf-8")) == {"code": 200}

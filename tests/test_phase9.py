@@ -3,10 +3,10 @@ import json
 
 import pytest
 
-from src.runtime.registry import discover_runtimes, register_runtime, get_runtime
-from src.runtime.base import AgentRuntime
-from src.im.base import IMChannel
-from src.vcs.base import VcsBackend
+from src.domains.runtime.engine.registry import discover_runtimes, register_runtime, get_runtime
+from src.domains.runtime.engine.base import AgentRuntime
+from src.domains.runtime.im.base import IMChannel
+from src.domains.runtime.vcs.base import VcsBackend
 
 
 class HermesRuntime(AgentRuntime):
@@ -52,7 +52,7 @@ class TestRuntimeRegistry:
             assert isinstance(b, HermesRuntime)
             assert b.build_args("p", "s") == ["hermes", "-p", "p"]
         finally:
-            from src.agent import executor
+            from src.domains.runtime.agents import executor
             executor._BACKENDS.pop("hermes_test", None)
 
 
@@ -70,7 +70,7 @@ class TestIMChannelAbstract:
 
 class TestVcsAdapter:
     def test_github_normalize_through_adapter(self):
-        from src.vcs.adapter import normalize_event
+        from src.domains.runtime.vcs.adapter import normalize_event
         payload = {"ref": "refs/heads/main", "repository": {"full_name": "org/repo"},
                    "sender": {"login": "alice"}}
         r = normalize_event(json.dumps(payload).encode(), "push", "github")
@@ -78,7 +78,7 @@ class TestVcsAdapter:
         assert r["repository"] == "org/repo"
 
     def test_register_gitlab_and_normalize(self):
-        from src.vcs.adapter import normalize_event, register_vcs_backend
+        from src.domains.runtime.vcs.adapter import normalize_event, register_vcs_backend
         register_vcs_backend("gitlab", GitLabBackend())
         r = normalize_event(b"{}", "Push Hook", "gitlab")
         assert r["source"] == "gitlab"

@@ -14,7 +14,10 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability
+from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community
+from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
+from src.domains.insight.routes import dashboard, search, health, latency, observability
+from src.api.routes import knowledge
 
 
 bot_manager = None
@@ -27,7 +30,7 @@ def _startup_security_check():
     其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
     from src.kernel.config import log
-    from src.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
+    from src.domains.mgmt.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
     errors = []
 
@@ -74,7 +77,7 @@ def _startup_security_check():
         errors.append("生产环境必须设置 COOKIE_SECURE=true（refresh_token cookie 需要 Secure 标志）")
 
     # 6. OAuth redirect_uri 配置校验（需求 11：每个 provider 必须配置 redirect_uri）
-    from src.auth.providers import get_provider, list_providers
+    from src.domains.mgmt.auth.providers import get_provider, list_providers
     missing_redirect = [p for p in list_providers() if not (get_provider(p) or {}).get("redirect_uri")]
     if missing_redirect:
         errors.append(f"生产环境必须配置 redirect_uri，缺少: {', '.join(missing_redirect)}")
@@ -99,7 +102,7 @@ async def lifespan(app: FastAPI):
     # Issue #455：对外基址未配置告警——OAuth 回调/安装命令依赖 server_base_url，
     # 未显式配置时默认 localhost，第三方平台无法回访（登录/托管不可用）。
     try:
-        from src.user.db import get_server_base_url_warning
+        from src.domains.mgmt.user.db import get_server_base_url_warning
         _base_warn = get_server_base_url_warning()
         if _base_warn:
             log.warning(f"[CONFIG] {_base_warn}")
@@ -109,9 +112,9 @@ async def lifespan(app: FastAPI):
         log.warning(f"[CONFIG] server_base_url check failed: {_bw}")
 
     try:
-        from src.im.feishu_async import BotManager
-        from src.im.handler_async import process_chat_async
-        from src.im.vod_handler_async import process_vod_async
+        from src.domains.runtime.im.feishu_async import BotManager
+        from src.domains.runtime.im.handler_async import process_chat_async
+        from src.domains.runtime.im.vod_handler_async import process_vod_async
 
         # psutil CPU 基准预热：interval=None 模式需要先调一次建立基准
         try:
@@ -122,7 +125,7 @@ async def lifespan(app: FastAPI):
 
         # 启动引擎健康探测线程（每 10 分钟对引擎发起 CLI 测试对话）
         try:
-            from src.observability.engine_probe import start_probe
+            from src.domains.insight.observability.engine_probe import start_probe
             start_probe()
         except Exception as e:
             log.warning(f"Engine probe start failed: {e}")
@@ -160,7 +163,7 @@ async def lifespan(app: FastAPI):
         from src.kernel.config import BOT_LEASE_DISABLED
         lease_store = None
         if not BOT_LEASE_DISABLED:
-            from src.im.bot_lease import BotLeaseStore, generate_instance_id
+            from src.domains.runtime.im.bot_lease import BotLeaseStore, generate_instance_id
             instance_id = generate_instance_id()
             lease_store = BotLeaseStore(instance_id=instance_id)
             log.info(f"IM WS: lease enabled, instance_id={instance_id}")
@@ -191,7 +194,7 @@ async def lifespan(app: FastAPI):
     # sweeper：Issue done 后清理 workdir（见 multi-issue-isolation-design.md §3.4.2）
     _sweep_task = None
     try:
-        from src.runtime.cleanup import sweep_loop
+        from src.domains.runtime.engine.cleanup import sweep_loop
         _sweep_task = asyncio.create_task(sweep_loop())
         log.info("Sweeper loop started")
     except Exception as e:
@@ -201,7 +204,7 @@ async def lifespan(app: FastAPI):
     _knowledge_sync_task = None
     try:
         async def _knowledge_sync_wrapper():
-            from src.storage import get_storage
+            from src.domains.runtime.storage import get_storage
             if not get_storage():
                 return  # OBS 未启用，不需要同步
             from src.api.knowledge import knowledge_sync_loop
@@ -222,7 +225,7 @@ async def lifespan(app: FastAPI):
 
     # 官方技能 OBS 自动同步：定时扫描本地技能变更，上传 OBS（每 30 分钟）
     try:
-        from src.storage.skill_sync import start_skill_sync_scheduler
+        from src.domains.runtime.storage.skill_sync import start_skill_sync_scheduler
         start_skill_sync_scheduler()
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
@@ -239,7 +242,7 @@ async def lifespan(app: FastAPI):
 
     # 临时上传文件定时清理：每小时清理超过 24 小时的孤儿文件（Issue-54）
     try:
-        from src.storage.upload_cleanup import start_upload_cleanup_scheduler
+        from src.domains.runtime.storage.upload_cleanup import start_upload_cleanup_scheduler
         start_upload_cleanup_scheduler()
     except Exception as e:
         log.warning(f"Upload cleanup scheduler start failed: {e}")
@@ -248,7 +251,7 @@ async def lifespan(app: FastAPI):
     # and delete old task_messages. Runs every 6 hours with distributed lock.
     # Issue #463 P1: also delete terminal agent_tasks older than 90 days.
     try:
-        from src.runtime.task_lock import run_with_distributed_lock
+        from src.domains.runtime.engine.task_lock import run_with_distributed_lock
 
         async def _table_maintenance_worker():
             import asyncio
@@ -256,7 +259,7 @@ async def lifespan(app: FastAPI):
             while True:
                 try:
                     async with run_with_distributed_lock("table_maintenance", ttl=3600):
-                        from src.runtime.table_maintenance import (
+                        from src.domains.runtime.engine.table_maintenance import (
                             cleanup_old_agent_tasks_fields,
                             cleanup_old_task_messages,
                             delete_old_agent_tasks,
@@ -280,7 +283,7 @@ async def lifespan(app: FastAPI):
     # 是同步函数返回 None，create_task(None) 抛 "a coroutine was expected"，靠下方幂等
     # 挡住才没有真双跑，但每次启动刷一条假 warning（9-17 引入，2026-10-14 移除）。
     try:
-        from src.runtime.scheduler import start_scheduler
+        from src.domains.runtime.engine.scheduler import start_scheduler
         start_scheduler()
     except Exception as e:
         log.warning(f"Autopilot scheduler start failed: {e}")
@@ -289,21 +292,21 @@ async def lifespan(app: FastAPI):
     # 让本机引擎与远端 worker 同级参与广播认领（同一条 claim_by_tag 检查链）。
     # GRAPE_LOCAL_CLAIMER=0 可关闭（回退为纯远端认领）。
     try:
-        from src.runtime.local_claimer import start_local_claimer
+        from src.domains.runtime.engine.local_claimer import start_local_claimer
         start_local_claimer()
     except Exception as e:
         log.warning(f"Local claimer start failed: {e}")
 
     # Issue #345: 全局 bot token 健康探活——每 5 分钟探活，集群下分布式锁保证单实例执行
     try:
-        from src.runtime.bot_token_health import start_bot_token_health
+        from src.domains.runtime.engine.bot_token_health import start_bot_token_health
         start_bot_token_health()
     except Exception as e:
         log.warning(f"Bot token health check start failed: {e}")
 
     # D7: 冷静期定时任务：每天执行一次，匿名化超 30 天的冷静期账号（需求 22）
     try:
-        from src.admin.cooldown import start_cooldown_scheduler
+        from src.domains.mgmt.admin.cooldown import start_cooldown_scheduler
         start_cooldown_scheduler()
     except Exception as e:
         log.warning(f"Cooldown scheduler start failed: {e}")
@@ -341,12 +344,12 @@ async def lifespan(app: FastAPI):
     try:
         async def _local_probe_loop():
             import time as _t
-            from src.runtime.registry import discover_runtimes
+            from src.domains.runtime.engine.registry import discover_runtimes
             while True:
                 def _run():
-                    from src.runtime.local_probe import probe_local_engines
-                    from src.runtime.agent import _scan_local_skills_with_detail
-                    from src.user import db as user_db
+                    from src.domains.runtime.engine.local_probe import probe_local_engines
+                    from src.domains.runtime.engine.agent import _scan_local_skills_with_detail
+                    from src.domains.mgmt.user import db as user_db
                     import socket as _sock
                     _hostname = _sock.gethostname()
                     probed = [r for r in probe_local_engines(discover_runtimes()) if r.get("installed")]
@@ -386,7 +389,7 @@ async def lifespan(app: FastAPI):
                     log.warning(f"Reap stale runtimes failed: {e}")
 
         def _reap_stale_runtimes_sync():
-            from src.runtime.service import reap_stale_runtimes
+            from src.domains.runtime.engine.service import reap_stale_runtimes
             return reap_stale_runtimes()
 
         _reap_task = asyncio.create_task(_reap_stale_loop())
@@ -505,7 +508,7 @@ async def lifespan(app: FastAPI):
     # Issue #85：引擎健康度定时刷新——每 5 分钟对所有引擎 force_refresh，
     # 覆盖离线引擎无任务事件触发的场景（失联引擎不会产生任务完成事件）
     try:
-        from src.runtime.health_scorer import start_health_refresh_scheduler
+        from src.domains.runtime.engine.health_scorer import start_health_refresh_scheduler
         start_health_refresh_scheduler()
     except Exception as e:
         log.warning(f"Health refresh scheduler start failed: {e}")
@@ -514,9 +517,9 @@ async def lifespan(app: FastAPI):
     # 平台级规则（DB/主机/全局引擎）与用户面规则一起求值，但用户面 API 只出 level='user'
     _obs_alert_loop_task = None
     try:
-        from src.observability import alerts as _obs_alerts
-        from src.observability import slo as _obs_slo
-        from src.observability import loops as _obs_loops
+        from src.domains.insight.observability import alerts as _obs_alerts
+        from src.domains.insight.observability import slo as _obs_slo
+        from src.domains.insight.observability import loops as _obs_loops
 
         _obs_seeded = _obs_alerts.seed_rules()
         _obs_slo_seeded = _obs_slo.seed_defaults()      # P2-1：三条默认 SLO（幂等）
@@ -578,9 +581,9 @@ async def lifespan(app: FastAPI):
     # 业务指标聚合（P1-2）：60s 追赶式补齐分钟/小时桶；每小时顺带清一次留存
     _obs_rollup_task = None
     try:
-        from src.observability import metric_rollup as _obs_mrollup
-        from src.observability import llm_usage as _obs_llm_usage
-        from src.observability import loops as _obs_loops
+        from src.domains.insight.observability import metric_rollup as _obs_mrollup
+        from src.domains.insight.observability import llm_usage as _obs_llm_usage
+        from src.domains.insight.observability import loops as _obs_loops
 
         async def _obs_rollup_loop():
             _tick = 0
@@ -611,9 +614,9 @@ async def lifespan(app: FastAPI):
     # 设备资源采样：每 60s 留一份历史（资源曲线用），顺带清理过期采样
     _obs_sample_task = None
     try:
-        from src.observability import rollup as _obs_rollup
-        from src.observability import logs as _obs_logs_mod
-        from src.observability import loops as _obs_loops
+        from src.domains.insight.observability import rollup as _obs_rollup
+        from src.domains.insight.observability import logs as _obs_logs_mod
+        from src.domains.insight.observability import loops as _obs_loops
 
         async def _obs_sample_loop():
             while True:
@@ -639,7 +642,7 @@ async def lifespan(app: FastAPI):
 
     # 可观测性日志落库：主控 WARNING/ERROR → obs_log（有界队列 + 后台批量，env OBS_LOG_DB=0 关闭）
     try:
-        from src.observability import logs as _obs_logs_install
+        from src.domains.insight.observability import logs as _obs_logs_install
         _st = _obs_logs_install.install_master_logging()
         log.info(f"Observability log sink: {_st}")
     except Exception as e:
@@ -647,7 +650,7 @@ async def lifespan(app: FastAPI):
 
     # 追踪（§6.4）：给历史任务补 trace id（确定性生成，一次即可；新任务由查询时惰性补齐）
     try:
-        from src.observability import trace as _obs_trace
+        from src.domains.insight.observability import trace as _obs_trace
         _nstamped = await asyncio.to_thread(_obs_trace.stamp_missing)
         log.info(f"Observability trace stamp: {_nstamped} legacy task(s) backfilled")
     except Exception as e:
@@ -658,7 +661,7 @@ async def lifespan(app: FastAPI):
     try:
         async def _active_user_tracker():
             from src.api.deps import get_pending_active
-            from src.user import db as user_db
+            from src.domains.mgmt.user import db as user_db
             _purge_i = 0
             while True:
                 await asyncio.sleep(30)
@@ -688,7 +691,7 @@ async def lifespan(app: FastAPI):
 
     # Issue #150: Autopilot 定时调度引擎
     try:
-        from src.runtime.scheduler import start_scheduler
+        from src.domains.runtime.engine.scheduler import start_scheduler
         start_scheduler()
     except Exception as e:
         log.warning(f"Autopilot scheduler start failed: {e}")
@@ -738,7 +741,7 @@ async def lifespan(app: FastAPI):
             pass
     # 官方技能 OBS 同步：优雅关闭定时任务
     try:
-        from src.storage.skill_sync import stop_skill_sync_scheduler
+        from src.domains.runtime.storage.skill_sync import stop_skill_sync_scheduler
         await stop_skill_sync_scheduler()
     except Exception:
         pass
@@ -752,20 +755,20 @@ async def lifespan(app: FastAPI):
     # stop_scene_sync_scheduler 已随 standalone worker 删除（决策 A）
     # Issue #85：健康度定时刷新线程优雅关闭
     try:
-        from src.runtime.health_scorer import stop_health_refresh_scheduler
+        from src.domains.runtime.engine.health_scorer import stop_health_refresh_scheduler
         stop_health_refresh_scheduler()
     except Exception:
         pass
     # Issue #150: 停止 Autopilot 调度器
     try:
-        from src.runtime.scheduler import stop_scheduler
+        from src.domains.runtime.engine.scheduler import stop_scheduler
         await stop_scheduler()
     except Exception:
         pass
     # 终止运行中的 agent 子进程（opencode），使 executor 线程尽快结束，
     # 避免 uvicorn 优雅停机等待超时被 systemd SIGKILL（grape-main timeout 重启根因，2026-08-18）
     try:
-        from src.agent.executor import terminate_active_agents
+        from src.domains.runtime.agents.executor import terminate_active_agents
         terminate_active_agents(grace_seconds=5)
     except Exception as e:
         log.warning(f"terminate_active_agents failed: {e}")
@@ -807,7 +810,7 @@ def _is_loopback(request: Request) -> bool:
     return False
 
 # 可观察性：HTTP 请求指标中间件（仅 METRICS_ADDR 启用时挂载）
-from src.observability import metrics_middleware, start_metrics_server, metrics_endpoint, metrics_enabled
+from src.domains.insight.observability import metrics_middleware, start_metrics_server, metrics_endpoint, metrics_enabled
 metrics_middleware(app)
 if metrics_enabled():
     start_metrics_server()
@@ -892,7 +895,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
                 _uid = str(_payload["sub"])
             else:
                 # fallback: 旧 session token（create_session_token 写入 _user_tokens）
-                from src.user.db import validate_token
+                from src.domains.mgmt.user.db import validate_token
                 _uid_val = validate_token(_auth[7:])
                 if _uid_val:
                     _uid = str(_uid_val)
@@ -905,7 +908,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
     # nginx 代理场景：优先 X-Forwarded-Host（含端口），X-Forwarded-Proto（https）
     if _uid:
         try:
-            from src.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
+            from src.domains.mgmt.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
             _host = request.headers.get("host", "")
             _fwd_host = request.headers.get("x-forwarded-host", "")
             _fwd_proto = request.headers.get("x-forwarded-proto", "")
@@ -1010,7 +1013,7 @@ app.include_router(grape_auth.router)
 app.include_router(auth.router)
 app.include_router(repos.router)
 # Admin 管理后台（/api/admin/*）
-from src.admin.routes import router as admin_router
+from src.domains.mgmt.admin.routes import router as admin_router
 app.include_router(admin_router)
 # Issue-45 M3：Git 仓库统一接口（provider 白名单资源端点；prefix=/api/git-repo，与 grape 托管 repos.py 区分）
 from src.api.git_repo_api import router as git_repo_router
@@ -1077,7 +1080,7 @@ if os.path.isdir(STATIC_DIR):
     app.add_middleware(NoCacheStaticMiddleware)
 
     from fastapi.responses import FileResponse, HTMLResponse
-    from src.auth.email_service import is_email_configured as _is_email_configured
+    from src.domains.mgmt.auth.email_service import is_email_configured as _is_email_configured
     import json as _json_mod
 
     # ── i18n boost: 服务端注入翻译数据，消除首屏 i18n 闪动 ──
@@ -1223,8 +1226,8 @@ document.documentElement.classList.remove('i18n-loading');})();
         window.__OAUTH_CONFIGURED__ = {provider: bool}。前端 oauthLogin 前置判断
         与 CSS 初始置灰直接读它——页面首帧即正确，不再「先常亮后置灰」闪动；
         renderOAuthButtons 返回后仍会刷新（运行时权威），与注入值不一致时纠正。"""
-        from src.auth.providers import get_provider, list_providers
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.auth.providers import get_provider, list_providers
+        from src.domains.mgmt.user.db import get_meta_value
         configured = _is_email_configured()
         val = 'true' if configured else 'false'
         cls = 'email-configured' if configured else 'email-not-configured'
@@ -1438,7 +1441,7 @@ async def health_realtime(request: Request):
     if not _is_loopback(request):
         return JSONResponse(status_code=403, content={"error": "forbidden"})
     from src.kernel.session_manager import db, db_lock
-    from src.runtime.health import derive_runtime_health
+    from src.domains.runtime.engine.health import derive_runtime_health
     import time as _time, os as _os
 
     now_ts = _time.time()

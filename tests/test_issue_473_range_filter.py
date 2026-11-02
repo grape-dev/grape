@@ -110,7 +110,7 @@ class TestRangeUser:
     """range=user：仅当前登录用户名下 user scope 引擎/设备。"""
 
     def test_engines_only_own_user_scope(self, seeded_all):
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         d = get_agent_runtimes(user=_user(), range="user")
         names = {rt["name"] for rt in d["runtimes"]}
         assert "t473-opencode" in names
@@ -119,7 +119,7 @@ class TestRangeUser:
         assert "t473-aishell" not in names, "range=user 不应含他人 user scope 引擎"
 
     def test_devices_only_own_user_scope(self, seeded_all):
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         d = get_runtime_devices(user=_user(), range="user", page=1, page_size=100)
         names = {dev["name"] for dev in d["devices"]}
         assert "t473-worker-user" in names
@@ -132,20 +132,20 @@ class TestRangeRepo:
     """range=repo：仅 repo scope 引擎/设备（复用 #277 口径）。"""
 
     def test_engines_only_repo_scope(self, seeded_all):
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         d = get_agent_runtimes(user=_user(), range="repo")
         names = {rt["name"] for rt in d["runtimes"]}
         assert names == {"t473-hermes"}, f"range=repo 应仅 repo scope 引擎: {names}"
 
     def test_devices_only_repo_scope(self, seeded_all):
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         d = get_runtime_devices(user=_user(), range="repo", page=1, page_size=100)
         names = {dev["name"] for dev in d["devices"]}
         assert names == {"t473-worker-repo"}, f"range=repo 应仅 repo scope 设备: {names}"
 
     def test_repo_param_narrows_to_current_repo(self, seeded_all):
         """range=repo + repo 参数组合：仅当前仓库（#277 口径不回退）。"""
-        from src.api.routes.settings import get_agent_runtimes, get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_agent_runtimes, get_runtime_devices
         # 种入另一个仓库的 repo scope 凭据
         with db_lock:
             c = db.cursor()
@@ -174,13 +174,13 @@ class TestRangeDefault:
     """range 空 / all：恢复现有全量口径。"""
 
     def test_no_range_returns_all_visible(self, seeded_all):
-        from src.api.routes.settings import get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_agent_runtimes
         d = get_agent_runtimes(user=_user())
         names = {rt["name"] for rt in d["runtimes"]}
         assert {"t473-opencode", "t473-hermes", "t473-codex"} <= names
 
     def test_range_all_returns_all_visible(self, seeded_all):
-        from src.api.routes.settings import get_agent_runtimes, get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_agent_runtimes, get_runtime_devices
         d = get_agent_runtimes(user=_user(), range="all")
         names = {rt["name"] for rt in d["runtimes"]}
         assert {"t473-opencode", "t473-hermes", "t473-codex"} <= names
@@ -193,7 +193,7 @@ class TestRangeCombined:
 
     def test_range_repo_with_search(self, seeded_all):
         """range=repo + q 搜索：命中当前仓 repo 引擎，total 正确。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         d = get_runtime_devices(user=_user(), range="repo", q="hermes", page=1, page_size=10)
         names = {dev["name"] for dev in d["devices"]}
         assert names == {"t473-worker-repo"}
@@ -201,7 +201,7 @@ class TestRangeCombined:
 
     def test_range_user_with_search_no_result(self, seeded_all):
         """range=user + q 搜索无命中 → 空列表 + total=0（#436 不回退，不误报）。"""
-        from src.api.routes.settings import get_runtime_devices, get_agent_runtimes
+        from src.domains.mgmt.routes.settings import get_runtime_devices, get_agent_runtimes
         d = get_runtime_devices(user=_user(), range="user", q="not-exist-keyword", page=1, page_size=10)
         assert d["devices"] == []
         assert d["total"] == 0
@@ -211,7 +211,7 @@ class TestRangeCombined:
 
     def test_range_repo_with_scope_filter_and_pagination(self, seeded_all):
         """range=repo + scope=repo + 分页：total 为组合筛选后总数。"""
-        from src.api.routes.settings import get_runtime_devices
+        from src.domains.mgmt.routes.settings import get_runtime_devices
         d = get_runtime_devices(user=_user(), range="repo", scope="repo", page=1, page_size=1)
         assert d["total"] == 1
         assert len(d["devices"]) == 1

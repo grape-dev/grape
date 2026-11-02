@@ -40,7 +40,7 @@ def _cleanup_whitelist():
         c = db.cursor()
         c.execute("DELETE FROM login_whitelist")
         db.commit()
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value("login_whitelist_enabled", "false")
 
 

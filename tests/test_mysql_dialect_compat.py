@@ -18,7 +18,7 @@ from fastapi import HTTPException
 # ---------------------------------------------------------------- S1-U5 白名单
 
 def test_s1_u5_provider_whitelist():
-    from src.api.routes.grape_auth import unbind_provider
+    from src.domains.mgmt.routes.grape_auth import unbind_provider
     src = inspect.getsource(unbind_provider)
     assert 'provider not in ("gitcode", "github")' in src
     with pytest.raises(HTTPException) as ei:
@@ -35,7 +35,7 @@ def test_s1_u5_um_column_mapping():
 # ---------------------------------------------------------------- S2 cutoff 预计算
 
 def test_s2_u1_u2_stale_cutoff():
-    from src.api.routes.feishu_onboard import STALE_TTL
+    from src.domains.mgmt.routes.feishu_onboard import STALE_TTL
     old = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - STALE_TTL - 60))
     fresh = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - 60))
     cutoff = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() - STALE_TTL))
@@ -124,14 +124,14 @@ def test_s3_session_active_uses_parameterized_cutoff():
 
 def test_s1_u3_affected_count_failure_not_silent_zero():
     """affected_count 查询失败 → -1（可见的未知），不得静默归零。"""
-    from src.api.routes.grape_auth import unbind_provider
+    from src.domains.mgmt.routes.grape_auth import unbind_provider
     src = inspect.getsource(unbind_provider)
     assert "affected_count = -1" in src
 
 
 def test_f3_user_repos_cleanup_partial_visible():
     """user_repos 清理失败 → 响应带 partial 标记 + log.error，不留静默半途状态。"""
-    from src.api.routes.grape_auth import unbind_provider
+    from src.domains.mgmt.routes.grape_auth import unbind_provider
     src = inspect.getsource(unbind_provider)
     assert "user_repos_cleanup_failed = True" in src
     assert '"partial": user_repos_cleanup_failed' in src

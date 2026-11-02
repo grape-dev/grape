@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline
-from src.runtime.service import (
+from src.domains.runtime.engine.service import (
     runtime_execution_kind,
     EXEC_MODE_DIRECT, EXEC_MODE_REMOTE,
 )

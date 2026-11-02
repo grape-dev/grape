@@ -15,15 +15,15 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 
-from src.observability import metric_rollup as MR  # noqa: E402
-from src.observability import slo as S  # noqa: E402
+from src.domains.insight.observability import metric_rollup as MR  # noqa: E402
+from src.domains.insight.observability import slo as S  # noqa: E402
 
 REPO_DIM = "repo:org/slo-x"
 NOW = datetime.now(timezone.utc)
 
 
 def _clean():
-    from src.observability import slo_backfill as _SB
+    from src.domains.insight.observability import slo_backfill as _SB
     _SB.reset()
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -172,7 +172,7 @@ def test_engine_availability_is_l2_only_and_uses_online_column():
     slo = S.get_slo(slo["id"]) or slo
     # L2：在线 210/240 = 0.875 < 0.99 → breached
     # Issue #544 L1：无 rollup 行时先转后台回填（不同步全窗扫），drain 后口径与旧一致
-    from src.observability import slo_backfill as SB
+    from src.domains.insight.observability import slo_backfill as SB
     l2 = S.compute(slo, ["global"], now=NOW, allow_engine=True)
     assert l2.get("avail_backfill_pending_hours", 0) > 0, l2
     SB.drain_for_test()
@@ -210,7 +210,7 @@ def test_availability_partial_backfill_fills_missing_hours():
     场景：窗口 [start, end) 跨 3+ 小时，rollup 只回了 1 个闭合小时桶；窗口头部不完整
     小时有界现算；缺失闭合小时（有采样）→ pending 透出 + 后台回填后可查。
     """
-    from src.observability import slo_backfill as SB
+    from src.domains.insight.observability import slo_backfill as SB
     from src.kernel.session_manager import db, db_lock
     start = _hour(3) + timedelta(minutes=37)       # 窗口起点落在小时中段
     end = start + timedelta(hours=3)               # 末端同样落在小时中段（含未闭合当前小时）
@@ -256,7 +256,7 @@ def test_engine_availability_partial_backfill_keeps_full_window():
     rollup 只覆盖 1/4 个小时桶时：缺失小时 pending 透出、不进预算（防窗口截断误报）；
     后台回填后 buckets=4，值与全量口径一致（210/240），预算按完整窗口计算。
     """
-    from src.observability import slo_backfill as SB
+    from src.domains.insight.observability import slo_backfill as SB
     slo = _slo(S.SLI_AVAIL)
     from src.kernel.session_manager import db, db_lock
     with db_lock:
@@ -290,7 +290,7 @@ def test_engine_availability_partial_backfill_keeps_full_window():
 
 def test_eval_interval_sec_sources(monkeypatch):
     """Issue #437：评估周期 meta 表（热更新）> 环境变量 > 默认 300s，下限 60s。"""
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     monkeypatch.delenv(S.EVAL_INTERVAL_ENV, raising=False)
     assert S.eval_interval_sec() == S.DEFAULT_EVAL_INTERVAL_SEC == 300
     monkeypatch.setenv(S.EVAL_INTERVAL_ENV, "600")
@@ -359,7 +359,7 @@ def test_summary_for_strips_burn():
 # ---------------------------------------------------------------- 违约事件 / 周期评估 / 接口
 
 def _events_of_source(source: str):
-    from src.observability import events_view as EV
+    from src.domains.insight.observability import events_view as EV
     return EV.unified_events({"id": 1, "username": "admin", "org_id": 0, "org_role": "owner"},
                              sources=[source], limit=50, allow_audit=True,
                              global_scope=True)["events"]
@@ -464,7 +464,7 @@ def _grant(uid: int, repo_key: str):
 
 def test_repo_scope_narrows_to_selected_repo():
     """给了 repo → 只看该仓（与总览页其它 KPI 同口径）；不给 → 可见仓库合计。"""
-    from src.observability.overview import RepoNotVisible
+    from src.domains.insight.observability.overview import RepoNotVisible
     # 注意：repo_dims 走 to_repo_key → 带 gitcode: 前缀，数据维度必须同形
     x_dim, other_dim = "repo:gitcode:org/slo-x", "repo:gitcode:org/slo-y"
     _grant(1, "gitcode:org/slo-x")

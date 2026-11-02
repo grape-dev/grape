@@ -73,7 +73,7 @@ class TestExtractEntityType:
 class TestResolvePrIssueIdSelfRef:
     def test_pr_title_with_issue_url_resolves(self):
         """PR title 含 /issues/224 → 解析为 #224（关联 Issue）"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {
                 "iid": 224,
@@ -86,7 +86,7 @@ class TestResolvePrIssueIdSelfRef:
 
     def test_pr_title_with_pull_url_self_ref_skipped(self):
         """PR title 含 /pulls/224（自身编号）→ 跳过自引用，返回空"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {
                 "iid": 224,
@@ -99,7 +99,7 @@ class TestResolvePrIssueIdSelfRef:
 
     def test_pr_title_with_hash_not_self_ref(self):
         """PR title 含 #224（自身编号）但无 URL 路径 → 无法判定类型，仍采用（向后兼容）"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {
                 "iid": 224,
@@ -112,7 +112,7 @@ class TestResolvePrIssueIdSelfRef:
 
     def test_pr_title_with_pull_url_different_num_resolves(self):
         """PR title 含 /pulls/300（非自身编号）→ 不跳过（可能关联其他 PR）"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {
                 "iid": 224,
@@ -125,7 +125,7 @@ class TestResolvePrIssueIdSelfRef:
 
     def test_pr_with_linked_issues_list(self):
         """PR payload.issues 列表 → 正常提取关联 Issue 编号"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {
                 "iid": 224,
@@ -139,7 +139,7 @@ class TestResolvePrIssueIdSelfRef:
 
     def test_pr_branch_issue_n(self):
         """PR 分支名 issue-224 → 解析为 #224"""
-        from src.api.event_pipeline import resolve_pr_issue_id
+        from src.domains.runtime.pipeline.event_pipeline import resolve_pr_issue_id
         payload = {
             "object_attributes": {
                 "iid": 300,
@@ -155,23 +155,23 @@ class TestResolvePrIssueIdSelfRef:
 
 class TestNumFromIssueId:
     def test_normal_issue_id(self):
-        from src.api.routes.issues import _num_from_issue_id
+        from src.domains.runtime.routes.issues import _num_from_issue_id
         assert _num_from_issue_id("#224") == "224"
 
     def test_pr_subscription_id_excluded(self):
-        from src.api.routes.issues import _num_from_issue_id
+        from src.domains.runtime.routes.issues import _num_from_issue_id
         assert _num_from_issue_id("#pr_224_scene123") == ""
 
     def test_pr_subscription_id_no_scene(self):
-        from src.api.routes.issues import _num_from_issue_id
+        from src.domains.runtime.routes.issues import _num_from_issue_id
         assert _num_from_issue_id("#pr_224") == ""
 
     def test_empty(self):
-        from src.api.routes.issues import _num_from_issue_id
+        from src.domains.runtime.routes.issues import _num_from_issue_id
         assert _num_from_issue_id("") == ""
 
     def test_zero(self):
-        from src.api.routes.issues import _num_from_issue_id
+        from src.domains.runtime.routes.issues import _num_from_issue_id
         assert _num_from_issue_id("#0") == "0"
 
 
@@ -181,7 +181,7 @@ class TestGroupEventsByEntityType:
     def test_pr_events_excluded_from_issue_group(self):
         """entity_type='pull_request' 的事件不混入 issue 分组"""
         from src.api.event_store import append_event
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
 
         # 写入 issue 事件
         append_event(repo_key=REPO, event_type="issue_opened", title="Issue #224",
@@ -198,7 +198,7 @@ class TestGroupEventsByEntityType:
     def test_old_events_without_entity_type_included(self):
         """无 entity_type 的旧事件仍正常分组（向后兼容）"""
         from src.api.event_store import append_event
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
 
         # 模拟旧事件（不传 entity_type，默认空串）
         append_event(repo_key=REPO, event_type="issue_opened", title="Old Issue #224",
@@ -212,7 +212,7 @@ class TestGroupEventsByEntityType:
     def test_pr_subscription_events_excluded(self):
         """#pr_ 前缀的 PR 订阅事件不混入 issue 分组"""
         from src.api.event_store import append_event
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
 
         # issue 事件
         append_event(repo_key=REPO, event_type="issue_opened", title="Issue #224",
@@ -262,7 +262,7 @@ class TestSameNumberE2E:
     def test_issue_and_pr_same_number_separated(self):
         """issue #224 和 PR #224 同时存在时，事件分组不混淆"""
         from src.api.event_store import append_event
-        from src.api.routes.issues import _group_events_by_issue, _query_pr_subscription_events
+        from src.domains.runtime.routes.issues import _group_events_by_issue, _query_pr_subscription_events
 
         # issue 事件
         append_event(repo_key=REPO, event_type="issue_opened", title="Issue #224",

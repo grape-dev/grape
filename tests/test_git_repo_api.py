@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
-from src.user.repo_manager import UpstreamAPIError
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError
 
 UID = 98701
 OWNER = "o"
@@ -34,8 +34,8 @@ def _client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _token(monkeypatch):
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
-    monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: BOT)
 
 
 def _override_user(repo_key: str):
@@ -55,7 +55,7 @@ def gitcode_calls(monkeypatch):
         recorded.append({"method": method, "url": url, "token": token, "body": body})
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     return recorded
 
 
@@ -68,7 +68,7 @@ def github_calls(monkeypatch):
         recorded.append({"method": method, "url": url, "token": token, "body": body})
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
 
-    monkeypatch.setattr("src.user.repo_manager._github_req", _fake_gh_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _fake_gh_req)
     return recorded
 
 
@@ -283,7 +283,7 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
 
 
 def test_no_token_502(monkeypatch, _client):
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
     client = _client
     r = client.get(f"/api/git-repo/{OWNER}/{REPO}/branches")
     assert r.status_code == 502
@@ -299,7 +299,7 @@ def _repo_token_call(user):
 def test_repo_token_chat_session_uses_user_token(monkeypatch):
     import src.api.git_repo_api as m
     calls = {"user": 0, "bot": 0}
-    monkeypatch.setattr("src.user.db.get_gitcode_token",
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token",
                         lambda *a, **k: calls.__setitem__("bot", calls["bot"] + 1) or BOT)
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
                         lambda *a, **k: calls.__setitem__("user", calls["user"] + 1) or "USRTOK")
@@ -312,7 +312,7 @@ def test_repo_token_chat_session_uses_user_token(monkeypatch):
 
 def test_repo_token_devops_session_uses_bot_token(monkeypatch):
     calls = {"user": 0, "bot": 0}
-    monkeypatch.setattr("src.user.db.get_gitcode_token",
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token",
                         lambda *a, **k: calls.__setitem__("bot", calls["bot"] + 1) or BOT)
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh",
                         lambda *a, **k: calls.__setitem__("user", calls["user"] + 1) or "USRTOK")
@@ -336,7 +336,7 @@ def test_repo_token_api_key_not_applicable():
 
 
 def test_repo_token_all_missing_502(monkeypatch):
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "")
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "")
     monkeypatch.setattr("src.api.deps.get_user_token_with_refresh", lambda *a, **k: "")
     import src.api.git_repo_api as m
     import pytest as _p
@@ -387,7 +387,7 @@ def test_tree_recursive_gitcode_rejected(_client):
 def test_close_issue_gitcode_ok(_client):
     """POST /issues/{number}/close：gitcode provider → VcsApiClient.close_issue 关闭，返回 issue。"""
     client = _client
-    with patch("src.vcs.api_client.VcsApiClient") as MC:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as MC:
         inst = MC.return_value
         inst.close_issue.return_value = {"number": 5, "state": "closed", "title": "t"}
         r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/5/close")
@@ -403,7 +403,7 @@ def test_close_issue_github_provider(_client):
     """repo_key=github: → provider=github → VcsApiClient(github, ...)"""
     client = _client
     _override_user(f"github:{OWNER}/{REPO}")
-    with patch("src.vcs.api_client.VcsApiClient") as MC:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as MC:
         inst = MC.return_value
         inst.close_issue.return_value = {"state": "closed", "number": 7}
         r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/7/close")
@@ -414,7 +414,7 @@ def test_close_issue_github_provider(_client):
 def test_close_issue_error_502(_client):
     """关闭失败（VcsApiClient 返回 error）→ 502。"""
     client = _client
-    with patch("src.vcs.api_client.VcsApiClient") as MC:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as MC:
         inst = MC.return_value
         inst.close_issue.return_value = {"error": "HTTP 400", "detail": "bad"}
         r = client.post(f"/api/git-repo/{OWNER}/{REPO}/issues/5/close")
@@ -452,8 +452,8 @@ class TestRepoCredentialProviderByPath:
             seen["repo_key"] = k.get("repo_key")
             return "gc_tok"
 
-        monkeypatch.setattr("src.user.db.get_gitcode_token", _gc)
-        monkeypatch.setattr("src.user.db.get_github_token",
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", _gc)
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token",
                             lambda *a, **k: (calls.__setitem__("github", calls["github"] + 1), "gh_tok")[1])
         _override_user(f"github:{OWNER}/{REPO}")
         r = _client.get("/api/repos/gitcode:linked/hello/git-credential")
@@ -471,13 +471,13 @@ class TestRepoCredentialProviderByPath:
     def test_cross_platform_path_prefix_github(self, monkeypatch, _client):
         """主仓 gitcode: 会话 + 请求 github: 前缀目标仓 → provider=github（反向组合）。"""
         seen = {}
-        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
 
         def _gh(*a, **k):
             seen["repo_key"] = k.get("repo_key")
             return "gh_tok"
 
-        monkeypatch.setattr("src.user.db.get_github_token", _gh)
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", _gh)
         _override_user(f"gitcode:{OWNER}/{REPO}")
         r = _client.get("/api/repos/github:linked/hello/git-credential")
         assert r.status_code == 200
@@ -491,8 +491,8 @@ class TestRepoCredentialProviderByPath:
 
     def test_no_prefix_falls_back_to_session_repo(self, monkeypatch, _client):
         """路径无前缀 → 回退会话主仓 provider（向后兼容，同平台现状不回归）。"""
-        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
-        monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: "gh_tok")
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: "gh_tok")
         _override_user(f"github:{OWNER}/{REPO}")
         r = _client.get(f"/api/repos/{OWNER}/{REPO}/git-credential")
         assert r.status_code == 200
@@ -502,7 +502,7 @@ class TestRepoCredentialProviderByPath:
 
     def test_unknown_path_prefix_falls_back(self, monkeypatch, _client):
         """路径带未接入前缀（gitlab:）→ 不按前缀解析，回退会话主仓。"""
-        monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: "gc_tok")
         _override_user(f"gitcode:{OWNER}/{REPO}")
         r = _client.get("/api/repos/gitlab:linked/hello/git-credential")
         assert r.status_code == 200
@@ -525,7 +525,7 @@ def upstream_error(monkeypatch):
     def _install(status_code: int, message: str):
         def _fake_req(method, url, token="", body=None):
             raise UpstreamAPIError(method, url, status_code, message)
-        monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     return _install
 
 
@@ -559,7 +559,7 @@ def test_network_error_still_502(monkeypatch, _client):
     """代理自身故障（连接失败 RuntimeError，非上游响应）→ 仍 502。"""
     def _fake_req(method, url, token="", body=None):
         raise RuntimeError("Cannot reach GitCode API: connection refused")
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents/README.md")
     assert r.status_code == 502
     assert r.json()["detail"]["code"] == 502
@@ -572,5 +572,5 @@ def test_upstream_error_keeps_runtime_error_compat(_client):
     assert e.status_code == 404
     # str 格式兼容 _extract_http_code 正则
     assert "(404)" in str(e)
-    from src.user.repo_manager import _extract_http_code
+    from src.domains.mgmt.user.repo_manager import _extract_http_code
     assert _extract_http_code(e) == 404

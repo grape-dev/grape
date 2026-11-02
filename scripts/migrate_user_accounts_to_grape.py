@@ -86,7 +86,7 @@ def _ensure_external_identity(grape_user_id, provider, external_id,
         return True
 
     # D10: 加密 access_token（与运行时 create_external_identity 调 encrypt 一致）
-    from src.auth.credential_crypto import encrypt
+    from src.domains.mgmt.auth.credential_crypto import encrypt
     encrypted_token = encrypt(access_token or "") if access_token else ""
 
     try:

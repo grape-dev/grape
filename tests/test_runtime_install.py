@@ -49,7 +49,7 @@ def test_install_ps1_endpoint_returns_script():
     assert "install-worker" in body
     assert "Token" in body or "-Token" in body
     assert "RUNTIME_SERVER_URL" in body
-    assert "src.runtime.agent" in body
+    assert "src.domains.runtime.engine.agent" in body
     # 不应硬编码任何真实 rta_ token
     assert "rta_" not in body or "rta_" in body.split("$Token")[0]  # token 由参数注入
 
@@ -73,7 +73,7 @@ def test_start_worker_ps1_exists_on_disk():
     p = os.path.join(os.path.dirname(__file__), "..", "scripts", "start-worker.ps1")
     assert os.path.isfile(p), "scripts/start-worker.ps1 应存在"
     content = open(p, encoding="utf-8").read()
-    assert "src.runtime.agent" in content
+    assert "src.domains.runtime.engine.agent" in content
     assert "Restart" in content or "restart" in content.lower()
     assert "daemon" in content.lower() or "NoDaemon" in content
 

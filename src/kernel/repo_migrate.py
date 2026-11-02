@@ -344,7 +344,7 @@ def _migrate_workspace_dir(old: str, new: str) -> int:
 
 def _audit(old: str, new: str, operator_id: int, detail: dict) -> None:
     try:
-        from src.auth import audit as auth_audit
+        from src.domains.mgmt.auth import audit as auth_audit
         auth_audit.log_audit(
             "repo_migrate",
             user_id=operator_id,

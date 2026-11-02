@@ -11,8 +11,8 @@ import pytest
 from unittest.mock import patch
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
-from src.runtime import agent as agent_mod
+from src.domains.runtime.engine import service
+from src.domains.runtime.engine import agent as agent_mod
 
 
 @pytest.fixture(autouse=True)
@@ -189,7 +189,7 @@ def test_sid_watchdog_cleans_ghost_task():
     import os
     os.environ["RUNTIME_SID_WATCHDOG_INTERVAL"] = "0.01"
 
-    from src.runtime import agent as _am
+    from src.domains.runtime.engine import agent as _am
 
     async def _run():
         await _am._run_loop(client, [4], poll_interval=0.01,

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.runtime.client import RuntimeClient, RetryableError, RuntimeGoneError
+from src.domains.runtime.engine.client import RuntimeClient, RetryableError, RuntimeGoneError
 
 
 class _FakeResp:

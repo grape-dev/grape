@@ -147,7 +147,7 @@ class TestA2AEarlyExitFailEvent:
         """早退① pick_engine=None → 三字段完整（无头失败修复核心）。"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        with patch("src.runtime.engine_select.pick_engine", return_value=None):
+        with patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None):
             client = TestClient(app)
             r = _post(client, _a2a_body())
         assert r.status_code == 200, r.text
@@ -165,7 +165,7 @@ class TestA2AEarlyExitFailEvent:
         """早退② auto-select 空集（无在线本机引擎）→ 三字段完整。"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        with patch("src.runtime.engine_select.pick_engine", return_value=0):
+        with patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0):
             client = TestClient(app)
             r = _post(client, _a2a_body())
         assert r.status_code == 200, r.text
@@ -181,7 +181,7 @@ class TestA2AEarlyExitFailEvent:
         """早退③ auto-select 查询异常 → reason 含「auto-select 异常」而非裸 failed。"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        with patch("src.runtime.engine_select.pick_engine", return_value=0), \
+        with patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0), \
              patch("src.kernel.session_manager.db", _BoomDb(db)):
             client = TestClient(app)
             r = _post(client, _a2a_body())
@@ -198,7 +198,7 @@ class TestA2AEarlyExitFailEvent:
         """早退④ try 兜底异常（pick_engine 抛错）→ reason 含「A2A 派发启动异常」。"""
         from fastapi.testclient import TestClient
         from src.api.main import app
-        with patch("src.runtime.engine_select.pick_engine",
+        with patch("src.domains.runtime.engine.engine_select.pick_engine",
                    side_effect=RuntimeError("模拟派发启动异常")):
             client = TestClient(app)
             r = _post(client, _a2a_body())
@@ -224,7 +224,7 @@ class TestFailEventIdempotent:
 
     def test_terminal_not_overwritten(self):
         """同一 seq 两次 _fail_event：第二次不覆盖第一次的 result/completed_at。"""
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         _fail_event(seq, "第一次原因：无可用引擎")
         with db_lock:
@@ -254,7 +254,7 @@ class TestTaskSideFailWriteback369:
 
     def test_pool_unreachable_syncs_event(self):
         """绑定引擎全部不可达判死 → 任务 failed 且关联事件三字段完整。"""
-        from src.runtime import service
+        from src.domains.runtime.engine import service
         seq = _mk_event(status="running")
         tid = f"t-issue418-{uuid.uuid4().hex[:8]}"
         with db_lock:

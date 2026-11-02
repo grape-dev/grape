@@ -28,7 +28,7 @@ def test_claim_by_tag_injects_token():
     修复前：claim_by_tag 没有 token 注入逻辑 → 远程 worker 拿到空 token。
     修复后：与 claim() 一致，返回前注入。
     """
-    from src.runtime.service import claim_by_tag
+    from src.domains.runtime.engine.service import claim_by_tag
 
     # Mock get_task to return a task with empty repo_gitcode_token
     _mock_task = {
@@ -39,15 +39,15 @@ def test_claim_by_tag_injects_token():
         "event_seq": 0,
     }
 
-    with patch("src.runtime.service.get_task", return_value=_mock_task), \
-         patch("src.runtime.service.db") as mock_db, \
-         patch("src.runtime.service.db_lock"), \
-         patch("src.runtime.service.refresh_busy_snapshot"), \
-         patch("src.runtime.instances.runtime_instance_name", return_value="opencode"), \
-         patch("src.runtime.service._get_task_token", return_value="INJECTED_TOKEN"), \
-         patch("src.runtime.service._check_pool_engines_reachable", return_value=True), \
-         patch("src.runtime.service.is_healthy", return_value=True, create=True), \
-         patch("src.runtime.health_scorer.is_healthy", return_value=True):
+    with patch("src.domains.runtime.engine.service.get_task", return_value=_mock_task), \
+         patch("src.domains.runtime.engine.service.db") as mock_db, \
+         patch("src.domains.runtime.engine.service.db_lock"), \
+         patch("src.domains.runtime.engine.service.refresh_busy_snapshot"), \
+         patch("src.domains.runtime.engine.instances.runtime_instance_name", return_value="opencode"), \
+         patch("src.domains.runtime.engine.service._get_task_token", return_value="INJECTED_TOKEN"), \
+         patch("src.domains.runtime.engine.service._check_pool_engines_reachable", return_value=True), \
+         patch("src.domains.runtime.engine.service.is_healthy", return_value=True, create=True), \
+         patch("src.domains.runtime.engine.health_scorer.is_healthy", return_value=True):
         # Mock the DB cursor to return a valid task_id
         cursor = MagicMock()
         cursor.fetchone.return_value = ("t_test_claim_tag_001",)
@@ -90,7 +90,7 @@ def test_update_issue_adds_marker():
 
 def test_detect_webhook_rejects_non_trusted_host():
     """T17-03: 配置 TRUSTED_HOSTS 时拒绝非白名单 host。"""
-    from src.user.db import detect_webhook_from_host
+    from src.domains.mgmt.user.db import detect_webhook_from_host
 
     _orig = os.environ.get("TRUSTED_HOSTS")
     try:
@@ -117,7 +117,7 @@ def test_detect_webhook_rejects_non_trusted_host():
 
 def test_detect_webhook_allows_all_when_no_trusted_hosts():
     """T17-04: 未配置 TRUSTED_HOSTS 时放行所有非 localhost。"""
-    from src.user.db import detect_webhook_from_host
+    from src.domains.mgmt.user.db import detect_webhook_from_host
 
     _orig = os.environ.get("TRUSTED_HOSTS")
     try:

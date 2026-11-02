@@ -20,8 +20,8 @@ def _run(coro):
 
 def test_add_collaborator_success():
     """GitCode PUT body 用单数 permission 字段，maintainer 映射为 admin（=仓库维护者）"""
-    from src.user.repo_manager import add_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import add_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.return_value = {}
         ok = add_collaborator("tok", "owner", "repo", "hwc-dev-bot", "maintainer")
         assert ok is True
@@ -34,8 +34,8 @@ def test_add_collaborator_success():
 
 def test_add_collaborator_developer_maps_push():
     """developer → push（GitCode 枚举）"""
-    from src.user.repo_manager import add_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import add_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.return_value = {}
         ok = add_collaborator("tok", "owner", "repo", "bot", "developer")
         assert ok is True
@@ -44,8 +44,8 @@ def test_add_collaborator_developer_maps_push():
 
 def test_add_collaborator_no_fallback():
     """maintainer 邀请失败时不再降级 developer，直接返回 False（由调用方拒绝托管）"""
-    from src.user.repo_manager import add_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import add_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("fail")
         ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
         assert mock_req.call_count == 1  # 只试一次，不降级
@@ -54,8 +54,8 @@ def test_add_collaborator_no_fallback():
 
 def test_add_collaborator_already_member():
     """已是成员（400）视为幂等成功"""
-    from src.user.repo_manager import add_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import add_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("用户已经是项目中的成员")
         ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
         assert ok is True
@@ -63,16 +63,16 @@ def test_add_collaborator_already_member():
 
 def test_add_collaborator_already_invited():
     """已被邀请（400 用户已被邀请）视为幂等成功"""
-    from src.user.repo_manager import add_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import add_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("用户已被邀请")
         ok = add_collaborator("tok", "owner", "repo", "bot", "maintainer")
         assert ok is True
 
 
 def test_add_collaborator_no_username():
-    from src.user.repo_manager import add_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import add_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         ok = add_collaborator("tok", "owner", "repo", "", "maintainer")
         assert ok is False
         mock_req.assert_not_called()
@@ -81,8 +81,8 @@ def test_add_collaborator_no_username():
 # ===================== repo_manager.remove_collaborator =====================
 
 def test_remove_collaborator_success():
-    from src.user.repo_manager import remove_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import remove_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.return_value = {}
         ok = remove_collaborator("tok", "owner", "repo", "hwc-dev-bot")
         assert ok is True
@@ -93,8 +93,8 @@ def test_remove_collaborator_success():
 
 def test_remove_collaborator_404_ok():
     """用户本就不是协作者（404）视为成功"""
-    from src.user.repo_manager import remove_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import remove_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("GitCode API DELETE failed (404): not found")
         ok = remove_collaborator("tok", "owner", "repo", "bot")
         assert ok is True
@@ -102,8 +102,8 @@ def test_remove_collaborator_404_ok():
 
 def test_remove_collaborator_error_false():
     """其他错误返回 False"""
-    from src.user.repo_manager import remove_collaborator
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import remove_collaborator
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.side_effect = RuntimeError("GitCode API DELETE failed (500): server error")
         ok = remove_collaborator("tok", "owner", "repo", "bot")
         assert ok is False
@@ -112,8 +112,8 @@ def test_remove_collaborator_error_false():
 # ===================== repo_manager invite 系列（GitCode 定制接口） =====================
 
 def test_list_user_invites():
-    from src.user.repo_manager import list_user_invites, _req_query
-    with patch("src.user.repo_manager._req_query") as mock_q:
+    from src.domains.mgmt.user.repo_manager import list_user_invites, _req_query
+    with patch("src.domains.mgmt.user.repo_manager._req_query") as mock_q:
         mock_q.return_value = {"content": [
             {"source_name": "owner/repo", "invitation_token": "tok1", "user_role": "开发者"}
         ]}
@@ -130,29 +130,29 @@ def test_list_user_invites():
 
 def test_accept_invite_for_repo():
     """按 owner/repo 匹配邀请并接受"""
-    from src.user.repo_manager import accept_invite_for_repo
-    with patch("src.user.repo_manager.list_user_invites", return_value=[
+    from src.domains.mgmt.user.repo_manager import accept_invite_for_repo
+    with patch("src.domains.mgmt.user.repo_manager.list_user_invites", return_value=[
         {"source_name": "other/repo", "invitation_token": "x"},
         {"source_name": "owner/repo", "invitation_token": "match_tok"},
-    ]), patch("src.user.repo_manager.accept_project_invite", return_value=True) as mock_acc:
+    ]), patch("src.domains.mgmt.user.repo_manager.accept_project_invite", return_value=True) as mock_acc:
         ok = accept_invite_for_repo("bot_tok", "owner", "repo")
         assert ok is True
         mock_acc.assert_called_once_with("bot_tok", "match_tok")
 
 
 def test_accept_invite_for_repo_no_match():
-    from src.user.repo_manager import accept_invite_for_repo
-    with patch("src.user.repo_manager.list_user_invites", return_value=[
+    from src.domains.mgmt.user.repo_manager import accept_invite_for_repo
+    with patch("src.domains.mgmt.user.repo_manager.list_user_invites", return_value=[
         {"source_name": "other/repo", "invitation_token": "x"},
-    ]), patch("src.user.repo_manager.accept_project_invite") as mock_acc:
+    ]), patch("src.domains.mgmt.user.repo_manager.accept_project_invite") as mock_acc:
         ok = accept_invite_for_repo("bot_tok", "owner", "repo")
         assert ok is False
         mock_acc.assert_not_called()
 
 
 def test_get_member_permission():
-    from src.user.repo_manager import get_member_permission
-    with patch("src.user.repo_manager._req") as mock_req:
+    from src.domains.mgmt.user.repo_manager import get_member_permission
+    with patch("src.domains.mgmt.user.repo_manager._req") as mock_req:
         mock_req.return_value = {"access_level": 40, "role_name": "Maintainer", "permission": "admin"}
         data = get_member_permission("tok", "owner", "repo", "grape_bot")
         assert data["access_level"] == 40
@@ -164,7 +164,7 @@ def test_get_member_permission():
 
 def test_host_repo_global_bot_fail_rejects():
     """全局 bot 添加协作者失败 → 拒绝托管（抛 502）"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
 
     class FakeBody:
         full_name = "owner/repo"
@@ -174,11 +174,11 @@ def test_host_repo_global_bot_fail_rejects():
 
     with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
          patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
-         patch("src.user.db.get_meta_value", return_value="http://webhook"), \
-         patch("src.user.repo_manager._check_collaborator_admin", return_value=True), \
-         patch("src.user.repo_manager._req", return_value={"login": "tester"}), \
-         patch("src.user.repo_manager.add_collaborator", return_value=False) as mock_add, \
-         patch("src.user.repo_manager.find_existing_webhook", return_value=None), \
+         patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://webhook"), \
+         patch("src.domains.mgmt.user.repo_manager._check_collaborator_admin", return_value=True), \
+         patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "tester"}), \
+         patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=False) as mock_add, \
+         patch("src.domains.mgmt.user.repo_manager.find_existing_webhook", return_value=None), \
          patch("builtins.open", MagicMock()) as mock_open:
         mock_f = MagicMock()
         mock_f.__enter__.return_value.read.return_value = gbt_json
@@ -194,7 +194,7 @@ def test_host_repo_global_bot_fail_rejects():
 
 def test_host_repo_global_bot_success():
     """全局 bot 添加协作者成功 + 自动接受邀请 + 已是维护者 → 托管成功"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
 
     class FakeBody:
         full_name = "owner/repo"
@@ -204,13 +204,13 @@ def test_host_repo_global_bot_success():
 
     with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
          patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
-         patch("src.user.db.get_meta_value", return_value="http://webhook"), \
-         patch("src.user.repo_manager._check_collaborator_admin", return_value=True), \
-         patch("src.user.repo_manager._req", return_value={"login": "tester"}), \
-         patch("src.user.repo_manager.add_collaborator", return_value=True), \
-         patch("src.user.repo_manager.accept_invite_for_repo", return_value=True) as mock_acc, \
-         patch("src.user.repo_manager.get_member_permission", return_value={"access_level": 40, "role_name": "Maintainer"}) as mock_perm, \
-         patch("src.user.repo_manager.find_existing_webhook", return_value=None), \
+         patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://webhook"), \
+         patch("src.domains.mgmt.user.repo_manager._check_collaborator_admin", return_value=True), \
+         patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "tester"}), \
+         patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=True), \
+         patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo", return_value=True) as mock_acc, \
+         patch("src.domains.mgmt.user.repo_manager.get_member_permission", return_value={"access_level": 40, "role_name": "Maintainer"}) as mock_perm, \
+         patch("src.domains.mgmt.user.repo_manager.find_existing_webhook", return_value=None), \
          patch.object(repos_mod, "setup_webhook", return_value=1), \
          patch.object(repos_mod, "user_db") as mock_udb, \
          patch("src.api.session_store.ensure_default_agent_sessions"), \
@@ -227,7 +227,7 @@ def test_host_repo_global_bot_success():
 
 def test_host_repo_global_bot_not_maintainer_rejects():
     """bot 已加入但非维护者（access_level<40）→ 拒绝托管"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
 
     class FakeBody:
         full_name = "owner/repo"
@@ -237,13 +237,13 @@ def test_host_repo_global_bot_not_maintainer_rejects():
 
     with patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
          patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
-         patch("src.user.db.get_meta_value", return_value="http://webhook"), \
-         patch("src.user.repo_manager._check_collaborator_admin", return_value=True), \
-         patch("src.user.repo_manager._req", return_value={"login": "tester"}), \
-         patch("src.user.repo_manager.add_collaborator", return_value=True), \
-         patch("src.user.repo_manager.accept_invite_for_repo", return_value=True), \
-         patch("src.user.repo_manager.get_member_permission", return_value={"access_level": 30, "role_name": "Developer"}), \
-         patch("src.user.repo_manager.find_existing_webhook", return_value=None), \
+         patch("src.domains.mgmt.user.db.get_meta_value", return_value="http://webhook"), \
+         patch("src.domains.mgmt.user.repo_manager._check_collaborator_admin", return_value=True), \
+         patch("src.domains.mgmt.user.repo_manager._req", return_value={"login": "tester"}), \
+         patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=True), \
+         patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo", return_value=True), \
+         patch("src.domains.mgmt.user.repo_manager.get_member_permission", return_value={"access_level": 30, "role_name": "Developer"}), \
+         patch("src.domains.mgmt.user.repo_manager.find_existing_webhook", return_value=None), \
          patch.object(repos_mod, "setup_webhook", return_value=1), \
          patch.object(repos_mod, "user_db") as mock_udb, \
          patch("src.api.session_store.ensure_default_agent_sessions"), \
@@ -263,7 +263,7 @@ def test_host_repo_global_bot_not_maintainer_rejects():
 
 def test_set_repo_bot_token_updates_username():
     """R15: 配置 repo bot token 后，验证 token → 获取 username → 邀 bot → 重建 webhook → 写 DB"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
 
     class FakeBody:
         full_name = "owner/repo"
@@ -284,7 +284,7 @@ def test_set_repo_bot_token_updates_username():
          patch("src.kernel.session_manager.db_lock"), \
          patch("src.kernel.token_resolver.GitCodeProvider.verify_token", return_value={"login": "repo-bot-login"}), \
          patch("src.kernel.token_resolver.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
-         patch("src.user.db.get_host_user_id", return_value=0), \
+         patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="owner_tok"), \
          patch("src.api.deps.check_repo_access"):
         mock_db.cursor.return_value = _fake_cursor
@@ -300,7 +300,7 @@ def test_set_repo_bot_token_updates_username():
 
 def test_set_repo_bot_token_invalid_token_returns_400():
     """R15.1.2: token 无效时返回 400 + TOKEN_INVALID，不写 DB"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
     from fastapi import HTTPException
 
     class FakeBody:
@@ -315,7 +315,7 @@ def test_set_repo_bot_token_invalid_token_returns_400():
     with patch("src.kernel.session_manager.db") as mock_db, \
          patch("src.kernel.session_manager.db_lock"), \
          patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("401")), \
-         patch("src.user.db.get_host_user_id", return_value=0), \
+         patch("src.domains.mgmt.user.db.get_host_user_id", return_value=0), \
          patch("src.api.deps.check_repo_access"), \
          patch.object(repos_mod, "update_managed_repo_bot_token") as mock_upd:
         mock_db.cursor.return_value = _fake_cursor
@@ -330,7 +330,7 @@ def test_set_repo_bot_token_invalid_token_returns_400():
 
 def test_set_repo_bot_token_clear_empty():
     """R15.5: 传空串清除仓库级 bot token + 清除 bot_token_status"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
 
     class FakeBody:
         full_name = "owner/repo"
@@ -358,7 +358,7 @@ def test_set_repo_bot_token_clear_empty():
 
 def test_remove_managed_repo_removes_collaborators():
     """解除托管时移除全局 bot + repo bot 协作者"""
-    import src.api.routes.repos as repos_mod
+    import src.domains.mgmt.routes.repos as repos_mod
 
     class FakeBody:
         full_name = "owner/repo"
@@ -373,8 +373,8 @@ def test_remove_managed_repo_removes_collaborators():
 
     with patch.object(repos_mod, "get_bot_token", return_value="bot_tok"), \
          patch.object(repos_mod, "get_user_token", return_value="user_tok"), \
-         patch("src.user.repo_manager._get_managed_webhook", return_value=None), \
-         patch("src.user.repo_manager.remove_collaborator") as mock_rm, \
+         patch("src.domains.mgmt.user.repo_manager._get_managed_webhook", return_value=None), \
+         patch("src.domains.mgmt.user.repo_manager.remove_collaborator") as mock_rm, \
          patch.object(repos_mod, "user_db") as mock_udb, \
          patch("src.api.session_store.remove_agent_sessions"), \
          patch("builtins.open", MagicMock()) as mock_open:
@@ -394,7 +394,7 @@ def test_remove_managed_repo_removes_collaborators():
 
 def test_fetch_repos_uses_permission_field_no_nplus1():
     """列表响应含 permission 字段时直接判定 is_admin，不再对每个非 owner 仓库调 collaborator API"""
-    from src.user.repo_manager import fetch_repos_with_role
+    from src.domains.mgmt.user.repo_manager import fetch_repos_with_role
 
     repos_payload = [
         {"full_name": "me/own-repo", "name": "own-repo",
@@ -414,7 +414,7 @@ def test_fetch_repos_uses_permission_field_no_nplus1():
             return repos_payload
         return {}
 
-    with patch("src.user.repo_manager._req", side_effect=fake_req) as mock_req:
+    with patch("src.domains.mgmt.user.repo_manager._req", side_effect=fake_req) as mock_req:
         result = fetch_repos_with_role("tok")
 
     # 只应有 2 次请求：/user + /user/repos（无 collaborator permission N+1）

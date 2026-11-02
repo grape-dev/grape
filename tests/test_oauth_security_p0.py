@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 
 @pytest.fixture(autouse=True)
@@ -109,8 +109,8 @@ class TestRefreshTokenLink:
 
     def test_read_from_identity_empty_token(self):
         """refresh_token 字段为空返回空。"""
-        from src.auth.grape_account_db import create_external_identity, delete_external_identity
-        from src.auth.grape_account_db import create_grape_account, soft_delete_account
+        from src.domains.mgmt.auth.grape_account_db import create_external_identity, delete_external_identity
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, soft_delete_account
         account = create_grape_account(username="test_rt_empty", email="", password="")
         assert account is not None
         try:
@@ -127,8 +127,8 @@ class TestRefreshTokenLink:
 
     def test_read_from_identity_valid_token(self):
         """有加密 refresh_token 返回解密后的明文。"""
-        from src.auth.grape_account_db import create_external_identity, delete_external_identity
-        from src.auth.grape_account_db import create_grape_account, soft_delete_account
+        from src.domains.mgmt.auth.grape_account_db import create_external_identity, delete_external_identity
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, soft_delete_account
         account = create_grape_account(username="test_rt_valid", email="", password="")
         assert account is not None
         try:
@@ -163,7 +163,7 @@ class TestCooldownDatetime:
 
     def test_no_datetime_now_in_cooldown(self):
         """cooldown.py 中无 datetime('now') SQL 内建函数。"""
-        import src.admin.cooldown as cooldown_mod
+        import src.domains.mgmt.admin.cooldown as cooldown_mod
         import inspect
         source = inspect.getsource(cooldown_mod)
         # 排除 docstring 中的文字描述
@@ -220,13 +220,13 @@ class TestRedirectUriInState:
 
     def test_build_auth_url_stores_redirect_uri(self):
         """build_auth_url saves redirect_uri into state_data."""
-        from src.auth.providers import build_auth_url, get_redirect_uri
+        from src.domains.mgmt.auth.providers import build_auth_url, get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "Test", "redirect_uri": "https://example.com/cb/test",
                      "auth_url": "https://example.com/auth", "scope": "",
                      "pkce_enabled": False}
-        with patch("src.auth.providers.get_provider", return_value=mock_cfg), \
-             patch("src.auth.providers._get_client_id", return_value="cid"):
+        with patch("src.domains.mgmt.auth.providers.get_provider", return_value=mock_cfg), \
+             patch("src.domains.mgmt.auth.providers._get_client_id", return_value="cid"):
             state = hashlib.sha256(os.urandom(32)).hexdigest()
             build_auth_url("test", state, "https://example.com/cb/test")
         data = user_db.validate_oauth_state(state)

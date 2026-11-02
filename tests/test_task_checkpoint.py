@@ -14,8 +14,8 @@ sys.path.insert(0, ROOT)
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime.checkpoint import TaskCheckpoint, checkpoint_path, inject_resume
-from src.runtime.resource_stack import TaskResourceStack
+from src.domains.runtime.engine.checkpoint import TaskCheckpoint, checkpoint_path, inject_resume
+from src.domains.runtime.engine.resource_stack import TaskResourceStack
 
 
 @pytest.fixture(autouse=True)

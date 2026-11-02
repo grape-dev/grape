@@ -107,7 +107,7 @@ class TestUpsertKeepsSessionId:
 
 class TestApplySceneKeepsSessionId:
     def _apply(self, owner: str, repo: str):
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest
         return apply_scene(owner, repo, ApplySceneRequest(scene_id="default"), {})
 
     def test_apply_twice_keeps_id_and_im(self):

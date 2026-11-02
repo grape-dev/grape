@@ -18,9 +18,9 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
-from src.runtime.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
-import src.agent.hermes_acp as ha  # noqa: E402
-from src.agent.failure_attribution import (  # noqa: E402
+from src.domains.runtime.engine.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
+import src.domains.runtime.agents.hermes_acp as ha  # noqa: E402
+from src.domains.runtime.agents.failure_attribution import (  # noqa: E402
     failure_summary,
     process_exit_attribution,
     timeout_error_text,

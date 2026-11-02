@@ -81,7 +81,7 @@ def test_apply_default_scene_from_market():
                 "VALUES ('default','通用开发','1.0.0','','',1,1,0,'official',0,'hello-flask','[]','repo-onboarding',1)")
             db.commit()
     from src.api.pipeline_config import get_scenes, apply_default_scene_to_repo
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     add_managed_repo("gitcode:new/repo", "new", "repo")
     ok = apply_default_scene_to_repo("gitcode:new/repo")
     assert ok is True
@@ -91,7 +91,7 @@ def test_apply_default_scene_from_market():
     _def = next((s for s in scenes if s["id"] == "default"), None)
     assert _def, "default scene missing in get_scenes"
     assert _def.get("display_name") == "通用开发", f"display_name should be 通用开发, got {_def.get('display_name')!r}"
-    from src.user.db import get_repo_scene
+    from src.domains.mgmt.user.db import get_repo_scene
     assert get_repo_scene("gitcode:new/repo") == "default"
 
 
@@ -147,9 +147,9 @@ def test_dev_scene_default_empty():
     """T10：新建 managed_repos dev_scene 默认空。"""
     from src.api import db_setup
     db_setup.init_database()
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     add_managed_repo("gitcode:devempty/repo", "devempty", "repo")
-    from src.user.db import get_repo_scene
+    from src.domains.mgmt.user.db import get_repo_scene
     assert get_repo_scene("gitcode:devempty/repo") == ""
 
 
@@ -157,7 +157,7 @@ def test_set_repo_scene_empty_not_default():
     """T11：set_repo_scene 空值写入空串（非 default）。"""
     from src.api import db_setup
     db_setup.init_database()
-    from src.user.db import add_managed_repo, set_repo_scene, get_repo_scene
+    from src.domains.mgmt.user.db import add_managed_repo, set_repo_scene, get_repo_scene
     add_managed_repo("gitcode:setempty/repo", "setempty", "repo")
     set_repo_scene("gitcode:setempty/repo", "")
     assert get_repo_scene("gitcode:setempty/repo") == ""

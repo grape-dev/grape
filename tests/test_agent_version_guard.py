@@ -19,7 +19,7 @@ def test_agent_module_has_version_guard():
 def test_agent_imports_on_current_python():
     """当前环境（>=3.10）应能正常导入 agent 模块（守卫不误伤）。"""
     import importlib
-    m = importlib.import_module("src.runtime.agent")
+    m = importlib.import_module("src.domains.runtime.engine.agent")
     assert hasattr(m, "main")
 
 
@@ -35,14 +35,14 @@ def test_main_requires_token():
     import importlib
     from unittest.mock import patch
     import tempfile
-    m = importlib.import_module("src.runtime.agent")
+    m = importlib.import_module("src.domains.runtime.engine.agent")
     old_env = os.environ.get("RUNTIME_TOKEN")
     os.environ.pop("RUNTIME_TOKEN", None)
     with tempfile.TemporaryDirectory() as tmp_dir:
         _fake_pid = os.path.join(tmp_dir, "worker.pid")
         try:
-            with patch("src.runtime.os_adapter.kill_existing_worker", return_value=False), \
-                 patch("src.runtime.os_adapter.pid_file", return_value=_fake_pid):
+            with patch("src.domains.runtime.engine.os_adapter.kill_existing_worker", return_value=False), \
+                 patch("src.domains.runtime.engine.os_adapter.pid_file", return_value=_fake_pid):
                 with __import__("contextlib").redirect_stderr(__import__("io").StringIO()) as err:
                     m.main()
         except SystemExit as e:

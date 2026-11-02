@@ -19,8 +19,8 @@ import pytest
 @pytest.fixture()
 def setup_db(monkeypatch):
     import sqlite3
-    from src.runtime import service as svc
-    import src.api.routes.runtime as rt
+    from src.domains.runtime.engine import service as svc
+    import src.domains.runtime.routes.runtime as rt
 
     test_db = sqlite3.connect(":memory:", check_same_thread=False)
     test_db.executescript("""
@@ -91,7 +91,7 @@ def _seed(c, tid, status, runtime_id, attempts=0, agent_type="coding",
 
 def test_ut1_force_fail_releases_busy_slots(setup_db):
     """UT-1：attempts 封顶 force-fail → busy_slots 释放（旧代码永久泄漏）。"""
-    from src.api.routes.runtime import runtime_recover_orphans
+    from src.domains.runtime.routes.runtime import runtime_recover_orphans
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
               "VALUES (501, 'codex', 'online', 1, 2, 4)")
@@ -108,7 +108,7 @@ def test_ut1_force_fail_releases_busy_slots(setup_db):
 
 def test_ut2_requeue_releases_and_zeroes_runtime(setup_db):
     """UT-2：回炉 → 槽位释放 + runtime_id 归零 + pool_agent_type 回填。"""
-    from src.api.routes.runtime import runtime_recover_orphans
+    from src.domains.runtime.routes.runtime import runtime_recover_orphans
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
               "VALUES (502, 'codex', 'online', 1, 3, 4)")
@@ -127,7 +127,7 @@ def test_ut2_requeue_releases_and_zeroes_runtime(setup_db):
 
 def test_ut3_active_task_keeps_busy_slots(setup_db):
     """UT-3：活跃任务（近期有消息）跳过 → 状态/槽位都不动。"""
-    from src.api.routes.runtime import runtime_recover_orphans
+    from src.domains.runtime.routes.runtime import runtime_recover_orphans
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
               "VALUES (503, 'codex', 'online', 1, 2, 4)")
@@ -144,7 +144,7 @@ def test_ut3_active_task_keeps_busy_slots(setup_db):
 
 def test_ut4_young_task_skipped(setup_db):
     """UT-4（Issue #370）：新任务（< 宽限期）→ skipped_young，attempts/状态/槽位不动。"""
-    from src.api.routes.runtime import runtime_recover_orphans
+    from src.domains.runtime.routes.runtime import runtime_recover_orphans
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
               "VALUES (504, 'codex', 'online', 1, 1, 4)")
@@ -167,7 +167,7 @@ def test_ut4_young_task_skipped(setup_db):
 
 def test_ut5_started_at_null_falls_back_to_created_at(setup_db):
     """UT-5（Issue #370）：started_at 为 NULL → 兜底 created_at；created_at < grace → skipped_young。"""
-    from src.api.routes.runtime import runtime_recover_orphans
+    from src.domains.runtime.routes.runtime import runtime_recover_orphans
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
               "VALUES (505, 'codex', 'online', 1, 1, 4)")
@@ -192,7 +192,7 @@ def test_ut6_recover_grace_seconds_env_override(setup_db, monkeypatch):
     场景 A：grace=60s，started_at=30s ago（< 60s）→ 仍 skipped_young。
     场景 B：grace=60s，started_at=90s ago（> 60s）→ 超龄，无消息 → 回炉。
     """
-    from src.api.routes.runtime import runtime_recover_orphans
+    from src.domains.runtime.routes.runtime import runtime_recover_orphans
     c = setup_db
     c.execute("INSERT INTO agent_runtimes (id, name, status, healthy, busy_slots, max_concurrent) "
               "VALUES (506, 'codex', 'online', 1, 2, 4)")

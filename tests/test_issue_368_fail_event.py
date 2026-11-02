@@ -99,7 +99,7 @@ class TestFailEventUnit:
 
     def test_writes_three_fields(self):
         """_fail_event 写入 result/exit_code=1/completed_at 三字段（无头失败修复核心）。"""
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         _fail_event(seq, "测试失败原因：无可用引擎")
         row = _event_row(seq)
@@ -114,7 +114,7 @@ class TestFailEventUnit:
 
         errors 字段为 COALESCE(errors, reason)：仅当原值为 NULL 时填充（既有行为）。
         """
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         _mk_task(seq, status="running")
         _fail_event(seq, "派发失败：引擎离线")
@@ -125,7 +125,7 @@ class TestFailEventUnit:
 
     def test_syncs_agent_tasks_errors_when_null(self):
         """_fail_event 在 errors=NULL 时填充原因（COALESCE 填充路径）。"""
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         _mk_task(seq, status="queued", errors=None)  # NULL → 可被 COALESCE 填充
         _fail_event(seq, "派发失败：引擎离线")
@@ -136,7 +136,7 @@ class TestFailEventUnit:
 
     def test_exception_no_propagate(self):
         """_fail_event 内部 update_event_complete 抛错时不外抛（派发主流程不污染）。"""
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         seq = _mk_event(status="running")
         with patch("src.api.event_store.update_event_complete",
                    side_effect=RuntimeError("模拟 DB 异常")):
@@ -146,7 +146,7 @@ class TestFailEventUnit:
 
     def test_zero_seq_noop(self):
         """seq=0 时 _fail_event 立即返回（边界保护）。"""
-        from src.api.event_pipeline import _fail_event
+        from src.domains.runtime.pipeline.event_pipeline import _fail_event
         _fail_event(0, "不应执行")  # 不得抛异常
 
 
@@ -165,13 +165,13 @@ class TestPRSubscriptionExtraFailPath:
 
     def test_pr_subscription_no_engine_writes_reason(self):
         """PR 订阅 extra 派发：pick_engine=None → a2a_event 三字段完整。"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         evt = {
             "repo_key": _REPO, "issue_id": "#0", "actor": "tester",
             "payload": {"object_attributes": {"iid": 99}},
         }
         match = ("sc368-a", "qa-cli", [], "", [])  # (scene_id, qa_skill, qa_engine_ids, sre_*, sre_*)
-        with patch("src.runtime.engine_select.pick_engine", return_value=None):
+        with patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None):
             ep._dispatch_pr_subscription_extra(_REPO, evt, "pull_request_opened", match)
         with db_lock:
             c = db.cursor()
@@ -222,13 +222,13 @@ class TestSubscriptionAgentFailPath:
 
     def test_subscription_agent_no_engine_writes_reason(self):
         """Pipeline 订阅分发：pick_engine=None → 事件三字段完整（无头失败修复）。"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         evt = {
             "repo_key": _REPO, "issue_id": "#0", "payload": {"issue_number": 0},
             "actor": "tester", "repository": "test/issue368", "source": "gitcode",
             "type": "issues_opened",
         }
-        with patch("src.runtime.engine_select.pick_engine", return_value=None):
+        with patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=None):
             ep._dispatch_subscription_agent(_REPO, evt, "issues_opened", "sre", "qa")
         with db_lock:
             c = db.cursor()

@@ -5,8 +5,8 @@ import pytest
 from fastapi import HTTPException
 
 from src.api import auth_token
-from src.api.routes.events import _require_event_bot_token
-from src.api.routes.webhook import _authorize_a2a
+from src.domains.runtime.routes.events import _require_event_bot_token
+from src.domains.runtime.routes.webhook import _authorize_a2a
 from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:o/r"

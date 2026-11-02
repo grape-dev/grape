@@ -17,7 +17,7 @@ from unittest.mock import AsyncMock, patch
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.im.feishu_async import BotContext
+from src.domains.runtime.im.feishu_async import BotContext
 from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat,
@@ -26,7 +26,7 @@ from src.kernel.session_manager import (
 
 @pytest.fixture(autouse=True)
 def _clear_repo_bind_cache():
-    from src.im.handler_async import _repo_bind_cache
+    from src.domains.runtime.im.handler_async import _repo_bind_cache
     _repo_bind_cache.clear()
     yield
     _repo_bind_cache.clear()
@@ -63,7 +63,7 @@ def _seed(bound_repo_key, conv_repo_key, title="repo 会话"):
 
 
 def _run_where():
-    from src.im.handler_async import process_command_async
+    from src.domains.runtime.im.handler_async import process_command_async
     api = AsyncMock()
     asyncio.run(process_command_async(
         _ctx(), api, "/where", "nav_chat", "sender_1", db,

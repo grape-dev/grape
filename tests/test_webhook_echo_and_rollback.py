@@ -134,7 +134,7 @@ class TestPlanBMarkerSuppression:
 
     def test_marker_in_comment_is_skipped(self):
         """Comment with grape-auto-comment marker should be skipped (no agent triggered)."""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         _seed_managed_repo()
         raw, headers = self._make_note_payload("[CODING Agent] done\n<!-- grape-auto-comment -->")
@@ -146,7 +146,7 @@ class TestPlanBMarkerSuppression:
 
     def test_user_comment_without_marker_is_not_skipped(self):
         """User comment without marker should NOT be skipped."""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         _seed_managed_repo()
         raw, headers = self._make_note_payload("Please start development")
@@ -158,7 +158,7 @@ class TestPlanBMarkerSuppression:
 
     def test_pr_comment_with_marker_is_skipped(self):
         """note_hook_pr with marker should also be skipped."""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         _seed_managed_repo()
         raw = json.dumps({
@@ -176,7 +176,7 @@ class TestPlanBMarkerSuppression:
 
     def test_empty_note_not_skipped(self):
         """Empty note should not crash and should not be skipped by marker check."""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         _seed_managed_repo()
         raw, headers = self._make_note_payload("")
@@ -184,7 +184,7 @@ class TestPlanBMarkerSuppression:
 
     def test_non_comment_event_not_affected_by_marker(self):
         """issue_opened event should not be affected by marker check."""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         _seed_managed_repo()
         raw = json.dumps({
@@ -223,7 +223,7 @@ class TestOnboardingIssueSelfCommentExemption:
 
     def test_onboarding_desc_bot_issue_opened_allowed_through(self):
         """bot 创建、description 以「首次托管引导」开头的 issue_opened → 放行（创建 event）。"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         _seed_managed_repo()
         raw, headers = self._make_issue_payload("首次托管引导：体验本项目的快速部署流程。")
@@ -235,7 +235,7 @@ class TestOnboardingIssueSelfCommentExemption:
 
     def test_plain_bot_issue_opened_still_skipped(self):
         """bot 创建但 description 非 onboarding 前缀的 issue_opened → 仍被 self-comment 跳过。"""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         _clean()
         # 清掉可能由其它用例留下的 issue_opened，保证 count==0 语义
         with db_lock:
@@ -260,7 +260,7 @@ class TestPlanBMarkerAdded:
 
     def test_post_result_to_issue_adds_marker(self):
         """_post_result_to_issue should append <!-- grape-auto-comment --> to comment body."""
-        import src.api.event_pipeline as ep
+        import src.domains.runtime.pipeline.event_pipeline as ep
         posted = {}
 
         class _MockResp:

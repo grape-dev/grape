@@ -93,7 +93,7 @@ def append_event(repo_key: str, event_type: str, title: str = "",
         c = db.cursor()
         try:
             # 解析 org_id（从 managed_repos.org_id 获取）
-            from src.user.org_db import get_org_id_by_repo_key
+            from src.domains.mgmt.user.org_db import get_org_id_by_repo_key
             _org_id = get_org_id_by_repo_key(repo_key)
             if idempotency_key:
                 c.execute(

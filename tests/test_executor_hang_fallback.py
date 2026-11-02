@@ -8,9 +8,9 @@
 """
 import io, subprocess
 
-from src.runtime.executor import stream_agent
+from src.domains.runtime.engine.executor import stream_agent
 
-import src.agent.executor as _ex_mod  # 用于 patch 模块级 _terminate_proc（stream_agent 内部引用它）
+import src.domains.runtime.agents.executor as _ex_mod  # 用于 patch 模块级 _terminate_proc（stream_agent 内部引用它）
 
 
 class _BlockingStdout:

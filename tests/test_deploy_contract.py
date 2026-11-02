@@ -17,7 +17,7 @@ import pytest
 class TestC2TrustedHosts:
     def test_c2_no_forwarded_host_without_whitelist(self):
         """C2: 未设 TRUSTED_HOSTS → 不读 X-Forwarded-Host（防伪造，R11.1）。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             # Host 是真实源（直连场景可读），X-Forwarded-Host 伪造值必须被忽略
@@ -33,7 +33,7 @@ class TestC2TrustedHosts:
         合法反代部署将丢失 https 探测（存量用户破坏路径），风险大于收益。
         本用例固化现状防静默漂移；如将来门禁 proto，先删本用例并更新契约 C2。
         """
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         with patch.dict(os.environ, {}, clear=False):
             os.environ.pop("TRUSTED_HOSTS", None)
             r = detect_webhook_from_host("1.2.3.4:3000", "evil.com", "https")
@@ -42,7 +42,7 @@ class TestC2TrustedHosts:
 
     def test_c2b_whitelist_enables_forwarded_host(self):
         """C2b: 已设白名单 → X-Forwarded-Host 参与且须命中白名单。"""
-        from src.user.db import detect_webhook_from_host
+        from src.domains.mgmt.user.db import detect_webhook_from_host
         with patch.dict(os.environ, {"TRUSTED_HOSTS": "example.com"}):
             r = detect_webhook_from_host("internal:3000", "x.example.com", "https")
             assert r == "https://x.example.com/webhook/gitcode"
@@ -69,14 +69,14 @@ class TestC3AdminDefaultPassword:
 class TestC4EmailDegradation:
     def test_c4_send_code_degrades_gracefully(self):
         """C4: 无邮箱配置 → send-code 返回 EMAIL_NOT_CONFIGURED（注册不受影响）。"""
-        from src.api.routes.grape_auth import register_send_code
-        from src.auth import email_service
+        from src.domains.mgmt.routes.grape_auth import register_send_code
+        from src.domains.mgmt.auth import email_service
         body = MagicMock()
         body.email = "u@example.com"
         body.username = "alice"
         request = MagicMock()
         with patch.object(email_service, "is_email_configured", return_value=False), \
-             patch("src.api.routes.grape_auth._get_client_ip", return_value="1.2.3.4"):
+             patch("src.domains.mgmt.routes.grape_auth._get_client_ip", return_value="1.2.3.4"):
             r = register_send_code(body, request)
         assert r.get("error_code") == "EMAIL_NOT_CONFIGURED"
         assert "username and password" in r.get("message", ""), \
@@ -84,7 +84,7 @@ class TestC4EmailDegradation:
 
     def test_c4b_verify_creates_account_without_email(self):
         """C4b: 无邮箱配置时 verify 路径直建账号（email 允许为空）——源码结构守卫。"""
-        from src.api.routes import grape_auth
+        from src.domains.mgmt.routes import grape_auth
         src_text = _read_src(grape_auth.__file__)
         assert "email_configured = is_email_configured()" in src_text
         # 直建账号分支存在（R7 注释锚点）
@@ -103,7 +103,7 @@ class TestC5InstallScriptServer:
     def test_c5b_ui_command_injects_real_server(self):
         """C5b: UI 生成的安装命令显式带 --server（闭环项）——结构守卫。"""
         import pathlib, inspect
-        rt = __import__("src.api.routes.runtime", fromlist=["runtime_engine_onboarding"])
+        rt = __import__("src.domains.runtime.routes.runtime", fromlist=["runtime_engine_onboarding"])
         src = inspect.getsource(rt.runtime_engine_onboarding)
         assert "--server {base}" in src or "--server' +" in src or "--server " in src, \
             "C5b: 生成的安装命令缺 --server 显式代入"

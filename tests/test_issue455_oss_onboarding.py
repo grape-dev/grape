@@ -17,7 +17,7 @@ from unittest.mock import patch
 
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 client = TestClient(app)
 
@@ -72,30 +72,30 @@ class TestPythonVersionCheck:
 
 class TestServerBaseUrl:
     def test_configured_public(self):
-        from src.user.db import is_server_base_url_configured, get_server_base_url_warning
+        from src.domains.mgmt.user.db import is_server_base_url_configured, get_server_base_url_warning
         with patch("src.kernel.config.read_server_config",
                    return_value={"server_base_url": "https://grape.example.com"}):
             assert is_server_base_url_configured() is True
             assert get_server_base_url_warning() == ""
 
     def test_loopback_not_configured(self):
-        from src.user.db import is_server_base_url_configured, get_server_base_url_warning
+        from src.domains.mgmt.user.db import is_server_base_url_configured, get_server_base_url_warning
         with patch("src.kernel.config.read_server_config",
                    return_value={"server_base_url": "http://localhost:3000"}):
             assert is_server_base_url_configured() is False
             assert "回环" in get_server_base_url_warning() or "localhost" in get_server_base_url_warning()
 
     def test_empty_not_configured(self):
-        from src.user.db import is_server_base_url_configured, get_server_base_url_warning
+        from src.domains.mgmt.user.db import is_server_base_url_configured, get_server_base_url_warning
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             assert is_server_base_url_configured() is False
             assert get_server_base_url_warning() != ""
 
     def test_meta_fallback_configured(self):
-        from src.user.db import is_server_base_url_configured
+        from src.domains.mgmt.user.db import is_server_base_url_configured
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value="https://worker.example.com"):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="https://worker.example.com"):
             assert is_server_base_url_configured() is True
 
     def test_health_reports_configuration(self):
@@ -109,7 +109,7 @@ class TestServerBaseUrl:
 
     def test_health_warns_when_unconfigured(self):
         with patch("src.kernel.config.read_server_config", return_value={}), \
-             patch("src.user.db.get_meta_value", return_value=""):
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""):
             r = client.get("/api/health")
         data = r.json()
         assert data["server_base_url_configured"] is False
@@ -181,7 +181,7 @@ def _gid():
 
 
 def _cleanup_gh(username: str, gid: str):
-    from src.auth.grape_account_db import get_grape_account_by_username, soft_delete_account, delete_external_identity
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username, soft_delete_account, delete_external_identity
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM unified_user_mapping WHERE github_login=?", (username,))
@@ -199,13 +199,13 @@ class TestGithubOAuthReadback:
         gid = _gid()
         state = _save_state("github")
         # create_grape_account_oauth 返回 dict，但紧随其后的读回返回 None → 模拟落库无痕
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "新用户"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True), \
-             patch("src.api.routes.grape_auth.create_grape_account_oauth",
+             patch("src.domains.mgmt.routes.grape_auth.create_grape_account_oauth",
                    return_value={"id": 900002, "username": uname, "email": ""}), \
-             patch("src.api.routes.grape_auth.get_grape_account_by_id", return_value=None):
+             patch("src.domains.mgmt.routes.grape_auth.get_grape_account_by_id", return_value=None):
             r = client.get("/api/auth/callback/github", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         assert "oauth_error" in r.headers.get("location", "")
@@ -215,18 +215,18 @@ class TestGithubOAuthReadback:
         uname = "gh_rb_bind_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state("github")
-        real_create = pytest.importorskip("src.api.routes.grape_auth").create_grape_account_oauth
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        real_create = pytest.importorskip("src.domains.mgmt.routes.grape_auth").create_grape_account_oauth
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "新用户"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True), \
-             patch("src.api.routes.grape_auth.create_grape_account_oauth") as m_create, \
-             patch("src.auth.grape_account_db.get_external_identity", return_value=None), \
-             patch("src.api.routes.grape_auth.soft_delete_account") as m_rollback:
+             patch("src.domains.mgmt.routes.grape_auth.create_grape_account_oauth") as m_create, \
+             patch("src.domains.mgmt.auth.grape_account_db.get_external_identity", return_value=None), \
+             patch("src.domains.mgmt.routes.grape_auth.soft_delete_account") as m_rollback:
             # 模拟账号真实创建成功（返回带 id），但绑定读回始终 None
             m_create.return_value = None
             # 用真实 create_grape_account_oauth 写入（确保后续软删有对象），再让绑定读回失败
-            from src.auth.grape_account_db import create_grape_account_oauth as _real_create
+            from src.domains.mgmt.auth.grape_account_db import create_grape_account_oauth as _real_create
             _acc = _real_create(username=uname, email="", provider="github")
             assert _acc, "预置账号创建失败"
             m_create.return_value = _acc
@@ -240,7 +240,7 @@ class TestGithubOAuthReadback:
         uname = "gh_rb_ok_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state("github")
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "新用户"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True):
@@ -254,7 +254,7 @@ class TestGithubOAuthReadback:
         uname = "gc_rb_" + uuid.uuid4().hex[:6]
         gid = _gid()
         state = _save_state("gitcode")
-        with patch("src.user.db.get_meta_value", return_value="x"), \
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
              patch("src.kernel.config.is_user_allowed", return_value=True):
@@ -271,7 +271,7 @@ class TestHost502Detail:
     """_host_502_detail：上游上下文与可重试性标记"""
 
     def test_500_retryable(self):
-        from src.api.routes.repos import _host_502_detail
+        from src.domains.mgmt.routes.repos import _host_502_detail
         d = _host_502_detail("github_host", RuntimeError("GitHub API POST https://api.github.com/x failed (500): boom"))
         assert d["code"] == 502
         assert d["retryable"] is True
@@ -281,19 +281,19 @@ class TestHost502Detail:
         assert "retry_hint" in d
 
     def test_403_not_retryable(self):
-        from src.api.routes.repos import _host_502_detail
+        from src.domains.mgmt.routes.repos import _host_502_detail
         d = _host_502_detail("gitcode_user", RuntimeError("GitCode API GET https://gitcode.com/x failed (403): no"))
         assert d["retryable"] is False
         assert d["upstream"]["status"] == 403
 
     def test_network_retryable(self):
-        from src.api.routes.repos import _host_502_detail
+        from src.domains.mgmt.routes.repos import _host_502_detail
         d = _host_502_detail("host_setup", RuntimeError("Cannot reach GitHub API: timed out"))
         assert d["retryable"] is True
         assert d["upstream"]["status"] is None
 
     def test_upstream_status_extractor(self):
-        from src.api.routes.repos import _upstream_status_code
+        from src.domains.mgmt.routes.repos import _upstream_status_code
         assert _upstream_status_code(RuntimeError("GitHub API GET u failed (502): x")) == 502
         assert _upstream_status_code(RuntimeError("random message")) == 0
 
@@ -313,21 +313,21 @@ class TestGithubHostPermissionPrecheck:
     """GitHub 托管前归属/权限前置校验：403/404 明确返回，网络错误不阻断"""
 
     def _base_mocks(self, monkeypatch, invoke_precheck=True):
-        import src.api.routes.repos as repos_mod
-        monkeypatch.setattr("src.user.db.get_webhook_url", lambda: "https://grape.topxtopx.com/webhook/gitcode")
+        import src.domains.mgmt.routes.repos as repos_mod
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_webhook_url", lambda: "https://grape.topxtopx.com/webhook/gitcode")
         monkeypatch.setattr("src.api.session_store.ensure_default_agent_sessions", lambda *a, **k: None)
         if invoke_precheck:
             # 模拟 with_oauth_token 真正调用 fn(token)（预检查使用同一刷新机制）
-            monkeypatch.setattr("src.api.routes.repos.with_oauth_token",
+            monkeypatch.setattr("src.domains.mgmt.routes.repos.with_oauth_token",
                                 lambda user, provider, fn, *a, **k: fn("real_tok"))
         else:
-            monkeypatch.setattr("src.api.routes.repos.with_oauth_token", lambda *a, **k: None)
-        monkeypatch.setattr("src.user.db.get_global_github_bot_token", lambda: "")
-        monkeypatch.setattr("src.user.db.get_global_github_bot_username", lambda: "")
-        monkeypatch.setattr("src.api.routes.repos.get_user_github_token_with_refresh",
+            monkeypatch.setattr("src.domains.mgmt.routes.repos.with_oauth_token", lambda *a, **k: None)
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_global_github_bot_token", lambda: "")
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_global_github_bot_username", lambda: "")
+        monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh",
                            lambda u, user_id: "gh_tok")
-        monkeypatch.setattr("src.user.repo_manager.setup_github_webhook", lambda *a, **k: 101)
-        monkeypatch.setattr("src.user.repo_manager.find_existing_github_webhook", lambda *a, **k: None)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager.setup_github_webhook", lambda *a, **k: 101)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager.find_existing_github_webhook", lambda *a, **k: None)
         # host_repo 内局部 import repo_manager._github_req —— patch 模块属性生效
         return repos_mod
 
@@ -347,7 +347,7 @@ class TestGithubHostPermissionPrecheck:
 
         def _gh_req(method, url, token=""):
             raise RuntimeError("GitHub API GET " + url + " failed (403): Forbidden")
-        monkeypatch.setattr("src.user.repo_manager._github_req", _gh_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 403, r.text
         assert r.json()["detail"]["error_code"] == "PERMISSION_DENIED"
@@ -357,7 +357,7 @@ class TestGithubHostPermissionPrecheck:
 
         def _gh_req(method, url, token=""):
             raise RuntimeError("GitHub API GET " + url + " failed (404): Not Found")
-        monkeypatch.setattr("src.user.repo_manager._github_req", _gh_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 404, r.text
         assert r.json()["detail"]["error_code"] == "REPO_NOT_FOUND"
@@ -369,7 +369,7 @@ class TestGithubHostPermissionPrecheck:
             if url.endswith("/user"):
                 return {"login": "Jason7602"}
             return {"owner": {"login": "SomeoneElse"}, "permissions": {"admin": False, "push": True}}
-        monkeypatch.setattr("src.user.repo_manager._github_req", _gh_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 403, r.text
         assert r.json()["detail"]["error_code"] == "PERMISSION_DENIED"
@@ -381,7 +381,7 @@ class TestGithubHostPermissionPrecheck:
             if url.endswith("/user"):
                 return {"login": "Jason7602"}
             return {"owner": {"login": "Jason7602"}, "permissions": {"admin": True, "push": True}}
-        monkeypatch.setattr("src.user.repo_manager._github_req", _gh_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 200, r.text
 
@@ -390,7 +390,7 @@ class TestGithubHostPermissionPrecheck:
 
         def _gh_req(method, url, token=""):
             raise RuntimeError("Cannot reach GitHub API: timed out")
-        monkeypatch.setattr("src.user.repo_manager._github_req", _gh_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _gh_req)
         r = self._host()
         assert r.status_code == 200, r.text  # 网络类：无法确认权限，交由下游既有流程
 
@@ -422,28 +422,28 @@ def _proc(returncode, stderr=""):
 
 class TestRepogitRetry:
     def test_network_error_detected(self):
-        from src.runtime.repogit import _is_git_network_error
+        from src.domains.runtime.engine.repogit import _is_git_network_error
         assert _is_git_network_error(_proc(128, "fatal: unable to access 'https://x': Failed to connect")) is True
         assert _is_git_network_error(_proc(128, "fatal: unable to access: HTTP/2 stream 0 was not cleanly closed")) is True
         assert _is_git_network_error(_proc(128, "fatal: early EOF")) is True
         assert _is_git_network_error(_proc(128, "fatal: Could not read from remote repository")) is True
 
     def test_auth_error_not_retried(self):
-        from src.runtime.repogit import _is_git_network_error
+        from src.domains.runtime.engine.repogit import _is_git_network_error
         assert _is_git_network_error(_proc(128, "fatal: unable to access: The requested URL returned error: 403")) is False
         assert _is_git_network_error(_proc(128, "fatal: Authentication failed for 'https://x/'")) is False
 
     def test_success_immediate(self):
-        from src.runtime.repogit import _run_git_retry
-        with patch("src.runtime.repogit._run_git") as m:
+        from src.domains.runtime.engine.repogit import _run_git_retry
+        with patch("src.domains.runtime.engine.repogit._run_git") as m:
             m.return_value = _proc(0)
             r = _run_git_retry(["fetch"], token="t", retries=3, base_delay=0)
         assert r.returncode == 0
         assert m.call_count == 1
 
     def test_network_error_retries_then_success(self):
-        from src.runtime.repogit import _run_git_retry
-        with patch("src.runtime.repogit._run_git") as m:
+        from src.domains.runtime.engine.repogit import _run_git_retry
+        with patch("src.domains.runtime.engine.repogit._run_git") as m:
             m.side_effect = [
                 _proc(128, "fatal: unable to access 'https://x': Failed to connect"),
                 _proc(128, "fatal: early EOF"),
@@ -454,16 +454,16 @@ class TestRepogitRetry:
         assert m.call_count == 3
 
     def test_network_error_exhausts_returns_last(self):
-        from src.runtime.repogit import _run_git_retry
-        with patch("src.runtime.repogit._run_git") as m:
+        from src.domains.runtime.engine.repogit import _run_git_retry
+        with patch("src.domains.runtime.engine.repogit._run_git") as m:
             m.return_value = _proc(128, "fatal: unable to access: Connection timed out")
             r = _run_git_retry(["fetch"], token="t", retries=2, base_delay=0)
         assert r.returncode == 128
         assert m.call_count == 2
 
     def test_4xx_fast_fail_single_attempt(self):
-        from src.runtime.repogit import _run_git_retry
-        with patch("src.runtime.repogit._run_git") as m:
+        from src.domains.runtime.engine.repogit import _run_git_retry
+        with patch("src.domains.runtime.engine.repogit._run_git") as m:
             m.return_value = _proc(128, "fatal: unable to access: The requested URL returned error: 403")
             r = _run_git_retry(["fetch"], token="t", retries=3, base_delay=0)
         assert r.returncode == 128
@@ -472,7 +472,7 @@ class TestRepogitRetry:
     def test_ensure_repo_base_uses_retry(self):
         """拉取主路径（fetch）已切换到重试版本"""
         import inspect
-        from src.runtime import repogit
+        from src.domains.runtime.engine import repogit
         src = inspect.getsource(repogit.ensure_repo_base)
         assert "_run_git_retry" in src
 

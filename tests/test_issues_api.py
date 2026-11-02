@@ -11,13 +11,13 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
-from src.auth import grape_account_db
+from src.domains.mgmt.user import db as user_db
+from src.domains.mgmt.auth import grape_account_db
 from src.kernel.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 client = TestClient(app)
@@ -370,8 +370,8 @@ class TestCreateIssue:
         from unittest.mock import patch
         def _raise_401(*a, **k):
             raise RuntimeError("GitHub API GET ... failed (401): unauthorized")
-        with patch("src.user.db.get_github_token", return_value="gh_bot_tok"), \
-             patch("src.user.repo_manager._github_req", side_effect=_raise_401):
+        with patch("src.domains.mgmt.user.db.get_github_token", return_value="gh_bot_tok"), \
+             patch("src.domains.mgmt.user.repo_manager._github_req", side_effect=_raise_401):
             resp = client.post("/api/issues/gh_owner/gh_repo",
                                json={"title": "t_gh", "description": "d",
                                      "repo_key": "github:gh_owner/gh_repo"},

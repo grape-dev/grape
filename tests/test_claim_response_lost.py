@@ -20,7 +20,7 @@ import os
 import pytest
 
 from src.kernel.session_manager import db, db_lock
-from src.runtime import service
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)
@@ -85,7 +85,7 @@ class TestClaimResponseLostRace:
     def test_run_loop_silently_skips_on_claim_error(self):
         """验证 _run_loop 对 claim 异常静默 continue（不重试、不标失败、不打 error 级日志）。"""
         import asyncio
-        from src.runtime import agent as runtime_agent
+        from src.domains.runtime.engine import agent as runtime_agent
 
         # 预置任务并让服务器先 claim（置 dispatched）
         tid = _enqueue(session_id="sess-1", runtime_id=1, seq=1)
@@ -117,7 +117,7 @@ class TestClaimResponseLostRace:
         service.claim(1)
         assert service.get_task(tid)["status"] == "dispatched"
         # 模拟 recover-orphans：置回 queued
-        from src.api.routes.runtime import runtime_recover_orphans
+        from src.domains.runtime.routes.runtime import runtime_recover_orphans
         # 直接调 service 层恢复（端点需 rta_ 鉴权，这里用底层 UPDATE 模拟）
         with db_lock:
             db.cursor().execute(

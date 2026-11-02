@@ -10,7 +10,7 @@
 """
 import pytest
 from src.kernel.session_manager import db, db_lock
-from src.api.routes.settings import _make_visible_credential_fn
+from src.domains.mgmt.routes.settings import _make_visible_credential_fn
 
 
 @pytest.fixture(autouse=True)
@@ -125,8 +125,8 @@ class TestGetAgentRuntimesRepoFilter:
     def test_repo_param_filters_repo_scoped_engines(self, monkeypatch):
         """repo 参数非空时，repo scope 引擎仅返回当前仓库的引擎。"""
         import time as _time
-        from src.api.routes.settings import _build_cred_map
-        from src.user import db as user_db
+        from src.domains.mgmt.routes.settings import _build_cred_map
+        from src.domains.mgmt.user import db as user_db
 
         # 创建两个仓库的凭据和引擎
         cid_a = _mk_cred("cred-a", scope="repo", owner_id="gitcode:alice/repo-a", owner_name="alice")
@@ -160,8 +160,8 @@ class TestGetAgentRuntimesRepoFilter:
 
     def test_no_repo_param_shows_all_visible_repos(self):
         """无 repo 参数时，repo scope 引擎对用户所有仓库可见（旧行为不变）。"""
-        from src.api.routes.settings import _build_cred_map
-        from src.user import db as user_db
+        from src.domains.mgmt.routes.settings import _build_cred_map
+        from src.domains.mgmt.user import db as user_db
 
         cid_a = _mk_cred("cred-a", scope="repo", owner_id="gitcode:alice/repo-a", owner_name="alice")
         cid_b = _mk_cred("cred-b", scope="repo", owner_id="gitcode:alice/repo-b", owner_name="alice")

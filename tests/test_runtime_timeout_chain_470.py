@@ -20,9 +20,9 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
-from src.runtime.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
-import src.agent.hermes_acp as ha  # noqa: E402
-import src.agent.hwcloud_acp as hca  # noqa: E402
+from src.domains.runtime.engine.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
+import src.domains.runtime.agents.hermes_acp as ha  # noqa: E402
+import src.domains.runtime.agents.hwcloud_acp as hca  # noqa: E402
 
 
 class TestHermesGlobalTimeoutEnv:
@@ -73,17 +73,17 @@ class TestWatchdogEnvPriority:
     """
 
     def test_task_env_overrides_os_environ(self, monkeypatch):
-        from src.runtime.agent import _watchdog_timeout_for
+        from src.domains.runtime.engine.agent import _watchdog_timeout_for
         monkeypatch.setenv("RUNTIME_TASK_TIMEOUT", "7200")
         assert _watchdog_timeout_for({"RUNTIME_TASK_TIMEOUT": "1800"}) == 1800.0
 
     def test_default_without_any_source(self, monkeypatch):
-        from src.runtime.agent import _watchdog_timeout_for
+        from src.domains.runtime.engine.agent import _watchdog_timeout_for
         monkeypatch.delenv("RUNTIME_TASK_TIMEOUT", raising=False)
         assert _watchdog_timeout_for({}) == 3600.0
 
     def test_os_environ_when_task_env_missing(self, monkeypatch):
-        from src.runtime.agent import _watchdog_timeout_for
+        from src.domains.runtime.engine.agent import _watchdog_timeout_for
         monkeypatch.setenv("RUNTIME_TASK_TIMEOUT", "900")
         assert _watchdog_timeout_for({}) == 900.0
 
@@ -96,12 +96,12 @@ class TestServerInjectsTimeoutIntoEnvExtra:
     """
 
     def test_returns_timeout_kv(self, monkeypatch):
-        from src.runtime.service import _runtime_timeout_env_kv
+        from src.domains.runtime.engine.service import _runtime_timeout_env_kv
         monkeypatch.setenv("RUNTIME_TASK_TIMEOUT", "5400")
         assert _runtime_timeout_env_kv() == {"RUNTIME_TASK_TIMEOUT": "5400"}
 
     def test_uses_config_default_when_unset(self, monkeypatch):
-        from src.runtime.service import _runtime_timeout_env_kv
+        from src.domains.runtime.engine.service import _runtime_timeout_env_kv
         monkeypatch.delenv("RUNTIME_TASK_TIMEOUT", raising=False)
         # 无 meta/文件时 → 默认 3600（与现状一致）
         assert _runtime_timeout_env_kv() == {"RUNTIME_TASK_TIMEOUT": "3600"}

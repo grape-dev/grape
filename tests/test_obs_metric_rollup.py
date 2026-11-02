@@ -16,7 +16,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import metric_rollup as mr   # noqa: E402
+from src.domains.insight.observability import metric_rollup as mr   # noqa: E402
 
 UID = 7811
 REPO = "gitcode:org/roll-mine"
@@ -240,7 +240,7 @@ def test_series_aggregation_over_dims():
 
 
 def test_overview_trends_from_rollup_and_fallback():
-    from src.observability import overview
+    from src.domains.insight.observability import overview
     base = _now().replace(second=0, microsecond=0) - timedelta(minutes=10)
     mr.write_bucket(mr.RES_MINUTE, base, {mr._repo_dim(REPO): {
         "task_done": (2.0, 2), "task_failed": (1.0, 1), "token_input": (500.0, 2)}})

@@ -12,7 +12,7 @@ import uuid
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from src.im import feishu_async as fa
+from src.domains.runtime.im import feishu_async as fa
 from src.kernel.session_manager import db, db_lock
 
 

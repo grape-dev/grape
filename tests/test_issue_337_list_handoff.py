@@ -54,7 +54,7 @@ def _ensure_db():
 _ensure_db()
 
 from src.kernel.session_manager import db, db_lock  # noqa: E402
-from src.api.routes.issues import targets_issue, handoff_issue, IssueHandoffBody  # noqa: E402
+from src.domains.runtime.routes.issues import targets_issue, handoff_issue, IssueHandoffBody  # noqa: E402
 from src.api.issues_center import get_handoff_targets  # noqa: E402
 
 REPO = "gitcode:org/test-337"
@@ -70,7 +70,7 @@ def _clean():
         c.execute("DELETE FROM devops_pipeline_scene WHERE repo_key=?", (REPO,))
         c.execute("DELETE FROM event_active_guard WHERE repo_key=?", (REPO,))
         db.commit()
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     set_meta_value("issue-handoff:200", "")
     set_meta_value("issue-handoff:201", "")
     yield
@@ -285,7 +285,7 @@ def test_handoff_rejects_unknown_scene():
 
 def test_handoff_30s_idempotent_guard():
     from unittest.mock import patch
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     _set_issue(200, "source-scene")
     _seed_scenes()
     # 预置 5 秒前的幂等键 → 409

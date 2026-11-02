@@ -2,7 +2,7 @@
 import os, subprocess
 import pytest
 
-from src.runtime import repogit
+from src.domains.runtime.engine import repogit
 
 # 原始 clone_url_for（autouse patch 会替换 repogit.clone_url_for，URL 测试用原函数）
 _ORIG_CLONE_URL = repogit.clone_url_for

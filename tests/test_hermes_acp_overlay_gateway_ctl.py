@@ -23,13 +23,13 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 # src/agent/__init__.py 会连带导入 runtime 层（与 test 收集期存在循环导入），
 # 这里用轻量包占位 + 按文件路径加载，只取 hermes_acp 模块本身。
-_pkg = types.ModuleType("src.agent")
+_pkg = types.ModuleType("src.domains.runtime.agents")
 _pkg.__path__ = [os.path.join(ROOT, "src", "agent")]
-sys.modules.setdefault("src.agent", _pkg)
+sys.modules.setdefault("src.domains.runtime.agents", _pkg)
 _spec = importlib.util.spec_from_file_location(
-    "src.agent.hermes_acp", os.path.join(ROOT, "src", "agent", "hermes_acp.py"))
+    "src.domains.runtime.agents.hermes_acp", os.path.join(ROOT, "src", "agent", "hermes_acp.py"))
 _mod = importlib.util.module_from_spec(_spec)
-sys.modules["src.agent.hermes_acp"] = _mod
+sys.modules["src.domains.runtime.agents.hermes_acp"] = _mod
 _spec.loader.exec_module(_mod)
 _build_overlay_home = _mod._build_overlay_home
 

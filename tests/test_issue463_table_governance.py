@@ -89,13 +89,13 @@ def teardown_function():
 # ---------- P0 ----------
 
 def test_p0_retention_is_7_days():
-    from src.runtime.table_maintenance import _AGENT_TASKS_RETENTION_DAYS
+    from src.domains.runtime.engine.table_maintenance import _AGENT_TASKS_RETENTION_DAYS
     assert _AGENT_TASKS_RETENTION_DAYS == 7
 
 
 def test_p0_cleanup_nullifies_all_10_fields_for_old_completed():
-    from src.runtime.table_maintenance import cleanup_old_agent_tasks_fields
-    _align_db("src.runtime.table_maintenance")
+    from src.domains.runtime.engine.table_maintenance import cleanup_old_agent_tasks_fields
+    _align_db("src.domains.runtime.engine.table_maintenance")
     _insert_task("t463_old", "completed", _OLD)
     from src.kernel.session_manager import db, db_lock
     updated = cleanup_old_agent_tasks_fields()
@@ -112,8 +112,8 @@ def test_p0_cleanup_nullifies_all_10_fields_for_old_completed():
 
 
 def test_p0_cleanup_keeps_recent_completed_and_running():
-    from src.runtime.table_maintenance import cleanup_old_agent_tasks_fields
-    _align_db("src.runtime.table_maintenance")
+    from src.domains.runtime.engine.table_maintenance import cleanup_old_agent_tasks_fields
+    _align_db("src.domains.runtime.engine.table_maintenance")
     recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     _insert_task("t463_recent", "completed", recent)
     _insert_task("t463_running_old", "running", _OLD)
@@ -130,9 +130,9 @@ def test_p0_cleanup_keeps_recent_completed_and_running():
 # ---------- P1 ----------
 
 def test_p1_delete_old_terminal_tasks_and_messages():
-    from src.runtime.table_maintenance import delete_old_agent_tasks
+    from src.domains.runtime.engine.table_maintenance import delete_old_agent_tasks
     from src.kernel.session_manager import db, db_lock
-    _align_db("src.runtime.table_maintenance")
+    _align_db("src.domains.runtime.engine.table_maintenance")
     for tid, st in (("t463_term_c", "completed"), ("t463_term_f", "failed"),
                     ("t463_term_x", "cancelled")):
         _insert_task(tid, st, _OLD)
@@ -168,15 +168,15 @@ class _FakeStorage:
 
 
 def test_p2_enqueue_url_wins_over_inline_content():
-    from src.runtime.service import enqueue_task
-    _align_db("src.runtime.service")
+    from src.domains.runtime.engine.service import enqueue_task
+    _align_db("src.domains.runtime.engine.service")
     collected = {
         "project_info": {"project-graph.md": {"content": "BIG"}, "member/extra.md": {"content": "M"}},
         "knowledge": {"agent/tips.md": {"content": "K"}},
         "meta": {"last_commit_sha": "abc"},
     }
-    with patch("src.storage.get_storage", return_value=_FakeStorage()), \
-         patch("src.runtime.service.collect_knowledge_files", return_value=collected):
+    with patch("src.domains.runtime.storage.get_storage", return_value=_FakeStorage()), \
+         patch("src.domains.runtime.engine.service.collect_knowledge_files", return_value=collected):
         tid = enqueue_task(
             agent_session_id="sess-463", runtime_id=1, prompt="p",
             repo_key="gitcode:org/repo463", agent_type="coding",
@@ -206,7 +206,7 @@ def test_p2_enqueue_url_wins_over_inline_content():
 # ---------- P3 ----------
 
 def test_p3_seed_rules_cover_agent_tasks_metrics():
-    from src.observability import alerts as al
+    from src.domains.insight.observability import alerts as al
     from src.kernel.session_manager import db, db_lock
     al.seed_rules()
     with db_lock:
@@ -220,7 +220,7 @@ def test_p3_seed_rules_cover_agent_tasks_metrics():
 
 
 def test_p3_platform_metrics_expose_agent_tasks_rows():
-    from src.observability import alerts as al
+    from src.domains.insight.observability import alerts as al
     vals = al._platform_metrics()
     assert "agent_tasks_rows" in vals
     assert vals["agent_tasks_rows"] >= 0

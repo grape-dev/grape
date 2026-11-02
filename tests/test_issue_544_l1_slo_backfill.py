@@ -16,9 +16,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: E402
 
-from src.observability import metric_rollup as MR  # noqa: E402
-from src.observability import slo as S  # noqa: E402
-from src.observability import slo_backfill as SB  # noqa: E402
+from src.domains.insight.observability import metric_rollup as MR  # noqa: E402
+from src.domains.insight.observability import slo as S  # noqa: E402
+from src.domains.insight.observability import slo_backfill as SB  # noqa: E402
 from src.kernel.session_manager import db as _db, db_lock as _db_lock  # noqa: E402
 
 NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)

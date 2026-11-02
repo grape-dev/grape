@@ -68,35 +68,35 @@ class TestScenarioCoverageAutoInherited:
     def test_get_repo_token_with_refresh_uses_resolver(self):
         """R20.7: get_repo_token_with_refresh 已委托 TokenResolver"""
         import inspect
-        from src.user.db import get_repo_token_with_refresh
+        from src.domains.mgmt.user.db import get_repo_token_with_refresh
         source = inspect.getsource(get_repo_token_with_refresh)
         assert "TokenResolver" in source
 
     def test_get_github_token_uses_resolver(self):
         """R20.7: get_github_token 已委托 TokenResolver"""
         import inspect
-        from src.user.db import get_github_token
+        from src.domains.mgmt.user.db import get_github_token
         source = inspect.getsource(get_github_token)
         assert "TokenResolver" in source
 
     def test_get_repo_bot_token_uses_resolver(self):
         """R20.7: get_repo_bot_token 已委托 TokenResolver"""
         import inspect
-        from src.user.db import get_repo_bot_token
+        from src.domains.mgmt.user.db import get_repo_bot_token
         source = inspect.getsource(get_repo_bot_token)
         assert "TokenResolver" in source
 
     def test_chat_resolve_token_uses_repo_bot_token(self):
         """R20.7.2: Chat _resolve_gitcode_token 通过 Repo.bot_token 获取 token"""
         import inspect
-        from src.api.routes.chat import _resolve_gitcode_token
+        from src.domains.runtime.routes.chat import _resolve_gitcode_token
         source = inspect.getsource(_resolve_gitcode_token)
         assert "Repo" in source or "token_service" in source
 
     def test_feishu_sync_uses_resolver_delegated_function(self):
         """R20.7.3: 飞书 sync_repo_feishu_mapping 通过已委托的函数获取 token"""
         import inspect
-        from src.im.feishu_async import FeishuAsync
+        from src.domains.runtime.im.feishu_async import FeishuAsync
         # 找到 sync_repo_feishu_mapping 方法
         source = inspect.getsource(FeishuAsync.sync_repo_feishu_mapping)
         # get_github_token / get_repo_token_with_refresh 已委托 TokenResolver

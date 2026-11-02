@@ -16,7 +16,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from unittest.mock import patch, MagicMock
 
-from src.api.routes import tasks as tasks_mod
+from src.domains.runtime.routes import tasks as tasks_mod
 from src.api import issues_center as ic
 from fastapi.testclient import TestClient
 from src.api.main import app
@@ -151,7 +151,7 @@ def setup_module():
     global _uid_a, _uid_b, _headers_a, _headers_b
     _uid_a = _uid_b = None
     # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
-    from src.auth.password import hash_password
+    from src.domains.mgmt.auth.password import hash_password
     db, db_lock = _get_db()
     with db_lock:
         c = db.cursor()
@@ -200,7 +200,7 @@ def test_user_a_creates_task_assignee_is_a():
     _cleanup_issues("gitcode:test_ab/demo")
     client = TestClient(app)
     # Issue #343: _gitcode_api_with_refresh 已删除，建单走 bot token + _post_gitcode_issue
-    with patch("src.user.repo_manager._req", side_effect=_req_fake), \
+    with patch("src.domains.mgmt.user.repo_manager._req", side_effect=_req_fake), \
          patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="bot_token_178"):
         r = client.post("/api/issues/test_ab/demo", headers=_headers_a,
@@ -220,7 +220,7 @@ def test_user_b_creates_task_assignee_is_b():
     """用户 B 新建任务 → 创建人 = 用户 B"""
     _cleanup_issues("gitcode:test_ab/demo")
     client = TestClient(app)
-    with patch("src.user.repo_manager._req", side_effect=_req_fake), \
+    with patch("src.domains.mgmt.user.repo_manager._req", side_effect=_req_fake), \
          patch("src.api.issues_center._post_gitcode_issue", side_effect=_issue_post_fake), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="bot_token_179"):
         r = client.post("/api/issues/test_ab/demo", headers=_headers_b,

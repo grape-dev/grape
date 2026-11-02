@@ -37,8 +37,8 @@ def _client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _token(monkeypatch):
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
-    monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: BOT)
 
 
 def _override_user(repo_key: str):
@@ -69,7 +69,7 @@ class TestGitCodeTreeSlashRef:
         recorded = []
         tree_sha = "abc123def456"
         monkeypatch.setattr(
-            "src.user.repo_manager._req",
+            "src.domains.mgmt.user.repo_manager._req",
             _routed_req_mock(recorded, {
                 "/commits": _commit_with_tree("c111222333", tree_sha),
             }))
@@ -85,7 +85,7 @@ class TestGitCodeTreeSlashRef:
     def test_non_slash_ref_direct_no_extra_call(self, monkeypatch):
         """QA-02：GitCode + ref=main（无斜杠）→ 直连 git/trees/main，不解析。"""
         recorded = []
-        monkeypatch.setattr("src.user.repo_manager._req", _routed_req_mock(recorded, {}))
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _routed_req_mock(recorded, {}))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=main")
         assert r.status_code == 200
         assert recorded[-1]["url"].endswith("/git/trees/main")
@@ -95,7 +95,7 @@ class TestGitCodeTreeSlashRef:
         """QA-03：GitCode + ref 空 → 沿用默认分支解析。"""
         recorded = []
         monkeypatch.setattr(
-            "src.user.repo_manager._req",
+            "src.domains.mgmt.user.repo_manager._req",
             _routed_req_mock(recorded, {
                 "/branches": [{"name": "main"}],
             }))
@@ -107,7 +107,7 @@ class TestGitCodeTreeSlashRef:
         """QA-04：commits 解析失败（坏结构）→ 降级返回原 ref，不 502。"""
         recorded = []
         monkeypatch.setattr(
-            "src.user.repo_manager._req",
+            "src.domains.mgmt.user.repo_manager._req",
             _routed_req_mock(recorded, {
                 "/commits": {"unexpected": True},  # 非 list 且无 tree → 解析失败
             }))
@@ -118,7 +118,7 @@ class TestGitCodeTreeSlashRef:
 
     def test_recursive_gitcode_rejected(self, monkeypatch):
         """QA-05：GitCode + recursive → 400 拒绝（不回归）。"""
-        monkeypatch.setattr("src.user.repo_manager._req", _routed_req_mock([], {}))
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _routed_req_mock([], {}))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=feat/issue-11&depth=recursive")
         assert r.status_code == 400
         assert "暂不支持递归" in r.json()["detail"]["message"]
@@ -131,7 +131,7 @@ class TestGitHubTreeSlashRef:
         recorded = []
         tree_sha = "gh_tree_9a8b7c"
         monkeypatch.setattr(
-            "src.user.repo_manager._github_req",
+            "src.domains.mgmt.user.repo_manager._github_req",
             _routed_req_mock(recorded, {
                 "/commits/": _commit_with_tree("ghc111", tree_sha),
             }))
@@ -146,7 +146,7 @@ class TestGitHubTreeSlashRef:
         _override_user(f"github:{OWNER}/{REPO}")
         recorded = []
         monkeypatch.setattr(
-            "src.user.repo_manager._github_req",
+            "src.domains.mgmt.user.repo_manager._github_req",
             _routed_req_mock(recorded, {
                 "/commits/": _commit_with_tree("ghc222", "gh_tree_5566"),
             }))
@@ -161,7 +161,7 @@ class TestGitHubTreeSlashRef:
         recorded = []
         tree_sha = "gh_tree_recur"
         monkeypatch.setattr(
-            "src.user.repo_manager._github_req",
+            "src.domains.mgmt.user.repo_manager._github_req",
             _routed_req_mock(recorded, {
                 "/commits/": _commit_with_tree("ghc333", tree_sha),
             }))

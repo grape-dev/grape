@@ -1,2 +1,4 @@
-"""Hwcloud 后端实现（兼容转发层，对齐 src/agent/hermes.py 模式）"""
-from src.runtime.hwcloud import HwcloudRuntime as HwcloudBackend
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.runtime.agents.hwcloud"""
+import src.domains.runtime.agents.hwcloud as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

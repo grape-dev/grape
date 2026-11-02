@@ -25,7 +25,7 @@ from unittest.mock import patch
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import _create_tables
-from src.auth.grape_account_db import (
+from src.domains.mgmt.auth.grape_account_db import (
     create_grape_account,
     create_external_identity,
     get_external_identity,
@@ -57,7 +57,7 @@ def _gid():
 
 
 def _save_state(provider="gitcode"):
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     state = "test-state-" + uuid.uuid4().hex[:8]
     user_db.save_oauth_state(state, provider, {})
     return state
@@ -101,7 +101,7 @@ def _seed_user(username, ext_id, external_login):
 class TestSyncExternalLoginOnRename:
     def test_sync_updates_four_tables_and_audit(self):
         """改名同步：external_identities + grape_accounts.username + um + whitelist + audit。"""
-        from src.auth.grape_account_db import sync_external_login_on_rename
+        from src.domains.mgmt.auth.grape_account_db import sync_external_login_on_rename
         uname = "rn_user_" + uuid.uuid4().hex[:6]
         ext_id = _gid()
         old_login = "gcw_OldRenamed"
@@ -146,7 +146,7 @@ class TestSyncExternalLoginOnRename:
 
     def test_username_unique_conflict_keeps_old_username(self):
         """新名已被其他账号占用：保留旧 username，external_login 仍正确更新。"""
-        from src.auth.grape_account_db import sync_external_login_on_rename
+        from src.domains.mgmt.auth.grape_account_db import sync_external_login_on_rename
         uname = "rn_cf_" + uuid.uuid4().hex[:6]
         ext_id = _gid()
         conflict_user = "rn_conflict_" + uuid.uuid4().hex[:6]
@@ -185,8 +185,8 @@ class TestSyncExternalLoginOnRename:
 
     def test_no_change_returns_false_no_write(self):
         """未改名（new == old）：返回 False，不产生额外写/audit。"""
-        from src.auth.grape_account_db import sync_external_login_on_rename
-        from src.auth.audit import EVENT_TYPES
+        from src.domains.mgmt.auth.grape_account_db import sync_external_login_on_rename
+        from src.domains.mgmt.auth.audit import EVENT_TYPES
         uname = "rn_nc_" + uuid.uuid4().hex[:6]
         ext_id = _gid()
         old_login = "gcw_NoChange"
@@ -212,7 +212,7 @@ class TestSyncExternalLoginOnRename:
 
     def test_empty_new_login_returns_false(self):
         """空 new_login：返回 False 不写。"""
-        from src.auth.grape_account_db import sync_external_login_on_rename
+        from src.domains.mgmt.auth.grape_account_db import sync_external_login_on_rename
         uname = "rn_empty_" + uuid.uuid4().hex[:6]
         ext_id = _gid()
         account = _seed_user(uname, ext_id, "gcw_Empty")
@@ -237,7 +237,7 @@ class TestOAuthCallbackLoginRename:
         account = _seed_user(uname, ext_id, old_login)
         state = _save_state()
         try:
-            with patch("src.user.db.get_meta_value", return_value="x"), \
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
                  patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
                  patch("requests.get", return_value=_FakeReqResp({"id": ext_id, "login": new_login,
                                                                   "nickname": "新昵称"})):
@@ -268,7 +268,7 @@ class TestOAuthCallbackLoginRename:
         assert delete_external_identity(account["id"], "gitcode") is True
         state = _save_state()
         try:
-            with patch("src.user.db.get_meta_value", return_value="x"), \
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
                  patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
                  patch("requests.get", return_value=_FakeReqResp({"id": ext_id, "login": new_login,
                                                                   "nickname": "新昵称"})):
@@ -298,7 +298,7 @@ class TestOAuthCallbackLoginRename:
         account = _seed_user(uname, ext_id, old_login)
         state = _save_state()
         try:
-            with patch("src.user.db.get_meta_value", return_value="x"), \
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="x"), \
                  patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
                  patch("requests.get", return_value=_FakeReqResp({"id": ext_id, "login": old_login,
                                                                   "nickname": "旧名"})):
@@ -327,7 +327,7 @@ class TestAssigneeFallbackDataSource:
         遍历 get_user_identities(user.id) 取 provider 匹配的 external_login。
         本测试验证同步后的数据源已指向新名（不改 issues_center 取值逻辑）。
         """
-        from src.auth.grape_account_db import sync_external_login_on_rename
+        from src.domains.mgmt.auth.grape_account_db import sync_external_login_on_rename
         uname = "rn_asg_" + uuid.uuid4().hex[:6]
         ext_id = _gid()
         old_login = "gcw_OldAssignee"

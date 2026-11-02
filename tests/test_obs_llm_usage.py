@@ -20,8 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import llm_usage as lu
-from src.runtime import usage_collect as uc
+from src.domains.insight.observability import llm_usage as lu
+from src.domains.runtime.engine import usage_collect as uc
 
 
 # ------------------------------------------------------- 运行主体分型（2026-10-17 决定 B）
@@ -104,7 +104,7 @@ def test_master_side_run_requires_run_id():
 
 def test_master_run_writes_chat_rows(monkeypatch):
     """主控机内运行（chat）：MasterRun.finish() 直接把用量写进台账（不经 HTTP 上报口）。"""
-    from src.observability import master_usage as mu
+    from src.domains.insight.observability import master_usage as mu
     # 采集器记录的真实形态：input/output/cache_*/reasoning + _source_suffix（见 _usage_payload）
     recs = [{"provider": "custom", "model": "glm-5.3", "input": 321, "output": 12,
              "cache_read": 7, "cache_write": 0, "reasoning": 0,
@@ -120,7 +120,7 @@ def test_master_run_writes_chat_rows(monkeypatch):
         def finish(self, session_id=""):
             return list(recs)
 
-    monkeypatch.setattr("src.runtime.usage_collect.UsageCollector", _Fake)
+    monkeypatch.setattr("src.domains.runtime.engine.usage_collect.UsageCollector", _Fake)
     run_id = "chat:convZZ:msg1"
     mr = mu.MasterRun("chat", run_id, engine="hermes", cwd="/tmp/x",
                       attr={"repo_key": "gitcode:org/repo", "scene_id": "convZZ",
@@ -159,11 +159,11 @@ class _FakeCollector:
 def test_for_task_uses_task_kind_and_auto_attribution(monkeypatch):
     """事件流水线/autopilot：有 agent_tasks 行 → run_kind='task'、归属自动反查、
     幂等键与 worker 采集**一致**（同一任务跨本机/worker 不会重复计）。"""
-    from src.observability import master_usage as mu
+    from src.domains.insight.observability import master_usage as mu
     tid = "t_test_fortask"
     _cleanup(tid)
     _make_task(tid, repo_key="gitcode:org/repo")          # 建 agent_tasks 行（user_id=42）
-    monkeypatch.setattr("src.runtime.usage_collect.UsageCollector", _FakeCollector)
+    monkeypatch.setattr("src.domains.runtime.engine.usage_collect.UsageCollector", _FakeCollector)
     m = mu.for_task(tid, "hermes", cwd="/tmp/ws", engine_id=999)
     assert m.run_kind == "task" and m.run_id == tid, (m.run_kind, m.run_id)
     m.start()
@@ -181,7 +181,7 @@ def test_for_task_uses_task_kind_and_auto_attribution(monkeypatch):
 
 def test_for_task_fills_engine_id_when_task_row_lacks_it(monkeypatch):
     """task 行的 runtime_id 为空时，用调用方知道的 engine_id 兜底（补空，不覆盖已有值）。"""
-    from src.observability import master_usage as mu
+    from src.domains.insight.observability import master_usage as mu
     from src.kernel.session_manager import db, db_lock
     tid = "t_test_fortask_noeng"
     _cleanup(tid)
@@ -190,7 +190,7 @@ def test_for_task_fills_engine_id_when_task_row_lacks_it(monkeypatch):
         c = db.cursor()
         c.execute("UPDATE agent_tasks SET runtime_id=0 WHERE id=?", (tid,))
         db.commit()
-    monkeypatch.setattr("src.runtime.usage_collect.UsageCollector", _FakeCollector)
+    monkeypatch.setattr("src.domains.runtime.engine.usage_collect.UsageCollector", _FakeCollector)
     m = mu.for_task(tid, "hermes", cwd="/tmp/ws", engine_id=259)
     m.start(); assert m.finish() == 1
     rows = _raw_rows("task_id=?", (tid,))
@@ -200,8 +200,8 @@ def test_for_task_fills_engine_id_when_task_row_lacks_it(monkeypatch):
 
 def test_for_task_falls_back_for_seq_only_runs(monkeypatch):
     """没有 agent_tasks 行的兜底运行（d_<seq>）：run_kind 兜底 + attr 传归属，不产生孤儿行。"""
-    from src.observability import master_usage as mu
-    monkeypatch.setattr("src.runtime.usage_collect.UsageCollector", _FakeCollector)
+    from src.domains.insight.observability import master_usage as mu
+    monkeypatch.setattr("src.domains.runtime.engine.usage_collect.UsageCollector", _FakeCollector)
     m = mu.for_task("", "hermes", cwd="/tmp", seq="d_9", repo_key="gitcode:org/x",
                     agent_type="coding", user_id=0, engine_id=88)
     assert m.run_kind == "devops" and m.run_id == "devops:d_9", (m.run_kind, m.run_id)
@@ -216,7 +216,7 @@ def test_for_task_falls_back_for_seq_only_runs(monkeypatch):
 
 def test_master_run_without_subject_is_noop(monkeypatch):
     """没有 run_id（或引擎）时不采集、不写库——避免产生无法归属的孤儿行。"""
-    from src.observability import master_usage as mu
+    from src.domains.insight.observability import master_usage as mu
     mr = mu.MasterRun("chat", "", engine="hermes")
     mr.start()
     assert mr.finish() == 0
@@ -339,7 +339,7 @@ def test_attribution_comes_from_task_not_from_caller():
 
 def test_usage_endpoint_never_touches_usage_json():
     """回归：/tasks/{id}/usage 曾用 UPDATE 覆盖 usage_json（冲掉会话续接指针）。"""
-    from src.api.routes.runtime import UsageBody, runtime_task_usage
+    from src.domains.runtime.routes.runtime import UsageBody, runtime_task_usage
     tid = "t_test_endpoint"
     pointer = json.dumps({"session_id": "acp_123", "work_dir": "/w", "engine": "hwcloud-x"})
     _make_task(tid, usage_json=pointer)
@@ -503,7 +503,7 @@ def test_collector_never_raises_on_broken_ledger(tmp_path, monkeypatch):
 # ------------------------------------------------------------------ 上报载荷
 
 def test_usage_payload_mapping():
-    from src.runtime.agent import _usage_payload
+    from src.domains.runtime.engine.agent import _usage_payload
     p = _usage_payload({"model": "glm-5.3", "provider": "custom", "input": 10,
                         "output": 2, "cache_read": 3, "cache_write": 1,
                         "reasoning": 4, "turn": 2}, "opencode")

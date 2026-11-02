@@ -33,33 +33,33 @@ class TestGlobalGitcodeBotToken:
     """统一入口：DB meta 表读取 + 文件 fallback（60s 缓存）。"""
 
     def setup_method(self):
-        from src.user.db import _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
 
     def test_db_has_value(self, fresh_db):
-        from src.user.db import get_global_gitcode_bot_token
-        with patch("src.user.db.get_meta_value", return_value="db_token_123"):
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="db_token_123"):
             result = get_global_gitcode_bot_token()
         assert result == "db_token_123"
 
     def test_db_empty_fallback_to_file(self, fresh_db):
-        from src.user.db import get_global_gitcode_bot_token
-        with patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._read_gbt_file_field", return_value="file_token_456"):
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_field", return_value="file_token_456"):
             result = get_global_gitcode_bot_token()
         assert result == "file_token_456"
 
     def test_both_empty_returns_empty(self, fresh_db):
-        from src.user.db import get_global_gitcode_bot_token
-        with patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._read_gbt_file_field", return_value=""):
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_field", return_value=""):
             result = get_global_gitcode_bot_token()
         assert result == ""
 
     def test_cache_hits_within_ttl(self):
         """60s 内只查一次 DB。"""
-        from src.user.db import get_global_gitcode_bot_token
-        with patch("src.user.db.get_meta_value", return_value="cached_tok") as mock_get:
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="cached_tok") as mock_get:
             get_global_gitcode_bot_token()
             get_global_gitcode_bot_token()
             get_global_gitcode_bot_token()
@@ -68,48 +68,48 @@ class TestGlobalGitcodeBotToken:
     def test_cache_expires_after_ttl(self):
         """TTL 过期后重新查 DB。"""
         import time as _t
-        from src.user.db import get_global_gitcode_bot_token, _global_bot_cache
-        with patch("src.user.db.get_meta_value", return_value="first") as mock_get:
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token, _global_bot_cache
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="first") as mock_get:
             get_global_gitcode_bot_token()
             # 模拟过期：把缓存时间戳改为过去
             for k in list(_global_bot_cache.keys()):
                 _global_bot_cache[k] = (_global_bot_cache[k][0], _t.time() - 1)
-            with patch("src.user.db.get_meta_value", return_value="second"):
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="second"):
                 result = get_global_gitcode_bot_token()
             assert result == "second"
             assert mock_get.call_count == 1  # 第一次调用
 
     def test_cache_invalidation(self):
         """admin 改配置后清缓存，下次读走 DB。"""
-        from src.user.db import get_global_gitcode_bot_token, _invalidate_global_bot_cache
-        with patch("src.user.db.get_meta_value", return_value="old") as mock_get:
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token, _invalidate_global_bot_cache
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="old") as mock_get:
             get_global_gitcode_bot_token()
             _invalidate_global_bot_cache()
-            with patch("src.user.db.get_meta_value", return_value="new"):
+            with patch("src.domains.mgmt.user.db.get_meta_value", return_value="new"):
                 result = get_global_gitcode_bot_token()
             assert result == "new"
             assert mock_get.call_count == 1  # 清缓存后又查了一次
 
     def test_no_file_fallback_after_migration(self):
         """迁移完成后（migrated=1），DB 空值不再 fallback 到文件。"""
-        from src.user.db import get_global_gitcode_bot_token, _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token, _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
         # 模拟迁移已完成 + DB 值为空
         _meta_values = {"global_bot_token_migrated": "1", "global_bot_gitcode_token": ""}
-        with patch("src.user.db.get_meta_value", side_effect=lambda k: _meta_values.get(k, "")), \
-             patch("src.user.db._read_gbt_file_field", return_value="file_old_value") as mock_file:
+        with patch("src.domains.mgmt.user.db.get_meta_value", side_effect=lambda k: _meta_values.get(k, "")), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_field", return_value="file_old_value") as mock_file:
             result = get_global_gitcode_bot_token()
             assert result == ""  # DB 空值，不 fallback 到文件
             mock_file.assert_not_called()  # 文件 fallback 没被调用
 
     def test_file_fallback_before_migration(self):
         """迁移未完成时，DB 空值 fallback 到文件。"""
-        from src.user.db import get_global_gitcode_bot_token, _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import get_global_gitcode_bot_token, _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
         # 模拟迁移未完成（无 migrated 标记）+ DB 值为空
         _meta_values = {"global_bot_token_migrated": "", "global_bot_gitcode_token": ""}
-        with patch("src.user.db.get_meta_value", side_effect=lambda k: _meta_values.get(k, "")), \
-             patch("src.user.db._read_gbt_file_field", return_value="file_old_value") as mock_file:
+        with patch("src.domains.mgmt.user.db.get_meta_value", side_effect=lambda k: _meta_values.get(k, "")), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_field", return_value="file_old_value") as mock_file:
             result = get_global_gitcode_bot_token()
             assert result == "file_old_value"  # fallback 到文件
             mock_file.assert_called_once()
@@ -117,80 +117,80 @@ class TestGlobalGitcodeBotToken:
 
 class TestGlobalGithubBotToken:
     def setup_method(self):
-        from src.user.db import _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
 
     def test_db_has_value(self):
-        from src.user.db import get_global_github_bot_token
-        with patch("src.user.db.get_meta_value", return_value="gh_db_token"):
+        from src.domains.mgmt.user.db import get_global_github_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="gh_db_token"):
             result = get_global_github_bot_token()
         assert result == "gh_db_token"
 
     def test_db_empty_fallback_to_file(self):
-        from src.user.db import get_global_github_bot_token
-        with patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._read_gbt_file_field", return_value="gh_file_token"):
+        from src.domains.mgmt.user.db import get_global_github_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_field", return_value="gh_file_token"):
             result = get_global_github_bot_token()
         assert result == "gh_file_token"
 
     def test_both_empty_returns_empty(self):
-        from src.user.db import get_global_github_bot_token
-        with patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._read_gbt_file_field", return_value=""):
+        from src.domains.mgmt.user.db import get_global_github_bot_token
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_field", return_value=""):
             result = get_global_github_bot_token()
         assert result == ""
 
 
 class TestGlobalBotUsernames:
     def setup_method(self):
-        from src.user.db import _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
 
     def test_db_has_value(self):
-        from src.user.db import get_global_bot_usernames
-        with patch("src.user.db.get_meta_value", return_value='["bot1","bot2"]'):
+        from src.domains.mgmt.user.db import get_global_bot_usernames
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value='["bot1","bot2"]'):
             result = get_global_bot_usernames()
         assert result == ["bot1", "bot2"]
 
     def test_db_empty_fallback_to_file(self):
-        from src.user.db import get_global_bot_usernames
-        with patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._read_gbt_file_usernames", return_value='["fallback_bot"]'):
+        from src.domains.mgmt.user.db import get_global_bot_usernames
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_usernames", return_value='["fallback_bot"]'):
             result = get_global_bot_usernames()
         assert result == ["fallback_bot"]
 
     def test_both_empty_returns_empty(self):
-        from src.user.db import get_global_bot_usernames
-        with patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db._read_gbt_file_usernames", return_value=""):
+        from src.domains.mgmt.user.db import get_global_bot_usernames
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_usernames", return_value=""):
             result = get_global_bot_usernames()
         assert result == []
 
     def test_db_invalid_json_returns_empty(self):
-        from src.user.db import get_global_bot_usernames
-        with patch("src.user.db.get_meta_value", return_value="invalid json"), \
-             patch("src.user.db._read_gbt_file_usernames", return_value=""):
+        from src.domains.mgmt.user.db import get_global_bot_usernames
+        with patch("src.domains.mgmt.user.db.get_meta_value", return_value="invalid json"), \
+             patch("src.domains.mgmt.user.db._read_gbt_file_usernames", return_value=""):
             result = get_global_bot_usernames()
             assert result == []
 
 
 class TestGetGlobalBotCredential:
     def setup_method(self):
-        from src.user.db import _invalidate_global_bot_cache
+        from src.domains.mgmt.user.db import _invalidate_global_bot_cache
         _invalidate_global_bot_cache()
 
     def test_returns_token_and_username(self):
-        from src.user.db import get_global_bot_credential
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value="tok"), \
-             patch("src.user.db.get_global_bot_usernames", return_value=["bot_user"]):
+        from src.domains.mgmt.user.db import get_global_bot_credential
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value="tok"), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=["bot_user"]):
             tok, user = get_global_bot_credential()
         assert tok == "tok"
         assert user == "bot_user"
 
     def test_empty_when_no_config(self):
-        from src.user.db import get_global_bot_credential
-        with patch("src.user.db.get_global_gitcode_bot_token", return_value=""), \
-             patch("src.user.db.get_global_bot_usernames", return_value=[]):
+        from src.domains.mgmt.user.db import get_global_bot_credential
+        with patch("src.domains.mgmt.user.db.get_global_gitcode_bot_token", return_value=""), \
+             patch("src.domains.mgmt.user.db.get_global_bot_usernames", return_value=[]):
             tok, user = get_global_bot_credential()
         assert tok == ""
         assert user == ""
@@ -202,8 +202,8 @@ class TestMigrateGlobalBotTokenToDb:
     def test_skip_if_already_migrated(self):
         """DB 已有迁移标记时跳过迁移。"""
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
-             patch("src.user.db.get_meta_value", return_value="1"), \
-             patch("src.user.db.set_meta_value") as mock_set:
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value="1"), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set:
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
             mock_set.assert_not_called()
@@ -211,7 +211,7 @@ class TestMigrateGlobalBotTokenToDb:
     def test_skip_if_lock_not_acquired(self):
         """其他实例持锁时跳过。"""
         with patch("src.kernel.lock.acquire_lock", return_value=False), \
-             patch("src.user.db.get_meta_value") as mock_get:
+             patch("src.domains.mgmt.user.db.get_meta_value") as mock_get:
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
             mock_get.assert_not_called()
@@ -235,8 +235,8 @@ class TestMigrateGlobalBotTokenToDb:
 
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock"), \
-             patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db.set_meta_value", side_effect=mock_set), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.set_meta_value", side_effect=mock_set), \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
@@ -263,8 +263,8 @@ class TestMigrateGlobalBotTokenToDb:
 
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock"), \
-             patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db.set_meta_value", side_effect=mock_set), \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.set_meta_value", side_effect=mock_set), \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
@@ -296,8 +296,8 @@ class TestMigrateGlobalBotTokenToDb:
 
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock"), \
-             patch("src.user.db.get_meta_value", side_effect=mock_get), \
-             patch("src.user.db.set_meta_value", side_effect=mock_set), \
+             patch("src.domains.mgmt.user.db.get_meta_value", side_effect=mock_get), \
+             patch("src.domains.mgmt.user.db.set_meta_value", side_effect=mock_set), \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
@@ -311,8 +311,8 @@ class TestMigrateGlobalBotTokenToDb:
         """文件不存在时跳过。"""
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock"), \
-             patch("src.user.db.get_meta_value", return_value=""), \
-             patch("src.user.db.set_meta_value") as mock_set, \
+             patch("src.domains.mgmt.user.db.get_meta_value", return_value=""), \
+             patch("src.domains.mgmt.user.db.set_meta_value") as mock_set, \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
@@ -322,7 +322,7 @@ class TestMigrateGlobalBotTokenToDb:
         """异常时锁也要释放。"""
         with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.kernel.lock.release_lock") as mock_release, \
-             patch("src.user.db.get_meta_value", side_effect=Exception("DB error")):
+             patch("src.domains.mgmt.user.db.get_meta_value", side_effect=Exception("DB error")):
             from src.api.db_setup import _migrate_global_bot_token_to_db
             try:
                 _migrate_global_bot_token_to_db()

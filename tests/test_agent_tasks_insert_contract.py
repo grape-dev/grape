@@ -47,7 +47,7 @@ def _row(seq):
 # ---------- 契约（纯逻辑，无 DB） ----------
 
 from src.api import event_pipeline as ep  # noqa: E402
-from src.runtime.service import _TASK_COLUMNS_LIST  # noqa: E402
+from src.domains.runtime.engine.service import _TASK_COLUMNS_LIST  # noqa: E402
 
 
 def test_task_insert_row_fully_covers_columns():

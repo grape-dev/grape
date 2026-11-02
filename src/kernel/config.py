@@ -191,9 +191,9 @@ OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 # Cookie 安全——生产 HTTPS 默认 secure=True，开发 HTTP 配 COOKIE_SECURE=false
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
 
-# 注意：此处禁止 import src.auth.*（worker 包含 config.py 但不含 src/auth/，
+# 注意：此处禁止 import src.domains.mgmt.auth.*（worker 包含 config.py 但不含 src/auth/，
 # 顶层 import 会直接打崩 runtime-agent 启动，2026-10-14 五台 worker 心跳全断事故根因）。
-# 服务端如需 is_production，直接 from src.auth.security_config import is_production。
+# 服务端如需 is_production，直接 from src.domains.mgmt.auth.security_config import is_production。
 # IS_PRODUCTION 常量已删除：全库零消费（死代码）。
 
 # JWT 密钥安全门禁
@@ -263,14 +263,14 @@ def _load_accounts():
                 log.warning(f"_detect_server_base: hostname resolution failed: {e}")
             # Issue #372 §14.2.1: 全部失败 → 写标记供设置页展示
             try:
-                from src.user.db import set_meta_value
+                from src.domains.mgmt.user.db import set_meta_value
                 set_meta_value("webhook_url_detect_failed", "1")
                 log.warning("_detect_server_base: all detection methods failed, webhook_url will be empty until configured or detected from Host header")
             except Exception:
                 pass
             return ""
         try:
-            from src.user.db import get_meta_value, set_meta_value
+            from src.domains.mgmt.user.db import get_meta_value, set_meta_value
             _cfg = read_server_config()
             if not get_meta_value("webhook_url"):
                 _wh = (_cfg.get("webhook_url") or "").strip()
@@ -428,7 +428,7 @@ def _read_runtime_config_file() -> dict:
 def _read_runtime_meta() -> dict:
     """DB meta 表读取管理台配置值（异常时返回空——worker 端无 DB 等场景）。"""
     try:
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.user.db import get_meta_value
         keys = ("runtime_task_timeout",
                 "devstage_template_id", "devstage_flavor_id",
                 "devstage_cores", "devstage_memory", "devstage_arch")
@@ -599,7 +599,7 @@ def _is_login_whitelist_enabled() -> bool:
     if _WL_ENABLED_CACHE is not None and (now - _WL_CACHE_TS) < _WL_CACHE_TTL:
         return _WL_ENABLED_CACHE
     try:
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.user.db import get_meta_value
         val = get_meta_value("login_whitelist_enabled")
         if val is not None and val != "":
             result = val.lower() in ("true", "1", "yes")

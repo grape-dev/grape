@@ -17,7 +17,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.api.event_pipeline import db, db_lock
+from src.domains.runtime.pipeline.event_pipeline import db, db_lock
 
 REPO_PREFIX = "gitcode:owner/test-repair-upgrade"
 
@@ -44,7 +44,7 @@ def test_repair_host_fallback_bot_token_empty():
     修复前：_db_kwargs[db_bot_token_field] = bot_token（无条件写入）→ 403。
     修复后：_db_kwargs[db_bot_token_field] = (bot_token if not _use_path_b else "")。
     """
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     import uuid
 
     repo_key = f"{REPO_PREFIX}-fallback-{uuid.uuid4().hex[:6]}"
@@ -85,7 +85,7 @@ def test_auto_upgrade_skips_on_collaborator_failure():
     修复后：ok=False 时 continue 跳过。
     """
     from unittest.mock import patch, MagicMock
-    from src.user.db import auto_upgrade_path_b_repos
+    from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
 
     # Mock _query_path_b_repos to return one repo
     _test_repo = {
@@ -100,12 +100,12 @@ def test_auto_upgrade_skips_on_collaborator_failure():
     def mock_update(repo_key, bot_token, provider):
         _updated_tokens.append((repo_key, bot_token, provider))
 
-    with patch("src.user.db._query_path_b_repos", return_value=[_test_repo]), \
-         patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+    with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[_test_repo]), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="HOST_TOKEN"), \
-         patch("src.user.repo_manager.add_collaborator", return_value=(False, "permission denied")), \
-         patch("src.user.repo_manager.accept_invite_for_repo"), \
-         patch("src.user.db._update_repo_bot_token", side_effect=mock_update):
+         patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(False, "permission denied")), \
+         patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo"), \
+         patch("src.domains.mgmt.user.db._update_repo_bot_token", side_effect=mock_update):
         auto_upgrade_path_b_repos("gitcode", "BOT_TOKEN", "grape_bot")
 
     # add_collaborator failed → _update_repo_bot_token should NOT be called
@@ -117,7 +117,7 @@ def test_auto_upgrade_skips_on_collaborator_failure():
 def test_auto_upgrade_writes_on_collaborator_success():
     """T12-02b: auto_upgrade add_collaborator 返回 ok=True → 写 bot token。"""
     from unittest.mock import patch, MagicMock
-    from src.user.db import auto_upgrade_path_b_repos
+    from src.domains.mgmt.user.db import auto_upgrade_path_b_repos
 
     _test_repo = {
         "repo_key": "gitcode:owner/test-upgrade-ok",
@@ -130,15 +130,15 @@ def test_auto_upgrade_writes_on_collaborator_success():
     def mock_update(repo_key, bot_token, provider, **kwargs):
         _updated_tokens.append((repo_key, bot_token, provider))
 
-    with patch("src.user.db._query_path_b_repos", return_value=[_test_repo]), \
-         patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+    with patch("src.domains.mgmt.user.db._query_path_b_repos", return_value=[_test_repo]), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="HOST_TOKEN"), \
-         patch("src.user.repo_manager.add_collaborator", return_value=(True, "")), \
-         patch("src.user.repo_manager.accept_invite_for_repo"), \
-         patch("src.user.db.get_webhook_url", return_value="http://example.com/webhook/gitcode"), \
-         patch("src.user.db._get_managed_webhook_id", return_value=0), \
-         patch("src.user.repo_manager.setup_webhook", return_value=12345), \
-         patch("src.user.db._update_repo_bot_token", side_effect=mock_update):
+         patch("src.domains.mgmt.user.repo_manager.add_collaborator", return_value=(True, "")), \
+         patch("src.domains.mgmt.user.repo_manager.accept_invite_for_repo"), \
+         patch("src.domains.mgmt.user.db.get_webhook_url", return_value="http://example.com/webhook/gitcode"), \
+         patch("src.domains.mgmt.user.db._get_managed_webhook_id", return_value=0), \
+         patch("src.domains.mgmt.user.repo_manager.setup_webhook", return_value=12345), \
+         patch("src.domains.mgmt.user.db._update_repo_bot_token", side_effect=mock_update):
         auto_upgrade_path_b_repos("gitcode", "BOT_TOKEN", "grape_bot")
 
     assert len(_updated_tokens) == 1, "成功时应写 bot token"
@@ -200,14 +200,14 @@ def test_get_repo_token_with_refresh_skips_repo_bot_for_path_b():
     即使 bot_gitcode_token 列非空（脏写入），host_user_id > 0 → 跳过 → 走用户 token。
     """
     from unittest.mock import patch, MagicMock
-    from src.user.db import get_repo_token_with_refresh
+    from src.domains.mgmt.user.db import get_repo_token_with_refresh
 
     # path B repo: host_user_id > 0, bot_gitcode_token has dirty value
-    with patch("src.user.db.db") as mock_db, \
-         patch("src.user.db.db_lock"), \
-         patch("src.user.db._get_global_bot_token", return_value=""), \
-         patch("src.user.db.get_host_user_id", return_value=42), \
-         patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+    with patch("src.domains.mgmt.user.db.db") as mock_db, \
+         patch("src.domains.mgmt.user.db.db_lock"), \
+         patch("src.domains.mgmt.user.db._get_global_bot_token", return_value=""), \
+         patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN"):
         cursor = MagicMock()
         # devops_agent_session: empty
@@ -224,14 +224,14 @@ def test_get_repo_token_with_refresh_skips_repo_bot_for_path_b():
 def test_get_repo_bot_token_skips_repo_bot_for_path_b():
     """T13-04: get_repo_bot_token 路径 B 仓库跳过仓库级 bot token 层。"""
     from unittest.mock import patch, MagicMock
-    from src.user.db import get_repo_bot_token
+    from src.domains.mgmt.user.db import get_repo_bot_token
 
-    with patch("src.user.db.db") as mock_db, \
-         patch("src.user.db.db_lock"), \
-         patch("src.user.db._get_global_bot_token", return_value=""), \
-         patch("src.user.db.get_host_user_id", return_value=42), \
-         patch("src.user.db.get_bot_token_by_repo", return_value="DIRTY_BOT"), \
-         patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+    with patch("src.domains.mgmt.user.db.db") as mock_db, \
+         patch("src.domains.mgmt.user.db.db_lock"), \
+         patch("src.domains.mgmt.user.db._get_global_bot_token", return_value=""), \
+         patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
+         patch("src.domains.mgmt.user.db.get_bot_token_by_repo", return_value="DIRTY_BOT"), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="USER_TOKEN"):
         result = get_repo_bot_token("gitcode:owner/repo")
         print(f"  result: {result!r}")
@@ -243,14 +243,14 @@ def test_get_repo_bot_token_skips_repo_bot_for_path_b():
 def test_get_github_token_skips_repo_bot_for_path_b():
     """T13-05: get_github_token 路径 B 仓库跳过仓库级 bot token 层。"""
     from unittest.mock import patch, MagicMock
-    from src.user.db import get_github_token
+    from src.domains.mgmt.user.db import get_github_token
 
-    with patch("src.user.db.db") as mock_db, \
-         patch("src.user.db.db_lock"), \
-         patch("src.user.db.get_host_user_id", return_value=42), \
-         patch("src.auth.grape_account_db.get_grape_account_by_username", return_value=None), \
-         patch("src.user.db.get_global_github_bot_token", return_value=""), \
-         patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
+    with patch("src.domains.mgmt.user.db.db") as mock_db, \
+         patch("src.domains.mgmt.user.db.db_lock"), \
+         patch("src.domains.mgmt.user.db.get_host_user_id", return_value=42), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_username", return_value=None), \
+         patch("src.domains.mgmt.user.db.get_global_github_bot_token", return_value=""), \
+         patch("src.domains.mgmt.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "alice"}), \
          patch("src.api.deps.get_user_github_token_with_refresh", return_value="USER_GH_TOKEN"):
         cursor = MagicMock()
         cursor.fetchone.return_value = ("DIRTY_GH_BOT",)
@@ -273,7 +273,7 @@ def test_host_repo_fallback_bot_username_empty():
     命中全局 bot → PR 审查人=全局 bot → bot 无协作权限 → 审查失败。
     修复：bot_username=(global_bot_username if not _use_path_b else "")。
     """
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     import uuid
 
     repo_key = f"gitcode:owner/test-botusername-{uuid.uuid4().hex[:6]}"
@@ -308,7 +308,7 @@ def test_repair_host_fallback_bot_username_empty():
 
     同 T14-01 但针对 repair_host 的 _db_kwargs 组装。
     """
-    from src.user.db import add_managed_repo
+    from src.domains.mgmt.user.db import add_managed_repo
     import uuid
 
     repo_key = f"gitcode:owner/test-repair-botusername-{uuid.uuid4().hex[:6]}"
@@ -348,7 +348,7 @@ def test_update_repo_bot_token_clears_host_user_id():
 
     auto_upgrade 升级后 host_user_id 应归 0（路径 A），消除语义混合状态。
     """
-    from src.user.db import add_managed_repo, _update_repo_bot_token
+    from src.domains.mgmt.user.db import add_managed_repo, _update_repo_bot_token
     import uuid
 
     repo_key = f"gitcode:owner/test-upgrade-clear-{uuid.uuid4().hex[:6]}"

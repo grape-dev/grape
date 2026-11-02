@@ -17,7 +17,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 
 @pytest.fixture(autouse=True)
@@ -96,7 +96,7 @@ class TestMergeSameTransaction:
 
     def test_unbind_placeholder_binding(self):
         """unbind_placeholder_binding 将旧绑定标记为 status=0。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account, create_external_identity,
             unbind_placeholder_binding, get_external_identity_any_status,
         )
@@ -116,7 +116,7 @@ class TestMergeSameTransaction:
 
     def test_mark_account_merged_clears_email(self):
         """mark_account_merged 标记 status=4 + 清空邮箱。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account_oauth, mark_account_merged, get_grape_account_by_id,
         )
         account = create_grape_account_oauth(
@@ -138,7 +138,7 @@ class TestMergeSameTransaction:
 
     def test_restore_binding_in_tx_revives_status0(self):
         """restore_binding_in_tx 恢复 status=0 的记录（只写不读，MySQL 安全）。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account, create_external_identity,
             unbind_placeholder_binding, restore_binding_in_tx,
             mark_account_merged, get_external_identity,
@@ -169,7 +169,7 @@ class TestMergeSameTransaction:
 
     def test_merge_placeholder_account_deprecated_wrapper(self):
         """旧 merge_placeholder_account 兼容包装仍然可用（含邮箱清理）。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account_oauth, create_external_identity,
             merge_placeholder_account, get_grape_account_by_id,
             create_grape_account,
@@ -200,7 +200,7 @@ class TestMergedAccountEmailCleanup:
 
     def test_mark_account_merged_clears_all_email_fields(self):
         """mark_account_merged 清空 email/email_source/email_is_placeholder。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account_oauth, mark_account_merged, get_grape_account_by_id,
         )
         account = create_grape_account_oauth(
@@ -220,7 +220,7 @@ class TestMergedAccountEmailCleanup:
 
     def test_transfer_bind_clears_email(self):
         """transfer_bind 中 status=4 SQL 包含 email 清理。"""
-        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_id
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_grape_account_by_id
         from src.kernel.session_manager import db as _db, db_lock as _dl
         account = create_grape_account(
             username="test_p12_transfer", email="transfer@example.com", password="",
@@ -250,8 +250,8 @@ class TestCooldownSingleTransaction:
 
     def test_anonymize_success(self):
         """匿名化成功：status=2 + 字段匿名化。"""
-        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_id
-        from src.admin.cooldown import _anonymize_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_grape_account_by_id
+        from src.domains.mgmt.admin.cooldown import _anonymize_account
         account = create_grape_account(
             username="test_p12_anon", email="anon@test.com", password="pw",
             nickname="TestUser", avatar_url="http://example.com/a.png",
@@ -271,8 +271,8 @@ class TestCooldownSingleTransaction:
 
     def test_anonymize_idempotent(self):
         """匿名化幂等：已处理（status=2）的账号再次执行是 no-op。"""
-        from src.auth.grape_account_db import create_grape_account, get_grape_account_by_id
-        from src.admin.cooldown import _anonymize_account
+        from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_grape_account_by_id
+        from src.domains.mgmt.admin.cooldown import _anonymize_account
         account = create_grape_account(username="test_p12_idem", email="idem@test.com", password="pw")
         assert account is not None
         with db_lock:
@@ -287,10 +287,10 @@ class TestCooldownSingleTransaction:
 
     def test_anonymize_clears_external_identities(self):
         """匿名化清除 external_identities。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account, create_external_identity, get_external_identity,
         )
-        from src.admin.cooldown import _anonymize_account
+        from src.domains.mgmt.admin.cooldown import _anonymize_account
         account = create_grape_account(username="test_p12_ext", email="", password="")
         assert account is not None
         create_external_identity(
@@ -308,7 +308,7 @@ class TestCooldownSingleTransaction:
     def test_no_datetime_now_in_anonymize(self):
         """_anonymize_account 源码中无 datetime('now') SQL。"""
         import inspect
-        from src.admin.cooldown import _anonymize_account
+        from src.domains.mgmt.admin.cooldown import _anonymize_account
         source = inspect.getsource(_anonymize_account)
         sql_lines = [l for l in source.split("\n") if "execute" in l or "WHERE" in l or "SET" in l]
         for line in sql_lines:
@@ -322,7 +322,7 @@ class TestUnbindViaDAL:
 
     def test_clear_placeholder_email_clears(self):
         """placeholder 邮箱被清理。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account, clear_placeholder_email, get_grape_account_by_id,
         )
         account = create_grape_account(username="test_p12_clear_ph", email="", password="")
@@ -337,7 +337,7 @@ class TestUnbindViaDAL:
 
     def test_clear_placeholder_email_not_placeholder(self):
         """非 placeholder 邮箱不受影响。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account, clear_placeholder_email, get_grape_account_by_id,
         )
         account = create_grape_account(
@@ -351,7 +351,7 @@ class TestUnbindViaDAL:
 
     def test_clear_placeholder_email_wrong_provider(self):
         """email_source 不匹配 provider 时不动。"""
-        from src.auth.grape_account_db import (
+        from src.domains.mgmt.auth.grape_account_db import (
             create_grape_account, clear_placeholder_email, get_grape_account_by_id,
         )
         account = create_grape_account(username="test_p12_wrong_prov", email="", password="")
@@ -365,7 +365,7 @@ class TestUnbindViaDAL:
     def test_unbind_provider_no_direct_sql(self):
         """unbind_provider 源码中无直接 SQL 操作 grape_accounts 表。"""
         import inspect
-        from src.api.routes.grape_auth import unbind_provider
+        from src.domains.mgmt.routes.grape_auth import unbind_provider
         source = inspect.getsource(unbind_provider)
         assert "UPDATE grape_accounts" not in source
         assert "INSERT INTO grape_accounts" not in source
@@ -379,10 +379,10 @@ class TestRedirectUriFromProviderConfig:
 
     def test_redirect_uri_from_provider_config(self):
         """provider 配置有 redirect_uri 时直接返回。"""
-        from src.auth.providers import get_redirect_uri
+        from src.domains.mgmt.auth.providers import get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "TestProvider", "redirect_uri": "https://example.com/cb/test"}
-        with patch("src.auth.providers.get_provider", return_value=mock_cfg):
+        with patch("src.domains.mgmt.auth.providers.get_provider", return_value=mock_cfg):
             class FakeRequest:
                 headers = {"Host": "localhost"}
             result = get_redirect_uri(FakeRequest(), "test")
@@ -390,10 +390,10 @@ class TestRedirectUriFromProviderConfig:
 
     def test_redirect_uri_fallback_host_header(self):
         """provider 配置无 redirect_uri 时从 Host header 构造。"""
-        from src.auth.providers import get_redirect_uri
+        from src.domains.mgmt.auth.providers import get_redirect_uri
         from unittest.mock import patch
         mock_cfg = {"name": "TestProvider"}
-        with patch("src.auth.providers.get_provider", return_value=mock_cfg):
+        with patch("src.domains.mgmt.auth.providers.get_provider", return_value=mock_cfg):
             class FakeRequest:
                 headers = {"Host": "localhost:8000", "X-Forwarded-Proto": "https"}
             result = get_redirect_uri(FakeRequest(), "test")
@@ -401,7 +401,7 @@ class TestRedirectUriFromProviderConfig:
 
     def test_redirect_uri_empty_provider_raises(self):
         """provider 为空字符串时抛 ValueError（统一回调路由已删除）。"""
-        from src.auth.providers import get_redirect_uri
+        from src.domains.mgmt.auth.providers import get_redirect_uri
         import pytest as _pytest
         class FakeRequest:
             headers = {"Host": "localhost"}
@@ -411,13 +411,13 @@ class TestRedirectUriFromProviderConfig:
     def test_no_oauth_redirect_uri_env_var(self):
         """get_redirect_uri 代码中无 OAUTH_REDIRECT_URI 环境变量引用。"""
         import inspect
-        from src.auth import providers
+        from src.domains.mgmt.auth import providers
         source = inspect.getsource(providers.get_redirect_uri)
         assert "OAUTH_REDIRECT_URI" not in source
 
     def test_no_get_oauth_redirect_uri_function(self):
         """security_config.py 中无 get_oauth_redirect_uri 函数。"""
-        from src.auth import security_config
+        from src.domains.mgmt.auth import security_config
         assert not hasattr(security_config, "get_oauth_redirect_uri")
 
     def test_example_config_has_redirect_uri(self):

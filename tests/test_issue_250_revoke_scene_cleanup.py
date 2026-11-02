@@ -113,7 +113,7 @@ class TestRevokeCleansSceneEngineRuntimeIds:
         _insert_scene(scene_id, repo_key, nodes)
 
         try:
-            from src.api.routes.settings import revoke_runtime_credential
+            from src.domains.mgmt.routes.settings import revoke_runtime_credential
             revoke_runtime_credential(cid, {"id": 1, "username": "tester", "auth_type": "api_key"})
 
             scene_nodes = _get_scene_nodes(scene_id, repo_key)
@@ -142,7 +142,7 @@ class TestRevokeCleansSceneEngineRuntimeIds:
         _insert_scene(scene_id, repo_key, nodes)
 
         try:
-            from src.api.routes.settings import revoke_runtime_credential
+            from src.domains.mgmt.routes.settings import revoke_runtime_credential
             revoke_runtime_credential(cid_del, {"id": 1, "username": "tester", "auth_type": "api_key"})
 
             scene_nodes = _get_scene_nodes(scene_id, repo_key)
@@ -158,7 +158,7 @@ class TestRevokeCleansSceneEngineRuntimeIds:
         """凭据无 runtime 时 revoke 不报错（无场景清理发生）。"""
         cid = _insert_credential()
         try:
-            from src.api.routes.settings import revoke_runtime_credential
+            from src.domains.mgmt.routes.settings import revoke_runtime_credential
             result = revoke_runtime_credential(cid, {"id": 1, "username": "tester", "auth_type": "api_key"})
             assert "已吊销" in result["message"]
         finally:
@@ -181,7 +181,7 @@ class TestValidateSceneEngineIdsGracefulDegradation:
                   "engine_runtime_ids": [rid_invalid, rid_valid]}]
 
         try:
-            from src.api.routes.scenes import _validate_scene_engine_ids
+            from src.domains.mgmt.routes.scenes import _validate_scene_engine_ids
             _validate_scene_engine_ids(nodes, repo_key)
         finally:
             _cleanup_credential(cid)
@@ -192,7 +192,7 @@ class TestValidateSceneEngineIdsGracefulDegradation:
         repo_key = f"gitcode:{owner}/{repo}"
         nodes = [{"id": "coding", "tag": "coding", "skill": "implementation",
                   "engine_runtime_ids": [999998, 999999]}]
-        from src.api.routes.scenes import _validate_scene_engine_ids
+        from src.domains.mgmt.routes.scenes import _validate_scene_engine_ids
         _validate_scene_engine_ids(nodes, repo_key)
 
     def test_valid_rid_still_validated(self):
@@ -206,7 +206,7 @@ class TestValidateSceneEngineIdsGracefulDegradation:
         nodes = [{"id": "coding", "tag": "coding", "skill": "implementation",
                   "engine_runtime_ids": [rid]}]
         try:
-            from src.api.routes.scenes import _validate_scene_engine_ids
+            from src.domains.mgmt.routes.scenes import _validate_scene_engine_ids
             _validate_scene_engine_ids(nodes, repo_key)
         finally:
             _cleanup_credential(cid)
@@ -231,14 +231,14 @@ class TestRevokeFullChain:
 
         try:
             # 1. revoke 凭据（物理删除 agent_runtimes + 清理场景配置）
-            from src.api.routes.settings import revoke_runtime_credential
+            from src.domains.mgmt.routes.settings import revoke_runtime_credential
             revoke_runtime_credential(cid, {"id": 1, "username": "tester", "auth_type": "api_key"})
 
             # 2. 场景校验不报错（失效 ID 已被清理 + 优雅降级兜底）
             scene_nodes = _get_scene_nodes(scene_id, repo_key)
             assert rid not in (scene_nodes[0].get("engine_runtime_ids") or [])
 
-            from src.api.routes.scenes import _validate_scene_engine_ids
+            from src.domains.mgmt.routes.scenes import _validate_scene_engine_ids
             _validate_scene_engine_ids(scene_nodes, repo_key)
 
             # 3. 场景应用不报错（dispatch 逻辑对失效 runtime_id 已有容错）
@@ -264,7 +264,7 @@ class TestRevokeFullChain:
         _insert_scene(scene_id_2, repo_key, nodes)
 
         try:
-            from src.api.routes.settings import revoke_runtime_credential
+            from src.domains.mgmt.routes.settings import revoke_runtime_credential
             revoke_runtime_credential(cid, {"id": 1, "username": "tester", "auth_type": "api_key"})
 
             for sid in (scene_id_1, scene_id_2):

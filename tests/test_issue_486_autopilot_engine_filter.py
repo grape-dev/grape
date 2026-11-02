@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.kernel.session_manager import db, db_lock
-from src.api.routes.autopilot import _validate_engine_runtime_ids
+from src.domains.mgmt.routes.autopilot import _validate_engine_runtime_ids
 
 
 def _mk_cred(name, scope="global", owner_id="", owner_name="alice", repo_key="", status="active"):

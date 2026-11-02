@@ -365,7 +365,7 @@ Grape Server (1 台, 部署全部服务端组件)
   └── nginx            (:80/:443 TLS, 反代 main+webhook)
 
 Remote Workers (N 台, 仅装 worker 运行时)
-  └── runtime-agent   (python -m src.runtime.agent)
+  └── runtime-agent   (python -m src.domains.runtime.engine.agent)
 
 注: grape-admin 运营管理台为独立项目，单独部署
 ```

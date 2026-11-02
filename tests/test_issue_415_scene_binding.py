@@ -61,7 +61,7 @@ def _add_issue(repo_key, number, title="t", scene_id=""):
 
 
 def _set_repo_scene(repo_key, scene_id):
-    from src.user.db import add_managed_repo, set_repo_scene
+    from src.domains.mgmt.user.db import add_managed_repo, set_repo_scene
     add_managed_repo(repo_key, "o", "r")
     set_repo_scene(repo_key, scene_id)
 
@@ -71,7 +71,7 @@ class TestGetIssueSceneFallback:
         """Issue 无场景 + 仓库有默认场景 → 返回仓库默认场景。"""
         from src.api.session_store import get_issue_scene
         _add_issue(REPO, 901, scene_id="")
-        with patch("src.user.db.get_repo_scene", return_value="cloud-native"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="cloud-native"):
             scene, uid = get_issue_scene(REPO, "#901")
         assert scene == "cloud-native"
         assert uid == 0
@@ -80,7 +80,7 @@ class TestGetIssueSceneFallback:
         """Issue 无场景 + 仓库无默认场景 → 保持 ("", 0)（走智能推荐）。"""
         from src.api.session_store import get_issue_scene
         _add_issue(REPO, 902, scene_id="")
-        with patch("src.user.db.get_repo_scene", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value=""):
             scene, uid = get_issue_scene(REPO, "#902")
         assert scene == ""
         assert uid == 0
@@ -89,7 +89,7 @@ class TestGetIssueSceneFallback:
         """Issue 级显式场景优先于仓库默认场景。"""
         from src.api.session_store import get_issue_scene
         _add_issue(REPO, 903, scene_id="issue-scene")
-        with patch("src.user.db.get_repo_scene", return_value="cloud-native"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="cloud-native"):
             scene, uid = get_issue_scene(REPO, "#903")
         assert scene == "issue-scene"
 
@@ -105,7 +105,7 @@ class TestCreateTaskSceneFallback:
              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 911}), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="fake_token"), \
              patch("src.api.issues_center._get_user_id_by_gitcode", return_value=1), \
-             patch("src.api.event_pipeline.run_pipeline", return_value={"seq": 0, "ok": True}):
+             patch("src.domains.runtime.pipeline.event_pipeline.run_pipeline", return_value={"seq": 0, "ok": True}):
             def _fake_set_issue_scene(rk, iid, sid, scene_user_id=0):
                 _calls.append((rk, iid, sid, scene_user_id))
             with patch.object(_ss, "set_issue_scene", side_effect=_fake_set_issue_scene):

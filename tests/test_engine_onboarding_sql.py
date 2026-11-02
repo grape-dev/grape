@@ -35,7 +35,7 @@ def _seed(conn, rows):
 
 
 def _call(repo="", user=None):
-    from src.api.routes.runtime import runtime_engine_onboarding
+    from src.domains.runtime.routes.runtime import runtime_engine_onboarding
     u = user or {"username": "dave", "id": 999, "org_id": 0}
     return runtime_engine_onboarding(repo=repo, user=u)
 
@@ -44,8 +44,8 @@ def _call(repo="", user=None):
 def real_db(monkeypatch):
     """使用 conftest 已初始化的真实测试库连接（列名=真实 DDL）。"""
     from src.kernel.session_manager import db, db_lock
-    import src.user.db as db_mod
-    import src.agent.executor as executor_mod
+    import src.domains.mgmt.user.db as db_mod
+    import src.domains.runtime.agents.executor as executor_mod
     from unittest.mock import patch
     _seed(db, [])
     with patch.object(db_mod, "get_server_base_url", return_value="https://test-base"), \
@@ -110,8 +110,8 @@ class TestOnboardingSqlColumns:
         """用户名 JOIN 大小写不敏感（对齐库内 LOWER(username) 惯例）：
         凭据 owner_name='Alice'，查询用户名 'alice' → 仍命中（大小写差异不造成误报）。"""
         from unittest.mock import patch
-        import src.user.db as db_mod
-        import src.agent.executor as executor_mod
+        import src.domains.mgmt.user.db as db_mod
+        import src.domains.runtime.agents.executor as executor_mod
         cur = real_db.cursor()
         cur.execute("DELETE FROM agent_runtimes"); cur.execute("DELETE FROM runtime_credentials")
         cur.execute("INSERT INTO runtime_credentials (id, name, token_hash, scope, owner_name, owner_id, repo_key, org_id) VALUES (301,'cred-x','hx','repo','Alice','','gitcode:owner/r',0)")
@@ -119,6 +119,6 @@ class TestOnboardingSqlColumns:
         real_db.commit()
         with patch.object(db_mod, "get_server_base_url", return_value="https://t"), \
              patch.object(executor_mod, "discover_backends", return_value=[]):
-            from src.api.routes.runtime import runtime_engine_onboarding
+            from src.domains.runtime.routes.runtime import runtime_engine_onboarding
             r = runtime_engine_onboarding(repo="gitcode:owner/r", user={"username": "alice", "id": 55, "org_id": 0})
         assert r["needs_worker"] is False, "凭据 owner_name 大小写差异不应漏命中（误报）"

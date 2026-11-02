@@ -1,7 +1,7 @@
 """Issue #500：bwrap wrap failed 告警噪音治理回归测试。
 
 背景：worker 日志被 `hermes ACP bwrap wrap failed, running unsandboxed:
-cannot import name 'build_bwrap_cmd' from 'src.agent.sandbox'` 刷屏——
+cannot import name 'build_bwrap_cmd' from 'src.domains.runtime.agents.sandbox'` 刷屏——
 部署环境 sandbox 为陈旧包布局（sandbox/__init__.py 无导出），三个调用点
 （hermes_acp / hwcloud_acp / executor）不看配置先 try-import 再逐条告警。
 
@@ -12,7 +12,7 @@ cannot import name 'build_bwrap_cmd' from 'src.agent.sandbox'` 刷屏——
 - 开启 + 包装/导入失败：命令降级 unsandboxed，WARNING 恰 1 条（log-once），
   后续降 DEBUG（不刷屏、不静默）。
 
-另守卫根因修复：src.agent.sandbox 必须以包布局发布且导出 build_bwrap_cmd
+另守卫根因修复：src.domains.runtime.agents.sandbox 必须以包布局发布且导出 build_bwrap_cmd
 （部署按文件覆盖时覆写陈旧 __init__.py）。
 """
 import json
@@ -30,12 +30,12 @@ if SRC_DIR not in sys.path:
 
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
-from src.runtime.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
+from src.domains.runtime.engine.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
 import src.kernel.config  # noqa: E402
-import src.agent.hermes_acp as ha  # noqa: E402
-import src.agent.hwcloud_acp as hwa  # noqa: E402
-import src.agent.executor as ex  # noqa: E402
-from src.runtime import stream_runtime  # noqa: E402
+import src.domains.runtime.agents.hermes_acp as ha  # noqa: E402
+import src.domains.runtime.agents.hwcloud_acp as hwa  # noqa: E402
+import src.domains.runtime.agents.executor as ex  # noqa: E402
+from src.domains.runtime.engine import stream_runtime  # noqa: E402
 
 _BWRAP_PREFIX = ["/usr/bin/bwrap", "--die-with-parent", "--unshare-all", "--share-net", "--"]
 _FAIL_SUBSTR = "bwrap wrap failed, running unsandboxed"
@@ -131,10 +131,10 @@ def _assert_three_states(runner, extract_cmds, cmd_tail_check, monkeypatch, tmp_
         caplog.clear()
         monkeypatch.setattr(src.kernel.config, "GRAPE_AGENT_SANDBOX", sandbox_on)
         if break_import:
-            monkeypatch.delattr("src.agent.sandbox.build_bwrap_cmd", raising=False)
+            monkeypatch.delattr("src.domains.runtime.agents.sandbox.build_bwrap_cmd", raising=False)
         else:
             monkeypatch.setattr(
-                "src.agent.sandbox.build_bwrap_cmd",
+                "src.domains.runtime.agents.sandbox.build_bwrap_cmd",
                 lambda cwd, backend_name="": list(_BWRAP_PREFIX), raising=False)
         runner(popen_cmds)
         return extract_cmds(popen_cmds), list(caplog.records)
@@ -160,7 +160,7 @@ def _assert_three_states(runner, extract_cmds, cmd_tail_check, monkeypatch, tmp_
     popen_cmds = []
     caplog.clear()
     monkeypatch.setattr(src.kernel.config, "GRAPE_AGENT_SANDBOX", True)
-    monkeypatch.delattr("src.agent.sandbox.build_bwrap_cmd", raising=False)
+    monkeypatch.delattr("src.domains.runtime.agents.sandbox.build_bwrap_cmd", raising=False)
     runner(popen_cmds)
     runner(popen_cmds)
     cmds = extract_cmds(popen_cmds)
@@ -245,8 +245,8 @@ def _run_executor_once(popen_cmds):
         popen_cmds.append(list(cmd))
         return FakeProc(cmd, *a, **k)
 
-    with patch("src.agent.executor.subprocess.Popen", side_effect=fake_popen), \
-         patch("src.runtime.os_adapter.find_cli", return_value="/usr/bin/opencode"):
+    with patch("src.domains.runtime.agents.executor.subprocess.Popen", side_effect=fake_popen), \
+         patch("src.domains.runtime.engine.os_adapter.find_cli", return_value="/usr/bin/opencode"):
         events = list(stream_runtime("p", os.getcwd(), "", "issue"))
     assert [d for et, d in events if et == "done"], "应产出 done 事件"
 
@@ -275,8 +275,8 @@ class TestSandboxPackage:
         部署环境曾以陈旧 sandbox/__init__.py（无导出）遮蔽模块文件，导致
         cannot import name；包布局使部署按文件覆盖时必然覆写该 __init__。
         """
-        import src.agent.sandbox as sbx
-        from src.agent.sandbox import build_bwrap_cmd, sandbox_enabled
+        import src.domains.runtime.agents.sandbox as sbx
+        from src.domains.runtime.agents.sandbox import build_bwrap_cmd, sandbox_enabled
         assert callable(build_bwrap_cmd)
         assert callable(sandbox_enabled)
         assert sbx.__file__.endswith(os.path.join("sandbox", "__init__.py")), \

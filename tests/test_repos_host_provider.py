@@ -57,27 +57,27 @@ def _records():
 
 
 def _patch_base(mp, rec):
-    mp.setattr("src.user.db.get_webhook_url",
+    mp.setattr("src.domains.mgmt.user.db.get_webhook_url",
                lambda: "https://grape.topxtopx.com/webhook/gitcode")
     mp.setattr("src.api.session_store.ensure_default_agent_sessions", lambda *a, **k: None)
-    mp.setattr("src.api.routes.repos.with_oauth_token", lambda *a, **k: None)
-    mp.setattr("src.user.db.get_global_github_bot_token", lambda: "")
-    mp.setattr("src.user.db.get_global_github_bot_username", lambda: "")
+    mp.setattr("src.domains.mgmt.routes.repos.with_oauth_token", lambda *a, **k: None)
+    mp.setattr("src.domains.mgmt.user.db.get_global_github_bot_token", lambda: "")
+    mp.setattr("src.domains.mgmt.user.db.get_global_github_bot_username", lambda: "")
     def f_gh(*a, **k):
         rec["gh"] += 1
         return 101
     def f_gc(*a, **k):
         rec["gc"] += 1
         return 202
-    mp.setattr("src.user.repo_manager.setup_github_webhook", f_gh)
-    mp.setattr("src.api.routes.repos.setup_webhook", f_gc)
-    mp.setattr("src.api.routes.repos.find_existing_webhook", lambda *a, **k: None)
+    mp.setattr("src.domains.mgmt.user.repo_manager.setup_github_webhook", f_gh)
+    mp.setattr("src.domains.mgmt.routes.repos.setup_webhook", f_gc)
+    mp.setattr("src.domains.mgmt.routes.repos.find_existing_webhook", lambda *a, **k: None)
 
 
 def test_HT01_explicit_provider_github_only_hits_github(monkeypatch):
     rec = _records()
     _patch_base(monkeypatch, rec)
-    monkeypatch.setattr("src.api.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
     r = client.post("/api/repos/host?provider=github",
                     json={"full_name": "Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 200, r.text
@@ -87,8 +87,8 @@ def test_HT01_explicit_provider_github_only_hits_github(monkeypatch):
 def test_HT02_full_name_github_prefix_routes_github_not_gitcode(monkeypatch):
     rec = _records()
     _patch_base(monkeypatch, rec)
-    monkeypatch.setattr("src.api.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
-    monkeypatch.setattr("src.api.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
     r = client.post("/api/repos/host",
                     json={"full_name": "github:Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 200, r.text
@@ -104,8 +104,8 @@ def test_HT03_managed_github_prefix_routes_github(monkeypatch):
             "INSERT INTO managed_repos (repo_key, repo_owner, repo_name, full_name) "
             "VALUES ('github:Jason7602/testhost','Jason7602','testhost','Jason7602/testhost')")
         db.commit()
-    monkeypatch.setattr("src.api.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
-    monkeypatch.setattr("src.api.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
     try:
         r = client.post("/api/repos/host",
                         json={"full_name": "Jason7602/testhost"}, headers=_HEADERS_GH)
@@ -118,7 +118,7 @@ def test_HT03_managed_github_prefix_routes_github(monkeypatch):
 def test_HT04_github_no_token_400_not_gitcode(monkeypatch):
     rec = _records()
     _patch_base(monkeypatch, rec)
-    monkeypatch.setattr("src.api.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "")
     r = client.post("/api/repos/host?provider=github",
                     json={"full_name": "Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 400
@@ -130,12 +130,12 @@ def test_HT04_github_no_token_400_not_gitcode(monkeypatch):
 def test_HT05_gitcode_404_message(monkeypatch):
     rec = _records()
     _patch_base(monkeypatch, rec)
-    monkeypatch.setattr("src.api.routes.repos.with_oauth_token", lambda *a, **k: {"login": "Jason7602"})
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.with_oauth_token", lambda *a, **k: {"login": "Jason7602"})
     def f_gc(*a, **k):
         rec["gc"] += 1
         raise RuntimeError("GitCode API POST .../hooks failed (404): Project not found:Jason7602/testhost")
-    monkeypatch.setattr("src.api.routes.repos.setup_webhook", f_gc)
-    monkeypatch.setattr("src.api.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.setup_webhook", f_gc)
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
     r = client.post("/api/repos/host?provider=gitcode",
                     json={"full_name": "Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 502
@@ -146,8 +146,8 @@ def test_HT06_login_provider_gitcode_but_github_repo_goes_github(monkeypatch):
     """用户 GitCode 登录 + github: 仓库 → 不得再被 login_provider 短路到 gitcode。"""
     rec = _records()
     _patch_base(monkeypatch, rec)
-    monkeypatch.setattr("src.api.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
-    monkeypatch.setattr("src.api.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_github_token_with_refresh", lambda u, user_id: "gh_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
     r = client.post("/api/repos/host",
                     json={"full_name": "github:Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 200, r.text
@@ -157,11 +157,11 @@ def test_HT06_login_provider_gitcode_but_github_repo_goes_github(monkeypatch):
 def test_HT07_gitcode_token_401_message(monkeypatch):
     rec = _records()
     _patch_base(monkeypatch, rec)
-    monkeypatch.setattr("src.api.routes.repos.with_oauth_token", lambda *a, **k: {"login": "Jason7602"})
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.with_oauth_token", lambda *a, **k: {"login": "Jason7602"})
     def f_gc(*a, **k):
         raise RuntimeError("GitCode API POST .../hooks failed (401): Bad credentials")
-    monkeypatch.setattr("src.api.routes.repos.setup_webhook", f_gc)
-    monkeypatch.setattr("src.api.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.setup_webhook", f_gc)
+    monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh", lambda u, i: "gc_tok")
     r = client.post("/api/repos/host?provider=gitcode",
                     json={"full_name": "Jason7602/testhost"}, headers=_HEADERS_GH)
     assert r.status_code == 502

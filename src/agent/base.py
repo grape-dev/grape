@@ -1,2 +1,4 @@
-"""Agent 后端抽象基类（兼容转发层，M0 后迁至 src.runtime.base）"""
-from src.runtime.base import AgentRuntime as AgentBackend
+"""Compatibility re-export (Issue #699 Phase 1). Canonical: src.domains.runtime.agents.base"""
+import src.domains.runtime.agents.base as _impl
+globals().update({k: v for k, v in vars(_impl).items() if not k.startswith("__")})
+del _impl

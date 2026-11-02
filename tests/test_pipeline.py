@@ -7,7 +7,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 
 from unittest.mock import patch
 import pytest
-from src.api.routes.pipeline import _get_issue_pipeline, _running_issue_ids, AGENT_ORDER, STAGE_STATUS_MAP
+from src.domains.runtime.routes.pipeline import _get_issue_pipeline, _running_issue_ids, AGENT_ORDER, STAGE_STATUS_MAP
 from src.kernel.session_manager import db, db_lock
 
 
@@ -19,8 +19,8 @@ def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at=
 
 def _mock_bots():
     """mock get_all_bot_usernames + get_agent_display_name（函数内 import，用 patch）"""
-    return patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-           patch("src.api.event_pipeline.get_agent_display_name", side_effect=lambda at: {
+    return patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
+           patch("src.domains.runtime.pipeline.event_pipeline.get_agent_display_name", side_effect=lambda at: {
                "issue": "Issue Agent", "coding": "Coding Agent", "qa": "QA Agent",
                "sre": "SRE Agent", "vod": "VOD Agent"}.get(at, at))
 
@@ -117,7 +117,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload={"object_attributes": {"assignee": "younger_eric"}})]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.api.routes.pipeline._resolve_feishu_name", return_value="吴扬"):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", return_value="吴扬"):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "吴扬"
 
@@ -126,7 +126,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload={"object_attributes": {"assignee": "younger_eric"}})]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "younger_eric"
 
@@ -135,7 +135,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload={"issue": {"assignee": {"username": "alice"}}})]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "alice"
 
@@ -148,7 +148,7 @@ class TestPipeline:
                 payload={"object_attributes": {"assignee": "new_owner"}}),
         ]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "new_owner"
 
@@ -158,7 +158,7 @@ class TestPipeline:
         events = [_ev(1, "#1", "issue_opened", "issue", "issue_opened", "completed", "grape_bot",
                       payload=_json.dumps({"object_attributes": {"assignee": "bob"}}))]
         with _mock_bots()[0], _mock_bots()[1], \
-             patch("src.api.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
+             patch("src.domains.runtime.routes.pipeline._resolve_feishu_name", side_effect=lambda u: u):
             p = _get_issue_pipeline("owner/repo", "#1", events)
         assert p["current_owner"] == "bob"
 
@@ -317,9 +317,9 @@ class TestHistoryLimit:
     REPO_KEY = "gitcode:test542p/pipe"
 
     def _jwt_headers(self):
-        from src.auth import grape_account_db
+        from src.domains.mgmt.auth import grape_account_db
         from src.kernel.auth_sdk.jwt_utils import create_access_token
-        from src.auth.grape_account_db import get_token_version
+        from src.domains.mgmt.auth.grape_account_db import get_token_version
         uid = grape_account_db.create_grape_account("test_542_pipe", email=None, password="test123")
         if not uid:
             uid = grape_account_db.get_grape_account_by_username("test_542_pipe")

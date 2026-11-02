@@ -72,7 +72,7 @@ class TestBuildProjectInfo:
             os.makedirs(base, exist_ok=True)
             return base
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
         # worktree add 必然失败（临时目录不是真实 git 仓库）→ 返回 None → degraded，但 ensure_repo_base 已被调用
         from src.project_info.builder import build_project_info
         r = build_project_info("gitcode:org/test")
@@ -89,7 +89,7 @@ class TestBuildProjectInfo:
             os.makedirs(base, exist_ok=True)
             return base
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
         monkeypatch.setattr("src.project_info.builder._ensure_analysis_worktree",
                             lambda repo_key, token="", default_branch="": os.path.join(workspace_repo_dir(repo_key), "codebase"))
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
@@ -153,7 +153,7 @@ class TestEnsureRepoBaseAlwaysRefresh:
             calls["token"] = token
             return base
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
         from src.project_info.builder import build_project_info
         build_project_info("gitcode:org/test")
         assert calls["n"] == 1  # 即使 bare mirror 已存在也调用了
@@ -171,7 +171,7 @@ class TestEnsureRepoBaseAlwaysRefresh:
             calls["token"] = token
             return base
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
         from src.project_info.builder import build_project_info
         build_project_info("gitcode:org/test", token="my-bot-token")
         assert calls["token"] == "my-bot-token"
@@ -204,8 +204,8 @@ class TestWorktreeFetchWithToken:
             return 1, "", "not a git repo"
             # codegraph init 也调 _run
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
-        monkeypatch.setattr("src.runtime.repogit._run_git", _fake_run_git)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit._run_git", _fake_run_git)
         monkeypatch.setattr("src.project_info.builder._run", _fake_run)
         from src.project_info.builder import _ensure_analysis_worktree
         # worktree add 失败 → 返回 None，但 fetch 不会被调用（worktree add 失败在 fetch 之前）
@@ -238,8 +238,8 @@ class TestWorktreeFetchWithToken:
                 return 0, "", ""  # codegraph init 成功
             return 0, "", ""
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
-        monkeypatch.setattr("src.runtime.repogit._run_git", _fake_run_git)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit._run_git", _fake_run_git)
         monkeypatch.setattr("src.project_info.builder._run", _fake_run)
         from src.project_info.builder import _ensure_analysis_worktree
         result = _ensure_analysis_worktree("gitcode:org/test", token="test-token")
@@ -274,7 +274,7 @@ class TestBuildProjectInfoTokenPassing:
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: "explore")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "files")
         # mock get_gitcode_token 验证兜底被调用
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         monkeypatch.setattr(user_db, "get_gitcode_token", lambda repo_key="", user_id=0: "fallback-token")
         from src.project_info.builder import build_project_info
         r = build_project_info("gitcode:org/test", token="")
@@ -418,8 +418,8 @@ class TestDefaultBranchDrivesWorktree:
             import subprocess
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
-        monkeypatch.setattr("src.runtime.repogit._run_git", _fake_run_git)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit._run_git", _fake_run_git)
         monkeypatch.setattr("src.project_info.builder._run", _fake_run)
         from src.project_info.builder import _ensure_analysis_worktree
         result = _ensure_analysis_worktree("gitcode:org/test", token="t", default_branch="main")
@@ -455,8 +455,8 @@ class TestDefaultBranchDrivesWorktree:
             import subprocess
             return subprocess.CompletedProcess(args=args, returncode=0, stdout="", stderr="")
 
-        monkeypatch.setattr("src.runtime.repogit.ensure_repo_base", _fake_ensure_repo_base)
-        monkeypatch.setattr("src.runtime.repogit._run_git", _fake_run_git)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit.ensure_repo_base", _fake_ensure_repo_base)
+        monkeypatch.setattr("src.domains.runtime.engine.repogit._run_git", _fake_run_git)
         monkeypatch.setattr("src.project_info.builder._run", _fake_run)
         from src.project_info.builder import _ensure_analysis_worktree
         result = _ensure_analysis_worktree("gitcode:org/test", token="t", default_branch="main")

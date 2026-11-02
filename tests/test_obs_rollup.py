@@ -13,7 +13,7 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import rollup  # noqa: E402
+from src.domains.insight.observability import rollup  # noqa: E402
 
 PREFIX = "obsroll-test-"
 

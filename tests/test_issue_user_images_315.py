@@ -16,7 +16,7 @@ import pytest
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 
-from src.vcs.api_client import (
+from src.domains.runtime.vcs.api_client import (
     extract_gitcode_user_image_urls,
     _download_user_image,
     USER_IMAGE_MAX_COUNT,
@@ -90,7 +90,7 @@ class _FakeResp:
 
 
 def test_download_success(monkeypatch):
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen",
                         lambda req, timeout=None: _FakeResp("image/png", b"\x89PNG-fake"))
     r = _download_user_image(U1, "fake-token")
     assert "error" not in r
@@ -106,7 +106,7 @@ def test_download_authorization_header(monkeypatch):
         captured["auth"] = req.headers.get("Authorization")
         return _FakeResp("image/png", b"abc")
 
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen", fake_urlopen)
     _download_user_image(U1, "fake-token")
     assert captured["auth"] == "Bearer fake-token"
 
@@ -117,13 +117,13 @@ def test_download_403(monkeypatch):
     def fake_urlopen(req, timeout=None):
         raise urllib.error.HTTPError(U1, 403, "Forbidden", email.message.Message(), io.BytesIO(b"no access"))
 
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen", fake_urlopen)
     r = _download_user_image(U1, "fake-token")
     assert r["error"] == "HTTP 403"
 
 
 def test_download_non_image(monkeypatch):
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen",
                         lambda req, timeout=None: _FakeResp("text/html", b"<html>"))
     r = _download_user_image(U1, "fake-token")
     assert "non-image content-type" in r["error"]
@@ -131,7 +131,7 @@ def test_download_non_image(monkeypatch):
 
 def test_download_size_limit(monkeypatch):
     big = b"x" * (1024 * 1024)
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen",
                         lambda req, timeout=None: _FakeResp("image/png", big))
     r = _download_user_image(U1, "fake-token", max_size=1024)
     assert "size limit" in r["error"]
@@ -141,7 +141,7 @@ def test_download_timeout(monkeypatch):
     def fake_urlopen(req, timeout=None):
         raise urllib.error.URLError(urllib.error.URLError("timed out"))
 
-    monkeypatch.setattr("src.vcs.api_client.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.urllib.request.urlopen", fake_urlopen)
     r = _download_user_image(U1, "fake-token")
     assert r["error"] == "timeout"
 
@@ -166,13 +166,13 @@ def _patch_collect_env(monkeypatch, token="tk-fake", download_results=None, save
     """给 _collect_issue_user_images 打桩：token、下载结果、_attach_save。"""
     import src.api.issues_center as ic
 
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda repo_key="": token, raising=False)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda repo_key="": token, raising=False)
 
     class _FakeClient:
         def download_user_image(self, url, **kw):
             return (download_results or {}).get(url, {"error": "HTTP 403"})
 
-    monkeypatch.setattr("src.vcs.api_client.create_client", lambda repo_key, token="": _FakeClient())
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.create_client", lambda repo_key, token="": _FakeClient())
 
     saved_list = saved if saved is not None else []
 
@@ -250,7 +250,7 @@ def test_collect_top_level_exception_not_raised(monkeypatch):
     def boom(*a, **kw):
         raise RuntimeError("unexpected")
 
-    monkeypatch.setattr("src.vcs.api_client.extract_gitcode_user_image_urls", boom)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.extract_gitcode_user_image_urls", boom)
     from src.api.issues_center import _collect_issue_user_images
     r = _collect_issue_user_images("grape-dev", "grape", 315, [U1])  # 不应抛出
     assert "error" in r

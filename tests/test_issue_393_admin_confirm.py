@@ -24,7 +24,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.kernel.session_manager import db, db_lock
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -38,7 +38,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username):
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -173,7 +173,7 @@ class TestRepoRolesHelper:
     """src/auth/repo_roles.py 角色判定单元测试。"""
 
     def test_owner_is_admin_without_api_call(self):
-        from src.auth.repo_roles import get_repo_admin_identity
+        from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
         # 用独立账号绑 owner 身份，避免 UNIQUE(grape_user_id, provider) 约束
         # REPLACE 掉主账号的 issue393_admin 绑定（污染后续用例）。
         with db_lock:
@@ -194,20 +194,20 @@ class TestRepoRolesHelper:
                 db.commit()
 
     def test_unbound_user_is_not_admin(self):
-        from src.auth.repo_roles import get_repo_admin_identity
+        from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity
         # user id 不存在 → 无绑定 → None（fail-closed，不发起 VCS 查询）
         assert get_repo_admin_identity({"id": 123456789}, REPO_KEY) is None
 
     def test_maintainer_40_is_not_admin(self):
         """#393 终审口径：Maintainer(40) 不是 admin（区别于托管口径 >=40）。"""
-        from src.user import repo_manager
+        from src.domains.mgmt.user import repo_manager
         with patch.object(repo_manager, "_req",
                           return_value=_perm_payload(access_level=40, permission="write")):
-            from src.auth.repo_roles import _check_gitcode_admin as _chk
+            from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin as _chk
             assert _chk("t", "org", "repo", "u") is False
         with patch.object(repo_manager, "_req",
                           return_value=_perm_payload(access_level=50, permission="admin")):
-            from src.auth.repo_roles import _check_gitcode_admin as _chk2
+            from src.domains.mgmt.auth.repo_roles import _check_gitcode_admin as _chk2
             assert _chk2("t", "org", "repo", "u") is True
 
 
@@ -223,8 +223,8 @@ class TestAdminConfirmDone:
         _clean()
         tid = _insert_task(issue_number=501)
         with _oauth_pass_through(), \
-             patch("src.auth.repo_roles._check_gitcode_admin", return_value=True), \
-             patch("src.api.routes.issues._close_vcs_issues",
+             patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin", return_value=True), \
+             patch("src.domains.runtime.routes.issues._close_vcs_issues",
                    return_value={"gitcode": "success", "github": "skipped"}) as m_close:
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 200, r.text
@@ -261,7 +261,7 @@ class TestAdminConfirmDone:
             db.commit()
         try:
             _tok = _jwt_access_token(_owner_uid["id"], _owner_uid["username"])
-            with patch("src.api.routes.issues._close_vcs_issues",
+            with patch("src.domains.runtime.routes.issues._close_vcs_issues",
                        return_value={"gitcode": "skipped", "github": "skipped"}):
                 r = client.post(f"/api/issues/{tid}/admin-confirm-done",
                                 headers={"Authorization": f"Bearer {_tok}"})
@@ -279,7 +279,7 @@ class TestAdminConfirmDone:
         """Developer（access_level=30）→ 403，状态不变，无审计。"""
         _clean()
         tid = _insert_task(issue_number=503)
-        with _oauth_pass_through(), patch("src.auth.repo_roles._check_gitcode_admin", return_value=False):
+        with _oauth_pass_through(), patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin", return_value=False):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 403
         assert "管理员" in r.json()["detail"]["message"]
@@ -294,7 +294,7 @@ class TestAdminConfirmDone:
         _clean()
         tid = _insert_task(issue_number=504)
         with _oauth_pass_through(), \
-             patch("src.auth.repo_roles._check_gitcode_admin",
+             patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin",
                    side_effect=RuntimeError("GitCode API GET failed (403): forbidden")):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 403
@@ -325,8 +325,8 @@ class TestAdminConfirmDone:
         _clean()
         tid = _insert_task(status='completed', issue_number=506)
         with _oauth_pass_through() as _m_oauth, \
-             patch("src.api.routes.issues._close_vcs_issues") as m_close, \
-             patch("src.auth.repo_roles._check_gitcode_admin", return_value=True):
+             patch("src.domains.runtime.routes.issues._close_vcs_issues") as m_close, \
+             patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin", return_value=True):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 200
         assert r.json()["already_done"] is True
@@ -336,7 +336,7 @@ class TestAdminConfirmDone:
     def test_cancelled_400(self):
         _clean()
         tid = _insert_task(status='cancelled', issue_number=507)
-        with _oauth_pass_through(), patch("src.auth.repo_roles._check_gitcode_admin", return_value=True):
+        with _oauth_pass_through(), patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin", return_value=True):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 400
 
@@ -367,8 +367,8 @@ class TestAdminConfirmDone:
         _at2 = _insert_agent_task(509, status='queued')
         _ev = _insert_event(509, status='running')
         with _oauth_pass_through(), \
-             patch("src.auth.repo_roles._check_gitcode_admin", return_value=True), \
-             patch("src.api.routes.issues._close_vcs_issues",
+             patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin", return_value=True), \
+             patch("src.domains.runtime.routes.issues._close_vcs_issues",
                    return_value={"gitcode": "skipped", "github": "skipped"}):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 200
@@ -386,8 +386,8 @@ class TestAdminConfirmDone:
         _clean()
         tid = _insert_task(issue_number=510)
         with _oauth_pass_through(), \
-             patch("src.auth.repo_roles._check_gitcode_admin", return_value=True), \
-             patch("src.api.routes.issues._close_vcs_issues",
+             patch("src.domains.mgmt.auth.repo_roles._check_gitcode_admin", return_value=True), \
+             patch("src.domains.runtime.routes.issues._close_vcs_issues",
                    return_value={"gitcode": "skipped", "github": "skipped"}):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 200
@@ -445,12 +445,12 @@ class TestIssue491CrossUserAdminConfirm:
         """#491 主场景：自定义 admin 角色（role_name=Admin/access_level=20）确认他人需求 → 200。"""
         _clean()
         tid = _insert_task(issue_number=521)
-        from src.user import repo_manager
+        from src.domains.mgmt.user import repo_manager
         _payload = {"access_level": 20, "permission": "custom", "role_name": "Admin",
                     "permissions": {"admin": False, "push": True, "pull": True}}
         with _oauth_pass_through(), \
              patch.object(repo_manager, "_req", return_value=_payload), \
-             patch("src.api.routes.issues._close_vcs_issues",
+             patch("src.domains.runtime.routes.issues._close_vcs_issues",
                    return_value={"gitcode": "skipped", "github": "skipped"}):
             r = client.post(f"/api/issues/{tid}/admin-confirm-done", headers=_headers)
         assert r.status_code == 200, r.text
@@ -464,7 +464,7 @@ class TestIssue491CrossUserAdminConfirm:
         """安全边界：Developer（role_name=Developer/access_level=30）非创建者 → 403。"""
         _clean()
         tid = _insert_task(issue_number=522)
-        from src.user import repo_manager
+        from src.domains.mgmt.user import repo_manager
         _payload = {"access_level": 30, "permission": "write", "role_name": "Developer",
                     "permissions": {"admin": False, "push": True, "pull": True}}
         with _oauth_pass_through(), \
@@ -498,7 +498,7 @@ class TestIssue491CrossUserAdminConfirm:
             db.commit()
         try:
             _tok = _jwt_access_token(_owner_uid["id"], _owner_uid["username"])
-            with patch("src.api.routes.issues._close_vcs_issues",
+            with patch("src.domains.runtime.routes.issues._close_vcs_issues",
                        return_value={"gitcode": "skipped", "github": "skipped"}):
                 r = client.post(f"/api/issues/{tid}/admin-confirm-done",
                                 headers={"Authorization": f"Bearer {_tok}"})

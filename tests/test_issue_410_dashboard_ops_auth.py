@@ -38,7 +38,7 @@ def test_anonymous_probe_now_does_not_trigger_probe():
     from fastapi.testclient import TestClient
     from src.api.main import app
 
-    with patch("src.observability.engine_probe.probe_all_now") as mock_probe:
+    with patch("src.domains.insight.observability.engine_probe.probe_all_now") as mock_probe:
         with TestClient(app) as cli:
             r = cli.get("/api/dashboard/ops/probe-now")
             assert r.status_code == 401
@@ -53,7 +53,7 @@ def test_authed_ops_endpoints_behavior_unchanged():
     from fastapi.testclient import TestClient
     from src.api.deps import require_org_member
     from src.api.main import app
-    import src.observability.engine_probe as _ep
+    import src.domains.insight.observability.engine_probe as _ep
 
     user = {"id": 41001, "username": "ops-user", "org_id": 0, "org_role": "owner"}
     app.dependency_overrides[require_org_member] = lambda: user
@@ -83,7 +83,7 @@ def test_authed_ops_endpoints_behavior_unchanged():
             assert "issues" in r.json()
 
             # a2a-health（server_base_url 置为不可达地址，handler 内捕获异常仍返回 200）
-            with patch("src.user.db.get_server_base_url", return_value="http://127.0.0.1:1"):
+            with patch("src.domains.mgmt.user.db.get_server_base_url", return_value="http://127.0.0.1:1"):
                 r = cli.get("/api/dashboard/ops/a2a-health")
                 assert r.status_code == 200, r.text
                 body = r.json()

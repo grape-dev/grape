@@ -30,12 +30,12 @@ _headers = {}
 def _seed_user_and_cache():
     """预置一个测试用户 + user_repos 缓存（未过期），使 /member 走缓存命中路径。"""
     global _headers
-    from src.auth.grape_account_db import create_grape_account, get_token_version
+    from src.domains.mgmt.auth.grape_account_db import create_grape_account, get_token_version
     from src.kernel.auth_sdk.jwt_utils import create_access_token
-    from src.user.db import save_user_repos
+    from src.domains.mgmt.user.db import save_user_repos
 
     uname = "probe_ttl_user"
-    from src.auth.grape_account_db import get_grape_account_by_username
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
     acc = get_grape_account_by_username(uname)
     if not acc:
         acc = create_grape_account(username=uname, email="", password="pw")
@@ -71,8 +71,8 @@ def _seed_user_and_cache():
 
 
 def _clear_member_cache():
-    from src.user.db import clear_user_repos
-    from src.auth.grape_account_db import get_grape_account_by_username
+    from src.domains.mgmt.user.db import clear_user_repos
+    from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
     acc = get_grape_account_by_username("probe_ttl_user")
     if acc:
         clear_user_repos(acc["id"])
@@ -86,7 +86,7 @@ class TestMemberProbeDeferred:
         self.uid = uid
         # 记录 _probe_stale_repos 是否被触发
         self.probe_called = []
-        monkeypatch.setattr("src.api.routes.repos._probe_stale_repos",
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._probe_stale_repos",
                             lambda *a, **k: self.probe_called.append((a, k)))
         # 记录 _fetch_and_cache（VCS 全量拉取）是否被调用——缓存命中不应调用
         self.fetch_calls = []
@@ -100,7 +100,7 @@ class TestMemberProbeDeferred:
                  "owner": "ownorg", "name": "probe-b", "is_admin": False, "role": "Member"},
             ]
 
-        monkeypatch.setattr("src.api.routes.repos._fetch_and_cache", _fake_fetch)
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache", _fake_fetch)
         yield
         _clear_member_cache()
 
@@ -122,8 +122,8 @@ class TestMemberProbeDeferred:
 
     def test_ut03_cache_expired_triggers_probe(self):
         """缓存过期/缺失时才触发探活（数据刷新后清理失效托管）。"""
-        from src.auth.grape_account_db import get_grape_account_by_username
-        from src.user.db import clear_user_repos
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username
+        from src.domains.mgmt.user.db import clear_user_repos
         acc = get_grape_account_by_username("probe_ttl_user")
         if acc:
             clear_user_repos(acc["id"])
@@ -147,9 +147,9 @@ class TestProbeThrottle:
         self.uid = uid
         _clear_member_cache()  # 强制缓存过期，走探活触发分支
         self.calls = []
-        monkeypatch.setattr("src.api.routes.repos._probe_stale_repos",
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._probe_stale_repos",
                             lambda *a, **k: self.calls.append(1))
-        monkeypatch.setattr("src.api.routes.repos._fetch_and_cache",
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache",
                             lambda uid, tok, p: [
                                 {"repo_key": "gitcode:ownorg/probe-a", "full_name": "ownorg/probe-a",
                                  "owner": "ownorg", "name": "probe-a", "is_admin": True, "role": "Admin"},
@@ -160,7 +160,7 @@ class TestProbeThrottle:
 
     def test_ut05_throttle_within_interval(self):
         """节流：短时间重复请求只触发一次探活。"""
-        with patch("src.user.repo_manager._req", return_value={}):
+        with patch("src.domains.mgmt.user.repo_manager._req", return_value={}):
             client.get("/api/repos/member", headers=_headers)
             client.get("/api/repos/member", headers=_headers)
         # 修复前每次 cache-miss 都探活 → >=2；修复后节流应只有 1 次
@@ -173,9 +173,9 @@ class TestCacheTimezoneCompat:
     def _setup(self, monkeypatch):
         uid = _seed_user_and_cache()
         self.uid = uid
-        monkeypatch.setattr("src.api.routes.repos._probe_stale_repos",
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._probe_stale_repos",
                             lambda *a, **k: None)
-        monkeypatch.setattr("src.api.routes.repos._fetch_and_cache",
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache",
                             lambda uid, tok, p: [
                                 {"repo_key": "gitcode:ownorg/probe-a", "full_name": "ownorg/probe-a",
                                  "owner": "ownorg", "name": "probe-a", "is_admin": True, "role": "Admin"}])
@@ -185,7 +185,7 @@ class TestCacheTimezoneCompat:
     def test_ut08_synced_at_utc_not_expired(self):
         """synced_at 存 UTC（比 now 早约 8h，如 SQLite datetime('now')）不应误判过期。"""
         from datetime import datetime as _dt
-        from src.auth.grape_account_db import get_grape_account_by_username as _g
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _g
         acc = _g("probe_ttl_user")
         # 写 UTC 时间（本地 -8h）
         utc_now = _dt.utcnow().strftime("%Y-%m-%d %H:%M:%S")
@@ -199,7 +199,7 @@ class TestCacheTimezoneCompat:
     def test_ut09_synced_at_local_not_expired(self):
         """synced_at 存本地时间（CST）且 30 分钟内 → 缓存命中。"""
         from datetime import datetime as _dt
-        from src.auth.grape_account_db import get_grape_account_by_username as _g
+        from src.domains.mgmt.auth.grape_account_db import get_grape_account_by_username as _g
         acc = _g("probe_ttl_user")
         local_now = _dt.now().strftime("%Y-%m-%d %H:%M:%S")
         with db_lock:

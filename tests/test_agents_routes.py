@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.kernel.session_manager import db, db_lock
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 UID = 98901
 USERNAME = "agent_tester"

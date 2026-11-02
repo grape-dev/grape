@@ -77,7 +77,7 @@ class _FakeRequest:
 
 def _do_heartbeat(probe_results: dict, runtime_ids: list[int], cid: int):
     """直接调用 runtime_heartbeat（绕过鉴权，传 credential_id=cid）。"""
-    from src.api.routes.runtime import runtime_heartbeat, HeartbeatBody
+    from src.domains.runtime.routes.runtime import runtime_heartbeat, HeartbeatBody
     body = HeartbeatBody(runtime_ids=runtime_ids, probe_results=probe_results)
     return runtime_heartbeat(body, _FakeRequest(), credential_id=cid)
 
@@ -192,7 +192,7 @@ class TestWorkerProbeLoopFirstRoundDelay:
     """_worker_probe_loop() 首轮应先 sleep _PROBE_INTERVAL 再探测。"""
 
     def test_first_round_sleeps_before_probing(self, monkeypatch):
-        import src.runtime.agent as ag
+        import src.domains.runtime.engine.agent as ag
 
         sleep_calls = []
         probe_calls = []
@@ -229,7 +229,7 @@ class TestHeartbeatFingerprintDedup:
     """心跳成功后未变化的观测不再重发（指纹去重）。"""
 
     def test_unchanged_observation_not_resent_after_success(self, monkeypatch):
-        import src.runtime.agent as ag
+        import src.domains.runtime.engine.agent as ag
 
         # 预置探针结果
         with ag._worker_probe_lock:

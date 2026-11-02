@@ -26,7 +26,7 @@ def _clean(monkeypatch):
     for k in ("RUNTIME_TASK_TIMEOUT", "GRAPE_DEVSTAGE_FLAVOR_ID",
               "GRAPE_DEVSTAGE_CORES", "GRAPE_DEVSTAGE_MEMORY", "GRAPE_DEVSTAGE_ARCH"):
         monkeypatch.delenv(k, raising=False)
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     for k in ("runtime_task_timeout", "devstage_template_id", "devstage_flavor_id",
               "devstage_cores", "devstage_memory", "devstage_arch"):
         set_meta_value(k, "")
@@ -37,7 +37,7 @@ def _clean(monkeypatch):
     if os.path.exists(RUNTIME_CONFIG_PATH):
         os.remove(RUNTIME_CONFIG_PATH)
     # 清理本用例文件写入的 meta，避免污染其他用例
-    from src.user.db import set_meta_value
+    from src.domains.mgmt.user.db import set_meta_value
     for k in ("runtime_task_timeout", "devstage_template_id", "devstage_flavor_id",
               "devstage_cores", "devstage_memory", "devstage_arch"):
         set_meta_value(k, "")
@@ -48,12 +48,12 @@ class TestDevstageConvergence:
     """模板 ID / 规格收敛到单一来源（src/config getter），默认行为不变。"""
 
     def test_template_id_single_source(self):
-        from src.api.routes import devstage as ds
+        from src.domains.mgmt.routes import devstage as ds
         assert ds.GRAPE_AI_DEVSPACE_TEMPLATE() == DEFAULT_TPL
 
     def test_template_id_from_config(self):
         _write_runtime_config_for_test({"devstage": {"template_id": "tpl-42"}})
-        from src.api.routes import devstage as ds
+        from src.domains.mgmt.routes import devstage as ds
         assert ds.GRAPE_AI_DEVSPACE_TEMPLATE() == "tpl-42"
 
     def test_create_env_uses_unified_flavor(self):
@@ -61,7 +61,7 @@ class TestDevstageConvergence:
 
         seam：_create_env_call_args(body) 返回传给 _create_env 的 kwargs（纯组装函数）。
         """
-        from src.api.routes import devstage as ds
+        from src.domains.mgmt.routes import devstage as ds
         args = ds._create_env_call_args({"name": "env-1"})
         assert args["template_id"] == DEFAULT_TPL
         assert args["flavor_id"] == DEFAULT_FLAVOR
@@ -72,7 +72,7 @@ class TestDevstageConvergence:
     def test_create_env_flavor_from_config(self):
         _write_runtime_config_for_test({"devstage": {
             "flavor_id": "fl-9", "cores": 8, "memory": 32, "arch": "x86"}})
-        from src.api.routes import devstage as ds
+        from src.domains.mgmt.routes import devstage as ds
         args = ds._create_env_call_args({"name": "env-2"})
         assert args["flavor_id"] == "fl-9"
         assert args["cores"] == 8
@@ -84,7 +84,7 @@ class TestDevstageConvergence:
         _write_runtime_config_for_test({"devstage": {"cores": 8, "memory": 32}})
         monkeypatch.setenv("GRAPE_DEVSTAGE_CORES", "2")
         monkeypatch.setenv("GRAPE_DEVSTAGE_MEMORY", "4")
-        from src.api.routes import devstage as ds
+        from src.domains.mgmt.routes import devstage as ds
         args = ds._create_env_call_args({"name": "env-3"})
         assert args["cores"] == 2
         assert args["memory"] == 4
@@ -160,7 +160,7 @@ class TestAdminRuntimeConfig:
 
     def test_get_with_dirty_meta_falls_back(self, client):
         """QA Minor2 脏数据防御：meta 非数字脏数据（绕过 API 写库）不导致 GET 500，回退默认值。"""
-        from src.user.db import set_meta_value
+        from src.domains.mgmt.user.db import set_meta_value
         set_meta_value("runtime_task_timeout", "abc")
         set_meta_value("devstage_cores", "x-large")
         set_meta_value("devstage_memory", "6GB")

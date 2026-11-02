@@ -28,7 +28,7 @@ def _seed_local_engine():
                       "VALUES ('opencode','test-local',0,1,1,'online','global','')")
         db.commit()
     # resolve_local_engine 有 30s 模块级缓存（engine_select.py:19/435），清掉避免吃到被其他测试清理的幽灵 runtime id
-    from src.runtime import engine_select
+    from src.domains.runtime.engine import engine_select
     engine_select._resolve_local_cache.clear()
 
 
@@ -90,7 +90,7 @@ class TestDirectChatInjectsToken:
             yield ("text", "已回写澄清结论")
             yield ("done", {"exit_code": 0, "text": "已回写澄清结论", "oc_session_id": "ses_x"})
 
-        with patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream):
+        with patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream):
             r = client.post("/api/chat/send", json={"message": "请把澄清结论回写 Issue #2", "conversation_id": cid})
         assert r.status_code == 200, r.text
         env = captured.get("env_extra") or {}
@@ -112,7 +112,7 @@ class TestDirectChatInjectsToken:
             yield ("text", "你好")
             yield ("done", {"exit_code": 0, "text": "你好", "oc_session_id": "ses_x"})
 
-        with patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream):
+        with patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream):
             r = client.post("/api/chat/send", json={"message": "你好", "conversation_id": cid})
         assert r.status_code == 200, r.text
         env = captured.get("env_extra") or {}

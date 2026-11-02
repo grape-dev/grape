@@ -677,7 +677,7 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
 
     # 调 apply_market_scene，走场景中心完整逻辑
     # 传入 repo_key 避免 apply_market_scene 内部用 to_repo_key 默认 gitcode: 前缀
-    from src.api.routes.scenes import apply_market_scene
+    from src.domains.mgmt.routes.scenes import apply_market_scene
     result = apply_market_scene(market_id, user={"id": user_id}, owner=owner, repo=repo_name, repo_key=repo_key)
     log.info(f"apply_market_scene_by_name: applied market scene {market_id} ({scene_name}) to {repo_key}: {result}")
     return True

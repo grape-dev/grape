@@ -7,7 +7,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.runtime.local_probe import probe_local_engines, LOCAL_PROBE_TIMEOUT
+from src.domains.runtime.engine.local_probe import probe_local_engines, LOCAL_PROBE_TIMEOUT
 
 
 def test_probe_normal_cli_healthy():
@@ -54,7 +54,7 @@ def test_probe_multiple_completes():
 
 def test_probe_save_writes_healthy_to_db():
     """P05：探测结果经 save_agent_runtimes 写入 DB 后 healthy=1"""
-    from src.user import db as user_db
+    from src.domains.mgmt.user import db as user_db
     from src.kernel.session_manager import db, db_lock
     name = "probe-test-local"
     with db_lock:

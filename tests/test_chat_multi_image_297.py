@@ -23,7 +23,7 @@ import pytest
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.kernel.session_manager import db, db_lock
-from src.api.routes.chat import _save_chat_images, _build_image_markers
+from src.domains.runtime.routes.chat import _save_chat_images, _build_image_markers
 
 UID = 99097
 USERNAME = "chat_multi_img_297"
@@ -176,11 +176,11 @@ class _multi_patch:
     def __enter__(self):
         from unittest.mock import patch
         self._cms = [
-            patch("src.api.routes.chat._get_chat_config",
+            patch("src.domains.runtime.routes.chat._get_chat_config",
                   return_value={"backend": "opencode", "runtime_id": self.rid}),
-            patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent),
-            patch("src.api.routes.chat._understand_image", return_value="[图片描述]"),
-            patch("src.api.routes.chat._push_reply_to_feishu", new=self._no_push),
+            patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_fake_stream_agent),
+            patch("src.domains.runtime.routes.chat._understand_image", return_value="[图片描述]"),
+            patch("src.domains.runtime.routes.chat._push_reply_to_feishu", new=self._no_push),
         ]
         for cm in self._cms:
             cm.start()

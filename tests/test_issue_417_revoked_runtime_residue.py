@@ -68,7 +68,7 @@ def _cleanup(cid: int):
 
 
 def _overview_runtime_ids():
-    from src.api.routes.dashboard import get_ops_overview
+    from src.domains.insight.routes.dashboard import get_ops_overview
     user = {"id": 1, "username": "tester", "org_id": 0}
     data = get_ops_overview(repo="", user=user)
     return {rt["id"] for rt in data["runtimes"]["list"]}
@@ -135,7 +135,7 @@ class TestRegisterRaceGuard:
 
     def test_register_after_revoke_rejected(self):
         from fastapi import HTTPException
-        from src.api.routes.runtime import runtime_register, RuntimeRegBody
+        from src.domains.runtime.routes.runtime import runtime_register, RuntimeRegBody
 
         cid = _insert_credential()
         try:
@@ -169,7 +169,7 @@ class TestRevokeCleansEngineCapabilities:
     """吊销级联清理 engine_capabilities（吊销事件同步清理补全）。"""
 
     def test_revoke_deletes_engine_capabilities(self):
-        from src.api.routes.settings import revoke_runtime_credential
+        from src.domains.mgmt.routes.settings import revoke_runtime_credential
 
         cid = _insert_credential()
         rid, _ = _insert_runtime(cid)

@@ -20,7 +20,7 @@ from src.api.deps import get_current_user, get_current_user_or_api_key
 from src.kernel.session_manager import (
     db, db_lock, add_message, get_message, get_messages,
 )
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 
 UID = 99001
 USERNAME = "recall_tester"
@@ -41,7 +41,7 @@ def _client():
         for tid in [t for t, tk in ChatTaskManager._tasks.items()
                     if tk.conv_id and tk.conv_id.startswith("rc442-")]:
             del ChatTaskManager._tasks[tid]
-    from src.api.routes.chat import _CHAT_ENQUEUE_MAP
+    from src.domains.runtime.routes.chat import _CHAT_ENQUEUE_MAP
     _CHAT_ENQUEUE_MAP.clear()
     with db_lock:
         cur = db.cursor()
@@ -175,10 +175,10 @@ class TestRecallTermination:
     def test_submit_returns_message_id(self, _client):
         rid = _local_engine_id()
         cid = _new_conv()
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                    return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_slow_stream_agent), \
-             patch("src.api.routes.chat._push_reply_to_feishu", new=_no_push()):
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_slow_stream_agent), \
+             patch("src.domains.runtime.routes.chat._push_reply_to_feishu", new=_no_push()):
             r = _client.post("/api/chat/submit", json={"message": "hi", "conversation_id": cid})
         assert r.status_code == 200, r.text
         d = r.json()
@@ -192,10 +192,10 @@ class TestRecallTermination:
         from src.api.chat_task_manager import ChatTaskManager
         rid = _local_engine_id()
         cid = _new_conv()
-        with patch("src.api.routes.chat._get_chat_config",
+        with patch("src.domains.runtime.routes.chat._get_chat_config",
                    return_value={"backend": "opencode", "runtime_id": rid}), \
-             patch("src.runtime.executor.stream_chat_agent", side_effect=_slow_stream_agent), \
-             patch("src.api.routes.chat._push_reply_to_feishu", new=_no_push()):
+             patch("src.domains.runtime.engine.executor.stream_chat_agent", side_effect=_slow_stream_agent), \
+             patch("src.domains.runtime.routes.chat._push_reply_to_feishu", new=_no_push()):
             r = _client.post("/api/chat/submit", json={"message": "会撤回的消息", "conversation_id": cid})
         assert r.status_code == 200
         d = r.json()
@@ -239,12 +239,12 @@ class TestRecallTermination:
 
     def test_recall_remote_mode_cancels_enqueued_task(self, _client):
         """远端模式：撤回经 _CHAT_ENQUEUE_MAP → service.cancel_task（复用 #136）。"""
-        from src.api.routes.chat import _CHAT_ENQUEUE_MAP
+        from src.domains.runtime.routes.chat import _CHAT_ENQUEUE_MAP
         cid = _new_conv()
         tid = "chat_rc442r"
         mid = add_message(cid, "user", "远端消息", task_id=tid)
         _CHAT_ENQUEUE_MAP[tid] = "999888"
-        with patch("src.runtime.service.cancel_task", return_value=True) as mock_cancel:
+        with patch("src.domains.runtime.engine.service.cancel_task", return_value=True) as mock_cancel:
             r = _client.post(f"/api/chat/messages/{mid}/recall")
         assert r.status_code == 200
         assert r.json()["terminated"] is True
