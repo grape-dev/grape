@@ -3245,6 +3245,8 @@ def _migrate_release_subissue_unique_index():
         db.commit()
         if is_mysql:
             try:
+                # 生成列：release_bind_env = NULLIF(release_target_env, '') STORED
+                # （空串转 NULL 不参与唯一约束）。ALTER 幂等：先查列存在。
                 c.execute(
                     "SELECT COUNT(*) FROM information_schema.columns "
                     "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
@@ -3254,15 +3256,17 @@ def _migrate_release_subissue_unique_index():
                         "ALTER TABLE issue ADD COLUMN release_bind_env VARCHAR(64) "
                         "AS (NULLIF(release_target_env, '')) STORED")
                     db.commit()
+                # B4（PR #847 审查）：索引必须用 CREATE UNIQUE INDEX IF NOT EXISTS
+                # 走 mysql_compat Cursor.execute 特判——对 TEXT 列自动加 (191) 前缀
+                # （repo_key/release_candidate_sha 均为 TEXT，无前缀长度 MySQL 报
+                # error 1170），并内置 information_schema 存在性检查。
+                # 此前自拼存在性检查 + 无 IF NOT EXISTS 的裸 CREATE 绕过特判 →
+                # 直发 MySQL → 1170 被 except 吞掉 → DB 层唯一性兜底在 MySQL 后端
+                # 完全缺失（与 idx_tasks_repo_issue 同路径才是对的）。
                 c.execute(
-                    "SELECT COUNT(*) FROM information_schema.statistics "
-                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
-                    "AND INDEX_NAME='uq_issue_release_bind'")
-                if (c.fetchone()[0] or 0) == 0:
-                    c.execute(
-                        "CREATE UNIQUE INDEX uq_issue_release_bind ON issue"
-                        "(repo_key, parent_issue_number, release_candidate_sha, release_bind_env)")
-                    db.commit()
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_issue_release_bind ON issue"
+                    "(repo_key, parent_issue_number, release_candidate_sha, release_bind_env)")
+                db.commit()
             except Exception as e:
                 log.warning(f"release subissue unique index (mysql) failed: {e}")
         else:
