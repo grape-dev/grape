@@ -114,6 +114,58 @@ def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
         return 0
 
 
+def _duplicate_a2a_original_refs(repo_key: str, existing_seq: int) -> dict:
+    """Issue #729：duplicate_a2a 拦截时回查原事件的任务产物引用。
+
+    返回 original_event 结构（seq / agent / status / issue_id / created_at +
+    task_ref / result_ref），随拦截响应透传给调用方，下游可凭引用定位并续接
+    原任务产物（task_id + query_path 轮询 / result 摘要）：
+    - 原任务在途（queued/dispatched/running）→ result_ref.status=pending，
+      仅 task_ref 可用于轮询（Spec：result pending 边界）；
+    - 无关联任务 / 查询失败 → unavailable 显式标注，不阻断拦截响应本身。
+    全部为新增可选字段，向后兼容。
+    """
+    from src.api.pipeline_status import (
+        _UNAVAILABLE_RESULT_REF,
+        _UNAVAILABLE_TASK_REF,
+        load_segment_task_refs,
+    )
+    evt = {"seq": existing_seq, "agent": "", "status": "",
+           "issue_id": "", "created_at": ""}
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT agent_type, status, issue_id, created_at FROM events "
+                "WHERE repo_key=? AND seq=? LIMIT 1",
+                (repo_key, existing_seq))
+            row = c.fetchone()
+        if row:
+            evt = {"seq": existing_seq, "agent": row[0] or "",
+                   "status": row[1] or "", "issue_id": row[2] or "",
+                   "created_at": row[3] or ""}
+    except Exception as _re:
+        log.warning(f"A2A #729: load original event failed seq={existing_seq}: {_re}")
+    pair = (load_segment_task_refs([repo_key], [existing_seq]) or {}).get(existing_seq)
+    if pair:
+        evt["task_ref"] = pair[0]
+        evt["result_ref"] = pair[1]
+    else:
+        evt["task_ref"] = dict(_UNAVAILABLE_TASK_REF)
+        evt["result_ref"] = dict(_UNAVAILABLE_RESULT_REF)
+    return evt
+
+
+def _duplicate_a2a_skip_response(agent_name: str, repo_key: str, existing_seq: int):
+    """Issue #729：同 issue 同 agent 重复 A2A 的拦截响应体（含原任务产物引用）。"""
+    return JSONResponse(status_code=200, content={
+        "status": "ok", "seq": 0, "agent": agent_name,
+        "skipped": "duplicate_a2a", "existing_seq": existing_seq,
+        "original_event": _duplicate_a2a_original_refs(repo_key, existing_seq),
+    })
+
+
 def _a2a_source_event_seq(session_info) -> int:
     """取 A2A 调用方（源事件）seq：会话 token 的 session_key=调用方任务 id → agent_tasks.event_seq。
 
@@ -618,7 +670,12 @@ def _cross_pipeline_handoff(
     _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "", scene_id=target_scene_id)
     if _existing_seq:
         log.info(f"A2A #329: duplicate handoff skip — issue=#{issue_number} already has running event in scene={target_scene_id} seq={_existing_seq}")
-        return {"ok": False, "error": "duplicate_handoff"}
+        # Issue #729：拦截时携带原事件的任务产物引用（task_ref/result_ref），
+        # 跨流水线下游凭引用可定位并续接原任务产物
+        return {
+            "ok": False, "error": "duplicate_handoff",
+            "original_event": _duplicate_a2a_original_refs(repo_key, _existing_seq),
+        }
 
     # 3. Persist carried_context + engine_config on issue_state
     #    Also capture old_assignee BEFORE the UPDATE so the audit trail in step 5
@@ -1083,10 +1140,14 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 return _redirect["response"]
             if _redirect.get("error"):
                 log.info(f"A2A #329: cross-pipeline handoff skipped: {_redirect['error']}")
-                return JSONResponse(status_code=200, content={
+                # Issue #729：拦截响应透传 original_event（含 task_ref/result_ref）
+                _skip_content = {
                     "status": "ok", "seq": 0, "agent": target_node or "vod",
                     "skipped": _redirect["error"],
-                })
+                }
+                if _redirect.get("original_event"):
+                    _skip_content["original_event"] = _redirect["original_event"]
+                return JSONResponse(status_code=200, content=_skip_content)
 
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
         if issue_number and repo_key:
@@ -1404,7 +1465,9 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", agent_name)
             if _existing_seq:
                 log.info(f"A2A: duplicate skip — issue=#{issue_number} agent={agent_name} already has running event seq={_existing_seq}")
-                return JSONResponse(status_code=200, content={"status": "ok", "seq": 0, "agent": agent_name, "skipped": "duplicate_a2a", "existing_seq": _existing_seq})
+                # Issue #729：拦截响应携带原任务产物引用（task_ref/result_ref），
+                # 下游凭引用可续接原任务产物，无需重新定位
+                return _duplicate_a2a_skip_response(agent_name, repo_key, _existing_seq)
 
         # 多任务模式：VOD A2A 交办时携带 is_subtask_mode → 持久化
         _is_subtask_mode = payload.get("is_subtask_mode", False)
