@@ -222,3 +222,44 @@ class TestUnifiedEventResolution:
         assert evt.get("_resolved_issue_id_token_tried") is not True  # 首次无 token 未标记
         _resolve_event_issue_id(evt, "gitcode:o/r", api_token="tok")
         assert evt.get("_resolved_issue_id_token_tried") is True
+
+
+# ===== 7. QA review fixes: robustness of exclude_num & evt.issue_id fallback =====
+
+class TestQaReviewFixes:
+    def test_max_issue_non_numeric_exclude_does_not_raise(self):
+        """Issue #528: exclude_num 非数字（non-numeric pr_number）时不抛 ValueError"""
+        from src.api.event_pipeline import _max_issue_from_issues
+        issues = [{"number": "#282"}, {"number": "#274"}]
+        # 不抛异常，非数字 exclude 视为无效（不排除任何编号）
+        assert _max_issue_from_issues(issues, exclude_num="abc") == "#282"
+        assert _max_issue_from_issues(issues, exclude_num="#!28") == "#282"
+        assert _max_issue_from_issues(issues, exclude_num=None) == "#282"
+        assert _max_issue_from_issues(issues, exclude_num="") == "#282"
+
+    def test_max_issue_exclude_with_hash_and_spaces(self):
+        from src.api.event_pipeline import _max_issue_from_issues
+        issues = [{"number": "#282"}, {"number": "#274"}]
+        # 带前缀/空白的合法 exclude 仍正确排除
+        assert _max_issue_from_issues(issues, exclude_num=" #282 ") == "#274"
+        assert _max_issue_from_issues(issues, exclude_num="282") == "#274"
+
+    def test_resolve_pr_issue_id_non_numeric_pr_number(self):
+        """Issue #528 复合场景：pr_number 非数字 + issues 非空 → 不抛异常"""
+        from src.api.event_pipeline import resolve_pr_issue_id
+        payload = {
+            "object_attributes": {"iid": "BUG-404", "title": "no ref", "source_branch": "feat/x"},
+            "issues": [{"number": "#282"}, {"number": "#274"}],
+        }
+        assert resolve_pr_issue_id(payload) == "#282"
+
+    def test_fallback_evt_issue_id_normalized(self):
+        """QA review: evt["issue_id"] 兜底值统一过 _norm_issue_id（补 # 前缀）"""
+        from src.api.event_pipeline import _resolve_event_issue_id
+        evt = {"type": "push", "payload": {}, "issue_id": "282"}
+        assert _resolve_event_issue_id(evt, "gitcode:o/r") == "#282"
+
+    def test_fallback_evt_issue_id_invalid_returns_empty(self):
+        from src.api.event_pipeline import _resolve_event_issue_id
+        evt = {"type": "push", "payload": {}, "issue_id": "not-a-number"}
+        assert _resolve_event_issue_id(evt, "gitcode:o/r") == ""

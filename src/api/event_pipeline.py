@@ -826,7 +826,10 @@ def _max_issue_from_issues(issues, exclude_num: str = "") -> str:
     GitCode pull_request_* payload 的 issues 列表同时含闭环目标与背景引用（如
     [#282, #274]），第一个未必是闭环目标；编号最大者为最新闭环目标。
     exclude_num：PR 自身编号（issues 列表里可能混入 PR 号，跳过）。
+    非数字的 exclude_num（Issue #528 已证实存在 non-numeric pr_number）安全跳过，不抛异常。
     """
+    _excl = str(exclude_num or "").strip().lstrip("#")
+    _exclude_n = int(_excl) if _excl.isdigit() else None
     best = 0
     if isinstance(issues, list):
         for it in issues:
@@ -836,7 +839,7 @@ def _max_issue_from_issues(issues, exclude_num: str = "") -> str:
             if not norm:
                 continue
             n = int(norm.lstrip("#"))
-            if exclude_num and n == int(exclude_num):
+            if _exclude_n is not None and n == _exclude_n:
                 continue
             if n > best:
                 best = n
@@ -1012,7 +1015,8 @@ def _resolve_event_issue_id(evt: dict, repo_key: str, api_token: str = "") -> st
     else:
         issue_id = resolve_issue_id(payload) or ""
     if not issue_id:
-        issue_id = str(evt.get("issue_id", "") or "")
+        # QA review: 缓存的 evt["issue_id"] 可能缺 # 前缀，统一过 _norm_issue_id
+        issue_id = _norm_issue_id(evt.get("issue_id", ""))
     if api_token:
         evt["_resolved_issue_id_token_tried"] = True
     evt["_resolved_issue_id"] = issue_id or ""
