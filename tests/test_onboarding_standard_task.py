@@ -61,7 +61,7 @@ class TestLoadOnboardingTemplate:
             json.dumps({"tasks": [
                 {"type": "experience", "title": "仅体验", "description": "只有体验"},
             ]}, ensure_ascii=False), encoding="utf-8")
-        monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
+        monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
         tasks = ob._load_onboarding_template("owner/repo")
         assert len(tasks) == 1
         assert tasks[0]["type"] == "experience"

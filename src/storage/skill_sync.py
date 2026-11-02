@@ -19,7 +19,7 @@ import os
 import shutil
 import zipfile
 
-from src.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skill_path
+from src.kernel.config import SKILLS_DIR, CONFIG_DIR, log, resolve_official_skill_path
 
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
@@ -69,7 +69,7 @@ def _sync_skills_to_db(data: dict) -> int:
     仅在实际数据变更时才 UPDATE + 更新 updated_at，避免 blanket UPDATE 架空 sort=latest。
     返回处理的 skill 数量。
     """
-    from src.session_manager import db as _db, db_lock as _db_lock
+    from src.kernel.session_manager import db as _db, db_lock as _db_lock
 
     count = 0
     with _db_lock:
@@ -221,7 +221,7 @@ def _detect_stale_official_skills(repo_skill_names: set, traversal_complete: boo
         logger.warning("skill sync: DB sync incomplete, skipping stale detection this cycle")
         return 0
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             stale = [name for (_id, name) in
@@ -301,7 +301,7 @@ async def sync_official_skills() -> dict:
                     logger.warning("skill sync: skill-description.json not found in zip")
 
                 # 同步 skill 文件目录（增量 hash 比对，分布式锁保护）
-                from src.lock import acquire_lock, release_lock, renew_lock
+                from src.kernel.lock import acquire_lock, release_lock, renew_lock
                 _LOCK_KEY = "skill_remote_sync"
                 _LOCK_TTL = 300
                 if not acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL):
@@ -339,7 +339,7 @@ async def sync_official_skills() -> dict:
                         release_lock(_LOCK_KEY)
 
                 # 清理过期锁
-                from src.lock import cleanup_expired_locks
+                from src.kernel.lock import cleanup_expired_locks
                 cleanup_expired_locks()
 
                 logger.info(
@@ -376,7 +376,7 @@ async def sync_official_skills() -> dict:
         #    §6.3 外层锁续期（to_thread 卸载）：锁被抢 → 中止本轮剩余步骤。
         #    §8.8 滚动升级避让：非阻塞试探旧 scene_sync 锁，抢不到=旧实例在跑 → 跳过本轮场景步骤。
         try:
-            from src.lock import acquire_lock as _al, release_lock as _rl, renew_lock as _rn
+            from src.kernel.lock import acquire_lock as _al, release_lock as _rl, renew_lock as _rn
             from src.storage.scene_sync import sync_official_scenes
             # §6.3 外层锁续期（to_thread 卸载，与下方 acquire/release 一致）
             if not await asyncio.to_thread(_rn, "skill_sync", 1800):

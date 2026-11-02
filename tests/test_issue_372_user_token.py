@@ -37,9 +37,9 @@ class TestGetRepoTokenWithRefresh:
     def test_level1_devops_agent_session_hits(self):
         """第一级：devops_agent_session.repo_gitcode_token 有值 → 直接返回。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.DevopsAgentSessionToken._fetch", return_value="SESSION_TOKEN"), \
-             patch("src.token_resolver.RepoBotToken._fetch", return_value=""), \
-             patch("src.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
+        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value="SESSION_TOKEN"), \
+             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
              patch("src.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "SESSION_TOKEN"
@@ -47,9 +47,9 @@ class TestGetRepoTokenWithRefresh:
     def test_level2_managed_repos_hits(self):
         """第二级：managed_repos.bot_gitcode_token 有值 → 直接返回。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.token_resolver.RepoBotToken._fetch", return_value="REPO_BOT_TOKEN"), \
-             patch("src.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
+        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value="REPO_BOT_TOKEN"), \
+             patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
              patch("src.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
@@ -57,9 +57,9 @@ class TestGetRepoTokenWithRefresh:
     def test_level3_global_bot_hits(self):
         """第三级：全局 bot token 有值 → 直接返回。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.token_resolver.RepoBotToken._fetch", return_value=""), \
-             patch("src.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
+        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value="GLOBAL_BOT"), \
              patch("src.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "GLOBAL_BOT"
@@ -67,9 +67,9 @@ class TestGetRepoTokenWithRefresh:
     def test_level4_user_token_fallback(self):
         """第四级：三级全空 → 降级到用户 token。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.token_resolver.RepoBotToken._fetch", return_value=""), \
-             patch("src.token_resolver.GlobalBotToken._fetch", return_value=""), \
+        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value=""), \
              patch("src.user.db.get_host_user_id", return_value=42), \
              patch("src.auth.grape_account_db.get_grape_account_by_id", return_value={"username": "testuser"}), \
              patch("src.api.deps.get_user_token_with_refresh", return_value="USER_OAUTH_TOKEN") as m:
@@ -80,9 +80,9 @@ class TestGetRepoTokenWithRefresh:
     def test_all_empty_returns_empty_string(self):
         """四级全空 → 返回空字符串。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
-             patch("src.token_resolver.RepoBotToken._fetch", return_value=""), \
-             patch("src.token_resolver.GlobalBotToken._fetch", return_value=""), \
+        with patch("src.kernel.token_resolver.DevopsAgentSessionToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.RepoBotToken._fetch", return_value=""), \
+             patch("src.kernel.token_resolver.GlobalBotToken._fetch", return_value=""), \
              patch("src.user.db.get_host_user_id", return_value=0):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == ""

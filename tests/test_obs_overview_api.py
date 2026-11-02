@@ -23,7 +23,7 @@ from src.observability import overview as ov  # noqa: E402
 # ------------------------------------------------------------------ 夹具
 
 def _reset(uid=4242):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in (
@@ -39,7 +39,7 @@ def _reset(uid=4242):
 
 
 def _grant_repo(uid, repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -49,7 +49,7 @@ def _grant_repo(uid, repo_key):
 
 
 def _make_task(uid, tid, repo_key, status, created, completed, started=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -61,7 +61,7 @@ def _make_task(uid, tid, repo_key, status, created, completed, started=None):
 
 
 def _make_usage(tid, repo_key, model, i, o, cr=0, cw=0, rz=0, created=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     created = created or _iso(datetime.now(timezone.utc))
     with db_lock:
         c = db.cursor()

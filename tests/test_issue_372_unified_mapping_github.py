@@ -104,7 +104,7 @@ def test_get_feishu_open_id_fallback_on_empty_open_id():
     - 回退条件必须是 "not row or not row[0]" 而非 "not row"
     """
     import inspect
-    from src.session_manager import get_feishu_open_id
+    from src.kernel.session_manager import get_feishu_open_id
     src = inspect.getsource(get_feishu_open_id)
     # 回退条件必须检查 row[0] 非空，不仅仅是 row 存在
     assert "not row or not row[0]" in src, (

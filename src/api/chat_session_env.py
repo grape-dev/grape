@@ -7,7 +7,7 @@
 Web（src/api/routes/chat.py）与飞书 IM（src/im/handler_async.py）共用本 helper，防两组逻辑漂移。
 仅真实仓库注入；一般对话（repo_key 为空 / `chat:{id}` 伪仓库）不注入，行为不变。
 """
-from src.config import log
+from src.kernel.config import log
 
 
 def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
@@ -20,7 +20,7 @@ def chat_session_env_extra(user_id: int, conv_id: str, repo_key: str) -> dict:
     env = {"USER_ID": str(user_id), "CONVERSATION_ID": conv_id or ""}
     if repo_key and not repo_key.startswith("chat:"):
         try:
-            from src.api.auth_token import issue_session_token
+            from src.kernel.auth_sdk.auth_token import issue_session_token
             env["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=f"conv:{conv_id}",
                 repo_key=repo_key, agent_type="chat", user_id=user_id)

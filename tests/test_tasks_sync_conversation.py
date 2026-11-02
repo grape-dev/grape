@@ -9,7 +9,7 @@ from unittest.mock import patch
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, get_messages, create_conversation, add_message
+from src.kernel.session_manager import db, db_lock, get_messages, create_conversation, add_message
 from src.user import db as user_db
 from src.auth import grape_account_db
 
@@ -62,7 +62,7 @@ def test_post_result_does_not_write_conversation():
 
 def test_post_result_syncs_to_conversation_via_exec_tail():
     """result_text 写入任务会话由 _execute_agent 收尾承担（单写路径仍可用）。"""
-    from src.session_manager import add_message
+    from src.kernel.session_manager import add_message
     add_message(_conv_id, "agent", "[VOD Agent] 需要确认：目标云服务是 ECS 还是 CCE？")
     messages = get_messages(_conv_id, limit=50)
     assert any("需要确认" in m["content"] and "[VOD Agent]" in m["content"] for m in messages)

@@ -396,8 +396,8 @@ class TestVerifyRepoBotTokensAsync:
         from src.runtime import bot_token_health as bth
         verify_mock = MagicMock()
         with caplog.at_level(logging.INFO, logger="devops-bot"), \
-             patch("src.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+             patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock):
             await bth._verify_repo_bot_tokens()
         assert any("started" in rec.message and "25" in rec.message for rec in caplog.records)
@@ -407,8 +407,8 @@ class TestVerifyRepoBotTokensAsync:
         """25 个仓库全被验证，分 3 批（10/10/5）。"""
         from src.runtime import bot_token_health as bth
         verify_mock = MagicMock()
-        with patch("src.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+        with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock), \
              patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
             await bth._verify_repo_bot_tokens()
@@ -426,8 +426,8 @@ class TestVerifyRepoBotTokensAsync:
         async def _track_sleep(s):
             sleeps.append(s)
 
-        with patch("src.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+        with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock), \
              patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0.01), \
              patch("asyncio.sleep", side_effect=_track_sleep), \
@@ -454,8 +454,8 @@ class TestVerifyRepoBotTokensAsync:
                 state["active"] -= 1
 
         t0 = time.monotonic()
-        with patch("src.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+        with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", side_effect=slow_verify), \
              patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
             await bth._verify_repo_bot_tokens()
@@ -481,8 +481,8 @@ class TestVerifyRepoBotTokensAsync:
                 heartbeat_done.append(time.monotonic())
 
         hb = asyncio.create_task(heartbeat())
-        with patch("src.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+        with patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in self.REPOS])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", side_effect=slow_verify), \
              patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
             await bth._verify_repo_bot_tokens()
@@ -513,8 +513,8 @@ class TestVerifyRepoBotTokensAsync:
             "github": {"healthy": True, "error": "", "error_type": ""},
         }}
         repo_check = AsyncMock()
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock"), \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock"), \
              patch("src.runtime.bot_token_health._verify_global_bot_token",
                    return_value=verify_result), \
              patch("src.runtime.bot_token_health._update_health_status"), \
@@ -538,8 +538,8 @@ class TestVerifyRepoBotTokensAsync:
 
         verify_mock = MagicMock(side_effect=flaky_verify)
         with caplog.at_level(logging.WARNING, logger="devops-bot"), \
-             patch("src.session_manager.db", _fake_db([(r[0],) for r in repos])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+             patch("src.kernel.session_manager.db", _fake_db([(r[0],) for r in repos])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock), \
              patch("src.runtime.bot_token_health.REPO_BATCH_INTERVAL", 0):
             # 不抛出 = 异常被隔离
@@ -552,8 +552,8 @@ class TestVerifyRepoBotTokensAsync:
         """无仓库级 token 时直接返回，不打 started 日志、不验证。"""
         from src.runtime import bot_token_health as bth
         verify_mock = MagicMock()
-        with patch("src.session_manager.db", _fake_db([])), \
-             patch("src.session_manager.db_lock", MagicMock()), \
+        with patch("src.kernel.session_manager.db", _fake_db([])), \
+             patch("src.kernel.session_manager.db_lock", MagicMock()), \
              patch("src.runtime.bot_token_health._verify_single_repo_token", verify_mock):
             await bth._verify_repo_bot_tokens()
         verify_mock.assert_not_called()
@@ -571,8 +571,8 @@ class TestHealthLoop:
             "gitcode": {"healthy": True, "error": "", "error_type": ""},
             "github": {"healthy": True, "error": "", "error_type": ""},
         }}
-        with patch("src.lock.acquire_lock", return_value=True) as mock_acquire, \
-             patch("src.lock.release_lock") as mock_release, \
+        with patch("src.kernel.lock.acquire_lock", return_value=True) as mock_acquire, \
+             patch("src.kernel.lock.release_lock") as mock_release, \
              patch("src.runtime.bot_token_health._verify_global_bot_token",
                    return_value=verify_result), \
              patch("src.runtime.bot_token_health._update_health_status") as mock_update, \
@@ -592,8 +592,8 @@ class TestHealthLoop:
         async def _mock_sleep(seconds):
             raise asyncio.CancelledError()
 
-        with patch("src.lock.acquire_lock", return_value=False), \
-             patch("src.lock.release_lock") as mock_release, \
+        with patch("src.kernel.lock.acquire_lock", return_value=False), \
+             patch("src.kernel.lock.release_lock") as mock_release, \
              patch("src.runtime.bot_token_health._verify_global_bot_token") as mock_verify, \
              patch("asyncio.sleep", side_effect=_mock_sleep):
             from src.runtime.bot_token_health import bot_token_health_loop
@@ -609,8 +609,8 @@ class TestHealthLoop:
         async def _mock_sleep(seconds):
             raise asyncio.CancelledError()
 
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock") as mock_release, \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock") as mock_release, \
              patch("src.runtime.bot_token_health._verify_global_bot_token",
                    side_effect=Exception("DB error")), \
              patch("asyncio.sleep", side_effect=_mock_sleep):

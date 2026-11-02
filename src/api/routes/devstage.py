@@ -17,7 +17,7 @@ from src.im.devstage_client import (
     _resolve_base_url,
     _request,
 )
-from src.config import log
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/devstage", tags=["devstage"])
 
@@ -43,7 +43,7 @@ def _annotate_worker_online(envs: list) -> None:
     """
     if not envs:
         return
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.runtime.health import derive_runtime_health
     from datetime import datetime, timezone
     now_ts = datetime.now(timezone.utc).timestamp()
@@ -154,7 +154,7 @@ def GRAPE_AI_DEVSPACE_TEMPLATE() -> str:
     优先级：管理台 meta > configs/runtime-config.json > 默认（现有模板）。
     保留原名称（list_environments 过滤、tests 引用），仅从常量变函数。
     """
-    from src.config import get_devstage_template_id
+    from src.kernel.config import get_devstage_template_id
     return get_devstage_template_id()
 
 
@@ -164,7 +164,7 @@ def _create_env_call_args(body: dict) -> dict:
     规格从统一 getter 取（env GRAPE_DEVSTAGE_* > 管理台 meta > runtime-config.json
     > 默认 3c6g/ARM）——原写死 flavor_id/cores/memory/arch 与重复 template_id 已收敛。
     """
-    from src.config import get_devstage_flavor
+    from src.kernel.config import get_devstage_flavor
     f = get_devstage_flavor()
     return {
         "template_id": GRAPE_AI_DEVSPACE_TEMPLATE(),
@@ -360,7 +360,7 @@ def delete_environment(devstage_id: str, user: dict = Depends(require_no_session
     # 删除对应的 Worker 凭据和 runtime（精确匹配环境名）
     if env_name:
         try:
-            from src.session_manager import db as sm_db, db_lock as sm_lock
+            from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
             with sm_lock:
                 c = sm_db.cursor()
                 c.execute("SELECT id FROM runtime_credentials WHERE name=?", (env_name,))

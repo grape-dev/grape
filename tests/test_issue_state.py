@@ -1,7 +1,7 @@
 """issue_state 生命周期状态机测试（见 vod-skill-upgrade-plan.md L1/L8）"""
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import session_store as ss
 
 

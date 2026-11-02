@@ -25,7 +25,7 @@ import json
 import random
 import time
 
-from src.config import log
+from src.kernel.config import log
 
 
 # R17.2.1: CHECK_INTERVAL 300→3600（1 小时），FAILURE_THRESHOLD 3→1
@@ -51,7 +51,7 @@ def _verify_bot_token(provider: str) -> dict:
         {"healthy": bool, "error": str, "error_type": str}
         error_type: "auth" (401) / "network" (timeout, 5xx) / "config" (no token) / "" (healthy)
     """
-    from src.token_resolver import create_provider
+    from src.kernel.token_resolver import create_provider
     _vcs = create_provider(provider)
 
     if provider == "github":
@@ -136,8 +136,8 @@ async def _verify_repo_bot_tokens():
     R17.2.10: 分批执行（每 10 个一批，间隔 1 秒）
     R21.3.7: 超时/5xx 不标记
     """
-    from src.session_manager import db, db_lock
-    from src.token_resolver import create_provider
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.token_resolver import create_provider
     from src.user.db import set_meta_value, _invalidate_global_bot_cache
 
     # 查询有 bot token 的仓库
@@ -198,8 +198,8 @@ def _verify_single_repo_token(repo_key: str, provider: str):
     R17.2.6: 200 → 清除过期标记
     R21.3.7: 超时/5xx 不标记
     """
-    from src.session_manager import db, db_lock
-    from src.token_resolver import create_provider
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.token_resolver import create_provider
 
     # 读取仓库级 token
     field = "bot_github_token" if provider == "github" else "bot_gitcode_token"
@@ -235,7 +235,7 @@ def _verify_single_repo_token(repo_key: str, provider: str):
 
 def _set_repo_bot_token_status(repo_key: str, status: str):
     """更新 managed_repos.bot_token_status。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -338,7 +338,7 @@ async def bot_token_health_loop():
     log.info(f"Bot token health loop started ({CHECK_INTERVAL}s interval)")
     while True:
         try:
-            from src.lock import acquire_lock, release_lock
+            from src.kernel.lock import acquire_lock, release_lock
             if acquire_lock("token_health_check", ttl=LOCK_TTL):
                 try:
                     # R17.2.1: 全局 bot token 检查

@@ -4,7 +4,7 @@
 不继承 repo 级 devops_agent_session 指针，避免多 Issue 共用同一 opencode session。
 """
 import uuid
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.session_store import get_or_create_issue_session, update_issue_session
 
 

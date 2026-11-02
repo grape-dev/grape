@@ -17,7 +17,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 
 from src.api.deps import require_no_session_token
-from src.config import log
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/feishu/onboard", tags=["feishu-onboard"])
 
@@ -61,7 +61,7 @@ class StartBody(BaseModel):
 
 
 def _create_task(task_id: str, bot_type: str, repo_key: str, user_id: int):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -76,7 +76,7 @@ def _update_task(task_id: str, **fields):
         return
     cols = ", ".join(f"{k}=?" for k in fields)
     vals = list(fields.values())
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(f"UPDATE feishu_onboard_task SET {cols} WHERE task_id=?", (*vals, task_id))
@@ -84,7 +84,7 @@ def _update_task(task_id: str, **fields):
 
 
 def _get_task(task_id: str) -> dict | None:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -117,7 +117,7 @@ def _apply_chat_credentials(user_id: int, app_id: str, app_secret: str) -> tuple
 
     返回 (error_msg, old_app_id)。error_msg 非空表示校验/写入失败。
     """
-    from src.session_manager import db, db_lock, get_chat_config, set_chat_config
+    from src.kernel.session_manager import db, db_lock, get_chat_config, set_chat_config
     old_app_id = get_chat_config(user_id).get("im_app_id", "")
     with db_lock:
         c = db.cursor()
@@ -160,10 +160,10 @@ def _apply_vod_credentials(repo_key: str, app_id: str, app_secret: str) -> tuple
     若无该 repo 的 vod 配置行则 INSERT 新建（否则 UPDATE 匹配不到行，凭据丢失）。
     返回 (error_msg, old_app_id)。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     import uuid
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT bot_type FROM global_im_bot_config WHERE bot_app_id=? AND is_active=1", (app_id,))
@@ -262,7 +262,7 @@ async def _run_registration(task_id: str, bot_type: str, repo_key: str, user_id:
             except Exception as e:
                 log.warning(f"Feishu onboard: get feishu_name failed: {e}")
             try:
-                from src.session_manager import bind_feishu_identity
+                from src.kernel.session_manager import bind_feishu_identity
                 # FR-18.7: 注册名语境——走 bind_feishu_identity 只写飞书三列，不碰平台列
                 bind_feishu_identity(user_id, open_id, feishu_name=feishu_name,
                                      app_id=app_id)
@@ -295,7 +295,7 @@ async def start_onboard(body: StartBody, user: dict = Depends(require_no_session
     # - 409 时 detail 附带旧 task_id，供前端「确认重开」直接作废旧任务（不再只能干等）。
     # - STALE_TTL 兜底：进行中任务超过存活时间（如进程重启丢协程/二维码过期未确认）自动置
     #   failed 并放行新任务，杜绝 waiting_confirm 永久滞留阻塞再扫码（docs/weekly-08 方案 §1.3）。
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # created_at 为 SQLite datetime('now')（UTC 字符串），用带 -STALE_TTL 修饰的比较即可

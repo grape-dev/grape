@@ -8,7 +8,7 @@ import pytest
 @pytest.fixture(autouse=True)
 def _clean_pkg_cache(monkeypatch, tmp_path):
     """隔离包缓存到临时目录，避免污染 data/cache。"""
-    import src.worker_package as wp
+    import src.kernel.worker_package as wp
     monkeypatch.setattr(wp, "CACHE_DIR", str(tmp_path))
     monkeypatch.setattr(wp, "PKG_PATH", os.path.join(str(tmp_path), "grape-worker.tar.gz"))
     monkeypatch.setattr(wp, "VERSION_PATH", os.path.join(str(tmp_path), "VERSION"))
@@ -32,7 +32,7 @@ def _clean_pkg_cache(monkeypatch, tmp_path):
 
 class TestWorkerPackage:
     def test_build_package_contents(self):
-        from src.worker_package import build_package, MANIFEST
+        from src.kernel.worker_package import build_package, MANIFEST
         p = build_package()
         assert os.path.isfile(p)
         tf = tarfile.open(p)
@@ -55,7 +55,7 @@ class TestWorkerPackage:
         tf.close()
 
     def test_sha256sums_match_payload(self):
-        from src.worker_package import build_package
+        from src.kernel.worker_package import build_package
         p = build_package()
         tf = tarfile.open(p)
         sums = {}
@@ -75,7 +75,7 @@ class TestWorkerPackage:
         assert any(k.endswith(".whl") for k in sums) # wheels 已随包下发（离线安装依赖）
 
     def test_version_cache_hit_reuse(self):
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         p1 = wp.build_package()
         mtime1 = os.path.getmtime(p1)
         # 第二次调用命中缓存，不重建
@@ -83,7 +83,7 @@ class TestWorkerPackage:
         assert os.path.getmtime(p2) == mtime1
 
     def test_version_changes_rebuild(self):
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         # 无 git 环境时版本指纹 = manifest 内容 sha256 指纹；内容变化触发指纹变化。
         # （mtime 不参与指纹——内容不变不应重建包，原断言 utime 触发指纹变化是错的）
         m1 = wp._manifest_version()
@@ -103,7 +103,7 @@ class TestWorkerPackage:
         assert m3 == m1, "恢复内容后指纹应复原"
 
     def test_manifest_files_exist(self):
-        from src.worker_package import MANIFEST, ROOT
+        from src.kernel.worker_package import MANIFEST, ROOT
         for item in MANIFEST:
             path = os.path.join(ROOT, item)
             assert os.path.exists(path), f"manifest 项缺失: {item}"
@@ -121,7 +121,7 @@ class TestWorkerPackage:
         src.auth 会从仓库（而非包内）解析成功，产生假阳性（import OK 但 worker 实崩）。
         """
         import subprocess
-        from src.worker_package import build_package
+        from src.kernel.worker_package import build_package
         p = build_package()
         with tarfile.open(p) as tf:
             tf.extractall(tmp_path, filter="data")
@@ -131,7 +131,7 @@ class TestWorkerPackage:
         code = (
             "import sys\n"
             "sys.path.insert(0, sys.argv[1])\n"
-            "import src.config\n"           # 启动链第一环（事故死因）
+            "import src.kernel.config\n"           # 启动链第一环（事故死因）
             "import src.runtime.agent\n"    # worker 主模块全量闭包
             "print('IMPORT_CLOSURE_OK')\n"
         )
@@ -150,7 +150,7 @@ class TestEnsureWheelsMultiPlatform:
     """Issue #499: _ensure_wheels 按平台矩阵预置多平台 wheels（linux x86_64/aarch64 + win_amd64）。"""
 
     def _fake_downloader(self, tmp_path, calls):
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
 
         def _fake(dest, platform_args, py_version):
             calls.append((tuple(platform_args), py_version))
@@ -164,7 +164,7 @@ class TestEnsureWheelsMultiPlatform:
 
     def test_downloads_per_platform_matrix(self, monkeypatch, tmp_path):
         """按 WHEEL_PLATFORMS 矩阵逐平台各下载一份（--platform 精确指定）。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         wd = tmp_path / "wheels"
         wd.mkdir()
         monkeypatch.setattr(wp, "WHEELS_DIR", str(wd))
@@ -179,7 +179,7 @@ class TestEnsureWheelsMultiPlatform:
 
     def test_cache_marker_short_circuit(self, monkeypatch, tmp_path):
         """marker 命中且有 wheel → 不重复下载。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         wd = tmp_path / "wheels"
         wd.mkdir()
         monkeypatch.setattr(wp, "WHEELS_DIR", str(wd))
@@ -195,7 +195,7 @@ class TestEnsureWheelsMultiPlatform:
 
     def test_single_platform_failure_nonfatal(self, monkeypatch, tmp_path):
         """单平台下载失败不阻断其余平台（安装端在线兜底）。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         wd = tmp_path / "wheels"
         wd.mkdir()
         monkeypatch.setattr(wp, "WHEELS_DIR", str(wd))
@@ -218,7 +218,7 @@ class TestEnsureWheelsMultiPlatform:
 
     def test_cache_key_contains_platform_matrix(self):
         """缓存键包含平台矩阵——矩阵变更（增删平台）触发重新下载。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         key = wp._wheels_cache_key("3.12")
         assert "manylinux2014_x86_64" in key
         assert "manylinux2014_aarch64" in key
@@ -228,7 +228,7 @@ class TestEnsureWheelsMultiPlatform:
 class TestGrapeCliWheel:
     def test_skip_when_wheel_present(self, monkeypatch, tmp_path):
         """wheels/ 已含 grape-*.whl → 不触发网络/clone/pip wheel（离线安全）。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         (tmp_path / "grape-0.1.0-py3-none-any.whl").write_text("dummy", encoding="utf-8")
         called = []
         monkeypatch.setattr(wp, "_git", lambda *a, **k: called.append("git"))
@@ -238,7 +238,7 @@ class TestGrapeCliWheel:
 
     def test_builds_wheel_when_missing(self, monkeypatch, tmp_path):
         """wheel 缺失 → 触发 clone + pip wheel 写入同一目录。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         from types import SimpleNamespace
         events = []
 
@@ -262,7 +262,7 @@ class TestInstallEndpoints:
         import hashlib as _h
         from fastapi.testclient import TestClient
         from src.api.main import app
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         token = "rta_" + os.urandom(12).hex()
         h = _h.sha256(token.encode()).hexdigest()
         cred_name = "t-worker-" + os.urandom(4).hex()
@@ -315,23 +315,23 @@ class TestNormalizeWorkerVersion:
     """B5: worker_package.normalize_worker_version 老版本串兼容。"""
 
     def test_new_format_unchanged(self):
-        from src.worker_package import normalize_worker_version
+        from src.kernel.worker_package import normalize_worker_version
         assert normalize_worker_version("h-abc123def456") == "h-abc123def456"
 
     def test_old_format_strips_suffix(self):
-        from src.worker_package import normalize_worker_version
+        from src.kernel.worker_package import normalize_worker_version
         result = normalize_worker_version("h-abc123def4567890-w111abcd-p222abcd")
         assert result == "h-abc123def456"
         assert "-w" not in result
         assert "-p" not in result
 
     def test_empty_string(self):
-        from src.worker_package import normalize_worker_version
+        from src.kernel.worker_package import normalize_worker_version
         assert normalize_worker_version("") == ""
 
     def test_old_new_same_code_matches(self):
         """老格式和新格式指向同一代码版本时归一化后相等。"""
-        from src.worker_package import normalize_worker_version
+        from src.kernel.worker_package import normalize_worker_version
         old_format = "h-abc123def4567890-w111-p222"
         new_format = "h-abc123def456"
         assert normalize_worker_version(old_format) == normalize_worker_version(new_format)
@@ -356,7 +356,7 @@ class TestFindPythonsByArch:
 
     def test_scan_pythons_parses_both_naming_formats(self, monkeypatch, tmp_path):
         """兼容 cpython-<ver>-<arch>-unknown-linux-gnu（新）与 cpython-<ver>-linux-<arch>-gnu（旧）。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         self._make_python(uv_dir, "3.12.8", "x86_64", "unknown-linux-gnu")
@@ -379,7 +379,7 @@ class TestFindPythonsByArch:
 
     def test_scan_pythons_takes_highest_version_per_arch(self, monkeypatch, tmp_path):
         """同架构多版本 → 版本最高者优先。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         self._make_python(uv_dir, "3.11.9", "aarch64", "unknown-linux-gnu")
@@ -391,7 +391,7 @@ class TestFindPythonsByArch:
 
     def test_scan_pythons_ignores_non_linux_and_missing_bin(self, monkeypatch, tmp_path):
         """非 linux（mac 等）standalone 与缺 bin/python3 的目录不进打包候选。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         self._make_python(uv_dir, "3.12.8", "aarch64", "apple-darwin")  # mac 不入包
@@ -411,7 +411,7 @@ class TestFindPythonsByArch:
         `unexpected argument '--arch'` rc=2），交叉架构安装改用官方请求格式
         cpython-3.12-linux-<arch>-gnu（实测成功安装 cpython-3.12.13-linux-x86_64-gnu）。
         """
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         self._make_python(uv_dir, "3.12.8", "aarch64", "unknown-linux-gnu")
@@ -449,7 +449,7 @@ class TestFindPythonsByArch:
 
     def test_find_pythons_none_returns_empty(self, monkeypatch, tmp_path):
         """找不到任何 python（无 uv/安装失败）→ 返回空 dict，不抛异常。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "empty_uv"
         uv_dir.mkdir()
         monkeypatch.setattr(wp, "UV_PYTHON_DIR", str(uv_dir))
@@ -475,7 +475,7 @@ class TestBundlePythonByArch:
 
     def test_build_package_bundles_per_arch_dirs(self, monkeypatch, tmp_path):
         """假双架构目录 → tar 内出现 python-x86_64/ 与 python-aarch64/，且无 python/ 单目录。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         self._make_python(uv_dir, "3.12.8", "x86_64", "unknown-linux-gnu")
@@ -493,7 +493,7 @@ class TestBundlePythonByArch:
 
     def test_python_fingerprint_includes_all_arches(self, monkeypatch, tmp_path):
         """package_version 的 -p 指纹随任一架构目录内容变化而变化。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         self._make_python(uv_dir, "3.12.8", "x86_64", "unknown-linux-gnu")

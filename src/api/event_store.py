@@ -1,8 +1,8 @@
 """Event Store — 事件记录与查询（shared events table）"""
 import json, threading, asyncio
 from datetime import datetime
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 
 # ====== Per-repo 锁（从旧 event_processor 迁移）======

@@ -1,7 +1,7 @@
 """Issue 级执行会话测试（见 multi-issue-isolation-design.md §7.2）"""
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import session_store
 
 

@@ -13,7 +13,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db")
 os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 import src.api.feedback_issue_converter as conv
 
 

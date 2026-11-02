@@ -15,9 +15,9 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.auth.password import hash_password
-from src.api.jwt_utils import create_access_token
+from src.kernel.auth_sdk.jwt_utils import create_access_token
 
 client = TestClient(app)
 
@@ -180,7 +180,7 @@ def test_migrate_orgs_upstream_failure_502(monkeypatch):
     token = _jwt(uid, username)
 
     # Patch session_manager.db_lock to raise
-    from src import session_manager as sm
+    from src.kernel import session_manager as sm
 
     class _BoomLock:
         def __enter__(self):

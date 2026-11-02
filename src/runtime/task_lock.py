@@ -27,7 +27,7 @@ import asyncio
 import logging
 from contextlib import asynccontextmanager
 
-from src.config import log
+from src.kernel.config import log
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ async def run_with_distributed_lock(lock_key: str, ttl: int = 300):
     Yields:
         bool: True if lock was acquired, False if another worker holds it.
     """
-    from src.lock import acquire_lock, release_lock
+    from src.kernel.lock import acquire_lock, release_lock
 
     acquired = await asyncio.to_thread(acquire_lock, lock_key, ttl)
     if not acquired:

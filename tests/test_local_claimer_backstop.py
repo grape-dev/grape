@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from src.runtime import local_claimer
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _mk_task(age_s: float, pool_engine_ids: str = "", pool_tag: str = "qa"):

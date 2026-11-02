@@ -8,7 +8,7 @@ import os
 import sys
 
 # 直接测试路径拼接逻辑（不依赖数据库连接）
-from src.config import SKILLS_DIR
+from src.kernel.config import SKILLS_DIR
 
 
 def test_skill_path_resolution_top_level():

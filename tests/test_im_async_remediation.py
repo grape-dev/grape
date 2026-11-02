@@ -61,7 +61,7 @@ class TestSyncRepoFeishuMapping:
 
     def test_b1_nickname_match_writes_mapping(self):
         """B1: 群成员昵称匹配 GitCode 协作者，写入 unified_user_mapping。"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.user import db as user_db
         # 预置 user_accounts 用户（set_feishu_open_id 需要真实 user_id 才写入）
         grape_account_db.get_grape_account_by_username('zhangsan') or grape_account_db.create_grape_account('zhangsan', email=None, password='pw')
@@ -110,7 +110,7 @@ class TestSyncRepoFeishuMapping:
 
     def test_b5_writes_gitcode_nickname(self):
         """B5: 匹配时写入 gitcode_nickname（覆盖 B1，此处单独断言昵称）。"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.user import db as user_db
         grape_account_db.get_grape_account_by_username('lisi') or grape_account_db.create_grape_account('lisi', email=None, password='pw')
         with db_lock:

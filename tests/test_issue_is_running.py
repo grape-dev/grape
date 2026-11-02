@@ -5,7 +5,7 @@ queued（排队未认领）/ dispatched（历史 pull 中间态）不算，避�
 """
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import issues_center as ic
 
 RK = "gitcode:test/repo"

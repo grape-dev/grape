@@ -23,7 +23,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config import log
+from src.kernel.config import log
 
 RETENTION_DAYS = 14
 CLEANUP_INTERVAL_SEC = 3600      # 最多每小时清一次（由采样循环调用 maybe_cleanup）
@@ -95,7 +95,7 @@ def ingest(records: List[Dict[str, Any]], default_source: str = "master") -> int
     """
     if not records:
         return 0
-    from src.session_manager import _is_mysql_backend, db, db_lock
+    from src.kernel.session_manager import _is_mysql_backend, db, db_lock
 
     rows: List[Tuple[Any, ...]] = []
     seen = set()
@@ -301,8 +301,8 @@ def query(user: Dict[str, Any], level: str = "", source: str = "", repo: str = "
     越权 `repo` → 抛 RepoNotVisible（路由转 404）。
     """
     from src.observability.overview import RepoNotVisible
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
 
     visible = set(_visible_repo_keys(user))
     if repo:
@@ -384,7 +384,7 @@ _last_cleanup = 0.0
 
 def cleanup(days: int = RETENTION_DAYS) -> int:
     """清理超过留存期的日志。返回删除行数。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
     try:
         with db_lock:

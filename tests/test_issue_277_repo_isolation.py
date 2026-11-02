@@ -9,7 +9,7 @@
 - get_runtime_devices 端点的 repo 参数过滤
 """
 import pytest
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.routes.settings import _make_visible_credential_fn
 
 

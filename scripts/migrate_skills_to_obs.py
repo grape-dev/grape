@@ -20,7 +20,7 @@ import zipfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from src.config import log, SKILLS_DIR  # noqa: E402
+from src.kernel.config import log, SKILLS_DIR  # noqa: E402
 from src.storage import get_storage, skill_key  # noqa: E402
 
 
@@ -90,7 +90,7 @@ def main():
     if not items:
         return
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     ok_count = 0
     for scope, owner, skill_name in items:

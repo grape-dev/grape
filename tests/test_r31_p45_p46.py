@@ -42,7 +42,7 @@ class TestDetectStaleOfficialScenes:
         """UC9-1: 仓库已删场景 → warning + 计数；DB 零写（只有 SELECT，无 UPDATE/DELETE）"""
         from src.storage.scene_sync import _detect_stale_official_scenes
         mock_db, mock_cursor = self._mock_db([(1, "api-skill-dev"), (2, "skill-dev"), (3, "hello-world")])
-        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_scenes({"hello-world"}, traversal_complete=True)
         assert n == 2
         execute_calls = [str(c) for c in mock_cursor.execute.call_args_list]
@@ -54,7 +54,7 @@ class TestDetectStaleOfficialScenes:
         """UC9-4: 遍历不完整 → 跳过本轮检测（零查询、零报告）"""
         from src.storage.scene_sync import _detect_stale_official_scenes
         mock_db, mock_cursor = self._mock_db([(1, "api-skill-dev")])
-        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_scenes({"whatever"}, traversal_complete=False)
         assert n == 0
         mock_cursor.execute.assert_not_called()  # 守卫先于查询
@@ -63,7 +63,7 @@ class TestDetectStaleOfficialScenes:
         """仓库与 DB 一致 → 0，正常路径"""
         from src.storage.scene_sync import _detect_stale_official_scenes
         mock_db, _ = self._mock_db([(1, "hello-world")])
-        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_scenes({"hello-world"}, traversal_complete=True)
         assert n == 0
 
@@ -79,7 +79,7 @@ class TestDetectStaleOfficialSkills:
         mock_cursor.execute = MagicMock(return_value=mock_cursor)
         mock_db = MagicMock()
         mock_db.cursor = MagicMock(return_value=mock_cursor)
-        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_skills({"vod"}, traversal_complete=True)
         assert n == 1
         execute_calls = [str(c) for c in mock_cursor.execute.call_args_list]
@@ -89,7 +89,7 @@ class TestDetectStaleOfficialSkills:
         """UC11-2: json 解析失败/写入中断 → 跳过检测，不出具误报名单"""
         from src.storage.skill_sync import _detect_stale_official_skills
         mock_db = MagicMock()
-        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             n = _detect_stale_official_skills({"vod"}, traversal_complete=False)
         assert n == 0
         mock_db.cursor.assert_not_called()
@@ -106,7 +106,7 @@ class TestPrecheckScopeUnification:
         mock_cursor.fetchall = MagicMock(return_value=[("vod",)])
         mock_db = MagicMock()
         mock_db.cursor = MagicMock(return_value=mock_cursor)
-        with patch("src.session_manager.db", mock_db), patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db", mock_db), patch("src.kernel.session_manager.db_lock"):
             existing = _query_active_skill_names({"vod", "my-skill"})
         assert "vod" in existing
         assert "my-skill" not in existing

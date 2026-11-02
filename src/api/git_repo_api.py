@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key
-from src.config import log
+from src.kernel.config import log
 from src.user.repo_manager import UpstreamAPIError
 from src.vcs.providers import (
     translate_inbound,
@@ -82,7 +82,7 @@ def _provider(user: dict = Depends(get_current_user_or_api_key)) -> str:
     不需要也不再接受 X-Git-Provider / provider query——消除双信息源错配
     （见 docs/weekly-02/git-repo-provider-from-token-design.md）。
     """
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     p = parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
     if p not in _SUPPORTED_PROVIDERS:
         raise HTTPException(status_code=403, detail={"code": 403, "message": f"Git provider 未接入: {p}"})
@@ -103,7 +103,7 @@ def _repo_token(owner: str, repo: str, user: dict, provider: str = "") -> str:
         raise ValueError(f"Git provider 未支持: {provider}")
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     mod = _PROVIDER_MODULES[provider]
     rk = to_repo_key(f"{provider}:{owner}/{repo}")
 
@@ -366,8 +366,8 @@ def create_issue(owner: str, repo: str, body: IssueCreateBody, user: dict = Depe
     resp = _vcs_req(p, "POST", _vcs_url(owner, repo, "/issues", None, p), _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S12 写入点1）：建 Issue 入账，webhook 回流按编号对账
     try:
-        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         _rk = to_repo_key(f"{owner}/{repo}", p)
         _cid = extract_content_id(resp, "issue")
         record_outbound(p, _rk, "issue", _cid, issue_number=_cid,
@@ -404,8 +404,8 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
     # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
     # S19：非 body 修改（assignee/labels/state）记 issue_meta（编号键）——元数据回声对账
     try:
-        from src.outbound_ledger import record_outbound, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         _rk = to_repo_key(f"{owner}/{repo}", p)
         if _body:
             record_outbound(p, _rk, "issue_edit", str(number),
@@ -452,8 +452,8 @@ def create_issue_comment(owner: str, repo: str, number: int, body: CommentBody,
     # （_repo_token 403 非 session），故无 jwt/api_key 分支。
     if user.get("agent_type") != "chat":
         try:
-            from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-            from src.repo_key import to_repo_key
+            from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+            from src.kernel.repo_key import to_repo_key
             _rk = to_repo_key(f"{owner}/{repo}", p)
             record_outbound(p, _rk, "issue_comment", extract_content_id(resp, "issue_comment"),
                             issue_number=str(number), content_hash=content_hash_md5(body.body),
@@ -497,8 +497,8 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     # best-effort：入账失败不阻断、不影响响应。bot 建 PR 回流由 S24 豁免先于台账判定放行给
     # QA，不受影响；外部用户建的 PR 无记录 → 放行（判定逻辑不变）。
     try:
-        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", extract_content_id(resp, "issue"),
                         issue_number=extract_content_id(resp, "issue"),
                         content_hash=content_hash_md5(_body) if _body else "")
@@ -525,8 +525,8 @@ def update_pull(owner: str, repo: str, number: int, body: PRUpdateBody,
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 台账（S25，第十一轮补漏）：agent 改 PR → pull_request_updated 回声对账
     try:
-        from src.outbound_ledger import record_outbound, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr", str(number),
                         issue_number=str(number),
                         content_hash=content_hash_md5(_body) if _body else "")
@@ -552,8 +552,8 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     # Issue #453 台账（S25）：合并 PR → pull_request_merged 回声对账（VcsApiClient.merge_pr
     # 已入账，网关直调路径此处分账）
     try:
-        from src.outbound_ledger import record_outbound
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound
+        from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge", str(number),
                         issue_number=str(number))
     except Exception as _e:
@@ -582,8 +582,8 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     # 的理论路径无台账防线。回流按 note_hook_pr 评论 ID 对账；系统内部 QA 回帖 PR 的
     # note_hook_pr 回声即命中。best-effort 不阻断。
     try:
-        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "issue_comment",
                         extract_content_id(resp, "issue_comment"),
                         issue_number=str(number), content_hash=content_hash_md5(_body))

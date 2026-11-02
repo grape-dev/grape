@@ -34,21 +34,21 @@ class TestA2ABotTokenPathB:
     def test_get_repo_bot_token_no_global_path_b_returns_host_user_token(self):
         """路径 B 仓库（无 bot token，有 host_user_id）→ get_repo_bot_token_no_global 降级返回 host 用户 token。"""
         from src.user.db import get_repo_bot_token_no_global
-        with patch("src.token_resolver.TokenResolver.read_stored_token", return_value="USER_TOKEN"):
+        with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value="USER_TOKEN"):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == "USER_TOKEN"
 
     def test_get_repo_bot_token_no_global_path_a_returns_bot_token(self):
         """路径 A 仓库（有 bot token）→ get_repo_bot_token_no_global 返回 bot token，不触发 host 用户降级。"""
         from src.user.db import get_repo_bot_token_no_global
-        with patch("src.token_resolver.TokenResolver.read_stored_token", return_value="BOT_TOKEN"):
+        with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value="BOT_TOKEN"):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == "BOT_TOKEN"
 
     def test_get_repo_bot_token_no_global_path_b_no_host_user_returns_empty(self):
         """路径 B 仓库无 host_user_id → 返回空。"""
         from src.user.db import get_repo_bot_token_no_global
-        with patch("src.token_resolver.TokenResolver.read_stored_token", return_value=""):
+        with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value=""):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == ""
 
@@ -75,7 +75,7 @@ class TestBotUsernamePathB:
             mock_db.cursor.return_value = cursor
 
             # 复现 event_pipeline 的注入逻辑
-            from src.repo_key import to_repo_key, parse_repo_key
+            from src.kernel.repo_key import to_repo_key, parse_repo_key
             _rk = to_repo_key("gitcode:owner/repo")
             _prov, _o, _r = parse_repo_key(_rk)
 
@@ -121,8 +121,8 @@ class TestStatus4TokenAccess:
         """status=4（token 过期）时 _get_oauth_token_from_identity 仍返回 token。"""
         with patch("src.auth.grape_account_db.get_grape_account_by_username",
                    return_value={"id": 1}), \
-             patch("src.session_manager.db") as mock_db, \
-             patch("src.session_manager.db_lock"), \
+             patch("src.kernel.session_manager.db") as mock_db, \
+             patch("src.kernel.session_manager.db_lock"), \
              patch("src.auth.credential_crypto.decrypt", return_value="EXPIRED_TOKEN"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_token", 4)  # status=4
@@ -135,8 +135,8 @@ class TestStatus4TokenAccess:
         """status=1（活跃）时正常返回 token。"""
         with patch("src.auth.grape_account_db.get_grape_account_by_username",
                    return_value={"id": 1}), \
-             patch("src.session_manager.db") as mock_db, \
-             patch("src.session_manager.db_lock"), \
+             patch("src.kernel.session_manager.db") as mock_db, \
+             patch("src.kernel.session_manager.db_lock"), \
              patch("src.auth.credential_crypto.decrypt", return_value="ACTIVE_TOKEN"):
             cursor = MagicMock()
             cursor.fetchone.return_value = ("encrypted_token", 1)
@@ -149,8 +149,8 @@ class TestStatus4TokenAccess:
         """status=0（解绑）时不返回 token。"""
         with patch("src.auth.grape_account_db.get_grape_account_by_username",
                    return_value={"id": 1}), \
-             patch("src.session_manager.db") as mock_db, \
-             patch("src.session_manager.db_lock"):
+             patch("src.kernel.session_manager.db") as mock_db, \
+             patch("src.kernel.session_manager.db_lock"):
             cursor = MagicMock()
             cursor.fetchone.return_value = None  # status=0 not in (1,4)
             mock_db.cursor.return_value = cursor
@@ -171,8 +171,8 @@ class TestAddManagedRepoHostUserIdPreserved:
         from src.user.db import add_managed_repo
         with patch("src.user.db.db") as mock_db, \
              patch("src.user.db.db_lock"), \
-             patch("src.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
-             patch("src.repo_key.from_repo_key", return_value="owner/repo"):
+             patch("src.kernel.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
+             patch("src.kernel.repo_key.from_repo_key", return_value="owner/repo"):
             cursor = MagicMock()
             # SELECT existing → host_user_id=42, webhook_secret="", bot_gitcode_token="", bot_github_token=""
             # R14.12: SELECT 现在返回 4 列
@@ -192,8 +192,8 @@ class TestAddManagedRepoHostUserIdPreserved:
         from src.user.db import add_managed_repo
         with patch("src.user.db.db") as mock_db, \
              patch("src.user.db.db_lock"), \
-             patch("src.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
-             patch("src.repo_key.from_repo_key", return_value="owner/repo"):
+             patch("src.kernel.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
+             patch("src.kernel.repo_key.from_repo_key", return_value="owner/repo"):
             cursor = MagicMock()
             cursor.fetchone.return_value = (42, "", "", "")  # R14.12: 4 列
             mock_db.cursor.return_value = cursor
@@ -209,8 +209,8 @@ class TestAddManagedRepoHostUserIdPreserved:
         from src.user.db import add_managed_repo
         with patch("src.user.db.db") as mock_db, \
              patch("src.user.db.db_lock"), \
-             patch("src.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
-             patch("src.repo_key.from_repo_key", return_value="owner/repo"):
+             patch("src.kernel.repo_key.to_repo_key", return_value="gitcode:owner/repo"), \
+             patch("src.kernel.repo_key.from_repo_key", return_value="owner/repo"):
             cursor = MagicMock()
             cursor.fetchone.return_value = None  # 无已有记录
             mock_db.cursor.return_value = cursor
@@ -445,9 +445,9 @@ class TestR10TokenExpiryDetection:
             "repo_gitcode_token": ""
         }), \
              patch("src.runtime.service.update_task_status") as m_update, \
-             patch("src.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"), \
-             patch("src.token_resolver.TokenResolver.resolve", return_value=MagicMock(level="user", token="", issue_id="#123")), \
-             patch("src.token_resolver.create_action_handler", return_value=None), \
+             patch("src.kernel.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"), \
+             patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=MagicMock(level="user", token="", issue_id="#123")), \
+             patch("src.kernel.token_resolver.create_action_handler", return_value=None), \
              patch("src.runtime.service.db") as mock_db, \
              patch("src.runtime.service.db_lock"), \
              patch("src.api.event_store.update_event_complete"), \
@@ -593,22 +593,22 @@ class TestGetTaskRepoToken:
 
         优化后 _get_task_repo_token 用 TokenResolver.resolve() 一次拿 token + level。
         """
-        from src.token_resolver import TokenResult
+        from src.kernel.token_resolver import TokenResult
         _mock_result = MagicMock()
         _mock_result.token = "BOT_TOKEN"
         _mock_result.level = "repo_bot"
-        with patch("src.token_resolver.TokenResolver.resolve", return_value=_mock_result):
+        with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
             from src.api.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("gitcode:owner/repo")
             assert result == "BOT_TOKEN"
 
     def test_user_token_writes_empty_to_task_row(self):
         """用户 token（路径 D）→ 写空。"""
-        from src.token_resolver import TokenResult
+        from src.kernel.token_resolver import TokenResult
         _mock_result = MagicMock()
         _mock_result.token = "USER_TOKEN"
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve", return_value=_mock_result):
+        with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
             from src.api.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("gitcode:owner/repo")
             assert result == ""
@@ -618,7 +618,7 @@ class TestGetTaskRepoToken:
         _mock_result = MagicMock()
         _mock_result.token = "GH_USER_TOKEN"
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve", return_value=_mock_result):
+        with patch("src.kernel.token_resolver.TokenResolver.resolve", return_value=_mock_result):
             from src.api.event_pipeline import _get_task_repo_token
             result = _get_task_repo_token("github:owner/repo")
             assert result == ""

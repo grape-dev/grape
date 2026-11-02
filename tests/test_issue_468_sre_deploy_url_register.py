@@ -21,7 +21,7 @@ SRC = os.path.join(ROOT, "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import init_database
 
 init_database()
@@ -161,7 +161,7 @@ def _quiet_remote_hooks(monkeypatch):
     monkeypatch.setattr("src.api.event_pipeline._post_subtask_completion_to_parent", lambda *a, **k: None)
     monkeypatch.setattr("src.api.event_pipeline._post_all_subtasks_done", lambda *a, **k: None)
     monkeypatch.setattr("src.runtime.service._handle_vod_recommend_complete", lambda *a, **k: None)
-    monkeypatch.setattr("src.token_resolver.create_provider_from_repo_key", lambda *a, **k: None)
+    monkeypatch.setattr("src.kernel.token_resolver.create_provider_from_repo_key", lambda *a, **k: None)
 
 
 def test_complete_task_sre_registers(_quiet_remote_hooks):

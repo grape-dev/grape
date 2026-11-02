@@ -22,7 +22,7 @@ os.environ.setdefault(
 os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 
 from src.api.openapi import custom_openapi
-from src.help_page_gen import write_openapi_contract
+from src.kernel.help_page_gen import write_openapi_contract
 from src.api.main import app
 
 

@@ -29,7 +29,7 @@ import subprocess
 import shutil
 import signal
 from typing import Generator
-from src.config import log
+from src.kernel.config import log
 
 _bwrap_fail_notified = False
 
@@ -145,7 +145,7 @@ class HermesACPBackend:
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         env = os.environ.copy()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
         env["NO_COLOR"] = "1"
@@ -224,11 +224,11 @@ class HermesACPBackend:
 
         # 组件2：文件系统隔离（issue #500：GRAPE_AGENT_SANDBOX 关闭时先短路，
         # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音。
-        # 直接读 src.config（与 sandbox_enabled() 同语义），规避 sandbox 模块
+        # 直接读 src.kernel.config（与 sandbox_enabled() 同语义），规避 sandbox 模块
         # 自身导入损坏时短路失效）
         _acp_cmd = [agent_cmd, "acp"]
         try:
-            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+            from src.kernel.config import GRAPE_AGENT_SANDBOX as _sbx_on
         except Exception:
             _sbx_on = False
         if _sbx_on:

@@ -15,7 +15,7 @@ NOW = datetime.now(timezone.utc)
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -34,7 +34,7 @@ def _setup():
 
 def _mk(task_id, engine_id=1, issue_id="#1", stage="vod", minutes_ago=30, inp=100, out=50,
         cache_r=10, cache_w=5, reason=7, run_kind="task", ts=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     when = ts or (NOW - timedelta(minutes=minutes_ago)).isoformat()
     with db_lock:
         c = db.cursor()

@@ -9,8 +9,8 @@ Designed to run as a periodic background task with distributed lock
 (only one worker executes at a time).
 """
 import logging
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 logger = logging.getLogger(__name__)
 
@@ -30,7 +30,7 @@ _AGENT_TASKS_TERMINAL_STATUSES = ("completed", "failed", "cancelled")
 
 def _time_expr(days: int) -> str:
     """跨后端的时间下界表达式（MySQL / SQLite）。"""
-    from src.mysql_compat import get_db_backend
+    from src.kernel.mysql_compat import get_db_backend
     is_mysql = get_db_backend() == "mysql"
     if is_mysql:
         return f"NOW() - INTERVAL {days} DAY"
@@ -141,7 +141,7 @@ def cleanup_old_task_messages() -> int:
     Returns the number of rows deleted.
     """
     try:
-        from src.mysql_compat import get_db_backend
+        from src.kernel.mysql_compat import get_db_backend
         is_mysql = get_db_backend() == "mysql"
         time_expr = (
             f"NOW() - INTERVAL {_TASK_MESSAGES_RETENTION_DAYS} DAY"

@@ -11,7 +11,7 @@ import time
 import threading
 from typing import Optional
 
-from src.config import CONFIG_DIR, log
+from src.kernel.config import CONFIG_DIR, log
 
 # File-based fallback (used during migration or if DB not ready)
 _PIPELINES_PATH = os.path.join(CONFIG_DIR, "pipelines.json")
@@ -112,7 +112,7 @@ def invalidate_scene_cache(scene_id: str = "", repo_key: str = ""):
 
 
 def _db():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
 
@@ -639,7 +639,7 @@ def delete_custom_scene(scene_id: str, repo_key: str):
 
     # 自检推荐配置：清理指向被删场景的规则/兜底
     try:
-        from src.prompt_builder import _sanitize_recommend_config
+        from src.kernel.prompt_builder import _sanitize_recommend_config
         _sanitize_recommend_config(repo_key)
     except Exception:
         pass
@@ -651,7 +651,7 @@ def apply_market_scene_by_name(repo_key: str, scene_name: str, user_id: int = 0)
     供模板创建流程按模板 scene_id 覆盖默认场景使用。
     幂等：仓库已有同 market_scene_id 的场景则不重复创建。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
 
     # 按 name 查 scene_market 拿 market_id
     db, lock = _db()

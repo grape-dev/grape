@@ -20,7 +20,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 # 异常脱敏测试用：不让 TestClient 把服务端异常重新抛出，走真实 500 响应路径
@@ -33,7 +33,7 @@ _headers = {}
 def setup_module():
     global _uid, _headers
     from src.auth.password import hash_password
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, token_version FROM grape_accounts WHERE username='test_412'")
@@ -158,7 +158,7 @@ class TestGlobalExceptionSanitization:
         """路由层抛出数据库异常（含 SQL 片段/表名）→ 500 通用文案，不回显原文。"""
         from unittest.mock import patch, MagicMock
         import sqlite3
-        import src.session_manager as sm
+        import src.kernel.session_manager as sm
 
         _mock_db = MagicMock()
         _mock_db.cursor.side_effect = sqlite3.OperationalError(

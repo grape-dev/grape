@@ -22,7 +22,7 @@ OTHER = "gitcode:org/alert-theirs"
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_alert_events", "DELETE FROM agent_tasks WHERE id LIKE 't_alrt_%'"):
@@ -38,7 +38,7 @@ def _clean():
 
 
 def _grant(repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -48,7 +48,7 @@ def _grant(repo_key):
 
 
 def _task(tid, repo_key, status, started_min_ago=None, completed_min_ago=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = datetime.now(timezone.utc)
     st = (now - timedelta(minutes=started_min_ago)).isoformat() if started_min_ago is not None else None
     ct = (now - timedelta(minutes=completed_min_ago)).isoformat() if completed_min_ago is not None else None
@@ -66,7 +66,7 @@ def _rules_by_name():
 
 
 def _events(**kw):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sql = "SELECT * FROM obs_alert_events"
     conds, params = [], []
     for k, v in kw.items():
@@ -82,7 +82,7 @@ def _events(**kw):
 
 
 def _set_rule(name, **fields):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sets = ", ".join(f"{k}=?" for k in fields)
     with db_lock:
         c = db.cursor()
@@ -174,7 +174,7 @@ def test_stuck_task_fires_and_resolves():
     assert evs2[0]["last_seen_at"] >= first_seen
 
     # 任务结束 → 条件不满足 → 转 resolved（不再通知）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE agent_tasks SET status='completed', completed_at=? WHERE id='t_alrt_stuck'",
@@ -239,7 +239,7 @@ def test_other_users_events_are_not_visible():
 
 def test_platform_events_never_reach_user_face():
     """平台级事件（即使被求值出来）绝不出现在用户面。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, name FROM obs_alert_rules WHERE level='platform' LIMIT 1")
@@ -271,7 +271,7 @@ def test_user_events_survive_visible_device_dims():
     为什么以前测不出来：只有 `dim_keys` 非空（调用者有可见设备）才会拼出那个 LIKE 分支，
     测试环境里 REPO 没有对应设备 → 分支被跳过。本用例显式造一台可见设备把这个分支打出来。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _clean()
     _grant(REPO)
     now = datetime.now(timezone.utc).isoformat()
@@ -299,7 +299,7 @@ def test_user_events_survive_visible_device_dims():
 
         # ① 拼出来的 SQL 文本里不能有字面 %（除占位符）——测试库是 SQLite（conftest 强制），
         #    pymysql 的 % 格式化问题在 SQLite 上**根本不会复现**，只能直接断言 SQL。
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         captured: list = []
 
         class _SpyCur:
@@ -417,7 +417,7 @@ class _FakeBM:
 
 
 def _bind_open_id(uid, open_id, username="u-notify"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO unified_user_mapping (user_id, gitcode_user, feishu_open_id,"
@@ -427,7 +427,7 @@ def _bind_open_id(uid, open_id, username="u-notify"):
 
 
 def _unbind_open_id(uid):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM unified_user_mapping WHERE user_id=?", (int(uid),))
@@ -716,7 +716,7 @@ def test_routes_banner_panel_and_rule_ops():
 
 def _insert_event(rule_id, rule_name, repo_key, first_iso=None, deferred=0, last_notified=""):
     """造一条 firing 事件（绕过求值，专注策略链路）。返回事件 id。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = first_iso or datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
@@ -834,7 +834,7 @@ def test_escalation_not_due_before_threshold():
 
 def test_evaluate_renominates_open_event_when_repeat_due():
     """repeat_sec>0：开放事件到期后**重新进通知候选**（真机演练发现的缺口：只抑制不复推）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     rid = _rules_by_name()["task_stuck"]["id"]
     al.set_rule_policy(rid, {"repeat_sec": 60})
     ev_id = _insert_event(rid, "task_stuck", REPO)          # last_notified_at='' → 从未通知过
@@ -873,7 +873,7 @@ def test_deferred_event_is_resent_only_inside_window():
     nh = (h + 9) % 24
     al.set_rule_policy(rid, {"notify_window_json":
                              '{"start":"%02d:00","end":"%02d:59"}' % (nh, nh)})
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE obs_alert_events SET notify_deferred=1, last_notified_at='' WHERE rule_id=?",

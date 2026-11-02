@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import _create_tables
 from src.auth.grape_account_db import (
     create_grape_account,

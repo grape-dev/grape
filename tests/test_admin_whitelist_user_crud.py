@@ -35,7 +35,7 @@ def client():
 
 def _cleanup_whitelist():
     """Remove all login_whitelist entries and reset toggle."""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM login_whitelist")
@@ -46,7 +46,7 @@ def _cleanup_whitelist():
 
 def _cleanup_user(username: str):
     """Remove a test user from grape_accounts."""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM grape_accounts WHERE LOWER(username)=LOWER(?)", (username,))
@@ -244,7 +244,7 @@ class TestUserCRUD:
         assert r.status_code == 200, r.text
 
         # Verify via DB
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT email, nickname FROM grape_accounts WHERE id=?", (uid,))
@@ -273,7 +273,7 @@ class TestUserCRUD:
         uid = r_create.json()["id"]
 
         # Get original token_version
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT token_version FROM grape_accounts WHERE id=?", (uid,))

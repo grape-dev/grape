@@ -24,7 +24,7 @@ from __future__ import annotations
 import os
 import threading
 
-from src.config import log
+from src.kernel.config import log
 
 _DEFAULT_ATTEMPTS = 6    # 首次离线后最多自动重试次数
 _DEFAULT_BASE_DELAY = 60  # 首次重试延迟（秒），指数退避
@@ -158,7 +158,7 @@ def _claim_for_redispatch(seq: int) -> bool:
     复位语义与 event_store.reset_event_terminal 对齐（清 exit_code/structured_output，
     并重抢 event guard 防重跑期间并发事件滑入）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -275,7 +275,7 @@ def _notify_issue_broken_chain(repo_key: str, issue_id: str, note: str) -> bool:
     try:
         from src.user.db import get_repo_token_with_refresh
         from src.api.event_pipeline import _post_result_to_issue
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         token = get_repo_token_with_refresh(repo_key) or ""
         repo = from_repo_key(repo_key)
         if not token or not repo:
@@ -304,7 +304,7 @@ def _mark_retry_exhausted(seq: int, attempts: int, err=None) -> None:
     status = ""
     _bk_repo, _bk_issue = "", ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT status, repo_key, issue_id FROM events WHERE seq=?", (seq,))

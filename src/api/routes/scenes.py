@@ -3,7 +3,7 @@ import json, os, re, threading, time
 from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
-from src.config import log
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
@@ -42,12 +42,12 @@ def _branches_cache_invalidate(owner: str, repo: str):
 
 def _resolve_repo_key(repo: str) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(repo)
     if ":" in repo:
         return rk
     try:
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
             row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
@@ -75,7 +75,7 @@ def _resolve_scene_repo_key(repo: str, user: dict) -> str:
         return _u["repo_key"]
     # 缺省回落 2：请求中间件解析的 repo 上下文（query param / 路径推导）
     try:
-        from src.config import repo_var
+        from src.kernel.config import repo_var
         _ctx_repo = repo_var.get()
         if _ctx_repo:
             return _ctx_repo if ":" in _ctx_repo else _resolve_repo_key(_ctx_repo)
@@ -89,7 +89,7 @@ def _scene_row_exists(scene_id: str, repo_key: str) -> bool:
     if not scene_id:
         return False
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -122,7 +122,7 @@ def _resolve_session_bound_scene(scene_id: str, user: dict):
     _repo_key = _u.get("repo_key") or ""
     _issue_id = ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -175,7 +175,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     不再逐场景调 get_pipeline_config 做二次 DB 查询。
     """
     from src.api.pipeline_config import get_scenes, get_pipeline_config
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = _resolve_scene_repo_key(repo, user)
     scene_list = get_scenes(repo_key=repo_key)
 
@@ -183,7 +183,7 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
     # 这样前端查看模式直接用 node 上的 display_name，不依赖 dashboard API 绑定的 agent skill
     skill_display_map = {}
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT skill_name, display_name FROM skill WHERE is_active=1 AND scope='official'")
@@ -307,7 +307,7 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
     """
     from src.user.db import (list_scene_market, batch_scene_liked,
                              batch_scene_repo_count)
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
     if repo:
@@ -355,7 +355,7 @@ def list_scenes_market(user: dict = Depends(require_no_session_token),
     # 精选场景按 admin 管理台设置的顺序排列
     if featured_only and result:
         try:
-            from src.featured_order import get_featured_order
+            from src.kernel.featured_order import get_featured_order
             _order = get_featured_order("scene")
             if _order:
                 _order_map = {sid: i for i, sid in enumerate(_order)}
@@ -370,7 +370,7 @@ def get_scene_market_detail(market_id: int, user: dict = Depends(require_no_sess
     """场景详情：完整介绍 + 技能链路详解 + 推荐模板 + 在用仓库列表"""
     from src.user.db import (get_scene_market_by_id, is_scene_liked,
                              get_scene_repos, get_scene_category)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     scene = get_scene_market_by_id(market_id)
     if not scene:
@@ -488,8 +488,8 @@ def check_market_scene_applied(market_id: int, user: dict = Depends(require_no_s
 
     返回: {"applied": bool, "scene_name": str}
     """
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
 
     if not owner or not repo:
         return {"applied": False, "scene_name": ""}
@@ -524,8 +524,8 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
     import uuid
     from src.user.db import get_scene_market_by_id
     from src.api.pipeline_config import create_custom_scene, update_custom_scene
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
 
     if not owner or not repo:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "请先选择仓库"})
@@ -544,7 +544,7 @@ def apply_market_scene(market_id: int, user: dict = Depends(require_no_session_t
         nodes = []
 
     # 检查场景引用的 skill 是否都存在（基于 scene_skill_ref 的 skill_id 查 skill 表）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT skill_name, skill_id FROM scene_skill_ref WHERE scene_id=?", (market_id,))
@@ -618,8 +618,8 @@ async def check_market_scene_experience(market_id: int, user: dict = Depends(req
     返回: {"repo_exists": bool, "scene_applied": bool, "full_name": str, "scene_name": str}
     """
     from src.user.db import get_scene_market_by_id
-    from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
     from src.api.oauth_token import with_oauth_token
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
@@ -711,8 +711,8 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     import asyncio
     import uuid
     from src.user.db import get_scene_market_by_id
-    from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
     from src.api.oauth_token import with_oauth_token
     from src.user.repo_manager import get_user_gitcode_login
     from src.api.routes.templates import _find_template
@@ -936,7 +936,7 @@ def _detect_repo_provider(owner: str, repo: str) -> str:
     GitCode 侧 133 个分支被误判成 GitHub 仓库后只剩 main。
     """
     from src.user.db import db_lock, db
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
 
     def _hit(table: str, rk: str) -> bool:
         try:
@@ -995,7 +995,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
 
     if provider == "github":
         from src.user.db import get_github_token
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(f"{owner}/{repo}", provider="github")
         token = get_github_token(repo_key=rk)
         if not token:
@@ -1026,7 +1026,7 @@ def list_repo_branches(owner: str, repo: str, provider: str = "", repo_key: str 
     # GitCode（原逻辑）
     # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
     from src.user.db import get_repo_token_with_refresh
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
     if not token:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法查询分支"})
@@ -1078,7 +1078,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
 
     if provider == "github":
         from src.user.db import get_github_token
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(f"{owner}/{repo}", provider="github")
         token = get_github_token(repo_key=rk)
         if not token:
@@ -1129,7 +1129,7 @@ def create_repo_branch(owner: str, repo: str, body: CreateBranchRequest,
     # GitCode（原逻辑）
     # R12.13: 改用 get_repo_token_with_refresh（路径 B 仓库返回用户 token，不会 403）
     from src.user.db import get_repo_token_with_refresh
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     token = get_repo_token_with_refresh(to_repo_key(f"{owner}/{repo}")) or ""
     if not token:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "Bot Token 未配置，无法创建分支"})
@@ -1182,7 +1182,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
     import uuid as _uuid
     from src.user.db import (create_scene_market, commit_uploaded_file,
                              delete_uploaded_file, get_uploaded_file)
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     from src.storage import get_storage
 
     if body.scope not in ("repo",):
@@ -1232,7 +1232,7 @@ def create_market_scene(body: CreateMarketSceneRequest, user: dict = Depends(req
         final_icon, final_obs_key = _finalize_scene_icon(body.file_id, market_id, body.obs_icon_key, user)
         # 更新 scene_market 的 icon 为正式路径
         if final_icon:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             try:
                 with db_lock:
                     c = db.cursor()
@@ -1358,7 +1358,7 @@ def check_scene_name(name: str, scope: str, user: dict = Depends(require_no_sess
                      repo: str = "", exclude_id: int = 0):
     """检查场景名称是否重复（同 scope 同用户同仓库下名称唯一）。"""
     from src.user.db import check_scene_name_exists
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
     if repo:
@@ -1443,7 +1443,7 @@ def _finalize_scene_icon(file_id: int, market_id: int, obs_icon_key: str, user: 
     from src.user.db import (get_uploaded_file, commit_uploaded_file,
                              delete_uploaded_file)
     from src.storage import get_storage
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     file_rec = get_uploaded_file(file_id)
     if not file_rec:
@@ -1559,7 +1559,7 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
                           page: int = Query(1, ge=1, description="页码，从 1 开始"),
                           page_size: int = Query(20, ge=1, le=200, description="每页条数，1-200")):
     """返回该 agent_type 可选的 skill 列表（支持搜索 + scope 过滤 + 分页）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     skills = []
     where = ["agent_type=?", "is_active=1"]
     params: list = [agent_type]
@@ -1567,13 +1567,13 @@ def list_skills_for_agent(agent_type: str, user: dict = Depends(require_no_sessi
     # skill 可见范围：official + 个人 user skill + 当前仓库的 repo skill
     repo_key = ""
     if repo:
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         repo_key = _resolve_repo_key(repo)
     else:
         try:
             _repo = app_current_repo()
             if _repo:
-                from src.repo_key import to_repo_key
+                from src.kernel.repo_key import to_repo_key
                 repo_key = _resolve_repo_key(f"{_repo.get('owner','')}/{_repo.get('name','')}")
         except Exception:
             pass
@@ -1654,8 +1654,8 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
 
     校验失败抛 HTTPException(400)；失效 runtime_id 跳过（优雅降级）。
     """
-    from src.session_manager import db, db_lock
-    from src.repo_key import from_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for node in nodes:
         tag = node.get("tag") or node.get("id") or ""
@@ -1722,7 +1722,7 @@ def _validate_scene_engine_ids(nodes: list, repo_key: str, username: str = ""):
 def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """创建自定义场景（方案 B：场景只与仓库关联，无 user 级）"""
     from src.api.pipeline_config import create_custom_scene
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     import uuid
 
     if body.scope == "official":
@@ -1777,7 +1777,7 @@ def create_scene(body: CreateSceneRequest, user: dict = Depends(require_no_sessi
 def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(require_no_session_token), repo: str = ""):
     """更新场景（repo/user scope 直接更新，official 不可修改）"""
     from src.api.pipeline_config import update_custom_scene, _query_scene_by_id
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
     if repo:
@@ -1832,7 +1832,7 @@ def update_scene(scene_id: str, body: UpdateSceneRequest, user: dict = Depends(r
 def delete_scene(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """删除自定义场景（软删除，官方场景不可删除）"""
     from src.api.pipeline_config import delete_custom_scene, _query_scene_by_id
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
 
     repo_key = ""
     if repo:
@@ -1860,8 +1860,8 @@ def apply_scene(owner: str, repo: str, body: ApplySceneRequest,
                       user: dict = Depends(require_no_session_token)):
     """为仓库应用指定场景"""
     from src.api.pipeline_config import get_pipeline_config, _query_scene_by_id
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     from src.api.session_store import upsert_agent_session
 
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
@@ -2025,8 +2025,8 @@ def _merge_preset_custom_fields(scene_id: str, repo_key: str, preset_json: str =
     - preset 项标注 preset=true，preyset 声明持久化为 advanced_options.preset_custom_fields
     """
     import json as _j
-    from src.session_manager import db, db_lock
-    from src.scene_custom_env import normalize_custom_field
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.scene_custom_env import normalize_custom_field
 
     try:
         preset_decls = _j.loads(preset_json) if preset_json else []
@@ -2082,8 +2082,8 @@ class AdvancedOptionsRequest(BaseModel):
 @router.get("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_get", summary="Get scene advanced options", description="Reads scene advanced options (work branch + custom key:value).")
 def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """读取场景高级选项（工作分支 + 自定义 key:value）"""
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     import json as _json
 
     repo_key = ""
@@ -2108,7 +2108,7 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             opts = _json.loads(row[0])
         except Exception:
             opts = {}
-        from src.scene_custom_env import normalize_custom_field
+        from src.kernel.scene_custom_env import normalize_custom_field
         _fields = []
         for f in (opts.get("custom_fields", []) or []):
             _nf = normalize_custom_field(f)
@@ -2144,8 +2144,8 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
 def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
                           user: dict = Depends(require_no_session_token), repo: str = ""):
     """保存场景高级选项（工作分支 + 自定义 key:value）"""
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     from src.api.pipeline_config import _query_scene_by_id
     import json as _json
     from datetime import datetime, timezone
@@ -2166,7 +2166,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
 
     # 校验 custom_fields name 非空/大写/保留冲突且不重复
-    from src.scene_custom_env import custom_env_error, normalize_custom_field
+    from src.kernel.scene_custom_env import custom_env_error, normalize_custom_field
     seen_names = set()
     for f in (body.custom_fields or []):
         _n = (f.get("name") or "").strip() if isinstance(f, dict) else ""
@@ -2179,7 +2179,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
         # scope 校验：数组内每项必须为合法枚举；全部非法 → 400（部分非法在 normalize 时剔除）
         _raw_scope = f.get("scope") if isinstance(f, dict) else None
         if _raw_scope:
-            from src.scene_custom_env import _SCOPE_SET
+            from src.kernel.scene_custom_env import _SCOPE_SET
             _items = _raw_scope if isinstance(_raw_scope, (list, tuple, set)) else [_raw_scope]
             _valid_items = {(str(x) or "").strip().lower() for x in _items if x not in (None, "")}
             if _valid_items and not (_valid_items & _SCOPE_SET):
@@ -2202,7 +2202,7 @@ def save_advanced_options(scene_id: str, body: AdvancedOptionsRequest,
     _custom_fields = [normalize_custom_field(f) for f in (body.custom_fields or []) if isinstance(f, dict)]
     _custom_fields = [f for f in _custom_fields if f.get("name")]
     # 读库内现有 advanced_options（preset 声明 + 既有值），预置参数保护
-    from src.scene_custom_env import normalize_scope as _normalize_scope
+    from src.kernel.scene_custom_env import normalize_scope as _normalize_scope
     _old_ao = {}
     _old_cf_map = {}      # name -> 完整旧项
     _preset_decl_map = {} # name -> preset 声明（preset_custom_fields 来源）
@@ -2347,7 +2347,7 @@ def _scene_deploy_url_guard(scene_id: str, repo: str, user: dict) -> str:
 @router.get("/{scene_id}/deploy-url", operation_id="scenes_deploy_url_get", summary="Get scene deployment URL", description="Returns the scene-level access URL registered on the scene detail page.")
 def get_scene_deploy_url(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
     """获取场景级访问地址（每场景独立一条；不影响需求中心仓库级 deploy_url）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     repo_key = _scene_deploy_url_guard(scene_id, repo, user)
     try:
         with db_lock:
@@ -2366,7 +2366,7 @@ def get_scene_deploy_url(scene_id: str, user: dict = Depends(require_no_session_
 def set_scene_deploy_url(scene_id: str, body: SceneDeployUrlBody,
                          user: dict = Depends(require_no_session_token), repo: str = ""):
     """登记/编辑场景级访问地址（校验与需求中心一致：http(s) 前缀 + ≤512；空串清除）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     # 复用 #446 的 XSS 防护校验（与 src/api/routes/repos.py set_deploy_url 同一规则）
     from src.api.routes.repos import _validate_deploy_url
     deploy_url = _validate_deploy_url(body.deploy_url)

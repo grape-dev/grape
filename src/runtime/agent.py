@@ -30,7 +30,7 @@ _CODEARTS_ALLOW_PERMS = [
     {"permission": "dotfile", "pattern": "*", "action": "ask"},
 ]
 
-from src.config import log, CHAT_CWD_BASE
+from src.kernel.config import log, CHAT_CWD_BASE
 from src.runtime.client import CredentialRevokedError
 # R11.4: _get_task_token 抽取到 src/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
@@ -2088,7 +2088,7 @@ async def _execute_task(client, task, engine_name: str = ""):
             """主渠道物化失败 → 官方技能包原子回退；成功则注入 DEVOPS_SKILLS_DIR。"""
             _skill_name = _task.get("skill") or ""
             try:
-                from src.config import resolve_official_skill_path
+                from src.kernel.config import resolve_official_skill_path
                 _official = resolve_official_skill_path(_skill_name)
             except Exception as _e:
                 log.warning(f"[skill] official resolve failed: {_e}")

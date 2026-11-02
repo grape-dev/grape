@@ -18,14 +18,14 @@ from fastapi.testclient import TestClient
 
 from src.api import auth_token
 from src.api.deps import get_current_user_or_api_key
-from src.api.jwt_utils import create_access_token
+from src.kernel.auth_sdk.jwt_utils import create_access_token
 from src.user import db as user_db
 
 
 @pytest.fixture(autouse=True)
 def _clean_token_tables():
     """每用例前清空 token 表：Windows 下旧库残留跨运行，防键值冲突。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%' OR session_key LIKE 'task-%' OR session_key LIKE 'sess-%' OR session_key LIKE 'task_%' OR session_key LIKE 'sess_%'")
         # OMIT-4 修复：api_tokens 表 schema 已改为 token_sha256（无 token 列），
@@ -67,7 +67,7 @@ def test_t1_issue_session_token_sha256_on_repo():
     plain = auth_token.issue_session_token(
         session_key="task-1", repo_key="o/r", agent_type="vod", user_id=0)
     assert plain.startswith("tk_")
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         row = db.cursor().execute(
             "SELECT token_sha256, repo_key, agent_type, user_id, expires_at FROM session_api_tokens WHERE session_key='task-1'"
@@ -82,7 +82,7 @@ def test_t9_plaintext_never_in_db():
     uid = _make_user("t9")["id"]
     plain = auth_token.issue_session_token(
         session_key="task-9", repo_key="o/r", agent_type="chat", user_id=uid)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # 全表扫描确认明文不出现在任何列
@@ -113,7 +113,7 @@ def test_t3_t5_revoke_session_token_invalid(client):
     assert auth_token.revoke_session_token("task-3") is True
     # revoke 改为延迟过期（180s 宽限期），宽限期内 token 仍有效
     # 模拟过期：手动将 expires_at 设为过去时间
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.cursor().execute("UPDATE session_api_tokens SET expires_at=? WHERE session_key=?", ("0", "task-3"))
         db.commit()
@@ -128,7 +128,7 @@ def test_t8_session_token_scope_not_shared():
     # 会话 a 的 token 作用域绑定在 o/r；会话 b 独立
     assert auth_token.revoke_session_token("sess-a") is True
     # revoke 改为延迟过期（180s 宽限期），手动模拟过期
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.cursor().execute("UPDATE session_api_tokens SET expires_at=? WHERE session_key=?", ("0", "sess-a"))
         db.commit()
@@ -149,7 +149,7 @@ def test_purge_expired_session_tokens():
     auth_token.issue_session_token(session_key="task-p2", repo_key="o/r", agent_type="vod", ttl=3600)
     n = auth_token.purge_expired_session_tokens()
     assert n >= 1
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         left = db.cursor().execute("SELECT session_key FROM session_api_tokens WHERE session_key='task-p1'").fetchall()
     assert left == []
@@ -183,7 +183,7 @@ def test_api_key_secret_hash_not_plain(client):
     uid = _make_user("t6h")["id"]
     got = auth_token.generate_api_token(uid, name="ci")
     assert got
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         row = db.cursor().execute("SELECT token_sha256 FROM api_tokens WHERE id=?", (got["id"],)).fetchone()
     assert row[0] == auth_token._sha256(got["token"])

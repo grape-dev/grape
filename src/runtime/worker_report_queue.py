@@ -19,7 +19,7 @@ import os
 import threading
 import time
 
-from src.config import log
+from src.kernel.config import log
 
 _TTL_SECONDS = int(os.environ.get("GRAPE_WORKER_REPORT_TTL", str(24 * 3600)))
 _CAP = int(os.environ.get("GRAPE_WORKER_REPORT_CAP", "10000"))

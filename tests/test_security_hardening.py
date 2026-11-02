@@ -13,7 +13,7 @@ import pytest
 
 from fastapi.testclient import TestClient
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import jwt_utils
 from src.api.main import app
 

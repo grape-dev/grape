@@ -14,8 +14,8 @@ import asyncio
 import logging
 import os
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
@@ -31,7 +31,7 @@ def _cleanup_temp_files():
 
     集群分布式锁互斥，抢不到锁直接跳过。
     """
-    from src.lock import acquire_lock, release_lock
+    from src.kernel.lock import acquire_lock, release_lock
     from src.user.db import list_temp_uploaded_files_before, hard_delete_uploaded_file
 
     acquired = acquire_lock(_LOCK_KEY, ttl=_LOCK_TTL)
@@ -88,8 +88,8 @@ def _cleanup_stale_attachments():
     集群分布式锁互斥。
     """
     from datetime import datetime, timedelta, timezone
-    from src.lock import acquire_lock, release_lock
-    from src.config import OBS_PREFIX
+    from src.kernel.lock import acquire_lock, release_lock
+    from src.kernel.config import OBS_PREFIX
 
     acquired = acquire_lock("attach_cleanup", ttl=_LOCK_TTL)
     if not acquired:

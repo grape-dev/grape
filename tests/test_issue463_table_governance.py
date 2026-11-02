@@ -27,7 +27,7 @@ def _align_db(*mod_names):
     先例见 test_issue_178_task_creator.py D43。
     """
     import importlib
-    from src.session_manager import db as _sm_db, db_lock as _sm_lock
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_lock
     for name in mod_names:
         mod = importlib.import_module(name)
         if hasattr(mod, "db"):
@@ -53,7 +53,7 @@ _PH = ",".join("?" * len(_ALL_FIELDS))
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for tid in ("t463_old", "t463_recent", "t463_term_c", "t463_term_f", "t463_term_x",
@@ -64,7 +64,7 @@ def _clean():
 
 
 def _insert_task(tid, status, created_at, fields=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     vals = dict(_ALL_FIELDS)
     if fields is not None:
         vals.update(fields)
@@ -97,7 +97,7 @@ def test_p0_cleanup_nullifies_all_10_fields_for_old_completed():
     from src.runtime.table_maintenance import cleanup_old_agent_tasks_fields
     _align_db("src.runtime.table_maintenance")
     _insert_task("t463_old", "completed", _OLD)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     updated = cleanup_old_agent_tasks_fields()
     assert updated >= 1
     with db_lock:
@@ -117,7 +117,7 @@ def test_p0_cleanup_keeps_recent_completed_and_running():
     recent = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
     _insert_task("t463_recent", "completed", recent)
     _insert_task("t463_running_old", "running", _OLD)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     cleanup_old_agent_tasks_fields()
     with db_lock:
         c = db.cursor()
@@ -131,7 +131,7 @@ def test_p0_cleanup_keeps_recent_completed_and_running():
 
 def test_p1_delete_old_terminal_tasks_and_messages():
     from src.runtime.table_maintenance import delete_old_agent_tasks
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _align_db("src.runtime.table_maintenance")
     for tid, st in (("t463_term_c", "completed"), ("t463_term_f", "failed"),
                     ("t463_term_x", "cancelled")):
@@ -185,7 +185,7 @@ def test_p2_enqueue_url_wins_over_inline_content():
             knowledge_files={"agent/tips.md": "K"},
         )
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT project_info_files, knowledge_files, project_info_file_urls, "
@@ -207,7 +207,7 @@ def test_p2_enqueue_url_wins_over_inline_content():
 
 def test_p3_seed_rules_cover_agent_tasks_metrics():
     from src.observability import alerts as al
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     al.seed_rules()
     with db_lock:
         c = db.cursor()

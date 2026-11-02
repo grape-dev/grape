@@ -280,7 +280,7 @@ class TestTransferBindRetry:
         from fastapi.testclient import TestClient
         from src.api.main import app
         from src.api.routes.grape_auth import require_jwt_only
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         with db_lock:
             c = db.cursor()
@@ -405,7 +405,7 @@ class TestTranslateSqlNo1093:
     """迁移 SQL 经 translate_sql 后无「目标表直现在子查询 FROM」形态。"""
 
     def _assert_no_direct_same_table(self, sql, tbl):
-        import src.mysql_compat as mc
+        import src.kernel.mysql_compat as mc
         out = mc.translate_sql(sql)
         # 翻译后目标表只允许出现在派生表内部（SELECT * FROM ( ... tbl ... ) AS __derived
         # 或手写派生表），不允许「IN (SELECT ... FROM tbl」直接形态
@@ -437,7 +437,7 @@ class TestTranslateSqlNo1093:
 
     def test_placeholder_translation_unchanged(self):
         """包裹后 ? 占位符数量不被翻译破坏。"""
-        import src.mysql_compat as mc
+        import src.kernel.mysql_compat as mc
         sql = (
             "UPDATE user_repos SET user_id=? "
             "WHERE user_id=? AND repo_key NOT IN "

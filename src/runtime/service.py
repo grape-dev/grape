@@ -6,10 +6,10 @@
 """
 import os, json, re, threading, time, uuid
 from datetime import datetime, timezone, timedelta
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
-from src.token_service import is_auth_401_error
+from src.kernel.token_service import is_auth_401_error
 
 
 # R11.4: _get_task_token 抽取到 src/user/db.py，统一调用
@@ -51,7 +51,7 @@ def _check_pool_engines_reachable(engine_ids: list, tag: str, repo_key: str = ""
     但测试 monkeypatch 裸 Lock（非重入）时嵌套获取会自死锁。
     所有调用点（claim / claim_by_tag / _check_stale_queued_tasks）均在 with db_lock 块内调用。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     _repo_norm = (from_repo_key(repo_key) or "").strip()
     for eid in engine_ids:
         try:
@@ -301,7 +301,7 @@ _RUNTIME_STALE_SECONDS = int(os.environ.get("RUNTIME_STALE_SECONDS", "100"))
 # Issue #470 后续：回收阈值改为 get_task_recover_stale_seconds() 动态取值——
 # env TASK_RECOVER_STALE_SECONDS 显式覆盖 > 跟随管理台 runtime_task_timeout 实时值。
 # 启动期 env 覆盖仅用于耦合告警；回收循环（_reap_stale_loop）每次执行实时取值。
-from src.config import get_task_recover_stale_seconds as _get_recover_stale_cfg
+from src.kernel.config import get_task_recover_stale_seconds as _get_recover_stale_cfg
 _TASK_RECOVER_STALE_SECONDS = _get_recover_stale_cfg()
 
 
@@ -326,7 +326,7 @@ def _recover_cutoff_for_agent(agent_type: str) -> str:
 # 二者默认均 3600s（安全），但部署侧单边调大 RUNTIME_TASK_TIMEOUT 而不调 TASK_RECOVER_STALE_SECONDS
 # 会导致服务端在 worker 仍本地执行时重派 → 双跑。启动期告警一次，运行期不再重复。
 # Issue #470：改读统一配置 getter（env > 管理台 meta > runtime-config.json > 默认 3600）。
-from src.config import get_runtime_task_timeout as _get_runtime_task_timeout_cfg
+from src.kernel.config import get_runtime_task_timeout as _get_runtime_task_timeout_cfg
 _WORKER_TASK_TIMEOUT_DEFAULT = _get_runtime_task_timeout_cfg()
 if _TASK_RECOVER_STALE_SECONDS < _WORKER_TASK_TIMEOUT_DEFAULT:
     log.warning(
@@ -569,8 +569,8 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
     if not repo_key:
         return {}, {}
     try:
-        from src.config import WORKSPACE_DIR
-        from src.repo_key import split_owner_repo
+        from src.kernel.config import WORKSPACE_DIR
+        from src.kernel.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
 
         # OBS 分支：查 DB scope='baseline' + OBS 读取（不依赖本地磁盘）
@@ -581,7 +581,7 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
             _storage = None
         if _storage is not None:
             files = {}
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.cursor().execute(
                     "SELECT file_path, obs_key FROM agent_shared_knowledge "
@@ -614,7 +614,7 @@ def load_project_info(repo_key: str) -> tuple[dict, dict]:
             # 继续走下面的本地逻辑
 
         # 本地模式（和 dev 一致）
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir(repo_key), "project-info")
         if not os.path.isdir(pi):
             return {}, {}
@@ -652,8 +652,8 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
     if not repo_key:
         return {}, {}
     try:
-        from src.config import WORKSPACE_DIR
-        from src.repo_key import split_owner_repo
+        from src.kernel.config import WORKSPACE_DIR
+        from src.kernel.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
 
         try:
@@ -663,7 +663,7 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
             _storage = None
         if _storage is not None:
             files = {}
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 rows = db.cursor().execute(
                     "SELECT file_path, obs_key FROM agent_shared_knowledge "
@@ -693,7 +693,7 @@ def load_project_info_with_obs(repo_key: str) -> tuple[dict, dict]:
                 return files, meta
 
         # 本地模式
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir(repo_key), "project-info")
         if not os.path.isdir(pi):
             return {}, {}
@@ -903,7 +903,7 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
     # devops 事件任务无用户概念（user_id=0，仓库身份）。
     if repo_key and agent_type:
         try:
-            from src.api.auth_token import issue_session_token
+            from src.kernel.auth_sdk.auth_token import issue_session_token
             _tk_uid = user_id or 0
             _usr = env.get("USER_ID") or ""
             if str(_usr).isdigit():
@@ -1372,7 +1372,7 @@ def claim(runtime_id) -> dict | None:
             try:
                 _rk = task.get("repo_key") or ""
                 if _rk:
-                    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+                    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
                     _provider = create_provider_from_repo_key(_rk)
                     _resolver = TokenResolver(_provider)
                     # R21.12.6: 只查 DB 过期标记，不调 VCS API
@@ -1735,7 +1735,7 @@ def refresh_busy_snapshot(runtime_id: int, cursor=None):
         _n = _real_active_count(cursor, runtime_id)
         cursor.execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
         return
-    from src.session_manager import db as _db, db_lock as _dl
+    from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
         _n = _real_active_count(_db.cursor(), runtime_id)
         _db.cursor().execute("UPDATE agent_runtimes SET busy_slots=? WHERE id=?", (_n, runtime_id))
@@ -1756,7 +1756,7 @@ def release_busy_slot(runtime_id, cursor=None):
     if cursor is not None:
         cursor.execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
         return
-    from src.session_manager import db as _db, db_lock as _dl
+    from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
         _db.cursor().execute(_BUSY_SLOT_DECREMENT_SQL, (runtime_id,))
         _db.commit()
@@ -1929,7 +1929,7 @@ def update_task_status(task_id, status, **kw):
     # Issue-45 M2：任务终态（含 timeout_failed）→ 会话级临时 token 即时失效（存在即有效，删除即失效）
     if status in TASK_TERMINAL_STATUSES:
         try:
-            from src.api.auth_token import revoke_session_token
+            from src.kernel.auth_sdk.auth_token import revoke_session_token
             revoke_session_token(task_id)
         except Exception as e:
             log.warning(f"update_task_status: revoke session token failed for {task_id}: {e}")
@@ -2021,7 +2021,7 @@ def report_messages(task_id, messages):
                       "ts": datetime.now(timezone.utc).isoformat()}
                      for m in (messages or []) if isinstance(m, dict)]
             if _logs:
-                from src.session_manager import db as _edb, db_lock as _edbl
+                from src.kernel.session_manager import db as _edb, db_lock as _edbl
                 with _edbl:
                     _c2 = _edb.cursor()
                     _c2.execute(
@@ -2339,7 +2339,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                 _sync_issue_comments_to_conversation,
                 _post_subtask_completion_to_parent, _post_all_subtasks_done,
             )
-            from src.repo_key import from_repo_key
+            from src.kernel.repo_key import from_repo_key
             _issue_id = task["issue_id"]
             _issue_num = _issue_num_from(_issue_id)
             _repo = from_repo_key(task["repo_key"]) or task.get("account") or ""
@@ -2359,7 +2359,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             # 1. 系统回帖（R18.6.10: 走 handler.post_issue_comment()）
             if _issue_num and _repo_key:
                 try:
-                    from src.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
+                    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
                     _p = create_provider_from_repo_key(_repo_key)
                     # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
                     _r = TokenResolver(_p).resolve_config_level(_repo_key)
@@ -2396,7 +2396,7 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
             # 3. 同步结果到任务会话
             if _issue_num and _result_text:
                 try:
-                    from src.session_manager import db as _db, db_lock as _dl, add_message as _am
+                    from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _am
                     with _dl:
                         _c = _db.cursor()
                         _c.execute("SELECT conversation_id FROM issue WHERE repo_key=? AND issue_number=? AND conversation_id!='' LIMIT 1",
@@ -2599,7 +2599,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     # 查 task prompt 判断是否为智能推荐任务
     _task_prompt = ""
     try:
-        from src.session_manager import db as _rdb, db_lock as _rdb_lock
+        from src.kernel.session_manager import db as _rdb, db_lock as _rdb_lock
         with _rdb_lock:
             c = _rdb.cursor()
             c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
@@ -2629,7 +2629,7 @@ def _handle_vod_recommend_complete(repo_key: str, issue_id: str, result_text: st
     from src.runtime.engine_select import _repo_user_id
     _vod_issue_creator = ""
     try:
-        from src.session_manager import db as _evdb, db_lock as _evdb_lock
+        from src.kernel.session_manager import db as _evdb, db_lock as _evdb_lock
         with _evdb_lock:
             _ec = _evdb.cursor()
             _ec.execute(
@@ -2689,7 +2689,7 @@ def _fetch_issue_comments(repo_key: str, repo: str, issue_num: str, token: str) 
     """
     try:
         if repo_key.startswith("github:"):
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             from src.user.repo_manager import _github_req
             _o, _r = split_owner_repo(repo_key)
             _result = _github_req(
@@ -2951,7 +2951,7 @@ def fail_task(task_id, error, exit_code=-1):
             _rk = task.get("repo_key") or ""
             if _rk:
                 # R18: 委托 TokenResolver 统一检测 + 标记
-                from src.token_resolver import TokenResolver, create_provider_from_repo_key
+                from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
                 _provider = create_provider_from_repo_key(_rk)
                 _resolver = TokenResolver(_provider)
                 _error_code = _resolver.detect_and_mark_expired(_rk)
@@ -2964,7 +2964,7 @@ def fail_task(task_id, error, exit_code=-1):
                     # R18.6.9: 评论 token 通过 handler.get_comment_token() 获取
                     # handler 内部按级别差异化选择评论 token（含 fallback）
                     try:
-                        from src.token_resolver import create_action_handler
+                        from src.kernel.token_resolver import create_action_handler
                         # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
                         _resolve_result = _resolver.resolve_config_level(_rk)
                         _resolve_result.issue_id = _issue_id
@@ -3032,7 +3032,7 @@ def fail_task(task_id, error, exit_code=-1):
                     # P2-1 去重：同一 issue 多个 task 401 失败时，只发一条"Token 已过期"评论
                     if _issue_id and _comment_token:
                         from src.api.event_pipeline import _post_result_to_issue, _issue_num_from
-                        from src.repo_key import from_repo_key
+                        from src.kernel.repo_key import from_repo_key
                         _issue_num = _issue_num_from(_issue_id)
                         _repo = from_repo_key(_rk) or task.get("account") or ""
                         if _issue_num and _repo:
@@ -3058,7 +3058,7 @@ def fail_task(task_id, error, exit_code=-1):
                             if not _already_notified:
                                 try:
                                     # R18.6.10: 走 handler.post_issue_comment()
-                                    from src.token_resolver import create_action_handler
+                                    from src.kernel.token_resolver import create_action_handler
                                     # R25.3: 回帖链用 resolve_config_level（不走过期短路），保留 best-effort 行为
                                     _resolve_r = _resolver.resolve_config_level(_rk)
                                     _resolve_r.issue_id = _issue_id
@@ -3108,7 +3108,7 @@ def fail_task(task_id, error, exit_code=-1):
         try:
             _rk = task.get("repo_key") or ""
             if _rk:
-                from src.token_resolver import TokenResolver, create_provider_from_repo_key
+                from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
                 _provider = create_provider_from_repo_key(_rk)
                 _resolver = TokenResolver(_provider)
                 _has_token = _resolver.get_token(_rk)

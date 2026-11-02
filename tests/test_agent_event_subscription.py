@@ -6,7 +6,7 @@ agents API 订阅字段读写往返。
 import json
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
 from src.api.event_pipeline import (
     _match_repo_subscription,

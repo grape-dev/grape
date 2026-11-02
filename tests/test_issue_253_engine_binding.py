@@ -71,7 +71,7 @@ def setup_db(monkeypatch, tmp_path):
     monkeypatch.setattr(svc, "db", test_db)
     monkeypatch.setattr(svc, "db_lock", threading.Lock())
     # 健康分/事件终态同步走 session_manager.db / event_store，一并替换到测试库
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.event_store as _es
     monkeypatch.setattr(_sm, "db", test_db)
     monkeypatch.setattr(_sm, "db_lock", threading.Lock())

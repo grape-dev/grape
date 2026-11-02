@@ -24,7 +24,7 @@ import json
 import os
 import random
 
-from src.config import log
+from src.kernel.config import log
 
 CLAIMER_ENABLED = os.environ.get("GRAPE_LOCAL_CLAIMER", "1").strip().lower() in ("1", "true", "yes", "on")
 CLAIM_INTERVAL = 3.0  # 与 worker 的 RUNTIME_POLL_INTERVAL 默认值一致
@@ -52,7 +52,7 @@ def _local_direct_engine_ids() -> list[int]:
     （与远端 worker 同约束，低分引擎 claim 返回 None 不抢任务）。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             rows = c.execute(
@@ -69,7 +69,7 @@ def _local_direct_engine_ids() -> list[int]:
 def _engine_tags(runtime_id: int) -> list[str]:
     """引擎的认领标签（engine_capabilities，通常为 ['all']）。"""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             rows = c.execute(
@@ -111,7 +111,7 @@ def _remote_claimants_reachable(task: dict) -> bool:
     查询异常保守返回 True（继续等待，宁可慢不可抢跑）。
     """
     import json as _json
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _tag = (task.get("pool_tag") or task.get("agent_type") or "").strip()
     _repo = task.get("repo_key") or ""
     _uid = task.get("user_id") or 0
@@ -183,7 +183,7 @@ def _engine_busy(runtime_id: int) -> bool:
     不再读 busy_slots 列——busy_slots 为展示快照，残留僵尸值不阻塞认领。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -220,7 +220,7 @@ def _rebuild_evt_from_task(task: dict) -> dict:
     if not seq:
         return evt
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -299,7 +299,7 @@ async def local_claimer_loop():
                     # runtime_id），恢复为无主池任务，等下一轮再评估。
                     if _backstop_should_yield(claimed):
                         try:
-                            from src.session_manager import db, db_lock
+                            from src.kernel.session_manager import db, db_lock
                             _yid = claimed.get("id") or ""
                             _yseq = claimed.get("event_seq") or 0
                             with db_lock:

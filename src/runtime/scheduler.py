@@ -19,8 +19,8 @@ import time
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 _SCHEDULER_INTERVAL = 60  # 秒：调度器扫描间隔
 _BASE_RETRY_DELAY = 10    # 秒：指数退避基数
@@ -230,7 +230,7 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     不走 _execute_agent_inner / build_devops_agent_prompt / 事件系统。
     直接构建 prompt → 物化 workdir → 调 stream_devops_agent。
     """
-    from src.repo_key import from_repo_key, split_owner_repo
+    from src.kernel.repo_key import from_repo_key, split_owner_repo
     from src.runtime.engine_select import pick_engine, engine_name
     from src.runtime.instances import runtime_instance_name
     from src.api.event_pipeline import (
@@ -306,7 +306,7 @@ def _execute_autopilot_agent(repo_key: str, task: dict, exec_id: int):
     if _task_custom_fields:
         try:
             _cf_list = json.loads(_task_custom_fields) if isinstance(_task_custom_fields, str) else _task_custom_fields
-            from src.scene_custom_env import is_upper_name, is_reserved_name
+            from src.kernel.scene_custom_env import is_upper_name, is_reserved_name
             for _f in _cf_list:
                 _fname = (_f.get("name") or "").strip()
                 if not _fname or not is_upper_name(_fname) or is_reserved_name(_fname):
@@ -399,7 +399,7 @@ def _execute_autopilot_remote(repo_key, task, exec_id, agent_type, skill_name,
     from src.runtime.service import enqueue_task
     from src.api.event_pipeline import get_agent_workdir as _gaw
     from src.api.session_store import get_or_create_agent_session, get_or_create_issue_session
-    from src.prompt_builder import _resolve_server_url
+    from src.kernel.prompt_builder import _resolve_server_url
 
     # 获取会话
     session = get_or_create_agent_session(repo_key, agent_type, backend or "")
@@ -744,7 +744,7 @@ def _notify_subscribers(task_id: int, exec_id: int, status: str,
         # Web 详情页 URL（前端 autopilot 页路由）
         _web_url = ""
         try:
-            from src.prompt_builder import _resolve_server_url
+            from src.kernel.prompt_builder import _resolve_server_url
             _web_url = f"{_resolve_server_url(0)}/autopilot"
         except Exception:
             pass

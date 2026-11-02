@@ -25,7 +25,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _REPO = "gitcode:issue476-owner/repo"
 _REPO_FULL = "issue476-owner/repo"
@@ -257,7 +257,7 @@ def setup_module():
 
 def _jwt(user_id, username):
     from src.auth.grape_account_db import get_token_version
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     return create_access_token(user_id, username, get_token_version(user_id))
 
 

@@ -36,7 +36,7 @@ class TestEvaluatePrefersJson:
 class TestBuildPromptContract:
     def test_prompt_includes_output_requirement(self):
         # issue-219 方向 D+E：输出契约首段为 Task Completion（英文）
-        from src.prompt_builder import build_devops_agent_prompt
+        from src.kernel.prompt_builder import build_devops_agent_prompt
         evt = {"type": "issue_opened", "repository": "owner/repo", "payload": {"issue": {"number": 5, "title": "t", "body": "b"}}, "source": "gitcode", "issue_id": "#5"}
         prompt = build_devops_agent_prompt(evt, [], "", ["issue"])
         assert "## Task Completion" in prompt

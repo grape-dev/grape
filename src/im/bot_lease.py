@@ -8,7 +8,7 @@
   BOT_LEASE_SWEEP_INTERVAL=10  sweep 扫描间隔（秒）
 """
 import secrets, socket, time
-from src.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
+from src.kernel.config import log, BOT_LEASE_TTL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_SWEEP_INTERVAL
 
 
 def generate_instance_id() -> str:
@@ -61,7 +61,7 @@ class BotLeaseStore:
                             pass
             except Exception as e:
                 log.warning(f"[lease] owner-alive precheck error {app_id}: {e}")
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -84,7 +84,7 @@ class BotLeaseStore:
     def renew(self, app_id: str, token: str) -> bool | None:
         expires_at = _future(self.ttl)
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -103,7 +103,7 @@ class BotLeaseStore:
 
     def release(self, app_id: str, token: str) -> None:
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -123,7 +123,7 @@ class BotLeaseStore:
 
     def list_expired_or_unheld(self, cursor: str = "", limit: int = 500) -> list[dict]:
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -151,7 +151,7 @@ class BotLeaseStore:
         results = {}
         expires_at = _future(self.ttl)
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -187,7 +187,7 @@ class BotLeaseStore:
             return []
         inactive = []
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             app_ids = list(held_bots.keys())
             ph = ",".join(["?"] * len(app_ids))
             with db_lock:
@@ -205,7 +205,7 @@ class BotLeaseStore:
         if not app_ids:
             return {}
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             ph = ",".join(["?"] * len(app_ids))
             with db_lock:
                 c = db.cursor()
@@ -236,11 +236,11 @@ class BotLeaseStore:
         try:
             from datetime import datetime, timezone
 
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             _ts = datetime.now(timezone.utc).replace(tzinfo=None).strftime("%Y-%m-%d %H:%M:%S")
             with db_lock:
                 c = db.cursor()
-                from src.session_manager import _is_mysql_backend
+                from src.kernel.session_manager import _is_mysql_backend
                 if _is_mysql_backend():
                     c.execute(
                         "INSERT INTO grape_im_instance (instance_id, hostname, ip, im_enabled, last_heartbeat) "
@@ -284,7 +284,7 @@ class BotLeaseStore:
         上下界都要判：下界=失联超时，上界=忽略"未来时间"的心跳（CST 口径脏行/未修实例）。
         """
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 # 各后端时间函数统一用 python 侧计算阈值（sqlite datetime / mysql datetime 均兼容）
@@ -309,7 +309,7 @@ class BotLeaseStore:
     def lease_owner_info(self, app_id: str) -> dict:
         """返回某 bot 当前 lease_owner（串 'owner|token'，便于查存活与防误抢）。"""
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute(
@@ -329,7 +329,7 @@ class BotLeaseStore:
         if not owner:
             return False
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             _low, _high = self._heartbeat_window(timeout)
             with db_lock:
                 c = db.cursor()
@@ -356,7 +356,7 @@ def purge_stale_instances(older_than_hours: float = 24.0) -> int:
     cutoff = (datetime.now(timezone.utc).replace(tzinfo=None)
               - timedelta(hours=older_than_hours)).strftime("%Y-%m-%d %H:%M:%S")
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM grape_im_instance WHERE last_heartbeat < ?", (cutoff,))

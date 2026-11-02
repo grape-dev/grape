@@ -20,8 +20,8 @@ import shutil
 import uuid
 import zipfile
 
-try:  # 服务端有 src.config；worker 同仓部署同样可导入。保持导入失败也不致命。
-    from src.config import log as _log
+try:  # 服务端有 src.kernel.config；worker 同仓部署同样可导入。保持导入失败也不致命。
+    from src.kernel.config import log as _log
 except Exception:  # pragma: no cover
     import logging as _logging
 
@@ -241,7 +241,7 @@ def materialize_skill_with_fallback(skills_root: str, skill_name: str, primary) 
     # 主渠道失败/缺失 → 回退官方技能包（resolve_official_skill_path → 本地目录 copytree）
     _fb_reason = reason if kind != "none" else (payload or "skill source unavailable")
     try:
-        from src.config import resolve_official_skill_path
+        from src.kernel.config import resolve_official_skill_path
         _official = resolve_official_skill_path(skill_name or "")
     except Exception as e:
         _official = ""

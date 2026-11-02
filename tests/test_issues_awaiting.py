@@ -15,7 +15,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.routes import issues as issues_mod
-from src.session_manager import db, db_lock, get_messages
+from src.kernel.session_manager import db, db_lock, get_messages
 from src.user import db as user_db
 from src.auth import grape_account_db
 

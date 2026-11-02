@@ -2,7 +2,7 @@
 import json, os
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline
 from src.runtime import service
 from src.api.event_store import append_event

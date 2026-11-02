@@ -18,7 +18,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 
@@ -70,7 +70,7 @@ def _teardown_engines(cid):
 def _headers():
     # 复用 test_api_routes 的建号逻辑（独立测试库由 conftest/环境变量保证）
     from tests.test_api_routes import _jwt_access_token, setup_module  # noqa: F401
-    from src.session_manager import db as _db, db_lock as _dl
+    from src.kernel.session_manager import db as _db, db_lock as _dl
     with _dl:
         c = _db.cursor()
         c.execute("SELECT id, username FROM grape_accounts WHERE username='test_api'")

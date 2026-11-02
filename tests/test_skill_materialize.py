@@ -124,7 +124,7 @@ def official_dir(tmp_path, monkeypatch):
     (d / "references").mkdir()
     (d / "references" / "runbook.md").write_text("# runbook", encoding="utf-8")
     (d / "references" / "extra.md").write_text("# extra", encoding="utf-8")
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(d / "SKILL.md") if name == "demo-skill" else "")
     return str(d)
@@ -139,7 +139,7 @@ def test_fallback_to_official(skills_root, official_dir):
 
 
 def test_degraded_when_fallback_also_fails(skills_root, tmp_path, monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     res = sm.materialize_skill_with_fallback(
         skills_root, "demo-skill", lambda: ("none", "skill zip unavailable"))
@@ -187,7 +187,7 @@ def test_zip_partial_success_target_missing_falls_back(skills_root, official_dir
 
 def test_zip_partial_success_target_missing_degraded(skills_root, monkeypatch):
     # 目标技能校验失败且无官方包 → degraded，不静默空注入
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     res = sm.materialize_skill_with_fallback(
         skills_root, "demo-skill", lambda: ("zip", _mk_multi_zip()))
@@ -234,7 +234,7 @@ def test_empty_target_dir_replaced(skills_root):
 # ── direct 端 _materialize_direct_workdir 降级标注 ─────────
 
 def test_direct_materialize_marks_degradation(skills_root, tmp_path, monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "resolve_official_skill_path", lambda name: "")
     from src.api.event_pipeline import _materialize_direct_workdir
     evt = {"_skill_id": 0, "_skill_path": ""}
@@ -251,7 +251,7 @@ def test_direct_materialize_marks_degradation(skills_root, tmp_path, monkeypatch
 
 
 def test_direct_materialize_ok_no_notice(skills_root, tmp_path, monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     official = tmp_path / "off" / "demo-skill"
     official.mkdir(parents=True)
     (official / "SKILL.md").write_text(SKILL_MD, encoding="utf-8")

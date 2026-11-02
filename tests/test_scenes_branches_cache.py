@@ -27,7 +27,7 @@ REPO_KEY = f"gitcode:{OWNER}/{REPO}"
 
 
 def _jwt_headers():
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     uid = grape_account_db.create_grape_account("test_542_branches", email=None, password="test123")
     if not uid:

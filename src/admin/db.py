@@ -6,8 +6,8 @@
 """
 import threading
 
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 
 def _hash_password_bcrypt(password: str) -> str:
@@ -100,7 +100,7 @@ def touch_admin_login(admin_id: int):
 
 def list_grape_users(page: int = 1, per_page: int = 20, q: str = "") -> dict:
     """分页查询 grape_accounts（排除 status=2 已注销）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import time
     offset = (page - 1) * per_page
     try:
@@ -122,7 +122,7 @@ def list_grape_users(page: int = 1, per_page: int = 20, q: str = "") -> dict:
             )
             rows = c.fetchall()
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"List grape users failed: {e}")
         return {"users": [], "total": 0, "page": page, "per_page": per_page}
     return {
@@ -138,7 +138,7 @@ def list_grape_users(page: int = 1, per_page: int = 20, q: str = "") -> dict:
 
 def get_grape_user_detail(user_id: int) -> dict | None:
     """获取用户详情（含绑定信息和是否有密码）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.auth.grape_account_db import get_user_identities, has_password
     try:
         with db_lock:
@@ -151,7 +151,7 @@ def get_grape_user_detail(user_id: int) -> dict | None:
             )
             row = c.fetchone()
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Get grape user detail failed: {e}")
         return None
     if not row:
@@ -169,7 +169,7 @@ def get_grape_user_detail(user_id: int) -> dict | None:
 
 def disable_grape_user(user_id: int, reason: str = "") -> bool:
     """禁用用户（status=0）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -181,14 +181,14 @@ def disable_grape_user(user_id: int, reason: str = "") -> bool:
             db.commit()
             return c.rowcount > 0
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Disable grape user failed: {e}")
         return False
 
 
 def restore_grape_user(user_id: int) -> bool:
     """恢复用户（status=0 禁用 或 status=3 冷静期 → status=1）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -201,14 +201,14 @@ def restore_grape_user(user_id: int) -> bool:
             db.commit()
             return c.rowcount > 0
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Restore grape user failed: {e}")
         return False
 
 
 def list_signup_whitelist() -> list[dict]:
     """获取注册白名单列表。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -218,7 +218,7 @@ def list_signup_whitelist() -> list[dict]:
             )
             rows = c.fetchall()
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"List signup whitelist failed: {e}")
         return []
     return [
@@ -229,7 +229,7 @@ def list_signup_whitelist() -> list[dict]:
 
 def add_signup_whitelist(wtype: str, value: str, remark: str = "") -> bool:
     """添加注册白名单。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -240,14 +240,14 @@ def add_signup_whitelist(wtype: str, value: str, remark: str = "") -> bool:
             db.commit()
             return c.rowcount > 0
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Add signup whitelist failed: {e}")
         return False
 
 
 def delete_signup_whitelist(item_id: int) -> bool:
     """删除注册白名单。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -255,7 +255,7 @@ def delete_signup_whitelist(item_id: int) -> bool:
             db.commit()
             return c.rowcount > 0
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Delete signup whitelist failed: {e}")
         return False
 
@@ -322,7 +322,7 @@ def get_login_whitelist_enabled() -> bool:
     panel displays the same state that is_user_allowed() actually enforces.
     """
     try:
-        from src.config import _is_login_whitelist_enabled
+        from src.kernel.config import _is_login_whitelist_enabled
         return _is_login_whitelist_enabled()
     except Exception:
         return False
@@ -335,7 +335,7 @@ def set_login_whitelist_enabled(enabled: bool) -> bool:
         set_meta_value("login_whitelist_enabled", "true" if enabled else "false")
         # Invalidate config.py 60s cache so toggle takes effect immediately
         try:
-            from src.config import invalidate_login_whitelist_cache
+            from src.kernel.config import invalidate_login_whitelist_cache
             invalidate_login_whitelist_cache()
         except Exception:
             pass  # cache invalidation is best-effort

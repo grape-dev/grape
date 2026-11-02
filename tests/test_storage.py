@@ -26,7 +26,7 @@ class TestSkillKey:
     @pytest.fixture(autouse=True)
     def _obs_prefix(self, monkeypatch):
         # 稳定断言：显式固定 OBS_PREFIX（不依赖模块加载时序）
-        import src.config as _cfg
+        import src.kernel.config as _cfg
         monkeypatch.setattr(_cfg, "OBS_PREFIX", "grape/test")
 
     def test_custom_key(self):
@@ -173,7 +173,7 @@ class TestObsStorageMock:
     @pytest.fixture(autouse=True)
     def _obs_prefix(self, monkeypatch):
         # 与实例 prefix 保持一致（不依赖模块加载时序）
-        import src.config as _cfg
+        import src.kernel.config as _cfg
         monkeypatch.setattr(_cfg, "OBS_PREFIX", "grape/test")
 
     def test_sdk_call_contract(self, monkeypatch):

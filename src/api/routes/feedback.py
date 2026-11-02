@@ -18,8 +18,8 @@ from src.api.deps import (
     require_no_session_token,
     require_admin,
 )
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 # 每个 Agent 任务（tk_ / session_key）最大反馈条数（feedback-openapi-expose-design.md §四.9）
 FEEDBACK_MAX_PER_AGENT_TASK = 2

@@ -9,7 +9,7 @@ from unittest.mock import patch, MagicMock
 @pytest.fixture
 def fresh_db():
     """每个测试用独立内存 SQLite。"""
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     sm.db = MagicMock()
     sm.db_lock = MagicMock()
     sm.db.cursor.return_value = sm.db.cursor.return_value or MagicMock()
@@ -201,7 +201,7 @@ class TestMigrateGlobalBotTokenToDb:
 
     def test_skip_if_already_migrated(self):
         """DB 已有迁移标记时跳过迁移。"""
-        with patch("src.lock.acquire_lock", return_value=True), \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
              patch("src.user.db.get_meta_value", return_value="1"), \
              patch("src.user.db.set_meta_value") as mock_set:
             from src.api.db_setup import _migrate_global_bot_token_to_db
@@ -210,7 +210,7 @@ class TestMigrateGlobalBotTokenToDb:
 
     def test_skip_if_lock_not_acquired(self):
         """其他实例持锁时跳过。"""
-        with patch("src.lock.acquire_lock", return_value=False), \
+        with patch("src.kernel.lock.acquire_lock", return_value=False), \
              patch("src.user.db.get_meta_value") as mock_get:
             from src.api.db_setup import _migrate_global_bot_token_to_db
             _migrate_global_bot_token_to_db()
@@ -233,8 +233,8 @@ class TestMigrateGlobalBotTokenToDb:
         def mock_set(key, val):
             set_calls[key] = val
 
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock"), \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock"), \
              patch("src.user.db.get_meta_value", return_value=""), \
              patch("src.user.db.set_meta_value", side_effect=mock_set), \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
@@ -261,8 +261,8 @@ class TestMigrateGlobalBotTokenToDb:
         def mock_set(key, val):
             set_calls[key] = val
 
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock"), \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock"), \
              patch("src.user.db.get_meta_value", return_value=""), \
              patch("src.user.db.set_meta_value", side_effect=mock_set), \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
@@ -294,8 +294,8 @@ class TestMigrateGlobalBotTokenToDb:
                 return ""  # 未迁移
             return ""
 
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock"), \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock"), \
              patch("src.user.db.get_meta_value", side_effect=mock_get), \
              patch("src.user.db.set_meta_value", side_effect=mock_set), \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
@@ -309,8 +309,8 @@ class TestMigrateGlobalBotTokenToDb:
 
     def test_skip_if_no_file(self, tmp_path):
         """文件不存在时跳过。"""
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock"), \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock"), \
              patch("src.user.db.get_meta_value", return_value=""), \
              patch("src.user.db.set_meta_value") as mock_set, \
              patch("src.api.db_setup._CONFIG_DIR", str(tmp_path)):
@@ -320,8 +320,8 @@ class TestMigrateGlobalBotTokenToDb:
 
     def test_lock_always_released(self):
         """异常时锁也要释放。"""
-        with patch("src.lock.acquire_lock", return_value=True), \
-             patch("src.lock.release_lock") as mock_release, \
+        with patch("src.kernel.lock.acquire_lock", return_value=True), \
+             patch("src.kernel.lock.release_lock") as mock_release, \
              patch("src.user.db.get_meta_value", side_effect=Exception("DB error")):
             from src.api.db_setup import _migrate_global_bot_token_to_db
             try:

@@ -9,7 +9,7 @@ import sys
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, create_conversation, add_message, mark_task_processing_by_conversation
+from src.kernel.session_manager import db, db_lock, create_conversation, add_message, mark_task_processing_by_conversation
 
 
 def _clean():

@@ -12,8 +12,8 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from src.admin import db as admin_db
 from src.api.deps import require_admin
-from src.config import log
-from src.auth.cookie_utils import _cookie_secure
+from src.kernel.config import log
+from src.kernel.auth_sdk.cookie_utils import _cookie_secure
 
 router = APIRouter(prefix="/api/admin", tags=["admin"])
 
@@ -94,7 +94,7 @@ def admin_login(body: AdminLoginBody, response: Response, request: Request):
                   detail={"identifier": body.username.strip()})
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "INVALID_CREDENTIALS", "message": "Invalid username or password"})
     login_throttle.clear_failures(_identifier, _ip)
-    from src.api.jwt_utils import create_access_token, create_refresh_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token, create_refresh_token
     access_token = create_access_token(admin["id"], admin["username"],
                                        admin["token_version"], role="admin")
     refresh_token = create_refresh_token(admin["id"], admin["username"],
@@ -117,7 +117,7 @@ def admin_refresh(request: Request, response: Response):
     refresh = request.cookies.get(_COOKIE_NAME, "")
     if not refresh:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "MISSING_REFRESH_TOKEN", "message": "Missing refresh_token"})
-    from src.api.jwt_utils import verify_refresh_token, create_access_token, create_refresh_token
+    from src.kernel.auth_sdk.jwt_utils import verify_refresh_token, create_access_token, create_refresh_token
     payload = verify_refresh_token(refresh)
     if not payload or payload.get("role") != "admin":
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "REFRESH_TOKEN_INVALID", "message": "refresh_token expired or invalid"})
@@ -699,7 +699,7 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
     elif sc == "repo":
         if not repo:
             raise HTTPException(status_code=400, detail={"code": 400, "message": "repo required"})
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         dims = [f"repo:{to_repo_key(repo)}", f"repo:{to_repo_key(repo, 'github')}"]
     elif sc == "all":
         dims = _all_rollup_dims()
@@ -714,7 +714,7 @@ def admin_obs_metrics_series(metric: str = "task_success_rate,task_done,task_fai
 
 
 def _all_rollup_dims() -> List[str]:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()

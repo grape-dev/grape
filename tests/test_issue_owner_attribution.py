@@ -18,7 +18,7 @@ _uid_default = None  # 默认/承载账号
 
 def _clean():
     """只清业务行，保留测试账号与映射（setup_module 创建）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM issue WHERE repo_key=?", (REPO,))
@@ -34,7 +34,7 @@ def setup_module():
     except Exception:
         pass
     global _uid_creator, _uid_default
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.auth.password import hash_password
     with db_lock:
         c = db.cursor()
@@ -60,7 +60,7 @@ def teardown_module():
 
 
 def _mk_card(issue_num=1, user_id=0, assignee=""):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, status) "
@@ -70,7 +70,7 @@ def _mk_card(issue_num=1, user_id=0, assignee=""):
 
 
 def _card_user(issue_num=1):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         r = db.cursor().execute(
             "SELECT user_id, assignee FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
@@ -136,7 +136,7 @@ def test_QA06_ensure_row_empty_assignee_zero():
     """_sync_issue_fields ensure_row：assignee 空 → 补卡 user_id=0，不得命中任意空登录用户。"""
     _clean()
     # 造一个「空 github_login」的干扰行（历史上正是这类行被 LIMIT 1 命中）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM unified_user_mapping WHERE user_id=? OR user_id=?",

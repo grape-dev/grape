@@ -10,7 +10,7 @@ import os
 import json
 import random
 import time as _time
-from src.config import CONFIG_DIR, log
+from src.kernel.config import CONFIG_DIR, log
 
 _ENGINE_SELECTION_PATH = os.path.join(CONFIG_DIR, "engine-selection.json")
 
@@ -54,7 +54,7 @@ def load_engine_selection() -> dict:
 
 def _norm_repo(repo_key: str) -> str:
     """仓库标识归一化为 owner/repo（与 runtime_credentials.owner_id 对齐）。"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     return (from_repo_key(repo_key or "") or "").strip()
 
 
@@ -78,7 +78,7 @@ def engine_name(runtime_id: int) -> str:
 
 
 def _db():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
 
@@ -88,7 +88,7 @@ def _member_scope(m: dict, repo: str) -> str:
     if cid == 0:
         return "local"                       # 本机直连（默认视为全局，但归 local 档位最后兜底）
     if m.get("scope") == "repo":
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         oid = from_repo_key(m.get("owner_id") or "")
         if oid and oid == repo:
             return "repo"
@@ -220,7 +220,7 @@ def _repo_user_id(repo_key: str, issue_creator: str = "") -> int:
                     return 0
                 # 1. 优先查 unified_user_mapping（Issue #76 修复，OAuth 登录用户）
                 # FR-CQ-1: 提取为 um_column_for_repo，消除 if/else 分支
-                from src.repo_key import parse_repo_key, um_column_for_repo
+                from src.kernel.repo_key import parse_repo_key, um_column_for_repo
                 _provider, _, _ = parse_repo_key(repo_key)
                 _col = um_column_for_repo(repo_key)
                 c.execute(
@@ -301,7 +301,7 @@ def _engine_scope_info(runtime_id: int) -> tuple[str, str]:
 def _default_priority(runtime_id: int, repo: str, cfg: dict) -> int:
     """按档位派生默认优先级：repo=10 / global=50 / local=local_priority。"""
     scope, owner_id = _engine_scope_info(runtime_id)
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     if scope == "repo" and from_repo_key(owner_id or "") == repo:
         return _PRIO_REPO
     return int(cfg.get("local_priority", _PRIO_LOCAL)) if scope == "local" else _PRIO_GLOBAL
@@ -614,8 +614,8 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
     user_repos = set()
     if username and scope == "repo" and not repo:
         try:
-            from src.session_manager import db as _udb, db_lock as _ulock
-            from src.repo_key import from_repo_key
+            from src.kernel.session_manager import db as _udb, db_lock as _ulock
+            from src.kernel.repo_key import from_repo_key
             with _ulock:
                 uc = _udb.cursor()
                 uc.execute(
@@ -690,7 +690,7 @@ def query_engines(repo_key: str, scope: str, agent_type: str = "", username: str
     out = []
     for r in rows:
         if scope == "repo":
-            from src.repo_key import from_repo_key
+            from src.kernel.repo_key import from_repo_key
             _repo_owner = from_repo_key(r[9] or "")
             if repo:
                 # 有 repo_key 时：只返回当前仓库的引擎
@@ -746,7 +746,7 @@ def cleanup_scene_engine_bindings(rid_list: list) -> int:
         return 0
     import json as _json
     from datetime import datetime, timezone
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     rid_set = set(rid_list)
     changed_rows = []
     with db_lock:
@@ -840,7 +840,7 @@ def get_detached_engine_hints(scene_row_id: int = 0, runtime_ids: list | None = 
       「本仓库场景」的解绑记录，否则其他仓库同引擎的审计会误报到无关任务上。
     返回 [{scene_row_id, scene_id, node_tag, runtime_id, runtime_name, detached_at, affected_autopilot_tasks}]
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out = []
     with db_lock:
         c = db.cursor()
@@ -897,7 +897,7 @@ def _detach_dead_engine_bindings() -> dict:
     import json as _json
     from datetime import datetime, timezone
     from src.runtime.health import parse_dt
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     if _ENGINE_DETACH_AFTER_SECONDS <= 0:
         return {"detached": 0, "disabled": True}

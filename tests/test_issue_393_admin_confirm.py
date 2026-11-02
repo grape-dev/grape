@@ -23,7 +23,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.auth import grape_account_db
 
 client = TestClient(app)
@@ -37,7 +37,7 @@ _headers = {}
 
 
 def _jwt_access_token(user_id, username):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -345,7 +345,7 @@ class TestAdminConfirmDone:
         _clean()
         tid = _insert_task(issue_number=508)
         # 签发真实 tk_ 会话 token（get_current_user_or_api_key 可解析 auth_type=session_token）
-        from src.api.auth_token import issue_session_token
+        from src.kernel.auth_sdk.auth_token import issue_session_token
         _tk = issue_session_token(session_key="sess393-tk", repo_key=REPO_KEY,
                                   agent_type="qa", user_id=0)
         try:
@@ -353,7 +353,7 @@ class TestAdminConfirmDone:
                             headers={"Authorization": f"Bearer {_tk}"})
             assert r.status_code == 403
         finally:
-            from src.session_manager import db as _db, db_lock as _dbl
+            from src.kernel.session_manager import db as _db, db_lock as _dbl
             with _dbl:
                 c = _db.cursor()
                 c.execute("DELETE FROM session_api_tokens WHERE session_key='sess393-tk'")

@@ -16,7 +16,7 @@ from unittest.mock import patch
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 from src.api.routes import repos as repos_mod
 
@@ -32,7 +32,7 @@ def _clean():
 # ===================== repo_key 工具函数 =====================
 
 def test_repo_key_utils():
-    from src.repo_key import to_repo_key, from_repo_key, parse_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, from_repo_key, parse_repo_key, split_owner_repo
     # to_repo_key：owner/repo → 带前缀；幂等
     assert to_repo_key("owner/repo") == "gitcode:owner/repo"
     assert to_repo_key("gitcode:owner/repo") == "gitcode:owner/repo"

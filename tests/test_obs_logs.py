@@ -23,7 +23,7 @@ MARK = "lgt"          # 本文件写入行的标记，便于清理
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -36,7 +36,7 @@ def _clean():
 
 
 def _grant(repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -48,7 +48,7 @@ def _grant(repo_key):
 def _mk_cred(name, token, device="dev-lg"):
     """创建主动上报用的 worker 凭据；返回凭据 id。"""
     import hashlib
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     h = hashlib.sha256(token.encode()).hexdigest()
     with db_lock:
         c = db.cursor()
@@ -60,7 +60,7 @@ def _mk_cred(name, token, device="dev-lg"):
 
 
 def _rows(**kw):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sql = "SELECT * FROM obs_log"
     conds, params = [], []
     for k, v in kw.items():

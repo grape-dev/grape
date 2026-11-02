@@ -13,8 +13,8 @@ D32 迁移完成后 user_accounts 表为死表，不再被业务代码读取。
   get_user_by_gitcode_id/get_user_by_github_id → get_external_identity
 """
 import json, hashlib, re, time, os, warnings, threading
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 # OAuth state 存储（内存，不依赖 SQLite 跨线程事务）
 # OAuth state 已改为 DB 共享存储（oauth_states 表），不再用进程内存
@@ -929,7 +929,7 @@ def init_db():
             # P2-A (Issue #357): Batched DELETE for user_credentials to avoid deadlock.
             # 2026-10-17 修复：白名单从 user_accounts（旧表）改为 grape_accounts（新体系），
             # 否则新体系 id 的凭据行每次启动被误删（AK/SK 丢失事故根因）。
-            from src.mysql_compat import get_db_backend as _get_be
+            from src.kernel.mysql_compat import get_db_backend as _get_be
             _is_mysql = _get_be() == "mysql"
             while True:
                 if _is_mysql:
@@ -1100,7 +1100,7 @@ def ensure_skill_dir(user_id: int, skill_name: str) -> str:
 
 def ensure_repo_skill_dir(repo_key: str, skill_name: str) -> str:
     """确保仓库技能目录存在，返回路径（skills/repo/{owner}/{repo}/{skill}）"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     path = os.path.join(os.path.dirname(SKILL_DIR), "repo", from_repo_key(repo_key), skill_name)
     os.makedirs(path, exist_ok=True)
     return path
@@ -1272,16 +1272,16 @@ def get_skill_path(skill_id) -> str:
     skill = get_skill_by_id(skill_id)
     if not skill:
         return ""
-    from src.config import SKILLS_DIR
+    from src.kernel.config import SKILLS_DIR
     sp = skill.get("skill_path") or skill.get("skill_name") or ""
     if skill.get("scope") == "user":
         return os.path.join(SKILLS_DIR, "custom", skill.get("owner_id") or "", sp, "SKILL.md")
     if skill.get("scope") == "repo":
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         return os.path.join(SKILLS_DIR, "repo", from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
     # 官方技能：优先按 configs/skill-description.json 的 path 解析（skills/<agent_type>/<skill>/SKILL.md），
     # 兼容旧平铺布局（skills/<skill>/SKILL.md）
-    from src.config import resolve_official_skill_path
+    from src.kernel.config import resolve_official_skill_path
     resolved = resolve_official_skill_path(skill.get("skill_name") or sp)
     if resolved:
         return resolved
@@ -1397,7 +1397,7 @@ def delete_skill(user_id: int, skill_name: str, scope: str = "user", owner_id: s
             # 删除技能目录
             import shutil
             if scope == "repo":
-                from src.repo_key import from_repo_key
+                from src.kernel.repo_key import from_repo_key
                 path = os.path.join(os.path.dirname(SKILL_DIR), "repo", from_repo_key(owner_id or str(user_id)), skill_name)
             else:
                 path = os.path.join(SKILL_DIR, str(user_id), skill_name)
@@ -1454,7 +1454,7 @@ def add_managed_repo(repo_key: str, repo_owner: str, repo_name: str, webhook_id:
     host_user_id: Issue #372 路径 B 托管时写入当前用户 ID（无全局 bot token 场景）。
     webhook_secret: Issue #372 路径 B webhook 验证密钥（随机生成，与 token 解耦）。
     """
-    from src.repo_key import to_repo_key, from_repo_key
+    from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = to_repo_key(repo_key)
     full_name = from_repo_key(repo_key)
     try:
@@ -1527,7 +1527,7 @@ def set_repo_scene(repo_key: str, scene_id: str):
 
     issue-39 方案 B：无「default」场景，scene_id 为空即清空（仓库未配置场景）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
@@ -1540,7 +1540,7 @@ def set_repo_scene(repo_key: str, scene_id: str):
 
 def get_repo_scene(repo_key: str) -> str:
     """读取仓库开发场景（managed_repos.dev_scene），无记录或未设置返回空字符串。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
@@ -1559,7 +1559,7 @@ def get_scene_recommend_config(repo_key: str) -> dict:
     返回 {"fallback_scene": "", "rules": [{"scene_id": "", "condition": ""}]}。
     无记录或未设置返回默认值。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
@@ -1590,7 +1590,7 @@ def set_scene_recommend_config(repo_key: str, fallback_scene: str, rules: list) 
     - UPDATE 0 行 → INSERT OR IGNORE 兜底补行后再 UPDATE；
     - 返回 True=已落库，False=兜底后仍未写入（调用方显式报错）。
     """
-    from src.repo_key import to_repo_key, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, parse_repo_key
     repo_key = to_repo_key(repo_key)
     import json
 
@@ -1638,7 +1638,7 @@ def set_host_status(repo_key: str, status: str = ""):
 
     空串=托管完整；bot_missing=bot 未成功加入；webhook_missing=webhook 未创建；partial=流程部分执行。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
@@ -1651,7 +1651,7 @@ def set_host_status(repo_key: str, status: str = ""):
 
 def get_host_status(repo_key: str) -> str:
     """读取仓库托管状态（managed_repos.host_status），无记录返回空串。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
@@ -1666,7 +1666,7 @@ def get_host_status(repo_key: str) -> str:
 
 def _get_managed_webhook_id(repo_key: str) -> int:
     """读取仓库本地记录的 webhook_id（方案 X：以本地 >0 判定 webhook 存在，不远程查）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     try:
         with db_lock:
@@ -1704,7 +1704,7 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
     大堂同样显示这类仓库，下拉框口径必须一致。
     团队组织（is_personal=0）仍严格按 m.org_id=? 隔离，不影响团队间隔离语义。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         try:
@@ -1757,7 +1757,7 @@ def get_managed_repos(user_id: int, org_id: int = 0, personal_org: bool = False)
 
 def update_managed_repo_admin(user_id: int, repo_key: str, is_admin: bool) -> bool:
     """更新该用户在 user_repos 的管理员状态（用户级）"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     try:
         with db_lock:
             c = db.cursor()
@@ -1777,7 +1777,7 @@ def _rebuild_webhook_with_bot_token(repo_key: str, bot_token: str, provider: str
 
     返回新 webhook_id（字符串），失败返回空串。
     """
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
     _wh_url = get_webhook_url()
     if not _wh_url:
@@ -1830,7 +1830,7 @@ def update_managed_repo_bot_token(repo_key: str, bot_token: str) -> dict:
     R14.19: 先检查仓库存在再重建 webhook，返回 rowcount 语义（404 检测不失效）。
     FR-20.11: 返回 {"ok": bool, "warning": str, "related_repos": list} 供 API 传 warning 给前端。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     # 先检查仓库是否存在于 managed_repos（不存在返回 False，调用方走 404）
     try:
@@ -1888,7 +1888,7 @@ def get_bot_token_by_repo(repo_owner: str, repo_name: str) -> str:
     所有调用方（scenes/feishu_async/chat/agents/session_store/settings 等 12 处）
     自动继承路径 B 跳过逻辑，与 get_repo_token_with_refresh / get_repo_bot_token 对齐。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(f"{repo_owner}/{repo_name}")
     # R12.12: 路径 B 仓库跳过仓库级 bot token（降级场景脏写入防护）
     if get_host_user_id(repo_key) > 0:
@@ -1915,7 +1915,7 @@ def get_repo_bot_token_no_global(repo_key: str) -> str:
     R25.1: 跳过第 3 级 GlobalBotToken 策略，保持"no_global"语义。
     read_stored_token 契约：不检查过期、不触发 refresh、走缓存层。
     """
-    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     # R25.1: 跳过第 3 级 GlobalBotToken（保持"no_global"语义）
@@ -2071,7 +2071,7 @@ def get_repo_bot_token(repo_key: str = "") -> str:
     """
     if not repo_key:
         return ""
-    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     resolver = TokenResolver(provider)
     resolver.strategies = resolver.strategies[1:]  # 跳过第 1 级 session token
@@ -2107,7 +2107,7 @@ def get_host_user_id(repo_key: str) -> int:
 
     返回 host_user_id（>0 表示用户托管），0 表示未配置或仓库不存在。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key:
         return 0
@@ -2131,7 +2131,7 @@ def get_webhook_secret(repo_key: str) -> str:
 
     返回 webhook_secret 字符串，空字符串表示未配置。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key:
         return ""
@@ -2157,7 +2157,7 @@ def get_webhook_verify_token(repo_key: str) -> str:
     R20.12.3: 短路机制不影响 webhook 验证——即使 bot token 过期短路，webhook 验证仍用 webhook_secret / webhook_token。
     R20.12.4: 路径 B 仓库 webhook 验证用 webhook_secret（随机密钥），与 token 过期状态无关。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key:
         return ""
@@ -2195,7 +2195,7 @@ def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
 
     R20.1.7: 查询失败时降级为返回空串（不阻断 pipeline）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key:
         return ""
@@ -2231,7 +2231,7 @@ def get_host_vcs_username(repo_key: str, provider: str = "") -> str:
 
 def sync_host_vcs_username(repo_key: str, login: str):
     """R20.1.5: 同步 host_vcs_username 到 managed_repos（verify_token 返回 login 变更时调用）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key or not login:
         return
@@ -2262,7 +2262,7 @@ def get_repo_token_with_refresh(repo_key: str) -> str:
 
     R16.4: 过期短路——标记过期的 token 短路返回空串（用户 token status=4 除外，best-effort）。
     """
-    from src.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
     provider = create_provider_from_repo_key(repo_key)
     return TokenResolver(provider).get_token(repo_key)
 
@@ -2274,7 +2274,7 @@ def _is_user_token_repo(repo_key: str) -> bool:
     全为空且 host_user_id > 0 → True。用于 task 创建时区分 token 来源——
     用户 OAuth token 会过期，不应写入 task 行，应由运行时实时获取。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     if not repo_key:
         return False
@@ -2334,7 +2334,7 @@ def _is_github_user_token_repo(repo_key: str) -> bool:
     owner external_identities → 全局 → host_user_id 用户 token。
     前三级全为空且 host_user_id > 0 → True。
     """
-    from src.repo_key import to_repo_key, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, parse_repo_key
     repo_key = to_repo_key(repo_key, provider="github")
     if not repo_key:
         return False
@@ -2361,7 +2361,7 @@ def _is_github_user_token_repo(repo_key: str) -> bool:
     # R14.13: 路径 B 仓库跳过此层（与 get_github_token 一致）
     if _hid == 0:
         try:
-            from src.repo_key import parse_repo_key as _prk
+            from src.kernel.repo_key import parse_repo_key as _prk
             from src.auth.grape_account_db import get_grape_account_by_username, get_user_identities_with_tokens
             _prov, owner, _name = _prk(repo_key)
             if owner:
@@ -2391,13 +2391,13 @@ def get_github_token(repo_key: str = "") -> str:
     - repo_key 非空 → bot token：managed_repos.bot_github_token → 全局 → 用户 token 降级
     - 无 repo_key → 空（用户级 token 走 get_user_github_token）
     """
-    from src.token_resolver import TokenResolver, create_provider
+    from src.kernel.token_resolver import TokenResolver, create_provider
     token = TokenResolver(create_provider("github")).get_token(repo_key)
     if token:
         return token
     # D32-补丁：TokenResolver 返回空时，查仓库 owner 的 GitHub identity
     try:
-        from src.repo_key import parse_repo_key, to_repo_key
+        from src.kernel.repo_key import parse_repo_key, to_repo_key
         repo_key = to_repo_key(repo_key, provider="github")
         if not repo_key:
             return ""
@@ -2458,7 +2458,7 @@ def _update_repo_bot_token(repo_key: str, bot_token: str, provider: str = "gitco
     确保升级后 webhook 验证用 bot token（而非已被清空的旧随机密钥）。
     R16.3.3: 同时清除 bot_token_status 过期标记（新 token 写入时短路自动解除）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo_key)
     # FR-23.1: webhook_id 列是 INTEGER DEFAULT 0，空串写 MySQL 整型列报 1366
     # 统一转 int：空串/None/0 → 0（无 webhook），非零字符串 → int
@@ -2665,7 +2665,7 @@ def get_webhook_token_by_repo(full_name: str) -> str:
     Issue #372: 优先返回 webhook_secret（路径 B 随机密钥，与 token 解耦），
     为空时 fallback 到 gitcode_webhook_token / github_webhook_token（路径 A 兼容）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
         # 同时查 gitcode: 和 github: 前缀
@@ -2702,7 +2702,7 @@ def remove_managed_repo(repo_key: str) -> dict | None:
 
     R19.3.4: 删除仓库时清理 devops_agent_session 中的 token 字段。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     try:
         with db_lock:
             c = db.cursor()
@@ -2728,7 +2728,7 @@ def remove_managed_repo(repo_key: str) -> dict | None:
 
 def get_all_managed_repos() -> list[dict]:
     """Admin 用：获取所有托管记录（repo_key 带前缀，full_name 无前缀）"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, repo_owner, repo_name, full_name, webhook_id, created_at FROM managed_repos ORDER BY full_name")
@@ -2863,7 +2863,7 @@ def get_server_base_url() -> str:
     再兜底从 webhook_url 剥掉 /webhook/gitcode 后缀；最后 http://localhost:{GRAPE_PORT}（默认 3000）。
     """
     try:
-        from src.config import read_server_config
+        from src.kernel.config import read_server_config
         _sb = (read_server_config().get("server_base_url") or "").strip().rstrip("/")
         if _sb:
             return _sb
@@ -2894,7 +2894,7 @@ def _server_base_url_configured_value() -> str:
     用于判断「用户是否显式配置了对外可访问基址」。
     """
     try:
-        from src.config import read_server_config
+        from src.kernel.config import read_server_config
         _sb = (read_server_config().get("server_base_url") or "").strip().rstrip("/")
         if _sb:
             return _sb
@@ -2987,7 +2987,7 @@ def get_webhook_url() -> str:
     （不设 localhost 兜底，让 repos.py「webhook_url 未配置即拒」守卫生效）。
     """
     try:
-        from src.config import read_server_config
+        from src.kernel.config import read_server_config
         _wh = (read_server_config().get("webhook_url") or "").strip()
         if _wh:
             return _wh
@@ -3230,7 +3230,7 @@ def _read_refresh_token_from_identity(user_id: int, provider: str) -> str:
     - 解密成功 → 返回明文
     """
     try:
-        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
         from src.auth.credential_crypto import decrypt
         with _sm_dl:
             c = _sm_db.cursor()
@@ -3421,7 +3421,7 @@ def save_user_repos(user_id: int, repos: list[dict]):
     is_join 从用户自己的主动托管记录（mark_user_repo_join 写入的 is_join=1 AND is_admin=1）继承，
     不再查询全局 managed_repos，防止 A 托管的仓库污染 B 的下拉框。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key FROM user_repos WHERE user_id=? AND is_join=1 AND is_admin=1", (user_id,))
@@ -3447,7 +3447,7 @@ def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
     org_id 参数保留兼容，但实际过滤在 _filter_repos 中完成
     （需要同时返回未托管的仓库供用户托管到当前组织）。
     """
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, owner, name, description, role, is_admin, is_join, created_at FROM user_repos WHERE user_id=? ORDER BY repo_key", (user_id,))
@@ -3461,7 +3461,7 @@ def get_user_repos(user_id: int, org_id: int = 0) -> list[dict]:
 
 def mark_user_repo_join(user_id: int, repo_key: str, is_join: bool = True, is_admin: bool = False):
     """标记用户已加入某仓库（user_repos.is_join），无对应缓存行则插入最小记录。"""
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     with db_lock:
         c = db.cursor()
@@ -3978,7 +3978,7 @@ def list_scene_market(q: str = "", category_id: int = 0, sort: str = "latest",
     # 精选模式：优先按 admin 管理台设置的排序返回
     featured_ordered_ids = []
     if limit and limit > 0 and featured_only:
-        from src.featured_order import get_featured_order
+        from src.kernel.featured_order import get_featured_order
         featured_ordered_ids = get_featured_order("scene")
 
     with db_lock:
@@ -4325,7 +4325,7 @@ def delete_uploaded_file(file_id: int) -> str:
 
 def list_temp_uploaded_files_before(hours: int = 24) -> list[dict]:
     """查超过指定小时数的临时文件（供定时清理用）。"""
-    from src.mysql_compat import get_db_backend
+    from src.kernel.mysql_compat import get_db_backend
     is_mysql = get_db_backend() == "mysql"
     time_expr = f"DATE_SUB(NOW(), INTERVAL {int(hours)} HOUR)" if is_mysql else f"datetime('now', '-{int(hours)} hours')"
     with db_lock:
@@ -4553,7 +4553,7 @@ def batch_scene_repo_count(market_scene_ids: list[int]) -> dict[int, int]:
 
 def get_scene_repos(market_scene_id: int) -> list[dict]:
     """返回某场景的在用仓库列表 [{repo_key, full_name}]"""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -4572,7 +4572,7 @@ def get_featured_skills(limit: int = 5) -> list[dict]:
     1. admin 管理台 admin_featured_config 表的 sort_order（与管理台设置一致）
     2. 降级：按 like_count 降序
     """
-    from src.featured_order import get_featured_order
+    from src.kernel.featured_order import get_featured_order
 
     ordered_ids = get_featured_order("skill")
 
@@ -4658,7 +4658,7 @@ def _split_url_configured_value(key: str) -> str:
     未配置返回空串（调用方回退 server_base_url）。
     """
     try:
-        from src.config import read_server_config
+        from src.kernel.config import read_server_config
         _v = (read_server_config().get(key) or "").strip().rstrip("/")
         if _v:
             return _v

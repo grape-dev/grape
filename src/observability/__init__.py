@@ -181,7 +181,7 @@ def start_metrics_server():
     t = threading.Thread(target=_metrics_httpd.serve_forever, daemon=True)
     t.start()
 
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"metrics server starting on {addr}")
 
 
@@ -416,7 +416,7 @@ def collect_mysql_metrics():
     仅 MySQL 后端时有效；SQLite 后端跳过。
     """
     try:
-        from src.session_manager import _is_mysql_backend, db, db_lock
+        from src.kernel.session_manager import _is_mysql_backend, db, db_lock
         if not _is_mysql_backend():
             return
         with db_lock:
@@ -466,7 +466,7 @@ def _stuck_minutes() -> int:
 
     采样器 8s TTL，每轮取当前配置值——管理台/配置文件修改后 ≤8s 生效。
     """
-    from src.config import get_stuck_threshold_minutes
+    from src.kernel.config import get_stuck_threshold_minutes
     return get_stuck_threshold_minutes()
 
 
@@ -523,7 +523,7 @@ def collect_business_sampler():
 
     # 采集新快照
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.runtime.health import derive_runtime_health
         from datetime import datetime, timezone, timedelta
 

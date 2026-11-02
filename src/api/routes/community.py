@@ -7,8 +7,8 @@ import os, uuid
 from fastapi import APIRouter, Depends, Query, UploadFile, File, HTTPException
 from pydantic import BaseModel
 from src.api.deps import get_current_user
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 router = APIRouter(prefix='/api/community', tags=['community'])
 

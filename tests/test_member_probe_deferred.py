@@ -21,7 +21,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 _headers = {}
@@ -31,7 +31,7 @@ def _seed_user_and_cache():
     """预置一个测试用户 + user_repos 缓存（未过期），使 /member 走缓存命中路径。"""
     global _headers
     from src.auth.grape_account_db import create_grape_account, get_token_version
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.user.db import save_user_repos
 
     uname = "probe_ttl_user"

@@ -270,7 +270,7 @@ class HermesRuntime(AgentRuntime):
 
     def get_env(self, account: str = "", user_id: int = 0) -> dict:
         env = os.environ.copy()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
         # verbose 模式下禁用 Rich 彩色输出（ANSI 转义序列干扰 parse_output）

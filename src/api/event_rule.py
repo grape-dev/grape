@@ -11,7 +11,7 @@ run_pipeline L1 命中时调用本模块判定事件是否有效/副作用短路
 import json
 import time as _time
 
-from src.config import log
+from src.kernel.config import log
 
 # 规则缓存（进程内 TTL，避免每次事件都查库）
 # 结构: {(vcs_source, event_type): {action: rule}}
@@ -22,7 +22,7 @@ _RULES_TTL = 30.0  # 30s 内复用缓存，热生效延迟 ≤30s
 
 def _load_from_db():
     """从 event_action_filter 表加载启用规则为 {(vcs_source, event_type): {action: rule}}。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     rules = {}
     try:
         with db_lock:

@@ -9,7 +9,7 @@ import json
 import re
 import urllib.request
 import urllib.error
-from src.config import log
+from src.kernel.config import log
 
 
 # Issue #315: GitCode 编辑器上传图片（raw.gitcode.com/user-images/...）链接识别与鉴权下载。
@@ -107,8 +107,8 @@ class VcsApiClient:
         content_id：字符串/数字 ID（评论 ID / issue 编号 / PR 编号）。
         """
         try:
-            from src.outbound_ledger import record_outbound, content_hash_md5
-            from src.repo_key import to_repo_key
+            from src.kernel.outbound_ledger import record_outbound, content_hash_md5
+            from src.kernel.repo_key import to_repo_key
             if content_id is None or str(content_id) == "":
                 return
             _rk = to_repo_key(f"{self.owner}/{self.repo}", self.provider)
@@ -116,7 +116,7 @@ class VcsApiClient:
                             issue_number=str(issue_number or ""),
                             content_hash=content_hash_md5(body) if body else "")
         except Exception as e:
-            from src.config import log
+            from src.kernel.config import log
             log.warning(f"VcsApiClient ledger record failed (non-blocking): {e}")
 
     def post_issue_comment(self, issue_number: int, body: str) -> dict:
@@ -138,7 +138,7 @@ class VcsApiClient:
             return {"error": f"unsupported provider: {self.provider}"}
         # Issue #453 台账：响应 dict 里的评论 ID 入账（无 ID 时记 issue_number 兼值）
         if isinstance(_resp, dict) and "error" not in _resp:
-            from src.outbound_ledger import extract_content_id
+            from src.kernel.outbound_ledger import extract_content_id
             _cid = extract_content_id(_resp, "issue_comment")
             self._ledger("issue_comment", _cid or issue_number, issue_number, body)
         return _resp
@@ -220,7 +220,7 @@ class VcsApiClient:
             return {"error": f"unsupported provider: {self.provider}"}
         # Issue #453 台账（写点11）：建 PR 入账——PR 编号（number/iid）为对账键
         if isinstance(_resp, dict) and "error" not in _resp:
-            from src.outbound_ledger import extract_content_id
+            from src.kernel.outbound_ledger import extract_content_id
             self._ledger("pr", extract_content_id(_resp, "issue"), "", body)
         return _resp
 
@@ -357,7 +357,7 @@ def create_pr_for_repo(repo_key: str, token: str, title: str, head: str, base: s
 
     根据 repo_key 前缀自动选择 VCS 平台，复用 VcsApiClient.create_pr。
     """
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     client = VcsApiClient(provider=provider, token=token, owner=owner, repo=repo)
     return client.create_pr(title=title, head=head, base=base, body=body)
@@ -367,7 +367,7 @@ def create_client(repo_key: str, token: str = "") -> "VcsApiClient":
 
     repo_key 格式: "gitcode:owner/repo" / "github:owner/repo" / "gitlab:owner/repo"
     """
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     if not token:
         # 从 DB 获取 token

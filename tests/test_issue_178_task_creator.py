@@ -24,11 +24,11 @@ from src.api.deps import get_current_user, get_current_user_or_api_key
 
 def _get_db():
     """D32: 运行时获取 session_manager.db/db_lock（避免模块级缓存指向被 session_manager 测试修改的临时 DB）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     db, db_lock = _get_db()
     with db_lock:
         c = db.cursor()
@@ -80,7 +80,7 @@ def test_get_user_id_warning_on_not_found():
 def test_get_user_id_warning_on_exception():
     """_get_user_id_by_gitcode 异常时记录 warning 日志"""
     # D43: 确保 tasks_mod.db 指向全局 DB（session_manager importlib 测试可能改了引用）
-    from src.session_manager import db as _sm_db
+    from src.kernel.session_manager import db as _sm_db
     tasks_mod.db = _sm_db
     with self_logger() as mock_log:
         # mock cursor 方法抛异常（MySQLCompatDB.cursor 是方法可 patch；sqlite3.Connection 不可）

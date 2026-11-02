@@ -3,7 +3,7 @@ import hashlib, json, time
 import pytest
 
 from fastapi.testclient import TestClient
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 from src.runtime.health import derive_runtime_health
 
@@ -350,7 +350,7 @@ class TestMultiInstanceUniqueKey:
 
     def test_unique_key_enforced(self):
         import sqlite3
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%') OR id IN (900001, 900002, 999)")
@@ -427,7 +427,7 @@ class TestRuntimeAdminViews:
         r2 = c.post("/api/settings/runtime-credentials", json={"name": "bob-w1", "scope": "user"})
         assert r2.status_code == 400, r2.text
         # owner 落当前用户
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute("SELECT scope, owner_name FROM runtime_credentials WHERE name='bob-w1'").fetchone()
         assert row and row[0] == "user" and row[1] == "bob", row
@@ -459,7 +459,7 @@ class TestRuntimeAdminViews:
                          headers={"Authorization": f"Bearer {t}"})
         rids = [x["id"] for x in r.json()["runtimes"]]
         from src.runtime import service
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         for rid in rids:
             service.enqueue_task(agent_session_id="s-agg", runtime_id=rid, prompt="p", repo_key="t/r", agent_type="issue", skill="issue")
         with db_lock:
@@ -500,7 +500,7 @@ class TestRuntimeAdminViews:
         from src.user.db import save_agent_runtimes
         # 真实安装（installed=True）→ 生成 credential_id=0 本机直连行
         save_agent_runtimes([{"name": "opencode", "installed": True, "cli_path": "/local", "version": "9", "healthy": True}])
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             rows = db.cursor().execute("SELECT credential_id FROM agent_runtimes WHERE name='opencode'").fetchall()
         assert any(rr[0] > 0 for rr in rows), "凭据绑定行应保留"
@@ -544,7 +544,7 @@ class TestGhostEnginePrevention:
 
     def test_set_chat_config_default_backend_no_ghost(self):
         """set_chat_config(backend='Default') 不得创建幽灵行；get_chat_config 回退空（无引擎，不隐式 opencode）。"""
-        from src.session_manager import set_chat_config, get_chat_config
+        from src.kernel.session_manager import set_chat_config, get_chat_config
         from src.user.db import is_known_engine_name
         set_chat_config(9999, backend="Default")
         cfg = get_chat_config(9999)
@@ -557,7 +557,7 @@ class TestGhostEnginePrevention:
 
     def test_get_chat_config_fallback_on_ghost_reference(self):
         """历史配置 runtime_id 指向幽灵引擎（credential_id=0 name='default'）时按未配置处理（backend=''）。"""
-        from src.session_manager import get_chat_config
+        from src.kernel.session_manager import get_chat_config
         with db_lock:
             c = db.cursor()
             c.execute("INSERT INTO agent_runtimes (credential_id, name, display_name, installed, version, healthy, pip_package, scope, owner_id) VALUES (0,'default','Default',1,'',1,'default','global','')")

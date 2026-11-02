@@ -36,7 +36,7 @@ class TestInjectLinkedRepoTokens:
 
     def test_injects_tokens_for_linked_repos(self):
         env = {}
-        with patch("src.token_service.get_repo_bot_token", _tok):
+        with patch("src.kernel.token_service.get_repo_bot_token", _tok):
             _inject_linked_repo_tokens(env, json.dumps(_LINKED))
         m = json.loads(env["GRAPE_LINKED_REPO_TOKENS"])
         assert m == {"gitcode:OPCTeam/HDBlogService": "tok_gc",
@@ -48,7 +48,7 @@ class TestInjectLinkedRepoTokens:
         def _boom(rk):
             raise RuntimeError("db down")
         env = {}
-        with patch("src.token_service.get_repo_bot_token", _boom):
+        with patch("src.kernel.token_service.get_repo_bot_token", _boom):
             _inject_linked_repo_tokens(env, json.dumps(_LINKED))
         assert "GRAPE_LINKED_REPO_TOKENS" not in env, "全部失败时不应注入空 map"
 
@@ -70,6 +70,6 @@ class TestInjectLinkedRepoTokens:
     def test_no_token_repos_only_no_inject(self):
         """全部关联仓都解析不到 token → 不注入（worker 端回退本地口径）。"""
         env = {}
-        with patch("src.token_service.get_repo_bot_token", lambda rk: ""):
+        with patch("src.kernel.token_service.get_repo_bot_token", lambda rk: ""):
             _inject_linked_repo_tokens(env, json.dumps(_LINKED))
         assert "GRAPE_LINKED_REPO_TOKENS" not in env

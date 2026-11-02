@@ -11,10 +11,10 @@ import pytest
 from unittest.mock import patch
 
 from src.user import db as udb
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.user.db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -90,7 +90,7 @@ class TestAccounts:
         u, uname = _mk_user()
         try:
             # JWT 无状态——create_access_token + verify_access_token
-            from src.api.jwt_utils import create_access_token, verify_access_token
+            from src.kernel.auth_sdk.jwt_utils import create_access_token, verify_access_token
             tok = create_access_token(u["id"], u["username"])
             payload = verify_access_token(tok)
             assert payload is not None
@@ -378,7 +378,7 @@ class TestServerUrls:
         self._reset_meta("webhook_url", "server_base_url")
         udb.set_meta_value("webhook_url", "https://srv/webhook/gitcode")
         try:
-            with patch("src.config.read_server_config", return_value={}):
+            with patch("src.kernel.config.read_server_config", return_value={}):
                 assert udb.get_webhook_url() == "https://srv/webhook/gitcode"
         finally:
             self._reset_meta("webhook_url", "server_base_url")
@@ -387,7 +387,7 @@ class TestServerUrls:
         self._reset_meta("webhook_url", "server_base_url")
         udb.set_meta_value("webhook_url", "https://srv/webhook/gitcode")
         try:
-            with patch("src.config.read_server_config", return_value={}):
+            with patch("src.kernel.config.read_server_config", return_value={}):
                 assert udb.get_server_base_url() == "https://srv"
         finally:
             self._reset_meta("webhook_url", "server_base_url")
@@ -396,14 +396,14 @@ class TestServerUrls:
         self._reset_meta("webhook_url", "server_base_url")
         udb.set_meta_value("server_base_url", "https://base/")
         try:
-            with patch("src.config.read_server_config", return_value={}):
+            with patch("src.kernel.config.read_server_config", return_value={}):
                 assert udb.get_server_base_url() == "https://base"
         finally:
             self._reset_meta("webhook_url", "server_base_url")
 
     def test_server_base_url_default(self):
         self._reset_meta("webhook_url", "server_base_url")
-        with patch("src.config.read_server_config", return_value={}):
+        with patch("src.kernel.config.read_server_config", return_value={}):
             assert udb.get_server_base_url() == "http://localhost:8080"
 
 

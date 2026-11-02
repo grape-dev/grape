@@ -1,7 +1,7 @@
 """GitCode 仓库托管管理：获取管理员仓库、创建/删除 webhook"""
 import json, urllib.request, urllib.error, urllib.parse, os, shutil, tempfile
 import requests as _requests
-from src.config import log
+from src.kernel.config import log
 
 # GitCode API 端点迁移：api.gitcode.com 上 /user/repos 和 /repos/... 已全部 404，
 # 仓库相关 API 改走 gitcode.com（证书正常，不需要 verify=False）。
@@ -518,7 +518,7 @@ def push_template_to_repo(template: dict, owner_login: str, target_repo: str,
     import os
     import shutil
     import tempfile
-    from src.config import EXAMPLE_DIR, CONFIG_DIR
+    from src.kernel.config import EXAMPLE_DIR, CONFIG_DIR
 
     if not user_token or not owner_login or not target_repo:
         raise RuntimeError("缺少用户 token 或目标仓库信息")
@@ -614,7 +614,7 @@ def find_existing_webhook(api_token: str, owner: str, repo: str, webhook_url: st
     if not webhook_url:
         return None
     import time
-    from src.config import log as _log
+    from src.kernel.config import log as _log
     url = f"{API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     for i in range(_retries):
         try:
@@ -687,8 +687,8 @@ def _get_managed_webhook(repo_key: str) -> int | None:
     import sqlite3
     db_path = None
     try:
-        from src.session_manager import db, db_lock
-        from src.repo_key import to_repo_key
+        from src.kernel.session_manager import db, db_lock
+        from src.kernel.repo_key import to_repo_key
         repo_key = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
@@ -859,7 +859,7 @@ def find_existing_github_webhook(api_token: str, owner: str, repo: str, webhook_
     """
     if not webhook_url:
         return None
-    from src.config import log as _log
+    from src.kernel.config import log as _log
     url = f"{_GITHUB_API_BASE}/repos/{owner}/{urllib.parse.quote(repo, safe='')}/hooks"
     try:
         hooks = _github_req("GET", url, api_token)

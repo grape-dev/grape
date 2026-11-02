@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.routes import templates as templates_mod
 from src.user import db as user_db
-from src.session_manager import db as sm_db, db_lock as sm_lock
+from src.kernel.session_manager import db as sm_db, db_lock as sm_lock
 from src.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_username,
     get_token_version as grape_get_token_version,
@@ -23,7 +23,7 @@ from src.auth.grape_account_db import (
 
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     # D32: 直接查 grape_accounts.token_version
     with sm_lock:
         c = sm_db.cursor()

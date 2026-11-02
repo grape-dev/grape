@@ -46,7 +46,7 @@ def health():
     # Issue #452: 暴露 agent_runtime 状态，缺失时显式标记 missing 而非静默通过
     agent_runtime_status = "unknown"
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             row = c.execute(

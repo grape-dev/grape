@@ -19,7 +19,7 @@ import uuid
 os.environ["DEVOPS_DB_PATH"] = os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db")
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.api.session_store import upsert_agent_session  # noqa: E402
 
 

@@ -16,7 +16,7 @@ import hashlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 
 

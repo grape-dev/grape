@@ -3,7 +3,7 @@ import os, json, threading, tempfile
 import pytest
 
 from src.api import event_archive as ea
-from src.config import WORKSPACE_DIR
+from src.kernel.config import WORKSPACE_DIR
 
 
 def _evt(issue_id="#5", title="登录超时"):
@@ -14,7 +14,7 @@ def _evt(issue_id="#5", title="登录超时"):
 @pytest.fixture(autouse=True)
 def _clean_archive():
     # 每个用例前清理测试档案目录（含 provider 隔离路径）
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     import shutil
     for rk in ("test/repo", "gitcode:test/repo"):
         base = workspace_repo_dir(rk)
@@ -147,7 +147,7 @@ class TestLegacyPrefixedCompat:
     def test_load_falls_back_to_legacy_prefix_dir(self):
         legacy = ea._legacy_base_dir("gitcode:test/repo")
         import shutil
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         shutil.rmtree(workspace_repo_dir("gitcode:test/repo"), ignore_errors=True)
         shutil.rmtree(os.path.dirname(legacy), ignore_errors=True)
         os.makedirs(os.path.join(legacy, "5"), exist_ok=True)
@@ -160,7 +160,7 @@ class TestLegacyPrefixedCompat:
     def test_locate_by_seq_finds_legacy(self):
         legacy = ea._legacy_base_dir("gitcode:test/repo")
         import shutil
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         shutil.rmtree(workspace_repo_dir("gitcode:test/repo"), ignore_errors=True)
         shutil.rmtree(os.path.dirname(legacy), ignore_errors=True)
         ea.init_event_json("gitcode:test/repo", 77, _evt(), "issue")

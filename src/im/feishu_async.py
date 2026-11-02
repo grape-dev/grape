@@ -18,7 +18,7 @@ import websockets
 from lark_oapi.ws.pb.pbbp2_pb2 import Frame
 from lark_oapi.ws.enum import FrameType, MessageType
 
-from src.config import log
+from src.kernel.config import log
 from src.im.lark_md import to_lark_elements
 
 FEISHU_BASE = "https://open.feishu.cn/open-apis"
@@ -31,7 +31,7 @@ _SEEN_MSG_MAX_LOAD = 2000
 
 def _load_seen_msg_ids(app_id: str) -> set:
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         cutoff = time.time() - _SEEN_MSG_TTL
         with db_lock:
             c = db.cursor()
@@ -44,7 +44,7 @@ def _load_seen_msg_ids(app_id: str) -> set:
 
 def _persist_seen_msg_id(app_id: str, message_id: str):
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("INSERT OR IGNORE INTO bot_seen_messages (app_id, message_id, seen_at) VALUES (?,?,?)",
@@ -56,7 +56,7 @@ def _persist_seen_msg_id(app_id: str, message_id: str):
 
 def _cleanup_seen_msg_ids(app_id: str):
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         cutoff = time.time() - _SEEN_MSG_TTL
         with db_lock:
             c = db.cursor()
@@ -201,7 +201,7 @@ def _fetch_github_collaborators(owner: str, repo: str, api_token: str) -> list:
 
 def _resolve_uid_by_platform_login(login: str, provider: str) -> int:
     """FR-21.2: 从 external_identities 按 platform login 查 grape_user_id。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         row = c.execute(
@@ -769,7 +769,7 @@ class FeishuAsync:
         if not members:
             return 0
 
-        from src.repo_key import split_owner_repo, to_repo_key, parse_repo_key
+        from src.kernel.repo_key import split_owner_repo, to_repo_key, parse_repo_key
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return 0
@@ -777,14 +777,14 @@ class FeishuAsync:
         provider, _, _ = parse_repo_key(repo_key)
 
         # R20.7.3: 统一走 TokenResolver（GitHub 侧也走 Repo.bot_token → TokenResolver）
-        from src.token_service import get_repo_bot_token
+        from src.kernel.token_service import get_repo_bot_token
         api_token = get_repo_bot_token(repo_key) or ""
         if not api_token:
             log.warning(f"[{ctx.name}] sync mapping: no bot token for {repo_key}, skipping")
             # R20.9.1: token 过期时跳过 sync + 飞书群发通知卡片
             try:
                 _error_code = ""
-                from src.token_service import detect_and_mark_expired
+                from src.kernel.token_service import detect_and_mark_expired
                 _error_code = detect_and_mark_expired(repo_key) or ""
                 if _error_code:
                     _msg = f"⚠️ 仓库 {repo_key} 的 Token 已过期，协作者映射同步已跳过，请重新绑定 Token"
@@ -802,7 +802,7 @@ class FeishuAsync:
             log.warning(f"[{ctx.name}] sync mapping: failed to fetch collaborators for {repo_key}: {e}")
             return 0
 
-        from src.session_manager import update_unified_user_info
+        from src.kernel.session_manager import update_unified_user_info
         matched = 0
         for collab in collabs:
             # GitCode 协作者字段: nick_name/username；GitHub: login/name
@@ -817,7 +817,7 @@ class FeishuAsync:
                         # 先从 external_identities 查 grape_user_id，再只写飞书三列
                         _uid = _resolve_uid_by_platform_login(login, "github")
                         if _uid:
-                            from src.session_manager import bind_feishu_identity
+                            from src.kernel.session_manager import bind_feishu_identity
                             bind_feishu_identity(_uid, m["open_id"], feishu_name=nick, app_id=ctx.app_id)
                             matched += 1
                     else:
@@ -1131,7 +1131,7 @@ async def _disable_bot(app_id: str):
     同时释放 lease（遗漏修复 3）——防止 lease 脏数据。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE global_im_bot_config SET is_active=0, lease_token=NULL, lease_expires_at=NULL, lease_owner=NULL, lease_acquired_at=NULL WHERE bot_app_id=?", (app_id,))
@@ -1246,7 +1246,7 @@ async def run_bot(ctx: BotContext, api: FeishuAsync,
                 # 问题 A：重连后检查 lease 是否还在自己手里
                 if ctx._lease_token:
                     try:
-                        from src.session_manager import db, db_lock
+                        from src.kernel.session_manager import db, db_lock
                         with db_lock:
                             c = db.cursor()
                             c.execute(
@@ -1603,7 +1603,7 @@ class BotManager:
           以 global_im_bot_config 登记为准。
         - load_eligible_bots 时确保所有 bot 登记到 global_im_bot_config（遗漏修复 4）
         """
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         bots: dict[str, str] = {}  # app_id -> bot_type（先去重）
         secrets: dict[str, str] = {}  # app_id -> secret
@@ -1701,7 +1701,7 @@ class BotManager:
         lease_store = self._lease_store  # 本地引用避免 Pyright None 检查
         import time as _time
         import socket as _socket
-        from src.config import (
+        from src.kernel.config import (
             BOT_LEASE_SWEEP_INTERVAL, BOT_LEASE_RENEW_INTERVAL, BOT_LEASE_GRACE,
             BOT_LEASE_RENEW_FAIL_THRESHOLD, IM_LEASE_STICKY, IM_INSTANCE_TIMEOUT,
             IM_STEAL_AFTER, IM_ACQUIRE_COOLDOWN, IM_HASH_VNODES,

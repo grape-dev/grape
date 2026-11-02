@@ -25,7 +25,7 @@ NOW = datetime.now(timezone.utc)
 def _clean():
     from src.observability import slo_backfill as _SB
     _SB.reset()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_metric_rollup WHERE dim_key LIKE 'repo:org/slo-%'",
@@ -148,7 +148,7 @@ def test_latency_slo_uses_hourly_p95_threshold():
 def test_engine_availability_is_l2_only_and_uses_online_column():
     slo = _slo(S.SLI_AVAIL)
     # 造 4 个小时桶的采样：3 小时在线 60/60、1 小时 30/60
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for h in range(1, 5):
@@ -185,7 +185,7 @@ def test_engine_availability_is_l2_only_and_uses_online_column():
 def test_engine_availability_reads_hour_rollup():
     """Issue #437：可用率改读小时桶 rollup（engine_avail_online/total），不再全窗扫原始采样。"""
     slo = _slo(S.SLI_AVAIL)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE obs_slo SET created_at=? WHERE id=?",
@@ -211,7 +211,7 @@ def test_availability_partial_backfill_fills_missing_hours():
     小时有界现算；缺失闭合小时（有采样）→ pending 透出 + 后台回填后可查。
     """
     from src.observability import slo_backfill as SB
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     start = _hour(3) + timedelta(minutes=37)       # 窗口起点落在小时中段
     end = start + timedelta(hours=3)               # 末端同样落在小时中段（含未闭合当前小时）
     # rollup 只覆盖闭合小时 _hour(2)（回填进行中）：60/60
@@ -258,7 +258,7 @@ def test_engine_availability_partial_backfill_keeps_full_window():
     """
     from src.observability import slo_backfill as SB
     slo = _slo(S.SLI_AVAIL)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE obs_slo SET created_at=? WHERE id=?",
@@ -377,7 +377,7 @@ def test_evaluate_all_writes_snapshot_and_fires_then_resolves():
     snaps = S.snapshots(slo["id"])
     assert len(snaps) == 1 and snaps[0]["state"] == S.STATE_BREACHED, snaps
     # 违约事件：source='slo'、rule_id=0、平台级（scope_type=global）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT rule_id, rule_name, level, status, source, dim_key, first_fired_at"
@@ -453,7 +453,7 @@ def test_slo_routes_l1_and_l2():
 # ---------------------------------------------------------------- 仓库维度（页面选择器）
 
 def _grant(uid: int, repo_key: str):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()

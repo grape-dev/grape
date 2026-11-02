@@ -75,7 +75,7 @@ def setup_db(monkeypatch):
     """)
     _lock = threading.RLock()
     # redispatch_event 内部均为函数级 import：patch 模块属性即可全部生效
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.event_store as _es
     monkeypatch.setattr(_sm, "db", test_db, raising=False)
     monkeypatch.setattr(_sm, "db_lock", _lock, raising=False)

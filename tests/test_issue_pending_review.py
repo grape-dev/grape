@@ -15,7 +15,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api.routes import issues as issues_mod
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 from src.auth import grape_account_db
 
@@ -121,7 +121,7 @@ class TestPendingReview:
 
     def test_review_points_written_to_conversation(self):
         from src.api.issues_center import _run_pending_review_notify
-        from src.session_manager import get_messages
+        from src.kernel.session_manager import get_messages
         cid = _seed(issue_number=23)
         with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
             r = client.post(f"/api/issues/{cid}/pending-review",

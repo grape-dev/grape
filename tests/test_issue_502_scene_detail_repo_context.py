@@ -22,7 +22,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
 from src.auth import grape_account_db  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 _TEST_REPO = "issue502/demo"
 _TEST_REPO_KEY = f"gitcode:{_TEST_REPO}"
@@ -34,7 +34,7 @@ _headers = {}
 
 
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     return create_access_token(user_id, username, 0)
 
 

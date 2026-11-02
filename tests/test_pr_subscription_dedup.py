@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _TEST_REPO = "gitcode:owner/repo"
 _BOT_TOKEN = "test-bot-token-318"

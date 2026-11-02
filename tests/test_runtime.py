@@ -2,7 +2,7 @@
 import json, threading
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 
 
@@ -42,7 +42,7 @@ class TestEnqueue:
 
     def test_packs_skill_files(self):
         import os
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         # 直接指定 skill_path，不依赖 skill 表（避免全量测试顺序污染）
         tid = service.enqueue_task(
             agent_session_id="sess-1", runtime_id=1, prompt="p", event_seq=1,
@@ -319,7 +319,7 @@ class TestMultiInstanceRouting:
 
     @staticmethod
     def _seed_runtimes(rows):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM agent_runtimes WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%' OR credential_id IN (SELECT id FROM runtime_credentials WHERE name LIKE 'test_%' OR name LIKE 'udb_%' OR name LIKE 'ag_%' OR name LIKE 'a2a-%' OR name LIKE 'rl-%' OR name LIKE 'chat_%' OR name LIKE 'redis-%' OR name LIKE 'lr-%' OR name LIKE 'wt_%') OR id IN (900001, 900002, 999)")
@@ -337,7 +337,7 @@ class TestMultiInstanceRouting:
             {"credential_id": 2, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
         ])
         rid = get_runtime_id_by_name("opencode")
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             st = db.cursor().execute("SELECT status FROM agent_runtimes WHERE id=?", (rid,)).fetchone()[0]
         assert st == "online", f"应优先选 online 实例, got id={rid} status={st}"
@@ -356,7 +356,7 @@ class TestMultiInstanceRouting:
             {"credential_id": 1, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
         ])
         rid = ensure_default_runtime("opencode")
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             cnt = db.cursor().execute("SELECT COUNT(*) FROM agent_runtimes WHERE name='opencode'").fetchone()[0]
         assert cnt == 1, f"ensure_default_runtime 不应重复插入, got {cnt}"
@@ -368,7 +368,7 @@ class TestMultiInstanceRouting:
             {"credential_id": 1, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
             {"credential_id": 2, "name": "opencode", "status": "online", "last_seen_at": "2026-08-09T00:00:00+00:00"},
         ])
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             r1, r2 = [r[0] for r in db.cursor().execute("SELECT id FROM agent_runtimes ORDER BY id").fetchall()]
         _enqueue(session_id="s-m1", runtime_id=r1, seq=1)

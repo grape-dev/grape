@@ -29,13 +29,13 @@ class _DbProxy:
     """动态转发到当前 session_manager.db（被 fixture patch 后即 mock 库）。"""
 
     def __getattr__(self, attr):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         return getattr(_sm.db, attr)
 
 
 class _DbLockProxy:
     def __enter__(self):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         self._real = _sm.db_lock
         return self._real.__enter__()
 
@@ -49,7 +49,7 @@ db_lock = _DbLockProxy()
 # 模块级捕获 session_manager.db/db_lock 的已知模块（run_pipeline 写侧链路）：
 # 函数级 import 的模块自动经 session_manager 取到 mock，无需列举。
 _PATCH_DB_MODULES = (
-    "src.session_manager", "src.api.event_store", "src.api.event_pipeline",
+    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
     "src.user.db", "src.api.session_store", "src.api.issues_center",
     "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
 )
@@ -59,7 +59,7 @@ _PATCH_DB_MODULES = (
 def _mock_db(monkeypatch):
     """每测试独立内存库：建表走真实 init_database（内部函数级 import 取到 mock）。"""
     import sqlite3
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.db_setup as _dbs
     _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _lock = threading.RLock()
@@ -73,7 +73,7 @@ def _mock_db(monkeypatch):
     _dbs.init_database()
     yield
     # 隔离修复：本 patch 生效期间若有模块是**首次** import，它的
-    # `from src.session_manager import db` 会把临时内存库句柄永久捕获到模块全局；
+    # `from src.kernel.session_manager import db` 会把临时内存库句柄永久捕获到模块全局；
     # monkeypatch 只还原被 patch 的属性，那个模块仍指向临时连接（且随后被 close）
     # → 泄漏到后续测试文件。此处兜住：扫描已加载模块，把仍指向临时句柄的重绑回真句柄。
     for _m in list(sys.modules.values()):
@@ -157,7 +157,7 @@ def _skipped_rows(reason=None):
 
 def _session_level_result():
     """模拟 issue-453 现场：session 级 token（PAT 被抄写进 devops_agent_session）。"""
-    from src.token_resolver import TokenResult
+    from src.kernel.token_resolver import TokenResult
     return TokenResult(token="SESSION_PAT", level="session",
                        provider=MagicMock(), repo_key=RK)
 
@@ -168,9 +168,9 @@ class TestS1SessionLevelBotComment:
     def test_s1_1_bot_issue_comment_skipped(self):
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
-             patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor",
+             patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
                    return_value=False):
             result = _run(_issue_comment_payload("grape_bot"), "Note Hook")
         assert _skipped_rows("self_loop") == 1, "bot issue 评论必须被入口拦截并留痕"
@@ -184,7 +184,7 @@ class TestS1SessionLevelBotComment:
     def test_s1_2_bot_pr_comment_skipped(self):
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()):
             _run(_pr_comment_payload("grape_bot"), "Note Hook")
         assert _skipped_rows("self_loop") == 1, "bot PR 评论（note_hook_pr）同样拦截"
@@ -197,7 +197,7 @@ class TestS1SessionLevelBotComment:
     def test_s1_3_user_comment_not_intercepted(self):
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()):
             _run(_issue_comment_payload("alice"), "Note Hook")
         assert _skipped_rows("self_loop") == 0, "真实用户评论不得被入口拦截"
@@ -208,11 +208,11 @@ class TestS2RepoBotLevelRegression:
 
     def test_s2_1_repo_bot_level_bot_comment_still_skipped(self):
         _clean()
-        from src.token_resolver import TokenResult
+        from src.kernel.token_resolver import TokenResult
         _bot_level = TokenResult(token="REPO_BOT", level="repo_bot",
                                  provider=MagicMock(), repo_key=RK)
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _bot_level):
             _run(_issue_comment_payload("grape_bot"), "Note Hook")
         assert _skipped_rows("self_loop") == 1, "repo_bot 级仓库 bot 评论仍被拦截"
@@ -220,7 +220,7 @@ class TestS2RepoBotLevelRegression:
     def test_s2_2_repo_bot_level_user_comment_not_skipped(self):
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()):
             _run(_issue_comment_payload("bob"), "Note Hook")
         assert _skipped_rows("self_loop") == 0
@@ -233,9 +233,9 @@ class TestS3NonCommentEvents:
         """bot 创建的「## 父任务」issue_opened 必须放行（豁免保留）。"""
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
-             patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor",
+             patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
                    return_value=False):
             _run(_issue_opened_payload("grape_bot", description="## 父任务\n#1"), "Issue Hook")
         assert _skipped_rows("self_loop") == 0, "子任务豁免被入口拦截破坏（回归！）"
@@ -250,9 +250,9 @@ class TestS3NonCommentEvents:
             "user": {"username": "grape_bot"},
         }
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
-             patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor",
+             patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
                    return_value=False):
             _run(payload, "Merge Request Hook")
         assert _skipped_rows("self_loop") == 0, "PR 族不应被评论族入口拦截"
@@ -272,9 +272,9 @@ class TestS5GuardEdges:
         """bot 用户名查询返回空（DB 异常降级）→ 不拦截，走原 handler 链。"""
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=[]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
-             patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor",
+             patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
                    return_value=False):
             _run(_issue_comment_payload("grape_bot"), "Note Hook")
         assert _skipped_rows("self_loop") == 0, "降级为不拦截（不误杀），由原 handler 链兜底"

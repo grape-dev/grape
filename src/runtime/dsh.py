@@ -208,7 +208,7 @@ class DshRuntime(AgentRuntime):
         （平台不持有模型 key）。本函数不读取、不转发任何模型凭据。
         """
         env = os.environ.copy()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
         return env

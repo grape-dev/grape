@@ -3,7 +3,7 @@ import os
 
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def test_template_usage_table_exists():

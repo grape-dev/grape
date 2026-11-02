@@ -26,7 +26,7 @@ import pytest  # noqa: E402
 from fastapi import HTTPException  # noqa: E402
 from src.api.routes.skills import (  # noqa: E402
     list_sub_skills, read_sub_skill, package_sub_skill)
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.storage import StorageBackend, zip_cache_invalidate  # noqa: E402
 
 SKILL = "obs-sub-test-skill"
@@ -270,7 +270,7 @@ def test_sub_skill_list_readable_and_detail_404(tmp_path, monkeypatch):
         "---\nname: valid_sub\ndescription: valid\n---\n\nvalid content", encoding="utf-8")
 
     monkeypatch.setattr(
-        "src.config.resolve_official_skill_path",
+        "src.kernel.config.resolve_official_skill_path",
         lambda skill_name: str(tmp_path / "SKILL.md"))
 
     sid = _insert_skill("local-sub-test", "official", "issue-509-test", "local-sub-test", "")

@@ -24,7 +24,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi import HTTPException  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.api.routes.scenes import apply_scene, ApplySceneRequest  # noqa: E402
 from src.api.pipeline_config import create_custom_scene  # noqa: E402
 from src.api.session_store import get_or_create_agent_session  # noqa: E402

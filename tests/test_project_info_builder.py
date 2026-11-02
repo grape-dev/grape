@@ -9,7 +9,7 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _tmp_workspace(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path))
+    monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path))
     monkeypatch.setattr("src.project_info.builder.WORKSPACE_DIR", str(tmp_path))
     yield tmp_path
 
@@ -19,7 +19,7 @@ class TestBuildProjectInfo:
         """codegraph 不可用 → 降级生成，degraded=true。"""
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: False)
         from src.project_info.builder import build_project_info
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is True
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
@@ -36,7 +36,7 @@ class TestBuildProjectInfo:
         monkeypatch.setattr("src.project_info.builder._codegraph_explore", lambda work, q, max_files=10: f"explore:{q}")
         monkeypatch.setattr("src.project_info.builder._codegraph_files", lambda work: "file-tree")
         from src.project_info.builder import build_project_info
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
@@ -62,7 +62,7 @@ class TestBuildProjectInfo:
         仅 VOD/Issue 的仓库无 codebase 时，builder 应主动建镜像而非直接 degraded。
         走真实 _ensure_analysis_worktree（不 mock），验证 ensure_repo_base 被调用。
         """
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         calls = {"n": 0}
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
 
@@ -81,7 +81,7 @@ class TestBuildProjectInfo:
 
     def test_ensure_repo_base_when_missing_then_generates(self, _tmp_workspace, monkeypatch):
         """无 codebase → ensure_repo_base 建立后 → 正常生成（degraded=false）。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
 
         def _fake_ensure_repo_base(repo_key, token=""):
@@ -109,7 +109,7 @@ class TestShouldRefresh:
     def test_degraded_with_codegraph_refresh(self, _tmp_workspace, monkeypatch):
         """degraded=true 且 codegraph 可用 → 应刷新。"""
         import os
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         os.makedirs(pi, exist_ok=True)
         open(os.path.join(pi, "project-graph.md"), "w", encoding="utf-8").write("g")
@@ -122,7 +122,7 @@ class TestShouldRefresh:
     def test_fresh_degraded_false_no_refresh(self, _tmp_workspace, monkeypatch):
         """degraded=false 且未超 7 天 → 不刷新。"""
         import os
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
         os.makedirs(pi, exist_ok=True)
         open(os.path.join(pi, "project-graph.md"), "w", encoding="utf-8").write("g")
@@ -140,7 +140,7 @@ class TestEnsureRepoBaseAlwaysRefresh:
 
     def test_ensure_repo_base_called_even_when_exists(self, _tmp_workspace, monkeypatch):
         """bare mirror 已存在时也调用 ensure_repo_base（不再 if not os.path.isdir 跳过）。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         calls = {"n": 0}
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
 
@@ -160,7 +160,7 @@ class TestEnsureRepoBaseAlwaysRefresh:
 
     def test_ensure_repo_base_passes_token(self, _tmp_workspace, monkeypatch):
         """ensure_repo_base 接收到传入的 token。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         calls = {"token": ""}
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
 
@@ -182,7 +182,7 @@ class TestWorktreeFetchWithToken:
 
     def test_worktree_fetch_uses_run_git_with_token(self, _tmp_workspace, monkeypatch):
         """_ensure_analysis_worktree 的 fetch 调用 _run_git 并传入 token。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         fetch_calls = []
 
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
@@ -216,7 +216,7 @@ class TestWorktreeFetchWithToken:
 
     def test_worktree_fetch_logs_failure(self, _tmp_workspace, monkeypatch):
         """worktree fetch 失败时记 log.warning 但不中断流程。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         import subprocess
 
         monkeypatch.setattr("src.project_info.builder._codegraph_available", lambda: True)
@@ -317,7 +317,7 @@ class TestContentEnrich:
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
                             lambda repo_key, owner, rname, token="": (["main", "release/1.0"], "main"))
         from src.project_info.builder import build_project_info
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
         caps = open(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "project-capabilities.md"), encoding="utf-8").read()
@@ -336,7 +336,7 @@ class TestContentEnrich:
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
                             lambda repo_key, owner, rname, token="": (["main", "dev", "release/1.0"], "main"))
         from src.project_info.builder import build_project_info
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
         pi = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info")
@@ -358,7 +358,7 @@ class TestContentEnrich:
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
                             lambda repo_key, owner, rname, token="": ([], ""))
         from src.project_info.builder import build_project_info
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test")
         assert r["degraded"] is False
         meta = json.load(open(os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", ".metadata.json"), encoding="utf-8"))
@@ -380,7 +380,7 @@ class TestDefaultBranchDrivesWorktree:
         monkeypatch.setattr("src.project_info.builder._fetch_branches",
                             lambda repo_key, owner, rname, token="": (["main", "develop"], "develop"))
         from src.project_info.builder import build_project_info
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         r = build_project_info("gitcode:org/test", token="t")
         assert r["degraded"] is False
         assert passed.get("default_branch") == "develop"
@@ -390,7 +390,7 @@ class TestDefaultBranchDrivesWorktree:
 
     def test_worktree_reset_on_tip_change(self, _tmp_workspace, monkeypatch):
         """默认分支 tip 变化 → reset 工作区并增量 sync（修复"只 fetch 不更新文件"）。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         work = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "codegraph-repo")
         os.makedirs(work, exist_ok=True)
         open(os.path.join(work, ".git"), "w").write("gitdir: x")
@@ -432,7 +432,7 @@ class TestDefaultBranchDrivesWorktree:
 
     def test_worktree_no_reset_when_unchanged(self, _tmp_workspace, monkeypatch):
         """tip 未变化 → 不 reset（避免无谓 churn）。"""
-        from src.repo_key import workspace_repo_dir
+        from src.kernel.repo_key import workspace_repo_dir
         work = os.path.join(workspace_repo_dir("gitcode:org/test"), "project-info", "codegraph-repo")
         os.makedirs(work, exist_ok=True)
         open(os.path.join(work, ".git"), "w").write("gitdir: x")

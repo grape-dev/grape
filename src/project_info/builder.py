@@ -9,9 +9,9 @@
   * 产物:          {WORKSPACE_DIR}/{owner}/{repo}/project-info/
 """
 import json, os, shutil, subprocess, hashlib, time
-from src.config import log, WORKSPACE_DIR
-from src.localfs import write_text as _atomic_write
-from src.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
+from src.kernel.config import log, WORKSPACE_DIR
+from src.kernel.localfs import write_text as _atomic_write
+from src.kernel.repo_key import split_owner_repo, BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, knowledge_obs_prefix
 
 _ANALYSIS_SUBDIR = "codegraph-repo"
 _GRAPH_FILE = "project-graph.md"
@@ -83,7 +83,7 @@ _CAP_TEMPLATE = """# Project Capabilities: {owner}/{repo}
 
 
 def _pi_dir(repo_key: str) -> str:
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "project-info")
 
 
@@ -92,7 +92,7 @@ def _analysis_dir(repo_key: str) -> str:
 
 
 def _repo_base_dir(repo_key: str) -> str:
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
 
@@ -157,7 +157,7 @@ def _write_to_obs(repo_key: str, name: str, content: str):
             storage_key = f"{knowledge_obs_prefix(repo_key)}/project-info/{name}"
             storage.save_bytes(storage_key, content.encode("utf-8"))
         # 无论 OBS 是否启用，都写 DB
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             # Issue #190：查重改用 name（不受 file_path 格式变化影响）
@@ -345,7 +345,7 @@ def _codegraph_callees(work: str, symbol: str, limit: int = 10) -> str:
 def _fetch_branches(repo_key: str, owner: str, rname: str, token: str = "") -> tuple[list, str]:
     """GitCode/GitHub 拉真实分支列表 + 默认分支（best-effort，失败回落空）。"""
     try:
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         _repo = Repo(repo_key)
         tok = token or _repo.bot_token
         if not tok:
@@ -438,7 +438,7 @@ def build_project_info(repo_key: str, token: str = "", lock_key: str = "", renew
     # 获取 main HEAD sha（用于刷新判定）
     try:
         import urllib.request
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         _repo = Repo(repo_key)
         tok = token or _repo.bot_token
         _api_base = _repo.api_base
@@ -563,8 +563,8 @@ def should_refresh(repo_key: str) -> bool:
     if last_sha:
         try:
             import urllib.request, json as _json
-            from src.repo_key import split_owner_repo
-            from src.repo import Repo
+            from src.kernel.repo_key import split_owner_repo
+            from src.kernel.repo import Repo
             _repo = Repo(repo_key)
             tok = _repo.bot_token
             _api_base = _repo.api_base
@@ -594,7 +594,7 @@ def maybe_refresh_project_info(repo_key: str, token: str = ""):
     """webhook 触发的后台刷新（不阻塞调用方）。分布式锁跨实例互斥（Issue #103）。"""
     if not repo_key:
         return
-    from src.lock import acquire_lock, release_lock, renew_lock
+    from src.kernel.lock import acquire_lock, release_lock, renew_lock
     lock_key = f"project_info_build:{hashlib.md5(repo_key.encode()).hexdigest()[:16]}"
     if not acquire_lock(lock_key, ttl=300):
         log.info(f"project-info: lock contention for {repo_key}, skipped")

@@ -26,7 +26,7 @@ def client():
     """创建测试客户端，注入 mock JWT 依赖。"""
     from src.api.main import app
     from src.api.routes.grape_auth import require_jwt_only
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 清理 user_id=200 的残留数据（防止跨文件测试污染）
     with db_lock:

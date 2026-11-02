@@ -7,7 +7,7 @@ from fastapi import HTTPException
 from src.api import auth_token
 from src.api.routes.events import _require_event_bot_token
 from src.api.routes.webhook import _authorize_a2a
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:o/r"
 
@@ -112,7 +112,7 @@ SESSION_REPO = "gitcode:o/session-repo"
 
 def _seed_managed_repo(repo_key: str, token: str):
     """插入 managed_repos 行（带 bot_gitcode_token）。"""
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     with db_lock:
         db.cursor().execute(

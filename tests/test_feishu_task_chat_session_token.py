@@ -83,7 +83,7 @@ class TestFeishuDirectInjectsToken:
         assert env.get("GRAPE_CLI_MODE") == "WORKER"
         assert env.get("USER_ID") == "0" and env.get("CONVERSATION_ID")
         assert env.get("IM_CHAT_ID") == "chat_1", "IM_CHAT_ID 需保留"
-        from src.api.auth_token import verify_session_token_for_repo
+        from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
         assert verify_session_token_for_repo(tok, "gitcode:Jason7602/test")
         assert verify_session_token_for_repo(tok, "github:other/repo") is None
 

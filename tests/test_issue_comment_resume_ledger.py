@@ -28,13 +28,13 @@ class _DbProxy:
     """动态转发到当前 session_manager.db（被 fixture patch 后即 mock 库）。"""
 
     def __getattr__(self, attr):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         return getattr(_sm.db, attr)
 
 
 class _DbLockProxy:
     def __enter__(self):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         self._real = _sm.db_lock
         return self._real.__enter__()
 
@@ -46,7 +46,7 @@ db = _DbProxy()
 db_lock = _DbLockProxy()
 
 _PATCH_DB_MODULES = (
-    "src.session_manager", "src.api.event_store", "src.api.event_pipeline",
+    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
     "src.user.db", "src.api.session_store", "src.api.issues_center",
     "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
 )
@@ -55,7 +55,7 @@ _PATCH_DB_MODULES = (
 @pytest.fixture(autouse=True)
 def _mock_db(monkeypatch):
     """每测试独立内存库：建表走真实 init_database（内部函数级 import 取到 mock）。"""
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.db_setup as _dbs
     _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _lock = threading.RLock()
@@ -71,7 +71,7 @@ def _mock_db(monkeypatch):
 
 
 from src.api import event_pipeline as ep
-from src import outbound_ledger as ol
+from src.kernel import outbound_ledger as ol
 
 
 RK = "gitcode:test/rsum"

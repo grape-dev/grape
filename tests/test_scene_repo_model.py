@@ -18,7 +18,7 @@ import pytest  # noqa: E402
 @pytest.fixture(autouse=True)
 def _clean_scene_table():
     """每个用例前清空场景表与 user_repos，保证幂等（不触碰 scene_market，避免跨文件污染）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -48,7 +48,7 @@ def test_scene_table_has_no_scope_userid():
     """新表结构：无 scope / user_id，唯一约束含 (scene_id, repo_key)。"""
     from src.api import db_setup
     db_setup.init_database()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
@@ -71,7 +71,7 @@ def test_apply_default_scene_from_market():
     """T6：从 scene_market 复刻默认「通用开发」到仓库。"""
     from src.api import db_setup
     db_setup.init_database()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT 1 FROM scene_market WHERE name='default' AND source='official' LIMIT 1")
@@ -118,7 +118,7 @@ def test_apply_custom_default_scene():
     """T8：配置 default_scene_market_name='iac' 时复刻 iac 场景。"""
     from src.api import db_setup
     db_setup.init_database()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT 1 FROM scene_market WHERE name='iac' AND source='official' LIMIT 1")

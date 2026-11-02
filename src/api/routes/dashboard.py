@@ -4,14 +4,14 @@ from src.user import db as user_db
 from src.api.deps import require_no_session_token, require_org_member
 from src.api.time_utils import normalize_event_time
 from src.observability.engine_probe import get_probe_results
-from src.config import log
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/dashboard", tags=["dashboard"])
 
 
 def _stuck_minutes() -> int:
     """stuck 预警阈值（分钟，Issue #470：随统一超时配置派生，默认超时 3600s → 22min）。"""
-    from src.config import get_stuck_threshold_minutes
+    from src.kernel.config import get_stuck_threshold_minutes
     return get_stuck_threshold_minutes()
 
 
@@ -118,7 +118,7 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
     数据全部来自 agent_tasks / agent_runtimes 表的实时 SQL 查询。
     repo 参数：仓库名（requiredsa/hello-flask），过滤仅该仓库的任务。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.runtime.health import derive_runtime_health
     from datetime import datetime, timezone, timedelta
     import time as _time
@@ -652,8 +652,8 @@ def probe_engines_now(user: dict = Depends(require_org_member)):
 async def get_error_log_sources(user: dict = Depends(require_org_member)):
     """需登录：组织成员可见。返回可用的日志来源列表（主控 + 各 worker）。"""
     import os as _os, glob as _glob2
-    from src.config import LOG_DIR
-    from src.session_manager import db, db_lock
+    from src.kernel.config import LOG_DIR
+    from src.kernel.session_manager import db, db_lock
 
     sources = [{"source": "主控", "id": 0}]
     _worker_dir = _os.path.join(LOG_DIR, "workers")
@@ -690,7 +690,7 @@ async def get_error_logs(limit: int = 100, level: str = "", repo: str = "", user
     需登录：组织成员可见。运维诊断数据。
     """
     import os, json as _json, glob as _glob, re as _re
-    from src.config import LOG_DIR
+    from src.kernel.config import LOG_DIR
 
     allowed_levels = {"ERROR", "WARNING"}
     if level and level.upper() in allowed_levels:
@@ -884,7 +884,7 @@ async def get_ops_timeline(repo: str = "", user: dict = Depends(require_org_memb
     需登录：组织成员可见。运维只读数据。
     返回 {repoKey, issues: [{issueId, title, eventCount, firstAt, lastAt, events: [...]}]}
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import json as _json
 
     repo_key = ""
@@ -997,7 +997,7 @@ async def get_a2a_health(user: dict = Depends(require_org_member)):
     """
     import requests as _requests
     from src.user.db import get_server_base_url
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     base_url = get_server_base_url()
     result = {
@@ -1049,7 +1049,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
       维持原值（不额外远程查权限，避免限流）。
     - 不调用任何远程 API，避免 429；真实"webhook 被手动删除"的漏报由 repair-host 手动确认兜底。
     """
-    from src.config import log as _log
+    from src.kernel.config import log as _log
     try:
         from src.user.db import get_host_status, set_host_status, _get_managed_webhook_id
         webhook_id = _get_managed_webhook_id(repo_key)
@@ -1074,7 +1074,7 @@ def _check_host_status(owner: str, repo: str, repo_key: str) -> str:
 
 @router.get("/{owner}/{repo}", operation_id="dashboard_repo", summary="Repository dashboard", description="Repository-scoped dashboard panel data for the current user.")
 def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member)):
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
     # 权限校验：用户必须有权访问该仓库
@@ -1086,7 +1086,7 @@ def get_dashboard(owner: str, repo: str, user: dict = Depends(require_org_member
     _repo_keys = [f"gitcode:{_owner_repo}", f"github:{_owner_repo}"]
     _rk_placeholders = ",".join("?" * len(_repo_keys))
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
 

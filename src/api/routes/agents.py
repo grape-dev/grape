@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import get_current_user_or_api_key, get_bot_token, require_no_session_token
-from src.config import log
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -18,7 +18,7 @@ def _update_scene_engine_ids(repo_key: str, agent_type: str, engine_ids: list[in
     查找仓库当前应用的场景（managed_repos.dev_scene），更新对应 node 的 engine_runtime_ids。
     方案 B：场景只与仓库关联，无 official/user fork 逻辑。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.api.pipeline_config import _query_scene_by_id, update_custom_scene
     # 查当前场景
     scene_id = ""
@@ -72,7 +72,7 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
       中该 app 的 open_id/feishu_name/app_id（open_id 为 app 级，app 释放后失效，重绑需重新 p2p 确认）。
     """
     from datetime import datetime, timezone
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     old_app_id = ""
     session_id = ""
     released = False
@@ -102,7 +102,7 @@ def _unbind_vod_im(repo_key: str) -> tuple[str, str, bool]:
 
 def _get_agent_type_meta(agent_type: str) -> dict | None:
     """从 agent_type 表读取 Agent 元数据"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -123,7 +123,7 @@ def _get_agent_type_meta(agent_type: str) -> dict | None:
 @router.get("/types")
 def list_agent_types():
     """返回所有 Agent 类型的元数据（显示名、图标、描述、颜色等）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -160,7 +160,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     if not meta:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"Agent 类型未配置: {name}"})
 
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
     repo_key = to_repo_key(_owner_repo)
 
@@ -183,7 +183,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         if _inum:
             highlight_issue_id = f"#{_inum}"
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     session_data = {}
     event_stats = {"pending": 0, "running": 0, "completed": 0, "failed": 0}
     recent_events = []
@@ -195,7 +195,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
         c = db.cursor()
         try:
             # FR-21.9: 按 repo_key 前缀选 token 列——GitHub 仓查 repo_github_token
-            from src.repo_key import parse_repo_key
+            from src.kernel.repo_key import parse_repo_key
             _provider = "gitcode"
             if _repo_keys:
                 _provider, _, _ = parse_repo_key(_repo_keys[0])
@@ -321,7 +321,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     try:
         from src.runtime.instances import instance_name
         from src.api.pipeline_config import get_scene_engine_ids
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         # 查当前场景（Issue #524: 从 managed_repos.dev_scene 解析，声明配置来源）
         _scene_id = ""
         try:
@@ -348,7 +348,7 @@ def get_agent_detail(name: str, owner: str, repo: str, issue_number: str = "",
     # 引擎绑定真实性同步 §4.3：该仓库场景有引擎被系统解绑且未重绑 → 前端编辑页提示条
     detached_engines = []
     try:
-        from src.session_manager import db as _sdb, db_lock as _slock
+        from src.kernel.session_manager import db as _sdb, db_lock as _slock
         with _slock:
             _sc = _sdb.cursor()
             _sc.execute("SELECT dev_scene FROM managed_repos WHERE repo_key IN ({})".format(_rk_placeholders),
@@ -428,11 +428,11 @@ def clean_agent_session(name: str, owner: str, repo: str,
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE devops_agent_session SET runtime_session_id='' WHERE repo_key=? AND agent_type=?",
@@ -449,7 +449,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     if name not in AGENT_TYPES:
         raise HTTPException(status_code=404, detail={"code": 404, "message": f"未知 Agent: {name}"})
 
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
@@ -460,7 +460,7 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
     # 的是 bot/用户级值回填，导致第 1 级命中 bot token → 自循环检测放行 → 回声）。
     # upsert 传 None = 保留既有 session token。
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # VOD IM 配置：保存到 global_im_bot_config + 类型独占校验 + 清理旧 app_id
     old_app_id = ""
@@ -622,12 +622,12 @@ async def update_agent_config(name: str, owner: str, repo: str, body: AgentConfi
                     log.warning(f"Agent config: skill_id={body.skill_id} not found or inactive, ignoring")
             elif body.skill:
                 # 旧方式兼容：按名称+scope 查 id
-                from src.session_manager import db as _db, db_lock as _db_lock
+                from src.kernel.session_manager import db as _db, db_lock as _db_lock
                 def _find_skill(scope, owner_id=""):
                     with _db_lock:
                         _c = _db.cursor()
                         if owner_id:
-                            from src.repo_key import from_repo_key
+                            from src.kernel.repo_key import from_repo_key
                             _owners = list(dict.fromkeys([owner_id, from_repo_key(owner_id)]))
                             _q = ",".join("?" * len(_owners))
                             row = _c.execute(

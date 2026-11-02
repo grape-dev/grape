@@ -13,10 +13,10 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from fastapi.testclient import TestClient
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 from src.auth import grape_account_db
-from src.api.jwt_utils import create_access_token
+from src.kernel.auth_sdk.jwt_utils import create_access_token
 
 
 def _seed(seq, repo_key, issue, agent, status="completed", structured=None, logs=None):
@@ -115,7 +115,7 @@ def test_api_issue_events_cross_provider_filter():
 # ── tk_ 会话 token：dual 支持 + repo 作用域 ──
 
 def _session_token(repo_key="gitcode:org/evapi"):
-    from src.api.auth_token import issue_session_token
+    from src.kernel.auth_sdk.auth_token import issue_session_token
     return issue_session_token(session_key="t_api", repo_key=repo_key, agent_type="vod")
 
 

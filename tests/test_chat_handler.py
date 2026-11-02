@@ -81,7 +81,7 @@ class TestProcessChatAsync:
         """Natural language bind intent should bind repo directly (no /bind cmd) + card confirm."""
         import asyncio
         from src.im.handler_async import db
-        from src.session_manager import db_lock
+        from src.kernel.session_manager import db_lock
         with db_lock:
             db.cursor().execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='chat_1'")
             db.commit()

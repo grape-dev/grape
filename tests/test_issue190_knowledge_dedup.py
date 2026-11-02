@@ -15,26 +15,26 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 import pytest
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 class TestKnowledgeObsPrefix:
     """knowledge_obs_prefix 和 knowledge_storage_key 格式验证"""
 
     def test_gitcode_prefix(self):
-        from src.repo_key import knowledge_obs_prefix
+        from src.kernel.repo_key import knowledge_obs_prefix
         assert knowledge_obs_prefix("gitcode:grape-dev/grape") == "knowledge/gitcode/grape-dev/grape"
 
     def test_github_prefix(self):
-        from src.repo_key import knowledge_obs_prefix
+        from src.kernel.repo_key import knowledge_obs_prefix
         assert knowledge_obs_prefix("github:grape-dev/grape") == "knowledge/github/grape-dev/grape"
 
     def test_default_provider(self):
-        from src.repo_key import knowledge_obs_prefix
+        from src.kernel.repo_key import knowledge_obs_prefix
         assert knowledge_obs_prefix("grape-dev/grape") == "knowledge/gitcode/grape-dev/grape"
 
     def test_cross_provider_no_conflict(self):
-        from src.repo_key import knowledge_obs_prefix
+        from src.kernel.repo_key import knowledge_obs_prefix
         g1 = knowledge_obs_prefix("gitcode:test/repo")
         g2 = knowledge_obs_prefix("github:test/repo")
         assert g1 != g2
@@ -66,7 +66,7 @@ class TestMemberObsKeyNoDuplication:
 
     def test_member_obs_key_no_path_duplication(self):
         """sync 路径提取 member/ 后拼接，不产生 owner/repo 重复"""
-        from src.repo_key import knowledge_obs_prefix
+        from src.kernel.repo_key import knowledge_obs_prefix
         repo_key = "gitcode:mm6667/test"
         file_path = "mm6667/test/project-info/member/admin/entry.md"
         _obs_prefix = knowledge_obs_prefix(repo_key)
@@ -85,7 +85,7 @@ class TestMemberObsKeyNoDuplication:
 
     def test_member_obs_key_matches_upload(self):
         """sync 和 upload 路径生成的 obs_key 一致"""
-        from src.repo_key import knowledge_obs_prefix
+        from src.kernel.repo_key import knowledge_obs_prefix
         repo_key = "gitcode:mm6667/test"
         username = "admin"
         filename = "entry.md"
@@ -109,14 +109,14 @@ class TestBaselineNameMap:
     """baseline name 映射常量"""
 
     def test_name_map_has_three_files(self):
-        from src.repo_key import BASELINE_NAME_MAP
+        from src.kernel.repo_key import BASELINE_NAME_MAP
         assert len(BASELINE_NAME_MAP) == 3
         assert "project-graph.md" in BASELINE_NAME_MAP
         assert "project-capabilities.md" in BASELINE_NAME_MAP
         assert ".metadata.json" in BASELINE_NAME_MAP
 
     def test_name_map_values_are_chinese(self):
-        from src.repo_key import BASELINE_NAME_MAP
+        from src.kernel.repo_key import BASELINE_NAME_MAP
         assert BASELINE_NAME_MAP["project-graph.md"] == "项目结构图谱"
         assert BASELINE_NAME_MAP["project-capabilities.md"] == "项目能力清单"
         assert BASELINE_NAME_MAP[".metadata.json"] == "项目元数据"
@@ -264,7 +264,7 @@ class TestFilePathMigration:
     """file_path 格式迁移逻辑"""
 
     def _migrate_fp(self, repo_key, file_path):
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         provider, owner, repo = parse_repo_key(repo_key)
         full_prefix = f"{provider}/{owner}/{repo}/"
         partial_prefix = f"{owner}/{repo}/"
@@ -297,7 +297,7 @@ class TestObsKeyMigration:
     """obs_key 格式迁移逻辑"""
 
     def _migrate_obs(self, repo_key, scope, obs_key, agent_type="", issue_num=0):
-        from src.repo_key import parse_repo_key, knowledge_obs_prefix
+        from src.kernel.repo_key import parse_repo_key, knowledge_obs_prefix
         provider, owner, repo = parse_repo_key(repo_key)
         new_prefix = knowledge_obs_prefix(repo_key)
         if obs_key.startswith(new_prefix):
@@ -367,7 +367,7 @@ class TestBackfillBeforeDedup:
 
     def test_empty_name_backfill_prevents_dedup_data_loss(self):
         """3 条 name 为空的 baseline，回填后去重不丢数据"""
-        from src.repo_key import BASELINE_NAME_MAP
+        from src.kernel.repo_key import BASELINE_NAME_MAP
         with db_lock:
             c = db.cursor()
             # 模拟老数据：3 条 baseline，name 全空，file_path 含不同文件名
@@ -379,7 +379,7 @@ class TestBackfillBeforeDedup:
             db.commit()
 
             # 执行回填逻辑（模拟 step 1.5）
-            from src.repo_key import BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, BASELINE_DESC_MAP
+            from src.kernel.repo_key import BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, BASELINE_DESC_MAP
             _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"
             rows = c.execute(
                 "SELECT id, name, file_path, obs_key, description FROM agent_shared_knowledge "
@@ -420,7 +420,7 @@ class TestBackfillBeforeDedup:
 
     def test_unified_desc_backfill_replaces_with_per_file(self):
         """统一 description 被回填为 per-file 描述"""
-        from src.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
+        from src.kernel.repo_key import BASELINE_NAME_MAP, BASELINE_DESC_MAP, BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -445,7 +445,7 @@ class TestBackfillBeforeDedup:
 
     def test_idempotent_backfill_no_change_on_second_run(self):
         """回填执行两次，第二次 0 行更新"""
-        from src.repo_key import BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, BASELINE_NAME_MAP, BASELINE_DESC_MAP
+        from src.kernel.repo_key import BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK, BASELINE_NAME_MAP, BASELINE_DESC_MAP
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -567,57 +567,57 @@ class TestLocalfs:
     """localfs 原子写入 + 路径安全"""
 
     def test_write_text_roundtrip(self, tmp_path):
-        from src.localfs import write_text, read_text
+        from src.kernel.localfs import write_text, read_text
         p = str(tmp_path / "test.md")
         write_text(p, "hello world")
         assert read_text(p) == "hello world"
 
     def test_write_text_overwrite(self, tmp_path):
-        from src.localfs import write_text, read_text
+        from src.kernel.localfs import write_text, read_text
         p = str(tmp_path / "test.md")
         write_text(p, "old content")
         write_text(p, "new content")
         assert read_text(p) == "new content"
 
     def test_write_text_creates_dir(self, tmp_path):
-        from src.localfs import write_text, read_text
+        from src.kernel.localfs import write_text, read_text
         p = str(tmp_path / "subdir" / "nested" / "test.md")
         write_text(p, "nested")
         assert read_text(p) == "nested"
 
     def test_write_bytes_roundtrip(self, tmp_path):
-        from src.localfs import write_bytes, read_bytes
+        from src.kernel.localfs import write_bytes, read_bytes
         p = str(tmp_path / "test.bin")
         write_bytes(p, b"\x00\x01\x02")
         assert read_bytes(p) == b"\x00\x01\x02"
 
     def test_read_text_missing_file(self, tmp_path):
-        from src.localfs import read_text
+        from src.kernel.localfs import read_text
         assert read_text(str(tmp_path / "nonexistent.md")) is None
 
     def test_read_bytes_missing_file(self, tmp_path):
-        from src.localfs import read_bytes
+        from src.kernel.localfs import read_bytes
         assert read_bytes(str(tmp_path / "nonexistent.bin")) is None
 
     def test_append_text(self, tmp_path):
-        from src.localfs import append_text, read_text
+        from src.kernel.localfs import append_text, read_text
         p = str(tmp_path / "log.md")
         append_text(p, "line1\n")
         append_text(p, "line2\n")
         assert read_text(p) == "line1\nline2\n"
 
     def test_safe_join_valid(self):
-        from src.localfs import safe_join
+        from src.kernel.localfs import safe_join
         p = safe_join("gitcode:test/repo", "project-info", "test.md")
         assert p.endswith("test/repo/project-info/test.md")
 
     def test_safe_workspace_path_valid(self):
-        from src.localfs import safe_workspace_path
+        from src.kernel.localfs import safe_workspace_path
         p = safe_workspace_path("gitcode/test/repo/project-info/test.md")
         assert p.endswith("gitcode/test/repo/project-info/test.md")
 
     def test_safe_workspace_path_traversal_blocked(self):
-        from src.localfs import safe_workspace_path
+        from src.kernel.localfs import safe_workspace_path
         import pytest
         with pytest.raises(ValueError, match="traversal"):
             safe_workspace_path("../../etc/passwd")

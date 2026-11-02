@@ -17,7 +17,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from unittest.mock import patch
 
 from src.api import issues_center as ic
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:owner/repo284"
 USER_ID = 5001
@@ -89,7 +89,7 @@ def test_reuse_no_duplicate_conversation():
 
 def test_old_title_upgrade_on_reuse():
     """存量「Issue #N」会话复用时自动升级为新格式"""
-    from src.session_manager import create_conversation
+    from src.kernel.session_manager import create_conversation
     old_conv_id = create_conversation(USER_ID, REPO, title="Issue #200",
                                        conv_type="task", issue_number=200)
     assert _get_conv_title(old_conv_id) == "Issue #200"
@@ -113,7 +113,7 @@ def test_empty_title_fallback():
 
 def test_user_custom_title_not_overwritten():
     """用户自定义标题不被覆盖（仅旧格式 Issue #N 才升级）"""
-    from src.session_manager import create_conversation
+    from src.kernel.session_manager import create_conversation
     custom_conv_id = create_conversation(USER_ID, REPO, title="我的自定义标题",
                                           conv_type="task", issue_number=400)
     with patch.object(ic, "_get_user_id_by_gitcode", return_value=USER_ID), \

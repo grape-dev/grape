@@ -28,7 +28,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from src.api.time_utils import normalize_event_time
-from src.config import log
+from src.kernel.config import log
 from src.observability.overview import _p95   # 复用同一分位数实现，避免两套口径
 from src.runtime.task_timeout import TIMEOUT_FAIL_SIGNATURE as _TIMEOUT_FAIL_SIGNATURE
 
@@ -108,7 +108,7 @@ def fetch_usage_rows(start: datetime, end: datetime) -> List[tuple]:
 
     `catch_up` 一次取整段窗口的行，避免每个桶都查一次库（回填 24h 时是 1440 次 → 1 次）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     lo = _local_str(start - timedelta(days=1))
     hi = _local_str(end + timedelta(days=1))
     try:
@@ -130,7 +130,7 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
     `usage_rows` 可传入预算好的 token 行（`catch_up` 会对整段窗口只查一次库）。
     返回 `{dim_key: {metric: (value, cnt)}}`；维度含各仓库 + `global`。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     per_repo: Dict[str, Dict[str, List[float]]] = {}
 
@@ -300,7 +300,7 @@ def compute_bucket(start: datetime, end: datetime, usage_rows: Optional[List[tup
 def write_bucket(resolution: str, bucket_start: datetime, rows: Dict[str, Dict[str, Tuple[float, int]]]
                  ) -> int:
     """写入/更新一个桶（幂等：同一 (resolution, bucket, metric, dim) 覆盖）。返回写入行数。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     b_iso = _iso(bucket_start)
     now_iso = _iso(_now())
     n = 0
@@ -324,7 +324,7 @@ def write_bucket(resolution: str, bucket_start: datetime, rows: Dict[str, Dict[s
 # ---------------------------------------------------------------- 追赶补齐
 
 def _existing_buckets(resolution: str, oldest: datetime, newest: datetime) -> set:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out = set()
     try:
         with db_lock:
@@ -403,7 +403,7 @@ def catch_up(now: Optional[datetime] = None, minute_back_min: int = 24 * 60,
 
 def cleanup(now: Optional[datetime] = None) -> Dict[str, int]:
     """留存清理：分钟 7 天、小时 30 天。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = now or _now()
     cut_m = _iso(now - timedelta(days=MINUTE_RETENTION_DAYS))
     cut_h = _iso(now - timedelta(days=HOUR_RETENTION_DAYS))
@@ -439,7 +439,7 @@ def series(metrics: Iterable[str], dim_keys: Iterable[str], start: datetime, end
     out: Dict[str, List[Dict[str, Any]]] = {m: [] for m in mets}
     if not dims or not mets:
         return out
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ph_d = ",".join("?" * len(dims))
     ph_m = ",".join("?" * len(mets))
     rows: List[tuple] = []

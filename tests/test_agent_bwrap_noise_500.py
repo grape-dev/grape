@@ -31,7 +31,7 @@ if SRC_DIR not in sys.path:
 os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
 from src.runtime.agent import _backend_for_engine  # noqa: F401,E402  先入 runtime 打破循环导入
-import src.config  # noqa: E402
+import src.kernel.config  # noqa: E402
 import src.agent.hermes_acp as ha  # noqa: E402
 import src.agent.hwcloud_acp as hwa  # noqa: E402
 import src.agent.executor as ex  # noqa: E402
@@ -129,7 +129,7 @@ def _assert_three_states(runner, extract_cmds, cmd_tail_check, monkeypatch, tmp_
     def run(sandbox_on, break_import):
         popen_cmds = []
         caplog.clear()
-        monkeypatch.setattr(src.config, "GRAPE_AGENT_SANDBOX", sandbox_on)
+        monkeypatch.setattr(src.kernel.config, "GRAPE_AGENT_SANDBOX", sandbox_on)
         if break_import:
             monkeypatch.delattr("src.agent.sandbox.build_bwrap_cmd", raising=False)
         else:
@@ -159,7 +159,7 @@ def _assert_three_states(runner, extract_cmds, cmd_tail_check, monkeypatch, tmp_
     # ③ 开启 + 失败（导入链路损坏复现部署症状）：降级执行 + WARNING 恰 1 条
     popen_cmds = []
     caplog.clear()
-    monkeypatch.setattr(src.config, "GRAPE_AGENT_SANDBOX", True)
+    monkeypatch.setattr(src.kernel.config, "GRAPE_AGENT_SANDBOX", True)
     monkeypatch.delattr("src.agent.sandbox.build_bwrap_cmd", raising=False)
     runner(popen_cmds)
     runner(popen_cmds)

@@ -15,7 +15,7 @@ import uuid
 import pytest
 from unittest.mock import patch
 
-from src.api.jwt_utils import (create_access_token, verify_access_token,
+from src.kernel.auth_sdk.jwt_utils import (create_access_token, verify_access_token,
                                create_refresh_token, verify_refresh_token)
 from src.api.routes.repos import _get_user_provider_and_token
 

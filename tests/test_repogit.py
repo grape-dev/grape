@@ -28,7 +28,7 @@ def git_src(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _patch(git_src, tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path / "ws"))
+    monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path / "ws"))
     monkeypatch.setattr(repogit, "clone_url_for", lambda repo_key: str(git_src))
     yield
 
@@ -202,7 +202,7 @@ class TestLinkedRepoTokenFromEnv:
                 local_called["n"] += 1
                 return "tok_local"
 
-        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         env = {"GRAPE_LINKED_REPO_TOKENS": '{"gitcode:OPCTeam/HDBlogService": "tok_env"}'}
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466", env=env)
         assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_env")
@@ -221,7 +221,7 @@ class TestLinkedRepoTokenFromEnv:
             def bot_token(self):
                 return "tok_local"
 
-        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         env = {"GRAPE_LINKED_REPO_TOKENS": '{"gitcode:other/repo": "tok_env"}'}
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466", env=env)
         assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_local")
@@ -239,7 +239,7 @@ class TestLinkedRepoTokenFromEnv:
             def bot_token(self):
                 return ""
 
-        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466", env={})
         assert wts == [], "双无 token 应 skip 该关联仓"
 
@@ -256,7 +256,7 @@ class TestLinkedRepoTokenFromEnv:
             def bot_token(self):
                 return "tok_local"
 
-        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466",
                                                    env={"GRAPE_LINKED_REPO_TOKENS": "{broken"})
         assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_local")
@@ -274,7 +274,7 @@ class TestLinkedRepoTokenFromEnv:
             def bot_token(self):
                 return "tok_local"
 
-        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         env = {"GRAPE_LINKED_REPO_TOKENS": '{"gitcode:OPCTeam/HDBlogService": "tok_env"}'}
         result = repogit.ensure_repo_base_multi(self.LINKED, env=env)
         assert result["gitcode:OPCTeam/HDBlogService"] == {
@@ -295,6 +295,6 @@ class TestLinkedRepoTokenFromEnv:
             def bot_token(self):
                 return "tok_local"
 
-        monkeypatch.setattr("src.repo.Repo", _FakeRepo)
+        monkeypatch.setattr("src.kernel.repo.Repo", _FakeRepo)
         wts = repogit.ensure_linked_repo_worktrees(self.LINKED, "coding", "466")
         assert wts and wts[0]["worktree_dir"] == ("gitcode:OPCTeam/HDBlogService", "tok_osenv")

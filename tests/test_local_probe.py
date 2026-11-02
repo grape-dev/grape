@@ -55,7 +55,7 @@ def test_probe_multiple_completes():
 def test_probe_save_writes_healthy_to_db():
     """P05：探测结果经 save_agent_runtimes 写入 DB 后 healthy=1"""
     from src.user import db as user_db
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     name = "probe-test-local"
     with db_lock:
         db.cursor().execute("DELETE FROM agent_runtimes WHERE name=?", (name,))

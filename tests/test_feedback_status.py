@@ -14,9 +14,9 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
-from src.api.jwt_utils import create_access_token
+from src.kernel.auth_sdk.jwt_utils import create_access_token
 from src.auth.grape_account_db import get_token_version
 
 

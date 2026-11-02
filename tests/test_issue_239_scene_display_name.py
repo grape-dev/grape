@@ -17,7 +17,7 @@ import pytest  # noqa: E402
 @pytest.fixture(autouse=True)
 def _clean_scene_table():
     """每个用例前清空场景表，保证幂等。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -84,7 +84,7 @@ def test_get_pipeline_config_returns_none_for_missing_scene():
 
 def test_get_pipeline_config_market_template_has_display_name():
     """scene_market 官方模板分支返回 display_name。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.api.pipeline_config import get_pipeline_config
 
     # 插入一条 official 模板

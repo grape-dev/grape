@@ -28,7 +28,7 @@ if os.path.exists("/tmp/test_r7_no_email.db"):
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import _create_tables
 from src.auth.grape_account_db import (
     is_username_taken, is_email_registered,

@@ -4,8 +4,8 @@
 """
 from __future__ import annotations
 
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 
 def create_org(name: str, slug: str, owner_id: int, description: str = "",

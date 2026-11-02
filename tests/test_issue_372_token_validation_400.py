@@ -33,7 +33,7 @@ def _create_test_user(client):
 
     username = "test_tokval_" + uuid.uuid4().hex[:6]
     account = create_grape_account(username, f"{username}@test.com", "TestPass123!")
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_status_and_token_version
     _status, _tv, _uname = get_status_and_token_version(account["id"])
     token = create_access_token(account["id"], username, _tv)
@@ -41,7 +41,7 @@ def _create_test_user(client):
 
 
 def _cleanup_user(user_id):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM external_identities WHERE grape_user_id=?", (user_id,))

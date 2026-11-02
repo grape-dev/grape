@@ -9,7 +9,7 @@ sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.im.feishu_async import BotContext
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.im.vod_handler_async import process_vod_async
 
 CHAT = "vod_chat"

@@ -15,8 +15,8 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import require_no_session_token
-from src.session_manager import db, db_lock
-import src.config as config_mod
+from src.kernel.session_manager import db, db_lock
+import src.kernel.config as config_mod
 
 UID = 99099
 USERNAME = "chat_timeout_tester"

@@ -11,10 +11,10 @@ from unittest.mock import patch
 
 from src.api.main import app
 from src.user import db as user_db
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -163,7 +163,7 @@ class TestOAuthCallback:
                    return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": 777777, "login": "whitelist_denied_user",
                                               "nickname": "拒绝"})), \
-             patch("src.config.is_user_allowed", return_value=False):
+             patch("src.kernel.config.is_user_allowed", return_value=False):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         assert "WHITELIST" in r.headers.get("location", "")
@@ -177,7 +177,7 @@ class TestOAuthCallback:
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
-             patch("src.config.is_user_allowed", return_value=True):
+             patch("src.kernel.config.is_user_allowed", return_value=True):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         # P0-3: 回调现在用 exchange_code 替代 URL token
@@ -234,7 +234,7 @@ class TestOAuthCallback:
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
-             patch("src.config.is_user_allowed", return_value=True), \
+             patch("src.kernel.config.is_user_allowed", return_value=True), \
              patch("src.user.db.create_user", return_value=None):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
@@ -250,8 +250,8 @@ class TestOAuthCallback:
              patch("requests.post",
                    return_value=_FakeReqResp({"access_token": "at"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "x"})), \
-             patch("src.config.is_user_allowed", return_value=True), \
-             patch("src.session_manager.set_feishu_open_id", side_effect=RuntimeError("boom")):
+             patch("src.kernel.config.is_user_allowed", return_value=True), \
+             patch("src.kernel.session_manager.set_feishu_open_id", side_effect=RuntimeError("boom")):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"},
                            follow_redirects=False)
         assert r.status_code == 302

@@ -6,7 +6,7 @@ set_chat_config would write now. Also cleans queued blackhole tasks on runtime 1
 import sys, json
 sys.path.insert(0, '/opt/grape')
 import pymysql
-from src.session_manager import _resolve_chat_runtime_id
+from src.kernel.session_manager import _resolve_chat_runtime_id
 
 cfg = json.load(open('/opt/grape/configs/db-backend.json'))['mysql']
 conn = pymysql.connect(host=cfg['host'], port=cfg['port'], user=cfg['user'],

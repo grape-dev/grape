@@ -3,7 +3,7 @@ import json, os
 import pytest
 from unittest.mock import patch as _p
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
 from src.api import session_store as ss
 from src.api.event_pipeline import _resolve_issue_stage_agent

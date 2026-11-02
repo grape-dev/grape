@@ -6,7 +6,7 @@ claim-based 引擎池已弃用（agent_type_runtime_pool / pool_agent_type），
 import threading
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 
 

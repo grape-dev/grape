@@ -6,9 +6,9 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from pydantic import BaseModel
 from src.user import db as user_db
 from src.api.deps import require_no_session_token, require_org_member
-from src.config import log
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
-from src.repo_key import from_repo_key
+from src.kernel.repo_key import from_repo_key
 
 router = APIRouter(prefix="/api/settings", tags=["settings"])
 
@@ -35,12 +35,12 @@ def _check_login_method_before_unbind(user_id: int, provider: str):
 
 def _resolve_repo_key(owner_repo: str) -> str:
     """查 DB 确定实际 repo_key 前缀（gitcode: 或 github:）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(owner_repo)
     if ":" in owner_repo:
         return rk
     try:
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
             row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
@@ -124,7 +124,7 @@ def _count_reveals_in_window(user_id: int) -> int:
     这里用 UTC 基准计算窗口起点，避免本地时区与库内 UTC 不一致导致误判。
     """
     try:
-        from src.session_manager import db as _sdb, db_lock as _sdl
+        from src.kernel.session_manager import db as _sdb, db_lock as _sdl
         since = (datetime.utcnow() - timedelta(seconds=_REVEAL_WINDOW_SECONDS)).strftime("%Y-%m-%d %H:%M:%S")
         with _sdl:
             c = _sdb.cursor()
@@ -139,7 +139,7 @@ def _count_reveals_in_window(user_id: int) -> int:
 def _record_reveal(user_id: int, provider: str, field: str, ip: str):
     """记录一次凭据取回（供高频告警计数；不存明文）。"""
     try:
-        from src.session_manager import db as _sdb, db_lock as _sdl
+        from src.kernel.session_manager import db as _sdb, db_lock as _sdl
         with _sdl:
             c = _sdb.cursor()
             c.execute(
@@ -334,7 +334,7 @@ def update_credentials(body: UpdateCredentials, user: dict = Depends(require_no_
                     # Issue #372 §12.8: 同步写入 unified_user_mapping.github_login
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 gitcode_user 等其他平台字段）
                     try:
-                        from src.session_manager import db as _um_db, db_lock as _um_dl
+                        from src.kernel.session_manager import db as _um_db, db_lock as _um_dl
                         with _um_dl:
                             _um_c = _um_db.cursor()
                             _um_c.execute(
@@ -451,7 +451,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitHub token 校
                     # pipeline 用 actor（gc_login）查 unified_user_mapping → 必须写 gc_login 作为 gitcode_user
                     # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE，避免覆盖 github_login 等其他平台字段）
                     try:
-                        from src.session_manager import db as _um_db, db_lock as _um_dl
+                        from src.kernel.session_manager import db as _um_db, db_lock as _um_dl
                         with _um_dl:
                             _um_c = _um_db.cursor()
                             _um_c.execute(
@@ -496,7 +496,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
     # 绑定/解绑平台后清理 user_repos 缓存——下次 /repos/member 会从 VCS 重新拉取
     if "github_token" in explicit or "gitcode_token" in explicit:
         try:
-            from src.session_manager import db as _sm_db, db_lock as _sm_dl
+            from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
             with _sm_dl:
                 _c = _sm_db.cursor()
                 _c.execute("DELETE FROM user_repos WHERE user_id=?", (user["id"],))
@@ -531,7 +531,7 @@ detail={"code": 400, "error_code": "TOKEN_INVALID", "message": "GitCode token �
                     pass  # 探测失败不阻断保存
                 # FR-10.1: 检测该用户名下 path B 仓库（host_user_id>0），提示 issue 写权限影响
                 try:
-                    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+                    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
                     with _sm_dl:
                         _c = _sm_db.cursor()
                         _c.execute("SELECT repo_key FROM managed_repos WHERE host_user_id=? AND host_user_id>0 LIMIT 5",
@@ -562,7 +562,7 @@ def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_sessi
     复用 auth_token.generate_api_token（Issue-45 方式 B 已有后端），
     补齐 Web UI 管理入口（Issue #69 验收标准）。
     """
-    from src.api.auth_token import generate_api_token
+    from src.kernel.auth_sdk.auth_token import generate_api_token
 
     name = (body.name or "").strip()
     if not name:
@@ -586,7 +586,7 @@ def create_api_key(body: CreateApiKeyBody, user: dict = Depends(require_no_sessi
 @router.get("/api-keys", operation_id="settings_keys", summary="List API keys", description="Lists the current user's API keys without plaintext (name + status + timestamps only).")
 def list_api_keys(user: dict = Depends(require_no_session_token)):
     """列出当前用户的所有 API key（不含明文，仅展示名称+状态+时间）。"""
-    from src.api.auth_token import list_api_tokens, API_KEY_PREFIX
+    from src.kernel.auth_sdk.auth_token import list_api_tokens, API_KEY_PREFIX
 
     tokens = list_api_tokens(user["id"])
     return {"keys": [
@@ -604,7 +604,7 @@ def list_api_keys(user: dict = Depends(require_no_session_token)):
 @router.delete("/api-keys/{key_id}", operation_id="settings_key_delete", summary="Revoke API key", description="Revokes an API key (soft delete, revoked=1); takes effect immediately and keeps audit.")
 def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
     """吊销 API key——软删除（revoked=1），立即失效，保审计。"""
-    from src.api.auth_token import revoke_api_token
+    from src.kernel.auth_sdk.auth_token import revoke_api_token
 
     ok = revoke_api_token(user["id"], key_id)
     if not ok:
@@ -618,7 +618,7 @@ def revoke_api_key(key_id: int, user: dict = Depends(require_no_session_token)):
 
 @router.get("/notifications", operation_id="settings_notifications_get", summary="Get notification preferences", description="Returns notification preferences.")
 def get_notifications(user: dict = Depends(require_no_session_token)):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -649,7 +649,7 @@ class NotificationPrefs(BaseModel):
 
 @router.put("/notifications", operation_id="settings_notifications_update", summary="Update notification preferences", description="Updates notification preferences.")
 def update_notifications(body: NotificationPrefs, user: dict = Depends(require_no_session_token)):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -666,8 +666,8 @@ def update_notifications(body: NotificationPrefs, user: dict = Depends(require_n
 @router.get("/gitcode-repo/{owner}/{repo}", operation_id="settings_gitcode_repo_get", summary="Get repo GitCode config", description="Returns GitCode config for a specific repo.")
 def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_no_session_token)):
     # R25.7: 用 TokenResolver.resolve() 替换 get_repo_token_with_refresh，返回 level 供前端分级显示
-    from src.token_resolver import TokenResolver, create_provider_from_repo_key
-    from src.repo_key import to_repo_key
+    from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
+    from src.kernel.repo_key import to_repo_key
     _rk = to_repo_key(f"{owner}/{repo}")
     _provider = create_provider_from_repo_key(_rk)
     _resolve_result = TokenResolver(_provider).resolve(_rk)
@@ -685,9 +685,9 @@ def get_gitcode_repo_config(owner: str, repo: str, user: dict = Depends(require_
     _bot_token_status = ""
     _has_repo_bot_token = False
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         # FR-21.4: 按 repo_key 前缀选列——GitHub 仓查 bot_github_token
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         _provider_name, _, _ = parse_repo_key(_rk)
         _token_col = "bot_github_token" if _provider_name == "github" else "bot_gitcode_token"
         with db_lock:
@@ -720,10 +720,10 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
                                      user: dict = Depends(require_no_session_token)):
     # 将 Bot Token / Bot Username 存储到 managed_repos（webhook_token 由托管流程自动维护）
     from src.user.db import update_managed_repo_bot_token, update_managed_repo_bot_username
-    from src.config import log as _log
+    from src.kernel.config import log as _log
     repo_key = _resolve_repo_key(f"{owner}/{repo}")
     # FR-20.5: 托管人/admin 权限校验——托管人(host_user_id)或 user_repos.is_admin 或 grape_accounts.role=admin
-    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
     _is_authorized = False
     if user.get("role", "") == "admin":
         _is_authorized = True
@@ -752,7 +752,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
     if body.bot_token and not _is_placeholder(body.bot_token):
         token = body.bot_token.strip()
         # FR-9.1: verify token 有效性（与 R15 同口径）
-        from src.token_resolver import create_provider_from_repo_key
+        from src.kernel.token_resolver import create_provider_from_repo_key
         _vcs_provider = create_provider_from_repo_key(repo_key)
         try:
             _vcs_provider.verify_token(token)
@@ -772,7 +772,7 @@ def update_gitcode_repo_config(owner: str, repo: str, body: GitCodeRepoConfig,
         _result = {"ok": True, "warning": "", "related_repos": []}
     if body.bot_username:
         # FR-12.3: bot 用户名与真人账号冲突检查
-        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
         try:
             with _sm_dl:
                 _c = _sm_db.cursor()
@@ -891,7 +891,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
     """
     from src.user import db as user_db
     from src.runtime.instances import instance_name
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     uid = user.get("id") or 0
     uname = user.get("username") or ""
@@ -1002,7 +1002,7 @@ def get_agent_runtimes(user: dict = Depends(require_org_member), page: int = 1, 
         rt["spec"] = cred.get("spec") or ""
         # B5 (Issue #257): worker 版本是否落后（服务端最新版本 vs worker 上报版本）
         try:
-            from src.worker_package import worker_code_version, normalize_worker_version
+            from src.kernel.worker_package import worker_code_version, normalize_worker_version
             _latest_wv = worker_code_version()
             _worker_wv = rt.get("worker_version", "")
             if _latest_wv and _worker_wv:
@@ -1338,7 +1338,7 @@ def _build_runtime_devices(db, db_lock, cred_map, visible_credential, valid_user
             _dev_wv_stale = False
             if _dev_wv:
                 try:
-                    from src.worker_package import worker_code_version, normalize_worker_version
+                    from src.kernel.worker_package import worker_code_version, normalize_worker_version
                     _dev_wv_stale = normalize_worker_version(worker_code_version()) != normalize_worker_version(_dev_wv)
                 except Exception:
                     pass
@@ -1445,7 +1445,7 @@ def get_runtime_devices(user: dict = Depends(require_org_member), page: int = 1,
     不受凭据创建时绑定的 org_id 隔离（与 dashboard 个人组织视图语义一致）。
     """
     from src.user import db as user_db
-    from src.session_manager import db as _db, db_lock as _dl
+    from src.kernel.session_manager import db as _db, db_lock as _dl
     import time as _time
 
     uid = user.get("id") or 0
@@ -1643,7 +1643,7 @@ def refresh_agent_runtimes(user: dict = Depends(require_org_member)):
     from src.runtime.local_probe import probe_local_engines
     from src.runtime.agent import _scan_local_skills
     from src.user import db as user_db
-    from src.config import log
+    from src.kernel.config import log
     import socket as _sock
     _hostname = _sock.gethostname()
     try:
@@ -1697,7 +1697,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     组织隔离：凭据创建时绑定当前组织 org_id。
     """
     import hashlib, secrets
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.user.org_db import is_org_personal
     name = (body.name or "").strip()
     if not name:
@@ -1733,7 +1733,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
     # 预构建 worker 安装包（异步）：凭据生成后即可一键安装，避免首次下载才打包
     # （首次构建含依赖 wheels 下载，耗时数秒至数分钟，放后台不阻塞响应）
     try:
-        from src.worker_package import ensure_package_ready
+        from src.kernel.worker_package import ensure_package_ready
         ensure_package_ready()
     except Exception as _e:
         log.warning(f"预构建 worker 安装包失败: {_e}")
@@ -1743,7 +1743,7 @@ def create_runtime_credential(body: RuntimeCredBody, user: dict = Depends(requir
 @router.put("/runtime-credentials/{cid}", operation_id="settings_runtime_credential_rename", summary="Rename runtime credential", description="Renames a credential (worker name); globally unique, duplicates rejected. owner/scope unchanged.")
 def rename_runtime_credential(cid: int, body: RuntimeCredBody, user: dict = Depends(require_no_session_token)):
     """改名凭据（worker 名）：全局唯一，重名拒绝。owner/scope 不可改。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "凭据名称不能为空"})
@@ -1777,7 +1777,7 @@ class CredScopeBody(BaseModel):
 @router.put("/runtime-credentials/{cid}/scope", operation_id="settings_runtime_credential_scope", summary="Change credential scope", description="Switches a credential scope (repo/personal). Owner-only, active-only; global is not allowed.")
 def change_credential_scope(cid: int, body: CredScopeBody, user: dict = Depends(require_org_member)):
     """切换凭据 scope（仓库/个人）。仅 owner 可操作，仅 active 凭据可改。不允许设为 global。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     scope = _normalize_scope(body.scope)
     if scope == "global":
         raise HTTPException(status_code=400, detail={"code": 400, "message": "不允许设为全局，仅可切换仓库/个人"})
@@ -1848,7 +1848,7 @@ def list_runtime_credentials(user: dict = Depends(require_org_member)):
     非个人组织只显示 org_id 匹配的凭据（不含 global）；
     个人组织显示全部（兼容现有行为）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.user.org_db import is_org_personal
     org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(org_id) if org_id else True
@@ -1894,7 +1894,7 @@ def revoke_runtime_credential(cid: int, user: dict = Depends(require_no_session_
     历史 agent_tasks 绑定旧 runtime_id 的任务恢复走 /api/events/{seq}/redispatch
     （pick_engine 重新绑定后 requeue，见 engine-selection-claim-pool-2026-08.md）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM runtime_credentials WHERE id=?", (cid,))
@@ -1984,7 +1984,7 @@ def _sync_agent_tags(rid: int, cursor):
 @router.get("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tags", summary="List engine tags", description="Lists an engine's tags.")
 def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
     """获取引擎的标签列表"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -2006,7 +2006,7 @@ def get_engine_tags(rid: int, user: dict = Depends(require_no_session_token)):
 @router.post("/agent-runtimes/{rid}/tags", operation_id="settings_engine_tag_create", summary="Add engine tag", description="Adds an engine tag (idempotent: updates if present).")
 def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_no_session_token)):
     """为引擎添加标签（幂等：已有则更新）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     tag = (body.tag or "").strip().lower()
@@ -2050,7 +2050,7 @@ def add_engine_tag(rid: int, body: EngineTagBody, user: dict = Depends(require_n
 def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
                             user: dict = Depends(require_no_session_token)):
     """修改引擎标签配置"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     tag = tag.strip().lower()
@@ -2077,7 +2077,7 @@ def update_engine_tag(rid: int, tag: str, body: EngineTagUpdateBody,
 @router.delete("/agent-runtimes/{rid}/tags/{tag}", operation_id="settings_engine_tag_delete", summary="Delete engine tag", description="Deletes an engine tag.")
 def delete_engine_tag(rid: int, tag: str, user: dict = Depends(require_no_session_token)):
     """删除引擎标签"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     tag = tag.strip().lower()
     with db_lock:
         c = db.cursor()
@@ -2123,7 +2123,7 @@ class EventActionFilterUpdateBody(BaseModel):
 @router.get("/event-action-filters", operation_id="settings_event_action_filters", summary="List event action filter rules", description="Lists all event action filter rules (hot-reloadable).")
 def list_event_action_filters(user: dict = Depends(require_no_session_token)):
     """查看全部事件 action 过滤规则（可配置热生效）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -2149,7 +2149,7 @@ def list_event_action_filters(user: dict = Depends(require_no_session_token)):
 @router.post("/event-action-filters", operation_id="settings_event_action_rule_create", summary="Add event action filter rule", description="Adds an event action filter rule (idempotent: skips an existing event_type x action combo).")
 def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(require_no_session_token)):
     """新增事件 action 过滤规则（幂等：同 event_type×action 已存在则跳过）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
@@ -2176,7 +2176,7 @@ def add_event_action_rule(body: EventActionFilterBody, user: dict = Depends(requ
 def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
                              user: dict = Depends(require_no_session_token)):
     """修改事件 action 过滤规则（改 allow/actor/changes/副作用/优先级/启用，热生效 ≤30s）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     now = datetime.now(timezone.utc).isoformat()
     sets, params = [], []
@@ -2214,7 +2214,7 @@ def update_event_action_rule(rule_id: int, body: EventActionFilterUpdateBody,
 @router.delete("/event-action-filters/{rule_id}", operation_id="settings_event_action_rule_delete", summary="Delete event action filter rule", description="Deletes an event action filter rule (no rules = allow all).")
 def delete_event_action_rule(rule_id: int, user: dict = Depends(require_no_session_token)):
     """删除事件 action 过滤规则（删除后无规则=放行）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -2250,7 +2250,7 @@ class BetaApplyBody(BaseModel):
 def beta_apply_submit(body: BetaApplyBody):
     """第三方内测申请提交——转发到 Admin Console 的 /api/admin/beta-apply/submit。"""
     import httpx
-    from src.config import ADMIN_CONSOLE_URL, ADMIN_BETA_APPLY_API_KEY
+    from src.kernel.config import ADMIN_CONSOLE_URL, ADMIN_BETA_APPLY_API_KEY
     if not ADMIN_CONSOLE_URL:
         raise HTTPException(status_code=503, detail={"code": 503, "message": "内测申请服务未配置"})
     if not ADMIN_BETA_APPLY_API_KEY:

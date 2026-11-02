@@ -10,8 +10,8 @@ import hmac
 import secrets
 import time
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 from src.auth.email_service import get_email_service, is_dev_verification_code
 
 # ---------------------------------------------------------------------------
@@ -52,7 +52,7 @@ def _hash_code(code: str) -> str:
     密钥复用 JWT 有效签名密钥（强 JWT_SECRET 或密钥轮换池；开发/测试回退到
     进程内随机兜底密钥）——不保留任何硬编码默认值（沿用 JWT 门禁语义）。
     """
-    from src.api.jwt_utils import _get_signing_secret
+    from src.kernel.auth_sdk.jwt_utils import _get_signing_secret
     key = _get_signing_secret()[0].encode("utf-8")
     return hmac.new(key, code.encode("utf-8"), hashlib.sha256).hexdigest()
 

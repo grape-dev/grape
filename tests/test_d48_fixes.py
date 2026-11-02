@@ -65,8 +65,8 @@ class TestUnbindWarehouseCheck:
                                           mock_delete, mock_identities, mock_audit, client):
         """无正在使用仓库时直接解绑成功。"""
         mock_db, mock_lock = _mock_sm_db([])
-        with patch("src.session_manager.db", mock_db), \
-             patch("src.session_manager.db_lock", mock_lock):
+        with patch("src.kernel.session_manager.db", mock_db), \
+             patch("src.kernel.session_manager.db_lock", mock_lock):
             r = client.delete("/api/auth/bind/gitcode")
         assert r.status_code == 200
         assert "解绑成功" in r.json()["message"]
@@ -80,8 +80,8 @@ class TestUnbindWarehouseCheck:
             ("gitcode:owner/repo1",),
             ("gitcode:owner/repo2",),
         ])
-        with patch("src.session_manager.db", mock_db), \
-             patch("src.session_manager.db_lock", mock_lock):
+        with patch("src.kernel.session_manager.db", mock_db), \
+             patch("src.kernel.session_manager.db_lock", mock_lock):
             r = client.delete("/api/auth/bind/gitcode")
         assert r.status_code == 409
         d = r.json()["detail"]
@@ -98,8 +98,8 @@ class TestUnbindWarehouseCheck:
                                                        mock_delete, mock_identities, mock_audit, client):
         """带 confirm=true 跳过仓库检查直接解绑。"""
         mock_db, mock_lock = _mock_sm_db([("gitcode:owner/repo1",)])
-        with patch("src.session_manager.db", mock_db), \
-             patch("src.session_manager.db_lock", mock_lock):
+        with patch("src.kernel.session_manager.db", mock_db), \
+             patch("src.kernel.session_manager.db_lock", mock_lock):
             r = client.delete("/api/auth/bind/gitcode?confirm=true")
         assert r.status_code == 200
         assert mock_delete.called

@@ -34,7 +34,7 @@ def _iso(dt):
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_alert_events",
@@ -54,7 +54,7 @@ def _clean():
 
 
 def _grant(uid, repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -69,7 +69,7 @@ def _rule(name):
 
 def _mk_alert(rule_name, repo_key, status="firing", first_min_ago=5, resolved_min_ago=None,
               level=None, source=None, dim_key=None, metric=None, value=1.0):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     r = _rule(rule_name)
     now = _now()
     first = _iso(now - timedelta(minutes=first_min_ago))
@@ -88,7 +88,7 @@ def _mk_alert(rule_name, repo_key, status="firing", first_min_ago=5, resolved_mi
 
 
 def _mk_task(tid, repo_key, status, started_min_ago=5, completed_min_ago=None, issue_id="#1"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = _now()
     st = _iso(now - timedelta(minutes=started_min_ago))
     ct = _iso(now - timedelta(minutes=completed_min_ago)) if completed_min_ago is not None else None
@@ -103,7 +103,7 @@ def _mk_task(tid, repo_key, status, started_min_ago=5, completed_min_ago=None, i
 
 
 def _mk_change(repo_key, issue_id="#1", title="ev-test merge", actor="liufei"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = _now()
     with db_lock:
         c = db.cursor()
@@ -116,7 +116,7 @@ def _mk_change(repo_key, issue_id="#1", title="ev-test merge", actor="liufei"):
 
 
 def _mk_audit(event_type="__test_ev_audit"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COALESCE(MAX(seq),0)+1, COALESCE(MAX(curr_hash),'') FROM audit_logs")
@@ -194,7 +194,7 @@ def test_unified_normalizes_all_sources():
 
 
 def _mk_runtime(name, scope="global", last_seen=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope,"

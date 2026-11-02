@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 
-from src.config import log
+from src.kernel.config import log
 
 ACP_CHECK_TIMEOUT = 15        # hermes acp --check 超时（含 hermes 冷启动余量）
 PIP_INSTALL_TIMEOUT = 120     # pip install 超时

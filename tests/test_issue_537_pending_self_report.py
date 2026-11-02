@@ -26,7 +26,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 RT_DIRECT = 9301
 RT_REMOTE = 9302

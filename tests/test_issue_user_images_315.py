@@ -275,7 +275,7 @@ def _base_evt(body="", note="", a2a=""):
 
 
 def _inject(monkeypatch, agent_type, body="", note="", a2a="", collected=None):
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     monkeypatch.setattr("src.api.issues_center._attach_list",
                         lambda owner, repo, n: [], raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_user_images",
@@ -316,7 +316,7 @@ def test_inject_issue_filenames_only(monkeypatch):
 
 def test_inject_qa_not_injected(monkeypatch):
     # qa/sre 不走附件注入（角色分级），_inject_attachments_by_role 直接 return
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     pb._USER_IMAGE_CACHE.clear()
     parts = []
     pb._inject_attachments_by_role(parts, "gitcode:grape-dev/grape", "#315", "qa", 0, evt=_base_evt())
@@ -337,7 +337,7 @@ def test_inject_collect_called_with_event_texts(monkeypatch):
 
     monkeypatch.setattr("src.api.issues_center._attach_list", lambda o, r, n: [], raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_user_images", fake_collect, raising=False)
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     pb._USER_IMAGE_CACHE.clear()
     parts = []
     pb._inject_attachments_by_role(parts, "gitcode:grape-dev/grape", "#315", "vod", 0,
@@ -356,7 +356,7 @@ def test_inject_cache_second_call_no_recollect(monkeypatch):
 
     monkeypatch.setattr("src.api.issues_center._attach_list", lambda o, r, n: [], raising=False)
     monkeypatch.setattr("src.api.issues_center._collect_issue_user_images", fake_collect, raising=False)
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     pb._USER_IMAGE_CACHE.clear()
     for _ in range(2):
         parts = []
@@ -381,7 +381,7 @@ def test_build_prompt_end_to_end(monkeypatch):
                         lambda o, r, n, texts, repo_key="": {"ok": [{"filename": "user-image-1.png",
                                                         "url": "http://srv/x.png", "size": 4}],
                                                 "failed": []}, raising=False)
-    import src.prompt_builder as pb
+    import src.kernel.prompt_builder as pb
     pb._USER_IMAGE_CACHE.clear()
     evt = _base_evt(body=f"在 issue 314 中附带的截图 ![img]({U1})")
     evt["payload"]["issue"]["title"] = "Agent 访问不了截图"

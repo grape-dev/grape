@@ -14,7 +14,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import engine_select as es
 from src.runtime.health import derive_runtime_health
 from src.user import db as user_db
@@ -28,7 +28,7 @@ _headers = {}
 
 
 def _jwt_access_token(user_id, username="test227"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 

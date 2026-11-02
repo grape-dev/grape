@@ -12,12 +12,12 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 # _inject_vod_scenes was removed in weekly-02 prompt_builder refactor;
 # T12-T14 are skipped if the function is not available.
 try:
-    from src.prompt_builder import _inject_vod_scenes  # noqa: E402
+    from src.kernel.prompt_builder import _inject_vod_scenes  # noqa: E402
 except ImportError:
     _inject_vod_scenes = None
 
@@ -31,7 +31,7 @@ def _ensure_tables():
 
 @pytest.fixture(autouse=True)
 def _clean_scene(data=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:

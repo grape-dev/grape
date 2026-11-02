@@ -7,8 +7,8 @@ import pytest
 import os
 import sys
 
-from src.session_manager import db, db_lock
-from src.session_manager import get_chat_config, set_chat_config, _write_chat_config_row
+from src.kernel.session_manager import db, db_lock
+from src.kernel.session_manager import get_chat_config, set_chat_config, _write_chat_config_row
 
 GA_KEY = "gitcode:shopowner/shop"
 

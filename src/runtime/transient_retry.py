@@ -20,8 +20,8 @@ import threading
 import time
 from datetime import datetime, timezone
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 # ── R50 错误分类 ──────────────────────────────────────────────
 
@@ -63,7 +63,7 @@ def classify_stream_failure(exit_code, error_text: str, has_output: bool) -> dic
     _txt = (error_text or "").strip()
     # 配置类错误优先（401/token 过期）——即便文本同时带 retry 字样也不盲目重试
     try:
-        from src.token_service import is_auth_401_error
+        from src.kernel.token_service import is_auth_401_error
         if _txt and is_auth_401_error(_txt):
             return {"error_class": AUTH_CONFIG, "transient": False, "reason": _txt[:300]}
     except Exception:
@@ -154,7 +154,7 @@ def _collect_tool_uses_from_agent_logs(event_seq) -> list:
 
 def retry_max() -> int:
     try:
-        from src.config import GRAPE_TRANSIENT_RETRY_MAX
+        from src.kernel.config import GRAPE_TRANSIENT_RETRY_MAX
         return GRAPE_TRANSIENT_RETRY_MAX
     except Exception:
         return 3
@@ -162,7 +162,7 @@ def retry_max() -> int:
 
 def retry_base_delay() -> int:
     try:
-        from src.config import GRAPE_TRANSIENT_RETRY_BASE
+        from src.kernel.config import GRAPE_TRANSIENT_RETRY_BASE
         return GRAPE_TRANSIENT_RETRY_BASE
     except Exception:
         return 10

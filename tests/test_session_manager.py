@@ -12,16 +12,16 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 
 @pytest.fixture(autouse=True)
 def _restore_shared_session_manager():
-    """隔离：_import_session_manager 通过 importlib 重载 src.session_manager 并把它指向临时库。
+    """隔离：_import_session_manager 通过 importlib 重载 src.kernel.session_manager 并把它指向临时库。
 
-    若不在每个用例后恢复，后续测试文件 from src.session_manager import db 会拿到指向
+    若不在每个用例后恢复，后续测试文件 from src.kernel.session_manager import db 会拿到指向
     临时旧 schema 库的连接（缺 runtime_id / chat_conversations / agent_runtimes 等表），
     造成顺序依赖的连锁失败（如 test_tasks / test_web_chat_tooluse / test_worker_package）。
 
     D32-补丁：保存/恢复原始 db/db_lock 引用，并同步 grape_account_db 的引用。
     """
     # 保存原始引用
-    import src.session_manager as _sm_orig
+    import src.kernel.session_manager as _sm_orig
     _orig_db = _sm_orig.db
     _orig_db_lock = _sm_orig.db_lock
     import src.auth.grape_account_db as _gad_orig
@@ -31,9 +31,9 @@ def _restore_shared_session_manager():
     # 恢复原始引用——_import_session_manager 可能 del+reimport 了 session_manager，
     # 需要获取当前 sys.modules 中的模块对象
     import sys as _sys
-    _sm = _sys.modules.get("src.session_manager")
+    _sm = _sys.modules.get("src.kernel.session_manager")
     if _sm is None:
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
     _sm.db = _orig_db
     _sm.db_lock = _orig_db_lock
     # 同步 grape_account_db（也可能被 _import_session_manager 修改过）
@@ -48,15 +48,15 @@ def _import_session_manager(tmp_path):
     """Import session_manager with a temporary DB path."""
     db_path = os.path.join(tmp_path, "test_sessions.db")
     # Clear module cache if already imported
-    if "src.session_manager" in sys.modules:
-        del sys.modules["src.session_manager"]
+    if "src.kernel.session_manager" in sys.modules:
+        del sys.modules["src.kernel.session_manager"]
     if "session_manager" in sys.modules:
         del sys.modules["session_manager"]
     # Ensure src is in path
     if SRC_DIR not in sys.path:
         sys.path.insert(0, SRC_DIR)
     # Override _db_path before import
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     sm._db_path = db_path
     # Reconnect to the new path
     import sqlite3
@@ -362,8 +362,8 @@ class TestConcurrency:
 
 class TestDumpHistoryToFile:
     def _setup(self, tmp_path):
-        import src.config
-        src.config.WORKSPACE_DIR = str(tmp_path)
+        import src.kernel.config
+        src.kernel.config.WORKSPACE_DIR = str(tmp_path)
         return _import_session_manager(tmp_path)
 
     def test_basic_dump_default_account(self, tmp_path):

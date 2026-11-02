@@ -16,8 +16,8 @@ import pytest
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
-from src.repo_migrate import migrate_repo_key, RepoMigrateError
+from src.kernel.session_manager import db, db_lock
+from src.kernel.repo_migrate import migrate_repo_key, RepoMigrateError
 
 SRC = "ownerA/repo540"
 SRC_KEY = "gitcode:" + SRC
@@ -233,7 +233,7 @@ def test_migrate_rollback_on_db_error(monkeypatch):
     def _boom(*a, **k):
         raise RuntimeError("simulated DB failure")
     # 在 user_repos UPDATE 阶段注入异常
-    import src.repo_migrate as rm
+    import src.kernel.repo_migrate as rm
     orig = rm._update_user_repos
     monkeypatch.setattr(rm, "_update_user_repos", _boom)
     with pytest.raises(RepoMigrateError):
@@ -253,8 +253,8 @@ def test_migrate_rollback_on_db_error(monkeypatch):
 
 def test_migrate_workspace_dir(tmp_path, monkeypatch):
     """工作区目录从 old 路径迁移到 new 路径。"""
-    from src.config import WORKSPACE_DIR
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.config import WORKSPACE_DIR
+    from src.kernel.repo_key import workspace_repo_dir
     old_dir = workspace_repo_dir(SRC_KEY)
     new_dir = workspace_repo_dir(DST_KEY)
     os.makedirs(old_dir, exist_ok=True)

@@ -9,7 +9,7 @@ import base64
 import os
 import secrets
 
-from src.config import log
+from src.kernel.config import log
 
 # 密钥缓存
 _keys: dict[str, bytes] = {}  # key_id → 32 字节密钥

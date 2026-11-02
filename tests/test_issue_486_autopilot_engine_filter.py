@@ -13,7 +13,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.routes.autopilot import _validate_engine_runtime_ids
 
 

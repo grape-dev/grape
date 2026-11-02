@@ -1,10 +1,10 @@
 """Chat Agent 路由：对话、消息、配置、反馈"""
 import json, asyncio, tempfile, os, threading, time
 
-from src.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
-from src.prompt_builder import build_general_chat_prompt
+from src.kernel.config import WORKSPACE_DIR, CHAT_CWD_BASE, log
+from src.kernel.prompt_builder import build_general_chat_prompt
 from src.auth.grape_account_db import get_grape_account_by_username as _get_acc
-from src.token_service import is_auth_401_error
+from src.kernel.token_service import is_auth_401_error
 
 def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     """每个 conversation 独立工作目录，避免相互影响。
@@ -13,7 +13,7 @@ def _get_chat_cwd(user_id: int, repo_key: str, conv_id: str) -> str:
     （同一 conv_id 同一路径，见 web-chat-no-response-cwd-fix.md §4）。
     远端 worker 执行时按 _remap_cwd 映射到各自用户 home；本机 direct 执行 root 可写。
     """
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     path = os.path.join(workspace_repo_dir(repo_key or ""),
                         "chat", str(user_id), conv_id)
     os.makedirs(path, exist_ok=True)
@@ -25,7 +25,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.user import db as user_db
-from src.session_manager import (
+from src.kernel.session_manager import (
     create_conversation, get_user_conversations, get_conversation,
     add_message, get_messages, touch_conversation, update_conversation,
     delete_messages_by_conv, delete_conversation,
@@ -189,7 +189,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
     并写入任务上下文消息 + 从 GitCode Issue 补拉 agent 评论。
     """
     from src.api.issues_center import _ensure_task_conversation, _get_issue_title
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(body.repo_key)
     title = ""
     try:
@@ -201,7 +201,7 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
         raise HTTPException(status_code=500, detail={"code": 500, "message": "创建会话失败"})
     # 更新 task 表中的 conversation_id 关联
     try:
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
             c.execute("UPDATE issue SET conversation_id=? WHERE repo_key=? AND issue_number=?",
@@ -212,8 +212,8 @@ def ensure_issue_conversation(body: EnsureIssueConvBody, user: dict = Depends(re
     # 从 GitCode Issue 补拉 agent 评论到新会话
     try:
         from src.api.event_pipeline import _sync_issue_comments_to_conversation
-        from src.repo_key import from_repo_key
-        from src.repo import Repo
+        from src.kernel.repo_key import from_repo_key
+        from src.kernel.repo import Repo
         _repo = from_repo_key(rk)
         _token = Repo(rk).bot_token
         if _repo and _token:
@@ -235,8 +235,8 @@ def list_messages(conv_id: str, before: int = Query(0, ge=0), user: dict = Depen
     if not before and conv.get("conv_type") == "task" and conv.get("issue_number"):
         try:
             from src.api.event_pipeline import _sync_issue_comments_to_conversation
-            from src.repo_key import from_repo_key
-            from src.repo import Repo
+            from src.kernel.repo_key import from_repo_key
+            from src.kernel.repo import Repo
             _rk = conv.get("repo_key", "")
             _repo = from_repo_key(_rk) if _rk else ""
             _token = Repo(_rk).bot_token if _rk else ""
@@ -358,7 +358,7 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
         im_channel_id = (conv or {}).get("im_channel_id", "")
         if not im_channel_id:
             return
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.api.issues_center import _get_feishu_open_id
         _repo_key = (conv or {}).get("repo_key", "")
         open_id = _get_feishu_open_id(user.get("username", ""), _repo_key)
@@ -382,10 +382,10 @@ async def _push_reply_to_feishu(conv: dict | None, user: dict, text: str):
         if not ctx:
             return
         await bm.api.send_card_to_user(ctx, open_id, f"[来自Web] {text[:1800]}", title="Chat Agent")
-        from src.config import log
+        from src.kernel.config import log
         log.info(f"Chat web->feishu push: conv={(conv or {}).get('id')} open_id={open_id[:20]} text_len={len(text)}")
     except Exception as e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Chat web->feishu push failed: {e}")
 
 
@@ -401,12 +401,12 @@ def _resolve_gitcode_token(user_token: str, repo_key: str = "") -> str:
         return user_token
     if repo_key:
         try:
-            from src.token_service import resolve_repo_token
+            from src.kernel.token_service import resolve_repo_token
             _result = resolve_repo_token(repo_key)
             if _result.token:
                 return _result.token
             # R20.8.1: token 过期或未配置 → 检测并标记
-            from src.token_service import detect_and_mark_expired
+            from src.kernel.token_service import detect_and_mark_expired
             _error_code = detect_and_mark_expired(repo_key)
             if _error_code:
                 log.warning(f"Chat resolve token: token expired (error_code={_error_code}), repo={repo_key}")
@@ -654,7 +654,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     has_valid_session = bool(runtime_session_id.startswith("ses_"))
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_issue_chat_prompt
+        from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
@@ -664,7 +664,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
 
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"Chat send: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
     # R20.8.1: token 过期/未配置时处理
@@ -785,7 +785,7 @@ async def send_message(body: ChatMessage, user: dict = Depends(require_no_sessio
         _is_401 = is_auth_401_error(_err_lower)
         if _is_401:
             try:
-                from src.token_service import detect_and_mark_expired
+                from src.kernel.token_service import detect_and_mark_expired
                 _error_code = detect_and_mark_expired(repo_key) or ""
             except Exception as _e:
                 log.warning(f"Chat post-exec 401 detect failed: {_e}")
@@ -843,7 +843,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     has_valid_session = bool(runtime_session_id.startswith("ses_"))
     # 任务会话走独立 prompt（注入 Issue 上下文 + 场景: task）；一般会话走通用 prompt
     if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_issue_chat_prompt
+        from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id,
@@ -853,7 +853,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
     if runtime_session_id and not runtime_session_id.startswith("ses_"):
         runtime_session_id = ""
 
-    from src.config import log
+    from src.kernel.config import log
     log.info(f"Chat send/stream: backend={backend_name or '(none)'}, skill={skill_name}, has_token={bool(gitcode_token)}, user_msg={body.message[:100]}")
 
     # 图片理解注入
@@ -898,7 +898,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
         if (runtime_credential_id(rid) or 0) == 0 and backend_name:
             # 配置行残留本机直连/未绑定 → queue_remote 下按 backend 名解析在线远端引擎
             #（存量 sess-cfg-* 行被 onboarding 写死 1 的兜底，解析不到才真拦截）
-            from src.session_manager import _resolve_chat_runtime_id
+            from src.kernel.session_manager import _resolve_chat_runtime_id
             _rid2 = _resolve_chat_runtime_id(backend_name) or 0
             if _rid2:
                 rid = _rid2
@@ -907,7 +907,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
         if kind != EXEC_MODE_DIRECT:
             from src.runtime.service import _remote_runtime_ready
             if not _remote_runtime_ready(rid) and backend_name:
-                from src.session_manager import _resolve_chat_runtime_id
+                from src.kernel.session_manager import _resolve_chat_runtime_id
                 _rid3 = _resolve_chat_runtime_id(backend_name) or 0
                 if _rid3 and _remote_runtime_ready(_rid3):
                     rid = _rid3
@@ -1079,7 +1079,7 @@ async def send_message_stream(body: ChatMessage, user: dict = Depends(require_no
                     _is_401 = is_auth_401_error(_err_lower)
                     if _is_401:
                         try:
-                            from src.token_service import detect_and_mark_expired
+                            from src.kernel.token_service import detect_and_mark_expired
                             _stream_error_code = detect_and_mark_expired(repo_key) or ""
                             if _stream_error_code:
                                 log.warning(f"[Agent:chat|user:{user['username']}] token expired during stream (error_code={_stream_error_code}), repo={repo_key}")
@@ -1175,7 +1175,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     """
     from src.runtime.service import enqueue_task, get_execution_mode
     from src.api.session_store import get_or_create_agent_session
-    from src.config import log as _log
+    from src.kernel.config import log as _log
     import os as _os
     cfg = _get_chat_config(user["id"])
     backend_name = cfg.get("backend", "")
@@ -1199,7 +1199,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     from src.runtime.service import runtime_credential_id
     if (runtime_credential_id(runtime_id) or 0) == 0 and backend_name:
         # 配置行残留本机直连/未绑定 → 按 backend 名解析在线远端引擎（与 send/stream 同款兜底）
-        from src.session_manager import _resolve_chat_runtime_id
+        from src.kernel.session_manager import _resolve_chat_runtime_id
         _rid2 = _resolve_chat_runtime_id(backend_name) or 0
         if _rid2:
             runtime_id = _rid2
@@ -1217,7 +1217,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
     _rsid = session.get("runtime_session_id") or ""
     has_valid_session = bool(_rsid.startswith("ses_"))
     if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_issue_chat_prompt
+        from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(message, repo_key, history, conv, account=user.get("username") or "", runtime_id=runtime_id, has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(message, repo_key, history, skill_name, skill_id,
@@ -1248,7 +1248,7 @@ def _enqueue_chat(user, conv_id, message, repo_key, skill_name, skill_id, gitcod
 
 @router.post("/feedback", operation_id="chat_feedback", summary="Submit feedback", description="Submits feedback on a chat turn (seq + type + comment).")
 def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_token)):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()
@@ -1335,7 +1335,7 @@ def _chat_selected_engine(cfg: dict, backends: list[dict]) -> dict | None:
                 return b
         try:
             from src.runtime.instances import instance_name
-            from src.session_manager import db as _db, db_lock as _dl
+            from src.kernel.session_manager import db as _db, db_lock as _dl
             with _dl:
                 c = _db.cursor()
                 c.execute(
@@ -1372,7 +1372,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
     # Chat 后端可选面：本机直连（默认兜底，engine-selection-design.md §8.2）+ 个人引擎（scope=user，显式选择）
     from src.runtime.instances import instance_name
     from src.user.db import is_known_engine_name
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     backends = []
     with db_lock:
         c = db.cursor()
@@ -1410,7 +1410,7 @@ def get_chat_config(user: dict = Depends(require_no_session_token), repo: str = 
             pass
     # Load chat skills from skill table（官方 + 个人 + 当前仓库，agent_type='chat'）
     chat_skills = []
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     # 跨平台：查 DB 确定 repo_key 实际前缀
     _rk_candidates = []
     if repo:
@@ -1486,7 +1486,7 @@ def _purge_chat_im_binding(user_id: int, gitcode_user: str, old_app_id: str) -> 
     if not old_app_id:
         return
     from datetime import datetime as _dt
-    from src.session_manager import db as _db, db_lock as _db_lock
+    from src.kernel.session_manager import db as _db, db_lock as _db_lock
     try:
         with _db_lock:
             c = _db.cursor()
@@ -1528,7 +1528,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
     kwargs = {}
     if feishu.get("app_id"):
         app_id = feishu["app_id"]
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             # 强约束：一个 app_id 全局唯一。类型注册表校验 VOD 占用 + 其他用户占用
@@ -1618,7 +1618,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
         skill_scope = body.get("skill_scope", "")
         skill_id = 0
         if skill_name:
-            from src.session_manager import db as _db, db_lock as _db_lock
+            from src.kernel.session_manager import db as _db, db_lock as _db_lock
             def _find_skill(scope, owner_id=""):
                 """精确按 scope(+owner) 查 skill_id，不走 official 优先"""
                 with _db_lock:
@@ -1632,7 +1632,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
                     return row[0] if row else 0
 
             if skill_scope == "repo" and repo:
-                from src.repo_key import to_repo_key
+                from src.kernel.repo_key import to_repo_key
                 skill_id = _find_skill("repo", to_repo_key(repo))
             elif skill_scope == "user":
                 skill_id = _find_skill("user", str(user["id"]))
@@ -1640,7 +1640,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
                 skill_id = _find_skill("official")
             else:
                 if repo:
-                    from src.repo_key import to_repo_key
+                    from src.kernel.repo_key import to_repo_key
                     skill_id = _find_skill("repo", to_repo_key(repo))
                 if not skill_id:
                     skill_id = _find_skill("user", str(user["id"]))
@@ -1660,7 +1660,7 @@ async def update_chat_config(body: dict, user: dict = Depends(require_no_session
     if _new_app and old_app_id and old_app_id != _new_app:
         try:
             # FR-18.7: 注册名语境——用 bind_feishu_identity 只清飞书三列，不碰平台列
-            from src.session_manager import bind_feishu_identity
+            from src.kernel.session_manager import bind_feishu_identity
             bind_feishu_identity(user["id"], open_id="", app_id=_new_app)
             log.info(f"Chat IM: app changed {old_app_id[:30]} -> {_new_app[:30]}, reconciled unified_user_mapping (open_id cleared)")
         except Exception as e:
@@ -1752,7 +1752,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         runtime_session_id = ""
     has_valid_session = bool(runtime_session_id.startswith("ses_"))
     if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_issue_chat_prompt
+        from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(body.message, repo_key, history, conv,
                                         account=user["username"], runtime_id=cfg.get("runtime_id", 0),
                                         has_valid_session=has_valid_session)
@@ -1798,7 +1798,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
         # 远端引擎离线兜底
         from src.runtime.service import _remote_runtime_ready
         if not _remote_runtime_ready(rid) and backend_name:
-            from src.session_manager import _resolve_chat_runtime_id
+            from src.kernel.session_manager import _resolve_chat_runtime_id
             _rid3 = _resolve_chat_runtime_id(backend_name) or 0
             if _rid3 and _remote_runtime_ready(_rid3):
                 rid = _rid3
@@ -1901,7 +1901,7 @@ async def chat_submit(body: ChatMessage, user: dict = Depends(require_no_session
                     _is_401 = is_auth_401_error(_err_lower)
                     if _is_401:
                         try:
-                            from src.token_service import detect_and_mark_expired
+                            from src.kernel.token_service import detect_and_mark_expired
                             _ctm_error_code = detect_and_mark_expired(repo_key) or ""
                             if _ctm_error_code:
                                 log.warning(f"[Chat submit] token expired (error_code={_ctm_error_code}), repo={repo_key}")
@@ -2035,8 +2035,8 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
     # 内存无任务 → 可能是跨机器 submit，DB 有 user 消息但 agent 还在执行
     # 轮询 DB 等待 agent 回复（总超时 = CHAT_STREAM_TIMEOUT，可配置，Issue #399），而不是立刻报「查询已中断」
     if not q:
-        from src.session_manager import db as _msg_db, db_lock as _msg_lock
-        from src.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
+        from src.kernel.session_manager import db as _msg_db, db_lock as _msg_lock
+        from src.kernel.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
 
         async def _poll_db_stream():
             import time as _t
@@ -2085,7 +2085,7 @@ async def chat_task_stream(task_id: str, user: dict = Depends(require_no_session
     # 内存有任务 → SSE 流
     async def event_stream():
         import time as _t
-        from src.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
+        from src.kernel.config import get_chat_stream_timeout, CHAT_STREAM_HEARTBEAT_INTERVAL as _hb_interval
         timeout_s = get_chat_stream_timeout()
         deadline = _t.time() + timeout_s
         # 先发一个思考中占位（如果缓冲为空）
@@ -2192,7 +2192,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
         runtime_session_id = ""
     has_valid_session = bool(runtime_session_id.startswith("ses_"))
     if conv and conv.get("conv_type") == "task":
-        from src.prompt_builder import build_issue_chat_prompt
+        from src.kernel.prompt_builder import build_issue_chat_prompt
         prompt = build_issue_chat_prompt(body.message, repo_key, history, conv, account=user["username"], runtime_id=cfg.get("runtime_id", 0), has_valid_session=has_valid_session)
     else:
         prompt = build_general_chat_prompt(body.message, repo_key, history, skill_name, skill_id, backend_name=backend_name, user_info=_build_web_user_info(user, acc), has_valid_session=has_valid_session)
@@ -2216,7 +2216,7 @@ def _sync_send_async(body: ChatMessage, user: dict) -> dict:
     from src.runtime.service import runtime_execution_kind, EXEC_MODE_DIRECT, runtime_credential_id
     kind = runtime_execution_kind(rid)
     if kind != EXEC_MODE_DIRECT and (runtime_credential_id(rid) or 0) == 0 and backend_name:
-        from src.session_manager import _resolve_chat_runtime_id
+        from src.kernel.session_manager import _resolve_chat_runtime_id
         rid = _resolve_chat_runtime_id(backend_name) or 0
         kind = runtime_execution_kind(rid)
 
@@ -2398,13 +2398,13 @@ def _execute_chat_task(task_id: str):
             _is_401 = is_auth_401_error(_err_lower)
             if _is_401:
                 try:
-                    from src.token_service import detect_and_mark_expired
+                    from src.kernel.token_service import detect_and_mark_expired
                     _task_error_code = detect_and_mark_expired(_task_repo_key) or ""
                     if _task_error_code:
                         _pName = "GitHub" if _task_repo_key.startswith("github:") else "GitCode"
                         final_text = f"⚠️ {_pName} Token 已过期或被撤销，请在设置页重新绑定 Token 后重试。"
                 except Exception as _te:
-                    from src.config import log as _cte_log
+                    from src.kernel.config import log as _cte_log
                     _cte_log.warning(f"Chat task post-exec 401 detect failed: {_te}")
 
         add_message(conv_id, "agent", final_text)
@@ -2432,7 +2432,7 @@ def _execute_chat_task(task_id: str):
                 t["status"] = "error"
                 t["error"] = str(e)[:500]
                 t["finished_at"] = _t.time()
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"Chat task {task_id} failed: {e}")
 
 
@@ -2474,7 +2474,7 @@ def chat_task_status(task_id: str, user: dict = Depends(require_no_session_token
             }
 
     # 3. DB 兜底（chat_messages 表 by task_id）
-    from src.session_manager import db as _msg_db, db_lock as _msg_lock
+    from src.kernel.session_manager import db as _msg_db, db_lock as _msg_lock
     with _msg_lock:
         c = _msg_db.cursor()
         c.execute("SELECT role, generate_status, content, conversation_id FROM chat_messages WHERE task_id=? ORDER BY id", (task_id,))

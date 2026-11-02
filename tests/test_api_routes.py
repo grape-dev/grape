@@ -8,7 +8,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_username,
     get_token_version as grape_get_token_version,
@@ -16,7 +16,7 @@ from src.auth.grape_account_db import (
 )
 
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     # D32: 直接查 grape_accounts.token_version（不依赖 grape_account_db 模块的 db 引用）
     with db_lock:
         c = db.cursor()
@@ -190,7 +190,7 @@ class TestAuth:
         _new_ver = _tv_row[0] if _tv_row else 0
         _token = _jwt_access_token(_uid["id"], _uid["username"])
         # _jwt_access_token 默认 ver=0——logout 后需要 ver=新版本
-        from src.api.jwt_utils import create_access_token
+        from src.kernel.auth_sdk.jwt_utils import create_access_token
         _token = create_access_token(_uid["id"], _uid["username"], _new_ver)
         _headers = {"Authorization": f"Bearer {_token}"}
 
@@ -221,7 +221,7 @@ class TestRepos:
         """验证 GET /api/repos/managed 只返回已加入的仓库，
         不会返回 GitCode 上所有有权限的仓库"""
         # 先清理已加入的记录
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM managed_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%' OR repo_key LIKE 'gitcode:tc_%' OR repo_key LIKE 'gitcode:o/r' OR repo_key LIKE 'o/r' OR repo_key LIKE 'gitcode:a/%' OR repo_key LIKE 'a/b' OR repo_key LIKE 'gitcode:b/%' OR repo_key LIKE 'gitcode:x/%' OR repo_key LIKE 'gitcode:new/%' OR repo_key LIKE 'gitcode:empty/%' OR repo_key LIKE 'gitcode:navuser/%' OR repo_key LIKE 'gitcode:nonexistent/%' OR repo_key LIKE 'gitcode:repair/%' OR repo_key LIKE 'gitcode:ghost/%' OR repo_key LIKE 'gitcode:iso/%' OR repo_key LIKE 'gitcode:iac/%' OR repo_key LIKE 'gitcode:Jason7602/%' OR repo_key LIKE 'gitcode:evapi/%' OR repo_key LIKE 'gitcode:sweep/%' OR repo_key LIKE 'gitcode:no-%' OR repo_key LIKE 'other/%' OR repo_key LIKE 'github:org/%' OR repo_key LIKE 'github:other/%' OR repo_key LIKE 'gitcode:chat:%'")
@@ -455,7 +455,7 @@ class TestRepos:
 class TestDashboard:
     def test_dashboard_success(self):
         # 确保测试用户有权访问 org/test（前面的测试可能清了 managed_repos）
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name) VALUES (?,?,?,?)",
                        ("gitcode:org/test", "org", "test", "org/test"))
@@ -473,7 +473,7 @@ class TestDashboard:
     def test_dashboard_agent_engines_includes_offline(self):
         """Issue #227: agent_engines 应返回全部引擎（含 offline），不能按状态过滤。"""
         import datetime as _dt
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _tz = _dt.timezone.utc
         _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
         _stale = (_dt.datetime.now(_tz) - _dt.timedelta(minutes=20)).isoformat()
@@ -546,7 +546,7 @@ class TestDashboard:
     def test_dashboard_agent_engines_dedup(self):
         """Issue #227: 同一 runtime_id 跨 scope 查询时应去重。"""
         import datetime as _dt
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _tz = _dt.timezone.utc
         _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
         _ids = []
@@ -604,7 +604,7 @@ class TestPipeline:
 
     def test_pipeline_queries_prefixed_repo_key(self):
         """get_pipeline 应按带前缀 repo_key 查 events（repo_key 整改后 events 值带 gitcode: 前缀）"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         repo_key = "gitcode:pipeline/repo-prefix"
         with db_lock:
             c = db.cursor()
@@ -639,7 +639,7 @@ class TestAgents:
             r = client.get(f"/api/agents/{agent}/org/test", headers=_headers)
             if r.status_code == 404:
                 # Agent type not configured in DB yet, insert it
-                from src.session_manager import db, db_lock
+                from src.kernel.session_manager import db, db_lock
                 with db_lock:
                     db.execute("INSERT OR IGNORE INTO agent_type (agent_type, display_name, description, icon, order_num) VALUES (?,?,?,?,?)",
                                (agent, f"{agent} Agent", f"Description for {agent}", "●", 0))
@@ -662,7 +662,7 @@ class TestAgents:
     def test_agent_config_repo_skill(self):
         """DevOps Agent 保存仓库技能时 skill_id 正确解析（仓库级 skill 配置）"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"agentskill{uniq}"
@@ -815,7 +815,7 @@ class TestChat:
     def test_chat_im_user_isolation(self):
         """Chat IM 配置每用户独立：A 配置后，B 的 GET /chat/config 应为空 IM"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         app_a = "cli_" + uuid.uuid4().hex[:12]
         # 清理测试用户配置，保证干净
@@ -865,7 +865,7 @@ class TestChat:
     def test_chat_im_app_id_global_unique(self):
         """强约束：同一 app_id 被其他用户保存时应 400"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         app_id = "cli_" + uuid.uuid4().hex[:12]
 
@@ -903,7 +903,7 @@ class TestChat:
     def test_chat_im_vod_conflict(self):
         """强约束：app_id 已被 VOD Agent 占用时，Chat 保存应 400"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         app_id = "cli_" + uuid.uuid4().hex[:12]
         # 登记一个 vod_bot
@@ -926,7 +926,7 @@ class TestChat:
     def test_chat_im_release_old_app_id(self):
         """用户更换 app_id 后，旧 app_id 应从 global_im_bot_config 释放"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         old_app = "cli_" + uuid.uuid4().hex[:12]
         new_app = "cli_" + uuid.uuid4().hex[:12]
@@ -967,12 +967,12 @@ class TestChat:
     def test_chat_config_skills_include_user_repo(self):
         """Chat GET /config：带 repo 时 skill 列表含官方+个人+仓库；不带 repo 时含官方+个人"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         uid = _uid["id"]
         uniq = uuid.uuid4().hex[:8]
         repo_key = f"org/chat-skill-{uniq}"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
         # 造一个个人 chat 技能 + 一个仓库 chat 技能（agent_type='chat'）
         with db_lock:
@@ -1007,14 +1007,14 @@ class TestChat:
     def test_chat_config_put_skill_id_resolution(self):
         """Chat PUT /config 保存个人/仓库技能时 skill_id 正确解析"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         uid = _uid["id"]
         uniq = uuid.uuid4().hex[:8]
         repo_key = f"org/chat-skillid-{uniq}"
         user_skill = f"chatsid{uniq}-user"
         repo_skill = f"chatsid{uniq}-repo"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
@@ -1055,13 +1055,13 @@ class TestChat:
     def test_chat_config_put_skill_scope_precise(self):
         """同名技能时 skill_scope 精确定位（官方/仓库同名选对的那个）"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         uid = _uid["id"]
         uniq = uuid.uuid4().hex[:8]
         repo_key = f"org/scope-{uniq}"
         same_name = f"dupname{uniq}"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
@@ -1257,7 +1257,7 @@ class TestSettings:
     def test_agent_runtime_detail(self):
         """Issue #364: 单引擎详情端点——可见引擎返回完整弹窗字段"""
         import datetime as _dt
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _tz = _dt.timezone.utc
         _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
         with db_lock:
@@ -1305,7 +1305,7 @@ class TestSettings:
     def test_agent_runtime_detail_invisible_user_scope(self):
         """Issue #364: user scope 他人引擎对非 owner 不可见 → 404（可见性校验复用列表口径）"""
         import datetime as _dt
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _tz = _dt.timezone.utc
         _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
         with db_lock:
@@ -1345,7 +1345,7 @@ class TestSettings:
     def test_agent_runtime_detail_spec_missing(self):
         """Issue #459: 无 spec 数据（未上报规格的旧版 worker）/ 本机直连引擎，详情与列表 spec 为空字符串不报错"""
         import datetime as _dt
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _tz = _dt.timezone.utc
         _fresh = (_dt.datetime.now(_tz) - _dt.timedelta(seconds=10)).isoformat()
         with db_lock:
@@ -1587,7 +1587,7 @@ class TestSkills:
     def test_skills_upload_valid_agent_type(self):
         """合法 agent_type（chat 等）上传应成功"""
         import tempfile, zipfile, os, sqlite3
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         with zipfile.ZipFile(tmp.name, "w") as zf:
             zf.writestr("skill-uploadtest/SKILL.md", "---\nname: skill-uploadtest\nversion: 1.0.0\ndescription: test skill\n---\n\n## 场景\n## 知识\n## 步骤\n- step")
@@ -1607,7 +1607,7 @@ class TestSkills:
     def test_skills_upload_no_sections_allowed(self):
         """放宽校验：无 场景/知识/步骤 三章节的自定义技能也应能上传（与官方技能格式一致）"""
         import tempfile, zipfile, os
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
         with zipfile.ZipFile(tmp.name, "w") as zf:
             zf.writestr("skill-nosections/SKILL.md", "---\nname: skill-nosections\nversion: 1.0.0\ndescription: 无三章节自定义技能\n---\n\n# 技能说明\n\n处理特定流程。")
@@ -1645,7 +1645,7 @@ class TestSkills:
     def test_skills_upload_repo_scope_via_form(self):
         """scope=repo 通过 form 提交时应正确落到仓库技能目录（此前无 Form() 标注会被当成 query 参数而失效）"""
         import tempfile, zipfile, os, shutil
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.user import db as user_db
         # 自隔离：清除历史残留（含 gitcode: 前缀变体行 + 磁盘目录），保证本用例独占
         with db_lock:
@@ -1676,7 +1676,7 @@ class TestSkills:
         assert row[2].endswith("owner/repo-x"), f"owner_id 应为 owner/repo-x（可带平台前缀），got {row}"
         assert row[3] == "repo skill", f"description should be parsed from front matter, got {row}"
         # by-id 权限校验需要 user_repos 中有该仓库记录
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         with db_lock:
             c = db.cursor()
             c.execute("INSERT OR REPLACE INTO user_repos (user_id, repo_key, owner, name, is_admin, is_join) VALUES (?,?,?,?,?,?)",
@@ -1704,13 +1704,13 @@ class TestSkills:
     def test_skills_convert_user_to_repo(self):
         """个人技能复制为仓库技能：目录复制 + DB 记录 + 原个人技能保留"""
         import uuid, os, shutil
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.user import db as user_db
 
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"convskill{uniq}"
         repo_key = f"org/convert-{uniq}"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
 
         # 造一个个人技能（目录 + DB）
@@ -1757,12 +1757,12 @@ class TestSkills:
     def test_skills_convert_duplicate_repo_skill(self):
         """目标仓库已有同名技能时转换返回 409"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"convdup{uniq}"
         repo_key = f"org/dup-{uniq}"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
@@ -1785,7 +1785,7 @@ class TestSkills:
     def test_skills_convert_not_owner(self):
         """个人技能不属于当前用户时转换返回 404"""
         import uuid
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         uniq = uuid.uuid4().hex[:8]
         skill_name = f"convother{uniq}"
@@ -1825,7 +1825,7 @@ class TestSearch:
 # ===================== 12. Webhook & A2A =====================
 class TestWebhook:
     def test_webhook_push(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, gitcode_webhook_token) VALUES (?,?,?,?,?)",
                        ("gitcode:org/repo", "org", "repo", "org/repo", "test_webhook_token_123"))
@@ -1838,7 +1838,7 @@ class TestWebhook:
 
     def test_webhook_invalid_token(self):
         # 自给自足：预置托管行，保证任何执行顺序下 token 校验路径一致（不依赖 test_webhook_push 先跑）
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, gitcode_webhook_token) VALUES (?,?,?,?,?)",
                        ("gitcode:org/repo", "org", "repo", "org/repo", "test_webhook_token_123"))
@@ -1864,14 +1864,14 @@ class TestWebhook:
         assert r.status_code == 404, f"Got {r.status_code}: {r.text[:200]}"
         # 确认未生成事件
         with db_lock:
-            from src.session_manager import db as _db
+            from src.kernel.session_manager import db as _db
             cur = _db.cursor()
             cur.execute("SELECT COUNT(*) FROM events WHERE repo_key='ghost/not-managed'")
             assert cur.fetchone()[0] == 0, "unmanaged repo should not create events"
 
     def test_a2a_reject_wrong_token(self):
         """A2A 鉴权：仓库配置 bot token 后，无/错 token → 403"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) VALUES (?,?,?,?,?)",
                        ("gitcode:org/test", "org", "test", "org/test", "test_bot_token_123"))
@@ -1892,7 +1892,7 @@ class TestWebhook:
 
     def test_a2a_with_pr_number(self):
         """A2A 接受可选 pr_number（正确 bot token 通过鉴权，非 400）"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO managed_repos (repo_key, repo_owner, repo_name, full_name, bot_gitcode_token) VALUES (?,?,?,?,?)",
                        ("gitcode:org/test", "org", "test", "org/test", "test_bot_token_123"))
@@ -1944,7 +1944,7 @@ class TestTokenLayers:
 class TestEventPipeline:
     def test_append_and_query(self):
         from src.api.event_store import append_event, get_events, get_event_count
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         repo = "gitcode:test/pipeline"
         with db_lock:
             db.execute("DELETE FROM events WHERE repo_key=?", (repo,))
@@ -1961,7 +1961,7 @@ class TestEventPipeline:
 
     def test_issue_summary(self):
         from src.api.event_store import append_event, get_issue_summary
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         repo = "gitcode:test/summary"
         with db_lock:
             db.execute("DELETE FROM events WHERE repo_key=?", (repo,))
@@ -1977,7 +1977,7 @@ class TestEventPipeline:
 
     def test_routing_db(self):
         from src.api.routing import get_domain_agent, get_agent_skill_map
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.execute("INSERT OR REPLACE INTO agent_type (agent_type, display_name, description, icon, order_num, subscribe_events) VALUES (?,?,?,?,?,?)",
                        ("issue", "Issue Agent", "Test", "●", 2, '["issue_opened"]'))
@@ -2095,7 +2095,7 @@ class TestKnowledge:
         client.delete(f"/api/knowledge/{kid}", headers=_headers)
         r = client.get(f"/api/knowledge/{kid}", headers=_headers)
         assert r.status_code == 404
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             count = db.cursor().execute(
                 "SELECT COUNT(*) FROM scene_knowledge_ref WHERE knowledge_id=?", (kid,)
@@ -2332,7 +2332,7 @@ class TestKnowledge:
 
     def test_update_system_knowledge_forbidden(self):
         """编辑系统知识返回 403"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -2357,7 +2357,7 @@ class TestKnowledge:
 
     def test_delete_system_knowledge_forbidden(self):
         """删除系统知识返回 403"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(

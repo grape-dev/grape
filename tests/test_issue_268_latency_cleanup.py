@@ -22,7 +22,7 @@ def _reset_cleanup_state():
 
 def _insert_latency_row(created_at="2020-01-01 00:00:00", method="GET", path="/x"):
     """直接插入一条 api_latency_log 记录（绕过 report_latency 的 datetime('now') 默认值）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -35,7 +35,7 @@ def _insert_latency_row(created_at="2020-01-01 00:00:00", method="GET", path="/x
 
 
 def _count_latency_rows():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         return c.execute("SELECT COUNT(*) FROM api_latency_log").fetchone()[0]
@@ -64,7 +64,7 @@ class TestSqlitePath:
         _insert_latency_row(created_at="2020-01-01 00:00:00")
         assert _count_latency_rows() >= 1
         latency._maybe_cleanup()
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             row = db.cursor().execute(
                 "SELECT COUNT(*) FROM api_latency_log WHERE created_at='2020-01-01 00:00:00'"
@@ -73,7 +73,7 @@ class TestSqlitePath:
 
     def test_recent_records_kept(self):
         _reset_cleanup_state()
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.cursor().execute(
                 "INSERT INTO api_latency_log (method, path, status, duration_ms, source) "
@@ -91,7 +91,7 @@ class TestSqlitePath:
         """超量裁剪逻辑不再因前序 DELETE 异常被跳过。"""
         _reset_cleanup_state()
         monkeypatch.setattr(latency, "_MAX_ROWS", 3)
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         before = _count_latency_rows()
         # 插入近期记录（created_at=now），确保不被超期 DELETE 删除，只触发超量裁剪
         for i in range(5):
@@ -115,7 +115,7 @@ class TestMysqlDialect:
 
     def test_maybe_cleanup_uses_mysql_interval(self, monkeypatch):
         _reset_cleanup_state()
-        import src.mysql_compat as mc
+        import src.kernel.mysql_compat as mc
         monkeypatch.setattr(mc, "get_db_backend", lambda: "mysql")
 
         captured = []
@@ -132,7 +132,7 @@ class TestMysqlDialect:
 
     def test_maybe_cleanup_sqlite_keeps_datetime(self, monkeypatch):
         _reset_cleanup_state()
-        import src.mysql_compat as mc
+        import src.kernel.mysql_compat as mc
         monkeypatch.setattr(mc, "get_db_backend", lambda: "sqlite")
 
         captured = []
@@ -146,7 +146,7 @@ class TestMysqlDialect:
             f"SQLite 分支应保留 datetime('now','-N days')，实际: {delete_sqls}"
 
     def test_cleanup_old_latency_logs_uses_mysql_interval(self, monkeypatch):
-        import src.mysql_compat as mc
+        import src.kernel.mysql_compat as mc
         monkeypatch.setattr(mc, "get_db_backend", lambda: "mysql")
 
         captured = []
@@ -162,7 +162,7 @@ class TestMysqlDialect:
             f"db_setup MySQL 分支不应出现 SQLite datetime() 语法，实际: {delete_sqls}"
 
     def test_cleanup_old_latency_logs_sqlite_keeps_datetime(self, monkeypatch):
-        import src.mysql_compat as mc
+        import src.kernel.mysql_compat as mc
         monkeypatch.setattr(mc, "get_db_backend", lambda: "sqlite")
 
         captured = []

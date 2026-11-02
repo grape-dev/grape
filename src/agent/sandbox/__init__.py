@@ -28,7 +28,7 @@ __all__ = ["sandbox_enabled", "build_bwrap_cmd"]
 def sandbox_enabled() -> bool:
     """开关（运行时读 config，支持 env 灰度，不重启代码逻辑）。"""
     try:
-        from src.config import GRAPE_AGENT_SANDBOX
+        from src.kernel.config import GRAPE_AGENT_SANDBOX
         return bool(GRAPE_AGENT_SANDBOX)
     except Exception:
         return False
@@ -57,7 +57,7 @@ def build_bwrap_cmd(cwd: str, backend_name: str = "") -> list[str] | None:
     if not cwd or not os.path.isdir(cwd):
         return None
 
-    from src.config import (
+    from src.kernel.config import (
         BWRAP_RO_SYSTEM, BWRAP_RO_ENGINE_COMMON, BWRAP_RO_ENGINE, BWRAP_RW_ENGINE,
     )
 

@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
 from src.api.deps import get_current_user_or_api_key  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.api.db_setup import init_database  # noqa: E402
 
 init_database()

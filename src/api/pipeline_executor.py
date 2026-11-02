@@ -16,7 +16,7 @@ from typing import Any
 
 from src.api.event_bus import get_event_bus, GrapeEvent, EventDomain
 from src.api.pipeline_config import get_pipeline_config, get_node_by_tag, get_next_node, is_node_skipped
-from src.config import log
+from src.kernel.config import log
 
 _bus = get_event_bus()
 
@@ -212,7 +212,7 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
     try:
         from src.api.event_pipeline import _enqueue_pipeline_task, is_plugin_mode
         from src.runtime.engine_select import pick_engine
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         # Validate runtime_id: if the engine no longer exists or is offline,
         # drop it to 0 so the task becomes a pool task (claim_by_tag can pick it up).

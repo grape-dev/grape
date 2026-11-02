@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 
 

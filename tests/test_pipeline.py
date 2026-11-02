@@ -8,7 +8,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 from unittest.mock import patch
 import pytest
 from src.api.routes.pipeline import _get_issue_pipeline, _running_issue_ids, AGENT_ORDER, STAGE_STATUS_MAP
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _ev(seq, issue_id, event_type, agent_type, title, status, actor, created_at="2026-08-04 10:00:00", payload=None):
@@ -318,7 +318,7 @@ class TestHistoryLimit:
 
     def _jwt_headers(self):
         from src.auth import grape_account_db
-        from src.api.jwt_utils import create_access_token
+        from src.kernel.auth_sdk.jwt_utils import create_access_token
         from src.auth.grape_account_db import get_token_version
         uid = grape_account_db.create_grape_account("test_542_pipe", email=None, password="test123")
         if not uid:

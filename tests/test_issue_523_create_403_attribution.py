@@ -33,7 +33,7 @@ def setup_module():
     _uid = grape_account_db.create_grape_account("test_523", email=None, password="test123")
     if not _uid:
         _uid = grape_account_db.get_grape_account_by_username("test_523")
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     _token = create_access_token(_uid["id"], _uid["username"], get_token_version(_uid["id"]))
     _headers = {"Authorization": f"Bearer {_token}"}
@@ -45,7 +45,7 @@ def setup_module():
 
 
 def teardown_module():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for t in ("events", "issue_state", "issue", "agent_tasks"):

@@ -15,8 +15,8 @@ class TestRepoBotTokenUnified:
 
     def test_repo_bot_token_delegates_to_service(self):
         """R20.11.1: Repo.bot_token 委托 token_service.get_repo_bot_token()"""
-        from src.repo import Repo
-        with patch("src.token_service.get_repo_bot_token", return_value="test_token") as mock_svc:
+        from src.kernel.repo import Repo
+        with patch("src.kernel.token_service.get_repo_bot_token", return_value="test_token") as mock_svc:
             repo = Repo("gitcode:owner/repo")
             token = repo.bot_token
             assert token == "test_token"
@@ -24,7 +24,7 @@ class TestRepoBotTokenUnified:
 
     def test_repo_does_not_import_token_resolver(self):
         """R20.11.5: Repo 不直接 import TokenResolver（避免循环依赖）"""
-        import src.repo as repo_mod
+        import src.kernel.repo as repo_mod
         # 检查模块级别没有 TokenResolver 绑定
         assert not hasattr(repo_mod, 'TokenResolver'), "repo module should not have TokenResolver attribute"
         # 应该委托 token_service
@@ -36,28 +36,28 @@ class TestRepoBotTokenUnified:
 
     def test_repo_bot_token_empty_when_no_token(self):
         """R20.11.3: token 过期短路时返回空串"""
-        from src.repo import Repo
-        with patch("src.token_service.get_repo_bot_token", return_value=""):
+        from src.kernel.repo import Repo
+        with patch("src.kernel.token_service.get_repo_bot_token", return_value=""):
             repo = Repo("gitcode:owner/repo")
             token = repo.bot_token
             assert token == ""
 
     def test_token_service_get_repo_bot_token(self):
         """R20.11.1: token_service.get_repo_bot_token() 委托 TokenResolver"""
-        from src.token_service import get_repo_bot_token
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="resolved_token"):
+        from src.kernel.token_service import get_repo_bot_token
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="resolved_token"):
             result = get_repo_bot_token("gitcode:owner/repo")
             assert result == "resolved_token"
 
     def test_token_service_empty_repo_key(self):
         """token_service: 空 repo_key 返回空串"""
-        from src.token_service import get_repo_bot_token
+        from src.kernel.token_service import get_repo_bot_token
         assert get_repo_bot_token("") == ""
 
     def test_token_service_detect_and_mark_expired(self):
         """R20.8.1: detect_and_mark_expired 供 Chat/飞书调用"""
-        from src.token_service import detect_and_mark_expired
-        with patch("src.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"):
+        from src.kernel.token_service import detect_and_mark_expired
+        with patch("src.kernel.token_resolver.TokenResolver.detect_and_mark_expired", return_value="TOKEN_EXPIRED"):
             result = detect_and_mark_expired("gitcode:owner/repo")
             assert result == "TOKEN_EXPIRED"
 

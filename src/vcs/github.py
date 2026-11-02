@@ -1,6 +1,6 @@
 """GitHub VCS 后端实现 — 支持 GitHub Webhook 事件归一化"""
 import json
-from src.config import log
+from src.kernel.config import log
 from .base import VcsBackend
 from .event_types import (
     ISSUE_OPENED, ISSUE_UPDATED, ISSUE_CLOSED, ISSUE_REOPENED,

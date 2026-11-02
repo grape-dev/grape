@@ -17,7 +17,7 @@ SRC = os.path.join(os.path.dirname(__file__), "..", "src")
 if SRC not in sys.path:
     sys.path.insert(0, SRC)
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 _REPO_A = "gitcode:org/repo-a"

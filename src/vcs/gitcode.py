@@ -1,5 +1,5 @@
 """GitCode VCS 后端实现"""
-from src.config import log
+from src.kernel.config import log
 from .base import VcsBackend
 from .event_types import (
     ISSUE_OPENED, ISSUE_UPDATED, ISSUE_CLOSED, ISSUE_REOPENED,

@@ -26,7 +26,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from src.config import log
+from src.kernel.config import log
 
 #: 超过这个时长没上报 → 视为已退役凭证，不再报缺失（仍出现在 L2 静默名单里）
 GAP_MAX_STALE_SEC = 7 * 24 * 3600
@@ -91,7 +91,7 @@ def probe_all(open_cache=None) -> Dict[str, int]:
 def _probe_runtimes(rule: Dict[str, Any], open_cache=None) -> tuple:
     """设备/引擎静默：last_seen_at 落后超过 threshold 秒。"""
     from src.observability import alerts as al
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     thr = float(rule.get("threshold") or 900)
     now = _now()
@@ -155,7 +155,7 @@ def _probe_runtimes(rule: Dict[str, Any], open_cache=None) -> tuple:
 def _probe_repos(rule: Dict[str, Any], open_cache=None) -> tuple:
     """仓库静默（默认关闭）：近 window_sec 有活动，最近 threshold 秒完全没有任务活动。"""
     from src.observability import alerts as al
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     thr = float(rule.get("threshold") or 3600)
     active_window = float(rule.get("window_sec") or 21600)
@@ -225,7 +225,7 @@ def silent_targets(include_retired: bool = True) -> Dict[str, Any]:
     返回 {runtimes: [...], repos: [...], generated_at}；每项带 `beyond_retire_window`
     标记（= 已超过 7 天，不会产生事件，但仍需人工处理）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = _now()
     runtimes: List[Dict[str, Any]] = []
     try:

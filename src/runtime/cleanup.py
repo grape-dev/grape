@@ -7,9 +7,9 @@
 - 对 chat / feishu / vod / history 目录做 TTL 清理（无活跃会话时删除）。
 """
 import asyncio, os, shutil, time
-from src import config
-from src.config import log, CHAT_CWD_BASE
-from src.session_manager import db, db_lock
+from src.kernel import config
+from src.kernel.config import log, CHAT_CWD_BASE
+from src.kernel.session_manager import db, db_lock
 
 _SWEEP_INTERVAL = int(os.environ.get("SWEEPER_INTERVAL_SECONDS", "900"))  # 15min
 _ZOMBIE_TTL_DAYS = int(os.environ.get("SWEEPER_ZOMBIE_TTL_DAYS", "3"))  # 非 done issue workdir 3 天不活跃清理
@@ -37,7 +37,7 @@ def _long_running_minutes() -> int:
                 return v
         except Exception:
             pass
-    from src.config import get_orphan_threshold_minutes
+    from src.kernel.config import get_orphan_threshold_minutes
     return get_orphan_threshold_minutes()
 
 _QUEUED_STALE_TXT = "中断：queued 超时无 worker 认领（sweeper 兜底回收）"
@@ -562,7 +562,7 @@ def sweep_once() -> int:
         except Exception as e:
             log.debug(f"sweeper im-instance purge skipped: {e}")
 
-        from src.repo_key import split_owner_repo
+        from src.kernel.repo_key import split_owner_repo
         from src.runtime import repogit
         if _has_db_tables:
             active = _active_issue_sessions()

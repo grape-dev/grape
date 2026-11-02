@@ -11,7 +11,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 
 from src.api.db_setup import init_database
 from src.api.issues_center import _close_other_assignee_tasks, _close_issue_tasks_bot_takeover
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _RK = "gitcode:org/test"
 

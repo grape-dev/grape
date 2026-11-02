@@ -19,11 +19,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
 from src.user import db as user_db
 from src.auth import grape_account_db  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 # JWT access token helper
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -557,7 +557,7 @@ class TestSceneSkillRef:
 
     def test_create_scene_builds_skill_ref(self):
         """创建场景时自动重建 scene_skill_ref"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         body = {
             "name": "test-ref-scene",
             "display_name": "测试Ref场景",
@@ -579,7 +579,7 @@ class TestSceneSkillRef:
 
     def test_update_scene_rebuilds_skill_ref(self):
         """更新场景时重建 scene_skill_ref"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         # 先创建
         create_body = {
             "name": "test-ref-update",
@@ -611,7 +611,7 @@ class TestSceneSkillRef:
 
     def test_detail_skill_deleted_flag(self):
         """详情页 skill_deleted 标记：引用不存在的 skill 时为 True"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         # 创建引用不存在 skill 的场景
         body = {
             "name": "test-deleted-skill",
@@ -651,7 +651,7 @@ class TestSceneSkillRef:
 
     def test_apply_scene_with_deleted_skill(self):
         """应用场景时引用已删除的 skill 返回 400"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         body = {
             "name": "test-apply-deleted",
             "display_name": "应用已删除技能场景",
@@ -697,7 +697,7 @@ class TestSceneMarketExtended:
 
     def test_delete_cascades_skill_ref(self):
         """删除场景级联清理 scene_skill_ref"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         # 创建场景
         body = {
             "name": "test-cascade-delete",

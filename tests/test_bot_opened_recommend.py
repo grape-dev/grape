@@ -31,13 +31,13 @@ import pytest
 # 防止混跑时其他模块 reload(session_manager) 导致写读两侧库分裂。
 class _DbProxy:
     def __getattr__(self, attr):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         return getattr(_sm.db, attr)
 
 
 class _DbLockProxy:
     def __enter__(self):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         self._real = _sm.db_lock
         return self._real.__enter__()
 
@@ -49,7 +49,7 @@ db = _DbProxy()
 db_lock = _DbLockProxy()
 
 _PATCH_DB_MODULES = (
-    "src.session_manager", "src.api.event_store", "src.api.event_pipeline",
+    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
     "src.user.db", "src.api.session_store", "src.api.issues_center",
     "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
     "src.runtime.service",
@@ -59,7 +59,7 @@ _PATCH_DB_MODULES = (
 @pytest.fixture(autouse=True)
 def _mock_db(monkeypatch):
     import sqlite3
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.db_setup as _dbs
     _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _lock = threading.RLock()
@@ -131,7 +131,7 @@ def _issue_comment_payload(username, note="bot 自评回帖", num=9):
 
 
 def _session_level_result():
-    from src.token_resolver import TokenResult
+    from src.kernel.token_resolver import TokenResult
     return TokenResult(token="SESSION_PAT", level="session",
                        provider=MagicMock(), repo_key=RK)
 
@@ -167,9 +167,9 @@ def _dispatch_patches(handler_self_loop=True):
 
     return captured, [
         patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
-        patch("src.token_resolver.TokenResolver.resolve_config_level",
+        patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
               side_effect=lambda rk: _session_level_result()),
-        patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor",
+        patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
               return_value=handler_self_loop),
         patch("src.runtime.engine_select.pick_engine", return_value=0),
         patch("src.runtime.engine_select.engine_name", return_value="opencode"),
@@ -281,9 +281,9 @@ class TestT4BotCommentStillIntercepted:
         """T4: bot 的 issue_comment → 仍被 self_loop 拦截（评论族闸门不动，回归保护）。"""
         _clean()
         with patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]), \
-             patch("src.token_resolver.TokenResolver.resolve_config_level",
+             patch("src.kernel.token_resolver.TokenResolver.resolve_config_level",
                    side_effect=lambda rk: _session_level_result()), \
-             patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor",
+             patch("src.kernel.token_resolver.SessionTokenHandler.is_self_loop_actor",
                    return_value=False):
             _run(_issue_comment_payload("grape_bot"), header="Note Hook")
         assert _skipped_count("self_loop") == 1, "bot 评论必须继续被入口拦截"

@@ -13,7 +13,7 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.im import feishu_async as fa
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _app_id():
@@ -536,7 +536,7 @@ class TestWsPermanentFailure:
 
     def test_permanent_codes_trigger_disable(self):
         """10002/10014/10003 永久错误码 → _disable_bot 写入 DB is_active=0"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         app_id = "cli_test_perm_" + str(int(time.time()))
         try:
             with db_lock:

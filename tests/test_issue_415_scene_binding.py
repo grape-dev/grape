@@ -13,7 +13,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest  # noqa: E402
 from unittest.mock import patch, MagicMock  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 REPO = "gitcode:o/r"
 
@@ -27,7 +27,7 @@ def _ensure_tables():
 
 @pytest.fixture(autouse=True)
 def _clean(data=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:

@@ -208,7 +208,7 @@ def load_issue_business_status(repo_keys, number):
 
     与 issues._issue_stage_map / _task_status_map 同口径（Issue #539 数据源）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     stage, task_status = "", ""
     if not repo_keys:
         return stage, task_status
@@ -245,7 +245,7 @@ def load_segment_task_refs(repo_keys, seqs=None):
     seqs 给定时仅取这些事件的任务（避免整仓拉取 result_text 大字段）。
     查询失败 → 空映射（调用方按 unavailable 显式标注，不阻塞 pipeline）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out = {}
     if not repo_keys:
         return out

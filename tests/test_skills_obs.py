@@ -21,11 +21,11 @@ from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
 from src.user import db as user_db
 from src.auth import grape_account_db  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.storage import StorageBackend  # noqa: E402
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -48,7 +48,7 @@ def setup_module():
         raise RuntimeError(f"create_grape_account({_uname}) failed")
     # grape_accounts 不再存平台 token（D32：平台字段移 external_identities），
     # 本文件用例不依赖 gitcode_api_token，无需回写。
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version as _get_tv
     _token = create_access_token(_uid["id"], _uid["username"], _get_tv(_uid["id"]))
     _headers = {"Authorization": f"Bearer {_token}"}
@@ -213,10 +213,10 @@ class TestSkillsObs:
         import sys as _sys
 
         def _restore():
-            for _n in ("src.session_manager", "session_manager"):
+            for _n in ("src.kernel.session_manager", "session_manager"):
                 _sys.modules.pop(_n, None)
             try:
-                _il.import_module("src.session_manager")
+                _il.import_module("src.kernel.session_manager")
             except Exception:
                 pass
 

@@ -22,7 +22,7 @@ import pytest
 
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.routes.chat import _save_chat_images, _build_image_markers
 
 UID = 99097

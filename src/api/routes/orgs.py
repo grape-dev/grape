@@ -152,7 +152,7 @@ def delete_organization(org_id: int, user: dict = Depends(require_no_session_tok
 def search_users(q: str = "", user: dict = Depends(require_no_session_token)):
     """按用户名模糊搜索用户（用于添加成员时的实时搜索）。"""
     # D32-补丁：查 grape_accounts，不查 user_accounts
-    from src.session_manager import db as _db, db_lock as _dbl
+    from src.kernel.session_manager import db as _db, db_lock as _dbl
     if not q or len(q) < 1:
         return []
     with _dbl:

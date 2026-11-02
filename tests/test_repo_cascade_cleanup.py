@@ -17,8 +17,8 @@ import pytest
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
     os.path.dirname(__file__), "..", "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
-from src.repo_cleanup import (
+from src.kernel.session_manager import db, db_lock
+from src.kernel.repo_cleanup import (
     cascade_cleanup_repo_data,
     retry_pending_file_cleanups,
     RepoCleanupError,
@@ -218,7 +218,7 @@ class TestPlatformUnhostCascade:
         """DB 删除中途失败 → 全量回滚 + RepoCleanupError（可重试）"""
         _clean()
         _seed_all()
-        import src.repo_cleanup as rc
+        import src.kernel.repo_cleanup as rc
         # 强制事务中后段失败：把假表加入清理表清单 + 探测结果，
         # 前面的表（issue 等）删除成功后，DELETE 假表报错 → 整体回滚
         real_existing = rc._existing_tables
@@ -292,11 +292,11 @@ class TestWebhookRepoDeletedCascade:
 class TestFileCleanupCompensation:
     def test_retry_pending_file_cleanups(self, tmp_path, monkeypatch):
         _clean()
-        from src.config import WORKSPACE_DIR
+        from src.kernel.config import WORKSPACE_DIR
         ws_dir = tmp_path / "ws" / "gitcode" / "owner" / "issue340-repo"
         ws_dir.mkdir(parents=True)
         (ws_dir / "project-info.md").write_text("knowledge baseline")
-        monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path / "ws"))
+        monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path / "ws"))
         # 模拟历史失败残留：pending 标记 + 目录仍在
         _insert("meta", ["key", "value"], (f"cleanup_pending:{REPO_KEY}", "1"))
         remaining = retry_pending_file_cleanups()

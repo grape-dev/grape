@@ -9,9 +9,9 @@
 import asyncio
 import logging
 
-from src.config import log
-from src.session_manager import db, db_lock
-from src.mysql_compat import get_db_backend
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.mysql_compat import get_db_backend
 
 logger = logging.getLogger(__name__)
 _bg_tasks: set[asyncio.Task] = set()
@@ -202,7 +202,7 @@ def run_cooldown_cleanup():
 
     集群分布式锁互斥——同一时间只有一个实例执行清理（复用 src/lock.py）。
     """
-    from src.lock import acquire_lock, release_lock
+    from src.kernel.lock import acquire_lock, release_lock
 
     _LOCK_KEY = "cooldown_cleanup"
     _LOCK_TTL = 600  # 10 分钟（清理任务最长执行时间）

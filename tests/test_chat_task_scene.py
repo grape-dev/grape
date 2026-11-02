@@ -4,8 +4,8 @@ import os
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, create_conversation, get_conversation, update_conversation
-from src.prompt_builder import build_issue_chat_prompt
+from src.kernel.session_manager import db, db_lock, create_conversation, get_conversation, update_conversation
+from src.kernel.prompt_builder import build_issue_chat_prompt
 
 
 def _clean():

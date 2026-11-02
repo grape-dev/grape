@@ -3,7 +3,7 @@ import os
 import re
 from fastapi import APIRouter, HTTPException, Depends, Request
 from pydantic import BaseModel
-from src.config import log, WORKSPACE_DIR
+from src.kernel.config import log, WORKSPACE_DIR
 from src.user import db as user_db
 from src.user.repo_manager import fetch_repos_with_role, setup_webhook, find_existing_webhook, create_repo
 from src.api.deps import get_current_user_or_api_key, get_bot_token, get_user_token, get_user_token_with_refresh, get_user_github_token_with_refresh, require_no_session_token, require_org_member
@@ -82,7 +82,7 @@ def _provider_from_hint(full_name: str) -> str:
         return "gitcode"
     base = f.split(":", 1)[-1]  # 兼容已有前缀写法
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             rows = db.cursor().execute(
                 "SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
@@ -140,9 +140,9 @@ def _filter_repos(user_id: int, repos: list[dict], org_id: int = 0) -> list[dict
     - 已托管到其他组织的仓库 → 隐藏（隔离）
     - 未托管的仓库 → 显示，用户可托管到当前组织
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     # 获取所有托管仓库及其 org_id
-    from src.session_manager import db as _db, db_lock as _dbl
+    from src.kernel.session_manager import db as _db, db_lock as _dbl
     managed = {}
     managed_org = {}
     with _dbl:
@@ -214,7 +214,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
     GitHub 仓库走 GitHub API + 用户 github_api_token；GitCode 仓库走 GitCode API + 传入 api_token。
     """
     import concurrent.futures, urllib.request, urllib.error, json as _json
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
 
     all_repos = user_db.get_managed_repos(user_id)
     if not all_repos:
@@ -373,7 +373,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
     # FR-1.2: 仓库 404 双信号交叉验证——用 bot token 二次确认
     # 用户 token 404 可能是权限问题而非仓库真删了，bot token 是 maintainer 有读权限
     if stale_keys:
-        from src.token_resolver import TokenResolver, create_provider
+        from src.kernel.token_resolver import TokenResolver, create_provider
         verified_deletes = []
         for repo_key, owner, repo_name in stale_keys:
             provider, _, _ = parse_repo_key(repo_key)
@@ -425,7 +425,7 @@ def _probe_stale_repos(api_token: str, user_id: int):
         log.info(f"managed repos: CLEANUP_START repo={repo_key} owner={owner}/{repo_name} "
                  f"trigger=polling-confirmed signals=[user_token_404, bot_token_404]")
         # Issue #340：级联清空全部关联数据（含需求中心 Issue 卡片/流水线/场景关联）
-        from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+        from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
         try:
             cascade_cleanup_repo_data(repo_key, owner, repo_name, trigger="polling-confirmed")
         except RepoCleanupError as e:
@@ -766,7 +766,7 @@ def check_repo_name(name: str, user: dict = Depends(require_no_session_token)):
 def create_new_repo(body: CreateRepoBody, user: dict = Depends(require_no_session_token)):
     """通过 VCS API 新建仓库，可选创建后自动托管"""
     import re as _re
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     name = (body.name or "").strip()
     if not name:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "仓库名称不能为空"})
@@ -1006,7 +1006,7 @@ def host_repo(body: RepoAction, user: dict = Depends(require_no_session_token), 
     provider 参数由调用方传入（如 create_from_template 已确定 provider）；
     不传时自动选择（向后兼容）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     # 解析当前组织上下文：优先从 user dict（require_org_member 注入），其次从 request header
     _org_id = user.get("org_id", 0) if isinstance(user, dict) else 0
     if not _org_id and request:
@@ -1434,7 +1434,7 @@ def repair_host(owner: str, repo: str, user: dict = Depends(require_no_session_t
 
     Issue #372: 按 provider 统一分流（get_hosting_provider_config），路径 B 支持无全局 bot token。
     """
-    from src.repo_key import to_repo_key, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, parse_repo_key
     from src.user.repo_manager import get_hosting_provider_config, _RateLimitedError
     from src.user.db import get_webhook_url, set_host_status
     from src.api.deps import get_user_token_with_refresh, get_user_github_token_with_refresh
@@ -1669,9 +1669,9 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
 
     R15.5: 传空串 bot_token 时清除仓库级 bot token（不重建 webhook，清除 bot_token_status）。
     """
-    from src.repo_key import to_repo_key, parse_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, parse_repo_key, split_owner_repo
     from src.api.deps import check_repo_access
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
@@ -1743,7 +1743,7 @@ def set_repo_bot_token(body: BotTokenBody, user: dict = Depends(require_no_sessi
         raise HTTPException(status_code=500, detail={"code": 500, "message": "仓库查询失败"})
 
     # 步骤 2: 验证 token 有效性（通过 VCSProvider 接口）
-    from src.token_resolver import create_provider_from_repo_key
+    from src.kernel.token_resolver import create_provider_from_repo_key
     _vcs_provider = create_provider_from_repo_key(repo_key)
     try:
         user_data = _vcs_provider.verify_token(body.bot_token)
@@ -1851,7 +1851,7 @@ def _remove_old_bot_collaborator(repo_key: str, owner: str, repo_name: str,
     if not old_bot_username:
         # 查 DB 获取旧 bot_username
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT bot_username FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
@@ -1863,7 +1863,7 @@ def _remove_old_bot_collaborator(repo_key: str, owner: str, repo_name: str,
     if not old_bot_username:
         return
     try:
-        from src.token_resolver import create_provider_from_repo_key
+        from src.kernel.token_resolver import create_provider_from_repo_key
         _provider = create_provider_from_repo_key(repo_key)
         # 移除旧 bot 需要用 owner token（有仓库管理权限的 token）
         _remove_token = ""
@@ -1899,8 +1899,8 @@ def _validate_deploy_url(url: str) -> str:
 @router.put("/deploy-url", operation_id="repos_deploy_url_set", summary="Set deployment URL", description="Registers the deployed access URL of the business system.")
 def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_token)):
     """登记业务系统部署后的访问 URL"""
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     deploy_url = _validate_deploy_url(body.deploy_url)
     repo_key = to_repo_key(body.full_name)
     from src.api.deps import check_repo_access
@@ -1917,8 +1917,8 @@ def set_deploy_url(body: DeployUrlBody, user: dict = Depends(require_no_session_
 @router.get("/deploy-url/{owner}/{repo_name}", operation_id="repos_deploy_url", summary="Get repository deployment URL", description="Returns the repository deployment access URL.")
 def get_deploy_url(owner: str, repo_name: str, user: dict = Depends(require_no_session_token)):
     """获取仓库的部署访问 URL"""
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     repo_key = to_repo_key(f"{owner}/{repo_name}")
     with db_lock:
         c = db.cursor()
@@ -2018,7 +2018,7 @@ def _cleanup_repo_data(repo_key: str, owner: str, repo: str) -> dict:
     用户维度数据（workspaces/chat/{user_id}、workspaces/{owner} 根）不清理。
     返回清理统计。
     """
-    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+    from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
     try:
         return cascade_cleanup_repo_data(repo_key, owner, repo, trigger="legacy")
     except RepoCleanupError:
@@ -2036,7 +2036,7 @@ def list_migrate_orgs(user: dict = Depends(require_no_session_token)):
     返回当前登录用户在 Grape 平台所属的组织列表 + 用户个人登录名（仓库可迁到个人名下）。
     鉴权：require_no_session_token（与 /migrate 同口径）；未登录 401。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     orgs = []
     personal_login = user.get("username") or ""
@@ -2089,8 +2089,8 @@ def migrate_repo(body: MigrateRepoBody, user: dict = Depends(require_no_session_
     2. 当前用户是源仓库的 admin/owner（403）
     3. 目标组织存在且当前用户是目标组织成员（403）
     """
-    from src.repo_key import to_repo_key
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
     from src.api.deps import check_repo_access
 
     repo_key = to_repo_key(body.repo_key)
@@ -2266,7 +2266,7 @@ def _check_migrate_vcs_permission(user: dict, owner: str, repo_name: str, repo_p
 
 @router.post("/remove", operation_id="repos_remove", summary="Remove hosting", description="Removes hosting for a repository (unregisters webhook/bot bindings).")
 def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_session_token)):
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     parts = body.full_name.split("/", 1)
     if len(parts) != 2:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "无效的仓库标识"})
@@ -2274,7 +2274,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
 
     # 按 provider 分流：前端传的 full_name 不含前缀
     # 先尝试 gitcode:（默认），不存在再尝试 github:
-    from src.repo_key import to_repo_key as _rk
+    from src.kernel.repo_key import to_repo_key as _rk
     gc_key = to_repo_key(body.full_name)  # 默认 gitcode:
     gh_key = _rk(body.full_name, provider="github")
 
@@ -2283,7 +2283,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
     repo_provider = "gitcode"
     _repo_exists = False
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c0 = db.cursor()
             c0.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)", (gh_key, gc_key))
@@ -2402,7 +2402,7 @@ def remove_managed_repo(body: RepoAction, user: dict = Depends(require_no_sessio
         raise HTTPException(status_code=404, detail={"code": 404, "message": "仓库未找到"})
     # Issue #340 级联清理：需求中心 Issue 卡片、流水线/事件、知识基线、场景关联、
     # 会话/技能/IM 绑定等全部关联数据，事务化 + 审计日志；失败可重试且无半清理。
-    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+    from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
     try:
         _stats = cascade_cleanup_repo_data(repo_key, owner, repo_name,
                                            trigger="platform",
@@ -2425,7 +2425,7 @@ def get_repo_project_info(owner: str, repo: str, user: dict = Depends(get_curren
     #219 按需获取：支持会话 token（tk_）——要求仓库作用域匹配（防绑 A 读 B）；
     JWT / API Key 用户维持现状（依赖 x-token-scope 的 user 通道）。
     """
-    from src.repo_key import split_owner_repo, to_repo_key
+    from src.kernel.repo_key import split_owner_repo, to_repo_key
     from src.runtime.service import load_project_info
     repo_key = to_repo_key(f"{owner}/{repo}")
     if user.get("auth_type") == "session_token":
@@ -2448,12 +2448,12 @@ def _resolve_scene_recommend_repo_key(owner: str, repo: str) -> str:
     导致保存假成功。与 /scenes/with-pipeline 同源：裸名查 DB 解析真实前缀，
     已带前缀幂等返回。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     owner_repo = f"{owner}/{repo}"
     if ":" in owner or ":" in repo:
         return to_repo_key(owner_repo)
     try:
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
             row = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?) LIMIT 1",
@@ -2543,7 +2543,7 @@ def _repo_provider(request: Request, user: dict = Depends(get_current_user_or_ap
     路径无前缀时回退认证 token 的 repo_key 前缀（会话主仓，见
     git-repo-provider-from-token-design.md），保持同平台/无前缀调用向后兼容。
     """
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     p = _provider_from_path(request.url.path) \
         or parse_repo_key(user.get("repo_key") or "")[0] or "gitcode"
     if p not in _SUPPORTED_PROVIDERS:
@@ -2573,7 +2573,7 @@ def _repo_platform_token(owner: str, repo: str, user: dict, provider: str = "git
     """
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "Git 仓库接口仅支持会话级临时 token（agent 专用），用户 API Key / Web 会话不适用"})
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
 
     if provider == "github":
         # Issue #466: owner 段可带 github: 前缀（跨平台关联仓换券）；用 to_repo_key(f"{owner}/{repo}")

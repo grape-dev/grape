@@ -19,7 +19,7 @@ PREFIX = "obsroll-test-"
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -31,7 +31,7 @@ def _clean():
 
 
 def _mk_cred(name, scope="global", owner_name="", status="active"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope, owner_name,"
@@ -45,7 +45,7 @@ def _mk_cred(name, scope="global", owner_name="", status="active"):
 
 
 def _sample(runtime_id, device, minutes_ago, cpu, mem=0.0, disk=50.0, health=90, status="online"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ts = (datetime.now(timezone.utc) - timedelta(minutes=minutes_ago)).isoformat()
     with db_lock:
         c = db.cursor()
@@ -68,7 +68,7 @@ def test_snapshot_writes_all_but_revoked():
     rid_revoked = _mk_cred("b", status="revoked")
     r = rollup.snapshot_runtimes()
     assert r["inserted"] >= 1, r
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM obs_runtime_samples WHERE runtime_id=?", (rid_ok,))
@@ -82,7 +82,7 @@ def test_snapshot_prunes_expired_samples():
     _sample(rid, PREFIX + "c", minutes_ago=8 * 24 * 60, cpu=99)      # 8 天前 → 应被清掉
     _sample(rid, PREFIX + "c", minutes_ago=5, cpu=11)                 # 保留
     rollup.snapshot_runtimes()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM obs_runtime_samples WHERE sampled_at < ?",

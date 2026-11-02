@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import health_scorer
 from src.runtime.engine_select import pick_engine, _filter_by_health, _best_health_fallback
 

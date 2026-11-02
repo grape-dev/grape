@@ -8,7 +8,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 @pytest.fixture(autouse=True)
 def _clean_mapping():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM unified_user_mapping WHERE gitcode_user LIKE 'p2puser%'")
@@ -28,7 +28,7 @@ def _make_ctx(app_id="cli_p2ptest"):
 
 def _seed_user_and_bot(username, app_id, user_id):
     """创建 grape_accounts 用户 + chat_agent_session 关联 app_id（用真实 user id）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.auth.password import hash_password
     # D32: 直接用 SQL 创建 grape_accounts 用户（不依赖 grape_account_db 模块的 db 引用）
     with db_lock:
@@ -72,7 +72,7 @@ def test_first_p2p_message_asks_confirmation_no_bind():
     ask_text = api.reply_text.call_args[0][2]
     assert "GitCode" in ask_text or "确认" in ask_text or "昵称" in ask_text
     # 未绑定
-    from src.session_manager import get_feishu_open_id
+    from src.kernel.session_manager import get_feishu_open_id
     assert get_feishu_open_id("p2puser1") is None
 
 
@@ -92,7 +92,7 @@ def test_confirm_binds_mapping():
         "chat_type": "p2p", "sender_open_id": "ou_p2p2", "message_id": "m2",
     }, app_id="cli_p2p2"))
     api2.reply_text.assert_called()
-    from src.session_manager import get_feishu_open_id, get_feishu_mapping, db, db_lock
+    from src.kernel.session_manager import get_feishu_open_id, get_feishu_mapping, db, db_lock
     with db_lock:
         _rows = db.cursor().execute("SELECT user_id, gitcode_user, feishu_open_id FROM unified_user_mapping").fetchall()
     assert _rows, f"mapping table empty after confirm; replies={[c.args for c in api2.reply_text.call_args_list]}"
@@ -118,7 +118,7 @@ def test_deny_does_not_bind():
         "chat_type": "p2p", "sender_open_id": "ou_p2p3", "message_id": "m2",
     }, app_id="cli_p2p3"))
     api2.reply_text.assert_called()
-    from src.session_manager import get_feishu_open_id
+    from src.kernel.session_manager import get_feishu_open_id
     assert get_feishu_open_id("p2puser3") is None
 
 
@@ -131,7 +131,7 @@ def test_group_message_does_not_trigger_bind():
         "chat_type": "group", "sender_open_id": "ou_p2p4", "message_id": "m1",
     }, app_id="cli_p2p4"))
     # 群聊不应发确认消息（reply_text 可能被后续逻辑调用，此处断言不出现确认文案）
-    from src.session_manager import get_feishu_open_id
+    from src.kernel.session_manager import get_feishu_open_id
     assert get_feishu_open_id("p2puser4") is None
     calls = [c.args[2] for c in api.reply_text.call_args_list if len(c.args) > 2]
     assert not any("GitCode" in t or "确认" in t for t in calls)
@@ -140,11 +140,11 @@ def test_group_message_does_not_trigger_bind():
 def test_already_bound_no_requery():
     """已绑定后不再发确认询问"""
     import asyncio
-    from src.session_manager import set_feishu_open_id
+    from src.kernel.session_manager import set_feishu_open_id
     _seed_user_and_bot("p2puser5", "cli_p2p5", 70005)
     set_feishu_open_id("", "p2puser5", "ou_existing")
     # 补写 app_id（feishu-app-scoped-openid-fix：get_feishu_open_id 按 app_id 过滤）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.cursor().execute("UPDATE unified_user_mapping SET app_id='cli_p2p5' WHERE gitcode_user='p2puser5'")
         db.commit()
@@ -154,7 +154,7 @@ def test_already_bound_no_requery():
     }, app_id="cli_p2p5"))
     calls = [c.args[2] for c in api.reply_text.call_args_list if len(c.args) > 2]
     assert not any("GitCode" in t or "确认" in t for t in calls)
-    from src.session_manager import get_feishu_open_id
+    from src.kernel.session_manager import get_feishu_open_id
     assert get_feishu_open_id("p2puser5") == "ou_existing"
 
 
@@ -166,7 +166,7 @@ def test_oauth_login_empty_open_id_preserves_binding():
     应保留已有 open_id，仅刷新昵称。
     """
     import asyncio
-    from src.session_manager import set_feishu_open_id, get_feishu_open_id, db, db_lock
+    from src.kernel.session_manager import set_feishu_open_id, get_feishu_open_id, db, db_lock
     _seed_user_and_bot("p2puser6", "cli_p2p6", 70006)
     # 1) 飞书确认绑定 open_id
     set_feishu_open_id("", "p2puser6", "ou_p2p6_bind", feishu_name="飞书昵称", gitcode_nickname="旧昵称")
@@ -186,7 +186,7 @@ def test_oauth_login_empty_open_id_preserves_binding():
 def test_set_feishu_open_id_empty_no_existing_creates_without_open_id():
     """无已有绑定时，空 open_id 写入映射（不报错，open_id 留空）——OAuth 首次登录建行"""
     import asyncio
-    from src.session_manager import set_feishu_open_id, get_feishu_open_id
+    from src.kernel.session_manager import set_feishu_open_id, get_feishu_open_id
     _seed_user_and_bot("p2puser7", "cli_p2p7", 70007)
     set_feishu_open_id("", "p2puser7", "", "", gitcode_nickname="昵称7")
     assert get_feishu_open_id("p2puser7") in (None, ""), "无绑定时空 open_id 不产生 open_id"

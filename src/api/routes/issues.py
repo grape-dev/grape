@@ -19,7 +19,7 @@ from fastapi import APIRouter, HTTPException, Depends, Query, File, UploadFile
 from pydantic import BaseModel
 
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
-from src.config import log
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
                                    _review_pass, _review_reject, _set_issue_pending_review)
@@ -54,7 +54,7 @@ def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
 
 def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     items = []
     placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
@@ -146,7 +146,7 @@ def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
 
 
 def _repo_key_of(owner: str, repo: str) -> str:
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     return to_repo_key(f"{owner}/{repo}")
 
 
@@ -157,7 +157,7 @@ def _repo_keys_of(owner: str, repo: str) -> list[str]:
     DB 中数据存为 github: 前缀，但前端传入的 owner/repo 无 provider 信息，
     _repo_key_of 默认返回 gitcode: 前缀会漏查 GitHub 仓库数据。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
     repo_key = to_repo_key(_owner_repo)
     keys = [repo_key]
@@ -175,7 +175,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
     `issue_state` 仅作停写过渡期兜底。
     numbers（Issue #542）：可选 issue_number 集合，非空时按集合收窄（列表页只富化返回集合）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     _num_clause = ""
@@ -238,7 +238,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
 
 def _task_status_map(repo_keys: list[str]) -> dict:
     """仓库内 issue_number → tasks.status（任务中心状态）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     with db_lock:
@@ -262,7 +262,7 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     收窄（events 表 issue_id 规范写路径恒为 `#N`；`#pr_` 伪 ID 由
     _query_pr_subscription_events 独立处理，不受影响）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     _num_clause = ""
@@ -437,7 +437,7 @@ async def start_issue(issue_id: int, user: dict = Depends(require_no_session_tok
     user_only：纯前端导航预检（确认可访问 + 取当前状态），Agent 执行期（tk_ 会话）无此场景；
     与周边操作类端点（confirm-done/cancel/resume/clarify 等）保持一致，收缩暴露面。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT user_id, status FROM issue WHERE id=?", (issue_id,))
@@ -452,7 +452,7 @@ async def start_issue(issue_id: int, user: dict = Depends(require_no_session_tok
 @router.get("/{issue_id}/status", operation_id="issues_status_get", summary="Query issue status (polling)", description="Returns the Issue status with context for CLI 'grape issues wait' polling.")
 def get_issue_status(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """返回 Issue 当前状态（含 repo/issue 上下文），供 CLI `grape issues wait` 轮询至终态。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -482,7 +482,7 @@ def change_issue_status(issue_id: int, body: _IssueStatusBody, user: dict = Depe
     脱钩→冲突/不一致，干扰任务执行。故仅用户（JWT / grape_）可改；读（GET /status，轮询 wait 用）保持 dual。
     """
     from src.api.issues_center import _TASK_STATUS_FLOWS
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ns = (body.status or "").strip()
     if ns not in _TASK_STATUS_FLOWS:
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"非法状态: {ns}"})
@@ -556,7 +556,7 @@ def _close_vcs_issues(repo_key: str, issue_number, user: dict) -> dict:
 
 def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_github: bool) -> str:
     """对单个 repo_key 执行幂等关闭 Issue，返回 success/failed/skipped。"""
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     if not owner or not repo:
         return "skipped"
@@ -657,8 +657,8 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
     通过 full_name 匹配。找不到返回空串。
     """
     try:
-        from src.repo_key import split_owner_repo
-        from src.session_manager import db, db_lock
+        from src.kernel.repo_key import split_owner_repo
+        from src.kernel.session_manager import db, db_lock
         owner, repo = split_owner_repo(repo_key)
         if not owner or not repo:
             return ""
@@ -677,7 +677,7 @@ def _find_github_mirror_repo_key(repo_key: str) -> str:
 async def confirm_issue_done(issue_id: int, body: _IssueConfirmBody, user: dict = Depends(require_no_session_token)):
     """开发者确认需求完成：status→completed、stage→done（任意阶段可确认，终态幂等）。"""
     from src.api.session_store import set_issue_stage
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, issue_number, status FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
@@ -714,7 +714,7 @@ def _sync_issue_pipeline_terminal(repo_key: str, issue_id_num) -> int:
     残留 running 属于脏状态，直接收敛，避免误杀仍在写回的引擎）。
     返回收敛的任务数。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _issue_id = f"#{issue_id_num}" if issue_id_num else ""
     if not _issue_id:
         return 0
@@ -758,7 +758,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
     """
     from src.api.session_store import set_issue_stage
     from src.auth.repo_roles import get_repo_admin_identity
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 1) 定位需求（admin 可跨归属确认，仅要求仓库访问权）
     with db_lock:
@@ -826,7 +826,7 @@ async def admin_confirm_issue_done(issue_id: int, user: dict = Depends(require_n
 @router.post("/{issue_id}/cancel", operation_id="issues_cancel", summary="Cancel issue (stop pipeline)", description="Developer cancels the requirement from any stage: terminates agents and stops the pipeline.")
 async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """开发者取消需求：任何阶段可取消，Agent 终止 + 流水线停止。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
@@ -880,7 +880,7 @@ async def cancel_issue(issue_id: int, user: dict = Depends(require_no_session_to
 async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_token)):
     """恢复已取消的需求：回到取消前 stage 继续流转。"""
     from src.api.session_store import get_issue_stage
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT status, repo_key, issue_number FROM issue WHERE id=? AND (user_id=? OR user_id=0)",
@@ -923,7 +923,7 @@ async def resume_issue(issue_id: int, user: dict = Depends(require_no_session_to
             set_issue_stage(repo_key, _issue_id, _resume_stage, "resume")
             try:
                 import urllib.request, json as _json
-                from src.prompt_builder import _resolve_server_url
+                from src.kernel.prompt_builder import _resolve_server_url
                 _a2a_url = _resolve_server_url() + "/api/a2a"
                 _a2a_payload = _json.dumps({
                     "agent": _resume_stage,
@@ -952,7 +952,7 @@ async def get_issue_pipeline_by_id(issue_id: int, user: dict = Depends(require_n
     from src.api.event_store import get_events
     from src.api.pipeline_config import get_pipeline_config
     from src.api.session_store import get_issue_stage, get_issue_scene
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # 仓库全部视图下，用户可以看到其他人的 Issue
@@ -1034,7 +1034,7 @@ class IssueHandoffBody(BaseModel):
 
 def _load_issue_repo_scene(issue_id: int) -> tuple[str, int, str]:
     """按 issue.id 取 (repo_key, issue_number, current_scene_id)；不存在 → 404。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, issue_number, scene_id FROM issue WHERE id=?", (issue_id,))
@@ -1147,7 +1147,7 @@ async def handoff_issue(issue_id: int, body: IssueHandoffBody,
 async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_no_session_token)):
     """拉取 agent 在该 Issue 上的澄清消息。"""
     from src.api.issues_center import _get_task_issue_info, _find_agent_task_ids
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     info = _get_task_issue_info(issue_id)
     if not info:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
@@ -1177,7 +1177,7 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
             messages.append(msg)
     conv_messages = []
     if conv_id:
-        from src.session_manager import get_messages
+        from src.kernel.session_manager import get_messages
         conv_messages = get_messages(conv_id, limit=30)
     _issue_host = "github.com" if repo_key.startswith("github:") else "gitcode.com"
     return {"messages": messages, "conversation_id": conv_id,
@@ -1199,7 +1199,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     """
     from src.api.issues_center import (_ensure_task_conversation, _get_feishu_open_id,
                                        _resolve_user_chat_bot, _run_awaiting_notify)
-    from src.session_manager import db as _db, db_lock as _dl, get_chat_config
+    from src.kernel.session_manager import db as _db, db_lock as _dl, get_chat_config
 
     questions = (body.questions or "").strip()
     if not questions:
@@ -1223,7 +1223,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                                        "hint": "awaiting-input 需传需求卡片 id（GRAPE_ISSUE_ID，issue 表主键），非 Issue number；可先 grape issues detail --number $ISSUE_NUMBER --json-out 取 id"})
     issue_card_id, repo_key, issue_number = irow[0], irow[1] or "", irow[2] or 0
     assignee, issue_user_id, title, cur_status = irow[3] or "", irow[4] or 0, irow[5] or "", irow[6] or ""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     if to_repo_key(repo_key) != to_repo_key(session_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     if cur_status in ("completed", "cancelled"):
@@ -1274,7 +1274,7 @@ _DEV_OPS_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
 def _session_devops_issue(issue_id: int, user: dict) -> dict:
     """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈devops；issue.repo_key==token.repo_key；返回 issue 行。"""
-    from src.session_manager import db as _db, db_lock as _dl
+    from src.kernel.session_manager import db as _db, db_lock as _dl
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期）"})
     _agent = user.get("agent_type") or ""
@@ -1289,7 +1289,7 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
         _r = c.fetchone()
     if not _r:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
@@ -1303,7 +1303,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""
     from src.api.issues_center import _ensure_task_conversation
-    from src.session_manager import db as _db, db_lock as _dl, add_message as _add
+    from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _add
 
     review_points = (body.review_points or "").strip()
     if not review_points:
@@ -1318,7 +1318,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
             conv_id = _ensure_task_conversation(it["user_id"], it["repo_key"], it["issue_number"], it["title"], "",
                                                 write_context_on_reuse=False)
             if conv_id:
-                from src.repo_key import from_repo_key
+                from src.kernel.repo_key import from_repo_key
                 _refs = (body.references or "").strip()
                 _msg = (f"🔎 需要你审核确认 · Issue #{it['issue_number']}\n\n"
                         f"仓库: {from_repo_key(it['repo_key'])}\n\n"
@@ -1335,7 +1335,7 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
         try:
             from src.api.issues_center import (_get_feishu_open_id, _get_feishu_open_id_by_user_id,
                                                _resolve_user_chat_bot, _run_pending_review_notify)
-            from src.session_manager import get_chat_config
+            from src.kernel.session_manager import get_chat_config
             _open_id = _get_feishu_open_id_by_user_id(it["user_id"]) or _get_feishu_open_id(it["assignee"], it.get("repo_key", ""))
             from src.api import main as api_main
             bm = api_main.bot_manager
@@ -1392,7 +1392,7 @@ class _IssueClarifyBody(BaseModel):
 async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Depends(require_no_session_token)):
     """开发者在需求中心回复 agent 澄清：同步发 GitCode Issue 评论 + 写入任务会话。"""
     from src.api.issues_center import _get_task_issue_info
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     msg = (body.message or "").strip()
     if not msg:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "消息不能为空"})
@@ -1404,18 +1404,18 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
     if _is_github:
         # Issue #343: GitHub 写操作走仓库 bot token
         from src.user.db import get_github_token
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         api_token = get_github_token(repo_key=to_repo_key(repo_key, provider="github"))
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 GitHub Bot Token 未配置"})
     else:
         # Issue #343: GitCode 写操作走仓库 bot token（跳过 agent session token）
         from src.user.db import get_repo_bot_token
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         api_token = get_repo_bot_token(repo_key=to_repo_key(repo_key))
         if not api_token:
             raise HTTPException(status_code=400, detail={"code": 400, "error_code": "TOKEN_NOT_BOUND", "message": "仓库 Bot Token 未配置"})
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
     comment_body = f"💬 **开发者澄清**\n\n{msg}"
     if _is_github:
@@ -1425,8 +1425,8 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
                         api_token, {"body": comment_body})
             # Issue #453 台账（S19-4）：GitHub 澄清评论入账——响应 dict 带 comment id
             try:
-                from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-                from src.repo_key import to_repo_key
+                from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+                from src.kernel.repo_key import to_repo_key
                 record_outbound("github", to_repo_key(f"{owner}/{rname}", "github"), "issue_comment",
                                 extract_content_id(_gh_resp, "issue_comment") if isinstance(_gh_resp, dict) else "",
                                 issue_number=str(issue_number), content_hash=content_hash_md5(comment_body))
@@ -1451,8 +1451,8 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
                     # Issue #453 代发台账（写点5/7）：澄清评论入账——响应读出后取 ID，不再丢弃
                     try:
                         import json as _lj
-                        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-                        from src.repo_key import to_repo_key
+                        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+                        from src.kernel.repo_key import to_repo_key
                         _parsed = _lj.loads(_raw) if _raw.strip() else {}
                         _cid = extract_content_id(_parsed, "issue_comment") if isinstance(_parsed, dict) else ""
                         record_outbound("gitcode", to_repo_key(f"{_owner}/{_rname}", "gitcode"),
@@ -1480,7 +1480,7 @@ async def clarify_issue(issue_id: int, body: _IssueClarifyBody, user: dict = Dep
                                                          "message": f"GitCode 评论失败: {str(e)[:200]}"})
     if conv_id:
         try:
-            from src.session_manager import add_message
+            from src.kernel.session_manager import add_message
             add_message(conv_id, "user", msg)
         except Exception as e:
             log.warning(f"Issue clarify: write conversation message failed: {e}")
@@ -1498,8 +1498,8 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
                                   user: dict = Depends(require_no_session_token)):
     """上传附件到需求关联的附件目录。"""
     from src.api.issues_center import (_attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE)
-    from src.repo_key import split_owner_repo
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import split_owner_repo
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (issue_id,))
@@ -1527,8 +1527,8 @@ async def upload_issue_attachment(issue_id: int, file: UploadFile = File(...),
 def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """列出需求关联的附件文件列表。"""
     from src.api.issues_center import _attach_list
-    from src.repo_key import split_owner_repo
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import split_owner_repo
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, issue_number FROM issue WHERE id=?", (issue_id,))
@@ -1547,8 +1547,8 @@ def list_issue_attachments(issue_id: int, user: dict = Depends(get_current_user_
 def delete_issue_attachment(issue_id: int, filename: str, user: dict = Depends(require_no_session_token)):
     """删除指定附件文件。filename 为 UUID 文件名。"""
     from src.api.issues_center import _attach_delete
-    from src.repo_key import split_owner_repo
-    from src.session_manager import db, db_lock
+    from src.kernel.repo_key import split_owner_repo
+    from src.kernel.session_manager import db, db_lock
     import re
     if not re.match(r'^[0-9a-f]{32}\.\w+$', filename):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
@@ -1574,7 +1574,7 @@ async def pre_upload_attachment(file: UploadFile = File(...),
                                 user: dict = Depends(require_no_session_token)):
     """创建 Issue 前的临时附件上传。文件存到 pending 目录，创建时按 safe_name 列表精确关联。"""
     from src.api.routes.tasks import _attach_save, _ATTACH_ALL_EXTS, _ATTACH_MAX_SIZE
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     rk = to_repo_key(repo_key)
     if not rk:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "repo_key 必填"})
@@ -1598,7 +1598,7 @@ def pre_delete_attachment(filename: str, repo_key: str = "",
                           user: dict = Depends(require_no_session_token)):
     """删除 pending 里的临时附件。"""
     from src.api.routes.tasks import _attach_delete
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     import re
     if not re.match(r'^[0-9a-f]{32}\.\w+$', filename):
         raise HTTPException(status_code=400, detail={"code": 400, "message": "非法文件名"})
@@ -1624,7 +1624,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     组织隔离：非个人组织只返回 org_id 匹配的 issue。
     """
     from src.api.issues_center import _query_tasks, _build_assignee_filter
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     from src.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
@@ -1709,7 +1709,7 @@ def list_repo_issues(owner: str, repo: str,
     _page_row_count = None
     if per_page > 0:
         # ---- 真分页：COUNT + LIMIT/OFFSET ----
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         try:
             with db_lock:
                 c = db.cursor()

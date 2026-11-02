@@ -21,7 +21,7 @@ def _fresh_imports():
 
 
 def _reset_db():
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     with sm.db_lock:
         c = sm.db.cursor()
         c.execute("DELETE FROM session_api_tokens")
@@ -31,7 +31,7 @@ def _reset_db():
 
 def _seed():
     import json
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     with sm.db_lock:
         c = sm.db.cursor()
         c.execute(
@@ -44,16 +44,16 @@ def _seed():
 
 
 def _make_session_token():
-    import src.api.auth_token as at
+    import src.kernel.auth_sdk.auth_token as at
     tk = at.create_session_token("k-1", "gitcode:acme/repo1", "vod", 1) if hasattr(at, "create_session_token") else None
     if tk:
         return tk
     # fallback: 手工插行
     import hashlib, time, secrets
     tok = "tk_" + secrets.token_urlsafe(24)
-    with __import__("src.session_manager", fromlist=["db"]).db_lock as _:
+    with __import__("src.kernel.session_manager", fromlist=["db"]).db_lock as _:
         pass
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     with sm.db_lock:
         c = sm.db.cursor()
         c.execute(
@@ -67,7 +67,7 @@ def _make_session_token():
 
 
 def _client():
-    import src.api.auth_token as at
+    import src.kernel.auth_sdk.auth_token as at
     _fresh_imports()
     import src.api.main as m
     importlib.reload(m)

@@ -22,12 +22,12 @@ def _resolve_repo_key(repo: str, strict: bool = False) -> str:
     "可处置的明确指引"），防止覆盖上传写错 provider 行。读路径（list/search/
     download）保持原 LIMIT 1 行为不变——读错列表无数据损害，收窄修复范围。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(repo)
     if ":" in repo:
         return rk
     try:
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         with _dl:
             c = _db.cursor()
             rows = c.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
@@ -77,8 +77,8 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
     page/page_size：分页参数，page_size=0 时不分页（返回全部，兼容旧逻辑）。
     扩展返回字段：is_featured, like_count, liked_by_me, scene_count, repo_count, scenes, category_id, category_name
     """
-    from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
     from src.user.db import (batch_skill_liked, get_skill_usage_stats,
                              batch_skill_scenes, list_skill_categories)
 
@@ -220,7 +220,7 @@ def list_skills(user: dict = Depends(require_org_member), repo: str = "", scope:
 @router.post("/{skill_id}/like", operation_id="skills_like_toggle", summary="Toggle skill like", description="Toggles a skill like.")
 def toggle_skill_like(skill_id: int, user: dict = Depends(require_no_session_token)):
     """点赞 toggle：已赞→取消，未赞→点赞"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.user.db import toggle_skill_like as _toggle
 
     # 校验技能存在
@@ -270,7 +270,7 @@ def list_featured_skills(user: dict = Depends(require_no_session_token), limit: 
     # 精选技能按 admin 管理台设置的顺序排列
     if skills:
         try:
-            from src.featured_order import get_featured_order
+            from src.kernel.featured_order import get_featured_order
             _order = get_featured_order("skill")
             if _order:
                 _order_map = {sid: i for i, sid in enumerate(_order)}
@@ -290,7 +290,7 @@ def get_agent_stats(user: dict = Depends(require_no_session_token), scope: str =
     user_only：仅 Web UI / 用户级调用方消费（skills.js 页面统计），Agent 执行期无此场景；
     且 tk_ 会话 token 的 user_id 在仓库身份下为 0，scope=user 过滤 owner_id=0 亦无可达数据——故禁 session。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     repo_key = _resolve_repo_key(repo) if repo else ""
     conditions = ["is_active=1"]
@@ -362,7 +362,7 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
     不调 LLM（第一期简单实现）——分词后匹配技能描述。
     返回 [{skill_id, name, display_name, description, category_id, category_name, match_reason}]
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.user.db import list_skill_categories
 
     q = (q or "").strip()
@@ -445,7 +445,7 @@ def search_skills(q: str = "", user: dict = Depends(require_no_session_token)):
 @router.get("/template")
 def download_skill_template():
     """下载技能模板 ZIP（skills/_template 目录打包）。免鉴权（token 通过 query 传递）。"""
-    from src.config import SKILLS_DIR
+    from src.kernel.config import SKILLS_DIR
 
     template_dir = os.path.join(SKILLS_DIR, "_template")
     if not os.path.isdir(template_dir):
@@ -487,8 +487,8 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
     临时签名 URL（300s，不落库），浏览器直连 OBS 下载；local 模式返回 zip 文件流。
     官方技能（scope=official）为部署内置物，未转集群不提供下载。
     """
-    from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key, from_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key, from_repo_key
     repo_key = _resolve_repo_key(repo) if repo else ""
     with db_lock:
         c = db.cursor()
@@ -535,8 +535,8 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
 
     权限校验：official 可见；user 需本人；repo 需当前用户托管该仓库。
     """
-    from src.session_manager import db, db_lock
-    from src.config import SKILLS_DIR
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.config import SKILLS_DIR
 
     with db_lock:
         c = db.cursor()
@@ -613,7 +613,7 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
     if scope in ("user", "repo"):
         raise HTTPException(status_code=503, detail={"code": 503, "message": "OBS 存储未启用，技能详情获取失败。请检查服务端 OBS 配置后重试。"})
     # official 技能：目录在代码仓库中，两台机器都有，保留磁盘读取
-    from src.config import resolve_official_skill_path
+    from src.kernel.config import resolve_official_skill_path
     _r = resolve_official_skill_path(row[0])
     if _r:
         skill_path = _r
@@ -664,7 +664,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
     if user.get("auth_type") == "session_token":
         if scope != "repo":
             raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 仅支持上传仓库技能（scope=repo）"})
-        from src.repo_key import split_owner_repo
+        from src.kernel.repo_key import split_owner_repo
         _tok_owner, _tok_repo = split_owner_repo(user.get("repo_key") or "")
         if not _tok_owner or split_owner_repo(repo) != (_tok_owner, _tok_repo):
             raise HTTPException(status_code=403, detail={"code": 403, "message": "无权上传到该仓库技能（仓库作用域不匹配）"})
@@ -729,15 +729,15 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
         description = fm.get("description", "") or ""
 
         import shutil
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         # ===== OBS/本地存储分支（N4）：规范化重打包 → 存固定 key（原子覆盖）→ DB upsert → 缓存 =====
-        from src.config import log
+        from src.kernel.config import log
         from src.storage import get_skill_storage
         storage = get_skill_storage()
         if storage is not None:
             from src.storage import skill_key, zip_cache_put, mem_cache_invalidate
             from src.user.db import upsert_skill_obs
-            from src.repo_key import to_repo_key
+            from src.kernel.repo_key import to_repo_key
             owner = _resolve_repo_key(repo, strict=True) if scope == "repo" else str(user["id"])
             db_scope = "repo" if scope == "repo" else "user"
             try:
@@ -787,8 +787,8 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
 
     权限校验：official 不允许删除；user 需本人；repo 需当前用户托管该仓库。
     """
-    from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
 
     with db_lock:
         c = db.cursor()
@@ -836,7 +836,7 @@ def delete_skill_by_id(skill_id: int, user: dict = Depends(require_no_session_to
         db.commit()
 
     if storage is None:
-        from src.config import log
+        from src.kernel.config import log
         log.warning("存储后端不可用，仅清理 DB 记录，对象文件需手动清理 (skill_id=%s, scope=%s, name=%s)", skill_id, skill_scope, skill_name)
 
     if object_key:
@@ -867,7 +867,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
     原行，保留 id/场景引用/点赞）；不一致返回 400 明确指引。
     agent_type / category_id 可选，缺省沿用原记录值。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 1. 查既有记录（按主键 id 精确）
     with db_lock:
@@ -963,7 +963,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
         description = fm.get("description", "") or ""
 
         # 5. 存储写序（对齐 #444：留存旧字节 → 覆盖 → upsert → 失败回滚 → 缓存失效）
-        from src.config import log
+        from src.kernel.config import log
         from src.storage import get_skill_storage
         storage = get_skill_storage()
         if storage is None:
@@ -1023,11 +1023,11 @@ def convert_skill(body: ConvertSkillRequest, user: dict = Depends(require_no_ses
     if source_scope not in ("user", "repo"):
         raise HTTPException(status_code=400, detail={"code": 400, "message": f"不支持的 source_scope: {source_scope}"})
 
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     repo_key = _resolve_repo_key(repo, strict=True)  # 写路径（convert）：歧义显式报错（#444 根治）
     user_id = str(user["id"])
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 1. 查源技能记录
     if source_scope == "user":
@@ -1129,7 +1129,7 @@ def _get_sub_skill_zip(skill_id: int, skill_name: str) -> bytes | None:
 @router.get("/{skill_id}/sub", operation_id="skills_sub_list", summary="List sub-skills of a skill package", description="Lists a skill package's sub-skills from the references/ directory.")
 def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包的子技能列表（从 skill_path 的 references/ 目录读取）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import re as _re
 
     with db_lock:
@@ -1140,7 +1140,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
     skill_name, skill_path = row[0], row[1] or ""
-    from src.config import SKILLS_DIR, resolve_official_skill_path
+    from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
     _r = resolve_official_skill_path(skill_name)
     if _r:
         base_dir = os.path.dirname(_r)
@@ -1201,7 +1201,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
 @router.get("/{skill_id}/sub/{sub_name}", operation_id="skills_sub_get", summary="Read sub-skill SKILL.md", description="Reads a sub-skill's SKILL.md content.")
 def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """读取技能包子技能的 SKILL.md 内容"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()
@@ -1210,7 +1210,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "技能未找到"})
 
-    from src.config import SKILLS_DIR, resolve_official_skill_path
+    from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
     _r = resolve_official_skill_path(row[0])
     if _r:
         base_dir = os.path.dirname(_r)
@@ -1257,7 +1257,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
 @router.get("/package-sub/{pkg_id}/{sub_name}", operation_id="skills_package_sub_get", summary="Get sub-skill detail from package", description="Returns a sub-skill detail from a package (same shape as skill detail).")
 def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_current_user_or_api_key)):
     """返回技能包子技能详情（格式与 skill detail 一致，支持导航到独立详情页）"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import re as _re
 
     with db_lock:
@@ -1267,7 +1267,7 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
     if not row:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "父技能未找到"})
 
-    from src.config import SKILLS_DIR, resolve_official_skill_path
+    from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
     _r = resolve_official_skill_path(row[0])
     if _r:
         base_dir = os.path.dirname(_r)

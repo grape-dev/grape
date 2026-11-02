@@ -3,7 +3,7 @@ import json, os, time
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-from src.config import log
+from src.kernel.config import log
 from src.api.deps import get_user_or_none
 from src.api.event_pipeline import run_pipeline
 
@@ -45,10 +45,10 @@ def _handle_repo_deleted(repo: str, provider: str, trigger_detail: str) -> dict:
 
     与平台侧"解除托管"等价：cascade_cleanup_repo_data + 移除 managed_repos。
     """
-    from src.repo_key import to_repo_key
-    from src.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
+    from src.kernel.repo_key import to_repo_key
+    from src.kernel.repo_cleanup import cascade_cleanup_repo_data, RepoCleanupError
     from src.user import db as user_db
-    from src.session_manager import db as _db, db_lock
+    from src.kernel.session_manager import db as _db, db_lock
 
     repo_key = to_repo_key(repo, provider=provider)
     owner, _, repo_name = repo.partition("/")
@@ -92,7 +92,7 @@ def _has_active_a2a_event(repo_key: str, issue_id: str, agent_type: str,
     scene_id 提供时限定跨流水线目标场景。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             if scene_id:
@@ -122,7 +122,7 @@ def _a2a_source_event_seq(session_info) -> int:
     """
     try:
         if session_info and session_info.get("session_key"):
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT event_seq FROM agent_tasks WHERE id=? LIMIT 1",
@@ -143,7 +143,7 @@ async def _on_handoff_dispatch(event):
     """
     import asyncio
     from src.api.pipeline_executor import dispatch_node
-    from src.config import log
+    from src.kernel.config import log
 
     payload = event.payload or {}
     target_agent = payload.get("target_agent", event.agent_type)
@@ -395,13 +395,13 @@ def _resolve_a2a_repo_key(repository: str) -> str:
     POST /api/a2a 与 GET /api/a2a/status 共用，保证两端点指纹/幂等键的
     repo_key 维度一致（否则 github 托管仓无前缀传入时核对接口假阴性）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     if not repository:
         return ""
     if ":" in repository:
         return to_repo_key(repository)
     try:
-        from src.session_manager import db as _pdb, db_lock as _pdb_lock
+        from src.kernel.session_manager import db as _pdb, db_lock as _pdb_lock
         with _pdb_lock:
             _pc = _pdb.cursor()
             _pc.execute("SELECT repo_key FROM managed_repos WHERE repo_key IN (?, ?)",
@@ -436,7 +436,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
         log.warning("A2A: missing repository, reject")
         raise HTTPException(status_code=400, detail={"code": 400, "message": "missing repository in payload"})
     from src.user.db import get_repo_bot_token_no_global
-    from src.api.auth_token import verify_session_token, verify_session_token_for_repo
+    from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
     _expected = get_repo_bot_token_no_global(repo_key) or ""
     _bot_ok = bool(_expected) and _auth == _expected
     # 严格匹配：会话 token 绑定仓库 == 目标仓库 → 返回 info（可反查调用方身份）
@@ -467,7 +467,7 @@ def _authorize_a2a(request: Request, repo_key: str) -> dict | None:
                 pass
             # 检查 2: 目标仓库是会话仓库的关联仓库（查场景 linked_repos）
             try:
-                from src.session_manager import db, db_lock
+                from src.kernel.session_manager import db, db_lock
                 import json as _json
                 with db_lock:
                     c = db.cursor()
@@ -549,10 +549,10 @@ def _refresh_issue_scene_after_handoff(repo_key: str, issue_number: str, target_
     移交主流程已通过 get_pipeline_config 兜底口径校验节点，这里仅收紧
     DB 作用域的绑定刷新，不阻断移交）。
     """
-    from src.config import log
+    from src.kernel.config import log
     effective_scene_id = ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -597,7 +597,7 @@ def _cross_pipeline_handoff(
     {"ok": False, "error": "<skip reason>"} on interception.
     """
     from src.api.pipeline_config import get_pipeline_config
-    from src.config import log
+    from src.kernel.config import log
 
     # 1. Validate target scene exists and contains the target_node
     target_cfg = get_pipeline_config(target_scene_id, repo_key=repo_key)
@@ -626,7 +626,7 @@ def _cross_pipeline_handoff(
     _old_assignee = ""
     try:
         from src.api.session_store import set_issue_scene, set_issue_stage
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _issue_key = f"#{issue_number}"
         _issue_num = int(issue_number)
         # Read current assignee BEFORE writing (audit trail needs the old value)
@@ -655,7 +655,7 @@ def _cross_pipeline_handoff(
     _cc = carried_context if isinstance(carried_context, dict) else {}
     if _cc:
         try:
-            from src.session_manager import db as _sdb, db_lock as _sdl
+            from src.kernel.session_manager import db as _sdb, db_lock as _sdl
             _cc_json = json.dumps(_cc)
             with _sdl:
                 _sc = _sdb.cursor()
@@ -862,7 +862,7 @@ async def a2a_status_endpoint(request: Request,
 
     import hashlib as _hashlib
     import json as _json
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     events: list = []
     try:
         with db_lock:
@@ -947,7 +947,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # 不让错误内容流入鉴权后的异步派发链路。查表异常时跳过（依赖下游场景节点检查兜底），
     # 避免表结构问题阻断正常 A2A。
     try:
-        from src.session_manager import db as _mr_db, db_lock as _mr_lock
+        from src.kernel.session_manager import db as _mr_db, db_lock as _mr_lock
         with _mr_lock:
             _mr_c = _mr_db.cursor()
             _mr_c.execute("SELECT 1 FROM managed_repos WHERE repo_key=? LIMIT 1", (repo_key,))
@@ -1008,7 +1008,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # Issue #51: cancelled 任务的 A2A 信号一律拒绝（防止取消后流水线继续流转）
         if issue_number and repo_key:
             try:
-                from src.session_manager import db as _ck_db, db_lock as _ck_lock
+                from src.kernel.session_manager import db as _ck_db, db_lock as _ck_lock
                 with _ck_lock:
                     _ck_c = _ck_db.cursor()
                     _ck_c.execute("SELECT status FROM issue WHERE repo_key=? AND issue_number=? AND status='cancelled' LIMIT 1",
@@ -1053,7 +1053,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         #   session token 通道（agent CLI 调用）可反查；bot token 通道（服务端 resume/redispatch）无身份，放行
         if _a2a_session_info and _a2a_session_info.get("session_key"):
             try:
-                from src.session_manager import db as _prsub_db, db_lock as _prsub_lock
+                from src.kernel.session_manager import db as _prsub_db, db_lock as _prsub_lock
                 _caller_task_id = _a2a_session_info["session_key"]
                 with _prsub_lock:
                     _prsub_c = _prsub_db.cursor()
@@ -1111,7 +1111,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         })
     try:
         from src.api.event_pipeline import _execute_agent
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         backend = ""
         runtime_id = 0
         skill_name = ""
@@ -1484,7 +1484,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
         # engine_id=0：auto/direct 兜底 → 自动选本机在线引擎
         if not engine_id:
             try:
-                from src.session_manager import db as _edb, db_lock as _edl
+                from src.kernel.session_manager import db as _edb, db_lock as _edl
                 with _edl:
                     _ec = _edb.cursor()
                     _ec.execute("SELECT id, name FROM agent_runtimes WHERE status='online' AND healthy=1 ORDER BY CASE name WHEN 'opencode' THEN 0 WHEN 'codearts' THEN 1 ELSE 2 END LIMIT 1")

@@ -8,7 +8,7 @@ import os
 
 import pytest
 
-import src.mysql_compat as mc
+import src.kernel.mysql_compat as mc
 
 
 @pytest.fixture(autouse=True)

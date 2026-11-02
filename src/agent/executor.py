@@ -1,7 +1,7 @@
 """Agent 执行器：流式子进程调度 (NDJSON)，不绑定具体后端。"""
 import os, subprocess, json, time, signal
 from typing import Generator, AsyncGenerator
-from src.config import log
+from src.kernel.config import log
 from .base import AgentBackend
 from .opencode import OpencodeBackend
 from .codearts import CodeArtsBackend
@@ -98,7 +98,7 @@ def terminate_active_agents(grace_seconds: int = 5):
     # 只有本机 DIRECT 任务（runtime_id=0 或本机引擎 credential_id=0）的子进程确实被
     # 上面的 SIGTERM 杀掉了，照旧标 failed。
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         from src.api.event_store import update_event_complete
         import time as _time
         _now = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime())
@@ -385,7 +385,7 @@ def _stream_hermes_acp(prompt, cwd, session_id, event_type, backend,
 
     # 技能路径占位符替换（direct 模式：按 skills/<agent_type>/<skill>/ 结构解析）
     try:
-        from src.config import replace_skill_dir_placeholders
+        from src.kernel.config import replace_skill_dir_placeholders
         prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
@@ -453,7 +453,7 @@ def _stream_hwcloud_acp(prompt, cwd, session_id, event_type, backend,
 
     # 技能路径占位符替换（direct 模式）
     try:
-        from src.config import replace_skill_dir_placeholders
+        from src.kernel.config import replace_skill_dir_placeholders
         prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
@@ -529,7 +529,7 @@ def _assemble_env(env: dict, *, kind: str, label: str = "",
     # VCS API base URL + 名称注入（skill 中 $VCS_API_BASE 引用，适配多 VCS provider）
     if repo_key:
         try:
-            from src.prompt_builder import _vcs_api_base, _vcs_name
+            from src.kernel.prompt_builder import _vcs_api_base, _vcs_name
             env["VCS_API_BASE"] = _vcs_api_base(repo_key)
             env["VCS_NAME"] = _vcs_name(repo_key)
         except Exception as e:
@@ -666,7 +666,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
     # 技能路径占位符：worker 侧已在物化时把 {{SKILL_DIR}} 替换为随任务下发的目录；
     # direct（服务端本地）执行在此按 skills/<agent_type>/<skill>/ 结构解析，使 read tool 能找到技能文件。
     try:
-        from src.config import replace_skill_dir_placeholders
+        from src.kernel.config import replace_skill_dir_placeholders
         prompt = replace_skill_dir_placeholders(prompt)
     except Exception:
         pass
@@ -793,7 +793,7 @@ def stream_agent(prompt: str, cwd: str, session_id: str = "",
         # 不进入 sandbox 导入/包装/告警路径，杜绝 wrap failed 刷屏噪音）
         _cmd = [agent_cmd] + args
         try:
-            from src.config import GRAPE_AGENT_SANDBOX as _sbx_on
+            from src.kernel.config import GRAPE_AGENT_SANDBOX as _sbx_on
         except Exception:
             _sbx_on = False
         if _sbx_on:

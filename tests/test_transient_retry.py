@@ -11,7 +11,7 @@ import pytest
 
 import re
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service as svc
 from src.runtime import transient_retry as tr
 
@@ -188,7 +188,7 @@ def test_no_retry_on_terminal_status():
 # ── UC1-3 / UC1-4：attempts 上限与耗尽诊断 ──
 
 def test_retry_exhausted(monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "GRAPE_TRANSIENT_RETRY_MAX", 3)
     _seed_task(attempts=3)
     assert tr.retry_transient_task(TID, -1, "IAM token refresh failed") is False
@@ -201,7 +201,7 @@ def test_retry_exhausted(monkeypatch):
 
 
 def test_backoff_delay_sequence_and_env(monkeypatch):
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "GRAPE_TRANSIENT_RETRY_BASE", 10)
     assert [tr._backoff_delay(n) for n in (0, 1, 2)] == [10, 20, 40]
     assert tr._backoff_delay(10) == 300  # 封顶
@@ -536,8 +536,8 @@ def test_worker_manifest_covers_transient_retry_deps():
     - 若未来清单改为文件枚举去掉目录条目，本测试逼着维护者显式补
       src/runtime/transient_retry.py。
     """
-    import src.worker_package as wp
-    manifest_src = open("src/worker_package.py", encoding="utf-8").read()
+    import src.kernel.worker_package as wp
+    manifest_src = open("src/kernel/worker_package.py", encoding="utf-8").read()
     # MANIFEST 条目（含目录形式）
     entries = set(re.findall(r'"(src/[^"]+)"', manifest_src))
     deps = [
@@ -646,7 +646,7 @@ def test_retry_notify_emits_task_retry_event():
 
 def test_config_constants_module_level():
     """config 常量集中声明（借鉴 PR #573）：模块可导入、默认值正确。"""
-    import src.config as cfg
+    import src.kernel.config as cfg
     assert cfg.GRAPE_TRANSIENT_RETRY_MAX == 3
     assert cfg.GRAPE_TRANSIENT_RETRY_BASE == 10
     assert tr.retry_max() == 3 and tr.retry_base_delay() == 10
@@ -654,7 +654,7 @@ def test_config_constants_module_level():
 
 def test_fail_task_exhausted_writes_classified_summary(monkeypatch):
     """R53：耗尽后判死 → 事件 result 为分类摘要（区分上游抖动）。"""
-    import src.config as cfg
+    import src.kernel.config as cfg
     monkeypatch.setattr(cfg, "GRAPE_TRANSIENT_RETRY_MAX", 0)  # 直接耗尽
     from src.api.event_store import append_event
     seq = append_event(REPO, "issue_opened", title="exhaust403")

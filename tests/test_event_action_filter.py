@@ -18,7 +18,7 @@ def _clean_event_rules():
     """清空 event_action_filter 并注入测试规则（避免依赖真实 seed）。"""
     from src.api import db_setup
     db_setup.init_database()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM event_action_filter WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%' OR repo_key LIKE 'gitcode:org/%' OR repo_key LIKE 'org/%' OR repo_key LIKE 'gitcode:owner/%' OR repo_key LIKE 'owner/%'")
@@ -164,7 +164,7 @@ class TestResolveIssueStageAgent:
             return val
         finally:
             # 清理避免污染下一用例
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 db.cursor().execute("DELETE FROM issue_state WHERE repo_key='gitcode:org/test' AND issue_id=?", (issue_id,))
                 db.commit()

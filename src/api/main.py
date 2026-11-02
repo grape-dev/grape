@@ -26,13 +26,13 @@ def _startup_security_check():
     JWT 密钥校验无条件执行（生产必须强密钥；开发/测试允许进程内随机兜底）；
     其余检查（密钥轮换池、邮件、凭据加密、cookie、redirect_uri）保留生产门禁。
     """
-    from src.config import log
+    from src.kernel.config import log
     from src.auth.security_config import is_production, get_jwt_kid_current, get_jwt_secret_keys, get_credential_keys
 
     errors = []
 
     # 1. JWT 密钥校验——无条件执行（开发/测试随机兜底态放行，其余不安全一律拒绝）
-    from src.api.jwt_utils import validate_jwt_secret
+    from src.kernel.auth_sdk.jwt_utils import validate_jwt_secret
     if not validate_jwt_secret():
         errors.append("JWT_SECRET 不安全：未配置强密钥（生产必须设置 JWT_SECRET 或密钥轮换池）")
 
@@ -88,7 +88,7 @@ def _startup_security_check():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bot_manager
-    from src.config import log
+    from src.kernel.config import log
 
     # 生产环境启动安全门禁
     try:
@@ -140,7 +140,7 @@ async def lifespan(app: FastAPI):
 
         # help.html 生成物：内容由 help/（usage + api）渲染，启动即刷新（改 md 后重启生效）
         try:
-            from src.help_page_gen import generate as _generate_help_page
+            from src.kernel.help_page_gen import generate as _generate_help_page
             _n_help = _generate_help_page()
             log.info(f"Help: help.html regenerated ({_n_help} sources)")
         except Exception as e:
@@ -149,7 +149,7 @@ async def lifespan(app: FastAPI):
         # OpenAPI 契约落盘：help/api/openapi.json（规范副本）+ static/openapi.json（固定下载 URL）
         try:
             from src.api.openapi import custom_openapi
-            from src.help_page_gen import write_openapi_contract
+            from src.kernel.help_page_gen import write_openapi_contract
             _schema = custom_openapi(app)
             _n_paths = write_openapi_contract(_schema)
             log.info(f"OpenAPI: contract dumped ({_n_paths} paths) -> /static/openapi.json")
@@ -157,7 +157,7 @@ async def lifespan(app: FastAPI):
             log.warning(f"OpenAPI: contract dump failed: {e}")
 
         # lease 模式：默认开启（方式 A），BOT_LEASE_DISABLED=true 退回旧模式
-        from src.config import BOT_LEASE_DISABLED
+        from src.kernel.config import BOT_LEASE_DISABLED
         lease_store = None
         if not BOT_LEASE_DISABLED:
             from src.im.bot_lease import BotLeaseStore, generate_instance_id
@@ -410,7 +410,7 @@ async def lifespan(app: FastAPI):
             except Exception:
                 pass
             try:
-                from src.session_manager import db, db_lock
+                from src.kernel.session_manager import db, db_lock
                 _token_hash = _hl.sha256(_hostname.encode()).hexdigest()
                 with db_lock:
                     c = db.cursor()
@@ -484,7 +484,7 @@ async def lifespan(app: FastAPI):
                     except Exception:
                         pass
                     _now = datetime.now(timezone.utc).isoformat()
-                    from src.session_manager import db, db_lock
+                    from src.kernel.session_manager import db, db_lock
                     with db_lock:
                         c = db.cursor()
                         c.execute(
@@ -673,7 +673,7 @@ async def lifespan(app: FastAPI):
                     _purge_i += 1
                     if _purge_i >= 10:
                         _purge_i = 0
-                        from src.api.auth_token import purge_expired_session_tokens
+                        from src.kernel.auth_sdk.auth_token import purge_expired_session_tokens
                         await asyncio.to_thread(purge_expired_session_tokens)
                         # 事件活跃守卫 TTL 兜底清理（进程崩溃未终态释放时自愈）
                         from src.api.event_store import purge_stale_event_guards
@@ -817,7 +817,7 @@ if metrics_enabled():
 # 请求日志：结构化记录 method/path/status/duration/request_id，按状态码分级
 import uuid as _uuid
 import time as _time
-from src.config import request_id_var, repo_var, user_var, log as _log
+from src.kernel.config import request_id_var, repo_var, user_var, log as _log
 
 
 # webhook 路径中的 token 需要 redact（参考 multica redactWebhookPath）
@@ -886,7 +886,7 @@ async def request_id_and_log_middleware(request: Request, call_next):
         try:
             # Issue #372 §14.2.2a: 优先用 JWT 解析 user_id（与依赖层 get_current_user 一致）
             # 注册/登录返回 JWT token，不走 create_session_token → validate_token 内存缓存查不到
-            from src.api.jwt_utils import verify_access_token
+            from src.kernel.auth_sdk.jwt_utils import verify_access_token
             _payload = verify_access_token(_auth[7:])
             if _payload and _payload.get("sub"):
                 _uid = str(_payload["sub"])
@@ -980,10 +980,10 @@ async def request_id_and_log_middleware(request: Request, call_next):
             else:
                 _log.info(msg, extra=extra)
             # 慢请求入库（方案C）
-            from src.config import SLOW_REQUEST_THRESHOLD_MS
+            from src.kernel.config import SLOW_REQUEST_THRESHOLD_MS
             if duration >= SLOW_REQUEST_THRESHOLD_MS:
                 try:
-                    from src.session_manager import db as _sdb, db_lock as _sdbl
+                    from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
                     with _sdbl:
                         _sdb.execute(
                             "INSERT INTO api_latency_log (request_id, method, path, status, duration_ms, repo_key, user_id, source) "
@@ -1048,7 +1048,7 @@ app.openapi = lambda: custom_openapi(app)
 # Issue 附件静态服务（Task Center 上传的文件）
 # 注意：必须在 /static 之前 mount，否则 /static 会拦截 /static/issue_attachments 请求
 # 路径与 tasks.py _attach_base_dir 对齐（基于 WORKSPACE_DIR）
-from src.config import WORKSPACE_DIR as _WS_DIR
+from src.kernel.config import WORKSPACE_DIR as _WS_DIR
 _ISSUE_ATTACH_DIR = os.path.join(_WS_DIR, "..", "data", "issue_attachments")
 os.makedirs(_ISSUE_ATTACH_DIR, exist_ok=True)
 app.mount("/static/issue_attachments", StaticFiles(directory=_ISSUE_ATTACH_DIR), name="issue_attachments")
@@ -1314,13 +1314,13 @@ document.documentElement.classList.remove('i18n-loading');})();
 from src.api.db_setup import init_database
 init_database()
 
-from src.config import _load_accounts
+from src.kernel.config import _load_accounts
 _load_accounts()
 
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    from src.config import log
+    from src.kernel.config import log
     # Issue #380/#395: 异常原文（含 DB/SQL 错误细节）不回显给客户端——原文仅落服务端日志，
     # 响应体返回通用文案 + request_id（便于关联排障）
     log.warning(f"API error ({request.url.path}): {exc}")
@@ -1374,7 +1374,7 @@ async def readiness(request: Request):
     if cached and now < _readiness_cache["expires_at"]:
         return cached
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     checks = {"db": "ok", "tables": "ok"}
     status = "ok"
     http_status = 200
@@ -1437,7 +1437,7 @@ async def health_realtime(request: Request):
     """
     if not _is_loopback(request):
         return JSONResponse(status_code=403, content={"error": "forbidden"})
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.runtime.health import derive_runtime_health
     import time as _time, os as _os
 
@@ -1495,7 +1495,7 @@ def _check_and_sync_templates() -> bool:
     调用 scripts/sync_templates.sh 执行实际同步。
     """
     import os as _os
-    from src.config import log
+    from src.kernel.config import log
 
     _repo_root = _os.path.dirname(_os.path.dirname(_os.path.dirname(_os.path.abspath(__file__))))
     _json_path = _os.path.join(_repo_root, "configs", "project-templates.json")

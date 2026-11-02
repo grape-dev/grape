@@ -12,7 +12,7 @@ from unittest.mock import patch
 
 from src.api import auth_token
 from src.runtime.service import enqueue_task, update_task_status, complete_task, cancel_task
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _seed_session_and_runtime(repo_key="gitcode:o/r", agent_type="vod"):
@@ -127,7 +127,7 @@ def test_direct_mode_issues_and_revokes():
         yield ("step_start", "s")
         yield ("done", {"exit_code": 0, "text": "ok"})
 
-    with patch("src.prompt_builder.build_devops_agent_prompt", return_value="prompt"), \
+    with patch("src.kernel.prompt_builder.build_devops_agent_prompt", return_value="prompt"), \
          patch("src.runtime.executor.stream_devops_agent", side_effect=_fake_stream):
         event_pipeline._execute_agent(
             "gitcode:o/r", 424242, "vod", "opencode", "m2skill",

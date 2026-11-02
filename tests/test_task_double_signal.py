@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src.api import auth_token
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import init_database
 from src.runtime import service
 

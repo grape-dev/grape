@@ -7,7 +7,7 @@
 import json
 from unittest.mock import patch
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
 from src.api import event_store as es
 

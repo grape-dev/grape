@@ -15,8 +15,8 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(SRC_DIR, "data", "test_sessions.db")
 
 
 def _bind_repo(chat_id, repo_key, account):
-    from src.session_manager import db, db_lock
-    from src.repo_key import to_repo_key
+    from src.kernel.session_manager import db, db_lock
+    from src.kernel.repo_key import to_repo_key
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id=?", (chat_id,))
@@ -55,7 +55,7 @@ def test_d4_detect_clean_intent_false():
 
 def test_d5_resolve_repo_from_binding():
     from src.im.handler_async import resolve_repo
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     _bind_repo("oc_d5", "owner/repo", "cli_d5")
     assert resolve_repo("现在如何", "oc_d5", "u1", db, "cli_d5") == "gitcode:owner/repo"
 
@@ -68,7 +68,7 @@ def test_d6_resolve_repo_explicit():
 
 def test_d6b_resolve_repo_bind_intent_wins():
     from src.im.handler_async import resolve_repo
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     _bind_repo("oc_d6b", "already/bound", "cli_d6b")
     # 自然语言绑定意图优先于已绑定仓库
     assert resolve_repo("绑定到 new/repo", "oc_d6b", "u1", db, "cli_d6b") == "new/repo"

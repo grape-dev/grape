@@ -13,7 +13,7 @@ import pytest
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import (
+from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation, get_conversation_by_im,
     update_conversation, add_message, get_messages,
@@ -135,7 +135,7 @@ def test_conversation_list_carries_type_and_issue():
     """T05 数据侧：get_user_conversations 标注 conv_type/issue_number，可区分任务/一般对话"""
     _clean()
     cid = _mk_conv(1, title="Issue #5", conv_type="task", issue_number=5)
-    from src.session_manager import get_user_conversations
+    from src.kernel.session_manager import get_user_conversations
     convs = get_user_conversations(1, repo_key="owner/repo")
     assert any(c["id"] == cid and c["conv_type"] == "task" and c["issue_number"] == 5 for c in convs)
     _clean()

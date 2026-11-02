@@ -24,13 +24,13 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 
 
 def _jwt(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -50,7 +50,7 @@ def _setup():
             _sync_skills_to_db(_json.load(f))
     yield
     # 清理测试用户和技能
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -289,7 +289,7 @@ class TestApiEndpoints:
     def test_featured_returns_category(self):
         headers = self._headers()
         # 手动设一个 official skill 为 featured
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("UPDATE skill SET is_featured=1 WHERE id=(SELECT id FROM skill WHERE scope='official' LIMIT 1)")
@@ -313,7 +313,7 @@ class TestUploadCategoryValidation:
             user = get_grape_account_by_username("test_issue179")
             uid = int(user["id"]) if user else 1
         uid = int(uid)
-        from src.api.jwt_utils import create_access_token
+        from src.kernel.auth_sdk.jwt_utils import create_access_token
         from src.auth.grape_account_db import get_token_version
         token = create_access_token(uid, "test_issue179", get_token_version(uid))
         return {"Authorization": f"Bearer {token}"}

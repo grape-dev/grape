@@ -12,7 +12,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(os.path.dirname(__file__), "..", "da
 class TestEventRouting:
     def _seed(self):
         """确保测试库 agent_type 表有标准的订阅事件映射"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         subscribe_map = {
             "vod": ["vod_signal"],
             "issue": ["issue_opened", "issue_updated", "issue_labeled", "issue_comment"],

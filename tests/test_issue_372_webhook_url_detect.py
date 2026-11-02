@@ -172,14 +172,14 @@ class TestGetWebhookUrlCompat:
     def test_t9_05_explicit_config_skips_detection(self):
         """T9-05: 显式配置存在时 get_webhook_url 返回显式配置，不触发探测。"""
         from src.user.db import get_webhook_url
-        with patch("src.config.read_server_config", return_value={"webhook_url": "https://my.grape.io/webhook/gitcode"}):
+        with patch("src.kernel.config.read_server_config", return_value={"webhook_url": "https://my.grape.io/webhook/gitcode"}):
             result = get_webhook_url()
             assert result == "https://my.grape.io/webhook/gitcode"
 
     def test_meta_fallback(self):
         """server-config.json 无值时 fallback 到 meta.webhook_url。"""
         from src.user.db import get_webhook_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value="http://10.0.0.1/webhook/gitcode"):
             result = get_webhook_url()
             assert result == "http://10.0.0.1/webhook/gitcode"
@@ -187,7 +187,7 @@ class TestGetWebhookUrlCompat:
     def test_empty_when_no_config(self):
         """无任何配置时返回空串。"""
         from src.user.db import get_webhook_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""):
             result = get_webhook_url()
             assert result == ""
@@ -296,7 +296,7 @@ class TestMiddlewareJwtParsing:
         验证：注册/登录返回的 JWT token 不在 _user_tokens 内存缓存中，
         validate_token 返回 None，但 verify_access_token 能解析出 payload。
         """
-        from src.api.jwt_utils import create_access_token, verify_access_token
+        from src.kernel.auth_sdk.jwt_utils import create_access_token, verify_access_token
         # 创建一个 JWT token（与注册/登录流程一致）
         token = create_access_token(user_id=42, username="alice", token_version=0)
         # verify_access_token 能解析
@@ -311,7 +311,7 @@ class TestMiddlewareJwtParsing:
 
     def test_t9_20_invalid_jwt_returns_none(self):
         """T9-20: JWT 过期或无效时 verify_access_token 返回 None → _uid 为空 → 推导不触发。"""
-        from src.api.jwt_utils import verify_access_token
+        from src.kernel.auth_sdk.jwt_utils import verify_access_token
         # 无效 token
         payload = verify_access_token("invalid.jwt.token")
         assert payload is None
@@ -337,7 +337,7 @@ class TestMiddlewareJwtParsing:
         jwt_line = None
         validate_line = None
         for i, line in enumerate(lines):
-            if 'from src.api.jwt_utils import verify_access_token' in line:
+            if 'from src.kernel.auth_sdk.jwt_utils import verify_access_token' in line:
                 jwt_line = i
             if 'from src.user.db import validate_token' in line:
                 validate_line = i
@@ -367,7 +367,7 @@ class TestDetectServerBaseFailureVisibility:
              patch("src.user.db.set_meta_value") as mock_set:
             # 模拟 _detect_server_base 的失败路径
             import urllib.request, socket
-            from src.config import log
+            from src.kernel.config import log
             methods = ["https://api.ipify.org?format=json"]
             all_failed = True
             for url in methods:

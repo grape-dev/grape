@@ -160,7 +160,7 @@ class TestResolveIssueIdPR:
 class TestQaSkillPrompt:
     @pytest.fixture(scope="module")
     def pb(self):
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         return prompt_builder
 
     def test_build_prompt_loads_qa_skill(self, pb):

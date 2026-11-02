@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 
 client = TestClient(app)
@@ -73,34 +73,34 @@ class TestPythonVersionCheck:
 class TestServerBaseUrl:
     def test_configured_public(self):
         from src.user.db import is_server_base_url_configured, get_server_base_url_warning
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"server_base_url": "https://grape.example.com"}):
             assert is_server_base_url_configured() is True
             assert get_server_base_url_warning() == ""
 
     def test_loopback_not_configured(self):
         from src.user.db import is_server_base_url_configured, get_server_base_url_warning
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"server_base_url": "http://localhost:3000"}):
             assert is_server_base_url_configured() is False
             assert "回环" in get_server_base_url_warning() or "localhost" in get_server_base_url_warning()
 
     def test_empty_not_configured(self):
         from src.user.db import is_server_base_url_configured, get_server_base_url_warning
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""):
             assert is_server_base_url_configured() is False
             assert get_server_base_url_warning() != ""
 
     def test_meta_fallback_configured(self):
         from src.user.db import is_server_base_url_configured
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value="https://worker.example.com"):
             assert is_server_base_url_configured() is True
 
     def test_health_reports_configuration(self):
         """/api/health 返回 server_base_url_configured 字段"""
-        with patch("src.config.read_server_config",
+        with patch("src.kernel.config.read_server_config",
                    return_value={"server_base_url": "https://grape.example.com"}):
             r = client.get("/api/health")
         data = r.json()
@@ -108,7 +108,7 @@ class TestServerBaseUrl:
         assert data["server_base_url_warning"] == ""
 
     def test_health_warns_when_unconfigured(self):
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""):
             r = client.get("/api/health")
         data = r.json()
@@ -202,7 +202,7 @@ class TestGithubOAuthReadback:
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "新用户"})), \
-             patch("src.config.is_user_allowed", return_value=True), \
+             patch("src.kernel.config.is_user_allowed", return_value=True), \
              patch("src.api.routes.grape_auth.create_grape_account_oauth",
                    return_value={"id": 900002, "username": uname, "email": ""}), \
              patch("src.api.routes.grape_auth.get_grape_account_by_id", return_value=None):
@@ -219,7 +219,7 @@ class TestGithubOAuthReadback:
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "新用户"})), \
-             patch("src.config.is_user_allowed", return_value=True), \
+             patch("src.kernel.config.is_user_allowed", return_value=True), \
              patch("src.api.routes.grape_auth.create_grape_account_oauth") as m_create, \
              patch("src.auth.grape_account_db.get_external_identity", return_value=None), \
              patch("src.api.routes.grape_auth.soft_delete_account") as m_rollback:
@@ -243,7 +243,7 @@ class TestGithubOAuthReadback:
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "name": "新用户"})), \
-             patch("src.config.is_user_allowed", return_value=True):
+             patch("src.kernel.config.is_user_allowed", return_value=True):
             r = client.get("/api/auth/callback/github", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         assert "exchange_code=" in r.headers.get("location", "")
@@ -257,7 +257,7 @@ class TestGithubOAuthReadback:
         with patch("src.user.db.get_meta_value", return_value="x"), \
              patch("requests.post", return_value=_FakeReqResp({"access_token": "at", "refresh_token": "rt"})), \
              patch("requests.get", return_value=_FakeReqResp({"id": gid, "login": uname, "nickname": "新用户"})), \
-             patch("src.config.is_user_allowed", return_value=True):
+             patch("src.kernel.config.is_user_allowed", return_value=True):
             r = client.get("/api/auth/callback/gitcode", params={"state": state, "code": "c"}, follow_redirects=False)
         assert r.status_code == 302
         assert "exchange_code=" in r.headers.get("location", "")
@@ -480,8 +480,8 @@ class TestRepogitRetry:
 class TestWorkerPackageRetry:
     def test_network_error_retries_then_success(self):
         import subprocess as _sp
-        from src.worker_package import _git_retry
-        with patch("src.worker_package._git") as m:
+        from src.kernel.worker_package import _git_retry
+        with patch("src.kernel.worker_package._git") as m:
             m.side_effect = [
                 _sp.CalledProcessError(128, ["git"], stderr="fatal: unable to access 'https://x': Failed to connect"),
                 _sp.CalledProcessError(128, ["git"], stderr="fatal: early EOF"),
@@ -493,8 +493,8 @@ class TestWorkerPackageRetry:
     def test_4xx_fast_fail(self):
         import subprocess as _sp
         import pytest as _pytest
-        from src.worker_package import _git_retry
-        with patch("src.worker_package._git") as m:
+        from src.kernel.worker_package import _git_retry
+        with patch("src.kernel.worker_package._git") as m:
             m.side_effect = _sp.CalledProcessError(
                 128, ["git"], stderr="fatal: unable to access: The requested URL returned error: 403")
             with _pytest.raises(_sp.CalledProcessError):

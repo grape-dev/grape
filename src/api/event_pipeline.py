@@ -2,12 +2,12 @@
 import json, os, re, time, uuid, threading
 from concurrent.futures import ThreadPoolExecutor, Future
 from datetime import datetime, timezone
-from src.config import log, WORKSPACE_DIR
+from src.kernel.config import log, WORKSPACE_DIR
 from src.vcs.adapter import normalize_event, get_event_header
 from src.api.routing import NON_ISSUE_EVENT_ROUTE, PR_DEFAULT_AGENT, ISSUE_EVENT_TYPES, PR_EVENT_TYPES
 from src.api.event_store import get_issue_summary
-from src.session_manager import db, db_lock
-from src.token_service import is_auth_401_error
+from src.kernel.session_manager import db, db_lock
+from src.kernel.token_service import is_auth_401_error
 
 # 本机 direct 执行的有界并发池（替代无界 threading.Thread，见 engine-selection-design.md §9.3）
 _DIRECT_POOL = ThreadPoolExecutor(
@@ -31,7 +31,7 @@ def _get_task_repo_token(repo_key: str) -> str:
     if not repo_key:
         return ""
     try:
-        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
         provider = create_provider_from_repo_key(repo_key)
         result = TokenResolver(provider).resolve(repo_key)
         # level == "user" → 路径 D 用户 token，不写入 task 行
@@ -57,7 +57,7 @@ def check_running_task(repo_key: str, issue_id: str) -> bool:
             return False
         return _check_session_active(repo_key)
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             # 1. 查 agent_tasks
@@ -89,7 +89,7 @@ def _check_session_active(repo_key: str) -> bool:
     import time as _time
     _cutoff = _time.strftime("%Y-%m-%d %H:%M:%S", _time.gmtime(_time.time() - 60))
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -132,7 +132,7 @@ def _is_path_b_self_loop(repo_key: str, actor: str, event_type: str, issue_id: s
         return False
     # 条件 1: 路径 B 仓库（level == "user"）
     try:
-        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key
         _provider = create_provider_from_repo_key(repo_key)
         _config_result = TokenResolver(_provider).resolve_config_level(repo_key)
         if _config_result.level != "user":
@@ -411,7 +411,7 @@ def _create_direct_task(repo_key, seq, agent_type, backend, skill_name,
     # issue_id 优先用传参，兜底从 evt 解析
     if not issue_id:
         issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
 
     # 获取 bot token（按 provider 分流：GitHub 仓库用 get_github_token）
     repo_gitcode_token = _get_task_repo_token(repo_key)
@@ -482,7 +482,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
     # 构建 prompt（重派复用）
     prompt = ""
     try:
-        from src.prompt_builder import build_devops_agent_prompt
+        from src.kernel.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
         evt["issue_id"] = issue_id
         evt["_skill_path"] = skill_path
@@ -501,7 +501,7 @@ def _create_failed_task(repo_key, seq, agent_type, backend, skill_name,
 
     # env_extra
     repository = evt.get("repository", "")
-    from src.repo_key import split_owner_repo as _sor
+    from src.kernel.repo_key import split_owner_repo as _sor
     _owner, _repo_name = _sor(repository)
     env_extra = {
         "REPO_FULL_NAME": repository,
@@ -615,7 +615,7 @@ def cancel_direct_task(seq: int) -> bool:
                 # Future 已在运行中 → 杀掉对应子进程（按 seq 查 task 的 cwd + engine）
                 log.info(f"cancel_direct_task: seq={seq} running, killing engine subprocess")
                 try:
-                    from src.session_manager import db, db_lock
+                    from src.kernel.session_manager import db, db_lock
                     with db_lock:
                         c = db.cursor()
                         c.execute("SELECT id, runtime_id, cwd, agent_type FROM agent_tasks WHERE event_seq=? ORDER BY created_at DESC LIMIT 1", (seq,))
@@ -687,7 +687,7 @@ def _is_pr_payload(payload: dict) -> bool:
 def resolve_issue_card_id(repo_key: str, issue_number) -> str:
     """需求卡片 id（issue 表主键）：awaiting-input 等 --issue_id 用（≠ Issue number）。查无返回空串。"""
     try:
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         _n = str(issue_number or "").lstrip("#")
         if not _n.isdigit():
             return ""
@@ -712,8 +712,8 @@ def _resolve_bot_username(repo_key: str) -> str:
     任何异常静默返回空串（与原注入块行为一致，不阻断任务派发）。
     """
     try:
-        from src.session_manager import db, db_lock
-        from src.repo_key import to_repo_key
+        from src.kernel.session_manager import db, db_lock
+        from src.kernel.repo_key import to_repo_key
         _rk = to_repo_key(repo_key)
         with db_lock:
             c = db.cursor()
@@ -724,7 +724,7 @@ def _resolve_bot_username(repo_key: str) -> str:
             return _bot_name
         # Issue #345: 不用 repo owner 兜底——owner 不是 bot，当 bot name 会导致
         # git commit 身份错乱、PR 审查人失败。改为按平台取全局 bot username。
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         _prov, _o, _r = parse_repo_key(_rk)
         if _prov == "github":
             from src.user.db import get_global_github_bot_username
@@ -972,7 +972,7 @@ def _resolve_issue_stage_agent(repo_key: str, event_type: str, payload: dict,
     stage = st["stage"]
 
     # Issue #51: cancelled 任务不再分发（防止取消后 A2A 继续流转）
-    from src.session_manager import db as _ck_db, db_lock as _ck_lock
+    from src.kernel.session_manager import db as _ck_db, db_lock as _ck_lock
     try:
         _ck_issue_num = str(issue_id).lstrip("#")
         if _ck_issue_num.isdigit():
@@ -1185,7 +1185,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
     返回 True = 派发成功，False = 引擎不可用或无 QA 节点。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         import json as _json
 
         repo_key = evt.get("repo_key", "") or ""
@@ -1236,7 +1236,7 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         _extra_evt = dict(evt)
         _extra_evt["payload"] = _payload  # 确保是 dict（_load_event 返回 JSON 字符串）
         # 补全 build_devops_agent_prompt 必需的字段（_load_event 不返回 repository/source）
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         _extra_evt["repository"] = _extra_evt.get("repository") or from_repo_key(repo_key)
         _extra_evt["source"] = _extra_evt.get("source") or (repo_key.split(":", 1)[0] if ":" in repo_key else "gitcode")
         _extra_evt["repo_key"] = repo_key
@@ -1291,7 +1291,7 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
     为订阅命中的 Agent 创建独立事件并分派任务，不改 issue_state.stage。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         backend = "opencode"
         runtime_id = 0
         skill_name = ""
@@ -1422,7 +1422,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
 
     repo_key = repo_key_override or f"{source}:{evt['repository']}"
     # 统一 repo_key：带平台前缀贯穿（gitcode:owner/repo），与 DB 内部一致
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
     # account 兜底用仓库 owner 段（无 default 概念；避免全名作为 ACCOUNT）
     if not account and evt.get("repository"):
@@ -1591,7 +1591,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             append_skipped_event(repo_key, event_type, "self_loop", actor, issue_id=_pre_issue_id)
             return result
         try:
-            from src.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
+            from src.kernel.token_resolver import TokenResolver, create_provider_from_repo_key, create_action_handler
             _provider = create_provider_from_repo_key(repo_key)
             _resolver = TokenResolver(_provider)
             _config_result = _resolver.resolve_config_level(repo_key)
@@ -1669,9 +1669,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _oa_io = _payload.get("object_attributes", {}) or {}
                 _body_io = str(_oa_io.get("description") or _payload.get("issue", {}).get("body") or "")
                 if "## 父任务" not in _body_io:
-                    from src.repo_key import parse_repo_key
+                    from src.kernel.repo_key import parse_repo_key
                     _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
-                    from src.outbound_ledger import is_our_outbound
+                    from src.kernel.outbound_ledger import is_our_outbound
                     _issue_key = str(_oa_io.get("iid") or _oa_io.get("number")
                                      or (_payload.get("issue", {}) or {}).get("number") or "")
                     if _issue_key and is_our_outbound(_provider_name, repo_key, "issue", _issue_key):
@@ -1720,9 +1720,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _oa_pc = _payload.get("object_attributes", {}) or {}
                 _pr_update_has_commit = bool(_payload.get("commits")) or bool(_oa_pc.get("oldrev"))
             if not _pr_opened_exempt and not _pr_update_has_commit:
-                from src.repo_key import parse_repo_key
+                from src.kernel.repo_key import parse_repo_key
                 _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
-                from src.outbound_ledger import is_our_outbound
+                from src.kernel.outbound_ledger import is_our_outbound
                 _oa_cl = _payload.get("object_attributes", {}) or {}
                 _num_cl = str(_oa_cl.get("iid") or _oa_cl.get("number")
                               or (_payload.get("issue", {}) or {}).get("number") or "")
@@ -1745,9 +1745,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type in ("issue_comment", "note_hook_pr"):
         try:
             _payload = evt.get("payload", {}) or {}
-            from src.repo_key import parse_repo_key
+            from src.kernel.repo_key import parse_repo_key
             _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
-            from src.outbound_ledger import is_our_outbound, extract_event_content_id, content_hash_md5
+            from src.kernel.outbound_ledger import is_our_outbound, extract_event_content_id, content_hash_md5
             _cid = extract_event_content_id(_provider_name, _payload)
             _note = str((_payload.get("object_attributes") or {}).get("note")
                         or (_payload.get("comment") or {}).get("body") or _payload.get("body") or "")
@@ -1785,9 +1785,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
     if event_type == "issue_updated":
         try:
             _payload = evt.get("payload", {}) or {}
-            from src.repo_key import parse_repo_key
+            from src.kernel.repo_key import parse_repo_key
             _provider_name = parse_repo_key(repo_key)[0] if repo_key else ""
-            from src.outbound_ledger import is_our_outbound, content_hash_md5
+            from src.kernel.outbound_ledger import is_our_outbound, content_hash_md5
             _oa_ed = _payload.get("object_attributes", {}) or {}
             _desc_ed = str(_oa_ed.get("description") or "")
             _edit_key = str(_oa_ed.get("iid") or _oa_ed.get("number")
@@ -1895,7 +1895,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
         # Issue #200: 传入 bot token，私有仓库 git fetch 需认证 header
         try:
             from src.project_info.builder import maybe_refresh_project_info
-            from src.repo import Repo
+            from src.kernel.repo import Repo
             _pi_token = Repo(repo_key).bot_token
             threading.Thread(target=maybe_refresh_project_info, args=(repo_key, _pi_token), daemon=True).start()
         except Exception as e:
@@ -2458,7 +2458,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             pass
     log.info(f"Pipeline: event created, seq={seq}, repo_key={repo_key}, agent={agent_type}, issue_id={issue_id or '#0'}")
 
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     result.update({"seq": seq, "event_type": event_type, "skill": agent_type,
                    "backend": backend, "skill_name": skill_name,
                    "repo_key": from_repo_key(repo_key), "ok": True, "issue_id": issue_id,
@@ -2577,7 +2577,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 _bind_names_253 = [str(x) for x in _pool_ids_253]
             _picked_253 = 0
             try:
-                from src.session_manager import db as _db, db_lock as _dbl
+                from src.kernel.session_manager import db as _db, db_lock as _dbl
                 with _dbl:
                     _c = _db.cursor()
                     _ph253 = ",".join("?" * len(_pool_ids_253))
@@ -2610,7 +2610,7 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             # org_id 隔离：从 managed_repos 推断仓库 org_id，非个人组织只选该组织引擎
             from src.user.db import get_meta_value as _gmv
             try:
-                from src.session_manager import db as _db, db_lock as _dbl
+                from src.kernel.session_manager import db as _db, db_lock as _dbl
                 from src.user.org_db import is_org_personal
                 log.info(f"Pipeline: acquiring db_lock for engine query, seq={seq}")
                 with _dbl:
@@ -2724,14 +2724,14 @@ def _ledger_record_comment(provider: str, repo_key: str, repository: str, issue_
     - 指纹记剥离 marker 后正文的 md5（仅用于旁路告警核对，不参与拦截）
     """
     try:
-        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
         _rk = repo_key or ""
         if not _rk and repository:
-            from src.repo_key import to_repo_key
+            from src.kernel.repo_key import to_repo_key
             _rk = to_repo_key(repository, provider)
         _cid = extract_content_id(resp, content_type) if isinstance(resp, dict) else ""
         if not _cid:
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             _log.warning(f"outbound_ledger: comment response carries no content ID "
                          f"(provider={provider}, repo={repo_key}, issue={issue_num}) — silent-miss risk, "
                          f"check provider response field mapping")
@@ -2779,7 +2779,7 @@ def _fetch_issue_assignee(repo_key: str, issue_id: str) -> str:
     if not num:
         return ""
     try:
-        from src.repo_key import split_owner_repo
+        from src.kernel.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
 
         if _is_github_repo(repo_key):
@@ -2829,7 +2829,7 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
     if not num:
         return ""
     try:
-        from src.repo_key import split_owner_repo
+        from src.kernel.repo_key import split_owner_repo
         owner, rname = split_owner_repo(repo_key)
 
         if _is_github_repo(repo_key):
@@ -2881,7 +2881,7 @@ def get_agent_workdir(repo_key: str, agent_type: str, issue_id: str = "") -> str
     - 有关联 Issue：#5 → {provider}/{owner}/{repo}/issues/5/{agent_type}/
     - 无关联 Issue（push/#0）→ {provider}/{owner}/{repo}/{agent_type}-agent（兼容现状）
     """
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     _base = workspace_repo_dir(repo_key)
     num = _issue_num_from(issue_id)
     if num:
@@ -2921,7 +2921,7 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
         # Issue #476：诊断上下文写入 events.payload._fail_diag（幂等：已存在不覆盖）
         if diag:
             try:
-                from src.session_manager import db, db_lock
+                from src.kernel.session_manager import db, db_lock
                 with db_lock:
                     c = db.cursor()
                     c.execute("SELECT status, payload FROM events WHERE seq=?", (seq,))
@@ -2942,7 +2942,7 @@ def _fail_event(seq: int, reason: str, exit_code: int = 1, diag: dict = None):
             except Exception as _de:
                 log.warning(f"Pipeline: _fail_event diag write failed seq={seq}: {_de}")
         # 同步更新 agent_tasks 表（如果有关联的 task）
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute(
@@ -2983,7 +2983,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     from src.api.event_archive import init_event_json
     from src.runtime.service import enqueue_task, get_execution_mode
     from src.runtime.instances import runtime_instance_name
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     import os as _os
 
     # local-claimer 设计：未显式指定时按上下文推导来源（带场景上下文的绑定 = scene）
@@ -3056,10 +3056,10 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         evt["issue_id"] = issue_id
         evt["_skill_path"] = skill_path
         if is_scene_recommend:
-            from src.prompt_builder import build_scene_recommender_prompt
+            from src.kernel.prompt_builder import build_scene_recommender_prompt
             prompt = build_scene_recommender_prompt(evt, repo_key)
         else:
-            from src.prompt_builder import build_devops_agent_prompt
+            from src.kernel.prompt_builder import build_devops_agent_prompt
             prompt = build_devops_agent_prompt(evt, [], "", [skill_name] if skill_name else [agent_type],
                                   skill_path=skill_path, runtime_id=runtime_id, agent_type=agent_type)
     except Exception as e:
@@ -3067,8 +3067,8 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
         _fail_event(seq, f"入队失败：prompt 构建异常 {str(e)[:150]}")
         return
 
-    from src.prompt_builder import _resolve_server_url
-    from src.repo_key import split_owner_repo as _sor2
+    from src.kernel.prompt_builder import _resolve_server_url
+    from src.kernel.repo_key import split_owner_repo as _sor2
     _owner2, _repo_name2 = _sor2(repository)
     env_extra = {
         "REPO_FULL_NAME": repository,
@@ -3113,7 +3113,7 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
     try:
         _num = _issue_num_from(issue_id)
         if _num and oc_session_id:
-            from src.repo_key import workspace_repo_dir
+            from src.kernel.repo_key import workspace_repo_dir
             _expected_ws = os.path.join(workspace_repo_dir(repo_key), "issues", _num, agent_type)
             if ws != _expected_ws:
                 log.warning(f"Pipeline enqueue: cwd/session mismatch, issue={issue_id} ws={ws} expected={_expected_ws}")
@@ -3170,7 +3170,7 @@ def _resolve_scene_id(repo_key: str, issue_id: str = "") -> str:
             scene_id = ""
     if not scene_id:
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 c = db.cursor()
                 c.execute("SELECT dev_scene FROM managed_repos WHERE repo_key=?", (repo_key,))
@@ -3201,10 +3201,10 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
         env_extra["GRAPE_SCENE_ID"] = scene_id
         if not scene_id:
             return
-        from src.session_manager import db, db_lock
-        from src.scene_custom_env import is_upper_name, is_reserved_name, normalize_scope
+        from src.kernel.session_manager import db, db_lock
+        from src.kernel.scene_custom_env import is_upper_name, is_reserved_name, normalize_scope
         import json as _json
-        from src.config import log
+        from src.kernel.config import log
         # 读 advanced_options 的 custom_fields
         with db_lock:
             c = db.cursor()
@@ -3230,7 +3230,7 @@ def _inject_scene_env(env_extra: dict, repo_key: str, issue_id: str = "",
                 continue
             env_extra[name] = str(f.get("value", ""))
     except Exception as _e:
-        from src.config import log
+        from src.kernel.config import log
         log.warning(f"inject scene env failed: {_e}")
 
 
@@ -3260,7 +3260,7 @@ def _inject_linked_repo_tokens(env: dict, linked_repos_json: str) -> None:
         if not rk:
             continue
         try:
-            from src.token_service import get_repo_bot_token
+            from src.kernel.token_service import get_repo_bot_token
             tok = get_repo_bot_token(rk)
         except Exception:
             tok = ""
@@ -3281,7 +3281,7 @@ def _read_scene_linked_repos(repo_key: str, issue_id: str = "") -> list:
         scene_id = _resolve_scene_id(repo_key, issue_id)
         if not scene_id:
             return []
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         import json as _json
         with db_lock:
             c = db.cursor()
@@ -3331,13 +3331,13 @@ def build_task_env(repo_key: str, agent_type: str, issue_id: str, runtime_id: in
     import json as _json
     env = {}
     # ── 仓库/服务地址基础四项 ──
-    from src.repo_key import split_owner_repo as _sor
+    from src.kernel.repo_key import split_owner_repo as _sor
     _owner, _repo_name = _sor(repo_key)
     env["REPO_FULL_NAME"] = _repo_name and f"{_owner}/{_repo_name}" or repo_key
     env["REPO_OWNER"] = _owner
     env["REPO_NAME"] = _repo_name
     env["ACCOUNT"] = account
-    from src.prompt_builder import _resolve_server_url
+    from src.kernel.prompt_builder import _resolve_server_url
     env["GRAPE_SERVER_URL"] = _resolve_server_url(runtime_id)
     # ── 场景环境（work_branch / scene_id / custom_fields / linked_repos）──
     try:
@@ -3451,7 +3451,7 @@ def _materialize_direct_workdir(ws: str, repo_key: str, agent_type: str, skill_n
                     if _full and os.path.exists(_full):
                         _skill_local = os.path.dirname(_full)
             else:
-                from src.config import resolve_official_skill_path as _resolve_skill_path
+                from src.kernel.config import resolve_official_skill_path as _resolve_skill_path
                 _real_skill_md = _resolve_skill_path(skill_name or "")
                 if not _real_skill_md:
                     _sp = evt.get("_skill_path", "") or ""
@@ -3500,7 +3500,7 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
     import os as _os
     import subprocess as _sp
     from src.runtime import repogit
-    from src.config import log as _log
+    from src.kernel.config import log as _log
 
     _linked_wt_json = env_extra.get("GRAPE_LINKED_WORKTREES", "")
     if not _linked_wt_json:
@@ -3581,7 +3581,7 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
 
             # 5. push（token 经 http.extraheader 注入）
             # R20.26.3: 关联仓库独立获取 token
-            from src.repo import Repo
+            from src.kernel.repo import Repo
             _linked_token = Repo(_rk).bot_token
             if not _linked_token:
                 _log.warning(f"direct linked PR: no token for {_rk}, skip push")
@@ -3649,7 +3649,7 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
         if _num:
             _token = ""
             try:
-                from src.repo import Repo
+                from src.kernel.repo import Repo
                 _token = Repo(repo_key).bot_token
             except Exception:
                 pass
@@ -3709,7 +3709,7 @@ def _execute_agent(repo_key: str, seq: int, agent_type: str,
             _DIRECT_FUTURES.pop(seq, None)
         # Issue-45 M2：direct 会话结束 → 会话级临时 token 即时失效
         try:
-            from src.api.auth_token import revoke_session_token
+            from src.kernel.auth_sdk.auth_token import revoke_session_token
             revoke_session_token(task_id or f"d_{seq}")
         except Exception as e:
             log.warning(f"Exec agent: revoke session token failed: {e}")
@@ -3829,7 +3829,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                          task_id: str = ""):
     """_execute_agent 的实际逻辑（被顶层 try/except 包裹）。"""
     from src.runtime.executor import stream_devops_agent
-    from src.prompt_builder import build_devops_agent_prompt
+    from src.kernel.prompt_builder import build_devops_agent_prompt
     from src.api.event_store import (
         update_event_config, update_event_status, update_event_complete, evaluate_agent_output, _extract_tool_command,
         append_skipped_event,
@@ -3848,7 +3848,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             # Write back actual runtime_id for plugin broadcast self-run tasks
             # (task created with runtime_id=0 for broadcast, but executed locally)
             if runtime_id and runtime_id > 0:
-                from src.session_manager import db as _sdb, db_lock as _sdl
+                from src.kernel.session_manager import db as _sdb, db_lock as _sdl
                 with _sdl:
                     c = _sdb.cursor()
                     c.execute("UPDATE agent_tasks SET runtime_id=? WHERE id=? AND (runtime_id IS NULL OR runtime_id=0)", (runtime_id, task_id))
@@ -3857,7 +3857,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         except Exception as e:
             log.warning(f"direct exec: failed to update task {task_id} to running: {e}")
 
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     repository = evt.get("repository", from_repo_key(repo_key))
     issue_id = evt.get("issue_id", "") or evt.get("payload", {}).get("issue_number", "") or ""
     ws = get_agent_workdir(repo_key, agent_type, issue_id)
@@ -3919,7 +3919,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     agent_name = get_agent_display_name(agent_type)
 
     try:
-        from src.prompt_builder import build_devops_agent_prompt
+        from src.kernel.prompt_builder import build_devops_agent_prompt
         evt["repo_key"] = repo_key
         evt["issue_id"] = issue_id
         # 智能推荐等入队时已构建 prompt 的任务（local_claimer 认领的广播任务）：
@@ -3931,7 +3931,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _reused_prompt = ""
         if task_id:
             try:
-                from src.session_manager import db as _pdb, db_lock as _pdl
+                from src.kernel.session_manager import db as _pdb, db_lock as _pdl
                 with _pdl:
                     c = _pdb.cursor()
                     c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
@@ -3956,7 +3956,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         log.info(f"Exec agent: prompt writeback check: task_id={task_id!r}, prompt_len={len(prompt)}")
         if task_id and prompt:
             try:
-                from src.session_manager import db as _wdb, db_lock as _wdl
+                from src.kernel.session_manager import db as _wdb, db_lock as _wdl
                 with _wdl:
                     c = _wdb.cursor()
                     c.execute("UPDATE agent_tasks SET prompt=? WHERE id=? AND prompt=''", (prompt, task_id))
@@ -4009,7 +4009,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
     # Issue #94（weekly-09）：direct 分支 exec_account 可能带平台前缀全名（gitcode:<owner>/<repo>，
     # 来自 local_claimer task.account），naive split 会得到 gitcode:<owner> → git-repo/repos 404。
     # 统一用 split_owner_repo 剥前缀，与入队（484/2829/3134）口径一致，REPO_OWNER/REPO_NAME 无前缀。
-    from src.repo_key import split_owner_repo as _sor_env
+    from src.kernel.repo_key import split_owner_repo as _sor_env
     _repo_owner_env, _repo_name_env = _sor_env(exec_account or repository)
     env_extra["REPO_OWNER"] = _repo_owner_env
     env_extra["REPO_NAME"] = _repo_name_env
@@ -4080,7 +4080,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
 
     # Issue-45 M2：direct 会话签发会话级临时 token（session_key=task_id 或 d_{seq}）
     try:
-        from src.api.auth_token import issue_session_token
+        from src.kernel.auth_sdk.auth_token import issue_session_token
         if repo_key and agent_type:
             env_extra["GRAPE_SESSION_TOKEN"] = issue_session_token(
                 session_key=task_id or f"d_{seq}",
@@ -4138,7 +4138,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
                 if agent_type == "vod" and final_text and issue_id:
                     _task_prompt = ""
                     try:
-                        from src.session_manager import db as _rdb, db_lock as _rdb_lock
+                        from src.kernel.session_manager import db as _rdb, db_lock as _rdb_lock
                         with _rdb_lock:
                             c = _rdb.cursor()
                             c.execute("SELECT prompt FROM agent_tasks WHERE id=?", (task_id,))
@@ -4330,7 +4330,7 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             _is_401 = is_auth_401_error(_err_lower)
             if _is_401:
                 try:
-                    from src.token_service import detect_and_mark_expired
+                    from src.kernel.token_service import detect_and_mark_expired
                     _pipeline_error_code = detect_and_mark_expired(repo_key) or ""
                     if _pipeline_error_code:
                         log.warning(f"Exec agent: token expired during direct exec (error_code={_pipeline_error_code}), repo={repo_key}")
@@ -4525,8 +4525,8 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
         _issue_num = _issue_num_from(issue_id)
         if _issue_num:
             try:
-                from src.repo_key import to_repo_key
-                from src.session_manager import db as _db, db_lock as _dl, add_message as _am
+                from src.kernel.repo_key import to_repo_key
+                from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _am
                 _rk = to_repo_key(repo_key)
                 with _dl:
                     _c = _db.cursor()
@@ -4589,7 +4589,7 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
     # 根据 repo_key provider 分流
     if _is_github_repo(repo_key):
         try:
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             _owner, _repo = split_owner_repo(repo_key)
             # 先查 Issue 已有评论，若已有 agent 评论则跳过（方案 B）
             _existing = _github_list_issue_comments(_owner, _repo, str(issue_number), bot_token)
@@ -4648,7 +4648,7 @@ def _post_subtask_completion_to_parent(repository: str, sub_issue_num: str, pare
         _comment = f"### \u5b50\u4efb\u52a1 #{sub_issue_num} \u5df2\u5b8c\u6210\n\n{_summary}\n\n---\n\u5b50\u4efb\u52a1\u6d41\u6c34\u7ebf\u5df2\u5168\u90e8\u5b8c\u6210\u3002"
         _comment += "\n<!-- grape-auto-comment -->"
         if _is_github_repo(repo_key):
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             _owner, _repo = split_owner_repo(repo_key)
             _gh_resp = _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
             # Issue #453 台账（审查 P1-1 补漏）：subtask 完成回帖入账
@@ -4676,7 +4676,7 @@ def _post_all_subtasks_done(repository: str, parent_issue_num: str, subtasks: li
         _comment = "\n".join(_lines)
         _comment += "\n<!-- grape-auto-comment -->"
         if _is_github_repo(repo_key):
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             _owner, _repo = split_owner_repo(repo_key)
             _gh_resp = _github_post_issue_comment(_owner, _repo, parent_issue_num, _comment, bot_token)
             # Issue #453 台账（审查 P1-1 补漏）：全部完成汇总回帖入账
@@ -4766,8 +4766,8 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     """
     import re
     try:
-        from src.repo_key import to_repo_key
-        from src.session_manager import db as _db, db_lock as _dl, add_message as _am, get_messages as _get_msgs
+        from src.kernel.repo_key import to_repo_key
+        from src.kernel.session_manager import db as _db, db_lock as _dl, add_message as _am, get_messages as _get_msgs
     except Exception:
         return
 
@@ -4792,7 +4792,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
     try:
         if _is_github_repo(rk):
             # GitHub API
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             _owner, _repo = split_owner_repo(rk)
             comments = _github_list_issue_comments(_owner, _repo, str(issue_number), bot_token)
         else:
@@ -4800,7 +4800,7 @@ def _sync_issue_comments_to_conversation(repo_key: str, issue_number, bot_token:
             import urllib.request
             import json as _json
             if not repository:
-                from src.repo_key import from_repo_key
+                from src.kernel.repo_key import from_repo_key
                 repository = from_repo_key(rk)
             api_url = f"https://gitcode.com/api/v5/repos/{repository}/issues/{issue_number}/comments"
             req = urllib.request.Request(api_url)

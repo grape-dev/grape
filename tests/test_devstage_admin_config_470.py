@@ -15,7 +15,7 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from src.config import _write_runtime_config_for_test, RUNTIME_CONFIG_PATH, invalidate_runtime_config_cache  # noqa: E402
+from src.kernel.config import _write_runtime_config_for_test, RUNTIME_CONFIG_PATH, invalidate_runtime_config_cache  # noqa: E402
 
 DEFAULT_TPL = "4ef59a2b4d3d4909aacd80f6007c00b2"
 DEFAULT_FLAVOR = "23ebdfe3b2d34cc4b34a1aaf03d27c54"
@@ -139,7 +139,7 @@ class TestAdminRuntimeConfig:
     def test_effective_after_save(self, client):
         """保存后统一 getter 立即读到新值（缓存失效链路）。"""
         client.put("/api/admin/config", json={"runtime_task_timeout": "5400"})
-        from src.config import get_runtime_task_timeout
+        from src.kernel.config import get_runtime_task_timeout
         assert get_runtime_task_timeout() == 5400
 
     def test_invalid_timeout_rejected(self, client):
@@ -147,7 +147,7 @@ class TestAdminRuntimeConfig:
         r = client.put("/api/admin/config", json={"runtime_task_timeout": -5})
         assert r.status_code == 422
         # 未落库：getter 仍默认
-        from src.config import get_runtime_task_timeout
+        from src.kernel.config import get_runtime_task_timeout
         assert get_runtime_task_timeout() == 3600
 
     def test_partial_put_keeps_other_fields(self, client):

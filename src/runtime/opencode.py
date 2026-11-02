@@ -1,6 +1,6 @@
 """Opencode Runtime 实现"""
 import os
-from src.config import SKILLS_DIR
+from src.kernel.config import SKILLS_DIR
 from .base import AgentRuntime
 
 

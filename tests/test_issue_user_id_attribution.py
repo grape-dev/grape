@@ -23,7 +23,7 @@ UNMAPPED = "unmapped_user_xyz"
 
 
 def _db():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     return db, db_lock
 
 

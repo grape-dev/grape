@@ -171,10 +171,10 @@ def engine_type_of_runtime(rid: int) -> str:
 
 
 def _lock():
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     return db_lock
 
 
 def _db():
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     return db

@@ -31,7 +31,7 @@ import urllib.request
 from typing import Optional
 from urllib.parse import urlparse
 
-from src.config import log
+from src.kernel.config import log
 
 _DEPLOY_KEYWORDS = (
     "deploy", "upgrade", "升级", "部署", "发布", "停双主", "双主", "重启 master",
@@ -102,7 +102,7 @@ def _fetch_worker_version(runtime_id) -> str:
     if not runtime_id:
         return ""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             r = db.cursor().execute(
                 "SELECT worker_version FROM agent_runtimes WHERE id=?", (runtime_id,)).fetchone()

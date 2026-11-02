@@ -14,12 +14,12 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.api.jwt_utils import create_access_token
+from src.kernel.auth_sdk.jwt_utils import create_access_token
 from src.api import auth_token
 from src.user import db as user_db
 from src.auth import grape_account_db
 from src.auth.grape_account_db import get_token_version
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 @pytest.fixture(autouse=True)

@@ -8,7 +8,7 @@
 """
 from pathlib import Path
 
-from src.help_docs_sync import compare, DOC_EXEMPT, _normalize, load_contract_ops, load_doc_ops
+from src.kernel.help_docs_sync import compare, DOC_EXEMPT, _normalize, load_contract_ops, load_doc_ops
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _HELP_DIR = _REPO_ROOT / "help" / "api"

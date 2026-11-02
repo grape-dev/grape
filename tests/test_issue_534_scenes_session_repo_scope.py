@@ -18,8 +18,8 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 from src.api.main import app  # noqa: E402
 from src.api.deps import get_current_user_or_api_key, require_no_session_token  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
-from src.config import repo_var  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
+from src.kernel.config import repo_var  # noqa: E402
 
 REPO_A = "gitcode:i534/repo-a"
 REPO_B = "gitcode:i534/repo-b"

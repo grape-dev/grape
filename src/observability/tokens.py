@@ -20,7 +20,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from src.config import log
+from src.kernel.config import log
 
 #: token 明细列（顺序即展示顺序）
 TOKEN_COLS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
@@ -122,7 +122,7 @@ def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = 
     if global_scope:
         return "", [], True
     if repo:
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         from src.observability.overview import visible_repo_keys
         want = {to_repo_key(repo), to_repo_key(repo, "github")}
         hit = sorted(want & set(visible_repo_keys(user or {})))
@@ -151,7 +151,7 @@ def _scope(user: Optional[Dict[str, Any]], repo: str = "", global_scope: bool = 
 def _fetch(start: datetime, end: datetime, where: str, params: List[Any],
            task_id: str = "", issue_id: str = "", limit: int = 20000) -> List[Dict[str, Any]]:
     """取窗口内明细（SQL 宽松窗口 ±1 天粗筛 + Python 精确窗口，见模块注释）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sql = ("SELECT u.task_id, u.agent_type, u.engine_id, u.repo_key, u.run_kind, u.run_id,"
            " u.created_at, u.input_tokens, u.output_tokens, u.cache_read_tokens,"
            " u.cache_write_tokens, u.reasoning_tokens, u.cost_usd, t.issue_id"
@@ -283,7 +283,7 @@ def _engine_names(ids: List[int]) -> Dict[int, str]:
     ids = sorted({int(i) for i in ids if i})
     if not ids:
         return {}
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out: Dict[int, str] = {}
     try:
         with db_lock:

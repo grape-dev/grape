@@ -19,7 +19,7 @@ import pytest  # noqa: E402
 from src.observability import metric_rollup as MR  # noqa: E402
 from src.observability import slo as S  # noqa: E402
 from src.observability import slo_backfill as SB  # noqa: E402
-from src.session_manager import db as _db, db_lock as _db_lock  # noqa: E402
+from src.kernel.session_manager import db as _db, db_lock as _db_lock  # noqa: E402
 
 NOW = datetime.now(timezone.utc).replace(minute=0, second=0, microsecond=0)
 END = NOW                                   # 对齐小时边界：无头部小段、无当前未闭合桶
@@ -28,7 +28,7 @@ WINDOW_HOURS = 48
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_metric_rollup WHERE metric LIKE 'engine_avail_%'",

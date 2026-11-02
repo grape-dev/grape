@@ -9,8 +9,8 @@
   辅助脚本读已注入的 `$BOT_GITCODE_TOKEN`（不落盘、随目录清理）。
 """
 import base64, os, re, shutil, subprocess, threading, time
-from src import config
-from src.config import log
+from src.kernel import config
+from src.kernel.config import log
 
 _HOSTS = {"gitcode": "gitcode.com", "github": "github.com"}
 
@@ -39,12 +39,12 @@ def is_git_agent(agent_type: str) -> bool:
 
 
 def repo_base_dir(repo_key: str) -> str:
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "codebase")
 
 
 def issue_dir_for(repo_key: str, agent_type: str, issue_num) -> str:
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return os.path.join(workspace_repo_dir(repo_key), "issues", str(issue_num), agent_type)
 
 
@@ -60,7 +60,7 @@ def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
         wt_dir: worktree 目录路径
         target_branch: 目标分支名（如 feat/issue-{N}）
         base_branch: 基线分支名（如 main），用于新建分支时追踪
-        logger: 可选 logger（默认用 src.config.log）
+        logger: 可选 logger（默认用 src.kernel.config.log）
 
     Returns:
         True 表示已在目标分支上（或成功切换），False 表示切换失败。
@@ -100,7 +100,7 @@ def ensure_feature_branch(wt_dir: str, target_branch: str, base_branch: str,
 
 
 def clone_url_for(repo_key: str) -> str:
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, owner, repo = parse_repo_key(repo_key)
     host = _HOSTS.get(provider, _HOSTS["gitcode"])
     return f"https://{host}/{owner}/{repo}.git"
@@ -264,7 +264,7 @@ def _linked_repo_token(repo_key: str, env: dict = None) -> str:
     if tok:
         return tok
     try:
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         return Repo(repo_key).bot_token
     except Exception as e:
         log.warning(f"linked repo token resolve failed for {repo_key}: {e}")
@@ -315,7 +315,7 @@ def _read_scene_work_branch(repo_key: str, issue_id: str = "") -> str:
     devops_pipeline_scene.advanced_options。这样流水线跑到一半时仓库场景切换不影响已在跑的 Issue。
     """
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         import json as _json
         # 1. 优先读 issue_state.scene_id（Issue 级快照），空则回退 managed_repos.dev_scene
         scene_id = ""

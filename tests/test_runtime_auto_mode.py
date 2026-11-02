@@ -6,7 +6,7 @@ auto 下 pipeline 入队与本地执行、chat 配置 runtime_id 透出。
 import json, os, uuid
 from datetime import datetime, timezone
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline
 from src.runtime.service import (
     runtime_execution_kind,
@@ -162,7 +162,7 @@ class TestChatConfigRuntimeId:
         os.environ.pop("DEVOPS_EXECUTION_MODE", None)
 
     def test_get_chat_config_returns_runtime_id(self):
-        from src.session_manager import get_chat_config, set_chat_config
+        from src.kernel.session_manager import get_chat_config, set_chat_config
         cid = _seed_credential("__auto_chat_w", scope="user")
         rid = _seed_runtime("__auto_chat_eng", cid, last_seen_at=_now_iso())
         set_chat_config(999, backend="__auto_chat_eng")
@@ -171,7 +171,7 @@ class TestChatConfigRuntimeId:
         assert runtime_execution_kind(cfg["runtime_id"]) == EXEC_MODE_REMOTE
 
     def test_unconfigured_chat_defaults_direct(self):
-        from src.session_manager import get_chat_config
+        from src.kernel.session_manager import get_chat_config
         cfg = get_chat_config(888)
         assert cfg["runtime_id"] == 0
         assert runtime_execution_kind(cfg["runtime_id"]) == EXEC_MODE_DIRECT

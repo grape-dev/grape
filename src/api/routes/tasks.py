@@ -12,9 +12,9 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, get_user_token
-from src.config import log, WORKSPACE_DIR
+from src.kernel.config import log, WORKSPACE_DIR
 from src.api.time_utils import normalize_event_time
-from src.session_manager import (
+from src.kernel.session_manager import (
     db, db_lock, get_chat_config, create_conversation, add_message,
 )
 
@@ -97,7 +97,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     - 幂等：同一 issue 已存在 active/processing 任务则复用（2026-09-03 修复#15：不再按 assignee 区分，
       防止 webhook 回声导致同一 issue 产生两个不同 assignee 的任务）
     """
-    from src.repo_key import to_repo_key, split_owner_repo
+    from src.kernel.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
     try:
         owner = split_owner_repo(repo_key)[0] or ""
@@ -129,7 +129,7 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
     # org_id 未显式传入时，从 managed_repos 表推断仓库关联的组织
     if not org_id:
         try:
-            from src.session_manager import db as _org_db, db_lock as _org_db_lock
+            from src.kernel.session_manager import db as _org_db, db_lock as _org_db_lock
             with _org_db_lock:
                 _oc = _org_db.cursor()
                 _oc.execute("SELECT org_id FROM managed_repos WHERE repo_key=? ORDER BY org_id DESC LIMIT 1", (repo_key,))
@@ -220,7 +220,7 @@ async def notify_task(body: TaskNotifyBody, request: Request,
       `_require_session_repo_token` 强制 `tk_` + 仓库作用域；`grape_` API Key / JWT → 403。
     - x-token-scope：session_only（见 openapi._SESSION_ONLY_OPERATIONS）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     if not body.assignee or not body.repo_key or not body.issue_number:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "assignee / repo_key / issue_number 必填"})
     body.repo_key = to_repo_key(body.repo_key)
@@ -456,7 +456,7 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
             from src.api.session_store import get_issue_stage
             st = get_issue_stage(_repo, f"#{_num}")
             _host = "github.com" if _repo.startswith("github:") else "gitcode.com"
-            from src.repo_key import split_owner_repo
+            from src.kernel.repo_key import split_owner_repo
             _owner, _rname = split_owner_repo(_repo)
             with db_lock:
                 c2 = db.cursor()
@@ -474,7 +474,7 @@ def get_current_task(user: dict = Depends(get_current_user_or_api_key)):
                 "url": f"https://{_host}/{_owner}/{_rname}/issues/{_num}",
             }
         except Exception as _e:
-            from src.config import log
+            from src.kernel.config import log
             log.warning(f"tasks/current: enrich issue failed for {task_id}: {_e}")
     return {"task": task}
 

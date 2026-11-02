@@ -4,9 +4,9 @@ import os
 from fastapi import APIRouter, HTTPException, Depends, Query, Request
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token, require_org_member
-from src.config import log
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
-from src.token_service import is_auth_401_error
+from src.kernel.token_service import is_auth_401_error
 
 router = APIRouter(prefix="/api/events", tags=["events"])
 
@@ -48,7 +48,7 @@ def _audit_admin_action(repo_key: str, target_seq: int, action: str, user: dict,
 
 @router.get("/detail/{seq}", operation_id="events_detail", summary="Event detail (result/log)", description="Event detail with payload/agent_logs/result for a seq.")
 def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -67,7 +67,7 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
     check_repo_access(user, row[1] or "")
 
     import json
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     payload = {}
     try:
         payload = json.loads(row[9]) if row[9] else {}
@@ -330,7 +330,7 @@ def terminate_event(seq: int, user: dict = Depends(require_no_session_token)):
     - direct 模式（本机引擎）→ fail_task（task 状态=failed）+ cancel_direct_task 杀子进程
     - 事件状态回写 failed
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.api.event_store import update_event_status
 
     # 查事件状态（含 repo_key 供归属校验）
@@ -445,7 +445,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
     跳过 pick_engine，不换机器。原 runtime_id 不可用（下线/不健康）→ 返回 4xx 错误，不切换。
     """
     import json as _json
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.runtime.service import requeue_task, get_task, enqueue_task, update_task_status
     from src.api.event_store import update_event_status
 
@@ -485,7 +485,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         _evt_type = evt.get("event_type", "") or ""
         if _evt_type in ("issue_comment", "note_hook_pr", "issue_opened", "issue_updated",
                          "issue_closed", "issue_reopened", "issue_assigned", "issue_labeled"):
-            from src.session_manager import db as _db, db_lock as _dbl
+            from src.kernel.session_manager import db as _db, db_lock as _dbl
             with _dbl:
                 _c = _db.cursor()
                 _c.execute("SELECT reason FROM event_skipped WHERE repo_key=? AND issue_id=? "
@@ -503,8 +503,8 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 except Exception:
                     _pl = {}
             if isinstance(_pl, dict) and not _pl.get("_grape_internal_trigger"):
-                from src.repo_key import parse_repo_key
-                from src.outbound_ledger import is_our_outbound, extract_event_content_id, content_hash_md5
+                from src.kernel.repo_key import parse_repo_key
+                from src.kernel.outbound_ledger import is_our_outbound, extract_event_content_id, content_hash_md5
                 _prov = parse_repo_key(evt.get("repo_key", "") or "")[0]
                 _cid = extract_event_content_id(_prov, _pl)
                 _ct = ("issue" if _evt_type == "issue_opened" else
@@ -525,7 +525,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
         else "dev" if evt.get("event_type") == "onboarding_explore" else ""
     )
     if _onb_target:
-        from src.repo_key import split_owner_repo
+        from src.kernel.repo_key import split_owner_repo
         from src.api.onboarding import retry_onboarding_task
         _owner, _repo = split_owner_repo(evt.get("repo_key", "") or "")
         log.info(f"[redispatch] seq={seq} onboarding {_onb_target}: task-level retry, repo={evt.get('repo_key')}")
@@ -609,7 +609,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     try:
                         from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.runtime.engine_select import engine_name as _en
-                        from src.repo_key import from_repo_key as _frk
+                        from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_orig_rid) or ""
                         _rk = old.get("repo_key") or ""
                         _evt_lq = {
@@ -688,7 +688,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
             try:
                 from src.api.event_pipeline import _execute_agent, start_direct_agent
                 from src.runtime.engine_select import engine_name as _en
-                from src.repo_key import from_repo_key as _frk
+                from src.kernel.repo_key import from_repo_key as _frk
                 _be = _en(_orig_rid) or ""
                 _skill_name = old.get("skill") or ""
                 _rk = old.get("repo_key") or ""
@@ -824,7 +824,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     if _cid == 0:
                         from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.runtime.engine_select import engine_name
-                        from src.repo_key import from_repo_key as _frk2
+                        from src.kernel.repo_key import from_repo_key as _frk2
                         _be = engine_name(_new_rid) or ""
                         # Build a minimal evt for _execute_agent
                         _evt = {
@@ -989,7 +989,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                 if (runtime_credential_id(_q_rid) or 0) == 0:
                     from src.api.event_pipeline import _execute_agent, start_direct_agent
                     from src.runtime.engine_select import engine_name as _en
-                    from src.repo_key import from_repo_key as _frk
+                    from src.kernel.repo_key import from_repo_key as _frk
                     _q_be = _en(_q_rid) or ""
                     _q_rk = old.get("repo_key") or ""
                     _q_evt = {
@@ -1201,7 +1201,7 @@ def redispatch_event(seq: int, local_only: bool = False, user: dict = Depends(re
                     try:
                         from src.api.event_pipeline import _execute_agent, start_direct_agent
                         from src.runtime.engine_select import engine_name as _en
-                        from src.repo_key import from_repo_key as _frk
+                        from src.kernel.repo_key import from_repo_key as _frk
                         _be = _en(_rid) or ""
                         _skill_name = old.get("skill") or ""
                         _rk = old.get("repo_key") or ""
@@ -1412,7 +1412,7 @@ def a2a_redo_scene(seq: int, user: dict = Depends(require_no_session_token)):
         # 上游提示（2026-10-12）：该 Issue 已 completed 过的 agent 集合——
         # 补发给它们 = 重跑已完成的阶段（防手误，仅提示不拦截；合法回退仍放行）
         try:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 _c = db.cursor()
                 _c.execute(
@@ -1504,7 +1504,7 @@ class FlowResetBody(BaseModel):
 
 
 def _load_event(seq: int) -> dict:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -1543,7 +1543,7 @@ def _thread_gate(repo_key: str, issue_id: str) -> dict:
 def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_type: str,
                         role: str, content: str, created_by: str = "",
                         task_id: str = "", generate_status: int = 0):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         if task_id:
@@ -1564,7 +1564,7 @@ def _add_thread_message(anchor_seq: int, repo_key: str, issue_id: str, agent_typ
 
 
 def _list_thread(anchor_seq: int, limit: int = 50) -> list:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -1585,7 +1585,7 @@ def _require_event_bot_token(request: Request, repo_key: str):
     if not token:
         token = request.headers.get("X-Bot-Token", "") or ""
     from src.user.db import get_repo_bot_token_no_global
-    from src.api.auth_token import verify_session_token_for_repo
+    from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
     expected = get_repo_bot_token_no_global(repo_key) or ""
     if expected and token == expected:
         return
@@ -1595,7 +1595,7 @@ def _require_event_bot_token(request: Request, repo_key: str):
 
 
 def _cancel_issue_tasks(repo_key: str, issue_id: str) -> int:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.runtime.service import cancel_task
     with db_lock:
         c = db.cursor()
@@ -1669,8 +1669,8 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     - direct：SSE 流式（consume_stream_async）
     - 队列模式：入队 + 轮询（knowledge_files 由 enqueue_task 打包，见 runtime/service.py）
     """
-    from src.config import WORKSPACE_DIR
-    from src.repo_key import from_repo_key
+    from src.kernel.config import WORKSPACE_DIR
+    from src.kernel.repo_key import from_repo_key
     from src.api.knowledge import _issue_num_from
     repo_key, agent_type, issue_id, anchor_seq = evt["repo_key"], evt["agent_type"], evt["issue_id"], evt["seq"]
 
@@ -1688,7 +1688,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
         issue_sess_id = isess.get("id") or ""
         oc_session_id = isess.get("runtime_session_id") or ""
     if not oc_session_id:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1696,11 +1696,11 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
             row = c.fetchone()
         oc_session_id = row[0] or "" if row else ""
 
-    from src.prompt_builder import build_conversation_prompt
+    from src.kernel.prompt_builder import build_conversation_prompt
     prompt, _inj_ids = build_conversation_prompt(evt, user_message, _list_thread(anchor_seq), agent_type, issue_num)
 
-    from src.repo_key import from_repo_key
-    from src.repo import Repo
+    from src.kernel.repo_key import from_repo_key
+    from src.kernel.repo import Repo
     bot_token = Repo(repo_key).bot_token
     repository = from_repo_key(repo_key)
 
@@ -1711,7 +1711,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
     # 引擎选择：按 issue 会话的 runtime_id 判断（credential_id=0 强制 direct）
     _conv_agent_sid = ""
     _conv_rid = 0
-    from src.session_manager import db as _conv_db, db_lock as _conv_db_lock
+    from src.kernel.session_manager import db as _conv_db, db_lock as _conv_db_lock
     with _conv_db_lock:
         c = _conv_db.cursor()
         c.execute("SELECT id, runtime_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?",
@@ -1729,7 +1729,7 @@ async def _run_conversation(evt: dict, user_message: str, username: str, conv_ta
         runtime_id = _conv_rid
         agent_sid = _conv_agent_sid
         if agent_sid:
-            from src.config import SKILLS_DIR, resolve_official_skill_path
+            from src.kernel.config import SKILLS_DIR, resolve_official_skill_path
             event_dialogue_path = resolve_official_skill_path("event-dialogue") \
                 or os.path.join(SKILLS_DIR, "event-dialogue", "SKILL.md")
             from src.api.event_pipeline import get_agent_workdir
@@ -1858,7 +1858,7 @@ def delete_event_thread(seq: int, user: dict = Depends(require_no_session_token)
     evt = _load_event(seq)
     from src.api.routes.knowledge import _check_repo_member
     _check_repo_member(user, evt["repo_key"])
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM event_thread WHERE anchor_seq=?", (seq,))
@@ -1876,7 +1876,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
     _check_repo_member(user, evt["repo_key"])
 
     from src.api.knowledge import knowledge_path, _issue_num_from
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import os
 
     issue_num = _issue_num_from(evt["issue_id"])
@@ -1898,7 +1898,7 @@ def delete_event_knowledge(seq: int, scope: str, user: dict = Depends(require_no
         from src.storage import get_storage
         storage = get_storage()
         if storage is not None:
-            from src.session_manager import db, db_lock
+            from src.kernel.session_manager import db, db_lock
             with db_lock:
                 obs_rows = db.cursor().execute(
                     "SELECT obs_key FROM agent_shared_knowledge "
@@ -2048,7 +2048,7 @@ def _execute_conv_task(task_id: str, loop):
         # session 兜底查询能命中（event dialogue 不创建 agent_tasks 行，
         # 自循环检测条件4依赖 session 兜底覆盖 event dialogue 执行窗口）。
         try:
-            from src.session_manager import db as _sdb, db_lock as _sdbl
+            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
             from datetime import datetime, timezone
             with _sdbl:
                 c = _sdb.cursor()
@@ -2067,11 +2067,11 @@ def _execute_conv_task(task_id: str, loop):
         agent_type = evt["agent_type"]
         issue_id = evt["issue_id"]
         anchor_seq = evt["seq"]
-        from src.config import WORKSPACE_DIR
-        from src.repo_key import from_repo_key
+        from src.kernel.config import WORKSPACE_DIR
+        from src.kernel.repo_key import from_repo_key
         from src.api.knowledge import _issue_num_from
         from src.api.event_pipeline import get_agent_workdir
-        from src.prompt_builder import build_conversation_prompt
+        from src.kernel.prompt_builder import build_conversation_prompt
         from src.api.session_store import get_or_create_issue_session
         issue_num = _issue_num_from(issue_id)
         # 会话复用
@@ -2082,7 +2082,7 @@ def _execute_conv_task(task_id: str, loop):
             issue_sess_id = isess.get("id") or ""
             oc_session_id = isess.get("runtime_session_id") or ""
         if not oc_session_id:
-            from src.session_manager import db as _sdb, db_lock as _sdbl
+            from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
             with _sdbl:
                 c = _sdb.cursor()
                 c.execute("SELECT runtime_session_id FROM devops_agent_session WHERE repo_key=? AND agent_type=?", (repo_key, agent_type))
@@ -2092,8 +2092,8 @@ def _execute_conv_task(task_id: str, loop):
         import os
         os.makedirs(ws, exist_ok=True)
         prompt, injected_ids = build_conversation_prompt(evt, message, _list_thread(anchor_seq), agent_type, issue_num)
-        from src.repo_key import from_repo_key
-        from src.repo import Repo
+        from src.kernel.repo_key import from_repo_key
+        from src.kernel.repo import Repo
         bot_token = Repo(repo_key).bot_token
         repository = from_repo_key(repo_key)
         _worker_final_text = ""
@@ -2144,7 +2144,7 @@ def _execute_conv_task(task_id: str, loop):
         _is_401 = is_auth_401_error(_err_lower)
         if _is_401:
             try:
-                from src.token_service import detect_and_mark_expired
+                from src.kernel.token_service import detect_and_mark_expired
                 _conv_error_code = detect_and_mark_expired(repo_key) or ""
                 if _conv_error_code:
                     log.warning(f"Event dialogue: token expired (error_code={_conv_error_code}), repo={repo_key}")
@@ -2173,7 +2173,7 @@ def _execute_conv_task(task_id: str, loop):
     # R20.15.5: event dialogue 完成后将 session 置 idle → check_running_task
     # session 兜底不再命中 → 用户后续评论可正常触发流水线（R21.7.1）。
     try:
-        from src.session_manager import db as _sdb, db_lock as _sdbl
+        from src.kernel.session_manager import db as _sdb, db_lock as _sdbl
         with _sdbl:
             c = _sdb.cursor()
             c.execute(
@@ -2229,7 +2229,7 @@ def conv_task_status(task_id: str, user: dict = Depends(require_no_session_token
                     "result": task.get("result", ""), "seq": task.get("seq", 0)}
 
     # 2. DB 兜底（event_thread by task_id）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? ORDER BY id", (task_id,))
@@ -2273,7 +2273,7 @@ async def conv_task_stream(task_id: str, user: dict = Depends(require_no_session
                 return
             if not task:
                 # 查 DB 看是否有结果
-                from src.session_manager import db, db_lock
+                from src.kernel.session_manager import db, db_lock
                 with db_lock:
                     c = db.cursor()
                     c.execute("SELECT role, generate_status, content FROM event_thread WHERE task_id=? AND role='agent' ORDER BY id DESC LIMIT 1", (task_id,))
@@ -2360,7 +2360,7 @@ def list_events(owner: str, repo: str,
                       page_size: int = Query(20, ge=1, le=100),
                       status: str = Query("", pattern="^(pending|running|completed|failed)?$"),
                       user: dict = Depends(get_current_user_or_api_key)):
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(f"{owner}/{repo}")
 
     # tk_ 会话 token：限定其绑定仓库（防 Agent 跨仓库读事件列表）
@@ -2373,7 +2373,7 @@ def list_events(owner: str, repo: str,
     from src.api.deps import check_repo_access
     check_repo_access(user, repo_key)
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 跨平台 repo_key 候选（用户可能通过 GitHub OAuth 登录）
     _owner_repo = f"{owner}/{repo}"

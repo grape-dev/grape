@@ -17,7 +17,7 @@ import asyncio
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 
-from src.config import log
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/feishu/card-action", tags=["feishu-card"])
 

@@ -17,7 +17,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
-from src.session_manager import db, db_lock, add_message, get_message
+from src.kernel.session_manager import db, db_lock, add_message, get_message
 
 UID = 99011
 USERNAME = "recall_xmaster_tester"
@@ -110,7 +110,7 @@ class TestCrossMasterRecall:
             # 模拟“另一台主控”的撤回：直接写共享库的撤回标记（本进程内存状态完全不变，
             # 即本进程 ChatTaskManager 根本不知道撤回过）
             t0 = time.time()
-            from src.session_manager import recall_message
+            from src.kernel.session_manager import recall_message
             recall_message(mid)
 
             def _finished():

@@ -13,7 +13,7 @@ from unittest.mock import patch
 
 from src.api.routes import tasks as tasks_mod
 from src.api import issues_center as ic
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:owner/repo"
 

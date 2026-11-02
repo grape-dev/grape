@@ -18,7 +18,7 @@ def global_search(q: str = Query("", min_length=1),
     user_repo_keys = {r["repo_key"] for r in managed}
 
     if type in ("all", "event"):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             try:
@@ -43,7 +43,7 @@ def global_search(q: str = Query("", min_length=1),
                 })
 
     if type in ("all", "agent"):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             try:

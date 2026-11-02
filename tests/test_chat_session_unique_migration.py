@@ -7,7 +7,7 @@
 import sqlite3
 
 from src.api.db_setup import _drop_chat_session_repo_unique
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 class TestDropChatSessionUnique:

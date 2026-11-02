@@ -50,13 +50,13 @@ class TestPostCommentViaProviderAgentType:
 
     def test_passes_real_agent_type_to_post_result(self):
         """传入 agent_type="vod" 时，评论前缀为 [VOD Agent] 而非 [AGENT Agent]。"""
-        from src.token_resolver import _post_comment_via_provider
+        from src.kernel.token_resolver import _post_comment_via_provider
         captured = {}
 
         class _FakeProvider:
             provider_name = "gitcode"
 
-        with patch("src.repo_key.from_repo_key", return_value="test/repo"), \
+        with patch("src.kernel.repo_key.from_repo_key", return_value="test/repo"), \
              patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_comment_via_provider(
@@ -70,13 +70,13 @@ class TestPostCommentViaProviderAgentType:
 
     def test_default_agent_type_still_works(self):
         """未传 agent_type 时默认 "agent"，不崩溃。"""
-        from src.token_resolver import _post_comment_via_provider
+        from src.kernel.token_resolver import _post_comment_via_provider
         captured = {}
 
         class _FakeProvider:
             provider_name = "gitcode"
 
-        with patch("src.repo_key.from_repo_key", return_value="test/repo"), \
+        with patch("src.kernel.repo_key.from_repo_key", return_value="test/repo"), \
              patch("src.api.event_pipeline._is_github_repo", return_value=False), \
              patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_comment_via_provider(
@@ -218,7 +218,7 @@ class TestCompleteTaskFallback:
     def test_post_comment_via_provider_no_hardcoded_agent(self):
         """_post_comment_via_provider 源码不再含硬编码 "agent" 字面量。"""
         import inspect
-        from src.token_resolver import _post_comment_via_provider
+        from src.kernel.token_resolver import _post_comment_via_provider
         src = inspect.getsource(_post_comment_via_provider)
         # 不应含 _post_result_to_issue(..., "agent", ...) 硬编码调用
         assert '"agent", repo_key' not in src, \

@@ -55,7 +55,7 @@ class TestA2ARedispatchUrl:
     def test_t10_03_a2a_url_uses_server_base_url(self):
         """T10-03: get_server_base_url() 有值时 A2A URL 含正确地址。"""
         from src.user.db import get_server_base_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value="http://1.2.3.4:3000"):
             base = get_server_base_url()
             assert base == "http://1.2.3.4:3000"
@@ -65,7 +65,7 @@ class TestA2ARedispatchUrl:
     def test_t10_04_fallback_to_localhost(self):
         """T10-04: get_server_base_url() 为空时 fallback 到 localhost（兼容本地开发）。"""
         from src.user.db import get_server_base_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""):
             base = get_server_base_url()
             # get_server_base_url 最终 fallback 到 localhost:8080（原有兜底）
@@ -178,7 +178,7 @@ class TestDetectServerBasePort:
     def test_config_no_hardcoded_8080(self):
         """验证 config.py 代码中不再有硬编码 :8080。"""
         import inspect
-        from src import config
+        from src.kernel import config
         src = inspect.getsource(config)
         # 不应有硬编码 http://{ip}:8080
         assert 'f"http://{ip}:8080"' not in src, \
@@ -198,7 +198,7 @@ class TestRemainingLocalhostFallback:
     def test_t10_12_get_server_base_url_fallback_not_8080(self):
         """T10-12: get_server_base_url() 所有来源为空时返回 http://localhost:3000（非 8080）。"""
         from src.user.db import get_server_base_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {}, clear=False):
             os.environ.pop("GRAPE_PORT", None)
@@ -209,7 +209,7 @@ class TestRemainingLocalhostFallback:
     def test_t10_13_get_server_base_url_fallback_grape_port(self):
         """T10-13: get_server_base_url() fallback 端口从 GRAPE_PORT 读取。"""
         from src.user.db import get_server_base_url
-        with patch("src.config.read_server_config", return_value={}), \
+        with patch("src.kernel.config.read_server_config", return_value={}), \
              patch("src.user.db.get_meta_value", return_value=""), \
              patch.dict(os.environ, {"GRAPE_PORT": "4000"}):
             result = get_server_base_url()
@@ -218,7 +218,7 @@ class TestRemainingLocalhostFallback:
     def test_t10_14_prompt_builder_fallback_uses_local_port(self):
         """T10-14: _resolve_server_url 异常 fallback 用 _local_port()（非硬编码 8080）。"""
         import inspect
-        from src import prompt_builder
+        from src.kernel import prompt_builder
         src = inspect.getsource(prompt_builder)
         # 不应有硬编码 localhost:8080
         assert '"http://localhost:8080"' not in src, \

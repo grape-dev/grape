@@ -17,7 +17,7 @@ import hashlib
 import base64
 import logging
 
-# 不从 src.config 导入（避免循环导入——config.py 导入本模块的 is_production）
+# 不从 src.kernel.config 导入（避免循环导入——config.py 导入本模块的 is_production）
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "configs"))
 _SECURITY_CONFIG_PATH = os.path.join(CONFIG_DIR, "security.json")
 _config = None

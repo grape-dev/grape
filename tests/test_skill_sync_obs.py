@@ -99,7 +99,7 @@ class TestSyncOfficialSkillsToObs:
     def skill_env(self, tmp_path, monkeypatch):
         """搭建隔离环境：临时 SKILLS_DIR + CONFIG_DIR + skill-description.json + skill 目录。
 
-        monkeypatch skill_sync 模块级 CONFIG_DIR / SKILLS_DIR（模块级 from src.config import），
+        monkeypatch skill_sync 模块级 CONFIG_DIR / SKILLS_DIR（模块级 from src.kernel.config import），
         使被测函数读取隔离的临时路径而非项目真实配置。
         """
         skills_dir = tmp_path / "skills"
@@ -129,7 +129,7 @@ class TestSyncOfficialSkillsToObs:
             json.dumps(desc, ensure_ascii=False), encoding="utf-8"
         )
 
-        # 模块级 import：from src.config import SKILLS_DIR, CONFIG_DIR
+        # 模块级 import：from src.kernel.config import SKILLS_DIR, CONFIG_DIR
         monkeypatch.setattr("src.storage.skill_sync.CONFIG_DIR", str(config_dir))
         monkeypatch.setattr("src.storage.skill_sync.SKILLS_DIR", str(skills_dir))
 

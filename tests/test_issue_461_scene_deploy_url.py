@@ -44,7 +44,7 @@ def client():
 def _seed(client):
     """托管仓库 + 归属关系 + 两个测试场景。"""
     from src.user import db as user_db
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     user_db.add_managed_repo(ALICE_REPO, "alice", "repo1")
     user_db.add_managed_repo(BOB_REPO, "bob", "repo2")
@@ -165,7 +165,7 @@ def test_scene_deploy_url_missing_repo_400(client):
 
 
 def test_scene_deploy_url_inactive_scene_404(client):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO devops_pipeline_scene "
@@ -195,7 +195,7 @@ def test_scene_deploy_url_scene_level_isolation(client):
 
 def test_scene_deploy_url_does_not_touch_repo_level(client):
     """场景级写不得影响需求中心 managed_repos.deploy_url。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _as(1)
     with db_lock:
         c = db.cursor()
@@ -211,7 +211,7 @@ def test_scene_deploy_url_does_not_touch_repo_level(client):
 
 def test_repo_level_deploy_url_does_not_touch_scene(client):
     """需求中心（仓库级）写不得影响场景级。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _as(1)
     client.put("/api/repos/deploy-url", json={"full_name": "alice/repo1",
                                               "deploy_url": "http://repo-level.example.com"})
@@ -225,7 +225,7 @@ def test_repo_level_deploy_url_does_not_touch_scene(client):
 
 def test_db_migration_column_exists():
     """init_database 后 devops_pipeline_scene 应有 deploy_url 列。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         cols = [r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()]

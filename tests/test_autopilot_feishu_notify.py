@@ -34,7 +34,7 @@ _SCHED = None
 def sched():
     """Load scheduler.py standalone with stubbed config/session_manager.
 
-    Real src.session_manager stays intact for other tests (conftest already
+    Real src.kernel.session_manager stays intact for other tests (conftest already
     initialized it); we install our stubs only around the standalone load.
     """
     global _SCHED
@@ -42,19 +42,19 @@ def sched():
         yield _SCHED
         return
 
-    saved = {k: sys.modules.get(k) for k in ("src.config", "src.session_manager")}
-    cfg = types.ModuleType("src.config")
+    saved = {k: sys.modules.get(k) for k in ("src.kernel.config", "src.kernel.session_manager")}
+    cfg = types.ModuleType("src.kernel.config")
     cfg.log = _log
     src_pkg = sys.modules.get("src") or types.ModuleType("src")
     if not hasattr(src_pkg, "__path__"):
         src_pkg.__path__ = [os.path.join(SRC_DIR, "src")]
     sys.modules["src"] = src_pkg
-    sys.modules["src.config"] = cfg
+    sys.modules["src.kernel.config"] = cfg
 
-    sm = types.ModuleType("src.session_manager")
+    sm = types.ModuleType("src.kernel.session_manager")
     sm.db = None
     sm.db_lock = threading.Lock()
-    sys.modules["src.session_manager"] = sm
+    sys.modules["src.kernel.session_manager"] = sm
 
     try:
         spec = importlib.util.spec_from_file_location(
@@ -149,7 +149,7 @@ def notify_env(sched):
     conn.execute("INSERT INTO autopilot_tasks (id, name, repo_key) VALUES (42, 'T42', 'gitcode:demo/repo')")
     conn.commit()
 
-    sm = sys.modules["src.session_manager"]
+    sm = sys.modules["src.kernel.session_manager"]
     old_db, old_lock = sm.db, sm.db_lock
     sm.db = conn
     sm.db_lock = threading.Lock()
@@ -171,9 +171,9 @@ def notify_env(sched):
     ic._get_feishu_open_id_by_user_id = lambda uid: "ou-X"
     ic._resolve_user_chat_bot = lambda bm, uid: "ctxX"
     sys.modules["src.api.issues_center"] = ic
-    pb = types.ModuleType("src.prompt_builder")
+    pb = types.ModuleType("src.kernel.prompt_builder")
     pb._resolve_server_url = lambda rid=0: "http://web"
-    sys.modules["src.prompt_builder"] = pb
+    sys.modules["src.kernel.prompt_builder"] = pb
 
     # scheduler module captured db/db_lock at import time — patch them too
     old_sdb, old_slock = sched.db, sched.db_lock

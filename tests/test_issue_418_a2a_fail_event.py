@@ -21,7 +21,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _REPO = "gitcode:issue418-owner/repo"
 _REPO_FULL = "issue418-owner/repo"
@@ -182,7 +182,7 @@ class TestA2AEarlyExitFailEvent:
         from fastapi.testclient import TestClient
         from src.api.main import app
         with patch("src.runtime.engine_select.pick_engine", return_value=0), \
-             patch("src.session_manager.db", _BoomDb(db)):
+             patch("src.kernel.session_manager.db", _BoomDb(db)):
             client = TestClient(app)
             r = _post(client, _a2a_body())
         assert r.status_code == 200, r.text

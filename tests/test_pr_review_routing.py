@@ -1,7 +1,7 @@
 """Issue #304: pull_request_review 事件阶段矩阵路由测试"""
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_pipeline as ep
 from src.api import session_store as ss
 from src.api.event_pipeline import _resolve_issue_stage_agent, _STAGE_EVENT_AGENT_MAP

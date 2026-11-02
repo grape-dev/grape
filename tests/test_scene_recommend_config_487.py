@@ -15,7 +15,7 @@ os.environ.setdefault("DEVOPS_DB_PATH",
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 
 client = TestClient(app)
@@ -31,7 +31,7 @@ _headers = {}
 
 
 def _jwt_access_token(user_id, username="sr_test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()
         c.execute("SELECT token_version FROM grape_accounts WHERE id=?", (user_id,))

@@ -21,8 +21,8 @@ from fastapi.testclient import TestClient
 from src.api import auth_token
 from src.api.db_setup import init_database
 from src.api.main import app
-from src.config import SKILL_STORAGE_DIR
-from src.session_manager import db, db_lock
+from src.kernel.config import SKILL_STORAGE_DIR
+from src.kernel.session_manager import db, db_lock
 from src.storage import get_storage, get_skill_storage, reset_skill_storage
 
 init_database()
@@ -42,7 +42,7 @@ def _session_token(repo_key=REPO, agent_type="sre"):
 
 
 def _user_headers():
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     if not _UID:
         return {"Authorization": f"Bearer {_BOT_TOKEN}"}
@@ -128,14 +128,14 @@ class TestLocalStorage:
 class TestSkillStorageSelector:
     def test_auto_local_without_obs(self, monkeypatch):
         assert get_storage() is None  # OBS 未启用
-        monkeypatch.setattr("src.config.SKILL_STORAGE", "auto")
+        monkeypatch.setattr("src.kernel.config.SKILL_STORAGE", "auto")
         reset_skill_storage()
         s = get_skill_storage()
         assert s is not None and s.backend_name() == "local"
         assert s._root == SKILL_STORAGE_DIR
 
     def test_obs_only_mode_returns_none(self, monkeypatch):
-        monkeypatch.setattr("src.config.SKILL_STORAGE", "obs")
+        monkeypatch.setattr("src.kernel.config.SKILL_STORAGE", "obs")
         reset_skill_storage()
         assert get_skill_storage() is None
 

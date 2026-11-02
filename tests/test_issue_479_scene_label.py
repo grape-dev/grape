@@ -114,7 +114,7 @@ class TestBackendSceneNameContract:
 
     @pytest.fixture(autouse=True)
     def _seed_and_cleanup(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             # 种仓库级 default 场景，display_name 改名（模拟 S1 场景）
@@ -227,7 +227,7 @@ class TestBackendSceneNameContract:
     def test_t3_05_get_scenes_returns_display_name(self):
         """UC9 数据来源：get_scenes 响应必须携带 display_name（行为契约）。"""
         from src.api.pipeline_config import get_scenes, invalidate_scene_cache
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         invalidate_scene_cache()
         with db_lock:

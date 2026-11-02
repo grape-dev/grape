@@ -34,7 +34,7 @@ import time
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal
 
-from src.config import log
+from src.kernel.config import log
 
 # ===== 配置（可环境变量调优）=====
 
@@ -63,12 +63,12 @@ _cache_lock = threading.Lock()
 
 
 def _db():
-    from src.session_manager import db
+    from src.kernel.session_manager import db
     return db
 
 
 def _lock():
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     return db_lock
 
 

@@ -12,7 +12,7 @@ from fastapi import APIRouter, HTTPException, Depends, Request, Response
 from src.user import db as user_db
 from src.api.deps import require_no_session_token
 from src.auth.grape_account_db import get_grape_account_by_username, increment_token_version as grape_inc
-from src.auth.cookie_utils import (
+from src.kernel.auth_sdk.cookie_utils import (
     set_refresh_cookie as _set_refresh_cookie,
     clear_refresh_cookie as _clear_refresh_cookie,
     get_refresh_token,
@@ -37,7 +37,7 @@ def refresh_token(request: Request, response: Response):
     refresh = get_refresh_token(request)
     if not refresh:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "MISSING_REFRESH_TOKEN", "message": "缺少 refresh_token"})
-    from src.api.jwt_utils import verify_refresh_token, create_access_token, create_refresh_token
+    from src.kernel.auth_sdk.jwt_utils import verify_refresh_token, create_access_token, create_refresh_token
     payload = verify_refresh_token(refresh)
     if not payload:
         raise HTTPException(status_code=401, detail={"code": 401, "error_code": "REFRESH_TOKEN_INVALID", "message": "refresh_token 过期或无效"})

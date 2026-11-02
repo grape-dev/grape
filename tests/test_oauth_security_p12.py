@@ -16,7 +16,7 @@ import hashlib
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 
 
@@ -221,7 +221,7 @@ class TestMergedAccountEmailCleanup:
     def test_transfer_bind_clears_email(self):
         """transfer_bind 中 status=4 SQL 包含 email 清理。"""
         from src.auth.grape_account_db import create_grape_account, get_grape_account_by_id
-        from src.session_manager import db as _db, db_lock as _dl
+        from src.kernel.session_manager import db as _db, db_lock as _dl
         account = create_grape_account(
             username="test_p12_transfer", email="transfer@example.com", password="",
         )

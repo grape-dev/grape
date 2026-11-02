@@ -84,7 +84,7 @@ def test_db(tmp_path, monkeypatch):
     );
     """)
 
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     monkeypatch.setattr(_sm, "db", _conn)
     monkeypatch.setattr(_sm, "db_lock", threading.Lock())
 

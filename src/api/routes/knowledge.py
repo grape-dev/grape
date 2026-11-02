@@ -8,20 +8,20 @@
 - DEL  /api/knowledge/{id}    删除知识条目（按 id）
 """
 import os, time, uuid, hashlib, json
-from src.repo_key import knowledge_obs_prefix
+from src.kernel.repo_key import knowledge_obs_prefix
 from fastapi import APIRouter, HTTPException, Depends, Query
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.api.knowledge import read_entry_content
-from src.config import log, WORKSPACE_DIR
-from src.localfs import write_text as _atomic_write
+from src.kernel.config import log, WORKSPACE_DIR
+from src.kernel.localfs import write_text as _atomic_write
 from src.api.time_utils import normalize_event_time
 
 router = APIRouter(prefix="/api/knowledge", tags=["knowledge"])
 
 
 def _repo_base(repo_key: str) -> str:
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     return workspace_repo_dir(repo_key)
 
 
@@ -31,7 +31,7 @@ def _resolve_repo_key(repo: str) -> str:
     to_repo_key 默认 gitcode: 前缀，但 GitHub OAuth 仓库在 DB 中是 github: 前缀。
     查 managed_repos 表确定实际前缀，找不到则回退 to_repo_key 默认值。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     repo_key = to_repo_key(repo)
     if ":" in repo:
         return repo_key  # 已带前缀，直接返回
@@ -39,7 +39,7 @@ def _resolve_repo_key(repo: str) -> str:
     base = repo
     candidates = [f"gitcode:{base}", f"github:{base}"]
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             placeholders = ",".join("?" * len(candidates))
@@ -59,7 +59,7 @@ def _check_repo_member(user: dict, repo_key: str):
     - 用户（JWT / `grape_` API Key）：仓库成员（托管者或已加入）。
     """
     if user.get("auth_type") == "session_token":
-        from src.repo_key import parse_repo_key
+        from src.kernel.repo_key import parse_repo_key
         _tok_prov, _tok_owner, _tok_repo = parse_repo_key(user.get("repo_key") or "")
         _req_prov, _req_owner, _req_repo = parse_repo_key(repo_key)
         if _tok_owner and (_tok_prov, _tok_owner, _tok_repo) == (_req_prov, _req_owner, _req_repo):
@@ -94,7 +94,7 @@ def list_knowledge(user: dict = Depends(get_current_user_or_api_key),
     repo_key = _resolve_repo_key(repo)
     _check_repo_member(user, repo_key)
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 构建 WHERE 条件
     where = "WHERE repo_key=?"
@@ -189,7 +189,7 @@ def knowledge_stats(user: dict = Depends(get_current_user_or_api_key),
     repo_key = _resolve_repo_key(repo)
     _check_repo_member(user, repo_key)
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         stats_row = db.cursor().execute(
             "SELECT "
@@ -304,7 +304,7 @@ def _build_ref_summary(refs: list) -> str:
 
 def _get_knowledge_by_id(knowledge_id: int):
     """按 id 查询单条知识记录。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         row = db.cursor().execute(
             "SELECT id, scope, repo_key, agent_type, issue_num, file_path, "
@@ -357,8 +357,8 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     """更新知识内容：写文件 + OBS + DB content_hash + updated_at。"""
     repo_key = row["repo_key"]
     file_path = row["file_path"]
-    from src.repo_key import workspace_repo_dir
-    from src.localfs import safe_workspace_path
+    from src.kernel.repo_key import workspace_repo_dir
+    from src.kernel.localfs import safe_workspace_path
     try:
         full = safe_workspace_path(file_path)
     except ValueError:
@@ -379,7 +379,7 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
     except Exception as e:
         log.warning(f"[knowledge] OBS update failed for {obs_key}: {e}")
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         db.cursor().execute(
             "UPDATE agent_shared_knowledge "
@@ -391,7 +391,7 @@ def _update_knowledge_content(knowledge_id: int, row: dict, new_content: str):
 
 def _delete_knowledge_full(knowledge_id: int, row: dict):
     """删除知识：OBS 对象 + 本地文件 + DB 记录 + 关联记录。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     obs_key = row.get("obs_key", "")
     if obs_key:
@@ -405,8 +405,8 @@ def _delete_knowledge_full(knowledge_id: int, row: dict):
 
     file_path = row.get("file_path", "")
     if file_path:
-        from src.repo_key import workspace_repo_dir
-        from src.localfs import safe_workspace_path
+        from src.kernel.repo_key import workspace_repo_dir
+        from src.kernel.localfs import safe_workspace_path
         try:
             full = safe_workspace_path(file_path)
         except ValueError:
@@ -461,7 +461,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
 
     # 校验 scene_ids 存在性（批量查，不循环）
     if scene_ids:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             placeholders = ",".join("?" * len(scene_ids))
             valid_rows = db.cursor().execute(
@@ -499,7 +499,7 @@ def create_knowledge_entry(body: KnowledgeEntryBody, user: dict = Depends(requir
     # 构建关联列表
     items = [(sid, "") for sid in scene_ids] + [("", at) for at in agent_types]
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -567,7 +567,7 @@ def get_knowledge_detail(knowledge_id: int, user: dict = Depends(get_current_use
 
     content = read_entry_content(row["repo_key"], row.get("obs_key", ""), row.get("file_path", ""), row.get("content_hash", ""))
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         refs = db.cursor().execute(
             "SELECT r.id, r.scene_id, r.agent_type, r.enabled, r.created_by, r.created_at, "
@@ -641,7 +641,7 @@ def update_knowledge(knowledge_id: int, body: KnowledgeUpdateBody,
 
     # 更新描述 + 名称
     if body.description is not None or body.name is not None:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             sets = []
             vals = []
@@ -685,7 +685,7 @@ def delete_knowledge_by_id(knowledge_id: int, user: dict = Depends(require_no_se
 def get_knowledge_refs(knowledge_id: int, user: dict = Depends(require_no_session_token)):
     """获取知识的所有关联关系。"""
     _check_ref_permission(knowledge_id, user)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         rows = db.cursor().execute(
             "SELECT id, scene_id, agent_type, enabled, created_by, created_at, updated_at, updated_by "
@@ -704,7 +704,7 @@ def add_knowledge_ref(knowledge_id: int, body: KnowledgeRefBody,
     _check_ref_permission(knowledge_id, user)
 
     # 校验关联数量——同一 scene_id + agent_type 最多 20 条
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     scene_id = body.scene_id or ""
     agent_type = body.agent_type or ""
     # Issue #95：禁止空关联——scene_id 和 agent_type 不能同时为空（否则全局注入）
@@ -765,7 +765,7 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
     """批量新增场景/Agent 关联（幂等，跳过已存在的）。"""
     row = _check_ref_permission(knowledge_id, user)
     username = str(user.get("username") or "")
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     scene_ids = body.scene_ids or []
     agent_types = body.agent_types or []
@@ -847,7 +847,7 @@ def add_knowledge_refs_batch(knowledge_id: int, body: KnowledgeRefBatchBody,
 def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
                          user: dict = Depends(require_no_session_token)):
     """修改关联的 enabled 开关。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         row = db.cursor().execute(
             "SELECT k.repo_key FROM scene_knowledge_ref r "
@@ -870,7 +870,7 @@ def update_knowledge_ref(ref_id: int, body: KnowledgeRefUpdateBody,
 @router.delete("/ref/{ref_id}", operation_id="knowledge_ref_delete", summary="Delete knowledge ref", description="Deletes a ref of a knowledge item.")
 def delete_knowledge_ref(ref_id: int, user: dict = Depends(require_no_session_token)):
     """删除知识的某条关联。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         row = db.cursor().execute(
             "SELECT k.repo_key FROM scene_knowledge_ref r "

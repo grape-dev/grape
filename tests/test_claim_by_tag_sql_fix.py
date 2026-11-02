@@ -104,7 +104,7 @@ def setup_db(tmp_path, monkeypatch):
 
     # Issue #259：claim_by_tag 的健康分检查（health_scorer）经 session_manager.db
     # 引用真实库，须一并替换到测试库；否则引擎 76 查不到 → 失联 → score=0 → claim 拒绝。
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.runtime.health_scorer as _hs
     monkeypatch.setattr(_sm, 'db', test_db)
     monkeypatch.setattr(_sm, 'db_lock', __import__('threading').Lock())

@@ -27,7 +27,7 @@ def test_s1_u5_provider_whitelist():
 
 
 def test_s1_u5_um_column_mapping():
-    from src.repo_key import um_column_for_provider
+    from src.kernel.repo_key import um_column_for_provider
     for p in ("gitcode", "github"):
         assert um_column_for_provider(p) in ("gitcode_user", "github_login")
 
@@ -45,7 +45,7 @@ def test_s2_u1_u2_stale_cutoff():
 
 def test_s2_cutoff_matches_sqlite_datetime_now_format():
     """cutoff 串格式必须与 datetime('now') 写入的 UTC 格式一致（字典序可比）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT datetime('now')")
@@ -158,7 +158,7 @@ def test_no_escape_backslash_in_sql_strings():
 def test_s9_u3_translated_param_sqlite_master():
     """S9-U3：翻译层对参数化 sqlite_master 形态保留原样（Cursor 特判标记），
     不落入后续 ? -> %s 替换链产生非法 SQL。"""
-    from src.mysql_compat import translate_sql, _SQLITE_MASTER_NAME_PARAM_RE
+    from src.kernel.mysql_compat import translate_sql, _SQLITE_MASTER_NAME_PARAM_RE
     sql = "SELECT name FROM sqlite_master WHERE type='table' AND name=?"
     assert _SQLITE_MASTER_NAME_PARAM_RE.match(sql), "regex should match param form"
     # translate 返回原样（标记特判），调用方（Cursor）负责特判
@@ -173,7 +173,7 @@ def test_s9_u3_translated_param_sqlite_master():
 
 def test_s9_u2_sqlite_param_sqlite_master_native():
     """S9-U2：SQLite 后端同 SQL 原生可执行（零回归）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT name FROM sqlite_master WHERE type='table' AND name=?", ("nonexistent_tbl_xyz",))

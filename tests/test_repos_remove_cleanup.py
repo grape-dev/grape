@@ -12,7 +12,7 @@ REPO = "owner/cleanup-test"
 @pytest.fixture()
 def clean_db():
     """清空测试库相关表，造数据"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for tbl in ("events", "event_skipped", "chat_conversations", "chat_messages",
@@ -30,7 +30,7 @@ def clean_db():
 
 
 def _insert(db, table, cols, vals):
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     with db_lock:
         c = db.cursor()
         ph = ",".join("?" for _ in cols)
@@ -60,7 +60,7 @@ class TestCleanupRepoData:
         owner, repo = REPO.split("/")
         _cleanup_repo_data(REPO, owner, repo)
 
-        from src.session_manager import db_lock
+        from src.kernel.session_manager import db_lock
         with db_lock:
             c = clean_db.cursor()
             for tbl in ("events", "event_skipped", "chat_conversations", "chat_agent_session",
@@ -90,7 +90,7 @@ class TestCleanupRepoData:
         owner, repo = REPO.split("/")
         _cleanup_repo_data(REPO, owner, repo)
 
-        from src.session_manager import db_lock
+        from src.kernel.session_manager import db_lock
         with db_lock:
             c = clean_db.cursor()
             assert c.execute("SELECT COUNT(*) FROM events WHERE repo_key='other/repo'").fetchone()[0] == 1
@@ -103,7 +103,7 @@ class TestCleanupRepoData:
         _insert(clean_db, "events", ["repo_key", "event_type", "title", "payload", "status"],
                 ("evil/../etc", "push", "x", "{}", "completed"))
         _cleanup_repo_data("evil/../etc", "evil", "../etc")
-        from src.session_manager import db_lock
+        from src.kernel.session_manager import db_lock
         with db_lock:
             c = clean_db.cursor()
             assert c.execute("SELECT COUNT(*) FROM events WHERE repo_key='evil/../etc'").fetchone()[0] == 1
@@ -131,7 +131,7 @@ class TestCleanupRepoData:
         import src.api.routes.repos as repos_mod
         real_ws = None
         real_skill = None
-        with patch("src.config.WORKSPACE_DIR", str(ws)), \
+        with patch("src.kernel.config.WORKSPACE_DIR", str(ws)), \
              patch("src.user.db.SKILL_DIR", str(skills / "custom")):
             _cleanup_repo_data("owner/cleanup-test", "owner", "cleanup-test")
 

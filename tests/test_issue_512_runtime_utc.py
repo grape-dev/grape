@@ -33,7 +33,7 @@ def _align_user_db():
     收集期捕获引用的模块会与之分裂（写 A 库读 B 库）；先例见 test_issue463_table_governance。
     """
     import importlib
-    from src.session_manager import db as _sm_db, db_lock as _sm_lock
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_lock
     mod = importlib.import_module("src.user.db")
     mod.db = _sm_db
     mod.db_lock = _sm_lock
@@ -50,7 +50,7 @@ def _db_aligned():
       测试侧在任意被污染的测试库上同样幂等补齐（与 test_sessions.db 全量 schema 对齐）。
     """
     _align_user_db()
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.api.db_setup import _ensure_column
     with db_lock:
         c = db.cursor()
@@ -65,7 +65,7 @@ def _db_aligned():
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_runtimes WHERE name LIKE 't512_%'")
@@ -92,10 +92,10 @@ class TestSaveAgentRuntimesUtcCaliber:
     """写入侧：save_agent_runtimes 的 last_seen_at/updated_at 必须为 UTC ISO（带 +00:00）。"""
 
     def test_insert_path_writes_utc_iso(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         import src.user.db as _u
         # 维护方评审意见①：原 4 行 DEBUG print 改为断言
-        assert _u.db is db, "src.user.db.db 应与 src.session_manager.db 为同一连接"
+        assert _u.db is db, "src.user.db.db 应与 src.kernel.session_manager.db 为同一连接"
         try:
             _cols = [r[1] for r in db.execute("PRAGMA table_info(agent_runtimes)").fetchall()]
         except Exception:
@@ -118,7 +118,7 @@ class TestSaveAgentRuntimesUtcCaliber:
             _clean()
 
     def test_update_path_writes_utc_iso(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _clean()
         try:
             udb.save_agent_runtimes([
@@ -143,7 +143,7 @@ class TestMigrateAgentRuntimesUtcCaliber:
     """存量迁移：仅修正"超前当前 UTC"的行，幂等可重放。"""
 
     def _seed(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _clean()
         with db_lock:
             c = db.cursor()
@@ -169,7 +169,7 @@ class TestMigrateAgentRuntimesUtcCaliber:
 
         模拟历史脏行（naive CST 落在未来 +8h）→ 迁移后所有 online 行的时间不超前当前 UTC。
         """
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         self._seed()
         try:
             with patch("src.api.time_utils._db_backend", return_value="mysql"):
@@ -189,7 +189,7 @@ class TestMigrateAgentRuntimesUtcCaliber:
             _clean()
 
     def test_migration_only_fixes_future_rows_and_idempotent(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         self._seed()
         try:
             with patch("src.api.time_utils._db_backend", return_value="mysql"):
@@ -223,7 +223,7 @@ class TestMigrateAgentRuntimesUtcCaliber:
 
     def test_in_process_throttle_skips_rescan(self):
         """维护方评审意见②：进程内节流——同一进程两次迁移间隔低于阈值时第二次直接跳过全表扫描。"""
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         self._seed()
         with patch("src.api.time_utils._db_backend", return_value="mysql"):
             udb._agent_runtimes_migrate_last_mono = 0.0
@@ -252,7 +252,7 @@ class TestAgentRuntimesReadOutletNormalized:
     """读取侧：GET /api/settings/agent-runtimes 出口 last_seen_at/updated_at 统一归一。"""
 
     def test_outlet_normalizes_mysql_naive_value(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         _clean()
         with db_lock:
             c = db.cursor()

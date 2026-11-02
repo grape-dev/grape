@@ -31,7 +31,7 @@ class TestResolveBotUsername:
     def test_repo_level_bot_username_wins(self, monkeypatch):
         """repo 级 managed_repos.bot_username 优先（GitCodeRepoConfig 来源）"""
         import sqlite3
-        from src.session_manager import db
+        from src.kernel.session_manager import db
 
         with db:  # noqa: SIM115（会话级共享连接）
             db.execute("DELETE FROM managed_repos WHERE repo_key=?", ("gitcode:octo/issue573",))
@@ -145,6 +145,6 @@ class TestSingleHelperPath:
 
     def test_agent_name_reserved_for_scene_custom_env(self):
         """AGENT_NAME 加入场景自定义变量保留集（防同名冲突覆盖）"""
-        from src.scene_custom_env import is_reserved_name
+        from src.kernel.scene_custom_env import is_reserved_name
         assert is_reserved_name("AGENT_NAME")
         assert is_reserved_name("BOT_USERNAME")

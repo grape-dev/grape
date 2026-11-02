@@ -16,7 +16,7 @@ import json
 import uuid
 from unittest.mock import patch
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 _REPO = "gitcode:XOcto/bound-repo"
 _BOT_TOKEN = "bound-bot-token"

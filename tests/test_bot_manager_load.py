@@ -15,7 +15,7 @@ def manager():
 
 def _seed_users_and_config():
     """在测试库写入两个用户的 chat 配置 + 一个 vod 配置"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM chat_agent_session WHERE (repo_key='' OR repo_key IS NULL) AND im_app_id!=''")
@@ -62,7 +62,7 @@ def test_load_from_db_loads_all_users():
 
 def test_load_from_db_dedup_same_app_id_two_users():
     """同一 app_id 被两个用户配置时只启动一个 bot"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM chat_agent_session WHERE (repo_key='' OR repo_key IS NULL) AND im_app_id!=''")
@@ -89,7 +89,7 @@ def test_load_from_db_dedup_same_app_id_two_users():
 
 def test_load_from_db_empty():
     """无配置时不应加载任何 bot"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         # 清空所有用户级 chat 配置 + iso 前缀的 vod 配置 + iso 登记
@@ -113,7 +113,7 @@ def test_load_from_db_empty():
 def test_ensure_default_sessions_no_vod_im_injection(tmp_path, monkeypatch):
     """ensure_default_agent_sessions 不应自动注入 VOD IM 配置（无全局 vod bot 概念）"""
     from unittest.mock import patch as _patch
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 清理目标仓库
     with db_lock:

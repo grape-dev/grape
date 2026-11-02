@@ -56,7 +56,7 @@ def _make_python(uv_dir, ver, arch, platform="unknown-linux-gnu", with_patch=Tru
 @pytest.fixture(autouse=True)
 def _reset_version_cache():
     """package_version 的 TTL 缓存是模块级状态，逐测试复位防串扰。"""
-    import src.worker_package as wp
+    import src.kernel.worker_package as wp
     monkey = pytest.MonkeyPatch()
     monkey.setattr(wp, "_cached_package_version", "")
     monkey.setattr(wp, "_cached_package_version_ts", 0.0)
@@ -68,7 +68,7 @@ class TestFindPythonsUVInstallFailureAlarm:
     """R2：uv install 非零退出（含 --arch 不存在 rc=2）必须告警，不得静默。"""
 
     def _setup(self, monkeypatch, tmp_path, exit_code, stderr_text):
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         _make_python(uv_dir, "3.12.8", "aarch64")  # 仅本机架构，x86_64 缺失
@@ -123,7 +123,7 @@ class TestFindPythonsFullRequestString:
 
     def test_uv_install_uses_full_request_string(self, monkeypatch, tmp_path):
         """缺架构补装命令 = `uv python install cpython-3.12-linux-<arch>-gnu`。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         uv_dir = tmp_path / "uv_python"
         uv_dir.mkdir()
         _make_python(uv_dir, "3.12.8", "aarch64")
@@ -155,7 +155,7 @@ class TestBuildPackageVersionFreshness:
     """R1：重建路径在架构补齐后，版本重算不得命中 TTL 缓存（指纹须与包内容一致）。"""
 
     def _isolate(self, monkeypatch, tmp_path):
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         monkeypatch.setattr(wp, "CACHE_DIR", str(tmp_path))
         monkeypatch.setattr(wp, "PKG_PATH", os.path.join(str(tmp_path), "grape-worker.tar.gz"))
         monkeypatch.setattr(wp, "VERSION_PATH", os.path.join(str(tmp_path), "VERSION"))
@@ -171,7 +171,7 @@ class TestBuildPackageVersionFreshness:
 
     def test_rebuild_version_recomputed_after_uv_install(self, monkeypatch, tmp_path):
         """心跳预热 TTL 缓存（单架构）→ x86_64 落盘 → 重建：VERSION 戳须为双架构指纹。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         wp, uv_dir = self._isolate(monkeypatch, tmp_path)
         _make_python(uv_dir, "3.12.8", "aarch64")
 
@@ -198,7 +198,7 @@ class TestBuildPackageVersionFreshness:
 
     def test_cached_rebuild_not_disturbed(self, monkeypatch, tmp_path):
         """缓存命中路径不受 force 影响：架构无变化时二次构建不重建包（mtime 不变）。"""
-        import src.worker_package as wp
+        import src.kernel.worker_package as wp
         wp, uv_dir = self._isolate(monkeypatch, tmp_path)
         _make_python(uv_dir, "3.12.8", "aarch64")
         _make_python(uv_dir, "3.12.8", "x86_64")

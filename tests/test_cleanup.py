@@ -4,7 +4,7 @@ import pytest
 
 from datetime import datetime, timezone, timedelta
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import cleanup
 
 
@@ -39,7 +39,7 @@ def test_sweep_once_purges_stale_im_instances():
 
 @pytest.fixture(autouse=True)
 def _cleanup_env(tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path / "ws"))
+    monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path / "ws"))
     with db_lock:
         for t in ("issue_state", "agent_tasks", "issue_agent_session"):
             try:

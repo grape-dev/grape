@@ -3,7 +3,7 @@ import json, os, re, asyncio, base64
 from fastapi import APIRouter, HTTPException, Depends
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token, require_org_member
-from src.config import log, CONFIG_DIR, EXAMPLE_DIR
+from src.kernel.config import log, CONFIG_DIR, EXAMPLE_DIR
 from src.user.repo_manager import create_repo, get_user_gitcode_login, push_template_to_repo
 from src.api.deps import get_user_token, get_user_token_with_refresh, get_user_github_token, get_user_github_token_with_refresh
 
@@ -271,7 +271,7 @@ async def create_from_template(body: CreateTemplateRequest,
     #    仓库托管时 apply_default_scene_to_repo 已应用默认「通用开发」场景。
     #    如果模板自带 scene_id（如 hello-world），覆盖为模板对应的场景。
     try:
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         from src.api.onboarding import trigger_onboarding, cleanup_stale_repo_data
         repo_key = to_repo_key(full_name, provider=provider)
         # FR-26.1: 优先用 VCS 平台 login（owner_login），注册名做降级
@@ -302,7 +302,7 @@ async def create_from_template(body: CreateTemplateRequest,
     except Exception as e:
         log.warning(f"template onboarding trigger failed: {e}")
 
-    from src.repo_key import to_repo_key as _to_rk
+    from src.kernel.repo_key import to_repo_key as _to_rk
     return {"full_name": full_name, "webhook_id": webhook_id,
             "host_warning": host_warning,
             "message": msg,

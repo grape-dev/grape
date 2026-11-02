@@ -19,7 +19,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 
 
 def _setup() -> int:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -40,7 +40,7 @@ def _setup() -> int:
 def test_apply_generates_unique_scene_id_and_editable_name():
     from src.api.main import app
     from src.api.deps import get_current_user_or_api_key
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {
         "id": 1, "username": "test_user", "auth_type": "api_key"}

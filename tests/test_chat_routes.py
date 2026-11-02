@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
-from src.session_manager import db, db_lock, get_chat_config
+from src.kernel.session_manager import db, db_lock, get_chat_config
 from src.user import db as user_db
 
 UID = 99001
@@ -171,7 +171,7 @@ class TestSend:
         with patch("src.api.routes.chat._get_chat_config",
                           return_value={"backend": "opencode", "runtime_id": rid}), \
              patch("src.runtime.executor.stream_chat_agent", side_effect=_fake_stream_agent), \
-             patch("src.prompt_builder.build_issue_chat_prompt", return_value="task-prompt") as m_build:
+             patch("src.kernel.prompt_builder.build_issue_chat_prompt", return_value="task-prompt") as m_build:
             _client.post("/api/chat/send", json={"message": "hi", "conversation_id": cid})
         m_build.assert_called()
 
@@ -452,7 +452,7 @@ class TestConfig:
 
 class TestHelpers:
     def test_build_chat_prompt(self):
-        from src.prompt_builder import build_general_chat_prompt
+        from src.kernel.prompt_builder import build_general_chat_prompt
         prompt = build_general_chat_prompt("帮我看看", "org/repo", [{"role": "user", "content": "x"}])
         assert "帮我看看" in prompt
 
@@ -464,11 +464,11 @@ class TestHelpers:
     def test_resolve_token_fallback_repo_token(self):
         # user_token empty + repo_key → repo bot token fallback
         from src.api.routes.chat import _resolve_gitcode_token
-        with patch("src.repo.Repo") as m_repo:
+        with patch("src.kernel.repo.Repo") as m_repo:
             m_repo.return_value.bot_token = "repo_tok"
             assert _resolve_gitcode_token("", "owner/repo") == "repo_tok"
         # repo token also empty → return empty string, no exception
-        with patch("src.repo.Repo") as m_repo:
+        with patch("src.kernel.repo.Repo") as m_repo:
             m_repo.return_value.bot_token = ""
             assert _resolve_gitcode_token("", "owner/repo") == ""
 

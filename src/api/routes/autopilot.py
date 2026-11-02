@@ -17,8 +17,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, field_validator
 from src.api.deps import get_current_user, check_repo_access
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 router = APIRouter(prefix="/api/autopilot", tags=["autopilot"])
 
@@ -91,7 +91,7 @@ def _validate_engine_runtime_ids(user: dict, repo_key: str, engine_ids: list) ->
     """
     if not engine_ids:
         return
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     from src.user import db as user_db
     from src.api.routes.settings import _build_cred_map, _make_visible_credential_fn
     uid = user.get("id") or 0
@@ -348,7 +348,7 @@ def get_task(task_id: int, user: dict = Depends(get_current_user)):
 def create_task(body: CreateTaskBody, user: dict = Depends(get_current_user)):
     """创建自动化任务。"""
     # 规范化 repo_key：前端可能硬编码 gitcode: 前缀，需按用户实际关联仓修正
-    from src.repo_key import to_repo_key, parse_repo_key
+    from src.kernel.repo_key import to_repo_key, parse_repo_key
     if body.repo_key:
         # 检查用户 managed_repos 中是否有匹配的仓库（跨平台前缀兼容）
         from src.user.db import get_managed_repos
@@ -633,7 +633,7 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
                                                      "issue_number": finding["dispatched_issue_number"]})
 
     # 创建真实 Issue（调用方传的 title/desc/scene_id 优先，否则用 finding 原值）
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     owner, rname = split_owner_repo(repo_key)
 
     # 获取 bot token

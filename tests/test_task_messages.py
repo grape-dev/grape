@@ -10,12 +10,12 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 from src.runtime.task_log_stream import subscribe, unsubscribe, fanout, _subscribers
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -192,7 +192,7 @@ class TestCrossMasterTail:
 
         # 模拟另一台 master 直接 INSERT task_messages（不触发本进程 fanout）
         from datetime import datetime, timezone
-        from src.session_manager import db as _db, db_lock as _dbl
+        from src.kernel.session_manager import db as _db, db_lock as _dbl
         with _dbl:
             c = _db.cursor()
             c.execute(
@@ -231,7 +231,7 @@ class TestCrossMasterTail:
         assert [m["seq"] for m in msgs] == [1, 2, 3]
         # 模拟另一台 master 再落 2 条
         from datetime import datetime, timezone
-        from src.session_manager import db as _db, db_lock as _dbl
+        from src.kernel.session_manager import db as _db, db_lock as _dbl
         with _dbl:
             c = _db.cursor()
             for i, txt in enumerate(["d", "e"], start=4):
@@ -277,7 +277,7 @@ class TestCrossMasterTail:
                         break
                 # 模拟另一台 master 落库（不触发本进程 fanout）
                 from datetime import datetime, timezone
-                from src.session_manager import db as _db, db_lock as _dbl
+                from src.kernel.session_manager import db as _db, db_lock as _dbl
                 with _dbl:
                     c = _db.cursor()
                     c.execute(

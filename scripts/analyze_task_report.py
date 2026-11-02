@@ -24,7 +24,7 @@ if _sys_dir not in sys.path:
 
 def _query_task_stats(days: int = 7):
     """查询近 N 天的任务统计数据。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone, timedelta
 
     window = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()

@@ -7,7 +7,7 @@
 import pytest
 
 from src.api import session_store
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 @pytest.fixture(autouse=True)

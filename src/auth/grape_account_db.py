@@ -5,8 +5,8 @@ Grape 账号表（grape_accounts）只存账号自身字段，不含任何第三
 """
 import time
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 from src.auth.password import hash_password, verify_password, needs_upgrade
 
 
@@ -36,7 +36,7 @@ def _sync_um_platform_col(grape_user_id: int, provider: str, external_login: str
             _c = db.cursor()
             _c.execute("INSERT OR IGNORE INTO unified_user_mapping (user_id) VALUES (?)", (grape_user_id,))
             # FR-CQ-1: 提取为 um_column_for_provider 工具函数
-            from src.repo_key import um_column_for_provider
+            from src.kernel.repo_key import um_column_for_provider
             _col = um_column_for_provider(provider)
             _c.execute(f"UPDATE unified_user_mapping SET {_col}=?, updated_at=datetime('now') WHERE user_id=?",
                        (external_login, grape_user_id))
@@ -1532,7 +1532,7 @@ def save_binding_ticket(
                 )
             except Exception as _exc:
                 # FR-CQ-5: 约束冲突时删旧票重试（提取为 _is_constraint_error）
-                from src.session_manager import _is_constraint_error
+                from src.kernel.session_manager import _is_constraint_error
                 if not _is_constraint_error(_exc):
                     raise
                 c.execute("DELETE FROM binding_tickets WHERE ticket=?", (ticket,))

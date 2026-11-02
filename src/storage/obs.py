@@ -11,7 +11,7 @@
 """
 import os
 
-from src.config import log
+from src.kernel.config import log
 from src.storage import StorageBackend, StorageError
 
 try:
@@ -33,7 +33,7 @@ class ObsStorage(StorageBackend):
         # 前缀一律来自配置（环境变量 OBS_PREFIX），不写死默认值——不同环境（prod/test/dev）
         # 用不同前缀隔离，任何实例化路径都不得绕过配置
         if not prefix:
-            from src.config import OBS_PREFIX as _cfg_prefix
+            from src.kernel.config import OBS_PREFIX as _cfg_prefix
             prefix = _cfg_prefix
         self.client = ObsClient(access_key_id=access_key, secret_access_key=secret_key,
                                 server=endpoint)

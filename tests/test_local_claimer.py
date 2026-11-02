@@ -20,7 +20,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 def claimer_env(tmp_path, monkeypatch):
     """内存 sqlite + 基础表数据（两台本机引擎 + 一台远端 worker 引擎）。"""
     import sqlite3
-    from src.session_manager import db as _db_mod
+    from src.kernel.session_manager import db as _db_mod
 
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
@@ -92,7 +92,7 @@ def claimer_env(tmp_path, monkeypatch):
     conn.commit()
 
     # monkeypatch session_manager 的 db 为内存库
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     monkeypatch.setattr(sm, "db", conn, raising=False)
     import src.runtime.service as svc
     monkeypatch.setattr(svc, "db", conn, raising=False)

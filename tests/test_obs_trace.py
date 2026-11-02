@@ -24,7 +24,7 @@ T2 = "t_trc0000000002"
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql, params in [
@@ -42,7 +42,7 @@ def _clean():
 
 
 def _grant(repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -53,7 +53,7 @@ def _grant(repo_key):
 
 def _task(tid, repo_key, issue_id="#7", agent_type="coding", status="completed",
           wait_s=2, dur_s=127, errors="", runtime_id=262, event_seq=588):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = datetime.now(timezone.utc)
     enq = now - timedelta(seconds=wait_s + dur_s + 5)
     disp = enq + timedelta(seconds=wait_s)
@@ -71,7 +71,7 @@ def _task(tid, repo_key, issue_id="#7", agent_type="coding", status="completed",
 
 
 def _msg(tid, seq, typ="tool_use", tool="shell", output="ok"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content,"
@@ -82,7 +82,7 @@ def _msg(tid, seq, typ="tool_use", tool="shell", output="ok"):
 
 
 def _usage(tid, i=1000, o=100, cr=500):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO obs_llm_usage (dedup_key, task_id, seq, source, repo_key,"
@@ -94,7 +94,7 @@ def _usage(tid, i=1000, o=100, cr=500):
 
 
 def _log(tid, level="ERROR", msg="boom"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT OR REPLACE INTO obs_log (dedup_key, ts, level, component, source, task_id,"
@@ -128,7 +128,7 @@ def test_trace_ids_are_deterministic():
 
 
 def test_stamp_missing_backfills_legacy_rows():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _task(T1, REPO)
     with db_lock:                                   # 模拟历史任务：trace 为空
         c = db.cursor()

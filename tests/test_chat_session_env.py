@@ -12,12 +12,12 @@ SRC = os.path.join(os.path.dirname(__file__), "..")
 sys.path.insert(0, SRC)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(SRC, "data", "test_sessions.db"))
 
-from src.api.auth_token import verify_session_token, verify_session_token_for_repo
+from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
 from src.api.chat_session_env import chat_session_env_extra
 
 
 def _lookup_session_key(tok: str) -> str:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sha = hashlib.sha256(tok.encode()).hexdigest()
     with db_lock:
         row = db.cursor().execute(
@@ -26,7 +26,7 @@ def _lookup_session_key(tok: str) -> str:
 
 
 def _cleanup():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM session_api_tokens WHERE user_id=99991 OR session_key LIKE 'conv:test-conv%'")
@@ -74,7 +74,7 @@ class TestChatSessionEnvExtra:
 
     def test_issue_token_failure_degrades(self):
         """issue_session_token 抛异常 → helper 不抛，仅缺 token 字段，其余 env 保留（chat 仍可正常回复）。"""
-        with patch("src.api.auth_token.issue_session_token", side_effect=Exception("DB down")):
+        with patch("src.kernel.auth_sdk.auth_token.issue_session_token", side_effect=Exception("DB down")):
             env = chat_session_env_extra(99991, "test-conv", "gitcode:owner/repo")
         assert "GRAPE_SESSION_TOKEN" not in env
         assert "GRAPE_CLI_MODE" not in env

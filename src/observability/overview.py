@@ -105,7 +105,7 @@ def _scope_keys(user: Dict[str, Any], repo: str) -> List[str]:
     visible = visible_repo_keys(user)
     if not repo:
         return visible
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     want = {to_repo_key(repo), to_repo_key(repo, "github")}
     hit = sorted(want & set(visible))
     if not hit:
@@ -141,7 +141,7 @@ def _fetch_tasks(repo_keys: List[str]) -> List[Dict[str, Any]]:
     """范围内任务（不分页，窗口在 Python 侧过滤：时间格式跨方言，交给 normalize 处理）。"""
     if not repo_keys:
         return []
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ph = ",".join("?" * len(repo_keys))
     out: List[Dict[str, Any]] = []
     try:
@@ -161,7 +161,7 @@ def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
     """范围内 LLM 用量台账行（table: obs_llm_usage）。"""
     if not repo_keys:
         return []
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ph = ",".join("?" * len(repo_keys))
     out: List[Dict[str, Any]] = []
     try:
@@ -181,7 +181,7 @@ def _fetch_usage(repo_keys: List[str]) -> List[Dict[str, Any]]:
 def _fetch_engines(user: Dict[str, Any], repo_keys: List[str]) -> Tuple[int, int]:
     """(在线设备数, 总数) —— 按可见性口径过滤 runtime_credentials。"""
     frag, params = _cred_visibility(user, repo_keys)
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     total = online = 0
     try:
         from src.runtime.health import derive_runtime_health

@@ -160,7 +160,7 @@ class TestAutoDetectUrlSwitch:
 
     def test_config_has_auto_detect_env(self):
         """验证 src/config.py 读取 GRAPE_AUTO_DETECT_URL 环境变量"""
-        config_path = os.path.join(_PROJECT_ROOT, "src", "config.py")
+        config_path = os.path.join(_PROJECT_ROOT, "src", "kernel", "config.py")
         with open(config_path, "r", encoding="utf-8") as f:
             source = f.read()
         assert "GRAPE_AUTO_DETECT_URL" in source, "config.py 应检查 GRAPE_AUTO_DETECT_URL"
@@ -169,7 +169,7 @@ class TestAutoDetectUrlSwitch:
         """GRAPE_AUTO_DETECT_URL=false 时 _detect_server_base 返回空串"""
         # 由于 _detect_server_base 是嵌套函数，无法直接导入测试
         # 验证逻辑：环境变量设置后源码中的分支条件
-        config_path = os.path.join(_PROJECT_ROOT, "src", "config.py")
+        config_path = os.path.join(_PROJECT_ROOT, "src", "kernel", "config.py")
         with open(config_path, "r", encoding="utf-8") as f:
             source = f.read()
         # 验证源码中包含开关逻辑

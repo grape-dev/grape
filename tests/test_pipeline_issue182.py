@@ -61,7 +61,7 @@ class TestPipelineFailedCount:
         # 模拟空 events（无流水线数据），验证字段存在
         with patch("src.api.deps.require_no_session_token", return_value={"user_id": "test"}):
             with patch("src.api.deps.check_repo_access", return_value=None):
-                with patch("src.session_manager.db") as mock_db:
+                with patch("src.kernel.session_manager.db") as mock_db:
                     mock_cursor = MagicMock()
                     mock_cursor.fetchall.return_value = []
                     mock_db.cursor.return_value = mock_cursor

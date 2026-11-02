@@ -34,7 +34,7 @@ def backup_restore():
 @pytest.fixture
 def test_env(monkeypatch):
     """用项目真实 DB，测试前清理 + 插入测试数据，测试后恢复。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import src.runtime.service as svc
     monkeypatch.setattr(svc, "db", db)
     monkeypatch.setattr(svc, "db_lock", db_lock)
@@ -83,7 +83,7 @@ def test_claim_by_tag_rejected_when_busy_slots_full(test_env):
     """真实 running 数 >= max_concurrent 时拒绝 claim（方案 D：以真实 COUNT 为事实源，
     busy_slots 列仅为展示快照，不再参与决策）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()
@@ -102,7 +102,7 @@ def test_claim_by_tag_rejected_when_busy_slots_full(test_env):
 
 def test_claim_by_tag_ignores_engine_capabilities_max_concurrent(test_env):
     """engine_capabilities.max_concurrent=1 但 agent_runtimes.max_concurrent=4 时，应能 claim。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = datetime.now(timezone.utc).isoformat()
     with db_lock:
         c = db.cursor()

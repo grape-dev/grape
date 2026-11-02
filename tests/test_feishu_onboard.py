@@ -22,10 +22,10 @@ from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
 from src.auth import grape_account_db
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -293,7 +293,7 @@ class TestStatusFlow:
     def test_vod_connected_persists_devops_session(self):
         """扫码成功 vod_bot → devops_agent_session + global_im_bot_config 落库。"""
         _clean_tasks()
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         repo_key = to_repo_key(f"repo_{_uid['id']}")  # 与 _apply_vod_credentials 归一化后一致
         from src.api.routes import feishu_onboard as f
         # 预建 devops_agent_session 行（vod）
@@ -333,7 +333,7 @@ class TestStatusFlow:
         应归一化为 gitcode:owner/repo 并 INSERT 建行——否则凭据丢失（历史 bug）。"""
         _clean_tasks()
         repo_key = f"owner{_uid['id']}/sample-repo"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         with _patch_register(_fake_success) as patched:
             from src.api.routes import feishu_onboard as f
             async def _fake_vod(**kwargs):
@@ -341,7 +341,7 @@ class TestStatusFlow:
                 return _result()
             patched.side_effect = _fake_vod
             task_id = _await_run("vod_bot", repo_key, patched=patched)
-        from src.session_manager import db as _db
+        from src.kernel.session_manager import db as _db
         with db_lock:
             c = db.cursor()
             row = c.execute(
@@ -364,7 +364,7 @@ class TestStatusFlow:
         """已有 vod 行时 UPDATE 凭据，且 session id 不变（不重建）。"""
         _clean_tasks()
         repo_key = f"owner{_uid['id']}/sample-repo"
-        from src.repo_key import to_repo_key
+        from src.kernel.repo_key import to_repo_key
         rk = to_repo_key(repo_key)
         import uuid as _uuid
         sess_id = str(_uuid.uuid4())

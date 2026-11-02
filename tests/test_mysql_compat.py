@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-import src.mysql_compat as mc
+import src.kernel.mysql_compat as mc
 
 
 # ====== 配置读取 ======
@@ -446,7 +446,7 @@ class TestCompatDB:
         db = mc.MySQLCompatDB(host="10.0.0.1", port=3306, user="u", password="p", database="d")
         # DB_POOL_DISABLED=1 forces the per-thread fallback path (no PooledDB)
         db._pool_disabled = True
-        with patch("src.mysql_compat.pymysql.connect") as m_conn:
+        with patch("src.kernel.mysql_compat.pymysql.connect") as m_conn:
             m_conn.return_value.cursor.return_value = MagicMock()
             cur = db._raw_cursor()
         assert cur is not None
@@ -459,7 +459,7 @@ class TestCompatDB:
         db._local.conn = old_conn
         # 第一次 ping 抛异常 → 重新 connect
         old_conn.ping.side_effect = RuntimeError("gone")
-        with patch("src.mysql_compat.pymysql.connect") as m_conn:
+        with patch("src.kernel.mysql_compat.pymysql.connect") as m_conn:
             m_conn.return_value.cursor.return_value = MagicMock()
             db._raw_cursor()
         assert m_conn.call_count == 1

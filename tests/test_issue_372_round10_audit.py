@@ -67,7 +67,7 @@ class TestT38bGetRepoBotTokenNoGlobalGuard:
         测试 mock TokenResolver.read_stored_token 返回用户 token。
         """
         from src.user.db import get_repo_bot_token_no_global
-        with patch("src.token_resolver.TokenResolver.read_stored_token", return_value="user_token"):
+        with patch("src.kernel.token_resolver.TokenResolver.read_stored_token", return_value="user_token"):
             result = get_repo_bot_token_no_global("gitcode:owner/repo")
             assert result == "user_token"
 

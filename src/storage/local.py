@@ -8,7 +8,7 @@
 import os
 import shutil
 
-from src.config import log
+from src.kernel.config import log
 from src.storage import StorageBackend
 
 

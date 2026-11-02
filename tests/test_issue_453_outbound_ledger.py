@@ -28,13 +28,13 @@ class _DbProxy:
     """动态转发到当前 session_manager.db（被 fixture patch 后即 mock 库）。"""
 
     def __getattr__(self, attr):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         return getattr(_sm.db, attr)
 
 
 class _DbLockProxy:
     def __enter__(self):
-        import src.session_manager as _sm
+        import src.kernel.session_manager as _sm
         self._real = _sm.db_lock
         return self._real.__enter__()
 
@@ -48,7 +48,7 @@ db_lock = _DbLockProxy()
 # 模块级捕获 session_manager.db/db_lock 的已知模块（run_pipeline 写侧链路）：
 # 函数级 import 的模块自动经 session_manager 取到 mock，无需列举。
 _PATCH_DB_MODULES = (
-    "src.session_manager", "src.api.event_store", "src.api.event_pipeline",
+    "src.kernel.session_manager", "src.api.event_store", "src.api.event_pipeline",
     "src.user.db", "src.api.session_store", "src.api.issues_center",
     "src.api.db_setup", "src.api.routes.events", "src.api.token_resolver",
 )
@@ -58,7 +58,7 @@ _PATCH_DB_MODULES = (
 def _mock_db(monkeypatch):
     """每测试独立内存库：建表走真实 init_database（内部函数级 import 取到 mock）。"""
     import sqlite3
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     import src.api.db_setup as _dbs
     _conn = sqlite3.connect(":memory:", check_same_thread=False)
     _lock = threading.RLock()
@@ -72,7 +72,7 @@ def _mock_db(monkeypatch):
     _dbs.init_database()
     yield
     # 隔离修复：本 patch 生效期间若有模块是**首次** import，它的
-    # `from src.session_manager import db` 会把临时内存库句柄永久捕获到模块全局；
+    # `from src.kernel.session_manager import db` 会把临时内存库句柄永久捕获到模块全局；
     # monkeypatch 只还原被 patch 的属性，那个模块仍指向临时连接（且随后被 close）
     # → 泄漏到后续测试文件。此处兜住：扫描已加载模块，把仍指向临时句柄的重绑回真句柄。
     for _m in list(sys.modules.values()):
@@ -86,7 +86,7 @@ def _mock_db(monkeypatch):
     _conn.close()
 
 from src.api import event_pipeline as ep
-from src import outbound_ledger as ol
+from src.kernel import outbound_ledger as ol
 
 
 RK = "gitcode:test/i453led"
@@ -303,7 +303,7 @@ def test_ledger_exception_allows_through():
             db.commit()
         except Exception:
             pass
-    with patch("src.outbound_ledger._ensure_table", side_effect=RuntimeError("db down")):
+    with patch("src.kernel.outbound_ledger._ensure_table", side_effect=RuntimeError("db down")):
         res = _run(_comment_payload("grape_bot", note="x", cid=99909), "Note Hook")
     # 异常放行：不崩、不 outbound_ledger_hit（兜底判断/bot 名单接手）
     assert "outbound_ledger_hit" not in _skipped_reasons(), _skipped_reasons()
@@ -576,8 +576,8 @@ def test_github_clarify_comment_ledgered():
     _gh_resp = {"id": 991001, "body": "💬 **开发者澄清**", "user": {"login": "u"}}
     with patch.object(rm, "_github_req", return_value=_gh_resp):
         # 复刻 issues.py GitHub 分支的入账逻辑（与产品代码同构）
-        from src.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
-        from src.repo_key import to_repo_key
+        from src.kernel.outbound_ledger import record_outbound, extract_content_id, content_hash_md5
+        from src.kernel.repo_key import to_repo_key
         owner, rname = "test", "i453led"
         comment_body = "💬 **开发者澄清**\n\n请补充复现步骤"
         record_outbound("github", to_repo_key(f"{owner}/{rname}", "github"), "issue_comment",
@@ -1199,7 +1199,7 @@ def test_ensure_table_once_per_connection():
     """审查 D6（性能优化回归钉子）：_ensure_table 进程内一次性——同一 db 连接上
     重复调用不再执行 DDL（消除热路径每事件带 db_lock 的 CREATE/information_schema
     往返）；连接更换（测试隔离 reload 换新库）后标记失效自动重建，语义不变。"""
-    import src.session_manager as _sm
+    import src.kernel.session_manager as _sm
     # 首次调用：在当前（fixture mock 的）连接上建表并绑定标记
     ol._TABLE_READY_CONN = None
     ol._ensure_table()
@@ -1222,7 +1222,7 @@ def test_ensure_table_once_per_connection():
 def _seed_ledger_row(content_type, cid, minutes_ago):
     """直接按指定时间插入台账记录（模拟写侧当时的入账）。"""
     import datetime as _dt
-    from src.session_manager import db as _db, db_lock as _dl
+    from src.kernel.session_manager import db as _db, db_lock as _dl
     _ts = (_dt.datetime.now() - _dt.timedelta(minutes=minutes_ago)).strftime("%Y-%m-%d %H:%M:%S")
     with _dl:
         c = _db.cursor()

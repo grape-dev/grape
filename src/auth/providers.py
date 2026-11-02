@@ -17,8 +17,8 @@ import urllib.request
 import json
 from typing import Protocol
 
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 
 

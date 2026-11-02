@@ -19,8 +19,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 _TMP_WS = tempfile.mkdtemp(prefix="evarch_test_")
 os.environ["DEVOPS_WORKSPACE_DIR"] = _TMP_WS
 
-from src.session_manager import db, db_lock
-from src.repo_key import workspace_repo_dir
+from src.kernel.session_manager import db, db_lock
+from src.kernel.repo_key import workspace_repo_dir
 
 RK = "gitcode:org/evarch"
 

@@ -18,7 +18,7 @@ from unittest.mock import patch
 from src.api import issues_center as ic
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 REPO = "gitcode:owner/issue89-test"
 

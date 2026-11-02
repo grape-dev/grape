@@ -33,7 +33,7 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
-from src.config import log
+from src.kernel.config import log
 
 # ---------------------------------------------------------------- 常量
 
@@ -131,7 +131,7 @@ def _json(raw: Any) -> Dict[str, Any]:
 
 def seed_defaults() -> int:
     """幂等写入 3 条默认 SLO（按 name 唯一）。返回新增条数。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     added = 0
     try:
         with db_lock:
@@ -166,7 +166,7 @@ _SLO_COLS = ("id", "name", "sli_type", "scope_type", "scope_key", "target", "win
 
 
 def list_slos(enabled_only: bool = True) -> List[Dict[str, Any]]:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sql = f"SELECT {','.join(_SLO_COLS)} FROM obs_slo"
     if enabled_only:
         sql += " WHERE enabled=1"
@@ -184,7 +184,7 @@ def list_slos(enabled_only: bool = True) -> List[Dict[str, Any]]:
 
 
 def get_slo(slo_id: int) -> Optional[Dict[str, Any]]:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -200,7 +200,7 @@ def create_slo(name: str, sli_type: str, scope_type: str = "global", scope_key: 
                target: float = 0.99, window_days: int = 30,
                threshold_json: str = "{}", created_by: str = "") -> int:
     """新建 SLO（管理台）；同名已存在 → 返回现有 id（幂等）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     if sli_type not in SLI_TYPES:
         raise ValueError(f"unknown sli_type: {sli_type}")
     if scope_type not in ("repo", "global", "engine"):
@@ -229,7 +229,7 @@ _UPDATABLE = ("target", "window_days", "threshold_json", "enabled", "scope_type"
 
 def update_slo(slo_id: int, **fields: Any) -> bool:
     """改配置（管理台统一设定目标值）。只允许白名单字段。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sets, params = [], []
     for k, v in fields.items():
         if k not in _UPDATABLE or v is None:
@@ -319,7 +319,7 @@ def _latency_buckets(dim_keys: List[str], start: datetime, end: datetime, max_p9
 def _availability_raw_buckets(start: datetime, end: datetime
                               ) -> List[Tuple[str, float, float]]:
     """原始扫描 `obs_runtime_samples.online`（有界 [start, end)）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     if start >= end:
         return []
     s_iso, e_iso = _iso(start), _iso(end)
@@ -438,7 +438,7 @@ def _iter_closed_hours(h1: datetime, closed_end: datetime) -> List[datetime]:
 
 def _engine_avail_covered_hours(h1: datetime, closed_end: datetime) -> set:
     """窗口内已有 `engine_avail_total`（global, hour）行的桶集合（行存在=已覆盖）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out: set = set()
     try:
         with db_lock:
@@ -568,7 +568,7 @@ def summary_for(slo: Dict[str, Any], dim_keys: List[str], now: Optional[datetime
 
 def write_snapshot(summary: Dict[str, Any], bucket_start: Optional[datetime] = None) -> bool:
     """把一次计算写进小时快照（唯一 (slo_id, bucket_start)，重复算覆盖）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -594,7 +594,7 @@ def write_snapshot(summary: Dict[str, Any], bucket_start: Optional[datetime] = N
 
 def snapshots(slo_id: int, limit: int = 168) -> List[Dict[str, Any]]:
     """取快照（默认最近 168 小时 ≈ 7 天）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out: List[Dict[str, Any]] = []
     try:
         with db_lock:
@@ -626,7 +626,7 @@ def repo_dims(repo: str, user: Optional[Dict[str, Any]] = None,
     与事件视图/rollup 序列同一套口径：`repo` 命中可见集合（含 github: 前缀变体）才算数；
     校验失败**不降级**成"看不见就按全量算"（那等于没有边界）。
     """
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     sk = str(repo or "").strip()
     if not sk:
         return []
@@ -716,7 +716,7 @@ def _sync_violation(slo: Dict[str, Any], summary: Dict[str, Any], now: datetime)
     只对 `breached` 触发（`warning` 是"预算快用完"的预警，卡片上显示即可，不打扰）。
     所有时间戳**显式写入 UTC**，不依赖 DDL 默认值（MySQL 下默认值是本地时间 CST，本仓已踩过）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     state = str(summary.get("state") or "")
     firing = (state == STATE_BREACHED)
     dim = f"slo:{slo.get('id')}"
@@ -796,7 +796,7 @@ def evaluate_all(now: Optional[datetime] = None) -> Dict[str, int]:
 
 def cleanup_snapshots(now: Optional[datetime] = None, keep_days: int = 90) -> int:
     """清理老快照（小时快照留 90 天）。返回删除行数。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     cutoff = _iso((now or _now()) - timedelta(days=max(1, int(keep_days))))
     try:
         with db_lock:

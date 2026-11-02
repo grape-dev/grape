@@ -10,7 +10,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import health_scorer, service
 from src.api import event_store
 

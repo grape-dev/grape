@@ -6,7 +6,7 @@
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as _CFTimeout
 
-from src.config import log
+from src.kernel.config import log
 
 LOCAL_PROBE_TIMEOUT = 5          # 单引擎 --version 超时（秒），与 worker 现有实现（agent.py:46）一致
 LOCAL_PROBE_MAX_TOTAL = 25       # 全量探测总上限（秒）

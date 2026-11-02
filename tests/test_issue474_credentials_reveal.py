@@ -24,7 +24,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.user import db as user_db
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 client = TestClient(app)
 
@@ -35,7 +35,7 @@ _headers = {}
 def setup_module():
     global _uid, _headers
     from src.auth.password import hash_password
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id, token_version FROM grape_accounts WHERE username='test_474_reveal'")
@@ -201,7 +201,7 @@ class TestCredentialsRevealNoPassword:
 
     @classmethod
     def setup_class(cls):
-        from src.api.jwt_utils import create_access_token
+        from src.kernel.auth_sdk.jwt_utils import create_access_token
         global _uid, _headers  # noqa: 复用同一用户（本测试需要无密码账号）
         # 无密码用户独立 id（避免污染主用例用户）
         with db_lock:

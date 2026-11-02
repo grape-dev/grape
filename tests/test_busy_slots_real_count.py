@@ -24,7 +24,7 @@ DB_PATH = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data", "sess
 def env(monkeypatch):
     """复用项目真实 DB，插入独立测试数据（id 高段避免与其它测试撞车）。"""
     import src.runtime.service as svc
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     monkeypatch.setattr(svc, "db", db)
     monkeypatch.setattr(svc, "db_lock", db_lock)
 
@@ -79,7 +79,7 @@ def test_engine_busy_reads_real_count_not_column(env):
     """busy_slots 列故意置 999（僵尸残留），但真实 running=0 → 引擎不忙，可认领。"""
     import src.runtime.local_claimer as lc
     db, rid, _ = env
-    with db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.session_manager", fromlist=["db_lock"]).db_lock:
+    with db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.kernel.session_manager", fromlist=["db_lock"]).db_lock:
         c = db.cursor()
         c.execute("UPDATE agent_runtimes SET busy_slots=999 WHERE id=?", (rid,))
         db.commit()
@@ -92,9 +92,9 @@ def test_engine_busy_real_count_full(env):
     import src.runtime.local_claimer as lc
     db, rid, tasks = env
     for i, tid in enumerate(tasks[:4]):
-        _seed_task(db, db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.session_manager", fromlist=["db_lock"]).db_lock,
+        _seed_task(db, db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.kernel.session_manager", fromlist=["db_lock"]).db_lock,
                    tid, "running", rid, sess=f"d-sess-{i}")
-    _seed_task(db, db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.session_manager", fromlist=["db_lock"]).db_lock,
+    _seed_task(db, db.session_manager_db_lock if hasattr(db, "session_manager_db_lock") else __import__("src.kernel.session_manager", fromlist=["db_lock"]).db_lock,
                tasks[4], "queued", rid, sess="d-sess-q")
     assert _count_real(env) == 4
     assert lc._engine_busy(rid) is True, "真实 running=4=max_concurrent，_engine_busy 应 True"
@@ -105,7 +105,7 @@ def test_engine_busy_real_count_full(env):
 def test_claim_rejected_when_real_count_full(env):
     """busy_slots 列残留 0，但真实 running=4 → claim_by_tag 应拒绝（决策看真实 COUNT）。"""
     from src.runtime.service import claim_by_tag
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     db, rid, tasks = env
     for i, tid in enumerate(tasks[:4]):
         _seed_task(db, sm.db_lock, tid, "running", rid, sess=f"d-sess-{i}")
@@ -123,7 +123,7 @@ def test_claim_rejected_when_real_count_full(env):
 def test_claim_allowed_when_real_count_spare(env):
     """busy_slots 列残留 999（僵尸），但真实 running=1 < 4 → claim_by_tag 放行。"""
     from src.runtime.service import claim_by_tag
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     db, rid, tasks = env
     _seed_task(db, sm.db_lock, tasks[0], "running", rid, sess="d-sess-0")
     _seed_task(db, sm.db_lock, tasks[1], "queued", rid, sess="d-sess-q")
@@ -141,7 +141,7 @@ def test_claim_allowed_when_real_count_spare(env):
 def test_leaked_busy_no_longer_blocks_claim(env):
     """模拟「完成但漏 release_busy_slot」：任务置终态（真实 running 归零）后立即能再认领。"""
     from src.runtime.service import claim_by_tag
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     db, rid, tasks = env
     # 先占用 1 槽（running）
     _seed_task(db, sm.db_lock, tasks[0], "running", rid, sess="d-sess-0")
@@ -166,7 +166,7 @@ def test_leaked_busy_no_longer_blocks_claim(env):
 
 def test_snapshot_reconcile_busy_slots(env):
     """展示快照重算：busy_slots 列 = 真实 running 数。"""
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     db, rid, tasks = env
     # 快照函数（方案 D 新增）：stub 先验证行为，生产实现放到 src.runtime.service.refresh_busy_snapshot
     from src.runtime.service import refresh_busy_snapshot as fn
@@ -193,7 +193,7 @@ def test_snapshot_reconcile_busy_slots(env):
 
 def test_covering_index_runtime_status_exists(env):
     """covering 索引 (runtime_id, status) 存在，且 EXPLAIN 为 COVERING INDEX。"""
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     c = sm.db.cursor()
     row = c.execute(
         "SELECT 1 FROM sqlite_master WHERE type='index' AND tbl_name='agent_tasks' AND name='idx_agent_tasks_runtime_status'"

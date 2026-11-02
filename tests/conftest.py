@@ -54,7 +54,7 @@ def _ensure_help_page_generated():
     help.html 已是生成物（.gitignore）；全新检查/克隆环境未启动服务时文件可能缺失，
     测试前调用生成器保证 test_help_directory.py 等对 help.html 的断言有确定输入。
     """
-    from src.help_page_gen import generate as _gen_help_page
+    from src.kernel.help_page_gen import generate as _gen_help_page
 
     _gen_help_page()
     yield

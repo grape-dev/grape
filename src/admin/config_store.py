@@ -12,7 +12,7 @@ admin 配置中心 save_config 分流：bot 字段写 DB meta，OAuth 字段写 
 import json
 import os
 
-from src.config import log, CONFIG_DIR
+from src.kernel.config import log, CONFIG_DIR
 
 _GBT_PATH = os.path.join(CONFIG_DIR, "global-bot-token.json")
 _OAUTH_PATH = os.path.join(CONFIG_DIR, "oauth-providers.json")
@@ -127,7 +127,7 @@ def read_public_config() -> dict:
     out["allow_signup"] = "1" if _is_allow_signup() else "0"
     # 运行参数（Issue #470）：明文回显管理台设置值（未设置回退展示默认）+
     # 当前生效值（含 env/文件层，便于管理员核对覆盖关系）
-    from src.config import (get_runtime_task_timeout, get_devstage_template_id,
+    from src.kernel.config import (get_runtime_task_timeout, get_devstage_template_id,
                             get_devstage_flavor, RUNTIME_CONFIG_PATH)
     _rt_meta = {f: (get_meta_value(f) or "") for f in _RUNTIME_FIELDS}
     _fl_eff = get_devstage_flavor()
@@ -179,7 +179,7 @@ def save_config(payload: dict) -> dict:
                     continue
             set_meta_value(field, str(val))
         # 当前实例立即生效（其他实例 ≤60s TTL）
-        from src.config import invalidate_runtime_config_cache
+        from src.kernel.config import invalidate_runtime_config_cache
         invalidate_runtime_config_cache()
         log.info("admin config_store: runtime config updated (DB meta)")
 
@@ -338,7 +338,7 @@ def verify_token(provider: str, token: str) -> dict:
 def _global_bot_token_swap_wrapper(provider: str, old_token: str, new_token: str):
     """R21.1.3/R21.1.7: 后台线程 wrapper——加分布式锁 + 异常隔离。"""
     try:
-        from src.lock import acquire_lock, release_lock
+        from src.kernel.lock import acquire_lock, release_lock
         if acquire_lock("global_bot_swap", ttl=600):
             try:
                 global_bot_token_swap(provider, old_token, new_token)
@@ -365,10 +365,10 @@ def global_bot_token_swap(provider: str, old_token: str, new_token: str):
     R21.1.4: 失败时仓库保持旧状态，记录 warning。
     R21.1.5: 过期标记已在 save_config 中清除（R16.3.2）。
     """
-    from src.token_resolver import create_provider
-    from src.session_manager import db, db_lock
+    from src.kernel.token_resolver import create_provider
+    from src.kernel.session_manager import db, db_lock
     from src.user.db import get_webhook_url, _get_managed_webhook_id
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
 
     _vcs = create_provider(provider)
     platform_label = provider.capitalize()

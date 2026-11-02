@@ -5,7 +5,7 @@ Image pipeline: RapidOCR (PP-OCRv4) for text + PIL for visual features → VLM (
 Video pipeline: ffmpeg keyframe extraction → per-frame VLM analysis → LLM synthesis of video summary.
 """
 import os, tempfile, base64, io, time, json, subprocess, urllib.request, urllib.error
-from src.config import log
+from src.kernel.config import log
 
 # Lazy-loaded OCR engine
 _ocr_engine = None

@@ -6,8 +6,8 @@ import time as _time_mod
 from dataclasses import dataclass
 from typing import Callable, List, Optional
 
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 # ====== 新表 DDL ======
 
@@ -1719,7 +1719,7 @@ def _create_tables():
     # 幂等 ALTER MODIFY 把 Default 改回 NULL（MySQL 专用，SQLite 不支持 MODIFY）。
     # Issue #536：MODIFY 属破坏性 DDL，统一走 _destructive_ddl 收口。
     try:
-        from src.mysql_compat import get_db_backend
+        from src.kernel.mysql_compat import get_db_backend
         if get_db_backend() == "mysql":
             with db_lock:
                 c = db.cursor()
@@ -1792,7 +1792,7 @@ def _create_tables():
 def _mysql_backend() -> bool:
     """是否 MySQL 后端（ALGORITHM / SET SESSION 仅 MySQL 下发；SQLite 路径不变）。"""
     try:
-        from src.mysql_compat import get_db_backend
+        from src.kernel.mysql_compat import get_db_backend
         return get_db_backend() == "mysql"
     except Exception:
         return False
@@ -2006,7 +2006,7 @@ def _create_indexes():
             for _r in c.execute("PRAGMA index_list('issue')").fetchall():
                 if _r[1] == "idx_tasks_repo_issue" and not _r[2]:
                     # F9/1064 修复（双栈）：裸 DROP INDEX 仅 SQLite 合法，MySQL 需 ON 子句
-                    from src.session_manager import _is_mysql_backend as _imb
+                    from src.kernel.session_manager import _is_mysql_backend as _imb
                     if _imb():
                         c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
                     else:
@@ -2043,7 +2043,7 @@ def _create_indexes():
                 # DROP 成功 CREATE 失败，索引被删不重建。改为 IF NOT EXISTS 形态
                 # （MySQL 走兼容层特判自动加 TEXT 前缀；SQLite 原生合法）。
                 # DROP 的 ON 子句 MySQL 必须 / SQLite 不允许，按后端分支。
-                from src.session_manager import _is_mysql_backend as _imb
+                from src.kernel.session_manager import _is_mysql_backend as _imb
                 if _imb():
                     c.execute("DROP INDEX idx_tasks_repo_issue ON issue")
                 else:
@@ -2189,7 +2189,7 @@ def _insert_seed_data(table: str, data: dict):
 def _migrate_whitelist_from_file():
     """首次启动：如果 login_whitelist 表为空但 login-whitelist.json 存在，导入文件中的用户名（一次性）。"""
     try:
-        from src.config import LOGIN_WHITELIST_PATH
+        from src.kernel.config import LOGIN_WHITELIST_PATH
         if not os.path.exists(LOGIN_WHITELIST_PATH):
             return
         with db_lock:
@@ -3111,10 +3111,10 @@ def _migrate_a2a_idempotency_key():
     - 唯一索引 `(repo_key, idempotency_key)`：同仓同键只允许一条事件，
       服务端据此把重复 A2A 请求去重为"返回已有事件"。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -3151,10 +3151,10 @@ def _ensure_case_insensitive_indexes():
 
     所有创建操作幂等（IF NOT EXISTS / 检查已存在），失败时记 WARNING 不崩溃。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     is_mysql = False
     try:
-        from src.session_manager import _is_mysql_backend
+        from src.kernel.session_manager import _is_mysql_backend
         is_mysql = _is_mysql_backend()
     except Exception:
         pass
@@ -3256,20 +3256,20 @@ def init_database():
     # 迁移前 DB 自动备份保留策略兜底（2026-10 磁盘告警：data/backups 曾堆到 63G 打满根盘）
     # 每次启动清理过量 pre-m0 备份，保留 DB_BACKUP_KEEP(默认5) 份
     try:
-        from src.session_manager import prune_db_backups, _db_path
+        from src.kernel.session_manager import prune_db_backups, _db_path
         prune_db_backups(_db_path)
     except Exception as _pb:
         log.warning(f"DB backup prune skipped: {_pb}")
 
     # 迁移锁——MySQL 用 GET_LOCK 防多实例同时迁移；SQLite 单实例不需要锁
-    from src.mysql_compat import get_db_backend
+    from src.kernel.mysql_compat import get_db_backend
     if get_db_backend() == "mysql":
         # 锁名按数据库隔离（2026-10-16）：GET_LOCK 是 MySQL 服务器级全局锁，多环境共用同一
         # MySQL 实例时固定锁名会让不同环境互相排队（实测 0007 重启等待 210s+）。追加库名后
         # 各环境互不干扰，同库多实例（真正的迁移竞争）仍互斥。滚动升级期间新旧锁名不同，
         # 可能同库两实例同时迁移——迁移幂等，风险可控。
         try:
-            from src.mysql_compat import mysql_config
+            from src.kernel.mysql_compat import mysql_config
             _lock_name = "grape_migrate_" + (mysql_config().get("database") or "default")
         except Exception:
             _lock_name = "grape_migrate"
@@ -3332,7 +3332,7 @@ def _migrate_event_status_pending():
     与「入队 pending、认领才 running」新语义对齐。幂等（每次启动可重跑无副作用）。
     """
     try:
-        from src.mysql_compat import get_db_backend
+        from src.kernel.mysql_compat import get_db_backend
         with db_lock:
             c = db.cursor()
             # ① running 且关联任务 queued → pending
@@ -3384,7 +3384,7 @@ def _migrate_knowledge_dedup_and_ref():
     每次启动执行（幂等）。issue95 修复部分有独立幂等标记。
     步骤顺序：source 回填 → name/description 回填 → 去重 → ref 迁移 → 孤儿 ref 清理。
     """
-    from src.mysql_compat import get_db_backend
+    from src.kernel.mysql_compat import get_db_backend
     _is_mysql = get_db_backend() == "mysql"
 
     # Issue #95：检查 #95 修复是否已执行过
@@ -3418,7 +3418,7 @@ def _migrate_knowledge_dedup_and_ref():
         # 会被合并为 1 条丢失数据。description 硬编码统一值无法区分。
         # 用 derive_knowledge_name 统一推导，所有 scope 共用同一逻辑。
         from src.api.knowledge import derive_knowledge_name, derive_knowledge_description
-        from src.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
+        from src.kernel.repo_key import (BASELINE_NAME_MAP, BASELINE_DESC_MAP,
                                   BASELINE_NAME_FALLBACK, BASELINE_DESC_FALLBACK)
         _UNIFIED_DESC = "codegraph 自动生成的项目基线知识"  # 老的统一值，勿改
         _rows = c.execute(
@@ -3608,7 +3608,7 @@ def _migrate_knowledge_dedup_and_ref():
     # 4. MySQL 原生 DDL——scene_knowledge_ref 表用原生 MySQL DDL 重建（如果翻译层产出不够严谨）
     if _is_mysql:
         try:
-            from src.mysql_compat import mysql_config
+            from src.kernel.mysql_compat import mysql_config
             import pymysql
             cfg = mysql_config()
             conn = pymysql.connect(
@@ -3644,10 +3644,10 @@ def _migrate_knowledge():
     分布式锁：acquire_lock 防多实例并发执行迁移。
     最终一致性：迁移期间旧格式数据仍可用，迁移完成后切换到新格式。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.user.db import get_meta_value, set_meta_value
-    from src.repo_key import parse_repo_key, knowledge_obs_prefix
-    from src.lock import acquire_lock, release_lock
+    from src.kernel.repo_key import parse_repo_key, knowledge_obs_prefix
+    from src.kernel.lock import acquire_lock, release_lock
 
     # 幂等检查
     if get_meta_value("knowledge_migrate_done") == "1":
@@ -3832,7 +3832,7 @@ def _cleanup_stale_meta():
 def _cleanup_old_latency_logs():
     """清理 7 天前的 API 慢请求日志"""
     try:
-        from src.mysql_compat import get_db_backend
+        from src.kernel.mysql_compat import get_db_backend
         is_mysql = get_db_backend() == "mysql"
         time_expr = "NOW() - INTERVAL 7 DAY" if is_mysql else "datetime('now', '-7 days')"
         with db_lock:
@@ -3993,7 +3993,7 @@ def _alter_skill_files_if_needed() -> str:
     SQLite 下无长度概念,直接返回空串(无害).
     """
     try:
-        from src.session_manager import db
+        from src.kernel.session_manager import db
         rows = db.execute(
             "SELECT DATA_TYPE FROM information_schema.COLUMNS "
             "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_tasks' "
@@ -4044,7 +4044,7 @@ def _migrate_global_bot_token_to_db():
     set_meta_value 本身是 INSERT OR REPLACE（UPSERT 语义），多实例并发写同一值结果一致。
     幂等：DB 已有值则跳过。
     """
-    from src.lock import acquire_lock, release_lock
+    from src.kernel.lock import acquire_lock, release_lock
     if not acquire_lock("migrate_global_bot_token", ttl=60):
         return  # 其他实例正在迁移，跳过
     try:
@@ -4116,7 +4116,7 @@ def _migrate_tables():
     """已有数据库的 schema 迁移"""
     # ===== new-version2 数据安全:迁移前自动备份(仅在有改动性迁移时触发一次)=====
     try:
-        from src.session_manager import _backup_db, _db_path
+        from src.kernel.session_manager import _backup_db, _db_path
         # 仅当存在旧结构(backend_* 表/列)时备份,避免无谓备份
         with db_lock:
             c = db.cursor()
@@ -5240,7 +5240,7 @@ def _migrate_tables():
         if _is_test:
             log.info("Phase C5: skip drop issue_state in test mode")
         else:
-            from src.mysql_compat import get_db_backend
+            from src.kernel.mysql_compat import get_db_backend
             if get_db_backend() == "mysql":
                 log.info("Phase C5: MySQL 请手动执行 DROP issue_state（数据核对后）")
             else:
@@ -5284,7 +5284,7 @@ def _rebuild_scene_market_unique():
     SQLite：表重建（CREATE 新表 → 复制数据 → DROP 旧表 → RENAME）
     MySQL：DROP INDEX + ADD UNIQUE INDEX（在线 DDL）
     """
-    from src.mysql_compat import get_db_backend
+    from src.kernel.mysql_compat import get_db_backend
     is_mysql = get_db_backend() == "mysql"
 
     with db_lock:

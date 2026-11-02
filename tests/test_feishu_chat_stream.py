@@ -66,7 +66,7 @@ def _drive_inner(api=None, ctx=None, text="测试执行", monkeypatch=None, **kw
 # ===================== helpers =====================
 
 def _last_user_msg(task_id_key="task_id"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT content, task_id, generate_status FROM chat_messages WHERE role='user' ORDER BY id DESC LIMIT 1")
@@ -75,7 +75,7 @@ def _last_user_msg(task_id_key="task_id"):
 
 
 def _last_agent_msg():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT content, task_id, generate_status FROM chat_messages WHERE role='agent' ORDER BY id DESC LIMIT 1")

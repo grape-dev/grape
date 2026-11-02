@@ -11,7 +11,7 @@ import hmac
 
 import bcrypt
 
-from src.config import log
+from src.kernel.config import log
 
 # bcrypt salt rounds — 越大越安全但越慢
 _BCRYPT_ROUNDS = 12

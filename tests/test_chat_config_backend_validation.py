@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user, get_current_user_or_api_key
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 UID = 50801
 USERNAME = "issue508_tester"

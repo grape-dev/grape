@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List
 
-from src.config import log
+from src.kernel.config import log
 
 #: 存量 legacy 标记前缀（backfill 脚本写入；口径只认这个前缀）
 LEGACY_PREFIX = "[legacy]"
@@ -28,7 +28,7 @@ def failed_result_gap(user: Dict[str, Any], limit: int = 20) -> Dict[str, Any]:
 
     limit: 最近空 result 样本条数（含真空 + legacy，按 seq 倒序）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.observability.overview import visible_repo_keys
 
     repos = visible_repo_keys(user)

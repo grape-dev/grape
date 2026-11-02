@@ -5,7 +5,7 @@ import sys
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, get_chat_config, set_chat_config
+from src.kernel.session_manager import db, db_lock, get_chat_config, set_chat_config
 
 # 测试用 runtime id（避免与存量冲突）
 R_WORKER_GLOBAL = 901   # 共享全局 worker（credential_id=9001，online）

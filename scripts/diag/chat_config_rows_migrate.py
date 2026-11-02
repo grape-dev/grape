@@ -17,12 +17,12 @@
 --------
 * 默认 `--dry-run`：只读，打印动作清单与预计影响，不写任何数据
 * `--apply --yes` 才写；先建备份表 `bak_chat_cfg_migrate_<date>`（整表快照），每步一个事务
-* 复用**生产同一份逻辑**（`src.session_manager._pick_chat_config_row`），不另写一套判定
+* 复用**生产同一份逻辑**（`src.kernel.session_manager._pick_chat_config_row`），不另写一套判定
 * 已核实：`sess-cfg-*` id 不被任何其他表引用（0 处）→ 改名安全；失败即中止，备份可回滚
 
 注意
 ----
-本脚本会 `import src.session_manager` 以复用读取逻辑；该模块有 import 期自检（如清理废弃列），
+本脚本会 `import src.kernel.session_manager` 以复用读取逻辑；该模块有 import 期自检（如清理废弃列），
 **作用在主服务配置指向的那个库**（configs/db-backend.json / 环境变量），不是本脚本的 --db 目标。
 建议在仓库根用 `.venv/bin/python` 运行，并确认两者指向同一库后再 --apply。
 
@@ -85,7 +85,7 @@ def classify(c, user_id):
 
     复用主服务真实逻辑：候选序 = canonical 优先 + 遗留行按 last_active DESC。
     """
-    from src.session_manager import _pick_chat_config_row
+    from src.kernel.session_manager import _pick_chat_config_row
     picked_id, row, backend = _pick_chat_config_row(c, user_id)
     c.execute("SELECT COUNT(*) FROM chat_agent_session WHERE id=? AND (repo_key='' OR repo_key IS NULL)",
               (CANON + str(user_id),))
@@ -126,7 +126,7 @@ def plan(c, users):
                                 rename=(rows[0][0], canon_id), rows=rows, backend=backend))
         elif canon_exists and picked_id != canon_id and len(rows) == 2:
             # D 类：canonical 是与本人同 user_id 的"死行"（引擎不可用），另一行在读 → 删死行 + 把在读行改名
-            from src.session_manager import _chat_config_row_engine
+            from src.kernel.session_manager import _chat_config_row_engine
             dead = [r for r in rows if r[0] == canon_id]
             good = [r for r in rows if r[0] != canon_id]
             if len(dead) == 1 and len(good) == 1:

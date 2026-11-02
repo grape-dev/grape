@@ -280,10 +280,10 @@ def test_set_repo_bot_token_updates_username():
 
     with patch.object(repos_mod, "update_managed_repo_bot_token", return_value={"ok": True, "warning": "", "related_repos": []}) as mock_upd, \
          patch.object(repos_mod, "update_managed_repo_bot_username") as mock_upd_username, \
-         patch("src.session_manager.db") as mock_db, \
-         patch("src.session_manager.db_lock"), \
-         patch("src.token_resolver.GitCodeProvider.verify_token", return_value={"login": "repo-bot-login"}), \
-         patch("src.token_resolver.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
+         patch("src.kernel.session_manager.db") as mock_db, \
+         patch("src.kernel.session_manager.db_lock"), \
+         patch("src.kernel.token_resolver.GitCodeProvider.verify_token", return_value={"login": "repo-bot-login"}), \
+         patch("src.kernel.token_resolver.GitCodeProvider.add_collaborator", return_value=True) as mock_add, \
          patch("src.user.db.get_host_user_id", return_value=0), \
          patch("src.api.deps.get_user_token_with_refresh", return_value="owner_tok"), \
          patch("src.api.deps.check_repo_access"):
@@ -312,9 +312,9 @@ def test_set_repo_bot_token_invalid_token_returns_400():
     _fake_cursor = MagicMock()
     _fake_cursor.fetchone.return_value = (1,)  # 仓库存在
 
-    with patch("src.session_manager.db") as mock_db, \
-         patch("src.session_manager.db_lock"), \
-         patch("src.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("401")), \
+    with patch("src.kernel.session_manager.db") as mock_db, \
+         patch("src.kernel.session_manager.db_lock"), \
+         patch("src.kernel.token_resolver.GitCodeProvider.verify_token", side_effect=RuntimeError("401")), \
          patch("src.user.db.get_host_user_id", return_value=0), \
          patch("src.api.deps.check_repo_access"), \
          patch.object(repos_mod, "update_managed_repo_bot_token") as mock_upd:
@@ -341,8 +341,8 @@ def test_set_repo_bot_token_clear_empty():
     _fake_cursor = MagicMock()
     _fake_cursor.rowcount = 1  # UPDATE 成功
 
-    with patch("src.session_manager.db") as mock_db, \
-         patch("src.session_manager.db_lock"), \
+    with patch("src.kernel.session_manager.db") as mock_db, \
+         patch("src.kernel.session_manager.db_lock"), \
          patch("src.api.deps.check_repo_access"), \
          patch.object(repos_mod, "_remove_old_bot_collaborator"):
         mock_db.cursor.return_value = _fake_cursor

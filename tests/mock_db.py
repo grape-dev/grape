@@ -7,7 +7,7 @@
    等方言行为的可编程模拟），否则记录到 self.queries 供断言。db_lock 用
    threading.Lock 模拟。用途：路由级/数据层用例（G2/G3/B-4 等）。
 
-2. translate 断言：不连 MySQL，直接对 src.mysql_compat.translate_sql 的
+2. translate 断言：不连 MySQL，直接对 src.kernel.mysql_compat.translate_sql 的
    输出做文本断言（G1 的跨后端一致性=两后端各取自己的时钟源，mock 层
    分别注入 UTC/CST 时钟验证调用方比较逻辑）。
 
@@ -75,14 +75,14 @@ class MockDB:
 
 
 def install_mock_db(monkeypatch, mock_db):
-    """把 src.session_manager 的 db/db_lock 替换为 MockDB（模块级引用同步替换）。
+    """把 src.kernel.session_manager 的 db/db_lock 替换为 MockDB（模块级引用同步替换）。
 
-    注意：业务代码多为 `from src.session_manager import db, db_lock` 的模块级
+    注意：业务代码多为 `from src.kernel.session_manager import db, db_lock` 的模块级
     绑定，必须逐模块替换其模块属性。
     """
     import importlib
     target_modules = [
-        "src.session_manager",
+        "src.kernel.session_manager",
         "src.api.session_store",
         "src.api.event_pipeline",
         "src.api.event_store",

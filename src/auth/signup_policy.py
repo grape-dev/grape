@@ -8,8 +8,8 @@
 
 注册白名单与现有 login_whitelist（OAuth 白名单）独立运作。
 """
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 
 def _get_whitelist_emails() -> "set[str] | None":

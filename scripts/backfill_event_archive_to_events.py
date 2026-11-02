@@ -18,7 +18,7 @@ import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.config import WORKSPACE_DIR
+from src.kernel.config import WORKSPACE_DIR
 
 
 def _iter_event_json_files():
@@ -56,7 +56,7 @@ def main():
     ap.add_argument("--dry-run", action="store_true", help="只统计，不写库")
     args = ap.parse_args()
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.api.event_archive import _load as _load_arch
 
     processed = written = skipped = failed = 0

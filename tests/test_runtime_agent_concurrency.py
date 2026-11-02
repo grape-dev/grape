@@ -10,7 +10,7 @@ import pytest
 
 from unittest.mock import patch
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 from src.runtime import agent as agent_mod
 

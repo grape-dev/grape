@@ -17,13 +17,13 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 from src.api.main import app  # noqa: E402
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.user import db as user_db
 from src.auth import grape_account_db  # noqa: E402
 
 # JWT access token helper
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -61,7 +61,7 @@ def test_knowledge():
     with db_lock:
         c = db.cursor()
         # 给测试用户加仓库托管者记录（system/agent 知识关联管理需要）
-        from src.repo_key import from_repo_key
+        from src.kernel.repo_key import from_repo_key
         c.execute("DELETE FROM user_repos WHERE user_id=? AND repo_key=?", (_uid["id"], TEST_REPO))
         c.execute(
             "INSERT INTO user_repos (user_id, repo_key, owner, name, description, role, is_admin, is_join, created_at) "
@@ -284,7 +284,7 @@ class TestPromptBuilder:
     """prompt_builder 注入逻辑测试"""
 
     def test_inject_by_ref(self, test_knowledge):
-        from src.prompt_builder import _build_agent_knowledge_section
+        from src.kernel.prompt_builder import _build_agent_knowledge_section
         text, ids = _build_agent_knowledge_section(
             test_knowledge["repo_key"], agent_type="", issue_num=0, scene_id=""
         )
@@ -292,7 +292,7 @@ class TestPromptBuilder:
         assert isinstance(ids, list)
 
     def test_inject_empty_repo(self):
-        from src.prompt_builder import _build_agent_knowledge_section
+        from src.kernel.prompt_builder import _build_agent_knowledge_section
         text, ids = _build_agent_knowledge_section(
             "gitcode:empty/empty", agent_type="", issue_num=0, scene_id=""
         )
@@ -300,7 +300,7 @@ class TestPromptBuilder:
         assert isinstance(ids, list)
 
     def test_return_type(self, test_knowledge):
-        from src.prompt_builder import _build_agent_knowledge_section
+        from src.kernel.prompt_builder import _build_agent_knowledge_section
         result = _build_agent_knowledge_section(
             test_knowledge["repo_key"], agent_type="", issue_num=0, scene_id=""
         )

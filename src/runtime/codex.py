@@ -211,7 +211,7 @@ class CodexRuntime(AgentRuntime):
         对齐 codearts AK/SK 注入模式（_assemble_env 中统一注入）。
         """
         env = os.environ.copy()
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
         return env

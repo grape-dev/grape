@@ -1,7 +1,7 @@
 """Issue #333: 登录白名单全局开关逻辑测试。
 
 全部 DB 操作用 MagicMock + unittest.mock.patch，不依赖真实数据库连接。
-patch 目标是 src.config 内部已绑定的引用（from src.session_manager import db），
+patch 目标是 src.kernel.config 内部已绑定的引用（from src.kernel.session_manager import db），
 确保不污染其他测试的模块缓存。
 """
 import pytest
@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 
 def _reset_whitelist_cache():
     """Reset whitelist cache between tests."""
-    import src.config as cfg
+    import src.kernel.config as cfg
     cfg._WL_ENABLED_CACHE = None
     cfg._WL_CACHE_TS = 0.0
 
@@ -46,15 +46,15 @@ def _run_is_user_allowed(meta_value, table_count, whitelist_rows, column, login)
     _reset_whitelist_cache()
     mock_db, mock_lock = _make_mock_db(table_count, whitelist_rows)
 
-    # Patch src.config's internal references (already imported at module level)
-    # src.config does: from src.session_manager import db, db_lock (inside function)
+    # Patch src.kernel.config's internal references (already imported at module level)
+    # src.kernel.config does: from src.kernel.session_manager import db, db_lock (inside function)
     # and: from src.user.db import get_meta_value (inside function)
     # So we patch at the source module level
-    with patch('src.session_manager.db', mock_db), \
-         patch('src.session_manager.db_lock', mock_lock), \
+    with patch('src.kernel.session_manager.db', mock_db), \
+         patch('src.kernel.session_manager.db_lock', mock_lock), \
          patch('src.user.db.get_meta_value', return_value=meta_value):
         _reset_whitelist_cache()
-        from src.config import is_user_allowed
+        from src.kernel.config import is_user_allowed
         return is_user_allowed(column, login)
 
 

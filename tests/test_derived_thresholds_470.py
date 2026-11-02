@@ -17,7 +17,7 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from src.config import _write_runtime_config_for_test, RUNTIME_CONFIG_PATH  # noqa: E402
+from src.kernel.config import _write_runtime_config_for_test, RUNTIME_CONFIG_PATH  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +31,7 @@ def _clean(monkeypatch):
     yield
     if os.path.exists(RUNTIME_CONFIG_PATH):
         os.remove(RUNTIME_CONFIG_PATH)
-    from src.config import invalidate_runtime_config_cache
+    from src.kernel.config import invalidate_runtime_config_cache
     invalidate_runtime_config_cache()
 
 

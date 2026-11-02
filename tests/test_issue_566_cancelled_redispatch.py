@@ -10,7 +10,7 @@
 import pytest
 import tempfile, os, sqlite3
 
-from src.session_manager import db_lock
+from src.kernel.session_manager import db_lock
 
 
 @pytest.fixture
@@ -35,9 +35,9 @@ def test_db(monkeypatch):
     """)
     _conn.commit()
 
-    monkeypatch.setattr("src.session_manager.db", _conn)
+    monkeypatch.setattr("src.kernel.session_manager.db", _conn)
     monkeypatch.setattr("src.api.event_store.db", _conn)
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     monkeypatch.setattr("src.api.event_store.db_lock", db_lock)
 
     yield _conn

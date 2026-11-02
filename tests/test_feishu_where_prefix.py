@@ -18,7 +18,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.im.feishu_async import BotContext
-from src.session_manager import (
+from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat,
 )

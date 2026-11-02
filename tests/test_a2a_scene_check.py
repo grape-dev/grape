@@ -14,7 +14,7 @@ os.environ["DEVOPS_DB_BACKEND"] = "sqlite"
 import pytest
 
 from src.api.db_setup import init_database
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.routes.webhook import _scene_node_check
 
 init_database()

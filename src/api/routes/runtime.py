@@ -9,9 +9,9 @@ from datetime import datetime, timedelta, timezone
 from fastapi import APIRouter, HTTPException, Depends, Request, Query
 from pydantic import BaseModel
 from src.api.deps import require_no_session_token, require_org_member
-from src.config import log
+from src.kernel.config import log
 from src.api.time_utils import normalize_event_time
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.runtime import service
 
 router = APIRouter(prefix="/api/runtime", tags=["runtime"])
@@ -344,7 +344,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
     # 写入 worker 上报的日志到 data/logs/workers/{credential_id}.log
     if body.log_lines:
         import os as _os, json as _json
-        from src.config import LOG_DIR
+        from src.kernel.config import LOG_DIR
         _worker_log_dir = _os.path.join(LOG_DIR, "workers")
         _os.makedirs(_worker_log_dir, exist_ok=True)
         # 查 worker 名称
@@ -387,7 +387,7 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
 
     # 返回 worker 代码版本（仅 git commit，不含 wheels/python 指纹）
     # worker 端对比此版本号决定是否自动升级
-    from src.worker_package import worker_code_version
+    from src.kernel.worker_package import worker_code_version
     _latest_ver = worker_code_version()
 
     return {"status": "ok", "cancelled_tasks": cancelled_tasks, "latest_version": _latest_ver}
@@ -528,7 +528,7 @@ def runtime_get_tags(runtime_id: int, credential_id: int = Depends(_require_cred
     Workers call this endpoint to get their current tag list, enabling real-time
     tag updates without restart.
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -549,7 +549,7 @@ def runtime_task_env(task_id: str, credential_id: int = Depends(_require_credent
     Workers call this before executing to get fresh credentials,
     instead of relying on the env_extra snapshot from task creation time.
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.runtime.service import _collect_server_env
     with db_lock:
         c = db.cursor()
@@ -980,7 +980,7 @@ def list_runtime_tasks(runtime_id: int, user: dict = Depends(require_no_session_
                              limit: int = Query(50, ge=1, le=500, description="最多返回条数，1-500"),
                              repo: str = ""):
     """设备任务列表（M4 前端设备 [查看任务]）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     clauses = ["runtime_id=?"]
     params = [runtime_id]
     if status:
@@ -1015,7 +1015,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
     而是查所有 session 后按 task 的 runtime_id 过滤 tasks。
     只返回有匹配 task 的 session。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     repo_clause = ""
     params: list = []
@@ -1093,7 +1093,7 @@ def list_runtime_sessions(runtime_id: int, user: dict = Depends(require_no_sessi
 def list_credential_tasks(cid: int, user: dict = Depends(require_no_session_token),
                                 status: str = "", limit: int = 50):
     """按凭据聚合任务（该凭据所有引擎实例的 agent_tasks，见 runtime-admin-two-view-design.md §4.3）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM agent_runtimes WHERE credential_id=?", (cid,))
@@ -1210,7 +1210,7 @@ def runtime_install_latest(credential_id: int = Depends(_require_credential)):
     供 worker 启动自检（见 worker-server-delivery-design.md §2.4）。
     返回 worker_code_version（仅 git commit），与 heartbeat latest_version 一致。
     """
-    from src.worker_package import worker_code_version
+    from src.kernel.worker_package import worker_code_version
     return {"version": worker_code_version()}
 
 
@@ -1236,7 +1236,7 @@ def runtime_worker_package_public():
         _pkg_download_count += 1
     try:
         from fastapi.responses import FileResponse, Response
-        from src.worker_package import build_package
+        from src.kernel.worker_package import build_package
         try:
             pkg = build_package()
         except Exception as e:
@@ -1270,7 +1270,7 @@ def runtime_install_package(credential_id: int = Depends(_require_credential)):
       curl -fsSL -H "Authorization: Bearer <rta_...>" <server>/api/runtime/install/package
     """
     from fastapi.responses import FileResponse
-    from src.worker_package import build_package
+    from src.kernel.worker_package import build_package
     try:
         pkg = build_package()
     except Exception as e:
@@ -1298,7 +1298,7 @@ def engine_onboarding_repo_key(repo: str) -> str:
     raw = (repo or "").strip()
     if not raw or ":" not in raw:
         return ""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     return to_repo_key(raw)
 
 
@@ -1330,7 +1330,7 @@ def runtime_engine_onboarding(repo: str = "", user: dict = Depends(require_org_m
     """
     from src.user.db import get_server_base_url
     from src.agent.executor import discover_backends
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
 
     base = (get_server_base_url() or "").rstrip("/")
     local = discover_backends()
@@ -1461,7 +1461,7 @@ def runtime_refresh_skills(runtime_id: int, force: bool = False, user: dict = De
     worker 下次 claim 时收到 scan_request 指令，执行扫描后回报。
     前端需轮询本接口获取结果（返回 status=pending 时继续轮询）。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     with db_lock:
         c = db.cursor()
@@ -1509,7 +1509,7 @@ def runtime_skills_report(runtime_id: int, body: dict, credential_id: int = Depe
 
     worker claim 时收到 scan_request → 执行扫描 → 调本接口回报。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     # 校验 runtime 归属
     with db_lock:
@@ -1556,7 +1556,7 @@ def _apply_tag_rules(tags: list[str]) -> list[str]:
 @router.get("/runtimes/{runtime_id}/role-tags", operation_id="runtime_role_tags", summary="Runtime role tags", description="Role tags of an engine (web admin view).")
 def get_runtime_tags(runtime_id: int, user: dict = Depends(require_no_session_token)):
     """返回 engine 的角色标签列表（web 管理视图；worker 取 tags 用 GET /runtimes/{id}/tags）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT agent_tags FROM agent_runtimes WHERE id=?", (runtime_id,))
@@ -1573,7 +1573,7 @@ def set_runtime_tags(runtime_id: int, body: dict, user: dict = Depends(require_n
     以 engine_capabilities 为单一数据源，agent_tags 列为派生缓存。
     写入顺序：先写 engine_capabilities，再 _sync_agent_tags 回写 agent_tags。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from datetime import datetime, timezone
     from src.api.routes.settings import _sync_agent_tags
     tags = _apply_tag_rules(body.get("tags") or [])
@@ -1611,7 +1611,7 @@ class MaxConcurrentBody(BaseModel):
 def set_runtime_max_concurrent(runtime_id: int, body: MaxConcurrentBody,
                                 user: dict = Depends(require_no_session_token)):
     """设置引擎级最大并发数（方案一：并发纯引擎级，标签只做路由）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     if body.max_concurrent < 1 or body.max_concurrent > 100:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "max_concurrent 必须在 1-100 之间"})
     with db_lock:

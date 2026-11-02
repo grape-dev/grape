@@ -34,7 +34,7 @@ if os.path.exists("/tmp/test_grape_auth.db"):
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api.db_setup import _create_tables
 from src.auth.grape_account_db import (
     create_grape_account, get_grape_account_by_id,
@@ -84,7 +84,7 @@ client = TestClient(app)
 
 
 def _jwt_access_token(uid: int, username: str, ver: int = 0):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     return create_access_token(uid, username, ver)
 
 

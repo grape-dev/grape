@@ -12,13 +12,13 @@ os.environ.setdefault("GRAPE_PIPELINE_MODE", "legacy")  # 测试用 legacy 模�
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 from src.auth import grape_account_db
 from src.runtime import service
 # JWT access token helper（替代旧的 create_session_token）
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -228,7 +228,7 @@ class TestKnowledge:
             row = db.cursor().execute("SELECT scope, issue_num, status, file_path FROM agent_shared_knowledge WHERE source_seq=?", (seq,)).fetchone()
         assert row and row[0] == "issue" and row[1] == 5 and row[2] == "accepted"
         import os as _os
-        from src.config import WORKSPACE_DIR
+        from src.kernel.config import WORKSPACE_DIR
         assert _os.path.isfile(_os.path.join(WORKSPACE_DIR, row[3]))
 
     def test_knowledge_scope_file_locations(self):
@@ -249,7 +249,7 @@ class TestKnowledge:
     def test_knowledge_injected_into_prompt(self):
         seq = _seed_event(issue_id="#5")
         client.post(f"/api/events/{seq}/knowledge", json={"scope": "project", "content": "此仓库 PR 走内部评审"}, headers=_bot_headers())
-        from src.prompt_builder import build_conversation_prompt
+        from src.kernel.prompt_builder import build_conversation_prompt
         evt = {"seq": seq, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
                "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
         prompt, _ = build_conversation_prompt(evt, "你好", [], "vod", 5)
@@ -375,7 +375,7 @@ class TestPromptSkillPlaceholder:
     """Fix B：prompt 技能路径用 {{SKILL_DIR}} 占位符，不再硬编码服务端路径"""
 
     def test_conversation_prompt_uses_placeholder(self):
-        from src.prompt_builder import build_conversation_prompt
+        from src.kernel.prompt_builder import build_conversation_prompt
         evt = {"seq": 1, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
                "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
         prompt = build_conversation_prompt(evt, "hi", [], "vod", 5)

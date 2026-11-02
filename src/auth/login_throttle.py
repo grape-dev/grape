@@ -14,8 +14,8 @@ P1-2 修复：锁定时长独立于统计窗口。
 """
 import time
 
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 
 # 限流参数

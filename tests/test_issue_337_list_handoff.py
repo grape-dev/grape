@@ -41,8 +41,8 @@ def _ensure_db():
     for _k in ("DEVOPS_DB_HOST", "DEVOPS_DB_USER", "DEVOPS_DB_PASSWORD", "DEVOPS_DB_NAME", "DEVOPS_DB_PORT"):
         os.environ.pop(_k, None)
     import importlib
-    import src.session_manager as _sm
-    import src.config as _cfg
+    import src.kernel.session_manager as _sm
+    import src.kernel.config as _cfg
     importlib.reload(_sm)
     _cfg.DB_PATH = _DB_PATH
     import src.api.db_setup as _dbs
@@ -53,7 +53,7 @@ def _ensure_db():
 
 _ensure_db()
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 from src.api.routes.issues import targets_issue, handoff_issue, IssueHandoffBody  # noqa: E402
 from src.api.issues_center import get_handoff_targets  # noqa: E402
 

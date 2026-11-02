@@ -190,7 +190,7 @@ class CodeArtsRuntime(AgentRuntime):
         env.setdefault("OPENCODE_ALWAYS_NOTIFY_UPDATE", "false")
         # 信任自签名证书（华为云内网场景需要）
         env.setdefault("NODE_TLS_REJECT_UNAUTHORIZED", "0")
-        from src.config import SKILLS_DIR
+        from src.kernel.config import SKILLS_DIR
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
         # self-check: 关键变量缺失时打 warning，便于 worker journalctl 定位
@@ -198,6 +198,6 @@ class CodeArtsRuntime(AgentRuntime):
                      "OPENCODE_CONFIG", "OPENCODE_MODE", "SCENARIO"]
         _missing = [k for k in _required if not env.get(k)]
         if _missing:
-            from src.config import log as _log
+            from src.kernel.config import log as _log
             _log.warning(f"codearts env missing: {_missing}")
         return env

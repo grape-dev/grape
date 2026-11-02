@@ -11,7 +11,7 @@
 import pytest
 import tempfile, os, sqlite3
 
-from src.session_manager import db as _db, db_lock as _db_lock
+from src.kernel.session_manager import db as _db, db_lock as _db_lock
 
 
 @pytest.fixture
@@ -36,11 +36,11 @@ def test_db(monkeypatch):
     """)
     _conn.commit()
 
-    monkeypatch.setattr("src.session_manager.db", _conn)
+    monkeypatch.setattr("src.kernel.session_manager.db", _conn)
     monkeypatch.setattr("src.api.event_store.db", _conn)
     # db_lock 保持原样（threading.Lock，可重入性由 with 保证）
     # 但需要确保 src.api.event_store 导入的 db_lock 指向同一对象
-    from src.session_manager import db_lock
+    from src.kernel.session_manager import db_lock
     monkeypatch.setattr("src.api.event_store.db_lock", db_lock)
 
     yield _conn

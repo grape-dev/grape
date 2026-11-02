@@ -10,12 +10,12 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.user import db as user_db
 from src.auth import grape_account_db
 
 def _jwt_access_token(user_id, username="test"):
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
@@ -55,7 +55,7 @@ def _clean():
         c.execute("DELETE FROM agent_shared_knowledge WHERE repo_key=?", (_REPO_KEY,))
         c.execute("DELETE FROM scene_knowledge_ref WHERE knowledge_id IN (SELECT id FROM agent_shared_knowledge WHERE repo_key=?)", (_REPO_KEY,))
         db.commit()
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     import shutil
     base = workspace_repo_dir(_REPO_KEY)
     shutil.rmtree(os.path.join(base, "project-info"), ignore_errors=True)
@@ -63,7 +63,7 @@ def _clean():
 
 
 def _write_pi(file_name: str, content: str):
-    from src.repo_key import workspace_repo_dir
+    from src.kernel.repo_key import workspace_repo_dir
     p = os.path.join(workspace_repo_dir(_REPO_KEY), "project-info", file_name)
     os.makedirs(os.path.dirname(p), exist_ok=True)
     with open(p, "w", encoding="utf-8") as f:
@@ -72,7 +72,7 @@ def _write_pi(file_name: str, content: str):
 
 def _seed_knowledge(scope="issue_agent", agent="vod", issue_num=5, content="验收标准 = 接口可跑通"):
     from src.api.knowledge import write_knowledge
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     write_knowledge(repo_key=_REPO_KEY, scope=scope, content=content,
                     agent_type=agent, issue_num=issue_num, source_seq=99, created_by="agent")
     # write_knowledge 返回 task_id 非 knowledge_id，查 DB 拿真实 id
@@ -240,7 +240,7 @@ class TestInjection:
         }, headers=_headers)
         kid = r.json()["id"]
         client.post(f"/api/knowledge/{kid}/refs/batch", json={"agent_types": ["vod"]}, headers=_headers)
-        from src.prompt_builder import build_event_chat_prompt
+        from src.kernel.prompt_builder import build_event_chat_prompt
         evt = {"seq": 1, "repo_key": _REPO_KEY, "issue_id": "#5", "agent_type": "vod",
                "event_type": "issue_opened", "title": "t", "status": "completed", "result": "r"}
         prompt, _ = build_event_chat_prompt(evt, "你好", [], "vod", 5)
@@ -276,7 +276,7 @@ class TestAgentScopedUpload:
         _clean()
 
     def test_upload_agent_looks_agent_dir(self):
-        from src.config import WORKSPACE_DIR
+        from src.kernel.config import WORKSPACE_DIR
         r = client.post("/api/knowledge/entry", json={
             "name": "VOD专属知识", "content": "VOD 专属知识", "description": "VOD 专属", "repo": _REPO
         }, headers=_headers)
@@ -307,14 +307,14 @@ class TestAgentScopedUpload:
     def test_prompt_tells_agent_dir(self):
         """Issue #95: agent/{type}/ 引导已删除。"""
         _write_pi("project-graph.md", "# Graph")
-        from src.prompt_builder import _build_project_info_section
+        from src.kernel.prompt_builder import _build_project_info_section
         sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
         assert "{{PROJECT_INFO_DIR}}/agent/coding/" not in sec
         assert "Project Graph" in sec
 
     def test_build_prompt_includes_agent_dir_guide(self):
         """Issue #95: agent/{type}/ 引导已删除。"""
-        from src.prompt_builder import build_devops_agent_prompt
+        from src.kernel.prompt_builder import build_devops_agent_prompt
         evt = {"type": "issue_opened", "repository": "org/test", "source": "gitcode",
                "payload": {"issue": {"title": "t", "body": "b"}}, "issue_id": "#5", "_skill_path": ""}
         prompt = build_devops_agent_prompt(evt, [], "", ["qa"], runtime_id=1, agent_type="qa")
@@ -365,7 +365,7 @@ class TestProjectScopedShared:
     def test_prompt_tells_member_dir(self):
         """Issue #95: member 引导条件输出——有 ref 关联才输出。"""
         self._seed_member_doc_with_ref(agent_type="coding")
-        from src.prompt_builder import _build_project_info_section
+        from src.kernel.prompt_builder import _build_project_info_section
         sec = _build_project_info_section(_REPO_KEY, agent_type="coding")
         assert "{{PROJECT_INFO_DIR}}/member/" in sec
         assert "{{PROJECT_INFO_DIR}}/agent/coding/" not in sec

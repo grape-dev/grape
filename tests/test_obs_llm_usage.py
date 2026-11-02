@@ -27,7 +27,7 @@ from src.runtime import usage_collect as uc
 # ------------------------------------------------------- 运行主体分型（2026-10-17 决定 B）
 
 def _raw_rows(where: str, params=()):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute(f"SELECT task_id, run_id, run_kind, dedup_key, repo_key, user_id, scene_id,"
@@ -37,7 +37,7 @@ def _raw_rows(where: str, params=()):
 
 
 def _cleanup_run(run_id: str):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM obs_llm_usage WHERE run_id=?", (run_id,))
@@ -137,7 +137,7 @@ def test_master_run_writes_chat_rows(monkeypatch):
     assert {r[8] for r in rows} == {259}, f"engine_id 应落 259（哪台引擎跑的），实际 {[r[8] for r in rows]}"
     srcs = {r[10] for r in rows} if False else None
     # 逐条保留 source（title_generation 与主调用分开记账）
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT source, input_tokens FROM obs_llm_usage WHERE run_id=?", (run_id,))
@@ -182,7 +182,7 @@ def test_for_task_uses_task_kind_and_auto_attribution(monkeypatch):
 def test_for_task_fills_engine_id_when_task_row_lacks_it(monkeypatch):
     """task 行的 runtime_id 为空时，用调用方知道的 engine_id 兜底（补空，不覆盖已有值）。"""
     from src.observability import master_usage as mu
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     tid = "t_test_fortask_noeng"
     _cleanup(tid)
     _make_task(tid, repo_key="gitcode:org/repo")
@@ -260,7 +260,7 @@ def test_stable_seq_deterministic_and_fits_int():
 # ------------------------------------------------------------------ 台账落库
 
 def _make_task(task_id: str, usage_json: str = "{}", repo_key: str = "gitcode:org/repo"):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM agent_tasks WHERE id=?", (task_id,))
@@ -276,7 +276,7 @@ def _rows(task_id: str):
 
 
 def _cleanup(task_id: str):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM obs_llm_usage WHERE task_id=?", (task_id,))
@@ -326,7 +326,7 @@ def test_attribution_comes_from_task_not_from_caller():
                            "user_id": 999, "engine_id": 12345}], source="report")
     rows = _rows(tid)
     assert len(rows) == 1
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT repo_key, user_id, engine_id, agent_type FROM obs_llm_usage WHERE task_id=?",
@@ -348,7 +348,7 @@ def test_usage_endpoint_never_touches_usage_json():
                                       input=1200, output=340, cache_read=8000, cache_write=100,
                                       reasoning=42, turn=1, source="hwcloud"), credential_id=1)
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT usage_json FROM agent_tasks WHERE id=?", (tid,))

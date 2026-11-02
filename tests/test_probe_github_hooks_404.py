@@ -96,7 +96,7 @@ class TestGithubHooks404Permission:
 
     def test_github_repo_exists_hooks_404_not_cleaned(self):
         """GitHub 仓库本体 200 + hooks 404（非 admin 用户）→ 不级联清理（本次修复核心）。"""
-        with patch("src.repo_cleanup.cascade_cleanup_repo_data") as cc:
+        with patch("src.kernel.repo_cleanup.cascade_cleanup_repo_data") as cc:
             udb = _run_probe(1, "github:testorg/testrepo",
                              {GH_REPO: 200, GH_HOOKS: 404})
             udb.remove_managed_repo.assert_not_called()
@@ -110,9 +110,9 @@ class TestGithubHooks404Permission:
 
     def test_github_repo_404_on_step1_still_cleaned_after_bot_confirm(self):
         """GitHub 仓库本体 404（真删除）+ bot token 也 404 → 双信号确认后仍清理。"""
-        from src.token_resolver import TokenResolver
+        from src.kernel.token_resolver import TokenResolver
         with patch.object(TokenResolver, "read_stored_token", return_value=BOT_TOKEN), \
-             patch("src.repo_cleanup.cascade_cleanup_repo_data") as cc:
+             patch("src.kernel.repo_cleanup.cascade_cleanup_repo_data") as cc:
             udb = _run_probe(1, "github:testorg/testrepo",
                              {GH_REPO: 404}, {GH_REPO: 404})
             cc.assert_called_once()
@@ -120,9 +120,9 @@ class TestGithubHooks404Permission:
 
     def test_github_repo_404_no_bot_token_downgrades_to_pending_repair(self):
         """GitHub 仓库 404 但无 bot token 二次验证 → 降级 webhook_missing，不清理。"""
-        from src.token_resolver import TokenResolver
+        from src.kernel.token_resolver import TokenResolver
         with patch.object(TokenResolver, "read_stored_token", return_value=""), \
-             patch("src.repo_cleanup.cascade_cleanup_repo_data") as cc:
+             patch("src.kernel.repo_cleanup.cascade_cleanup_repo_data") as cc:
             udb = _run_probe(1, "github:testorg/testrepo",
                              {GH_REPO: 404}, {})
             cc.assert_not_called()
@@ -134,9 +134,9 @@ class TestGitcodeHooks404Unchanged:
 
     def test_gitcode_repo_exists_hooks_404_still_stale(self):
         """GitCode 仓库本体 200 + hooks 404 → 保持旧行为（bot 二次确认 404 后清理）。"""
-        from src.token_resolver import TokenResolver
+        from src.kernel.token_resolver import TokenResolver
         with patch.object(TokenResolver, "read_stored_token", return_value=BOT_TOKEN), \
-             patch("src.repo_cleanup.cascade_cleanup_repo_data") as cc:
+             patch("src.kernel.repo_cleanup.cascade_cleanup_repo_data") as cc:
             udb = _run_probe(1, "gitcode:testorg/testrepo",
                              {GC_REPO: 200, GC_HOOKS: 404}, {GC_REPO: 404})
             cc.assert_called_once()

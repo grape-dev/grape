@@ -10,7 +10,7 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 @pytest.fixture(scope="module")
 def pb():
     """Import once for all tests in this module."""
-    from src import prompt_builder
+    from src.kernel import prompt_builder
     return prompt_builder
 
 
@@ -115,12 +115,12 @@ class TestHistoryInjection:
     ]
 
     def _general(self, has_valid_session):
-        from src.prompt_builder import build_general_chat_prompt
+        from src.kernel.prompt_builder import build_general_chat_prompt
         return build_general_chat_prompt("hi", "org/repo", self.HISTORY, skill_name="chat",
                                          has_valid_session=has_valid_session)
 
     def _task(self, has_valid_session):
-        from src.prompt_builder import build_issue_chat_prompt
+        from src.kernel.prompt_builder import build_issue_chat_prompt
         conv = {"conv_type": "task", "issue_number": 7, "title": "t", "repo_key": "org/repo"}
         return build_issue_chat_prompt("hi", "org/repo", self.HISTORY, conv,
                                        has_valid_session=has_valid_session)
@@ -149,7 +149,7 @@ class TestHistoryInjection:
         assert "## Issue Agent Progress" in p and "[QA Agent] ✅ PR #1" in p
 
     def test_no_history_no_sections(self, pb):
-        from src.prompt_builder import build_general_chat_prompt
+        from src.kernel.prompt_builder import build_general_chat_prompt
         p = build_general_chat_prompt("hi", "org/repo", [], has_valid_session=False)
         assert "## Chat History" not in p and "## Issue Agent Progress" not in p
 
@@ -449,7 +449,7 @@ class TestIssueSummaryExcludesCurrent:
     REPO = "gitcode:org/issue219-excl"
 
     def _seed(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         rows = [
             (1, "1", "issue_one", "r1"),
             (2, "2", "issue_two", "r2"),
@@ -465,14 +465,14 @@ class TestIssueSummaryExcludesCurrent:
             db.commit()
 
     def _clean(self):
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             db.cursor().execute("DELETE FROM events WHERE repo_key=?", (self.REPO,))
             db.commit()
 
     def test_excludes_current_issue(self):
         from src.api.event_store import get_issue_summary
-        from src.prompt_builder import build_devops_agent_prompt
+        from src.kernel.prompt_builder import build_devops_agent_prompt
         self._seed()
         try:
             s = get_issue_summary(self.REPO, exclude_issue="3")

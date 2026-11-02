@@ -48,8 +48,8 @@ class TestCheckRunningTask:
         from src.api.event_pipeline import check_running_task
         _cursor = MagicMock()
         _cursor.fetchone.return_value = (1,)
-        with patch("src.session_manager.db") as mock_db, \
-             patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db") as mock_db, \
+             patch("src.kernel.session_manager.db_lock"):
             mock_db.cursor.return_value = _cursor
             result = check_running_task("gitcode:owner/repo", "123")
             assert result is True
@@ -58,8 +58,8 @@ class TestCheckRunningTask:
         from src.api.event_pipeline import check_running_task
         _cursor = MagicMock()
         _cursor.fetchone.return_value = None  # 无 task + 无 session
-        with patch("src.session_manager.db") as mock_db, \
-             patch("src.session_manager.db_lock"):
+        with patch("src.kernel.session_manager.db") as mock_db, \
+             patch("src.kernel.session_manager.db_lock"):
             mock_db.cursor.return_value = _cursor
             result = check_running_task("gitcode:owner/repo", "123")
             assert result is False
@@ -84,7 +84,7 @@ class TestIsPathBSelfLoop:
         from src.api.event_pipeline import _is_path_b_self_loop
         _mock_result = MagicMock()
         _mock_result.level = "repo_bot"  # 路径 A
-        with patch("src.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result):
+        with patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result):
             result = _is_path_b_self_loop("gitcode:owner/repo", "someuser", "issue_comment", "123")
             assert result is False
 
@@ -93,7 +93,7 @@ class TestIsPathBSelfLoop:
         from src.api.event_pipeline import _is_path_b_self_loop
         _mock_result = MagicMock()
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result):
+        with patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result):
             result = _is_path_b_self_loop("gitcode:owner/repo", "hostuser", "issue_opened", "123")
             assert result is False
 
@@ -102,7 +102,7 @@ class TestIsPathBSelfLoop:
         from src.api.event_pipeline import _is_path_b_self_loop
         _mock_result = MagicMock()
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
+        with patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
              patch("src.user.db.get_host_vcs_username", return_value="real_host_user"):
             result = _is_path_b_self_loop("gitcode:owner/repo", "someone_else", "issue_comment", "123")
             assert result is False
@@ -112,7 +112,7 @@ class TestIsPathBSelfLoop:
         from src.api.event_pipeline import _is_path_b_self_loop
         _mock_result = MagicMock()
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
+        with patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
              patch("src.user.db.get_host_vcs_username", return_value="hostuser"), \
              patch("src.api.event_pipeline.check_running_task", return_value=False):
             result = _is_path_b_self_loop("gitcode:owner/repo", "hostuser", "issue_comment", "123")
@@ -123,7 +123,7 @@ class TestIsPathBSelfLoop:
         from src.api.event_pipeline import _is_path_b_self_loop
         _mock_result = MagicMock()
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
+        with patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
              patch("src.user.db.get_host_vcs_username", return_value="hostuser"), \
              patch("src.api.event_pipeline.check_running_task", return_value=True):
             result = _is_path_b_self_loop("gitcode:owner/repo", "hostuser", "issue_comment", "123")
@@ -134,7 +134,7 @@ class TestIsPathBSelfLoop:
         from src.api.event_pipeline import _is_path_b_self_loop
         _mock_result = MagicMock()
         _mock_result.level = "user"
-        with patch("src.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
+        with patch("src.kernel.token_resolver.TokenResolver.resolve_config_level", return_value=_mock_result), \
              patch("src.user.db.get_host_vcs_username", return_value=""):
             result = _is_path_b_self_loop("gitcode:owner/repo", "hostuser", "issue_comment", "123")
             assert result is False

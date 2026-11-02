@@ -9,7 +9,7 @@ ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
 from src.im.feishu_async import BotContext
-from src.session_manager import (
+from src.kernel.session_manager import (
     db, db_lock,
     create_conversation, get_conversation_by_im, join_feishu_chat, get_conversation,
 )
@@ -525,7 +525,7 @@ def test_feishu_general_conversation_uses_chat_prompt():
 def test_feishu_task_prompt_history_from_conversation_messages():
     """P03：任务 prompt 历史用会话消息（chat_messages）"""
     _seed()
-    from src.session_manager import add_message
+    from src.kernel.session_manager import add_message
     cid = create_conversation(1, "gitcode:navuser/repo-a", title="Issue #6", conv_type="task", issue_number=6)
     add_message(cid, "user", "任务分配")
     add_message(cid, "agent", "收到")

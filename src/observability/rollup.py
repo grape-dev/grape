@@ -16,7 +16,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from src.config import log
+from src.kernel.config import log
 
 RETENTION_DAYS = 7
 SAMPLE_INTERVAL_SEC = 60
@@ -52,7 +52,7 @@ ONLINE_WINDOW_SEC = 900
 
 def snapshot_runtimes() -> Dict[str, int]:
     """采样一轮：把每个未吊销引擎的当前资源值写一行历史 + 清理过期数据。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = _now()
     now_iso = now.isoformat()
     inserted = 0
@@ -126,7 +126,7 @@ def runtime_history(runtime_ids: List[int], range_str: str = DEFAULT_RANGE) -> D
     acc: Dict[str, Dict[int, Dict[str, float]]] = {}
     ph = ",".join("?" * len(runtime_ids))
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT runtime_id, sampled_at, cpu_percent, memory_percent, disk_percent,"

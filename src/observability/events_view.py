@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from src.api.time_utils import normalize_event_time
-from src.config import log
+from src.kernel.config import log
 
 #: 用户面可用来源（`audit` 只在 L2）
 #: `slo` = SLO 违约（P2-1）：仓库范围的对用户可见（level='user'），平台范围的是 level='platform'
@@ -292,7 +292,7 @@ def _visible_filter(items: List[Dict[str, Any]], repo_keys: Set[str]) -> List[Di
 def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
                    repo_keys: Set[str], all_repos: bool = False, q: str = "") -> List[Dict[str, Any]]:
     """变更类来源：PR 合并（`events`，P2-3 会扩展到部署等）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     if not all_repos and not repo_keys:
         return []
     sql = ("SELECT seq, repo_key, event_type, issue_id, title, actor, duration, started_at,"
@@ -344,7 +344,7 @@ def _change_events(user: Dict[str, Any], state: str, repo: str, limit: int,
 
 def _audit_events(state: str, limit: int, q: str = "") -> List[Dict[str, Any]]:
     """审计类来源（**仅 L2**）：平台动作流水（登录/改配置等）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     rows: List[tuple] = []
     try:
         with db_lock:
@@ -400,7 +400,7 @@ def unified_events(user: Dict[str, Any], sources: Optional[List[str]] = None, st
         except Exception as e:
             log.warning(f"obs events: visible keys failed: {e}")
         if repo:
-            from src.repo_key import to_repo_key
+            from src.kernel.repo_key import to_repo_key
             want_keys = {to_repo_key(repo), to_repo_key(repo, "github")}
             hit = sorted(want_keys & repo_keys)
             if not hit:

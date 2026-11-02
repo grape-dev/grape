@@ -24,7 +24,7 @@ OTHER = "gitcode:org/ret-theirs"
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_alert_events",
@@ -43,7 +43,7 @@ def _iso(dt):
 
 
 def _task(tid, status, *, created_ago=0, started_ago=None, completed_ago=None, repo=REPO):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = datetime.now(timezone.utc)
     with db_lock:
         c = db.cursor()
@@ -59,7 +59,7 @@ def _task(tid, status, *, created_ago=0, started_ago=None, completed_ago=None, r
 
 def _event(status, *, resolved_ago=None, fired_ago=0, rule_id=1, rule_name="task_stuck",
            dim="repo:" + REPO, repo=REPO):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = datetime.now(timezone.utc)
     with db_lock:
         c = db.cursor()
@@ -75,7 +75,7 @@ def _event(status, *, resolved_ago=None, fired_ago=0, rule_id=1, rule_name="task
 
 def _usage(task_id, created_local, tokens=100):
     """按台账真实写法插入：created_at 是**数据库本地时间串**（datetime('now') 风格）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO obs_llm_usage (dedup_key, task_id, seq, source, model_key,"
@@ -113,7 +113,7 @@ def test_usage_archive_moves_old_rows_only():
     _usage("t_ret_new", new_local)
     r = lu.archive_old_usage()
     assert r["archived"] == 1, r
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT task_id FROM obs_llm_usage"); live = [x[0] for x in c.fetchall()]
@@ -132,7 +132,7 @@ def test_usage_archive_handles_iso_format_too():
     _usage("t_ret_iso_new", (now - timedelta(days=1)).isoformat())
     r = lu.archive_old_usage()
     assert r["archived"] == 1, r
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT task_id FROM obs_llm_usage_archive")

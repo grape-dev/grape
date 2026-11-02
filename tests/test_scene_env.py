@@ -5,7 +5,7 @@ custom_fields 直接注入（Issue #236：name 直接作为变量名注入 + 冲
 import json
 import pytest
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 RK = "gitcode:org/sceneenv"
 
@@ -108,7 +108,7 @@ def test_secret_masked_from_get_but_injected():
     env = _inject()
     assert env["DEPLOY_SECRET"] == "ultra-secret"
 
-    from src.scene_custom_env import normalize_custom_field
+    from src.kernel.scene_custom_env import normalize_custom_field
     f = normalize_custom_field({"name": "DEPLOY_SECRET", "value": "ultra-secret", "is_secret": True})
     assert f["is_secret"] is True
     f2 = normalize_custom_field({"name": "DEPLOY_URL", "value": "http://x"})
@@ -204,7 +204,7 @@ def test_unchecking_secret_keeps_value_and_returns_plaintext():
 
 def test_secret_suffix_name_explicit_false_stays_plain():
     """_KEY 后缀名显式取消密钥后保持明文（防前端自动兜底识别回退）。"""
-    from src.scene_custom_env import normalize_custom_field
+    from src.kernel.scene_custom_env import normalize_custom_field
     from src.api.routes.scenes import save_advanced_options, get_advanced_options
     _seed_issue(5, "devops-scene")
     _seed_scene("devops-scene", '{}')
@@ -287,7 +287,7 @@ def test_scope_all_default_and_missing_injects_everywhere():
 
 
 def test_scope_empty_and_unspecified_normalize_to_all():
-    from src.scene_custom_env import normalize_scope
+    from src.kernel.scene_custom_env import normalize_scope
     assert normalize_scope(None) == ["all"]
     assert normalize_scope([]) == ["all"]
     assert normalize_scope("sre") == ["sre"]            # 旧单值字符串兼容

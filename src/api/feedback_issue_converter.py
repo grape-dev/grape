@@ -13,8 +13,8 @@
 import os
 import asyncio
 
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 # 官方技能仓库（owner 唯一固定、无其它值；无 env 覆盖——反馈目标恒为官方技能仓。
 # 与 src/storage/scene_sync.py 同源：grape-dev/grape-skills）
@@ -68,7 +68,7 @@ def _feedback_official_issue_enabled() -> bool:
 
 def _repo_target(repo_key: str):
     """反馈所属仓库目标：返回 (provider, owner, repo)。"""
-    from src.repo_key import parse_repo_key, split_owner_repo
+    from src.kernel.repo_key import parse_repo_key, split_owner_repo
     provider, _ = parse_repo_key(repo_key) or ("gitcode", "")
     provider = provider or "gitcode"
     owner, repo = split_owner_repo(repo_key)
@@ -77,7 +77,7 @@ def _repo_target(repo_key: str):
 
 def _repo_bot_token(repo_key: str):
     """反馈所属仓库 bot token（provider 模块解析）。"""
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     provider, _ = parse_repo_key(repo_key) or ("gitcode", "")
     provider = provider or "gitcode"
     try:

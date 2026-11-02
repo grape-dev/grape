@@ -22,8 +22,8 @@ import tempfile
 import zipfile
 
 import httpx
-from src.config import log
-from src.session_manager import db, db_lock
+from src.kernel.config import log
+from src.kernel.session_manager import db, db_lock
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ def _query_active_skill_names(skill_names: set) -> set:
 
     _check_skills_exist 与 _rebuild_scene_skill_ref 共用，保证口径一致。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     if not skill_names:
         return set()
     with db_lock:
@@ -290,7 +290,7 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
 
     P46.2：存在性判定与 _check_skills_exist 统一为 _query_active_skill_names 口径。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("DELETE FROM scene_skill_ref WHERE scene_id=?", (market_id,))
@@ -321,7 +321,7 @@ def _rebuild_scene_skill_ref(market_id: int, nodes: list, scene_name: str = ""):
 
 def _rebuild_scene_skill_ref_by_name(scene_name: str, nodes: list):
     """通过场景名查 market_id 后重建 scene_skill_ref。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT id FROM scene_market WHERE name=? AND source='official' LIMIT 1", (scene_name,))
@@ -388,7 +388,7 @@ def _detect_stale_official_scenes(repo_scene_names: set, traversal_complete: boo
         logger.warning("Scene sync: traversal incomplete, skipping stale detection this cycle")
         return 0
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             stale = [name for (_id, name) in

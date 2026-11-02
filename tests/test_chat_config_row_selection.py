@@ -16,7 +16,7 @@ import sys
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, get_chat_config  # noqa: E402
+from src.kernel.session_manager import db, db_lock, get_chat_config  # noqa: E402
 
 R_OK = 9401      # 可用引擎（本机直连 credential_id=0）
 R_GONE = 9499    # 不存在的引擎 id（幽灵引擎）

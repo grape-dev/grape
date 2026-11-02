@@ -14,7 +14,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 # ── split_owner_repo：owner/repo 拆分 ──
 
 def test_split_owner_repo_basic():
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     assert split_owner_repo("grape-dev/grape") == ("grape-dev", "grape")
     assert split_owner_repo("gitcode:grape-dev/grape") == ("grape-dev", "grape")
     assert split_owner_repo("github:org/repo") == ("org", "repo")
@@ -22,7 +22,7 @@ def test_split_owner_repo_basic():
 
 
 def test_split_owner_repo_no_slash():
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     # 无 / 时 owner=repo 原样、repo 名空（调用方据此兜底）
     owner, repo = split_owner_repo("justname")
     assert owner == "justname" and repo == ""
@@ -32,7 +32,7 @@ def test_split_owner_repo_no_slash():
 
 def _env_from_execute_inner(actor="jason7602"):
     """复用 L255 区域构建逻辑（REPO_OWNER 拆分 + ACCOUNT 取 actor）。"""
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     repository = "grape-dev/grape"   # owner 是组织，ACCOUNT 是个人
     owner, rn = split_owner_repo(repository)
     env = {
@@ -55,7 +55,7 @@ def test_env_extra_repo_owner_and_account_actor():
 
 
 def test_env_extra_owner_from_gitcode_prefix():
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     repository = "gitcode:org/www"
     owner, rn = split_owner_repo(repository)
     env = {
@@ -91,7 +91,7 @@ def _direct_env(exec_account, repository, actor="dev_act"):
     修复前为 naive split（带前缀输入会得到 gitcode:<owner>，即 Issue #94 根因）；
     修复后统一走 split_owner_repo，REPO_OWNER/REPO_NAME 均无前缀。
     """
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     _repo_owner, _repo_name = split_owner_repo(exec_account)
     return {
         "REPO_FULL_NAME": repository,
@@ -128,7 +128,7 @@ def test_direct_branch_env_parts_unprefixed_account():
 
 def test_direct_branch_env_parts_owner_repo_no_prefix():
     """T3：split_owner_repo 幂等——对已剥前缀输入再跑结果不变（无双重剥离）。"""
-    from src.repo_key import split_owner_repo
+    from src.kernel.repo_key import split_owner_repo
     assert split_owner_repo("Jason7602/hello-x") == ("Jason7602", "hello-x")
     again = split_owner_repo("Jason7602/hello-x")
     assert again == ("Jason7602", "hello-x")

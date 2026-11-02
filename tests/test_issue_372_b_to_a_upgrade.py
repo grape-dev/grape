@@ -38,7 +38,7 @@ class TestBToACompatGetRepoTokenWithRefresh:
     def test_t8_01_path_b_skips_global_bot(self):
         """T8-01: 路径 B 仓库（host_user_id > 0）在全局 bot token 配置后返回用户 token（非全局 bot token）。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="USER_TOKEN"):
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="USER_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "USER_TOKEN"
             assert result != "GLOBAL_BOT"
@@ -46,14 +46,14 @@ class TestBToACompatGetRepoTokenWithRefresh:
     def test_t8_02_path_a_unaffected(self):
         """T8-02: 路径 A 仓库（bot_gitcode_token 非空）返回 bot_gitcode_token（回归保护）。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
 
     def test_t8_03_new_repo_global_bot_works(self):
         """T8-03: 新仓库全局 bot token 层正常生效。"""
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="GLOBAL_BOT"):
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="GLOBAL_BOT"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "GLOBAL_BOT"
 
@@ -71,7 +71,7 @@ class TestBToACompatGetRepoBotToken:
         R18 改造后委托 TokenResolver.get_token()（跳过第 1 级 session）。
         """
         from src.user.db import get_repo_bot_token
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="USER_TOKEN"):
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="USER_TOKEN"):
             result = get_repo_bot_token("gitcode:owner/repo")
             assert result == "USER_TOKEN"
             assert result != "GLOBAL_BOT"
@@ -90,8 +90,8 @@ class TestBToACompatGetGithubToken:
         R18 改造后委托 TokenResolver.get_token()（GitHubProvider）。
         """
         from src.user.db import get_github_token
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="GH_USER_TOKEN"), \
-             patch("src.token_resolver.create_provider_from_repo_key", return_value=MagicMock(provider_name="github")):
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="GH_USER_TOKEN"), \
+             patch("src.kernel.token_resolver.create_provider_from_repo_key", return_value=MagicMock(provider_name="github")):
             result = get_github_token("github:owner/repo")
             assert result == "GH_USER_TOKEN"
             assert result != "GH_GLOBAL_BOT"
@@ -110,7 +110,7 @@ class TestBToAAfterRepair:
         R18 改造后委托 TokenResolver.get_token()，mock 返回 REPO_BOT_TOKEN。
         """
         from src.user.db import get_repo_token_with_refresh
-        with patch("src.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
+        with patch("src.kernel.token_resolver.TokenResolver.get_token", return_value="REPO_BOT_TOKEN"):
             result = get_repo_token_with_refresh("gitcode:owner/repo")
             assert result == "REPO_BOT_TOKEN"
 

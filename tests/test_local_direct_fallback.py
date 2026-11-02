@@ -16,7 +16,7 @@ from unittest.mock import patch, MagicMock
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 # UT-01/02/03：_pool_only_local_direct 判定
@@ -172,7 +172,7 @@ def test_enqueue_broadcast_self_run_when_only_local():
     from src.api import event_pipeline as ep
     from src.api import event_archive as ea
     from src.runtime import service as svc
-    from src.prompt_builder import build_devops_agent_prompt as _bdap
+    from src.kernel.prompt_builder import build_devops_agent_prompt as _bdap
 
     fake_tid = "t_selftest"
     kwargs = {
@@ -187,8 +187,8 @@ def test_enqueue_broadcast_self_run_when_only_local():
          patch.object(ea, "init_event_json", return_value=None), \
          patch.object(_bdap, "__module__", "x"), \
          patch.object(ep, "prompt_ok" , create=True):
-        # 直接 patch build_devops_agent_prompt 符号（函数内 from src.prompt_builder import）
-        with patch("src.prompt_builder.build_devops_agent_prompt", return_value="P"), \
+        # 直接 patch build_devops_agent_prompt 符号（函数内 from src.kernel.prompt_builder import）
+        with patch("src.kernel.prompt_builder.build_devops_agent_prompt", return_value="P"), \
              patch.object(svc, "enqueue_task", return_value=fake_tid), \
              patch.object(ep, "_pool_only_local_direct", return_value=24), \
              patch.object(ep, "start_direct_agent", return_value=None) as m_sda, \

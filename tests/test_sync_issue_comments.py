@@ -5,7 +5,7 @@ from unittest.mock import patch, MagicMock
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, get_messages, create_conversation, add_message
+from src.kernel.session_manager import db, db_lock, get_messages, create_conversation, add_message
 from src.user import db as user_db
 from src.auth import grape_account_db
 

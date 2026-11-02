@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from src.api.deps import require_no_session_token
-from src.config import log
+from src.kernel.config import log
 from src.runtime.service import list_task_messages
 
 router = APIRouter(prefix="/api/task-logs", tags=["task-logs"])
@@ -40,7 +40,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.device_name/last_ip/owner_name。
     prompt 为 agent 接收到的完整上下文（截断至 8000 字符），prompt_full_length 为原始长度。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     from src.api.time_utils import normalize_event_time
     with db_lock:
         c = db.cursor()

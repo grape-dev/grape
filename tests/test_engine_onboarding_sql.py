@@ -43,7 +43,7 @@ def _call(repo="", user=None):
 @pytest.fixture()
 def real_db(monkeypatch):
     """使用 conftest 已初始化的真实测试库连接（列名=真实 DDL）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     import src.user.db as db_mod
     import src.agent.executor as executor_mod
     from unittest.mock import patch

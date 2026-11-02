@@ -13,12 +13,12 @@
 Fail-closed 原则：任何查询失败（网络/401/403/404/限流）一律返回 None（非 admin），
 宁可拒绝合法 admin（其可稍后重试），绝不放行无权限用户。
 """
-from src.config import log
+from src.kernel.config import log
 
 
 def _split_repo_key(repo_key: str) -> tuple[str, str, str]:
     """拆 repo_key → (provider, owner, name)。无前缀默认 gitcode。"""
-    from src.repo_key import parse_repo_key
+    from src.kernel.repo_key import parse_repo_key
     try:
         provider, owner, name = parse_repo_key(repo_key or "")
         if owner and name:

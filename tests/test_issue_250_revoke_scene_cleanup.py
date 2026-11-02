@@ -15,7 +15,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(
 
 import pytest  # noqa: E402
 
-from src.session_manager import db, db_lock  # noqa: E402
+from src.kernel.session_manager import db, db_lock  # noqa: E402
 
 
 def _unique_repo() -> str:

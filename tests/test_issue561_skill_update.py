@@ -101,7 +101,7 @@ def wdb(monkeypatch):
     db_obj = _DB()
     db_lock = threading.Lock()
 
-    import src.session_manager as sm
+    import src.kernel.session_manager as sm
     import src.user.db as user_db
     monkeypatch.setattr(sm, "db", db_obj)
     monkeypatch.setattr(sm, "db_lock", db_lock)

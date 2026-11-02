@@ -49,9 +49,9 @@ def _resolve_feishu_name(gitcode_user: str, repo_key: str = "") -> str:
     """
     if not gitcode_user:
         return ""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     # FR-CQ-1: 提取为 um_column_for_repo 工具函数
-    from src.repo_key import um_column_for_repo
+    from src.kernel.repo_key import um_column_for_repo
     _col = um_column_for_repo(repo_key)
     with db_lock:
         c = db.cursor()
@@ -135,7 +135,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
     # title_map 已提供有效标题时跳过 DB 查询；否则回退到 DB 查询（兼容无 title_map 的调用）
     if not title_map or _is_placeholder(title):
         try:
-            from src.session_manager import db as _db, db_lock as _dl
+            from src.kernel.session_manager import db as _db, db_lock as _dl
             _iss_num = int(str(issue_id).lstrip("#"))
             with _dl:
                 _c = _db.cursor()
@@ -205,7 +205,7 @@ def _get_issue_pipeline(repo_key: str, issue_id: str, events: list,
                 title = _api_title
                 # 回写 tasks 表（后续不再调 API）
                 try:
-                    from src.session_manager import db as _db2, db_lock as _dl2
+                    from src.kernel.session_manager import db as _db2, db_lock as _dl2
                     with _dl2:
                         _c2 = _db2.cursor()
                         _c2.execute("UPDATE issue SET title=? WHERE repo_key=? AND issue_number=? AND (title='' OR title IS NULL)",
@@ -369,7 +369,7 @@ def _running_issue_ids(repo_keys) -> set[str]:
     """按 repo 查 agent_tasks 中 queued/dispatched/running 的 issue_id 集合（前端 B 执行态派生）。"""
     if isinstance(repo_keys, str):
         repo_keys = [repo_keys]
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -389,7 +389,7 @@ def get_pipeline(owner: str, repo: str,
                  history_limit: int = Query(50, ge=1, le=500, description="history 截断条数（最近优先），默认 50"),
                  history_offset: int = Query(0, ge=0, description="history 偏移量（最近优先起点，0=最新；与 history_limit 组合支持前端增量翻页拉取全量历史）"),
                  user: dict = Depends(require_no_session_token)):
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     _owner_repo = f"{owner}/{repo}"
     repo_key = to_repo_key(_owner_repo)
 
@@ -404,7 +404,7 @@ def get_pipeline(owner: str, repo: str,
     elif repo_key.startswith("github:"):
         _repo_keys.append(f"gitcode:{_owner_repo}")
 
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         try:
@@ -551,7 +551,7 @@ def get_pipeline(owner: str, repo: str,
         _actual_repo_key = events[0].get("repo_key", repo_key) or repo_key
 
     # 返回 repo（不带 provider 前缀，前端用 _vcsUrl() 按 repo_key 判断 provider 拼链接）
-    from src.repo_key import from_repo_key
+    from src.kernel.repo_key import from_repo_key
     return {
         "repo": from_repo_key(_actual_repo_key),
         "repo_key": _actual_repo_key,

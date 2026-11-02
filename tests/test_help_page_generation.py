@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-import src.help_page_gen as gen
+import src.kernel.help_page_gen as gen
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 HELP_HTML = REPO_ROOT / "src" / "api" / "static" / "help.html"

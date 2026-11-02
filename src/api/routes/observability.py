@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from src.api.deps import require_org_member
 from src.api.routes.runtime import _require_credential
-from src.config import log
+from src.kernel.config import log
 from src.observability.overview import DEFAULT_RANGE, RANGE_SPECS, RepoNotVisible, build_overview
 
 router = APIRouter(prefix="/api/obs", tags=["observability"])
@@ -224,7 +224,7 @@ def obs_logs_ingest(body: LogIngestBody, credential_id: int = Depends(_require_c
 
     src = f"worker-{credential_id}"
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
@@ -392,7 +392,7 @@ def obs_runtime_history(
     frag, params = _cred_visibility(user, repo_keys)
     runtimes = []
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("SELECT id, device_name, name FROM runtime_credentials"
@@ -605,7 +605,7 @@ def _obs_token_scope(repo: str, user: dict) -> None:
     if not repo:
         return
     from src.observability.overview import RepoNotVisible, visible_repo_keys
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     want = {to_repo_key(repo), to_repo_key(repo, "github")}
     if not (want & set(visible_repo_keys(user or {}))):
         raise RepoNotVisible(repo)

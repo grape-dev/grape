@@ -11,7 +11,7 @@ import time
 
 from fastapi import APIRouter, HTTPException, Request, Response, Depends
 from pydantic import BaseModel
-from src.config import log
+from src.kernel.config import log
 from src.api.deps import require_no_session_token, require_jwt_only, invalidate_user_cache
 from src.auth import password as auth_password
 from src.auth import verification as auth_verification
@@ -39,7 +39,7 @@ from src.auth.grape_account_db import (
     transfer_external_identity,
     transfer_external_identity_in_tx, transfer_business_data,
 )
-from src.auth.cookie_utils import (
+from src.kernel.auth_sdk.cookie_utils import (
     set_refresh_cookie as _set_refresh_cookie,
     clear_refresh_cookie as _clear_refresh_cookie,
     app_base as _app_base,
@@ -116,7 +116,7 @@ def _clear_user_repos_cache(user_id: int):
     统一入口，所有绑定/解绑路径调用此函数。
     """
     try:
-        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
         with _sm_dl:
             _c = _sm_db.cursor()
             _c.execute("DELETE FROM user_repos WHERE user_id=?", (user_id,))
@@ -128,7 +128,7 @@ def _clear_user_repos_cache(user_id: int):
 def _issue_jwt(user_id: int, username: str, token_version: int,
                login_provider: str = "grape"):
     """签发 JWT 双 token。"""
-    from src.api.jwt_utils import create_access_token, create_refresh_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token, create_refresh_token
     access = create_access_token(user_id, username, token_version,
                                   login_provider=login_provider)
     refresh = create_refresh_token(user_id, username, token_version,
@@ -841,7 +841,7 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
         repo_keys = [r.get("repo_key") or r.get("full_name", "") for r in user_repos]
         repo_keys = [k for k in repo_keys if k]
         if repo_keys:
-            from src.session_manager import db as _sdb, db_lock as _sdl
+            from src.kernel.session_manager import db as _sdb, db_lock as _sdl
             with _sdl:
                 _c = _sdb.cursor()
                 placeholders = ",".join("?" * len(repo_keys))
@@ -886,7 +886,7 @@ def delete_account(body: DeleteAccountBody, user: dict = Depends(require_jwt_onl
     # 2. unified_user_mapping（飞书用户映射）——清列保行不 DELETE
     # 铁律 1：DELETE 整行后下次重启 backfill 按 user_id 重灌伪身份；
     # 清列保行后 INSERT OR IGNORE 命中已有行不重灌
-    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
     with _sm_dl:
         _c = _sm_db.cursor()
         _c.execute("UPDATE unified_user_mapping SET gitcode_user='', github_login='', feishu_open_id='', feishu_name='', app_id='' WHERE user_id=?",
@@ -1006,7 +1006,7 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     # R19.3.1: 检查路径 B 仓库依赖（host_user_id 指向该用户的仓库）
     # managed_repos 无 user_id 列，通过 user_repos 关联查询
     if not confirm:
-        from src.session_manager import db as _sm_db, db_lock as _sm_dl
+        from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
         affected_warehouses = []
         path_b_warehouses = []
         with _sm_dl:
@@ -1064,9 +1064,9 @@ def unbind_provider(provider: str, confirm: bool = False, user: dict = Depends(r
     clear_placeholder_email(user["id"], provider)
 
     # FR-21.7: 清 um 平台列——解绑后 um.gitcode_user/github_login 残留会导致飞书反查命中旧身份
-    from src.repo_key import um_column_for_provider
+    from src.kernel.repo_key import um_column_for_provider
     _um_col = um_column_for_provider(provider)
-    from src.session_manager import db as _sm_db, db_lock as _sm_dl
+    from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
     with _sm_dl:
         _c = _sm_db.cursor()
         _c.execute(f"UPDATE unified_user_mapping SET {_um_col}='' WHERE user_id=?", (user["id"],))
@@ -1219,7 +1219,7 @@ def _check_whitelist(provider: str, external_login: str) -> bool:
     cfg = _get_prov_cfg(provider)
     wl_col = cfg.get("whitelist_column") if cfg else None
     if wl_col:
-        from src.config import is_user_allowed
+        from src.kernel.config import is_user_allowed
         return is_user_allowed(wl_col, external_login)
     return True
 
@@ -1401,7 +1401,7 @@ def oauth_login(provider: str, popup: bool = False, request: Request = None, lan
         auth_header = request.headers.get("authorization", "")
         if auth_header.startswith("Bearer "):
             token = auth_header[7:].strip()
-            from src.api.jwt_utils import verify_access_token
+            from src.kernel.auth_sdk.jwt_utils import verify_access_token
             payload = verify_access_token(token)
             if payload:
                 uid = int(payload.get("sub", 0))
@@ -1495,7 +1495,7 @@ def _handle_oauth_bind(request, provider, external_id, user_info, access_token, 
                 return _bind_error_redirect(request, "bind_conflict", popup=popup)
 
             # 对方是纯占位账号 → 单事务执行 unbind → create → mark
-            from src.session_manager import db as _sm_db, db_lock as _sm_dl
+            from src.kernel.session_manager import db as _sm_db, db_lock as _sm_dl
             try:
                 with _sm_dl:
                     c = _sm_db.cursor()

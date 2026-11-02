@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def _fake_stream_agent(prompt, cwd, session_id="", **kw):
@@ -108,7 +108,7 @@ class TestWebChatToolUseRegression:
                       "VALUES ('opencode','opencode',?, 'online', datetime('now'), 'user', '99901', 1, 1)", (_cid,))
             _rid = c.lastrowid
             db.commit()
-        from src.session_manager import set_chat_config
+        from src.kernel.session_manager import set_chat_config
         set_chat_config(99901, backend="opencode-wt-dev")
         with patch("src.runtime.service.enqueue_task", return_value="t_q") as m_enq, \
              patch("src.runtime.service.wait_task_terminal",

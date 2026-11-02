@@ -18,7 +18,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import tempfile
 os.environ.setdefault("DEVOPS_WORKSPACE_DIR", tempfile.mkdtemp(prefix="evstop_"))
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 RK = "gitcode:org/eventstruct"
 
@@ -83,7 +83,7 @@ def _detail(seq):
     from fastapi.testclient import TestClient
     from src.api.main import app
     from src.user import db as user_db
-    from src.api.jwt_utils import create_access_token
+    from src.kernel.auth_sdk.jwt_utils import create_access_token
     from src.auth.grape_account_db import get_token_version
     from unittest.mock import patch
     uid = grape_account_db.create_grape_account("evstruct_user", email=None, password="pwd")

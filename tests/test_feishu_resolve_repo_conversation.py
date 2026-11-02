@@ -20,7 +20,7 @@ import pytest
 SRC_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)))
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(SRC_DIR, "data", "test_sessions.db"))
 
-from src.session_manager import db, db_lock, create_conversation, join_feishu_chat
+from src.kernel.session_manager import db, db_lock, create_conversation, join_feishu_chat
 
 
 @pytest.fixture(autouse=True)
@@ -92,7 +92,7 @@ class TestResolveRepoConversationFallback:
 
     def test_unbound_conv_without_repo_returns_empty(self):
         """UT-03：群未绑定，会话存在但 repo_key 为空 → 返回空（无仓库上下文不放行）。"""
-        from src.session_manager import create_conversation, join_feishu_chat, db, db_lock
+        from src.kernel.session_manager import create_conversation, join_feishu_chat, db, db_lock
         with db_lock:
             c = db.cursor()
             c.execute("DELETE FROM repo_im_group_binding WHERE im_chat_id='oc_test_conv'")

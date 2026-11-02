@@ -19,7 +19,7 @@ import ssl as ssl_module
 from email.mime.text import MIMEText
 from email.utils import formatdate
 
-from src.config import log, CONFIG_DIR
+from src.kernel.config import log, CONFIG_DIR
 
 
 def is_production_env() -> bool:

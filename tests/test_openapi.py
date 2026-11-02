@@ -17,7 +17,7 @@ os.environ.setdefault("DEVOPS_DB_BACKEND", "sqlite")
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.api import auth_token, openapi
-from src.api.jwt_utils import create_access_token
+from src.kernel.auth_sdk.jwt_utils import create_access_token
 from src.user import db as user_db
 from src.auth import grape_account_db
 
@@ -420,7 +420,7 @@ def _user():
 
 
 def test_three_channels_can_call_public_api():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:  # 清空 token 表，避免残留
         db.cursor().execute("DELETE FROM session_api_tokens WHERE id LIKE 'test_%' OR id LIKE 'sess_%' OR session_key LIKE 'test_%'")
         db.cursor().execute("DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM grape_accounts WHERE username LIKE 'test_%' OR username LIKE 'tc_%')")

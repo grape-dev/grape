@@ -23,7 +23,7 @@ DRY_RUN = "--apply" not in sys.argv
 
 
 def main():
-    from src.repo_key import parse_repo_key  # noqa: E402
+    from src.kernel.repo_key import parse_repo_key  # noqa: E402
 
     g = sqlite3.connect(GRAPE_DB)
     # id -> (repo_key, user_id)

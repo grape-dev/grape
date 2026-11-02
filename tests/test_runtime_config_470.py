@@ -20,7 +20,7 @@ SRC_DIR = os.path.join(os.path.dirname(__file__), "..", "src")
 if SRC_DIR not in sys.path:
     sys.path.insert(0, SRC_DIR)
 
-from src.config import (  # noqa: E402
+from src.kernel.config import (  # noqa: E402
     RUNTIME_CONFIG_PATH,
     get_runtime_task_timeout,
     get_stuck_threshold_minutes,

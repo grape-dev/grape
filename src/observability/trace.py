@@ -20,7 +20,7 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from src.config import log
+from src.kernel.config import log
 
 STEP_LIMIT = 200            # 单任务时间线最多返回的步骤数
 LOG_LIMIT = 50              # 时间线内联命中的日志条数
@@ -67,7 +67,7 @@ def _iso(d) -> str:
 
 def stamp_missing(limit: int = 5000) -> int:
     """给还没 trace 的任务补上两个 id（幂等，可反复调用）。返回补齐行数。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     done = 0
     try:
         with db_lock:
@@ -93,7 +93,7 @@ def stamp_missing(limit: int = 5000) -> int:
 # ---------------------------------------------------------------- 时间线
 
 def _steps(task_id: str) -> List[Dict[str, Any]]:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out: List[Dict[str, Any]] = []
     try:
         with db_lock:
@@ -115,7 +115,7 @@ def _steps(task_id: str) -> List[Dict[str, Any]]:
 
 
 def _tokens_by_task(task_ids: List[str]) -> Dict[str, Dict[str, int]]:
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     out: Dict[str, Dict[str, int]] = {}
     if not task_ids:
         return out
@@ -143,7 +143,7 @@ def _engine_label(runtime_id: int) -> str:
     """runtime_id → `引擎@设备`（给时间线标注在哪台机器的哪个引擎上跑）。"""
     if not runtime_id:
         return ""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     try:
         with db_lock:
             c = db.cursor()
@@ -195,7 +195,7 @@ def resolve_tasks(trace: str) -> List[Dict[str, Any]]:
 
     传任务号时返回**该任务的整条流水线**（同 issue 的其他任务一起），前端从任务列表点进来即可看全流程。
     """
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     t = str(trace or "").strip()
     if not t:
         return []
@@ -239,7 +239,7 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
     路由层对空结果给 404。
     """
     from src.observability.overview import visible_repo_keys
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     stamp_missing()                                     # 保证历史任务也有 id
     rows = resolve_tasks(trace)
@@ -301,6 +301,6 @@ def timeline(user: Dict[str, Any], trace: str, with_steps: bool = True) -> Dict[
 
 def pipeline_by_issue(user: Dict[str, Any], repo: str, issue_id: str) -> Dict[str, Any]:
     """按 (仓库, issue) 直接看整条流水线（前端从任务列表点进"这条 issue 的流程"）。"""
-    from src.repo_key import to_repo_key
+    from src.kernel.repo_key import to_repo_key
     rk = to_repo_key(repo) if repo else ""
     return timeline(user, pipeline_trace_id(rk, issue_id))

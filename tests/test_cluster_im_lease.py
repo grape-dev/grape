@@ -9,7 +9,7 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 from src.api.db_setup import init_database
 from src.im import bot_lease as bl
 from src.im import feishu_async as fa
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 
 def setup_module():

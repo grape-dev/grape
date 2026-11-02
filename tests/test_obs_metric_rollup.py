@@ -37,7 +37,7 @@ def _local(dt):
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_metric_rollup",
@@ -56,7 +56,7 @@ def _clean():
 
 
 def _mk_task(tid, repo_key, status, created, started=None, completed=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO agent_tasks (id, agent_session_id, runtime_id, prompt, repo_key,"
@@ -70,7 +70,7 @@ def _mk_task(tid, repo_key, status, created, started=None, completed=None):
 
 def _mk_usage(tid, repo_key, created, tokens=100, local_fmt=True):
     """插一条用量行；local_fmt=True 用本地时间串（与 DDL 默认一致）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     ts = _local(created) if local_fmt else _iso(created)
     with db_lock:
         c = db.cursor()
@@ -95,7 +95,7 @@ def _setup():
 
 def test_compute_bucket_engine_availability_preagg():
     """Issue #437：小时桶补引擎可用率预聚合（engine_avail_online/total，仅 global 维）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     base = _now().replace(minute=0, second=0, microsecond=0) - timedelta(hours=2)
     with db_lock:
         c = db.cursor()
@@ -168,7 +168,7 @@ def test_write_bucket_is_idempotent():
     n1 = mr.write_bucket(mr.RES_MINUTE, base, rows)
     n2 = mr.write_bucket(mr.RES_MINUTE, base, rows)      # 再写一次
     assert n1 > 0 and n2 == n1
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM obs_metric_rollup WHERE resolution=? AND bucket_start=?",
@@ -186,7 +186,7 @@ def test_catch_up_fills_missing_and_skips_existing():
     first = mr.catch_up(now=base + timedelta(minutes=3), minute_back_min=10, hour_back_hours=0,
                         max_minutes=10)
     assert first["minute_done"] > 0, first
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT DISTINCT bucket_start FROM obs_metric_rollup WHERE resolution=?",
@@ -254,7 +254,7 @@ def test_overview_trends_from_rollup_and_fallback():
     assert mr.overview_trends([], base, 60, 3) is None
     assert mr.overview_trends(["repo:gitcode:org/void"], base, 60, 3) is None
     # 总览接口：有 rollup 数据 → charts.source=rollup；清掉 → live
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     _grant(REPO)
     user = {"id": UID, "username": "roll-tester", "org_id": 0, "org_role": "owner"}
     ov = overview.build_overview(user, range_str="1h")
@@ -268,7 +268,7 @@ def test_overview_trends_from_rollup_and_fallback():
 
 
 def _grant(repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, name = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -302,7 +302,7 @@ def test_cleanup_only_removes_expired():
         mr.write_bucket(res, b, {"global": {"task_done": (1.0, 1)}})
     got = mr.cleanup(now)
     assert got["minute"] >= 1 and got["hour"] >= 1, got
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("SELECT COUNT(*) FROM obs_metric_rollup WHERE resolution=? AND bucket_start=?",

@@ -10,7 +10,7 @@ import asyncio
 import json
 from collections import defaultdict
 
-from src.config import log
+from src.kernel.config import log
 
 _subscribers: dict[str, set[tuple[asyncio.Queue, asyncio.AbstractEventLoop]]] = defaultdict(set)
 _lock = asyncio.Lock()

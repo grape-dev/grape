@@ -12,7 +12,7 @@ import pytest
 
 class TestRepoInit:
     def test_gitcode_repo_key(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         r = Repo("gitcode:owner/repo")
         assert r.provider == "gitcode"
         assert r.owner == "owner"
@@ -20,21 +20,21 @@ class TestRepoInit:
         assert r.repo_key == "gitcode:owner/repo"
 
     def test_github_repo_key(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         r = Repo("github:owner/repo")
         assert r.provider == "github"
         assert r.owner == "owner"
         assert r.name == "repo"
 
     def test_no_prefix_defaults_gitcode(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         r = Repo("owner/repo")
         assert r.provider == "gitcode"
         assert r.owner == "owner"
         assert r.name == "repo"
 
     def test_empty_repo_key(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         r = Repo("")
         assert r.provider == "gitcode"
         assert r.owner == ""
@@ -43,31 +43,31 @@ class TestRepoInit:
 
 class TestRepoApiBase:
     def test_gitcode_api_base(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         assert Repo("gitcode:owner/repo").api_base == "https://gitcode.com/api/v5"
 
     def test_github_api_base(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         assert Repo("github:owner/repo").api_base == "https://api.github.com"
 
     def test_unknown_provider_falls_back_gitcode(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         assert Repo("gitlab:owner/repo").api_base == "https://gitcode.com/api/v5"
 
 
 class TestRepoCloneUrl:
     def test_gitcode_clone_url(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         assert Repo("gitcode:owner/repo").clone_url == "https://gitcode.com/owner/repo.git"
 
     def test_github_clone_url(self):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         assert Repo("github:owner/repo").clone_url == "https://github.com/owner/repo.git"
 
 
 class TestRepoBotToken:
     def test_github_calls_get_github_token(self, monkeypatch):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         called = {"fn": ""}
         def _fake_github_token(repo_key=""):
             called["fn"] = "github"
@@ -84,7 +84,7 @@ class TestRepoBotToken:
         assert called["repo_key"] == "github:owner/repo"
 
     def test_gitcode_calls_get_gitcode_token(self, monkeypatch):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         called = {"fn": ""}
         def _fake_github_token(repo_key=""):
             called["fn"] = "github"
@@ -101,7 +101,7 @@ class TestRepoBotToken:
         assert called["repo_key"] == "gitcode:owner/repo"
 
     def test_no_prefix_calls_get_gitcode_token(self, monkeypatch):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         called = {"fn": ""}
         def _fake_repo_token(repo_key):
             called["fn"] = "gitcode"
@@ -112,11 +112,11 @@ class TestRepoBotToken:
         assert called["fn"] == "gitcode"
 
     def test_empty_token_returns_empty_string(self, monkeypatch):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda repo_key: "")
         assert Repo("gitcode:owner/repo").bot_token == ""
 
     def test_none_token_returns_empty_string(self, monkeypatch):
-        from src.repo import Repo
+        from src.kernel.repo import Repo
         monkeypatch.setattr("src.user.db.get_repo_token_with_refresh", lambda repo_key: "")
         assert Repo("gitcode:owner/repo").bot_token == ""

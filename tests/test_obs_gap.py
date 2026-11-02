@@ -37,7 +37,7 @@ def _iso(dt):
 
 
 def _clean():
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         for sql in ("DELETE FROM obs_alert_events",
@@ -55,7 +55,7 @@ def _clean():
 
 
 def _set_rule(name, **fields):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sets = ", ".join(f"{k}=?" for k in fields)
     with db_lock:
         c = db.cursor()
@@ -68,7 +68,7 @@ def _rule_id(name):
 
 
 def _grant(repo_key):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     owner, _, rname = repo_key.split(":", 1)[1].partition("/")
     with db_lock:
         c = db.cursor()
@@ -79,7 +79,7 @@ def _grant(repo_key):
 
 def _mk_runtime(name, scope="global", owner_name="", last_seen=None, status="active",
                 org_id=0, repo_key=""):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("INSERT INTO runtime_credentials (token_hash, name, device_name, scope,"
@@ -92,7 +92,7 @@ def _mk_runtime(name, scope="global", owner_name="", last_seen=None, status="act
 
 
 def _mk_task(tid, repo_key, status, completed_min_ago=None, created_min_ago=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     now = _now()
     ct = _iso(now - timedelta(minutes=completed_min_ago)) if completed_min_ago is not None else None
     crt = _iso(now - timedelta(minutes=(created_min_ago if created_min_ago is not None else 0)))
@@ -106,7 +106,7 @@ def _mk_task(tid, repo_key, status, completed_min_ago=None, created_min_ago=None
 
 
 def _events(rule_name=None, dim_key=None):
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     sql = ("SELECT e.* FROM obs_alert_events e JOIN obs_alert_rules r ON r.id=e.rule_id WHERE 1=1")
     params = []
     if rule_name:
@@ -150,7 +150,7 @@ def test_runtime_gap_fires_and_resolves():
     assert abs((silent_since - (_now() - timedelta(minutes=30) + timedelta(seconds=900))
                 ).total_seconds()) < 5
     # 心跳恢复 → 事件收口
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE runtime_credentials SET last_seen_at=? WHERE id=?", (_iso(_now()), rid))
@@ -242,7 +242,7 @@ def test_mutation_rule_fires_on_drop_and_resolves_on_recovery():
     assert float(ev["value"]) == pytest.approx(-1.0, abs=0.01)
 
     # 本窗口也变成功 → 环比 0（不再满足阈值）→ 收口
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     with db_lock:
         c = db.cursor()
         c.execute("UPDATE agent_tasks SET status='completed' WHERE id LIKE 't_gap_cw%'")
@@ -284,7 +284,7 @@ def test_runtime_gap_visibility_and_silence():
 
 def test_platform_level_gap_events_never_reach_user_face():
     """平台级（level='platform'）的缺失事件不进用户面（§5.3）。"""
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
     rid = _mk_runtime(RT_GLOBAL, scope="global", last_seen=_now() - timedelta(minutes=30))
     _set_rule("runtime_silent", enabled=1, threshold=900)
     with db_lock:

@@ -167,7 +167,7 @@ _WORKSPACE_HOST = "workspace.example.com"
 def _build_client(meta_values: dict):
     """最小应用挂真实中间件，patch DB 与 JWT 解析，返回 (client, writes)。"""
     import src.user.db as db_mod
-    import src.api.jwt_utils as jwt_mod
+    import src.kernel.auth_sdk.jwt_utils as jwt_mod
     import src.api.main as main_mod
 
     writes = {}

@@ -19,11 +19,11 @@ import pytest
 class TestConnectionPool:
     def test_pool_disabled_falls_back_to_per_thread(self):
         """DB_POOL_DISABLED=1 skips pool init, uses legacy per-thread connection."""
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         db = MySQLCompatDB(host="10.0.0.1", port=3306, user="u", password="p", database="d")
         db._pool_disabled = True
         assert db._pool is None
-        with patch("src.mysql_compat.pymysql.connect") as m_conn:
+        with patch("src.kernel.mysql_compat.pymysql.connect") as m_conn:
             m_conn.return_value.cursor.return_value = MagicMock()
             cur = db._raw_cursor()
         assert cur is not None
@@ -31,14 +31,14 @@ class TestConnectionPool:
 
     def test_pool_lazy_init_flag(self):
         """Pool is not initialized until first _raw_cursor call."""
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         db = MySQLCompatDB(host="h")
         assert db._pool is None
         assert db._pool_disabled is False  # not disabled by default (unless env says so)
 
     def test_pool_env_var_disables(self):
         """DB_POOL_DISABLED=1 env var sets _pool_disabled at init time."""
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         with patch.dict(os.environ, {"DB_POOL_DISABLED": "1"}):
             db = MySQLCompatDB(host="h")
             assert db._pool_disabled is True
@@ -50,7 +50,7 @@ class TestConnectionPool:
         does NOT return the PooledConnection; commit() must call
         PooledConnection.close() to return it.
         """
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         db = MySQLCompatDB(host="h")
         mock_pool = MagicMock()
         mock_conn = MagicMock()
@@ -69,7 +69,7 @@ class TestConnectionPool:
 
     def test_pool_mode_returns_connection_on_rollback(self):
         """Pool mode: rollback() returns the borrowed connection to the pool."""
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         db = MySQLCompatDB(host="h")
         mock_pool = MagicMock()
         mock_conn = MagicMock()
@@ -92,7 +92,7 @@ class TestConnectionPool:
         borrowed a new connection per cursor, so db.commit() only committed
         the last connection's transaction.
         """
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         db = MySQLCompatDB(host="h")
         mock_pool = MagicMock()
         mock_conn = MagicMock()
@@ -121,7 +121,7 @@ class TestConnectionPool:
     def test_pool_mode_reborrows_after_commit(self):
         """Pool mode: after commit returns the connection, a new execute()
         borrows a fresh connection from the pool."""
-        from src.mysql_compat import MySQLCompatDB
+        from src.kernel.mysql_compat import MySQLCompatDB
         db = MySQLCompatDB(host="h")
         mock_pool = MagicMock()
         mock_conn1 = MagicMock()
@@ -236,8 +236,8 @@ class TestTaskLock:
 
         async def _test():
             nonlocal body_ran
-            with patch("src.lock.acquire_lock", return_value=True):
-                with patch("src.lock.release_lock") as mock_release:
+            with patch("src.kernel.lock.acquire_lock", return_value=True):
+                with patch("src.kernel.lock.release_lock") as mock_release:
                     async with run_with_distributed_lock("test_task", ttl=60) as acquired:
                         body_ran = True
                         assert acquired is True
@@ -256,7 +256,7 @@ class TestTaskLock:
 
         async def _test():
             nonlocal body_ran
-            with patch("src.lock.acquire_lock", return_value=False):
+            with patch("src.kernel.lock.acquire_lock", return_value=False):
                 async with run_with_distributed_lock("test_task", ttl=60) as acquired:
                     if acquired:
                         body_ran = True
@@ -273,7 +273,7 @@ class TestTableMaintenance:
     def test_cleanup_old_agent_tasks_fields(self):
         """cleanup_old_agent_tasks_fields nullifies old completed task fields."""
         from src.runtime.table_maintenance import cleanup_old_agent_tasks_fields
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         # Insert a completed task with old timestamp
         with db_lock:
@@ -304,7 +304,7 @@ class TestTableMaintenance:
     def test_cleanup_old_task_messages(self):
         """cleanup_old_task_messages deletes old messages."""
         from src.runtime.table_maintenance import cleanup_old_task_messages
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
 
         # Insert an old task message (type column, not role)
         with db_lock:

@@ -20,7 +20,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 import sqlite3
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 from src.api import event_store
 
 GROUP_CHAT = "oc_test_repo_align"

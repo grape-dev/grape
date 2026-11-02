@@ -22,7 +22,7 @@ import threading
 import zipfile
 from abc import ABC, abstractmethod
 
-from src.config import log, OBS_LOCAL_CACHE
+from src.kernel.config import log, OBS_LOCAL_CACHE
 
 # 磁盘缓存根（OBS 模式下 zip 包缓存；默认 data/cache/storage）
 CACHE_ROOT = OBS_LOCAL_CACHE or os.path.join(
@@ -143,7 +143,7 @@ def get_storage() -> StorageBackend | None:
     if _storage is None:
         with _storage_lock:
             if _storage is None:
-                from src.config import (
+                from src.kernel.config import (
                     OBS_ENABLED, OBS_BUCKET, OBS_ACCESS_KEY, OBS_SECRET_KEY,
                     OBS_ENDPOINT, OBS_PREFIX, OBS_URL_EXPIRES,
                 )
@@ -179,7 +179,7 @@ def get_skill_storage() -> StorageBackend | None:
 
 
 def _build_skill_storage(_base: StorageBackend | None) -> StorageBackend | None:
-    from src.config import SKILL_STORAGE, SKILL_STORAGE_DIR
+    from src.kernel.config import SKILL_STORAGE, SKILL_STORAGE_DIR
     _mode = (SKILL_STORAGE or "auto").lower()
     if _base is not None:  # OBS 已配置则优先
         return _base
@@ -233,7 +233,7 @@ def skill_key(scope: str, owner: str, skill_name: str, version: int | None = Non
         owner_seg = f"{_provider}/{parts[0]}/{parts[1]}"
     else:  # official
         owner_seg = ""
-    from src.config import OBS_PREFIX
+    from src.kernel.config import OBS_PREFIX
     prefix = (OBS_PREFIX or "").strip("/")
     base = f"skills/{scope}/{owner_seg}" if owner_seg else f"skills/{scope}"
     return f"{prefix}/{base}/{skill_name}/{skill_name}.zip"

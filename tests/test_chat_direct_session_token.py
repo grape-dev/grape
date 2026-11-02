@@ -11,7 +11,7 @@ from unittest.mock import patch
 from fastapi.testclient import TestClient
 
 from src.api.main import app
-from src.session_manager import db, db_lock, create_conversation
+from src.kernel.session_manager import db, db_lock, create_conversation
 
 
 def _seed_local_engine():
@@ -54,7 +54,7 @@ class TestChatSessionEnvExtra:
     def test_real_repo_injects_session_token(self):
         """真仓库 → 注入 tk_ 会话 token + GRAPE_CLI_MODE=WORKER，且作用域校验通过。"""
         from src.api.chat_session_env import chat_session_env_extra
-        from src.api.auth_token import verify_session_token, verify_session_token_for_repo
+        from src.kernel.auth_sdk.auth_token import verify_session_token, verify_session_token_for_repo
         env = chat_session_env_extra(99902, "test-conv", "gitcode:owner/repo")
         assert env["USER_ID"] == "99902"
         assert env["CONVERSATION_ID"] == "test-conv"
@@ -97,7 +97,7 @@ class TestDirectChatInjectsToken:
         tok = env.get("GRAPE_SESSION_TOKEN", "")
         assert tok.startswith("tk_"), "direct 任务会话必须注入 tk_ 会话 token"
         assert env.get("GRAPE_CLI_MODE") == "WORKER"
-        from src.api.auth_token import verify_session_token_for_repo
+        from src.kernel.auth_sdk.auth_token import verify_session_token_for_repo
         assert verify_session_token_for_repo(tok, "gitcode:owner/repo")
 
     def test_send_general_conv_no_token(self, client, monkeypatch):

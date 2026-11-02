@@ -34,7 +34,7 @@ _project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 log = logging.getLogger("devops-bot")
 

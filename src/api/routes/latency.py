@@ -5,8 +5,8 @@
 """
 import time
 from fastapi import APIRouter, Request
-from src.session_manager import db, db_lock
-from src.config import log
+from src.kernel.session_manager import db, db_lock
+from src.kernel.config import log
 
 router = APIRouter(prefix="/api/latency", tags=["latency"])
 
@@ -25,7 +25,7 @@ def _maybe_cleanup():
         return
     _last_cleanup = now
     try:
-        from src.mysql_compat import get_db_backend
+        from src.kernel.mysql_compat import get_db_backend
         is_mysql = get_db_backend() == "mysql"
         with db_lock:
             c = db.cursor()

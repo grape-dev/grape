@@ -44,7 +44,7 @@ def client():
 def _seed(client):
     """托管仓库 + user_repos 归属关系 + 一条归属 alice 的事件。"""
     from src.user import db as user_db
-    from src.session_manager import db, db_lock
+    from src.kernel.session_manager import db, db_lock
 
     user_db.add_managed_repo(ALICE_REPO, "alice", "repo1")
     user_db.add_managed_repo(BOB_REPO, "bob", "repo2")

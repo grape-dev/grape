@@ -152,7 +152,7 @@ def test_auto_upgrade_writes_on_collaborator_success():
 
 def test_local_port_prefers_grape_port():
     """T12-03: _local_port 优先读 GRAPE_PORT，fallback GRAPE_MAIN_PORT。"""
-    from src.prompt_builder import _local_port
+    from src.kernel.prompt_builder import _local_port
 
     # Save original env
     _orig_gp = os.environ.get("GRAPE_PORT")
