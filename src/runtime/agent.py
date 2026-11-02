@@ -2390,6 +2390,11 @@ async def _execute_task(client, task, engine_name: str = ""):
             if evt_type == "done":
                 done = data
                 continue
+            # issue #727：hermes ACP 直报用量（("usage", {...}) 事件）——只喂采集器，
+            # 不进消息流/日志（内部观测数据，非任务执行事件）。
+            if evt_type == "usage":
+                _usage_col.feed(evt_type, data)
+                continue
             # 流式引擎的用量(目前只有 codex)随事件带出，喂给采集器
             _usage_col.feed(evt_type, data)
             # 引擎确已开始执行（opencode 已 Popen 并产出首个执行事件）→ 才置 running。

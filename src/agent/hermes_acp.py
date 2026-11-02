@@ -179,6 +179,7 @@ class HermesACPBackend:
         - ("tool_finish", str)
         - ("tool_result", str)
         - ("step_finish", str)
+        - ("usage", dict)   # issue #727：PromptResponse result.usage 直报（LLM 用量采集）
         - ("done", {"exit_code": int, "text": str, "oc_session_id": str, "errors": list, "stderr": str})
         """
         label = f"{agent_label} " if agent_label else ""
@@ -654,6 +655,14 @@ class HermesACPBackend:
             stop_reason = prompt_result.get("stopReason", "")
             log.info(f"{label}hermes ACP done: stopReason={stop_reason}")
 
+            # issue #727：PromptResponse result.usage 直报——治本路径，喂事件流
+            # （("usage", {...})），由调用方（worker/主控）转给 UsageCollector.feed；
+            # state.db 读取只做兜底（缺表降级见 usage_collect._hermes_rows）。
+            _usage_rec = _extract_prompt_usage(prompt_result.get("result"))
+            if _usage_rec is not None:
+                log.info(f"{label}hermes ACP prompt usage: {json.dumps(_usage_rec, ensure_ascii=False)}")
+                yield ("usage", _usage_rec)
+
             # Issue #494：超时失败显式归因（与 hwcloud_acp 同口径）——stopReason=timeout
             # 时 stderr/errors 常为空，补「执行超时（Ns）」文案进 errors。
             if stop_reason == "timeout" and not error_events:
@@ -1040,6 +1049,56 @@ def _extract_session_id(result) -> str:
             if sid:
                 return sid
     return ""
+
+
+def _extract_prompt_usage(result) -> dict | None:
+    """issue #727：从 `session/prompt` 的 PromptResponse result 里提取 `usage`。
+
+    hermes 0.9.0 起 PromptResponse result 携带 usage（token 计数字段命名跨版本
+    有波动：input_tokens/input、completion_tokens/output……），这里是治本路径——
+    用量经事件流 `("usage", {...})` 直报给 UsageCollector，不依赖 state.db 表结构。
+
+    返回形态与 UsageCollector.feed 的 usage dict 对齐：
+    {model, provider, input, output, cache_read, cache_write, reasoning}；全 0/缺失返回 None。
+    """
+    if not isinstance(result, dict):
+        return None
+    usage = result.get("usage")
+    if not isinstance(usage, dict) or not usage:
+        return None
+    tok = {"input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "reasoning": 0}
+    try:
+        from src.observability.llm_usage import normalize_tokens
+        _n = normalize_tokens(usage)
+        tok = {
+            "input": _n.get("input_tokens", 0),
+            "output": _n.get("output_tokens", 0),
+            "cache_read": _n.get("cache_read_tokens", 0),
+            "cache_write": _n.get("cache_write_tokens", 0),
+            "reasoning": _n.get("reasoning_tokens", 0),
+        }
+    except Exception:
+        # 归一化器不可用时退化为常见 snake/camel 键的手工解析
+        for canon, aliases in (
+            ("input", ("input_tokens", "input", "prompt_tokens")),
+            ("output", ("output_tokens", "output", "completion_tokens")),
+            ("cache_read", ("cache_read_tokens", "cache_read")),
+            ("cache_write", ("cache_write_tokens", "cache_write")),
+            ("reasoning", ("reasoning_tokens", "reasoning")),
+        ):
+            for a in aliases:
+                v = usage.get(a)
+                if isinstance(v, (int, float)) and v > 0:
+                    tok[canon] = int(v)
+                    break
+    if not any(tok.values()):
+        return None
+    model = str(usage.get("model") or result.get("model") or "")
+    provider = str(usage.get("provider") or result.get("provider") or "")
+    rec = dict(tok)
+    rec["model"] = model
+    rec["provider"] = provider
+    return rec
 
 
 def _has_completion_record(chunks: list) -> bool:
