@@ -1,6 +1,6 @@
 # Spec: obs_runtime_samples 单写者租约（Issue #702）
 
-> 开发分支 `feat/issue-702` · 基线 `local-liufei` · 上游 Spec：Issue #702 评论 197674249
+> 开发分支 `feat/issue-702` · 基线 `weekly-09` · 上游 Spec：Issue #702 评论（内部评论 id 略）
 
 ## Objective
 
