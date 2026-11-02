@@ -1,6 +1,6 @@
 # Task: Issue #627（方案 C：发布子单，复用现有子任务机制）
 
-1. [x] 基线确认：feat/issue-627 分支就绪（基于 local-liufei，快进同步到 origin/local-liufei 最新），git 身份已配置。
+1. [x] 基线确认：feat/issue-627 分支就绪（基于开发分支，快进同步到远端集成分支最新），git 身份已配置。
 2. [x] 代码线索考察：production_release 旁路实现（issues_center create_production_release / _dispatch_production_release_sre /
    _fill_production_release_result / session_store 存储层 / webhook payload 透传 / runtime.service 回填钩子）、
    现有子任务机制（issue 表 is_subtask_mode/parent_issue_number/parent_issue_id、`## 父任务` 识别、ensure_issue_task、
@@ -17,4 +17,4 @@
    - webhook：移除 production_release payload 透传。
    - event_pipeline：issue_opened 发布子单跳过 vod（webhook 回声防护）。
 6. [ ] 回归：627 测试全绿；test_state/test_tasks_lifecycle/test_issues_api/openapi 等相关套件通过（pre-existing failures 与基线一致）。
-7. [ ] 自审查（5 轴 + pre-pr 增量检查）→ 建 PR（base=local-liufei）→ Issue 评论 → A2A QA → tasks complete。
+7. [ ] 自审查（5 轴 + pre-pr 增量检查）→ 建 PR（base=weekly-09）→ Issue 评论 → A2A QA → tasks complete。
