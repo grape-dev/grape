@@ -310,19 +310,22 @@ else
     PIP_CMD="$VENV/bin/pip3"
   fi
 fi
-if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
+# Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
+# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
+WORKER_DEPS="aiohttp bcrypt click httpx"
+if [ -f "$INSTALL_DIR/pyproject.toml" ]; then
   # pip 镜像：默认清华（国内网络 pypi.org 直连常超时），可用 PIP_INDEX_URL 或 --pip-index 覆盖
   PIP_INDEX="${PIP_INDEX_URL:-https://pypi.tuna.tsinghua.edu.cn/simple}"
   # 优先离线安装：包内已带依赖 wheels（grape-worker/wheels/），免网络下载
   if [ -d "$INSTALL_DIR/wheels" ] && ls "$INSTALL_DIR/wheels"/*.whl >/dev/null 2>&1; then
     log "Installing deps offline (bundled wheels: $(ls "$INSTALL_DIR/wheels"/*.whl | wc -l) files, no network needed)"
     if "$PIP_CMD" install --quiet --no-index --find-links "$INSTALL_DIR/wheels" \
-        -r "$INSTALL_DIR/requirements-worker.txt"; then
+        $WORKER_DEPS; then
       log "Deps installed offline (wheels auto-matched to arch $TARGET_ARCH by pip)"
     else
       log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
       if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
-          -r "$INSTALL_DIR/requirements-worker.txt"; then
+          $WORKER_DEPS; then
         log "Dependency install failed. Check network and retry, or specify a reachable mirror:"
         log "  PIP_INDEX_URL=https://mirrors.aliyun.com/pypi/simple bash -c 'curl -fsSL $SERVER/api/runtime/install | bash -s -- --token <token> --server $SERVER'"
         fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
@@ -331,7 +334,7 @@ if [ -f "$INSTALL_DIR/requirements-worker.txt" ]; then
   else
     log "Installing deps online (mirror: $PIP_INDEX, first run takes minutes)"
     if ! "$PIP_CMD" install --quiet -i "$PIP_INDEX" --retries 3 --timeout 30 \
-        -r "$INSTALL_DIR/requirements-worker.txt"; then
+        $WORKER_DEPS; then
       fail "Dependency install failed (worker cannot start without aiohttp): retry this install command, or set PIP_INDEX_URL to a reachable pip mirror"
     fi
   fi

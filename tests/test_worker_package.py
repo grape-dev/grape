@@ -43,7 +43,7 @@ class TestWorkerPackage:
         assert "grape-worker/src/config.py" in names
         assert "grape-worker/src/runtime/agent.py" in names
         assert "grape-worker/src/agent/executor.py" in names
-        assert "grape-worker/requirements-worker.txt" in names
+        assert "grape-worker/pyproject.toml" in names
         # 不应泄漏服务端代码 / 配置 / 静态资源（内置 Python stdlib 含 statistics.py 等，跳过）
         for n in names:
             if n.startswith("grape-worker/python"):

@@ -395,8 +395,11 @@ if (-not (Test-Path $VenvPip) -or -not (_VenvPipOk)) {
     }
 }
 
-$reqFile = Join-Path $Dir "requirements-worker.txt"
-if (Test-Path $reqFile) {
+# Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
+# Worker deps list mirrors pyproject.toml [project.optional-dependencies] worker.
+$workerDeps = @("aiohttp", "bcrypt", "click", "httpx")
+$pyprojectFile = Join-Path $Dir "pyproject.toml"
+if (Test-Path $pyprojectFile) {
     $pipIndex = $env:PIP_INDEX_URL
     if (-not $pipIndex) { $pipIndex = "https://pypi.tuna.tsinghua.edu.cn/simple" }
 
@@ -409,17 +412,17 @@ if (Test-Path $reqFile) {
     }
     if ($useWheels) {
         Log "Installing deps from bundled wheels (offline)"
-        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir, "-r", $reqFile)
+        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "--no-index", "--find-links", $wheelsDir) $workerDeps
         if ($rc -ne 0) {
             Log "Offline install failed (platform wheel not bundled or python version mismatch), falling back to online..."
-            $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
+            $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30") $workerDeps
             if ($rc -ne 0) {
                 Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
             }
         }
     } else {
         Log "Installing deps online (mirror: $pipIndex, first run takes minutes)"
-        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30", "-r", $reqFile)
+        $rc = Invoke-PipQuiet $VenvPip @("install", "--quiet", "-i", $pipIndex, "--retries", "3", "--timeout", "30") $workerDeps
         if ($rc -ne 0) {
             Fail "Dependency install failed. Retry the install command, or set PIP_INDEX_URL to specify a pip mirror"
         }

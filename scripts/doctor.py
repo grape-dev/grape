@@ -97,7 +97,7 @@ def check_core_deps():
         return CheckResult(
             "核心依赖", "error",
             f"缺失: {', '.join(missing)}",
-            f"pip install -r requirements.txt"
+            f"pip install -e '.[all]'"
         )
     return CheckResult("核心依赖", "ok", "全部已安装")
 
@@ -120,7 +120,7 @@ def check_optional_deps():
     return CheckResult("可选依赖", "ok" if all(
         _try_import(m)[0] for _, m, _ in optional
     ) else "warn", "; ".join(results),
-        "本地开发可安装 requirements-local.txt（最小集，不含 OBS/MySQL/飞书）")
+        "本地开发可安装 pip install -e .（最小集，不含 OBS/MySQL/飞书）")
 
 
 def check_agent_cli():

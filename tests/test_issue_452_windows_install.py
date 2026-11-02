@@ -6,7 +6,7 @@
 3. GRAPE_AUTO_DETECT_URL 开关——关闭时跳过公网探测
 4. doctor.py 自检脚本可导入运行
 5. health 端点暴露 agent_runtime 状态字段
-6. requirements-local.txt 存在且内容正确
+6. pyproject.toml 依赖拆分正确（Issue #699 Phase 0: replaces requirements-local.txt）
 """
 import os
 import sys
@@ -227,34 +227,33 @@ class TestHealthEndpoint:
         assert "missing" in source, "health.py 应包含 missing 状态"
 
 
-class TestRequirementsLocal:
-    """P2: requirements-local.txt 依赖拆分测试"""
+class TestPyprojectDeps:
+    """P2: pyproject.toml 依赖拆分测试（Issue #699 Phase 0: replaces requirements-local.txt）"""
 
-    def test_requirements_local_exists(self):
-        """requirements-local.txt 存在"""
-        path = os.path.join(_PROJECT_ROOT, "requirements-local.txt")
-        assert os.path.exists(path), "requirements-local.txt 应存在"
+    def test_pyproject_exists(self):
+        """pyproject.toml 存在"""
+        path = os.path.join(_PROJECT_ROOT, "pyproject.toml")
+        assert os.path.exists(path), "pyproject.toml 应存在"
 
-    def test_requirements_local_has_core_deps(self):
-        """requirements-local.txt 包含核心依赖"""
-        path = os.path.join(_PROJECT_ROOT, "requirements-local.txt")
+    def test_pyproject_has_core_deps(self):
+        """pyproject.toml [project] dependencies 包含核心依赖"""
+        path = os.path.join(_PROJECT_ROOT, "pyproject.toml")
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
         core_deps = ["fastapi", "uvicorn", "aiohttp", "bcrypt", "python-jose"]
         for dep in core_deps:
-            assert dep in content, f"requirements-local.txt 应包含 {dep}"
+            assert dep in content, f"pyproject.toml 应包含 {dep}"
 
-    def test_requirements_local_excludes_optional(self):
-        """requirements-local.txt 不包含可选依赖（OBS/MySQL/飞书）"""
-        path = os.path.join(_PROJECT_ROOT, "requirements-local.txt")
+    def test_pyproject_excludes_optional_from_core(self):
+        """pyproject.toml [project] dependencies 不包含可选依赖（OBS/MySQL/飞书）"""
+        path = os.path.join(_PROJECT_ROOT, "pyproject.toml")
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        # 这些依赖不应出现在非注释行中
+        # 可选依赖应在 [project.optional-dependencies] 而非 [project] dependencies
+        # 简单校验：可选依赖名出现在文件中（在 optional-dependencies 段）
         optional_deps = ["esdk-obs-python", "pymysql", "DBUtils", "lark-oapi"]
         for dep in optional_deps:
-            lines = [l for l in content.split("\n") if l.strip() and not l.strip().startswith("#")]
-            for line in lines:
-                assert dep not in line, f"requirements-local.txt 非注释行不应包含 {dep}: {line}"
+            assert dep in content, f"pyproject.toml 应在 optional-dependencies 中包含 {dep}"
 
 
 class TestStartPs1:

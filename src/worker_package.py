@@ -13,7 +13,7 @@ CACHE_DIR = os.path.join(ROOT, "data", "cache", "worker-package")
 PKG_PATH = os.path.join(CACHE_DIR, "grape-worker.tar.gz")
 VERSION_PATH = os.path.join(CACHE_DIR, "VERSION")
 WHEELS_DIR = os.path.join(CACHE_DIR, "wheels")
-REQUIREMENTS_PATH = os.path.join(ROOT, "requirements-worker.txt")
+PYPROJECT_PATH = os.path.join(ROOT, "pyproject.toml")
 PIP_INDEX = os.environ.get("PIP_INDEX_URL", "https://pypi.tuna.tsinghua.edu.cn/simple")
 # grape CLI 独立项目：打包成 wheel 随 workers 离线安装（issue-45-worker-offline-grape-cli-design.md）
 GRAPE_CLI_REPO = os.environ.get("GRAPE_CLI_REPO", "https://gitcode.com/grape-dev/grape-cli.git")
@@ -51,7 +51,8 @@ MANIFEST = [
     "src/runtime/",
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
-    "requirements-worker.txt",
+    # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra
+    "pyproject.toml",
 ]
 
 _build_lock = threading.Lock()
@@ -161,11 +162,11 @@ def _manifest_version() -> str:
 
 
 def _requirements_hash() -> str:
-    """requirements-worker.txt 内容指纹（变更即重新下载 wheels）。"""
+    """pyproject.toml [worker] extra 内容指纹（变更即重新下载 wheels）。"""
     h = hashlib.sha256()
     try:
-        if os.path.isfile(REQUIREMENTS_PATH):
-            h.update(open(REQUIREMENTS_PATH, "rb").read())
+        if os.path.isfile(PYPROJECT_PATH):
+            h.update(open(PYPROJECT_PATH, "rb").read())
     except Exception:
         pass
     return h.hexdigest()[:16]
@@ -354,13 +355,19 @@ WHEEL_PLATFORMS = [
 ]
 
 
+# Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra.
+# pip download cannot parse extras from pyproject.toml directly, so we list the worker
+# deps explicitly here. Keep in sync with pyproject.toml [project.optional-dependencies] worker.
+WORKER_DEPS = ["aiohttp>=3.9", "bcrypt>=4.0", "click>=8.0", "httpx>=0.24"]
+
+
 def _pip_download_wheels(dest: str, platform_args: list[str], py_version: str) -> int:
     """pip download 依赖 wheels 到 dest（可带跨平台 --platform 参数），返回退出码。
 
     失败仅告警不抛异常：单平台失败由安装端在线兜底（见 install-worker.sh/ps1）。
     """
-    cmd = [sys.executable, "-m", "pip", "download",
-           "-r", REQUIREMENTS_PATH, "-d", dest,
+    cmd = [sys.executable, "-m", "pip", "download"] + WORKER_DEPS + [
+           "-d", dest,
            "--only-binary=:all:", "--retries", "3", "--timeout", "30",
            "-i", PIP_INDEX]
     if py_version:

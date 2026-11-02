@@ -126,7 +126,7 @@ cd grape
 # Or manual setup:
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
-pip install -r requirements-local.txt
+pip install -e .                   # Minimal (core deps, no OBS/MySQL/Feishu)
 Copy-Item .env.example .env
 New-Item -ItemType Directory -Force -Path data
 python -m src.api.run --dev    # Dev mode, open http://localhost:3000
@@ -142,8 +142,8 @@ cd grape
 
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements-local.txt     # Minimal (no OBS/MySQL/Feishu)
-# pip install -r requirements.txt         # Full deps
+pip install -e .                   # Minimal (no OBS/MySQL/Feishu)
+# pip install -e ".[all]"          # Full deps (OBS/MySQL/Feishu)
 
 cp .env.example .env
 mkdir -p data
@@ -154,7 +154,7 @@ python -m src.api.run --dev                # Dev mode, open http://localhost:300
 
 ```bash
 # PyPI mirror
-pip install -r requirements-local.txt -i https://mirrors.aliyun.com/pypi/simple/
+pip install -e . -i https://mirrors.aliyun.com/pypi/simple/
 
 # Or configure permanently:
 pip config set global.index-url https://mirrors.aliyun.com/pypi/simple/
@@ -263,8 +263,7 @@ Production deployment examples (nginx reverse proxy / systemd / Docker) in `docs
 # Install dependencies (local dev minimal set)
 python3 -m venv .venv
 source .venv/bin/activate        # Windows: .\.venv\Scripts\Activate.ps1
-pip install -r requirements-local.txt
-pip install -r requirements-dev.txt
+pip install -e ".[dev]"            # Core + dev/test deps
 
 # Run tests
 mkdir -p data                    # Windows: New-Item -ItemType Directory -Force data

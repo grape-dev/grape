@@ -91,15 +91,20 @@ def pack_backend(ts):
     help_dir = os.path.join(ROOT, "help")
     if os.path.isdir(help_dir):
         items.append((help_dir, "help"))
-    # 仓库根文件 (Dockerfile, docker-compose.yml, README 等)
+    # 仓库根文件 (pyproject.toml, README 等)
     # ⚠️ start-worker.sh 不打入服务端包：install-worker.sh 会按实际安装目录动态生成，
     #    打入反而可能把模板/脏文件覆盖到 worker 本地脚本（历史事故：/home/mys 硬编码版）。
-    for rf in ["Dockerfile", "docker-compose.yml",
-               "README.md", "README.zh.md", "requirements.txt",
-               "requirements-worker.txt", ".gitignore"]:
+    # Issue #699 Phase 0: requirements*.txt merged into pyproject.toml;
+    #   Dockerfile/docker-compose.yml/nginx moved to deploy/
+    for rf in ["pyproject.toml", "Makefile",
+               "README.md", "README.zh.md", ".gitignore"]:
         p = os.path.join(ROOT, rf)
         if os.path.isfile(p):
             items.append((p, rf))
+    # deploy/ (Dockerfile, docker-compose.yml, nginx-grape.conf, alerts.yml)
+    deploy_dir = os.path.join(ROOT, "deploy")
+    if os.path.isdir(deploy_dir):
+        items.append((deploy_dir, "deploy"))
     # configs (只保留 *.example.json + 种子 json)
     # 2026-10-14 账号体系重构补充：security / oauth-providers / email 三个 example 模板——
     # 账号系统（登录/OAuth/凭据加密/邮件验证）依赖 security.json + oauth-providers.json，
@@ -116,13 +121,12 @@ def pack_backend(ts):
         p = os.path.join(ROOT, "configs", cf)
         if os.path.isfile(p):
             items.append((p, f"configs/{cf}"))
-    # requirements (顶层也放一份)
-    for rf in ["requirements.txt", "requirements-worker.txt"]:
-        p = os.path.join(ROOT, rf)
-        if os.path.isfile(p):
-            items.append((p, rf))
-    # Dockerfile
-    df = os.path.join(ROOT, "Dockerfile")
+    # pyproject.toml (顶层也放一份; Issue #699 Phase 0: replaces requirements*.txt)
+    pt = os.path.join(ROOT, "pyproject.toml")
+    if os.path.isfile(pt):
+        items.append((pt, "pyproject.toml"))
+    # Dockerfile (Issue #699 Phase 0: moved to deploy/)
+    df = os.path.join(ROOT, "deploy", "Dockerfile")
     if os.path.isfile(df):
         items.append((df, "Dockerfile"))
     make_subtar_gz(items, out)
@@ -297,7 +301,7 @@ def pack_templates(ts):
     return out
 
 def pack_tools(ts):
-    """worker 运行时: src/runtime + src/agent + install-worker.sh + requirements-worker.txt"""
+    """worker 运行时: src/runtime + src/agent + install-worker.sh + pyproject.toml"""
     out = os.path.join(OUT_DIR, f"staging/tools/grape-toolkit-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
@@ -318,10 +322,10 @@ def pack_tools(ts):
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
             items.append((p, d))
-    # requirements-worker.txt
-    rw = os.path.join(ROOT, "requirements-worker.txt")
-    if os.path.isfile(rw):
-        items.append((rw, "requirements-worker.txt"))
+    # pyproject.toml (Issue #699 Phase 0: replaces requirements-worker.txt)
+    pt = os.path.join(ROOT, "pyproject.toml")
+    if os.path.isfile(pt):
+        items.append((pt, "pyproject.toml"))
     # install-worker.sh
     iw = os.path.join(ROOT, "scripts/install-worker.sh")
     if os.path.isfile(iw):
@@ -400,7 +404,7 @@ tar xzf /path/to/backend/grape-backend-{ts}.tar.gz
 curl -LsSf https://astral.sh/uv/install.sh | sh
 uv python install 3.12
 uv venv --python 3.12 --clear .venv
-uv pip install --python .venv/bin/python3 -r requirements.txt
+uv pip install --python .venv/bin/python3 -e ".[all]"
 
 # 数据目录
 mkdir -p data
@@ -510,7 +514,7 @@ curl -fsSL https://<grape主控域名>/api/runtime/install | bash -s -- --token 
 tar xzf /path/to/tools/grape-toolkit-{ts}.tar.gz -C /opt/grape
 cd /opt/grape
 python3.12 -m venv .venv
-.venv/bin/pip install -r requirements-worker.txt
+.venv/bin/pip install aiohttp bcrypt click httpx
 bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 ```
 

@@ -24,7 +24,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -e ".[all,dev]"
       - name: Windows prompt smoke tests (issue #351 + #452)
         env:
           GITCODE_API_TOKEN: test_token
@@ -46,7 +46,7 @@ jobs:
       - name: Install deps
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pytest
+          pip install -e ".[all,dev]"
       - name: Backend range-filter tests (issue #473)
         env:
           GITCODE_API_TOKEN: test_token

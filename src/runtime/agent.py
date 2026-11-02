@@ -9,7 +9,7 @@ import sys
 # 放最顶部（任何 import 之前），给清晰报错而非 traceback。
 if sys.version_info < (3, 10):
     print(f"RuntimeAgent requires Python >= 3.10 (got {sys.version.split()[0]}). "
-          f"请用 python3.12 重建 venv: python3.12 -m venv .venv && .venv/bin/pip install -r requirements-worker.txt",
+          f"请用 python3.12 重建 venv: python3.12 -m venv .venv && .venv/bin/pip install aiohttp bcrypt click httpx",
           file=sys.stderr)
     sys.exit(1)
 

@@ -7,9 +7,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc g++ && \
     rm -rf /var/lib/apt/lists/*
 
-# Python 依赖（Issue #452: 使用完整 requirements.txt，生产部署需全部功能）
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Python 依赖（Issue #699 Phase 0: pyproject.toml replaces requirements.txt）
+# 安装全部可选依赖（mysql + obs + im），生产部署需全部功能
+COPY pyproject.toml .
+RUN pip install --no-cache-dir -e ".[all]"
 
 # 代码
 COPY . .

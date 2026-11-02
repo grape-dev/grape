@@ -46,11 +46,12 @@ class TestPythonVersionCheck:
         from src.api.version_check import _MIN_PYTHON
         assert _MIN_PYTHON == (3, 10)
 
-    def test_requirements_declares_310(self):
-        """requirements.txt 注释声明 >= 3.10"""
+    def test_pyproject_declares_310(self):
+        """pyproject.toml requires-python 声明 >= 3.10（Issue #699 Phase 0: replaces requirements.txt）"""
         root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        with open(os.path.join(root, "requirements.txt"), encoding="utf-8") as f:
-            assert ">= 3.10" in f.read()
+        with open(os.path.join(root, "pyproject.toml"), encoding="utf-8") as f:
+            content = f.read()
+        assert ">=3.10" in content or ">= 3.10" in content
 
     def test_doctor_rejects_39(self):
         """scripts/doctor.py 对 3.9 判 error（阻断）"""
