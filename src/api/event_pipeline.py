@@ -788,6 +788,12 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     交办接口要求 issue_number 为数字，注入占位值会被拒）；PR 号由 PR_NUMBER
     独立承载（payload.pr_number 优先，evt._pr_sub_pr_number 兜底），非数字同样
     不注入。关联 Issue 的场景（issue_id 为真实编号）行为不变。
+
+    Issue #595：PR 关联真实 Issue 时 webhook 原始 payload 无顶层 pr_number，
+    _pr_sub_pr_number 又仅订阅分支设置 → PR_NUMBER 恒为空。增加嵌套键兜底：
+    前两来源均空时依次尝试 payload.pull_request.number（GitHub/GitCode）→
+    payload.merge_request.number（GitLab MR）→ payload.object_attributes.iid
+    （GitLab hook），沿用 lstrip("#").isdigit() 校验。
     """
     _issue_num = str(evt.get("issue_id", "") or (evt.get("payload", {}) or {}).get("issue_number", "") or "").lstrip("#")
     if _issue_num.isdigit():
@@ -796,8 +802,14 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
         env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
     elif _issue_num:
         log.info(f"Pipeline env: non-numeric issue_id '{_issue_num}', skip ISSUE_NUMBER/GRAPE_ISSUE_ID injection (Issue #528)")
-    _pr_num = str((evt.get("payload", {}) or {}).get("pr_number", "")
-                  or evt.get("_pr_sub_pr_number", "") or "").lstrip("#")
+    _payload = evt.get("payload", {}) or {}
+    _pr_raw = (_payload.get("pr_number", "")
+               or evt.get("_pr_sub_pr_number", "")
+               or (( _payload.get("pull_request", {}) or {}).get("number", "") if isinstance(_payload.get("pull_request"), dict) else "")
+               or ((_payload.get("merge_request", {}) or {}).get("number", "") if isinstance(_payload.get("merge_request"), dict) else "")
+               or ((_payload.get("object_attributes", {}) or {}).get("iid", "") if isinstance(_payload.get("object_attributes"), dict) else "")
+               or "")
+    _pr_num = str(_pr_raw).lstrip("#")
     if _pr_num.isdigit():
         env_extra["PR_NUMBER"] = _pr_num
     elif _pr_num:

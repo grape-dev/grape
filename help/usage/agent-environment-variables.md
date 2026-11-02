@@ -33,7 +33,7 @@ GitCode 事件（Issue/PR/评论）
 | `ACCOUNT` | **个人账号（webhook 触发人，如 `Jason7602`）**；取 `actor`，与仓库属主解耦 | 全部（devops 事件） | `_execute_agent`（`evt["actor"]`） |
 | `ISSUE_NUMBER` | Issue 编号（去 # 前缀的数字） | 事件任务（有 Issue） | `_execute_agent` |
 | `GRAPE_ISSUE_ID` | **需求卡片 id（issue 表主键，整数**；awaiting-input / pending-review / review-pass 的 `--issue_id` 用此值，**非 ISSUE_NUMBER**） | 事件任务（有 Issue） | `_execute_agent`（按 `(repo_key, issue_number)` 查卡片） |
-| `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent` |
+| `PR_NUMBER` | PR 编号 | 事件任务（有 PR） | `_execute_agent`（`_inject_issue_pr_env`：`payload.pr_number` → `evt._pr_sub_pr_number` → 嵌套键兜底 `payload.pull_request.number` / `payload.merge_request.number` / `payload.object_attributes.iid`，均为去 `#` 后纯数字，Issue #595） |
 | `BOT_USERNAME` | 全局 bot 用户名（grape_bot） | Coding 等（skill 用） | `_execute_agent`（coding 注入） |
 | `GRAPE_WORK_BRANCH` | 场景工作基线分支 | Coding/QA/SRE（git 类） | `_read_scene_work_branch` → env_extra |
 | `GRAPE_SCENE_ID` | 当前 Issue 绑定的场景标识（issue-219：统一 env 注入；未选定=空串，不回落 default） | 全部（devops 事件，含注入场景的任务） | `_inject_scene_env` → env_extra |
