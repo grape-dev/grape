@@ -162,7 +162,46 @@ const app = (() => {
     } catch { return null; }
   }
 
+  // ── Issue #614：会话失效时统一清理明文凭据弹窗 ──
+  // showLogin 是所有登出路径（app.logout 手动登出 / doRefresh 失败 /
+  // handle401 无 retryFn 踢回登录）的最终汇聚点。在此集中关闭/清空
+  // 所有含明文秘钥的弹窗与面板，避免秘钥在无人值守屏幕上残留暴露。
+  function _clearSensitiveModals() {
+    // 1) 统一弹层：showModal/showPrompt（grapeModalOverlay）与 showConfirm（grapeConfirmOverlay）
+    closeModal();
+    closeConfirm();
+    // 2) 已知明文凭据面板：runtime 添加设备的凭据生成区 / AI Devspace 区
+    //    （runtimes.js 一次性渲染明文 token，清空 DOM 即清除秘钥）
+    var panelIds = ['addDeviceCredArea', 'addDeviceDevArea', 'aiDevspacePanel'];
+    for (var i = 0; i < panelIds.length; i++) {
+      var panel = document.getElementById(panelIds[i]);
+      if (panel) { panel.innerHTML = ''; panel.style.display = 'none'; }
+    }
+    // 3) 已知敏感弹窗：SRE 添加设备弹窗、侧边栏添加设备面板、
+    //    devspace 环境凭据弹窗（credModal_*，直含明文 token 安装命令）
+    var modalIds = ['sreAddDeviceOverlay', 'addDeviceOverlay'];
+    for (var j = 0; j < modalIds.length; j++) {
+      var modal = document.getElementById(modalIds[j]);
+      if (modal) modal.remove();
+    }
+    var credModals = document.querySelectorAll('[id^="credModal_"]');
+    for (var k = 0; k < credModals.length; k++) { credModals[k].remove(); }
+    // 4) 兜底：移除 body 直系子节点中 position:fixed 且 z-index∈[1000,9000)
+    //    的未知遮罩层（toast 9999/10000、warn 9999、帮助抽屉 9990/9991 不在
+    //    区间内，不受影响）
+    var overlays = document.querySelectorAll('body > div');
+    for (var m = 0; m < overlays.length; m++) {
+      var node = overlays[m];
+      var pos = (node.style && node.style.position) || '';
+      var z = parseInt((node.style && node.style.zIndex) || '', 10);
+      if (pos === 'fixed' && !isNaN(z) && z >= 1000 && z < 9000) { node.remove(); }
+    }
+  }
+
   function showLogin() {
+    // Issue #614：会话失效统一清理明文凭据弹窗（所有登出路径的汇聚点，
+    // 与下方 UC16e 停轮询同一收口语义）
+    _clearSensitiveModals();
     document.documentElement.removeAttribute('data-logged-in');
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
@@ -3311,7 +3350,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
+  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */
