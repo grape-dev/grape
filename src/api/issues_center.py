@@ -1793,16 +1793,20 @@ def _backfill_release_subissue_result(repo_key: str, issue_number: int,
     else:
         _result = "not_executed"
         _reason = ""
+    # B1 SQL 双模式：'release_' || ? 的 || 拼接不被 mysql_compat 翻译层覆盖（仅
+    # 'gitcode:' || col 一种模式），MySQL 后端会把 || 当逻辑或 → 写入 0。
+    # 改为应用层拼接，双后端语义一致。
+    _completed_reason = f"release_{_result}"
     try:
         with db_lock:
             c = db.cursor()
             c.execute(
                 "UPDATE issue SET release_result=?, release_failure_reason=?, "
-                "status='completed', completed_reason='release_' || ?, "
+                "status='completed', completed_reason=?, "
                 "stage='done', owner_agent='sre', completed_at=datetime('now'), "
                 "updated_at=datetime('now') "
                 "WHERE repo_key=? AND issue_number=? AND (release_result IS NULL OR release_result='')",
-                (_result, _reason, _result, repo_key, int(issue_number)))
+                (_result, _reason, _completed_reason, repo_key, int(issue_number)))
             _changed = c.rowcount > 0
             db.commit()
         if _changed:

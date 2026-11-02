@@ -179,7 +179,7 @@ def _get_subissue_row(number):
             "SELECT id, issue_number, parent_issue_number, is_subtask_mode, "
             "release_candidate_sha, release_target_env, release_evidence_ref, "
             "release_result, release_failure_reason, release_approved_by, release_approved_at, "
-            "status, stage "
+            "status, stage, completed_reason "
             "FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
             "ORDER BY id DESC LIMIT 1", (REPO_KEY, number))
         return c.fetchone()
@@ -317,7 +317,7 @@ class TestCreateSuccess:
         row = _get_subissue_row(120)
         assert row, "发布子单 issue 行应存在"
         (_id, _num, _parent, _subtask, _sha, _env, _evid, _res, _reason,
-         _ap, _at, _status, _stage) = row
+         _ap, _at, _status, _stage, _creason) = row
         assert _num == sub_num
         assert _parent == 120
         assert _subtask == 1, "发布子单必须 is_subtask_mode=1（复用子任务机制）"
@@ -493,6 +493,8 @@ class TestBackfillIntegration:
         row = _get_subissue_row(150)
         assert row[7] == "deployed_success", row
         assert row[11] == "completed", "子单终态 status=completed"
+        # B1 加固：completed_reason 应用层拼接（release_<result>），与 SQL 后端无关
+        assert row[13] == "release_deployed_success", row
 
     def test_complete_task_backfills_deploy_failed(self):
         """exit != 0 → deploy_failed（失败原因可查询）。"""
@@ -507,6 +509,7 @@ class TestBackfillIntegration:
         row = _get_subissue_row(151)
         assert row[7] == "deploy_failed"
         assert "镜像" in row[8]
+        assert row[13] == "release_deploy_failed", row
 
     def test_complete_task_backfills_not_executed(self):
         """exit 0 但无部署证据 → not_executed（completed ≠ 发布成功）。"""
