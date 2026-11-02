@@ -603,21 +603,44 @@ def _pipeline_last_node_check(repo_key: str, issue_number: int, agent_type: str)
             _nid = (_n.get("id") or _n.get("tag") or "").strip()
             if _nid == agent_type:
                 _next = (_n.get("next") or "").strip()
-                return _next == "done" or _next == "" or _next not in _ids
+                if _next == "done" or _next == "":
+                    return True
+                if _next not in _ids:
+                    # 配置笔误（next 指向不存在节点）不视为末节点，防误触发自动结单
+                    log.warning(f"pipeline last-node check: next={_next} not in nodes "
+                                f"(misconfig?) {repo_key}/#{issue_number} agent={agent_type}")
+                return False
         return False
     except Exception as _e:
         log.warning(f"pipeline last-node check failed {repo_key}/#{issue_number}: {_e}")
         return False
 
 
-def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
-    """Issue #656: 服务端自动结单后联动关闭 VCS Issue（bot token，降级不阻断）。
+def _find_github_mirror_repo_key(repo_key: str) -> str:
+    """查找 GitCode 仓库绑定的 GitHub 镜像 repo_key（confirm-done 同款逻辑，#656 复用）。
 
-    幂等：VCS 侧已 closed → skipped。返回 "success" / "skipped" / "failed"（失败仅记日志，
-    不影响本地已完成状态，与 confirm-done 的降级语义一致）。
+    managed_repos 表中同一 owner/repo 可能同时存在 gitcode: 和 github: 两条记录，
+    通过 full_name 匹配。找不到返回空串。
     """
-    if not issue_number:
-        return "skipped"
+    try:
+        from src.repo_key import split_owner_repo
+        from src.session_manager import db, db_lock
+        owner, repo = split_owner_repo(repo_key)
+        if not owner or not repo:
+            return ""
+        gh_key = f"github:{owner}/{repo}"
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
+            row = c.fetchone()
+        return row[0] if row else ""
+    except Exception as e:
+        log.warning(f"find github mirror for {repo_key} failed: {e}")
+        return ""
+
+
+def _close_vcs_one_auto(repo_key: str, issue_number: int) -> str:
+    """对单个 repo_key 幂等关闭 VCS Issue（bot token，降级不阻断）。"""
     try:
         from src.repo_key import parse_repo_key
         provider, owner, repo = parse_repo_key(repo_key)
@@ -649,6 +672,36 @@ def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
     except Exception as _e:
         log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
         return "failed"
+
+
+def _close_vcs_issue_auto(repo_key: str, issue_number: int) -> str:
+    """Issue #656: 服务端自动结单后联动关闭 VCS Issue（bot token，降级不阻断）。
+
+    与 confirm-done 人工路径语义一致：GitCode 仓库同时尝试关闭绑定的 GitHub 镜像 Issue
+    （镜像 repo_key 解析失败按降级语义 skip）；github: 仓库仅关闭 GitHub 侧。
+
+    幂等：VCS 侧已 closed → skipped。返回 "success" / "skipped" / "failed"（聚合：
+    任一侧 success 即 success，否则任一侧 failed 即 failed，全 skipped 即 skipped；
+    失败仅记日志，不影响本地已完成状态，与 confirm-done 的降级语义一致）。
+    """
+    if not issue_number:
+        return "skipped"
+    _results = {}
+    try:
+        _results[repo_key] = _close_vcs_one_auto(repo_key, issue_number)
+        if not repo_key.startswith("github:"):
+            _gh_rk = _find_github_mirror_repo_key(repo_key)
+            if _gh_rk:
+                _results[_gh_rk] = _close_vcs_one_auto(_gh_rk, issue_number)
+    except Exception as _e:
+        log.warning(f"auto-finalize: close VCS issue {repo_key}#{issue_number} failed: {_e}")
+        return "failed"
+    _vals = list(_results.values())
+    if "success" in _vals:
+        return "success"
+    if "failed" in _vals:
+        return "failed"
+    return "skipped"
 
 
 def _issue_latest_event_status_by_agent(repo_key: str, issue_id_tag: str) -> dict:
@@ -715,6 +768,18 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
         if not _row:
             return "noop:no_issue_row"
         if _status in ("completed", "cancelled"):
+            # 补偿对齐：status=completed 但 stage 未到 done（历史 set_issue_stage 失败残留）
+            # → 读 status 反向对齐 stage（幂等，失败仅记日志，不改变 noop 语义）
+            if _status == "completed":
+                try:
+                    from src.api.session_store import get_issue_stage_name, set_issue_stage
+                    if (get_issue_stage_name(repo_key, _tag) or "") != "done":
+                        log.info(f"Issue #656: compensate stage=done for completed "
+                                 f"{repo_key}/{_tag}")
+                        set_issue_stage(repo_key, _tag, "done", "agent")
+                except Exception as _se:
+                    log.warning(f"auto-finalize compensate stage=done failed "
+                                f"{repo_key}/{_tag}: {_se}")
             return "noop:terminal"
         if _status == "pending_review":
             return "noop:pending_review"      # 显式待人工确认（confirm done 路径），不自动结单
@@ -760,7 +825,13 @@ def auto_finalize_issue_on_last_node(repo_key: str, issue_id: str, agent_type: s
             from src.api.session_store import set_issue_stage
             set_issue_stage(repo_key, _tag, "done", source or "pipeline")
         except Exception as _se:
-            log.warning(f"auto-finalize stage=done failed {repo_key}/{_tag}: {_se}")
+            # UPDATE completed 与 set_issue_stage 非原子 → 立即补偿重试一次，仍失败仅记日志
+            log.warning(f"auto-finalize stage=done failed {repo_key}/{_tag}: {_se}, retry once")
+            try:
+                set_issue_stage(repo_key, _tag, "done", source or "pipeline")
+            except Exception as _se2:
+                log.warning(f"auto-finalize stage=done retry failed {repo_key}/{_tag}: {_se2} "
+                            f"(will be compensated on next event)")
         _closed = _close_vcs_issue_auto(repo_key, _num)
         log.info(f"Issue #656: auto-finalized {repo_key}/{_tag} by {source} "
                  f"(agent={agent_type}, vcs_close={_closed})")

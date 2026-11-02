@@ -22,7 +22,8 @@ from src.api.deps import get_current_user_or_api_key, require_no_session_token, 
 from src.config import log
 from src.api.time_utils import normalize_event_time
 from src.api.issues_center import (TaskAwaitingInputBody, TaskPendingReviewBody,
-                                   _review_pass, _review_reject, _set_issue_pending_review)
+                                   _review_pass, _review_reject, _set_issue_pending_review,
+                                   _find_github_mirror_repo_key)
 
 router = APIRouter(prefix="/api/issues", tags=["issues"])
 
@@ -648,29 +649,6 @@ def _try_close_issue_for_repo(repo_key: str, issue_number: int, user: dict, is_g
             return "bot_token_failed"
         log.warning(f"confirm-done: close_issue {repo_key}#{issue_number} exception: {e}")
         return "failed"
-
-
-def _find_github_mirror_repo_key(repo_key: str) -> str:
-    """查找 GitCode 仓库绑定的 GitHub 镜像 repo_key。
-
-    managed_repos 表中同一 owner/repo 可能同时存在 gitcode: 和 github: 两条记录，
-    通过 full_name 匹配。找不到返回空串。
-    """
-    try:
-        from src.repo_key import split_owner_repo
-        from src.session_manager import db, db_lock
-        owner, repo = split_owner_repo(repo_key)
-        if not owner or not repo:
-            return ""
-        gh_key = f"github:{owner}/{repo}"
-        with db_lock:
-            c = db.cursor()
-            c.execute("SELECT repo_key FROM managed_repos WHERE repo_key=? LIMIT 1", (gh_key,))
-            row = c.fetchone()
-        return row[0] if row else ""
-    except Exception as e:
-        log.warning(f"confirm-done: find github mirror for {repo_key} failed: {e}")
-        return ""
 
 
 @router.post("/{issue_id}/confirm-done", operation_id="issues_confirm_done", summary="Confirm issue done", description="Manual confirmation of issue done: status -> completed, stage -> done (idempotent in terminal state). Issue #656: since the pipeline auto-finalizes an issue when its last node completes with no blockers (all nodes completed, no failed events), this endpoint is ONLY for explicit confirmation scenarios: issue in pending_review (agent-set review point, e.g. failed-node fallback or issue closed awaiting review), or user-side early closure of a still-open issue. Do not use it for routine pipeline completion.")
