@@ -121,10 +121,15 @@ class TestHermesVenvBin:
         with patch("os.path.isfile", side_effect=lambda p: str(p) in (str(launcher), str(venv_bin / "python"))):
             assert ab._hermes_venv_bin(str(launcher)) == str(venv_bin)
 
-    def test_env_shebang_not_resolved(self, tmp_path):
-        """`#!/usr/bin/env python` 形态 shebang 无法定位 venv → 空串。"""
+    def test_env_shebang_not_resolved(self, tmp_path, monkeypatch):
+        """`#!/usr/bin/env python` 形态 shebang：env 解析不出 python（which 失败）→ 空串。
+
+        Issue #700 Linux 跟进：env 形态现已解析（which 命中即返回目录）；
+        which 解析不到目标时保持旧契约（空串 → 落人工修复指引）。
+        """
         launcher = tmp_path / "hermes"
         launcher.write_text("#!/usr/bin/env python\nimport sys\n")
+        monkeypatch.setattr(ab.shutil, "which", lambda name: None)
         assert ab._hermes_venv_bin(str(launcher)) == ""
 
     def test_windows_exe_unsupported(self):

@@ -23,6 +23,7 @@ agent-client-protocol。`hermes --version` 探测不出该缺失（不触碰 ACP
 import json
 import os
 import re
+import shutil
 import subprocess
 import threading
 
@@ -331,6 +332,11 @@ def _hermes_venv_bin(cli: str) -> str:
     3. Windows 启动器（Issue #700）：.exe/.cmd/.bat —— 走
        _hermes_venv_bin_windows（.exe 同目录校验 / .cmd·.bat 内容行解析
        / py launcher 定位），使缺依赖自动补装在 Windows 上生效。
+    4. Linux 侧对称补齐（Issue #700 跟进）：与 Windows 修复对齐的三种形态——
+       a. `#!/usr/bin/env python*` shebang（pip console-script 默认形态）：
+          shutil.which 解析 env 实际命中的解释器，返回其目录；
+       b. bash shim exec 行不带引号（exec /path/bin/hermes "$@"）；
+       c. `exec ".../python" -m hermes` 形态（pipx/pdm）：解释器路径目录即 bin。
     解析失败返回空串（此前 Windows 形态一律空串 → 无法自愈，现补齐）。
     """
     try:
@@ -341,10 +347,18 @@ def _hermes_venv_bin(cli: str) -> str:
         real = os.path.realpath(cli)
         with open(real, "r", encoding="utf-8", errors="replace") as f:
             content = f.read(4096)
-        # ① bash shim exec 行
+        # ① bash shim exec 行（带引号 / 不带引号 / python -m 形态）
+        #    exec ".../bin/hermes" "$@"            —— 原始支持（带引号）
+        #    exec .../bin/hermes "$@"              —— 不带引号（#700 Linux 跟进）
+        #    exec ".../bin/python" -m hermes "$@"  —— pipx/pdm 形态（#700 Linux 跟进）
         m = re.search(r'exec\s+"([^"\n]+/bin/hermes)"', content)
+        if not m:
+            m = re.search(r'exec\s+([^\s"\n]+/bin/hermes)(?:\s|")', content)
         if m and os.path.isfile(m.group(1)):
             return os.path.dirname(m.group(1))
+        m2 = re.search(r'exec\s+"([^"\n]+/bin/python[0-9.]*)"\s+-m', content)
+        if m2 and os.path.isfile(m2.group(1)):
+            return os.path.dirname(m2.group(1))
         # ② shebang 反推：#!/path/to/venv/bin/python(-x) → venv/bin
         first = content.splitlines()[0] if content else ""
         if first.startswith("#!"):
@@ -354,6 +368,15 @@ def _hermes_venv_bin(cli: str) -> str:
                     and os.path.basename(interp).startswith("python")
                     and os.path.isfile(interp)):
                 return os.path.dirname(interp)
+            # ②-b env shebang：#!/usr/bin/env python3(-x)（pip console-script 默认形态，
+            # #700 Linux 跟进）——which 解析实际解释器，返回其目录（venv 前置 PATH 时
+            # 即 venv bin；系统 python 时为其 bin 目录，与 Windows py launcher 行为对齐）
+            if interp.endswith("/env") and len(parts) >= 2:
+                env_target = parts[1]
+                if os.path.basename(env_target).startswith("python"):
+                    resolved = shutil.which(env_target) or ""
+                    if resolved and os.path.isfile(resolved):
+                        return os.path.dirname(resolved)
     except Exception:
         pass
     return ""

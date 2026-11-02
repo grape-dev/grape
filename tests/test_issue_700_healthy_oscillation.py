@@ -223,6 +223,71 @@ class TestAcpCheckTimeoutOverride:
 
 # ============================ 切片 3：Windows 启动器解析 ============================
 
+class TestHermesVenvBinLinux:
+    """_hermes_venv_bin 对 Linux 常见 launcher 形态返回有效 venv bin（Linux 自愈对称补齐）。
+
+    #837 只修了 Windows 侧（.exe/.cmd/.bat）；Linux 侧 pip 安装的 console-script
+    默认 shebang 为 `#!/usr/bin/env python*`、bash shim 有不带引号的 exec 形态、
+    pipx/pdm 用 `python -m` 形态——此前全部解析失败返回空串，缺依赖时自动补装失效。
+    """
+
+    def test_env_shebang_launcher(self, tmp_path, monkeypatch):
+        """`#!/usr/bin/env python3` shebang（pip console-script 最常见默认形态）。"""
+        import src.runtime.acp_bootstrap as ab
+        venv = tmp_path / "venv" / "bin"
+        venv.mkdir(parents=True)
+        py = venv / "python3"
+        py.write_bytes(b"")
+        launcher = tmp_path / "hermes"
+        launcher.write_text("#!/usr/bin/env python3\nimport hermes\n", encoding="utf-8")
+        launcher.chmod(0o755)
+        # env 解析: which('python3') → venv python（模拟 PATH 前置 venv）
+        monkeypatch.setattr(ab.shutil, "which", lambda name: str(py) if name == "python3" else None)
+        out = ab._hermes_venv_bin(str(launcher))
+        assert out, f"env-shebang launcher 应解析出 venv bin, got ''（launcher={launcher}）"
+        assert os.path.isfile(os.path.join(out, "python3"))
+
+    def test_env_shebang_launcher_system_python(self, tmp_path, monkeypatch):
+        """env shebang 解析到系统 python（非 venv）——仍返回其目录（bin 目录本身可作
+        pip 安装目标；与 Windows py-launcher 解析到 base python 的行为对齐）。"""
+        import src.runtime.acp_bootstrap as ab
+        sysdir = tmp_path / "sys" / "bin"
+        sysdir.mkdir(parents=True)
+        py = sysdir / "python3"
+        py.write_bytes(b"")
+        launcher = tmp_path / "hermes"
+        launcher.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+        monkeypatch.setattr(ab.shutil, "which", lambda name: str(py) if name == "python3" else None)
+        out = ab._hermes_venv_bin(str(launcher))
+        assert out == str(sysdir)
+
+    def test_bash_shim_exec_unquoted(self, tmp_path):
+        """bash shim `exec /path/bin/hermes "$@"`（不带引号）。"""
+        import src.runtime.acp_bootstrap as ab
+        venv = tmp_path / "venv" / "bin"
+        venv.mkdir(parents=True)
+        (venv / "hermes").write_bytes(b"")
+        launcher = tmp_path / "shim"
+        launcher.write_text(f'#!/usr/bin/env bash\nexec {venv}/hermes "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+        out = ab._hermes_venv_bin(str(launcher))
+        assert out, f"不带引号 exec shim 应解析出 venv bin, got ''"
+        assert os.path.isfile(os.path.join(out, "hermes"))
+
+    def test_bash_shim_python_dash_m(self, tmp_path):
+        """`exec ".../venv/bin/python" -m hermes` 形态（pipx/pdm 常见）。"""
+        import src.runtime.acp_bootstrap as ab
+        venv = tmp_path / "venv" / "bin"
+        venv.mkdir(parents=True)
+        py = venv / "python"
+        py.write_bytes(b"")
+        launcher = tmp_path / "shim"
+        launcher.write_text(f'#!/usr/bin/env bash\nexec "{py}" -m hermes "$@"\n', encoding="utf-8")
+        launcher.chmod(0o755)
+        out = ab._hermes_venv_bin(str(launcher))
+        assert out, f"python -m shim 应解析出 venv bin, got ''"
+        assert os.path.isfile(os.path.join(out, "python"))
+
 class TestHermesVenvBinWindows:
     """_hermes_venv_bin 对 .exe/.cmd/.bat 返回有效 venv bin（Windows 自愈）。"""
 
