@@ -10,8 +10,15 @@ hermes 只给 {size, used}(上下文压力),hwcloud 给 {cost, used, size}(有�
 |---|---|---|---|
 | codex | 事件流 `turn.completed.usage` | 每轮**增量** | 进程内 |
 | opencode | SQLite `message.data.tokens` | 每消息**增量** | session_id |
-| hermes | SQLite `session_model_usage` | **累计值** | cwd-hash 隔离目录 |
+| hermes | ACP `PromptResponse.result.usage` 直报（issue #727 治本）；state.db 兜底 | 直报=每轮增量；state.db=**累计值** | cwd-hash 隔离目录 |
 | hwcloud | `<iso>/logs/hwcloud.log` | 每 run**增量** | cwd-hash 隔离目录 |
+
+**hermes 双路径（issue #727）**：
+- 治本：`session/prompt` 的 PromptResponse `result.usage` 经事件流（`("usage", {...})` 事件）
+  喂入 `feed()`，`finish()` 优先返回直报记录——不依赖 state.db 表结构，跨 hermes 版本稳定；
+- 兜底：事件流没喂到（旧调用方/直报缺失）时读 state.db。hermes <0.10（如 0.9.0）没有
+  `session_model_usage` 表 → 回退读 `sessions` 表（同是累计值，按 session 取差值），
+  告警一次降级提示，绝不中断采集。
 
 **增量 vs 累计**:增量源直接 SUM;累计源(hermes)必须在任务开始时记基线、结束时取差值,
 否则续接会话会把历史任务的用量重复计入。hwcloud 日志同理——按字节偏移只读本次新增部分。
@@ -33,6 +40,19 @@ import tempfile
 from typing import Any, Dict, List, Optional
 
 log = logging.getLogger(__name__)
+
+# issue #727：hermes <0.10（如 0.9.0）state.db 没有 session_model_usage 表——
+# 回退 sessions 表的降级告警只发一次，避免逐任务刷屏。
+_hermes_missing_table_notified = False
+
+
+def _note_hermes_missing_table_once(message: str) -> None:
+    global _hermes_missing_table_notified
+    if _hermes_missing_table_notified:
+        log.debug(message)
+        return
+    _hermes_missing_table_notified = True
+    log.warning(message)
 
 
 # ---------------------------------------------------------------- 路径解析
@@ -134,15 +154,30 @@ class UsageCollector:
             self._baseline = {}
 
     def feed(self, evt_type: str, data: Any) -> None:
-        """流式引擎(codex)在事件循环里喂事件。"""
-        if evt_type != "step_finish" or not isinstance(data, dict):
+        """流式引擎在事件循环里喂事件。
+
+        两种入口（issue #727 起统一入 `_fed`）：
+        - codex：`step_finish` 事件携带 `usage` 拆分 dict；
+        - hermes：独立 `("usage", {...})` 事件——`session/prompt` 的
+          PromptResponse `result.usage` 直报（治本路径，不依赖 state.db）。
+        """
+        if evt_type == "usage":
+            if not isinstance(data, dict):
+                return
+            usage = data
+        elif evt_type == "step_finish" and isinstance(data, dict):
+            usage = data.get("usage")
+            if not isinstance(usage, dict):
+                return
+        else:
             return
-        usage = data.get("usage")
-        if not isinstance(usage, dict):
+        rec = dict(usage)
+        rec["turn"] = self._turn + 1
+        if not any(int(rec.get(k) or 0) for k in
+                   ("input", "output", "cache_read", "cache_write", "reasoning")):
+            # 全 0 记录不入账（与 record_usage 的 0 值纪律一致）
             return
         self._turn += 1
-        rec = dict(usage)
-        rec["turn"] = self._turn
         self._fed.append(rec)
 
     def finish(self, session_id: str = "") -> List[Dict[str, Any]]:
@@ -150,6 +185,10 @@ class UsageCollector:
 
         session_id:引擎在本次运行中实际使用的会话号(opencode 新会话只有跑完才知道,
         由调用方从 done 事件取 oc_session_id 传入),覆盖构造时的值。
+
+        hermes(issue #727):优先返回事件流直报(`_fed`);没有直报才读 state.db 兜底
+        ——两条路径互斥使用,避免同一任务双计入。finish 幂等:重复调用不抛异常
+        (临时目录已清理会重建),直报记录重复返回由台账侧幂等键去重。
         """
         if session_id:
             self.session_id = session_id
@@ -159,6 +198,8 @@ class UsageCollector:
             if self.engine == "opencode":
                 return self._opencode_usage()
             if self.engine == "hermes":
+                if self._fed:
+                    return self._fed
                 return self._hermes_usage()
             if self.engine in ("hwcloud", "aishell"):
                 return self._hwcloud_usage()
@@ -170,8 +211,12 @@ class UsageCollector:
             self._cleanup()
 
     def _cleanup(self) -> None:
-        if self._tmpdir and os.path.isdir(self._tmpdir):
+        if self._tmpdir:
             shutil.rmtree(self._tmpdir, ignore_errors=True)
+            # issue #727：复位 _tmpdir——_report_llm_usage 对 hermes/hwcloud 会在
+            # 首次 finish 后短重试二次 finish；不复位时 _workdir() 返回已删除目录,
+            # 拷贝账本报 Errno 2。复位后二次调用会重建临时目录,finish 幂等。
+            self._tmpdir = None
 
     def _workdir(self) -> str:
         if not self._tmpdir:
@@ -245,19 +290,42 @@ class UsageCollector:
     # -------------------------------------------------- hermes
 
     def _hermes_rows(self) -> Dict[str, Dict[str, int]]:
-        """{key: 计数} —— key = f"{session_id}|{model}|{task}"。"""
+        """{key: 计数} —— key = f"{session_id}|{model}|{task}"。
+
+        issue #727：hermes <0.10（如 0.9.0）没有 `session_model_usage` 表
+        → 回退读 `sessions` 表（每 session 一行累计值，含 token 列），
+        告警一次降级提示，不中断采集。两表都是累计值，差值语义不变。
+        """
         iso = _hermes_iso_home(self.cwd)
         db_path = os.path.join(iso, "state.db")
         conn = _open_sqlite_readonly(db_path, self._workdir())
         if conn is None:
             return {}
         try:
-            cur = conn.execute(
-                "SELECT session_id, model, COALESCE(task,''), input_tokens, output_tokens,"
-                " cache_read_tokens, cache_write_tokens, reasoning_tokens"
-                " FROM session_model_usage")
+            try:
+                cur = conn.execute(
+                    "SELECT session_id, model, COALESCE(task,''), input_tokens, output_tokens,"
+                    " cache_read_tokens, cache_write_tokens, reasoning_tokens"
+                    " FROM session_model_usage")
+                rows = cur.fetchall()
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e).lower():
+                    raise
+                _note_hermes_missing_table_once(
+                    "usage_collect: hermes state.db has no session_model_usage table"
+                    " (hermes <0.10, e.g. 0.9.0); falling back to sessions table"
+                    " (aggregated per session, no per-model/task split) — degraded"
+                    " but usage collection continues")
+                cur = conn.execute(
+                    "SELECT id, COALESCE(model,''),"
+                    " COALESCE(input_tokens,0), COALESCE(output_tokens,0),"
+                    " COALESCE(cache_read_tokens,0), COALESCE(cache_write_tokens,0),"
+                    " COALESCE(reasoning_tokens,0)"
+                    " FROM sessions")
+                rows = [(sid, model, "", i, o, cr, cw, rz)
+                        for sid, model, i, o, cr, cw, rz in cur.fetchall()]
             out: Dict[str, Dict[str, int]] = {}
-            for sid, model, task, i, o, cr, cw, rz in cur.fetchall():
+            for sid, model, task, i, o, cr, cw, rz in rows:
                 out[f"{sid}|{model}|{task}"] = {
                     "input": int(i or 0), "output": int(o or 0),
                     "cache_read": int(cr or 0), "cache_write": int(cw or 0),
