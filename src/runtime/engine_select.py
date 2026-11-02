@@ -1074,6 +1074,199 @@ def cleanup_scene_engine_bindings(rid_list: list) -> int:
     return len(changed_rows)
 
 
+def merge_duplicate_engine_rows(credential_id: int, c=None) -> dict:
+    """按 (credential_id, lower(name)) 去重合并引擎行（Issue #654），保留 MAX(id)。
+
+    与 scope 切换/重注册的「保留最新行」口径一致。被替换行的配置迁移到存活行：
+    - engine_capabilities：存活行无 capabilities 行时，被替换行的 capabilities 改指向存活行
+      （priority/标签/max_concurrent 继承，不静默回默认 50/'all'）；
+    - tags_user_set：存活行=0 且任一被替换行=1 时置 1（用户手动配置过的标记继承）。
+    返回 {old_rid: surviving_rid} 映射（无重复行时为空 dict），供调用方
+    remap_engine_references 改写引擎 id 引用 + 输出结构化变更事件。
+    事务边界：传入 cursor（c）时由调用方 commit；c=None 时自取 db_lock 并 commit。
+    """
+    from src.session_manager import db, db_lock
+    _own_tx = c is None
+    if _own_tx:
+        # db_lock 可重入，with 只是保证互斥
+        with db_lock:
+            c = db.cursor()
+            return _merge_duplicate_engine_rows_locked(credential_id, c, _own_tx)
+    return _merge_duplicate_engine_rows_locked(credential_id, c, _own_tx)
+
+
+def _merge_duplicate_engine_rows_locked(credential_id: int, c, commit: bool) -> dict:
+    rid_map = {}
+    try:
+        rows = c.execute(
+            "SELECT id, lower(name), tags_user_set FROM agent_runtimes WHERE credential_id=?",
+            (credential_id,)).fetchall()
+    except Exception as _e:
+        log.warning(f"merge_duplicate_engine_rows: query failed: {_e}")
+        return rid_map
+    groups = {}
+    for rid, lname, tus in rows:
+        groups.setdefault(lname, []).append((rid, tus or 0))
+    replaced_ids = []
+    for lname, items in groups.items():
+        if len(items) < 2:
+            continue
+        items_sorted = sorted(items, key=lambda x: x[0])
+        surviving = items_sorted[-1][0]
+        replaced = [rid for rid, _ in items_sorted[:-1]]
+        # capabilities 迁移：存活行无 → 被替换行首个有 capabilities 的改指向存活行
+        try:
+            has_cap = c.execute(
+                "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1",
+                (surviving,)).fetchone()
+            if not has_cap:
+                for rid in replaced:
+                    cap = c.execute(
+                        "SELECT 1 FROM engine_capabilities WHERE runtime_id=? LIMIT 1",
+                        (rid,)).fetchone()
+                    if cap:
+                        c.execute(
+                            "UPDATE engine_capabilities SET runtime_id=?, "
+                            "updated_at=CURRENT_TIMESTAMP WHERE runtime_id=?",
+                            (surviving, rid))
+                        break
+        except Exception as _e:
+            log.warning(f"merge_duplicate_engine_rows: migrate capabilities failed: {_e}")
+        # tags_user_set 继承
+        try:
+            if items_sorted[-1][1] == 0 and any(tus for _, tus in items_sorted[:-1]):
+                c.execute("UPDATE agent_runtimes SET tags_user_set=1 WHERE id=?", (surviving,))
+        except Exception as _e:
+            log.warning(f"merge_duplicate_engine_rows: inherit tags_user_set failed: {_e}")
+        for rid in replaced:
+            rid_map[rid] = surviving
+        replaced_ids.extend(replaced)
+    if replaced_ids:
+        _ph = ",".join("?" * len(replaced_ids))
+        try:
+            # 未迁移的 capabilities 残留一并清理（避免悬空 runtime_id）
+            c.execute(f"DELETE FROM engine_capabilities WHERE runtime_id IN ({_ph})", replaced_ids)
+            c.execute(f"DELETE FROM agent_runtimes WHERE id IN ({_ph})", replaced_ids)
+        except Exception as _e:
+            log.warning(f"merge_duplicate_engine_rows: delete replaced rows failed: {_e}")
+        if commit:
+            db.commit()
+    return rid_map
+
+
+def remap_scene_engine_bindings(rid_map: dict) -> int:
+    """将所有活跃场景 nodes_json 的 engine_runtime_ids 按 rid_map {old: new} 重映射（Issue #654）。
+
+    cleanup_scene_engine_bindings 的泛化：不是移除引用而是改指向存活引擎行，
+    场景配置的引擎绑定在引擎行替换（scope 切换去重/重注册）后不悬空。
+    返回被修改的场景数。
+    """
+    if not rid_map:
+        return 0
+    import json as _json
+    from datetime import datetime, timezone
+    from src.session_manager import db, db_lock
+    changed_rows = []
+    with db_lock:
+        c = db.cursor()
+        try:
+            c.execute("SELECT id, nodes_json FROM devops_pipeline_scene WHERE is_active=1")
+            rows = c.fetchall()
+        except Exception as _e:
+            log.warning(f"remap_scene_engine_bindings: query scenes failed: {_e}")
+            return 0
+        now = datetime.now(timezone.utc).isoformat()
+        for row_id, nodes_str in rows:
+            try:
+                nodes = _json.loads(nodes_str or "[]") if nodes_str else []
+            except Exception:
+                continue
+            changed = False
+            for node in nodes:
+                eids = node.get("engine_runtime_ids") or []
+                if not eids:
+                    continue
+                new_eids = [rid_map.get(eid, eid) for eid in eids]
+                if new_eids != eids:
+                    node["engine_runtime_ids"] = new_eids
+                    changed = True
+            if changed:
+                try:
+                    c.execute(
+                        "UPDATE devops_pipeline_scene SET nodes_json=?, updated_at=? WHERE id=?",
+                        (_json.dumps(nodes, ensure_ascii=False), now, row_id))
+                    changed_rows.append(row_id)
+                except Exception as _e:
+                    log.warning(f"remap_scene_engine_bindings: update scene {row_id} failed: {_e}")
+        db.commit()
+    return len(changed_rows)
+
+
+def remap_engine_references(rid_map: dict, cid: int = 0, reason: str = "engine_row_replaced") -> dict:
+    """引擎行替换后统一 remap 引擎 id 引用（Issue #654），输出结构化变更事件日志。
+
+    覆盖的引用面（每表独立 try/except，旧库缺列/缺表不致命）：
+    - devops_pipeline_scene.nodes_json 的 engine_runtime_ids（场景绑定）
+    - autopilot_tasks.engine_runtime_ids（任务级意图声明）
+    - devops_agent_session.runtime_id / chat_agent_session.runtime_id（agent backend 引用）
+    - agent_type.default_runtime_id / agent_type_runtime_pool.runtime_id
+
+    事件日志格式（可追溯）：JSON 单行，含 cid、reason、影响引擎数、旧→新 id 映射、
+    各表命中行数。返回 {"scenes": n, "sessions": n, ...} 统计。
+    """
+    if not rid_map:
+        return {}
+    import json as _json
+    from src.session_manager import db, db_lock
+    stats = {"scenes": 0, "autopilot_tasks": 0, "devops_agent_session": 0,
+             "chat_agent_session": 0, "agent_type": 0, "agent_type_runtime_pool": 0}
+    old_ids = list(rid_map.keys())
+    _ph = ",".join("?" * len(old_ids))
+    with db_lock:
+        c = db.cursor()
+        # 1. 场景 nodes_json（结构化 JSON，逐节点替换）
+        try:
+            stats["scenes"] = remap_scene_engine_bindings(rid_map)
+        except Exception as _e:
+            log.warning(f"remap_engine_references: remap scenes failed: {_e}")
+        # 2. autopilot_tasks.engine_runtime_ids（JSON 列表字符串）
+        try:
+            c.execute(f"SELECT id, engine_runtime_ids FROM autopilot_tasks WHERE engine_runtime_ids != ''")
+            for tid, eids_str in c.fetchall():
+                try:
+                    eids = _json.loads(eids_str) if eids_str else []
+                except Exception:
+                    continue
+                if not isinstance(eids, list):
+                    continue
+                new_eids = [rid_map.get(eid, eid) for eid in eids]
+                if new_eids != eids:
+                    c.execute("UPDATE autopilot_tasks SET engine_runtime_ids=? WHERE id=?",
+                              (_json.dumps(new_eids), tid))
+                    stats["autopilot_tasks"] += 1
+        except Exception as _e:
+            log.warning(f"remap_engine_references: remap autopilot_tasks failed: {_e}")
+        # 3. agent backend 引用（整型列，CASE 批量替换）
+        for table, col in (("devops_agent_session", "runtime_id"),
+                           ("chat_agent_session", "runtime_id"),
+                           ("agent_type", "default_runtime_id"),
+                           ("agent_type_runtime_pool", "runtime_id")):
+            try:
+                case = "CASE " + " ".join(
+                    f"WHEN {col}={old} THEN {new}" for old, new in rid_map.items()) + f" ELSE {col} END"
+                c.execute(f"UPDATE {table} SET {col}={case} WHERE {col} IN ({_ph})", old_ids)
+                stats[table] = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+            except Exception as _e:
+                log.warning(f"remap_engine_references: remap {table}.{col} failed: {_e}")
+        db.commit()
+    # 结构化变更事件（Issue #654 验收：cid、影响引擎数、旧→新 id 映射）
+    event = {"event": "engine_reference_remap", "credential_id": cid, "reason": reason,
+             "engines_affected": len(rid_map), "id_mapping": {str(k): v for k, v in rid_map.items()},
+             **stats}
+    log.info("engine_change_event: " + _json.dumps(event, ensure_ascii=False))
+    return stats
+
+
 def _find_scene_bindings_for_runtime(c, runtime_id: int) -> list:
     """查所有活跃场景中绑定了 runtime_id 的 (row_id, repo_key, scene_id, node_tag, before_ids)。
 
