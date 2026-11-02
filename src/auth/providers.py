@@ -279,6 +279,19 @@ def exchange_token(provider: str, code: str, redirect_uri: str,
                 )
                 resp.raise_for_status()
                 return resp.json(), ""
+            except _req.exceptions.HTTPError as _he:
+                # 诊断增强（Issue token_exchange_failed 排查）：记录 GitCode 拒绝的具体原因
+                _body = ""
+                try:
+                    _body = (_he.response.text or "")[:200] if _he.response is not None else ""
+                except Exception:
+                    pass
+                log.warning(f"OAuth token endpoint rejected {provider}: "
+                            f"HTTP {_he.response.status_code if _he.response is not None else '?'}, body: {_body}")
+                last_err_type = "token_exchange_failed"
+                if _attempt < 2:
+                    import time as _t
+                    _t.sleep(1 * (2 ** _attempt))
             except _req.exceptions.ConnectTimeout:
                 last_err_type = "network_timeout"
                 if _attempt < 2:
