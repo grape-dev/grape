@@ -138,6 +138,89 @@ def _require_credential(request: Request) -> int:
 
 # ===== 协议端点（M3）=====
 
+# Issue #700：register healthy-guard 探活新鲜窗口解析（env 校验）
+def _resolve_probe_fresh_window() -> int:
+    """解析 register healthy-guard 探活新鲜窗口（秒）。
+
+    默认 2×RUNTIME_PROBE_INTERVAL（interval 默认 600s → 窗口 1200s）；
+    RUNTIME_PROBE_FRESH_WINDOW 可显式覆盖。非法值（非整数/非正数/超范围）
+    回退默认并告警，不抛异常——否则守卫会静默失效（#837 Suggested-1，
+    对齐 acp_bootstrap._resolve_acp_check_timeout 模式）。
+    """
+    _interval_raw = (os.environ.get("RUNTIME_PROBE_INTERVAL") or "").strip()
+    _interval = 600
+    if _interval_raw:
+        try:
+            _val = int(_interval_raw)
+        except ValueError:
+            log.warning(f"RUNTIME_PROBE_INTERVAL 非法值 '{_interval_raw}'（非整数），回退默认 600s")
+            _val = 600
+        if _val < 1 or _val > 86400:
+            log.warning(f"RUNTIME_PROBE_INTERVAL 非法值 '{_interval_raw}'（超出 1~86400 范围），回退默认 600s")
+        else:
+            _interval = _val
+    _default = 2 * _interval
+    _raw = (os.environ.get("RUNTIME_PROBE_FRESH_WINDOW") or "").strip()
+    if not _raw:
+        return _default
+    try:
+        _window = int(_raw)
+    except ValueError:
+        log.warning(f"RUNTIME_PROBE_FRESH_WINDOW 非法值 '{_raw}'（非整数），回退默认 {_default}s")
+        return _default
+    if _window < 1 or _window > 86400:
+        log.warning(f"RUNTIME_PROBE_FRESH_WINDOW 非法值 '{_raw}'（超出 1~86400 范围），回退默认 {_default}s")
+        return _default
+    return _window
+
+
+def _register_healthy_guard(c, rid: int, reported: bool) -> int:
+    """Issue #700：register 降级守卫——已 healthy 且探活新鲜的行不被瞬时探测打回 0。
+
+    震荡根因：worker re-register（每 300s）用 ACP 握手探测（15s 总闸）判
+    healthy，Windows 冷启动易超时 → 上报 False；而心跳探活（每 600s）真跑
+    ACP 成功后把 healthy 升回 1。两写入源打架导致 healthy 大部分时间为 0。
+
+    守卫规则（仅作用于 UPDATE 分支的 1→0 方向）：
+    - DB 行 healthy=1 且 probe_status='ok' 且 probe_last 距今 ≤ 新鲜窗口
+      （默认 2×RUNTIME_PROBE_INTERVAL=1200s，env RUNTIME_PROBE_INTERVAL 可调）
+      → 保持 1（探活方为更权威的端到端判定，瞬时握手超时不降级）；
+    - 探活过期 / probe_status 非 ok / 已不健康 / 上报 True → 不干预
+      （真实故障仍由心跳连败路径（probe_fail_count≥2 → 0）正常摘除）。
+
+    INSERT 分支（新引擎首注册）不经此函数——上报值原样生效。
+    """
+    try:
+        row = c.execute(
+            "SELECT healthy, probe_status, probe_last FROM agent_runtimes WHERE id=?",
+            (rid,)).fetchone()
+        if not row:
+            return 1 if reported else 0
+        cur_healthy, probe_status, probe_last = (row[0] or 0), (row[1] or ""), (row[2] or "")
+        if reported or not cur_healthy:
+            return 1 if reported else 0
+        # 仅剩「当前 healthy=1、上报 False」的降级方向需要守卫
+        if (probe_status or "").strip().lower() != "ok":
+            return 0
+        _window = _resolve_probe_fresh_window()
+        try:
+            _last = datetime.fromisoformat(probe_last)
+            if _last.tzinfo is None:
+                _last = _last.replace(tzinfo=timezone.utc)
+            fresh = (datetime.now(timezone.utc) - _last).total_seconds() <= _window
+        except Exception:
+            fresh = False
+        if fresh:
+            log.info(f"register healthy-guard: runtime={rid} probe ok within {_window}s, "
+                     f"keep healthy=1 (transient ACP check downgrade suppressed)")
+            return 1
+        return 0
+    except Exception as _ge:
+        # 守卫自身异常绝不阻塞注册主链路（保守：按上报值）
+        log.warning(f"register healthy-guard failed (runtime={rid}): {_ge}")
+        return 1 if reported else 0
+
+
 @router.post("/register")
 def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int = Depends(_require_credential)):
     """凭据校验 + 按实例键 upsert agent_runtimes（幂等），返回 server 权威 runtime IDs。
@@ -212,9 +295,12 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                 _role_tags_json = ""
             if row:
                 rid = row[0]
+                # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
+                # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
+                # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
                 c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=?"
                           + (", role_tags=?" if _role_tags_json else "") + " WHERE id=?",
-                          (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
+                          (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid)
                           + ((_role_tags_json,) if _role_tags_json else ()))
                 # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
@@ -398,7 +484,8 @@ def runtime_heartbeat(body: HeartbeatBody, request: Request, credential_id: int 
                 c2.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
                 row = c2.fetchone()
                 if row:
-                    _wname = row[1] or row[0] or f"worker-{credential_id}"
+                    # Issue #701：worker_name 优先凭据自定义名 rc.name（空回退 device_name → id 兜底）
+                    _wname = (row[0] or "").strip() or row[1] or f"worker-{credential_id}"
         except Exception:
             _wname = f"worker-{credential_id}"
         _wf = _os.path.join(_worker_log_dir, f"{credential_id}.log")

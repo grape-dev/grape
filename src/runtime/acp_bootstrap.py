@@ -28,7 +28,33 @@ import threading
 
 from src.config import log
 
-ACP_CHECK_TIMEOUT = 15        # ACP 握手探测超时（含 hermes 冷启动余量）
+ACP_CHECK_TIMEOUT_DEFAULT = 20   # ACP 握手探测超时默认（含 Windows 冷启动余量）
+                               # Issue #700：15s 在 Windows 冷启动（.exe 启动器 + 大量
+                               # import）实测易吃满 → 超时统一归 ACP_FAIL → healthy
+                               # 震荡。对齐 --version 探测的 20s，并支持 env 覆盖。
+
+
+def _resolve_acp_check_timeout() -> int:
+    """解析 ACP 握手探测超时：RUNTIME_ACP_CHECK_TIMEOUT env 覆盖（正整数，1~300 钳制）。
+
+    非法值（非数字 / 非正整数 / 超范围）回退默认并告警，不抛异常
+    （对齐 agent.py:1030-1032 的 env 覆盖先例）。
+    """
+    _raw = (os.environ.get("RUNTIME_ACP_CHECK_TIMEOUT") or "").strip()
+    if not _raw:
+        return ACP_CHECK_TIMEOUT_DEFAULT
+    try:
+        _val = int(_raw)
+    except ValueError:
+        log.warning(f"RUNTIME_ACP_CHECK_TIMEOUT 非法值 '{_raw}'（非整数），回退默认 {ACP_CHECK_TIMEOUT_DEFAULT}s")
+        return ACP_CHECK_TIMEOUT_DEFAULT
+    if _val < 1 or _val > 300:
+        log.warning(f"RUNTIME_ACP_CHECK_TIMEOUT 非法值 '{_raw}'（超出 1~300 范围），回退默认 {ACP_CHECK_TIMEOUT_DEFAULT}s")
+        return ACP_CHECK_TIMEOUT_DEFAULT
+    return _val
+
+
+ACP_CHECK_TIMEOUT = _resolve_acp_check_timeout()  # ACP 握手探测超时（含 hermes 冷启动余量）
 PIP_INSTALL_TIMEOUT = 120     # pip install 超时
 ACP_PACKAGE = "agent-client-protocol"  # 不硬钉版本：安装前做已装版本兼容判断
 
@@ -145,6 +171,153 @@ def _acp_check(cli: str) -> bool:
     return ok
 
 
+def _pyvenv_scripts_dir(python_exe: str) -> str:
+    """由 python 解释器路径定位 venv Scripts/bin 目录（pyvenv.cfg 同级判定）。
+
+    解释器在 venv 里时，其目录即 venv 的 Scripts（Windows）/ bin（Unix）；
+    若同目录存在 pyvenv.cfg 视为确认。找不到 pyvenv.cfg 也接受同目录
+    （`py -3` 解析出的 base python 反推场景：上溯父目录找 pyvenv.cfg）。
+    返回空串表示无法定位 venv。
+    """
+    try:
+        d = os.path.dirname(python_exe)
+        # 直接同目录
+        if os.path.isfile(os.path.join(d, "pyvenv.cfg")):
+            return d
+        # 上溯两级（Windows: venv\Scripts\python.exe → venv\pyvenv.cfg）
+        for _ in range(2):
+            d = os.path.dirname(d)
+            if not d or d == os.path.dirname(d):
+                break
+            if os.path.isfile(os.path.join(d, "pyvenv.cfg")):
+                sub = os.path.join(d, "Scripts")
+                if os.path.isfile(os.path.join(sub, "python.exe")):
+                    return sub
+                if os.path.isdir(os.path.join(d, "bin")):
+                    return os.path.join(d, "bin")
+    except Exception:
+        pass
+    # 解释器同目录本身形态（venv Scripts 直查）
+    base = os.path.dirname(python_exe)
+    if (os.path.isfile(os.path.join(base, "python.exe"))
+            or os.path.isfile(os.path.join(base, "python"))):
+        return base
+    return ""
+
+
+def _resolve_py_launcher_python() -> str:
+    """`py -3` 形态：用 Windows Python Launcher 定位解释器真实路径。
+
+    venv 的 .cmd 模板里 `@py -3 script.py` 由系统 py launcher 解析；
+    `py -3 -c "import sys; print(sys.executable or getattr(sys, '_base_executable', ''))"`
+    可拿到解释器路径——优先 sys.executable（#837 Required-1）：
+
+    - Windows 常规 base python 没有 sys._base_executable 属性，旧表达式
+      `sys._base_executable or sys.executable` 会 AttributeError → 兜底失效；
+    - venv 上下文里 sys.executable 指 venv python（与 _pyvenv_scripts_dir
+      反推的目录一致）；base python 下就是 base 解释器路径，均可可靠定位。
+    解析失败返回空串。冷启动风险：仅在解析 .cmd 静态行失败后的兜底路径，
+    超时 10s。
+    """
+    try:
+        res = subprocess.run(
+            ["py", "-3", "-c",
+             "import sys; print(sys.executable or getattr(sys, '_base_executable', ''))"],
+            capture_output=True, text=True, timeout=10)
+        if res.returncode == 0:
+            path = (res.stdout or "").strip().splitlines()
+            if path and path[0]:
+                return path[0]
+    except Exception:
+        pass
+    return ""
+
+
+_CMD_PY_LINE = re.compile(
+    r'^\s*@?\s*"?(py|python|pythonw)"?\s+(?:-\S+\s+)*"([^"\n]+\.exe)"',
+    re.IGNORECASE)
+# 绝对路径 python 解释器（盘符 X:\ 或 X:/ 或 POSIX / 形态；测试在 Linux 上
+# 造 Windows 风格 .cmd 时路径为 POSIX 绝对路径，两种都要认）
+_CMD_PY_PLAIN = re.compile(
+    r'^\s*@?\s*"?((?:[A-Za-z]:[\\/]|/|%~dp0[\\/]?)[^"\n]*?python(?:w)?\.exe)"?',
+    re.IGNORECASE)
+
+
+def _cmd_python_candidates(content: str, launcher_dir: str = "") -> list:
+    """从 .cmd/.bat 内容提取候选 python 解释器路径（Windows venv 模板）。
+
+    %~dp0 前缀展开为 launcher 所在目录（launcher_dir 缺省且候选为 %~dp0
+    形态时无法展开，跳过该候选）。路径统一成正斜杠形态返回（Windows 下
+    os.path API 兼容正/反斜杠，Linux 测试环境也一致）。"""
+    out = []
+    for line in (content or "").splitlines():
+        m = _CMD_PY_PLAIN.search(line)
+        if m:
+            cand = m.group(1)
+            if cand.lower().startswith("%~dp0"):
+                if not launcher_dir:
+                    continue
+                cand = os.path.join(launcher_dir, cand[len("%~dp0"):].lstrip("\\/"))
+            out.append(cand.replace("\\", "/"))
+            continue
+        m2 = _CMD_PY_LINE.search(line)
+        if m2:
+            cand = m2.group(2)
+            if os.path.basename(cand).lower().startswith("python"):
+                out.append(cand.replace("\\", "/"))
+    return out
+
+
+def _hermes_venv_bin_windows(cli: str) -> str:
+    """Windows 启动器（.exe/.cmd/.bat）解析 venv bin（Scripts 目录）。
+
+    支持形态（Issue #700，Windows 自愈补装前提）：
+    1. `.exe`：console-script launcher 位于 venv\\Scripts\\（hermes.exe 与
+       python.exe 同目录）——launcher 所在目录即 venv Scripts，校验
+       python.exe 存在即返回。
+    2. `.cmd`/`.bat` 内容行：
+       - venv 模板标准形态 `@"C:\\path\\venv\\Scripts\\python.exe" "script" %*`
+         （带引号绝对路径）或 `@C:\\path\\python.exe script %*`（无引号）；
+       - pip/distlib 常见 `"%~dp0\\python.exe" "%~dp0\\hermes-script.py" %*`
+         （%~dp0 相对路径，展开为 launcher 所在目录，#837 Required-2）；
+       - `@py -3 script.py %*`（Python launcher 形态）——静态行拿不到
+         解释器路径，走 _resolve_py_launcher_python 子进程定位，再由
+         解释器路径反推 venv Scripts（上溯找 pyvenv.cfg）。
+    内容解析失败时若 launcher 同目录存在 python.exe 直接返回该目录
+    （.cmd 包装器与 python.exe 同处 venv\\Scripts，与 .exe 分支同规则）。
+    全部失败返回空串（_ensure_hermes_acp 落人工修复指引，契约不变）。
+    """
+    try:
+        launcher_dir = os.path.dirname(os.path.realpath(cli))
+        ext = os.path.splitext(cli)[1].lower()
+        if ext == ".exe":
+            if os.path.isfile(os.path.join(launcher_dir, "python.exe")):
+                return launcher_dir
+            return ""
+        # .cmd / .bat：读内容解析
+        with open(cli, "r", encoding="utf-8", errors="replace") as f:
+            content = f.read(8192)
+        for cand in _cmd_python_candidates(content, launcher_dir):
+            if os.path.isfile(cand):
+                scripts = _pyvenv_scripts_dir(cand)
+                if scripts:
+                    return scripts
+        # ② 内容解析失败兜底：launcher 同目录 python.exe（pip/distlib .cmd
+        #    包装器与 python.exe 同处 venv\Scripts，与 .exe 分支同规则）
+        if os.path.isfile(os.path.join(launcher_dir, "python.exe")):
+            return launcher_dir
+        # ③ @py -3 形态（无绝对路径）→ py launcher 子进程定位
+        if re.search(r'^\s*@?\s*"?py"?\s', content, re.IGNORECASE):
+            exe = _resolve_py_launcher_python()
+            if exe and os.path.isfile(exe):
+                scripts = _pyvenv_scripts_dir(exe)
+                if scripts:
+                    return scripts
+        return ""
+    except Exception:
+        return ""
+
+
 def _hermes_venv_bin(cli: str) -> str:
     """从 hermes launcher 解析其 venv bin 目录。
 
@@ -155,11 +328,16 @@ def _hermes_venv_bin(cli: str) -> str:
        提取 exec 行中的绝对路径，返回其目录（venv/bin）。
     2. 软链 / console-script launcher：realpath 跟随软链后，读目标首行
        shebang（#!/path/to/venv/bin/python），由解释器路径反推 venv/bin。
-    解析失败返回空串（Windows .exe/.cmd/.bat 等形态暂不支持，走 False 路径）。
+    3. Windows 启动器（Issue #700）：.exe/.cmd/.bat —— 走
+       _hermes_venv_bin_windows（.exe 同目录校验 / .cmd·.bat 内容行解析
+       / py launcher 定位），使缺依赖自动补装在 Windows 上生效。
+    解析失败返回空串（此前 Windows 形态一律空串 → 无法自愈，现补齐）。
     """
     try:
-        if not os.path.isfile(cli) or os.path.splitext(cli)[1].lower() in (".exe", ".cmd", ".bat"):
+        if not os.path.isfile(cli):
             return ""
+        if os.path.splitext(cli)[1].lower() in (".exe", ".cmd", ".bat"):
+            return _hermes_venv_bin_windows(cli)
         real = os.path.realpath(cli)
         with open(real, "r", encoding="utf-8", errors="replace") as f:
             content = f.read(4096)
@@ -181,9 +359,27 @@ def _hermes_venv_bin(cli: str) -> str:
     return ""
 
 
+def _venv_python(venv_bin: str) -> str:
+    """venv 的 python 解释器路径（Windows Scripts 下为 python.exe）。"""
+    for name in ("python.exe", "python"):
+        cand = os.path.join(venv_bin, name)
+        if os.path.isfile(cand):
+            return cand
+    return os.path.join(venv_bin, "python")
+
+
+def _venv_pip(venv_bin: str) -> str:
+    """venv 的 pip 路径（Windows Scripts 下为 pip.exe；不存在回退 python -m pip）。"""
+    for name in ("pip.exe", "pip"):
+        cand = os.path.join(venv_bin, name)
+        if os.path.isfile(cand):
+            return cand
+    return os.path.join(venv_bin, "pip")
+
+
 def _installed_acp_version(venv_bin: str) -> str:
     """查询 hermes venv 已安装的 agent-client-protocol 版本（未装返回空串）。"""
-    py = os.path.join(venv_bin, "python")
+    py = _venv_python(venv_bin)
     try:
         res = subprocess.run(
             [py, "-c", "import importlib.metadata as m; print(m.version('agent-client-protocol'))"],
@@ -197,7 +393,8 @@ def _installed_acp_version(venv_bin: str) -> str:
 
 def _pip_install_into(venv_bin: str) -> bool:
     """用指定 venv 的 pip 安装 ACP 包（不硬钉版本）。pip 不可用时用 python -m pip 兜底。"""
-    for cmd in ([os.path.join(venv_bin, "pip")], [os.path.join(venv_bin, "python"), "-m", "pip"]):
+    py = _venv_python(venv_bin)
+    for cmd in ([_venv_pip(venv_bin)], [py, "-m", "pip"]):
         try:
             res = subprocess.run(cmd + ["install", ACP_PACKAGE],
                                  capture_output=True, text=True, timeout=PIP_INSTALL_TIMEOUT)
