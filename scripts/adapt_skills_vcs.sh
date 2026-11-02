@@ -26,7 +26,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SKILLS_DIR="$ROOT_DIR/skills"
+SKILLS_DIR="$ROOT_DIR/.grape/skills"
 
 # GitHub 差异对照表（追加到 vcs-api-reference.md 末尾）
 GITHUB_DIFF_SECTION='

@@ -52,7 +52,9 @@ ADD-WHITELIST.md
 opencode-incident-*.md
 OPENCODE-CUSTOM-PROVIDER-CONFIG.md
 temp/
-.grape/
+.grape/*
+!.grape/skills/
+!.grape/docs/
 .skills/
 .hermes/
 .venv/
@@ -114,8 +116,6 @@ admin/
 logs/
 examples/
 skills/
-!.opencode/
-!.opencode/skills/
 trace_*.py
 diag_*.py
 configs/scene-sync.json

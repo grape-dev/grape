@@ -113,7 +113,7 @@ log = logging.getLogger("devops-bot")
 log.addFilter(_RequestIdFilter())
 
 # ====== 目录常量 ======
-SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "skills"))
+SKILLS_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".grape", "skills"))
 CONFIG_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "configs"))
 EXAMPLE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "examples"))
 

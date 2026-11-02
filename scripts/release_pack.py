@@ -6,7 +6,7 @@
   ├── SHA256SUMS          (相对路径校验)
   ├── backend/            (grape 后端 src + 静态资源 + configs example)
   ├── database/           (MySQL DDL + 种子数据)
-  ├── skills/             (grape-skills 全量，从独立仓库读取)
+  ├── skills/             (grape-skills 全量，从独立仓库读取；部署时解压到 .grape/skills/)
   ├── templates/          (grape-template 项目模板，从独立仓库读取)
   └── tools/              (worker 运行时 + install-worker.sh)
 
@@ -273,17 +273,17 @@ def pack_skills(ts):
     if not os.path.isdir(skills_dir):
         print(f"[WARN] skills 目录不存在 ({SKILLS_REPO}/skills)，跳过")
         return None
-    # skills/ 和 scenes/ 一起打包，部署时都解压到 grape 根目录
+    # Issue #699 Phase 0: skills → .grape/skills/, scenes → configs/scenes/
     items = []
     if os.path.isdir(skills_dir):
         for item in os.listdir(skills_dir):
             s = os.path.join(skills_dir, item)
-            a = os.path.join("skills", item)
+            a = os.path.join(".grape", "skills", item)
             items.append((s, a))
     if os.path.isdir(scenes_dir):
         for item in os.listdir(scenes_dir):
             s = os.path.join(scenes_dir, item)
-            a = os.path.join("scenes", item)
+            a = os.path.join("configs", "scenes", item)
             items.append((s, a))
     else:
         print(f"[WARN] scenes 目录不存在 ({SKILLS_REPO}/scenes)，仅打包 skills")
@@ -445,8 +445,8 @@ mysql -h<HOST> -u<USER> -p <DB> < grape-db-{ts}.sql
 # 解压 skills + scenes 到 grape 仓库根目录
 cd /opt/grape
 tar xzf /path/to/skills/grape-skills-{ts}.tar.gz
-# skills/ 目录覆盖到 /opt/grape/skills/
-# scenes/ 目录覆盖到 /opt/grape/scenes/
+# .grape/skills/ 目录覆盖到 /opt/grape/.grape/skills/
+# configs/scenes/ 目录覆盖到 /opt/grape/configs/scenes/
 ```
 
 ### 3.5 systemd 服务
@@ -524,7 +524,7 @@ bash install-worker.sh --token <rta_...> --server https://<grape主控域名>
 |------|------|----------|
 | backend/grape-backend-{ts}.tar.gz | 后端代码(src/api + static) + configs | /opt/grape/ |
 | database/grape-db-{ts}.sql.gz | MySQL DDL + 种子数据 | MySQL |
-| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) + 官方场景 (8 scenes，独立仓库) | /opt/grape/skills/ + /opt/grape/scenes/ |
+| skills/grape-skills-{ts}.tar.gz | 官方技能 (60+ skills) + 官方场景 (8 scenes，独立仓库) | /opt/grape/.grape/skills/ + /opt/grape/configs/scenes/ |
 | templates/grape-templates-{ts}.tar.gz | 项目模板 (独立仓库) | /opt/grape/examples/ |
 | tools/grape-toolkit-{ts}.tar.gz | worker 运行时 + 注册脚本 | /opt/grape/ (worker 机) |
 
