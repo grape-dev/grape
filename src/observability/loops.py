@@ -31,7 +31,7 @@ from typing import Any, Dict, List, Optional
 log = logging.getLogger(__name__)
 
 # 已知循环名（供 snapshot 排序/展示用；未知名字也接受，只是排在后面）
-KNOWN = ("obs_alert", "obs_gap", "obs_rollup", "obs_sample", "obs_log_cleanup",
+KNOWN = ("obs_alert", "obs_gap", "obs_rollup", "obs_sample", "obs_sample_skip", "obs_log_cleanup",
          "obs_alert_retention", "obs_usage_archive")
 
 _STATE: Dict[str, Dict[str, Any]] = {}

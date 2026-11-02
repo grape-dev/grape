@@ -642,10 +642,20 @@ async def lifespan(app: FastAPI):
             while True:
                 await asyncio.sleep(60)
                 try:
-                    r = await asyncio.to_thread(_obs_rollup.snapshot_runtimes)
-                    if r.get("inserted"):
+                    # Issue #702 多主单写：每轮先抢全局采样租约（distributed_locks
+                    # TTL lease，TTL=60s）。持锁者采样 + 清理过期样本并续期；未抢到
+                    # （他主持有/锁表异常降级）本轮跳过写入——同一分钟同 runtime 不再
+                    # 被多台主控各写一条；持锁主控失联（lease 过期）后其余主控下一轮
+                    # 自动抢占接管。清理职责已随锁收敛（snapshot 不再顺带 DELETE）。
+                    r = await asyncio.to_thread(_obs_rollup.sample_once_under_lease)
+                    if r.get("skipped"):
+                        # 非持有者：记 skip 打点（谁在跳过、跳了多少轮，L2 可观测），
+                        # 本轮不写不清；不 fail——这是单写收敛的正常形态，不是故障。
+                        _obs_loops.beat("obs_sample_skip")
+                    elif r.get("inserted"):
                         log.debug(f"Observability runtime samples: {r}")
-                    # 日志留存：顺带按小时限流清理（14 天）
+                    # 日志留存：顺带按小时限流清理（14 天）——与采样租约**解耦**，
+                    # 非持锁主控照常执行（上游 Spec Out of Scope：不误伤其清理节奏）。
                     _nc = await asyncio.to_thread(_obs_logs_mod.maybe_cleanup)
                     if _nc:
                         log.info(f"Observability logs cleaned: {_nc} rows")
