@@ -419,30 +419,56 @@ def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depe
                     {"name": body.name, "color": body.color.lstrip("#")})
 
 
-@router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones", summary="List milestones", description="Lists repository milestones (state filter).")
-def list_milestones(owner: str, repo: str, state: str = Query("all"),
+# ===================== Milestones =====================
+
+# Issue #684：上游返回 state=active/opened，过滤合法值为 open/closed/all →
+# 返回字段归一化为 open/closed（口径与过滤值对齐；active→open 映射见端点描述/文档）
+_MILESTONE_STATE_MAP = {"active": "open", "opened": "open", "closed": "closed"}
+
+
+def _normalize_milestone_states(data):
+    """milestone(s) 返回条目 state 字段归一化（active/opened→open），其余字段原样透传。"""
+    if isinstance(data, list):
+        return [_normalize_milestone_states(item) for item in data]
+    if isinstance(data, dict) and "state" in data:
+        out = dict(data)
+        out["state"] = _MILESTONE_STATE_MAP.get(str(data["state"]).lower(), data["state"])
+        return out
+    return data
+
+
+@router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones",
+            summary="List milestones",
+            description="Lists repository milestones (state filter: open/closed/all). "
+                        "Returned items' `state` field is normalized to open/closed "
+                        "(upstream `active`/`opened` is mapped to `open`).")
+def list_milestones(owner: str, repo: str, state: str = Query("all",
+                    description="Filter: open/closed/all (upstream rejects other values)"),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", {"state": state}, p),
+    data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/milestones", {"state": state}, p),
                     _repo_token(owner, repo, user, p))
+    return _normalize_milestone_states(data)
 
 
-@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with id.")
+@router.post("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones_create", summary="Create milestone", description="Creates a repository milestone (title required; description/due_on optional). Provider passthrough, returns the created milestone with id; returned `state` is normalized to open/closed (active→open).")
 def create_milestone(owner: str, repo: str, body: MilestoneCreateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #632（对齐 #577）：GitHub/GitCode milestones 字段语义一致 → 直调透传（同 labels 模式）
     payload = {k: v for k, v in {"title": body.title, "description": body.description,
                                  "due_on": body.due_on}.items() if v != ""}
-    return _vcs_req(p, "POST", _vcs_url(owner, repo, "/milestones", None, p),
+    data = _vcs_req(p, "POST", _vcs_url(owner, repo, "/milestones", None, p),
                     _repo_token(owner, repo, user, p), payload)
+    return _normalize_milestone_states(data)
 
 
-@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough.")
+@router.patch("/{owner}/{repo}/milestones/{number}", operation_id="gitrepo_milestones_update", summary="Update milestone", description="Updates a repository milestone by number (title/description/due_on/state; empty fields are not passed through). Provider passthrough; returned `state` is normalized to open/closed (active→open).")
 def update_milestone(owner: str, repo: str, number: int, body: MilestoneUpdateBody,
                      user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     payload = {k: v for k, v in {"title": body.title, "description": body.description,
                                  "due_on": body.due_on, "state": body.state}.items() if v != ""}
-    return _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/milestones/{number}", None, p),
+    data = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/milestones/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
+    return _normalize_milestone_states(data)
 
 
 # ===================== Issues =====================

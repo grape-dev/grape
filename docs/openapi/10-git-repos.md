@@ -306,9 +306,10 @@ grapecli git diff --repo Jason7602/hello
 
 ### GET /api/git-repo/{owner}/{repo}/milestones?state=all
 
-**Query**：`state`（open/closed/all，技能用 all）
+**Query**：`state`（open/closed/all，技能用 all；其他值上游 400）
 
 **返回（200）**：里程碑数组 `[{"id":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+（Issue #684：`state` 字段归一化为 `open`/`closed`，上游 `active`/`opened` 映射为 `open`——与过滤合法值口径一致）
 
 **错误**：401 / 403 / 404。
 
@@ -337,7 +338,7 @@ provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 | `due_on` | string | 截止时间 ISO 时间戳 |
 | `state` | string | `open`/`closed` |
 
-**返回（200）**：更新后的里程碑对象。**错误**：400 / 401 / 403 / 404。
+**返回（200）**：更新后的里程碑对象（`state` 归一化为 `open`/`closed`，上游 `active` 映射为 `open`）。**错误**：400 / 401 / 403 / 404。
 
 ---
 
