@@ -118,6 +118,7 @@ EXPECTED_PUBLIC = {
     "gitrepo_pulls_get": ("get", "/api/git-repo/{owner}/{repo}/pulls/{number}"),
     "gitrepo_pulls_list": ("get", "/api/git-repo/{owner}/{repo}/pulls"),
     "gitrepo_pulls_merge": ("put", "/api/git-repo/{owner}/{repo}/pulls/{number}/merge"),
+    "gitrepo_pulls_issues_unlink": ("delete", "/api/git-repo/{owner}/{repo}/pulls/{number}/issues/{issue_number}"),
     "gitrepo_pulls_update": ("patch", "/api/git-repo/{owner}/{repo}/pulls/{number}"),
     "gitrepo_repo": ("get", "/api/git-repo/{owner}/{repo}"),
     "gitrepo_tree": ("get", "/api/git-repo/{owner}/{repo}/tree"),

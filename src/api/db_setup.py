@@ -3290,10 +3290,12 @@ def _mig_issue627_drop_legacy_production_release():
 
 
 register_migration(
-    "202611020001", "issue627_release_subissue_unique_index", "safe",
+    # 版本号冲突修复（本地集成）：202611020001/2 已被 patrol-findings 迁移占用并盖章，
+    # 复用同号会导致本迁移永远被判"已执行"而跳过（#627 发布子单列/唯一索引在 MySQL 上缺失）。
+    "202611020003", "issue627_release_subissue_unique_index", "safe",
     _migrate_release_subissue_unique_index)
 register_migration(
-    "202611020002", "issue627_drop_legacy_production_release", "cleanup",
+    "202611020004", "issue627_drop_legacy_production_release", "cleanup",
     _mig_issue627_drop_legacy_production_release)
 
 

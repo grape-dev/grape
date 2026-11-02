@@ -831,7 +831,7 @@ class TestReviewFixesPR818:
             c.execute("CREATE TABLE IF NOT EXISTS production_release (id INTEGER PRIMARY KEY)")
             # 重置本条迁移的盖章，模拟未跑过该迁移的旧库
             c.execute(
-                "DELETE FROM grape_t_schema_migrations WHERE version='202611020002'")
+                "DELETE FROM grape_t_schema_migrations WHERE version='202611020004'")
             db.commit()
         from src.api.db_setup import init_database
         init_database()
