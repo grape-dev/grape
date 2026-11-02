@@ -1186,7 +1186,7 @@ async def get_issue_clarifications(issue_id: int, user: dict = Depends(require_n
 
 @router.post("/{issue_id}/awaiting-input", operation_id="issues_awaiting-input",
              summary="Agent declares issue awaiting-input (待澄清)",
-             description="vod/issue agent explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue, agent_type must be vod/issue. Colocated with issues clarify (user reply) / issues clarifications (history).")
+             description="vod/issue agent (or any agent_type in the issue's bound scene nodes, Issue #655) explicitly declares this issue needs user input: atomically moves active/processing -> awaiting-input, writes the clarification questions to the task conversation and sends a static Feishu card. Session-only (tk_), repo scope must match the issue. Colocated with issues clarify (user reply) / issues clarifications (history).")
 async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """vod/issue agent 显式声明「待澄清」（澄清三件套之 Agent 发起）。
@@ -1210,12 +1210,10 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     session_agent = user.get("agent_type") or ""
     if not session_repo:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
-    if session_agent not in ("vod", "issue"):
-        raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={session_agent} 不在本接口范围（仅 vod/issue 可声明待澄清）"})
 
     with _dl:
         c = _db.cursor()
-        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?",
+        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue WHERE id=?",
                   (issue_id,))
         irow = c.fetchone()
     if not irow:
@@ -1226,6 +1224,12 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
     from src.repo_key import to_repo_key
     if to_repo_key(repo_key) != to_repo_key(session_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+    # Issue #655: awaiting-input 允许集 = vod/issue ∪ issue 绑定场景节点集（场景未绑定/解析失败 → 仅原白名单）
+    _await_allowed = {"vod", "issue"} | _scene_agent_allowlist(repo_key, irow[7] or "")
+    if session_agent not in _await_allowed:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": f"agent_type={session_agent} 不在本接口范围（仅 vod/issue 或当前 issue 绑定场景节点可声明待澄清）"})
     if cur_status in ("completed", "cancelled"):
         return {"ok": True, "issue_id": issue_card_id, "status": cur_status, "changed": False}
 
@@ -1272,33 +1276,58 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
 _DEV_OPS_AGENTS = ("vod", "issue", "coding", "qa", "sre")
 
 
+def _scene_agent_allowlist(repo_key: str, scene_id: str) -> set:
+    """Issue #655: 场景动态 agent 允许集 —— issue 绑定场景的 nodes[].id 集合。
+
+    兜底（返回空集，仅原白名单生效）：scene_id 为空 / default（视为未绑定）、
+    场景解析失败（异常 / get_pipeline_config 未命中且 fallback）。
+    """
+    sid = (scene_id or "").strip()
+    if not sid or sid == "default":
+        return set()
+    try:
+        from src.api.pipeline_config import get_pipeline_config
+        cfg = get_pipeline_config(sid, repo_key=repo_key or "")
+        if not cfg or cfg.get("fallback"):
+            return set()
+        return {str((n or {}).get("id") or "").strip()
+                for n in cfg.get("nodes") or [] if (n or {}).get("id")}
+    except Exception as e:
+        log.warning(f"[issue-655] scene agent allowlist resolve failed scene={sid}: {e}")
+        return set()
+
+
 def _session_devops_issue(issue_id: int, user: dict) -> dict:
-    """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈devops；issue.repo_key==token.repo_key；返回 issue 行。"""
+    """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈(devops 白名单 ∪ issue 绑定场景节点集)（Issue #655）；
+    issue.repo_key==token.repo_key；返回 issue 行。"""
     from src.session_manager import db as _db, db_lock as _dl
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期）"})
-    _agent = user.get("agent_type") or ""
-    if _agent not in _DEV_OPS_AGENTS:
-        raise HTTPException(status_code=403, detail={"code": 403, "message": f"agent_type={_agent} 不在本接口范围（devops agent）"})
     _repo = user.get("repo_key") or ""
     if not _repo:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
     with _dl:
         c = _db.cursor()
-        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue WHERE id=?", (issue_id,))
+        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue WHERE id=?", (issue_id,))
         _r = c.fetchone()
     if not _r:
         raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
     from src.repo_key import to_repo_key
     if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+    _agent = user.get("agent_type") or ""
+    _allowed = set(_DEV_OPS_AGENTS) | _scene_agent_allowlist(_r[1] or "", _r[7] or "")
+    if _agent not in _allowed:
+        raise HTTPException(status_code=403, detail={
+            "code": 403,
+            "message": f"agent_type={_agent} 不在本接口范围（devops agent 或当前 issue 绑定场景节点）"})
     return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
-            "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or ""}
+            "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or "", "scene_id": _r[7] or ""}
 
 
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent 显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。Session-only (tk_)，repo 匹配，agent_type 为 devops agent。与 awaiting-input 对称（等用户双态）。")
+             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""
