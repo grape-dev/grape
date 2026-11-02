@@ -132,8 +132,16 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **dual**（三通道） |
 | Path | `{owner}` / `{repo}` / `{number}` 仓库 + Issue 编号 |
-| 出参 | `{...Issue 字段, events: Event[], pipeline: Pipeline}` |
-| 返回 | 200 成功；404 Issue 不存在；401 未认证 |
+| 出参 | `{...Issue 字段, events: Event[], pipeline: Pipeline, synced_by_fallback?}` |
+| 返回 | 200 成功；404 Issue 不存在（含语义区分，见下）；401 未认证 |
+
+> **404 语义区分与兜底解析（Issue #667）**：内部三表（issue/issue_state/events）未命中时，服务端按
+> `owner/repo + number` 调 VCS API 核实 Issue 存在性：存在 → 自动补建内部需求卡行并正常返回
+> （出参带 `synced_by_fallback: true`）；404 detail 含 `reason` 字段——
+> `reason=issue_not_found`（VCS 侧亦无此 Issue，可能已删除，属预期 404）与
+> `reason=internal_sync_missing`（VCS 无法核实且内部缺行，`suggestion` 提示稍后重试/检查 webhook 同步链路）。
+> Agent 侧降级指引：命中 `issue_not_found` 不再重试；命中 `internal_sync_missing` 可短暂重试一次，
+> 持续失败再走人工排查。
 
 > **`issue_id` 字段与两套 id 体系（Issue #569）**：出参含 `issue_id`（issue 表主键，**平台内部需求卡片 id**），
 > 可直接作 `awaiting-input` / `pending-review` / `review-pass` 等的 `--issue_id`（首选服务端注入的
@@ -369,9 +377,16 @@ Issue 对象字段：
 |----|-----|
 | scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT/`BOT_GITCODE_TOKEN` → 403） |
 | Path | `{issue_id}` int（需求卡片 id） |
-| Body | `{"questions": "...", "reason": "..."}` |
+| Body | `{"questions": "...", "reason": "...", "issue_number": 0?}` |
 | 出参 | `{"ok": true, "issue_id": 210, "status": "awaiting_input", "changed": true}` |
-| 返回 | 200；400 questions 缺失；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 需求不存在 |
+| 返回 | 200；400 questions 缺失；403 非会话 token / 仓库作用域不匹配 / 非 vod·issue agent；404 需求不存在（含语义区分，见下） |
+
+> **卡片缺行兜底（Issue #667）**：`{issue_id}` 无对应卡片行时，可在 Body 附 `issue_number`
+> （GitCode 侧编号，须落在会话 token 的仓库作用域内）——服务端按该编号复用既有卡行；
+> 无卡行则经 VCS 核实存在后自动补建（`ensure_issue_task`）再执行状态迁移。404 detail 的 `reason`：
+> `issue_not_found`（VCS 侧无此 Issue）/ `internal_card_missing`（卡片 id 与 issue_number 兜底均未命中，
+> `hint` 给出 `grape issues detail` 解析指引）。`GRAPE_ISSUE_ID` 注入侧同步修复：事件链路注入时发现
+> 卡片行缺失会先补建再注入，消除「同步时序未到 → 空 id」缺口。
 
 > 鉴权：会话 token 的 `(repo_key, agent_type)` 作用域——须与需求的 repo_key 一致且 `agent_type∈{vod,issue}`
 > （与 `tasks notify` 同源信任模型）。效果：`active/processing → awaiting_input` 原子迁移（`changed` 可观测）、

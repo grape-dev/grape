@@ -799,7 +799,21 @@ def _inject_issue_pr_env(env_extra: dict, evt: dict, repo_key: str) -> None:
     if _issue_num.isdigit():
         env_extra["ISSUE_NUMBER"] = _issue_num
         # 需求卡片 id（issue 表主键）：awaiting-input 等 --issue_id 用（≠ ISSUE_NUMBER）
-        env_extra["GRAPE_ISSUE_ID"] = resolve_issue_card_id(repo_key, _issue_num)
+        # Issue #667：解析为空（run_pipeline step 3.2 被提前 return / 旁路失败未落行）时，
+        # 先 ensure_issue_task 补建行再重解析——事件本身即 Issue 存在性证据，无需额外 VCS 校验。
+        _card_id = resolve_issue_card_id(repo_key, _issue_num)
+        if not _card_id:
+            try:
+                from src.api.issues_center import ensure_issue_task
+                _oa = (evt.get("payload", {}) or {}).get("object_attributes", {})
+                _t = str(evt.get("title", "") or (isinstance(_oa, dict) and _oa.get("title", "") or "") or "")
+                ensure_issue_task(repo_key, int(_issue_num), title=_t, event_type=evt.get("event_type", ""))
+                _card_id = resolve_issue_card_id(repo_key, _issue_num)
+                if _card_id:
+                    log.info(f"Pipeline env: issue #{_issue_num} card row missing, backfilled id={_card_id} (Issue #667)")
+            except Exception as _e:
+                log.warning(f"Pipeline env: backfill issue card #{_issue_num} failed: {_e}")
+        env_extra["GRAPE_ISSUE_ID"] = _card_id
     elif _issue_num:
         log.info(f"Pipeline env: non-numeric issue_id '{_issue_num}', skip ISSUE_NUMBER/GRAPE_ISSUE_ID injection (Issue #528)")
     _payload = evt.get("payload", {}) or {}
@@ -2973,6 +2987,50 @@ def _fetch_issue_title_via_api(repo_key: str, issue_id: str) -> str:
         return d.get("title", "") or ""
     except Exception:
         return ""
+
+
+def fetch_issue_via_vcs(repo_key: str, issue_number) -> tuple:
+    """Issue #667：按 repo_key + issue_number 调 VCS API 核实 Issue 存在性并取详情。
+
+    返回 (state, data)：
+    - ("exists", {issue dict})：VCS 侧存在（data 至少含 title，可能为空标题）
+    - ("missing", {})：VCS 侧明确 404（Issue 已删除/不存在）
+    - ("unknown", {})：无法核实（无 token / 网络异常 / 非法编号），调用方按降级语义处理
+    """
+    num = _issue_num_from(str(issue_number or ""))
+    if not num:
+        return ("unknown", {})
+    import urllib.error
+    from src.repo_key import to_repo_key, split_owner_repo
+    _rk = to_repo_key(repo_key)
+    owner, rname = split_owner_repo(_rk)
+    if not owner or not rname:
+        return ("unknown", {})
+    try:
+        if _is_github_repo(_rk):
+            from src.user.db import get_github_token
+            tok = get_github_token(repo_key=_rk) or ""
+            if not tok:
+                return ("unknown", {})
+            d = _github_fetch_issue(owner, rname, num, tok)
+            return ("exists", d if isinstance(d, dict) else {})
+        import urllib.request
+        import json as _json
+        from src.user.db import get_repo_token_with_refresh
+        tok = get_repo_token_with_refresh(_rk) or ""
+        if not tok:
+            return ("unknown", {})
+        req = urllib.request.Request(
+            f"https://gitcode.com/api/v5/repos/{owner}/{rname}/issues/{num}",
+            headers={"Authorization": "Bearer " + tok, "User-Agent": "Mozilla/5.0"})
+        d = _json.load(urllib.request.urlopen(req, timeout=15))
+        return ("exists", d if isinstance(d, dict) else {})
+    except urllib.error.HTTPError as _he:
+        if int(_he.code) == 404:
+            return ("missing", {})
+        return ("unknown", {})
+    except Exception:
+        return ("unknown", {})
 
 
 def _parse_parent_issue_from_payload(payload: dict) -> str:

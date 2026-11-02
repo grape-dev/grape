@@ -53,6 +53,48 @@ def _enforce_session_repo_scope(user: dict, repo_keys: list[str]):
                 detail={"code": 403, "message": "会话 token 无权访问该仓库事件"})
 
 
+def _detail_404(reason: str, number) -> HTTPException:
+    """Issue #667：detail 404 语义区分——「Issue 不存在（VCS 侧亦无）」vs「需求不存在（内部缺行）」。"""
+    if reason == "issue_not_found":
+        return HTTPException(status_code=404, detail={
+            "code": 404, "reason": "issue_not_found",
+            "message": f"Issue #{number} 不存在（GitCode 侧无此 Issue，可能已删除或编号有误）",
+            "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"})
+    return HTTPException(status_code=404, detail={
+        "code": 404, "reason": "internal_sync_missing",
+        "message": f"需求不存在：VCS 侧 Issue #{number} 存在性无法核实且内部需求库缺行（同步未落或时序未到）",
+        "suggestion": "稍后重试（webhook 同步到位后自动恢复）；持续失败请检查仓库 token 与 webhook 同步链路"})
+
+
+def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
+    """Issue #667 兜底解析：内部三表未命中时按 VCS 核实并自动补建 issue 行。
+
+    返回：
+    - "exists"：已补建（或已存在）内部行，调用方重读聚合后正常返回
+    - "missing"：VCS 侧明确 404（Issue 不存在）
+    - "unknown"：VCS 无法核实（token 缺失/网络异常），调用方按降级语义 404
+    """
+    num = str(number)
+    from src.api.event_pipeline import fetch_issue_via_vcs
+    for rk in repo_keys:
+        try:
+            state, data = fetch_issue_via_vcs(rk, num)
+        except Exception:
+            state, data = "unknown", {}
+        if state == "exists":
+            try:
+                from src.api.issues_center import ensure_issue_task
+                ensure_issue_task(rk, int(num), title=str((data or {}).get("title", "") or ""),
+                                  event_type="issue_opened")
+                return "exists"
+            except Exception as e:
+                log.warning(f"issues: fallback ensure_issue_task failed repo={rk} #{num}: {e}")
+                return "unknown"
+        if state == "missing":
+            return "missing"
+    return "unknown"
+
+
 def _query_pr_subscription_events(repo_keys: list[str]) -> list[dict]:
     """查 PR 订阅事件（issue_id LIKE '#pr_%'），按 PR 号聚合为伪卡片。"""
     from src.session_manager import db, db_lock
@@ -1195,8 +1237,43 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                   (issue_id,))
         irow = c.fetchone()
     if not irow:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在",
-                                                       "hint": "awaiting-input 需传需求卡片 id（GRAPE_ISSUE_ID，issue 表主键），非 Issue number；可先 grape issues detail --number $ISSUE_NUMBER --json-out 取 id"})
+        # Issue #667：卡片 id 无行 → 支持按 (会话仓库作用域, body.issue_number) 兜底解析：
+        # 行已存在则复用；VCS 侧存在则 ensure_issue_task 自动补建（缺行同步缺口自动修复）。
+        _fb_num = int(getattr(body, "issue_number", 0) or 0)
+        if _fb_num > 0:
+            from src.repo_key import to_repo_key as _trk
+            _fb_repo = _trk(session_repo)
+            with _dl:
+                c = _db.cursor()
+                c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue "
+                          "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
+                          (_fb_repo, _fb_num))
+                irow = c.fetchone()
+            if not irow:
+                from src.api.event_pipeline import fetch_issue_via_vcs
+                _st, _data = fetch_issue_via_vcs(_fb_repo, str(_fb_num))
+                if _st == "exists":
+                    from src.api.issues_center import ensure_issue_task
+                    _fb_id = ensure_issue_task(_fb_repo, _fb_num,
+                                               title=str((_data or {}).get("title", "") or ""),
+                                               event_type="issue_opened")
+                    with _dl:
+                        c = _db.cursor()
+                        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue "
+                                  "WHERE id=?", (_fb_id,))
+                        irow = c.fetchone()
+                elif _st == "missing":
+                    raise HTTPException(status_code=404, detail={
+                        "code": 404, "reason": "issue_not_found",
+                        "message": f"Issue #{_fb_num} 不存在（GitCode 侧无此 Issue，可能已删除）",
+                        "suggestion": "确认 Issue 编号；已删除的 Issue 属预期 404"})
+        if not irow:
+            raise HTTPException(status_code=404, detail={
+                "code": 404, "reason": "internal_card_missing",
+                "message": "需求不存在：内部需求库无该卡片行（同步未落或时序未到，且未能按 issue_number 兜底）",
+                "hint": "awaiting-input 需传需求卡片 id（GRAPE_ISSUE_ID，issue 表主键），非 Issue number；"
+                        "可先 grape issues detail --number $ISSUE_NUMBER --json-out 取 id；"
+                        "卡片缺行时可在 body 附 issue_number（GitCode 侧编号）触发兜底补建（Issue #667）"})
     issue_card_id, repo_key, issue_number = irow[0], irow[1] or "", irow[2] or 0
     assignee, issue_user_id, title, cur_status = irow[3] or "", irow[4] or 0, irow[5] or "", irow[6] or ""
     from src.repo_key import to_repo_key
@@ -1820,8 +1897,18 @@ def get_issue_detail(owner: str, repo: str, number: int,
     status_map = _task_status_map(repo_keys)
     group_map = _group_events_by_issue(repo_keys)
     title_map = _issue_title_map(repo_keys)
+    _fallback_synced = False
     if num not in stage_map and num not in status_map and num not in group_map:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": f"Issue #{number} 不存在"})
+        # Issue #667：三表未命中 → VCS 兜底核实并自动补建内部行（存在）/
+        # 语义区分 404（不存在 vs 内部缺行且无法核实）
+        _state = _sync_missing_issue_row(repo_keys, number)
+        if _state != "exists":
+            raise _detail_404("issue_not_found" if _state == "missing" else "internal_sync_missing", number)
+        stage_map = _issue_stage_map(repo_keys)
+        status_map = _task_status_map(repo_keys)
+        group_map = _group_events_by_issue(repo_keys)
+        title_map = _issue_title_map(repo_keys)
+        _fallback_synced = True
     base = _assemble_issue(repo_keys[0], num, stage_map, status_map, group_map, title_map)
     events = group_map.get(num) or []
     # Issue #600：events 优先（与 /pipeline 端点同口径），archive 兜底。
@@ -1837,7 +1924,10 @@ def get_issue_detail(owner: str, repo: str, number: int,
     enrich_pipeline_business_status(
         pipeline, _biz_stage, _biz_status,
         load_segment_task_refs(repo_keys, _pipeline_segment_seqs(pipeline)))
-    return {**base, "events": events, "pipeline": pipeline}
+    out = {**base, "events": events, "pipeline": pipeline}
+    if _fallback_synced:
+        out["synced_by_fallback"] = True
+    return out
 
 
 @router.get("/{owner}/{repo}/{number}/events", operation_id="issues_events", summary="Issue events list (with structured output)", description="Event list of an issue (seq asc), each with structured output/logs when present. `number` accepts `5` or `#5`.")

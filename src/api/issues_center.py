@@ -44,6 +44,9 @@ class TaskNotifyBody(BaseModel):
 class TaskAwaitingInputBody(BaseModel):
     questions: str = ""
     reason: str = ""
+    # Issue #667：卡片 id 缺行时的兜底解析——GitCode 侧 Issue number（会话仓库作用域内），
+    # 服务端据此复用/补建内部需求卡行，避免同步缺口导致 404 阻断澄清流程。
+    issue_number: int = 0
 
 
 class TaskPendingReviewBody(BaseModel):
