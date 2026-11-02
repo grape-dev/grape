@@ -293,14 +293,16 @@ class TestDockerfileFix:
 
     def test_dockerfile_has_auto_detect_url(self):
         """Dockerfile 设置 GRAPE_AUTO_DETECT_URL=false"""
-        path = os.path.join(_PROJECT_ROOT, "Dockerfile")
+        # Issue #699 Phase 0: Dockerfile moved to deploy/
+        path = os.path.join(_PROJECT_ROOT, "deploy", "Dockerfile")
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
         assert "GRAPE_AUTO_DETECT_URL" in content, "Dockerfile 应设置 GRAPE_AUTO_DETECT_URL=false"
 
     def test_dockerfile_python_version(self):
         """Dockerfile 使用 Python 3.12（非过新的 3.14）"""
-        path = os.path.join(_PROJECT_ROOT, "Dockerfile")
+        # Issue #699 Phase 0: Dockerfile moved to deploy/
+        path = os.path.join(_PROJECT_ROOT, "deploy", "Dockerfile")
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
         assert "python:3.12" in content, "Dockerfile 应使用 Python 3.12"
@@ -342,4 +344,4 @@ class TestReadmeCrossPlatform:
         path = os.path.join(_PROJECT_ROOT, "README.md")
         with open(path, "r", encoding="utf-8") as f:
             content = f.read()
-        assert "3.9" in content, "README 应标注 Python 3.9 版本要求"
+        assert "3.10" in content, "README 应标注 Python 3.10 版本要求"
