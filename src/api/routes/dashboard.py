@@ -552,12 +552,12 @@ def get_ops_overview(repo: str = "", user: dict = Depends(require_org_member)):
                         "error": rprobe_error or "",
                     }
                 # 本机直连引擎的 device_name 用 host_name（区分多台主控机）
-                # 远端引擎优先用户自定义凭据名 rc.name（与 Agent 运行时页 Workers 卡片一致），
-                # 为空回退边端自报 device_name（Issue #465，避免存量空名出现空列）
+                # 远端引擎 device_name = 凭据自定义名 rc.name 唯一来源（Issue #701 收口）：
+                # 为空下发空值，前端统一占位「未命名设备」，不回退边端自报 device_name
                 if (cid or 0) == 0:
                     _dev_name = rhost or "本机直连"
                 else:
-                    _dev_name = rc_name or rdev or ""
+                    _dev_name = (rc_name or "").strip()
                 from src.runtime.instances import to_display as _td
                 runtime_list.append({
                     "id": rid, "name": _td(rname or ""), "status": rstatus or "offline",
