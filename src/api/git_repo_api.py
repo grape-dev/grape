@@ -512,7 +512,7 @@ def get_issue(owner: str, repo: str, number: int, user: dict = Depends(get_curre
     return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p), _repo_token(owner, repo, user, p))
 
 
-@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body).")
+@router.patch("/{owner}/{repo}/issues/{number}", operation_id="gitrepo_issues_update", summary="Update issue", description="Updates an issue (labels/assignee/milestone/state/body). GitCode: milestone_id maps to upstream `milestone` (number); PATCH auto-fills required repo/title; milestone changes are read-back verified and echoed, or 502 if the milestone was not applied.")
 def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
                  user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 §30: body 字段追加 grape-auto-comment 标记（与 create_issue_comment 一致）
@@ -529,6 +529,22 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
         "body": _body,
     }
     payload = translate_inbound(p, "issues", "update", neutral, {"owner_repo": f"{owner}/{repo}"})
+    _want_milestone = bool(body.milestone_id)
+    # Issue #640：GitCode PATCH /repos/{owner}/issues/{number} body 必填 repo+title（路径不含 repo 维度
+    # 的必填语义），仅传元数据字段（如 milestone_id）会被上游 400 拒绝 —— 复用 close_issue 已验证模式：
+    # 服务端自动补 repo，title 缺失时先 GET 回取当前值回填，调用方无感
+    if p == "gitcode":
+        payload.setdefault("repo", f"{owner}/{repo}")
+        if "title" not in payload:
+            try:
+                _info = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                                 _repo_token(owner, repo, user, p))
+                payload["title"] = str(_info.get("title") or "") if isinstance(_info, dict) else ""
+            except HTTPException:
+                raise
+            except Exception as _e:
+                log.warning(f"gitcode title backfill (update_issue #{number}) failed: {_e}")
+                payload["title"] = ""
     resp = _vcs_req(p, "PATCH", _vcs_url(owner, repo, f"/issues/{number}", None, p),
                     _repo_token(owner, repo, user, p), payload)
     # Issue #453 代发台账（S14 编辑回声）：代编辑正文无 comment_id，按 (repo+指纹) 记账；
@@ -544,6 +560,27 @@ def update_issue(owner: str, repo: str, number: int, body: IssueUpdateBody,
             record_outbound(p, _rk, "issue_meta", str(number), issue_number=str(number))
     except Exception as _e:
         log.warning(f"outbound_ledger record (update_issue) failed: {_e}")
+    # Issue #640：milestone 写后回读校验（上游有静默忽略先例，PATCH 响应 200 不可信）。
+    # 仅当请求含 milestone_id 且 provider=gitcode 时执行一次 GET 回读：
+    #   - 未落库 → 返回明确 502 结构化错误（不再是 200 假成功）
+    #   - 已落库 → 响应回显 milestone（上游 PATCH 响应可能不回显，以回读值为准）
+    if p == "gitcode" and _want_milestone and isinstance(resp, dict) and "error" not in resp:
+        try:
+            _after = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, p),
+                              _repo_token(owner, repo, user, p))
+            _ms = _after.get("milestone") if isinstance(_after, dict) else None
+            if not _ms:
+                raise HTTPException(status_code=502, detail={
+                    "code": 502,
+                    "message": f"milestone_id={body.milestone_id} 未生效：上游 PATCH 返回 200 但回读校验 "
+                               f"milestone 仍为空（里程碑 number 可能无效或上游不支持），"
+                               f"请用 milestones list 核对里程碑 number 后重试"})
+            resp = dict(resp)
+            resp["milestone"] = _ms
+        except HTTPException:
+            raise
+        except Exception as _e:
+            log.warning(f"milestone readback verify (update_issue #{number}) failed: {_e}")
     return resp
 
 

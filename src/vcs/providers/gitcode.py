@@ -40,7 +40,9 @@ _RULES = {
     ("issues", "update"): {
         "labels": "labels",
         "assignee": "assignee",
-        "milestone_id": "milestone_id",
+        # Issue #640: 上游 PATCH /repos/{owner}/issues/{number} 里程碑参数名为 milestone（int），
+        # 不存在 milestone_id —— 同名直传会被静默忽略（200 假成功）
+        "milestone_id": "milestone",
         "state": {"native": "state", "values": _UPDATE_STATE},
         "body": "body",
     },

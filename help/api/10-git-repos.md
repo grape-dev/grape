@@ -253,11 +253,18 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 |------|------|------|
 | `labels` | string/array | 标签 |
 | `assignee` | string | 责任人 |
-| `milestone_id` | int | 里程碑 id |
+| `milestone_id` | int | 里程碑 number（GitCode 下游映射为上游 `milestone` 参数，#640） |
 | `state` | string | Issue 状态迁移（对齐 GitHub `state_event`）：仅接受 `"reopen"` / `"close"`，其他取值后端返回 400 |
 | `body` | string | Issue 正文（空值忽略，不影响其他字段） |
 
-**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
+**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/502。
+
+> **里程碑（#640）**：
+> - GitCode：`milestone_id` 服务端映射为上游 `milestone`（int，取 `milestones list` 的 number）；PATCH 必填
+>   `repo`+`title` 由服务端自动补齐（title 缺失时 GET 回取），**仅传 `milestone_id` 也不会被上游 400 拒绝**。
+> - 写后回读校验：PATCH 返回 200 但回读 `milestone` 为空 → 返回 **502**（明确错误，不再是假成功）；
+>   成功时响应回显 `milestone`（`issues get` 同样回显上游 milestone 字段）。
+> - GitHub：`milestone_id` 语义不变（透传上游同名参数）。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
