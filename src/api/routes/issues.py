@@ -1527,40 +1527,44 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
         c = _db.cursor()
         c.execute(f"SELECT {_cols} FROM issue WHERE id=?", (issue_id,))
         _r = c.fetchone()
-    # Issue #672 兜底一：会话仓库作用域内按 issue_number 二次解析（id 撞号/主键 miss 或 scope 不匹配）
-    _fb = None
-    with _dl:
-        c = _db.cursor()
-        c.execute(f"SELECT {_cols} FROM issue WHERE repo_key=? AND issue_number=?",
-                  (to_repo_key(_repo), issue_id))
-        _fb = c.fetchone()
-    if not _fb:
-        # Issue #672 兜底二：远端存在但本地未建档（eduSwarm 类存量缺行）→ 建最小行后回读
-        _p, _o, _n = parse_repo_key(_repo)
-        _vcs = _vcs_issue_lookup(_o, _n, issue_id, user) if (_o and _n) else None
-        if _vcs:
-            _title = ((_vcs.get("issue") or {}).get("title") or f"Issue #{issue_id}")
-            try:
-                from src.api.session_store import _sync_issue_fields
-                _sync_issue_fields(to_repo_key(_repo), str(issue_id),
-                                   {"title": _title}, ensure_row=True)
-                with _dl:
-                    c = _db.cursor()
-                    c.execute(f"SELECT {_cols} FROM issue WHERE repo_key=? AND issue_number=?",
-                              (to_repo_key(_repo), issue_id))
-                    _fb = c.fetchone()
-            except Exception as e:
-                log.warning(f"Issue #672 ensure row failed {to_repo_key(_repo)}#{issue_id}: {e}")
-    if _fb:
-        log.info(f"Issue #672 dual-path resolve: issue_id={issue_id} -> number row "
-                 f"{to_repo_key(_repo)}#{_fb[2]} (id={_fb[0]})")
-        _row = _fb
-    elif _r and (not _r[1] or to_repo_key(_r[1]) == to_repo_key(_repo)):
+    # 主键命中且会话作用域匹配 → 权威行，不再走 number 兜底（Issue #725：防内部卡片 id 与
+    # 同仓 issue_number 撞号时被 number 兜底错误覆盖，重复调用解析到错误卡片）
+    if _r and (not _r[1] or to_repo_key(_r[1]) == to_repo_key(_repo)):
         _row = _r
     else:
-        if not _r:
+        # Issue #672 兜底一：主键 miss（404）或 scope 不匹配（403，GitCode number 撞上其它仓库
+        # 的内部 id）时，把 issue_id 视作 GitCode number 在会话仓库作用域内二次解析
+        _fb = None
+        with _dl:
+            c = _db.cursor()
+            c.execute(f"SELECT {_cols} FROM issue WHERE repo_key=? AND issue_number=?",
+                      (to_repo_key(_repo), issue_id))
+            _fb = c.fetchone()
+        if not _fb:
+            # Issue #672 兜底二：远端存在但本地未建档（eduSwarm 类存量缺行）→ 建最小行后回读
+            _p, _o, _n = parse_repo_key(_repo)
+            _vcs = _vcs_issue_lookup(_o, _n, issue_id, user) if (_o and _n) else None
+            if _vcs:
+                _title = ((_vcs.get("issue") or {}).get("title") or f"Issue #{issue_id}")
+                try:
+                    from src.api.session_store import _sync_issue_fields
+                    _sync_issue_fields(to_repo_key(_repo), str(issue_id),
+                                       {"title": _title}, ensure_row=True)
+                    with _dl:
+                        c = _db.cursor()
+                        c.execute(f"SELECT {_cols} FROM issue WHERE repo_key=? AND issue_number=?",
+                                  (to_repo_key(_repo), issue_id))
+                        _fb = c.fetchone()
+                except Exception as e:
+                    log.warning(f"Issue #672 ensure row failed {to_repo_key(_repo)}#{issue_id}: {e}")
+        if _fb:
+            log.info(f"Issue #672 dual-path resolve: issue_id={issue_id} -> number row "
+                     f"{to_repo_key(_repo)}#{_fb[2]} (id={_fb[0]})")
+            _row = _fb
+        elif not _r:
             raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-        raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+        else:
+            raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
     # Issue #655：agent_type ∈ devops 白名单 ∪ issue 绑定场景节点集
     _agent = user.get("agent_type") or ""
     _allowed = set(_DEV_OPS_AGENTS) | _scene_agent_allowlist(_row[1] or "", _row[7] or "")
@@ -1574,7 +1578,7 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
 
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
+              description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""

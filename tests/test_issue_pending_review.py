@@ -161,6 +161,7 @@ class TestPendingReview:
         cid = _seed(status="pending_review")
         r = client.post(f"/api/issues/{cid}/pending-review",
                         headers=_session_headers(agent_type="qa"), json={"review_points": "x"})
+        assert r.status_code == 200
         assert r.json()["changed"] is False
 
     def test_duplicate_pending_review_idempotent_200(self):
@@ -202,6 +203,27 @@ class TestPendingReview:
         data = r.json()
         assert data["changed"] is True and data["idempotent"] is False
         assert _status(issue_number=27)[0] == "pending_review"
+
+    def test_card_id_collision_resolves_primary_row(self):
+        """Issue #725：内部卡片 id 与同仓 issue_number 撞号时，主键命中优先于 #672 number 兜底。
+
+        构造：行 A（number=71，processing，内部主键 R）；行 B（number=R，completed）。
+        以 issue_id=R 调用 → 主键命中行 A（作用域匹配）为权威（changed=true），
+        若 number 兜底错误抢占则解析到行 B（completed → idempotent=true 短路）。
+        """
+        cid = _seed(status="processing", issue_number=71)          # 行 A：内部主键 R
+        _seed(status="completed", issue_number=cid)                # 行 B：number 撞 R
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"),
+                            json={"review_points": "撞号场景"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["issue_id"] == cid
+        assert data["changed"] is True and data["idempotent"] is False
+        assert data["status"] == "pending_review"
+        assert _status(issue_number=71)[0] == "pending_review"     # 行 A 被迁移
+        assert _status(issue_number=cid)[0] == "completed"         # 行 B 不受影响
 
     def test_review_pass_processing(self):
         cid = _seed(status="pending_review")
