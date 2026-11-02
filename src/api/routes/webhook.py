@@ -1433,8 +1433,10 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 from src.api.session_store import get_issue_scene
                 _a2a_scene, _a2a_scene_uid = get_issue_scene(repo_key, f"#{issue_number}")
                 _a2a_scene = _a2a_scene or "default"
-            except Exception:
-                pass
+            except Exception as _se653:
+                # Issue #653：场景解析失败曾是静默回退「default」的旁路（节点查不到 → 全局池），必须留痕
+                log.warning(f"A2A: get_issue_scene failed for repo={repo_key} "
+                            f"issue=#{issue_number}: {_se653}")
         engine_id = pick_engine(repo_key, agent_name, fallback_runtime_id=runtime_id or 0,
                                 scene_id=_a2a_scene, user_id=_a2a_scene_uid)
         if engine_id is None:

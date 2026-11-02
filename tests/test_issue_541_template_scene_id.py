@@ -211,13 +211,14 @@ class TestDispatchFailureReason:
             _cleanup(repo_key, [scene_id], [])
 
     def test_reason_all_offline(self):
-        """场景绑定了引擎（但池判定全灭）→ 报「全部离线」。"""
+        """场景绑定了不存在的引擎 id → Issue #653 起报「已注销或不存在」（原笼统报全部离线）。"""
         from src.runtime.engine_select import scene_dispatch_failure_reason
         repo_key = f"gitcode:test541/{_unique_repo()}"
         scene_id = self._scene_with_sre_node(repo_key, [987654])
         try:
             reason = scene_dispatch_failure_reason(scene_id, "sre", repo_key=repo_key)
-            assert "全部离线" in reason, reason
+            assert "已注销或不存在" in reason, reason
+            assert "987654" in reason, reason
             assert "未绑定引擎" not in reason
         finally:
             _cleanup(repo_key, [scene_id], [])

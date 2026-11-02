@@ -2276,8 +2276,10 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             from src.api.session_store import get_issue_scene
             _issue_scene, _issue_scene_uid = get_issue_scene(repo_key, _early_issue_id)
             _issue_scene = _issue_scene or ""   # 方案 B：无「default」场景，空=无场景
-        except Exception:
-            pass
+        except Exception as _se653:
+            # Issue #653：场景解析失败曾是静默路径（节点查不到 → 派发回退全局池），必须留痕
+            log.warning(f"Pipeline: get_issue_scene failed for repo={repo_key} "
+                        f"issue={_early_issue_id}: {_se653}")
     # scene_user_id=0 时兜底反查（旧数据 is_join=0 导致 scene_user_id 未写入）
     # 优先用 issue 创建者（actor）查 unified_user_mapping，避免多人仓库取错用户
     if not _issue_scene_uid:

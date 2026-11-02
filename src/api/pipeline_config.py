@@ -811,12 +811,55 @@ def _query_official_scene_ids() -> set[str]:
             return set()
 
 
+def get_scene_engine_binding(scene_id: str, agent_type: str, repo_key: str = "",
+                             user_id: int = 0) -> dict:
+    """Issue #653：解析场景节点的 engine_runtime_ids 绑定状态（空值语义单点收口）。
+
+    返回 {"status": <状态>, "engine_ids": [...]}，status 四态：
+    - "no_scene"：场景配置整体不存在（查询失败 / 未创建）
+    - "no_node" ：场景存在但无该 agent 节点
+    - "unbound" ：节点存在但 engine_runtime_ids 为空（未配置 → 保持全量广播）
+    - "bound"  ：节点显式配置了非空 engine_runtime_ids（派发硬约束）
+
+    此前 get_scene_engine_ids 对「节点不存在/查询失败」与「未配置」均返回 []，
+    派发侧无法区分，已配置节点解析落空时被静默当作未配置回退全局池（#653 根因）。
+    """
+    try:
+        cfg = get_pipeline_config(scene_id, repo_key=repo_key)
+    except Exception as e:
+        log.warning(f"get_scene_engine_binding: scene query failed: {e}")
+        return {"status": "no_scene", "engine_ids": []}
+    if not cfg:
+        return {"status": "no_scene", "engine_ids": []}
+    # pipelines.json default 兜底（fallback=True）：请求的 scene_id 未解析到真实场景
+    # → 视为 no_scene（Issue #653：不得把兜底 default 节点当作真实绑定语义）
+    if cfg.get("fallback"):
+        return {"status": "no_scene", "engine_ids": []}
+    node = None
+    for n in cfg.get("nodes") or []:
+        if n.get("tag") == agent_type:
+            node = n
+            break
+    if node is None:
+        return {"status": "no_node", "engine_ids": []}
+    ids = node.get("engine_runtime_ids") or []
+    if not ids:
+        return {"status": "unbound", "engine_ids": []}
+    out_ids = []
+    for _x in ids:
+        try:
+            _xi = int(_x)
+        except (TypeError, ValueError):
+            continue
+        if _xi:
+            out_ids.append(_xi)
+    return {"status": "bound", "engine_ids": out_ids}
+
+
 def get_scene_engine_ids(scene_id: str, agent_type: str, repo_key: str = "", user_id: int = 0) -> list[int]:
     """Get engine_runtime_ids from a scene's node for a specific agent_type.
 
     Returns empty list if no scene found, node not found, or node has no engine binding.
+    （Issue #653：需要区分空值语义时请改用 get_scene_engine_binding。）
     """
-    node = get_node_by_tag(scene_id, agent_type, repo_key=repo_key)
-    if not node:
-        return []
-    return node.get("engine_runtime_ids", []) or []
+    return get_scene_engine_binding(scene_id, agent_type, repo_key=repo_key, user_id=user_id)["engine_ids"]

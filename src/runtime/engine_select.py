@@ -34,6 +34,11 @@ _DEFAULT_CFG = {
     "rule": "order",
     "filters": {"only_online": True, "only_healthy": True, "only_installed": True},
     "local_priority": _PRIO_LOCAL,
+    # Issue #653：场景节点 engine_runtime_ids 空值语义严格模式（默认开启）。
+    # True  = 「已配置但解析为空/全部不可达/查询异常」显式报错（None，不入队），
+    #         绝不静默回退全局池；未配置节点仍全量广播（行为不变）。
+    # False = 兼容旧语义：解析落空回退全量广播，但必须打告警日志（可审计）。
+    "strict_scene_engines": True,
 }
 
 
@@ -675,10 +680,18 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
     SRE 专属（sre-repo-worker-relax §1.1）：只保留 user/repo 两档引擎；
     场景没配 SRE 引擎 → None（空 = 无引擎，不广播，调用方报错）。
 
+    Issue #653（空值语义单点收口 + 严格模式开关，默认严格）：
+    通过 get_scene_engine_binding 区分节点绑定四态（no_scene/no_node/unbound/bound）：
+    - bound（已配置）：候选解析为空（引擎行不存在/被删）或全部不健康 → None（显式报错，
+      绝不回退全局池）；strict_scene_engines=False 时回退 ""（广播）但打告警日志。
+    - unbound / no_node（未配置）：非 SRE → ""（全量广播，存量行为不变）。
+    - 场景查询异常：严格模式 fail-closed → None；关闭时 ""（广播）+ 告警。
+
     返回值（三方语义，调用方必须用 is None 显式区分 None 与 ""）：
     - JSON 字符串：场景配了引擎且有健康的 → 限定名单（仅健康引擎）
-    - ""：场景没配引擎 / node 不存在 / 场景查询失败 → 全量广播（原行为不变，SRE 除外）
-    - None：场景配了引擎但全部不健康 → 全灭，调用方不入队并明确报错（Issue #259 方案A）
+    - ""：场景没配引擎 / node 不存在（原行为不变，SRE 除外）
+    - None：场景配了引擎但全部不健康 / 解析为空 / 查询异常（严格模式）→ 全灭，
+      调用方不入队并明确报错（Issue #259 方案A / #653）
     """
     import json
     if not user_id:
@@ -697,45 +710,67 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                         return None
             except Exception as _e541:
                 log.warning(f"get_scene_pool_engine_ids: repo existence check failed: {_e541}")
+        # Issue #653：严格模式开关（engine-selection.json strict_scene_engines，默认 True）
+        _strict_653 = bool(load_engine_selection().get("strict_scene_engines", True))
         try:
-            from src.api.pipeline_config import get_scene_engine_ids
-            ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
-            # SRE 空 = 无引擎：不广播，直接全灭语义（Q2 裁定，区别于其他 agent 的 "" 广播）
-            if _sre_no_broadcast(agent_type) and not ids:
+            from src.api.pipeline_config import get_scene_engine_binding
+            _binding_653 = get_scene_engine_binding(scene_id, agent_type, repo_key=repo_key, user_id=user_id)
+            ids = _binding_653.get("engine_ids") or []
+        except Exception as e:
+            # 场景查询异常：严格模式 fail-closed（宁失败不跑飞，#253 语义）；关闭时维持广播
+            log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
+            if _strict_653:
+                _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
+                              scene_id=scene_id, bound_engine_ids=[], healthy_ids=[],
+                              result="query_failed_strict")
                 return None
-            if ids:
-                # Issue #259：写入 pool 前按健康过滤（与 legacy pick_engine 的 _health_ok 同一把尺子）
-                members = dedupe_engines(_engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection()))
-                # SRE 派发层约束（Q3 裁定）：只允许 user/repo 档（配置后引擎 scope 被改也不放行 global）
-                if _sre_no_broadcast(agent_type):
-                    _before = len(members)
-                    members = [m for m in members if m.get("scope") in ("user", "repo")]
-                    if len(members) < _before:
-                        log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
-                # Issue #605：广播名单过滤留痕——每个被过滤引擎的 rid/name 与原因（stale 心跳/离线等）
-                _dropped = []
-                for m in members:
-                    if not _health_ok(m):
-                        if (m.get("status") or "") != "online":
-                            _why = f"status={m.get('status') or 'offline'}"
-                        else:
-                            _why = f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s"
-                        _dropped.append({"rid": m.get("runtime_id"), "name": m.get("name") or "", "reason": _why})
-                healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
-                if healthy_ids:
-                    _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
-                                  scene_id=scene_id, bound_engine_ids=ids,
-                                  healthy_ids=healthy_ids, dropped=_dropped,
-                                  result="healthy_pool")
-                    return json.dumps(healthy_ids)
-                # 配了引擎但全灭 → None（方案A：调用方报错，不放开广播）
+            return ""
+        # SRE 空 = 无引擎：不广播，直接全灭语义（Q2 裁定，区别于其他 agent 的 "" 广播）
+        if _sre_no_broadcast(agent_type) and not ids:
+            return None
+        if ids:
+            # Issue #653：bound（已配置）→ 硬约束，空候选绝不让路给全量广播
+            # Issue #259：写入 pool 前按健康过滤（与 legacy pick_engine 的 _health_ok 同一把尺子）
+            members = dedupe_engines(_engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection()))
+            if not members:
+                # 配置的引擎在 agent_runtimes 已不存在（被删/revoke）→ 空候选
+                if not _strict_653:
+                    log.warning(f"get_scene_pool_engine_ids: scene={scene_id} agent={agent_type} "
+                                f"bound engines {ids} missing in agent_runtimes, fallback to broadcast "
+                                f"(strict_scene_engines=off, Issue #653)")
+                    return ""
+                _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
+                              scene_id=scene_id, bound_engine_ids=ids, healthy_ids=[],
+                              result="bound_engines_missing")
+                return None
+            # SRE 派发层约束（Q3 裁定）：只允许 user/repo 档（配置后引擎 scope 被改也不放行 global）
+            if _sre_no_broadcast(agent_type):
+                _before = len(members)
+                members = [m for m in members if m.get("scope") in ("user", "repo")]
+                if len(members) < _before:
+                    log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
+            # Issue #605：广播名单过滤留痕——每个被过滤引擎的 rid/name 与原因（stale 心跳/离线等）
+            _dropped = []
+            for m in members:
+                if not _health_ok(m):
+                    if (m.get("status") or "") != "online":
+                        _why = f"status={m.get('status') or 'offline'}"
+                    else:
+                        _why = f"stale_heartbeat>{_RUNTIME_STALE_SECONDS}s"
+                    _dropped.append({"rid": m.get("runtime_id"), "name": m.get("name") or "", "reason": _why})
+            healthy_ids = [m["runtime_id"] for m in members if _health_ok(m)]
+            if healthy_ids:
                 _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
                               scene_id=scene_id, bound_engine_ids=ids,
-                              healthy_ids=[], dropped=_dropped,
-                              result="all_offline")
-                return None
-        except Exception as e:
-            log.warning(f"get_scene_pool_engine_ids: scene query failed: {e}")
+                              healthy_ids=healthy_ids, dropped=_dropped,
+                              result="healthy_pool")
+                return json.dumps(healthy_ids)
+            # 配了引擎但全灭 → None（方案A：调用方报错，不放开广播）
+            _decision_log("pool_engine_ids", repo_key=repo_key, agent_type=agent_type,
+                          scene_id=scene_id, bound_engine_ids=ids,
+                          healthy_ids=[], dropped=_dropped,
+                          result="all_offline")
+            return None
     return ""
 
 
@@ -743,11 +778,13 @@ def scene_dispatch_failure_reason(scene_id: str, agent_type: str, repo_key: str 
                                   user_id: int = 0, issue_creator: str = "") -> str:
     """Issue #541：场景派发失败原因判定（调用方在 get_scene_pool_engine_ids 返回 None 后使用）。
 
-    区分三类失败（此前统一报「场景绑定的引擎全部离线」，无法定位真实原因）：
+    区分失败（此前统一报「场景绑定的引擎全部离线」，无法定位真实原因）：
     1. 场景仓内不存在：scene_id 未绑定到该仓库（典型为误绑模板场景名，
        回退全局模板行后无引擎）→ 提示重新应用场景
     2. 场景未绑定引擎：仓内场景存在但该 Agent 节点 engine_runtime_ids 为空
     3. 引擎全部离线：节点声明了引擎但池判定全灭（在线状态/心跳不健康）
+    4. Issue #653：绑定的引擎已注销（agent_runtimes 行不存在/被删）→ 空候选
+    5. Issue #653：场景/引擎查询异常（严格模式 fail-closed）
     """
     if not scene_id:
         return f"场景未绑定引擎（scene=空, agent={agent_type}），请先为任务绑定场景"
@@ -763,11 +800,21 @@ def scene_dispatch_failure_reason(scene_id: str, agent_type: str, repo_key: str 
         from src.api.pipeline_config import get_scene_engine_ids
         ids = get_scene_engine_ids(scene_id, agent_type, repo_key=repo_key, user_id=user_id) or []
     except Exception as _e:
+        # Issue #653：查询异常（严格模式 fail-closed）——报查询失败而非误导性的「未绑定」
         log.warning(f"scene_dispatch_failure_reason: engine ids lookup failed: {_e}")
-        ids = []
+        return (f"场景引擎查询失败（scene={scene_id}, agent={agent_type}，{_e}），"
+                f"严格模式下宁失败不派发（Issue #653），请检查数据库后重试")
     if not ids:
         return f"场景未绑定引擎（scene={scene_id}, agent={agent_type}），请在场景中为该 Agent 配置引擎"
-    return f"场景绑定的引擎全部离线（scene={scene_id}, agent={agent_type}），请检查引擎在线状态"
+    # Issue #653：绑定存在但引擎行全部缺失 → 与「全部离线」区分，提示引擎被注销
+    try:
+        members = _engines_by_ids(ids, _norm_repo(repo_key), load_engine_selection())
+    except Exception:
+        members = None
+    if members is not None and not members:
+        return (f"场景绑定的引擎已注销或不存在（scene={scene_id}, agent={agent_type}, "
+                f"engines={ids}），请检查引擎注册状态后重新配置（Issue #653）")
+    return f"场景绑定的引擎全部离线（scene={scene_id}, agent={agent_type}, engines={ids}），请检查引擎在线状态"
 
 
 def resolve_local_engine(user_id: int = 0) -> int | None:

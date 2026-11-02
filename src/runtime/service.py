@@ -901,6 +901,25 @@ def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
         raise ValueError("agent_session_id is required")
     if not runtime_id and not pool_agent_type:
         raise ValueError("runtime_id or pool_agent_type is required (确定路由 D3)")
+    # Issue #653：入队前置空候选校验——pool_engine_ids 为 JSON 空数组 "[]" 时：
+    # '[]' 是 truthy 字符串但没有任何引擎能通过 claim 守卫，任务会卡死无人认领。
+    # scene 来源（用户显式绑定，#253 硬约束）→ 拒绝入队（宁失败不跑飞）；
+    # auto 来源（系统自动选择）→ 降级 "" 全量广播 + 告警（可审计）。
+    if pool_engine_ids:
+        try:
+            _pei_653 = json.loads(pool_engine_ids)
+        except Exception:
+            _pei_653 = None  # 非 JSON 值保持原语义（历史调用方可能传其它格式）
+        if isinstance(_pei_653, list) and not _pei_653:
+            if (pool_engine_source or "") == "auto":
+                log.warning(f"enqueue_task: empty pool_engine_ids (source=auto) degraded to "
+                            f"broadcast for agent={agent_type} (Issue #653)")
+                pool_engine_ids = ""
+            else:
+                raise ValueError(
+                    "pool_engine_ids resolved to an empty engine list (source="
+                    f"{pool_engine_source or 'scene'}, agent={agent_type}); refusing enqueue "
+                    "to avoid silent global-pool fallback (Issue #653)")
     task_id = "t_" + uuid.uuid4().hex[:12]
     skill_files = {}
     # Issue #463 P2 扩展（2026-10-27）：skill_files URL/引用单写——技能在 OBS 有原始 zip
