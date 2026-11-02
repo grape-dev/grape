@@ -544,7 +544,7 @@ function _renderSkillCard(s, fixedWidth) {
     <div class="rf">
       ${isUserSkill ? '<span class="s"></span>' : `<span class="s" style="cursor:pointer" onclick="event.stopPropagation();toggleSkillLike(${s.id},this)">${likeIcon} ${likeCount}</span>`}
       <div class="sk-card-btns">
-        <button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">${I18N.t('skills.action.view')||'详情'}</button>
+        ${s.scope === 'official' ? `<button class="bt bt-o bt-s" onclick="event.stopPropagation();app.nav('skill','${s.id}')">${I18N.t('skills.action.view')||'详情'}</button>` : ''}
         ${actionBtns}
       </div>
     </div>
