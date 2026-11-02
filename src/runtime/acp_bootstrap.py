@@ -126,7 +126,6 @@ def _acp_probe(cli: str) -> tuple:
         try:
             proc.stdin.write(_acp_requests())
             proc.stdin.flush()
-            proc.stdin.close()
         except Exception:
             pass
         box = {}

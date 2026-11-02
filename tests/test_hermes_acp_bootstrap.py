@@ -54,6 +54,26 @@ class TestAcpProbe:
         sent = m.return_value.stdin.write.call_args.args[0]
         assert "initialize" in sent and "session/new" in sent
 
+    def test_stdin_kept_open_until_response_read(self):
+        # Issue #741：写入块不得提前 proc.stdin.close()——hermes 0.20.6 把 stdin EOF
+        # 当客户端退出、进程退出不写响应。读到响应那一刻 stdin 必须仍处于打开状态。
+        resp = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": 1}}) + "\n"
+        proc = _FakeProc(first_line=resp)
+        closed_before_read = []
+        orig_close = proc.stdin.close
+
+        def _tracking_close():
+            # 仅记录发生在 readline 之前的 close → 写入块过早关闭 stdin
+            if not proc.stdout.readline.called:
+                closed_before_read.append(True)
+            orig_close()
+
+        proc.stdin.close = _tracking_close
+        with patch("subprocess.Popen", return_value=proc):
+            ok, reason = ab._acp_probe("/bin/hermes")
+        assert ok is True and reason == ab.ACP_OK
+        assert not closed_before_read, "stdin 在读到响应前被关闭（写入块提前 close）"
+
     def test_handshake_non_jsonrpc_output_fail(self):
         with patch("subprocess.Popen", return_value=_FakeProc(first_line="garbage\n")):
             assert ab._acp_probe("/bin/hermes") == (False, ab.ACP_FAIL)
