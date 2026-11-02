@@ -21,7 +21,13 @@
     "download_template": "📄 下载技能模板 ZIP",
     "back_to_library": "返回 Skills Library",
     "back_to_huawei": "返回华为云技能包",
-    "download_skill_title": "下载技能包 zip"
+    "download_skill_title": "下载技能包 zip",
+    "update_skill": "上传更新",
+    "confirm_update": "确认覆盖更新"
+  },
+  "update": {
+    "title": "上传更新技能",
+    "tip": "上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致"
   },
   "toast": {
     "sync_found": "发现新增官方技能，已同步",
@@ -43,7 +49,9 @@
     "already_experienced": "您已体验过该场景",
     "experience_failed": "体验失败",
     "like_failed": "点赞失败",
-    "like_success": "操作成功"
+    "like_success": "操作成功",
+    "update_success": "更新成功",
+    "update_failed": "更新失败"
   },
   "empty": {
     "no_repo_selected": "未选择仓库，请先在仓库页面选择当前仓库。",

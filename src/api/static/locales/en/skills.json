@@ -21,7 +21,13 @@
     "download_template": "📄 Download Skill Template ZIP",
     "back_to_library": "Back to Skills Library",
     "back_to_huawei": "Back to Huawei Cloud Skills",
-    "download_skill_title": "Download skill package zip"
+    "download_skill_title": "Download skill package zip",
+    "update_skill": "Upload Update",
+    "confirm_update": "Confirm Overwrite Update"
+  },
+  "update": {
+    "title": "Upload Skill Update",
+    "tip": "Upload a new ZIP to overwrite the current skill content; skill ID, scene references and likes are preserved. The folder name inside the ZIP must match the skill name"
   },
   "toast": {
     "sync_found": "New official skills found, synced",
@@ -43,7 +49,9 @@
     "already_experienced": "You have already experienced this scene",
     "experience_failed": "Experience failed",
     "like_failed": "Like failed",
-    "like_success": "Done"
+    "like_success": "Done",
+    "update_success": "Updated successfully",
+    "update_failed": "Update failed"
   },
   "empty": {
     "no_repo_selected": "No repo selected. Please select a current repo on the Repos page.",

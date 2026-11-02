@@ -503,7 +503,7 @@ function _renderSkillCard(s, fixedWidth) {
     let btns = '';
     if (s.scope !== 'official') {
       btns = `<button class="bt bt-o bt-s" style="color:var(--r);border-color:var(--r)" onclick="event.stopPropagation();deleteSkill('${s.id}','${s.scope}')">${I18N.t('skills.action.delete')||'删除'}</button>`;
-      btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();showSkillUpdate(${s.id},'${s.name}')">${I18N.t('skills.action.update_skill')||'上传更新'}</button>`;
+      btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();showSkillUpdate(${s.id},'${(s.display_name || s.name || '').replace(/'/g, "\\'")}')">${I18N.t('skills.action.update_skill', null, '上传更新')}</button>`;
       if (_currentRepo()) {
         if (s.scope === 'user') {
           btns += `<button class="bt bt-o bt-s" onclick="event.stopPropagation();convertSkill('${s.name}','user')">转仓库</button>`;
@@ -873,8 +873,8 @@ function showSkillUpdate(skillId, skillName) {
   modal.id = 'skillUpdateModal';
   modal.style.cssText = 'position:fixed;inset:0;z-index:1001;background:rgba(0,0,0,0.25);backdrop-filter:blur(4px);-webkit-backdrop-filter:blur(4px);display:flex;align-items:center;justify-content:center';
   modal.innerHTML = `<div class="cd" style="width:480px;padding:20px;border-radius:10px">
-    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">${I18N.t('skills.update.title')||'上传更新技能'} — ${skillName}</h3>
-    <div style="font-size:12px;color:var(--t2);margin-bottom:10px">${I18N.t('skills.update.tip')||'上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致'}</div>
+    <h3 style="font-size:14px;font-weight:600;margin-bottom:14px">${I18N.t('skills.update.title', null, '上传更新技能')} — ${skillName}</h3>
+    <div style="font-size:12px;color:var(--t2);margin-bottom:10px">${I18N.t('skills.update.tip', null, '上传新 ZIP 覆盖当前技能内容，技能 ID、场景引用与点赞保留；ZIP 内目录名需与技能名一致')}</div>
     <div style="margin-bottom:14px">
       <label style="font-size:11px;color:var(--t2);display:block;margin-bottom:6px">${I18N.t('skills.upload.file_label')||'技能 ZIP 包'}</label>
       <input type="file" id="skillUpdateFile" accept=".zip" style="font-size:12px">
@@ -885,7 +885,7 @@ function showSkillUpdate(skillId, skillName) {
     </div>
     <div style="display:flex;gap:8px;justify-content:flex-end">
       <button class="bt bt-o bt-s" onclick="document.getElementById('skillUpdateModal').remove()">${I18N.t('skills.action.cancel')||'取消'}</button>
-      <button class="bt bt-p bt-s" onclick="doSkillUpdate(${skillId})">${I18N.t('skills.action.confirm_update')||'确认覆盖更新'}</button>
+      <button class="bt bt-p bt-s" onclick="doSkillUpdate(${skillId})">${I18N.t('skills.action.confirm_update', null, '确认覆盖更新')}</button>
     </div>
   </div>`;
   document.body.appendChild(modal);
@@ -913,11 +913,11 @@ function doSkillUpdate(skillId) {
   API.upload('/skills/by-id/' + skillId + '/update', fd, (pct) => _setSkillUpdateProgress(pct, false)).then(r => {
     _setSkillUpdateProgress(100, true);
     document.getElementById('skillUpdateModal')?.remove();
-    if (app && app.showToast) app.showToast(r.message || (I18N.t('skills.toast.update_success')||'更新成功'));
+    if (app && app.showToast) app.showToast(r.message || (I18N.t('skills.toast.update_success', null, '更新成功')));
     renderSkills();
   }).catch(e => {
     _setSkillUpdateProgress(0, true);
-    let msg = e.message || (I18N.t('skills.toast.update_failed')||'更新失败');
+    let msg = e.message || (I18N.t('skills.toast.update_failed', null, '更新失败'));
     if (e.errors && Array.isArray(e.errors) && e.errors.length > 0) {
       msg = e.errors.join('；');
     }
