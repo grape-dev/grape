@@ -368,7 +368,33 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
     r = client.post(f"{base}/labels", json={"name": "bug", "color": "#d73a4a"})
     assert r.status_code == 200
     last = gitcode_calls[-1]
-    assert last["method"] == "POST" and last["body"]["name"] == "bug" and last["body"]["color"] == "#d73a4a"
+    assert last["method"] == "POST" and last["body"]["name"] == "bug" and last["body"]["color"] == "d73a4a"
+
+
+def test_labels_color_normalization(gitcode_calls, github_calls, _client):
+    """Issue #580：labels create 对 color 做 lstrip('#') 归一化——GitHub/GitCode 双通道 × 带/不带 # 双输入。
+
+    GitHub REST API labels 端点要求 color 为不带 # 的 6 位 hex，带 # 返回 422 Validation Failed；
+    GitCode 通道对两种格式均宽容。归一化放在服务端透传层（单点修复，所有客户端受益）。
+    """
+    client = _client
+
+    # GitCode 通道（默认 token 派生 provider=gitcode）
+    for color in ("#e11d21", "e11d21"):
+        assert client.post(f"/api/git-repo/{OWNER}/{REPO}/labels", json={"name": "P1", "color": color}).status_code == 200
+        assert gitcode_calls[-1]["body"] == {"name": "P1", "color": "e11d21"}
+
+    # GitHub 通道（repo_key 前缀 github 派生 provider）
+    _override_user(f"github:{OWNER}/{REPO}")
+    for color in ("#e11d21", "e11d21"):
+        assert client.post(f"/api/git-repo/{OWNER}/{REPO}/labels", json={"name": "P1", "color": color}).status_code == 200
+        assert github_calls[-1]["method"] == "POST"
+        assert "api.github.com" in github_calls[-1]["url"]
+        assert github_calls[-1]["body"] == {"name": "P1", "color": "e11d21"}
+
+    # 不传 color → 默认值 d73a4a（不带 # 前缀）
+    assert client.post(f"/api/git-repo/{OWNER}/{REPO}/labels", json={"name": "def"}).status_code == 200
+    assert github_calls[-1]["body"] == {"name": "def", "color": "d73a4a"}
 
 
 def test_milestones_create_update(gitcode_calls, _client):

@@ -84,7 +84,8 @@ class IssueUpdateBody(BaseModel):
 
 class LabelCreateBody(BaseModel):
     name: str
-    color: str = "#d73a4a"
+    # Issue #580: color 默认值去 # 前缀（GitHub REST API 要求不带 # 的 6 位 hex）
+    color: str = "d73a4a"
 
 
 class MilestoneCreateBody(BaseModel):
@@ -362,8 +363,9 @@ def list_labels(owner: str, repo: str, user: dict = Depends(get_current_user_or_
 @router.post("/{owner}/{repo}/labels", operation_id="gitrepo_labels_create", summary="Create label", description="Creates a repository label (name required, color optional).")
 def create_label(owner: str, repo: str, body: LabelCreateBody, user: dict = Depends(get_current_user_or_api_key),
                  p: str = Depends(_provider)):
+    # Issue #580: color 归一化——GitHub 通道要求不带 # 的 6 位 hex，带 # 返回 422；GitCode 对两种格式均宽容
     return _vcs_req(p, "POST", _vcs_url(owner, repo, "/labels", None, p), _repo_token(owner, repo, user, p),
-                    {"name": body.name, "color": body.color})
+                    {"name": body.name, "color": body.color.lstrip("#")})
 
 
 @router.get("/{owner}/{repo}/milestones", operation_id="gitrepo_milestones", summary="List milestones", description="Lists repository milestones (state filter).")

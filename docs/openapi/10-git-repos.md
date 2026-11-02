@@ -296,7 +296,7 @@ grapecli git diff --repo Jason7602/hello
 
 ### POST /api/git-repo/{owner}/{repo}/labels
 
-**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
+**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `d73a4a`，不带 `#` 的 6 位 hex；带 `#` 前缀会被自动去除）
 
 **返回（201）**：创建后的标签对象。**错误**：400（缺 name）/ 409（已存在）/ 403。
 

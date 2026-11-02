@@ -183,9 +183,9 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### POST /api/git-repo/{owner}/{repo}/labels
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
-> CLI：`grape git-repo labels create --owner {owner} --repo {repo} --json '{"name":"bug","color":"#d73a4a"}'`（operation_id=`gitrepo_labels_create`）。
+> CLI：`grape git-repo labels create --owner {owner} --repo {repo} --json '{"name":"bug","color":"d73a4a"}'`（operation_id=`gitrepo_labels_create`）。
 
-**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
+**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `d73a4a`，不带 `#` 的 6 位 hex；带 `#` 前缀会被自动去除）
 
 **返回（201）**：创建后的标签对象。**错误**：400（缺 name）/ 409（已存在）/ 403。
 
@@ -390,7 +390,7 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | GET/contents/{path} | `grape git-repo contents --owner Jason7602 --repo hello --path CODEOWNERS --ref codeowner` |
 | GET/commits | `grape git-repo commits --owner Jason7602 --repo hello --per-page 10` |
 | GET/labels | `grape git-repo labels --owner Jason7602 --repo hello` |
-| POST/labels | `grape git-repo labels create --owner Jason7602 --repo hello --json '{"name":"bug","color":"#d73a4a"}'` |
+| POST/labels | `grape git-repo labels create --owner Jason7602 --repo hello --json '{"name":"bug","color":"d73a4a"}'` |
 | GET/milestones | `grape git-repo milestones --owner Jason7602 --repo hello --state all` |
 | GET/issues | `grape git-repo issues --owner Jason7602 --repo hello --state open` |
 | POST/issues | `grape git-repo issues create --owner Jason7602 --repo hello --json '{"title":"bug: 列表为空","body":"复现步骤...","assignee":"Jason7602"}'` |
