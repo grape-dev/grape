@@ -109,5 +109,6 @@
   "session_expired": "Session expired, please log in again",
   "gitcode_reauth_required": "GitCode authorization expired, redirecting to re-authorize...",
   "request_failed": "Request failed ({{status}})",
-  "network_upload_error": "Network error, upload failed"
+  "network_upload_error": "Network error, upload failed",
+  "unnamed_worker": "Unnamed device"
 }

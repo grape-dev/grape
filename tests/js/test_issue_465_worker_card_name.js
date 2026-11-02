@@ -53,7 +53,10 @@ function makeDom() {
 
 // 直接从 observability.js 源码加载目标函数（沙箱 eval，只导出需要的符号）
 function loadObsFns() {
-  const src = fs.readFileSync(
+  // Issue #701：统一取值函数 workerDisplayName（worker-name.js）先于页面脚本加载（同 index.html 顺序）
+  const helperSrc = fs.readFileSync(
+    path.resolve(__dirname, '../../src/api/static/js/worker-name.js'), 'utf8');
+  const src = helperSrc + '\n;\n' + fs.readFileSync(
     path.resolve(__dirname, '../../src/api/static/js/pages/observability.js'), 'utf8');
   const I18N = { t: (k, p) => '«' + k + '»' + (p && p.id !== undefined ? ':' + p.id : ''), getLang: () => 'zh' };
   const sandbox = {
@@ -74,6 +77,7 @@ function loadObsFns() {
   const keys = Object.keys(sandbox);
   const vals = keys.map(k => sandbox[k]);
   const exportsStr = '\n; return {' +
+    'workerDisplayName: (typeof window !== "undefined" && window.workerDisplayName) || (typeof globalThis !== "undefined" && globalThis.workerDisplayName) || null,' +
     '_workerCardHTML: typeof _workerCardHTML !== "undefined" ? _workerCardHTML : null,' +
     '_sortedWorkers: typeof _sortedWorkers !== "undefined" ? _sortedWorkers : null,' +
     'renderOverview: typeof renderOverview !== "undefined" ? renderOverview : null' +
@@ -93,8 +97,12 @@ function _wk(id, name, device_name) {
   };
 }
 
-console.log('Issue #465 追加：Worker 设备卡片名称口径（name 优先，回退 device_name）');
+console.log('Issue #465 回归（#701 收口后）：Worker 卡片名称口径（rc.name 唯一来源，空名占位）');
 const fns = loadObsFns();
+// helper 在沙箱 window 上落位；导出后挂到真实 global，使页面源码里的裸引用 workerDisplayName 可解析
+if (fns.workerDisplayName && typeof globalThis !== 'undefined') {
+  globalThis.workerDisplayName = fns.workerDisplayName;
+}
 
 // --- 用例 1：远端 worker 卡片标题显示 rc.name（自定义名） ---
 check('远端 worker：卡片标题显示自定义名 rc.name（不显示原始 device_name）', () => {
@@ -103,11 +111,12 @@ check('远端 worker：卡片标题显示自定义名 rc.name（不显示原始 
   assert.ok(!html.includes('worker-os-hostname'), '卡片标题不应显示原始设备名 device_name');
 });
 
-// --- 用例 2：rc.name 为空回退 device_name，不出现空标题 ---
-check('rc.name 为空：回退显示 device_name，不出现空标题', () => {
+// --- 用例 2（#701 收口）：rc.name 为空显示统一占位符，不回退 device_name ---
+check('rc.name 为空：显示占位符「未命名设备」，不回退显示 device_name', () => {
   const html = fns._workerCardHTML(_wk(12, '', 'worker-buildnode-b'));
-  assert.ok(html.includes('worker-buildnode-b'), 'name 为空应回退显示 device_name');
-  // 标题 <b> 不应为空：回退链终点是 I18N 占位（id 兜底）
+  assert.ok(html.includes('worker-buildnode-b') === false, '卡片不得回退显示原始设备名 device_name（#701）');
+  // I18N stub：t('common.unnamed_worker') → «common.unnamed_worker»
+  assert.ok(html.includes('«common.unnamed_worker»'), 'name 为空应显示统一占位符');
   assert.ok(!/<b style="font-size:13px"><\/b>/.test(html), '标题 <b> 不得为空');
 });
 
@@ -127,9 +136,9 @@ check('_sortedWorkers 排序键与卡片显示名口径一致（name 优先）',
     _wk(23, 'Alpha工作站', 'worker-gamma'),
   ] };
   const sorted = fns._sortedWorkers(w);
-  // 显示名：Alpha工作站 / beta-node（回退）/ zeta-工作机 → 按显示名排序
-  assert.strictEqual(sorted.map(x => x.id).join(','), '23,22,21',
-    '排序应按 name 优先的显示名（alpha < beta < zeta），而不是按 device_name（alpha < beta < gamma 相同前缀不可分辨）');
+  // 显示名：Alpha工作站 / zeta-工作机 / «common.unnamed_worker»（占位，'«' 码位高）→ 按显示名排序
+  assert.strictEqual(sorted.map(x => x.id).join(','), '23,21,22',
+    '排序应按 name 优先的显示名（alpha < zeta < 占位符），而不是按 device_name');
 });
 
 // --- 用例 5：renderOverview 全链路——wk-grid 渲染自定义名 ---
@@ -144,7 +153,7 @@ check('renderOverview 全链路：wk-grid 内 Worker 卡片渲染自定义名（
   const html = fns.renderOverview(ops, {});
   assert.ok(html.includes('我的工作机'), 'wk-grid 应渲染自定义名「我的工作机」');
   assert.ok(!html.includes('worker-os-hostname'), 'wk-grid 不应渲染原始设备名');
-  assert.ok(html.includes('worker-buildnode-b'), 'name 为空设备应回退渲染 device_name');
+  assert.ok(html.includes('«common.unnamed_worker»'), 'name 为空设备应渲染统一占位符（不回退 device_name）');
 });
 
 // --- 用例 6：排序稳定性——同一设备多引擎时卡片位置稳定 ---

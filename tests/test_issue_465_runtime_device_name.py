@@ -78,14 +78,14 @@ class TestRuntimeDeviceNameFallback:
             _cleanup(cid, [rid])
 
     def test_remote_runtime_falls_back_to_device_name_when_name_empty(self):
-        """存量凭据 name 为空：回退 rc.device_name，不出现空列。"""
+        """存量凭据 name 为空：下发空串（前端统一占位「未命名设备」），不回退 device_name（#701 收口）。"""
         cid = _insert_credential(name="", device_name="legacy-os-host")
         rid = _insert_runtime(cid)
         try:
             rts = _overview_runtimes()
             assert rid in rts
-            assert rts[rid]["device_name"] == "legacy-os-host", \
-                "rc.name 为空时应回退显示原始 device_name，不得出现空列"
+            assert rts[rid]["device_name"] == "", \
+                "rc.name 为空时后端应下发空值，由前端统一占位，不得回退 rc.device_name（Issue #701）"
         finally:
             _cleanup(cid, [rid])
 

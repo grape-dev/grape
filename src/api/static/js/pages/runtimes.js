@@ -466,7 +466,7 @@ function _rebuildRtEngineIndex() {
       if (!rt || rt.id === undefined || _rtEngineIndex[rt.id]) return;
       _rtEngineIndex[rt.id] = Object.assign({}, rt, {
         credential_id: d.credential_id,
-        worker_name: d.name || d.device_name || '',
+        worker_name: workerDisplayName(d),
         worker_ip: d.worker_ip || '',
         scope: d.scope || 'global',
         owner: d.owner || '',
@@ -665,7 +665,7 @@ function renderWorkers(data, devices) {
         ${_healthBadge(d.health, d.credential_id ? relTime(d.last_seen_at) : I18N.t('runtimes.label.local_direct'))}
         ${_helpBtn(_healthHelpHint(d))}
         ${_scopeBadge(_curScope, _isLocal)}
-        <span style="font-weight:600;font-size:14px">${d.name || d.device_name || '?'}</span>
+        <span style="font-weight:600;font-size:14px">${workerDisplayName(d)}</span>
         <span style="font-weight:400;color:var(--t3);font-size:12px">${d.worker_ip || ''}</span>
         ${_canManage ? `<button class="bt bt-o" style="font-size:11px;padding:4px 10px;border-radius:4px;margin-left:auto" onclick="openScopeSwitcher(${d.credential_id}, '${_curScope}')">${_scopeLabelShort(_curScope)}</button>` : ''}
         ${d.credential_id && _isOwner ? `<button class="bt bt-o" style="font-size:11px;padding:6px 10px;border-radius:4px" onclick="renameCredential(${d.credential_id})">${I18N.t('runtimes.action.rename')}</button>` : ''}

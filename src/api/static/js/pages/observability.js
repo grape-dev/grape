@@ -159,7 +159,7 @@ function _fillObsResSelect() {
   const d = _obsResData || {};
   const rts = d.runtimes || [];
   const opts = ['<option value="">' + I18N.t('observability.res.all') + '</option>']
-    .concat(rts.map(r => `<option value="${r.id}">${(r.device_name || r.name || ('#' + r.id))}</option>`));
+    .concat(rts.map(r => `<option value="${r.id}">${workerDisplayName(r)}</option>`));
   sel.innerHTML = opts.join('');
   sel.value = rts.some(r => String(r.id) === String(_obsResRt)) ? _obsResRt : '';
   if (!rts.some(r => String(r.id) === String(_obsResRt))) _obsResRt = '';
@@ -1089,10 +1089,10 @@ function _paginationWithPageSizeHTML(page, totalPages, prevExpr, nextExpr, pageS
   </div>`;
 }
 
-// Worker 卡片显示名（Issue #465）：name（凭据自定义名）优先、空回退 device_name，
-// 与 runtimes 表「所属设备」列（PR #650）及 Agent 运行时页 Workers 卡片口径一致。
+// Worker 卡片显示名（Issue #701）：统一走 workerDisplayName——rc.name（凭据自定义名）唯一来源，
+// 空名显示占位符「未命名设备」，不再回退 device_name（#465 的回退口径已废弃）。
 function _workerDisplayName(wk) {
-  return wk.name || wk.device_name || '';
+  return workerDisplayName(wk);
 }
 
 function _sortedWorkers(w) {
@@ -1133,9 +1133,8 @@ function _workerCardHTML(wk) {
   const wid = wk.id != null ? wk.id : (wk.device_name || wk.name || '').replace(/[^a-zA-Z0-9_-]/g, '_');
   const dot = _OBS_HEALTH_DOT[wk.health] || '⚫';
   const hc = _OBS_HEALTH_COLOR[wk.health] || 'var(--t3)';
-  // Issue #465：卡片标题显示名 name 优先（凭据自定义名），空回退 device_name，
-  // 与 runtimes 表「所属设备」列及 Agent 运行时页 Workers 卡片口径一致，不出现空名称
-  const displayName = wk.name || wk.device_name || I18N.t('observability.worker_id', {id: wk.id});
+  // Issue #701：卡片标题显示名 = rc.name（凭据自定义名）唯一来源，空名显示统一占位符
+  const displayName = _workerDisplayName(wk);
   return `<div id="wk-${wid}" style="background:var(--c);border:1px solid var(--b);border-radius:var(--r2);padding:12px 14px;box-shadow:var(--sh)">
     <div style="display:flex;align-items:center;gap:8px;margin-bottom:8px">
       <span id="wk-${wid}-dot" style="font-size:14px">${dot}</span>
@@ -1229,7 +1228,7 @@ function _runtimeRowHTML(rti) {
     <td><span id="rt-${rid}-tok" class="ts t2">${_obsTokFor(rid)}</span></td>
     <td><span${probeTitle} style="color:${probeColor}">${probeIcon} ${probeStr}</span></td>
     <td>${modeTag}</td>
-    <td><span id="rt-${rid}-device" class="ts t3">${rti.device_name || '-'}</span></td>
+    <td><span id="rt-${rid}-device" class="ts t3">${workerDisplayName({name: rti.device_name})}</span></td>
   </tr>`;
 }
 
@@ -1796,7 +1795,7 @@ function updateOverview(ops, rt) {
     if (versionEl) versionEl.textContent = rti.version || '-';
 
     const deviceEl = document.getElementById('rt-' + rid + '-device');
-    if (deviceEl) deviceEl.textContent = rti.device_name || '-';
+    if (deviceEl) deviceEl.textContent = workerDisplayName({name: rti.device_name});
   }
   // 同步 Runtime 分页控件 + 计数
   const countEl = document.getElementById('obs-runtime-count');

@@ -1336,7 +1336,8 @@ function _tlLoadInfo(taskId) {
       if (!el) return;
       const bits = [];
       if (info.agent_name) bits.push('🤖 ' + _tlEsc(info.agent_name) + (info.agent_version ? ' <span style="color:var(--t3)">v' + _tlEsc(info.agent_version) + '</span>' : ''));
-      if (info.device_name) bits.push('🖥 ' + _tlEsc(info.device_name));
+      // Issue #701：执行设备名 = 凭据自定义名 rc.name（后端口径），空名显示统一占位符
+      if (info.device_name || info.agent_name) bits.push('🖥 ' + _tlEsc(workerDisplayName({name: info.device_name})));
       if (info.last_ip) bits.push('🌐 ' + _tlEsc(info.last_ip));
       if (info.owner_name) bits.push('👤 ' + _tlEsc(info.owner_name));
       if (info.spec) bits.push('⚙️ ' + _tlEsc(info.spec));
