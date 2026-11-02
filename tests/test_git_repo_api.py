@@ -6,6 +6,7 @@
 - git-credential / workspace
 - 无 token → 502；未认证 → 401
 """
+import json
 import uuid
 from unittest.mock import patch
 
@@ -765,3 +766,53 @@ def test_upstream_error_keeps_runtime_error_compat(_client):
     assert "(404)" in str(e)
     from src.user.repo_manager import _extract_http_code
     assert _extract_http_code(e) == 404
+
+
+# ===================== Issue #684 =====================
+
+def test_json_out_control_chars_parseable(monkeypatch, _client):
+    """Issue #684 验收：上游返回含原始控制字符/孤立代理项的字符串字段，
+    git-repo 读端点响应体可 json.loads 无预处理直接解析（统一序列化出口）。"""
+    raw_body = "line1\nline2\x01\x1f\x7f end \ud800"
+    def _fake_req(method, url, token="", body=None):
+        return [{"id": 1, "title": "t", "body": raw_body, "state": "opened"}]
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/pulls")
+    assert r.status_code == 200
+    assert b"\x01" not in r.content  # 原始控制字符不落字节流
+    parsed = json.loads(r.content)  # 无预处理直接解析
+    assert parsed[0]["body"] == raw_body
+
+
+def test_milestones_state_normalized(monkeypatch, _client):
+    """Issue #684：milestones 返回 state 归一化 active/opened→open（与过滤合法值口径对齐）。"""
+    calls = []
+    def _fake_req(method, url, token="", body=None):
+        calls.append({"method": method, "url": url, "token": token, "body": body})
+        if method == "GET" and "/milestones" in url:
+            return [{"id": 1, "title": "v1", "state": "active"},
+                    {"id": 2, "title": "v2", "state": "closed"},
+                    {"id": 3, "title": "v3", "state": "opened"}]
+        return {"id": 9, "title": "v9", "state": "active"}
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    r = _client.get(f"{base}/milestones?state=all")
+    assert r.status_code == 200
+    assert "state=all" in calls[-1]["url"]
+    items = r.json()
+    assert [i["state"] for i in items] == ["open", "closed", "open"]
+
+    r = _client.post(f"{base}/milestones", json={"title": "v9"})
+    assert r.status_code == 200
+    assert r.json()["state"] == "open"
+
+    r = _client.patch(f"{base}/milestones/3", json={"state": "closed"})
+    assert r.status_code == 200
+    assert r.json()["state"] == "open"  # 上游返回 active → 归一化 open
+
+
+def test_milestones_state_passthrough_filter(gitcode_calls, _client):
+    """过滤参数仍按上游口径 open/closed/all 原样透传（归一化仅作用于返回字段）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    assert _client.get(f"{base}/milestones?state=closed").status_code == 200
+    assert "state=closed" in gitcode_calls[-1]["url"]
