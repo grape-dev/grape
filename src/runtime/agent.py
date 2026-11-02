@@ -599,13 +599,26 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
         cmd = [cli_path] + cmd[1:]
     # Issue #471 C2：codearts 探测走专用数据目录（预写目录信任）——
     # 探测进程无 TTY，folder-trust 闸门未信任 cwd 时会 exit 1 误报引擎不健康。
+    # Issue 探活session堆积：opencode/cursor/dsh 探测走独立 XDG_DATA_HOME 临时目录，
+    # 探活会话只写临时库，finally 整目录删除——不进生产 opencode.db（此前每次
+    # 探活新建一条 Greeting session 且无任何清理路径，DB 堆积至数百 MB）。
+    # 认证/配置不受影响：opencode 凭据存 ~/.config（XDG_CONFIG_HOME），不在数据目录。
     _probe_env = None
+    _probe_data_tmp = None
     if engine_name == "codearts":
         try:
             from src.runtime.codearts import probe_env as _codearts_probe_env
             _probe_env = {**os.environ, **_codearts_probe_env(os.getcwd())}
         except Exception as _pe:
             log.warning(f"codearts probe env setup failed: {_pe}")
+    elif engine_name in ("opencode", "cursor", "dsh"):
+        try:
+            import tempfile as _tempfile
+            _probe_data_tmp = _tempfile.mkdtemp(prefix="grape-probe-data-")
+            _probe_env = {**os.environ, "XDG_DATA_HOME": _probe_data_tmp}
+        except Exception as _pe:
+            log.warning(f"probe data dir setup failed for {engine_name}: {_pe}")
+            _probe_data_tmp = None
     start = _time_mod.time()
     try:
         result = _subprocess.run(
@@ -627,6 +640,9 @@ def _probe_engine_worker(engine_name: str, cli_path: str) -> dict:
     except Exception as e:
         latency = round(_time_mod.time() - start, 1)
         return {"status": "fail", "latency": latency, "error": str(e)[:200]}
+    finally:
+        if _probe_data_tmp:
+            _shutil.rmtree(_probe_data_tmp, ignore_errors=True)
 
 
 def _worker_probe_once():
