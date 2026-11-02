@@ -474,8 +474,10 @@ provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 **返回（200）**：变更文件数组
 ```json
 [{"filename": "src/a.py", "status": "modified", "additions": 10, "deletions": 2,
-  "patch": "@@ ...", "raw_url": "..."}]
+  "patch": {"diff": "@@ ...", "added_lines": 10, "removed_lines": 2}, "raw_url": "..."}]
 ```
+
+> **Issue #731（diff 字段路径契约）**：所有文件对象的 diff 内容**统一且仅在** `.patch.diff`（对象内字符串，含 `@@ ... @@` diff 头）。代理层已对平台差异返回做归一化（顶层 `.diff` 会并入 `.patch.diff` 并移除），下游脚本无需 `.patch.diff // .diff` 兜底；`patch` 元信息（added_lines/removed_lines/too_large 等）语义不变。
 
 ---
 

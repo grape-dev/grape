@@ -919,14 +919,50 @@ def delete_pull_comment(owner: str, repo: str, number: int, comment_id: int,
                     _repo_token(owner, repo, user, p))
 
 
+def _normalize_pull_files_diff(resp):
+    """Issue #731: normalize pull files diff field path to unified ``.patch.diff``.
+
+    GitCode may return file objects with a top-level ``.diff`` string (mixed structure
+    seen from the platform API). Move it into ``.patch = {"diff": ...}`` (merging with
+    existing patch metadata) and drop the top-level key. Also convert legacy
+    string-valued ``.patch`` into the object form. Consistency assertion afterwards:
+    every file object with diff content must expose it at ``.patch.diff``; abnormal
+    structures are logged via log.warning instead of being silently passed through.
+    """
+    if not isinstance(resp, list):
+        return resp
+    for item in resp:
+        if not isinstance(item, dict):
+            continue
+        top_diff = item.get("diff")
+        patch = item.get("patch")
+        if isinstance(top_diff, str) and top_diff:
+            if not isinstance(patch, dict) or not patch.get("diff"):
+                merged = dict(patch) if isinstance(patch, dict) else {}
+                merged["diff"] = top_diff
+                item["patch"] = merged
+            item.pop("diff", None)
+        elif isinstance(patch, str) and patch:
+            item["patch"] = {"diff": patch}
+        final = item.get("patch")
+        if not isinstance(final, dict) or not final.get("diff"):
+            log.warning(f"Pull files diff consistency check failed for {item.get('filename')!r}: "
+                        "no non-empty diff at .patch.diff after normalization")
+    return resp
+
+
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files",
             description="Lists files changed in a pull request. Issue #585: page/per_page pass through to the provider "
                         "(GitHub default per_page=30 silently truncated large PRs; default here is per_page=100). "
-                        "For changed_files>100 PRs, page through manually; tree --depth recursive is a fallback for huge PRs.")
+                        "For changed_files>100 PRs, page through manually; tree --depth recursive is a fallback for huge PRs. "
+                        "Issue #731: file diff content is always normalized to the unified field path .patch.diff; "
+                        "top-level .diff (if returned by the provider) is merged into .patch.diff.")
 def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=1),
                     per_page: int = Query(100, ge=1, le=100),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #585 Bug 2: 未透传分页参数时 GitHub 默认 per_page=30，>30 文件的 PR 被静默截断
-    return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
+    # Issue #731: 出参归一化——diff 字段统一收敛到 .patch.diff（详见 _normalize_pull_files_diff）
+    resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
                                        {"page": page, "per_page": per_page}, p),
                     _repo_token(owner, repo, user, p))
+    return _normalize_pull_files_diff(resp)

@@ -892,3 +892,66 @@ def test_milestones_state_passthrough_filter(gitcode_calls, _client):
     base = f"/api/git-repo/{OWNER}/{REPO}"
     assert _client.get(f"{base}/milestones?state=closed").status_code == 200
     assert "state=closed" in gitcode_calls[-1]["url"]
+
+
+def test_pulls_files_diff_normalization(monkeypatch, _client):
+    """Issue #731：pulls files 出参 diff 字段归一化统一至 .patch.diff。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    upstream = [
+        # GitCode 正常结构：已在 .patch.diff → 保持不变（含 patch 元信息）
+        {"filename": "src/a.py", "status": "modified",
+         "patch": {"diff": "@@ -1 +1 @@\n+a", "added_lines": 1, "removed_lines": 1}},
+        # 平台差异返回：顶层 .diff 而无 .patch → 迁入 .patch.diff 并移除顶层字段
+        {"filename": "app.py", "status": "modified", "diff": "@@ -1 +1 @@\n+b"},
+        # 顶层 .diff 且 .patch 已有元信息但缺 diff → 合并保留元信息
+        {"filename": "scripts/x.sh", "status": "modified",
+         "diff": "@@ -1 +1 @@\n+c", "patch": {"added_lines": 1, "removed_lines": 0}},
+        # 顶层 .diff 且 .patch.diff 已存在 → 以 .patch.diff 为准，顶层移除
+        {"filename": "dup.py", "status": "modified",
+         "diff": "@@ stale @@", "patch": {"diff": "@@ -1 +1 @@\n+d"}},
+    ]
+
+    def _fake_req(method, url, token="", body=None):
+        return [dict(f) for f in upstream]
+
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    files = r.json()
+
+    assert files[0]["patch"]["diff"] == "@@ -1 +1 @@\n+a"
+    assert files[0]["patch"]["added_lines"] == 1
+
+    assert "diff" not in files[1] and files[1]["patch"]["diff"] == "@@ -1 +1 @@\n+b"
+
+    assert "diff" not in files[2]
+    assert files[2]["patch"]["diff"] == "@@ -1 +1 @@\n+c"
+    assert files[2]["patch"]["added_lines"] == 1  # 元信息保留
+
+    assert "diff" not in files[3] and files[3]["patch"]["diff"] == "@@ -1 +1 @@\n+d"
+
+    # 一致性：所有文件对象 diff 只在 .patch.diff
+    for f in files:
+        assert isinstance(f["patch"], dict) and f["patch"]["diff"]
+
+
+def test_pulls_files_diff_patch_string_form(monkeypatch, _client):
+    """Issue #731：旧式 string 值 .patch 统一收敛为 object 形式（diff 落 .patch.diff）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    upstream = [{"filename": "src/a.py", "status": "modified", "patch": "@@ -1 +1 @@\n+a"}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert isinstance(f["patch"], dict) and f["patch"]["diff"] == "@@ -1 +1 @@\n+a"
+
+
+def test_pulls_files_diff_non_list_passthrough(monkeypatch, _client):
+    """Issue #731：非 list 出参（如错误回显 dict）不做归一化，原样透传。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: {"ok": True})
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200 and r.json() == {"ok": True}
