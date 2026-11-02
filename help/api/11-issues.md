@@ -404,13 +404,19 @@ Issue 对象字段：
 | scope（x-token-scope） | **session_only**（仅 `tk_`；`grape_`/JWT → 403） |
 | Path | `{issue_id}` int |
 | Body | `{"review_points": "...", "references": "...(可选，如 PR#/设计文档)"}` |
-| 出参 | `{"ok": true, "issue_id": 217, "status": "pending_review", "changed": true}` |
-| 返回 | 200；400 review_points 缺失；403 非会话 / 仓库作用域不匹配 / 非 devops agent；404 |
+| 出参 | `{"ok": true, "issue_id": 217, "status": "pending_review", "changed": true, "idempotent": false}` |
+| 返回 | 200（重复调用幂等，见下）；400 review_points 缺失；403 非会话 / 仓库作用域不匹配 / 非 devops agent；404 |
 
 > 鉴权：`agent_type∈{vod,issue,coding,qa,sre}` 且 `issue.repo_key == token.repo_key`。效果：
 > `active/processing/awaiting_input → pending_review` 原子迁移（`changed` 可观测）、审核点写入任务会话、
 > 向本人飞书 bot 发静态卡片「需要你审核确认」（缺配置则跳过）、不改 stage、不终态化（与任务生命周期正交）。
 > 用户评论（非 bot）会自动恢复为 processing。
+>
+> **重复调用幂等（Issue #725）**：Issue 已处于 `pending_review` 时再次调用 → **200 幂等短路**，
+> 出参 `{"ok": true, "status": "pending_review", "changed": false, "idempotent": true}`；
+> 不重复写会话审核点、不重复发通知。`completed/cancelled` 终态重复调用同样 200 + `idempotent: true`。
+> CLI/Agent 重复调用处理指引：收到 `idempotent: true` 视为提交已被接受（此前审核点已生效），
+> 无需重试、无需换 `issue_id` 兜底；切勿将其当作失败走 405/重试路径。
 
 ### POST /api/issues/{issue_id}/review-pass — Agent 判定审核通过
 

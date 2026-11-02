@@ -1574,7 +1574,7 @@ def _session_devops_issue(issue_id: int, user: dict) -> dict:
 
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
              summary="Agent declares issue pending_review (阶段审核点)",
-             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
+             description="任意 devops agent（vod/issue/coding/qa/sre 或 issue 绑定场景节点角色，Issue #655）显式将 issue 置为待审核（阶段性审核点）：active/processing/awaiting_input -> pending_review，不改 stage，审核点写入任务会话。重复调用幂等（Issue #725）：已是 pending_review 时短路返回 200（status + idempotent:true，changed:false，不重复写会话/发通知）。Session-only (tk_)，repo 匹配。与 awaiting-input 对称（等用户双态）。")
 async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                                user: dict = Depends(get_current_user_or_api_key)):
     """Agent 显式提交阶段审核点 → status=pending_review（不改 stage）。"""
@@ -1585,8 +1585,14 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
     if not review_points:
         raise HTTPException(status_code=400, detail={"code": 400, "message": "review_points 必填（本次需审核的内容）"})
     it = _session_devops_issue(issue_id, user)
+    if it["status"] == "pending_review":
+        # Issue #725：已是 pending_review 的重复调用 → 200 幂等短路（status + idempotent），
+        # 不写会话审核点、不重复发通知（重复调用不重复打扰用户）。
+        return {"ok": True, "issue_id": it["id"], "status": "pending_review",
+                "changed": False, "idempotent": True}
     if it["status"] in ("completed", "cancelled"):
-        return {"ok": True, "issue_id": it["id"], "status": it["status"], "changed": False}
+        return {"ok": True, "issue_id": it["id"], "status": it["status"],
+                "changed": False, "idempotent": True}
     _changed = _set_issue_pending_review(it["repo_key"], it["issue_number"])
     conv_id = ""
     if it["user_id"] > 0 and _changed:
@@ -1623,7 +1629,8 @@ async def issue_pending_review(issue_id: int, body: TaskPendingReviewBody,
                 body.references or "", it["repo_key"], it["issue_number"], _cfg))
         except Exception as e:
             log.warning(f"Issue pending-review: notify schedule failed: {e}")
-    return {"ok": True, "issue_id": it["id"], "status": "pending_review", "changed": _changed}
+    return {"ok": True, "issue_id": it["id"], "status": "pending_review", "changed": _changed,
+            "idempotent": False}
 
 
 class _ReviewPassBody(BaseModel):

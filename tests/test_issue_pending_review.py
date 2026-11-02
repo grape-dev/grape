@@ -163,6 +163,46 @@ class TestPendingReview:
                         headers=_session_headers(agent_type="qa"), json={"review_points": "x"})
         assert r.json()["changed"] is False
 
+    def test_duplicate_pending_review_idempotent_200(self):
+        """Issue #725：已是 pending_review 的重复调用 → 200 幂等短路（idempotent:true，无副作用）。"""
+        cid = _seed(status="pending_review", issue_number=25)
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow) as _ct:
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"),
+                            json={"review_points": "再次提交", "references": ""})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["ok"] is True and data["status"] == "pending_review"
+        assert data["changed"] is False and data["idempotent"] is True
+        # 幂等短路：不写会话审核点（conversation_id 保持为空）、不调度通知
+        with db_lock:
+            conv = db.cursor().execute("SELECT conversation_id FROM issue WHERE id=?", (cid,)).fetchone()
+        assert conv and not conv[0]
+        _ct.assert_not_called()
+        assert _status(issue_number=25)[0] == "pending_review"
+
+    def test_terminal_idempotent_flag(self):
+        """Issue #725：completed/cancelled 终态短路同样携带 idempotent:true。"""
+        for st in ("completed", "cancelled"):
+            cid = _seed(status=st, issue_number=26)
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"), json={"review_points": "x"})
+            assert r.status_code == 200
+            data = r.json()
+            assert data["changed"] is False and data["idempotent"] is True
+            assert data["status"] == st
+
+    def test_first_call_unaffected_no_idempotent_flag(self):
+        """首次调用（processing → pending_review）行为不变：changed=true 且无 idempotent 短路标识。"""
+        cid = _seed(status="processing", issue_number=27)
+        with patch.object(issues_mod.asyncio, "create_task", side_effect=_swallow):
+            r = client.post(f"/api/issues/{cid}/pending-review",
+                            headers=_session_headers(agent_type="qa"), json={"review_points": "首次"})
+        assert r.status_code == 200
+        data = r.json()
+        assert data["changed"] is True and data["idempotent"] is False
+        assert _status(issue_number=27)[0] == "pending_review"
+
     def test_review_pass_processing(self):
         cid = _seed(status="pending_review")
         r = client.post(f"/api/issues/{cid}/review-pass",
