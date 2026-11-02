@@ -181,19 +181,45 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             eng = (ls.get("engine") or "").strip().lower()
             if eng:
                 skills_by_name[eng] = json.dumps(ls.get("skills") or [], ensure_ascii=False)
+        # Issue #654：注册前先按 (credential_id, lower(name)) 合并历史重复行
+        # （保留 MAX(id)，capabilities/tags_user_set 迁移到存活行），
+        # 避免 upsert 键收敛后与旧 (scope, owner_id) 唯一约束撞车；映射在
+        # commit 后统一 remap 引用 + 输出结构化事件。
+        from src.runtime.engine_select import merge_duplicate_engine_rows, remap_engine_references
+        _rid_map = merge_duplicate_engine_rows(credential_id, c)
         for rt in body.runtimes or []:
             name = (rt.get("name") or "").strip().lower()
             if not name:
                 continue
             _ls_json = skills_by_name.get(name, "[]")
-            c.execute("SELECT id FROM agent_runtimes WHERE credential_id=? AND lower(name)=? AND scope=? AND owner_id=? LIMIT 1",
-                      (credential_id, name, cred_scope, owner_id))
+            # Issue #654：upsert 查找键收敛为 (credential_id, lower(name))——
+            # scope/owner_id/org_id/repo_key 是凭据派生属性，命中既有行后原地同步，
+            # 引擎 id 天然稳定（scope 往返切换不再 INSERT 新行 + id 全量变更）。
+            # 多行历史脏数据时取 MAX(id)（与 scope 切换去重「保留最新行」口径一致，
+            # 重复行已由上方 merge_duplicate_engine_rows 合并）。
+            c.execute("SELECT id, scope, owner_id, repo_key, org_id FROM agent_runtimes "
+                      "WHERE credential_id=? AND lower(name)=? ORDER BY id DESC LIMIT 1",
+                      (credential_id, name))
             row = c.fetchone()
             if row:
                 rid = row[0]
                 c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=? WHERE id=?",
                           (rt.get("version", ""), 1 if rt.get("healthy", True) else 0,
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid))
+                # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
+                # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
+                if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
+                        or (row[3] or "") != (cred_repo_key or "")
+                        or (row[4] or 0) != cred_org_id):
+                    c.execute("UPDATE agent_runtimes SET scope=?, owner_id=?, repo_key=?, org_id=? WHERE id=?",
+                              (cred_scope, owner_id, cred_repo_key, cred_org_id, rid))
+                    _ev = {"event": "engine_scope_synced", "credential_id": credential_id,
+                           "runtime_id": rid, "engine": name,
+                           "old": {"scope": row[1] or "", "owner_id": row[2] or "",
+                                   "repo_key": row[3] or "", "org_id": row[4] or 0},
+                           "new": {"scope": cred_scope, "owner_id": owner_id,
+                                   "repo_key": cred_repo_key, "org_id": cred_org_id}}
+                    log.info("engine_change_event: " + json.dumps(_ev, ensure_ascii=False))
             else:
                 c.execute(
                     "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
@@ -221,6 +247,12 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
             _sync_agent_tags(rid, c)
             registered.append({"id": rid, "name": name})
         db.commit()
+    # Issue #654：引擎行替换（历史重复行合并）后 remap 引用 + 结构化事件（锁外执行）
+    if _rid_map:
+        try:
+            remap_engine_references(_rid_map, credential_id, reason="register_merge")
+        except Exception as _e:
+            log.warning(f"runtime_register: remap references failed: {_e}")
     # v3.0：probe_url——启动可达性探测（复用任一已转存技能对象签名，
     # 验证完整链路：网络+签名+读取；空库返回空，worker 声明能力 false）
     probe_url = ""
