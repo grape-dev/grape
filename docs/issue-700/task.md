@@ -10,4 +10,4 @@
 - [x] T3 绿：_hermes_venv_bin() Windows 分支
 - [x] 回归：test_issue_490 / test_issue_471（32 全绿）；相关面 acp/hermes/bootstrap 197 passed（3 预存失败在基线同样失败，非本次引入）
 - [ ] 自审查（5 轴 + 开源前置增量检查）
-- [ ] 建 PR（base=local-liufei）+ Issue 评论 + A2A QA
+- [ ] 建 PR（base=weekly-09）+ Issue 评论 + A2A QA
