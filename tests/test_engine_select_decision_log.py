@@ -109,8 +109,10 @@ class TestPoolEngineIdsDecisionLog:
         """Issue #605 场景：hermes 心跳过期 → 被过滤出广播名单且原因落日志。"""
         caplog.set_level(logging.INFO, logger="devops-bot")
         cid = _mk_cred("c-605")
-        oc = _mk_engine("opencode", credential_id=cid)
-        hermes = _mk_engine("hermes", credential_id=cid,
+        # Issue #658 角色硬过滤后：健康引擎须与 vod 角色匹配（hermes），
+        # 心跳过期的换成不限角色的 codex（未知类型，零配置兼容）
+        oc = _mk_engine("hermes", credential_id=cid)
+        hermes = _mk_engine("codex", credential_id=cid,
                             last_seen=_stale_ts(10000))  # 远古心跳（超 _RUNTIME_STALE_SECONDS）
         _mk_scene("test-605-pool", "vod", [oc, hermes])
 
@@ -146,12 +148,13 @@ class TestPickEngineDecisionLog:
         """健康引擎被选中 → 日志含候选全集、选中理由（scope/rule）。"""
         caplog.set_level(logging.INFO, logger="devops-bot")
         cid = _mk_cred("c-605c")
+        # Issue #658：agent_type 用 coding（opencode 默认角色集含 coding；vod 已不可派 opencode）
         oc = _mk_engine("opencode", credential_id=cid)
         hermes = _mk_engine("hermes", credential_id=cid,
                             last_seen=_stale_ts(10000))
-        _mk_scene("test-605-pick", "vod", [oc, hermes])
+        _mk_scene("test-605-pick", "coding", [oc, hermes])
 
-        picked = es.pick_engine("owner/repo", "vod", scene_id="test-605-pick")
+        picked = es.pick_engine("owner/repo", "coding", scene_id="test-605-pick")
         assert picked == oc
 
         recs = _decision_records(caplog)
@@ -181,12 +184,13 @@ class TestExplainEngineSelection:
     def test_explain_returns_forensic_view(self):
         """主控取证口径：candidates[].reasons / selected / pool 一应俱全。"""
         cid = _mk_cred("c-605d")
+        # Issue #658：agent_type 用 coding（vod 已不可派 opencode/codearts）
         oc = _mk_engine("opencode", credential_id=cid)
         hermes = _mk_engine("hermes", credential_id=cid,
                             last_seen=_stale_ts(10000))
-        _mk_scene("test-605-explain", "vod", [oc, hermes])
+        _mk_scene("test-605-explain", "coding", [oc, hermes])
 
-        out = es.explain_engine_selection("owner/repo", "vod", scene_id="test-605-explain")
+        out = es.explain_engine_selection("owner/repo", "coding", scene_id="test-605-explain")
         assert out["mode"] == "legacy"
         assert out["bound_engine_ids"] == [oc, hermes]
         cand = {c["runtime_id"]: c for c in out["candidates"]}
@@ -208,17 +212,17 @@ class TestClaimPoolSkipLog:
         caplog.set_level(logging.INFO, logger="devops-bot")
         cid = _mk_cred("c-605e")
         oc = _mk_engine("opencode", credential_id=cid)
-        hermes = _mk_engine("hermes", credential_id=cid)
+        hermes = _mk_engine("codex", credential_id=cid)  # Issue #658：名单外引擎用不限角色类型
         with db_lock:
             c = db.cursor()
             c.execute(
                 "INSERT INTO agent_tasks (id, agent_session_id, runtime_id, agent_type, pool_tag, "
                 "pool_agent_type, pool_engine_ids, status, created_at, repo_key, issue_session_id, prompt, cwd, skill) "
-                "VALUES ('t-605', 's-605', 0, 'vod', 'vod', 'vod', ?, 'queued', ?, 'owner/repo', '', '', '', '')",
+                "VALUES ('t-605', 's-605', 0, 'coding', 'coding', 'coding', ?, 'queued', ?, 'owner/repo', '', '', '', '')",
                 (json.dumps([oc]), _now()))
             db.commit()
 
-        task = service.claim_by_tag("vod", hermes)
+        task = service.claim_by_tag("coding", hermes)
         assert task is None, "hermes 不在广播名单 → 不应认领成功"
         msgs = [r.getMessage() for r in caplog.records]
         assert any("claim pool filter" in m and "t-605" in m and str(hermes) in m for m in msgs), \
@@ -230,5 +234,5 @@ class TestClaimPoolSkipLog:
         assert again == []
 
         # opencode 在名单内 → 正常认领（回归：观测改动不影响派发语义）
-        task = service.claim_by_tag("vod", oc)
+        task = service.claim_by_tag("coding", oc)
         assert task and task["id"] == "t-605"

@@ -1758,14 +1758,48 @@ def claim_by_tag(tag: str, runtime_id: int,
             # 后面的任务永远不会被尝试。改为循环跳过不匹配的任务，继续尝试下一个。
             # pool_engine_ids 是 JSON 数组如 "[76]"，SQL 难以直接过滤，
             # 这里用 Python 循环 LIMIT N 逐个检查。
+            # Issue #658：认领侧角色守卫——引擎有效角色集（显式 role_tags > 引擎类型默认映射）
+            # 非空时，任务 pool_tag（已知节点角色）必须 ∈ 角色集才可认领（堵全量广播漏洞：
+            # #90 vod 任务被 codearts 引擎按 tag='all' 认领 → rc=1）。角色集为 None
+            # （未知类型且未显式声明）不限制；pool_tag 非已知角色（自定义路由 tag）不受约束。
+            _engine_roles = None
+            try:
+                from src.runtime.engine_select import engine_role_tags as _ert, is_agent_role as _is_role
+                _er_row = c.execute(
+                    "SELECT name, COALESCE(role_tags,'') FROM agent_runtimes WHERE id=?",
+                    (runtime_id,)).fetchone()
+                if _er_row:
+                    _engine_roles = _ert(_er_row[0] or "", _er_row[1] or "")
+            except Exception as _ere:
+                log.warning(f"claim_by_tag: role tags lookup failed for engine {runtime_id}: {_ere}")
+                _engine_roles = None
             _tried_ids = [task_id]
             _max_tries = 20  # 防止全表扫描
             while True:
                 if expected_task_id is not None:
-                    break  # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），不进入 FIFO 跳过/健康检查循环
-                c.execute("SELECT pool_engine_ids FROM agent_tasks WHERE id=?", (task_id,))
+                    # Issue #520 bound claim：目标已原子校验（含 pool_engine_ids 守卫），
+                    # 此处补角色硬校验：不匹配 → fail-closed（不尝试其他任务）
+                    if _engine_roles is not None:
+                        _bt_row = c.execute("SELECT pool_tag FROM agent_tasks WHERE id=?", (task_id,)).fetchone()
+                        _bt_tag = (_bt_row[0] or "").strip().lower() if _bt_row else ""
+                        if _is_role(_bt_tag) and _bt_tag not in _engine_roles:
+                            log.warning(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} "
+                                        f"mismatch task {task_id} pool_tag={_bt_tag} (Issue #658), reject bound claim")
+                            return None
+                    break
+                c.execute("SELECT pool_engine_ids, pool_tag FROM agent_tasks WHERE id=?", (task_id,))
                 _pe_row = c.fetchone()
+                _task_pool_tag = ""
+                if _pe_row:
+                    _task_pool_tag = (_pe_row[1] or "").strip().lower()
                 _skip = False
+                if (_engine_roles is not None and _is_role(_task_pool_tag)
+                        and _task_pool_tag not in _engine_roles):
+                    # Issue #658：角色不匹配 → 跳过该任务继续尝试下一个（与 pool 名单
+                    # 守卫同款跳过语义，不阻塞队列，也绝不认领不匹配角色任务）
+                    log.info(f"claim_by_tag: engine {runtime_id} roles={_engine_roles} mismatch "
+                             f"task {task_id} pool_tag={_task_pool_tag} (Issue #658), skip")
+                    _skip = True
                 if _pe_row and _pe_row[0]:
                     import json as _json
                     try:

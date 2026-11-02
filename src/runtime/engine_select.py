@@ -28,6 +28,87 @@ _PRIO_REPO = 10
 _PRIO_GLOBAL = 50
 _PRIO_LOCAL = 90
 
+# ===== Issue #658：引擎角色（role_tags）与节点角色（agent_type）硬匹配 =====
+# 引擎类型 → 默认角色集（帮助文档分工：opencode/codearts→Coding/Issue/QA、hermes→VOD/Chat/SRE）。
+# 引擎注册可显式声明 role_tags 覆盖默认映射；未声明且类型不在映射内 → None（不限角色，存量零配置兼容）。
+_DEFAULT_ENGINE_ROLE_TAGS = {
+    "opencode": ["coding", "issue", "qa"],
+    "codearts": ["coding", "issue", "qa"],
+    "hermes": ["vod", "chat", "sre"],
+}
+
+# 已知节点角色全集（认领侧守卫仅对角色类 pool_tag 生效；自定义路由 tag 如 "b520tag"
+# 不是角色，不受角色硬过滤约束）
+_KNOWN_AGENT_ROLES = {"coding", "issue", "qa", "vod", "chat", "sre"}
+
+
+def is_agent_role(tag: str) -> bool:
+    """pool_tag 是否为已知节点角色（Issue #658 认领侧守卫的适用判定）。"""
+    return (tag or "").strip().lower() in _KNOWN_AGENT_ROLES
+
+
+def engine_role_tags(engine_name: str, role_tags_json: str = "") -> list | None:
+    """解析引擎有效角色集（双轨：显式 role_tags 声明 > 引擎类型默认映射兜底）。
+
+    返回：
+    - 非空 list：引擎可服务的 agent_type 集合（硬过滤口径）
+    - None：不限角色（引擎类型不在默认映射且未显式声明——存量引擎零配置兼容，
+      不因缺声明被全量排除）
+    """
+    raw = (role_tags_json or "").strip()
+    if raw:
+        try:
+            tags = json.loads(raw)
+            if isinstance(tags, list):
+                tags = [str(t).strip().lower() for t in tags if str(t).strip()]
+                if tags:
+                    return tags
+        except Exception:
+            pass
+    name = (engine_name or "").strip().lower()
+    return _DEFAULT_ENGINE_ROLE_TAGS.get(name)
+
+
+def _member_role_tags(m: dict) -> list | None:
+    """从候选引擎成员 dict 取有效角色集（成员未带 role_tags 字段时按 name 解析）。"""
+    return engine_role_tags(m.get("name") or "", m.get("role_tags") or "")
+
+
+def _filter_by_role(members: list[dict], agent_type: str) -> list[dict]:
+    """Issue #658 角色硬过滤（派发候选筛选最前置）：agent_type ∈ engine 有效角色集。
+
+    有效角色集为 None 的引擎（未知类型且未显式声明）不参与过滤（兼容口径）。
+    """
+    at = (agent_type or "").strip().lower()
+    if not at or not members:
+        return members
+    out = []
+    for m in members:
+        roles = _member_role_tags(m)
+        if roles is None or at in roles:
+            out.append(m)
+    return out
+
+
+def _role_no_candidates_detail(members: list[dict], agent_type: str) -> str:
+    """角色硬过滤后无候选的显式错误信息（含 agent_type 与各候选引擎 role_tags）。"""
+    at = (agent_type or "").strip().lower()
+    parts = []
+    for m in members:
+        roles = _member_role_tags(m)
+        parts.append(f"{m.get('name') or '?'}(id={m.get('runtime_id')}):{','.join(roles) if roles else 'any'}")
+    return (f"no engine matches agent_type '{at}' by role_tags "
+            f"(available engines: {'; '.join(parts) or 'none'})")
+
+
+def _log_role_no_candidates(stage: str, repo_key: str, agent_type: str, scene_id: str,
+                            members: list[dict]) -> None:
+    """角色无候选统一留痕：结构化决策日志 + 明确错误日志（不静默降级）。"""
+    detail = _role_no_candidates_detail(members, agent_type)
+    _decision_log(stage, repo_key=repo_key, agent_type=agent_type, scene_id=scene_id,
+                  result="role_no_candidates", detail=detail)
+    log.error(f"engine_select[{stage}]: {detail}")
+
 _DEFAULT_CFG = {
     "enabled": True,
     "scopes": ["repo", "global", "local"],
@@ -180,6 +261,11 @@ def _candidate_reject_reasons(m: dict, cfg: dict, agent_type: str = "") -> list:
             tags = []
         if agent_type not in tags and "all" not in tags:
             reasons.append(f"tag_mismatch({','.join(tags) or 'none'})")
+        # Issue #658：角色硬过滤口径（role_tags/引擎类型默认映射）
+        _at = (agent_type or "").strip().lower()
+        _roles = _member_role_tags(m)
+        if _at and _roles is not None and _at not in _roles:
+            reasons.append(f"role_mismatch({','.join(_roles)})")
     if rid:
         try:
             from src.runtime.health_scorer import is_healthy as _score_ok
@@ -450,7 +536,7 @@ def _engines_by_ids(engine_ids: list[int], repo: str, cfg: dict) -> list[dict]:
             c.execute(
                 "SELECT r.id, r.name, r.status, r.healthy, r.installed, r.credential_id, r.last_seen_at, "
                 " r.scope, r.owner_id, "
-                " COALESCE(rc.device_name, ''), COALESCE(rc.owner_name, '') "
+                " COALESCE(rc.device_name, ''), COALESCE(rc.owner_name, ''), COALESCE(r.role_tags, '') "
                 "FROM agent_runtimes r LEFT JOIN runtime_credentials rc ON rc.id = r.credential_id "
                 f"WHERE r.id IN ({placeholders})",
                 tuple(engine_ids))
@@ -465,6 +551,7 @@ def _engines_by_ids(engine_ids: list[int], repo: str, cfg: dict) -> list[dict]:
             "installed": bool(r[4]), "credential_id": r[5] or 0, "last_seen_at": r[6] or "",
             "scope": r[7] or "global", "owner_id": r[8] or "", "device_name": r[9] or "",
             "owner_name": r[10] or "", "priority": _default_priority(rid, repo, cfg),
+            "role_tags": r[11] or "",
         })
     return members
 
@@ -578,6 +665,12 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
                           result="sre_no_bound_engines")
             return None
         members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
+        # Issue #658：角色硬过滤（候选筛选最前置，先于 tag/scope/priority/health）
+        members = _filter_by_role(members, agent_type)
+        if not members:
+            _log_role_no_candidates("pick_engine", repo_key, agent_type, scene_id,
+                                    dedupe_engines(_engines_by_ids(_bound_ids, repo, cfg)))
+            return None
         members = _filter_by_tags(members, agent_type)
         members = [m for m in members if m.get("scope") in ("user", "repo")]
         for _scope in ("user", "repo"):
@@ -607,6 +700,13 @@ def pick_engine(repo_key: str, agent_type: str, fallback_runtime_id: int = 0,
     if engine_ids:
         # 多引擎选择：查引擎详情，按优先级选健康引擎
         members = dedupe_engines(_engines_by_ids(engine_ids, repo, cfg))
+        # Issue #658：角色硬过滤（候选筛选最前置，先于 tag/scope/priority/health；
+        # 无候选报明确错误——含 agent_type 与各候选引擎 role_tags，不静默降级）
+        members = _filter_by_role(members, agent_type)
+        if not members:
+            _log_role_no_candidates("pick_engine", repo_key, agent_type, scene_id,
+                                    dedupe_engines(_engines_by_ids(_bound_ids, repo, cfg)))
+            return None
         members = _filter_by_tags(members, agent_type)
         if members:
             for scope in cfg.get("scopes") or ["repo", "global", "local"]:
@@ -749,6 +849,16 @@ def get_scene_pool_engine_ids(scene_id: str, agent_type: str, repo_key: str = ""
                 members = [m for m in members if m.get("scope") in ("user", "repo")]
                 if len(members) < _before:
                     log.warning(f"get_scene_pool_engine_ids: SRE 过滤掉 {_before - len(members)} 个非个人/仓库级引擎")
+            # Issue #658：角色硬过滤（候选筛选最前置，先于健康过滤）——
+            # agent_type ∈ engine 有效角色集（显式 role_tags > 引擎类型默认映射）；
+            # 无候选返回 None（调用方明确报错，不静默降级/广播给不匹配引擎）
+            # SRE 档位过滤后已空时不重复报「角色不匹配」（沿用 #653 的 all_offline 语义）
+            if members:
+                _pre_role = list(members)
+                members = _filter_by_role(members, agent_type)
+                if not members:
+                    _log_role_no_candidates("pool_engine_ids", repo_key, agent_type, scene_id, _pre_role)
+                    return None
             # Issue #605：广播名单过滤留痕——每个被过滤引擎的 rid/name 与原因（stale 心跳/离线等）
             _dropped = []
             for m in members:

@@ -121,8 +121,9 @@ class TestPickEngine:
     def test_global_offline_falls_to_local(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"), status="offline")
         loc_eng = _mk_engine("opencode", credential_id=0)
-        _mk_scene("test-gl", "vod", [glob_eng, loc_eng])
-        assert es.pick_engine("owner/repo", "vod", scene_id="test-gl") == loc_eng
+        # Issue #658：agent_type 用 coding（本机 opencode 默认角色集含 coding；vod 不可派 opencode）
+        _mk_scene("test-gl", "coding", [glob_eng, loc_eng])
+        assert es.pick_engine("owner/repo", "coding", scene_id="test-gl") == loc_eng
 
     def test_no_healthy_member_returns_none(self):
         glob_eng = _mk_engine("opencode-g", credential_id=_mk_cred("c-g"), status="offline")
