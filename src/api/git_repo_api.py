@@ -23,6 +23,10 @@ from src.vcs.providers import _MODULES as _PROVIDER_MODULES
 
 router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 
+# 完整 sha（40-hex，git object id）：tree 接口直连免存在性预校验（Issue #734）
+import re as _re
+_FULL_SHA_RE = _re.compile(r"^[0-9a-fA-F]{40}$")
+
 # provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
 _SUPPORTED_PROVIDERS = set(_PROVIDER_MODULES)
 
@@ -293,7 +297,7 @@ def list_commits(owner: str, repo: str, per_page: int = Query(20, ge=1, le=100),
                     _repo_token(owner, repo, user, p))
 
 
-@router.get("/{owner}/{repo}/tree", operation_id="gitrepo_tree", summary="Repository tree (single-level; GitHub recursive)", description="Repository directory tree. Single-level (default) proxies git/trees/{ref}; depth=recursive is GitHub-only (GitCode rejects it). ref empty resolves the default branch.")
+@router.get("/{owner}/{repo}/tree", operation_id="gitrepo_tree", summary="Repository tree (single-level; GitHub recursive)", description="Repository directory tree. Single-level (default) resolves ref existence then proxies git/trees/{sha}; depth=recursive is GitHub-only (GitCode rejects it). ref empty resolves the default branch; nonexistent ref returns 404 (Issue #734).")
 def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分支/引用，空=默认分支"),
                   depth: str = Query("single", description="single(单层，默认)/recursive(递归，仅 GitHub)"),
                   user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
@@ -303,6 +307,9 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
     - 递归（depth=recursive）：仅 GitHub 支持（`git/trees/{sha}?recursive=1`）；
       GitCode 平台 recursive 返回破碎树（丢失 blob），故明确拒绝，避免产出残缺数据。
     - ref 空 → 自动解析默认分支。
+    - Issue #734/#643：GitCode 上游 `git/trees/{ref}` 对不存在 ref 返回 200 空树，
+      故先经 `/commits?sha={ref}` 校验 ref 存在性；不存在 → HTTP 404 + 统一包络
+      （与 contents 的 #549 透传语义一致）。完整 sha（40-hex）ref 仍直连零回归。
     """
     depth = (depth or "single").strip().lower()
     ref = (ref or "").strip()
@@ -313,10 +320,22 @@ def get_repo_tree(owner: str, repo: str, ref: str = Query("", description="分�
             ref = _default_ref(p, owner, repo, user)
         # 分支/引用名含 `/`（如 feat/issue-11）裸拼进 git/trees/{ref} 会被 GitCode 当
         # 路径分隔符拆成两段 → 404（grape-skills#95）。先解析为无斜杠的 tree/commit sha
-        # 再取树；sha 不含 `/`，彻底免 URL 编码歧义。无斜杠 ref 保持直连（零回归）。
-        if "/" in ref:
-            ref = _ref_to_tree_sha(p, owner, repo, ref, user)
-            log.info(f"gitrepo_tree: slash ref resolved -> tree sha {ref}")
+        # 再取树；sha 不含 `/`，彻底免 URL 编码歧义。GitHub 无斜杠 ref 保持直连（零回归）。
+        if p == "github" and "/" not in ref:
+            return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
+                            _repo_token(owner, repo, user, p))
+        if p != "github" and _FULL_SHA_RE.fullmatch(ref):
+            # 完整 tree/commit sha：直连 git/trees/{sha}，不做存在性预校验（sha 非分支名，
+            # commits?sha= 对 tree sha 会 404，预校验反成回归）。
+            return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
+                            _repo_token(owner, repo, user, p))
+        _sha = _ref_to_tree_sha(p, owner, repo, ref, user)
+        if not _sha:
+            # Issue #734：不存在 ref 归一 404（含斜杠/不含斜杠一致），不再返回 200 空树。
+            raise HTTPException(status_code=404,
+                                detail={"code": 404, "message": f"ref not found: {ref}"})
+        ref = _sha
+        log.info(f"gitrepo_tree: ref resolved -> tree sha {ref}")
         return _vcs_req(p, "GET", _vcs_url(owner, repo, f"/git/trees/{ref}", None, p),
                         _repo_token(owner, repo, user, p))
     # 递归
@@ -348,13 +367,16 @@ def _default_ref(p: str, owner: str, repo: str, user: dict) -> str:
     return "main"
 
 
-def _ref_to_tree_sha(p: str, owner: str, repo: str, ref: str, user: dict) -> str:
-    """ref 含 `/` 时解析为无斜杠的 tree/commit sha（git-repo-tree-slash-ref-design §3.1）。
+def _ref_to_tree_sha(p: str, owner: str, repo: str, ref: str, user: dict) -> str | None:
+    """ref 解析为无斜杠的 tree/commit sha（git-repo-tree-slash-ref-design §3.1）。
 
     - GitCode：`/commits?sha={ref}`（query 参数形态，urlencode 免斜杠切分）→ commit 的
       `commit.tree.sha`；与 `_github_tree_sha` 同思路。
-    - GitHub：复用 `_github_tree_sha`（本函数对 github provider 不额外发请求，直接委托）。
-    解析失败 → 保序降级返回原 ref（调用方仍按 `git/trees/{ref}` 透传，行为等同现状，不新增 502）。
+    - GitHub：复用 `_github_tree_sha`（本函数对 github provider 不额外发请求，直接委托；
+      其失败兜底仍返回原 ref，由上游 git/trees 404 兜底）。
+    - Issue #734：GitCode 解析不到 commit（空列表/坏结构）→ 返回 None，调用方按
+      「ref 不存在 → 404」归一处理（不再保序降级返回原 ref）；上游错误（含 404）
+      按 #549 透传。
     """
     if p == "github":
         return _github_tree_sha(owner, repo, ref, user)
@@ -363,8 +385,8 @@ def _ref_to_tree_sha(p: str, owner: str, repo: str, ref: str, user: dict) -> str
         data = _vcs_req(p, "GET", _vcs_url(owner, repo, "/commits", {"sha": ref, "per_page": 1}, p),
                         _repo_token(owner, repo, user, p))
         _c = None
-        if isinstance(data, list) and data:
-            _c = data[0]
+        if isinstance(data, list):
+            _c = data[0] if data else None
         elif isinstance(data, dict):
             _c = data
         if _c is not None:
@@ -373,9 +395,12 @@ def _ref_to_tree_sha(p: str, owner: str, repo: str, ref: str, user: dict) -> str
                 return _tree["sha"]
             if _c.get("sha"):
                 return _c["sha"]
+        log.info(f"gitrepo_tree: ref not found via commits lookup: {ref}")
+    except HTTPException:
+        raise
     except Exception as e:
         log.warning(f"gitrepo_tree: resolve tree sha failed for ref={ref}: {e}")
-    return ref
+    return None
 
 
 def _github_tree_sha(owner: str, repo: str, ref: str, user: dict) -> str:

@@ -55,6 +55,9 @@ def gitcode_calls(monkeypatch):
     def _fake_req(method, url, token="", body=None):
         recorded.append({"method": method, "url": url, "token": token, "body": body})
         # "title"：gitcode issues update PATCH 必填 title 自动回取（#640），回取为空会 502
+        # "/commits?sha="：tree ref 存在性校验（#734）→ 返回带 tree sha 的单条 commit
+        if "/commits" in url and "sha=" in url:
+            return [{"sha": "c0ffee", "commit": {"tree": {"sha": "tree0f9e8d"}, "message": "m"}}]
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}, "title": "t"}
 
     monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
@@ -588,13 +591,15 @@ def test_unauthenticated_401():
 
 
 def test_tree_single_level(gitcode_calls, _client):
-    """选项 B：单层树透传 git/trees/{ref}。"""
+    """选项 B：单层树先经 commits 校验 ref 存在性再透传 git/trees/{sha}（#734）。"""
     client = _client
     base = f"/api/git-repo/{OWNER}/{REPO}"
     r = client.get(f"{base}/tree?ref=main")
     assert r.status_code == 200
+    reqs = [c["url"] for c in gitcode_calls]
+    assert any("/commits?sha=main" in u for u in reqs), "ref 必须先经 commits 存在性校验"
     last = gitcode_calls[-1]
-    assert "/git/trees/main" in last["url"] and last["method"] == "GET"
+    assert "/git/trees/" in last["url"] and last["method"] == "GET"
 
 
 def test_tree_ref_empty_resolves_default(gitcode_calls, _client):
@@ -798,6 +803,34 @@ def test_network_error_still_502(monkeypatch, _client):
     r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents/README.md")
     assert r.status_code == 502
     assert r.json()["detail"]["code"] == 502
+
+
+# ===================== Issue #734: contents --ref 404 回归锁定 =====================
+
+def test_contents_nonexistent_branch_ref_404(upstream_error, _client):
+    """contents + 不存在分支 ref（上游 404）→ 透传 404 + 统一包络（回归锁定）。"""
+    upstream_error(404, '{"message":"Not Found"}')
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents/README.md?ref=nosuchref")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == 404
+
+
+def test_contents_root_nonexistent_ref_404(upstream_error, _client):
+    """根目录 contents + 不存在 ref → 透传 404（与子路径行为一致）。"""
+    upstream_error(404, '{"message":"Not Found"}')
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents?ref=nosuchref")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == 404
+
+
+def test_contents_deep_path_404_consistent(upstream_error, _client):
+    """深路径 + 不存在 ref → 404（#783 场景：深/浅路径行为一致，不再返回空）。"""
+    upstream_error(404, '{"message":"Not Found"}')
+    r = _client.get(
+        f"/api/git-repo/{OWNER}/{REPO}/contents/.skills/issue-cli/references/runbook.md?ref=dev-dzr")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == 404
+    assert "Not Found" in r.json()["detail"]["message"]
 
 
 def test_upstream_error_keeps_runtime_error_compat(_client):

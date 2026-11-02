@@ -4,11 +4,16 @@
 根因：`get_repo_tree` 把 ref 裸拼进 URL 路径段 `/git/trees/{ref}`，含 `/` 的分支名被
 GitCode 当路径分隔符拆成两段；而 contents 走 query 参数（urlencode 后 %2F）正常。
 
+Issue #734：统一 tree 对不存在 ref（含 `/` 与不含 `/`）的 404 语义——
+GitCode 先经 `/commits?sha={ref}` 校验存在性，不存在 → HTTP 404 + 统一包络。
+
 本文件守住：
 - 含 `/` 的 ref：先解析 tree/commit sha → 再调 `git/trees/{sha}`（sha 无斜杠）；
-- 无斜杠 ref / 空 ref / recursive 拒绝：保持现状零回归；
-- commits 解析失败 → 保序降级返回原 ref（不新增 502）；
-- GitHub：走 `_github_tree_sha` 既有语义（commit.tree.sha，无斜杠）。
+- 不含 `/` 的分支名 ref：同样先经 commits 校验存在性（多一次上游请求，Spec 接受）；
+- 不存在 ref（空 commits / 上游 404 / 坏结构）→ 404，不再 200 空树降级；
+- 完整 40-hex sha ref：直连 `git/trees/{sha}`，零回归；
+- 空 ref / recursive 拒绝：保持现状零回归；
+- GitHub：走 `_github_tree_sha` 既有语义（commit.tree.sha，无斜杠；无斜杠 ref 直连）。
 """
 import uuid
 from unittest.mock import patch
@@ -18,11 +23,13 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
+from src.user.repo_manager import UpstreamAPIError
 
 UID = 98702
 OWNER = "o"
 REPO = "hello"
 BOT = "bot_tok_456"
+FULL_SHA = "a" * 40
 
 
 @pytest.fixture(autouse=True)
@@ -82,39 +89,99 @@ class TestGitCodeTreeSlashRef:
         assert trees and trees[-1]["url"].endswith(f"/git/trees/{tree_sha}"), \
             "取树必须用解析出的无斜杠 sha"
 
-    def test_non_slash_ref_direct_no_extra_call(self, monkeypatch):
-        """QA-02：GitCode + ref=main（无斜杠）→ 直连 git/trees/main，不解析。"""
+    def test_non_slash_ref_validated_then_resolved(self, monkeypatch):
+        """QA-02：GitCode + ref=main（无斜杠）→ 先 commits 存在性校验 → git/trees/{sha}。
+
+        Issue #734：非斜杠分支名同样经 commits?sha= 预校验（上游 git/trees 对
+        未知 ref 返回 200 空树，无法归一 404，Spec 接受多一次上游请求）。
+        """
         recorded = []
-        monkeypatch.setattr("src.user.repo_manager._req", _routed_req_mock(recorded, {}))
+        tree_sha = "abc123def456"
+        monkeypatch.setattr(
+            "src.user.repo_manager._req",
+            _routed_req_mock(recorded, {
+                "/commits": _commit_with_tree("c111222333", tree_sha),
+            }))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=main")
         assert r.status_code == 200
-        assert recorded[-1]["url"].endswith("/git/trees/main")
-        assert not any("/commits" in c["url"] for c in recorded), "无斜杠 ref 不得多一次请求"
+        commits = [c for c in recorded if "/commits" in c["url"] and "sha=main" in c["url"]]
+        assert commits, "非斜杠 ref 必须先经 commits 存在性校验"
+        trees = [c for c in recorded if "/git/trees/" in c["url"]]
+        assert trees and trees[-1]["url"].endswith(f"/git/trees/{tree_sha}"), \
+            "取树必须用解析出的 tree sha"
+
+    def test_full_sha_ref_direct_no_validation(self, monkeypatch):
+        """QA-02b：GitCode + 完整 40-hex sha ref → 直连 git/trees/{sha}，不做预校验。"""
+        recorded = []
+        monkeypatch.setattr(
+            "src.user.repo_manager._req",
+            _routed_req_mock(recorded, {}))
+        r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref={FULL_SHA}")
+        assert r.status_code == 200
+        assert recorded[-1]["url"].endswith(f"/git/trees/{FULL_SHA}")
+        assert not any("/commits" in c["url"] for c in recorded), "sha ref 不得多一次请求"
 
     def test_empty_ref_resolves_default(self, monkeypatch):
-        """QA-03：GitCode + ref 空 → 沿用默认分支解析。"""
+        """QA-03：GitCode + ref 空 → 沿用默认分支解析（再经 commits 校验）。"""
         recorded = []
+        tree_sha = "abc123def456"
         monkeypatch.setattr(
             "src.user.repo_manager._req",
             _routed_req_mock(recorded, {
                 "/branches": [{"name": "main"}],
+                "/commits": _commit_with_tree("c111222333", tree_sha),
             }))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree")
         assert r.status_code == 200
-        assert recorded[-1]["url"].endswith("/git/trees/main")
+        assert recorded[-1]["url"].endswith(f"/git/trees/{tree_sha}")
 
-    def test_commits_parse_failure_degrades_to_raw_ref(self, monkeypatch):
-        """QA-04：commits 解析失败（坏结构）→ 降级返回原 ref，不 502。"""
+    def test_nonexistent_ref_returns_404_empty_commits(self, monkeypatch):
+        """QA-04a：GitCode + 不存在 ref（commits 返回空列表）→ HTTP 404 + 统一包络。"""
         recorded = []
         monkeypatch.setattr(
             "src.user.repo_manager._req",
             _routed_req_mock(recorded, {
+                "/commits": [],  # ref 不存在 → 空提交列表
+            }))
+        r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=nosuchref")
+        assert r.status_code == 404
+        envelope = r.json()["detail"]
+        assert envelope["code"] == 404
+        assert "nosuchref" in envelope["message"]
+        assert not any("/git/trees/" in c["url"] for c in recorded), \
+            "不存在 ref 不得再透传 git/trees（上游会返回 200 空树）"
+
+    def test_nonexistent_slash_ref_returns_404(self, monkeypatch):
+        """QA-04b：GitCode + 不存在斜杠 ref → 404（与无斜杠行为一致，#734 归一）。"""
+        monkeypatch.setattr(
+            "src.user.repo_manager._req",
+            _routed_req_mock([], {
+                "/commits": [],
+            }))
+        r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=feat/nosuch-branch")
+        assert r.status_code == 404
+        assert r.json()["detail"]["code"] == 404
+
+    def test_nonexistent_ref_upstream_404_passthrough(self, monkeypatch):
+        """QA-04c：commits 上游直接 404 → 按 #549 透传 404（不 502、不空树）。"""
+        def _fake_req(method, url, token="", body=None):
+            raise UpstreamAPIError(method, url, 404, "Not Found")
+        monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+        r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=nosuchref")
+        assert r.status_code == 404
+        assert r.json()["detail"]["code"] == 404
+        assert "Not Found" in r.json()["detail"]["message"]
+
+    def test_commits_parse_failure_returns_404(self, monkeypatch):
+        """QA-04d：commits 解析失败（坏结构）→ 归一 404（不再降级返回 200 空树，#734）。"""
+        monkeypatch.setattr(
+            "src.user.repo_manager._req",
+            _routed_req_mock([], {
                 "/commits": {"unexpected": True},  # 非 list 且无 tree → 解析失败
             }))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=feat/issue-11")
-        assert r.status_code == 200
-        assert recorded[-1]["url"].endswith("/git/trees/feat/issue-11"), \
-            "解析失败应保序降级原样透传"
+        assert r.status_code == 404
+        assert r.json()["detail"]["code"] == 404
 
     def test_recursive_gitcode_rejected(self, monkeypatch):
         """QA-05：GitCode + recursive → 400 拒绝（不回归）。"""
