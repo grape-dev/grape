@@ -701,7 +701,7 @@ def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
             if not candidates:
                 return None
             raw = zf.read(candidates[0])
-            return raw.decode("utf-8", errors="replace")
+            return raw.decode("utf-8-sig", errors="replace")
     except Exception as e:
         log.warning(f"extract_skill_md failed: {e}")
         return None
@@ -731,7 +731,7 @@ def list_zip_sub_skills(zip_bytes: bytes, skill_name: str) -> list:
                 if not sub_name or sub_name in (".", "..") or sub_name in subs:
                     continue
                 try:
-                    front = zf.read(n).decode("utf-8", errors="replace")[:500]
+                    front = zf.read(n).decode("utf-8-sig", errors="replace")[:500]
                 except Exception:
                     front = ""
                 display_name, description = sub_name, ""
@@ -775,7 +775,7 @@ def read_zip_sub_skill(zip_bytes: bytes, skill_name: str, sub_name: str) -> dict
             entry = f"{skill_name}/references/{sub_name}/SKILL.md"
             if entry not in names:
                 return None
-            content = zf.read(entry).decode("utf-8", errors="replace")
+            content = zf.read(entry).decode("utf-8-sig", errors="replace")
             refs = []
             ref_prefix = f"{skill_name}/references/{sub_name}/references/"
             for n in sorted(names):
@@ -785,7 +785,7 @@ def read_zip_sub_skill(zip_bytes: bytes, skill_name: str, sub_name: str) -> dict
                 if not rest or "/" in rest:
                     continue  # 只读顶层文件（对齐本地 os.listdir 行为）
                 try:
-                    refs.append({"name": rest, "content": zf.read(n).decode("utf-8", errors="replace")[:2000]})
+                    refs.append({"name": rest, "content": zf.read(n).decode("utf-8-sig", errors="replace")[:2000]})
                 except Exception:
                     refs.append({"name": rest, "content": ""})
             return {"content": content, "references": refs}

@@ -640,7 +640,7 @@ def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_
             skill_path = os.path.join(SKILLS_DIR, skill_dir, "SKILL.md")
     content = ""
     if os.path.exists(skill_path):
-        with open(skill_path, encoding="utf-8") as f:
+        with open(skill_path, encoding="utf-8-sig") as f:
             content = f.read()
     return {
         "id": current_id,
@@ -1189,7 +1189,7 @@ def list_sub_skills(skill_id: int, user: dict = Depends(get_current_user_or_api_
         file_count = 0
         if readable:
             try:
-                with open(sub_md, encoding="utf-8") as f:
+                with open(sub_md, encoding="utf-8-sig") as f:
                     front = f.read(500)
                 m = _re.search(r'description:\s*["\']?(.*?)["\']?$', front, _re.MULTILINE)
                 if m:
@@ -1247,7 +1247,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
         return {"name": sub_name, "content": sub_data["content"], "references": sub_data["references"]}
 
     try:
-        with open(sub_md, encoding="utf-8") as f:
+        with open(sub_md, encoding="utf-8-sig") as f:
             content = f.read()
     except Exception as e:
         raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})
@@ -1260,7 +1260,7 @@ def read_sub_skill(skill_id: int, sub_name: str, user: dict = Depends(get_curren
             rp = os.path.join(ref_dir, r)
             if os.path.isfile(rp):
                 try:
-                    with open(rp, encoding="utf-8") as f:
+                    with open(rp, encoding="utf-8-sig") as f:
                         refs.append({"name": r, "content": f.read()[:2000]})
                 except Exception:
                     refs.append({"name": r, "content": ""})
@@ -1297,7 +1297,7 @@ def package_sub_skill(pkg_id: int, sub_name: str, user: dict = Depends(get_curre
     content = None
     if os.path.isfile(sub_md):
         try:
-            with open(sub_md, encoding="utf-8") as f:
+            with open(sub_md, encoding="utf-8-sig") as f:
                 content = f.read()
         except Exception as e:
             raise HTTPException(status_code=500, detail={"code": 500, "message": f"读取失败: {e}"})

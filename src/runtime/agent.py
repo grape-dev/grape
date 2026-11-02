@@ -1213,7 +1213,7 @@ def _scan_local_skills_with_detail(engine_type: str) -> list[dict]:
                     break
         if detail["path"]:
             try:
-                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8") as f:
+                with open(_os.path.join(detail["path"], "SKILL.md"), "r", encoding="utf-8-sig") as f:
                     content = f.read()
                 if content.startswith("---"):
                     end = content.find("---", 3)
