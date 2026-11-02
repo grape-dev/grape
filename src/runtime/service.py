@@ -2588,7 +2588,11 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
                     _r.issue_id = _issue_id
                     _h = create_action_handler(_r)
                     if _h:
-                        _h.post_issue_comment(_repo_key, _issue_num, _result_text or "任务已完成。", _r, _agent_type)
+                        # Issue #679：result_text 为空时无内容可发，跳过系统回帖（不发占位文案）
+                        if _result_text:
+                            _h.post_issue_comment(_repo_key, _issue_num, _result_text, _r, _agent_type)
+                        else:
+                            log.info(f"complete_task: skip system comment, empty result_text for {_repo_key}/issues/{_issue_num}")
                     elif _token:
                         # 无 handler（无 token 配置）→ fallback 直接调 _post_result_to_issue
                         from src.api.event_pipeline import _post_result_to_issue

@@ -118,30 +118,24 @@ class TestPostResultToIssueConclusion:
         assert "任务已完成。" not in captured["body"], \
             "有效 result_text 不应被占位文案覆盖"
 
-    def test_empty_result_uses_clean_fallback(self):
-        """result_text 为空时兜底文案为简洁「任务已完成。」，不含「（agent agent）」。"""
+    def test_empty_result_skips_comment(self):
+        """Issue #679：result_text 为空时不发任何评论（无占位文案）。"""
         from src.api.event_pipeline import _post_result_to_issue
         captured = {}
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_result_to_issue("test/repo", "5", "", "fake_token", "vod")
-        assert "[VOD Agent]" in captured["body"]
-        assert "任务已完成。" in captured["body"]
-        assert "agent agent" not in captured["body"], \
-            "兜底文案不应出现「agent agent」"
-        assert "AGENT Agent" not in captured["body"], \
-            "不应出现「AGENT Agent」"
+        assert "body" not in captured, \
+            "result_text 为空时应跳过回帖，不应发出占位文案"
 
-    def test_json_without_conclusion_uses_fallback(self):
-        """result_text 为 JSON 但无 conclusion 字段时用兜底文案。"""
+    def test_json_without_conclusion_skips_comment(self):
+        """Issue #679：result_text 为 JSON 但无 conclusion 字段时不发评论（原文也不泄漏）。"""
         from src.api.event_pipeline import _post_result_to_issue
         captured = {}
         result_text = '{"foo": "bar"}'
         with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
             _post_result_to_issue("test/repo", "5", result_text, "fake_token", "sre")
-        assert "[SRE Agent]" in captured["body"]
-        assert "任务已完成。" in captured["body"]
-        assert '"foo"' not in captured["body"], \
-            "JSON 原文不应泄漏到评论"
+        assert "body" not in captured, \
+            "无 conclusion 的 JSON 产出应跳过回帖，不应发出占位文案"
 
     def test_marker_stripped_from_conclusion(self):
         """result_text 含预附 marker 时，marker 不出现在 conclusion 中（避免双重 marker）。"""
@@ -200,18 +194,19 @@ class TestPostResultToIssueDedup:
 # =====================================================================
 # 4. complete_task 兜底文案链路（集成）
 # =====================================================================
-
 class TestCompleteTaskFallback:
-    """complete_task 兜底文案不产出「（agent agent）」。"""
+    """complete_task 链路不产出占位文案。"""
 
     def test_fallback_text_no_agent_agent(self):
-        """complete_task 传给 post_issue_comment 的兜底文案为「任务已完成。」。"""
+        """Issue #679：complete_task 不再拼接任何「任务已完成」兜底文案。"""
         import inspect
         from src.runtime.service import complete_task
         src = inspect.getsource(complete_task)
         # 兜底文案应使用简洁形式，不含「（{agent_type} agent）」
         assert "任务已完成（" not in src, \
             "complete_task 不应再使用「任务已完成（xxx agent）」占位文案"
+        assert "任务已完成。" not in src, \
+            "complete_task 不应再使用「任务已完成。」占位文案（Issue #679：空则跳过）"
         # 应传 agent_type 参数给 post_issue_comment
         assert "_agent_type" in src, "complete_task 应引用 _agent_type"
 
@@ -225,3 +220,62 @@ class TestCompleteTaskFallback:
             "_post_comment_via_provider 不应硬编码 agent_type=\"agent\""
         assert "agent_type, repo_key" in src, \
             "_post_comment_via_provider 应透传 agent_type 参数"
+
+
+# =====================================================================
+# 5. Issue #679：三处发帖入口无内容时跳过发帖（不发占位文案）
+# =====================================================================
+
+class TestIssue679SkipEmptyPosting:
+    """Issue #679：conclusion 与有效正文均缺失时跳过发帖。"""
+
+    def test_pr_result_empty_skips_comment(self):
+        """PR 订阅回帖：result_text 为空时不发评论。"""
+        from src.api.event_pipeline import _post_result_to_pr
+        captured = {}
+        with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
+             patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
+            _post_result_to_pr("test/repo", "33", "", "fake_token", "qa")
+        assert "body" not in captured, \
+            "PR 回帖：result_text 为空时应跳过，不应发出占位文案"
+
+    def test_pr_result_json_without_conclusion_skips_comment(self):
+        """PR 订阅回帖：纯 JSON 无 conclusion 时不发评论。"""
+        from src.api.event_pipeline import _post_result_to_pr
+        captured = {}
+        with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
+             patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
+            _post_result_to_pr("test/repo", "33", '{"foo": "bar"}', "fake_token", "qa")
+        assert "body" not in captured, \
+            "PR 回帖：无 conclusion 的 JSON 产出应跳过"
+
+    def test_pr_result_plain_text_posts(self):
+        """PR 订阅回帖：纯文本正文正常发布（行为不变）。"""
+        from src.api.event_pipeline import _post_result_to_pr
+        captured = {}
+        with patch("src.api.event_pipeline._is_github_repo", return_value=False), \
+             patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
+            _post_result_to_pr("test/repo", "33", "conclusion: 审查通过", "fake_token", "qa")
+        assert "body" in captured, "PR 回帖：纯文本正文应正常发布"
+        assert "审查通过" in captured["body"]
+        assert "任务已完成" not in captured["body"]
+
+    def test_issue_result_json_conclusion_posts(self):
+        """issue 回帖主路径：结构化 conclusion 正常发布（行为不变）。"""
+        from src.api.event_pipeline import _post_result_to_issue
+        captured = {}
+        result_text = json.dumps({"conclusion": "分析完成，评级 ready"})
+        with patch("urllib.request.urlopen", side_effect=_make_mock_urlopen(captured)):
+            _post_result_to_issue("test/repo", "5", result_text, "fake_token", "vod")
+        assert "分析完成，评级 ready" in captured["body"]
+        assert "任务已完成" not in captured["body"]
+
+    def test_service_handler_skips_empty_result_text(self):
+        """service handler 发帖链：result_text 为空时不调用 post_issue_comment。"""
+        import inspect
+        from src.runtime import service as _svc
+        src = inspect.getsource(_svc.complete_task)
+        assert 'or "任务已完成。"' not in src, \
+            "complete_task 不应再对 result_text 做「任务已完成。」兜底"
+        assert "if _result_text:" in src, \
+            "complete_task 应在 result_text 非空时才调用 post_issue_comment"

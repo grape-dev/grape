@@ -4641,14 +4641,15 @@ def _post_result_to_issue(repository: str, issue_number, result_text: str, bot_t
             _conclusion = _parsed["conclusion"]
     except Exception:
         pass
-    # conclusion 提取失败时：保留有效 result_text（纯文本），避免占位文案覆盖 Agent 真实产出；
-    # result_text 为空或纯 JSON 时用简洁默认消息（前缀已携带 Agent 身份）
+    # conclusion 提取失败时：保留有效 result_text（纯文本），避免思考过程/JSON 块泄漏到 Issue 评论；
+    # result_text 为空或纯 JSON 时无内容可发，直接跳过回帖（Issue #679：不发占位文案）
     if not _conclusion:
         _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
         if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
             _conclusion = _stripped[:3000]
         else:
-            _conclusion = "任务已完成。"
+            log.info(f"Exec agent: skip system comment, no conclusion or valid text to post to {repository}/issues/{issue_number}")
+            return
 
     # 根据 repo_key provider 分流
     if _is_github_repo(repo_key):
@@ -4772,7 +4773,13 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
     except Exception:
         pass
     if not _conclusion:
-        _conclusion = f"PR 审查任务已完成（{agent_type} agent）。"
+        # Issue #679：无 conclusion 时保留有效纯文本正文；为空或纯 JSON 时跳过发帖（不发占位文案）
+        _stripped = (result_text or "").replace("<!-- grape-auto-comment -->", "").strip()
+        if _stripped and not _stripped.startswith("{") and not _stripped.startswith("["):
+            _conclusion = _stripped[:3000]
+        else:
+            log.info(f"Exec agent: skip PR comment, no conclusion to post to {repository}/pulls/{pr_number}")
+            return
     _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
     _comment += "\n<!-- grape-auto-comment -->"
     try:
