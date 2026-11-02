@@ -250,6 +250,45 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     return "", 0
 
 
+def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
+    """读取 Issue 真实绑定的场景（Issue #681，推荐入口专用，勿用于展示/A2A）。
+
+    与 get_issue_scene 的区别：**不回退 managed_repos.dev_scene**，只查两层真实绑定：
+    1. issue_state.scene_id（get_issue_stage）
+    2. issue 表 scene_id（Phase C3 权威源）
+
+    返回 (scene_id, scene_user_id)：
+    - 命中任一层真实绑定 → 该值（GitCode 详情页选择 / Task Center 创建时写入 /
+      VOD 智能推荐完成后写回，均为真实绑定，应跳过推荐）
+    - 均未命中 → ("", 0)（无真实绑定，应走智能推荐；dev_scene 仅作展示兜底，
+      不构成跳过推荐的强绑定，见 Issue #681 / #415 spec）
+
+    PR 订阅伪 issue_id（#pr_<PR号>_<scene_id>）场景 ID 编码在伪 id 内，视为真实绑定。
+    """
+    import re as _re
+    _m = _re.match(r"^#?pr_\d+_(.+)$", str(issue_id or ""))
+    if _m:
+        return _m.group(1), 0
+    st = get_issue_stage(repo_key, issue_id)
+    if st and st.get("scene_id"):
+        return st["scene_id"], st.get("scene_user_id", 0) or 0
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, scene_user_id FROM issue "
+                "WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num)
+            )
+            r = c.fetchone()
+            if r and r[0]:
+                return r[0], r[1] or 0
+    except Exception:
+        pass
+    return "", 0
+
+
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
     """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},

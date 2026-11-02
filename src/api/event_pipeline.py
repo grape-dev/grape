@@ -1887,8 +1887,11 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
             import time as _time
             for _attempt in range(3):
                 try:
-                    from src.api.session_store import get_issue_scene
-                    _existing_scene, _ = get_issue_scene(repo_key, _rid_early)
+                    # Issue #681: 推荐入口判定只认真实绑定（issue_state.scene_id → issue 表
+                    # scene_id），不回退 managed_repos.dev_scene（dev_scene 仅作展示兜底，
+                    # 见 #415）；用 get_issue_scene 会被 dev_scene 短路、整体跳过推荐。
+                    from src.api.session_store import get_issue_bound_scene
+                    _existing_scene, _ = get_issue_bound_scene(repo_key, _rid_early)
                     if _existing_scene:
                         _is_scene_recommend = False
                         log.info(f"Pipeline: issue_opened 已有场景 {_existing_scene}（attempt={_attempt+1}），跳过推荐")
