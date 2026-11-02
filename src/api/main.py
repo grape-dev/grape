@@ -14,6 +14,8 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
+from src.api.json_safe import SafeJSONResponse  # Issue #684：统一 JSON 序列化出口
+
 from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability, patrol
 
 
@@ -810,6 +812,7 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
     openapi_url="/openapi.json",
+    default_response_class=SafeJSONResponse,  # Issue #684：统一 JSON 序列化出口（控制字符转义）
 )
 
 app.add_middleware(
