@@ -62,6 +62,7 @@
 | [17 Feedback](17-feedback.md) | `POST /api/feedback`（Submit） | dual（Agent tk_ 场景） |
 | | `mine` / `context` / `delete` / `upload` | user_only |
 | | `list` / `stats` / `{fid}/status`（管理） | admin-only（不进契约） |
+| [18 Patrol](18-patrol.md) | 全部（findings 清单/dismiss） | user_only |
 
 ## 目录
 
@@ -83,6 +84,7 @@
 16. [DevStage 开发环境（/api/devstage）](15-devstage.md)
 17. [Auth/Misc 账号与全局（/api/auth · dashboard · pipeline · search · project-templates · feishu）](16-auth-and-misc.md)
 18. [Feedback 意见反馈（/api/feedback）](17-feedback.md)
+19. [Patrol 巡检异常清单（/api/patrol）](18-patrol.md)
 
 ## 状态码约定
 

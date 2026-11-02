@@ -1,0 +1,7 @@
+{
+  "_comment": "A2A 链路巡检器配置示例（seed 用）。运行真源是 DB meta（patrol:interval_seconds / patrol:confirm_minutes / patrol:lookback_mode / patrol:compensate_enabled / patrol:compensate_blocklist），集群共享、每周期重读、改即生效无需重启；本文件仅在首次启动、meta 无对应键时 seed 一次（login-whitelist 先例），此后以表为准，没有本文件则全部走代码默认（能力全开：interval=300s、confirm=10min、lookback=runtime、compensate=true）。lookback_mode 可选 audit（存量核对，扫描覆盖全历史）/ runtime（常规 7 天窗）。紧急控制：总关=set meta patrol:compensate_enabled=false；逐仓排除/全拦=set meta patrol:compensate_blocklist=<repo_key 逗号分隔 | *>。坏值一律回落默认并告警。",
+  "interval_seconds": 300,
+  "confirm_minutes": 10,
+  "lookback_mode": "runtime",
+  "compensate_enabled": true
+}

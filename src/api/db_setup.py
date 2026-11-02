@@ -137,6 +137,29 @@ CREATE TABLE IF NOT EXISTS meta (
 )
 """
 
+# A2A 链路巡检器（docs/weekly-09/a2a-chain-patrol-design.md §三）：只增新表，不改既有表。
+# UNIQUE(kind, task_id, event_seq) + INSERT OR IGNORE = 集群双主同轮同发现静默去重（D3 兜底层）。
+_PATROL_FINDINGS_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_patrol_findings (
+    id            TEXT PRIMARY KEY,           -- uuid（硬性要求：新表主键一律 UUID，Python 侧生成，禁自增）
+    kind          TEXT NOT NULL,            -- broken_chain | zombie_running_signal | zombie_running_window | zombie_queued_dead | zombie_queued_window | stalled_issue
+    task_id       TEXT NOT NULL DEFAULT '',  -- agent_tasks.id（UUID 引用；合成键空串参与唯一约束）
+    event_seq     INTEGER NOT NULL DEFAULT 0, -- 关联 events.seq（可空时用 0，参与唯一约束）
+    repo_key      TEXT DEFAULT '',
+    issue_id      TEXT DEFAULT '',
+    owner         INTEGER NOT NULL DEFAULT 0,  -- 归属人 user_id（D16：路径 B=host_user_id；0=unowned 置顶）
+    detail        TEXT DEFAULT '',          -- 判定输入快照
+    suggestion    TEXT DEFAULT '',          -- 建议处置（Phase 1 只写建议不执行）
+    status        TEXT NOT NULL DEFAULT 'open',  -- open | claiming | compensated | dismissed | false_positive
+    action_meta   TEXT DEFAULT '',
+    created_at    TEXT DEFAULT '',
+    updated_at    TEXT DEFAULT '',
+    UNIQUE(kind, task_id, issue_id, event_seq)
+    -- 部署验证修正（2026-11-02 实测）：issue 级 finding（stalled_issue）task_id 恒为空串，
+    -- 原三列唯一键使全部 issue 级发现共享同一键（14 条只存 1 条）——issue_id 进键。
+)
+"""
+
 # ===== Issue #536: 迁移版本表（迁移只跑一遍的地基）=====
 # 设计：docs/weekly-09/migration-versioning-and-ddl-safety-design.md §D1
 # - version 主键（'202611010001' 日期+序号）；kind: safe/backfill/cleanup/legacy-stamp；
@@ -866,6 +889,7 @@ CREATE TABLE IF NOT EXISTS admin_accounts (
 _NEW_TABLES = [
     ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
+    ("grape_t_patrol_findings", _PATROL_FINDINGS_DDL),
     ("grape_t_schema_migrations", _SCHEMA_MIGRATIONS_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
@@ -2680,6 +2704,57 @@ def register_migration(version: str, name: str, kind: str,
     _MIGRATIONS.append(mig)
     _MIGRATIONS.sort(key=lambda m: m.version)
     return mig
+
+
+def _fn_create_grape_t_patrol_findings() -> None:
+    """部署验证实测发现的缺口修复（2026-11-02）：存量库（迁移台账已盖章）
+    上 grape_t_patrol_findings 永不建表——_NEW_TABLES 只服务 legacy 全量首跑路径，
+    已盖章库启动只跑 _MIGRATIONS。注册 safe 迁移让存量库启动自动补建
+    （CREATE TABLE IF NOT EXISTS 幂等）。"""
+    with db_lock:
+        db.execute(_PATROL_FINDINGS_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611020001",
+    name="create-patrol-findings-table",
+    kind="safe",
+    fn=_fn_create_grape_t_patrol_findings,
+)
+
+
+def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
+    """部署验证实测发现（2026-11-02）：issue 级 finding（stalled_issue）task_id 恒为空串，
+    原三列唯一键 UNIQUE(kind, task_id, event_seq) 使全部 issue 级发现共享同一键——
+    本机实测 14 条 stalled 只落 1 条。issue_id 进唯一键；旧形态表重建（保数据）。"""
+    with db_lock:
+        c = db.cursor()
+        # 评审十轮修正②：sqlite_master 判断用字面量名形态——兼容层
+        # _SQLITE_MASTER_SQL_RE 只认 name='字面量'（参数化形态穿透不翻译，
+        # MySQL 上每次启动报错、迁移永不盖章）。字面量形态被翻译为
+        # information_schema 查询，双方言一致。
+        c.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='grape_t_patrol_findings'")
+        row = c.fetchone()
+        create_sql = (row[0] or "") if row else ""
+        if "grape_t_patrol_findings" not in create_sql:
+            return          # 表不存在：fresh 库走新 DDL
+        if "UNIQUE(kind,task_id,issue_id,event_seq)" in create_sql.replace(" ", ""):
+            return          # 已是新形态
+        db.execute("ALTER TABLE grape_t_patrol_findings RENAME TO grape_t_patrol_findings_old")
+        db.execute(_PATROL_FINDINGS_DDL)
+        db.execute("INSERT INTO grape_t_patrol_findings SELECT * FROM grape_t_patrol_findings_old")
+        db.execute("DROP TABLE grape_t_patrol_findings_old")
+        db.commit()
+
+
+register_migration(
+    version="202611020002",
+    name="rebuild-patrol-findings-unique-with-issue-id",
+    kind="safe",
+    fn=_fn_rebuild_grape_t_patrol_findings_unique,
+)
 
 
 def _fn_checksum(fn: Callable[[], None]) -> str:

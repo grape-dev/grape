@@ -14,7 +14,7 @@ from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 
-from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability
+from src.api.routes import auth, grape_auth, repos, dashboard, agents, events, chat, settings, skills, search, pipeline, webhook, scenes, templates, tasks, runtime, feishu_onboard, feishu_card, task_logs, knowledge, health, devstage, latency, issues, feedback, autopilot, orgs, community, observability, patrol
 
 
 bot_manager = None
@@ -207,6 +207,16 @@ async def lifespan(app: FastAPI):
         log.info("Sweeper loop started")
     except Exception as e:
         log.warning(f"Sweeper loop start failed: {e}")
+
+    # A2A 链路巡检器（Phase 1 只读，docs/weekly-09/a2a-chain-patrol-design.md）：
+    # 拉模型兜底，谓词 UPDATE 选主，仅写 grape_t_patrol_findings，零既有表写路径
+    _patrol_task = None
+    try:
+        from src.api.patrol import patrol_loop
+        _patrol_task = asyncio.create_task(patrol_loop())
+        log.info("Patrol loop started")
+    except Exception as e:
+        log.warning(f"Patrol loop start failed: {e}")
 
     # 知识库 OBS 同步：后台定时迁移老数据到 OBS（每小时一次）
     _knowledge_sync_task = None
@@ -728,6 +738,16 @@ async def lifespan(app: FastAPI):
             await asyncio.wait_for(_knowledge_write_task, timeout=5)
         except (asyncio.CancelledError, asyncio.TimeoutError):
             pass
+    # 巡检后台循环（S53/R24，外部复审发现 1）：与 obs 三循环同款收口——
+    # 此前漏 cancel，patrol_loop 是无限循环写库任务，任何在本进程启动过 app
+    # 的场景（含 pytest TestClient）都会把它留在后台继续写库 → 用例成片假失败
+    # （main.py 本处注释记录过的同类真实事故，复发封口）。
+    if _patrol_task:
+        _patrol_task.cancel()
+        try:
+            await asyncio.wait_for(_patrol_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
     # 可观测性后台循环（告警求值 / 指标聚合 / 设备采样）：**必须一起收掉**。
     # 之前漏了这三个 cancel —— 任何在本进程里启动过 app 的场景（含 pytest 里的 TestClient）
     # 都会把这些循环留在后台，继续对同一个库读写 → 后续用例成片假失败（真实踩到）。
@@ -1052,6 +1072,7 @@ app.include_router(autopilot.router)
 app.include_router(orgs.router)
 app.include_router(community.router)
 app.include_router(observability.router)
+app.include_router(patrol.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 from src.api.openapi import custom_openapi

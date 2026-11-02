@@ -1513,7 +1513,9 @@ async def a2a_redo_event(seq: int, body: A2ARedoBody, user: dict = Depends(requi
         "account": actor,
         "issue_number": issue_id,
         "pr_number": "",
-        "context": f"用户手动补发 A2A：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
+        # D5 评审修正③：手工路径必传 compensated_by=manual+操作用户（不给默认值，防审计底线被稀释）；
+        # marker 进 context 使其随 a2a_endpoint 组装落入事件 payload
+        "context": f"用户手动补发 A2A[compensated_by=manual:{user.get('username', '')}]：原事件 seq={seq}（{evt.get('agent_type') or 'agent'}）已完成但未交办下游，请基于该事件结论继续处理。",
     })
     _res = await a2a_endpoint(None, _a2a_body, _redo_user)  # type: ignore[arg-type]  # jwt 分支不读 request
     # JSONResponse（拦截类 skipped）原样透传
