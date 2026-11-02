@@ -1269,7 +1269,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
             _fb_repo = _trk(session_repo)
             with _dl:
                 c = _db.cursor()
-                c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue "
+                c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
                           "WHERE repo_key=? AND issue_number=? ORDER BY id LIMIT 1",
                           (_fb_repo, _fb_num))
                 irow = c.fetchone()
@@ -1283,7 +1283,7 @@ async def issue_awaiting_input(issue_id: int, body: TaskAwaitingInputBody,
                                                event_type="issue_opened")
                     with _dl:
                         c = _db.cursor()
-                        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status FROM issue "
+                        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue "
                                   "WHERE id=?", (_fb_id,))
                         irow = c.fetchone()
                 elif _st == "missing":
@@ -1376,32 +1376,108 @@ def _scene_agent_allowlist(repo_key: str, scene_id: str) -> set:
         return set()
 
 
+def _vcs_issue_lookup(owner: str, repo: str, number: int, user: dict) -> dict | None:
+    """Issue #672：按 GitCode number + owner/repo 走 git-repo 通道核对远端 issue 是否存在。
+
+    双路径兜底之一（内部需求库 issue_id 解析失败时使用）：provider 双试 gitcode→github，
+    token 优先仓库 bot token（devops 场景），会话用户 token 交叉回退。
+    任何失败都视为未命中（兜底不放大错误），返回 None 或 {"provider", "issue"}。
+    """
+    from src.api.git_repo_api import _PROVIDER_MODULES, _vcs_req, _vcs_url
+    from src.repo_key import to_repo_key
+    for _p in ("gitcode", "github"):
+        try:
+            _mod = _PROVIDER_MODULES.get(_p)
+            if _mod is None:
+                continue
+            _rk = to_repo_key(f"{owner}/{repo}", provider=_p)
+            _tok = ""
+            try:
+                _tok = _mod.bot_token(_rk) or ""
+            except Exception:
+                _tok = ""
+            if not _tok and user.get("auth_type") == "session_token":
+                try:
+                    _tok = _mod.user_token(user.get("username") or "", user.get("id") or 0) or ""
+                except Exception:
+                    _tok = ""
+            if not _tok:
+                continue
+            resp = _vcs_req(_p, "GET", _vcs_url(owner, repo, f"/issues/{number}", None, _p), _tok)
+            if isinstance(resp, dict) and (resp.get("number") is not None or resp.get("id")):
+                return {"provider": _p, "issue": resp}
+        except HTTPException as e:
+            if getattr(e, "status_code", 0) == 404:
+                continue
+            log.warning(f"Issue #672 VCS fallback: {_p} {owner}/{repo}#{number} lookup failed: {getattr(e, 'detail', '')}")
+        except Exception as e:
+            log.warning(f"Issue #672 VCS fallback: {_p} {owner}/{repo}#{number} error: {e}")
+    return None
+
+
 def _session_devops_issue(issue_id: int, user: dict) -> dict:
     """待审核系列端点通用鉴权：仅 tk_ 会话；agent_type∈(devops 白名单 ∪ issue 绑定场景节点集)（Issue #655）；
-    issue.repo_key==token.repo_key；返回 issue 行。"""
+    issue.repo_key==token.repo_key；返回 issue 行。
+
+    Issue #672：双路径解析——内部主键 miss（404）或 scope 不匹配（403，GitCode number 撞上
+    其它仓库的内部 id）时，把 issue_id 视作 GitCode number 在会话仓库作用域内二次解析；
+    本地亦无行但远端（number+owner/repo）存在时建最小行（同步修复，覆盖存量缺行）。
+    """
     from src.session_manager import db as _db, db_lock as _dl
+    from src.repo_key import to_repo_key, parse_repo_key
     if user.get("auth_type") != "session_token":
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仅会话 token（tk_）可调用（Agent 执行期）"})
     _repo = user.get("repo_key") or ""
     if not _repo:
         raise HTTPException(status_code=403, detail={"code": 403, "message": "会话 token 缺少仓库作用域"})
+    _cols = "id, repo_key, issue_number, assignee, user_id, title, status, scene_id"
     with _dl:
         c = _db.cursor()
-        c.execute("SELECT id, repo_key, issue_number, assignee, user_id, title, status, scene_id FROM issue WHERE id=?", (issue_id,))
+        c.execute(f"SELECT {_cols} FROM issue WHERE id=?", (issue_id,))
         _r = c.fetchone()
-    if not _r:
-        raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
-    from src.repo_key import to_repo_key
-    if _r[1] and to_repo_key(_r[1]) != to_repo_key(_repo):
+    # Issue #672 兜底一：会话仓库作用域内按 issue_number 二次解析（id 撞号/主键 miss 或 scope 不匹配）
+    _fb = None
+    with _dl:
+        c = _db.cursor()
+        c.execute(f"SELECT {_cols} FROM issue WHERE repo_key=? AND issue_number=?",
+                  (to_repo_key(_repo), issue_id))
+        _fb = c.fetchone()
+    if not _fb:
+        # Issue #672 兜底二：远端存在但本地未建档（eduSwarm 类存量缺行）→ 建最小行后回读
+        _p, _o, _n = parse_repo_key(_repo)
+        _vcs = _vcs_issue_lookup(_o, _n, issue_id, user) if (_o and _n) else None
+        if _vcs:
+            _title = ((_vcs.get("issue") or {}).get("title") or f"Issue #{issue_id}")
+            try:
+                from src.api.session_store import _sync_issue_fields
+                _sync_issue_fields(to_repo_key(_repo), str(issue_id),
+                                   {"title": _title}, ensure_row=True)
+                with _dl:
+                    c = _db.cursor()
+                    c.execute(f"SELECT {_cols} FROM issue WHERE repo_key=? AND issue_number=?",
+                              (to_repo_key(_repo), issue_id))
+                    _fb = c.fetchone()
+            except Exception as e:
+                log.warning(f"Issue #672 ensure row failed {to_repo_key(_repo)}#{issue_id}: {e}")
+    if _fb:
+        log.info(f"Issue #672 dual-path resolve: issue_id={issue_id} -> number row "
+                 f"{to_repo_key(_repo)}#{_fb[2]} (id={_fb[0]})")
+        _row = _fb
+    elif _r and (not _r[1] or to_repo_key(_r[1]) == to_repo_key(_repo)):
+        _row = _r
+    else:
+        if not _r:
+            raise HTTPException(status_code=404, detail={"code": 404, "message": "需求不存在"})
         raise HTTPException(status_code=403, detail={"code": 403, "message": "仓库作用域不匹配"})
+    # Issue #655：agent_type ∈ devops 白名单 ∪ issue 绑定场景节点集
     _agent = user.get("agent_type") or ""
-    _allowed = set(_DEV_OPS_AGENTS) | _scene_agent_allowlist(_r[1] or "", _r[7] or "")
+    _allowed = set(_DEV_OPS_AGENTS) | _scene_agent_allowlist(_row[1] or "", _row[7] or "")
     if _agent not in _allowed:
         raise HTTPException(status_code=403, detail={
             "code": 403,
             "message": f"agent_type={_agent} 不在本接口范围（devops agent 或当前 issue 绑定场景节点）"})
-    return {"id": _r[0], "repo_key": _r[1], "issue_number": _r[2], "assignee": _r[3] or "",
-            "user_id": _r[4] or 0, "title": _r[5] or "", "status": _r[6] or "", "scene_id": _r[7] or ""}
+    return {"id": _row[0], "repo_key": _row[1], "issue_number": _row[2], "assignee": _row[3] or "",
+            "user_id": _row[4] or 0, "title": _row[5] or "", "status": _row[6] or "", "scene_id": _row[7] or ""}
 
 
 @router.post("/{issue_id}/pending-review", operation_id="issues_pending-review",
@@ -1940,6 +2016,34 @@ def get_issue_detail(owner: str, repo: str, number: int,
     title_map = _issue_title_map(repo_keys)
     _fallback_synced = False
     if num not in stage_map and num not in status_map and num not in group_map:
+        # Issue #672：本地聚合 miss 时按 number+owner/repo 走 git-repo 通道兜底，
+        # 消除 issues detail 与 git-repo issues get 同编号 404/正常分裂（eduSwarm 实测）。
+        _vcs = _vcs_issue_lookup(owner, repo, number, user)
+        if _vcs:
+            _vi = _vcs.get("issue") or {}
+            _asg = _vi.get("assignee") or ""
+            if isinstance(_asg, dict):
+                _asg = _asg.get("login") or _asg.get("username") or ""
+            return {
+                "number": int(number),
+                "issue_id": None,
+                "title": (_vi.get("title") or f"Issue #{number}"),
+                "stage": "vod",
+                "task_status": "",
+                "owner_agent": "vod",
+                "scene_id": "",
+                "assignee": _asg,
+                "is_subtask_mode": 0,
+                "parent_issue_id": "",
+                "events_count": 0,
+                "latest_event": None,
+                "events": [],
+                "pipeline": {"issue": {"number": int(number)}, "summary": "", "status": "unknown", "segments": []},
+                "source": "vcs",
+                "vcs_provider": _vcs.get("provider", ""),
+                "vcs_id": _vi.get("id"),
+                "state": _vi.get("state", ""),
+            }
         # Issue #667：三表未命中 → VCS 兜底核实并自动补建内部行（存在）/
         # 语义区分 404（不存在 vs 内部缺行且无法核实）
         _state = _sync_missing_issue_row(repo_keys, number)
