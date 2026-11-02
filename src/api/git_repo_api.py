@@ -239,7 +239,9 @@ def _vcs_url(owner: str, repo: str, subpath: str, params: dict | None = None,
     import urllib.parse
     api_base = _PROVIDER_MODULES[provider].API_BASE
     base = f"{api_base}/repos/{urllib.parse.quote(owner, safe='')}/{urllib.parse.quote(repo, safe='')}"
-    url = base + subpath
+    # Issue #714：subpath 以 / 为分隔逐段 percent-encode（+→%2B、中文→UTF-8、空格→%20），
+    # / 保留路径分隔语义；纯 ASCII 段（/branches、issue 编号等）编码后不变，存量行为零变更。
+    url = base + "/".join(urllib.parse.quote(seg, safe="") for seg in subpath.split("/"))
     if params:
         q = urllib.parse.urlencode({k: v for k, v in params.items() if v not in (None, "", [])})
         if q:

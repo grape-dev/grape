@@ -419,6 +419,48 @@ def test_contents_branches_milestones_labels(gitcode_calls, _client):
     assert last["method"] == "POST" and last["body"]["name"] == "bug" and last["body"]["color"] == "d73a4a"
 
 
+# ===================== Issue #714: 特殊字符路径逐段 percent-encode =====================
+
+def test_contents_special_chars_plus_encoded(gitcode_calls, _client):
+    """Issue #714：含 + 路径 → 转发 URL 中 + 编码为 %2B（不再被对端解析为空格）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    assert _get(_client, f"{base}/contents/c++/README.md").status_code == 200
+    url = gitcode_calls[-1]["url"]
+    assert "/contents/c%2B%2B/README.md" in url
+    assert "+" not in url.split("?")[0]
+
+
+def test_contents_special_chars_chinese_and_space_encoded(gitcode_calls, _client):
+    """Issue #714：中文 + 空格路径 → UTF-8 percent-encode、空格→%20。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    assert _get(_client, f"{base}/contents/docs/文件 名.md").status_code == 200
+    url = gitcode_calls[-1]["url"]
+    assert "/contents/docs/%E6%96%87%E4%BB%B6%20%E5%90%8D.md" in url
+
+
+def test_contents_special_chars_ascii_unaffected(gitcode_calls, _client):
+    """Issue #714 回归：ASCII 路径（含 -/_/.）编码后不变。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    assert _get(_client, f"{base}/contents/configs/sub-dir_v1.0.py").status_code == 200
+    assert "/contents/configs/sub-dir_v1.0.py" in gitcode_calls[-1]["url"]
+
+
+def test_contents_special_chars_404_passthrough(upstream_error, _client):
+    """Issue #714：不存在的特殊字符路径 → 上游 404 透传为明确 404（非空内容/空数组）。"""
+    upstream_error(404, '{"message":"Not Found"}')
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/contents/不存在的+文件.md")
+    assert r.status_code == 404
+    assert r.json()["detail"]["code"] == 404
+
+
+def test_vcs_url_encodes_owner_repo_and_subpath_segments():
+    """Issue #714 单元级：owner/repo/subpath 逐段 quote，/ 分隔语义保留。"""
+    from src.api.git_repo_api import _vcs_url
+    url = _vcs_url("o w", "re+po", "/contents/c++/文件 名.md", {"ref": "main"}, "gitcode")
+    assert "/repos/o%20w/re%2Bpo/contents/c%2B%2B/%E6%96%87%E4%BB%B6%20%E5%90%8D.md" in url
+    assert url.endswith("?ref=main")
+
+
 def test_labels_color_normalization(gitcode_calls, github_calls, _client):
     """Issue #580：labels create 对 color 做 lstrip('#') 归一化——GitHub/GitCode 双通道 × 带/不带 # 双输入。
 
