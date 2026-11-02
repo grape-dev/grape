@@ -230,7 +230,8 @@ def obs_logs_ingest(body: LogIngestBody, credential_id: int = Depends(_require_c
             c.execute("SELECT name, device_name FROM runtime_credentials WHERE id=?", (credential_id,))
             row = c.fetchone()
             if row:
-                src = row[1] or row[0] or src
+                # Issue #701：日志来源名优先凭据自定义名 rc.name（空回退 device_name → id 兜底）
+                src = (row[0] or "").strip() or row[1] or src
     except Exception:
         pass
 

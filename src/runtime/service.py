@@ -2475,6 +2475,38 @@ def premature_end_marker() -> str:
         return "[PREMATURE_END_TURN]"
 
 
+# ===== Issue #627: SRE 生产发布任务终态回填 =====
+
+def _backfill_release_subissue_on_complete(task: dict | None, exit_code: int,
+                                            result_text: str) -> None:
+    """按 task.issue_id 反查发布子单回填结果三分支（方案 C，无需 payload 锚点）。
+
+    - 任务须为 sre 且关联发布子单（issue 行 release_target_env 非空）；
+      普通 sre 任务直接返回，零影响。
+    - exit_code == 0：有 deploy_url 证据 → deployed_success；否则 not_executed
+      （阶段 completed 不视为发布成功）。
+    - exit_code != 0：deploy_failed（failure_reason 取 result_text 摘要）。
+    - 幂等：release_result 已回填不再覆盖（_backfill_release_subissue_result 内部保护）。
+    """
+    if not task:
+        return
+    if (task.get("agent_type") or "") != "sre":
+        return
+    _issue_id = task.get("issue_id") or ""
+    _issue_num = str(_issue_id).lstrip("#")
+    if not _issue_num.isdigit():
+        return
+    try:
+        from src.api.issues_center import _backfill_release_subissue_result
+        _backfill_release_subissue_result(
+            repo_key=task.get("repo_key") or "",
+            issue_number=int(_issue_num),
+            exit_code=int(exit_code or 0),
+            result_text=result_text or "")
+    except Exception as _e:
+        log.warning(f"_backfill_release_subissue_on_complete failed: {_e}")
+
+
 def complete_task(task_id, result_text, exit_code=0, usage=None):
     """完成：解析结构化 output → 业务失败检测 → finalize_event_archive → update_event_complete → 终态。"""
     task = get_task(task_id)
@@ -2596,6 +2628,13 @@ def complete_task(task_id, result_text, exit_code=0, usage=None):
         except Exception as e:
             log.warning(f"complete_task update issue session failed: {e}")
     log.info(f"Task completed: {task_id} exit={exit_code}")
+    # Issue #627: SRE 生产发布任务终态回填（成功/失败都要回填——deploy_failed 分支
+    # 恰在 exit!=0；钩子自带 production_release 锚点判断，普通任务零影响、幂等）
+    if task and (task.get("agent_type") or "") == "sre" and task.get("issue_id"):
+        try:
+            _backfill_release_subissue_on_complete(task, exit_code, result_text or "")
+        except Exception as _se:
+            log.warning(f"complete_task production_release backfill failed: {_se}")
     # remote worker 模式下 _execute_agent 不执行，系统回帖 + 会话同步在此补触发
     if exit_code == 0 and task and task.get("issue_id"):
         try:
@@ -3169,6 +3208,11 @@ def fail_task(task_id, error, exit_code=-1):
     update_task_status(task_id, "failed", exit_code=exit_code,
                        result_text=_result_text_write,
                        errors=_fail_errors)
+    # PR #799 R2：worker 失败上报终态路径同样回填发布任务结果三分支——
+    # 否则 SRE 发布任务 failed 终态后 release 永远停留 dispatched。
+    # 幂等由钩子内部 finished 终态保护承担；普通任务（无 production_release
+    # payload 锚点）在钩子入口直接返回，零影响。
+    _backfill_release_subissue_on_complete(task, exit_code, str(error or ""))
     # Issue #372 R10/R16.1: 统一 token 过期检测（fail_task 统一入口）
     # task failed 时检查 error 是否含 401/auth 错误
     # R16.1: 按 token 来源统一分流（用户 / 全局 / 仓库级 / session），不再只针对路径 B

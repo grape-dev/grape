@@ -216,14 +216,16 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                         runtime_id = sr[0]
             if runtime_id:
                 c2.execute(
-                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                    "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                     "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
                     (runtime_id,))
                 ar = c2.fetchone()
                 if ar:
+                    # Issue #701：engine_device 下发凭据自定义名 rc.name；
+                    # engine_instance 派生仍用 device_name（实例唯一名标识符，供 resolve 匹配）
                     engine_instance = instance_name(ar[0] or "engine", ar[2] or "", ar[1] or 0)
-                    engine_device = ar[2] or ""
-                    engine_ip = ar[3] or ""
+                    engine_device = ar[3] or ""
+                    engine_ip = ar[4] or ""
             if not engine_instance and row[12]:
                 # 兜底：按类型名找本机（credential_id=0）优先、其次在线实例
                 # Issue #285 + C 方案：runtime_id=0 说明无任何真实绑定（未派发/未认领），
@@ -258,22 +260,23 @@ def get_event_detail(seq: int, user: dict = Depends(get_current_user_or_api_key)
                     if _resolved_rid:
                         runtime_id = _resolved_rid
                         c2.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id WHERE ar.id=?",
                             (_resolved_rid,))
                         ar2 = c2.fetchone()
                     else:
                         # 回退：旧格式类型名（本机 credential_id=0 优先、其次在线实例）
                         c2.execute(
-                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.last_ip,'') "
+                            "SELECT ar.name, ar.credential_id, COALESCE(rc.device_name,''), COALESCE(rc.name,''), COALESCE(rc.last_ip,'') "
                             "FROM agent_runtimes ar LEFT JOIN runtime_credentials rc ON rc.id=ar.credential_id "
                             "WHERE ar.name=? ORDER BY (ar.credential_id=0) DESC, ar.status='online' DESC, ar.id ASC LIMIT 1",
                             (row[12],))
                         ar2 = c2.fetchone()
                     if ar2:
+                        # Issue #701：engine_device = rc.name（凭据自定义名）；instance 派生仍用 device_name
                         engine_instance = instance_name(ar2[0] or "engine", ar2[2] or "", ar2[1] or 0)
-                        engine_device = ar2[2] or ""
-                        engine_ip = ar2[3] or ""
+                        engine_device = ar2[3] or ""
+                        engine_ip = ar2[4] or ""
     except Exception:
         pass
     result["engine_instance"] = engine_instance

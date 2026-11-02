@@ -37,7 +37,9 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
 
     返回：{agent_name, agent_version, device_name, last_ip, owner_name, prompt, prompt_full_length,
            created_at, started_at, completed_at, status, issue_id, event_seq, repo_key}
-    agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.device_name/last_ip/owner_name。
+    agent_runtimes.name/version（引擎名+版本号）、runtime_credentials.name/last_ip/owner_name。
+    Issue #701：device_name 字段下发凭据自定义名 rc.name（空则空值，前端统一占位），
+    不再下发边端自报 device_name。
     prompt 为 agent 接收到的完整上下文（截断至 8000 字符），prompt_full_length 为原始长度。
     """
     from src.session_manager import db, db_lock
@@ -45,7 +47,7 @@ def get_task_runtime_info(task_id: str, user: dict = Depends(require_no_session_
     with db_lock:
         c = db.cursor()
         c.execute(
-            """SELECT ar.name, ar.version, rc.device_name, rc.last_ip, rc.owner_name, t.prompt,
+            """SELECT ar.name, ar.version, rc.name, rc.last_ip, rc.owner_name, t.prompt,
                       t.created_at, t.started_at, t.completed_at, t.status, t.issue_id, t.event_seq, t.repo_key,
                       rc.cpu_percent, rc.memory_percent, rc.disk_percent, rc.load_avg, rc.spec
                FROM agent_tasks t
