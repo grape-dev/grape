@@ -158,26 +158,79 @@ def _load_scenes() -> dict:
     return data.get("scenes", {})
 
 
-@router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official).")
-def list_scenes(user: dict = Depends(require_no_session_token), repo: str = ""):
-    """返回所有可用场景列表（repo，不含 official）"""
-    from src.api.pipeline_config import get_scenes
+@router.get("", operation_id="scenes_list", summary="List scenes", description="Lists all available scenes for a repo (repo-scoped, non-official). Supports page/page_size (page omitted -> full list, backward compatible) and optional q (name/display_name/description LIKE search) + sort (id/latest); always returns total.")
+def list_scenes(user: dict = Depends(require_no_session_token), repo: str = "",
+                page: int = Query(default=None, ge=1),
+                page_size: int = Query(default=20, ge=1, le=100),
+                q: str = Query(default="", max_length=100),
+                sort: str = Query(default="id", pattern="^(id|latest)$"),
+                fields: str = Query(default="", pattern="^(|minimal)$")):
+    """返回所有可用场景列表（repo，不含 official）。
+
+    分页（场景数量增长后项目场景页不再全量拉取，Issue #501）：
+    - 不带 page 参数：全量返回（老调用方零改动，向后兼容）
+    - page>=1：SQL LIMIT/OFFSET（ORDER BY id 稳定排序），page_size 上限 100
+    - total 始终返回：COUNT 查询（不带 page 时也与数组长度一致）
+    - 检索（Issue #501 增量）：q 非空按 name/display_name/description LIKE 过滤，
+      total 为命中数；sort=id 稳定序 / latest 按创建时间倒序。q/sort 均可选，默认行为不变。
+    """
+    from src.api.pipeline_config import get_scenes, _count_scenes_from_db
     repo_key = _resolve_scene_repo_key(repo, user)
-    scenes = get_scenes(repo_key=repo_key)
-    return {"scenes": scenes}
+    # FastAPI 直调（测试）时 Query 默认值是 Query 实例而非 None/int——规范化
+    if not isinstance(page, int) or page < 1:
+        page = None
+    if not isinstance(page_size, int) or page_size < 1:
+        page_size = 20
+    if not isinstance(q, str):
+        q = ""
+    if sort not in ("id", "latest"):
+        sort = "id"
+    _minimal = (fields == "minimal")
+    # Issue #501: total 走 COUNT（不拉 nodes_json），带 page 时 SQL 层分页；q 过滤两处同 WHERE
+    # fields=minimal（C 方案）：跳过 nodes_json 解析，供只要名字/图标的下拉类调用方
+    total = _count_scenes_from_db(repo_key, q=q)
+    if page is not None:
+        _start = (page - 1) * page_size
+        scenes = get_scenes(repo_key=repo_key, limit=page_size, offset=_start, q=q, sort=sort, minimal=_minimal)
+    else:
+        scenes = get_scenes(repo_key=repo_key, q=q, sort=sort, minimal=_minimal)
+    return {"scenes": scenes, "total": total}
 
 
-@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query.")
-def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = ""):
+@router.get("/with-pipeline", operation_id="scenes_with_pipeline", summary="List scenes with pipeline", description="Scenes with their pipeline config (description, work branch, creator). Reuses nodes_json from the single DB query. Supports page/page_size (page omitted -> full list) and optional q/sort like /scenes; carries card fields (icon/scope/created_by) so the dashboard can use it as its single scene-list source; enrichment (skill display names) runs only for the returned page.")
+def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), repo: str = "",
+                              page: int = Query(default=None, ge=1),
+                              page_size: int = Query(default=20, ge=1, le=100),
+                              q: str = Query(default="", max_length=100),
+                              sort: str = Query(default="id", pattern="^(id|latest)$")):
     """返回场景列表 + 各场景流水线配置（含描述、工作分支、创建人）。
-    
+
     优化：get_scenes 已在单次 DB 查询中返回 nodes_json，直接复用，
     不再逐场景调 get_pipeline_config 做二次 DB 查询。
+
+    分页（与 /scenes 同参数同语义，保证卡片列表与技能链/引擎标记页对齐）：
+    不带 page 全量（兼容），带 page 时逐节点引擎探测只跑当前页。
+    检索（Issue #501 增量）：q/sort 与 /scenes 完全同参同语义。
     """
-    from src.api.pipeline_config import get_scenes, get_pipeline_config
+    from src.api.pipeline_config import get_scenes, get_pipeline_config, _count_scenes_from_db
     from src.repo_key import to_repo_key
     repo_key = _resolve_scene_repo_key(repo, user)
-    scene_list = get_scenes(repo_key=repo_key)
+    # Issue #501: total 走 COUNT；带 page 时 SQL LIMIT/OFFSET，enrich 只处理当前页
+    # FastAPI 直调（测试）时 Query 默认值是 Query 实例而非 None/int——规范化
+    if not isinstance(page, int) or page < 1:
+        page = None
+    if not isinstance(page_size, int) or page_size < 1:
+        page_size = 20
+    if not isinstance(q, str):
+        q = ""
+    if sort not in ("id", "latest"):
+        sort = "id"
+    _total = _count_scenes_from_db(repo_key, q=q)
+    if page is not None:
+        _start = (page - 1) * page_size
+        scene_list = get_scenes(repo_key=repo_key, limit=page_size, offset=_start, q=q, sort=sort)
+    else:
+        scene_list = get_scenes(repo_key=repo_key, q=q, sort=sort)
 
     # 构建 skill_name → display_name 映射，给每个 node 补 skill_display_name
     # 这样前端查看模式直接用 node 上的 display_name，不依赖 dashboard API 绑定的 agent skill
@@ -203,48 +256,89 @@ def list_scenes_with_pipeline(user: dict = Depends(require_no_session_token), re
         for n in (cfg.get("nodes") or []):
             _sk = n.get("skill", "")
             n["skill_display_name"] = skill_display_map.get(_sk, _sk) if _sk else ""
-        # 需求中心事前拦截（用户思路）：创建需求前就知道场景引擎全灭。
-        # 对每个有 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids：
-        # 返回 None = 该节点绑定引擎全部离线。批量算好随场景返回，弹窗直接用。
-        # 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）。
-        # SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
-        # 与「配了引擎但全灭」区分开——前端提示换成「未选择机器」话术。
-        offline_nodes: list[str] = []
-        sre_unbound: bool = False
-        try:
-            from src.runtime.engine_select import get_scene_pool_engine_ids as _gspei
-            for n in (cfg.get("nodes") or []):
-                if not isinstance(n, dict):
-                    continue
-                _tag = n.get("tag") or n.get("id") or ""
-                _eids = n.get("engine_runtime_ids") or []
-                if not _tag or not _eids:
-                    # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
-                    if _tag and str(_tag).lower() == "sre":
-                        sre_unbound = True
-                    continue
-                if n.get("enabled") is False:
-                    continue
-                try:
-                    if _gspei(s["id"], _tag, repo_key=repo_key) is None:
-                        offline_nodes.append(str(_tag))
-                except Exception:
-                    pass
-        except Exception:
-            pass
+        # Issue #501: 引擎在线探测已从本接口移出——N 场景 × M 节点的探测改为
+        # 按需接口 GET /scenes/{scene_id}/engine-status（需求中心弹窗选中场景时才探测）。
+        # 本接口不再返回 offline_nodes/sre_unbound/all_offline。
         result.append({"id": s["id"], "name": s["name"],
+                       "scope": s.get("scope") or "repo",
                        "display_name": s.get("display_name") or s["name"],
                        "description": s.get("description") or "",
                        "work_branch": s.get("work_branch") or "main",
                        "created_by": s.get("created_by") or "",
+                       "icon": s.get("icon") or "",
                        "scene_type": s.get("scene_type") or "standard",
                        "pr_subscription_enabled": bool(s.get("pr_subscription_enabled", 0)),
                        "linked_repos": s.get("linked_repos") or [],
-                       "offline_nodes": offline_nodes,
-                       "sre_unbound": sre_unbound,
-                       "all_offline": bool(offline_nodes) or sre_unbound,
                        "pipeline": cfg})
-    return {"scenes": result}
+    return {"scenes": result, "total": _total}
+
+
+def _scene_engine_status(scene_id: str, cfg_nodes: list, repo_key: str = "") -> dict:
+    """计算单个场景的引擎在线状态（Issue #501：从 with-pipeline 抽出，按需探测）。
+
+    语义与原 with-pipeline 内联版完全一致：
+    - 对每个绑定 engine_runtime_ids 的启用节点跑 get_scene_pool_engine_ids，
+      返回 None = 该节点绑定引擎全部离线 → 记入 offline_nodes
+    - SRE 特例（sre-repo-worker-relax Q2）：SRE 空绑定=禁止广播（无引擎），
+      与「配了引擎但全灭」区分开——sre_unbound 单独标记，前端提示「未选择机器」
+    - 校验失败降级为不标记（不让提示功能本身挡住需求创建入口）
+    """
+    offline_nodes: list[str] = []
+    sre_unbound: bool = False
+    try:
+        from src.runtime.engine_select import get_scene_pool_engine_ids as _gspei
+        for n in (cfg_nodes or []):
+            if not isinstance(n, dict):
+                continue
+            _tag = n.get("tag") or n.get("id") or ""
+            _eids = n.get("engine_runtime_ids") or []
+            if not _tag or not _eids:
+                # SRE 没选机器：无绑定即无引擎（不广播），提示用户去绑
+                if _tag and str(_tag).lower() == "sre":
+                    sre_unbound = True
+                continue
+            if n.get("enabled") is False:
+                continue
+            try:
+                if _gspei(scene_id, _tag, repo_key=repo_key) is None:
+                    offline_nodes.append(str(_tag))
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return {"offline_nodes": offline_nodes,
+            "sre_unbound": sre_unbound,
+            "all_offline": bool(offline_nodes) or sre_unbound}
+
+
+@router.get("/{scene_id}/engine-status", operation_id="scenes_engine_status",
+            summary="Scene engine online status",
+            description="On-demand engine probe for one scene (moved out of /scenes/with-pipeline, Issue #501). Returns offline_nodes / sre_unbound / all_offline for the given scene; probe failures degrade to no-warning.")
+def get_scene_engine_status(scene_id: str, user: dict = Depends(require_no_session_token), repo: str = ""):
+    """返回单个场景的引擎在线状态（需求中心弹窗选中场景时按需调用，1 场景 × M 节点）。
+
+    节点来源与 with-pipeline 一致：DB 场景（get_scenes）优先，查不到回退
+    get_pipeline_config（official 模板 / pipelines.json）。
+    场景不存在时返回 all_offline=False（不拦创建入口）。
+    """
+    from src.api.pipeline_config import get_pipeline_config
+    from src.repo_key import to_repo_key
+
+    # P3（Issue #501 深审）：与 /scenes 列表同一会话级 repo 解析（#534），
+    # 不再只认显式 repo 参数——避免无 repo 上下文时退化到全局作用域探测错库。
+    repo_key = _resolve_scene_repo_key(repo, user)
+    # 单场景单行查询（DB-first，走 60s 场景配置缓存），不再全量拉场景列表
+    cfg = get_pipeline_config(scene_id, repo_key=repo_key) or {}
+    # P1（Issue #501 深审）：get_pipeline_config 第 4 级兜底会静默回退
+    # pipelines.json 的 default 场景——不存在的场景 id 会拿别人的节点探测，
+    # 返回误导性 sre_unbound 警告。回退（fallback=True 或解析出的 scene_id
+    # 与请求不一致）时按「场景不存在」处理：不标记、不拦创建入口。
+    if cfg.get("fallback") or (cfg.get("scene_id") and cfg.get("scene_id") != scene_id):
+        return {"scene_id": scene_id, "offline_nodes": [], "sre_unbound": False, "all_offline": False}
+    cfg_nodes = cfg.get("nodes") or []
+    status = _scene_engine_status(scene_id, cfg_nodes, repo_key=repo_key)
+    status["scene_id"] = scene_id
+    return status
 
 
 # ===== Scene Market API（场景市场）=====

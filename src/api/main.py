@@ -1202,7 +1202,7 @@ document.documentElement.classList.remove('i18n-loading');})();
     }).then(function(d){
       try {
         localStorage.setItem('token', d.token);
-        localStorage.setItem('app_cache_ver', '46');
+        localStorage.setItem('app_cache_ver', '47');
         localStorage.removeItem('repo_member_cache');
         localStorage.removeItem('currentRepo');
         localStorage.removeItem('current_org_id');

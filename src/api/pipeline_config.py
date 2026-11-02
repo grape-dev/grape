@@ -176,10 +176,38 @@ def _load_official_scene_from_market(scene_id: str) -> Optional[dict]:
     return None
 
 
-def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
+def _scene_search_where(q: str, cols: set[str]) -> tuple[str, list]:
+    """Issue #501 检索 WHERE 片段单一来源（评审遗留提醒3）：
+    q 非空时按 name/description/display_name（列存在时）三字段 LIKE 构建过滤，
+    返回 (" AND (...)", [like 参数...])；_query_scenes_from_db 与
+    _count_scenes_from_db 共用——改检索字段只需改这一处。
+    cols 为调用方探测的列集合（query 用行内探测，count 用进程级缓存）。
+    """
+    if not q:
+        return "", []
+    like = f"%{q}%"
+    fields = ["name", "description"]
+    if "display_name" in cols:
+        fields.append("display_name")
+    where = " AND (" + " OR ".join(f"{f} LIKE ?" for f in fields) + ")"
+    return where, [like] * len(fields)
+
+
+def _query_scenes_from_db(repo_key: str = "", limit: int = None, offset: int = 0,
+                          q: str = "", sort: str = "id", minimal: bool = False) -> list[dict]:
     """Query repo-scoped scenes from DB (scenes only bound to repo_key).
 
     Official scenes are templates in scene_market, not shown as repo scenes.
+    Issue #501 分页：limit 非 None 时 SQL LIMIT/OFFSET（ORDER BY id 稳定排序，
+    UNIQUE(scene_id, repo_key) 保证无重复行，页边界不漂移）；不带 limit 全量
+    （其余 9 个共享调用点零改动）。LIMIT/OFFSET 为 SQLite/MySQL 通用语法。
+    Issue #501 增量（场景检索）：q 非空时 name/display_name/description 三字段
+    LIKE 过滤（与 _count_scenes_from_db 同一 WHERE 片段，两处必须同步）；
+    sort: id（默认，稳定序）/ latest（created_at DESC, id DESC 兜底并列）。
+    q 与 sort 仅由路由层传入，其余调用点默认值零改动。
+    Issue #501 增量（C 方案）：minimal=True 时跳过 nodes_json 反序列化——
+    只要名字/图标的调用方（需求中心下拉）不再为大 nodes 付解析成本；
+    列仍被 SELECT（列索引稳定），仅不 parse。
     """
     db, lock = _db()
     rows = []
@@ -190,6 +218,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
     _has_st = False
     _has_pr_sub = False
     _has_linked_repos = False
+    _has_ca = False
     with lock:
         c = db.cursor()
         try:
@@ -207,6 +236,7 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
                 _has_st = "scene_type" in _cols
                 _has_pr_sub = "pr_subscription_enabled" in _cols
                 _has_linked_repos = "linked_repos" in _cols
+                _has_ca = "created_at" in _cols
                 _extra = ""
                 if _has_dn: _extra += ", display_name"
                 if _has_ao: _extra += ", advanced_options"
@@ -215,9 +245,20 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
                 if _has_st: _extra += ", scene_type"
                 if _has_pr_sub: _extra += ", pr_subscription_enabled"
                 if _has_linked_repos: _extra += ", linked_repos"
+                if _has_ca and sort == "latest": _extra += ", created_at"
+                # 检索 WHERE：共享构建器（与 _count_scenes_from_db 单一来源）
+                _where_extra, _q_params = _scene_search_where(q, _cols)
+                _params = [repo_key] + _q_params
+                _order = "ORDER BY id" if sort != "latest" else "ORDER BY created_at DESC, id DESC"
+                # LIMIT/OFFSET 走占位符（评审遗留提醒2：与同函数参数化风格一致；
+                # int() 强转保留为双保险）
+                _limit_sql = " LIMIT ? OFFSET ?" if limit is not None else ""
+                if limit is not None:
+                    _params = _params + [int(limit), int(offset)]
                 c.execute(
                     f"SELECT scene_id, name, description, nodes_json, onboarding{_extra} FROM devops_pipeline_scene "
-                    "WHERE is_active=1 AND repo_key=? ORDER BY id", (repo_key,))
+                    f"WHERE is_active=1 AND repo_key=?{_where_extra} {_order}{_limit_sql}",
+                    tuple(_params))
                 rows.extend(c.fetchall())
         except Exception as e:
             log.warning(f"_query_scenes_from_db failed: {e}")
@@ -228,10 +269,13 @@ def _query_scenes_from_db(repo_key: str = "") -> list[dict]:
         if scene_id in seen_ids:
             continue
         seen_ids.add(scene_id)
-        try:
-            nodes = json.loads(r[3] or "[]") if r[3] else []
-        except Exception:
+        if minimal:
             nodes = []
+        else:
+            try:
+                nodes = json.loads(r[3] or "[]") if r[3] else []
+            except Exception:
+                nodes = []
         # Parse advanced_options for work_branch
         work_branch = "main"
         col_offset = 5  # columns after onboarding (index 4)
@@ -337,9 +381,41 @@ def _query_scene_by_id(scene_id: str, repo_key: str = "") -> Optional[dict]:
     return None
 
 
-def get_scenes(repo_key: str = "") -> list[dict]:
-    """Return scene list [{id, name, display_name, scope, description, work_branch, created_by, icon, nodes, onboarding}] for this repo."""
-    db_scenes = _query_scenes_from_db(repo_key=repo_key)
+def _count_scenes_from_db(repo_key: str = "", q: str = "") -> int:
+    """Count active repo-scoped scenes (Issue #501: 分页 total，不拉 nodes_json).
+
+    与 _query_scenes_from_db 同一 WHERE 条件（q 过滤两处必须同步），仅 COUNT；
+    查不到/异常返回 0。
+    """
+    if not repo_key:
+        return 0
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        try:
+            # 共享构建器（列集合走进程级缓存 _get_scene_columns，与列表降级口径一致）
+            _where_extra, _q_params = _scene_search_where(q, _get_scene_columns())
+            c.execute(
+                "SELECT COUNT(*) FROM devops_pipeline_scene "
+                f"WHERE is_active=1 AND repo_key=?{_where_extra}",
+                tuple([repo_key] + _q_params))
+            row = c.fetchone()
+            return int(row[0]) if row else 0
+        except Exception as e:
+            log.warning(f"_count_scenes_from_db failed: {e}")
+            return 0
+
+
+def get_scenes(repo_key: str = "", limit: int = None, offset: int = 0,
+               q: str = "", sort: str = "id", minimal: bool = False) -> list[dict]:
+    """Return scene list [{id, name, display_name, scope, description, work_branch, created_by, icon, nodes, onboarding}] for this repo.
+
+    Issue #501: limit 非 None 时 SQL 层 LIMIT/OFFSET（分页调用方），
+    不带 limit 保持全量语义（向后兼容，其余调用点零改动）。
+    Issue #501 增量：q（name/display_name/description LIKE 检索）与
+    sort（id/latest）由路由层可选传入，默认行为不变。
+    """
+    db_scenes = _query_scenes_from_db(repo_key=repo_key, limit=limit, offset=offset, q=q, sort=sort, minimal=minimal)
     return [{"id": s["scene_id"], "name": s["name"],
              "display_name": s.get("display_name") or s["name"],
              "scope": "repo",

@@ -1657,16 +1657,39 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       window._dashboardEditing = false;
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
-      const loadDash = () => Promise.all([
+      // Issue #501: 场景列表分页——不带 page 的老调用方不受影响，前端带 page 时后端按页切片
+      // 切换仓库时页码/搜索词归位，避免带着旧仓库的页码拉新仓库（越界返回空列表）
+      if (window._sceneListRepo !== (repo.fullName || '')) {
+        window._sceneListRepo = repo.fullName || '';
+        window._sceneListPage = 1;
+        window._sceneListQ = '';
+      }
+      // 检索参数（Issue #501 增量）：q 为空串时不携带，保持 URL 简洁。
+      // 必须在 loadDash 内部取值——闭包外取值会被 30s 自动刷新/_sceneReload 复用旧 q，静默丢搜索词
+      const loadDash = () => {
+        const _q = (window._sceneListQ || '').trim();
+        const _qParam = _q ? '&q=' + encodeURIComponent(_q) : '';
+        const _sort = window._sceneListSort || 'id';
+        const _sortParam = _sort !== 'id' ? '&sort=' + encodeURIComponent(_sort) : '';
+        return Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
-        API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
+        // Issue #501 A 方案：卡片+技能链合并为 with-pipeline 单一来源（原 /scenes+with-pipeline
+        // 双请求查同表同页数据双倍付费，30s 自动刷新每轮省 1 请求 1 次 DB 读）
+        API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(repo.owner + '/' + repo.name) + '&page=' + (window._sceneListPage || 1) + '&page_size=' + (window._sceneListPageSize || 20) + _qParam + _sortParam),
       ]).then(([dashData, scenesData]) => {
         if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
+        // Issue #501 深审优化：挂到 window 供场景分页条局部重载（替代整页 app.nav('dash')）
+        window._sceneReload = loadDash;
         // R14.17: dashboard 成功加载时清除 403 去重列表，权限恢复后可切回之前 403 的仓库
         window._tried403Repos = null;
         dashData._scenes = scenesData.scenes || [];
+        // 分页角标/分页条用跨页总数 total（老后端无 total 时回退当前页条数）
+        dashData._scenesTotal = (typeof scenesData.total === 'number') ? scenesData.total : (scenesData.scenes || []).length;
+        // A 方案：同一响应直接产出技能链映射，dashboard.js 不再二次拉 with-pipeline
+        dashData._pipelines = {};
+        (scenesData.scenes || []).forEach(s => { dashData._pipelines[s.id] = s.pipeline || {}; });
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
@@ -1705,6 +1728,7 @@ function loadAgentTypes() {
         }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
       });
+      };
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
