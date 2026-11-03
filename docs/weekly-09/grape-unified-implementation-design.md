@@ -1,6 +1,6 @@
 # Grape 融合实施方案 — 三域四进程 + 分 Schema + Monorepo
 
-> **版本**：v2.1（GSB 统一服务通信框架 + 跨语言接入版）
+> **版本**：v2.2（chat 表归运行域 + GSB 统一服务通信框架 + 跨语言接入版）
 > **日期**：2026-11-02
 > **基础仓**：`/home/grape/grape-new-version2`
 > **融合来源**：grape-three-schema-split-design.md、grape-three-process-split-design.md、grape-monorepo-design.md、grape-three-dimension-analysis.md
@@ -85,8 +85,8 @@ Grape 系统按职责划分为三个域，每域一个独立进程组：
                 +---+---+---+---+---+---+
                     |
              [MySQL 单实例]
-             ├── grape_mgmt schema     (48 张表)
-             ├── grape_runtime schema  (22 张表)
+             ├── grape_mgmt schema     (45 张表)
+             ├── grape_runtime schema  (25 张表)
              └── grape_insight schema  (11 张表)
 
 单机模式：SQLite 单文件 + 表前缀（mgmt_/rt_/ins_），四进程同主机
@@ -521,7 +521,7 @@ dev = ["pytest", "pytest-asyncio", "httpx", "playwright"]
 
 ## 4. 分 Schema 设计
 
-### 4.1 grape_mgmt schema（48 张表）— 管理域
+### 4.1 grape_mgmt schema（45 张表）— 管理域
 
 | # | 表名 | 说明 | 跨域访问方 |
 |---|------|------|-----------|
@@ -554,25 +554,22 @@ dev = ["pytest", "pytest-asyncio", "httpx", "playwright"]
 | 27 | skill_category | 技能分类 | — |
 | 28 | skill_likes | 技能点赞 | — |
 | 29 | featured_templates | 推荐模板 | — |
-| 30 | chat_conversations | 聊天对话 | Runtime 读/写（聊天任务） |
-| 31 | chat_messages | 聊天消息 | Runtime 写（Agent 产出） |
-| 32 | chat_agent_session | 聊天 Agent 会话 | — |
-| 33 | vod_conversations | VOD 对话 | — |
-| 34 | community_posts | 社区帖子 | — |
-| 35 | community_comments | 社区评论 | — |
-| 36 | community_post_likes | 社区点赞 | — |
-| 37 | user_feedback | 用户反馈 | — |
-| 38 | uploaded_files | 上传文件 | — |
-| 39 | knowledge_write_queue | 知识写入队列 | — |
-| 40 | feishu_onboard_task | 飞书入驻任务 | — |
-| 41 | global_im_bot_config | IM Bot 配置 | Runtime 读（IM 集成） |
-| 42 | grape_im_instance | IM 实例 | — |
-| 43 | bot_seen_messages | Bot 消息去重 | Runtime 读/写 |
-| 44 | repo_im_group_binding | 仓库-IM 群绑定 | — |
-| 45 | autopilot_tasks | Autopilot 定时任务定义 | Runtime 读（调度） |
-| 46 | autopilot_executions | Autopilot 执行记录 | Runtime 写 |
-| 47 | autopilot_subscriptions | Autopilot 订阅 | — |
-| 48 | oauth_states | OAuth 状态 | — |
+| 30 | vod_conversations | VOD 对话 | — |
+| 31 | community_posts | 社区帖子 | — |
+| 32 | community_comments | 社区评论 | — |
+| 33 | community_post_likes | 社区点赞 | — |
+| 34 | user_feedback | 用户反馈 | — |
+| 35 | uploaded_files | 上传文件 | — |
+| 36 | knowledge_write_queue | 知识写入队列 | — |
+| 37 | feishu_onboard_task | 飞书入驻任务 | — |
+| 38 | global_im_bot_config | IM Bot 配置 | Runtime 读（IM 集成） |
+| 39 | grape_im_instance | IM 实例 | — |
+| 40 | bot_seen_messages | Bot 消息去重 | Runtime 读/写 |
+| 41 | repo_im_group_binding | 仓库-IM 群绑定 | — |
+| 42 | autopilot_tasks | Autopilot 定时任务定义 | Runtime 读（调度） |
+| 43 | autopilot_executions | Autopilot 执行记录 | Runtime 写 |
+| 44 | autopilot_subscriptions | Autopilot 订阅 | — |
+| 45 | oauth_states | OAuth 状态 | — |
 | — | user_credentials | 用户凭据 | — |
 | — | user_accounts | 旧版用户账号（兼容） | — |
 | — | outbound_content_ledger | 代发内容台账 | Runtime 读/写 |
@@ -582,7 +579,7 @@ dev = ["pytest", "pytest-asyncio", "httpx", "playwright"]
 
 > 注：编号 1-48 为核心表，"—"编号的为附加/兼容表，总计约 55 张归属于管理域。
 
-### 4.2 grape_runtime schema（22 张表）— 运行域
+### 4.2 grape_runtime schema（25 张表）— 运行域
 
 | # | 表名 | 说明 | 跨域访问方 |
 |---|------|------|-----------|
@@ -608,6 +605,9 @@ dev = ["pytest", "pytest-asyncio", "httpx", "playwright"]
 | 20 | distributed_locks | 分布式锁 | 四进程共用 |
 | 21 | meta | 元数据键值对 | Mgmt 读 |
 | 22 | devops_agent_session（runtime 视图） | Agent 会话（运行态） | — |
+| 23 | chat_conversations | 聊天对话 | Mgmt 读（用户面展示） |
+| 24 | chat_messages | 聊天消息 | Mgmt 读（SSE 流）、Insight 聚合 |
+| 25 | chat_agent_session | 聊天 Agent 会话 | — |
 
 ### 4.3 grape_insight schema（11 张表）— 数据域
 
@@ -642,7 +642,7 @@ dev = ["pytest", "pytest-asyncio", "httpx", "playwright"]
 | issue_state | Runtime 写 | Mgmt 读/写 | Mgmt 通过 RuntimeService 操作 |
 | task_messages | Runtime 写（C） | Mgmt 读（SSE 流） | Mgmt 通过 RuntimeService.get_task_messages() |
 | session_api_tokens | Mgmt 写 | Runtime 读/写 | Runtime 直接读写 grape_mgmt |
-| chat_conversations | Mgmt 写 | Runtime 读/写 | Runtime 直接读写 grape_mgmt |
+| chat_conversations | Runtime 写 | Mgmt 读（用户面展示） | Mgmt 通过 RuntimeService.get_chat_conversations() |
 
 ### 4.5 SQLite 兼容方案
 
