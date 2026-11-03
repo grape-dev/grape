@@ -1051,7 +1051,7 @@ def _issue_num(issue_id) -> int:
     return int(m.group(1)) if m else 0
 
 
-def claim(runtime_id) -> dict | None:
+def claim(runtime_id, deterministic_only: bool = False) -> dict | None:
     """原子抢单 + 串行槽（见 multi-issue-isolation-design.md §3.3 / concurrency-design.md §2.3）。
 
     串行粒度（M2）：任务带 issue_session_id → 同 Issue 严格串行（跨 Issue 并行）；
@@ -1060,6 +1060,9 @@ def claim(runtime_id) -> dict | None:
     引擎池（agent-cluster-design.md §4.2）：本引擎属于某 Agent 池时，除自己的队列外，
     还可领取该池的未定任务（runtime_id=0 + pool_agent_type 匹配，领取后 runtime_id 定为
     本引擎）。affinity_runtime_id 命中本引擎的任务优先（会话亲和，§4.5）。
+        deterministic_only=True（Issue #699 Phase 3，local_claimer 确定性认领用）：
+    只认领 runtime_id 绑定到本引擎的定向 queued 任务，跳过 legacy 池兜底；
+    默认 False，行为与历史完全一致。
     """
     with db_lock:
         c = db.cursor()
@@ -1197,7 +1200,7 @@ def claim(runtime_id) -> dict | None:
                     _is_plugin = is_plugin_mode()
                 except Exception:
                     pass
-                if not _is_plugin:
+                if not _is_plugin and not deterministic_only:
                     c.execute("""
                         SELECT id FROM agent_tasks
                         WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued'
@@ -1282,7 +1285,7 @@ def claim(runtime_id) -> dict | None:
                         _is_plugin = is_plugin_mode()
                     except Exception:
                         pass
-                    if not _is_plugin:
+                    if not _is_plugin and not deterministic_only:
                         c.execute(
                             f"SELECT id FROM agent_tasks "
                             f"WHERE runtime_id=0 AND pool_agent_type != '' AND status='queued' "

@@ -14,6 +14,12 @@ plugin 广播模式下，本机 direct 引擎（credential_id=0）此前不是�
 - 认领后复用 direct 执行通道（start_direct_agent + _execute_agent），
   evt 从 events 表按 event_seq 忠实重建（payload/type/actor 落库齐全）。
 
+Phase 3（Issue #699）：_execute_agent 系列迁往
+src.domains.runtime.engine.direct_executor（本模块 import 同步切换），且
+event_pipeline 的 direct 即时执行改为 enqueue_task 入队——本循环新增
+确定性认领步骤（_claim_deterministic_locally，service.claim
+deterministic_only=True），领取 runtime_id 绑定到本机引擎的 queued 任务。
+
 双主安全：claim_by_tag 的 UPDATE ... WHERE status='queued' 原子性保证
 不双跑（谁先 UPDATE 成功谁执行，另一方 rowcount=0 自然放弃）。
 
@@ -265,6 +271,27 @@ async def _execute_claimed_locally(task: dict, rid: int):
          task.get("skill") or "", evt, rid, tid))
 
 
+async def _claim_deterministic_locally(rid: int) -> dict | None:
+    """Phase 3（Issue #699）：确定性认领——领取 runtime_id 绑定到本机引擎 rid 的 queued 任务。
+
+    direct 分派自 event_pipeline 的 start_direct_agent 即时执行改为 enqueue_task 入队后，
+    绑定本机引擎的任务需要由本机认领执行（远端 worker 的 claim 只匹配自己的 runtime_id，
+    不会替本机引擎领单）。复用 service.claim 的原子抢单/串行槽/超时回收全套逻辑，
+    仅以 deterministic_only=True 跳过 legacy 池兜底（池任务仍走 claim_by_tag 全检查链）。
+
+    确定性任务不进 backstop 让位窗口：任务已绑定本引擎，远端不会认领，无需空等。
+    """
+    from src.domains.runtime.engine.service import claim
+    try:
+        task = await asyncio.to_thread(claim, rid, True)
+    except TypeError:
+        # 兼容：老版本 service.claim 无 deterministic_only 形参（不应出现，防御性回退）
+        task = await asyncio.to_thread(claim, rid)
+        if task and int(task.get("runtime_id") or 0) != rid:
+            return None
+    return task
+
+
 async def local_claimer_loop():
     """本机 direct 引擎认领主循环——语义与 worker 的 claim 循环对齐。"""
     log.info("Local claimer loop started (3s interval) — local direct engines now "
@@ -285,19 +312,24 @@ async def local_claimer_loop():
             for rid in _local_direct_engine_ids():
                 if _engine_busy(rid):
                     continue
-                claimed = None
-                for tag in _engine_tags(rid):
-                    # 与远端 worker 完全相同的认领入口（含白名单/健康分/满载/守卫全套检查）
-                    task = await asyncio.to_thread(claim_by_tag, tag, rid)
-                    if task:
-                        claimed = task
-                        break
+                # Phase 3（#699）：先做确定性认领（runtime_id 绑定本机的 queued 任务，
+                # 对应原 direct 即时执行路径的入队化；不进 backstop 窗口）
+                _det_claimed = await _claim_deterministic_locally(rid)
+                claimed = _det_claimed
+                if not claimed:
+                    for tag in _engine_tags(rid):
+                        # 与远端 worker 完全相同的认领入口（含白名单/健康分/满载/守卫全套检查）
+                        task = await asyncio.to_thread(claim_by_tag, tag, rid)
+                        if task:
+                            claimed = task
+                            break
                 if claimed:
                     # 兜底守卫（local-claimer-backstop-design）：窗口期内且仍有可达的
                     # 远端认领方 → 放弃本次认领，让远端 worker 先拿。
+                    # 确定性认领（任务已绑定本引擎，远端不会领）不进让位窗口。
                     # 放弃方式：把任务状态回滚 queued（claim 已把它置为 running 并占用本机
                     # runtime_id），恢复为无主池任务，等下一轮再评估。
-                    if _backstop_should_yield(claimed):
+                    if not _det_claimed and _backstop_should_yield(claimed):
                         try:
                             from src.kernel.session_manager import db, db_lock
                             _yid = claimed.get("id") or ""

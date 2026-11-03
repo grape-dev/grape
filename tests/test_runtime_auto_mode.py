@@ -139,15 +139,20 @@ class TestAutoPipelineRouting:
             tasks = db.cursor().execute("SELECT COUNT(*) FROM agent_tasks WHERE runtime_id=?", (rid,)).fetchone()[0]
         assert tasks >= 1, "auto + 远端绑定应入队 agent_tasks"
 
-    def test_auto_local_binding_executes_direct(self):
+    def test_auto_local_binding_enqueues_for_local_claimer(self):
+        """Phase 3（#699）：auto + 本地绑定不再就地执行，改为确定性入队（status=queued，
+        runtime_id=本机引擎），由 local_claimer 确定性认领后经 direct_executor 执行。"""
         rid = _seed_runtime("__auto_pipe_local", 0)
         self._bind_session("issue", rid)
         raw = json.dumps(_evt_body()).encode()
         headers = {"X-GitCode-Event": "Issue Hook"}
         event_pipeline.run_pipeline(raw, headers, account="owner/repo")
         with db_lock:
-            tasks = db.cursor().execute("SELECT COUNT(*) FROM agent_tasks").fetchone()[0]
-        assert tasks == 0, "auto + 本地绑定应就地执行，不入队 agent_tasks"
+            row = db.cursor().execute(
+                "SELECT runtime_id, status FROM agent_tasks ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+        assert row and row[0] == rid, "auto + 本地绑定应确定性入队到本机引擎"
+        assert row[1] == "queued", "入队任务应为 queued，等待 local_claimer 认领"
 
 
 class TestChatConfigRuntimeId:

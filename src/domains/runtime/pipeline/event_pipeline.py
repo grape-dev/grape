@@ -9,9 +9,8 @@ from src.api.event_store import get_issue_summary
 from src.kernel.session_manager import db, db_lock
 from src.kernel.token_service import is_auth_401_error
 
-from src.domains.runtime.engine.direct_executor import (  # noqa: F401 — moved to direct_executor in Phase 3 (#699)
-    _DIRECT_POOL, _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK,
-    start_direct_agent, _execute_agent, _execute_agent_inner,
+from src.domains.runtime.engine.direct_executor import (  # noqa: F401 — Phase 3 (#699) 迁往 direct_executor
+    _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK,
 )
 
 
@@ -1117,47 +1116,25 @@ def _dispatch_pr_subscription_extra(repo_key: str, evt: dict, event_type: str, m
             entity_type="pull_request",
         )
         log.info(f"Pipeline: PR subscription extra dispatch seq={seq} scene={scene_id}")
-        # 分派执行：跟主场景 run_pipeline 一致的判断逻辑
-        # engine_id=0 + plugin + auto(非direct) → broadcast enqueue（远端worker认领）
-        # 仅 direct 模式或选中具体本机引擎时走 DIRECT
+        # 分派执行（Phase 3 #699）：broadcast/direct 统一 enqueue 入队，
+        # 由本机引擎 local_claimer / 远端 worker 认领执行
         from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
-        from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
         _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
         if _engine_id is None:
             log.info(f"Pipeline: PR subscription extra: no engine for scene={scene_id}, mark failed")
             _fail_event(seq, f"PR 订阅派发失败：无可用引擎（scene={scene_id}, agent=qa），请检查引擎在线状态")
             return
         _be = engine_name(_engine_id) or ""
-        _is_broadcast = (_engine_id == 0 and is_plugin_mode()
-                         and get_execution_mode() != EXEC_MODE_DIRECT)
-        if _is_broadcast:
-            # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
-            # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
-            _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-            if _pool_ids is None:
-                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
-                return
-            _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
-                                   0, qa_skill, _engine_id, _pseudo_id,
-                                   pool_engine_ids=_pool_ids or "")
-        else:
-            _kind = runtime_execution_kind(_engine_id)
-            if _kind == EXEC_MODE_DIRECT:
-                _extra_evt["_skill_path"] = qa_skill
-                _extra_evt["_skill_id"] = 0
-                _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
-                                    qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
-                start_direct_agent(_execute_agent, (
-                    repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
-                ))
-            else:
-                _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-                if _pool_ids is None:
-                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch", repo_key=repo_key)
-                    return
-                _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
-                                       0, qa_skill, _engine_id, _pseudo_id,
-                                       pool_engine_ids=_pool_ids or "")
+        # Phase 3 (#699)：direct 即时执行已移除，统一入队
+        # （status=queued）由本机引擎 local_claimer 认领执行；broadcast 与 direct
+        # 分派收敛为同一条 _enqueue_pipeline_task 路径。
+        _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+        if _pool_ids is None:
+            _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
+            return
+        _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                               0, qa_skill, _engine_id, _pseudo_id,
+                               pool_engine_ids=_pool_ids or "")
     except Exception as e:
         log.warning(f"Pipeline: PR subscription extra dispatch failed: {e}")
 
@@ -1208,17 +1185,14 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         # 伪 issue_id（跟 _dispatch_pr_subscription_extra 一致）
         _pseudo_id = f"#pr_{_pr_num}_{scene_id}" if _pr_num else ""
 
-        # 选引擎
+        # 选引擎（Phase 3 #699：direct/broadcast 统一入队）
         from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
-        from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT, get_execution_mode
         _engine_id = pick_engine(repo_key, "qa", fallback_runtime_id=0, scene_id=scene_id)
         if _engine_id is None:
             log.info(f"Pipeline: PR subscription redispatch: no engine for scene={scene_id}")
             return False
 
         _be = engine_name(_engine_id) or ""
-        _is_broadcast = (_engine_id == 0 and is_plugin_mode()
-                         and get_execution_mode() != EXEC_MODE_DIRECT)
         _extra_evt = dict(evt)
         _extra_evt["payload"] = _payload  # 确保是 dict（_load_event 返回 JSON 字符串）
         # 补全 build_devops_agent_prompt 必需的字段（_load_event 不返回 repository/source）
@@ -1232,34 +1206,14 @@ def _dispatch_pr_subscription_redispatch(evt: dict, seq: int, scene_id: str) -> 
         if _pr_num:
             _extra_evt["_pr_sub_pr_number"] = _pr_num
 
-        if _is_broadcast:
-            # 复用 _enqueue_pipeline_task：自动构建 prompt/env_extra/会话/init_event_json
-            # Issue #259：get_scene_pool_engine_ids 已按健康过滤；None = 场景引擎全灭（方案A，不入队）
-            _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-            if _pool_ids is None:
-                _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
-                return
-            _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
-                                   0, qa_skill, _engine_id, _pseudo_id,
-                                   pool_engine_ids=_pool_ids or "")
-        else:
-            _kind = runtime_execution_kind(_engine_id)
-            if _kind == EXEC_MODE_DIRECT:
-                _extra_evt["_skill_path"] = qa_skill
-                _extra_evt["_skill_id"] = 0
-                _direct_tid = _create_direct_task(repo_key, seq, "qa", _be, qa_skill,
-                                    qa_skill, _engine_id, _extra_evt, _pseudo_id, skill_id=0)
-                start_direct_agent(_execute_agent, (
-                    repo_key, seq, "qa", _be, qa_skill, _extra_evt, _engine_id, _direct_tid
-                ))
-            else:
-                _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
-                if _pool_ids is None:
-                    _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub else-branch", repo_key=repo_key)
-                    return
-                _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
-                                       0, qa_skill, _engine_id, _pseudo_id,
-                                       pool_engine_ids=_pool_ids or "")
+        # Phase 3 (#699)：direct 即时执行已移除，统一入队（同 extra 分派）
+        _pool_ids = get_scene_pool_engine_ids(scene_id, "qa", repo_key=repo_key)
+        if _pool_ids is None:
+            _fail_scene_all_offline(seq, scene_id, "qa", "Pipeline PR sub", repo_key=repo_key)
+            return
+        _enqueue_pipeline_task(repo_key, seq, "qa", _be, qa_skill, _extra_evt,
+                               0, qa_skill, _engine_id, _pseudo_id,
+                               pool_engine_ids=_pool_ids or "")
 
         # 重派成功：把事件状态改回 running（重派前可能是 failed）
         from src.api.event_store import update_event_status
@@ -1368,30 +1322,18 @@ def _dispatch_subscription_agent(repo_key: str, evt: dict, event_type: str,
             entity_type=_sub_entity_type,
         )
         log.info(f"Pipeline subscription: event created seq={seq} agent={agent_type}")
-        # 执行分派
-        from src.domains.runtime.engine.engine_select import pick_engine, engine_name
-        from src.domains.runtime.engine.service import runtime_execution_kind, EXEC_MODE_DIRECT
+        # 执行分派（Phase 3 #699）：direct 即时执行已移除，统一入队
+        from src.domains.runtime.engine.engine_select import pick_engine, engine_name, _repo_user_id
         engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0)
         if not engine_id:
             log.info(f"Pipeline subscription: no engine for agent={agent_type}, mark failed")
             _fail_event(seq, f"订阅派发失败：无可用引擎（agent={agent_type}），请检查引擎在线状态")
             return
         _be = engine_name(engine_id) or backend
-        kind = runtime_execution_kind(engine_id)
-        if kind == EXEC_MODE_DIRECT:
-            evt["_skill_path"] = skill_path
-            evt["_skill_id"] = skill_id
-            _direct_tid = _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
-                                skill_path, engine_id, evt, issue_id, skill_id=skill_id)
-            start_direct_agent(_execute_agent, (
-                repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
-            ), name=f"sub-{agent_type}-{seq}")
-        else:
-            from src.domains.runtime.engine.engine_select import _repo_user_id
-            _sub_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
-            _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
-                                   skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
-        log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} mode={kind}")
+        _sub_uid = _repo_user_id(repo_key, issue_creator=evt.get("actor", ""))
+        _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
+                               skill_id, skill_path, engine_id, issue_id, user_id=_sub_uid)
+        log.info(f"Pipeline subscription: dispatched seq={seq} agent={agent_type} engine={engine_id}")
     except Exception as e:
         log.warning(f"Pipeline subscription dispatch failed: {e}")
 
@@ -2451,9 +2393,9 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                    "repository": evt["repository"]})
 
     # 执行分派：从引擎集合选引擎（专属→全局→本机，engine-selection-design.md v2）；
-    # 选中 remote → 入队该引擎（queue_remote）；选中本机 → direct 就地执行。
+    # Phase 3 (#699)：所有路径统一入队（queue_remote/direct 均经 enqueue_task）。
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name, get_scene_pool_engine_ids
-    from src.domains.runtime.engine.service import runtime_execution_kind, enqueue_task, EXEC_MODE_DIRECT, EXEC_MODE_REMOTE, get_execution_mode
+    from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT
     try:
         engine_id = pick_engine(repo_key, agent_type, fallback_runtime_id=runtime_id or 0,
                                 scene_id=_issue_scene, user_id=_issue_scene_uid)
@@ -2630,25 +2572,17 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                                     skill_path, skill_id, evt, issue_id, runtime_id or 0)
                 _fail_event(seq, "无可用引擎（engine_unavailable），请配置仓库/全局/本机引擎")
                 return result
-    kind = runtime_execution_kind(engine_id)
     try:
         # Issue #372 §12.7: dispatch 段包 try/except，异常时 _fail_event 释放 guard
-        if kind != EXEC_MODE_DIRECT and _be and skill_name and seq > 0:
+        # Phase 3 (#699)：direct 即时执行已移除，remote/direct 统一
+        # 入队（status=queued）；本机引擎任务由 local_claimer 确定性认领（≤3s），
+        # 广播/远端任务由 worker 认领。智能推荐模式 skill_name 可为空（纯 prompt）。
+        if _be and seq > 0 and (skill_name or _is_scene_recommend):
             _enqueue_pipeline_task(repo_key, seq, agent_type, _be, skill_name, evt,
                                    skill_id, skill_path, engine_id, issue_id,
                                    pool_engine_ids=_pool_engine_ids, user_id=_issue_scene_uid,
                                    is_scene_recommend=_is_scene_recommend)
-        elif _be and seq > 0 and (skill_name or _is_scene_recommend):
-            # 智能推荐模式 skill_name 可为空（纯 prompt）
-            evt["_skill_path"] = skill_path  # 供 prompt 构建使用（skill_id 解析出的真实路径）
-            evt["_skill_id"] = skill_id
-            # 先创建 agent_tasks + 设 started_at，防 sweeper 在排队期间误杀
-            _direct_tid = _create_direct_task(repo_key, seq, agent_type, _be, skill_name,
-                                skill_path, engine_id, evt, issue_id, skill_id=skill_id)
-            start_direct_agent(_execute_agent, (
-                repo_key, seq, agent_type, _be, skill_name, evt, engine_id, _direct_tid,
-            ), name=f"ag-{agent_type}-{seq}")
-            log.info(f"Pipeline: started agent execution, seq={seq}, repo={repo_key}, agent={agent_type}")
+            log.info(f"Pipeline: enqueued agent execution, seq={seq}, repo={repo_key}, agent={agent_type}, engine={engine_id}")
     except Exception as _de:
         log.warning(f"Pipeline: dispatch exception for seq={seq}: {_de}")
         _fail_event(seq, f"pipeline dispatch exception: {_de}")
@@ -2988,8 +2922,20 @@ def _enqueue_pipeline_task(repo_key, seq, agent_type, backend, skill_name, evt,
             _pool_agent_type = agent_type
             log.info(f"Pipeline enqueue (broadcast): runtime_id=0 pool_agent_type={agent_type} seq={seq}")
         else:
-            _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
-            return
+            # Phase 3 (#699)：legacy 模式 runtime_id=0（原 direct 即时执行路径的兜底语义：
+            # 未绑定引擎也落本机执行）→ 回退本机 direct 引擎确定性入队，由 local_claimer 认领
+            _local_ids = []
+            try:
+                from src.domains.runtime.engine.local_claimer import _local_direct_engine_ids
+                _local_ids = _local_direct_engine_ids()
+            except Exception:
+                _local_ids = []
+            if _local_ids:
+                runtime_id = _local_ids[0]
+                log.info(f"Pipeline enqueue: legacy runtime_id=0 -> local direct engine {runtime_id} seq={seq}")
+            else:
+                _fail_event(seq, "入队失败：无可用引擎（runtime_id 为空）")
+                return
     # 引擎实例名（`{type}-{device}`，与 UI 同源）：runtime_id 反查，查不到回退类型名。
     # 注意：engine_select v2 派发已选定具体引擎（runtime_id>0），无 pool_mode 路径；
     # 历史 pool 模式（runtime_id=0 + pool_agent_type）由 service.claim 兼容处理。
@@ -4091,7 +4037,6 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
         return
     from src.api.event_store import append_event
     from src.domains.runtime.engine.engine_select import pick_engine, engine_name
-    from src.domains.runtime.engine.service import get_execution_mode, EXEC_MODE_DIRECT
     from src.domains.runtime.pipeline.event_pipeline import is_plugin_mode
 
     # 获取 Issue 标题
@@ -4155,29 +4100,19 @@ def _redispatch_vod_after_recommend(repo_key: str, issue_id: str, vod_skill: str
 
     _be = engine_name(engine_id) or "opencode"
 
-    # 入队或直接执行（_enqueue_pipeline_task 内部会构建 prompt）
-    kind = get_execution_mode()
-    if kind != EXEC_MODE_DIRECT and (engine_id > 0 or (engine_id == 0 and is_plugin_mode())):
-        _pool_eids = ""
-        if is_plugin_mode():
-            from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
-            _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
+    # 入队（Phase 3 #699）：direct 即时执行已移除，统一
+    # _enqueue_pipeline_task 入队（status=queued），由本机引擎 local_claimer / 远端
+    # worker 认领执行（内部会构建 prompt）
+    _pool_eids = ""
+    if is_plugin_mode():
+        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
+        _pool_eids = get_scene_pool_engine_ids(_scene_id, "vod", repo_key=repo_key, user_id=_scene_uid)
         # Issue #259：None = 场景引擎全灭（方案A，不入队）
         if _pool_eids is None:
             _fail_scene_all_offline(seq, _scene_id, "vod", "智能推荐重派", repo_key=repo_key)
             return False
-        _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
-                               skill_id, skill_path, engine_id, issue_id,
-                               pool_engine_ids=_pool_eids, user_id=_scene_uid,
-                               is_scene_recommend=False)
-        log.info(f"智能推荐重派: enqueued VOD task, seq={seq}, skill={vod_skill}")
-    else:
-        # direct 模式
-        evt_copy["_skill_path"] = skill_path
-        evt_copy["_skill_id"] = skill_id
-        _direct_tid = _create_direct_task(repo_key, seq, "vod", _be, vod_skill,
-                                          skill_path, engine_id, evt_copy, issue_id, skill_id=skill_id)
-        start_direct_agent(_execute_agent, (
-            repo_key, seq, "vod", _be, vod_skill, evt_copy, engine_id, _direct_tid,
-        ), name=f"ag-vod-{seq}")
-        log.info(f"智能推荐重派: started direct VOD, seq={seq}, skill={vod_skill}")
+    _enqueue_pipeline_task(repo_key, seq, "vod", _be, vod_skill, evt_copy,
+                           skill_id, skill_path, engine_id, issue_id,
+                           pool_engine_ids=_pool_eids, user_id=_scene_uid,
+                           is_scene_recommend=False)
+    log.info(f"智能推荐重派: enqueued VOD task, seq={seq}, skill={vod_skill}")
