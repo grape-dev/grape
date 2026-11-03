@@ -22,9 +22,31 @@ class OpencodeRuntime(AgentRuntime):
         env = os.environ.copy()
         env["DEVOPS_SKILLS_DIR"] = SKILLS_DIR
         env["DEVOPS_EVENT_TYPE"] = ""
-        from src.runtime.os_adapter import bun_cache_dir
+        import logging
+
+        from src.runtime.os_adapter import bun_cache_dir, bun_cache_fallback_dir
         cache_dir = bun_cache_dir()
-        os.makedirs(cache_dir, exist_ok=True)
+        try:
+            os.makedirs(cache_dir, exist_ok=True)
+        except OSError as exc:
+            # issue #857: 缓存仅影响性能，目录创建失败降级到临时目录，
+            # 记 warning 不阻塞任务启动
+            fallback = bun_cache_fallback_dir()
+            logging.getLogger(__name__).warning(
+                "bun cache dir %s unusable (%s), falling back to %s",
+                cache_dir, exc, fallback,
+            )
+            cache_dir = fallback
+            try:
+                os.makedirs(cache_dir, exist_ok=True)
+            except OSError:
+                logging.getLogger(__name__).warning(
+                    "bun cache fallback dir %s unusable, bun cache disabled", cache_dir
+                )
+                # 环境中可能残留旧值，彻底不注入缓存路径
+                env.pop("BUN_RUNTIME_TRANSPILER_CACHE_PATH", None)
+                env.pop("JSC_diskCachePath", None)
+                return env
         env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] = cache_dir
         env["JSC_diskCachePath"] = cache_dir
         return env

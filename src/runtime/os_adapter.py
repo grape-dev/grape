@@ -287,12 +287,24 @@ def path_separator() -> str:
 def bun_cache_dir() -> str:
     """bun JIT 编译缓存目录（跨平台）。
 
-    Unix: /var/cache/bun-compile
-    Windows: %LOCALAPPDATA%\\grape\\bun-compile
+    Unix 按三级优先级解析（issue #857）：
+      1. GRAPE_BUN_CACHE_DIR 环境变量
+      2. ~/.cache/grape/bun-compile（用户级默认）
+      3. 系统临时目录下 grape/bun-compile（兜底）
+    Windows: %LOCALAPPDATA%\\grape\\bun-compile（不变）
     """
     if _IS_WINDOWS:
         return os.path.join(os.environ.get("LOCALAPPDATA", home_dir()), "grape", "bun-compile")
-    return "/var/cache/bun-compile"
+    env_dir = os.environ.get("GRAPE_BUN_CACHE_DIR", "")
+    if env_dir:
+        return os.path.expanduser(os.path.expandvars(env_dir))
+    return os.path.join(home_dir(), ".cache", "grape", "bun-compile")
+
+
+def bun_cache_fallback_dir() -> str:
+    """bun 编译缓存兜底目录（临时目录下，issue #857 降级用）。"""
+    import tempfile
+    return os.path.join(tempfile.gettempdir(), "grape", "bun-compile")
 
 
 def remap_cwd(path: str) -> str:

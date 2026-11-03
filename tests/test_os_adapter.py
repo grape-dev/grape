@@ -7,7 +7,7 @@
 - 引擎 skill 目录（跨平台）
 - extra_skill_dirs（分隔符 ; vs :）
 - path_separator
-- bun_cache_dir（Unix /var/cache vs Windows LOCALAPPDATA）
+- bun_cache_dir（Unix 三级解析：GRAPE_BUN_CACHE_DIR / ~/.cache / Windows LOCALAPPDATA）
 - remap_cwd（Unix 不变 / Windows Unix→Windows 路径转换）
 - hostname（跨平台）
 - temp_dir
@@ -181,15 +181,89 @@ class TestPathSeparator:
 
 
 class TestBunCacheDir:
-    def test_unix(self):
+    def test_unix_default_user_cache(self):
         with patch.object(os_adapter, "_IS_WINDOWS", False):
-            assert os_adapter.bun_cache_dir() == "/var/cache/bun-compile"
+            with patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("GRAPE_BUN_CACHE_DIR", None)
+                d = os_adapter.bun_cache_dir()
+            assert d == os.path.join(os.path.expanduser("~"), ".cache", "grape", "bun-compile")
+
+    def test_env_override(self):
+        with patch.object(os_adapter, "_IS_WINDOWS", False):
+            with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": "/tmp/custom-bun-cache"}):
+                assert os_adapter.bun_cache_dir() == "/tmp/custom-bun-cache"
+
+    def test_env_override_expands_user_and_vars(self):
+        with patch.object(os_adapter, "_IS_WINDOWS", False):
+            with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": "~/cache/$MYVAR", "MYVAR": "sub"}):
+                assert os_adapter.bun_cache_dir() == os.path.expanduser("~/cache/sub")
+
+    def test_env_override_explicit_empty_string_falls_back_to_default(self):
+        with patch.object(os_adapter, "_IS_WINDOWS", False):
+            with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": ""}):
+                d = os_adapter.bun_cache_dir()
+            assert d == os.path.join(os.path.expanduser("~"), ".cache", "grape", "bun-compile")
+
+    def test_fallback_dir_under_tempdir(self):
+        import tempfile
+        d = os_adapter.bun_cache_fallback_dir()
+        assert d == os.path.join(tempfile.gettempdir(), "grape", "bun-compile")
 
     def test_windows(self):
         with patch.object(os_adapter, "_IS_WINDOWS", True):
             d = os_adapter.bun_cache_dir()
             assert "grape" in d
             assert "bun-compile" in d
+
+
+class TestOpencodeGetEnvBunCache:
+    def _runtime(self):
+        from src.runtime.opencode import OpencodeRuntime
+        return OpencodeRuntime()
+
+    def test_env_injects_resolved_cache_dir(self, tmp_path):
+        rt = self._runtime()
+        with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": str(tmp_path / "bun")}):
+            env = rt.get_env()
+        assert env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] == str(tmp_path / "bun")
+        assert env["JSC_diskCachePath"] == str(tmp_path / "bun")
+        assert os.path.isdir(str(tmp_path / "bun"))
+
+    def test_makedirs_failure_degrades_to_fallback_with_warning(self, tmp_path, caplog):
+        import logging
+        rt = self._runtime()
+        fallback = tmp_path / "fallback"
+        with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": str(tmp_path / "unwritable")}):
+            with patch("src.runtime.os_adapter.bun_cache_fallback_dir", return_value=str(fallback)):
+                with patch("os.makedirs", side_effect=PermissionError("Operation not permitted")):
+                    with caplog.at_level(logging.WARNING, logger="src.runtime.opencode"):
+                        env = rt.get_env()
+        assert any("Operation not permitted" in r.message for r in caplog.records)
+        # makedirs 全部失败 → 不注入缓存变量，但 get_env 正常返回（不抛错）
+        assert "BUN_RUNTIME_TRANSPILER_CACHE_PATH" not in env
+        assert "DEVOPS_SKILLS_DIR" in env
+
+    def test_makedirs_primary_failure_uses_fallback_dir(self, tmp_path, caplog):
+        import logging
+        real_makedirs = os.makedirs
+        primary = tmp_path / "primary"
+        fallback = tmp_path / "fb"
+        calls = []
+
+        def fake_makedirs(path, exist_ok=False):
+            calls.append(path)
+            if path == str(primary):
+                raise PermissionError("Operation not permitted")
+            return real_makedirs(path, exist_ok=exist_ok)
+
+        rt = self._runtime()
+        with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": str(primary)}):
+            with patch("src.runtime.os_adapter.bun_cache_fallback_dir", return_value=str(fallback)):
+                with patch("os.makedirs", side_effect=fake_makedirs):
+                    with caplog.at_level(logging.WARNING, logger="src.runtime.opencode"):
+                        env = rt.get_env()
+        assert env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] == str(fallback)
+        assert any("falling back" in r.message for r in caplog.records)
 
 
 class TestRemapCwd:
