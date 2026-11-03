@@ -12,6 +12,9 @@
     from src.kernel.gsb.router import GsbService
     gsb = GsbService("mgmt", 38080, app)
     gsb.mount()
+    # 在 lifespan 中调用:
+    await gsb.startup()   # 启动心跳
+    await gsb.shutdown()  # 注销服务
 """
 from __future__ import annotations
 
@@ -44,11 +47,15 @@ class GsbService:
         self.base_url = f"http://localhost:{port}"
         self.internal_router = APIRouter(prefix="/internal")
         self._mounted = False
+        self._heartbeat_task: asyncio.Task | None = None
 
     def mount(self) -> None:
-        """启动时调用：注册服务 + 挂载内部路由 + 启动心跳。
+        """启动时调用：注册服务 + 挂载内部路由。
 
         幂等：重复调用不会重复注册。
+
+        Note: startup/shutdown 钩子通过 ``startup()`` / ``shutdown()``
+        方法暴露，由调用方在 lifespan 中调用（替代废弃的 ``@app.on_event``）。
         """
         if self._mounted:
             return
@@ -71,19 +78,24 @@ class GsbService:
         except Exception as e:
             log.warning(f"GSB register_service failed: {e}")
 
-        # startup 心跳、shutdown 注销
-        @self.app.on_event("startup")
-        async def _start_heartbeat():  # type: ignore[no-untyped-def]
-            asyncio.create_task(self._heartbeat_loop())
-
-        @self.app.on_event("shutdown")
-        async def _deregister():  # type: ignore[no-untyped-def]
-            try:
-                deregister_service(self.name)
-            except Exception as e:
-                log.warning(f"GSB deregister failed: {e}")
-
         log.info(f"GSB service '{self.name}' mounted at {self.base_url}")
+
+    async def startup(self) -> None:
+        """启动心跳循环——在 lifespan startup 阶段调用。"""
+        self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+
+    async def shutdown(self) -> None:
+        """注销服务——在 lifespan shutdown 阶段调用。"""
+        if self._heartbeat_task:
+            self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+        try:
+            deregister_service(self.name)
+        except Exception as e:
+            log.warning(f"GSB deregister failed: {e}")
 
     async def _heartbeat_loop(self) -> None:
         """30s 心跳循环。"""

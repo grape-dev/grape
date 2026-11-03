@@ -17,6 +17,7 @@ its combined sweep_loop / table-maintenance, so behavior is unchanged. The four-
 servers call only their own group. Code moved verbatim from the legacy lifespan.
 """
 import asyncio
+import os
 
 from src.kernel.config import log
 

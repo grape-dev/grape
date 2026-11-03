@@ -51,4 +51,7 @@ app.include_router(health.router)
 
 server_common.init_process_db()
 
+# /internal/* 端点——供集群模式 RemoteProvider 调用（Phase 5）
+server_common.attach_internal_routes(app, "insight")
+
 server_common.attach_health(app, service_name="insight-server", readiness=False)

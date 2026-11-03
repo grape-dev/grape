@@ -52,4 +52,7 @@ server_common.include_selected(app, chat.router, methods={"POST"})
 
 server_common.init_process_db()
 
+# /internal/* 端点——供集群模式 RemoteProvider 调用（Phase 5）
+server_common.attach_internal_routes(app, "runtime")
+
 server_common.attach_health(app, service_name="worker-server", readiness=False)

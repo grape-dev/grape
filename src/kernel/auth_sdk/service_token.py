@@ -48,6 +48,14 @@ def generate_service_token(
         单机模式（SERVICE_SECRET 为空）返回空串。
     """
     if not SERVICE_SECRET:
+        # 集群模式下密钥未设置——告警（middleware 会 fail-closed 拒绝请求）
+        if os.environ.get("GRAPE_MODE", "").strip().lower() == "cluster":
+            from src.kernel.config import log
+            log.warning(
+                "generate_service_token called in cluster mode but "
+                "GRAPE_SERVICE_SECRET not set; returning empty token "
+                "(requests will be rejected by InternalAuthMiddleware)"
+            )
         return ""
     ts = str(int(time.time()))
     payload = f"{service_name}.{target_service}.{ts}"
@@ -71,7 +79,8 @@ def verify_service_token(
         True 表示验证通过；单机模式（SERVICE_SECRET 为空）始终返回 True。
     """
     if not SERVICE_SECRET:
-        return True  # 单机模式跳过
+        # 单机模式跳过验证；集群模式下 middleware 已 fail-closed 拦截
+        return True  # single-mode skip
     if not token or token.count(".") != 3:
         return False
     parts = token.split(".")

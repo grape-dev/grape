@@ -36,6 +36,7 @@ __all__ = [
     "is_loopback",
     "include_selected",
     "check_and_sync_templates",
+    "attach_internal_routes",
 ]
 
 
@@ -760,3 +761,28 @@ def include_selected(
         from fastapi import APIRouter
         sub = APIRouter(routes=routes)
         app.include_router(sub)
+
+
+def attach_internal_routes(app: FastAPI, domain: str) -> None:
+    """Mount /internal/* routes for cross-domain RemoteProvider calls (Phase 5).
+
+    Adds InternalAuthMiddleware and includes the domain's internal router.
+    Called by each four-process server entry point to enable /internal/*
+    endpoints for cluster-mode RemoteProvider access.
+
+    Args:
+        app: FastAPI application instance
+        domain: domain name (mgmt / runtime / insight)
+    """
+    from src.kernel.auth_sdk.internal_middleware import InternalAuthMiddleware
+    app.add_middleware(InternalAuthMiddleware)
+
+    if domain == "mgmt":
+        from src.domains.mgmt.routes.internal import router as internal_router
+    elif domain == "runtime":
+        from src.domains.runtime.routes.internal import router as internal_router
+    elif domain == "insight":
+        from src.domains.insight.routes.internal import router as internal_router
+    else:
+        return
+    app.include_router(internal_router)

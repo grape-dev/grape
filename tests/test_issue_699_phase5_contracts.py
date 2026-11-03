@@ -496,9 +496,10 @@ class TestTC54NoRawCrossSchemaSQL:
              "--include=*.py", "--exclude-dir=contracts"],
             capture_output=True, text=True,
         )
-        # grep returns 0=found, 1=not found, 2=error
-        # Phase 5 provides the interface; historical references may exist
-        assert result.returncode in (0, 1)
+        # grep returns 1=not found (desired), 0=found (violation), 2=error
+        assert result.returncode == 1, (
+            f"mgmt 域发现裸 grape_runtime. SQL 引用（应走 contracts 层）：\n{result.stdout}"
+        )
 
     def test_no_raw_grape_mgmt_in_runtime(self):
         """runtime 域（排除 contracts/）不应有裸 grape_mgmt. SQL。"""
@@ -509,7 +510,9 @@ class TestTC54NoRawCrossSchemaSQL:
              "--include=*.py", "--exclude-dir=contracts"],
             capture_output=True, text=True,
         )
-        assert result.returncode in (0, 1)
+        assert result.returncode == 1, (
+            f"runtime 域发现裸 grape_mgmt. SQL 引用（应走 contracts 层）：\n{result.stdout}"
+        )
 
     def test_contracts_use_t_mgmt_t_runtime_t_insight(self):
         """contracts/local/ 实现类应使用 t_mgmt()/t_runtime()/t_insight() 映射。"""
@@ -660,12 +663,57 @@ class TestInternalEndpoints:
         assert any("/logs" in r for r in routes)
         assert any("/latency" in r for r in routes)
 
+    def test_internal_routes_mounted_on_servers(self):
+        """四进程入口应挂载对应域的 /internal/* 路由（通过 TestClient 验证可达）。"""
+        from starlette.testclient import TestClient
+        from src.api.grape_worker_server import app as worker_app
+        from src.api.grape_insight_server import app as insight_app
+
+        # Worker: /internal/tasks 路由应存在（非 404）
+        worker_client = TestClient(worker_app)
+        resp = worker_client.get("/internal/tasks?repo_key=test")
+        assert resp.status_code != 404, "Worker should mount /internal/tasks"
+
+        # Insight: /internal/logs 路由应存在（非 404）
+        insight_client = TestClient(insight_app)
+        resp = insight_client.post("/internal/logs", json={})
+        assert resp.status_code != 404, "Insight should mount /internal/logs"
+
+    def test_cluster_empty_secret_rejects_internal(self, temp_db, monkeypatch):
+        """集群模式 + 空密钥 → /internal/* 请求被 fail-closed 拒绝（503）。"""
+        monkeypatch.setenv("GRAPE_MODE", "cluster")
+        monkeypatch.delenv("GRAPE_SERVICE_SECRET", raising=False)
+        # 重置 middleware 告警标志
+        import src.kernel.auth_sdk.internal_middleware as mw_mod
+        mw_mod._WARNED_NO_SECRET = False
+        # 重置 SERVICE_SECRET 模块级变量
+        import src.kernel.auth_sdk.service_token as st_mod
+        st_mod.SERVICE_SECRET = ""
+
+        from starlette.testclient import TestClient
+        from fastapi import FastAPI
+        from src.kernel.auth_sdk.internal_middleware import InternalAuthMiddleware
+
+        test_app = FastAPI()
+        test_app.add_middleware(InternalAuthMiddleware)
+
+        @test_app.post("/internal/test")
+        async def _test():
+            return {"ok": True}
+
+        client = TestClient(test_app)
+        resp = client.post("/internal/test")
+        assert resp.status_code == 503, f"cluster+empty secret should return 503, got {resp.status_code}"
+        assert resp.json()["code"] == "SERVICE_SECRET_NOT_CONFIGURED"
+
 
 class TestContractsRegistration:
-    """契约注册测试。"""
+    """契约注册测试（惰性注册——首次调用 get_service 时触发）。"""
 
     def test_providers_registered_on_import(self, temp_db):
-        import src.domains.contracts  # noqa: F401
+        """惰性注册：调用 ensure_providers_registered() 后 Provider 入表。"""
+        from src.domains.contracts import ensure_providers_registered
+        ensure_providers_registered()
         from src.kernel.gsb.provider import _PROVIDERS
         assert "mgmt" in _PROVIDERS
         assert "runtime" in _PROVIDERS

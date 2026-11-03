@@ -52,9 +52,14 @@ def get_service(name: str) -> Any:
     - GRAPE_MODE=cluster 但无 GRAPE_PROVIDER_MODE → Local（共库模式）
     - 其他（single）→ Local
 
+    首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。
+
     Raises:
         ValueError: 服务未注册
     """
+    if not _PROVIDERS:
+        from src.domains.contracts import ensure_providers_registered
+        ensure_providers_registered()
     if name not in _PROVIDERS:
         raise ValueError(
             f"Unknown service: {name}. "

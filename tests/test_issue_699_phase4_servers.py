@@ -231,8 +231,18 @@ class TestTC46NginxConfig:
                     "location ~ ^/api/events/", "location /api/obs/",
                     "location /api/dashboard/", "location /api/search",
                     "location /api/latency", "location /api/task-logs/",
+                    "location /api/chat/",
                     "location /"):
             assert loc in conf, f"missing location {loc}"
+
+    def test_chat_routes_to_worker(self):
+        """TC-4.6: /api/chat/ 分流到 Worker（proxy_pass grape_worker_server）。"""
+        conf = self._conf()
+        assert "location /api/chat/" in conf
+        # 找到 /api/chat/ location 块，验证 proxy_pass 指向 worker
+        chat_block = conf.split("location /api/chat/")[1].split("location")[0]
+        assert "grape_worker_server" in chat_block, "/api/chat/ should proxy to grape_worker_server"
+        assert "proxy_buffering off" in chat_block, "/api/chat/ should disable proxy_buffering for SSE"
 
 
 # ===========================================================================
