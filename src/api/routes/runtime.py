@@ -58,6 +58,7 @@ class RuntimeInfo(BaseModel):
     version: str = ""
     healthy: bool = True
     role_tags: list[str] = []  # Issue #658：引擎显式角色声明（如 ["coding","issue"]；空=按引擎类型默认映射）
+    model: str = ""  # Issue #865：配置模型名（worker 本机配置解析上报；空=未上报/解析失败，不影响注册）
 
 
 class LogLineBody(BaseModel):
@@ -293,16 +294,22 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     _role_tags_json = json.dumps([str(t).strip().lower() for t in _rt if str(t).strip()], ensure_ascii=False)
             except Exception:
                 _role_tags_json = ""
+            # Issue #865：配置模型（worker 上报本机配置解析结果；空=未上报，
+            # 不覆盖既有值——未升级 worker 重注册不会抹掉历史/兜底值，同 #658 模式）
+            _model_name = str(rt.get("model") or "").strip()[:120]
             if row:
                 rid = row[0]
                 # Issue #700：降级守卫——已 healthy 且探活新鲜的行不被 worker
                 # 瞬时 ACP 握手超时打回 0（UPDATE 的 1→0 方向过守卫）
                 # （健康值经 _register_healthy_guard，其余字段保留 #654 role_tags/凭据同步）
                 c.execute("UPDATE agent_runtimes SET version=?, healthy=?, installed=1, status='online', last_seen_at=?, cli_path=?, local_skills=?, worker_version=?"
-                          + (", role_tags=?" if _role_tags_json else "") + " WHERE id=?",
+                          + (", role_tags=?" if _role_tags_json else "")
+                          + (", model_name=?, model_source='worker_report', model_reported_at=?" if _model_name else "")
+                          + " WHERE id=?",
                           (rt.get("version", ""), _register_healthy_guard(c, rid, bool(rt.get("healthy", True))),
                            datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), _ls_json, body.cli_version, rid)
-                          + ((_role_tags_json,) if _role_tags_json else ()))
+                          + ((_role_tags_json,) if _role_tags_json else ())
+                          + ((_model_name, datetime.now(timezone.utc).isoformat()) if _model_name else ()))
                 # Issue #654：凭据派生属性原地同步（纵深防御：即使 scope 切换路径
                 # 漏改，注册也会把引擎行拉回与凭据一致），变化时输出结构化事件。
                 if ((row[1] or "") != cred_scope or (row[2] or "") != owner_id
@@ -319,10 +326,11 @@ def runtime_register(body: RuntimeRegBody, request: Request, credential_id: int 
                     log.info("engine_change_event: " + json.dumps(_ev, ensure_ascii=False))
             else:
                 c.execute(
-                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id, role_tags) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO agent_runtimes (credential_id, name, display_name, `binary`, version, healthy, installed, status, last_seen_at, cli_path, scope, owner_id, local_skills, repo_key, worker_version, org_id, role_tags, model_name, model_source, model_reported_at) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (credential_id, name, rt.get("display_name", name), name, rt.get("version", ""),
                      1 if rt.get("healthy", True) else 0, 1, "online",
-                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id, _role_tags_json))
+                     datetime.now(timezone.utc).isoformat(), rt.get("cli_path", ""), cred_scope, owner_id, _ls_json, cred_repo_key, body.cli_version, cred_org_id, _role_tags_json,
+                     _model_name, "worker_report" if _model_name else "", datetime.now(timezone.utc).isoformat() if _model_name else ""))
                 rid = c.lastrowid
             # 自动写入默认 "all" 标签——新引擎默认可认领任意角色任务。
             # 若已有 capabilities 行则跳过（用户手动配置过标签的不覆盖）。

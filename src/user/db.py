@@ -3837,9 +3837,9 @@ def get_agent_runtimes(scope: str | None = "global", owner_id: str = "") -> list
     with db_lock:
         c = db.cursor()
         if scope is None:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes ORDER BY name")
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id, model_name, model_source, model_reported_at FROM agent_runtimes ORDER BY name")
         else:
-            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
+            c.execute("SELECT id, name, display_name, installed, cli_path, version, healthy, pip_package, updated_at, scope, owner_id, credential_id, status, last_seen_at, local_skills, skill_scan_result, agent_tags, host_name, max_concurrent, scene_tags, alias, worker_version, org_id, model_name, model_source, model_reported_at FROM agent_runtimes WHERE scope=? AND (owner_id=? OR owner_id='') ORDER BY name", (scope, owner_id))
         return _rows_to_runtimes(c.fetchall())
 
 
@@ -3861,7 +3861,10 @@ def _rows_to_runtimes(rows) -> list[dict]:
          "scene_tags": json.loads(r[19]) if r[19] else ["default"],
          "alias": r[20] or "",
          "worker_version": r[21] or "",
-         "org_id": r[22] or 0}
+         "org_id": r[22] or 0,
+         "model_name": r[23] or "",
+         "model_source": r[24] or "",
+         "model_reported_at": r[25] or ""}
         for r in rows
     ]
 

@@ -1058,8 +1058,11 @@ def _discover_local_runtimes() -> list[dict]:
         from src.runtime.instances import engine_display_name, ENGINE_DISPLAY_NAMES
         _et = (r["name"] or "").strip().lower()
         _dn = ENGINE_DISPLAY_NAMES.get(_et, "")
+        # Issue #865：配置模型（本机配置解析；失败留空不影响注册/心跳）
+        from src.runtime.engine_model import detect_engine_model
         out.append({"name": r["name"], "display_name": (_dn.capitalize() if _dn else r["name"]),
-                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False)})
+                    "version": version, "healthy": healthy, "cli_path": cli, "installed": r.get("installed", False),
+                    "model": detect_engine_model(_et)})
     return out
 
 
