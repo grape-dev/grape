@@ -314,6 +314,7 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
     _query_pr_subscription_events 独立处理，不受影响）。
     """
     from src.session_manager import db, db_lock
+    import json as _json
     out = {}
     placeholders = ",".join("?" * len(repo_keys))
     _num_clause = ""
@@ -322,23 +323,26 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
         _iids = [f"#{n}" for n in numbers]
         _num_clause = f" AND issue_id IN ({','.join('?' * len(_iids))})"
         _num_params = _iids
+    _has_so = False
     with db_lock:
         c = db.cursor()
         try:
             cols = [r[1] for r in c.execute("PRAGMA table_info(events)").fetchall()]
             _has_so = "structured_output" in cols
-            _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, runtime, skill"
+            # Issue #859: 统一使用 _sel 执行查询（含 PRAGMA 动态探测 structured_output/agent_logs），
+            # 并补充 entity_type 列保留 Issue #252 PR 事件过滤；列顺序与下方 r[N] 索引一一对应。
+            _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, "
+                    f"runtime, skill, entity_type"
                     + (", structured_output, agent_logs" if _has_so else ""))
             c.execute(
-                f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, entity_type "
-                f"FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
+                f"{_sel} FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
                 repo_keys + _num_params)
             rows = c.fetchall()
         except Exception:
             rows = []
     for r in rows:
         iid = r[1]
-        _entity_type = r[9] if len(r) > 9 else ""
+        _entity_type = r[11] if len(r) > 11 else ""
         # Issue #252: PR 事件不混入 issue 分组
         if _entity_type == "pull_request":
             continue
@@ -350,17 +354,17 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             "title": r[4] or r[2], "actor": r[5] or "",
             "summary": r[6] or r[4] or r[2],
             "status": r[7], "created_at": normalize_event_time(r[8]),
-            "runtime": r[9] if len(r) > 9 else "",
-            "skill": r[10] if len(r) > 10 else "",
+            "runtime": r[9] or "",
+            "skill": r[10] or "",
         }
-        if len(r) > 11:  # structured_output / agent_logs 存在
-            raw_so = r[11]
+        if _has_so and len(r) > 12:  # structured_output / agent_logs 存在
+            raw_so = r[12]
             try:
                 item["output"] = _json.loads(raw_so) if raw_so else None
             except Exception:
                 item["output"] = None
             try:
-                raw_logs = r[12] if len(r) > 12 else None
+                raw_logs = r[13] if len(r) > 13 else None
                 item["logs"] = _json.loads(raw_logs) if raw_logs else []
             except Exception:
                 item["logs"] = []
