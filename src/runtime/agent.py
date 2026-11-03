@@ -1842,9 +1842,11 @@ def _submit_linked_repo_prs(task: dict, env: dict):
             # Issue #752（M2）：commit 前冲突标记推送守卫——暂存文件硬命中
             # `<<<<<<< `/`>>>>>>> ` → 阻断提交/推送（防冲突残留被 add -A 整树写入分支，
             # PR #352 实证的损坏通道）；软命中（孤立 =======）仅告警。
-            # 另做功能文件指纹保真校验（vs 任务开始基线），不一致告警不阻断。
+            # 保真告警不在推送口（PR #874 审查修正）：agent 正常编码必然修改功能文件，
+            # 推送口告警全是噪声；保真校验保留在清理口（remove_issue_worktree 前），
+            # 由 cleanup 阶段对照任务开始基线告警。
             try:
-                from src.runtime.worktree_guard import scan_staged_files, verify_fidelity
+                from src.runtime.worktree_guard import scan_staged_files
                 _g = scan_staged_files(_wt_dir)
                 if _g.get("hard"):
                     log.warning(f"linked PR: conflict markers in staged files, BLOCKED push {_rk}: {_g['hard']}")
@@ -1854,10 +1856,6 @@ def _submit_linked_repo_prs(task: dict, env: dict):
                     continue
                 if _g.get("soft"):
                     log.warning(f"linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
-                _fid = verify_fidelity(_wt_dir)
-                if not _fid.get("baseline_missing") and (_fid.get("modified") or _fid.get("removed")):
-                    log.warning(f"linked PR: fidelity alarm {_rk}: modified={_fid.get('modified')} "
-                                f"removed={_fid.get('removed')}")
             except Exception as _ge:
                 log.warning(f"linked PR: worktree guard failed {_rk}: {_ge}")
 

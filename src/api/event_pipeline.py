@@ -3849,9 +3849,11 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 continue
 
             # Issue #752（M2）：commit 前冲突标记推送守卫（与 worker 端 _submit_linked_repo_prs
-            # 同口径）：暂存硬命中阻断提交/推送；软命中/指纹保真不一致告警不阻断。
+            # 同口径）：暂存硬命中阻断提交/推送；软命中告警不阻断。
+            # 保真告警不在推送口（PR #874 审查修正）：agent 正常编码必然修改功能文件，
+            # 推送口告警全是噪声；保真校验保留在清理口（同函数尾部 cleanup 段）。
             try:
-                from src.runtime.worktree_guard import scan_staged_files, verify_fidelity
+                from src.runtime.worktree_guard import scan_staged_files
                 _g = scan_staged_files(_wt_dir)
                 if _g.get("hard"):
                     _log.warning(f"direct linked PR: conflict markers in staged files, "
@@ -3862,10 +3864,6 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                     continue
                 if _g.get("soft"):
                     _log.warning(f"direct linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
-                _fid = verify_fidelity(_wt_dir)
-                if not _fid.get("baseline_missing") and (_fid.get("modified") or _fid.get("removed")):
-                    _log.warning(f"direct linked PR: fidelity alarm {_rk}: "
-                                 f"modified={_fid.get('modified')} removed={_fid.get('removed')}")
             except Exception as _ge:
                 _log.warning(f"direct linked PR: worktree guard failed {_rk}: {_ge}")
 
