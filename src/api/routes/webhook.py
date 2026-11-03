@@ -311,7 +311,7 @@ async def gitcode_webhook(request: Request):
     xff = request.headers.get("X-Forwarded-For", "")
     xri = request.headers.get("X-Real-IP", "")
     log.info(f"Webhook: from ip={client_host}, xff={xff or 'none'}, xri={xri or 'none'}, "
-             f"event={event_header}, body_size={len(body)}, token={token[:8] if token else 'none'}...")
+             f"event={event_header}, body_size={len(body)}, token={'present' if token else 'absent'}")
 
     # 1. 解析事件体获取 repo 名
     try:
@@ -342,8 +342,9 @@ async def gitcode_webhook(request: Request):
         log.warning(f"Webhook rejected: unmanaged repo={repo}")
         return JSONResponse(status_code=404, content={"code": 404, "message": "repository not managed"})
 
-    # 4. token 对比验证
-    if token != expected:
+    # 4. token 对比验证（Issue #860：hmac.compare_digest 恒定时间比较，防时序侧信道）
+    import hmac
+    if not hmac.compare_digest(str(token), str(expected)):
         log.warning(f"Webhook rejected: token mismatch for repo={repo}")
         return JSONResponse(status_code=403, content={"code": 403, "message": "invalid webhook token"})
 
@@ -412,10 +413,10 @@ async def _process_github_webhook(body: bytes, headers) -> dict:
     if signature:
         computed = hmac.new(expected.encode(), body, hashlib.sha256).hexdigest()
         if not hmac.compare_digest(f"sha256={computed}", signature):
-            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, expected_sha256=sha256={computed[:20]}..., got_sha256={signature[:25]}..., body_size={len(body)}, token_prefix={expected[:10]}...")
+            log.warning(f"GitHub Webhook rejected: signature mismatch for repo={repo}, body_size={len(body)}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid signature"})
     else:
-        if token_header != expected:
+        if not hmac.compare_digest(str(token_header), str(expected)):
             log.warning(f"GitHub Webhook rejected: token mismatch for repo={repo}")
             return JSONResponse(status_code=403, content={"code": 403, "message": "invalid token"})
 
