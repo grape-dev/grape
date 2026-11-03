@@ -2892,6 +2892,52 @@ register_migration(
 )
 
 
+def _fn_add_obs_llm_usage_engine_index() -> None:
+    """性能补丁（2026-11-03）：obs_llm_usage 原先没有 engine_id 索引，
+    引擎页的"最近使用模型"聚合（Issue #865 `_recent_models_by_runtime`）
+    每页触发一次全表扫描（EXPLAIN: type=ALL + Using temporary）——千万行量级
+    下单页 0.3~0.6s，且全程持 db_lock，会串行堵住其它 DB 请求。
+    补 (engine_id, model_key, model_raw, created_at) 索引后按引擎收窄 + 覆盖分组，
+    实测（sqlite，100 万行）38ms → 1.5ms。幂等：索引已存在即跳过。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    _idx = "idx_obs_llm_engine_model"
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            # MySQL 下 model_key/model_raw/created_at 是 TEXT，必须带前缀长度
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.statistics "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='obs_llm_usage' "
+                "AND INDEX_NAME=%s", (_idx,))
+            if c.fetchone()[0]:
+                return
+            c.execute(
+                f"CREATE INDEX {_idx} ON obs_llm_usage "
+                "(engine_id, model_key(64), model_raw(64), created_at(32))")
+            db.commit()
+        else:
+            c.execute("SELECT name FROM sqlite_master WHERE type='index' AND name=?", (_idx,))
+            if c.fetchone():
+                return
+            c.execute(
+                f"CREATE INDEX {_idx} ON obs_llm_usage "
+                "(engine_id, model_key, model_raw, created_at)")
+            db.commit()
+
+
+register_migration(
+    version="202611030003",
+    name="perf_obs_llm_usage_engine_index",
+    kind="safe",
+    fn=_fn_add_obs_llm_usage_engine_index,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 

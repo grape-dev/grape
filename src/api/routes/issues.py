@@ -303,6 +303,72 @@ def _task_status_map(repo_keys: list[str]) -> dict:
     return out
 
 
+# Issue #859 性能（2026-11-03）：事件 payload 内联额度
+# 每 issue 只内联最新 N 条的 output/logs；单次请求最多 M 条；单条超过 CHARS 就截断。
+_EVENT_PAYLOAD_PER_ISSUE = 1
+_EVENT_PAYLOAD_MAX_EVENTS = 200
+_EVENT_PAYLOAD_MAX_CHARS = 32768
+
+
+def _attach_event_payloads(group_map: dict) -> None:
+    """按需补 structured_output / agent_logs（Issue #859 性能修复，2026-11-03）。
+
+    旧实现把 payload 两列塞进事件主查询：单仓 2 万事件 × 平均 8.3KB 日志 ≈ 166MB
+    传输 + 2 万次 JSON 解析（实测 50ms → 386ms@5KB/条），且全程持 db_lock。
+    现在主查询只取 12 列元数据，再按 seq 只补"每个 issue 最新 N 条"的 payload：
+    单次最多 _EVENT_PAYLOAD_MAX_EVENTS 条、单条最多 _EVENT_PAYLOAD_MAX_CHARS 字符
+    （超出即截断并打 *_truncated 标记，避免 MB 级大字段拖垮响应）。
+    未命中的事件保留 output=None/logs=[]（与原响应形状一致）并标记 payload_omitted。
+    """
+    picks = []
+    for evs in group_map.values():
+        picks.extend(evs[-_EVENT_PAYLOAD_PER_ISSUE:])
+    if len(picks) > _EVENT_PAYLOAD_MAX_EVENTS:
+        picks = picks[-_EVENT_PAYLOAD_MAX_EVENTS:]
+    if not picks:
+        return
+    cap = _EVENT_PAYLOAD_MAX_CHARS
+    seqs = [int(p["seq"]) for p in picks]
+    placeholders = ",".join("?" * len(seqs))
+    from src.session_manager import db, db_lock
+    import json as _json
+    try:
+        with db_lock:
+            c = db.cursor()
+            # SUBSTR 在 sqlite/MySQL 语义一致；多取 1 字符用于判断是否被截断
+            c.execute(
+                f"SELECT seq, SUBSTR(structured_output, 1, {cap + 1}), "
+                f"SUBSTR(agent_logs, 1, {cap + 1}) FROM events WHERE seq IN ({placeholders})",
+                seqs)
+            rows = {int(r[0]): (r[1], r[2]) for r in c.fetchall()}
+    except Exception:
+        return
+    picked = set()
+    for p in picks:
+        picked.add(id(p))
+        raw_so, raw_logs = rows.get(int(p["seq"]), (None, None))
+        if raw_so:
+            if len(raw_so) > cap:
+                p["output_truncated"] = True
+            else:
+                try:
+                    p["output"] = _json.loads(raw_so)
+                except Exception:
+                    p["output"] = None
+        if raw_logs:
+            if len(raw_logs) > cap:
+                p["logs_truncated"] = True
+            else:
+                try:
+                    p["logs"] = _json.loads(raw_logs)
+                except Exception:
+                    p["logs"] = []
+    for evs in group_map.values():
+        for e in evs:
+            if id(e) not in picked:
+                e["payload_omitted"] = True
+
+
 def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> dict:
     """仓库内 issue_id → events 列表（seq 升序），带时间格式化。
 
@@ -331,9 +397,9 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             _has_so = "structured_output" in cols
             # Issue #859: 统一使用 _sel 执行查询（含 PRAGMA 动态探测 structured_output/agent_logs），
             # 并补充 entity_type 列保留 Issue #252 PR 事件过滤；列顺序与下方 r[N] 索引一一对应。
+            # 性能（2026-11-03）：payload 两列不再随主查询全量返回，改由 _attach_event_payloads 按需补。
             _sel = (f"SELECT seq, issue_id, event_type, agent_type, title, actor, summary, status, created_at, "
-                    f"runtime, skill, entity_type"
-                    + (", structured_output, agent_logs" if _has_so else ""))
+                    f"runtime, skill, entity_type")
             c.execute(
                 f"{_sel} FROM events WHERE repo_key IN ({placeholders}) AND issue_id!=''{_num_clause} ORDER BY seq ASC",
                 repo_keys + _num_params)
@@ -357,7 +423,7 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
             "runtime": r[9] or "",
             "skill": r[10] or "",
         }
-        if _has_so and len(r) > 12:  # structured_output / agent_logs 存在
+        if _has_so and len(r) > 12:  # structured_output / agent_logs 存在（旧形态兼容）
             raw_so = r[12]
             try:
                 item["output"] = _json.loads(raw_so) if raw_so else None
@@ -368,7 +434,13 @@ def _group_events_by_issue(repo_keys: list[str], numbers: list[str] = None) -> d
                 item["logs"] = _json.loads(raw_logs) if raw_logs else []
             except Exception:
                 item["logs"] = []
+        elif _has_so:
+            # 性能（2026-11-03）：主查询不再取 payload，先占位，随后按需补
+            item["output"] = None
+            item["logs"] = []
         out.setdefault(n, []).append(item)
+    if _has_so:
+        _attach_event_payloads(out)
     return out
 
 

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import time
 
 _MAX_MODEL_LEN = 120
 
@@ -24,9 +25,20 @@ def _sanitize(value) -> str:
     return v[:_MAX_MODEL_LEN]
 
 
+def _hermes_path() -> str:
+    return os.path.join(os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes")), "config.yaml")
+
+
+def _opencode_path() -> str:
+    return os.path.expanduser("~/.config/opencode/opencode.json")
+
+
+def _codearts_path() -> str:
+    return os.path.expanduser("~/.codeartsdoer/codearts_cli.json")
+
+
 def _hermes_model() -> str:
-    home = os.path.expanduser(os.environ.get("HERMES_HOME", "~/.hermes"))
-    path = os.path.join(home, "config.yaml")
+    path = _hermes_path()
     if not os.path.isfile(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -51,7 +63,7 @@ def _hermes_model() -> str:
 
 
 def _opencode_model() -> str:
-    path = os.path.expanduser("~/.config/opencode/opencode.json")
+    path = _opencode_path()
     if not os.path.isfile(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -64,7 +76,7 @@ def _codearts_model() -> str:
     env_model = _sanitize(os.environ.get("CODEARTS_MODEL"))
     if env_model:
         return env_model
-    path = os.path.expanduser("~/.codeartsdoer/codearts_cli.json")
+    path = _codearts_path()
     if not os.path.isfile(path):
         return ""
     with open(path, encoding="utf-8") as f:
@@ -79,13 +91,49 @@ _PARSERS = {
 }
 
 
+# 性能（2026-11-03）：本机配置解析实测 5.9ms/次（yaml.safe_load 占 5.83ms），而引擎页
+# 每次请求都会为"未上报的本机引擎"现算一次。按**文件指纹**（路径+mtime+大小+相关环境变量）
+# 缓存：配置一改立刻失效重算，指纹不变时 60s 内直接命中（体积防护，不必每分钟重解析）。
+_MODEL_CACHE_TTL = 60.0
+_model_cache: dict[str, tuple[tuple, float, str]] = {}
+
+_CONFIG_PATHS = {
+    "hermes": _hermes_path,
+    "opencode": _opencode_path,
+    "codearts": _codearts_path,
+}
+
+
+def _config_signature(name: str) -> tuple:
+    """配置指纹：文件 (路径, mtime_ns, size) + 会覆盖配置的环境变量取值。"""
+    sig = []
+    fn = _CONFIG_PATHS.get(name)
+    if fn:
+        path = fn()
+        try:
+            st = os.stat(path)
+            sig.append((path, st.st_mtime_ns, st.st_size))
+        except OSError:
+            sig.append((path, 0, 0))
+    if name == "codearts":
+        sig.append(os.environ.get("CODEARTS_MODEL", ""))
+    return tuple(sig)
+
+
 def detect_engine_model(name: str) -> str:
     """按引擎名解析本机配置的模型名；未知名/失败一律返回空串（降级不影响注册）。"""
     key = str(name or "").strip().lower()
     fn = _PARSERS.get(key)
     if not fn:
         return ""
+    sig = _config_signature(key)
+    now = time.monotonic()
+    hit = _model_cache.get(key)
+    if hit and hit[0] == sig and now - hit[1] < _MODEL_CACHE_TTL:
+        return hit[2]
     try:
-        return fn()
+        val = fn()
     except Exception:
-        return ""
+        val = ""
+    _model_cache[key] = (sig, now, val)
+    return val
