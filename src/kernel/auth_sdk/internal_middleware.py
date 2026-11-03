@@ -15,7 +15,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from src.kernel.auth_sdk.service_token import verify_service_token, SERVICE_SECRET
+from src.kernel.auth_sdk import service_token as _service_token
 from src.kernel.config import log
 
 _WARNED_NO_SECRET = False
@@ -41,7 +41,7 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
             # 单机模式跳过认证
             return await call_next(request)
 
-        if not SERVICE_SECRET:
+        if not _service_token.SERVICE_SECRET:
             # 集群模式但密钥未设置——fail-closed，拒绝并告警（仅告警一次避免日志刷屏）
             if not _WARNED_NO_SECRET:
                 log.error(
@@ -59,7 +59,7 @@ class InternalAuthMiddleware(BaseHTTPMiddleware):
 
         token = request.headers.get("X-Service-Token", "")
         source = request.headers.get("X-Service", "")
-        if not verify_service_token(token):
+        if not _service_token.verify_service_token(token):
             return JSONResponse(
                 status_code=401,
                 content={"code": "SERVICE_TOKEN_INVALID", "detail": "Invalid or expired service token"},
