@@ -45,6 +45,42 @@ def _resolve_repo_key(repo: str, strict: bool = False) -> str:
     return rk
 
 
+def _safe_zip_name(filename: str | None) -> str:
+    """净化 multipart filename 为安全 .zip 文件名（CWE-22 路径穿越防护，Issue #856）。
+
+    - None/空白 → 默认 "skill.zip"（保持原有缺省行为）
+    - 含 / 或 \\ 路径分隔符（绝对路径、目录穿越片段）→ 非法（返回空串，调用方返回 400）
+    - 必须以 .zip 结尾，否则非法
+    """
+    if not filename or not filename.strip():
+        return "skill.zip"
+    name = filename.strip()
+    if "/" in name or "\\" in name or name in (".", ".."):
+        return ""
+    if not name.lower().endswith(".zip"):
+        return ""
+    return name
+
+
+def _restore_zip_permissions(zf: zipfile.ZipFile, extract_dir: str) -> None:
+    """恢复解压成员的 Unix 权限位（Python 3.12+ extractall 不再恢复）。
+
+    chmod 前对每个成员做 realpath 前缀校验（Issue #856 纵深防御）：
+    不在 extract_dir 下的成员跳过并记日志，杜绝 info.filename 伪造穿越。
+    """
+    from src.config import log
+    real_root = os.path.realpath(extract_dir)
+    for info in zf.infolist():
+        mode = info.external_attr >> 16
+        if mode and not info.is_dir():
+            p = os.path.join(extract_dir, info.filename)
+            if os.path.realpath(p).startswith(real_root + os.sep):
+                if os.path.isfile(p):
+                    os.chmod(p, mode & 0o777)
+            else:
+                log.warning("skill zip member escapes extract dir, skip chmod: %r", info.filename)
+
+
 def _normalize_skill_zip(skill_dir: str, skill_name: str) -> bytes:
     """规范化重打包技能 zip：根 = {skill_name}/，逐文件保留权限位（external_attr），
     丢弃系统目录。返回 zip 字节（OBS 存储正体，见 obs-skill-storage-design.md §2.2）。"""
@@ -695,7 +731,11 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        zip_path = os.path.join(tmp_dir, file.filename or "skill.zip")
+        # Issue #856：basename 净化 + .zip 后缀校验，防 multipart filename 路径穿越
+        safe_name = _safe_zip_name(file.filename)
+        if not safe_name:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "文件名非法：仅接受 .zip 文件名，不允许路径分隔符或目录穿越片段"})
+        zip_path = os.path.join(tmp_dir, safe_name)
         with open(zip_path, "wb") as f:
             f.write(content)
 
@@ -709,12 +749,7 @@ async def upload_skill(file: UploadFile = File(...), user: dict = Depends(get_cu
                 zf.extractall(extract_dir)
                 # Python 3.12+ extractall 不再恢复 Unix 权限位 → 手动恢复
                 # （否则后续规范化重打包读 st_mode 拿不到上传时的权限，见 obs-skill-storage-design.md §7）
-                for info in zf.infolist():
-                    mode = info.external_attr >> 16
-                    if mode and not info.is_dir():
-                        p = os.path.join(extract_dir, info.filename)
-                        if os.path.isfile(p):
-                            os.chmod(p, mode & 0o777)
+                _restore_zip_permissions(zf, extract_dir)
         except HTTPException:
             raise
         except zipfile.BadZipFile:
@@ -931,7 +966,11 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
 
     tmp_dir = tempfile.mkdtemp()
     try:
-        zip_path = os.path.join(tmp_dir, file.filename or "skill.zip")
+        # Issue #856：basename 净化 + .zip 后缀校验，防 multipart filename 路径穿越
+        safe_name = _safe_zip_name(file.filename)
+        if not safe_name:
+            raise HTTPException(status_code=400, detail={"code": 400, "message": "文件名非法：仅接受 .zip 文件名，不允许路径分隔符或目录穿越片段"})
+        zip_path = os.path.join(tmp_dir, safe_name)
         with open(zip_path, "wb") as f:
             f.write(content)
 
@@ -942,12 +981,7 @@ async def update_skill_by_id(skill_id: int, file: UploadFile = File(...),
                 if total > MAX_EXTRACT_BYTES:
                     raise HTTPException(status_code=400, detail={"code": 400, "message": f"ZIP 解压后总大小超过 {MAX_EXTRACT_BYTES // (1024 * 1024)}MB 上限"})
                 zf.extractall(extract_dir)
-                for info in zf.infolist():
-                    mode = info.external_attr >> 16
-                    if mode and not info.is_dir():
-                        p = os.path.join(extract_dir, info.filename)
-                        if os.path.isfile(p):
-                            os.chmod(p, mode & 0o777)
+                _restore_zip_permissions(zf, extract_dir)
         except HTTPException:
             raise
         except zipfile.BadZipFile:
