@@ -565,6 +565,7 @@ def sweep_once() -> int:
         from src.kernel.repo_key import split_owner_repo
         from src.domains.runtime.engine import repogit
         if _has_db_tables:
+            from src.domains.runtime.engine import repogit
             active = _active_issue_sessions()
             for repo_key, issue_id in _done_issues():
                 num = str(issue_id or "").lstrip("#")
@@ -817,3 +818,70 @@ async def sweep_loop():
         except Exception as e:
             log.warning(f"sweeper loop error: {e}")
         await asyncio.sleep(_SWEEP_INTERVAL)
+
+
+# ===========================================================================
+# Issue #699 Phase 4：sweep_loop 拆分（设计 §8.2）
+# - sweep_events_loop：Event 进程（僵尸事件回收 + IM 实例清理 + workdir 清理）
+# - sweep_tasks_loop：Worker 进程（悬空 agent_tasks 回收，依赖 local_claimer 在线认领）
+# 单进程模式仍用原有 sweep_loop()（内部 sweep_once 做两件事的并集）。
+# ===========================================================================
+
+
+async def sweep_events_loop() -> None:
+    """Event 进程：僵尸事件回收 + IM 实例清理 + workdir 清理。
+
+    workdir 清理依赖 issue_state（Event 独占表），放在 Event 进程合理。
+    """
+    import asyncio as _aio
+    while True:
+        try:
+            cleaned = 0
+            try:
+                cleaned += sweep_stuck_events_once()
+            except Exception as e:
+                log.warning(f"Event sweeper stuck-event sweep failed: {e}")
+            try:
+                from src.domains.runtime.im.bot_lease import purge_stale_instances
+                cleaned += purge_stale_instances(older_than_hours=24)
+            except Exception as e:
+                log.debug(f"Event sweeper im-instance purge skipped: {e}")
+
+            active = _active_issue_sessions()
+            for repo_key, issue_id in _done_issues():
+                num = str(issue_id or "").lstrip("#")
+                if not num or num == "0":
+                    continue
+                for agent_type in _GIT_AGENTS:
+                    if (repo_key, agent_type, num) in active:
+                        continue
+                    issue_dir = repogit.issue_dir_for(repo_key, agent_type, num)
+                    if not os.path.isdir(issue_dir):
+                        continue
+                    try:
+                        repogit.cleanup_issue_worktree(repo_key, agent_type, num)
+                        cleaned += 1
+                    except Exception as e:
+                        log.warning(f"Event sweeper cleanup failed {issue_dir}: {e}")
+            if cleaned:
+                log.info(f"Event sweeper: cleaned {cleaned} items")
+        except Exception as e:
+            log.warning(f"Event sweeper error: {e}")
+        await _aio.sleep(_SWEEP_INTERVAL)
+
+
+async def sweep_tasks_loop() -> None:
+    """Worker 进程：悬空 agent_tasks 回收。
+
+    sweep_stuck_agent_tasks_once 内部会重派 queued 任务，依赖 Worker 的
+    local_claimer 在线认领，放在 Worker 进程合理。
+    """
+    import asyncio as _aio
+    while True:
+        try:
+            cleaned = sweep_stuck_agent_tasks_once()
+            if cleaned:
+                log.info(f"Task sweeper: cleaned {cleaned} stuck tasks")
+        except Exception as e:
+            log.warning(f"Task sweeper error: {e}")
+        await _aio.sleep(_SWEEP_INTERVAL)
