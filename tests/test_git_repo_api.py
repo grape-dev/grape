@@ -863,6 +863,38 @@ def test_json_out_control_chars_parseable(monkeypatch, _client):
     assert parsed[0]["body"] == raw_body
 
 
+def test_commits_control_chars_big_page_parseable(monkeypatch, _client):
+    """Issue #818 验收（增量用例）：commits 透传端点 per_page=60 大分页，
+    上游 commit message 含原始控制字符（C0 全集 + DEL + 引号/反斜杠/孤立代理项），
+    响应体可 json.loads(strict=True) 无预处理直接解析且值保真。
+
+    报障原场景：`grape git-repo commits --per_page 60 --json-out` 因
+    `Invalid control character at char 19970` 解析失败；#684 既有用例仅覆盖
+    pulls 端点小响应，本用例补齐 commits 端点 + 大分页（per_page 60）维度。
+    """
+    ctrl = "".join(chr(c) for c in range(0x01, 0x1F)) + "\x00\x7f"
+    raw_msg = f"fix: page scan\nline2{ctrl} end \"quoted\" \\ back \ud800"
+    upstream = [{"sha": f"c{i:04d}",
+                 "commit": {"message": raw_msg, "author": {"name": "a\x02b"}}}
+                for i in range(60)]
+    calls = []
+    def _fake_req(method, url, token="", body=None):
+        calls.append(url)
+        return [dict(c) for c in upstream]
+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/commits?per_page=60")
+    assert r.status_code == 200
+    assert "per_page=60" in calls[-1]  # 大分页参数如实透传上游
+    # 原始控制字符不落字节流（以转义序列出现）
+    assert b"\x01" not in r.content and b"\x7f" not in r.content
+    parsed = json.loads(r.content, strict=True)  # 无预处理直接解析
+    assert len(parsed) == 60
+    # round-trip 值保真：转义无损，值与上游一致
+    assert parsed[0]["commit"]["message"] == raw_msg
+    assert parsed[59]["commit"]["message"] == raw_msg
+    assert parsed[0]["commit"]["author"]["name"] == "a\x02b"
+
+
 def test_milestones_state_normalized(monkeypatch, _client):
     """Issue #684：milestones 返回 state 归一化 active/opened→open（与过滤合法值口径对齐）。"""
     calls = []
