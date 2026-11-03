@@ -4504,6 +4504,14 @@ def _execute_agent_inner(repo_key: str, seq: int, agent_type: str,
             elif evt_type == "tool_use":
                 tool_uses.append(data if isinstance(data, dict) else {})
                 log.info(f"[agent {agent_type}|repo:{repo_name}] TOOL: {str(data)[:160]}")
+                # Issue #757 消费方接线：命令写目标审计（GRAPE_COMMAND_PATH_AUDIT 默认关闭，
+                # 只告警不阻断；异常一律吞掉，绝不影响工具流）
+                try:
+                    from src.agent.command_audit import audit_tool_use
+                    audit_tool_use(data if isinstance(data, dict) else {},
+                                   repo_key=repo_key, agent_type=agent_type)
+                except Exception as _cpa_e:
+                    log.warning(f"command path audit failed: {_cpa_e}")
             elif evt_type == "text":
                 log.info(f"[agent {agent_type}|repo:{repo_name}] TEXT: {str(data)[:160]}")
             elif evt_type == "reasoning":
