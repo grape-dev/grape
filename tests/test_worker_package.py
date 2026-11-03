@@ -42,6 +42,8 @@ class TestWorkerPackage:
         assert "grape-worker/SHA256SUMS" in names
         assert "grape-worker/src/config.py" in names
         assert "grape-worker/src/runtime/agent.py" in names
+        assert "grape-worker/src/api/merge_gate.py" in names
+        assert "grape-worker/src/runtime/worktree_guard.py" in names
         assert "grape-worker/src/agent/executor.py" in names
         assert "grape-worker/requirements-worker.txt" in names
         # 不应泄漏服务端代码 / 配置 / 静态资源（内置 Python stdlib 含 statistics.py 等，跳过）
@@ -508,3 +510,23 @@ class TestBundlePythonByArch:
             f.write("# touch\n")
         f2 = wp._pythons_fingerprint(wp._find_pythons())
         assert f1 != f2, "任一架构 python 变化应触发指纹变化"
+
+
+def test_manifest_covers_worktree_guard_deps():
+    """Issue #752：worktree_guard 随 src/runtime/ 整目录进 worker 包并在 worker 内执行，
+    其 `from src.api.<mod> import ...` 依赖必须一并入包。
+
+    历史教训：MANIFEST 漏列 time_utils 导致 worker 启动即崩（2026-08-17）；漏列
+    merge_gate 会让守卫的 fallback 扫描（unmerged 路径 / 旧 git）静默失效——异常被
+    except 吞掉后返回空结果，守卫形同虚设。
+    """
+    import pathlib
+    import re
+
+    from src.worker_package import MANIFEST
+
+    txt = pathlib.Path("src/runtime/worktree_guard.py").read_text(encoding="utf-8")
+    deps = set(re.findall(r"from\s+src\.api\.([a-zA-Z0-9_]+)\s+import", txt))
+    assert deps, "worktree_guard 应至少懒加载一个 src.api 依赖（否则本守卫失效）"
+    missing = [d for d in sorted(deps) if f"src/api/{d}.py" not in MANIFEST]
+    assert not missing, f"worker MANIFEST missing worktree_guard deps: {missing}"

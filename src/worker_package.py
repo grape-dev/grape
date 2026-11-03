@@ -47,6 +47,10 @@ MANIFEST = [
     # 服务端 read 兼容（历史存档回退）保留在服务端代码库，不进 worker 包。
     "src/api/session_store.py",
     "src/api/knowledge.py",
+    # Issue #752: worktree_guard（src/runtime/ 整目录入包）在 fallback 扫描路径里
+    # lazily import merge_gate.scan_text；漏列会让 unmerged/旧 git 路径静默失效
+    # （守卫 fail-open 成空结果），故 merge_gate 必须随包下发。
+    "src/api/merge_gate.py",
     "src/agent/",
     "src/runtime/",
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
