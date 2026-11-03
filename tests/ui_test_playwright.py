@@ -20,9 +20,11 @@ def _sql(script):
 
 @pytest.fixture(scope="session", autouse=True)
 def setup():
-    _sql(f"import sqlite3, os; db=sqlite3.connect(os.environ['DEVOPS_DB_PATH'],timeout=30); c=db.cursor(); "
-         "c.execute('DELETE FROM user_accounts WHERE username=\"uitest\"');"
-         "c.execute("DELETE FROM managed_repos WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%'");c.execute("DELETE FROM events WHERE repo_key LIKE 'test_%' OR repo_key LIKE 'gitcode:test_%'");db.commit();db.close()")
+    _sql(f'''import sqlite3, os; db=sqlite3.connect(os.environ['DEVOPS_DB_PATH'],timeout=30); c=db.cursor();
+         c.execute('DELETE FROM user_accounts WHERE username="uitest"');
+         c.execute('DELETE FROM managed_repos WHERE repo_key LIKE "test_%" OR repo_key LIKE "gitcode:test_%"');
+         c.execute('DELETE FROM events WHERE repo_key LIKE "test_%" OR repo_key LIKE "gitcode:test_%"');
+         db.commit();db.close()''')
     global _SERVER
     _SERVER = subprocess.Popen([sys.executable, '-m', 'uvicorn', 'src.api.main:app',
         '--host', '127.0.0.1', '--port', '3099'],
