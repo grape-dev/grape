@@ -55,6 +55,10 @@ jobs:
         env:
           GITCODE_API_TOKEN: test_token
         run: python -m pytest tests/test_issue_587_event_convergence.py tests/test_terminate_event.py -v
+      - name: Labels dual-channel tests (issue #581)
+        env:
+          GITCODE_API_TOKEN: test_token
+        run: python -m pytest tests/test_issue_581_labels_dual_channel.py -v
       - name: Frontend source-assertion tests (issue #473)
         run: node tests/js/test_issue_473_range_filter.js
       - name: Destructive DDL guard + Issue #536 migration safety tests

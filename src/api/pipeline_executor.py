@@ -250,8 +250,10 @@ def _enqueue_via_pipeline(repo_key, seq, agent_type, skill_name, evt,
                 from src.api.session_store import get_issue_scene
                 _scene_id, _scene_uid = get_issue_scene(repo_key, issue_id)
                 _scene_id = _scene_id or "default"
-            except Exception:
-                pass
+            except Exception as _se653:
+                # Issue #653：场景解析失败曾是静默回退「default」的旁路，必须留痕
+                log.warning(f"Pipeline emit: get_issue_scene failed for repo={repo_key} "
+                            f"issue={issue_id}: {_se653}")
             # scene_user_id=0 时兜底反查（Task Center 建 repo 级场景任务时可能漏写 scene_uid）
             if not _scene_uid:
                 try:

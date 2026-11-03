@@ -126,7 +126,8 @@ grape git-repo pulls comments create --owner "$REPO_OWNER" --repo "$REPO_NAME" -
 | `pulls get` / API 5xx | `grape tasks wait --task-id` 或 CLI 内置退避重试；仍失败 `grape git ls-remote origin` 核对远端 ref |
 | 脚本报错 `not a directory` | `REPO_PATH` 传仓库根目录（含 src/ 或 tests/ 的层级），非子目录 |
 | 脚本输出 finding 洪水 | 加 `--min-severity high` 收敛 + `--changed-files` 聚焦 PR 变更文件 |
-| 评论发布失败 | 重试 ≤3 次；仍失败 → Issue 评论说明 + 人工介入标注 |
+| 评论发布失败 | 重试 ≤3 次；仍失败 → Issue 评论说明 + 人工介入标注；`pulls comments create` 返回 422 时降级 `git-repo issues comments create --number {PR_NUMBER}`（Issue #585，PR=issue 语义等价） |
+| `pulls files` 清单不全 | `--page`/`--per-page` 翻页拉全（Issue #585，默认 per_page=100）；超大 PR 用 `git-repo tree --depth recursive` 兜底 |
 | 401 凭据失效 | 说明「凭据已失效」，不换 token |
 
 ## 明确禁止

@@ -137,6 +137,29 @@ CREATE TABLE IF NOT EXISTS meta (
 )
 """
 
+# A2A 链路巡检器（docs/weekly-09/a2a-chain-patrol-design.md §三）：只增新表，不改既有表。
+# UNIQUE(kind, task_id, event_seq) + INSERT OR IGNORE = 集群双主同轮同发现静默去重（D3 兜底层）。
+_PATROL_FINDINGS_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_patrol_findings (
+    id            TEXT PRIMARY KEY,           -- uuid（硬性要求：新表主键一律 UUID，Python 侧生成，禁自增）
+    kind          TEXT NOT NULL,            -- broken_chain | zombie_running_signal | zombie_running_window | zombie_queued_dead | zombie_queued_window | stalled_issue
+    task_id       TEXT NOT NULL DEFAULT '',  -- agent_tasks.id（UUID 引用；合成键空串参与唯一约束）
+    event_seq     INTEGER NOT NULL DEFAULT 0, -- 关联 events.seq（可空时用 0，参与唯一约束）
+    repo_key      TEXT DEFAULT '',
+    issue_id      TEXT DEFAULT '',
+    owner         INTEGER NOT NULL DEFAULT 0,  -- 归属人 user_id（D16：路径 B=host_user_id；0=unowned 置顶）
+    detail        TEXT DEFAULT '',          -- 判定输入快照
+    suggestion    TEXT DEFAULT '',          -- 建议处置（Phase 1 只写建议不执行）
+    status        TEXT NOT NULL DEFAULT 'open',  -- open | claiming | compensated | dismissed | false_positive
+    action_meta   TEXT DEFAULT '',
+    created_at    TEXT DEFAULT '',
+    updated_at    TEXT DEFAULT '',
+    UNIQUE(kind, task_id, issue_id, event_seq)
+    -- 部署验证修正（2026-11-02 实测）：issue 级 finding（stalled_issue）task_id 恒为空串，
+    -- 原三列唯一键使全部 issue 级发现共享同一键（14 条只存 1 条）——issue_id 进键。
+)
+"""
+
 # ===== Issue #536: 迁移版本表（迁移只跑一遍的地基）=====
 # 设计：docs/weekly-09/migration-versioning-and-ddl-safety-design.md §D1
 # - version 主键（'202611010001' 日期+序号）；kind: safe/backfill/cleanup/legacy-stamp；
@@ -199,6 +222,7 @@ CREATE TABLE IF NOT EXISTS agent_runtimes (
     worker_version TEXT DEFAULT '',      -- worker 自报版本号（心跳/兼容性检测，见 knowledge-obs-design）
     host_name VARCHAR(191) DEFAULT '',   -- 本机直连引擎归属主控机 hostname（credential_id=0 时区分多台主控）
     detached_from_scenes_at TEXT DEFAULT '',  -- 引擎离线超阈值被系统从场景绑定移除的时间（空=未处理，引擎绑定真实性同步方案）
+    role_tags TEXT DEFAULT '',           -- Issue #658：引擎角色标签（JSON 数组，如 ["coding","issue"]；空=按引擎类型默认映射兜底）
     updated_at TEXT DEFAULT (datetime('now')),
     UNIQUE (credential_id, name, scope, owner_id, host_name)
 )
@@ -866,6 +890,7 @@ CREATE TABLE IF NOT EXISTS admin_accounts (
 _NEW_TABLES = [
     ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
+    ("grape_t_patrol_findings", _PATROL_FINDINGS_DDL),
     ("grape_t_schema_migrations", _SCHEMA_MIGRATIONS_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
@@ -1807,7 +1832,7 @@ _DDL_MANUAL_REVIEW: List[str] = []
 _LEGACY_BLOCKED_DDL: List[str] = []
 
 
-def _ensure_column(c, tbl: str, col: str, ddl: str):
+def _ensure_column(c, tbl: str, col: str, ddl: str, allow_copy: bool = False):
     """Idempotent column add: PRAGMA check if column missing then ALTER.
 
     Column name wrapped in backticks for MySQL compatibility (e.g. `binary` is reserved).
@@ -1818,6 +1843,10 @@ def _ensure_column(c, tbl: str, col: str, ddl: str):
        做不到就报错而非默默锁全表）；
     3. 再失败 → 记 ERROR 进人工处理清单，**绝不静默降级到 COPY**；
        列未建成，下次启动幂等重试。
+
+    allow_copy=True（小表迁移专用，如 issue 表百级行）：第 3 步改为允许默认算法
+    补列（MySQL 会自动选 COPY 重建）。带 DEFAULT 的 TEXT 列无法 INSTANT/INPLACE，
+    不加此开关时会被安全策略挡下导致列永远建不出来。
     """
     cols = [r[1] for r in c.execute(f"PRAGMA table_info({tbl})").fetchall()]
     if col in cols:
@@ -1846,6 +1875,17 @@ def _ensure_column(c, tbl: str, col: str, ddl: str):
         if _is_mdl_timeout(_inplace_err):
             _LEGACY_BLOCKED_DDL.append(f"{tbl}.{col} ADD COLUMN（MDL 超时）")
             raise _MdlWaitTimeout(str(_inplace_err))
+        if allow_copy:
+            try:
+                c.execute(base_sql)      # 默认算法：MySQL 按需选 COPY 重建（小表安全）
+                log.info(f"_ensure_column({tbl}.{col}) INPLACE 不支持 → 已按默认算法(COPY)补列")
+                return
+            except Exception as _copy_err:
+                entry = (f"{tbl}.{col}: INSTANT/INPLACE/默认算法(COPY) 均失败 "
+                         f"({_copy_err})——需人工处理")
+                _DDL_MANUAL_REVIEW.append(entry)
+                log.error(f"_ensure_column MANUAL REVIEW: {entry}")
+                return
         entry = (f"{tbl}.{col}: INSTANT 与 INPLACE,LOCK=NONE 均失败 "
                  f"(INPLACE err={_inplace_err})——需人工处理，未静默 COPY")
         _DDL_MANUAL_REVIEW.append(entry)
@@ -2682,6 +2722,96 @@ def register_migration(version: str, name: str, kind: str,
     return mig
 
 
+def _fn_create_grape_t_patrol_findings() -> None:
+    """部署验证实测发现的缺口修复（2026-11-02）：存量库（迁移台账已盖章）
+    上 grape_t_patrol_findings 永不建表——_NEW_TABLES 只服务 legacy 全量首跑路径，
+    已盖章库启动只跑 _MIGRATIONS。注册 safe 迁移让存量库启动自动补建
+    （CREATE TABLE IF NOT EXISTS 幂等）。"""
+    with db_lock:
+        db.execute(_PATROL_FINDINGS_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611020001",
+    name="create-patrol-findings-table",
+    kind="safe",
+    fn=_fn_create_grape_t_patrol_findings,
+)
+
+
+def _fn_rebuild_grape_t_patrol_findings_unique() -> None:
+    """部署验证实测发现（2026-11-02）：issue 级 finding（stalled_issue）task_id 恒为空串，
+    原三列唯一键 UNIQUE(kind, task_id, event_seq) 使全部 issue 级发现共享同一键——
+    本机实测 14 条 stalled 只落 1 条。issue_id 进唯一键；旧形态表重建（保数据）。"""
+    with db_lock:
+        c = db.cursor()
+        # 评审十轮修正②：sqlite_master 判断用字面量名形态——兼容层
+        # _SQLITE_MASTER_SQL_RE 只认 name='字面量'（参数化形态穿透不翻译，
+        # MySQL 上每次启动报错、迁移永不盖章）。字面量形态被翻译为
+        # information_schema 查询，双方言一致。
+        c.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='grape_t_patrol_findings'")
+        row = c.fetchone()
+        create_sql = (row[0] or "") if row else ""
+        if "grape_t_patrol_findings" not in create_sql:
+            return          # 表不存在：fresh 库走新 DDL
+        if "UNIQUE(kind,task_id,issue_id,event_seq)" in create_sql.replace(" ", ""):
+            return          # 已是新形态
+        db.execute("ALTER TABLE grape_t_patrol_findings RENAME TO grape_t_patrol_findings_old")
+        db.execute(_PATROL_FINDINGS_DDL)
+        db.execute("INSERT INTO grape_t_patrol_findings SELECT * FROM grape_t_patrol_findings_old")
+        db.execute("DROP TABLE grape_t_patrol_findings_old")
+        db.commit()
+
+
+register_migration(
+    version="202611020002",
+    name="rebuild-patrol-findings-unique-with-issue-id",
+    kind="safe",
+    fn=_fn_rebuild_grape_t_patrol_findings_unique,
+)
+
+
+def _fn_add_agent_runtimes_role_tags() -> None:
+    """Issue #658 补注册（2026-11-03）：role_tags DDL 被写进已冻结的 legacy
+    _migrate_tables 清单而未走新轨——legacy-stamp 盖帽后该 ALTER 永不执行。
+    生产库已人工补列（本迁移在其上幂等空转、仅补盖章）；新装库建表定义
+    天然含列，同样空转。幂等：information_schema 查列，缺才 ALTER。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_runtimes'"
+                " AND COLUMN_NAME='role_tags'")
+            if c.fetchone()[0]:
+                return
+            c.execute("ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''")
+            db.commit()
+        else:
+            c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'")
+            row = c.fetchone()
+            if not row or "role_tags" in (row[0] or ""):
+                return
+            db.execute("ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''")
+            db.commit()
+
+
+register_migration(
+    version="202611030001",
+    name="issue658_agent_runtimes_role_tags",
+    kind="safe",
+    fn=_fn_add_agent_runtimes_role_tags,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 
@@ -3141,6 +3271,97 @@ def _migrate_a2a_idempotency_key():
                 db.commit()
             except Exception as e:
                 log.warning(f"events idempotency index (sqlite) failed: {e}")
+
+
+def _migrate_release_subissue_unique_index():
+    """Issue #627 方案 C 审查修复（R1）：发布子单唯一性 DB 兜底（部分唯一索引）。
+
+    前置显式查询防重复存在并发窗口（双提交可同时通过前置查询各建一张子单），
+    DB 层唯一约束兜底：同 (repo_key, parent_issue_number, release_candidate_sha,
+    release_target_env) 只允许一行发布子单；普通 issue（release_target_env 空）不参与。
+
+    - SQLite：部分唯一索引 WHERE release_target_env != ''；
+    - MySQL：生成列 NULLIF(release_target_env, '')（空串转 NULL 不参与唯一）+ 唯一索引。
+    建索引幂等（IF NOT EXISTS / information_schema 检查）；存量脏数据冲突时记
+    WARNING 不阻塞启动（前置查询仍兜一层）。
+    """
+    from src.session_manager import db, db_lock
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    with db_lock:
+        c = db.cursor()
+        # B5（本地集成修复）：release_* 字段此前只在 legacy 全量首跑路径补列，已盖章库
+        # 从未建过；且带 DEFAULT 的 TEXT 列 MySQL 无法 INSTANT/INPLACE，安全策略会挡下
+        # 导致列永远建不出来 → 此处统一补全部 7 列并允许默认算法（issue 表百级行，COPY 安全）。
+        for _col, _ddl in (
+            ("release_candidate_sha", "TEXT DEFAULT ''"),
+            ("release_target_env", "TEXT DEFAULT ''"),
+            ("release_evidence_ref", "TEXT DEFAULT ''"),
+            ("release_approved_by", "INTEGER DEFAULT 0"),
+            ("release_approved_at", "TEXT DEFAULT ''"),
+            ("release_result", "TEXT DEFAULT ''"),
+            ("release_failure_reason", "TEXT DEFAULT ''"),
+        ):
+            _ensure_column(c, "issue", _col, _ddl, allow_copy=True)
+        db.commit()
+        if is_mysql:
+            try:
+                # 生成列：release_bind_env = NULLIF(release_target_env, '') STORED
+                # （空串转 NULL 不参与唯一约束）。ALTER 幂等：先查列存在。
+                c.execute(
+                    "SELECT COUNT(*) FROM information_schema.columns "
+                    "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='issue' "
+                    "AND COLUMN_NAME='release_bind_env'")
+                if (c.fetchone()[0] or 0) == 0:
+                    c.execute(
+                        "ALTER TABLE issue ADD COLUMN release_bind_env VARCHAR(64) "
+                        "AS (NULLIF(release_target_env, '')) STORED")
+                    db.commit()
+                # B4（PR #847 审查）：索引必须用 CREATE UNIQUE INDEX IF NOT EXISTS
+                # 走 mysql_compat Cursor.execute 特判——对 TEXT 列自动加 (191) 前缀
+                # （repo_key/release_candidate_sha 均为 TEXT，无前缀长度 MySQL 报
+                # error 1170），并内置 information_schema 存在性检查。
+                # 此前自拼存在性检查 + 无 IF NOT EXISTS 的裸 CREATE 绕过特判 →
+                # 直发 MySQL → 1170 被 except 吞掉 → DB 层唯一性兜底在 MySQL 后端
+                # 完全缺失（与 idx_tasks_repo_issue 同路径才是对的）。
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_issue_release_bind ON issue"
+                    "(repo_key, parent_issue_number, release_candidate_sha, release_bind_env)")
+                db.commit()
+            except Exception as e:
+                log.warning(f"release subissue unique index (mysql) failed: {e}")
+        else:
+            try:
+                c.execute(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS uq_release_subissue ON issue"
+                    "(repo_key, parent_issue_number, release_candidate_sha, release_target_env) "
+                    "WHERE release_target_env != ''")
+                db.commit()
+            except Exception as e:
+                log.warning(f"release subissue unique index (sqlite) failed: {e}")
+
+
+def _mig_issue627_drop_legacy_production_release():
+    """Issue #627 方案 C 审查修复（Optional-4）：DROP 旧库遗留旁路表（代码已无引用）。"""
+    from src.session_manager import db, db_lock
+    with db_lock:
+        db.execute("DROP TABLE IF EXISTS production_release")
+        db.commit()
+    log.info("Dropped legacy production_release table (Issue #627 Plan C)")
+
+
+register_migration(
+    # 版本号冲突修复（本地集成）：202611020001/2 已被 patrol-findings 迁移占用并盖章，
+    # 复用同号会导致本迁移永远被判"已执行"而跳过（#627 发布子单列/唯一索引在 MySQL 上缺失）。
+    "202611020003", "issue627_release_subissue_unique_index", "safe",
+    _migrate_release_subissue_unique_index)
+register_migration(
+    "202611020004", "issue627_drop_legacy_production_release", "cleanup",
+    _mig_issue627_drop_legacy_production_release)
 
 
 def _ensure_case_insensitive_indexes():
@@ -4256,6 +4477,8 @@ def _migrate_tables():
         "ALTER TABLE agent_runtimes ADD COLUMN tags_user_set INTEGER DEFAULT 0",
         # ===== Issue-P2: 健康分重置时间戳（管理员赦免点，计算窗口起点=max(此值, 7天前)）=====
         "ALTER TABLE agent_runtimes ADD COLUMN health_reset_at VARCHAR(64) DEFAULT ''",
+        # ===== Issue #658: 引擎角色标签（显式声明；空=按引擎类型默认角色映射兜底）=====
+        "ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''",
         # ===== Issue #498: 健康统计自愈留痕（失败衰减窗口有效失败数 + 最近失败时间）=====
         "ALTER TABLE runtime_health_scores ADD COLUMN failed_tasks_effective INTEGER DEFAULT 0",
         "ALTER TABLE runtime_health_scores ADD COLUMN last_failure_at TEXT DEFAULT ''",
@@ -5123,6 +5346,16 @@ def _migrate_tables():
             _ensure_column(c, "issue", "updated_at", "TEXT DEFAULT ''")
             # Issue #329: cross-pipeline handoff carried context
             _ensure_column(c, "issue", "carried_context", "TEXT DEFAULT ''")
+            # Issue #627 方案 C：发布子单（复用现有子任务机制）——绑定与结果字段落在子单 issue 行
+            # 自身（替代 PR #799 旁路 production_release 表；零平行表、零状态机改动）。
+            # release_result 三分支：deployed_success / deploy_failed / not_executed（空=未完成）。
+            _ensure_column(c, "issue", "release_candidate_sha", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_target_env", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_evidence_ref", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_approved_by", "INTEGER DEFAULT 0")
+            _ensure_column(c, "issue", "release_approved_at", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_result", "TEXT DEFAULT ''")
+            _ensure_column(c, "issue", "release_failure_reason", "TEXT DEFAULT ''")
             db.commit()
     except Exception as e:
         log.warning(f"Phase B2 issue 收编字段补列失败: {e}")

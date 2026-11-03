@@ -428,6 +428,17 @@ window._openBoardDetail = function(taskId) {
   }).catch(function() {
     document.getElementById('_boardPipelineSection').innerHTML = '';
   });
+  // Issue #600：流水线卡片轮询——重派成功/新终态到达后卡片自动刷新，无手动刷新依赖
+  if (window._taskPipeTimer) { clearInterval(window._taskPipeTimer); window._taskPipeTimer = null; }
+  window._taskPipeTimer = setInterval(function() {
+    if (!document.getElementById('_boardPipelineSection')) {
+      clearInterval(window._taskPipeTimer); window._taskPipeTimer = null;
+      return;
+    }
+    API.get('/issues/' + taskId + '/pipeline').then(function(data) {
+      if (document.getElementById('_boardPipelineSection')) _renderPipelineSection(data);
+    }).catch(function() { /* 静默轮询失败忽略，下轮重试 */ });
+  }, 15000);
 };
 
 // PR 事件详情页
@@ -1181,30 +1192,40 @@ function _detailHtml(t) {
     </div>`;
 }
 
-function _loadTaskAttachments(taskId) {
-  API.get('/issues/' + taskId + '/attachments').then(function(data) {
-    var list = document.getElementById('_taskAttachmentsList');
-    if (!list) return;
-    var atts = data.attachments || [];
-    if (atts.length === 0) {
-      list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无附件</div>';
-      return;
-    }
-    list.innerHTML = atts.map(function(a) {
-      var del = '<button onclick="_deleteTaskAttach(' + taskId + ',\'' + a.filename + '\')" style="margin-left:6px;font-size:11px;color:#ff3b30;background:none;border:none;cursor:pointer;padding:2px 4px">删除</button>';
-      if (a.is_image) {
-        return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
-          + '<img src="' + a.url + '" style="width:32px;height:32px;object-fit:cover;border-radius:6px;margin-right:8px">'
-          + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
-          + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
-          + del + '</div>';
-      }
+function _renderTaskAttachments(taskId, atts) {
+  var list = document.getElementById('_taskAttachmentsList');
+  if (!list) return;
+  if (!atts || atts.length === 0) {
+    list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">暂无附件</div>';
+    return;
+  }
+  list.innerHTML = atts.map(function(a) {
+    var del = '<button onclick="_deleteTaskAttach(' + taskId + ',\'' + a.filename + '\')" style="margin-left:6px;font-size:11px;color:#ff3b30;background:none;border:none;cursor:pointer;padding:2px 4px">删除</button>';
+    if (a.is_image) {
       return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
-        + '<span style="margin-right:8px">📎</span>'
+        + '<img src="' + a.url + '" style="width:32px;height:32px;object-fit:cover;border-radius:6px;margin-right:8px">'
         + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
         + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
         + del + '</div>';
-    }).join('');
+    }
+    return '<div style="display:flex;align-items:center;padding:4px 0;border-bottom:0.5px solid rgba(0,0,0,.04);font-size:12px">'
+      + '<span style="margin-right:8px">📎</span>'
+      + '<a href="' + a.url + '" target="_blank" style="color:#0071e3;text-decoration:none;flex:1">' + a.filename + '</a>'
+      + '<span style="color:var(--t3,#86868b);font-size:11px">' + _formatSize(a.size) + '</span>'
+      + del + '</div>';
+  }).join('');
+}
+
+function _loadTaskAttachments(taskId, forceRefresh) {
+  // Issue #648：详情卡片自带 attachments 字段（详情/统一列表 API 新增）时直接渲染，
+  // 免二次请求；上传/删除后 forceRefresh=true 强制走端点刷新拿最新清单。
+  var t = window._currentDetailTask;
+  if (!forceRefresh && t && Array.isArray(t.attachments)) {
+    _renderTaskAttachments(taskId, t.attachments);
+    return;
+  }
+  API.get('/issues/' + taskId + '/attachments').then(function(data) {
+    _renderTaskAttachments(taskId, data.attachments || []);
   }).catch(function() {
     var list = document.getElementById('_taskAttachmentsList');
     if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">加载失败</div>';
@@ -1224,11 +1245,11 @@ function _onTaskAttachSelect(fileInput, taskId) {
   var list = document.getElementById('_taskAttachmentsList');
   if (list) list.innerHTML = '<div style="font-size:12px;color:var(--t3,#86868b)">' + I18N.t('issues.uploading') + '</div>';
   API.upload('/issues/' + taskId + '/attachments', formData).then(function() {
-    _loadTaskAttachments(taskId);
+    _loadTaskAttachments(taskId, true);
   }).catch(function(e) {
     if (e && e.name === 'AbortError' && e.silent) return;
     if (list) list.innerHTML = '<div style="font-size:12px;color:#ff3b30">' + I18N.t('issues.upload_failed', {msg: e.message}) + '</div>';
-    _loadTaskAttachments(taskId);
+    _loadTaskAttachments(taskId, true);
   });
   fileInput.value = '';
 }
@@ -1237,7 +1258,7 @@ function _deleteTaskAttach(taskId, filename) {
   app.showConfirm(I18N.t('issues.confirm_delete_attach'), function() {
     // Issue #175: 走 API.js 获得超时保护
     API.del('/issues/' + taskId + '/attachments/' + filename).then(function() {
-      _loadTaskAttachments(taskId);
+      _loadTaskAttachments(taskId, true);
     }).catch(function(e) {
       if (e && e.name === 'AbortError' && e.silent) return;
       app.showToast(I18N.t('tasks.operation_failed', {msg: (e && e.detail && e.detail.message || e && e.message || String(e))}));
@@ -1659,8 +1680,9 @@ function openTaskCreateModal() {
   _taskCreateModal = ov;
 
   // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
-  // 需求中心事前拦截：all_offline 场景标 ⚠️ 且默认选中时显示警告条提示换绑
-  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
+  // Issue #501: 弹窗只取场景名（C 方案 fields=minimal——不反序列化 nodes_json），
+  // 用户选中某场景时再按需调 /scenes/{scene_id}/engine-status 显示警告条（N×M → 1×M）
+  API.get('/scenes?repo=' + encodeURIComponent(defaultRepo) + '&fields=minimal').then(function(d) {
     const sel = document.getElementById('tcCreateScene');
     if (!sel) return;
     const scenes = d.scenes || [];
@@ -1668,41 +1690,43 @@ function openTaskCreateModal() {
       const opt = document.createElement('option');
       opt.value = s.id;
       const scopeTag = s.scope === 'repo' ? '【仓库级】' : '';
-      const offlineTag = s.all_offline ? ' ⚠️' : '';
-      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '') + offlineTag;
-      if (s.all_offline) opt.style.color = '#b45309';
-      opt._offline_nodes = s.offline_nodes || [];
-      opt._sre_unbound = !!s.sre_unbound;
-      opt._all_offline = !!s.all_offline;
+      opt.textContent = (s.display_name || s.name || s.id) + (scopeTag ? ' ' + scopeTag : '');
       sel.appendChild(opt);
     });
-    // 初始选中「VOD 自动识别」时无警告；用户选中带 ⚠️ 的场景时联动提示
+    // 初始选中「VOD 自动识别」时无警告；用户切换场景时按需探测并联动提示
     sel.onchange = function() {
       _updateSceneOfflineWarning(sel);
     };
+    // 对默认选中项也探测一次（否则用户不切换场景就收不到全灭警告），成本 1×M
+    _updateSceneOfflineWarning(sel);
   }).catch(function(){});
 
-  // 场景引擎全灭警告条：选中 all_offline 场景时显示，附「去换绑」入口。
+  // 场景引擎全灭警告条：选中场景时按需探测（Issue #501 从 with-pipeline 预标记改为单场景实时探测）。
   // 两种话术：SRE 未选机器（sre_unbound）/ 引擎全部离线（offline_nodes）。
+  // 探测失败静默降级——不让提示功能本身挡住需求创建入口。
   function _updateSceneOfflineWarning(sel) {
     var old = document.getElementById('tcSceneOfflineWarn');
     if (old) old.remove();
-    var opt = sel && sel.options && sel.options[sel.selectedIndex];
-    if (!opt || !opt._all_offline) return;
-    var nodes = (opt._offline_nodes || []).join('、');
-    var reason = opt._sre_unbound
-      ? 'SRE 节点未选择机器（SRE 不支持广播模式），部署任务无法执行。请为 SRE 节点绑定个人或仓库级机器。'
-      : '该场景绑定的引擎当前全部离线' + (nodes ? '（离线节点：' + nodes + '）' : '') + '，创建后任务将无法派发。';
-    var warn = document.createElement('div');
-    warn.id = 'tcSceneOfflineWarn';
-    warn.style.cssText = 'margin-top:4px;padding:8px 12px;border-radius:8px;' +
-      'background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);' +
-      'font-size:12px;color:#b45309;line-height:1.6;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
-    warn.innerHTML = '⚠️ ' + reason +
-      '<a style="color:#0071e3;text-decoration:none;cursor:pointer;font-weight:600;white-space:nowrap" ' +
-      'onclick="document.getElementById(\'taskCreateOverlay\').remove();app.nav(\'scene-detail-local\',\'' + sel.value + '\')">去换绑 →</a>';
-    var label = sel.closest('label');
-    (label || sel.parentElement || document.getElementById('tcCreateScene').parentElement).appendChild(warn);
+    var sceneId = sel && sel.value;
+    if (!sceneId) return;
+    API.get('/scenes/' + encodeURIComponent(sceneId) + '/engine-status?repo=' + encodeURIComponent(defaultRepo)).then(function(st) {
+      if (!sel || sel.value !== sceneId) return;  // stale guard：用户已切到别的场景
+      if (!st || !st.all_offline) return;
+      var nodes = (st.offline_nodes || []).join('、');
+      var reason = st.sre_unbound
+        ? 'SRE 节点未选择机器（SRE 不支持广播模式），部署任务无法执行。请为 SRE 节点绑定个人或仓库级机器。'
+        : '该场景绑定的引擎当前全部离线' + (nodes ? '（离线节点：' + nodes + '）' : '') + '，创建后任务将无法派发。';
+      var warn = document.createElement('div');
+      warn.id = 'tcSceneOfflineWarn';
+      warn.style.cssText = 'margin-top:4px;padding:8px 12px;border-radius:8px;' +
+        'background:rgba(245,158,11,.08);border:1px solid rgba(245,158,11,.3);' +
+        'font-size:12px;color:#b45309;line-height:1.6;display:flex;align-items:center;gap:8px;flex-wrap:wrap;';
+      warn.innerHTML = '⚠️ ' + reason +
+        '<a style="color:#0071e3;text-decoration:none;cursor:pointer;font-weight:600;white-space:nowrap" ' +
+        'onclick="document.getElementById(\'taskCreateOverlay\').remove();app.nav(\'scene-detail-local\',\'' + sceneId + '\')">去换绑 →</a>';
+      var label = sel.closest('label');
+      (label || sel.parentElement || document.getElementById('tcCreateScene').parentElement).appendChild(warn);
+    }).catch(function(){});
   }
 
   // 点击遮罩空白处不关闭——防止误触丢失内容，通过右上角✕或取消按钮关闭
@@ -1816,8 +1840,8 @@ function openTaskCopyModal(taskId) {
   document.body.appendChild(ov);
   _taskCopyModal = ov;
 
-  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景）
-  API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(defaultRepo)).then(function(d) {
+  // 异步加载场景列表填充下拉框（带 repo 参数获取仓库级场景；C 方案 minimal 不拉 nodes）
+  API.get('/scenes?repo=' + encodeURIComponent(defaultRepo) + '&fields=minimal').then(function(d) {
     const sel = document.getElementById('tcCopyScene');
     if (!sel) return;
     const scenes = d.scenes || [];

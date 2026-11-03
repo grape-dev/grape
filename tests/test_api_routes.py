@@ -1622,6 +1622,44 @@ class TestSkills:
             row = c.execute("SELECT agent_type FROM skill WHERE skill_name='skill-nosections' AND scope='user'").fetchone()
         assert row and row[0] == "issue", f"agent_type should be issue, got {row}"
 
+    def test_skills_upload_bom_encoded(self):
+        """Issue #608: 上传 UTF-8 with BOM 编码的 SKILL.md 技能包，详情接口应返回无 BOM 的内容。"""
+        import tempfile, zipfile, os
+        from src.session_manager import db, db_lock
+        # 自隔离：清除历史残留
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name='skill-bomtest' AND scope='user'")
+            db.commit()
+        tmp = tempfile.NamedTemporaryFile(suffix=".zip", delete=False)
+        skill_md = "---\nname: skill-bomtest\nversion: 1.0.0\ndescription: BOM encoded skill\n---\n\n## 场景\n## 知识\n## 步骤\n- step"
+        with zipfile.ZipFile(tmp.name, "w") as zf:
+            zf.writestr("skill-bomtest/SKILL.md", b"\xef\xbb\xbf" + skill_md.encode("utf-8"))
+        tmp.close()
+        with open(tmp.name, "rb") as f:
+            r = client.post("/api/skills/upload", files={"file": ("skill-bomtest.zip", f.read())},
+                            data={"agent_type": "chat"}, headers=_headers)
+        os.unlink(tmp.name)
+        assert r.status_code == 200, f"Upload failed: {r.status_code}: {r.text[:200]}"
+        # 验证 description 从 BOM frontmatter 正确解析
+        with db_lock:
+            c = db.cursor()
+            row = c.execute("SELECT id, description FROM skill WHERE skill_name='skill-bomtest' AND scope='user'").fetchone()
+        assert row, "skill should be inserted"
+        sid, desc = row
+        assert desc == "BOM encoded skill", f"description should be parsed from BOM frontmatter, got {desc!r}"
+        # 验证 by-id 接口返回的 content 无 BOM
+        detail = client.get(f"/api/skills/by-id/{sid}", headers=_headers)
+        assert detail.status_code == 200, f"Detail failed: {detail.status_code}"
+        content = detail.json().get("content", "")
+        assert not content.startswith("\ufeff"), "content should not start with BOM"
+        assert content.startswith("---"), "content should start with --- (frontmatter matchable)"
+        # 清理
+        with db_lock:
+            c = db.cursor()
+            c.execute("DELETE FROM skill WHERE skill_name='skill-bomtest' AND scope='user'")
+            db.commit()
+
     def test_skills_template_download(self):
         """GET /api/skills/template — OBS 模式返回 {url, expires_in} JSON"""
         r = client.get("/api/skills/template", headers=_headers)

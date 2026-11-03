@@ -16,8 +16,8 @@
 > scenes list 是可指定任意 `--repo` 的跨仓库枚举入口，放开超出会话凭据 scope 模型；
 > 会话内取当前场景请用 `GET /api/scenes/{scene_id}`（dual，缺省按会话仓库解析）。
 
-| Query | `repo`（可选；带 repo 时返回仓库级场景；缺省按会话/请求上下文解析，Issue #534） |
-| 出参 | 可用场景数组 |
+| Query | `repo`（可选；带 repo 时返回仓库级场景；缺省按会话/请求上下文解析，Issue #534）；`page`/`page_size`（可选，Issue #501 分页——不带 `page` 全量返回，带时 SQL LIMIT/OFFSET，total 恒返回）；`q`（可选，Issue #501 检索——name/display_name/description 三字段 LIKE，total 为命中数）；`sort`（可选：`id` 稳定序默认 / `latest` 按创建时间倒序）；`fields=minimal`（可选，Issue #501 C——跳过 nodes_json 反序列化，供只要名字/图标的下拉类调用方） |
+| 出参 | `{"scenes": [...], "total"}`（minimal 时 items 的 nodes 为空数组） |
 | 返回 | 200 |
 
 ---
@@ -75,8 +75,17 @@
 ## GET /api/scenes/with-pipeline — 场景列表（含流水线）
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
 
-| Query | `repo`（可选；缺省按会话/请求上下文解析，Issue #534） |
-| 出参 | `[{scene_id, name, description, display_name, nodes, onboarding, is_active}]` |
+| Query | `repo`（可选；缺省按会话/请求上下文解析，Issue #534）；`page`/`page_size`（可选，Issue #501 分页）；`q`（可选，Issue #501 检索——与 /scenes 同参同语义）；`sort`（可选：`id`/`latest`） |
+| 出参 | `{"scenes": [{scene_id, name, display_name, description, work_branch, created_by, is_active, pipeline}], "total"}`（引擎在线字段 `offline_nodes`/`sre_unbound`/`all_offline` 已移出——改走 `GET /api/scenes/{scene_id}/engine-status` 按需探测） |
+| 返回 | 200 |
+
+---
+
+## GET /api/scenes/{scene_id}/engine-status — 场景引擎在线状态（按需探测）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+
+| Query | `repo`（可选，仓库级场景定位；缺省按会话/请求上下文解析，Issue #534） |
+| 出参 | `{"scene_id", "offline_nodes": [tag...], "sre_unbound": bool, "all_offline": bool}`——单场景 × 各启用节点一次引擎池探测；探测异常降级为不标记（不拦需求创建）；场景不存在/静默回退 default 时返回全 False |
 | 返回 | 200 |
 
 ---

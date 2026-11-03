@@ -162,7 +162,46 @@ const app = (() => {
     } catch { return null; }
   }
 
+  // ── Issue #614：会话失效时统一清理明文凭据弹窗 ──
+  // showLogin 是所有登出路径（app.logout 手动登出 / doRefresh 失败 /
+  // handle401 无 retryFn 踢回登录）的最终汇聚点。在此集中关闭/清空
+  // 所有含明文秘钥的弹窗与面板，避免秘钥在无人值守屏幕上残留暴露。
+  function _clearSensitiveModals() {
+    // 1) 统一弹层：showModal/showPrompt（grapeModalOverlay）与 showConfirm（grapeConfirmOverlay）
+    closeModal();
+    closeConfirm();
+    // 2) 已知明文凭据面板：runtime 添加设备的凭据生成区 / AI Devspace 区
+    //    （runtimes.js 一次性渲染明文 token，清空 DOM 即清除秘钥）
+    var panelIds = ['addDeviceCredArea', 'addDeviceDevArea', 'aiDevspacePanel'];
+    for (var i = 0; i < panelIds.length; i++) {
+      var panel = document.getElementById(panelIds[i]);
+      if (panel) { panel.innerHTML = ''; panel.style.display = 'none'; }
+    }
+    // 3) 已知敏感弹窗：SRE 添加设备弹窗、侧边栏添加设备面板、
+    //    devspace 环境凭据弹窗（credModal_*，直含明文 token 安装命令）
+    var modalIds = ['sreAddDeviceOverlay', 'addDeviceOverlay'];
+    for (var j = 0; j < modalIds.length; j++) {
+      var modal = document.getElementById(modalIds[j]);
+      if (modal) modal.remove();
+    }
+    var credModals = document.querySelectorAll('[id^="credModal_"]');
+    for (var k = 0; k < credModals.length; k++) { credModals[k].remove(); }
+    // 4) 兜底：移除 body 直系子节点中 position:fixed 且 z-index∈[1000,9000)
+    //    的未知遮罩层（toast 9999/10000、warn 9999、帮助抽屉 9990/9991 不在
+    //    区间内，不受影响）
+    var overlays = document.querySelectorAll('body > div');
+    for (var m = 0; m < overlays.length; m++) {
+      var node = overlays[m];
+      var pos = (node.style && node.style.position) || '';
+      var z = parseInt((node.style && node.style.zIndex) || '', 10);
+      if (pos === 'fixed' && !isNaN(z) && z >= 1000 && z < 9000) { node.remove(); }
+    }
+  }
+
   function showLogin() {
+    // Issue #614：会话失效统一清理明文凭据弹窗（所有登出路径的汇聚点，
+    // 与下方 UC16e 停轮询同一收口语义）
+    _clearSensitiveModals();
     document.documentElement.removeAttribute('data-logged-in');
     $('loginView').classList.remove('hid');
     $('sidebar').style.display = 'none';
@@ -174,6 +213,8 @@ const app = (() => {
     // 踢人路径（refresh 失败/手动登出/token 失效）的统一收口，在此
     // 停轮询 = 一次修复覆盖全部入口。
     if (_refreshTimer) { clearInterval(_refreshTimer); _refreshTimer = null; }
+    // Issue #600：离开/被踢时停掉流水线卡片轮询
+    if (typeof stopPipePolling === 'function') stopPipePolling();
     // 清除当前视图状态——退出/过期后重新登录时 _restoreNavAfterLogin 需要重新路由
     window._currentView = '';
     renderOAuthButtons();
@@ -1657,16 +1698,39 @@ function loadAgentTypes() {
       title.textContent = I18N.t('app.current_project');
       window._dashboardEditing = false;
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
-      const loadDash = () => Promise.all([
+      // Issue #501: 场景列表分页——不带 page 的老调用方不受影响，前端带 page 时后端按页切片
+      // 切换仓库时页码/搜索词归位，避免带着旧仓库的页码拉新仓库（越界返回空列表）
+      if (window._sceneListRepo !== (repo.fullName || '')) {
+        window._sceneListRepo = repo.fullName || '';
+        window._sceneListPage = 1;
+        window._sceneListQ = '';
+      }
+      // 检索参数（Issue #501 增量）：q 为空串时不携带，保持 URL 简洁。
+      // 必须在 loadDash 内部取值——闭包外取值会被 30s 自动刷新/_sceneReload 复用旧 q，静默丢搜索词
+      const loadDash = () => {
+        const _q = (window._sceneListQ || '').trim();
+        const _qParam = _q ? '&q=' + encodeURIComponent(_q) : '';
+        const _sort = window._sceneListSort || 'id';
+        const _sortParam = _sort !== 'id' ? '&sort=' + encodeURIComponent(_sort) : '';
+        return Promise.all([
         API.get('/dashboard/' + repo.owner + '/' + repo.name),
-        API.get('/scenes?repo=' + encodeURIComponent(repo.owner + '/' + repo.name)),
+        // Issue #501 A 方案：卡片+技能链合并为 with-pipeline 单一来源（原 /scenes+with-pipeline
+        // 双请求查同表同页数据双倍付费，30s 自动刷新每轮省 1 请求 1 次 DB 读）
+        API.get('/scenes/with-pipeline?repo=' + encodeURIComponent(repo.owner + '/' + repo.name) + '&page=' + (window._sceneListPage || 1) + '&page_size=' + (window._sceneListPageSize || 20) + _qParam + _sortParam),
       ]).then(([dashData, scenesData]) => {
         if (window._currentView !== 'dash') return;  // stale guard
         // 编辑中不覆盖 UI，避免丢失用户正在进行的修改
         if (window._dashboardEditing) return;
+        // Issue #501 深审优化：挂到 window 供场景分页条局部重载（替代整页 app.nav('dash')）
+        window._sceneReload = loadDash;
         // R14.17: dashboard 成功加载时清除 403 去重列表，权限恢复后可切回之前 403 的仓库
         window._tried403Repos = null;
         dashData._scenes = scenesData.scenes || [];
+        // 分页角标/分页条用跨页总数 total（老后端无 total 时回退当前页条数）
+        dashData._scenesTotal = (typeof scenesData.total === 'number') ? scenesData.total : (scenesData.scenes || []).length;
+        // A 方案：同一响应直接产出技能链映射，dashboard.js 不再二次拉 with-pipeline
+        dashData._pipelines = {};
+        (scenesData.scenes || []).forEach(s => { dashData._pipelines[s.id] = s.pipeline || {}; });
         dashData._owner = repo.owner;
         dashData._name = repo.name;
         renderDashboard(dashData);
@@ -1705,12 +1769,15 @@ function loadAgentTypes() {
         }
         pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>';
       });
+      };
       loadDash();
       _refreshTimer = setInterval(loadDash, 30000);
     } else if (view === 'pipe') {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
       API.get('/pipeline/' + repo.owner + '/' + repo.name).then(d => { if (window._currentView !== 'pipe') return; renderPipeline(d, param); }).catch(e => { if (e.name === 'AbortError' && e.silent) return; if (window._currentView !== 'pipe') return; pc.innerHTML = '<div class="error">' + I18N.t('common.load_failed') + ': ' + errMsg(e) + '</div>'; });
+      // Issue #600：流水线卡片轮询——重派成功/新终态到达后自动刷新，无手动刷新依赖
+      if (typeof startPipePolling === 'function') startPipePolling();
     } else if (['vod','issue','coding','qa','sre'].includes(view)) {
       title.textContent = I18N.t('app.current_project');
       if (!repo) { pc.innerHTML = _noRepoPlaceholder(); return; }
@@ -3287,7 +3354,7 @@ function openBetaApply() {
     }
   }
 
-  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
+  return {nav, search, oauthLogin, renderOAuthButtons, openBetaApply, submitBetaApply, baSelectIdentity, baToggleOther, logout, showToast, errMsg, openHelp, closeHelp, switchRepo, switchOrg, goToRepos, currentRepo, showLogin, init, loadRepos, _forceSyncRepos, _renderBindingGuide, _rerenderReposView, _clearCachedReposData, _clearSensitiveModals, initSidebarRepos, loadProfile, getTheme, getThemeMode, setTheme, setThemeMode, toggleGroup, toggleSidebar, showConfirm, closeConfirm, showModal, closeModal, showPrompt, _toggleOrgDropdown, _updateTbOrgName, _toggleLobbyOrgDropdown, _updateLobbyOrgName, _toggleLobbyUserMenu, _loadLobbyUserMenu, _toggleUserMenu, _toggleTbUserMenu, _loadTbUserMenu, _accountGoBack, pwdLogin, _toggleLoginPwd, _clearLoginError, _blurValidateLogin, _submitValidateLogin, saveProfile, showChangePassword, doChangePassword, showSetPassword, sendSetPasswordCode, doSetPassword, showChangeEmail, sendChangeEmailCode, doChangeEmail, bindProvider, deleteAccount, _daChoosePwd, _daChooseCode, sendDeleteAccountCode, doDeleteAccount, _checkOAuthCompletion, _dismissOAuthCompletion, _copyEngineCmd, _dismissEngineBanner, _gotoEnginePage, _checkEngineBanner};
 })();
 
 /** 根据 repo_key 生成 VCS 平台 URL（仓库/Issue 等通用）。 */

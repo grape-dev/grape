@@ -72,6 +72,7 @@ class TestCreate403Attribution:
         """GitCode Space/模型仓/数据集仓 403 → 仓库类型限制提示，不再误报 assignee 无效。"""
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
              patch("src.api.issues_center._post_gitcode_issue",
                    side_effect=_post("The current operation is prohibited "
                                      "for model repository and dataset repository.")):
@@ -84,23 +85,29 @@ class TestCreate403Attribution:
         # 上游脱敏正文被保留回显
         assert "prohibited for model repository" in msg, msg
 
-    def test_403_permission_body_keeps_assignee_hint(self):
-        """用户/权限类 403 正文 → 保留 assignee 提示并附上游正文。"""
+    def test_403_permission_body_nonmember_semantics(self):
+        """Issue #649: 用户/权限类 403 正文 → 归类「非成员/无权指派」语义（含 trace_id），不再误报用户名无效。"""
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
              patch("src.api.issues_center._post_gitcode_issue",
-                   side_effect=_post("user someone not found or has no permission")):
+                    side_effect=_post("user someone not found or has no permission")):
             resp = _create("t_523_perm")
         assert resp.status_code == 403, resp.text
-        msg = resp.json()["detail"]["message"]
-        assert "处理人无效或无权限" in msg, msg
+        detail = resp.json()["detail"]
+        msg = detail["message"]
+        assert "无权指派" in msg, msg
         assert "assignee=someone" in msg, msg
-        assert "user someone not found" in msg, msg
+        assert "成员" in msg, msg
+        assert "用户名" not in msg, msg
+        assert detail.get("trace_id", "").startswith("tr_"), detail
+        assert "user someone not found" in detail.get("upstream_detail", ""), detail
 
     def test_403_unrecognized_body_falls_back_generic_with_sanitized_body(self):
         """无法识别的 403 正文 → 通用「上游 403」提示附脱敏正文，不猜测归因。"""
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
              patch("src.api.issues_center._post_gitcode_issue",
                    side_effect=_post("some totally unexpected upstream reason")):
             resp = _create("t_523_unknown")
@@ -115,6 +122,7 @@ class TestCreate403Attribution:
         long_body = "x" * 500
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
              patch("src.api.issues_center._post_gitcode_issue",
                    side_effect=_post(long_body)):
             resp = _create("t_523_trunc")
@@ -127,6 +135,7 @@ class TestCreate403Attribution:
         """正文中 token 类敏感键值被脱敏，不回显。"""
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
              patch("src.api.issues_center._post_gitcode_issue",
                    side_effect=_post("access_token=ghp_secret123 whatever happened")):
             resp = _create("t_523_san")
@@ -139,6 +148,7 @@ class TestCreate403Attribution:
         """正常代码仓建单（mock 200 返回 number）→ 成功路径不受影响。"""
         with patch("src.api.deps.get_user_token_with_refresh", return_value="test_tok"), \
              patch("src.api.issues_center._find_open_issue_by_title", return_value=None), \
+             patch("src.api.issues_center._gitcode_assignee_member_check", return_value="unknown"), \
              patch("src.api.issues_center._post_gitcode_issue", return_value={"number": 523}), \
              patch("src.api.issues_center.ensure_issue_task", return_value=523):
             resp = _create("t_523_ok")

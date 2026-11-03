@@ -18,6 +18,7 @@ ALL_DOCS = [
     "05-skills.md", "06-scenes.md", "07-knowledge.md", "08-events.md",
     "09-task-logs.md", "10-git-repos.md", "11-issues.md", "12-a2a.md",
     "13-settings.md", "14-runtime.md", "15-devstage.md", "16-auth-and-misc.md",
+    "17-feedback.md", "18-patrol.md",
     "README.md",
 ]
 

@@ -250,6 +250,45 @@ def get_issue_scene(repo_key: str, issue_id: str) -> tuple:
     return "", 0
 
 
+def get_issue_bound_scene(repo_key: str, issue_id: str) -> tuple:
+    """读取 Issue 真实绑定的场景（Issue #681，推荐入口专用，勿用于展示/A2A）。
+
+    与 get_issue_scene 的区别：**不回退 managed_repos.dev_scene**，只查两层真实绑定：
+    1. issue_state.scene_id（get_issue_stage）
+    2. issue 表 scene_id（Phase C3 权威源）
+
+    返回 (scene_id, scene_user_id)：
+    - 命中任一层真实绑定 → 该值（GitCode 详情页选择 / Task Center 创建时写入 /
+      VOD 智能推荐完成后写回，均为真实绑定，应跳过推荐）
+    - 均未命中 → ("", 0)（无真实绑定，应走智能推荐；dev_scene 仅作展示兜底，
+      不构成跳过推荐的强绑定，见 Issue #681 / #415 spec）
+
+    PR 订阅伪 issue_id（#pr_<PR号>_<scene_id>）场景 ID 编码在伪 id 内，视为真实绑定。
+    """
+    import re as _re
+    _m = _re.match(r"^#?pr_\d+_(.+)$", str(issue_id or ""))
+    if _m:
+        return _m.group(1), 0
+    st = get_issue_stage(repo_key, issue_id)
+    if st and st.get("scene_id"):
+        return st["scene_id"], st.get("scene_user_id", 0) or 0
+    try:
+        _num = int(str(issue_id or "").lstrip("#"))
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT scene_id, scene_user_id FROM issue "
+                "WHERE repo_key=? AND issue_number=?",
+                (repo_key, _num)
+            )
+            r = c.fetchone()
+            if r and r[0]:
+                return r[0], r[1] or 0
+    except Exception:
+        pass
+    return "", 0
+
+
 def set_issue_scene(repo_key: str, issue_id: str, scene_id: str, scene_user_id: int = 0):
     """写入 Issue 级开发场景（VOD 判定后调用，幂等）。Phase C3：仅写 issue 单表。"""
     _sync_issue_fields(repo_key, issue_id, {"scene_id": scene_id or "", "scene_user_id": scene_user_id},
@@ -350,6 +389,44 @@ def get_subtask_issues(repo_key: str, parent_issue_id: str) -> list[dict]:
             (repo_key, _pid),
         )
         return [{"issue_id": "#" + str(r[0]), "stage": r[1], "owner_agent": r[2]} for r in c.fetchall()]
+
+
+def list_release_subissues(repo_key: str, parent_issue_number: int) -> list[dict]:
+    """查询源需求下的发布子单列表（方案 C：子单为 issue 行，release_target_env 非空即发布子单）。
+
+    返回最新在前，含绑定要素 / 生命周期状态 / 结果三分支 / 失败原因。
+    """
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "SELECT id, issue_number, title, status, stage, "
+            "release_candidate_sha, release_target_env, release_evidence_ref, "
+            "release_result, release_failure_reason, release_approved_by, release_approved_at, "
+            "created_at, completed_at "
+            "FROM issue WHERE repo_key=? AND parent_issue_number=? AND release_target_env != '' "
+            "ORDER BY id DESC",
+            (repo_key, int(parent_issue_number)),
+        )
+        out = []
+        for r in c.fetchall():
+            out.append({
+                "issue_id": r[0],
+                "sub_issue_number": r[1],
+                "parent_issue_number": int(parent_issue_number),
+                "title": r[2] or "",
+                "status": r[3] or "active",
+                "stage": r[4] or "vod",
+                "candidate_sha": r[5] or "",
+                "target_env": r[6] or "",
+                "evidence_ref": r[7] or "",
+                "result": r[8] or "",
+                "failure_reason": r[9] or "",
+                "approved_by": r[10] or 0,
+                "approved_at": r[11] or "",
+                "created_at": r[12] or "",
+                "completed_at": r[13] or "",
+            })
+        return out
 
 
 def get_or_create_agent_session(repo_key: str, agent_type: str,

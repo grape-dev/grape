@@ -183,9 +183,9 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 
 ### POST /api/git-repo/{owner}/{repo}/labels
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
-> CLI：`grape git-repo labels create --owner {owner} --repo {repo} --json '{"name":"bug","color":"#d73a4a"}'`（operation_id=`gitrepo_labels_create`）。
+> CLI：`grape git-repo labels create --owner {owner} --repo {repo} --json '{"name":"bug","color":"d73a4a"}'`（operation_id=`gitrepo_labels_create`）。
 
-**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
+**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `d73a4a`，不带 `#` 的 6 位 hex；带 `#` 前缀会被自动去除）
 
 **返回（201）**：创建后的标签对象。**错误**：400（缺 name）/ 409（已存在）/ 403。
 
@@ -253,11 +253,20 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 |------|------|------|
 | `labels` | string/array | 标签 |
 | `assignee` | string | 责任人 |
-| `milestone_id` | int | 里程碑 id |
-| `state` | string | `"open"`（打开）/ `"close"`、`"closed"`（关闭，同义）——平台值归一由服务端处理 |
+| `milestone_id` | int | 里程碑 number（GitCode 下游映射为上游 `milestone` 参数，#640） |
+| `state` | string | Issue 状态迁移（对齐 GitHub `state_event`）：仅接受 `"reopen"` / `"close"`，其他取值后端返回 400 |
 | `body` | string | Issue 正文（空值忽略，不影响其他字段） |
 
-**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403。
+**返回（200）**：更新后的 Issue 对象。**错误**：400/404/403/502。
+
+> **里程碑（#640）**：
+> - GitCode：`milestone_id` 服务端映射为上游 `milestone`（int，取 `milestones list` 的 number）；PATCH 必填
+>   `repo`+`title` 由服务端自动补齐（title 缺失时 GET 回取，回取失败/为空返回 502），**仅传 `milestone_id`
+>   也不会被上游 400 拒绝**。
+> - 写后回读校验：PATCH 返回 200 但回读 `milestone` 为空、或回读 number 与请求的 `milestone_id` 不一致
+>   （如 Issue 原挂其它里程碑且新值被上游静默忽略）→ 返回 **502**（明确错误，不再是假成功）；
+>   成功时响应回显 `milestone`（`issues get` 同样回显上游 milestone 字段）。
+> - GitHub：`milestone_id` 语义不变（透传上游同名参数）。
 
 ### POST /api/git-repo/{owner}/{repo}/issues/{number}/close
 > scope（x-token-scope）：**session_only**（仅 `tk_` 会话 token；API Key / JWT → 403）
@@ -343,7 +352,8 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 > CLI：`grape git-repo pulls comments update --owner {owner} --repo {repo} --number {number} --comment_id {id} --json '{"body":"修正后的内容"}'` / `grape git-repo pulls comments delete --owner {owner} --repo {repo} --number {number} --comment_id {id}`（operation_id=`gitrepo_pulls_comments_update` / `gitrepo_pulls_comments_delete`；comment_id 取 list 返回的评论 id，上游全局唯一，PR number 仅作上下文）。
 
 - **PATCH**：Body `{body}`（必填）→ 透传 `PATCH /pulls/comments/{id}` 改写评论正文 → 返回更新后的评论对象。
-- **DELETE**：透传 `DELETE /pulls/comments/{id}` 删除评论（误发评论自纠，Issue #563）。
+  - **Issue #623 契约说明**：`--comment_id` 支持**数字 note_id（推荐，list 响应中的 `id`）**与 **create 响应返回的十六进制 `id`（兼容形态，服务端自动映射为 note_id）**——直接回用 create 响应主键不再 422；其余非法形态返回 422（明确错误信息）。十六进制识别规则：全 hex 字符且含 a-f 字母（纯数字串按 note_id 直传，向后兼容）。
+- **DELETE**：透传 `DELETE /pulls/comments/{id}` 删除评论（误发评论自纠，Issue #563；delete 的 comment_id 仍为数字 note_id）。
 - **create --json @file 读取失败**：CLI ≥0.3.3 已显式报错 `cannot read --json file '...'` 并以非零码退出，不再静默。
 
 ### GET /api/git-repo/{owner}/{repo}/pulls/{number}/files
@@ -389,12 +399,12 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | GET/contents/{path} | `grape git-repo contents --owner Jason7602 --repo hello --path CODEOWNERS --ref codeowner` |
 | GET/commits | `grape git-repo commits --owner Jason7602 --repo hello --per-page 10` |
 | GET/labels | `grape git-repo labels --owner Jason7602 --repo hello` |
-| POST/labels | `grape git-repo labels create --owner Jason7602 --repo hello --json '{"name":"bug","color":"#d73a4a"}'` |
+| POST/labels | `grape git-repo labels create --owner Jason7602 --repo hello --json '{"name":"bug","color":"d73a4a"}'` |
 | GET/milestones | `grape git-repo milestones --owner Jason7602 --repo hello --state all` |
 | GET/issues | `grape git-repo issues --owner Jason7602 --repo hello --state open` |
 | POST/issues | `grape git-repo issues create --owner Jason7602 --repo hello --json '{"title":"bug: 列表为空","body":"复现步骤...","assignee":"Jason7602"}'` |
 | GET/issues/{number} | `grape git-repo issues get --owner Jason7602 --repo hello --number 5` |
-| PATCH/issues/{number} | `grape git-repo issues update --owner Jason7602 --repo hello --number 5 --json '{"state":"closed","labels":"bug"}'` |
+| PATCH/issues/{number} | `grape git-repo issues update --owner Jason7602 --repo hello --number 5 --json '{"state":"reopen","labels":"bug"}'` |
 | POST/issues/{number}/close | `grape git-repo issues close --owner Jason7602 --repo hello --number 5` |
 | GET/issues comments | `grape git-repo issues comments list --owner Jason7602 --repo hello --number 5` |
 | POST/issues comments | `grape git-repo issues comments create --owner Jason7602 --repo hello --number 5 --json '{"body":"已定位原因"}'` |
@@ -405,3 +415,17 @@ token（tk_）repo_key = github:owner/repo   → GitHub 后端
 | PUT/pulls/{number}/merge | `grape git-repo pulls merge --owner Jason7602 --repo hello --number 7` |
 | GET/POST pulls comments | `grape git-repo pulls comments list --owner Jason7602 --repo hello --number 7` / `... comments create ... --json '{"body":"LGTM","path":"a.py","line":5}'` |
 | GET/pulls/{number}/files | `grape git-repo pulls files --owner Jason7602 --repo hello --number 7` |
+| DELETE/pulls/{number}/issues/{issue_number} | `grape git-repo pulls issues unlink --owner Jason7602 --repo hello --number 7 --issue-number 5` |
+
+### PR body 提及 Issue 号的规避写法（Issue #728）
+
+`pulls create` 在调用方未显式传 `related_issue_nums` 时，会从 body 自动提取 Issue 号建立 PR↔Issue 关联。提取前有**上下文过滤**：代码块（\`\`\` 围栏）、行内反引号、引用块（`>` 行）内的 `#N` 属非语义语境，不会被捕获；正文自然语言 `#N` 与 `Closes #` / `Related #` / `关联 #` 显式写法正常关联。
+
+- 想在 body 里**提及但不关联**某个 Issue：把编号放进代码块或用反引号包裹，如 `` `#123` ``。
+- 想确保**一定关联**：正文显式写 `Closes #N` / `Related #N` / `关联 #N`，或 create 时直接传 `related_issue_nums`（显式参数优先，不受过滤影响）。
+- 已误建立的关联可用 unlink 命令解除（幂等，重复调用安全）：
+  ```bash
+  grape git-repo pulls issues unlink --owner Jason7602 --repo hello --number 7 --issue-number 5
+  # {"unlinked": true, "pr_number": 7, "issue_number": 5, "remaining_issue_nums": [...]}
+  ```
+  关联不存在时返回 `unlinked=false`（幂等 no-op）；GitHub 通道无原生 PR↔Issue 关联存储，恒为 no-op。

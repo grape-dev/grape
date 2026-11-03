@@ -1459,7 +1459,7 @@ function _apSubmitForm() {
               '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
                 '<div><span style="color:var(--t2)">' + _apt('detail.name_label') + '</span> <b>' + _esc(task.name) + '</b></div>' +
                 '<div><span style="color:var(--t2)">' + _apt('detail.repo_label') + '</span> ' + _esc(task.repo_key) + '</div>' +
-                '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(task.skill_name||'—') + '</div>' +
+                '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(task.display_name || task.skill_name||'—') + '</div>' +
                 '<div><span style="color:var(--t2)">' + _apt('detail.engine_label') + '</span> ' + engineNames + '</div>' +
                 '<div><span style="color:var(--t2)">' + _apt('detail.max_retry_label') + '</span> ' + (typeof task.max_retry === 'number' ? task.max_retry : 3) + '</div>' +
                 '<div><span style="color:var(--t2)">' + _apt('detail.created_at_label') + '</span> ' + _apFormatTime(task.created_at) + '</div>' +
@@ -1574,7 +1574,7 @@ function _apDetailHTML(t) {
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;font-size:13px">' +
         '<div><span style="color:var(--t2)">' + _apt('detail.name_label') + '</span> <b>' + _esc(t.name) + '</b></div>' +
         '<div><span style="color:var(--t2)">' + _apt('detail.repo_label') + '</span> ' + _esc(t.repo_key) + '</div>' +
-        '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(t.skill_name||'—') + '</div>' +
+        '<div><span style="color:var(--t2)">Skill:</span> ' + _esc(t.display_name || t.skill_name||'—') + '</div>' +
         '<div><span style="color:var(--t2)">' + _apt('detail.engine_label') + '</span> ' + engineNames + '</div>' +
         '<div><span style="color:var(--t2)">' + _apt('detail.max_retry_label') + '</span> ' + (typeof t.max_retry === 'number' ? t.max_retry : 3) + '</div>' +
         '<div><span style="color:var(--t2)">' + _apt('detail.created_at_label') + '</span> ' + _apFormatTime(t.created_at) + '</div>' +

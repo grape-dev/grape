@@ -135,5 +135,10 @@ class TestResolveIssueCardIdGuard:
         assert resolve_issue_card_id(_TEST_REPO, "#pr_257_default") == ""
 
     def test_numeric_returns_card_id_or_empty(self):
-        # 测试库无该 Issue 行 → 空串；但不抛异常
+        # Issue #667：_inject_issue_pr_env 现会兜底补建缺行（同文件上方用例可能已建 owner/repo#528 行），
+        # 先清行再断言纯查询语义：无行 → 空串；但不抛异常
+        from src.session_manager import db as _db, db_lock as _dl
+        with _dl:
+            _db.cursor().execute("DELETE FROM issue WHERE repo_key=? AND issue_number=528", (_TEST_REPO,))
+            _db.commit()
         assert resolve_issue_card_id(_TEST_REPO, "#528") == ""

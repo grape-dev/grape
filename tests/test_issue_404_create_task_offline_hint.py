@@ -3,34 +3,29 @@
 用户思路：不做事后告警/重派链路，在创建需求的场景下拉框里直接提示
 「场景绑定的引擎全部离线」，引导用户去换绑。
 
+Issue #501 迁移：探测从 /scenes/with-pipeline（N 场景 × M 节点，拉取即全量预探测）
+移到按需接口 GET /scenes/{scene_id}/engine-status（用户选中场景时 1 × M）。
+探测语义与原 with-pipeline 内联版完全一致，本用例集改为锚定新接口。
+
 验收：
-1. /scenes/with-pipeline 对引擎全灭的场景返回 all_offline=True + offline_nodes
+1. /scenes/{scene_id}/engine-status 对引擎全灭的场景返回 all_offline=True + offline_nodes
 2. 部分离线（非全部）不在 offline_nodes 里（只有该节点全灭才标记）
 3. 无引擎绑定的节点不参与判定
 4. enabled=False 的节点跳过
 5. 校验异常降级为不标记（不挡创建入口）
+6. SRE 空绑定 → sre_unbound=True（「未选择机器」话术，区别于引擎全灭）
+7. 场景不存在 → all_offline=False（不拦创建入口）
 """
 import os
 import sys
-import types
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-
-class _Cursor:
-    def __init__(self, rows):
-        self._rows = rows
-
-    def execute(self, *a, **kw):
-        if a and "FROM skill" in str(a[0]):
-            self._rows = []
-
-    def fetchall(self):
-        return self._rows
+REPO = "gitcode:foo/bar"
 
 
-def _patch_scenes_module(monkeypatch, scene_list, pool_results):
-    """patch get_scenes / get_pipeline_config / engine_select 判定函数。
+def _patch_scenes_module(monkeypatch, cfgs, pool_results):
+    """patch get_pipeline_config / engine_select 判定函数。
 
     get_scenes / get_pipeline_config 在路由函数体内 import，须 patch 源模块
     src.api.pipeline_config；engine_select 判定函数同样在函数体内 import，
@@ -39,9 +34,8 @@ def _patch_scenes_module(monkeypatch, scene_list, pool_results):
     import src.api.pipeline_config as pc
     import src.domains.runtime.engine.engine_select as es
 
-    monkeypatch.setattr(pc, "get_scenes", lambda repo_key="": scene_list)
     monkeypatch.setattr(pc, "get_pipeline_config",
-                        lambda scene_id, repo_key="": None)
+                        lambda scene_id, repo_key="": cfgs.get(scene_id))
 
     def _fake_pool(scene_id, agent_type, repo_key="", user_id=0, issue_creator=""):
         return pool_results.get((scene_id, agent_type), "")
@@ -49,19 +43,8 @@ def _patch_scenes_module(monkeypatch, scene_list, pool_results):
     monkeypatch.setattr(es, "get_scene_pool_engine_ids", _fake_pool)
 
 
-def test_all_offline_scene_flagged(monkeypatch):
-    scene_list = [{
-        "id": "scene_dead", "name": "全灭场景", "display_name": "全灭场景",
-        "description": "", "work_branch": "main", "created_by": "",
-        "scene_type": "standard", "pr_subscription_enabled": 0, "linked_repos": [],
-        "nodes": [
-            {"tag": "coding", "skill": "s1", "engine_runtime_ids": [1, 2]},
-            {"tag": "qa", "skill": "s2", "engine_runtime_ids": [3]},
-        ],
-    }]
-    # coding/qa 两个节点全灭
-    _patch_scenes_module(monkeypatch, scene_list,
-                         {("scene_dead", "coding"): None, ("scene_dead", "qa"): None})
+def _scene(sid, nodes):
+    return {"name": sid, "nodes": nodes}
 
     import src.domains.mgmt.routes.scenes as scenes_mod
     res = scenes_mod.list_scenes_with_pipeline(repo="gitcode:foo/bar")

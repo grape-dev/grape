@@ -116,6 +116,45 @@ function _renderCrossSceneBadge(pipe) {
   return '<div style="font-size:10px;color:#0071e3;background:rgba(0,113,227,.06);border-radius:6px;padding:3px 8px;margin-top:4px;display:inline-flex;align-items:center;gap:4px"><span style="font-size:11px">⇄</span><span>' + _label + '</span></div>';
 }
 
+// ===== Issue #600：流水线卡片静默轮询刷新 =====
+// 重派成功/新终态到达后，卡片状态自动刷新，无需手动刷新页面。
+// 15s 静默拉取 + 状态指纹对比，仅指纹变化时重建流程图卡片（表格/搜索/滚动不受干扰）。
+let _pipePollTimer = null;
+const _PIPE_POLL_MS = 15000;
+
+function _pipeFingerprint(data) {
+  if (!data) return '';
+  var active = data.active;
+  var all = active ? [active].concat(data.history || []) : (data.history || []);
+  var fp = [data.active_count || 0, data.today_count || 0, data.failed_count || 0].join(',');
+  all.forEach(function(p) {
+    fp += '|' + (p.issue_id || '') + ':' + (p.statuses || []).join('.') + ':' + (p.executing ? 1 : 0);
+  });
+  return fp;
+}
+
+function startPipePolling() {
+  if (_pipePollTimer) return;
+  _pipePollTimer = setInterval(function() {
+    if (window._currentView !== 'pipe' || _pipeLoadingMore) return;
+    var repo = app.currentRepo();
+    if (!repo || !_pipeData) return;
+    // 覆盖已增量加载的 history 条数，避免轮询覆盖丢行
+    var loaded = ((_pipeData.history) || []).length;
+    var qs = loaded > 0 ? ('?history_limit=' + loaded) : '';
+    API.get('/pipeline/' + repo.owner + '/' + repo.name + qs).then(function(d) {
+      if (window._currentView !== 'pipe' || !d) return;
+      if (_pipeFingerprint(d) === _pipeFingerprint(_pipeData)) return;
+      _pipeData = d;
+      selPipe(_pipeActiveIdx);  // 仅重建流程图卡片，表格/搜索不动
+    }).catch(function() { /* 静默轮询失败忽略，下轮重试 */ });
+  }, _PIPE_POLL_MS);
+}
+
+function stopPipePolling() {
+  if (_pipePollTimer) { clearInterval(_pipePollTimer); _pipePollTimer = null; }
+}
+
 function selPipe(idx) {
   _pipeActiveIdx = idx;
   // 只更新流程图区域 + 高亮选中行，不重建表格（保持滚动位置）

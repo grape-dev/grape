@@ -296,7 +296,7 @@ grapecli git diff --repo Jason7602/hello
 
 ### POST /api/git-repo/{owner}/{repo}/labels
 
-**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `#d73a4a`）
+**Body（form-encoded 或 JSON）**：`name`（必填）、`color`（如 `d73a4a`，不带 `#` 的 6 位 hex；带 `#` 前缀会被自动去除）
 
 **返回（201）**：创建后的标签对象。**错误**：400（缺 name）/ 409（已存在）/ 403。
 
@@ -306,11 +306,39 @@ grapecli git diff --repo Jason7602/hello
 
 ### GET /api/git-repo/{owner}/{repo}/milestones?state=all
 
-**Query**：`state`（open/closed/all，技能用 all）
+**Query**：`state`（open/closed/all，技能用 all；其他值上游 400）
 
 **返回（200）**：里程碑数组 `[{"id":1,"title":"v1.0","state":"open","description":"","due_on":null,"open_issues":3,"closed_issues":1,"created_at":"..."}]`
+（Issue #684：`state` 字段归一化为 `open`/`closed`，上游 `active`/`opened` 映射为 `open`——与过滤合法值口径一致）
 
 **错误**：401 / 403 / 404。
+
+### POST /api/git-repo/{owner}/{repo}/milestones
+
+**入参 Body（JSON）**：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `title` | string | ✅ | 里程碑标题 |
+| `description` | string | 否 | 描述（空值不透传） |
+| `due_on` | string | 否 | 截止时间 ISO 时间戳（空值不透传） |
+
+**返回（200/201）**：创建后的里程碑对象（含 `id`，可挂接 `issues update --milestone_id`）。
+**错误**：400（缺 title 等上游校验）/ 422（title 缺失的契约校验）/ 401 / 403 / 409（标题重复）。
+provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
+
+### PATCH /api/git-repo/{owner}/{repo}/milestones/{number}
+
+**入参 Body（JSON）**：全字段可选（空值不透传，不影响其他字段）：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `title` | string | 里程碑标题 |
+| `description` | string | 描述 |
+| `due_on` | string | 截止时间 ISO 时间戳 |
+| `state` | string | `open`/`closed` |
+
+**返回（200）**：更新后的里程碑对象（`state` 归一化为 `open`/`closed`，上游 `active` 映射为 `open`）。**错误**：400 / 401 / 403 / 404。
 
 ---
 
@@ -446,8 +474,10 @@ grapecli git diff --repo Jason7602/hello
 **返回（200）**：变更文件数组
 ```json
 [{"filename": "src/a.py", "status": "modified", "additions": 10, "deletions": 2,
-  "patch": "@@ ...", "raw_url": "..."}]
+  "patch": {"diff": "@@ ...", "added_lines": 10, "removed_lines": 2}, "raw_url": "..."}]
 ```
+
+> **Issue #731（diff 字段路径契约）**：所有文件对象的 diff 内容**统一且仅在** `.patch.diff`（对象内字符串，含 `@@ ... @@` diff 头）。代理层已对平台差异返回做归一化（顶层 `.diff` 会并入 `.patch.diff` 并移除），下游脚本无需 `.patch.diff // .diff` 兜底；`patch` 元信息（added_lines/removed_lines/too_large 等）语义不变。
 
 ---
 

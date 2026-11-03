@@ -199,6 +199,7 @@ app.include_router(autopilot.router)
 app.include_router(orgs.router)
 app.include_router(community.router)
 app.include_router(observability.router)
+app.include_router(patrol.router)
 
 # ===== Issue-45: OpenAPI 定制渲染（securitySchemes + 仅对外安全路由进契约）=====
 

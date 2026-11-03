@@ -121,12 +121,41 @@ class TestExtract:
         assert extract_skill_md(buf.getvalue(), "_template") is None
 
     def test_extract_keeps_exec_bit_metadata(self):
-        """zip 内脚本 external_attr 权限位可读（worker 物化时按此恢复）。"""
+        """zip 内脚本 external_attr 权限位可读（worker 物理时按此恢复）。"""
         zip_bytes = _make_zip("hello", with_exec=True)
         with zipfile.ZipFile(io.BytesIO(zip_bytes)) as zf:
             info = zf.getinfo("hello/scripts/run.sh")
             mode = info.external_attr >> 16
             assert mode & 0o111
+
+    def test_extract_skill_md_with_bom(self):
+        """Issue #608: UTF-8 with BOM 编码的 SKILL.md 应正确剥离 BOM，保证 frontmatter 正则可匹配。"""
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            content = "---\nname: bom-skill\nversion: 1.0.0\ndescription: BOM test\n---\n\n# BOM Skill"
+            zf.writestr("bom-skill/SKILL.md", b"\xef\xbb\xbf" + content.encode("utf-8"))
+        md = extract_skill_md(buf.getvalue(), "bom-skill")
+        assert md is not None
+        assert not md.startswith("\ufeff"), "BOM character should be stripped"
+        assert md.startswith("---"), "content should start with --- (frontmatter regex matchable)"
+        assert "# BOM Skill" in md
+
+    def test_extract_skill_md_without_bom_unchanged(self):
+        """Issue #608: 非 BOM 编码的 SKILL.md 读取结果不受影响（回归测试）。"""
+        md = extract_skill_md(_make_zip("hello"), "hello")
+        assert md and md.startswith("---") and "# Hello" in md
+
+    def test_read_zip_sub_skill_with_bom(self):
+        """Issue #608: 子技能 SKILL.md 带 BOM 时也应正确剥离。"""
+        from src.storage import read_zip_sub_skill
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as zf:
+            content = "---\nname: sub-bom\n---\n\n# Sub BOM"
+            zf.writestr("pkg/references/sub-bom/SKILL.md", b"\xef\xbb\xbf" + content.encode("utf-8"))
+        result = read_zip_sub_skill(buf.getvalue(), "pkg", "sub-bom")
+        assert result is not None
+        assert not result["content"].startswith("\ufeff")
+        assert result["content"].startswith("---")
 
 
 class TestZipCache:

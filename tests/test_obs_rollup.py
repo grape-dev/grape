@@ -78,6 +78,7 @@ def test_snapshot_writes_all_but_revoked():
 
 
 def test_snapshot_prunes_expired_samples():
+    """Issue #702 清理职责拆分：snapshot 只采样，清理由持锁分支的 cleanup_expired_samples 执行。"""
     rid = _mk_cred("c")
     _sample(rid, PREFIX + "c", minutes_ago=8 * 24 * 60, cpu=99)      # 8 天前 → 应被清掉
     _sample(rid, PREFIX + "c", minutes_ago=5, cpu=11)                 # 保留
