@@ -839,10 +839,30 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
+        # 命中文件清单入 message（承接基线分支 Issue #754 语义：报告 path(markers)）
+        _files = ", ".join(f"{_p}({_n})" for _p, _n in (_gate.get("hard_hits") or {}).items())
+        _msg = (f"merge blocked by conflict-marker gate (Issue #752): "
+                f"unresolved merge conflict markers found in PR changed files: {_files}")
+        # 阻断留痕①（承接 Issue #754）：台账 pr_merge_blocked，best-effort 不影响阻断本身
+        try:
+            from src.outbound_ledger import record_outbound
+            from src.repo_key import to_repo_key
+            record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
+                            issue_number=str(number), origin_channel="api")
+        except Exception as _le:
+            log.warning(f"outbound_ledger record (pr_merge_blocked) failed: {_le}")
+        # 阻断留痕②（承接 Issue #754）：PR 评论 best-effort（GitCode /pulls、GitHub /issues 通道）
+        try:
+            _trace_body = (f"[Grape] merge blocked: unresolved conflict markers in PR files: {_files}. "
+                           f"Manual fix required before merge. (Issue #752)")
+            _trace_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
+            _vcs_req(p, "POST", _vcs_url(owner, repo, _trace_path, None, p), _token,
+                     {"body": _trace_body})
+        except Exception as _ce:
+            log.warning(f"merge gate block-trace PR comment failed: {_ce}")
         raise HTTPException(status_code=409, detail={
             "code": 409,
-            "message": "merge blocked by conflict-marker gate (Issue #752): "
-                       "unresolved merge conflict markers found in PR changed files",
+            "message": _msg,
             "gate": {"phase": "pre_merge", "hard_hits": _gate.get("hard_hits", {}),
                      "soft_hits": _gate.get("soft_hits", {})}})
     if _gate.get("decision") == "warned":
@@ -1064,48 +1084,6 @@ def _normalize_pull_files_diff(resp):
                         "no non-empty diff at .patch.diff after normalization")
     return resp
 
-
-# Issue #754：未解决冲突标记行首模式（<<<<<<< 与 >>>>>>>；======= 单独出现误报率高，
-# 不作为独立命中信号，由配对的首尾标记共同判定）。允许 unified diff 行前缀
-# （+/space）一个字符：实际 PR diff 中冲突标记行形如 "+<<<<<<< HEAD"。
-_CONFLICT_MARKER_RES = (
-    _re.compile(r"^[+\- ]?<{7}(?=[ \t\r\n]|$)", _re.MULTILINE),
-    _re.compile(r"^[+\- ]?>{7}(?=[ \t\r\n]|$)", _re.MULTILINE),
-)
-
-
-def _scan_pull_conflict_markers(p: str, owner: str, repo: str, number: int, token: str,
-                                per_page: int = 100, max_pages: int = 10) -> list:
-    """Issue #754：merge 前置复测等价检查——扫描 PR 全部变更文件 diff 中的冲突标记。
-
-    - 复用 `list_pull_files` 的 `GET /pulls/{n}/files`（分页 per_page=100，上限 10 页）。
-    - diff 字段统一经 `_normalize_pull_files_diff` 归一到 ``.patch.diff``（Issue #731）。
-    - 返回命中列表 ``[{path, markers}]``（markers = 首尾标记出现总次数）；未命中返回 []。
-    - 上游/网络异常向上抛出，由调用方（merge_pull）决定 fail-open。
-    """
-    hits: list = []
-    page = 1
-    for _ in range(max_pages):
-        resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
-                                           {"page": page, "per_page": per_page}, p), token)
-        resp = _normalize_pull_files_diff(resp)
-        if not isinstance(resp, list):
-            break
-        for item in resp:
-            if not isinstance(item, dict):
-                continue
-            patch = item.get("patch")
-            diff = patch.get("diff") if isinstance(patch, dict) else None
-            if not isinstance(diff, str) or not diff:
-                continue
-            count = sum(len(rx.findall(diff)) for rx in _CONFLICT_MARKER_RES)
-            if count:
-                hits.append({"path": item.get("filename") or item.get("path") or "",
-                             "markers": count})
-        if len(resp) < per_page:
-            break
-        page += 1
-    return hits
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files",

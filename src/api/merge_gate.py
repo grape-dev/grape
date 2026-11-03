@@ -64,7 +64,11 @@ def scan_pull_files(files) -> dict:
         if not isinstance(item, dict):
             continue
         filename = item.get("filename") or item.get("path") or ""
-        patch = item.get("patch") or ""
+        patch = item.get("patch")
+        # Issue #754 归一：patch 可能是 str（GitHub）或 {"diff": str}（GitCode，Issue #731/#750
+        # 归一字段 .patch.diff），两种形态都扫描，避免 GitCode 响应漏检。
+        if isinstance(patch, dict):
+            patch = patch.get("diff")
         if not filename or not isinstance(patch, str) or not patch:
             continue
         r = scan_patch(patch)
