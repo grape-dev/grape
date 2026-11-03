@@ -12,7 +12,8 @@ from fastapi.testclient import TestClient
 
 from src.api.deps import get_current_user_or_api_key
 from src.api.main import app
-from src.api.merge_gate import run_merge_gate, scan_patch, scan_pull_files, scan_text
+from src.api.merge_gate import (run_merge_gate, run_post_merge_gate, scan_patch,
+                                scan_pull_files, scan_text)
 
 UID = 98752
 OWNER = "o"
@@ -22,6 +23,13 @@ BOT = "bot_tok_752"
 
 @pytest.fixture(autouse=True)
 def _client(monkeypatch):
+    # 清残留合入日志（sqlite db 跨 pytest 会话持久化，防跨会话串扰断言）
+    from src.session_manager import db
+    try:
+        db.execute("DELETE FROM grape_t_merge_gate_log")
+        db.commit()
+    except Exception:
+        pass
     app.dependency_overrides[get_current_user_or_api_key] = lambda: {
         "id": UID, "username": "merge_gate_tester", "auth_type": "session_token",
         "agent_type": "vod", "user_id": 0, "session_key": "s752",
@@ -92,13 +100,38 @@ def test_scan_pull_files_aggregates():
 
 # ===================== merge 路由门禁 =====================
 
-def _fake_req_dispatch(files_payload, merge_payload=None, get_error=None):
+def _fake_req_dispatch(files_payload, merge_payload=None, get_error=None,
+                       post_files=None, pull_detail=None, pages=None):
+    """模拟 _req 分发。
+
+    - /pulls/{n}/files：pages 传入时按 URL page 参数分页返回（翻页测试），否则整体返回
+    - PUT /pulls/{n}/merge：merge_payload（含 sha）
+    - GET /pulls/{n}：PR 详情（base ref/sha，post-merge compare 起点）
+    - GET /commits?sha=：base 分支 tip 列表
+    - GET /compare/{a}...{b}：base 分支合入结果 diff（post_files，默认复用 files_payload）
+    - GET /commits/{sha}：merge commit 详情（compare 缺失时降级路径）
+    """
     def _req(method, url, token="", body=None):
         if "/files" in url:
             if get_error:
                 raise get_error
+            if pages is not None:
+                page = 1
+                if "page=" in url:
+                    page = int(url.split("page=")[1].split("&")[0])
+                return pages[page - 1] if page <= len(pages) else []
             return files_payload
-        return merge_payload or {"merged": True, "sha": "sha752"}
+        if url.endswith("/merge"):
+            return merge_payload or {"merged": True, "sha": "sha752"}
+        if "/compare/" in url:
+            return {"files": post_files if post_files is not None else (files_payload or [])}
+        if "/commits/" in url:
+            return {"files": post_files if post_files is not None else (files_payload or [])}
+        if "/commits" in url:
+            return [{"sha": "tip752"}]
+        # PR 详情（GET /pulls/{n}）
+        return pull_detail or {"base": {"ref": "main", "sha": "base0"},
+                               "head": {"ref": "feat/issue-752", "sha": "head0"}}
     return _req
 
 
@@ -176,6 +209,71 @@ def test_run_merge_gate_unit(monkeypatch):
 
     monkeypatch.setattr("src.api.git_repo_api._vcs_req", lambda p, m, u, t: [])
     assert run_merge_gate(OWNER, REPO, 7, "gitcode", BOT)["decision"] == "passed"
+
+
+def test_run_merge_gate_paginates_over_100_files(monkeypatch):
+    """PR #874 Required：>100 文件翻页取全量——第 2 页的硬命中不被首页截断漏扫。"""
+    page1 = [{"filename": f"f{i}.md", "patch": "@@\n+ok\n"} for i in range(100)]
+    page2 = [{"filename": "runbook.md", "patch": "@@\n+>>>>>>> dev\n"}]
+    calls = []
+
+    def _fake(p, m, u, t):
+        import re as _re
+        calls.append(u)
+        m_ = _re.search(r"[?&]page=(\d+)", u)  # 注意 per_page=100 也含 "page=1" 子串
+        page = int(m_.group(1)) if m_ else 1
+        if page == 1:
+            return page1
+        if page == 2:
+            return page2
+        return []
+
+    monkeypatch.setattr("src.api.git_repo_api._vcs_req", _fake)
+    g = run_merge_gate(OWNER, REPO, 7, "gitcode", BOT)
+    assert g["decision"] == "blocked" and g["hard_hits"] == {"runbook.md": 1}
+    assert len(calls) == 2  # 首页满 100 → 继续翻页；次页 1 条 <100 → 停止
+
+
+def test_run_post_merge_gate_scans_base_compare(monkeypatch):
+    """PR #874 Required：post-merge 扫 base 分支合入结果（base0...tip compare）。"""
+    def _fake(p, m, u, t):
+        if "/commits" in u and "sha=" in u:
+            return [{"sha": "tip9"}]
+        if "/compare/" in u:
+            assert "base0...tip9" in u  # 起点=合入前 base sha，终点=合入后 tip
+            return {"files": [{"filename": "b.md", "patch": "+=======\n"}]}
+        return {}
+
+    monkeypatch.setattr("src.api.git_repo_api._vcs_req", _fake)
+    g = run_post_merge_gate(OWNER, REPO, 7, "gitcode", BOT, "main", "base0", "sha752")
+    assert g["decision"] == "warned" and g["soft_hits"] == {"b.md": 1}
+
+
+def test_run_post_merge_gate_fallback_merge_commit(monkeypatch):
+    """base 信息缺失时降级扫 merge commit 详情文件。"""
+    def _fake(p, m, u, t):
+        if "/commits/" in u:
+            assert u.endswith("/commits/sha752")
+            return {"files": [{"filename": "m.py", "patch": "+>>>>>>> d\n"}]}
+        return {}
+
+    monkeypatch.setattr("src.api.git_repo_api._vcs_req", _fake)
+    g = run_post_merge_gate(OWNER, REPO, 7, "gitcode", BOT, "", "", "sha752")
+    assert g["decision"] == "blocked" and g["hard_hits"] == {"m.py": 1}
+
+
+def test_merge_post_merge_bypass_residue_alarm(monkeypatch, _client):
+    """PR #874 Required：PR diff 干净放行，但旁路写入 base 的残留 → post_merge alarmed。"""
+    files = [{"filename": "code.py", "patch": "@@\n+print('ok')\n"}]
+    bypass = [{"filename": "base_file.md",
+               "patch": "@@\n+<<<<<<< HEAD\n+x\n+>>>>>>> dev\n"}]
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        _fake_req_dispatch(files, post_files=bypass))
+    r = _merge(_client, number=96)
+    assert r.status_code == 200
+    rows = _gate_rows(96)
+    assert [(x[0], x[1]) for x in rows] == [("pre_merge", "passed"), ("post_merge", "alarmed")]
+    assert "base_file.md" in rows[1][2]  # 命中来自 base 分支 compare，非 PR files
 
 
 def test_record_gate_log_best_effort():

@@ -832,8 +832,10 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
     # Issue #752（M1）：合入前冲突标记扫描门禁——PR 变更文件硬命中 `<<<<<<< `/`>>>>>>> `
     # → 阻断 409（防残留进入基线分支，AC1）；仅孤立 `=======` 软命中 → 告警放行（防误杀
     # markdown 下划线）；扫描自身异常 fail-open。每次决策写合入日志（AC3）。
-    from src.api.merge_gate import run_merge_gate, record_gate_log
+    from src.api.merge_gate import run_merge_gate, run_post_merge_gate, get_pull_base, record_gate_log
     _repo_key = f"{owner}/{repo}"
+    # PR #874 审查修正：合入前记录 base 分支 sha（post-merge compare 扫描的起点）
+    _base_info = get_pull_base(owner, repo, number, p, _token)
     _gate = run_merge_gate(owner, repo, number, p, _token)
     if _gate.get("decision") == "blocked":
         record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
@@ -851,9 +853,14 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
         record_gate_log(_repo_key, number, "pre_merge", _gate.get("decision", "passed"), _gate)
     resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
                     _token, _payload)
-    # Issue #752（M1）：合入后二次扫描——覆盖自动复测等旁路引入的残留；命中告警+日志
-    # （合入已完成无法回滚，人工裁决），未命中记录 passed。fail-open 不影响返回。
-    _post = run_merge_gate(owner, repo, number, p, _token)
+    # Issue #752（M1，PR #874 审查修正）：合入后扫描 base 分支合入结果（pre-merge base sha
+    # → 合入后 tip 的 compare diff）——覆盖自动复测等旁路写入 base 分支的残留（PR files
+    # 复扫永远与 pre_merge 同结果，检不出旁路）；命中告警+日志（合入已完成无法回滚，
+    # 人工裁决），未命中记录 passed。fail-open 不影响返回。
+    _merge_sha = resp.get("sha") or "" if isinstance(resp, dict) else ""
+    _post = run_post_merge_gate(owner, repo, number, p, _token,
+                                _base_info.get("ref", ""), _base_info.get("sha", ""),
+                                _merge_sha)
     _post_decision = "alarmed" if _post.get("decision") in ("blocked", "warned") \
         else _post.get("decision", "passed")
     record_gate_log(_repo_key, number, "post_merge", _post_decision, _post)
