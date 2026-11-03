@@ -1,0 +1,20 @@
+# Grape Insight Server（Insight 进程 :38083）— Issue #699 Phase 4 四进程拆分
+[Unit]
+Description=Grape Insight Server (Observability + Dashboard + SLO)
+After=network.target grape-server.service
+
+[Service]
+User=grape
+WorkingDirectory=/opt/grape
+Environment=PYTHONUNBUFFERED=1
+Environment=GRAPE_PROCESS_ROLE=insight
+Environment=GRAPE_PORT=38083
+Environment=OBS_LOG_DB=1
+EnvironmentFile=/etc/grape/grape.env
+ExecStart=/opt/grape/.venv/bin/uvicorn src.api.grape_insight_server:app \
+    --host 0.0.0.0 --port 38083 --workers 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
