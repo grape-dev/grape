@@ -665,6 +665,22 @@ def _cross_pipeline_handoff(
         log.info(f"A2A #329: target scene '{target_scene_id}' does not contain node '{target_node}', nodes={target_node_ids}")
         return {"ok": False, "error": "target_scene_missing_node"}
 
+    # 1.5 Issue #755 方案A：跨仓单号回填——转交 payload 沿用源仓单号时（目标仓 VCS 404），
+    #     解析真实落地单号（carried_context.target_issue_number / DB 反查 source_issue_number）
+    #     并替换 issue_number；后续去重检查 / issue_state / 事件 / 派发 payload 全部使用真实单号，
+    #     下游任务注入的 ISSUE_NUMBER 即命中目标仓真实 Issue。未命中不改写（行为不变）。
+    try:
+        _cc_pre = carried_context if isinstance(carried_context, dict) else {}
+        _resolved_num, _resolved_via = _resolve_cross_repo_issue_number(repo_key, issue_number, _cc_pre)
+        if _resolved_via in ("target_field", "db_mapping") and _resolved_num != str(issue_number).strip().lstrip("#"):
+            log.info(f"A2A #755: cross-pipeline issue_number backfilled {issue_number} -> {_resolved_num} "
+                     f"(via {_resolved_via}, repo={repo_key})")
+            issue_number = _resolved_num
+            if isinstance(carried_context, dict):
+                carried_context["target_issue_number"] = int(_resolved_num)
+    except Exception as _755_e:
+        log.warning(f"A2A #755: cross-pipeline issue_number backfill failed, keep original: {_755_e}")
+
     # 2. Duplicate handoff check: same Issue already has a non-terminal event in target scene
     #    Issue #587：去重判定键 = 事件活跃(running/dispatched)；已终态事件不阻断新交接
     _existing_seq = _has_active_a2a_event(repo_key, f"#{issue_number}", "", scene_id=target_scene_id)
@@ -710,6 +726,14 @@ def _cross_pipeline_handoff(
 
     # 4. Persist carried_context metadata (source_issue_number, spec_ref, etc.)
     _cc = carried_context if isinstance(carried_context, dict) else {}
+    # Issue #755：target_issue_number 与 source_issue_number 配对持久化——
+    # 后续 A2A 入口按该字段做源仓单号 → 真实落地单号映射兜底（方案B）。
+    try:
+        _tgt_num_755 = str(issue_number).strip().lstrip("#")
+        if _tgt_num_755.isdigit():
+            _cc["target_issue_number"] = int(_tgt_num_755)
+    except Exception:
+        pass
     if _cc:
         try:
             from src.session_manager import db as _sdb, db_lock as _sdl
@@ -1016,6 +1040,111 @@ def _a2a_repo_fallback_check(repo_key: str, user_hint: dict | None = None) -> st
     return "unreachable"
 
 
+def _issue_exists_in_db(repo_key: str, issue_number) -> bool:
+    """Issue #755：目标仓 issue 表存在性快查（平台已知 Issue 直接放行，避免每条 A2A 外呼 VCS）。"""
+    try:
+        _num = int(str(issue_number).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return False
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT 1 FROM issue WHERE repo_key=? AND issue_number=? LIMIT 1",
+                      (repo_key, _num))
+            return bool(c.fetchone())
+    except Exception as _e:
+        log.warning(f"A2A #755: issue existence db check failed for {repo_key}: {_e}")
+        return False
+
+
+def _resolve_cross_repo_issue_number(repo_key: str, issue_number, carried_context) -> tuple:
+    """Issue #755 方案A：把跨仓 A2A 沿用的源仓单号解析/回填为目标仓真实落地单号。
+
+    背景：跨仓转交时 payload.issue_number 可能是源仓单号（目标仓 VCS 404，下游任务
+    注入 ISSUE_NUMBER 后全链路 404）。解析优先级：
+    1. 目标仓 issue 表已有该编号行 → 原样返回（正常同仓 A2A，零行为变化）；
+    2. carried_context.target_issue_number（转交建单后显式回填）且目标仓存在 → 采用；
+    3. 目标仓 issue 表反查 carried_context.source_issue_number == 传入编号 → 命中
+       （多命中取最大编号 = 最新落地单，与 _max_issue_from_issues 口径一致）；
+    4. 均未命中 → 原样返回（unresolved，行为不变，交由方案 B 入口校验拦截）。
+
+    返回 (resolved_number_str, via)，via ∈ {"kept","target_field","db_mapping","unresolved"}。
+    """
+    _num = str(issue_number or "").strip().lstrip("#")
+    if not _num.isdigit():
+        return _num, "unresolved"
+    if _issue_exists_in_db(repo_key, _num):
+        return _num, "kept"
+    _cc = carried_context if isinstance(carried_context, dict) else {}
+    _tgt = str(_cc.get("target_issue_number", "") or "").strip().lstrip("#")
+    if _tgt.isdigit() and _tgt != _num and _issue_exists_in_db(repo_key, _tgt):
+        return _tgt, "target_field"
+    try:
+        from src.session_manager import db, db_lock
+        with db_lock:
+            c = db.cursor()
+            c.execute("SELECT issue_number, carried_context FROM issue WHERE repo_key=?",
+                      (repo_key,))
+            rows = c.fetchall() or []
+    except Exception as _e:
+        log.warning(f"A2A #755: source mapping db scan failed for {repo_key}: {_e}")
+        rows = []
+    _hits = []
+    for _n, _raw in rows:
+        if _n is None:
+            continue
+        try:
+            _ctx = json.loads(_raw) if isinstance(_raw, str) and _raw.strip() else (_raw or {})
+        except Exception:
+            continue
+        if isinstance(_ctx, dict) and str(_ctx.get("source_issue_number", "") or "").strip().lstrip("#") == _num:
+            _hits.append(int(_n))
+    if _hits:
+        return str(max(_hits)), "db_mapping"
+    return _num, "unresolved"
+
+
+def _a2a_issue_vcs_check(repo_key: str, issue_number) -> str:
+    """Issue #755 方案B：issue_number 在目标仓 VCS 的存在性校验（DB 未命中时兜底外呼）。
+
+    token 口径与 _a2a_repo_fallback_check 对齐（TokenResolver 策略链，仅认证后调用）。
+    返回 verdict：
+    - "exists"    VCS 命中真实 Issue（放行）
+    - "not_found" 上游 404（入口 400 拒绝）
+    - "unknown"   无 token / 网络 / 其他错误（不阻断，防误杀正常链路）
+    """
+    from src.repo_key import parse_repo_key
+    _provider, _owner, _name = parse_repo_key(repo_key)
+    if _provider not in ("gitcode", "github") or not _owner or not _name:
+        return "unknown"
+    try:
+        _num = int(str(issue_number).strip().lstrip("#"))
+    except (TypeError, ValueError):
+        return "not_found"
+    token = ""
+    try:
+        from src.token_resolver import TokenResolver, create_provider_from_repo_key
+        token = TokenResolver(create_provider_from_repo_key(repo_key)).get_token(repo_key) or ""
+    except Exception as _te:
+        log.warning(f"A2A #755: token resolver failed for {repo_key}: {_te}")
+    if not token:
+        return "unknown"
+    try:
+        from src.vcs.api_client import VcsApiClient
+        _info = VcsApiClient(_provider, token, _owner, _name).get_issue(_num)
+    except Exception as _ve:
+        log.warning(f"A2A #755: issue probe failed for {repo_key} #{_num}: {_ve}")
+        return "unknown"
+    if isinstance(_info, dict) and not _info.get("error"):
+        return "exists"
+    _err = str(_info.get("error", "") or "") if isinstance(_info, dict) else ""
+    _status = _info.get("status_code") if isinstance(_info, dict) else 0
+    if _status == 404 or "404" in _err:
+        return "not_found"
+    return "unknown"
+
+
 def _a2a_register_repo(repo_key: str) -> bool:
     """Issue #671：回退放行后幂等补录 managed_repos（最小行，INSERT OR IGNORE，不覆盖既有配置）。"""
     from src.repo_key import parse_repo_key
@@ -1078,6 +1207,24 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
     # （Issue #544 审查修正②：与 GET /api/a2a/status 统一走 _resolve_a2a_repo_key）
     repo_key = _resolve_a2a_repo_key(repository)
     log.info(f"A2A: agent={agent_name}, repo={repository}")
+
+    # ── Issue #755 方案A入口：跨仓单号回填 ──
+    # 源仓单号在目标仓 issue 表不存在时，按 carried_context.target_issue_number /
+    # DB 反查 source_issue_number 解析真实落地单号并回填 payload.issue_number；
+    # 下游 evt / 事件 / 任务注入 ISSUE_NUMBER 全链路使用回填值（resolve_issue_id
+    # 从 payload.issue_number 提取，回填后自然生效）。未命中不改写（行为不变）。
+    try:
+        _cc_755 = payload.get("carried_context") if isinstance(payload.get("carried_context"), dict) else {}
+        _mapped_num, _mapped_via = _resolve_cross_repo_issue_number(repo_key, issue_number_early, _cc_755)
+        if _mapped_via in ("target_field", "db_mapping") and _mapped_num != issue_number_early:
+            payload["issue_number"] = _mapped_num
+            issue_number_early = _mapped_num
+            issue_number = _mapped_num
+            if isinstance(payload.get("carried_context"), dict):
+                payload["carried_context"]["target_issue_number"] = int(_mapped_num)
+            log.info(f"A2A #755: issue_number backfilled to {_mapped_num} (via {_mapped_via}, repo={repo_key})")
+    except Exception as _755_e:
+        log.warning(f"A2A #755: entry issue_number backfill failed, keep original: {_755_e}")
 
     # ── 仓库真实性校验（a2a-input-validation-fix 第4条，防假仓库）：
     # Issue #671 方案 B：注册表优先 + GitCode 可达性回退。
@@ -1200,6 +1347,20 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                     raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
             else:
                 raise HTTPException(status_code=400, detail={"code": 400, "message": f"repository '{repository}' is not hosted on this Grape server (repo_key={repo_key}): 请检查 owner/repo 拼写，或先在平台上托管该仓库"})
+
+        # ── Issue #755 方案B：issue_number 目标仓存在性校验（鉴权后，未认证不外呼）──
+        # 跨仓 A2A 沿用源仓单号（目标仓 VCS 404）会污染异步链路：入口同步 400 拒绝
+        # 并提示转交建单状态（与 a2a-input-validation-fix 同口径，错误不流入异步派发）。
+        # DB 快查命中（平台已知 Issue）→ 放行不外呼；VCS 明确 404 → 400；
+        # 网络/无 token（unknown）→ 放行，不误杀正常链路。
+        if issue_number and not _issue_exists_in_db(repo_key, issue_number):
+            _issue_verdict = _a2a_issue_vcs_check(repo_key, issue_number)
+            if _issue_verdict == "not_found":
+                log.info(f"A2A #755: rejected — issue #{issue_number} not found in target repo {repo_key}")
+                raise HTTPException(status_code=400, detail={
+                    "code": 400,
+                    "message": f"issue_number '{issue_number}' not found in repository '{repository}' (repo_key={repo_key}): "
+                               f"跨仓转交请先在目标仓完成建单，再用真实落地单号发起 A2A"})
 
         # Issue #544 审查修正①：幂等命中查询在鉴权之后——未认证调用方不得
         # 凭已有幂等键探测/获取事件信息（seq/status/issue_id）。

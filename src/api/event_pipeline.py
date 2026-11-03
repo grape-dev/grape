@@ -893,6 +893,16 @@ def resolve_issue_id(payload: dict) -> str:
     # A2A payload 用 issue_number 字段
     num = payload.get("issue_number", "")
     if num:
+        # Issue #755：跨仓转交 payload 沿用源仓单号时（编号 == carried_context.source_issue_number），
+        # 若 carried_context 显式标记了 target_issue_number（真实落地单号）则以其为准——
+        # 下游任务注入的 ISSUE_NUMBER 即命中目标仓 VCS 真实 Issue（非 404）。
+        # 仅当 payload 单号被显式标记为源单号才替换，避免污染同仓正常 A2A。
+        _cc = payload.get("carried_context")
+        if isinstance(_cc, dict):
+            _tgt = str(_cc.get("target_issue_number", "") or "").strip().lstrip("#")
+            _src = str(_cc.get("source_issue_number", "") or "").strip().lstrip("#")
+            if _tgt.isdigit() and _src == str(num).strip().lstrip("#") and _tgt != _src:
+                return f"#{_tgt}"
         return _norm_issue_id(num)
     # Issue 类事件（issue_comment 等）顶层 issue 对象
     obj = payload.get("issue", {})
