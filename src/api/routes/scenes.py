@@ -7,6 +7,13 @@ from src.config import log
 
 router = APIRouter(prefix="/api/scenes", tags=["scenes"])
 
+# Issue #862：体验模板创建总闸（#357 P1-C 引入，原 30s）。实测 domain-swarm
+# 全流程 ≈30s 压线撞闸（shallow clone ~3s + git add ~3s + force push ~16s +
+# 建仓/托管 API），模板工作区 ≈126MB。放宽至 45s 覆盖慢尾分布，仍远低于
+# 外层 nginx 300s 与前端 300s；内层 git 操作超时（clone 120s / push 180s）不变。
+# 根治（异步化/模板瘦身）见 Issue #862 M2。
+EXPERIENCE_TEMPLATE_CREATE_TIMEOUT = 45
+
 _CONFIG_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "..", "configs", "agent-skill-mapping.json")
 
 # Issue #542：branches 列表进程内 TTL 缓存（分支变更低频，可接受短暂陈旧；
@@ -879,14 +886,16 @@ async def experience_market_scene(market_id: int, user: dict = Depends(require_n
     else:
         # 仓库不存在 → 调 create_from_template（建仓库+推代码+托管）
         # 如果仓库在 GitCode 上存在但 user_repos 未同步，push 可能失败——不视为致命错误
-        # P1-C: Wrap external HTTP call with 30s timeout (create_from_template is async
-        # but internally calls blocking GitCode API; the timeout caps total wait).
+        # P1-C (#357): Wrap external HTTP call with timeout (create_from_template is
+        # async but internally calls blocking GitCode API; the timeout caps total
+        # wait). #862: raised 30s -> 45s, full pipeline measures ~30s and trips
+        # the old gate; see EXPERIENCE_TEMPLATE_CREATE_TIMEOUT above.
         try:
             from src.api.routes.templates import create_from_template, CreateTemplateRequest
             result = await asyncio.wait_for(
                 create_from_template(
                     CreateTemplateRequest(template_id=scene["recommended_template"]), user),
-                timeout=30,
+                timeout=EXPERIENCE_TEMPLATE_CREATE_TIMEOUT,
             )
             full_name = result.get("full_name", full_name)
         except asyncio.TimeoutError:
