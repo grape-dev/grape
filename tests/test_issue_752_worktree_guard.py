@@ -88,6 +88,39 @@ def test_scan_staged_clean_and_unstaged_ignored(tmp_path):
     assert r["hard"] == {} and r["soft"] == {}
 
 
+def test_scan_staged_blob_not_disk_content(tmp_path):
+    """PR #874 Optional：暂存后磁盘又被改出冲突标记——扫描对象是暂存 blob，不误报。"""
+    wt = tmp_path / "wt"
+    _git(["clone", str(tmp_path / "src"), str(wt)], str(tmp_path))
+    # 暂存干净内容，随后磁盘写入冲突标记（未暂存）
+    (wt / "code.py").write_text("print(2)\n", encoding="utf-8")
+    _git(["add", "code.py"], str(wt))
+    (wt / "code.py").write_text("<<<<<<< HEAD\nprint(2)\n>>>>>>> dev\n", encoding="utf-8")
+    r = wg.scan_staged_files(str(wt))
+    assert r["hard"] == {} and r["soft"] == {}
+    # 暂存含标记的 blob（即实际将提交的内容）→ 命中
+    _git(["add", "code.py"], str(wt))
+    r = wg.scan_staged_files(str(wt))
+    assert r["hard"] == {"code.py": 2}
+
+
+def test_scan_staged_unmerged_falls_back_to_disk(tmp_path):
+    """unmerged 路径无单 stage blob → 降级扫工作区文件（git 冲突标记在工作区）。"""
+    src = tmp_path / "src"
+    # 上游制造双边改动：other 分支与 main 分支各自改 code.py
+    _git(["checkout", "-b", "other", "HEAD"], str(src))
+    (src / "code.py").write_text("print(99)\n", encoding="utf-8")
+    _git(["commit", "-am", "other change"], str(src))
+    _git(["checkout", "main"], str(src))
+    (src / "code.py").write_text("print(2)\n", encoding="utf-8")
+    _git(["commit", "-am", "main change"], str(src))
+    wt = tmp_path / "wt"
+    _git(["clone", str(src), str(wt)], str(tmp_path))
+    _git(["merge", "origin/other"], str(wt))  # 双边改 code.py → unmerged 冲突
+    r = wg.scan_staged_files(str(wt))
+    assert "code.py" in (r["hard"] or {})  # 工作区冲突标记被降级路径检出
+
+
 # ===================== 指纹保真校验 =====================
 
 def test_fidelity_detects_modify_and_remove(tmp_path):

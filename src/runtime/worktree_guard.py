@@ -66,8 +66,31 @@ def _scan_file_text(path: str) -> dict:
         return {"hard": 0, "soft": 0}
 
 
+def _scan_staged_blob(wt_dir: str, name: str, token: str) -> dict | None:
+    """读暂存区 blob（git show :name）并扫描——保证扫描对象=实际将提交的内容。
+
+    PR #874 审查修正：文件暂存后又被修改时，磁盘内容 ≠ 提交内容，须扫 blob。
+    `git show :name` 失败（如 unmerged 路径多 stage）→ 返回 None，调用方降级扫磁盘。
+    """
+    try:
+        from src.runtime.repogit import _run_git
+        b = _run_git(["-C", wt_dir, "show", f":{name}"], token=token)
+        if b is None or b.returncode != 0:
+            return None
+        text = b.stdout or ""
+        if len(text) > _MAX_FILE_BYTES:
+            return {"hard": 0, "soft": 0}
+        from src.api.merge_gate import scan_text
+        return scan_text(text)
+    except Exception:
+        return None
+
+
 def scan_staged_files(wt_dir: str, token: str = "") -> dict:
     """扫描暂存区（git diff --cached）文件内容的冲突标记。
+
+    扫描对象是暂存 blob（`git show :file`，PR #874 审查修正）：文件暂存后又被修改时
+    与实际提交内容一致；blob 读取失败（unmerged）降级扫磁盘工作区文件。
 
     返回 {"hard": {file: n}, "soft": {file: n}}；硬命中调用方应阻断 commit/push
     （防冲突残留写入分支，AC1 的自动提交路径）。
@@ -81,10 +104,13 @@ def scan_staged_files(wt_dir: str, token: str = "") -> dict:
             return {"hard": hard, "soft": soft}
         names = [n for n in (r.stdout or "").split("\0") if n]
         for name in names:
-            path = os.path.join(wt_dir, name)
-            if not os.path.isfile(path):
-                continue
-            got = _scan_file_text(path)
+            got = _scan_staged_blob(wt_dir, name, token)
+            if got is None:
+                # 降级：unmerged 路径无单 stage blob，扫工作区文件（git 冲突标记在工作区）
+                path = os.path.join(wt_dir, name)
+                if not os.path.isfile(path):
+                    continue
+                got = _scan_file_text(path)
             if got["hard"]:
                 hard[name] = got["hard"]
             if got["soft"]:
