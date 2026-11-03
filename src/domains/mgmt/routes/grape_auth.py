@@ -1234,21 +1234,47 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
     """
     from src.domains.mgmt.auth.providers import _get_trusted_host
     from src.domains.mgmt.auth.email_service import is_production_env
-    if is_production_env():
-        scheme = "https"
+
+    # 优先用 browser_callback_url 配置（nginx 反代场景 Host header 不可靠）
+    base = ""
+    try:
+        from src.domains.mgmt.user.db import get_browser_callback_url
+        base = get_browser_callback_url()
+        if base and ("localhost" in base or "127.0.0.1" in base):
+            base = ""
+    except Exception:
+        base = ""
+
+    if base:
+        # 配置模式：直接用配置的 base_url 构造
+        scheme = "https" if is_production_env() else ("https" if request.headers.get("X-Forwarded-Proto") == "https" else "http")
+        lang = request.cookies.get("grapeLang", "zh")
+        prefix = f"/{lang}" if lang != "zh" else ""
+        import urllib.parse as _up
+        if popup:
+            real_path = "/oauth-popup-callback.html"
+        else:
+            real_path = path
+        qs = f"?{_up.urlencode(params)}" if params else ""
+        frag = f"#{hash_frag}" if hash_frag else ""
+        return f"{base.rstrip('/')}{_app_base()}{prefix}{real_path}{qs}{frag}"
     else:
-        scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
-    host = _get_trusted_host(request)
-    lang = request.cookies.get("grapeLang", "zh")
-    prefix = f"/{lang}" if lang != "zh" else ""
-    import urllib.parse as _up
-    if popup:
-        real_path = "/oauth-popup-callback.html"
-    else:
-        real_path = path
-    qs = f"?{_up.urlencode(params)}" if params else ""
-    frag = f"#{hash_frag}" if hash_frag else ""
-    return f"{scheme}://{host}{_app_base()}{prefix}{real_path}{qs}{frag}"
+        # fallback：从 Host header 构造（开发环境直连）
+        if is_production_env():
+            scheme = "https"
+        else:
+            scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
+        host = _get_trusted_host(request)
+        lang = request.cookies.get("grapeLang", "zh")
+        prefix = f"/{lang}" if lang != "zh" else ""
+        import urllib.parse as _up
+        if popup:
+            real_path = "/oauth-popup-callback.html"
+        else:
+            real_path = path
+        qs = f"?{_up.urlencode(params)}" if params else ""
+        frag = f"#{hash_frag}" if hash_frag else ""
+        return f"{scheme}://{host}{_app_base()}{prefix}{real_path}{qs}{frag}"
 
 
 def _oauth_error_redirect(request: Request, message: str, popup: bool = False):
