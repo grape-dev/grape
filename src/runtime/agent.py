@@ -1711,6 +1711,16 @@ def _cleanup_task_workdir(task: dict, env: dict | None = None):
         from src.runtime import repogit
         _num = repogit.issue_num_from(task.get("issue_id") or "")
         if _num and task.get("issue_session_id"):
+            # Issue #752（M2）：清理（卸载 worktree）前保真校验——功能文件指纹 vs
+            # 任务开始基线，不一致（复测清理损坏功能文件证据）告警供人工裁决，不阻断清理。
+            try:
+                from src.runtime.worktree_guard import verify_fidelity
+                _fid = verify_fidelity(cwd)
+                if not _fid.get("baseline_missing") and (_fid.get("modified") or _fid.get("removed")):
+                    log.warning(f"workdir cleanup fidelity alarm task={task.get('id')}: "
+                                f"modified={_fid.get('modified')} removed={_fid.get('removed')}")
+            except Exception as _fe:
+                log.warning(f"workdir cleanup fidelity check failed: {_fe}")
             repogit.remove_issue_worktree_if_pushed(
                 task.get("repo_key") or "", task.get("agent_type") or "",
                 _num, token=_get_task_token(task))
@@ -1828,6 +1838,28 @@ def _submit_linked_repo_prs(task: dict, env: dict):
                 log.info(f"linked PR: no changes in {_rk}, skip")
                 _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
                 continue
+
+            # Issue #752（M2）：commit 前冲突标记推送守卫——暂存文件硬命中
+            # `<<<<<<< `/`>>>>>>> ` → 阻断提交/推送（防冲突残留被 add -A 整树写入分支，
+            # PR #352 实证的损坏通道）；软命中（孤立 =======）仅告警。
+            # 另做功能文件指纹保真校验（vs 任务开始基线），不一致告警不阻断。
+            try:
+                from src.runtime.worktree_guard import scan_staged_files, verify_fidelity
+                _g = scan_staged_files(_wt_dir)
+                if _g.get("hard"):
+                    log.warning(f"linked PR: conflict markers in staged files, BLOCKED push {_rk}: {_g['hard']}")
+                    _results.append({"repo_key": _rk, "status": "blocked",
+                                     "reason": f"conflict markers in staged files: "
+                                               f"{list(_g['hard'].keys())[:5]}"})
+                    continue
+                if _g.get("soft"):
+                    log.warning(f"linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
+                _fid = verify_fidelity(_wt_dir)
+                if not _fid.get("baseline_missing") and (_fid.get("modified") or _fid.get("removed")):
+                    log.warning(f"linked PR: fidelity alarm {_rk}: modified={_fid.get('modified')} "
+                                f"removed={_fid.get('removed')}")
+            except Exception as _ge:
+                log.warning(f"linked PR: worktree guard failed {_rk}: {_ge}")
 
             # 4. commit staged changes
             if _has_staged:

@@ -3848,6 +3848,27 @@ def _submit_direct_linked_prs(env_extra: dict, repo_key: str, issue_id: str,
                 _results.append({"repo_key": _rk, "status": "skipped", "reason": "no changes"})
                 continue
 
+            # Issue #752（M2）：commit 前冲突标记推送守卫（与 worker 端 _submit_linked_repo_prs
+            # 同口径）：暂存硬命中阻断提交/推送；软命中/指纹保真不一致告警不阻断。
+            try:
+                from src.runtime.worktree_guard import scan_staged_files, verify_fidelity
+                _g = scan_staged_files(_wt_dir)
+                if _g.get("hard"):
+                    _log.warning(f"direct linked PR: conflict markers in staged files, "
+                                 f"BLOCKED push {_rk}: {_g['hard']}")
+                    _results.append({"repo_key": _rk, "status": "blocked",
+                                     "reason": f"conflict markers in staged files: "
+                                               f"{list(_g['hard'].keys())[:5]}"})
+                    continue
+                if _g.get("soft"):
+                    _log.warning(f"direct linked PR: soft conflict markers (allowed) {_rk}: {_g['soft']}")
+                _fid = verify_fidelity(_wt_dir)
+                if not _fid.get("baseline_missing") and (_fid.get("modified") or _fid.get("removed")):
+                    _log.warning(f"direct linked PR: fidelity alarm {_rk}: "
+                                 f"modified={_fid.get('modified')} removed={_fid.get('removed')}")
+            except Exception as _ge:
+                _log.warning(f"direct linked PR: worktree guard failed {_rk}: {_ge}")
+
             # 4. commit staged changes
             if _has_staged:
                 _msg = f"feat: #{_issue_num} linked repo changes"
@@ -3932,6 +3953,15 @@ def _cleanup_direct_workdir(repo_key: str, agent_type: str, issue_id: str = ""):
                 _token = Repo(repo_key).bot_token
             except Exception:
                 pass
+            # Issue #752（M2）：清理前保真校验（与 worker 端 _cleanup_task_workdir 同口径）
+            try:
+                from src.runtime.worktree_guard import verify_fidelity
+                _fid_dr = verify_fidelity(ws)
+                if not _fid_dr.get("baseline_missing") and (_fid_dr.get("modified") or _fid_dr.get("removed")):
+                    log.warning(f"direct workdir cleanup fidelity alarm {repo_key}/{agent_type}: "
+                                f"modified={_fid_dr.get('modified')} removed={_fid_dr.get('removed')}")
+            except Exception as _fe:
+                log.warning(f"direct cleanup fidelity check failed: {_fe}")
             repogit.remove_issue_worktree_if_pushed(repo_key, agent_type, _num, token=_token)
             # Issue #242: 清理关联仓库 worktree（coding agent 多仓库）
             # 关联 worktree 路径由 repogit.issue_dir_for(repo_key, "coding", issue_num) 推导，
