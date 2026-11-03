@@ -401,7 +401,8 @@ def get_redirect_uri(request, provider: str = "") -> str:
 
     需求 11：从 provider 配置的 redirect_uri 字段读取（完整地址，含路径）。
     需求 3：路径为 /api/auth/callback/{provider}。
-    开发环境 fallback：provider 未配 redirect_uri 时从 Host header 构造。
+    fallback 1：server_base_url 配置（nginx 反代场景，Host header 不可靠）。
+    fallback 2：从 Host header 构造（开发环境直连）。
     """
     # 优先从 provider 配置读取
     if provider:
@@ -409,12 +410,21 @@ def get_redirect_uri(request, provider: str = "") -> str:
         if cfg and cfg.get("redirect_uri"):
             return cfg["redirect_uri"]
 
-    # fallback：从 Host header 构造（开发环境）
     # provider 为空意味着调用方未传 provider，属于编程错误——统一回调路由已删除
     if not provider:
         raise ValueError("get_redirect_uri requires a non-empty provider after callback route split")
     path = f"/api/auth/callback/{provider}"
-    # 生产环境强制 https，防止 X-Forwarded-Proto 伪造
+
+    # fallback 1：server_base_url 配置（nginx 反代场景优先用配置而非 Host header）
+    try:
+        from src.user.db import get_browser_callback_url
+        base = get_browser_callback_url()
+        if base and "localhost" not in base and "127.0.0.1" not in base:
+            return f"{base.rstrip('/')}{path}"
+    except Exception:
+        pass
+
+    # fallback 2：从 Host header 构造（开发环境直连）
     from src.auth.security_config import is_production
     if is_production():
         scheme = "https"

@@ -1234,11 +1234,17 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
     """
     from src.auth.providers import _get_trusted_host
     from src.auth.email_service import is_production_env
-    if is_production_env():
-        scheme = "https"
-    else:
-        scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
-    host = _get_trusted_host(request)
+
+    # 优先用 browser_callback_url 配置（nginx 反代场景 Host header 不可靠）
+    base = ""
+    try:
+        from src.user.db import get_browser_callback_url
+        base = get_browser_callback_url()
+        if base and ("localhost" in base or "127.0.0.1" in base):
+            base = ""
+    except Exception:
+        base = ""
+
     lang = request.cookies.get("grapeLang", "zh")
     prefix = f"/{lang}" if lang != "zh" else ""
     import urllib.parse as _up
@@ -1248,7 +1254,16 @@ def _build_redirect_url(request: Request, path: str = "/", params: dict | None =
         real_path = path
     qs = f"?{_up.urlencode(params)}" if params else ""
     frag = f"#{hash_frag}" if hash_frag else ""
-    return f"{scheme}://{host}{_app_base()}{prefix}{real_path}{qs}{frag}"
+
+    if base:
+        return f"{base.rstrip('/')}{_app_base()}{prefix}{real_path}{qs}{frag}"
+    else:
+        if is_production_env():
+            scheme = "https"
+        else:
+            scheme = "https" if request.headers.get("X-Forwarded-Proto") == "https" else "http"
+        host = _get_trusted_host(request)
+        return f"{scheme}://{host}{_app_base()}{prefix}{real_path}{qs}{frag}"
 
 
 def _oauth_error_redirect(request: Request, message: str, popup: bool = False):
