@@ -207,7 +207,8 @@ def test_complete_task_non_sre_no_register(_quiet_remote_hooks):
 # ===== 双路径调用点源码检查（防遗漏回归）=====
 
 def test_direct_path_calls_scene_register():
-    from src.domains.runtime.pipeline.event_pipeline import _execute_agent_inner, register_scene_deploy_url
+    from src.domains.runtime.engine.direct_executor import _execute_agent_inner
+    from src.domains.runtime.pipeline.event_pipeline import register_scene_deploy_url
     src = inspect.getsource(_execute_agent_inner)
     assert "register_scene_deploy_url" in src, (
         "_execute_agent_inner must call register_scene_deploy_url (Issue #482 direct path)")

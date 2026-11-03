@@ -1110,7 +1110,7 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
             "hint": "retry with the same idempotency_key, or verify via GET /api/a2a/status",
         })
     try:
-        from src.domains.runtime.pipeline.event_pipeline import _execute_agent
+        from src.domains.runtime.engine.direct_executor import _execute_agent
         from src.kernel.session_manager import db, db_lock
         backend = ""
         runtime_id = 0
@@ -1514,7 +1514,8 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                 return {"status": "ok", "seq": 0, "agent": agent_name}
         kind = runtime_execution_kind(engine_id)
         if kind == EXEC_MODE_DIRECT:
-            from src.domains.runtime.pipeline.event_pipeline import start_direct_agent, _create_direct_task
+            from src.domains.runtime.engine.direct_executor import start_direct_agent
+            from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
             _issue_id = f"#{issue_number}" if issue_number else ""
             evt["_skill_id"] = skill_id
             _a2a_task_id = _create_direct_task(repo_key, seq, agent_name, _be,

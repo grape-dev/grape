@@ -250,7 +250,8 @@ def _dispatch_picked(p: dict, engine_id: int, pool: str) -> None:
                                pool_engine_source="scene")
         return
     # 本机直连：建任务行（防 sweeper）+ 提交执行
-    from src.domains.runtime.pipeline.event_pipeline import _create_direct_task, start_direct_agent, _execute_agent
+    from src.domains.runtime.pipeline.event_pipeline import _create_direct_task
+    from src.domains.runtime.engine.direct_executor import start_direct_agent, _execute_agent
     tid = _create_direct_task(p["repo_key"], seq, p["agent_type"], _be,
                               p["skill_name"], p["skill_path"], engine_id,
                               p["evt"], p["issue_id"], skill_id=p["skill_id"])

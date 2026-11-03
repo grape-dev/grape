@@ -103,7 +103,7 @@ class TestTokenRedaction:
     def test_event_pipeline_has_user_token_redaction(self):
         """R20.25.4: event_pipeline.py 中有 user_token 脱敏逻辑"""
         import inspect
-        from src.domains.runtime.pipeline.event_pipeline import _execute_agent_inner
+        from src.domains.runtime.engine.direct_executor import _execute_agent_inner
         source = inspect.getsource(_execute_agent_inner)
         # R20.25.1: result_text 脱敏覆盖 user_token
         assert "_user_token_for_redact" in source, \
@@ -118,7 +118,7 @@ class TestTokenRedaction:
     def test_agent_logs_redacts_user_token(self):
         """R20.25.2: agent_logs 脱敏覆盖 user_token"""
         import inspect
-        from src.domains.runtime.pipeline.event_pipeline import _execute_agent_inner
+        from src.domains.runtime.engine.direct_executor import _execute_agent_inner
         source = inspect.getsource(_execute_agent_inner)
         # 找到 agent_logs 脱敏位置
         idx = source.find("_msg = _msg.replace")
