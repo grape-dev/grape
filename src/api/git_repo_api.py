@@ -828,8 +828,43 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
                      {"merge_method": (body.merge_method or "").strip(),
                       "title": (body.title or "").strip()}.items() if v}
         _payload = _filtered or None
+    _token = _repo_token(owner, repo, user, p)
+    # Issue #754：合并前置硬阻断——PR 变更 diff 存在未解决冲突标记（<<<<<<< / >>>>>>>，
+    # 复测 unresolved-marker 失败的等价物）时拒绝合并并留痕；预检本身上游失败 → fail-open
+    # 透传合并（保持 #549/#558 上游透传语义，不引入新的 502）。
+    _blocked_hits: list = []
+    try:
+        _blocked_hits = _scan_pull_conflict_markers(p, owner, repo, number, _token)
+    except HTTPException as _e:
+        log.warning(f"Issue #754 conflict-marker precheck skipped "
+                    f"(upstream {getattr(_e, 'status_code', '?')}): {getattr(_e, 'detail', _e)}")
+    except Exception as _e:
+        log.warning(f"Issue #754 conflict-marker precheck failed (fail-open): {_e}")
+    if _blocked_hits:
+        _files = ", ".join(f"{h.get('path') or '<unknown>'}({h.get('markers')})" for h in _blocked_hits)
+        _msg = (f"merge blocked: unresolved conflict markers detected in PR files: {_files}. "
+                f"Fix the markers and retry (Issue #754).")
+        # 阻断留痕①：台账（pr_merge_blocked，best-effort 不影响阻断本身）
+        try:
+            from src.outbound_ledger import record_outbound
+            from src.repo_key import to_repo_key
+            record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
+                            issue_number=str(number), origin_channel="api")
+        except Exception as _le:
+            log.warning(f"outbound_ledger record (pr_merge_blocked) failed: {_le}")
+        # 阻断留痕②：PR 评论 best-effort（GitCode /pulls、GitHub /issues 通道均尝试）
+        try:
+            _trace_body = (f"[Grape] merge blocked: unresolved conflict markers in PR files: {_files}. "
+                           f"Manual fix required before merge. (Issue #754)")
+            _trace_path = (f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments")
+            _vcs_req(p, "POST", _vcs_url(owner, repo, _trace_path, None, p), _token,
+                     {"body": _trace_body})
+        except Exception as _ce:
+            log.warning(f"Issue #754 block-trace PR comment failed: {_ce}")
+        log.warning(f"Issue #754 {_msg}")
+        raise HTTPException(status_code=409, detail={"code": 409, "message": _msg})
     resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
-                    _repo_token(owner, repo, user, p), _payload)
+                    _token, _payload)
     # Issue #453 台账（S25）：合并 PR → pull_request_merged 回声对账（VcsApiClient.merge_pr
     # 已入账，网关直调路径此处分账）
     try:
@@ -853,7 +888,9 @@ def list_pull_comments(owner: str, repo: str, number: int, user: dict = Depends(
              description="Creates a PR comment (body required). Issue #585: the GitHub provider routes this through "
                          "POST /issues/{number}/comments (a PR is an issue; that endpoint only needs body), because "
                          "GitHub's /pulls/{n}/comments is the inline review comment endpoint which requires "
-                         "commit_id/path/line and returns 422 for body-only payloads. GitCode keeps /pulls/{n}/comments.")
+                         "commit_id/path/line and returns 422 for body-only payloads. GitCode keeps /pulls/{n}/comments. "
+                         "Issue #754: GitCode 405 (PR already merged, not reviewable) automatically falls back to "
+                         "POST /issues/{number}/comments (equivalent trace channel, PR-is-issue semantics).")
 def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
                         user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):
     # Issue #372 R4.1: PR 评论同样追加标记
@@ -864,8 +901,22 @@ def create_pull_comment(owner: str, repo: str, number: int, body: CommentBody,
     # （必填 commit_id/path/line），仅传 body 必然 422；PR 本身是 issue，改用
     # /issues/{n}/comments 发普通 PR 评论（仅需 body），与 GitCode 行为对齐。
     _comments_path = f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments"
-    resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _comments_path, None, p),
-                    _repo_token(owner, repo, user, p), {"body": _body})
+    # Issue #754：GitCode 已 merged PR 上 POST /pulls/{n}/comments 返回 405
+    # （not allowed to be reviewed after being merged）→ 等价留痕通道回写兜底：
+    # PR=issue 语义（同 #585 方案），改走 /issues/{n}/comments，闭环说明不再散落 Issue。
+    _fallback_path = None if p == "github" else f"/issues/{number}/comments"
+    _token = _repo_token(owner, repo, user, p)
+    try:
+        resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _comments_path, None, p),
+                        _token, {"body": _body})
+    except HTTPException as _e:
+        if _fallback_path and getattr(_e, "status_code", None) == 405:
+            log.warning(f"Issue #754 PR comment 405 on {_comments_path} (merged PR?) "
+                        f"→ fallback to {_fallback_path}")
+            resp = _vcs_req(p, "POST", _vcs_url(owner, repo, _fallback_path, None, p),
+                            _token, {"body": _body})
+        else:
+            raise
     # Issue #453 台账（S29-G1，网关 PR 端点族补全）：PR 评论入账——系统内部发 PR 评论
     # 走 event_pipeline 裸 urllib 路径（已入账），此网关端点原先漏账，仅剩外部 API 调用者
     # 的理论路径无台账防线。回流按 note_hook_pr 评论 ID 对账；系统内部 QA 回帖 PR 的
@@ -1010,6 +1061,49 @@ def _normalize_pull_files_diff(resp):
             log.warning(f"Pull files diff consistency check failed for {item.get('filename')!r}: "
                         "no non-empty diff at .patch.diff after normalization")
     return resp
+
+
+# Issue #754：未解决冲突标记行首模式（<<<<<<< 与 >>>>>>>；======= 单独出现误报率高，
+# 不作为独立命中信号，由配对的首尾标记共同判定）。允许 unified diff 行前缀
+# （+/space）一个字符：实际 PR diff 中冲突标记行形如 "+<<<<<<< HEAD"。
+_CONFLICT_MARKER_RES = (
+    _re.compile(r"^[+\- ]?<{7}(?=[ \t\r\n]|$)", _re.MULTILINE),
+    _re.compile(r"^[+\- ]?>{7}(?=[ \t\r\n]|$)", _re.MULTILINE),
+)
+
+
+def _scan_pull_conflict_markers(p: str, owner: str, repo: str, number: int, token: str,
+                                per_page: int = 100, max_pages: int = 10) -> list:
+    """Issue #754：merge 前置复测等价检查——扫描 PR 全部变更文件 diff 中的冲突标记。
+
+    - 复用 `list_pull_files` 的 `GET /pulls/{n}/files`（分页 per_page=100，上限 10 页）。
+    - diff 字段统一经 `_normalize_pull_files_diff` 归一到 ``.patch.diff``（Issue #731）。
+    - 返回命中列表 ``[{path, markers}]``（markers = 首尾标记出现总次数）；未命中返回 []。
+    - 上游/网络异常向上抛出，由调用方（merge_pull）决定 fail-open。
+    """
+    hits: list = []
+    page = 1
+    for _ in range(max_pages):
+        resp = _vcs_req(p, "GET", _vcs_url(owner, repo, f"/pulls/{number}/files",
+                                           {"page": page, "per_page": per_page}, p), token)
+        resp = _normalize_pull_files_diff(resp)
+        if not isinstance(resp, list):
+            break
+        for item in resp:
+            if not isinstance(item, dict):
+                continue
+            patch = item.get("patch")
+            diff = patch.get("diff") if isinstance(patch, dict) else None
+            if not isinstance(diff, str) or not diff:
+                continue
+            count = sum(len(rx.findall(diff)) for rx in _CONFLICT_MARKER_RES)
+            if count:
+                hits.append({"path": item.get("filename") or item.get("path") or "",
+                             "markers": count})
+        if len(resp) < per_page:
+            break
+        page += 1
+    return hits
 
 
 @router.get("/{owner}/{repo}/pulls/{number}/files", operation_id="gitrepo_pulls_files", summary="List PR changed files",

@@ -4970,7 +4970,7 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
     _comment = f"[{agent_type.upper()} Agent] {_conclusion}"
     _comment += "\n<!-- grape-auto-comment -->"
     try:
-        import urllib.request, json as _json
+        import urllib.request, urllib.error, json as _json
         if _is_github_repo(repo_key):
             # GitHub: PR 共用 Issue 评论 API
             _url = f"https://api.github.com/repos/{repository}/issues/{pr_number}/comments"
@@ -5007,6 +5007,38 @@ def _post_result_to_pr(repository: str, pr_number: str, result_text: str, bot_to
         except Exception as _le:
             log.warning(f"outbound_ledger record (_post_result_to_pr) failed: {_le}")
         log.info(f"PR-sub: posted result comment to {repository}/pulls/{pr_number}")
+    except urllib.error.HTTPError as e:
+        # Issue #754：GitCode 已 merged PR 评论 405（not allowed to be reviewed after being
+        # merged）→ 等价留痕通道回写兜底：PR=issue 语义，改走 /issues/{n}/comments。
+        if (e.code == 405 and "/pulls/" in getattr(e, "url", "") and "gitcode.com" in getattr(e, "url", "")):
+            try:
+                _url754 = f"https://gitcode.com/api/v5/repos/{repository}/issues/{pr_number}/comments"
+                _req754 = urllib.request.Request(_url754, data=_data,
+                    headers={"Authorization": f"Bearer {bot_token}",
+                             "Content-Type": "application/json"}, method="POST")
+                _resp = urllib.request.urlopen(_req754, timeout=15)
+                try:
+                    _body_resp = b""
+                    try:
+                        _body_resp = _resp.read()
+                    except Exception:
+                        pass
+                    _parsed_pr = {}
+                    try:
+                        _parsed_pr = _json.loads(_body_resp) if _body_resp else {}
+                    except Exception:
+                        _parsed_pr = {}
+                    _ledger_record_comment("gitcode", repo_key, repository, pr_number, _comment,
+                                           _parsed_pr if isinstance(_parsed_pr, dict) else {})
+                except Exception as _le:
+                    log.warning(f"outbound_ledger record (_post_result_to_pr 405-fallback) failed: {_le}")
+                log.info(f"PR-sub: posted result comment via issue-channel fallback to "
+                         f"{repository}/pulls/{pr_number} (Issue #754)")
+                return
+            except Exception as e2:
+                log.warning(f"PR-sub: post result comment failed (405 fallback also failed): {e2}")
+                return
+        log.warning(f"PR-sub: post result comment failed: {e}")
     except Exception as e:
         log.warning(f"PR-sub: post result comment failed: {e}")
 
