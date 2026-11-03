@@ -478,6 +478,8 @@ provider 透传（GitHub/GitCode 字段一致，Issue #632 对齐 #577）。
 ```
 
 > **Issue #731（diff 字段路径契约）**：所有文件对象的 diff 内容**统一且仅在** `.patch.diff`（对象内字符串，含 `@@ ... @@` diff 头）。代理层已对平台差异返回做归一化（顶层 `.diff` 会并入 `.patch.diff` 并移除），下游脚本无需 `.patch.diff // .diff` 兜底；`patch` 元信息（added_lines/removed_lines/too_large 等）语义不变。
+>
+> **Issue #750（单次解析保证）**：`.patch.diff` **恒为裸 diff 文本字符串**（非 JSON 字符串）。平台侧的双重 JSON 编码（patch 字段本身为 `"{\"diff\":\"...\"}"` 字符串）已在代理层 `list_pull_files` 出参归一化中内层解码；裸 diff 字符串按 `{"diff": <raw>}` 包裹。下游**单次** `json.loads(输出)[i]["patch"]["diff"]` 即可直接取到 diff 文本，无需二次解析。
 
 ---
 

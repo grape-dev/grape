@@ -25,6 +25,8 @@ router = APIRouter(prefix="/api/git-repo", tags=["git-repo"])
 
 # 完整 sha（40-hex，git object id）：tree 接口直连免存在性预校验（Issue #734）
 import re as _re
+
+import json
 _FULL_SHA_RE = _re.compile(r"^[0-9a-fA-F]{40}$")
 
 # provider = 注册表（vcs/providers）自动派生；新增 provider 只加模块
@@ -973,6 +975,12 @@ def _normalize_pull_files_diff(resp):
     string-valued ``.patch`` into the object form. Consistency assertion afterwards:
     every file object with diff content must expose it at ``.patch.diff``; abnormal
     structures are logged via log.warning instead of being silently passed through.
+
+    Issue #750: string-valued ``.patch`` may be a doubly JSON-encoded payload
+    (``"{\\"diff\\": ...}"``). Try an inner ``json.loads`` first: if it decodes into a
+    dict with a ``diff`` key, that value is the bare diff text; otherwise treat the
+    string itself as a raw diff. ``.patch.diff`` is therefore always a bare diff text
+    string, so a single ``json.loads`` of the CLI output suffices downstream.
     """
     if not isinstance(resp, list):
         return resp
@@ -988,7 +996,15 @@ def _normalize_pull_files_diff(resp):
                 item["patch"] = merged
             item.pop("diff", None)
         elif isinstance(patch, str) and patch:
-            item["patch"] = {"diff": patch}
+            diff_text = patch
+            try:
+                decoded = json.loads(patch)
+            except (ValueError, TypeError):
+                decoded = None
+            if isinstance(decoded, dict) and isinstance(decoded.get("diff"), str) \
+                    and decoded["diff"]:
+                diff_text = decoded["diff"]
+            item["patch"] = {"diff": diff_text}
         final = item.get("patch")
         if not isinstance(final, dict) or not final.get("diff"):
             log.warning(f"Pull files diff consistency check failed for {item.get('filename')!r}: "
@@ -1001,7 +1017,9 @@ def _normalize_pull_files_diff(resp):
                         "(GitHub default per_page=30 silently truncated large PRs; default here is per_page=100). "
                         "For changed_files>100 PRs, page through manually; tree --depth recursive is a fallback for huge PRs. "
                         "Issue #731: file diff content is always normalized to the unified field path .patch.diff; "
-                        "top-level .diff (if returned by the provider) is merged into .patch.diff.")
+                        "top-level .diff (if returned by the provider) is merged into .patch.diff. "
+                        "Issue #750: doubly JSON-encoded patch strings are inner-decoded, so .patch.diff "
+                        "is always a bare diff text string (single json.loads downstream).")
 def list_pull_files(owner: str, repo: str, number: int, page: int = Query(1, ge=1),
                     per_page: int = Query(100, ge=1, le=100),
                     user: dict = Depends(get_current_user_or_api_key), p: str = Depends(_provider)):

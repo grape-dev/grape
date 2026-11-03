@@ -955,3 +955,62 @@ def test_pulls_files_diff_non_list_passthrough(monkeypatch, _client):
                         lambda m, u, token="", body=None: {"ok": True})
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200 and r.json() == {"ok": True}
+
+
+def test_pulls_files_diff_double_encoded_patch_decoded(monkeypatch, _client):
+    """Issue #750：patch 为双重 JSON 编码字符串时内层解码，.patch.diff 为裸 diff 文本。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    raw_diff = "@@ -1 +1 @@\n+a"
+    upstream = [{"filename": "src/a.py", "status": "modified",
+                 "patch": json.dumps({"diff": raw_diff})}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert isinstance(f["patch"], dict)
+    assert f["patch"]["diff"] == raw_diff  # 裸 diff 文本，非 JSON 字符串
+
+
+def test_pulls_files_diff_raw_patch_string_wrapped(monkeypatch, _client):
+    """Issue #750：patch 为裸 diff 字符串（非合法 JSON）时按原样包裹（兼容 #731）。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    raw_diff = "@@ -1,2 +1,3 @@\n context\n-old\n+new\n+line"
+    upstream = [{"filename": "src/b.py", "status": "modified", "patch": raw_diff}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert isinstance(f["patch"], dict) and f["patch"]["diff"] == raw_diff
+
+
+def test_pulls_files_diff_json_string_without_diff_key_wrapped(monkeypatch, _client):
+    """Issue #750：patch 可 json.loads 但非含 diff 键的 dict → 视为裸 diff 字符串。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    upstream = [{"filename": "src/c.py", "status": "modified",
+                 "patch": json.dumps({"text": "@@ -1 +1 @@\n+x"})}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    # json.dumps({"text":...}) 不是合法 JSON 语义下的裸 diff？不——它可解码但无 diff 键，按裸字符串原样包裹
+    assert f["patch"]["diff"] == json.dumps({"text": "@@ -1 +1 @@\n+x"})
+
+
+def test_pulls_files_diff_json_string_with_empty_diff_wrapped(monkeypatch, _client):
+    """Issue #750：patch 解码为含 diff 键但值为空字符串 → 不取空值，按裸字符串包裹。"""
+    base = f"/api/git-repo/{OWNER}/{REPO}"
+    payload = json.dumps({"diff": ""})
+    upstream = [{"filename": "src/d.py", "status": "modified", "patch": payload}]
+
+    monkeypatch.setattr("src.user.repo_manager._req",
+                        lambda m, u, token="", body=None: [dict(f) for f in upstream])
+    r = _get(_client, f"{base}/pulls/9/files")
+    assert r.status_code == 200
+    f = r.json()[0]
+    assert f["patch"]["diff"] == payload
