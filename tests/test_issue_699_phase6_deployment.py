@@ -259,6 +259,54 @@ class TestTC63DockerCompose:
         assert "grape_worker_server" in chat_block
         assert "proxy_buffering off" in chat_block
 
+    def test_healthcheck_only_hits_mounted_endpoint(self):
+        """healthcheck 必须命中该进程真实挂载的健康端点。
+
+        Event/Worker 只经 server_common.attach_health 挂载 /health（无 insight health.router
+        的 /api/health，GET /api/health 返回 404 → 容器永久 unhealthy）；
+        Mgmt/Insight 挂载 insight health.router，/api/health 可用。
+        """
+        d = self._compose()
+        expectations = {
+            "grape-server": ("38080", "/api/health"),
+            "grape-event-server": ("38081", "/health"),
+            "grape-worker-server": ("38082", "/health"),
+            "grape-insight-server": ("38083", "/api/health"),
+        }
+        for svc, (port, path) in expectations.items():
+            test_cmd = " ".join(d["services"][svc]["healthcheck"]["test"])
+            assert port in test_cmd, (svc, test_cmd)
+            assert f"http://127.0.0.1:{port}{path}'" in test_cmd, (svc, test_cmd)
+        # 反向断言：Event/Worker 不得再探测未挂载的 /api/health
+        for svc in ("grape-event-server", "grape-worker-server"):
+            test_cmd = " ".join(d["services"][svc]["healthcheck"]["test"])
+            assert "/api/health" not in test_cmd, (svc, test_cmd)
+
+    def test_compose_nginx_routes_chat_reads_to_mgmt(self):
+        """chat 读端点（conversations/messages 等 GET）→ Mgmt，避免 Worker 405/404。"""
+        conf = _read("deploy/nginx-grape-compose.conf")
+        read_block = conf.split("location ~ ^/api/chat/")[1].split("location ")[0]
+        assert "grape_server" in read_block
+        assert "grape_worker_server" not in read_block
+
+        import re
+        m = re.search(r"location ~ (\^/api/chat/\([^)]*\))", conf)
+        assert m, "chat read-endpoint regex location missing"
+        pattern = re.compile(m.group(1))
+        for path in (
+            "/api/chat/conversations",
+            "/api/chat/messages/12",
+            "/api/chat/config",
+            "/api/chat/task/t1/stream",
+            "/api/chat/task/t1/status",
+            "/api/chat/analyze-image",
+            "/api/chat/image/12/a.png",
+        ):
+            assert pattern.match(path), path
+        # chat 执行端点仍归 Worker（不被读端点正则吞掉）
+        for path in ("/api/chat/send", "/api/chat/send/stream", "/api/chat/submit"):
+            assert not pattern.match(path), path
+
 
 # ===========================================================================
 # TC-6.4：systemd 服务管理验证（静态结构；systemd 运行态在本环境不可用）

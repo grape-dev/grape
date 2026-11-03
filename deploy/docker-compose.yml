@@ -77,7 +77,8 @@ services:
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38081/api/health')"]
+      # Event 进程只挂载 /health（server_common.attach_health），无 /api/health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38081/health')"]
 
   grape-worker-server:
     build:
@@ -106,7 +107,8 @@ services:
     logging: *default-logging
     healthcheck:
       <<: *app-healthcheck
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38082/api/health')"]
+      # Worker 进程只挂载 /health（server_common.attach_health），无 /api/health
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38082/health')"]
 
   grape-insight-server:
     build:
