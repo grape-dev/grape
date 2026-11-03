@@ -1305,6 +1305,52 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
     return 0
 
 
+def get_skill_scope_info(skill_name: str, repo_key: str = "") -> dict:
+    """技能 scope 与场景（repo 级）scope 匹配判定（Issue #657）。
+
+    按 repo → official → user（任意 owner）顺序查 skill 表：
+    - 命中 repo（owner_id=repo_key）或 official → matched=True（repo 级场景可引用）；
+    - 仅 user scope 存在 → found=True, matched=False
+      （scope 不匹配：repo 级场景不可引用 user 级技能，无论 owner 是谁）；
+    - 全部未命中 → found=False（技能不在 skill 表，如官方内置包形态，
+      由调用方走内置包兜底/派发侧门禁，维持存量场景兼容）。
+
+    返回 {found, matched, scope, skill_id, owner_id}。
+    """
+    info = {"found": False, "matched": False, "scope": "", "skill_id": 0, "owner_id": ""}
+    if not skill_name:
+        return info
+    try:
+        with db_lock:
+            c = db.cursor()
+            if repo_key:
+                row = c.execute(
+                    "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='repo' "
+                    "AND owner_id=? AND is_active=1 LIMIT 1",
+                    (skill_name, repo_key)).fetchone()
+                if row:
+                    info.update(found=True, matched=True, scope="repo",
+                                skill_id=row[0], owner_id=row[1] or "")
+                    return info
+            row = c.execute(
+                "SELECT id FROM skill WHERE skill_name=? AND scope='official' "
+                "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            if row:
+                info.update(found=True, matched=True, scope="official",
+                            skill_id=row[0], owner_id="")
+                return info
+            row = c.execute(
+                "SELECT id, owner_id FROM skill WHERE skill_name=? AND scope='user' "
+                "AND is_active=1 LIMIT 1", (skill_name,)).fetchone()
+            if row:
+                info.update(found=True, matched=False, scope="user",
+                            skill_id=row[0], owner_id=row[1] or "")
+                return info
+    except Exception as e:
+        log.warning(f"get_skill_scope_info failed: {e}")
+    return info
+
+
 def get_skill_path(skill_id) -> str:
     """按 skill_id 返回 skill 的实际 SKILL.md 绝对路径（official/user/repo scope 处理）"""
     skill = get_skill_by_id(skill_id)

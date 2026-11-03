@@ -1496,6 +1496,27 @@ async def a2a_endpoint(request: Request, body: A2AHandoffBody, user: dict | None
                         else:
                             skill_path = _pipe_skill
                             skill_id = 0
+                            # Issue #657: skill 解析为空（仅 user scope 可用，scope 不匹配）
+                            # → 立即落 skill_resolve_failed 错误事件并返回 failed，不再派发
+                            from src.api.event_pipeline import (
+                                _skill_scope_mismatch, _skill_scope_mismatch_reason,
+                                _fail_skill_resolve_event)
+                            _mm, _mm_info = _skill_scope_mismatch(_pipe_skill, repo_key)
+                            if _mm:
+                                _reason = _skill_scope_mismatch_reason(
+                                    _pipe_skill, _mm_info, _a2a_issue_scene, agent_name)
+                                _fr = _fail_skill_resolve_event(
+                                    repo_key, _pipe_skill, _a2a_issue_scene, agent_name,
+                                    _reason,
+                                    issue_id=f"#{issue_number}" if issue_number else "")
+                                return JSONResponse(
+                                    status_code=400,
+                                    content={"code": 400, "status": "failed",
+                                             "seq": _fr.get("seq", 0),
+                                             "agent": agent_name,
+                                             "skill": _pipe_skill,
+                                             "skill_resolve_failed": True,
+                                             "message": _reason})
                         log.info(f"A2A: issue scene skill override: {agent_name}={_pipe_skill} sid={skill_id} (scene={_a2a_issue_scene})")
             except Exception as _oe:
                 log.warning(f"A2A: issue scene skill override failed: {_oe}")

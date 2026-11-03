@@ -32,6 +32,11 @@ BUILD_FAILURE   = "build_failure"
 DEPLOY_START    = "deploy_start"
 DEPLOY_FINISH   = "deploy_finish"
 
+# === 派发前错误事件（Issue #657）===
+# 派发前技能解析失败（如 repo 级场景引用 user 级技能，scope 不匹配）→
+# 立即产生该错误事件（status=failed）并阻断派发，替代 pending_self_report 1800s 超时
+SKILL_RESOLVE_FAILED = "skill_resolve_failed"
+
 # 所有需要阶段矩阵路由的事件
 ROUTABLE_EVENTS = {
     ISSUE_OPENED, ISSUE_UPDATED, ISSUE_COMMENT, ISSUE_LABELED,
