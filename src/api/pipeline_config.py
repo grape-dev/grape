@@ -42,15 +42,24 @@ _SCENE_COLUMNS_LOCK = threading.Lock()
 
 
 def _get_scene_columns() -> set[str]:
-    """Return column names of devops_pipeline_scene (cached once per process)."""
+    """Return column names of devops_pipeline_scene (cached once per process).
+
+    Lock order fix (deadlock 2026-11-03): previously acquired _SCENE_COLUMNS_LOCK
+    first and then db_lock while holding it, which inverted against callers that
+    already hold db_lock (e.g. dashboard sync paths) -> ABBA deadlock. Now the DB
+    query runs with db_lock ONLY, and _SCENE_COLUMNS_LOCK guards just the cache
+    write, so the two locks are never held simultaneously.
+    """
     global _SCENE_COLUMNS_CACHE
     if _SCENE_COLUMNS_CACHE is not None:
         return _SCENE_COLUMNS_CACHE
-    with _SCENE_COLUMNS_LOCK:
-        if _SCENE_COLUMNS_CACHE is not None:
-            return _SCENE_COLUMNS_CACHE
-        db, lock = _db()
-        with lock:
+
+    # 1) DB query guarded by db_lock only (never nested with _SCENE_COLUMNS_LOCK).
+    cols: set[str] = set()
+    db, lock = _db()
+    acquired = lock.acquire(timeout=30)
+    try:
+        if acquired:
             c = db.cursor()
             try:
                 try:
@@ -60,8 +69,17 @@ def _get_scene_columns() -> set[str]:
                     cols = {r[1] for r in c.execute("PRAGMA table_info(devops_pipeline_scene)").fetchall()}
             except Exception:
                 cols = set()
-        _SCENE_COLUMNS_CACHE = cols
-        return cols
+        else:
+            log.warning("_get_scene_columns: db_lock acquire timed out (30s), returning empty column set")
+    finally:
+        if acquired:
+            lock.release()
+
+    # 2) Publish to cache under the columns lock (no DB / no db_lock inside).
+    with _SCENE_COLUMNS_LOCK:
+        if _SCENE_COLUMNS_CACHE is None:
+            _SCENE_COLUMNS_CACHE = cols
+        return _SCENE_COLUMNS_CACHE
 
 
 def _cache_get(scene_id: str, repo_key: str):
