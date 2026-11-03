@@ -2773,6 +2773,45 @@ register_migration(
 )
 
 
+def _fn_add_agent_runtimes_role_tags() -> None:
+    """Issue #658 补注册（2026-11-03）：role_tags DDL 被写进已冻结的 legacy
+    _migrate_tables 清单而未走新轨——legacy-stamp 盖帽后该 ALTER 永不执行。
+    生产库已人工补列（本迁移在其上幂等空转、仅补盖章）；新装库建表定义
+    天然含列，同样空转。幂等：information_schema 查列，缺才 ALTER。"""
+    is_mysql = False
+    try:
+        from src.session_manager import _is_mysql_backend
+        is_mysql = _is_mysql_backend()
+    except Exception:
+        pass
+    with db_lock:
+        c = db.cursor()
+        if is_mysql:
+            c.execute(
+                "SELECT COUNT(*) FROM information_schema.columns "
+                "WHERE TABLE_SCHEMA=DATABASE() AND TABLE_NAME='agent_runtimes'"
+                " AND COLUMN_NAME='role_tags'")
+            if c.fetchone()[0]:
+                return
+            c.execute("ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''")
+            db.commit()
+        else:
+            c.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_runtimes'")
+            row = c.fetchone()
+            if not row or "role_tags" in (row[0] or ""):
+                return
+            db.execute("ALTER TABLE agent_runtimes ADD COLUMN role_tags TEXT DEFAULT ''")
+            db.commit()
+
+
+register_migration(
+    version="202611030001",
+    name="issue658_agent_runtimes_role_tags",
+    kind="safe",
+    fn=_fn_add_agent_runtimes_role_tags,
+)
+
+
 def _fn_checksum(fn: Callable[[], None]) -> str:
     """fn 指纹 sha256 前 16 位（漂移检测用；取不到返回空串不阻断）。
 
