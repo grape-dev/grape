@@ -36,18 +36,20 @@ SQLITE_PREFIX = {
     SCHEMA_INSIGHT: "ins_",
 }
 
-# ===== 表注册表（design §4.1~4.3）=====
-# mgmt：48 张核心表 + 附加/兼容表；runtime：22 张；insight：11 张。
+# ===== 表注册表（design §4.1~4.3，v2.2）=====
+# v2.2 变更（docs/weekly-09/grape-unified-implementation-design.md v2.2）：
+#   chat_conversations / chat_messages / chat_agent_session 从 grape_mgmt 迁至
+#   grape_runtime（Runtime 写、Mgmt 经 RuntimeService 读）。mgmt 核心 48→45 张；
+#   runtime 22→25 张。跨域方向：Runtime 写，Mgmt 通过 RuntimeService.get_chat_*() 读。
 _MGMT_TABLES = (
-    # 4.1 核心 1-48
+    # 4.1 核心 1-45（v2.2 剔除 chat 三表）
     "grape_accounts", "external_identities", "verification_codes", "signup_whitelist",
     "login_whitelist", "login_failures", "exchange_codes", "binding_tickets",
     "audit_logs", "admin_accounts", "api_tokens", "session_api_tokens",
     "organization", "org_member", "org_invitation", "managed_repos", "user_repos",
     "runtime_credentials", "devops_agent_session", "devops_pipeline_scene", "scene_market",
     "scene_category", "scene_likes", "scene_skill_ref", "scene_engine_detach_log", "skill",
-    "skill_category", "skill_likes", "featured_templates", "chat_conversations",
-    "chat_messages", "chat_agent_session", "vod_conversations", "community_posts",
+    "skill_category", "skill_likes", "featured_templates", "vod_conversations", "community_posts",
     "community_comments", "community_post_likes", "user_feedback", "uploaded_files",
     "knowledge_write_queue", "feishu_onboard_task", "global_im_bot_config",
     "grape_im_instance", "bot_seen_messages", "repo_im_group_binding", "autopilot_tasks",
@@ -57,12 +59,14 @@ _MGMT_TABLES = (
     "grape_t_credential_reveal_log", "grape_t_schema_migrations", "unified_user_mapping",
 )
 _RUNTIME_TABLES = (
-    # 4.2 1-22（devops_agent_session runtime 视图复用 mgmt 物理表，不重复注册）
+    # 4.2 1-25（devops_agent_session runtime 视图复用 mgmt 物理表，不重复注册；
+    # v2.2：chat 三表归属运行域——Runtime 写、Mgmt 经 RuntimeService 读）
     "events", "event_skipped", "event_active_guard", "event_thread",
     "event_action_filter", "event_route_config", "agent_tasks", "task_messages", "issue",
     "issue_state", "issue_agent_session", "pipeline_instances", "agent_runtimes",
     "engine_capabilities", "agent_type_runtime_pool", "agent_shared_knowledge",
     "scene_knowledge_ref", "agent_type", "backend_agents", "distributed_locks", "meta",
+    "chat_conversations", "chat_messages", "chat_agent_session",
     # 存量（db_setup DDL）
     "agent_type_config",
 )

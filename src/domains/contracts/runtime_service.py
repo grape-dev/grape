@@ -37,3 +37,17 @@ class RuntimeService(ABC):
     @abstractmethod
     def update_issue_state(self, repo_key: str, issue_number: int, patch: dict) -> Any:
         """A 用户操作推进 Issue 状态（Phase 5 细化事务边界）。"""
+
+    @abstractmethod
+    def get_chat_conversations(self, repo_key: str, limit: int = 50) -> list:
+        """A 用户面聊天对话列表（v2.2：chat 表归运行域，Mgmt 经本接口读）。
+
+        返回 chat_conversations 行列表。
+        """
+
+    @abstractmethod
+    def get_chat_messages(self, conv_id: str, limit: int = 100, before: int = 0) -> list:
+        """A 用户面聊天消息分页（Mgmt SSE 流/历史展示）。
+
+        返回 chat_messages 行列表（按 id 倒序取 limit，before>0 时取 id<before）。
+        """

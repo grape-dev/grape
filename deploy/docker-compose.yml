@@ -1,21 +1,34 @@
+# Grape Docker Compose——四容器 + nginx（Issue #699 Phase 6，TC-6.3）
+#
+# 改造自单容器 backend 布局：四个应用容器各跑一个进程
+#   grape-server         Mgmt    :38080（用户面 API / IM WS / 前端托管）
+#   grape-event-server   Event   :38081（webhook / A2A）
+#   grape-worker-server  Worker  :38082（runtime 协议 / tasks / chat 执行）
+#   grape-insight-server Insight :38083（可观测性 / 仪表盘）
+# 外加 nginx 容器按路径分流（nginx-grape-compose.conf）。
+#
+# 单机模式默认（SQLite + 表前缀，grape-data 卷共享）；
+# 集群模式把 DEVOPS_DB_BACKEND=mysql + DEVOPS_DB_* 写入 .env 后 up。
+#
+# 用法：cd deploy && docker compose up -d && sleep 30 && docker compose ps
+#      健康检查：curl -s http://localhost/api/health
 services:
-  backend:
+  grape-server:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    container_name: grape-backend
-    ports:
-      - "80:3000"
-      - "8080:3000"
+    command:
+      ["uvicorn", "src.api.grape_server:app", "--host", "0.0.0.0", "--port", "38080",
+       "--proxy-headers", "--forwarded-allow-ips=*"]
+    container_name: grape-server
     environment:
       - TZ=Asia/Shanghai
       - JWT_SECRET=${JWT_SECRET:?JWT_SECRET required}
-      # Issue #452: Docker 环境默认关闭公网 IP 探测
       - GRAPE_AUTO_DETECT_URL=false
-    # 审查修复: 移除 bind mount ./.env:/app/.env（宿主无 .env 时 compose 失败）
-    # 容器内 /app/.env 由 Dockerfile COPY .env.example .env 提供；
-    # 宿主 .env（如存在）通过 env_file 注入为环境变量，覆盖容器内默认值
-    # 注：compose 文件在 deploy/ 目录，相对路径指向 repo root (..)
+      - GRAPE_PROCESS_ROLE=server
+      - GRAPE_MODE=${GRAPE_MODE:-single}
+      - DEVOPS_DB_BACKEND=${DEVOPS_DB_BACKEND:-sqlite}
+      - GRAPE_SCHEMA_MODE=${GRAPE_SCHEMA_MODE:-1}
     env_file:
       - path: ../.env
         required: false
@@ -25,13 +38,122 @@ services:
       - ../.grape/skills:/app/.grape/skills
       - ../examples:/app/examples
     restart: unless-stopped
-    logging:
+    logging: &default-logging
       driver: json-file
       options:
         max-size: "50m"
         max-file: "3"
+    healthcheck: &app-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38080/api/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  grape-event-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      ["uvicorn", "src.api.grape_event_server:app", "--host", "0.0.0.0", "--port", "38081",
+       "--proxy-headers", "--forwarded-allow-ips=*"]
+    container_name: grape-event-server
+    environment:
+      - TZ=Asia/Shanghai
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET required}
+      - GRAPE_AUTO_DETECT_URL=false
+      - GRAPE_PROCESS_ROLE=event
+      - GRAPE_MODE=${GRAPE_MODE:-single}
+      - DEVOPS_DB_BACKEND=${DEVOPS_DB_BACKEND:-sqlite}
+      - GRAPE_SCHEMA_MODE=${GRAPE_SCHEMA_MODE:-1}
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - grape-data:/app/data
+      - ../configs:/app/configs
+      - ../.grape/skills:/app/.grape/skills
+    restart: unless-stopped
+    logging: *default-logging
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3000/api/health')"]
+      <<: *app-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38081/api/health')"]
+
+  grape-worker-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      ["uvicorn", "src.api.grape_worker_server:app", "--host", "0.0.0.0", "--port", "38082",
+       "--proxy-headers", "--forwarded-allow-ips=*"]
+    container_name: grape-worker-server
+    environment:
+      - TZ=Asia/Shanghai
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET required}
+      - GRAPE_AUTO_DETECT_URL=false
+      - GRAPE_PROCESS_ROLE=worker
+      - GRAPE_MODE=${GRAPE_MODE:-single}
+      - DEVOPS_DB_BACKEND=${DEVOPS_DB_BACKEND:-sqlite}
+      - GRAPE_SCHEMA_MODE=${GRAPE_SCHEMA_MODE:-1}
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - grape-data:/app/data
+      - ../configs:/app/configs
+      - ../.grape/skills:/app/.grape/skills
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38082/api/health')"]
+
+  grape-insight-server:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    command:
+      ["uvicorn", "src.api.grape_insight_server:app", "--host", "0.0.0.0", "--port", "38083",
+       "--proxy-headers", "--forwarded-allow-ips=*"]
+    container_name: grape-insight-server
+    environment:
+      - TZ=Asia/Shanghai
+      - JWT_SECRET=${JWT_SECRET:?JWT_SECRET required}
+      - GRAPE_AUTO_DETECT_URL=false
+      - GRAPE_PROCESS_ROLE=insight
+      - GRAPE_MODE=${GRAPE_MODE:-single}
+      - DEVOPS_DB_BACKEND=${DEVOPS_DB_BACKEND:-sqlite}
+      - GRAPE_SCHEMA_MODE=${GRAPE_SCHEMA_MODE:-1}
+    env_file:
+      - path: ../.env
+        required: false
+    volumes:
+      - grape-data:/app/data
+      - ../configs:/app/configs
+      - ../.grape/skills:/app/.grape/skills
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      <<: *app-healthcheck
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:38083/api/health')"]
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: grape-nginx
+    depends_on:
+      - grape-server
+      - grape-event-server
+      - grape-worker-server
+      - grape-insight-server
+    ports:
+      - "80:80"
+    volumes:
+      # 四进程分流配置（upstream 指向 compose 服务名）
+      - ./nginx-grape-compose.conf:/etc/nginx/conf.d/grape.conf:ro
+    restart: unless-stopped
+    logging: *default-logging
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/api/health"]
       interval: 30s
       timeout: 5s
       retries: 3

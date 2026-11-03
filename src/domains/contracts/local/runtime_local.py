@@ -154,3 +154,59 @@ class RuntimeServiceLocal(RuntimeService):
             )
             self._db.commit()
             return {"ok": True, "repo_key": repo_key, "issue_id": issue_id}
+
+    def get_chat_conversations(self, repo_key: str, limit: int = 50) -> list:
+        """A 用户面聊天对话列表（v2.2：chat 表归运行域，Mgmt 经本接口读）。"""
+        with self._lock:
+            c = self._db.cursor()
+            if repo_key:
+                c.execute(
+                    f"SELECT id, agent_session_id, user_id, backend_session_id, "
+                    f"repo_key, im_channel_id, title, status, created_at, updated_at "
+                    f"FROM {t_runtime('chat_conversations')} "
+                    f"WHERE repo_key=? AND status!='deleted' "
+                    f"ORDER BY updated_at DESC LIMIT ?",
+                    (repo_key, limit),
+                )
+            else:
+                c.execute(
+                    f"SELECT id, agent_session_id, user_id, backend_session_id, "
+                    f"repo_key, im_channel_id, title, status, created_at, updated_at "
+                    f"FROM {t_runtime('chat_conversations')} "
+                    f"WHERE status!='deleted' "
+                    f"ORDER BY updated_at DESC LIMIT ?",
+                    (limit,),
+                )
+            rows = c.fetchall()
+            if not rows:
+                return []
+            cols = [d[0] for d in c.description] if c.description else []
+            return [dict(zip(cols, r)) for r in rows] if cols else [dict(r) for r in rows]
+
+    def get_chat_messages(self, conv_id: str, limit: int = 100, before: int = 0) -> list:
+        """A 用户面聊天消息分页（Mgmt SSE 流/历史展示）。"""
+        with self._lock:
+            c = self._db.cursor()
+            if before > 0:
+                c.execute(
+                    f"SELECT id, conversation_id, role, content, created_at, "
+                    f"task_id, generate_status, deleted "
+                    f"FROM {t_runtime('chat_messages')} "
+                    f"WHERE conversation_id=? AND id<? "
+                    f"ORDER BY id DESC LIMIT ?",
+                    (conv_id, before, limit),
+                )
+            else:
+                c.execute(
+                    f"SELECT id, conversation_id, role, content, created_at, "
+                    f"task_id, generate_status, deleted "
+                    f"FROM {t_runtime('chat_messages')} "
+                    f"WHERE conversation_id=? "
+                    f"ORDER BY id DESC LIMIT ?",
+                    (conv_id, limit),
+                )
+            rows = c.fetchall()
+            if not rows:
+                return []
+            cols = [d[0] for d in c.description] if c.description else []
+            return [dict(zip(cols, r)) for r in rows] if cols else [dict(r) for r in rows]

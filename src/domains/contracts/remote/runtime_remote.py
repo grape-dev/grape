@@ -46,3 +46,14 @@ class RuntimeServiceRemote(RuntimeService):
         return self.client.post(
             f"/internal/issues/{repo_key}/{issue_number}/state", json_data=patch
         )
+
+    def get_chat_conversations(self, repo_key: str, limit: int = 50) -> list:
+        return self.client.get(
+            "/internal/chat/conversations", params={"repo_key": repo_key, "limit": limit}
+        )
+
+    def get_chat_messages(self, conv_id: str, limit: int = 100, before: int = 0) -> list:
+        return self.client.get(
+            f"/internal/chat/conversations/{conv_id}/messages",
+            params={"limit": limit, "before": before},
+        )

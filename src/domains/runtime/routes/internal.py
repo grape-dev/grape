@@ -55,3 +55,15 @@ async def get_issue_state(repo_key: str, issue_number: int) -> dict:
 async def update_issue_state(repo_key: str, issue_number: int, body: dict) -> dict:
     """供 RuntimeServiceRemote.update_issue_state() 调用。"""
     return get_runtime_service().update_issue_state(repo_key, issue_number, body)
+
+
+@router.get("/chat/conversations")
+async def list_chat_conversations(repo_key: str = "", limit: int = 50) -> list:
+    """供 RuntimeServiceRemote.get_chat_conversations() 调用（v2.2：chat 表归运行域）。"""
+    return get_runtime_service().get_chat_conversations(repo_key, limit)
+
+
+@router.get("/chat/conversations/{conv_id}/messages")
+async def get_chat_messages(conv_id: str, limit: int = 100, before: int = 0) -> list:
+    """供 RuntimeServiceRemote.get_chat_messages() 调用（v2.2：chat 表归运行域）。"""
+    return get_runtime_service().get_chat_messages(conv_id, limit, before)
