@@ -3231,6 +3231,27 @@ def _run_all_migrations():
         _migrate_a2a_idempotency_key()
     except Exception as _e:
         log.warning(f"A2A idempotency key migration failed: {_e}")
+    # ===== Issue #805: issue.created_by 列兜底（SQLite 新库建表已含，存量库/MySQL 幂等补列）=====
+    try:
+        _migrate_issue_created_by()
+    except Exception as _e:
+        log.warning(f"Issue #805 issue created_by migration failed: {_e}")
+
+
+def _migrate_issue_created_by():
+    """Issue #805：issue 表幂等补 `created_by TEXT DEFAULT ''` 列（创建人一等数据化）。
+
+    - SQLite 新库：CREATE TABLE issue 已含该列，_ensure_column 自动跳过；
+    - 存量 SQLite / MySQL：_ensure_column 走 ALTER TABLE ADD COLUMN（MySQL 经 mysql_compat 翻译）。
+    """
+    from src.session_manager import db, db_lock
+    try:
+        with db_lock:
+            c = db.cursor()
+            _ensure_column(c, "issue", "created_by", "TEXT DEFAULT ''")
+            db.commit()
+    except Exception as e:
+        log.warning(f"issue created_by column migration failed: {e}")
 
 
 def _migrate_a2a_idempotency_key():

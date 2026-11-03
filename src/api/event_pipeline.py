@@ -2253,12 +2253,35 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                             _sender3 = _snd.get("username") or _snd.get("login") or ""
                     except Exception:
                         pass
+                    # Issue #805: 提取创建人（creator）——优先 payload 原生 user，逐级兜底：
+                    # object_attributes/user → issue/user → VCS 详情（仅 open 类事件，避免每事件一次 API）
+                    # → sender。创建人建档固化（created_by 仅空补写），不随 assignee 流转变化。
+                    _creator3 = ""
+                    try:
+                        _cu3 = _o3.get("user") if isinstance(_o3.get("user"), dict) else None
+                        if not _cu3:
+                            _ci3 = _p3.get("issue") or {}
+                            _cu3 = _ci3.get("user") if isinstance(_ci3, dict) and isinstance(_ci3.get("user"), dict) else None
+                        if _cu3:
+                            _creator3 = _cu3.get("username") or _cu3.get("login") or ""
+                    except Exception:
+                        pass
+                    if not _creator3 and _act3 in ("open", "create", "opened", "created"):
+                        try:
+                            _st_v, _data_v = fetch_issue_via_vcs(repo_key, int(_num3))
+                            _u_v = (_data_v or {}).get("user") or {}
+                            if isinstance(_u_v, dict):
+                                _creator3 = _u_v.get("username") or _u_v.get("login") or ""
+                        except Exception:
+                            pass
+                    if not _creator3:
+                        _creator3 = _sender3
                     _t3 = str(_o3.get("title", "") or "") if isinstance(_o3, dict) else ""
                     if not _t3:
                         _t3 = evt.get("title", "") or ""
                     ensure_issue_task(repo_key, int(_num3), title=_t3, assignee=_asg3,
-                                      event_type=event_type, sender=_sender3)
-                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or _sender3 or '(owner)'}")
+                                      event_type=event_type, sender=_sender3, creator=_creator3)
+                    log.info(f"Pipeline: ensure task #{_num3} assignee={_asg3 or _sender3 or '(owner)'} creator={_creator3 or '(unknown)'}")
     except Exception as _e:
         log.warning(f"Pipeline: task-center sync failed: {_e}")
 

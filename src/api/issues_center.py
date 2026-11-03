@@ -255,7 +255,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                       subtask_mode: int = -1,
                       sender: str = "",
                       org_id: int = 0,
-                      owner_user_id: int = 0) -> int | None:
+                      owner_user_id: int = 0,
+                      creator: str = "") -> int | None:
     """Issue 事件幂等建档（任务中心全覆盖，task-center-issue-coverage-design.md §3-A）。
 
     - assignee 优先 → 对应平台 user_id
@@ -266,6 +267,8 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
       任务中心 mine 查询 `user_id=? OR user_id=0` 展示（P2 拍板修订：展示，不隐藏）
     - 幂等：同一 issue 已存在 active/processing 任务则复用（2026-09-03 修复#15：不再按 assignee 区分，
       防止 webhook 回声导致同一 issue 产生两个不同 assignee 的任务）
+    - Issue #805：creator（创建人 login）落库 created_by；复用路径仅空值回填（幂等不覆盖），
+      assignee 流转不改变创建人。
     """
     from src.repo_key import to_repo_key, split_owner_repo
     repo_key = to_repo_key(repo_key)
@@ -359,6 +362,12 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
                     _close_other_assignee_tasks(repo_key, issue_number, keep_assignee=target)
                 except Exception:
                     pass
+            # Issue #805: 创建人幂等补写——仅 created_by 为空时回填，绝不覆盖已有创建人
+            _creator_val = (creator or "").strip()
+            if _creator_val:
+                c.execute(
+                    "UPDATE issue SET created_by=? WHERE id=? AND (created_by IS NULL OR created_by='')",
+                    (_creator_val, task_id))
             db.commit()
         else:
             if not title:
@@ -368,10 +377,11 @@ def ensure_issue_task(repo_key: str, issue_number: int, title: str = "",
             _subtask_val = subtask_mode if subtask_mode >= 0 else _get_issue_subtask_mode(repo_key, issue_number)
             _parent_val = _get_issue_parent(repo_key, issue_number)
             c.execute(
-                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id) "
-                "VALUES (?,?,?,?,?,?,'active',?,?,?,?)",
+                "INSERT INTO issue (user_id, assignee, repo_key, issue_number, title, task_description, status, is_subtask_mode, parent_issue_number, parent_issue_id, org_id, created_by) "
+                "VALUES (?,?,?,?,?,?,'active',?,?,?,?,?)",
                 (user_id, target, repo_key, issue_number, title, description,
-                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id)
+                 _subtask_val, _parent_val, _get_issue_parent_id(repo_key, issue_number), org_id,
+                 (creator or "").strip())
             )
             db.commit()
             task_id = c.lastrowid
@@ -2786,6 +2796,20 @@ def _build_assignee_filter(assignees: str, clauses: list, params: list):
         clauses.append(f"assignee IN ({','.join('?' * len(_list))})")
         params.extend(_list)
 
+def _build_creator_filter(creators: str, clauses: list, params: list):
+    """Issue #805：将逗号分隔的 creators 转成 created_by SQL 过滤（单值 =? / 多值 IN）。
+
+    与 _build_assignee_filter 并列：assignees 仍按责任人过滤（向后兼容），
+    creators 按创建人过滤（与 GitCode issue 作者口径一致）。
+    """
+    _list = [a.strip() for a in (creators or "").split(",") if a.strip()]
+    if len(_list) == 1:
+        clauses.append("created_by=?")
+        params.append(_list[0])
+    elif len(_list) > 1:
+        clauses.append(f"created_by IN ({','.join('?' * len(_list))})")
+        params.extend(_list)
+
 def _batch_fetch_pr_issue_keys(keys: list) -> set:
     """批量查 events 表，返回 issue 本身是 PR 的 (repo_key, issue_id) 集合。
 
@@ -3005,7 +3029,7 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
     """
     _select = (
         "SELECT id, assignee, repo_key, issue_number, title, task_description, conversation_id, "
-        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id"
+        "status, completed_reason, created_at, completed_at, is_subtask_mode, parent_issue_number, parent_issue_id, created_by"
         + (", user_id" if include_user_id else "")
     )
     _limit_sql = ""
@@ -3087,6 +3111,8 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "is_subtask_mode": r[11] or 0,
             "parent_issue_number": r[12] or 0,
             "parent_issue_id": r[13] or "",
+            # Issue #805: 创建人（issue.created_by，建档固化，不随 assignee 流转变化）
+            "creator": r[14] or "",
             "scene_id": _scene_id,
             "scene_name": _scene_name,
             "scene_source": _scene_source,
@@ -3096,6 +3122,6 @@ def _query_tasks(where: str, params: list, order_by: str, include_user_id: bool 
             "is_pr": (_rk, _issue_id) in _pr_issue_keys,
         }
         if include_user_id:
-            item["user_id"] = r[14] or 0
+            item["user_id"] = r[15] or 0
         tasks_out.append(item)
     return tasks_out

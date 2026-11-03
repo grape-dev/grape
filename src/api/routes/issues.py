@@ -84,8 +84,12 @@ def _sync_missing_issue_row(repo_keys: list[str], number) -> str:
         if state == "exists":
             try:
                 from src.api.issues_center import ensure_issue_task
+                # Issue #805: VCS 兜底补建行时带上创建人（GitCode issue 作者）
+                _fb_user = (data or {}).get("user") or {}
+                _fb_creator = (_fb_user.get("login") or _fb_user.get("username") or "") \
+                    if isinstance(_fb_user, dict) else ""
                 ensure_issue_task(rk, int(num), title=str((data or {}).get("title", "") or ""),
-                                  event_type="issue_opened")
+                                  event_type="issue_opened", creator=_fb_creator)
                 return "exists"
             except Exception as e:
                 log.warning(f"issues: fallback ensure_issue_task failed repo={rk} #{num}: {e}")
@@ -233,7 +237,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
             c = db.cursor()
             c.execute(
                 f"SELECT id, issue_number, stage, owner_agent, assignee, a2a_seq, scene_id, "
-                f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override "
+                f"parent_issue_id, is_subtask_mode, scene_user_id, allow_scene_override, created_by "
                 f"FROM issue WHERE repo_key IN ({placeholders}){_num_clause}",
                 repo_keys + _num_params)
             for r in c.fetchall():
@@ -246,6 +250,8 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
                     "scene_id": r[6] or "", "parent_issue_id": r[7] or "",
                     "is_subtask_mode": r[8] or 0, "scene_user_id": r[9] or 0,
                     "allow_scene_override": r[10] or 0,
+                    # Issue #805: 创建人（issue.created_by，issue_state 过渡期数据无此列 → 兜底空）
+                    "creator": r[11] or "",
                 }
     except Exception as e:
         log.warning(f"issues: load issue table failed: {e}")
@@ -274,6 +280,7 @@ def _issue_stage_map(repo_keys: list[str], numbers: list[str] = None) -> dict:
                     "scene_id": r[5] or "", "parent_issue_id": r[6] or "",
                     "is_subtask_mode": r[7] or 0, "scene_user_id": r[8] or 0,
                     "allow_scene_override": r[9] or 0,
+                    "creator": "",
                 }
     except Exception as e:
         log.warning(f"issues: load issue_state failed: {e}")
@@ -391,6 +398,8 @@ def _assemble_issue(repo_key: str, number: str, stage_map: dict, status_map: dic
         "owner_agent": stage.get("owner_agent", "vod"),
         "scene_id": stage.get("scene_id", ""),
         "assignee": stage.get("assignee", ""),
+        # Issue #805: 创建人（created_by 建档固化；issue_state 过渡期兜底无值 → 空串）
+        "creator": stage.get("creator", ""),
         "is_subtask_mode": stage.get("is_subtask_mode") or 0,
         "parent_issue_id": stage.get("parent_issue_id", ""),
         "events_count": len(events),
@@ -1912,7 +1921,8 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
                     sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                     mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
                     created_by_me: str = Query("", description="仅我创建的任务"),
-                    assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                    assignees: str = Query("", description="按责任人筛选(逗号分隔)"),
+                    creators: str = Query("", description="按创建人筛选(逗号分隔, Issue #805)"),
                     user: dict = Depends(require_org_member)):
     """我的需求列表（需求中心·个人维度）。
 
@@ -1920,7 +1930,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
     （scene/stage/is_running/agent_statuses）。
     组织隔离：非个人组织只返回 org_id 匹配的 issue。
     """
-    from src.api.issues_center import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
     from src.repo_key import to_repo_key
     from src.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
@@ -1947,6 +1957,7 @@ async def my_issues(status: str = Query("", pattern="^(active|processing|awaitin
         clauses.append("org_id=?")
         params.append(_filter_org_id)
     _build_assignee_filter(assignees, clauses, params)
+    _build_creator_filter(creators, clauses, params)
     where = " AND ".join(clauses)
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
     _order_by = f"created_at {_order_dir}"
@@ -1961,7 +1972,8 @@ def list_repo_issues(owner: str, repo: str,
                      status: str = Query("", pattern="^(active|processing|awaiting_input|pending_review|completed|cancelled|)$"),
                      sort_order: str = Query("desc", pattern="^(desc|asc)$", description="按创建时间排序方向"),
                      mode: str = Query("default", pattern="^(default|time)$", description="default=状态优先；time=纯时间序"),
-                     assignees: str = Query("", description="按创建人筛选(逗号分隔)"),
+                     assignees: str = Query("", description="按责任人筛选(逗号分隔)"),
+                     creators: str = Query("", description="按创建人筛选(逗号分隔, Issue #805)"),
                      page: int = Query(1, ge=1, description="页码（per_page>0 时生效）"),
                      per_page: int = Query(0, ge=0, le=500, description="每页条数；0=不分页（默认，兼容旧前端全量+终态截断模式）"),
                      recent_terminal: int = Query(30, ge=0, description="非分页模式下终态(completed/cancelled)保留的最近条数；0=全量"),
@@ -1977,7 +1989,7 @@ def list_repo_issues(owner: str, repo: str,
         （分析文档第一步"数据截断"：前端不改也能先受益，翻页再拉走 per_page）
       * recent_terminal=0 或显式 status 过滤：legacy 全量返回
     """
-    from src.api.issues_center import _query_tasks, _build_assignee_filter
+    from src.api.issues_center import _query_tasks, _build_assignee_filter, _build_creator_filter
     from src.user.org_db import is_org_personal
     _org_id = user.get("org_id", 0)
     _is_personal = is_org_personal(_org_id) if _org_id else True
@@ -1994,6 +2006,7 @@ def list_repo_issues(owner: str, repo: str,
         clauses.append("org_id=?")
         params.append(_filter_org_id)
     _build_assignee_filter(assignees, clauses, params)
+    _build_creator_filter(creators, clauses, params)
     where = " AND ".join(clauses)
     _order_dir = "DESC" if sort_order == "desc" else "ASC"
     _order_by = f"created_at {_order_dir}"
@@ -2046,6 +2059,8 @@ def list_repo_issues(owner: str, repo: str,
         _st = stage_map.get(str(_num or "")) or {}
         it["owner_agent"] = it.get("owner_agent") or _st.get("owner_agent", "vod")
         it.setdefault("assignee", _st.get("assignee", ""))
+        # Issue #805: creator 缺失时从 issue 行兜底（如 issue_state 过渡期来源）
+        it.setdefault("creator", _st.get("creator", ""))
         it.setdefault("parent_issue_id", _st.get("parent_issue_id", ""))
         it.setdefault("is_subtask_mode", _st.get("is_subtask_mode") or 0)
         evs = group_map.get(str(_num or "")) or []
@@ -2075,6 +2090,8 @@ def list_repo_issues(owner: str, repo: str,
     # Issue #648：PR 伪卡片 attachments 兜底恒为 []（PR 号非 issue 附件目录编号，防错配）
     for _pit in pr_items:
         _pit.setdefault("attachments", [])
+        # Issue #805: PR 伪卡片无创建人概念（触发者语义保留 assignee），creator 置空防前端 undefined
+        _pit.setdefault("creator", "")
     if _total is None or page == 1:
         issues.extend(pr_items)
 
@@ -2127,6 +2144,9 @@ def get_issue_detail(owner: str, repo: str, number: int,
             _asg = _vi.get("assignee") or ""
             if isinstance(_asg, dict):
                 _asg = _asg.get("login") or _asg.get("username") or ""
+            # Issue #805: VCS 兜底详情透出创建人（GitCode issue 作者 login）
+            _vcs_user = _vi.get("user") or {}
+            _vcs_creator = (_vcs_user.get("login") or _vcs_user.get("username") or "") if isinstance(_vcs_user, dict) else ""
             return {
                 "number": int(number),
                 "issue_id": None,
@@ -2136,6 +2156,7 @@ def get_issue_detail(owner: str, repo: str, number: int,
                 "owner_agent": "vod",
                 "scene_id": "",
                 "assignee": _asg,
+                "creator": _vcs_creator,
                 "is_subtask_mode": 0,
                 "parent_issue_id": "",
                 "events_count": 0,
