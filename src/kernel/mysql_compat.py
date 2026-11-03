@@ -466,6 +466,13 @@ class MySQLCompatCursor:
         self.description = None
 
     def execute(self, sql: str, params=None):
+        # 分 Schema 灰度（Issue #699 Phase 2）：表名语法位置的注册表表名映射为
+        # grape_mgmt./grape_runtime./grape_insight. 限定名（GRAPE_SCHEMA_MODE 未启用时直通）。
+        try:
+            from src.kernel.db import qualify_sql
+            sql = qualify_sql(sql)
+        except Exception:
+            pass
         if params is not None and not isinstance(params, (tuple, list, dict)):
             params = (params,)
         # PRAGMA table_info(X)

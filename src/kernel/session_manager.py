@@ -131,6 +131,15 @@ else:
         db.execute("PRAGMA foreign_keys=ON")
     except Exception as e:
         log.warning(f"SQLite pragma setup failed: {e}")
+    # 分 Schema 灰度开关（Issue #699 Phase 2）：启用后 SQLite 表名带 mgmt_/rt_/ins_ 前缀，
+    # 业务代码经 kernel/db.qualify_sql 运行时改写，零改动无感。
+    try:
+        from src.kernel.db import schema_mode_enabled, SchemaSQLiteDB
+        if schema_mode_enabled():
+            db = SchemaSQLiteDB(db)
+            log.info("Schema mode enabled: SQLite table prefixes (mgmt_/rt_/ins_)")
+    except Exception as e:
+        log.warning(f"Schema mode wrap failed (fallback to plain sqlite): {e}")
 # 迁移旧表 sessions → chat_agent_session（幂等，须先于 CREATE 执行）
 try:
     _old_tables = [r[0] for r in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()]
