@@ -120,8 +120,8 @@ class TestInjectionCallSitesUseHelper:
         assert 'env_extra["ISSUE_NUMBER"] = str(_issue_num)' not in src_enqueue
 
     def test_execute_agent_inner_uses_helper(self):
-        import src.domains.runtime.pipeline.event_pipeline as ep
-        src_exec = inspect.getsource(ep._execute_agent_inner)
+        import src.domains.runtime.engine.direct_executor as de
+        src_exec = inspect.getsource(de._execute_agent_inner)
         assert "_inject_issue_pr_env(" in src_exec, \
             "_execute_agent_inner 应调用 _inject_issue_pr_env（Issue #528）"
         assert 'env["ISSUE_NUMBER"] = str(issue_number)' not in src_exec
