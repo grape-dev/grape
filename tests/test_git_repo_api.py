@@ -217,7 +217,10 @@ def test_pulls_mapping(gitcode_calls, _client):
 
     r = client.put(f"{base}/pulls/9/merge")
     assert r.status_code == 200
-    assert gitcode_calls[-1]["method"] == "PUT" and gitcode_calls[-1]["url"].endswith("/pulls/9/merge")
+    # Issue #752：merge 前后各有一次门禁 GET /pulls/9/files 扫描，merge PUT 不再是
+    # 「最后一次」上游调用——改为存在性断言（PUT /pulls/9/merge 已发出且返回 200）。
+    assert any(c["method"] == "PUT" and c["url"].endswith("/pulls/9/merge")
+               for c in gitcode_calls)
 
     assert _get(client, f"{base}/pulls/9/files").status_code == 200
     assert gitcode_calls[-1]["url"].split("?")[0].endswith("/pulls/9/files")

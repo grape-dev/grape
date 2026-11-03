@@ -67,14 +67,18 @@ def test_merge_params_passthrough(monkeypatch, _client):
     recorded = {}
 
     def _fake_req(method, url, token="", body=None):
-        recorded.update({"method": method, "url": url, "body": body})
+        recorded.update({f"{method}:{url}": {"method": method, "url": url, "body": body}})
         return {"merged": True, "sha": "abc123"}
 
     monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
     r = _merge(_client, merge_method="squash", title="chore: squash merge")
     assert r.status_code == 200
-    assert recorded["method"] == "PUT" and recorded["url"].endswith("/pulls/9/merge")
-    assert recorded["body"] == {"merge_method": "squash", "title": "chore: squash merge"}
+    # Issue #752：merge 前后各有一次门禁 GET /pulls/9/files 扫描，「最后一次调用」
+    # 不再是 merge PUT——改为按键断言 merge PUT 已按透传参数发出。
+    _puts = [v for (k, v) in recorded.items()
+             if k.startswith("PUT:") and k.split("?")[0].endswith("/pulls/9/merge")]
+    assert len(_puts) == 1
+    assert _puts[0]["body"] == {"merge_method": "squash", "title": "chore: squash merge"}
 
 
 def test_merge_default_keeps_legacy_body(monkeypatch, _client):
