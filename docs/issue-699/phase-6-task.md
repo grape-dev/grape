@@ -33,6 +33,7 @@
 - TC-6.2 集群：注册表→`grape_runtime.chat_conversations` 限定名；Worker `/internal/chat/*`
   挂载（非 404）；cluster 缺 DEVOPS_DB_HOST 快速失败；MySQL 真机验收留运维环境。
 - TC-6.3 Compose：YAML 解析 + 五服务/命令/角色/healthcheck/卷/nginx 挂载/upstream 指服务名/
-  `/api/chat/`→Worker 全部断言通过；docker 真机 up 留运维环境。
+  `/api/chat/`→Worker、chat 读端点→Mgmt、healthcheck 命中各进程真实挂载端点（Event/Worker
+  `/health`，Mgmt/Insight `/api/health`）全部断言通过；docker 真机 up 留运维环境。
 - TC-6.4 systemd：四单元 ExecStart/端口/Restart 断言通过；systemd 运行态留运维环境。
 - TC-6.5 回归：pytest 全量（见 PR 描述）。

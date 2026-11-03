@@ -244,6 +244,23 @@ class TestTC46NginxConfig:
         assert "grape_worker_server" in chat_block, "/api/chat/ should proxy to grape_worker_server"
         assert "proxy_buffering off" in chat_block, "/api/chat/ should disable proxy_buffering for SSE"
 
+    def test_chat_reads_route_to_mgmt(self):
+        """chat 读端点（GET conversations/messages/...）→ Mgmt，Worker 只挂 POST 会 405/404。"""
+        import re
+        conf = self._conf()
+        m = re.search(r"location ~ (\^/api/chat/\([^)]*\)) \{", conf)
+        assert m, "chat read-endpoint regex location missing"
+        read_block = conf[m.end():].split("location ")[0]
+        assert "grape_server" in read_block
+        assert "grape_worker_server" not in read_block
+        pattern = re.compile(m.group(1))
+        for path in ("/api/chat/conversations", "/api/chat/messages/9",
+                     "/api/chat/config", "/api/chat/task/t9/stream",
+                     "/api/chat/analyze-image", "/api/chat/image/9/a.png"):
+            assert pattern.match(path), path
+        for path in ("/api/chat/send", "/api/chat/send/stream", "/api/chat/submit"):
+            assert not pattern.match(path), path
+
 
 # ===========================================================================
 # TC-4.7：定时任务按进程分配验证

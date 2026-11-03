@@ -31,5 +31,5 @@
 |------|------|
 | chat 表归属变更影响存量 mgmt 裸 SQL（cooldown/account 清理等） | SQL 经统一连接代理自动改写（`SchemaSQLiteDB.qualify_sql`），schema mode 关闭时零回归；契约口径只约束 Mgmt 读路径 |
 | MySQL/systemd/Docker 本环境不可实装 | 等价静态校验 + 脚本交付 + PR 描述注明真机验收项 |
-| 四进程健康端点不统一（/health vs /api/health） | 脚本双探测；测试断言各自端口 |
+| 四进程健康端点不统一（/health vs /api/health） | 脚本双探测；compose healthcheck 按进程挂载端点（Event/Worker `/health`，Mgmt/Insight `/api/health`）；测试断言各自端口与端点 |
 | uvicorn 首次启动慢（引擎探测 ~40s） | 健康轮询超时默认 60s 可调（`GRAPE_FOUR_HEALTH_TIMEOUT`） |
