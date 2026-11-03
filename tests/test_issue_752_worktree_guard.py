@@ -116,7 +116,8 @@ def test_scan_staged_unmerged_falls_back_to_disk(tmp_path):
     _git(["commit", "-am", "main change"], str(src))
     wt = tmp_path / "wt"
     _git(["clone", str(src), str(wt)], str(tmp_path))
-    _git(["merge", "origin/other"], str(wt))  # 双边改 code.py → unmerged 冲突
+    _git(["-c", "user.email=test@example.com", "-c", "user.name=Test User",
+          "merge", "origin/other"], str(wt))  # 双边改 code.py → unmerged 冲突
     r = wg.scan_staged_files(str(wt))
     assert "code.py" in (r["hard"] or {})  # 工作区冲突标记被降级路径检出
 
