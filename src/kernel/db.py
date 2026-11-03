@@ -9,7 +9,8 @@
 3. 运行时 SQL 改写 qualify_sql()：把 SQL 中表名语法位置（FROM/JOIN/INTO/UPDATE/TABLE/TO 后）
    的注册表表名自动映射为前缀/schema 限定名；跳过单引号字符串字面量，避免数据值误改写。
 4. 灰度开关 schema_mode_enabled()：GRAPE_SCHEMA_MODE=1 时启用改写（SQLite 前缀 / MySQL 限定），
-   默认关闭——存量库与全量测试零回归。t_*() 映射本身不受开关影响（恒定契约）。
+   默认关闭——存量库与全量测试零回归。t_*() 映射遵循开关：模式关闭返回裸表名，
+   模式开启返回前缀/限定名（保证 codemod 通道 B 产物在两种模式下均可用）。
 5. 迁移辅助：ensure_schemas()（MySQL CREATE SCHEMA IF NOT EXISTS）、
    migrate_sqlite_prefixes()（ALTER TABLE RENAME，保留数据）、migrate_mysql_schemas()（RENAME TABLE）。
 6. SQLite 连接代理 SchemaSQLiteDB：execute 入口统一过 qualify_sql（唯一写路径挂接点）。
@@ -104,7 +105,21 @@ def schema_mode_enabled() -> bool:
 def table(schema: str, table_name: str) -> str:
     """返回带 schema 前缀/限定的完整表名（design §4.5）。
 
-    SQLite：mgmt_/rt_/ins_ 前缀；MySQL：grape_x.table。未注册 schema 直通返回原名。
+    遵循 schema_mode_enabled()：模式关闭时返回裸表名（存量库零回归），
+    模式开启时返回前缀/限定名。这样 codemod 通道 B 产物（FROM {t_runtime(...)})
+    在未开 schema mode 的库上也能正确引用裸表名，灰度降级语义不断裂。
+    迁移函数用 _qualified_table() 强制取目标名（不受开关影响）。
+    """
+    if not schema_mode_enabled():
+        return table_name
+    return _qualified_table(schema, table_name)
+
+
+def _qualified_table(schema: str, table_name: str) -> str:
+    """强制返回 schema 前缀/限定名（不受 schema_mode 开关影响）。
+
+    供迁移函数（migrate_sqlite_prefixes / migrate_mysql_schemas）使用：
+    迁移本身就是启用 schema mode 的过程，需始终取目标前缀名。
     """
     if schema in SQLITE_PREFIX:
         if get_db_backend() == "mysql":
@@ -142,11 +157,17 @@ _PRAGMA_TABLE_RE = re.compile(r"(?i)^(PRAGMA\s+table_info\s*\(\s*)(\w+)(\s*\)\s*
 
 # SELECT name FROM sqlite_master：返回逻辑表名（剥前缀），保证业务侧
 # `if "xxx" in _tables` 这类物理名成员判断在分 Schema 模式下语义不变。
+# 注意：必须用 LIKE 'prefix%' 锚定前缀，不能用 REPLACE 子串替换——
+# 否则表名内含 rt_/ins_/mgmt_ 子串（如 obs_alert_rules 中的 rt_）会被误剥。
 _SQLITE_MASTER_NAMES_RE = re.compile(
     r"(?i)^(\s*SELECT\s+)name(\s+FROM\s+sqlite_master\b)(.*)$"
 )
 _SQLITE_MASTER_STRIP = (
-    "REPLACE(REPLACE(REPLACE(name,'mgmt_',''),'rt_',''),'ins_','') AS name"
+    "CASE"
+    " WHEN name LIKE 'mgmt_%' THEN substr(name, 6)"
+    " WHEN name LIKE 'rt_%' THEN substr(name, 4)"
+    " WHEN name LIKE 'ins_%' THEN substr(name, 5)"
+    " ELSE name END AS name"
 )
 
 
@@ -210,7 +231,7 @@ def ensure_schemas(conn) -> None:
 
 def _ledger_rows(conn, backend: str) -> set:
     """已迁移表集合（读 grape_t_schema_migrations；表不存在返回空集）。"""
-    ledger = table(SCHEMA_MGMT, _MIGRATION_LEDGER) if backend != "identity" else _MIGRATION_LEDGER
+    ledger = _qualified_table(SCHEMA_MGMT, _MIGRATION_LEDGER) if backend != "identity" else _MIGRATION_LEDGER
     try:
         rows = conn.execute(f"SELECT table_name FROM {ledger}").fetchall()
         return {r[0] for r in rows}
@@ -228,12 +249,12 @@ def migrate_sqlite_prefixes(conn, dry_run: bool = False) -> list:
     done = _ledger_rows(conn, "sqlite")
     plan = []
     for name, schema in TABLE_REGISTRY.items():
-        new = table(schema, name)
+        new = _qualified_table(schema, name)
         if name in existing and new not in existing and new != name and name not in done:
             plan.append((name, new))
     if dry_run:
         return plan
-    ledger = t_mgmt(_MIGRATION_LEDGER)
+    ledger = _qualified_table(SCHEMA_MGMT, _MIGRATION_LEDGER)
     for old, new in plan:
         conn.execute(f"ALTER TABLE {old} RENAME TO {new}")
     conn.execute(
@@ -273,7 +294,7 @@ def migrate_mysql_schemas(conn, dry_run: bool = False) -> list:
             plan.append((name, schema))
     if dry_run:
         return plan
-    ledger = t_mgmt(_MIGRATION_LEDGER)
+    ledger = _qualified_table(SCHEMA_MGMT, _MIGRATION_LEDGER)
     conn.execute(
         f"CREATE TABLE IF NOT EXISTS {ledger} ("
         f"table_name VARCHAR(190) PRIMARY KEY, target_schema VARCHAR(64), "
@@ -281,7 +302,7 @@ def migrate_mysql_schemas(conn, dry_run: bool = False) -> list:
     )
     for name, schema in plan:
         conn.execute(f"RENAME TABLE {name} TO {schema}.{name}")
-        conn.execute(f"REPLACE INTO {ledger} (table_name, target_schema) VALUES (?, ?)",
+        conn.execute(f"REPLACE INTO {ledger} (table_name, target_schema) VALUES (%s, %s)",
             (name, schema),
         )
     conn.commit()

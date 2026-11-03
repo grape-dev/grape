@@ -35,7 +35,9 @@
 
 - 默认 **off**（未设置或 0/false）：`qualify_sql` 直通不改写，现有库与全量测试零回归。
 - `GRAPE_SCHEMA_MODE=1`：启用前缀/schema 限定（对应 TC-2.3 单机模式 / TC-2.4 TC-2.5 集群模式行为）。
-- `t_mgmt()/t_runtime()/t_insight()` 本身按设计文档恒定返回前缀/限定名（TC-2.1 契约），不受开关影响。
+- `t_mgmt()/t_runtime()/t_insight()` 遵循 schema_mode_enabled()：模式关闭返回裸表名（存量库零回归），
+  模式开启返回前缀/限定名。这样 codemod 通道 B 产物在两种模式下均可用，灰度降级语义不断裂。
+  迁移函数用 `_qualified_table()` 强制取目标前缀名（不受开关影响）。
 
 ### 2.3 表注册表（TABLE_REGISTRY）
 

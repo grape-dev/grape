@@ -6,6 +6,11 @@
 kernel/db.qualify_sql 运行时改写等价，用于把热点模块逐步迁移为显式 t_*() 调用
 （Phase 5 契约收口配套）。默认仅检查（--check），不写文件。
 
+⚠️ 前置条件：写回（非 --check）后的代码要求目标库已开启 GRAPE_SCHEMA_MODE=1
+（物理表已带 mgmt_/rt_/ins_ 前缀或 grape_x. 限定名）。t_*() 遵循 schema_mode_enabled()：
+模式关闭时返回裸表名、模式开启时返回前缀/限定名，因此写回产物在两种模式下均可运行，
+但若意图使用分 Schema 行为（前缀表），须先执行 scripts/migrate_schemas.py 迁移再开启开关。
+
 用法：
   python scripts/replace_table_refs.py --check src/api/db_setup.py
   python scripts/replace_table_refs.py src/api/db_setup.py      # 写回

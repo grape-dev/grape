@@ -471,8 +471,8 @@ class MySQLCompatCursor:
         try:
             from src.kernel.db import qualify_sql
             sql = qualify_sql(sql)
-        except Exception:
-            pass
+        except Exception as e:
+            log.warning(f"mysql_compat: qualify_sql failed, falling back to raw SQL: {sql[:80]!r} ({e})")
         if params is not None and not isinstance(params, (tuple, list, dict)):
             params = (params,)
         # PRAGMA table_info(X)

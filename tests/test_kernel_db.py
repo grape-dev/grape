@@ -15,6 +15,7 @@ REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 
 def test_t_mgmt_sqlite_prefix(monkeypatch):
     monkeypatch.setenv("DEVOPS_DB_BACKEND", "sqlite")
+    monkeypatch.setenv("GRAPE_SCHEMA_MODE", "1")
     from src.kernel import db as kdb
     importlib.reload(kdb)
     assert kdb.t_mgmt("managed_repos") == "mgmt_managed_repos"
@@ -24,12 +25,26 @@ def test_t_mgmt_sqlite_prefix(monkeypatch):
 
 def test_t_mgmt_mysql_schema_qualified(monkeypatch):
     monkeypatch.setenv("DEVOPS_DB_BACKEND", "mysql")
+    monkeypatch.setenv("GRAPE_SCHEMA_MODE", "1")
     from src.kernel import db as kdb
     importlib.reload(kdb)
     assert kdb.t_mgmt("managed_repos") == "grape_mgmt.managed_repos"
     assert kdb.t_runtime("events") == "grape_runtime.events"
     assert kdb.t_insight("obs_log") == "grape_insight.obs_log"
     monkeypatch.setenv("DEVOPS_DB_BACKEND", "sqlite")
+
+
+def test_t_bare_name_when_schema_mode_off(monkeypatch):
+    """t_*() returns bare table name when schema mode is off (graceful degradation)."""
+    monkeypatch.setenv("DEVOPS_DB_BACKEND", "sqlite")
+    monkeypatch.delenv("GRAPE_SCHEMA_MODE", raising=False)
+    from src.kernel import db as kdb
+    importlib.reload(kdb)
+    assert kdb.t_mgmt("managed_repos") == "managed_repos"
+    assert kdb.t_runtime("events") == "events"
+    assert kdb.t_insight("obs_log") == "obs_log"
+    # _qualified_table always returns prefixed name regardless of schema mode
+    assert kdb._qualified_table(kdb.SCHEMA_RUNTIME, "events") == "rt_events"
 
 
 # ===== 注册表完整性 =====
@@ -118,6 +133,34 @@ def test_qualify_sql_skips_literals_and_columns(schema_mode):
     )
     # 已前缀表名不重复改写
     assert kdb.qualify_sql("SELECT * FROM rt_events") == "SELECT * FROM rt_events"
+
+
+def test_sqlite_master_strip_anchored_prefix(schema_mode):
+    """Regression: obs_alert_rules contains 'rt_' substring — must not be stripped.
+
+    The old REPLACE(name,'rt_','') approach corrupted obs_alert_rules → obs_alerules.
+    The new CASE+LIKE 'prefix%' anchored approach only strips actual prefixes.
+    """
+    kdb = schema_mode
+    conn = sqlite3.connect(":memory:")
+    wrapped = kdb.SchemaSQLiteDB(conn)
+    # Create prefixed insight tables (obs_alert_rules / obs_alert_events both contain 'rt_')
+    wrapped.execute("CREATE TABLE IF NOT EXISTS obs_alert_rules (id INTEGER)")
+    wrapped.execute("CREATE TABLE IF NOT EXISTS obs_alert_events (id INTEGER)")
+    wrapped.execute("CREATE TABLE IF NOT EXISTS obs_llm_usage (id INTEGER)")
+    wrapped.commit()
+    # Query via wrapped connection: qualify_sql rewrites SELECT name FROM sqlite_master
+    # to use _SQLITE_MASTER_STRIP which must strip ins_ prefix correctly
+    tables = {r[0] for r in wrapped.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    # Logical names (prefix stripped) must be the full registered names
+    assert "obs_alert_rules" in tables, f"got {tables}"
+    assert "obs_alert_events" in tables, f"got {tables}"
+    assert "obs_llm_usage" in tables, f"got {tables}"
+    # Must NOT contain corrupted names
+    assert "obs_alerules" not in tables
+    assert "obs_aleevents" not in tables
+    conn.close()
 
 
 # ===== SQLite 连接代理（TC-2.3 行为面）=====
