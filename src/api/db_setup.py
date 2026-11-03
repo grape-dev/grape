@@ -160,6 +160,21 @@ CREATE TABLE IF NOT EXISTS grape_t_patrol_findings (
 )
 """
 
+# Issue #752: 合入流程冲突标记扫描门禁日志（docs/issue-752/plan.md §3）。
+# 只增新表不改既有表；主键 UUID（新表硬性要求）；每次门禁决策一行
+# （phase: pre_merge/post_merge；decision: blocked/warned/alarmed/passed/error）。
+_MERGE_GATE_LOG_DDL = """
+CREATE TABLE IF NOT EXISTS grape_t_merge_gate_log (
+    id         TEXT PRIMARY KEY,
+    repo_key   TEXT NOT NULL DEFAULT '',
+    pr_number  INTEGER NOT NULL DEFAULT 0,
+    phase      TEXT NOT NULL DEFAULT '',
+    decision   TEXT NOT NULL DEFAULT '',
+    hits_json  TEXT DEFAULT '',
+    created_at TEXT DEFAULT ''
+)
+"""
+
 # ===== Issue #536: 迁移版本表（迁移只跑一遍的地基）=====
 # 设计：docs/weekly-09/migration-versioning-and-ddl-safety-design.md §D1
 # - version 主键（'202611010001' 日期+序号）；kind: safe/backfill/cleanup/legacy-stamp；
@@ -891,6 +906,7 @@ _NEW_TABLES = [
     ("admin_accounts", _ADMIN_ACCOUNTS_TABLE_DDL),
     ("meta", _META_TABLE_DDL),
     ("grape_t_patrol_findings", _PATROL_FINDINGS_DDL),
+    ("grape_t_merge_gate_log", _MERGE_GATE_LOG_DDL),
     ("grape_t_schema_migrations", _SCHEMA_MIGRATIONS_DDL),
     ("agent_runtimes", _AGENT_RUNTIMES_DDL),
     ("agent_tasks", _AGENT_TASKS_DDL),
@@ -2737,6 +2753,22 @@ register_migration(
     name="create-patrol-findings-table",
     kind="safe",
     fn=_fn_create_grape_t_patrol_findings,
+)
+
+
+def _fn_create_grape_t_merge_gate_log() -> None:
+    """Issue #752：存量库补建合入门禁日志表（CREATE TABLE IF NOT EXISTS 幂等，
+    与 patrol-findings 同路径：_NEW_TABLES 只服务 legacy 全量首跑，已盖章库走本迁移）。"""
+    with db_lock:
+        db.execute(_MERGE_GATE_LOG_DDL)
+        db.commit()
+
+
+register_migration(
+    version="202611030001",
+    name="create-merge-gate-log-table",
+    kind="safe",
+    fn=_fn_create_grape_t_merge_gate_log,
 )
 
 

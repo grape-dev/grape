@@ -829,42 +829,37 @@ def merge_pull(owner: str, repo: str, number: int, body: PRMergeBody | None = No
                       "title": (body.title or "").strip()}.items() if v}
         _payload = _filtered or None
     _token = _repo_token(owner, repo, user, p)
-    # Issue #754：合并前置硬阻断——PR 变更 diff 存在未解决冲突标记（<<<<<<< / >>>>>>>，
-    # 复测 unresolved-marker 失败的等价物）时拒绝合并并留痕；预检本身上游失败 → fail-open
-    # 透传合并（保持 #549/#558 上游透传语义，不引入新的 502）。
-    _blocked_hits: list = []
-    try:
-        _blocked_hits = _scan_pull_conflict_markers(p, owner, repo, number, _token)
-    except HTTPException as _e:
-        log.warning(f"Issue #754 conflict-marker precheck skipped "
-                    f"(upstream {getattr(_e, 'status_code', '?')}): {getattr(_e, 'detail', _e)}")
-    except Exception as _e:
-        log.warning(f"Issue #754 conflict-marker precheck failed (fail-open): {_e}")
-    if _blocked_hits:
-        _files = ", ".join(f"{h.get('path') or '<unknown>'}({h.get('markers')})" for h in _blocked_hits)
-        _msg = (f"merge blocked: unresolved conflict markers detected in PR files: {_files}. "
-                f"Fix the markers and retry (Issue #754).")
-        # 阻断留痕①：台账（pr_merge_blocked，best-effort 不影响阻断本身）
-        try:
-            from src.outbound_ledger import record_outbound
-            from src.repo_key import to_repo_key
-            record_outbound(p, to_repo_key(f"{owner}/{repo}", p), "pr_merge_blocked", str(number),
-                            issue_number=str(number), origin_channel="api")
-        except Exception as _le:
-            log.warning(f"outbound_ledger record (pr_merge_blocked) failed: {_le}")
-        # 阻断留痕②：PR 评论 best-effort（GitCode /pulls、GitHub /issues 通道均尝试）
-        try:
-            _trace_body = (f"[Grape] merge blocked: unresolved conflict markers in PR files: {_files}. "
-                           f"Manual fix required before merge. (Issue #754)")
-            _trace_path = (f"/issues/{number}/comments" if p == "github" else f"/pulls/{number}/comments")
-            _vcs_req(p, "POST", _vcs_url(owner, repo, _trace_path, None, p), _token,
-                     {"body": _trace_body})
-        except Exception as _ce:
-            log.warning(f"Issue #754 block-trace PR comment failed: {_ce}")
-        log.warning(f"Issue #754 {_msg}")
-        raise HTTPException(status_code=409, detail={"code": 409, "message": _msg})
+    # Issue #752（M1）：合入前冲突标记扫描门禁——PR 变更文件硬命中 `<<<<<<< `/`>>>>>>> `
+    # → 阻断 409（防残留进入基线分支，AC1）；仅孤立 `=======` 软命中 → 告警放行（防误杀
+    # markdown 下划线）；扫描自身异常 fail-open。每次决策写合入日志（AC3）。
+    from src.api.merge_gate import run_merge_gate, record_gate_log
+    _repo_key = f"{owner}/{repo}"
+    _gate = run_merge_gate(owner, repo, number, p, _token)
+    if _gate.get("decision") == "blocked":
+        record_gate_log(_repo_key, number, "pre_merge", "blocked", _gate)
+        raise HTTPException(status_code=409, detail={
+            "code": 409,
+            "message": "merge blocked by conflict-marker gate (Issue #752): "
+                       "unresolved merge conflict markers found in PR changed files",
+            "gate": {"phase": "pre_merge", "hard_hits": _gate.get("hard_hits", {}),
+                     "soft_hits": _gate.get("soft_hits", {})}})
+    if _gate.get("decision") == "warned":
+        record_gate_log(_repo_key, number, "pre_merge", "warned", _gate)
+        log.warning(f"merge gate soft warning {owner}/{repo}#{number}: "
+                    f"{_gate.get('soft_hits')}")
+    else:
+        record_gate_log(_repo_key, number, "pre_merge", _gate.get("decision", "passed"), _gate)
     resp = _vcs_req(p, "PUT", _vcs_url(owner, repo, f"/pulls/{number}/merge", None, p),
                     _token, _payload)
+    # Issue #752（M1）：合入后二次扫描——覆盖自动复测等旁路引入的残留；命中告警+日志
+    # （合入已完成无法回滚，人工裁决），未命中记录 passed。fail-open 不影响返回。
+    _post = run_merge_gate(owner, repo, number, p, _token)
+    _post_decision = "alarmed" if _post.get("decision") in ("blocked", "warned") \
+        else _post.get("decision", "passed")
+    record_gate_log(_repo_key, number, "post_merge", _post_decision, _post)
+    if _post_decision == "alarmed":
+        log.warning(f"merge gate post-merge alarm {owner}/{repo}#{number}: "
+                    f"hard={_post.get('hard_hits')} soft={_post.get('soft_hits')}")
     # Issue #453 台账（S25）：合并 PR → pull_request_merged 回声对账（VcsApiClient.merge_pr
     # 已入账，网关直调路径此处分账）
     try:
