@@ -178,3 +178,59 @@ def cleanup_old_task_messages() -> int:
     except Exception as e:
         log.warning(f"task_messages cleanup failed: {e}")
         return 0
+
+
+# ===========================================================================
+# Issue #699 Phase 4：table_maintenance 按进程拆分（设计 §9.5）
+# - table_maintenance_tasks_loop：Worker 进程（agent_tasks 字段置空 + 90 天删除，
+#   分布式锁 key=table_maintenance_tasks）
+# - table_maintenance_messages_loop：Insight 进程（task_messages 清理，
+#   分布式锁 key=table_maintenance_messages）
+# 单进程模式仍用原有组合锁（key=table_maintenance，见 main.py lifespan）。
+# ===========================================================================
+
+_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS = 600  # 启动 10 分钟后首跑（避免迁移竞态）
+_TABLE_MAINTENANCE_INTERVAL_SECONDS = 6 * 3600  # 每 6 小时
+
+
+async def table_maintenance_tasks_loop() -> None:
+    """Worker 进程：agent_tasks 大字段置空（7 天）+ 终态整行删除（90 天）。
+
+    与 Insight 进程的 task_messages 清理使用不同分布式锁 key，互不阻塞。
+    """
+    import asyncio
+    from src.kernel.config import log as _log
+    from src.domains.runtime.engine.task_lock import run_with_distributed_lock
+
+    await asyncio.sleep(_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            async with run_with_distributed_lock("table_maintenance_tasks", ttl=3600):
+                cleanup_old_agent_tasks_fields()
+                delete_old_agent_tasks()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("table maintenance (agent_tasks) run failed")
+        await asyncio.sleep(_TABLE_MAINTENANCE_INTERVAL_SECONDS)
+
+
+async def table_maintenance_messages_loop() -> None:
+    """Insight 进程：task_messages 清理（90 天）。
+
+    与 Worker 进程的 agent_tasks 维护使用不同分布式锁 key，互不阻塞。
+    """
+    import asyncio
+    from src.kernel.config import log as _log
+    from src.domains.runtime.engine.task_lock import run_with_distributed_lock
+
+    await asyncio.sleep(_TABLE_MAINTENANCE_STARTUP_DELAY_SECONDS)
+    while True:
+        try:
+            async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
+                cleanup_old_task_messages()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.exception("table maintenance (task_messages) run failed")
+        await asyncio.sleep(_TABLE_MAINTENANCE_INTERVAL_SECONDS)
