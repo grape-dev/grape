@@ -104,6 +104,89 @@ def current_trace_context_headers() -> dict:
         return {}
 
 
+# ===== MR-2（2026-11-05）：任务生命周期 spans =====
+
+def resume_trace_context(trace_context: str):
+    """从任务行携带的 W3C traceparent 恢复上下文（worker/后续环节成为同一 trace 的子段）。
+
+    trace_context 格式："traceparent|00-<traceid>-<spanid>-01"（inject 输出的 join）。
+    无效/缺失/OTel 未启用 → 返回 None，调用方直接起新 span 或跳过。
+    """
+    try:
+        if not otel_enabled() or not trace_context:
+            return None
+        from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
+        tp = trace_context.split("|", 1)[1] if "|" in trace_context else trace_context
+        carrier = {"traceparent": tp}
+        ctx = TraceContextTextMapPropagator().extract(carrier)
+        # 校验恢复出有效 trace id（坏数据返回 INVALID）
+        from opentelemetry.trace import INVALID_SPAN_CONTEXT, get_current_span
+        if ctx.get("current-span", None) is None:
+            pass
+        span_ctx = get_current_span(ctx).get_span_context()
+        if span_ctx.trace_id == 0:
+            return None
+        return ctx
+    except Exception:
+        return None
+
+
+def start_task_span(name: str, attributes: dict, trace_context: str = ""):
+    """任务生命周期 span 的统一入口。
+
+    - trace_context 非空：resume 成同一 trace 的子 span（跨进程串联）
+    - 为空：新 trace（enqueue 是根）
+    返回 (span, ctx) 或 (None, None)（未启用/失败——调用方跳过，绝不阻塞业务）。
+    用法:
+        span, ctx = start_task_span("task.enqueue", {...})
+        if span:
+            try: ...业务...
+            finally: span.end()
+    """
+    try:
+        if not otel_enabled():
+            return None, None
+        init_otel("grape-task")  # 幂等：服务进程已被四入口初始化；独立调用（CLI/worker）自动补
+        from opentelemetry import trace
+        from opentelemetry.trace import SpanKind, set_span_in_context
+        ctx = None
+        token = None
+        if trace_context:
+            ctx = resume_trace_context(trace_context)
+        if ctx is not None:
+            from opentelemetry import context as _otel_ctx
+            token = _otel_ctx.attach(ctx)
+        try:
+            span = trace.get_tracer("grape.task").start_span(
+                name, kind=SpanKind.INTERNAL, attributes={k: str(v)[:200] for k, v in attributes.items() if v is not None})
+        finally:
+            if token is not None:
+                from opentelemetry import context as _otel_ctx
+                _otel_ctx.detach(token)
+        return span, ctx
+    except Exception:
+        return None, None
+
+
+def snapshot_trace_context(span=None) -> str:
+    """当前（或指定）span 的 W3C traceparent 序列化（存任务行 trace_context 列）。
+
+    格式 "traceparent|<header 值>"（resume_trace_context 的逆操作）。
+    无有效 span / 未启用 → ""。
+    """
+    try:
+        if not otel_enabled():
+            return ""
+        from opentelemetry import trace
+        sc = (span.get_span_context() if span is not None
+              else trace.get_current_span().get_span_context())
+        if not sc or not sc.is_valid:
+            return ""
+        return "traceparent|00-%s-%s-01" % (format(sc.trace_id, "032x"), format(sc.span_id, "016x"))
+    except Exception:
+        return ""
+
+
 def inject_trace_ids(record) -> None:
     """logging.LogRecord 注入 OTel trace_id/span_id（Step 3 日志关联）。
 
