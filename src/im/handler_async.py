@@ -595,8 +595,12 @@ async def _autopilot_finding_list_card(ctx, api, msg_id, uid, exec_id, action_to
 
 
 async def _autopilot_finding_dispatch(ctx, api, msg_id, uid, exec_id, finding_id,
-                                      scene_id="", action_token=""):
-    """派发选中 finding 为真实 Issue（原地更新卡为 result 态）。"""
+                                      scene_id="", action_token="", dedup_confirmed=False):
+    """派发选中 finding 为真实 Issue（原地更新卡为 result 态）。
+
+    Issue #697：疑似重复（suspected_duplicate）未确认时被 409 门禁拦截，
+    转疑似重复确认卡（/finding-confirm），确认后携带 dedup_confirmed=true 重试派发。
+    """
     from fastapi import HTTPException
     info = _autopilot_exec_row(exec_id)
     if not info:
@@ -611,7 +615,9 @@ async def _autopilot_finding_dispatch(ctx, api, msg_id, uid, exec_id, finding_id
         _uname = _acc.get("username", "")
         from src.api.routes.autopilot import _dispatch_finding_core
         result = await _dispatch_finding_core(exec_id, finding_id, scene_id=scene_id,
-                                              user={"id": uid, "username": _uname})
+                                              user={"id": uid, "username": _uname},
+                                              dedup_confirmed=dedup_confirmed,
+                                              dedup_confirmed_by=_uname)
         # 派发后原地更新卡为 result 态（刷新 info 拿回写后的 findings_json）
         info2 = _autopilot_exec_row(exec_id)
         card = _autopilot_state_card(info2 or info, exec_id, state="result", finding_id=finding_id)
@@ -621,11 +627,42 @@ async def _autopilot_finding_dispatch(ctx, api, msg_id, uid, exec_id, finding_id
             await _send_card_reply(ctx, api, msg_id, card)
         log.info(f"[finding-card] dispatch exec={exec_id} fid={finding_id} ok={result.get('ok')}")
     except HTTPException as he:
-        _msg = he.detail.get("message", str(he.detail)) if isinstance(he.detail, dict) else str(he.detail)
+        _detail = he.detail if isinstance(he.detail, dict) else {}
+        if he.status_code == 409 and _detail.get("dedup_level"):
+            # Issue #697：疑似重复门禁拦截 → 推确认卡（确认人=当前飞书用户，落库 dedup_confirmed_by）
+            card = _autopilot_dedup_confirm_card(exec_id, finding_id, scene_id, _detail)
+            if action_token:
+                await api.update_card_by_token(ctx, action_token, card)
+            else:
+                await _send_card_reply(ctx, api, msg_id, card)
+            return
+        _msg = _detail.get("message", str(he.detail)) if isinstance(he.detail, dict) else str(he.detail)
         await api.reply_card(ctx, msg_id, f"**{_msg}**")
     except Exception as e:
         log.warning(f"[finding-card] dispatch failed exec={exec_id} fid={finding_id}: {e}")
         await api.reply_card(ctx, msg_id, f"**派发异常: {e}**")
+
+
+def _autopilot_dedup_confirm_card(exec_id: int, finding_id: str, scene_id: str, detail: dict) -> dict:
+    """Issue #697：疑似重复确认卡（owner 确认后方可并入派发）。"""
+    _note = " ".join(str(detail.get("dedup_note") or "").split())[:200]
+    body = [
+        {"tag": "div", "text": {"tag": "lark_md",
+                                "content": "**⚠️ 疑似重复（根因比对不一致）**\n"
+                                           "该问题与已有跟踪单仅标题相似、根因不一致，"
+                                           "需确认后方可派发并入；级联关闭在确认前不会自动触发。"}},
+    ]
+    if _note:
+        body.append({"tag": "div", "text": {"tag": "lark_md",
+                                            "content": f"<font color='grey'>差异说明: {_note}</font>"}})
+    body.append({"tag": "hr"})
+    body.append({"tag": "button", "text": {"tag": "plain_text", "content": "确认重复并派发"},
+                 "type": "primary", "behaviors": [{"type": "callback", "value": {
+                     "cmd": "/finding-confirm", "exec_id": exec_id,
+                     "finding_id": finding_id, "scene_id": scene_id}}]})
+    return {"schema": "2.0",
+            "header": {"title": {"tag": "plain_text", "content": "疑似重复确认"}, "template": "orange"},
+            "body": {"elements": body}}
 
 
 async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
@@ -1017,6 +1054,21 @@ async def process_command_async(ctx: "BotContext", api: "FeishuAsync",
             return ""
         await _autopilot_finding_dispatch(ctx, api, msg_id, uid, int(_exec_id), _fid,
                                           scene_id=_sid, action_token=action_token)
+        return ""
+
+    # /finding-confirm — Issue #697：疑似重复 owner 确认 → 携带 dedup_confirmed=true 重派
+    if cmd == "/finding-confirm":
+        value = card_value or {}
+        _exec_id = value.get("exec_id") or 0
+        _fid = str(value.get("finding_id") or "")
+        _sid = str(value.get("scene_id") or "")
+        if not _exec_id or not _fid:
+            return ""
+        if not uid:
+            return ""
+        await _autopilot_finding_dispatch(ctx, api, msg_id, uid, int(_exec_id), _fid,
+                                          scene_id=_sid, action_token=action_token,
+                                          dedup_confirmed=True)
         return ""
 
     # /bind N — 数字按钮直接绑定仓库

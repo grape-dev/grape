@@ -618,41 +618,86 @@ class DispatchBody(BaseModel):
     dedup_confirmed_by: str = ""
 
 
-# Issue #697：判定级别常量（与 scheduler.AUTOPILOT_DEDUP_RULE 的输出契约一致）
-_DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+# Issue #697：判定级别枚举/归一/门禁判定统一取自 scheduler（单一事实源，禁止双源漂移）
+try:
+    from src.runtime.scheduler import (
+        DEDUP_LEVEL_SUSPECTED,
+        dedup_auto_merge_allowed,
+        dedup_cascade_close_allowed,
+        normalize_dedup_level,
+        sanitize_dedup_note,
+        sanitize_dedup_confirmed_by,
+    )
+except Exception:  # scheduler 不可达时兜底（与 AUTOPILOT_DEDUP_RULE 同策略）
+    DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+
+    def normalize_dedup_level(raw):
+        level = str(raw or "").strip().lower()
+        if not level:
+            return ""
+        return level if level in ("exact_duplicate", "suspected_duplicate", "not_duplicate") \
+            else "suspected_duplicate"
+
+    def dedup_auto_merge_allowed(dedup_level, dedup_confirmed=False):
+        level = normalize_dedup_level(dedup_level)
+        return level in ("", "not_duplicate", "exact_duplicate") or bool(dedup_confirmed)
+
+    def dedup_cascade_close_allowed(dedup_level, dedup_confirmed=False):
+        level = normalize_dedup_level(dedup_level)
+        return level in ("", "not_duplicate", "exact_duplicate") or bool(dedup_confirmed)
+
+    def sanitize_dedup_note(raw):
+        return " ".join(str(raw or "").split())[:200]
+
+    def sanitize_dedup_confirmed_by(raw):
+        return " ".join(str(raw or "").split())[:64]
 
 
 def _dedup_dispatch_guard(finding: dict, dedup_confirmed: bool = False) -> None:
-    """疑似重复派发门禁（Issue #697）。
+    """疑似重复派发门禁（Issue #697，代码级强制）。
 
-    dedup_level=suspected_duplicate 且未经 owner 确认（dedup_confirmed != true）时，
-    拒绝派发挂靠（409），防止仅标题相似即误并乃至级联关闭独立跟踪线。
-    确认后由调用方将 dedup_confirmed 落回 findings_json。
+    dedup_level 经 normalize_dedup_level 归一（fail-closed：LLM 漏发为空串保持既有放行，
+    拼错/未知非空级别一律降级为 suspected_duplicate），疑似重复且未经 owner 确认
+    （dedup_confirmed != true）时拒绝派发挂靠（409），防止仅标题相似即误并乃至级联关闭独立跟踪线。
+    确认后由调用方将 dedup_confirmed 落回 findings_json（创建 Issue 失败也不丢确认标记）。
     """
-    if str(finding.get("dedup_level") or "") != _DEDUP_LEVEL_SUSPECTED:
-        return
-    if not (dedup_confirmed or finding.get("dedup_confirmed")):
+    if not dedup_auto_merge_allowed(finding.get("dedup_level"), dedup_confirmed
+                                    or bool(finding.get("dedup_confirmed"))):
         raise HTTPException(status_code=409, detail={
             "code": 409,
             "message": "疑似重复（suspected_duplicate）：根因比对不一致，"
                        "需跟踪单 owner agent 确认后方可派发并入；确认后携带 dedup_confirmed=true 重试",
-            "dedup_level": _DEDUP_LEVEL_SUSPECTED,
-            "dedup_note": finding.get("dedup_note", ""),
+            "dedup_level": DEDUP_LEVEL_SUSPECTED,
+            "dedup_note": sanitize_dedup_note(finding.get("dedup_note")),
         })
 
 
 def _append_dedup_note(description: str, finding: dict) -> str:
-    """Issue #697：派发描述追加判定级别与差异说明，保留根因对比证据链。"""
-    level = str(finding.get("dedup_level") or "").strip()
+    """Issue #697：派发描述追加判定级别与差异说明，保留根因对比证据链。
+
+    级别经 normalize 归一（未知 fail-closed）、dedup_note 压平限长后再写入公开 Issue 描述。
+    """
+    level = normalize_dedup_level(finding.get("dedup_level"))
     if not level:
         return description
-    note = str(finding.get("dedup_note") or "").strip()
+    note = sanitize_dedup_note(finding.get("dedup_note"))
     lines = [description.rstrip(), "", f"[dedup] level={level}"]
     if note:
         lines.append(f"[dedup] 差异说明: {note}")
-    if level == _DEDUP_LEVEL_SUSPECTED:
+    if level == DEDUP_LEVEL_SUSPECTED:
         lines.append("[dedup] 疑似重复：待跟踪单 owner agent 确认后方可并入；级联关闭不自动触发")
     return "\n".join(lines)
+
+
+def _save_findings_json(exec_id: int, findings_data: dict) -> None:
+    """Issue #697：findings_json 回写（确认标记/派发号共用，统一加锁提交）。"""
+    with db_lock:
+        c = db.cursor()
+        c.execute(
+            "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
+            (json.dumps(findings_data, ensure_ascii=False), exec_id)
+        )
+        db.commit()
 
 
 async def _dispatch_finding_core(exec_id: int, finding_id: str,
@@ -700,11 +745,14 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     # Issue #697：疑似重复（根因不一致）未经 owner 确认 → 拒绝派发挂靠
     _dedup_dispatch_guard(finding, dedup_confirmed)
 
-    # Issue #697：owner 确认后落库标记，防止后续重复确认/误判链重启
+    # Issue #697：owner 确认后立即落库标记（先于建 Issue，建 Issue 失败也不丢确认），
+    # 防止后续重复确认/误判链重启；确认人取服务端身份，客户端自证字段仅作兜底展示
     if dedup_confirmed and not finding.get("dedup_confirmed"):
         finding["dedup_confirmed"] = True
-        if dedup_confirmed_by:
-            finding["dedup_confirmed_by"] = dedup_confirmed_by
+        _confirmed_by = sanitize_dedup_confirmed_by(dedup_confirmed_by)
+        if _confirmed_by:
+            finding["dedup_confirmed_by"] = _confirmed_by
+        _save_findings_json(exec_id, findings_data)
 
     # 创建真实 Issue（调用方传的 title/desc/scene_id 优先，否则用 finding 原值）
     from src.repo_key import split_owner_repo
@@ -739,13 +787,7 @@ async def _dispatch_finding_core(exec_id: int, finding_id: str,
     if issue_number and issue_number != "0":
         # 更新 findings_json
         finding["dispatched_issue_number"] = issue_number
-        with db_lock:
-            c = db.cursor()
-            c.execute(
-                "UPDATE autopilot_executions SET findings_json=? WHERE id=?",
-                (json.dumps(findings_data, ensure_ascii=False), exec_id)
-            )
-            db.commit()
+        _save_findings_json(exec_id, findings_data)
         log.info(f"Autopilot: finding {finding_id} dispatched as Issue #{issue_number} (exec={exec_id})")
         return {"ok": True, "issue_number": issue_number, "message": f"已创建 Issue #{issue_number}"}
     return {"ok": False, "message": f"创建 Issue 失败: {result}"}
@@ -757,12 +799,14 @@ async def dispatch_finding(exec_id: int, body: DispatchBody, user: dict = Depend
     exec_info = _check_exec_access(user, exec_id)
     log.info(f"[dispatch-debug] body.scene_id={body.scene_id!r} body.title={body.title!r}")
 
-    # 权限/仓库校验后走共用核心（权限模型与路由原本一致）
+    # 权限/仓库校验后走共用核心（权限模型与路由原本一致）；
+    # dedup_confirmed_by 以服务端认证身份为准（客户端自证字段仅兜底，防止伪造确认人）
     return await _dispatch_finding_core(exec_id, body.finding_id,
                                         body.title or "", body.description or "",
                                         body.scene_id or "", user=user,
                                         dedup_confirmed=bool(body.dedup_confirmed),
-                                        dedup_confirmed_by=body.dedup_confirmed_by or "")
+                                        dedup_confirmed_by=str((user or {}).get("username")
+                                                               or body.dedup_confirmed_by or ""))
 
 
 # ====== 飞书订阅（autopilot-feishu-subscription-design.md §4.3）======

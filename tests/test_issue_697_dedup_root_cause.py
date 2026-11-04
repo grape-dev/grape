@@ -123,6 +123,13 @@ class TestPromptBuilderDedupGuard:
         assert "Issue Pipeline:" in prompt
         assert "重复判定双维度门禁" in prompt
 
+    def test_rule_single_source_from_scheduler(self, pb):
+        """判重规则片段单一事实源：prompt_builder 复用 scheduler 共享片段，禁止双源漂移。"""
+        from src.runtime.scheduler import (DEDUP_ROOT_CAUSE_ELEMENTS_RULE,
+                                           DEDUP_CASCADE_CLOSE_GUARD_RULE)
+        assert DEDUP_ROOT_CAUSE_ELEMENTS_RULE in pb.ISSUE_DEDUP_ROOT_CAUSE_RULE
+        assert DEDUP_CASCADE_CLOSE_GUARD_RULE in pb.ISSUE_DEDUP_ROOT_CAUSE_RULE
+
 
 # ===== 2/3. scheduler：执行 prompt 注入 + findings 透传 =====
 
@@ -192,6 +199,45 @@ class TestSchedulerDedupRule:
         assert f["dedup_level"] == ""
         assert f["dedup_note"] == ""
 
+    def test_parse_findings_unknown_level_fail_closed(self, sched):
+        """LLM 拼错 dedup_level（非法枚举）→ 解析层即降级 suspected_duplicate（fail-closed）。"""
+        out = ('<!-- autopilot-findings\n'
+               '{"result":"warning","summary":"s1","findings":[{"id":"f1","title":"t","description":"d",'
+               '"dedup_level":"suspected"}]}\n-->')
+        f = sched.parse_findings(out)["findings"][0]
+        assert f["dedup_level"] == "suspected_duplicate"
+
+    def test_parse_findings_truncates_long_note(self, sched):
+        """dedup_note 在解析层限长（写入公开 Issue 描述前的防线）。"""
+        import json as _json
+        payload = {"result": "warning", "summary": "s1", "findings": [
+            {"id": "f1", "title": "t", "description": "d",
+             "dedup_level": "suspected_duplicate", "dedup_note": "长" * 500}]}
+        out = '<!-- autopilot-findings\n' + _json.dumps(payload, ensure_ascii=False) + '\n-->'
+        f = sched.parse_findings(out)["findings"][0]
+        assert len(f["dedup_note"]) == sched.DEDUP_NOTE_MAX_CHARS
+
+    def test_normalize_and_guard_helpers(self, sched):
+        assert sched.normalize_dedup_level("") == ""
+        assert sched.normalize_dedup_level(None) == ""
+        assert sched.normalize_dedup_level("Exact_Duplicate") == "exact_duplicate"
+        assert sched.normalize_dedup_level("suspected") == "suspected_duplicate"  # 未知 fail-closed
+        # 级联关闭守护（代码级）：疑似重复未确认不允许；确认后允许；未知级别未确认不允许
+        assert sched.dedup_cascade_close_allowed("suspected_duplicate", False) is False
+        assert sched.dedup_cascade_close_allowed("suspected_duplicate", True) is True
+        assert sched.dedup_cascade_close_allowed("unknown_level", False) is False
+        assert sched.dedup_cascade_close_allowed("exact_duplicate", False) is True
+        assert sched.dedup_cascade_close_allowed("not_duplicate", False) is True
+        # 并入门禁：疑似未确认拒绝，确认放行
+        assert sched.dedup_auto_merge_allowed("suspected_duplicate", False) is False
+        assert sched.dedup_auto_merge_allowed("suspected_duplicate", True) is True
+        assert sched.dedup_auto_merge_allowed("", False) is True
+
+    def test_rule_single_source_fragments(self, sched):
+        """规则文本片段单一事实源：AUTOPILOT_DEDUP_RULE 由共享片段组成。"""
+        assert sched.DEDUP_ROOT_CAUSE_ELEMENTS_RULE in sched.AUTOPILOT_DEDUP_RULE
+        assert sched.DEDUP_CASCADE_CLOSE_GUARD_RULE in sched.AUTOPILOT_DEDUP_RULE
+
 
 # ===== 4/5/6. routes/autopilot.py：dispatch 门禁 + 描述证据链 + 润色 prompt =====
 
@@ -220,6 +266,63 @@ class TestDispatchGuard:
 
     def test_no_level_passes(self, ap):
         ap._dedup_dispatch_guard({}, dedup_confirmed=False)
+
+    def test_unknown_level_fail_closed(self, ap):
+        """LLM 拼错/漏发非空 dedup_level → fail-closed 按 suspected 处理（409）。"""
+        for bad in ("suspected", "SUSPECTED_DUPLICATE ", "duplicate?", "exact"):
+            finding = {"id": "f1", "dedup_level": bad}
+            with pytest.raises(Exception) as ei:
+                ap._dedup_dispatch_guard(finding, dedup_confirmed=False)
+            assert getattr(ei.value, "status_code", None) == 409, bad
+
+    def test_append_dedup_note_unknown_level_fail_closed(self, ap):
+        out = ap._append_dedup_note("原始描述", {"dedup_level": "duplicate?"})
+        assert "level=suspected_duplicate" in out
+        assert "级联关闭不自动触发" in out
+
+    def test_append_dedup_note_truncates_and_flattens(self, ap):
+        finding = {"dedup_level": "suspected_duplicate", "dedup_note": "行1\n行2 " + "长" * 400}
+        out = ap._append_dedup_note("原始描述", finding)
+        seg = out.split("[dedup] 差异说明: ", 1)[1].split("\n", 1)[0]
+        assert "\n" not in seg
+        assert len(seg) == 200
+
+    def test_cascade_close_helper_reexported(self, ap):
+        """routes/autopilot 复用 scheduler 级联关闭守护（代码级单一事实源）。"""
+        assert ap.dedup_cascade_close_allowed("suspected_duplicate", False) is False
+        assert ap.dedup_cascade_close_allowed("suspected_duplicate", True) is True
+
+    def test_confirmation_persisted_even_if_issue_create_fails(self, ap, monkeypatch):
+        """Issue #697：owner 确认标记先于建 Issue 落库，建 Issue 失败（issue_number=0）不丢确认。"""
+        import asyncio
+        import sqlite3
+        import json as _json
+        import src.api.issues_center as issues_center
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE autopilot_executions (id INTEGER PRIMARY KEY, task_id INTEGER, findings_json TEXT)")
+        conn.execute("CREATE TABLE autopilot_tasks (id INTEGER PRIMARY KEY, repo_key TEXT)")
+        conn.execute("INSERT INTO autopilot_tasks VALUES (1, 'gitcode:org/repo')")
+        findings = {"result": "", "summary": "", "findings": [
+            {"id": "f1", "title": "t", "description": "d", "dedup_level": "suspected_duplicate"}]}
+        conn.execute("INSERT INTO autopilot_executions VALUES (5, 1, ?)", (_json.dumps(findings),))
+        monkeypatch.setattr(ap, "db", conn)
+        monkeypatch.setattr(ap, "db_lock", threading.Lock())
+
+        async def fake_create(body, user=None):
+            return {"issue_number": "0"}
+        monkeypatch.setattr(issues_center, "create_task_via_issue", fake_create)
+        r = asyncio.run(ap._dispatch_finding_core(5, "f1", dedup_confirmed=True,
+                                                  dedup_confirmed_by="owner-agent"))
+        assert r.get("ok") is False
+        row = conn.execute("SELECT findings_json FROM autopilot_executions WHERE id=5").fetchone()
+        f = _json.loads(row[0])["findings"][0]
+        assert f["dedup_confirmed"] is True
+        assert f["dedup_confirmed_by"] == "owner-agent"
+        assert not f.get("dispatched_issue_number")
+
+    def test_confirmed_by_sanitized(self, ap):
+        """dedup_confirmed_by 非自由文本：压平限长。"""
+        assert ap.sanitize_dedup_confirmed_by(" a\n b " + "x" * 100) == "a b " + "x" * 60
 
     def test_append_dedup_note_evidence_chain(self, ap):
         finding = {"dedup_level": "suspected_duplicate",

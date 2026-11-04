@@ -108,18 +108,82 @@ def _heal_findings_marker(text: str) -> str:
     return text
 
 
+# ====== Issue #697：dedup 判定级别枚举 + 门禁判定（代码级强制，单一事实源） ======
+# prompt_builder / routes/autopilot.py 均从这里取常量与判定函数，禁止各自复制规则文本。
+
+DEDUP_LEVEL_EXACT = "exact_duplicate"
+DEDUP_LEVEL_SUSPECTED = "suspected_duplicate"
+DEDUP_LEVEL_NOT = "not_duplicate"
+DEDUP_LEVELS = (DEDUP_LEVEL_EXACT, DEDUP_LEVEL_SUSPECTED, DEDUP_LEVEL_NOT)
+
+# 写入公开 Issue 描述 / 确认人字段的限长（防 LLM 长文注入公开面）
+DEDUP_NOTE_MAX_CHARS = 200
+DEDUP_CONFIRMED_BY_MAX_CHARS = 64
+
+# 根因三要素比对规则（双源共用片段：巡检执行 prompt + 反馈分诊 prompt）
+DEDUP_ROOT_CAUSE_ELEMENTS_RULE = (
+    "判定重复时禁止仅凭标题相似度下结论，必须逐一比对根因三要素：\n"
+    "1. 报错信息（error message 原文）\n"
+    "2. 根因描述（root cause 结论）\n"
+    "3. 涉及命令与参数（command + args）"
+)
+# 级联关闭守护规则（双源共用片段）
+DEDUP_CASCADE_CLOSE_GUARD_RULE = (
+    "级联关闭守护：resolve 级联关闭仅对「exact_duplicate（已确认）」生效；"
+    "suspected_duplicate 在 owner 确认前不得触发级联关闭。"
+)
+
+
+def normalize_dedup_level(raw) -> str:
+    """判定级别归一（fail-closed）。
+
+    合法枚举原样返回；空串=LLM 未分类（保持既有放行行为）；
+    非法/拼错的非空级别一律降级为 suspected_duplicate，杜绝漏发/拼错绕过 409 门禁。
+    """
+    level = str(raw or "").strip().lower()
+    if not level:
+        return ""
+    return level if level in DEDUP_LEVELS else DEDUP_LEVEL_SUSPECTED
+
+
+def sanitize_dedup_note(raw) -> str:
+    """dedup_note 压平换行 + 限长（写入公开 Issue 描述前调用）。"""
+    return " ".join(str(raw or "").split())[:DEDUP_NOTE_MAX_CHARS]
+
+
+def sanitize_dedup_confirmed_by(raw) -> str:
+    """dedup_confirmed_by 压平 + 限长（确认人身份字段，非自由文本）。"""
+    return " ".join(str(raw or "").split())[:DEDUP_CONFIRMED_BY_MAX_CHARS]
+
+
+def dedup_auto_merge_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
+    """并入挂靠门禁：exact 允许；未分类（空）保持既有行为允许；疑似/未知需 owner 确认。"""
+    level = normalize_dedup_level(dedup_level)
+    if level in ("", DEDUP_LEVEL_NOT, DEDUP_LEVEL_EXACT):
+        return True
+    return bool(dedup_confirmed)
+
+
+def dedup_cascade_close_allowed(dedup_level, dedup_confirmed: bool = False) -> bool:
+    """级联关闭守护（代码级）：仅 exact_duplicate 或 owner 已确认的疑似重复允许级联关闭。"""
+    level = normalize_dedup_level(dedup_level)
+    if level in ("", DEDUP_LEVEL_NOT, DEDUP_LEVEL_EXACT):
+        return True
+    return bool(dedup_confirmed)
+
+
 # Issue #697：巡检重复判定双维度规则（根因三要素比对 + 三级判定 + owner 确认 + 级联关闭守护）。
 # 同时注入巡检执行 prompt 与润色 prompt（routes/autopilot.py 复用），保持单一事实源。
-AUTOPILOT_DEDUP_RULE = """## 重复判定双维度门禁（Issue #697）
-判定两个 Issue/问题是否重复时，禁止仅凭标题相似度下结论，必须逐一比对根因三要素：
-1. 报错信息（error message 原文）
-2. 根因描述（root cause 结论）
-3. 涉及命令与参数（command + args）
-输出分级结论之一：
-- exact_duplicate：标题相似且根因三要素一致，才可判定完全重复（允许自动并入挂靠）
-- suspected_duplicate：仅标题相似而任一要素不一致 → 疑似重复，列出差异点，通知跟踪单 owner agent 确认后方可并入，禁止自动挂靠
-- not_duplicate：不重复
-级联关闭守护：resolve 级联关闭仅对「exact_duplicate（已确认）」生效；suspected_duplicate 在 owner 确认前不得触发级联关闭。"""
+AUTOPILOT_DEDUP_RULE = (
+    "## 重复判定双维度门禁（Issue #697）\n"
+    + DEDUP_ROOT_CAUSE_ELEMENTS_RULE + "\n"
+    "输出分级结论之一：\n"
+    "- exact_duplicate：标题相似且根因三要素一致，才可判定完全重复（允许自动并入挂靠）\n"
+    "- suspected_duplicate：仅标题相似而任一要素不一致 → 疑似重复，列出差异点，"
+    "通知跟踪单 owner agent 确认后方可并入，禁止自动挂靠\n"
+    "- not_duplicate：不重复\n"
+    + DEDUP_CASCADE_CLOSE_GUARD_RULE
+)
 
 
 def parse_findings(agent_output: str) -> dict:
@@ -174,9 +238,10 @@ def parse_findings(agent_output: str) -> dict:
             f.setdefault("severity", "medium")
             f.setdefault("suggested_assignee", "coding")
             f.setdefault("suggested_skill", "implementation")
-            # Issue #697：判定级别与差异说明透传（exact_duplicate/suspected_duplicate/not_duplicate）
-            f.setdefault("dedup_level", "")
-            f.setdefault("dedup_note", "")
+            # Issue #697：判定级别与差异说明透传（exact_duplicate/suspected_duplicate/not_duplicate）；
+            # 级别在解析层即归一 fail-closed（漏发/拼错的非空级别按疑似重复处理，杜绝绕过 409 门禁）
+            f["dedup_level"] = normalize_dedup_level(f.get("dedup_level"))
+            f["dedup_note"] = sanitize_dedup_note(f.get("dedup_note"))
             valid.append(f)
         return {
             "result": data.get("result", ""),
