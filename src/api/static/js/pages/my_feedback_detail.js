@@ -47,6 +47,14 @@ function renderMyFeedbackDetail(feedbackId) {
     var timeStr = (item.created_at || '').slice(0, 19).replace('T', ' ');
     var updateTimeStr = (item.updated_at || '').slice(0, 19).replace('T', ' ');
 
+    // 关联 Issue（Issue #673：转换回写后展示链接 + 处理进度文案）
+    var issueHtml = t('issue_none');
+    if (item.issue_url) {
+      issueHtml = '<a href="' + item.issue_url + '" target="_blank" rel="noopener" ' +
+        'style="color:var(--a);font-weight:600;text-decoration:none">#' + (item.issue_number || '') + '</a>' +
+        '<span class="ts t3" style="margin-left:6px">' + t('issue_progress', { status: statusLabel(st) }) + '</span>';
+    }
+
     var html = '';
 
     // 返回按钮
@@ -67,6 +75,7 @@ function renderMyFeedbackDetail(feedbackId) {
       '<div style="display:grid;grid-template-columns:1fr 1fr;gap:8px 20px;font-size:13px;color:var(--t2);margin-bottom:16px">' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_type') + '</span> ' + catIcon + ' ' + catLabel + '</div>' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_status') + '</span> <span style="color:' + stColor + ';font-weight:600">' + statusLabel(st) + '</span></div>' +
+      '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_issue') + '</span> ' + issueHtml + '</div>' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_created_at') + '</span> ' + timeStr + '</div>' +
       '<div><span style="color:var(--t3);display:inline-block;min-width:60px">' + t('field_updated_at') + '</span> ' + updateTimeStr + '</div>' +
       '</div>' +

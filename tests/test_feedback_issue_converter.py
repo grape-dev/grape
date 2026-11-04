@@ -5,7 +5,7 @@
 - 官方技能（scope=official）→ 官方技能仓库 + 全局 bot
 - repo/user 技能 → 反馈所属仓库 + 仓库 bot token
 - 转换成功回写 issue_url/number/converted_at；失败不回写留重试
-- 仅 source='agent' AND issue_url='' 入选；is_deleted=1 排除
+- 仅 issue_url='' 入选（agent 全量 + 带上下文的 user，Issue #673）；is_deleted=1 排除
 """
 import sys, os, uuid
 from unittest import mock
@@ -21,7 +21,7 @@ import src.api.feedback_issue_converter as conv
 def _insert(source="agent", title="测试", skill_name="", skill_scope="",
             repo_key="gitcode:o/r", task_id="", is_deleted=0,
             issue_url="", description="desc", issue_id=None,
-            agent_type="coding", fail_summary="sum"):
+            agent_type="coding", fail_summary="sum", username="tester"):
     with db_lock:
         c = db.cursor()
         c.execute(
@@ -30,7 +30,7 @@ def _insert(source="agent", title="测试", skill_name="", skill_scope="",
             "task_id, skill_id, skill_name, skill_scope, issue_url, issue_number, "
             "converted_at, is_deleted, agent_type, fail_summary, event_seq) "
             "VALUES (?,?,?,?,?,?,'open',?,?,?,?,?,?,?,NULL,?,?,?,?)",
-            (0, "", "bug", title, description, repo_key, source,
+            (0, username, "bug", title, description, repo_key, source,
              task_id, 0, skill_name, skill_scope, issue_url, "",
              is_deleted, agent_type, fail_summary, issue_id))
         db.commit()
@@ -147,12 +147,12 @@ class TestFeedbackIssueConverter:
         finally:
             _cleanup(fid)
 
-    def test_only_agent_pending_selected(self):
-        """仅 source='agent' AND issue_url='' 入选；user 反馈与已转反馈不转换。"""
+    def test_only_pending_selected(self):
+        """仅 issue_url='' 入选：agent 全量 + 带上下文 user；纯意见类 user（无 repo_key）与已转反馈不转换。"""
         a = _insert(source="agent", title="agent的", task_id="t-6",
                     skill_name="sk", skill_scope="repo", repo_key="gitcode:o/r")
         u = _insert(source="user", title="用户的", task_id="u-6",
-                    skill_name="sk2", skill_scope="repo", repo_key="gitcode:o/r")
+                    skill_name="sk2", skill_scope="repo", repo_key="")
         done = _insert(source="agent", title="已转", task_id="t-6b",
                        skill_name="sk3", skill_scope="repo", repo_key="gitcode:o/r",
                        issue_url="u_done")
@@ -169,6 +169,63 @@ class TestFeedbackIssueConverter:
             assert "已转" not in titles_called
         finally:
             _cleanup(a, u, done)
+
+    def test_user_feedback_with_repo_converted(self):
+        """带 repo 上下文的用户反馈（Issue #673）按 repo_key 路由建 Issue 并回写。"""
+        fid = _insert(source="user", title="用户的", repo_key="gitcode:o/r")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 21, "url": "uu1"}) as m, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="REPO_BOT") as tb, \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")):
+                conv.convert_pending_feedback(limit=10)
+            assert m.called
+            assert m.call_args[0][:4] == ("gitcode", "o", "r", "REPO_BOT")
+            body = m.call_args[0][5]
+            assert "source=user" in body and "tester" in body
+            with db_lock:
+                row = db.execute(
+                    "SELECT issue_url, issue_number, converted_at FROM user_feedback WHERE id=?",
+                    (fid,)).fetchone()
+            assert row[0] == "uu1" and str(row[1]) == "21" and row[2]
+        finally:
+            _cleanup(fid)
+
+    def test_user_feedback_official_scope_routes_repo(self):
+        """用户反馈即使带 official 技能上下文也按所属仓库路由（不进官方技能仓）。"""
+        fid = _insert(source="user", title="用户的2", repo_key="gitcode:o/r",
+                      skill_name="official-sk", skill_scope="official")
+        try:
+            with mock.patch.object(conv, "_create_provider_issue",
+                                   return_value={"number": 22, "url": "uu2"}) as m, \
+                 mock.patch.object(conv, "_official_skills_target") as ot, \
+                 mock.patch.object(conv, "_repo_bot_token", return_value="RB"), \
+                 mock.patch.object(conv, "_repo_target",
+                                   return_value=("gitcode", "o", "r")):
+                conv.convert_pending_feedback(limit=10)
+            assert m.called
+            assert not ot.called
+            assert m.call_args[0][:4] == ("gitcode", "o", "r", "RB")
+        finally:
+            _cleanup(fid)
+
+    def test_user_feedback_idempotent(self):
+        """user 反馈重复 reconcile 不重复建 Issue（WHERE issue_url='' 保护）。"""
+        fid = _insert(source="user", title="用户的幂等", repo_key="gitcode:o/r")
+        calls = 0
+        try:
+            for _ in range(2):
+                with mock.patch.object(conv, "_create_provider_issue",
+                                       return_value={"number": 23, "url": "uu3"}) as m, \
+                     mock.patch.object(conv, "_repo_bot_token", return_value="B"), \
+                     mock.patch.object(conv, "_repo_target",
+                                       return_value=("gitcode", "o", "r")):
+                    conv.convert_pending_feedback(limit=10)
+                calls += m.call_count
+            assert calls == 1
+        finally:
+            _cleanup(fid)
 
     def test_deleted_excluded(self):
         """软删除的 agent 反馈不入选。"""
