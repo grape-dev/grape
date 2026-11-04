@@ -148,10 +148,16 @@ def start_metrics_server():
     """在独立端口启动 metrics HTTP server（参考 multica metrics/server.go）。
 
     仅在 METRICS_ADDR 启用时启动。绑定到指定地址，与主 API 分离。
+    幂等（2026-11-04）：三进程入口（grape_server.py）的 lifespan 会
+    `_startup_security_check() → import src.api.main`——main.py 的**模块级**
+    start_metrics_server() 副作用随之再触发一次，同端口二次 bind 直接
+    Errno 98 崩进程。已有实例直接复用，不再重复绑定。
     """
     global _metrics_httpd
     if not metrics_enabled():
         return
+    if _metrics_httpd is not None:
+        return  # 幂等：已启动（跨入口 import 副作用）
 
     from http.server import HTTPServer, BaseHTTPRequestHandler
 
