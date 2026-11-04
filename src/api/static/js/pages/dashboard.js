@@ -1054,7 +1054,7 @@ function _renderLocalSceneDetailPage(scene, nodes, agents, agentEngines, isAppli
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
   };
 
-window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
+window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description, hasValue) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -1063,6 +1063,10 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _val = (value || '');
+    // Issue #885: secret 字段接口已占位化（value:"" + has_value）——已配置未改动时
+    // 输入框留空、占位提示 ********；保存空 secret 值由服务端保留旧值（不回传明文）
+    var _ph = 'value';
+    if (_isSec && !_val && hasValue) { _ph = '********'; }
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
     var _desc = (description || '').trim();
@@ -1074,7 +1078,7 @@ window._addCustomFieldInline = function(name, value, isSecret, scope, preset, de
         '</span>'
       : '<input class="adv-kv-key" placeholder="name" value="' + (name || '') + '" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" onblur="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))">';
     row.innerHTML = _nameEl +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" value="' + _val + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="adv-del" onclick="this.parentElement.remove()">×</button>') +
@@ -2200,7 +2204,7 @@ function _enterCreateStandardMode(data, owner, name) {
     if (el2) el2.style.display = el2.style.display === 'none' ? 'block' : 'none';
   };
 
-  window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description) {
+window._addCustomFieldInline = function(name, value, isSecret, scope, preset, description, hasValue) {
     var container = document.getElementById('advCustomFieldsInline');
     if (!container) return;
     var row = document.createElement('div');
@@ -2209,6 +2213,10 @@ function _enterCreateStandardMode(data, owner, name) {
     var valId = 'advVal_' + Math.random().toString(36).slice(2,8);
     var _isSec = _cfComputeIsSecret(name, isSecret);
     var _val = (value || '');
+    // Issue #885: secret 字段接口已占位化（value:"" + has_value）——已配置未改动时
+    // 输入框留空、占位提示 ********；保存空 secret 值由服务端保留旧值（不回传明文）
+    var _ph = 'value';
+    if (_isSec && !_val && hasValue) { _ph = '********'; }
     var _vType = _isSec ? 'password' : 'text';
     var _vEye = _isSec ? '👁' : '🙈';
     var _desc = (description || '').trim();
@@ -2219,7 +2227,7 @@ function _enterCreateStandardMode(data, owner, name) {
         '</span>'
       : '<input class="adv-kv-key" placeholder="name" style="flex:0 0 120px;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" oninput="this.classList.toggle(\'cf-invalid\', !!_cfNameError(this.value))" value="' + (name || '') + '">';
     row.innerHTML = _nameEl +
-      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="value" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
+      '<input class="adv-kv-val" id="' + valId + '" type="' + _vType + '" placeholder="' + _ph + '" style="flex:1;padding:7px 12px;border:1px solid #e8e8ed;border-radius:10px;font-size:12px;outline:none;background:#f5f5f7;transition:all .15s" onfocus="this.style.borderColor=\'#0071e3\';this.style.background=\'#fff\'" onblur="this.style.borderColor=\'#e8e8ed\';this.style.background=\'#f5f5f7\'" value="' + _val + '">' +
       '<button type="button" style="border:1px solid #e8e8ed;background:#f5f5f7;border-radius:8px;width:28px;height:28px;padding:0;font-size:14px;cursor:pointer;color:#86868b;flex-shrink:0" onclick="(function(b){var i=document.getElementById(\'' + valId + '\');if(i){i.type=i.type===\'password\'?\'text\':\'password\';b.textContent=i.type===\'password\'?\'👁\':\'🙈\';}})(this)">' + _vEye + '</button>' +
       (preset ? '' : '<span class="adv-kv-scope-wrap" style="display:inline-flex;gap:2px 8px;align-items:center;flex-wrap:wrap">' + _cfScopeHtml(scope) + '</span>') +
       (preset ? '' : '<button class="ap-btn" style="color:#ff3b30;border-color:#e8e8ed;width:28px;height:28px;padding:0;font-size:14px" onclick="this.parentElement.remove()">×</button>') +
@@ -2473,7 +2481,7 @@ function _loadAdvancedOptionsInline(sceneId, owner, name) {
     var container = document.getElementById('advCustomFieldsInline');
     if (container) {
       container.innerHTML = '';
-      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description); });
+      fields.forEach(function(f) { window._addCustomFieldInline(f.name, f.value, f.is_secret, f.scope, f.preset, f.description, f.has_value); });
     }
     // Issue #242: 加载关联仓库（等托管仓库列表加载完成后再渲染，确保下拉框有选项）
     var linkedRepos = d.linked_repos || [];

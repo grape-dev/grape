@@ -283,8 +283,27 @@
 
 | Path | `{scene_id}` |
 | Query | `repo`（可选） |
-| 出参 | `{work_branch: "main", custom_fields: [{key, value}]}` |
+| 出参 | `{work_branch, custom_fields: [{name, value, is_secret, has_value?, scope, preset, description}], linked_repos}` |
+| 说明 | Issue #885：`is_secret=true` 字段不再明文返回——`value` 恒为空串，`has_value` 标记是否已配置；明文按需取回走 `POST /advanced-options/reveal` |
 | 返回 | 200；404 |
+
+## POST /api/scenes/{scene_id}/advanced-options/reveal — 按需取回密钥字段明文（一次性）
+> scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）
+> Issue #885（对齐 #474 reveal 模式）：密码二次确认 + 审计日志（不落明文）+ 当次返回（`Cache-Control: no-store`）+ 窗口高频限流（429）。
+
+请求头：`Content-Type: application/json`
+
+请求体（SceneAdvancedOptionsRevealBody）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `name` | string | 是 | 密钥字段变量名（`is_secret=true`） |
+| `password` | string | 是 | 二次确认：当前 Grape 密码 |
+
+| Path | `{scene_id}` |
+| Query | `repo`（必填，owner/repo） |
+| 出参 | `{name: "...", value: "..."}`（明文仅当次返回） |
+| 返回 | 200；400（缺 repo / 缺密码 / 密码错误 / 非密钥字段 / 未设密码）；403（非归属人）；404（场景或字段不存在）；429（高频取回） |
 
 ## PUT /api/scenes/{scene_id}/advanced-options — 保存高级选项
 > scope（x-token-scope）：**user_only**（`grape_` API Key / JWT；`tk_` → 403）

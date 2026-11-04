@@ -1,6 +1,6 @@
 """Scenes 路由：场景列表获取、CRUD、应用"""
 import json, os, re, threading, time
-from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query
+from fastapi import APIRouter, HTTPException, Depends, UploadFile, File, Query, Request, Response
 from pydantic import BaseModel
 from src.api.deps import get_current_user_or_api_key, require_no_session_token
 from src.config import log
@@ -2265,11 +2265,15 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
             _nf = normalize_custom_field(f)
             if not _nf.get("name"):
                 continue
-            # preset 项：scope/is_secret/preset 锁定展示；value 正常返回（前端按 is_secret 掩码）
+            # Issue #885: is_secret 字段不再明文返回——占位（value:"" + has_value 标记），
+            # 按需取回明文走 POST /{scene_id}/advanced-options/reveal（对齐 #474 模式）；
+            # 非 secret 字段保持明文返回（原行为）。
+            _is_sec = bool(_nf.get("is_secret"))
             _fields.append({
                 "name": _nf["name"],
-                "value": _nf.get("value", ""),
-                "is_secret": _nf.get("is_secret", False),
+                "value": "" if _is_sec else _nf.get("value", ""),
+                "is_secret": _is_sec,
+                "has_value": bool(_nf.get("value")),
                 "scope": _nf.get("scope", ["all"]),
                 "preset": _nf.get("preset", False),
                 "description": _nf.get("description", ""),
@@ -2289,6 +2293,109 @@ def get_advanced_options(scene_id: str, user: dict = Depends(require_no_session_
     except Exception:
         pass
     return {"work_branch": "main", "custom_fields": [], "linked_repos": _linked_repos}
+
+
+# ===== Issue #885: 场景自定义变量密钥字段按需取回明文（对齐 #474 reveal 模式）=====
+# GET advanced-options 已收敛为占位（is_secret → value:"" + has_value）；
+# 需要查看明文时走本接口：密码二次确认 + 审计日志（不落明文）+ 当次返回
+# （Cache-Control: no-store）+ 高频取回限流（复用 #474 的 reveal 日志表，429）。
+class SceneAdvancedOptionsRevealBody(BaseModel):
+    name: str = ""       # custom_field 变量名（大写）
+    password: str = ""   # 二次确认：当前 Grape 密码
+
+
+@router.post("/{scene_id}/advanced-options/reveal", operation_id="scenes_advanced_options_reveal", summary="Reveal a scene custom-field secret once", description="Returns the plaintext value of one is_secret custom field once, after the user re-enters their Grape password. The response carries Cache-Control: no-store and a successful reveal is written to the audit log (scene/repo/field only, never the secret). Repeated reveals within a short window are rate-limited (429).")
+def reveal_advanced_options_secret(scene_id: str, body: SceneAdvancedOptionsRevealBody,
+                                   user: dict = Depends(require_no_session_token),
+                                   repo: str = "", request: Request = None, response: Response = None):
+    """按需取回场景自定义变量密钥明文（一次性，Issue #885）。
+
+    - 前置：repo 归属校验（check_repo_access）+ 场景存在 + 字段存在且 is_secret
+    - 二次确认：重新输入当前 Grape 密码（未设密码 → 400 + need_set_password）
+    - 审计：scene_secret_reveal，detail 仅含 scene_id/repo_key/name，不落明文值
+    - 明文仅当次返回：Cache-Control: no-store
+    - 高频告警：窗口内取回次数达到阈值 → 429（复用 #474 reveal 日志表计数）
+    """
+    from src.session_manager import db, db_lock
+    from src.scene_custom_env import normalize_custom_field
+    from src.api.routes.settings import (
+        _count_reveals_in_window, _record_reveal, _REVEAL_MAX_PER_WINDOW)
+    import json as _json
+
+    repo_key = ""
+    if repo:
+        repo_key = _resolve_repo_key(repo)
+    if not repo_key:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "需要选择仓库"})
+    from src.api.deps import check_repo_access
+    check_repo_access(user, repo_key)
+
+    name = (body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "变量名不能为空"})
+
+    # 读取场景存储的 custom_fields（明文在库内，接口层不下发）
+    try:
+        with db_lock:
+            c = db.cursor()
+            c.execute(
+                "SELECT advanced_options FROM devops_pipeline_scene "
+                "WHERE scene_id=? AND repo_key=? AND is_active=1 LIMIT 1",
+                (scene_id, repo_key))
+            row = c.fetchone()
+    except Exception:
+        row = None
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"场景 '{scene_id}' 不存在"})
+    try:
+        opts = _json.loads(row[0]) or {}
+    except Exception:
+        opts = {}
+
+    target = None
+    for f in (opts.get("custom_fields", []) or []):
+        _nf = normalize_custom_field(f) if isinstance(f, dict) else {}
+        if _nf.get("name") == name:
+            target = _nf
+            break
+    if not target:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": f"配置项 '{name}' 不存在"})
+    if not target.get("is_secret"):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "非密钥字段无需按需取回"})
+    value = target.get("value") or ""
+    if not value:
+        raise HTTPException(status_code=404, detail={"code": 404, "message": "该配置项未配置值"})
+
+    # 二次确认：重新输入当前密码（与 #474 reveal 一致）
+    from src.auth.password import verify_password
+    from src.auth.grape_account_db import get_grape_account_by_id
+    account = get_grape_account_by_id(user["id"]) or {}
+    password_hash = account.get("password_hash") or ""
+    if not password_hash:
+        raise HTTPException(status_code=400, detail={
+            "code": 400, "message": "请先设置 Grape 密码后再取回明文", "need_set_password": True})
+    if not verify_password(body.password or "", password_hash):
+        raise HTTPException(status_code=400, detail={"code": 400, "message": "当前密码错误"})
+
+    # 高频取回告警：窗口内已达阈值 → 拒绝并提示（复用 #474 计数表）
+    if _count_reveals_in_window(user["id"]) >= _REVEAL_MAX_PER_WINDOW:
+        ip = request.client.host if request and request.client else ""
+        log.warning(f"scene secret reveal high-frequency: user={user['id']} scene={scene_id} "
+                    f"repo={repo_key} field={name} ip={ip}")
+        raise HTTPException(status_code=429, detail={
+            "code": 429, "message": "明文取回过于频繁，请稍后再试"})
+
+    # 审计：谁/何时/取了哪个场景的哪个字段（detail 不含明文）
+    ip = request.client.host if request and request.client else ""
+    from src.auth import audit as auth_audit
+    auth_audit.log_audit("scene_secret_reveal", user_id=user["id"], ip=ip,
+                         detail={"scene_id": scene_id, "repo_key": repo_key, "name": name})
+    _record_reveal(user["id"], "scene_advanced_options", name, ip)
+
+    if response:
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Pragma"] = "no-cache"
+    return {"name": name, "value": value}
 
 
 @router.put("/{scene_id}/advanced-options", operation_id="scenes_advanced_options_set", summary="Save scene advanced options", description="Saves scene advanced options (work branch + custom key:value).")
