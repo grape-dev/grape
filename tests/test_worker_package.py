@@ -530,3 +530,12 @@ def test_manifest_covers_worktree_guard_deps():
     assert deps, "worktree_guard 应至少懒加载一个 src.api 依赖（否则本守卫失效）"
     missing = [d for d in sorted(deps) if f"src/api/{d}.py" not in MANIFEST]
     assert not missing, f"worker MANIFEST missing worktree_guard deps: {missing}"
+
+
+class TestManifestCodegraphInstaller:
+    """Issue #666 (M4)：worker 包随包下发 codegraph 离线安装脚本。"""
+
+    def test_manifest_contains_install_codegraph(self):
+        from src.worker_package import MANIFEST, ROOT
+        assert "scripts/install-codegraph.sh" in MANIFEST
+        assert os.path.isfile(os.path.join(ROOT, "scripts", "install-codegraph.sh"))
