@@ -145,12 +145,16 @@ async def replay_pending_reports(client, queue: WorkerReportQueue):
 async def _replay_messages(client, queue: WorkerReportQueue, entry: dict):
     """重放单条 messages 补报条目（Issue #975 降级入队的消息）。"""
     from src.runtime.client import ReportBatchError
-    from src.runtime.message_report import degrade_failed_batch
+    from src.runtime.message_report import degrade_failed_batch, real_task_id
     task_id = entry.get("task_id") or ""
-    real_tid = entry.get("task") or task_id.split("#msg-")[0]
+    # QA 复审：#msg- 键格式与入队侧共享常量/解析函数（message_report.real_task_id），
+    # 消除跨模块字符串隐式耦合；优先取 task 字段，缺失时从 task_id 剥离后缀
+    real_tid = real_task_id(task_id, entry.get("task") or "")
     message = entry.get("message") or []
     try:
-        resp = await client.report_messages(real_tid, [message] if isinstance(message, dict) else [message])
+        # message 恒为单条 dict（入队侧 truncate_message 保证）；原
+        # `[message] if isinstance(...) else [message]` 两分支相同（死条件）已清除
+        resp = await client.report_messages(real_tid, [message])
         if isinstance(resp, dict) and resp.get("status") == "ok":
             queue.remove(task_id)
             log.info(f"worker_report_queue: replayed messages {task_id}")

@@ -20,6 +20,22 @@ MAX_SPLIT_DEPTH = 6
 # 占位消息 data 截断长度：占位必须小到能通过触发 413 的 body 限制
 _PLACEHOLDER_DATA_HEAD = 200
 
+# Issue #975（QA 复审）：messages 补报条目 task_id 的后缀分隔符。
+# worker_report_queue 解析真实 task 时依赖同一格式——集中定义避免跨模块字符串隐式耦合
+MSG_ENTRY_ID_SEP = "#msg-"
+
+
+def build_msg_entry_id(task_id: str, ts: float, index: int) -> str:
+    """构造 messages 补报条目的唯一 task_id（{task_id}#msg-{ts}-{index}）。"""
+    return f"{task_id}{MSG_ENTRY_ID_SEP}{ts}-{index}"
+
+
+def real_task_id(entry_task_id: str, task_field: str = "") -> str:
+    """从补报条目 task_id 解析真实 task id（无后缀时回退 task 字段）。"""
+    if task_field:
+        return task_field
+    return (entry_task_id or "").split(MSG_ENTRY_ID_SEP, 1)[0]
+
 
 class SplitOutcome:
     """拆批重发结果（可观测计数）。"""
@@ -148,7 +164,7 @@ async def degrade_failed_batch(report, task_id: str, batch: list, err: ReportBat
                 try:
                     enqueue({
                         "kind": "messages",
-                        "task_id": f"{task_id}#msg-{_ts}-{i}",
+                        "task_id": build_msg_entry_id(task_id, _ts, i),
                         "task": task_id,
                         "message": truncate_message(m),
                     })

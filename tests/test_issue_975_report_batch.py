@@ -157,6 +157,66 @@ class TestFlushReportBatch:
         with pytest.raises(CredentialRevokedError):
             asyncio.run(_flush_report_batch(cli, "t1", self._batch(10)))
 
+    def test_degrade_failure_falls_back_to_queue_not_ok_silently(self):
+        """QA 复审（Spec #3）：degrade_failed_batch 自身抛错时不得仍返回 "ok" 静默清空
+        batch——兜底逐条落补报队列（可重放，不丢）；队列不可用才返回 "retry" 保留 batch。"""
+        from src.runtime.agent import _flush_report_batch
+
+        async def policy(cli, messages):
+            raise ReportBatchError(413, "too large")
+
+        cli = _ScriptedClient(policy)
+        batch = self._batch(5)
+        queued = []
+        import src.runtime.agent as agent_mod
+        orig_degrade = agent_mod.degrade_failed_batch if hasattr(agent_mod, "degrade_failed_batch") else None
+        from src.runtime import message_report as mr
+        orig_split = mr.split_resend
+        orig_q = agent_mod._report_queue
+
+        async def _boom(*a, **k):
+            raise RuntimeError("degrade pipeline broken")
+
+        mr.split_resend = _boom
+        agent_mod._report_queue = lambda: type("Q", (), {"add": staticmethod(queued.append)})()
+        try:
+            outcome = asyncio.run(_flush_report_batch(cli, "t1", batch))
+        finally:
+            mr.split_resend = orig_split
+            agent_mod._report_queue = orig_q
+        assert outcome == "ok", "兜底入队成功（可重放）按已处理清空 batch"
+        assert len(queued) == 5 and all(e["kind"] == "messages" and e["task"] == "t1" for e in queued)
+
+    def test_degrade_failure_and_queue_failure_keeps_batch(self):
+        """QA 复审（Spec #3）续：兜底入队也失败 → 返回 "retry" 保留 batch，绝不静默丢失。"""
+        from src.runtime.agent import _flush_report_batch
+        from src.runtime import message_report as mr
+        import src.runtime.agent as agent_mod
+
+        async def policy(cli, messages):
+            raise ReportBatchError(413, "too large")
+
+        cli = _ScriptedClient(policy)
+
+        async def _boom(*a, **k):
+            raise RuntimeError("degrade pipeline broken")
+
+        orig_split = mr.split_resend
+        orig_q = agent_mod._report_queue
+        mr.split_resend = _boom
+
+        class _BrokenQ:
+            def add(self, entry):
+                raise RuntimeError("disk full")
+
+        agent_mod._report_queue = lambda: _BrokenQ()
+        try:
+            outcome = asyncio.run(_flush_report_batch(cli, "t1", self._batch(5)))
+        finally:
+            mr.split_resend = orig_split
+            agent_mod._report_queue = orig_q
+        assert outcome == "retry", "队列也不可用时必须保留 batch 等待重试"
+
 
 # ---------- message_report 拆批单元 ----------
 
@@ -289,3 +349,86 @@ class TestServiceSeqRange:
             assert [m["seq"] for m in msgs] == [5], "预约 seq 范围必须被落库沿用"
         finally:
             self._clean(task_id)
+
+    def test_report_messages_returns_actual_receipt_and_skips_non_dict(self):
+        """QA 复审（Spec #1）：返回实际落库回执；非 dict 消息不占 seq、不计入回执。"""
+        from src.runtime import service
+        task_id = "t_seq975"
+        self._clean(task_id)
+        self._make_task(task_id)
+        try:
+            receipt = service.report_messages(
+                task_id, ["raw-string", {"type": "text", "data": "a"},
+                          {"type": "text", "data": "b"}], seq_start=1)
+            assert receipt == {"count": 2, "seq_start": 1, "seq_end": 2}
+            assert service.peek_next_seq(task_id) == 3
+        finally:
+            self._clean(task_id)
+
+    def test_report_messages_seq_conflict_reallocates(self):
+        """QA 复审（Spec #4）：预留 seq 与已存在行撞号 → 改用 MAX+1 重试，不静默丢消息。"""
+        from src.runtime import service
+        task_id = "t_seq975"
+        self._clean(task_id)
+        self._make_task(task_id)
+        try:
+            service.report_messages(task_id, [{"type": "text", "data": "a"}], seq_start=1)
+            # 模拟并发重放：不传 seq_start → MAX+1=2；再传过期预留 1（已占用）应撞号重试
+            service.report_messages(task_id, [{"type": "text", "data": "b"}], seq_start=1)
+            msgs = service.list_task_messages(task_id)
+            assert [m["seq"] for m in msgs] == [1, 2], "撞号必须重新分配而不是丢消息"
+            assert service.peek_next_seq(task_id) == 3
+        finally:
+            self._clean(task_id)
+
+    def test_enqueue_async_report_returns_sync_receipt(self):
+        """QA 复审（Spec #1）：同步兜底路径把实际落库回执透传给路由层。"""
+        from src.runtime import service
+        task_id = "t_seq975"
+        self._clean(task_id)
+        self._make_task(task_id)
+        try:
+            service._ASYNC_REPORT_QUEUE = None
+            receipt = service.enqueue_async_report(
+                "messages", task_id, [{"type": "text", "data": "a"}], seq_start=1)
+            assert receipt == {"count": 1, "seq_start": 1, "seq_end": 1}
+        finally:
+            self._clean(task_id)
+
+
+# ---------- QA 复审：client 并发 error_sink / 共享 #msg- 常量 ----------
+
+class TestQaReviewFixes:
+    def test_report_messages_uses_per_call_error_sink(self):
+        """并发覆盖竞态：report_messages 判定用本次调用私有 sink，不受其它请求污染。"""
+        c = _client(_Ctx(_FakeResp(413, text="payload too large")))
+        # 模拟并发请求覆盖实例级 last_http_error（网络错误）
+        c.last_http_error = {"status": 0, "text": "conn reset by peer request"}
+        with pytest.raises(ReportBatchError) as ei:
+            _run(c.report_messages("t1", [{"type": "text", "data": "x"}]))
+        assert ei.value.status == 413
+
+    def test_msg_entry_id_helpers_roundtrip(self):
+        from src.runtime.message_report import MSG_ENTRY_ID_SEP, build_msg_entry_id, real_task_id
+        eid = build_msg_entry_id("t9", 1700000000.5, 3)
+        assert eid.startswith(f"t9{MSG_ENTRY_ID_SEP}")
+        assert real_task_id(eid) == "t9"
+        assert real_task_id(eid, "t9") == "t9"
+        assert real_task_id("plain-task-id") == "plain-task-id"
+
+    def test_replay_uses_real_task_id_without_task_field(self, tmp_path):
+        """补报条目缺 task 字段时仍能从 task_id 剥离 #msg- 后缀得到真实 task。"""
+        from src.runtime import worker_report_queue as wrq
+        delivered = []
+
+        class _FakeClient:
+            async def report_messages(self, tid, messages):
+                delivered.append((tid, messages))
+                return {"status": "ok", "seq_start": 1, "seq_end": 1}
+
+        q = wrq.WorkerReportQueue(path=str(tmp_path / "q.jsonl"))
+        q.add({"kind": "messages", "task_id": "t42#msg-123-0",
+               "message": {"type": "text", "data": "lost"}})
+        asyncio.run(wrq.replay_pending_reports(_FakeClient(), q))
+        assert q.size() == 0
+        assert delivered and delivered[0][0] == "t42"

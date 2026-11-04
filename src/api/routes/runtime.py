@@ -967,11 +967,14 @@ def runtime_task_messages(task_id: str, body: MessagesBody, credential_id: int =
             log.info(f"auto-fix: task {task_id} status {task.get('status')} -> running (messages reported)")
         except Exception as e:
             log.warning(f"auto-fix: failed to update task {task_id} to running: {e}")
-    # Issue #975：批次回执带 seq 范围（peek 预留 + 异步落库沿用），worker 侧记录累计
-    # 已确认 seq 供对账（worker 对同一 task 串行上报，预约与落库顺序一致）
-    _count = len(body.messages or [])
+    # Issue #975（QA 复审 Spec #1）：批次回执带 seq 范围——只对 dict 消息预留/计数
+    # （service.report_messages 跳过非 dict，不消耗 seq，计入即假回执）；同步兜底路径
+    # 直接采用实际落库回执，异步路径返回预约范围（实际范围以服务端落库日志为准）
+    _count = sum(1 for m in (body.messages or []) if isinstance(m, dict))
     _seq_start = service.peek_next_seq(task_id)
-    service.enqueue_async_report("messages", task_id, body.messages, seq_start=_seq_start)
+    _receipt = service.enqueue_async_report("messages", task_id, body.messages, seq_start=_seq_start)
+    if isinstance(_receipt, dict) and _receipt.get("count"):
+        return {"status": "ok", **_receipt}
     return {"status": "ok", "count": _count, "seq_start": _seq_start,
             "seq_end": _seq_start + _count - 1 if _count > 0 else _seq_start - 1}
 

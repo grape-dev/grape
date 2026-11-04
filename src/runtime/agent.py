@@ -2252,7 +2252,7 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
     - "terminal" 任务已被服务端标终态（410），调用方应中断执行
     """
     from src.runtime.client import ReportBatchError
-    from src.runtime.message_report import degrade_failed_batch
+    from src.runtime.message_report import degrade_failed_batch, truncate_message, build_msg_entry_id
     try:
         _resp = await client.report_messages(tid, batch)
     except ReportBatchError as e:
@@ -2262,7 +2262,23 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
                 lambda msgs: client.report_messages(tid, msgs), tid, batch, e,
                 enqueue=_report_queue().add)
         except Exception as _de:
+            # QA 复审修复（Spec #3）：降级链路自身抛错时绝不能仍返回 "ok"
+            # 静默清空 batch（原缺陷换入口复现）。兜底：逐条落本地持久化补报队列
+            # （截断防 413），由 _report_replay_loop 后续重放；队列也不可用才返回
+            # "retry" 保留 batch 下个窗口重试——两条路径都不丢消息。
             log.warning(f"task {tid} report degrade failed: {_de}")
+            try:
+                import time as _time
+                _q = _report_queue()
+                _ts = _time.time()
+                for i, m in enumerate(batch):
+                    _q.add({"kind": "messages", "task_id": build_msg_entry_id(tid, _ts, i),
+                            "task": tid, "message": truncate_message(m)})
+                log.info(f"task {tid} report degrade fallback: {len(batch)} message(s) queued for replay")
+                return "ok"
+            except Exception as _qe:
+                log.warning(f"task {tid} report degrade fallback enqueue failed: {_qe}")
+                return "retry"
         return "ok"
     except CredentialRevokedError:
         raise
@@ -2277,6 +2293,17 @@ async def _flush_report_batch(client, tid: str, batch: list) -> str:
         return "ok"
     # 网络错误（{}）：保留 batch，下个窗口重试（不清空，防止静默丢失）
     return "retry"
+
+
+def _abort_task_terminal(task, engine_name, env, res, started: bool, reason: str) -> dict:
+    """任务被服务端标终态（410）→ 统一中断处理（QA 复审：执行中/收尾两处
+    flush 的 terminal 处理块逐行重复，提取为单一实现）。"""
+    tid = task.get("id", "")
+    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting: {reason}")
+    _kill_stale_engine(task, _backend_for_engine(engine_name))
+    res.dispose()
+    _cleanup_task_workdir(task, env)
+    return {"_error": f"task terminated by server (aborted {reason})", "_started": started}
 
 
 async def _execute_task(client, task, engine_name: str = ""):
@@ -2591,22 +2618,16 @@ async def _execute_task(client, task, engine_name: str = ""):
                 _outcome = await _flush_report_batch(client, tid, batch)
                 if _outcome == "terminal":
                     # task 已被服务端标终态（410 Gone）→ 中断执行，杀引擎进程
-                    log.warning(f"task {tid} report_messages returned None (task terminated?), aborting execution")
-                    _kill_stale_engine(task, _backend_for_engine(engine_name))
-                    _res.dispose()
-                    _cleanup_task_workdir(task, env)
-                    return {"_error": "task terminated by server (aborted during execution)", "_started": started}
+                    return _abort_task_terminal(task, engine_name, env, _res, started,
+                                                "during execution")
                 if _outcome == "ok":
                     batch = []
                 _last_flush = _now
         if batch:
             _outcome = await _flush_report_batch(client, tid, batch)
             if _outcome == "terminal":
-                log.warning(f"task {tid} final report_messages returned None (task terminated?), aborting")
-                _kill_stale_engine(task, _backend_for_engine(engine_name))
-                _res.dispose()
-                _cleanup_task_workdir(task, env)
-                return {"_error": "task terminated by server (aborted at final flush)", "_started": started}
+                return _abort_task_terminal(task, engine_name, env, _res, started,
+                                            "at final flush")
         # Issue #242: coding agent 成功完成后，向关联仓库提交 PR（在 cleanup 删 worktree 之前执行）
         if done is not None and not (isinstance(done, dict) and done.get("_error")):
             try:

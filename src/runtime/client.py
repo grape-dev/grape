@@ -35,6 +35,11 @@ class ReportBatchError(Exception):
         self.text = text
 
 
+# Issue #975：4xx 中「非批次级失败」的状态码——已有专属语义（401 凭据吊销 /
+# 404 runtime gone / 408+429 可重试），不得进入 ReportBatchError 拆批降级分支
+NON_BATCH_4XX_STATUSES = (401, 404, 408, 429)
+
+
 class RuntimeClient:
     def __init__(self, server: str, token: str, max_connections: int = 10, timeout: float = 30.0):
         self.base = server.rstrip("/")
@@ -77,7 +82,8 @@ class RuntimeClient:
         self._connector = None
         self._session = None
 
-    async def _request(self, method: str, path: str, body=None, retries: int = 4) -> dict | None:
+    async def _request(self, method: str, path: str, body=None, retries: int = 4,
+                       error_sink: dict | None = None) -> dict | None:
         """HTTP 请求 + 指数退避。404 且含 runtime → RuntimeGone。返回 JSON 或 None。
 
         401 鉴权失败（凭据被吊销/revoke）抛 CredentialRevokedError——调用方感知后
@@ -86,8 +92,20 @@ class RuntimeClient:
         Issue #975：返回 None 时把最近一次 HTTP 错误记录到 self.last_http_error
         （{"status": int, "text": str}，status=0 表示网络/重试耗尽），供 report_messages
         区分 410 终态 / 4xx 批次级失败 / 网络错误。
+
+        error_sink（QA 复审修复）：并发请求会互相覆盖实例级 last_http_error，
+        需要可靠读取本次错误的调用方（report_messages 三态判定）传入本次调用
+        私有的 dict，错误同时写入 sink 与 last_http_error（后者仅为兼容保留）。
         """
         self.last_http_error = None
+
+        def _record(status: int, text: str):
+            _err = {"status": status, "text": text}
+            self.last_http_error = _err
+            if error_sink is not None:
+                error_sink.clear()
+                error_sink.update(_err)
+
         delay = 4
         attempt = 0
         while True:
@@ -105,7 +123,7 @@ class RuntimeClient:
                         raise CredentialRevokedError(path)
                     if resp.status >= 400:
                         txt = (await resp.text())[:200]
-                        self.last_http_error = {"status": resp.status, "text": txt}
+                        _record(resp.status, txt)
                         if resp.status == 410:
                             log.info(f"RuntimeClient {method} {path} -> 410 (task terminated): {txt}")
                         else:
@@ -121,12 +139,12 @@ class RuntimeClient:
                 raise  # 凭据失效不重试，直接上抛——调用方决定退出
             except RuntimeGoneError:
                 log.warning(f"runtime_gone: {path}, clearing and re-registering")
-                self.last_http_error = {"status": 404, "text": "runtime gone"}
+                _record(404, "runtime gone")
                 return None  # 调用方处理重注册
             except RetryableError:
                 if attempt >= retries:
                     log.warning(f"RuntimeClient {method} {path} retries exhausted")
-                    self.last_http_error = {"status": 0, "text": "retries exhausted"}
+                    _record(0, "retries exhausted")
                     return None
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 64)
@@ -136,7 +154,7 @@ class RuntimeClient:
             except Exception as e:
                 log.warning(f"RuntimeClient {method} {path} error: {e}")
                 if attempt >= retries:
-                    self.last_http_error = {"status": 0, "text": str(e)[:200]}
+                    _record(0, str(e)[:200])
                     return None
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 64)
@@ -255,17 +273,20 @@ class RuntimeClient:
         避免服务短暂中断导致正在执行的 task 被误标 failed。
         """
         try:
+            # QA 复审修复：本次调用私有 error_sink，避免并发请求互相覆盖
+            # last_http_error 导致 413 被误判为网络错误（吞错语义回归）
+            _sink: dict = {}
             data = await self._request("POST", f"/api/runtime/tasks/{task_id}/messages",
-                                       {"messages": messages}, retries=3)
+                                       {"messages": messages}, retries=3, error_sink=_sink)
             if data is None:
-                _err = getattr(self, "last_http_error", None) or {}
+                _err = _sink or getattr(self, "last_http_error", None) or {}
                 _status = _err.get("status") or 0
                 # 410（任务终态）→ None，调用方中断
                 if _status == 410:
                     return None
                 # 4xx 批次级失败（413 payload too large / 400 bad request 等）→ 显式抛错，
                 # 不得返回 {} 冒充成功（原缺陷根因，Issue #975）
-                if 400 <= _status < 500 and _status not in (401, 404, 408, 429):
+                if 400 <= _status < 500 and _status not in NON_BATCH_4XX_STATUSES:
                     raise ReportBatchError(_status, _err.get("text") or "")
                 # 其余（网络错误/重试耗尽/404 runtime gone）：查一次任务状态区分终态
                 try:

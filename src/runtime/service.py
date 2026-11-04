@@ -2264,11 +2264,16 @@ def peek_next_seq(task_id) -> int:
         return (c.fetchone()[0] or 0) + 1
 
 
-def report_messages(task_id, messages, seq_start: int | None = None):
+def report_messages(task_id, messages, seq_start: int | None = None) -> dict | None:
     """批量执行消息 → append_event_archive_log（M1 落档，脱敏）+ task_messages 结构化落库 + 实时 fanout
 
     seq_start（Issue #975）：路由层同步预定的批次 seq 起点（peek_next_seq 预留）。
     不传则沿用 MAX+1。批次回执（日志 + 返回值）带 seq 范围，供 worker/master 对账。
+
+    返回（QA 复审修复，Spec #1）：**实际落库**的回执 dict
+    {"count": 落库条数, "seq_start": 首条 seq, "seq_end": 末条 seq}；
+    无可落库消息返回 None。落库异常时返回 {}（调用方不得当作成功范围）。
+    非 dict 消息不计入 seq 消耗与回执（与 insert 跳过行为一致，杜绝假回执）。
     """
     task = get_task(task_id)
     if not task:
@@ -2334,38 +2339,58 @@ def report_messages(task_id, messages, seq_start: int | None = None):
             log.warning(f"report_messages events.agent_logs failed: {e}")
     # 结构化落库（task_messages，双后端一致；seq 服务端生成 MAX+1，UNIQUE 防重放）
     # 收集落库后的 (原始消息, seq) 对，供 fanout 透传 seq（前端按 seq 去重，跨主 DB 尾随双通道不重复渲染）
+    # QA 复审（Spec #1/#4）：只对 dict 消息消耗 seq；INSERT 命中 UNIQUE（预留 seq 与
+    # 并发落库/重放撞号）时改用 MAX+1 重试一次——防 INSERT OR IGNORE 静默丢消息
+    _persistable = [m for m in (messages or []) if isinstance(m, dict)]
     _seq_messages: list[dict] = []
-    try:
-        with db_lock:
-            c = db.cursor()
-            if seq_start is not None:
-                seq = int(seq_start)
-            else:
-                c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
-                seq = (c.fetchone()[0] or 0) + 1
-            _seq_first = seq
-            for m in (messages or []):
-                if not isinstance(m, dict):
-                    continue
-                _t = m.get("type", "log")
-                _d = m.get("data")
-                tool, content, input_json, output = _normalize_message(_t, _d)
-                # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
-                # 双后端存储语义统一，读时 normalize_event_time 幂等）
-                c.execute(
-                    "INSERT OR IGNORE INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (task_id, seq, _t, tool, content, input_json, output,
-                     datetime.now(timezone.utc).isoformat()))
-                # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
-                _seq_messages.append({**m, "seq": seq})
-                seq += 1
-            db.commit()
-            # Issue #975：批次回执日志（seq 起止 + 条数）——master 侧对账凭证
-            if _seq_messages:
-                log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
-                         f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
-    except Exception as e:
-        log.warning(f"report_messages task_messages insert failed: {e}")
+    _receipt: dict | None = None
+    if _persistable:
+        try:
+            with db_lock:
+                c = db.cursor()
+                if seq_start is not None:
+                    seq = int(seq_start)
+                else:
+                    c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                    seq = (c.fetchone()[0] or 0) + 1
+                _seq_first = None
+                for m in _persistable:
+                    _t = m.get("type", "log")
+                    _d = m.get("data")
+                    tool, content, input_json, output = _normalize_message(_t, _d)
+                    # created_at 显式写 UTC ISO（时间本地化：MySQL 表默认 now() 为 CST 无时区，
+                    # 双后端存储语义统一，读时 normalize_event_time 幂等）
+                    _row = (task_id, seq, _t, tool, content, input_json, output,
+                            datetime.now(timezone.utc).isoformat())
+                    try:
+                        c.execute(
+                            "INSERT INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            _row)
+                    except Exception as _ie:
+                        # seq 撞号（预留范围与异步落库/补报重放并发）：改用 MAX+1 重试一次，
+                        # 不允许 INSERT OR IGNORE 式静默丢消息（QA Spec #4 seq 重复风险）
+                        c.execute("SELECT COALESCE(MAX(seq),0) FROM task_messages WHERE task_id=?", (task_id,))
+                        seq = (c.fetchone()[0] or 0) + 1
+                        c.execute(
+                            "INSERT INTO task_messages (task_id, seq, type, tool, content, input_json, output, created_at) VALUES (?,?,?,?,?,?,?,?)",
+                            (task_id, seq, _t, tool, content, input_json, output,
+                             datetime.now(timezone.utc).isoformat()))
+                        log.warning(f"report_messages: task={task_id} seq conflict, reallocated to {seq}")
+                    if _seq_first is None:
+                        _seq_first = seq
+                    # 透传 seq 给 fanout（done 终态消息 _to_payload 返回 None 不会推送，但 seq 仍记录）
+                    _seq_messages.append({**m, "seq": seq})
+                    seq += 1
+                db.commit()
+                _receipt = {"count": len(_seq_messages), "seq_start": _seq_first,
+                            "seq_end": _seq_messages[-1].get("seq")}
+                # Issue #975：批次回执日志（seq 起止 + 条数）——master 侧对账凭证
+                if _seq_messages:
+                    log.info(f"report_messages: task={task_id} persisted count={len(_seq_messages)} "
+                             f"seq_range={_seq_first}..{_seq_messages[-1].get('seq')}")
+        except Exception as e:
+            log.warning(f"report_messages task_messages insert failed: {e}")
+            _receipt = {}
     # 实时 fanout（订阅表推送，队列满丢弃保活；SSE 重连靠 since 回源）
     # 传带 seq 的消息：前端按 seq 去重，queue 快路径与 SSE DB 尾随双通道不重复渲染
     try:
@@ -2373,6 +2398,7 @@ def report_messages(task_id, messages, seq_start: int | None = None):
         fanout(task_id, _seq_messages if _seq_messages else (messages or []))
     except Exception as e:
         log.warning(f"report_messages fanout failed: {e}")
+    return _receipt
 
 
 def _normalize_message(_t: str, _d) -> tuple[str, str, str, str]:
@@ -3636,24 +3662,31 @@ async def _ingestion_loop():
 _ASYNC_REPORT_QUEUE = None
 
 
-def enqueue_async_report(kind: str, task_id: str, payload, seq_start: int | None = None):
-    """异步回报入队（队列满降级同步，不丢数据）。seq_start：Issue #975 批次 seq 预留起点。"""
+def enqueue_async_report(kind: str, task_id: str, payload, seq_start: int | None = None) -> dict | None:
+    """异步回报入队（队列满降级同步，不丢数据）。seq_start：Issue #975 批次 seq 预留起点。
+
+    返回（QA 复审，Spec #1）：同步兜底路径返回 report_messages 的实际落库回执
+    （dict）；走异步队列时返回 None（实际回执以服务端 report_messages 日志为准）。
+    """
     q = _ASYNC_REPORT_QUEUE
     if q is None:
         # 队列未启动 → 同步兜底
         if kind == "messages":
-            report_messages(task_id, payload, seq_start=seq_start)
+            return report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
-        return
+            return None
+        return None
     try:
         q.put_nowait((kind, task_id, payload, seq_start))
+        return None
     except Exception:
         # 队列满：同步降级
         if kind == "messages":
-            report_messages(task_id, payload, seq_start=seq_start)
+            return report_messages(task_id, payload, seq_start=seq_start)
         elif kind == "progress":
             report_progress(task_id, payload)
+        return None
 
 
 async def wait_task_terminal(task_id: str, timeout: float = 1800.0, poll_interval: float = 1.0) -> dict:
