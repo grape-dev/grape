@@ -44,6 +44,28 @@ def register_provider(
     _PROVIDERS[name] = {"local": local_cls, "remote": remote_cls}
 
 
+def _ensure_registered() -> None:
+    """首次调用时惰性注册 contracts Provider（避免模块级 import cycle）。"""
+    if not _PROVIDERS:
+        from src.domains.contracts import ensure_providers_registered
+
+        ensure_providers_registered()
+
+
+def get_local_service(name: str) -> Any:
+    """强制返回 Local 实现（忽略 GRAPE_PROVIDER_MODE）。
+
+    供 ``/internal/*`` 服务端使用：这些端点的职责就是「被远端调用后在本进程内查数据」，
+    如果也跟着 remote 模式走 RemoteProvider，就会 HTTP 回环调用自己
+    （mgmt /internal/x → RemoteProvider → mgmt /internal/x …），直接 500/超时。
+    """
+    _ensure_registered()
+    entry = _PROVIDERS.get(name)
+    if not entry or entry["local"] is None:
+        raise ValueError(f"Local provider not registered for service: {name}")
+    return entry["local"]()
+
+
 def get_service(name: str) -> Any:
     """获取服务实现——根据部署模式自动选择 Local 或 Remote。
 

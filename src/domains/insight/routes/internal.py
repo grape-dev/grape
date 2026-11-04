@@ -5,12 +5,14 @@
 集群模式下挂载到 Insight 进程，提供 /internal/* 端点供
 MgmtServiceRemote / RuntimeServiceRemote 调用。
 单机模式不挂载（走 LocalProvider 直接查 DB）。
+
+服务端一律用 Local 实现（get_local_service），否则 remote 模式下会 HTTP 回环自调用。
 """
 from __future__ import annotations
 
 from fastapi import APIRouter
 
-from src.kernel.provider import get_insight_service
+from src.kernel.gsb.provider import get_local_service as _get_local
 
 router = APIRouter(prefix="/internal", tags=["internal-insight"])
 
@@ -18,40 +20,40 @@ router = APIRouter(prefix="/internal", tags=["internal-insight"])
 @router.post("/logs")
 async def log_obs(body: dict) -> dict:
     """供 InsightServiceRemote.log_obs() 调用。"""
-    return get_insight_service().log_obs(body)
+    return _get_local("insight").log_obs(body)
 
 
 @router.post("/llm-usage")
 async def log_llm_usage(body: dict) -> dict:
     """供 InsightServiceRemote.log_llm_usage() 调用。"""
-    return get_insight_service().log_llm_usage(body)
+    return _get_local("insight").log_llm_usage(body)
 
 
 @router.post("/latency")
 async def log_latency(body: dict) -> dict:
     """供 InsightServiceRemote.log_api_latency() 调用。"""
-    return get_insight_service().log_api_latency(body)
+    return _get_local("insight").log_api_latency(body)
 
 
 @router.get("/metrics/{repo_key}")
 async def get_metrics(repo_key: str, window: str = "1h") -> list:
     """供 InsightServiceRemote.query_metrics() 调用。"""
-    return get_insight_service().query_metrics(repo_key, window)
+    return _get_local("insight").query_metrics(repo_key, window)
 
 
 @router.get("/slo/{repo_key}")
 async def get_slo(repo_key: str) -> list:
     """供 InsightServiceRemote.query_slo() 调用。"""
-    return get_insight_service().query_slo(repo_key)
+    return _get_local("insight").query_slo(repo_key)
 
 
 @router.get("/alerts/{repo_key}")
 async def get_alerts(repo_key: str) -> list:
     """供 InsightServiceRemote.query_alerts() 调用。"""
-    return get_insight_service().query_alerts(repo_key)
+    return _get_local("insight").query_alerts(repo_key)
 
 
 @router.get("/dashboard/overview")
 async def get_dashboard_overview() -> dict:
     """供 InsightServiceRemote.aggregate_runtime_stats() 调用。"""
-    return get_insight_service().aggregate_runtime_stats()
+    return _get_local("insight").aggregate_runtime_stats()

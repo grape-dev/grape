@@ -356,3 +356,34 @@ def test_heartbeat_loop_runs_periodic_purge(monkeypatch):
 
     asyncio.run(svc._heartbeat_loop())
     assert len(purged) == 1
+
+
+def test_get_service_returns_remote_when_mode_remote(monkeypatch):
+    """GRAPE_PROVIDER_MODE=remote 时业务侧应拿到 Remote 实现（总线承载跨域调用）。"""
+    from src.kernel.gsb.provider import get_service
+
+    monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
+    svc = get_service("mgmt")
+    assert type(svc).__name__ == "MgmtServiceRemote"
+
+
+def test_get_local_service_ignores_remote_mode(monkeypatch):
+    """/internal/* 服务端必须强制 Local：否则 remote 模式下会 HTTP 回环自调用。"""
+    from src.kernel.gsb.provider import get_local_service, is_remote_mode
+
+    monkeypatch.setenv("GRAPE_PROVIDER_MODE", "remote")
+    assert is_remote_mode() is True
+    svc = get_local_service("mgmt")
+    assert type(svc).__name__ == "MgmtServiceLocal"
+
+
+def test_internal_routes_use_local_provider_only():
+    """结构性守卫：三域 /internal/* 不得再引用模式敏感的 get_*_service()。"""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[2] / "src" / "domains"
+    for domain in ("mgmt", "runtime", "insight"):
+        src = (root / domain / "routes" / "internal.py").read_text(encoding="utf-8")
+        for banned in ("get_mgmt_service()", "get_runtime_service()", "get_insight_service()"):
+            assert banned not in src, f"{domain} internal routes must not call {banned}"
+        assert "get_local_service" in src
