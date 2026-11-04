@@ -75,9 +75,11 @@ jobs:
         # Issue #897 P0：契约 v2.2.0 曾被 A 进程子集落盘覆盖，丢失 /api/a2a、
         # /api/tasks/* 等核心工作流端点导致 CLI 命令组不渲染。CI 卡点：
         # 1) 当前代码渲染的契约必须包含 7 个核心工作流端点；
-        # 2) 不得删除基线（help/api/openapi.json）中核心工作流前缀下端点。
+        # 2) 不得删除基线（help/api/openapi-baseline.json，checked-in 的上次
+        #    发布契约快照）中核心工作流前缀下端点。--require-baseline 保证
+        #    基线缺失时 FAIL，版本间比对不会静默跳过（QA 审查修复项）。
         env:
           GITCODE_API_TOKEN: test_token
         run: |
-          python3 scripts/check-openapi-endpoints.py
+          python3 scripts/check-openapi-endpoints.py --require-baseline
           python -m pytest tests/test_check_openapi_endpoints.py -v
