@@ -2513,13 +2513,16 @@ def run_pipeline(raw_body: bytes, headers: dict, account: str = "",
                 log.info(f"Pipeline (plugin): skill for {agent_type}={_pipe_skill} (scene={_issue_scene})")
                 # Issue #657: 派发前技能 scope 校验——skill 解析为空（仅 user scope 可用）
                 # → 立即 fail-fast 落错误事件，不再派发
-                _mm, _mm_info = _skill_scope_mismatch(_pipe_skill, repo_key)
-                if _mm:
-                    return _fail_skill_resolve_event(
-                        repo_key, _pipe_skill, _issue_scene, agent_type,
-                        _skill_scope_mismatch_reason(_pipe_skill, _mm_info,
-                                                     _issue_scene, agent_type),
-                        issue_id=_pre_issue_id or "")
+                # Issue #979: skill_id 已由权威解析命中（id 显式绑定=授权）→ 跳过
+                # 名字级 scope 门禁（与上方覆盖分支口径一致）
+                if not skill_id:
+                    _mm, _mm_info = _skill_scope_mismatch(_pipe_skill, repo_key)
+                    if _mm:
+                        return _fail_skill_resolve_event(
+                            repo_key, _pipe_skill, _issue_scene, agent_type,
+                            _skill_scope_mismatch_reason(_pipe_skill, _mm_info,
+                                                         _issue_scene, agent_type),
+                            issue_id=_pre_issue_id or "")
         if not skill_name and not _is_scene_recommend:
             # 推荐模式不需要 skill（用 build_scene_recommender_prompt 内置 prompt），
             # 跳过 fallback 的 no_agent_session 检查，直接走引擎选择 → 广播入队

@@ -2938,6 +2938,48 @@ register_migration(
 )
 
 
+def _backfill_scene_rows_skill_id(rows: list, update_sql: str) -> int:
+    """Issue #979 backfill 公共循环（devops_pipeline_scene / scene_market 共用）。
+
+    rows 元素为 (row_id, repo_key, uid, nodes_json)：对仅含 skill_name 的节点按
+    现有规则（user→repo→official，resolve_skill_id）解析一次并写回 skill_id
+    （update_sql 形如 "UPDATE <table> SET nodes_json=? WHERE id=?"）。
+    幂等：节点已有 skill_id 跳过；解析不到保持原样（派发时按名字降级 + warning）。
+    返回发生写回的行数。
+    """
+    from src.user.db import resolve_skill_id
+    updated = 0
+    for row_id, repo_key, uid, nodes_json in rows:
+        try:
+            nodes = json.loads(nodes_json or "[]")
+        except Exception as e:
+            log.warning(f"issue979 backfill: bad nodes_json (row={row_id}): {e}")
+            continue
+        if not isinstance(nodes, list) or not nodes:
+            continue
+        changed = False
+        for n in nodes:
+            if not isinstance(n, dict):
+                continue
+            _name = n.get("skill") or ""
+            if not _name or n.get("skill_id"):
+                continue
+            sid = resolve_skill_id(_name, repo_key=repo_key or "", user_id=uid or 0)
+            if sid:
+                n["skill_id"] = int(sid)
+                changed = True
+        if changed:
+            try:
+                with db_lock:
+                    db.cursor().execute(update_sql,
+                                        (json.dumps(nodes, ensure_ascii=False), row_id))
+                    db.commit()
+                updated += 1
+            except Exception as e:
+                log.warning(f"issue979 backfill: write back failed (row={row_id}): {e}")
+    return updated
+
+
 def _fn_scene_nodes_skill_id_backfill() -> None:
     """Issue #979：存量场景节点写回 skill_id（backfill，幂等续跑）。
 
@@ -2946,28 +2988,25 @@ def _fn_scene_nodes_skill_id_backfill() -> None:
     resolve_skill_id）解析一次并写回 skill_id：
     - devops_pipeline_scene：user 上下文取 created_by（gitcode 用户名 →
       unified_user_mapping.user_id），repo 上下文取行内 repo_key；
-    - scene_market：user 上下文取 source_user_id。
+    - scene_market：user 上下文取 source_user_id，repo 上下文取行内 repo_key
+      （scope='repo' 行；此前空 repo_key 解析会漏 repo 档）。
     解析不到（官方内置包形态等）保持原样，派发时按名字降级 + warning。
     仅写回 skill_id，不删 skill_name（显示与降级兜底）。"""
-    from src.user.db import resolve_skill_id
     with db_lock:
         c = db.cursor()
         c.execute(
             "SELECT id, repo_key, nodes_json, created_by "
             "FROM devops_pipeline_scene WHERE is_active=1")
-        rows = c.fetchall() or []
+        scene_rows = c.fetchall() or []
         try:
-            c.execute("SELECT id, source_user_id, nodes_json FROM scene_market")
+            c.execute("SELECT id, repo_key, source_user_id, nodes_json FROM scene_market")
             market_rows = c.fetchall() or []
-        except Exception:
+        except Exception as e:
+            log.warning(f"issue979 backfill: scene_market read failed: {e}")
             market_rows = []
-    for row_id, repo_key, nodes_json, created_by in rows:
-        try:
-            nodes = json.loads(nodes_json or "[]")
-        except Exception:
-            continue
-        if not isinstance(nodes, list) or not nodes:
-            continue
+    # devops_pipeline_scene：created_by（gitcode 用户名）→ user_id
+    normalized = []
+    for row_id, repo_key, nodes_json, created_by in scene_rows:
         uid = 0
         if created_by:
             try:
@@ -2978,50 +3017,17 @@ def _fn_scene_nodes_skill_id_backfill() -> None:
                         (created_by,)).fetchone()
                 if r2:
                     uid = int(r2[0] or 0)
-            except Exception:
-                uid = 0
-        changed = False
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            _name = n.get("skill") or ""
-            if not _name or n.get("skill_id"):
-                continue
-            sid = resolve_skill_id(_name, repo_key=repo_key or "", user_id=uid)
-            if sid:
-                n["skill_id"] = int(sid)
-                changed = True
-        if changed:
-            with db_lock:
-                db.cursor().execute(
-                    "UPDATE devops_pipeline_scene SET nodes_json=? WHERE id=?",
-                    (json.dumps(nodes, ensure_ascii=False), row_id))
-                db.commit()
-    for row_id, source_user_id, nodes_json in market_rows:
-        try:
-            nodes = json.loads(nodes_json or "[]")
-        except Exception:
-            continue
-        if not isinstance(nodes, list) or not nodes:
-            continue
-        uid = int(source_user_id or 0)
-        changed = False
-        for n in nodes:
-            if not isinstance(n, dict):
-                continue
-            _name = n.get("skill") or ""
-            if not _name or n.get("skill_id"):
-                continue
-            sid = resolve_skill_id(_name, repo_key="", user_id=uid)
-            if sid:
-                n["skill_id"] = int(sid)
-                changed = True
-        if changed:
-            with db_lock:
-                db.cursor().execute(
-                    "UPDATE scene_market SET nodes_json=? WHERE id=?",
-                    (json.dumps(nodes, ensure_ascii=False), row_id))
-                db.commit()
+            except Exception as e:
+                log.warning(f"issue979 backfill: created_by lookup failed "
+                            f"(row={row_id}, user={created_by}): {e}")
+        normalized.append((row_id, repo_key or "", uid, nodes_json))
+    _backfill_scene_rows_skill_id(
+        normalized, "UPDATE devops_pipeline_scene SET nodes_json=? WHERE id=?")
+    # scene_market：source_user_id 即 user 上下文，repo_key 行内（repo 档）
+    _backfill_scene_rows_skill_id(
+        [(row_id, repo_key or "", int(source_user_id or 0), nodes_json)
+         for row_id, repo_key, source_user_id, nodes_json in market_rows],
+        "UPDATE scene_market SET nodes_json=? WHERE id=?")
 
 
 register_migration(

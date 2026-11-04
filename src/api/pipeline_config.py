@@ -522,20 +522,61 @@ def get_pipeline_config(scene_id: str = "default", repo_key: str = "") -> Option
     return result
 
 
+def _query_user_market_scene_nodes(scene_id: str, user_id: int) -> Optional[list]:
+    """Issue #979: 查用户个人场景（scene_market scope='user'）的 nodes。
+
+    个人场景不落 devops_pipeline_scene（仅 repo/global 行），标准解析链路
+    （repo 副本 → 全局行 → 官方市场模板 → pipelines.json）查不到；命中返回
+    nodes 列表，未命中/异常返回 None（调用方继续按未解析处理）。
+    """
+    if not scene_id or not user_id:
+        return None
+    db, lock = _db()
+    with lock:
+        c = db.cursor()
+        try:
+            c.execute(
+                "SELECT nodes_json FROM scene_market "
+                "WHERE name=? AND scope='user' AND source='user' "
+                "AND source_user_id=? AND is_active=1 LIMIT 1",
+                (scene_id, user_id))
+            row = c.fetchone()
+            if row and row[0]:
+                return json.loads(row[0])
+        except Exception as e:
+            log.warning(f"_query_user_market_scene_nodes failed: {e}")
+    return None
+
+
 def get_node_by_tag(scene_id: str, tag: str, repo_key: str = "", user_id: int = 0) -> Optional[dict]:
     """Find a node by tag in a scene's pipeline.
 
     Issue #955：id 优先、tag 兜底——节点 id 即角色名（agent_type），
     tag 为展示用阶段名（可为中文等任意值）；存量非标准 tag 场景按 id 匹配。
+
+    Issue #979: user_id>0 时，标准解析未命中 tag 节点（或仅命中 pipelines.json
+    default 兜底）后补查用户个人场景（scene_market scope='user'），避免个人
+    场景节点查不到而静默走名字降级（user_id 此前为死参数）。
     """
     from src.runtime.engine_select import node_matches_agent_role
     cfg = get_pipeline_config(scene_id, repo_key=repo_key)
-    if not cfg:
-        return None
-    for node in cfg.get("nodes", []):
-        if node_matches_agent_role(node, tag):
-            return node
-    return None
+    node = None
+    if cfg:
+        for _n in cfg.get("nodes", []):
+            if node_matches_agent_role(_n, tag):
+                node = _n
+                break
+    # 真实命中（非 pipelines.json default 兜底）→ 直接返回
+    if node and cfg and not (cfg.get("fallback") or cfg.get("fallback_source")):
+        return node
+    # 用户个人场景（scene_market scope='user'）优先于 default 兜底节点
+    if user_id and scene_id:
+        nodes = _query_user_market_scene_nodes(scene_id, user_id)
+        if nodes is not None:
+            for _n in nodes:
+                if isinstance(_n, dict) and node_matches_agent_role(_n, tag):
+                    return _n
+    return node
 
 
 def get_first_node(scene_id: str = "default", repo_key: str = "") -> Optional[dict]:
