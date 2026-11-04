@@ -1,6 +1,6 @@
-"""Hwcloud Runtime 转发层（M0 兼容，对齐 src/agent/hermes.py → src/runtime/hermes.py 模式）。
+"""Hwcloud Runtime 转发层（M0 兼容，对齐 src/domains/runtime/agents/hermes.py → src/domains/runtime/engine/hermes.py 模式）。
 
-实际实现在 src/agent/hwcloud_acp.py（ACP JSON-RPC 协议，不走 build_args/parse_output）。
+实际实现在 src/domains/runtime/agents/hwcloud_acp.py（ACP JSON-RPC 协议，不走 build_args/parse_output）。
 本文件提供 runtime 侧的名字锚点 + env 组装入口，供 executor/_BACKENDS 注册与
 discover_backends 发现。
 """
@@ -12,7 +12,7 @@ class HwcloudRuntime(AgentRuntime):
     """hwcloud 引擎的 runtime 描述。
 
     build_args/parse_output 不被使用（hwcloud 走 ACP 专用路径，
-    见 src/agent/executor.py stream_agent 的 backend_name == "hwcloud" 分支）。
+    见 src/domains/runtime/agents/executor.py stream_agent 的 backend_name == "hwcloud" 分支）。
     """
 
     name = "hwcloud"

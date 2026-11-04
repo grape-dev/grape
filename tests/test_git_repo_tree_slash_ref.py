@@ -23,7 +23,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
-from src.user.repo_manager import UpstreamAPIError
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError
 
 UID = 98702
 OWNER = "o"
@@ -109,7 +109,7 @@ class TestGitCodeTreeSlashRef:
         """QA-02b：GitCode + 完整 40-hex sha ref → 直连 git/trees/{sha}，不做预校验。"""
         recorded = []
         monkeypatch.setattr(
-            "src.user.repo_manager._req",
+            "src.domains.mgmt.user.repo_manager._req",
             _routed_req_mock(recorded, {}))
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref={FULL_SHA}")
         assert r.status_code == 200
@@ -149,7 +149,7 @@ class TestGitCodeTreeSlashRef:
     def test_nonexistent_slash_ref_returns_404(self, monkeypatch):
         """QA-04b：GitCode + 不存在斜杠 ref → 404（与无斜杠行为一致，#734 归一）。"""
         monkeypatch.setattr(
-            "src.user.repo_manager._req",
+            "src.domains.mgmt.user.repo_manager._req",
             _routed_req_mock([], {
                 "/commits": [],
             }))
@@ -161,7 +161,7 @@ class TestGitCodeTreeSlashRef:
         """QA-04c：commits 上游直接 404 → 按 #549 透传 404（不 502、不空树）。"""
         def _fake_req(method, url, token="", body=None):
             raise UpstreamAPIError(method, url, 404, "Not Found")
-        monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+        monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
         r = TestClient(app).get(f"/api/git-repo/{OWNER}/{REPO}/tree?ref=nosuchref")
         assert r.status_code == 404
         assert r.json()["detail"]["code"] == 404
@@ -170,7 +170,7 @@ class TestGitCodeTreeSlashRef:
     def test_commits_parse_failure_returns_404(self, monkeypatch):
         """QA-04d：commits 解析失败（坏结构）→ 归一 404（不再降级返回 200 空树，#734）。"""
         monkeypatch.setattr(
-            "src.user.repo_manager._req",
+            "src.domains.mgmt.user.repo_manager._req",
             _routed_req_mock([], {
                 "/commits": {"unexpected": True},  # 非 list 且无 tree → 解析失败
             }))

@@ -69,7 +69,7 @@ def _seed_event(seq, issue_id="#859", entity_type="issue", status="completed",
 
 class TestOutputLogsReturned:
     def test_output_and_logs_non_empty(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         if not _has_structured_col():
             pytest.skip("events.structured_output column missing")
         structured = {"actions": ["a1"], "conclusion": "结论X", "artifacts": ["PR #1"],
@@ -93,7 +93,7 @@ class TestOutputLogsReturned:
 
     def test_runtime_and_skill_correct(self):
         """回归顺带缺陷：runtime/skill 取值正确（旧实现 runtime 取到 entity_type、skill 恒空）。"""
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         _seed_event(85902, runtime="hermes", skill="issue-skill")
         groups = _group_events_by_issue([REPO])
         ev = groups["859"][0]
@@ -105,7 +105,7 @@ class TestOutputLogsReturned:
 
 class TestParseFallback:
     def test_invalid_output_json_falls_back_none(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         if not _has_structured_col():
             pytest.skip("events.structured_output column missing")
         _seed_event(85903)
@@ -120,7 +120,7 @@ class TestParseFallback:
         assert ev["logs"] == []
 
     def test_null_output_falls_back_none(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         if not _has_structured_col():
             pytest.skip("events.structured_output column missing")
         _seed_event(85904, structured_output=None, agent_logs=[{"type": "x"}])
@@ -138,7 +138,7 @@ class TestParseFallback:
 
 class TestBackwardCompat:
     def test_event_without_structured_output_still_grouped(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         _seed_event(85905)
         groups = _group_events_by_issue([REPO])
         evs = groups.get("859", [])
@@ -150,7 +150,7 @@ class TestBackwardCompat:
 
 class TestEntityTypeFilter:
     def test_pr_events_excluded(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         _seed_event(85906, entity_type="issue")
         _seed_event(85907, entity_type="pull_request")
         groups = _group_events_by_issue([REPO])
@@ -158,7 +158,7 @@ class TestEntityTypeFilter:
         assert len(evs) == 1, "PR 事件应被过滤（Issue #252）"
 
     def test_pr_event_with_output_still_excluded(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         if not _has_structured_col():
             pytest.skip("events.structured_output column missing")
         _seed_event(85908, entity_type="issue",
@@ -175,7 +175,7 @@ class TestEntityTypeFilter:
 
 class TestNumbersFilter:
     def test_numbers_clause(self):
-        from src.api.routes.issues import _group_events_by_issue
+        from src.domains.runtime.routes.issues import _group_events_by_issue
         _seed_event(85910, issue_id="#100")
         _seed_event(85911, issue_id="#200")
         groups = _group_events_by_issue([REPO], numbers=["100"])

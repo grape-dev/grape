@@ -277,7 +277,7 @@ def test_overview_trends_from_rollup_and_fallback():
 
 def test_overview_rollup_exception_falls_back_to_live(monkeypatch):
     """rollup 聚合查询抛异常时，降级分支应记录 warning 并回退 live，而非 NameError/500。"""
-    from src.observability import overview
+    from src.domains.insight.observability import overview
     from src.session_manager import db, db_lock
 
     _grant(REPO)
@@ -287,7 +287,7 @@ def test_overview_rollup_exception_falls_back_to_live(monkeypatch):
     mr.write_bucket(mr.RES_MINUTE, base, {mr._repo_dim(REPO): {
         "task_done": (2.0, 2), "task_failed": (1.0, 1), "token_input": (500.0, 2)}})
 
-    import src.observability.metric_rollup as mr_mod
+    import src.domains.insight.observability.metric_rollup as mr_mod
     orig = mr_mod.overview_trends
 
     def boom(*a, **k):

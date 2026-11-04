@@ -321,9 +321,9 @@ class TestLocalProbeHermesArgs:
 
     def test_probe_one_hermes_uses_handshake(self):
         """hermes 探测：版本走 --version，健康走真实 ACP 握手。"""
-        from src.runtime.local_probe import _probe_one
+        from src.domains.runtime.engine.local_probe import _probe_one
         with patch("subprocess.run", return_value=_run_ok(0, stdout="0.9.0")), \
-             patch("src.runtime.acp_bootstrap._acp_check", return_value=True) as chk:
+             patch("src.domains.runtime.engine.acp_bootstrap._acp_check", return_value=True) as chk:
             out = _probe_one({"name": "hermes", "cli_path": "/bin/hermes",
                               "installed": True, "acp_probe": True})
         assert out["healthy"] is True
@@ -331,7 +331,7 @@ class TestLocalProbeHermesArgs:
         chk.assert_called_once_with("/bin/hermes")
 
     def test_probe_one_non_hermes_version_only(self):
-        from src.runtime.local_probe import _probe_one
+        from src.domains.runtime.engine.local_probe import _probe_one
         with patch("subprocess.run", return_value=_run_ok(0, stdout="1.0")) as m:
             out = _probe_one({"name": "opencode", "cli_path": "/bin/opencode", "installed": True})
         assert out["healthy"] is True

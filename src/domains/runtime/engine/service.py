@@ -12,7 +12,7 @@ from src.api.time_utils import normalize_event_time
 from src.kernel.token_service import is_auth_401_error
 
 
-# R11.4: _get_task_token 抽取到 src/user/db.py，统一调用
+# R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用
 from src.domains.mgmt.user.db import get_task_token as _get_task_token
 
 # R16.2.1: 统一 error_code → message 映射（task errors / dashboard 展示用）
@@ -308,7 +308,7 @@ _TASK_RECOVER_STALE_SECONDS = _get_recover_stale_cfg()
 def _recover_cutoff_for_agent(agent_type: str) -> str:
     """Issue #516 M1：running 任务回收阈值按 agent_type 超时对齐。
 
-    worker 侧超时已配置化（coding 默认 7200s，见 src/runtime/task_timeout.py），
+    worker 侧超时已配置化（coding 默认 7200s，见 src/domains/runtime/engine/task_timeout.py），
     服务端若仍用固定 3600s 阈值回收 running 任务，会在 worker 本地仍在执行时
     重派 → 双跑。此处与 worker 同源解析该 agent 的超时上限，再加固定余量
     （对齐旧部署约定 TASK_RECOVER_STALE_SECONDS >= worker 超时）。
@@ -763,6 +763,92 @@ def collect_knowledge_files(repo_key: str, agent_type: str = "", issue_id: str =
         pass
 
     return {"project_info": _pif, "meta": _pim, "knowledge": _know}
+
+
+def verify_skill_materializable(skill: str, skill_id: int = 0, repo_key: str = "",
+                                user_id: str | int = "") -> tuple:
+    """Issue #630：技能物化完整性校验（Pipeline enqueue 前门禁）。
+
+    校验「配置了技能」时是否存在可完整物化的内容源（SKILL.md + references）：
+      ① skill_id / 名称解析命中 skill 表（resolve_skill_id user→repo→official）；
+      ② OBS 对象键（file_path）可读 → worker 端按 sid 整包拉取 zip 物化；
+      ③ 本地技能目录完整（validate_skill_dir：SKILL.md + references）；
+      ④ sid=0 时允许官方内置包（resolve_official_skill_path，部署随包分发）。
+    返回 (ok, reason, sid)。
+
+    空壳技能行（legacy create_skill/迁移注册、file_path 空 + 本地目录无 SKILL.md）
+    → (False, ...)，调用方显式阻断派发不静默降级。
+    技能未配置（skill 为空）恒 (True, ...)，不误伤未配置场景（Spec 风险表）。
+    """
+    skill = (skill or "").strip()
+    if not skill:
+        return True, "skill not configured", 0
+    from src.domains.mgmt.user.db import (
+        resolve_skill_id, get_skill_by_id, get_skill_path, get_skill_object_key,
+    )
+    sid = int(skill_id or 0)
+    if not sid:
+        try:
+            sid = int(resolve_skill_id(skill, repo_key=repo_key, user_id=user_id) or 0)
+        except Exception:
+            sid = 0
+    if sid:
+        _sk = None
+        try:
+            _sk = get_skill_by_id(sid)
+        except Exception:
+            _sk = None
+        if not _sk:
+            return False, f"skill '{skill}' (sid={sid}) not found or inactive", sid
+        _okey = (_sk.get("file_path") or "").strip() or get_skill_object_key(sid)
+        _storage_unavailable = False
+        if _okey:
+            _st = None
+            try:
+                from src.domains.runtime.storage import get_skill_storage
+                _st = get_skill_storage()
+            except Exception:
+                _st = None
+            # 存储可用且对象可读 → OBS 路径放行；存储不可用/不可读 → 回退本地目录校验，
+            # 且 reason 标明 storage unavailable（PR #797：不得 fail-open 误标 obs ok）
+            if _st is not None:
+                try:
+                    if _st.read_bytes(_okey) is not None:
+                        return True, f"obs object ok (key={_okey})", sid
+                except Exception:
+                    pass
+            else:
+                _storage_unavailable = True
+        # 本地目录完整性（SKILL.md + references）
+        try:
+            _full = get_skill_path(sid)
+        except Exception:
+            _full = ""
+        if _full:
+            from src.domains.runtime.engine.skill_materialize import validate_skill_dir
+            ok, missing = validate_skill_dir(os.path.dirname(_full))
+            if ok:
+                return True, "local skill dir ok", sid
+            _st_note = "storage unavailable; " if _storage_unavailable else ""
+            return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
+                           f"{_st_note}no readable obs object"
+                           + (f" (key={_okey})" if _okey else " (file_path empty)")
+                           + f", local dir incomplete (missing: {', '.join(missing[:5])}); "
+                           f"re-upload the skill package to fix"), sid
+        _st_note = "storage unavailable; " if _storage_unavailable else ""
+        return False, (f"skill '{skill}' (sid={sid}) materialization source missing: "
+                       f"{_st_note}no obs file_path and no local skill dir; "
+                       f"re-upload the skill package to fix"), sid
+    # sid=0：官方内置包兜底（worker 端 official fallback 可完整物化，非静默换技能）
+    try:
+        from src.kernel.config import resolve_official_skill_path
+        _official = resolve_official_skill_path(skill)
+        if _official and os.path.isfile(_official):
+            return True, "official skill bundle ok", 0
+    except Exception:
+        pass
+    return False, (f"skill '{skill}' unresolvable (no skill row, no official bundle); "
+                   f"check scene skill binding or upload the skill first"), 0
 
 
 def enqueue_task(*, agent_session_id, runtime_id, prompt, cwd="",
@@ -2191,7 +2277,7 @@ def _detect_business_failure(agent_type, output, result_text):
 
 
 def premature_end_marker() -> str:
-    """「疑似提前结束」标记（唯一来源：适配器 src/agent/hermes_acp.py）。
+    """「疑似提前结束」标记（唯一来源：适配器 src/domains/runtime/agents/hermes_acp.py）。
 
     懒加载转发，避免 runtime.service 与 agent 适配器在导入期互相牵扯；适配器
     不可用（未安装/裁剪）时回退到字面量，保证标记语义不变。

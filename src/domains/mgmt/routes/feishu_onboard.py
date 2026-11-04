@@ -34,7 +34,7 @@ STALE_TTL = 600  # 10 分钟
 # 后台任务注册表（进程内；跨进程状态以 DB 行为准，cancel 仅在同进程生效）
 _TASKS: dict[str, asyncio.Task] = {}
 
-# 预填权限/事件订阅：与 src/im/feishu_async.py 实际调用对齐
+# 预填权限/事件订阅：与 src/domains/runtime/im/feishu_async.py 实际调用对齐
 # 注意：addons 仅允许 scopes/events/callbacks 三个顶层键（lark-oapi 1.7.0 实测
 # _normalize_addons 会拒绝 preset 等额外键并抛 ValueError）。平台默认即为基础模板，
 # 因此不传 preset 等价于保留平台基础模板；敏感配置（事件 URL/security）不走 addons。

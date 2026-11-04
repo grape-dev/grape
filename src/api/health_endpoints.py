@@ -108,7 +108,7 @@ def install_health_endpoints(app: FastAPI, service_name: str = "server") -> None
         if not _is_loopback(request):
             return JSONResponse(status_code=403, content={"error": "forbidden"})
         from src.session_manager import db, db_lock
-        from src.runtime.health import derive_runtime_health
+        from src.domains.runtime.engine.health import derive_runtime_health
 
         now_ts = time.time()
         result = {

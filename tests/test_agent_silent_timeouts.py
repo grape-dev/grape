@@ -1,9 +1,9 @@
 """Issue #378: 看门狗静默杀死阈值针对 coding/qa 放宽为 1200s 的单元测试。
 
 覆盖：
-1. src/runtime/agent.py _AGENT_SILENT_TIMEOUTS 映射表 + setdefault 注入语义
-2. src/agent/hermes_acp.py _silent_timeout_for(env) 读 env 默认值/覆盖/非法回退
-3. src/agent/executor.py _silent_window 优先读任务级 env dict（AGENT_SILENT_WINDOW）
+1. src/domains/runtime/engine/agent.py _AGENT_SILENT_TIMEOUTS 映射表 + setdefault 注入语义
+2. src/domains/runtime/agents/hermes_acp.py _silent_timeout_for(env) 读 env 默认值/覆盖/非法回退
+3. src/domains/runtime/agents/executor.py _silent_window 优先读任务级 env dict（AGENT_SILENT_WINDOW）
 """
 import os
 import sys

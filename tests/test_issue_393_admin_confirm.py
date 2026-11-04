@@ -170,7 +170,7 @@ def _oauth_pass_through():
 
 
 class TestRepoRolesHelper:
-    """src/auth/repo_roles.py 角色判定单元测试。"""
+    """src/domains/mgmt/auth/repo_roles.py 角色判定单元测试。"""
 
     def test_owner_is_admin_without_api_call(self):
         from src.domains.mgmt.auth.repo_roles import get_repo_admin_identity

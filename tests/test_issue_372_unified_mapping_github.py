@@ -45,7 +45,7 @@ def test_session_store_set_issue_stage_uses_provider_split():
 
 def test_pipeline_resolve_feishu_name_uses_provider_split():
     """T20-04: pipeline _resolve_feishu_name 按 provider 分列查询。"""
-    assert _grep_source("src/api/routes/pipeline.py", "um_column_for_repo")
+    assert _grep_source("src/domains/runtime/routes/pipeline.py", "um_column_for_repo")
 
 
 def test_session_manager_get_feishu_open_id_has_github_fallback():
@@ -90,7 +90,7 @@ def test_prompt_builder_uses_insert_ignore_not_replace():
 def test_chat_update_uses_gitcode_user_column():
     """T20-08: chat.py UPDATE 按 gitcode_user 列（不再 OR github_login）。"""
     # FR-17.2: chat.py 解绑清映射只查 gitcode_user 列
-    assert _grep_source("src/api/routes/chat.py", "gitcode_user=?")
+    assert _grep_source("src/domains/runtime/routes/chat.py", "gitcode_user=?")
 
 
 def test_get_feishu_open_id_fallback_on_empty_open_id():

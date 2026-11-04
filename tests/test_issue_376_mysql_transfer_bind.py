@@ -83,7 +83,7 @@ class TestDerivedTableSQLText:
 
     def test_transfer_business_data_derived_table(self):
         """user_repos 两条迁移 SQL 均为派生表包裹。"""
-        src = self._read("src/auth/grape_account_db.py")
+        src = self._read("src/domains/mgmt/auth/grape_account_db.py")
         lits = self._sql_literals(src)
         joined = " || ".join(lits)
         assert "NOT IN (SELECT repo_key FROM (SELECT repo_key FROM" in joined, \
@@ -95,7 +95,7 @@ class TestDerivedTableSQLText:
 
     def test_latency_cleanup_derived_table(self):
         """latency.py 超限清理 SQL 为派生表包裹。"""
-        src = self._read("src/api/routes/latency.py")
+        src = self._read("src/domains/insight/routes/latency.py")
         joined = " || ".join(self._sql_literals(src))
         assert "id IN (SELECT id FROM (SELECT id FROM api_latency_log" in joined, \
             "latency 清理缺少派生表包裹"
@@ -103,7 +103,7 @@ class TestDerivedTableSQLText:
 
     def test_table_maintenance_derived_table(self):
         """table_maintenance.py SQLite 分支清理 SQL 为派生表包裹（同类排查命中）。"""
-        src = self._read("src/runtime/table_maintenance.py")
+        src = self._read("src/domains/runtime/engine/table_maintenance.py")
         joined = " || ".join(self._sql_literals(src))
         assert "id IN (SELECT id FROM (SELECT id FROM task_messages" in joined
         self._assert_no_direct_same_table_subquery(src, "task_messages")

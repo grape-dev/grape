@@ -34,7 +34,7 @@ class TestGitCodePatBindingUnifiedMapping:
 
     def test_t13_01_gitcode_pat_writes_unified_mapping(self):
         """T13-01: PAT 绑定成功后写入 unified_user_mapping（gitcode_user = gc_login）。"""
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         assert "unified_user_mapping" in src, \
             "settings.py should write unified_user_mapping after PAT binding"
         # 用 INSERT OR IGNORE + UPDATE（不用 INSERT OR REPLACE）
@@ -48,7 +48,7 @@ class TestGitCodePatBindingUnifiedMapping:
 
         INSERT OR IGNORE 不删旧行，UPDATE 覆盖 gitcode_user 字段。
         """
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         # 不应用 INSERT OR REPLACE（会删整行重插）
         assert "INSERT OR REPLACE INTO unified_user_mapping" not in src, \
             "should NOT use INSERT OR REPLACE (would overwrite other platform fields)"
@@ -58,7 +58,7 @@ class TestGitCodePatBindingUnifiedMapping:
 
     def test_t13_04_gitcode_uses_gc_login_not_username(self):
         """T13-04: PAT 绑定写入的 gitcode_user 是 gc_login（非 grape_accounts.username）。"""
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         gc_log_idx = src.find("GitCode token saved")
         assert gc_log_idx > 0
         after_gc = src[gc_log_idx:gc_log_idx + 1200]
@@ -77,7 +77,7 @@ class TestGitHubPatBindingUnifiedMapping:
 
     def test_t13_03_github_pat_writes_unified_mapping(self):
         """T13-03: GitHub PAT 绑定后写入 unified_user_mapping.github_login。"""
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         gh_bind_idx = src.find("GitHub token saved")
         assert gh_bind_idx > 0, "GitHub token saved log not found"
         after_log = src[gh_bind_idx:gh_bind_idx + 800]
@@ -94,7 +94,7 @@ class TestGitHubPatBindingUnifiedMapping:
 
     def test_t13_04_gitcode_uses_gc_login_not_username(self):
         """T13-04: PAT 绑定写入的 gitcode_user 是 gc_login（非 grape_accounts.username）。"""
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         gc_log_idx = src.find("GitCode token saved")
         assert gc_log_idx > 0
         after_gc = src[gc_log_idx:gc_log_idx + 1200]
@@ -135,14 +135,14 @@ class TestDualPlatformNoOverwrite:
 
         验证源码中 unified_user_mapping 相关代码全部用 INSERT OR IGNORE + UPDATE。
         """
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         # 不应有任何 INSERT OR REPLACE INTO unified_user_mapping
         assert "INSERT OR REPLACE INTO unified_user_mapping" not in src, \
             "must NOT use INSERT OR REPLACE for unified_user_mapping (would overwrite other platform fields)"
 
     def test_t13_07_gitcode_update_only_gitcode_fields(self):
         """T13-07: GitCode 绑定只 UPDATE gitcode_user/gitcode_nickname，不碰 github_login。"""
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         # GitCode UPDATE 语句只改 gitcode_user 和 gitcode_nickname
         gc_log_idx = src.find("GitCode token saved")
         after_gc = src[gc_log_idx:gc_log_idx + 1000]
@@ -155,7 +155,7 @@ class TestDualPlatformNoOverwrite:
 
     def test_t13_07b_github_update_only_github_fields(self):
         """T13-07b: GitHub 绑定只 UPDATE github_login，不碰 gitcode_user。"""
-        src = _read_src("api/routes/settings.py")
+        src = _read_src("domains/mgmt/routes/settings.py")
         gh_log_idx = src.find("GitHub token saved")
         after_gh = src[gh_log_idx:gh_log_idx + 800]
         update_idx = after_gh.find("UPDATE unified_user_mapping SET github_login")

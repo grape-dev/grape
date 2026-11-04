@@ -1,6 +1,6 @@
 """回归测试：场景应用（apply_scene）不得重置仓库级 Agent 启用开关 enable。
 
-背景：src/api/routes/scenes.py 的 INSERT OR REPLACE 遗漏 enable 列。INSERT OR REPLACE
+背景：src/domains/mgmt/routes/scenes.py 的 INSERT OR REPLACE 遗漏 enable 列。INSERT OR REPLACE
 删除旧行后插入新行，未提供的 enable 落到列默认 1，导致 sre（agent-description.json 全局
 默认 false）在应用场景后被误开启（Prompt-to-Premiere 事故）。
 修复后：已有会话保留仓库级 enable（用户 Dashboard 开关为准）；仅新建会话继承

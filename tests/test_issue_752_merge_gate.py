@@ -34,7 +34,7 @@ def _client(monkeypatch):
         "id": UID, "username": "merge_gate_tester", "auth_type": "session_token",
         "agent_type": "vod", "user_id": 0, "session_key": "s752",
         "repo_key": f"gitcode:{OWNER}/{REPO}"}
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -43,11 +43,14 @@ def _merge(client, number=9, **payload):
     return client.put(f"/api/git-repo/{OWNER}/{REPO}/pulls/{number}/merge", json=payload or None)
 
 
-# ===================== 扫描函数 ==============
+# ===================== 扫描函数 =====================
+
 def test_scan_text_hard_hits():
-    text = "line1\n<<<<<<< HEAD\nold\n=======\nnew\n    r = scan_text(text)
+    text = "line1\n<<<<<<< HEAD\nold\n=======\nnew\n>>>>>>> dev\nline2\n"
+    r = scan_text(text)
     assert r["hard"] == 2   # <<<<<<< + >>>>>>>
-    assert r["soft"] == 1   # 
+    assert r["soft"] == 1   # =======
+
 
 def test_scan_text_soft_only_not_hard():
     """孤立 ======= 是软命中（markdown 下划线同形，不参与阻断）。"""
@@ -58,7 +61,8 @@ def test_scan_text_soft_only_not_hard():
 
 def test_scan_text_inline_mentions_not_hits():
     """正文行内提及标记（非行首）不命中，防误报。"""
-    text = "scan for     r = scan_text(text)
+    text = "scan for >>>>>>> markers, see docs\nrun `=======` check\nsee <<<<<<< inline >>>>>>> mention"
+    r = scan_text(text)
     assert r["hard"] == 0
     assert r["soft"] == 0
 
@@ -75,7 +79,8 @@ def test_scan_patch_only_added_lines():
              "-<<<<<<< HEAD\n"
              "+<<<<<<< HEAD\n"
              "+=======\n"
-             "+             " context\n")
+             "+>>>>>>> dev\n"
+             " context\n")
     r = scan_patch(patch)
     assert r["hard"] == 2
     assert r["soft"] == 1
@@ -93,7 +98,8 @@ def test_scan_pull_files_aggregates():
     assert r["soft_hits"] == {"b.md": 1}
 
 
-# ===================== merge 路由门禁 ==============
+# ===================== merge 路由门禁 =====================
+
 def _fake_req_dispatch(files_payload, merge_payload=None, get_error=None,
                        post_files=None, pull_detail=None, pages=None):
     """模拟 _req 分发。
@@ -141,7 +147,8 @@ def test_merge_blocked_on_hard_hit(monkeypatch, _client):
     """硬命中 → 409 阻断（AC1），上游 merge 未被调用，合入日志 blocked（AC3）。"""
     # 每用例独立 PR 号（合入日志按 pr_number 断言，防跨用例串扰）
     files = [{"filename": "runbook.md",
-              "patch": "@@\n+<<<<<<< HEAD\n+step\n+=======\n+step2\n+    monkeypatch.setattr("src.user.repo_manager._req", _fake_req_dispatch(files))
+              "patch": "@@\n+<<<<<<< HEAD\n+step\n+=======\n+step2\n+>>>>>>> dev\n"}]
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req_dispatch(files))
     r = _merge(_client, number=91)
     assert r.status_code == 409
     detail = r.json()["detail"]
@@ -157,7 +164,7 @@ def test_merge_soft_hit_warns_and_passes(monkeypatch, _client):
     """仅软命中（孤立 =======）→ 放行 + pre warned / post alarmed 日志。"""
     # 每用例独立 PR 号
     files = [{"filename": "doc.md", "patch": "@@\n+Title\n+=======\n"}]
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req_dispatch(files))
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req_dispatch(files))
     r = _merge(_client, number=92)
     assert r.status_code == 200
     rows = _gate_rows(92)
@@ -168,7 +175,7 @@ def test_merge_clean_pr_passes(monkeypatch, _client):
     """干净 PR → 200 + pre passed / post passed 日志，返回体不变。"""
     # 每用例独立 PR 号
     files = [{"filename": "code.py", "patch": "@@\n+print('ok')\n"}]
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req_dispatch(files))
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req_dispatch(files))
     r = _merge(_client, number=93)
     assert r.status_code == 200
     assert r.json() == {"merged": True, "sha": "sha752"}
@@ -179,7 +186,7 @@ def test_merge_clean_pr_passes(monkeypatch, _client):
 def test_merge_gate_fail_open_on_scan_error(monkeypatch, _client):
     """门禁扫描异常 → fail-open 放行（error 决策落日志），存量合入不受影响。"""
     # 每用例独立 PR 号
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         _fake_req_dispatch(None, get_error=RuntimeError("scan net down")))
     r = _merge(_client, number=94)
     assert r.status_code == 200
@@ -191,7 +198,8 @@ def test_merge_gate_fail_open_on_scan_error(monkeypatch, _client):
 def test_run_merge_gate_unit(monkeypatch):
     """run_merge_gate 单元：blocked/warned 决策与命中明细。"""
     monkeypatch.setattr("src.api.git_repo_api._vcs_req",
-                        lambda p, m, u, t: [{"filename": "f.py", "patch": "+    g = run_merge_gate(OWNER, REPO, 7, "gitcode", BOT)
+                        lambda p, m, u, t: [{"filename": "f.py", "patch": "+>>>>>>> x\n"}])
+    g = run_merge_gate(OWNER, REPO, 7, "gitcode", BOT)
     assert g["decision"] == "blocked" and g["hard_hits"] == {"f.py": 1}
 
     monkeypatch.setattr("src.api.git_repo_api._vcs_req",
@@ -206,7 +214,8 @@ def test_run_merge_gate_unit(monkeypatch):
 def test_run_merge_gate_paginates_over_100_files(monkeypatch):
     """PR #874 Required：>100 文件翻页取全量——第 2 页的硬命中不被首页截断漏扫。"""
     page1 = [{"filename": f"f{i}.md", "patch": "@@\n+ok\n"} for i in range(100)]
-    page2 = [{"filename": "runbook.md", "patch": "@@\n+    calls = []
+    page2 = [{"filename": "runbook.md", "patch": "@@\n+>>>>>>> dev\n"}]
+    calls = []
 
     def _fake(p, m, u, t):
         import re as _re
@@ -245,7 +254,8 @@ def test_run_post_merge_gate_fallback_merge_commit(monkeypatch):
     def _fake(p, m, u, t):
         if "/commits/" in u:
             assert u.endswith("/commits/sha752")
-            return {"files": [{"filename": "m.py", "patch": "+        return {}
+            return {"files": [{"filename": "m.py", "patch": "+>>>>>>> d\n"}]}
+        return {}
 
     monkeypatch.setattr("src.api.git_repo_api._vcs_req", _fake)
     g = run_post_merge_gate(OWNER, REPO, 7, "gitcode", BOT, "", "", "sha752")
@@ -256,7 +266,8 @@ def test_merge_post_merge_bypass_residue_alarm(monkeypatch, _client):
     """PR #874 Required：PR diff 干净放行，但旁路写入 base 的残留 → post_merge alarmed。"""
     files = [{"filename": "code.py", "patch": "@@\n+print('ok')\n"}]
     bypass = [{"filename": "base_file.md",
-               "patch": "@@\n+<<<<<<< HEAD\n+x\n+    monkeypatch.setattr("src.user.repo_manager._req",
+               "patch": "@@\n+<<<<<<< HEAD\n+x\n+>>>>>>> dev\n"}]
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         _fake_req_dispatch(files, post_files=bypass))
     r = _merge(_client, number=96)
     assert r.status_code == 200

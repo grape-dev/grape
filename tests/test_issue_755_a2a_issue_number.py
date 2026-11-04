@@ -81,7 +81,7 @@ def _set_scene(scene_id, nodes):
 # ══════════════════ helper 单测 ══════════════════
 
 def test_issue_exists_in_db():
-    from src.api.routes.webhook import _issue_exists_in_db
+    from src.domains.runtime.routes.webhook import _issue_exists_in_db
     _set_issue(755)
     assert _issue_exists_in_db(REPO_KEY, 755) is True
     assert _issue_exists_in_db(REPO_KEY, "755") is True
@@ -91,14 +91,14 @@ def test_issue_exists_in_db():
 
 def test_resolve_kept_when_issue_in_db():
     """目标仓已有该编号行 → 原样返回（正常同仓 A2A 零行为变化）。"""
-    from src.api.routes.webhook import _resolve_cross_repo_issue_number
+    from src.domains.runtime.routes.webhook import _resolve_cross_repo_issue_number
     _set_issue(755)
     assert _resolve_cross_repo_issue_number(REPO_KEY, "755", {}) == ("755", "kept")
 
 
 def test_resolve_target_field():
     """carried_context.target_issue_number 显式回填 → 采用。"""
-    from src.api.routes.webhook import _resolve_cross_repo_issue_number
+    from src.domains.runtime.routes.webhook import _resolve_cross_repo_issue_number
     _set_issue(755, carried={"source_issue_number": 1099})
     num, via = _resolve_cross_repo_issue_number(
         REPO_KEY, "1099", {"source_issue_number": 1099, "target_issue_number": 755})
@@ -107,7 +107,7 @@ def test_resolve_target_field():
 
 def test_resolve_db_mapping():
     """DB 反查 carried_context.source_issue_number → 真实落地单号（多命中取最大）。"""
-    from src.api.routes.webhook import _resolve_cross_repo_issue_number
+    from src.domains.runtime.routes.webhook import _resolve_cross_repo_issue_number
     _set_issue(753, carried={"source_issue_number": 1099})
     _set_issue(754, carried={"source_issue_number": 1099})
     num, via = _resolve_cross_repo_issue_number(REPO_KEY, "1099", {})
@@ -116,21 +116,21 @@ def test_resolve_db_mapping():
 
 def test_resolve_unresolved():
     """均未命中 → 原样返回（行为不变，交由方案 B 入口校验）。"""
-    from src.api.routes.webhook import _resolve_cross_repo_issue_number
+    from src.domains.runtime.routes.webhook import _resolve_cross_repo_issue_number
     assert _resolve_cross_repo_issue_number(REPO_KEY, "1099", {}) == ("1099", "unresolved")
     assert _resolve_cross_repo_issue_number(REPO_KEY, "", {}) == ("", "unresolved")
     assert _resolve_cross_repo_issue_number(REPO_KEY, "#1099", {}) == ("1099", "unresolved")
 
 
 def test_vcs_check_verdicts(monkeypatch):
-    from src.api.routes.webhook import _a2a_issue_vcs_check
+    from src.domains.runtime.routes.webhook import _a2a_issue_vcs_check
     monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "tok-755")
-    monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_issue", lambda self, n: {"number": n})
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue", lambda self, n: {"number": n})
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "exists"
-    monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_issue",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue",
                         lambda self, n: {"error": "HTTP 404", "status_code": 404})
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "not_found"
-    monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_issue",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue",
                         lambda self, n: {"error": "conn timeout"})
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "unknown"
     monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "")
@@ -138,7 +138,7 @@ def test_vcs_check_verdicts(monkeypatch):
     # 无 token 时不外呼
     def _no_call(*a, **kw):
         raise AssertionError("no-token path must not call VCS")
-    monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_issue", _no_call)
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue", _no_call)
     assert _a2a_issue_vcs_check(REPO_KEY, "755") == "unknown"
 
 
@@ -147,7 +147,7 @@ def test_vcs_check_verdicts(monkeypatch):
 def test_cross_pipeline_handoff_backfills_source_number():
     """跨仓转交沿用源仓单号（1099）→ 回填为真实落地单号（755），
     事件 issue_id / 派发 payload / carried_context.target_issue_number 全部使用真实单号。"""
-    from src.api.routes.webhook import _cross_pipeline_handoff
+    from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
     _set_issue(755, scene_id="source-scene", carried={"source_issue_number": 1099})
     _set_scene("target-scene", [{"id": "vod"}])
     carried = {"source_issue_number": 1099, "source_scene_id": "source-scene", "rating": "ready"}
@@ -182,7 +182,7 @@ def test_cross_pipeline_handoff_backfills_source_number():
 
 def test_cross_pipeline_handoff_keeps_existing_number():
     """同仓已有编号（kept）→ 不改写（回归，行为不变）。"""
-    from src.api.routes.webhook import _cross_pipeline_handoff
+    from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
     _set_issue(100, scene_id="source-scene")
     _set_scene("target-scene", [{"id": "vod"}])
     result = _cross_pipeline_handoff(
@@ -249,7 +249,7 @@ def test_a2a_endpoint_400_on_vcs_not_found(monkeypatch):
     """方案B：DB 查无 + VCS 明确 404 → 400 拒绝并提示转交建单。"""
     _seed_registered()
     monkeypatch.setattr("src.token_resolver.TokenResolver.get_token", lambda self, rk: "tok-755")
-    monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_issue",
+    monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_issue",
                         lambda self, n: {"error": "HTTP 404", "status_code": 404})
     body = {
         "agent": "coding",

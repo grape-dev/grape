@@ -13,7 +13,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from src.session_manager import db, db_lock
-from src.runtime.engine_model import detect_engine_model
+from src.domains.runtime.engine.engine_model import detect_engine_model
 
 ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 ZH_PATH = os.path.join(ROOT, "src", "api", "static", "locales", "zh", "runtimes.json")
@@ -57,7 +57,7 @@ def client():
 class TestDetectEngineModel:
     def _stub_expanduser(self, monkeypatch, home):
         """把三引擎配置路径指到 tmp home（隔离真实本机配置）。"""
-        import src.runtime.engine_model as em
+        import src.domains.runtime.engine.engine_model as em
         monkeypatch.setattr(em.os.path, "expanduser", lambda p: {
             "~/.hermes/config.yaml": str(home / ".hermes/config.yaml"),
             "~/.config/opencode/opencode.json": str(home / ".config/opencode/opencode.json"),
@@ -194,7 +194,7 @@ class TestRecentModelsAggregation:
         return rid
 
     def test_batch_group_by_no_n_plus_1(self):
-        from src.api.routes.settings import _recent_models_by_runtime, _RECENT_MODELS_TOP_N
+        from src.domains.mgmt.routes.settings import _recent_models_by_runtime, _RECENT_MODELS_TOP_N
         import src.session_manager as sm
         rid = self._seed()
         calls = {"n": 0}
@@ -232,7 +232,7 @@ class TestRecentModelsAggregation:
         assert all("api_key" not in json.dumps(t) for t in top)
 
     def test_empty_ids_returns_empty_without_query(self):
-        from src.api.routes.settings import _recent_models_by_runtime
+        from src.domains.mgmt.routes.settings import _recent_models_by_runtime
         assert _recent_models_by_runtime([]) == {}
         assert _recent_models_by_runtime(None) == {}
 

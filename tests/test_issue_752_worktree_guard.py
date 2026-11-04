@@ -12,8 +12,8 @@ import subprocess
 
 import pytest
 
-from src.runtime import repogit
-from src.runtime import worktree_guard as wg
+from src.domains.runtime.engine import repogit
+from src.domains.runtime.engine import worktree_guard as wg
 
 
 def _git(args, cwd):
@@ -38,12 +38,14 @@ def git_src(tmp_path):
 
 @pytest.fixture(autouse=True)
 def _patch(git_src, tmp_path, monkeypatch):
-    monkeypatch.setattr("src.config.WORKSPACE_DIR", str(tmp_path / "ws"))
+    # workspace 根目录走 canonical kernel 配置（repo_key.workspace_repo_dir 调用时读取）
+    monkeypatch.setattr("src.kernel.config.WORKSPACE_DIR", str(tmp_path / "ws"))
     monkeypatch.setattr(repogit, "clone_url_for", lambda repo_key: str(git_src))
     yield
 
 
-# ===================== 产物路径白名单 ==============
+# ===================== 产物路径白名单 =====================
+
 @pytest.mark.parametrize("path,expected", [
     ("dist/app.js", True), ("build/x.js", True), ("node_modules/a/b.js", True),
     (".skills/coding/SKILL.md", True), (".project-info/x.md", True),
@@ -53,11 +55,13 @@ def test_is_artifact_path(path, expected):
     assert wg.is_artifact_path(path) is expected
 
 
-# ===================== 暂存冲突标记扫描 ==============
+# ===================== 暂存冲突标记扫描 =====================
+
 def test_scan_staged_hard_hit(tmp_path):
     wt = tmp_path / "wt"
     _git(["clone", str(tmp_path / "src"), str(wt)], str(tmp_path))
-    (wt / "runbook.md").write_text("a\n<<<<<<< HEAD\nx\n=======\ny\n    _git(["add", "-A"], str(wt))
+    (wt / "runbook.md").write_text("a\n<<<<<<< HEAD\nx\n=======\ny\n>>>>>>> dev\n", encoding="utf-8")
+    _git(["add", "-A"], str(wt))
     r = wg.scan_staged_files(str(wt))
     assert r["hard"] == {"runbook.md": 2}
     assert r["soft"] == {"runbook.md": 1}
@@ -92,7 +96,8 @@ def test_scan_staged_blob_not_disk_content(tmp_path):
     # 暂存干净内容，随后磁盘写入冲突标记（未暂存）
     (wt / "code.py").write_text("print(2)\n", encoding="utf-8")
     _git(["add", "code.py"], str(wt))
-    (wt / "code.py").write_text("<<<<<<< HEAD\nprint(2)\n    r = wg.scan_staged_files(str(wt))
+    (wt / "code.py").write_text("<<<<<<< HEAD\nprint(2)\n=======\nprint(3)\n>>>>>>> dev\n", encoding="utf-8")
+    r = wg.scan_staged_files(str(wt))
     assert r["hard"] == {} and r["soft"] == {}
     # 暂存含标记的 blob（即实际将提交的内容）→ 命中
     _git(["add", "code.py"], str(wt))
@@ -103,7 +108,6 @@ def test_scan_staged_blob_not_disk_content(tmp_path):
 def test_scan_staged_unmerged_falls_back_to_disk(tmp_path):
     """unmerged 路径无单 stage blob → 降级扫工作区文件（git 冲突标记在工作区）。"""
     src = tmp_path / "src"
-    # 上游制造双边改动：other 分支与 main 分支各自改 code.py
     _git(["checkout", "-b", "other", "HEAD"], str(src))
     (src / "code.py").write_text("print(99)\n", encoding="utf-8")
     _git(["commit", "-am", "other change"], str(src))
@@ -113,12 +117,13 @@ def test_scan_staged_unmerged_falls_back_to_disk(tmp_path):
     wt = tmp_path / "wt"
     _git(["clone", str(src), str(wt)], str(tmp_path))
     _git(["-c", "user.email=test@example.com", "-c", "user.name=Test User",
-          "merge", "origin/other"], str(wt))  # 双边改 code.py → unmerged 冲突
+          "merge", "origin/other"], str(wt))
     r = wg.scan_staged_files(str(wt))
-    assert "code.py" in (r["hard"] or {})  # 工作区冲突标记被降级路径检出
+    assert "code.py" in (r["hard"] or {})
 
 
-# ===================== 指纹保真校验 ==============
+# ===================== 指纹保真校验 =====================
+
 def test_fidelity_detects_modify_and_remove(tmp_path):
     wt = tmp_path / "wt"
     _git(["clone", str(tmp_path / "src"), str(wt)], str(tmp_path))
@@ -163,7 +168,8 @@ def test_fidelity_without_baseline(tmp_path):
     assert r["baseline_missing"] is True
 
 
-# ===================== repogit 接线：建/复用 worktree 自动保存基线 ==============
+# ===================== repogit 接线：建/复用 worktree 自动保存基线 =====================
+
 def test_ensure_issue_worktree_saves_baseline():
     wt = repogit.ensure_issue_worktree("gitcode:owner/repo", "qa", "5")
     assert wt

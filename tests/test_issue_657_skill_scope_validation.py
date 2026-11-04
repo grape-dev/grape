@@ -81,7 +81,7 @@ class TestGetSkillScopeInfo:
 
     def test_user_only_scope_mismatch(self):
         """仅 user scope 存在 → found=True, matched=False, scope=user。"""
-        from src.user.db import get_skill_scope_info
+        from src.domains.mgmt.user.db import get_skill_scope_info
         sname = f"usk657_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:o657/scopeinfo"
         try:
@@ -96,7 +96,7 @@ class TestGetSkillScopeInfo:
 
     def test_repo_scope_matched(self):
         """repo scope（owner=repo_key）→ matched=True。"""
-        from src.user.db import get_skill_scope_info
+        from src.domains.mgmt.user.db import get_skill_scope_info
         sname = f"rsk657_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:o657/scopeinfo"
         try:
@@ -109,7 +109,7 @@ class TestGetSkillScopeInfo:
 
     def test_official_scope_matched(self):
         """official scope → matched=True（repo 场景可引用）。"""
-        from src.user.db import get_skill_scope_info
+        from src.domains.mgmt.user.db import get_skill_scope_info
         sname = f"osk657_{uuid.uuid4().hex[:6]}"
         try:
             _mk_skill_row(scope="official", owner="", sname=sname)
@@ -121,7 +121,7 @@ class TestGetSkillScopeInfo:
 
     def test_user_plus_repo_same_name_prefers_repo(self):
         """user + repo 同名并存 → repo 可用 → matched=True（不误伤）。"""
-        from src.user.db import get_skill_scope_info
+        from src.domains.mgmt.user.db import get_skill_scope_info
         sname = f"both657_{uuid.uuid4().hex[:6]}"
         rk = "gitcode:o657/scopeinfo"
         try:
@@ -135,7 +135,7 @@ class TestGetSkillScopeInfo:
 
     def test_unknown_skill_not_found(self):
         """技能不在 skill 表（官方内置包形态）→ found=False（存量场景兼容）。"""
-        from src.user.db import get_skill_scope_info
+        from src.domains.mgmt.user.db import get_skill_scope_info
         info = get_skill_scope_info(f"nosuch657_{uuid.uuid4().hex[:6]}",
                                     "gitcode:o657/scopeinfo")
         assert info["found"] is False
@@ -147,7 +147,7 @@ class TestApplySceneScopeMismatch:
 
     def test_apply_user_scope_skill_rejected(self):
         """user 级技能节点 → apply 直接 400，错误含「scope 不匹配」+ 技能名 + scope 值。"""
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{uuid.uuid4().hex[:8]}"
@@ -169,7 +169,7 @@ class TestApplySceneScopeMismatch:
 
     def test_apply_repo_scope_skill_passes(self):
         """repo 级技能（owner=repo_key）→ 不触发 scope 拦截。"""
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{uuid.uuid4().hex[:8]}"
@@ -186,7 +186,7 @@ class TestApplySceneScopeMismatch:
 
     def test_apply_unknown_skill_keeps_legacy_behavior(self):
         """技能不在 skill 表（官方内置包形态）→ 维持原行为（兼容 Issue #524 存量用例）。"""
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         scene_id = f"sc-{uuid.uuid4().hex[:8]}"
@@ -204,7 +204,7 @@ class TestCreateUpdateSceneScopeMismatch:
     """保存拦截：create/update 场景引用 user 级技能 → 400。"""
 
     def test_create_scene_user_scope_skill_rejected(self):
-        from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
+        from src.domains.mgmt.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
         owner, repo = "o657", _unique_repo()
         sname = f"usk657_{uuid.uuid4().hex[:6]}"
         try:
@@ -222,7 +222,7 @@ class TestCreateUpdateSceneScopeMismatch:
 
     def test_create_scene_own_user_scope_skill_passes(self):
         """#657 follow-up：自己的个人技能（owner==当前用户）→ 放行。"""
-        from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
+        from src.domains.mgmt.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
         sname = f"usk657_{uuid.uuid4().hex[:6]}"
@@ -241,7 +241,7 @@ class TestCreateUpdateSceneScopeMismatch:
 
     def test_create_scene_other_user_scope_skill_rejected(self):
         """#657 follow-up：他人个人技能（owner!=当前用户）→ 仍 400。"""
-        from src.api.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
+        from src.domains.mgmt.routes.scenes import create_scene, CreateSceneRequest, SceneNodeInput
         owner, repo = "o657", _unique_repo()
         sname = f"usk657_{uuid.uuid4().hex[:6]}"
         try:
@@ -257,7 +257,7 @@ class TestCreateUpdateSceneScopeMismatch:
             _delete_skills(sname)
 
     def test_update_scene_user_scope_skill_rejected(self):
-        from src.api.routes.scenes import (update_scene, UpdateSceneRequest,
+        from src.domains.mgmt.routes.scenes import (update_scene, UpdateSceneRequest,
                                            SceneNodeInput)
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"
@@ -372,7 +372,7 @@ class TestSmokeRegression:
 
     def test_user_scope_skill_full_chain(self):
         """user 技能 → repo 场景：apply 拒绝 + 强行落库后派发 fail-fast。"""
-        from src.api.routes.scenes import apply_scene, ApplySceneRequest
+        from src.domains.mgmt.routes.scenes import apply_scene, ApplySceneRequest
         import src.api.event_pipeline as ep
         owner, repo = "o657", _unique_repo()
         repo_key = f"gitcode:{owner}/{repo}"

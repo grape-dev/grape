@@ -4,7 +4,7 @@
 签发 tk_ 会话 token 注入 GRAPE_SESSION_TOKEN，使 agent 能调用仓库作用域内部端点
 （如 git-repo issue comment 回写澄清结论）；并按 tk_ 作用域过滤 CLI 命令（GRAPE_CLI_MODE=WORKER）。
 
-Web（src/api/routes/chat.py）与飞书 IM（src/im/handler_async.py）共用本 helper，防两组逻辑漂移。
+Web（src/domains/runtime/routes/chat.py）与飞书 IM（src/domains/runtime/im/handler_async.py）共用本 helper，防两组逻辑漂移。
 仅真实仓库注入；一般对话（repo_key 为空 / `chat:{id}` 伪仓库）不注入，行为不变。
 """
 from src.kernel.config import log

@@ -655,7 +655,7 @@ def admin_obs_events(sources: str = "", state: str = "", repo: str = "", limit: 
                      admin: dict = Depends(require_admin)):
     """统一事件视图（管理台，P1-4 / T-A4）：**全局不过滤仓库**，额外含 `audit` 来源。
 
-    与用户面共用同一套聚合口径（`src/observability/events_view.py`），保证两端数字一致；
+    与用户面共用同一套聚合口径（`src/domains/insight/observability/events_view.py`），保证两端数字一致；
     差别只有三点：① 全局（不按可见范围过滤）② 含 `audit`（平台动作）③ 不返回平台级告警之外的
     平台指标事件（那些走 admin 健康中心）。
     """

@@ -21,13 +21,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_sessions.db"))
 
-# src/agent/__init__.py 会连带导入 runtime 层（与 test 收集期存在循环导入），
+# src/domains/runtime/agents/__init__.py 会连带导入 runtime 层（与 test 收集期存在循环导入），
 # 这里用轻量包占位 + 按文件路径加载，只取 hermes_acp 模块本身。
 _pkg = types.ModuleType("src.domains.runtime.agents")
 _pkg.__path__ = [os.path.join(ROOT, "src", "agent")]
 sys.modules.setdefault("src.domains.runtime.agents", _pkg)
 _spec = importlib.util.spec_from_file_location(
-    "src.domains.runtime.agents.hermes_acp", os.path.join(ROOT, "src", "agent", "hermes_acp.py"))
+    "src.domains.runtime.agents.hermes_acp", os.path.join(ROOT, "src", "domains", "runtime", "agents", "hermes_acp.py"))
 _mod = importlib.util.module_from_spec(_spec)
 sys.modules["src.domains.runtime.agents.hermes_acp"] = _mod
 _spec.loader.exec_module(_mod)

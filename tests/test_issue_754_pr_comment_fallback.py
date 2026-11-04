@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
-from src.user.repo_manager import UpstreamAPIError
+from src.domains.mgmt.user.repo_manager import UpstreamAPIError
 
 UID = 98755
 OWNER = "o"
@@ -31,7 +31,7 @@ def _client(monkeypatch):
         "id": UID, "username": "git_tester", "auth_type": "session_token",
         "agent_type": "vod", "user_id": 0, "session_key": "s1",
         "repo_key": f"gitcode:{OWNER}/{REPO}"}
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -49,7 +49,7 @@ def test_pull_comment_405_falls_back_to_issue_channel(monkeypatch, _client):
             return {"id": 424242, "body": body["body"]}
         return {"ok": True}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     ledger = []
     monkeypatch.setattr("src.outbound_ledger.record_outbound",
                         lambda *a, **k: ledger.append((a, k)) or True)
@@ -73,7 +73,7 @@ def test_pull_comment_other_errors_not_fallback(monkeypatch, _client):
             raise UpstreamAPIError(method, url, 403, '{"message":"Forbidden"}')
         return {"ok": True}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _client.post(f"{base}/pulls/9/comments", json={"body": "x"})
     assert r.status_code == 403
     assert r.json()["detail"]["code"] == 403

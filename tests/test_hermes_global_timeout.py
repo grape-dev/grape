@@ -4,7 +4,7 @@
 长时 coding 任务 20 分钟一到即 stopReason=timeout 硬切，即使输出持续正常滚动
 （实测任务 9620：786 条消息、20 分 13 秒被切）。
 
-修复：全局上限取 RUNTIME_TASK_TIMEOUT（与 src/runtime/agent.py 任务级看门狗同源，
+修复：全局上限取 RUNTIME_TASK_TIMEOUT（与 src/domains/runtime/engine/agent.py 任务级看门狗同源，
 默认 3600s），下限保护 max_exec_seconds；静默超时（_SILENT_TIMEOUT/_TEXT_SILENT_TIMEOUT）
 语义不变。
 

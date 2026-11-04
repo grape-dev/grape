@@ -29,9 +29,9 @@ UV_PYTHON_DIR = os.path.expanduser(os.environ.get("UV_PYTHON_DIR", "~/.local/sha
 # main.py/run.py 等服务端专用文件（test_build_package_contents 守卫）。
 MANIFEST = [
     "src/__init__.py",
-    # Issue #699 Phase 1: canonical layers (real code). Old entries below
-    # remain as re-export shims for the worker entrypoint (python -m
-    # src.runtime.agent) and inline imports in install-worker.sh.
+    # Issue #699: canonical layers only. Legacy top-level shim dirs
+    # (src/runtime, src/agent, ...) were removed once every importer migrated;
+    # worker entrypoint is python -m src.domains.runtime.engine.agent.
     "src/kernel/",
     "src/domains/",
     "src/config.py",
@@ -41,9 +41,9 @@ MANIFEST = [
     "src/mysql_compat.py",
     "src/token_service.py",
     "src/token_resolver.py",
-    "src/user/__init__.py",
-    "src/user/db.py",
-    "src/auth/",
+    "src/domains/mgmt/user/__init__.py",
+    "src/domains/mgmt/user/db.py",
+    "src/domains/mgmt/auth/",
     "src/api/__init__.py",
     "src/api/routing.py",
     "src/api/time_utils.py",
@@ -52,8 +52,9 @@ MANIFEST = [
     # 服务端 read 兼容（历史存档回退）保留在服务端代码库，不进 worker 包。
     "src/api/session_store.py",
     "src/api/knowledge.py",
-    "src/agent/",
-    "src/runtime/",
+    "src/api/merge_gate.py",  # Issue #752: worktree_guard 依赖（冲突标记扫描）
+    "src/domains/runtime/agents/",
+    "src/domains/runtime/engine/",
     # grape CLI 已拆为独立项目 grape-cli（gitcode.com/grape-dev/grape-cli），
     # 由 install-worker.sh 以 pip git 方式安装（2026-09-08 起不再随包内置）
     # Issue #699 Phase 0: requirements-worker.txt merged into pyproject.toml [worker] extra
@@ -673,6 +674,18 @@ def build_package() -> str:
         else:
             log.warning("worker_package: no python to bundle (system python required on worker)")
         with tarfile.open(tmp, "w:gz") as tar:
+            # MANIFEST 存在目录/文件重叠（如 src/domains/ 与 src/domains/runtime/engine/），
+            # 按归档名去重，避免同一文件在包内出现两次（SHA256SUMS 校验与安装端解压都需要唯一名）。
+            _seen: set[str] = set()
+
+            def _add(arc: str, fp: str) -> None:
+                if arc in _seen:
+                    return
+                _seen.add(arc)
+                tar.add(fp, arcname=f"grape-worker/{arc}", filter=_tar_filter)
+                with open(fp, "rb") as fh:
+                    members.append((f"grape-worker/{arc}", fh.read()))
+
             for item in MANIFEST:
                 path = os.path.join(ROOT, item)
                 if not os.path.exists(path):
@@ -685,14 +698,10 @@ def build_package() -> str:
                             if fp.endswith(".pyc"):
                                 continue
                             arc = os.path.relpath(fp, ROOT).replace(os.sep, "/")
-                            tar.add(fp, arcname=f"grape-worker/{arc}", filter=_tar_filter)
-                            with open(fp, "rb") as fh:
-                                members.append((f"grape-worker/{arc}", fh.read()))
+                            _add(arc, fp)
                 else:
                     arc = item.replace(os.sep, "/")
-                    tar.add(path, arcname=f"grape-worker/{arc}", filter=_tar_filter)
-                    with open(path, "rb") as fh:
-                        members.append((f"grape-worker/{arc}", fh.read()))
+                    _add(arc, path)
             # 包内 VERSION 文件写入代码版本（仅 git commit，不含 wheels/python 指纹）
             # worker 端读此文件与主控 heartbeat 中的 latest_version 对比
             # 打包路径强制重算（不走 TTL 缓存）：确保版本戳与包内代码一致

@@ -36,7 +36,7 @@ class TestR14_1UpdateRepoBotTokenWebhookRebuild:
 
     def test_update_repo_bot_token_accepts_webhook_token_param(self):
         """_update_repo_bot_token 签名包含 webhook_token 参数。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         # 确认函数签名包含新参数
         assert 'webhook_token: str = ""' in db_src, \
             "_update_repo_bot_token should accept webhook_token parameter"
@@ -45,7 +45,7 @@ class TestR14_1UpdateRepoBotTokenWebhookRebuild:
 
     def test_update_repo_bot_token_writes_webhook_token(self):
         """UPDATE 语句写入 webhook_token 字段。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         # 查找 _update_repo_bot_token 函数体中的 UPDATE 语句
         func_start = db_src.index('def _update_repo_bot_token')
         func_end = db_src.index('\ndef auto_upgrade_path_b_repos', func_start)
@@ -59,7 +59,7 @@ class TestR14_1UpdateRepoBotTokenWebhookRebuild:
 
     def test_auto_upgrade_calls_webhook_rebuild(self):
         """auto_upgrade_path_b_repos 中包含 webhook 重建逻辑。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_start = db_src.index('def auto_upgrade_path_b_repos')
         func_body = db_src[func_start:]
         # R14.16: webhook 重建收进 _rebuild_webhook_with_bot_token 统一入口
@@ -70,7 +70,7 @@ class TestR14_1UpdateRepoBotTokenWebhookRebuild:
 
     def test_auto_upgrade_passes_webhook_token_to_update(self):
         """auto_upgrade 调用 _update_repo_bot_token 时传入 webhook_token 和 webhook_id。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_start = db_src.index('def auto_upgrade_path_b_repos')
         func_body = db_src[func_start:]
         assert 'webhook_token=bot_token' in func_body, \
@@ -86,7 +86,7 @@ class TestR14_2PathBNoStaleToken:
 
     def test_host_repo_path_b_writes_empty_wh_token(self):
         """host_repo 中路径 B 成功新建 webhook 时 wh_col 值为空串。"""
-        repos_src = _read('src/api/routes/repos.py')
+        repos_src = _read('src/domains/mgmt/routes/repos.py')
         # 查找路径 B 成功新建的 add_managed_repo 调用
         # 应该有 _use_path_b 时 wh_col 对应值写空串的逻辑
         # 查找 R14.2 注释标记或空串逻辑
@@ -98,7 +98,7 @@ class TestR14_2PathBNoStaleToken:
 
     def test_create_new_repo_path_b_no_user_token_in_wh_col(self):
         """create_new_repo 路径 B 时不写用户 token 到 wh_col。"""
-        repos_src = _read('src/api/routes/repos.py')
+        repos_src = _read('src/domains/mgmt/routes/repos.py')
         # 查找 create_new_repo 函数
         func_match = re.search(r'def create_new_repo.*?(?=\ndef )', repos_src, re.DOTALL)
         if func_match:
@@ -118,7 +118,7 @@ class TestR14_3R10PathBBotTokenFallback:
 
     def test_fail_task_path_b_tries_global_bot_token(self):
         """fail_task 中路径 B 仓库也尝试全局 bot token 发评论。"""
-        svc_src = _read('src/runtime/service.py')
+        svc_src = _read('src/domains/runtime/engine/service.py')
         # 查找 R10 逻辑中的路径 B 分支
         # 应该有路径 B 时先尝试全局 bot token 的逻辑
         r10_section = svc_src[svc_src.index('R10'):]
@@ -143,7 +143,7 @@ class TestR14_4HostUserIdNoRedundantQuery:
 
     def test_get_repo_token_with_refresh_single_call(self):
         """get_repo_token_with_refresh 中 get_host_user_id 调用 ≤ 2 次（1次主调用+可能的_is_user_token_repo内部）。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def get_repo_token_with_refresh\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -157,7 +157,7 @@ class TestR14_4HostUserIdNoRedundantQuery:
 
     def test_get_repo_bot_token_single_call(self):
         """get_repo_bot_token 中 get_host_user_id 调用 ≤ 2 次。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def get_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -168,7 +168,7 @@ class TestR14_4HostUserIdNoRedundantQuery:
 
     def test_get_github_token_single_call(self):
         """get_github_token 中 get_host_user_id 调用 ≤ 2 次。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def get_github_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -185,7 +185,7 @@ class TestR14_5ConfigStoreTOCTOU:
 
     def test_save_config_db_lock_wraps_upgrade_detection(self):
         """save_config 中 _upgrade_triggers 的检测和写入在 with db_lock 块内。"""
-        cs_src = _read('src/admin/config_store.py')
+        cs_src = _read('src/domains/mgmt/admin/config_store.py')
         # 查找 _upgrade_triggers 相关代码
         assert '_upgrade_triggers' in cs_src
         # 确认 with db_lock 包裹了 get_meta_value 和 set_meta_value
@@ -220,7 +220,7 @@ class TestR14_7Status4Annotation:
 
     def test_get_grape_account_by_email_comment_merged(self):
         """get_grape_account_by_email 的注释中 status=4 描述为 merged。"""
-        db_src = _read('src/auth/grape_account_db.py')
+        db_src = _read('src/domains/mgmt/auth/grape_account_db.py')
         # 查找 get_grape_account_by_email 的 docstring
         func_match = re.search(
             r'def get_grape_account_by_email\(.*?"""(.*?)"""', db_src, re.DOTALL
@@ -259,7 +259,7 @@ class TestR14_9CreateExternalIdentityCleanStatus4:
 
     def test_create_external_identity_deletes_status4(self):
         """create_external_identity 中有清理 status=4 的逻辑。"""
-        db_src = _read('src/auth/grape_account_db.py')
+        db_src = _read('src/domains/mgmt/auth/grape_account_db.py')
         func_match = re.search(
             r'def create_external_identity\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -316,7 +316,7 @@ class TestR14_12AddManagedRepoPreserveExisting:
 
     def test_select_queries_webhook_secret_and_bot_tokens(self):
         """SELECT 语句查出 webhook_secret / bot_gitcode_token / bot_github_token。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -332,7 +332,7 @@ class TestR14_12AddManagedRepoPreserveExisting:
 
     def test_update_uses_final_variables(self):
         """UPDATE 语句使用 _final_secret / _final_bot_gc / _final_bot_gh 而非原始参数。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -343,7 +343,7 @@ class TestR14_12AddManagedRepoPreserveExisting:
 
     def test_preserve_logic_for_webhook_secret(self):
         """webhook_secret 空串时保留已有值的逻辑存在。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -354,7 +354,7 @@ class TestR14_12AddManagedRepoPreserveExisting:
 
     def test_preserve_logic_for_bot_tokens(self):
         """bot_gitcode_token / bot_github_token 空串时保留已有值的逻辑存在。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -372,7 +372,7 @@ class TestR14_13IsUserTokenRepoGuardAlignment:
 
     def test_is_user_token_repo_path_b_has_host_user_id_guard(self):
         """_is_user_token_repo 路径 B 查询前有 host_user_id == 0 守卫。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _is_user_token_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -391,7 +391,7 @@ class TestR14_13IsUserTokenRepoGuardAlignment:
 
     def test_is_github_user_token_repo_path1_has_guard(self):
         """_is_github_user_token_repo 路径 1（bot_github_token）查询前有 host_user_id 守卫。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _is_github_user_token_repo\(.*?(?=\n\ndef |\nclass )', db_src, re.DOTALL
         )
@@ -411,7 +411,7 @@ class TestR14_13IsUserTokenRepoGuardAlignment:
 
     def test_is_github_user_token_repo_path2_has_guard(self):
         """_is_github_user_token_repo 路径 2（owner external_identities）查询前有 host_user_id 守卫。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _is_github_user_token_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -432,7 +432,7 @@ class TestR14_13IsUserTokenRepoGuardAlignment:
 
     def test_is_user_token_repo_single_get_host_user_id_call(self):
         """_is_user_token_repo 函数内 get_host_user_id 调用 ≤ 1 次。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _is_user_token_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -443,7 +443,7 @@ class TestR14_13IsUserTokenRepoGuardAlignment:
 
     def test_is_github_user_token_repo_single_get_host_user_id_call(self):
         """_is_github_user_token_repo 函数内 get_host_user_id 调用 ≤ 1 次。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _is_github_user_token_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -461,7 +461,7 @@ class TestR14_14UpdateManagedRepoBotToken:
 
     def test_calls_rebuild_webhook(self):
         """R14.16: update_managed_repo_bot_token 调用 _rebuild_webhook_with_bot_token。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def update_managed_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -472,7 +472,7 @@ class TestR14_14UpdateManagedRepoBotToken:
 
     def test_calls_update_repo_bot_token(self):
         """R14.16: update_managed_repo_bot_token 调用 _update_repo_bot_token 统一写入。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def update_managed_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -482,7 +482,7 @@ class TestR14_14UpdateManagedRepoBotToken:
 
     def test_provider_split_by_repo_key_prefix(self):
         """R14.14: 按 repo_key 前缀判断 provider。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def update_managed_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -492,7 +492,7 @@ class TestR14_14UpdateManagedRepoBotToken:
 
     def test_rebuild_failure_does_not_block_db_write(self):
         """R14.16: webhook 重建失败时仍写 DB（webhook_id 为空，用户可 repair）。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def update_managed_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -503,13 +503,13 @@ class TestR14_14UpdateManagedRepoBotToken:
 
     def test_rebuild_webhook_function_exists(self):
         """R14.16: _rebuild_webhook_with_bot_token 统一重建函数存在。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         assert 'def _rebuild_webhook_with_bot_token' in db_src, \
             "_rebuild_webhook_with_bot_token function should exist"
 
     def test_rebuild_handles_remove_failure(self):
         """R14.16: 删旧 webhook 失败时不建新（返回空，保留旧 webhook）。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _rebuild_webhook_with_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -527,7 +527,7 @@ class TestR14_15AddManagedRepoPathAClearsHostUserId:
 
     def test_final_host_clears_when_bot_token_nonempty(self):
         """调用方传 bot_token 非空 + host_user_id=0 时 _final_host=0。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -543,7 +543,7 @@ class TestR14_15AddManagedRepoPathAClearsHostUserId:
 
     def test_final_host_preserves_when_no_bot_token(self):
         """调用方传 bot_token 空 + host_user_id=0 时保留已有值。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -554,7 +554,7 @@ class TestR14_15AddManagedRepoPathAClearsHostUserId:
 
     def test_final_host_uses_caller_value_when_positive(self):
         """调用方传 host_user_id > 0 时用调用方值。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def add_managed_repo\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -574,7 +574,7 @@ class TestR14_18FailTaskErrorsAppend:
 
     def test_r10_reads_existing_errors_before_write(self):
         """R10 写 errors 前先 SELECT 读取已有 errors。"""
-        svc_src = _read('src/runtime/service.py')
+        svc_src = _read('src/domains/runtime/engine/service.py')
         r10_idx = svc_src.find('R14.18')
         assert r10_idx >= 0, "R14.18 append mode not found"
         section = svc_src[r10_idx:r10_idx + 2000]
@@ -583,7 +583,7 @@ class TestR14_18FailTaskErrorsAppend:
 
     def test_r10_appends_not_overwrites(self):
         """R10 append TOKEN_EXPIRED 到已有列表，不覆写。"""
-        svc_src = _read('src/runtime/service.py')
+        svc_src = _read('src/domains/runtime/engine/service.py')
         r10_idx = svc_src.find('R14.18')
         section = svc_src[r10_idx:r10_idx + 2000]
         assert 'append' in section, \
@@ -593,7 +593,7 @@ class TestR14_18FailTaskErrorsAppend:
 
     def test_r10_limits_errors_list_length(self):
         """R10 限制 errors 列表长度。"""
-        svc_src = _read('src/runtime/service.py')
+        svc_src = _read('src/domains/runtime/engine/service.py')
         r10_idx = svc_src.find('R14.18')
         section = svc_src[r10_idx:r10_idx + 2000]
         assert '[-5:]' in section or '[-3:]' in section, \
@@ -601,7 +601,7 @@ class TestR14_18FailTaskErrorsAppend:
 
     def test_r10_handles_non_json_errors(self):
         """已有 errors 非 JSON list 时转为 list 再 append。"""
-        svc_src = _read('src/runtime/service.py')
+        svc_src = _read('src/domains/runtime/engine/service.py')
         r10_idx = svc_src.find('R14.18')
         section = svc_src[r10_idx:r10_idx + 2000]
         assert 'JSONDecodeError' in section or 'TypeError' in section, \
@@ -617,7 +617,7 @@ class TestR14_19UpdateManagedRepoBotToken404:
 
     def test_checks_existence_before_rebuild(self):
         """先 SELECT 检查仓库存在，不存在返回 False。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def update_managed_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -632,7 +632,7 @@ class TestR14_19UpdateManagedRepoBotToken404:
 
     def test_rebuild_after_existence_check(self):
         """仓库存在时才调 _rebuild_webhook_with_bot_token。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def update_managed_repo_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -647,7 +647,7 @@ class TestR14_19UpdateManagedRepoBotToken404:
 
     def test_rebuild_comment_accurate(self):
         """_rebuild_webhook_with_bot_token 删旧失败注释准确描述行为。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_match = re.search(
             r'def _rebuild_webhook_with_bot_token\(.*?(?=\ndef )', db_src, re.DOTALL
         )
@@ -662,7 +662,7 @@ class TestR14_19UpdateManagedRepoBotToken404:
 
     def test_auto_upgrade_log_distinguishes_webhook_failure(self):
         """auto_upgrade 日志区分 upgraded 和 webhook_rebuild_failed。"""
-        db_src = _read('src/user/db.py')
+        db_src = _read('src/domains/mgmt/user/db.py')
         func_start = db_src.index('def auto_upgrade_path_b_repos')
         func_body = db_src[func_start:]
         assert 'webhook_rebuild_failed' in func_body, \

@@ -48,7 +48,9 @@ class TestConfig:
         ("mysql", "mysql"), ("rds", "mysql"), ("1", "mysql"), ("true", "mysql"),
         ("sqlite", "sqlite"), ("0", "sqlite"), ("false", "sqlite"), ("", "sqlite"),
     ])
-    def test_get_db_backend_env(self, monkeypatch, env, expect):
+    def test_get_db_backend_env(self, monkeypatch, env, expect, tmp_path):
+        # env 未命中时回落到配置文件——隔离真实 configs/db-backend.json（本机可能是 mysql）
+        monkeypatch.setattr(mc, "_DB_BACKEND_CONFIG_PATH", str(tmp_path / "none.json"))
         monkeypatch.setenv("DEVOPS_DB_BACKEND", env)
         assert mc.get_db_backend() == expect
 

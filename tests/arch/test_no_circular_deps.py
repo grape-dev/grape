@@ -54,8 +54,11 @@ def test_r5_detects_injected_cycle():
         assert "src.domains.mgmt.user" in top and "src.domains.mgmt.user" in all_imports
         assert ns["layer_of"]("src.domains.mgmt.user") == "mgmt"
 
-    # legacy shim prefix list is populated
-    assert len(ns["LEGACY_SHIM_PREFIXES"]) > 30
+    # legacy shim prefix list is populated with paths that still exist as shims
+    assert len(ns["LEGACY_SHIM_PREFIXES"]) >= 15
+    for p in ns["LEGACY_SHIM_PREFIXES"]:
+        rel = p.replace(".", os.sep) + ".py"
+        assert os.path.isfile(os.path.join(REPO_ROOT, rel)), f"stale shim prefix {p} (no such module)"
     # whitelist is structured module -> {rule: reason}
     assert ns["WHITELIST"]
     for mod, rules in ns["WHITELIST"].items():

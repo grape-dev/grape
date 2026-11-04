@@ -164,6 +164,18 @@ async def start_mgmt_tasks(app) -> dict:
     except Exception as e:
         log.warning(f"Skill sync scheduler start failed: {e}")
 
+    # 需求巡查（patrol）：周期巡检活跃需求并补偿停滞任务（S53 复审收口：
+    # 四进程拆分后由 Mgmt 进程持有；必须是 shutdown 可 cancel 的后台任务，否则
+    # 进程退出后循环残留继续写库 → 用例成片假失败）
+    _patrol_task = None
+    try:
+        from src.api.patrol import patrol_loop
+        _patrol_task = asyncio.create_task(patrol_loop())
+        log.info("Patrol loop started (Mgmt)")
+    except Exception as e:
+        log.warning(f"Patrol loop start failed: {e}")
+    h["patrol_task"] = _patrol_task
+
     # 反馈→Issue reconcile：Agent 自动反馈定时转官方技能仓库/所属仓库 Issue（weekly-08）
     try:
         from src.api.feedback_issue_converter import start_feedback_reconcile_scheduler
@@ -257,6 +269,14 @@ async def stop_mgmt_tasks(app, h: dict) -> None:
     bot_manager = h.get("bot_manager")
     if bot_manager:
         await bot_manager.stop()
+
+    _patrol_task = h.get("patrol_task")
+    if _patrol_task:
+        _patrol_task.cancel()
+        try:
+            await asyncio.wait_for(_patrol_task, timeout=5)
+        except (asyncio.CancelledError, asyncio.TimeoutError):
+            pass
 
     _active_tracker_task = h.get("active_tracker_task")
     if _active_tracker_task:

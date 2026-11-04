@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
-from src.vcs.providers import gitcode, github
+from src.domains.runtime.vcs.providers import gitcode, github
 
 UID = 70701
 OWNER = "o"
@@ -31,8 +31,8 @@ def _client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _token(monkeypatch):
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
-    monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: BOT)
 
 
 @pytest.fixture
@@ -44,7 +44,7 @@ def gitcode_calls(monkeypatch):
         # title 回取（#640 PATCH 必填 title 自动回填）
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}, "title": "t"}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     return recorded
 
 

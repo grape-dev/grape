@@ -1,6 +1,6 @@
 """lark_md 适配转换测试：表格→列表、代码块/标题/分割线降级、按行截断。
 
-见 src/im/lark_md.py 与 2026-08-16 飞书卡片 markdown 显示修复。
+见 src/domains/runtime/im/lark_md.py 与 2026-08-16 飞书卡片 markdown 显示修复。
 """
 import os
 import sys

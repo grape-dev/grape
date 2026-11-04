@@ -50,7 +50,7 @@ def install_spa_routes(app: FastAPI) -> None:
 
     app.add_middleware(NoCacheStaticMiddleware)
 
-    from src.auth.email_service import is_email_configured as _is_email_configured
+    from src.domains.mgmt.auth.email_service import is_email_configured as _is_email_configured
 
     # ── i18n boost: 服务端注入翻译数据，消除首屏 i18n 闪动 ──
     _I18N_BOOST_CACHE = None
@@ -172,8 +172,8 @@ document.documentElement.classList.remove('i18n-loading');})();
 
     def _inject_email_configured(html: str) -> str:
         """在 </head> 前注入邮箱/OAuth 配置状态 + i18n boost 翻译数据。"""
-        from src.auth.providers import get_provider, list_providers
-        from src.user.db import get_meta_value
+        from src.domains.mgmt.auth.providers import get_provider, list_providers
+        from src.domains.mgmt.user.db import get_meta_value
         configured = _is_email_configured()
         val = 'true' if configured else 'false'
         cls = 'email-configured' if configured else 'email-not-configured'

@@ -161,7 +161,7 @@ app.include_router(latency.router)
 app.include_router(health.router)
 
 # 知识库 CRUD
-from src.api.routes import knowledge
+from src.domains.mgmt.routes import knowledge
 app.include_router(knowledge.router)
 
 # ===== Issue-45: OpenAPI 定制渲染 =====

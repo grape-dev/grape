@@ -2249,7 +2249,7 @@ class TestKnowledge:
         """环境变量 KNOWLEDGE_MAX_CONTENT_BYTES 覆盖默认上限（子进程读取模块常量）"""
         import subprocess
         code = (
-            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES; "
             "print(MAX_CONTENT_BYTES)"
         )
         env = dict(os.environ, KNOWLEDGE_MAX_CONTENT_BYTES="2097152")
@@ -2264,7 +2264,7 @@ class TestKnowledge:
         """未设置环境变量时默认 5MB（子进程读取模块常量，Issue #372）"""
         import subprocess
         code = (
-            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES; "
             "print(MAX_CONTENT_BYTES)"
         )
         env = {k: v for k, v in os.environ.items() if k != "KNOWLEDGE_MAX_CONTENT_BYTES"}
@@ -2279,7 +2279,7 @@ class TestKnowledge:
         """环境变量为非数字时回退默认 5MB"""
         import subprocess
         code = (
-            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES; "
             "print(MAX_CONTENT_BYTES)"
         )
         env = dict(os.environ, KNOWLEDGE_MAX_CONTENT_BYTES="abc")
@@ -2294,7 +2294,7 @@ class TestKnowledge:
         """环境变量为 0/负数时钳制到下限 1024"""
         import subprocess
         code = (
-            "from src.api.routes.knowledge import MAX_CONTENT_BYTES; "
+            "from src.domains.mgmt.routes.knowledge import MAX_CONTENT_BYTES; "
             "print(MAX_CONTENT_BYTES)"
         )
         for bad_value in ("0", "-4096"):

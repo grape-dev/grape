@@ -154,7 +154,7 @@ def engine_unique_key(m: dict) -> str:
 
     - 本机直连（credential_id=0）：`local:{engine_type}@{host_name}`（本机引擎以类型名+归属主控机为键——
       多主控机同名引擎是两台不同的机器，不是重复行；host_name 缺失时退回 `local:{engine_type}`）
-    - 个人/远端：`{scope}:{instance_name}`（instance_name 与 src/runtime/instances.py 同源）
+    - 个人/远端：`{scope}:{instance_name}`（instance_name 与 src/domains/runtime/engine/instances.py 同源）
     """
     cid = m.get("credential_id") or 0
     scope = (m.get("scope") or "global").strip().lower()

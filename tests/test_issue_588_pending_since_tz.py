@@ -121,7 +121,7 @@ def _task_status(tid):
 class TestT1ExecutorWritesTzAware:
     def test_terminate_writes_utc_offset_suffix(self):
         """terminate_active_agents 写入的 pending_since 必须带 +00:00 时区偏移。"""
-        from src.agent.executor import terminate_active_agents
+        from src.domains.runtime.agents.executor import terminate_active_agents
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_exec", 9700, _iso(_utcnow()), status="running")
         terminate_active_agents(grace_seconds=0)
@@ -143,7 +143,7 @@ class TestT2FreshWriteNotTimeout:
         return _t.strftime("%Y-%m-%dT%H:%M:%S+00:00", _t.gmtime(_t.time() - age))
 
     def test_sqlite_fresh_8s_not_timeout(self):
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_f_sq", 9701, self._fresh_tz_value())
         _sweep_pending_self_report_timeouts()
@@ -151,7 +151,7 @@ class TestT2FreshWriteNotTimeout:
 
     def test_mysql_fresh_8s_not_timeout(self):
         """核心回归：MySQL 后端下刚写入 8 秒不得判 timeout_failed（原缺陷：elapsed=28808s）。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_f_my", 9702, self._fresh_tz_value())
         with patch("src.api.time_utils._db_backend", return_value="mysql"):
@@ -161,8 +161,8 @@ class TestT2FreshWriteNotTimeout:
 
     def test_mysql_fresh_8s_via_terminate_end_to_end(self):
         """端到端：terminate 写入 → MySQL 口径 sweep → 不超时。"""
-        from src.agent.executor import terminate_active_agents
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.agents.executor import terminate_active_agents
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_e2e", 9703, _iso(_utcnow()), status="running")
         terminate_active_agents(grace_seconds=0)
@@ -181,7 +181,7 @@ class TestT3RealTimeoutStillSwept:
                            _t.gmtime(_t.time() - (PENDING_TIMEOUT_DEFAULT + 60)))
 
     def test_sqlite_expired_marked(self):
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_x_sq", 9704, self._expired_tz_value())
         _sweep_pending_self_report_timeouts()
@@ -189,7 +189,7 @@ class TestT3RealTimeoutStillSwept:
 
     def test_mysql_expired_marked(self):
         """超时兜底不得被本次修复削弱：真实超时（1800+60s 前）仍判 timeout_failed。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_x_my", 9705, self._expired_tz_value())
         with patch("src.api.time_utils._db_backend", return_value="mysql"):
@@ -205,7 +205,7 @@ class TestT4ParseDtSameEpoch:
     VAL = "2026-10-31T01:00:00+00:00"
 
     def test_tz_aware_epoch_identical_across_backends(self):
-        from src.runtime.health import parse_dt
+        from src.domains.runtime.engine.health import parse_dt
         with patch("src.api.time_utils._db_backend", return_value="sqlite"):
             ts_sql = parse_dt(self.VAL)
         with patch("src.api.time_utils._db_backend", return_value="mysql"):
@@ -215,14 +215,14 @@ class TestT4ParseDtSameEpoch:
             f"带时区值双后端 epoch 应一致：sqlite={ts_sql} mysql={ts_my}"
 
     def test_tz_aware_matches_expected_utc_epoch(self):
-        from src.runtime.health import parse_dt
+        from src.domains.runtime.engine.health import parse_dt
         expected = datetime(2026, 10, 31, 1, 0, 0, tzinfo=timezone.utc).timestamp()
         with patch("src.api.time_utils._db_backend", return_value="mysql"):
             assert abs(parse_dt(self.VAL) - expected) < 1.0
 
     def test_naive_values_keep_backend_semantics(self):
         """无时区历史值维持既有口径（sqlite=UTC / mysql=CST）——本次不改 parse_dt。"""
-        from src.runtime.health import parse_dt
+        from src.domains.runtime.engine.health import parse_dt
         naive = "2026-10-31T01:00:00"
         with patch("src.api.time_utils._db_backend", return_value="sqlite"):
             ts_sql = parse_dt(naive)
@@ -239,7 +239,7 @@ class TestT4ParseDtSameEpoch:
 class TestT5NaiveHistoricalValues:
     def test_naive_expired_still_swept_both_backends(self):
         """无时区历史远期值（超过任何口径的超时窗口）双后端仍应回收。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_h_sq", 9706, "2026-01-01 00:00:00")
         _seed_task("t_i588_h_my", 9707, "2026-01-01T00:00:00")
@@ -251,7 +251,7 @@ class TestT5NaiveHistoricalValues:
 
     def test_naive_recent_not_crash(self):
         """无时区近窗值：sweep 不抛异常、不写半态（兼容恢复单独改动处理）。"""
-        from src.runtime.scheduler import _sweep_pending_self_report_timeouts
+        from src.domains.runtime.engine.scheduler import _sweep_pending_self_report_timeouts
         _seed_runtime(RT_REMOTE, CRED_REMOTE)
         _seed_task("t_i588_h_r", 9708, _t.strftime("%Y-%m-%d %H:%M:%S", _t.gmtime()))
         with patch("src.api.time_utils._db_backend", return_value="mysql"):

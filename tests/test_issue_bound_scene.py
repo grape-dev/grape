@@ -66,7 +66,7 @@ def _add_issue_state(number, scene_id):
 
 
 def _set_repo_scene(scene_id):
-    from src.user.db import add_managed_repo, set_repo_scene
+    from src.domains.mgmt.user.db import add_managed_repo, set_repo_scene
     add_managed_repo(REPO, "o", "r681")
     set_repo_scene(REPO, scene_id)
 
@@ -77,7 +77,7 @@ class TestGetIssueBoundScene:
         from src.api.session_store import get_issue_bound_scene
         _set_repo_scene("custom-dev-scene")
         _add_issue(801, scene_id="")
-        with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
             scene, uid = get_issue_bound_scene(REPO, "#801")
         assert scene == ""
         assert uid == 0
@@ -87,7 +87,7 @@ class TestGetIssueBoundScene:
         from src.api.session_store import get_issue_bound_scene
         _set_repo_scene("custom-dev-scene")
         _add_issue(802, scene_id="real-scene")
-        with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
             scene, _ = get_issue_bound_scene(REPO, "#802")
         assert scene == "real-scene"
 
@@ -96,7 +96,7 @@ class TestGetIssueBoundScene:
         from src.api.session_store import get_issue_bound_scene
         _set_repo_scene("custom-dev-scene")
         _add_issue_state(803, "state-scene")
-        with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
             scene, _ = get_issue_bound_scene(REPO, "#803")
         assert scene == "state-scene"
 
@@ -112,7 +112,7 @@ class TestGetIssueBoundScene:
         """三态 3：无真实绑定 + 无 dev_scene → ("", 0)（行为不变，走推荐）。"""
         from src.api.session_store import get_issue_bound_scene
         _add_issue(805, scene_id="")
-        with patch("src.user.db.get_repo_scene", return_value=""):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value=""):
             scene, uid = get_issue_bound_scene(REPO, "#805")
         assert scene == ""
         assert uid == 0
@@ -121,7 +121,7 @@ class TestGetIssueBoundScene:
         """issue 不存在 + 有 dev_scene → ("", 0)（不回退）。"""
         from src.api.session_store import get_issue_bound_scene
         _set_repo_scene("custom-dev-scene")
-        with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
             scene, uid = get_issue_bound_scene(REPO, "#999999")
         assert scene == ""
         assert uid == 0
@@ -140,7 +140,7 @@ class TestGetIssueSceneRegression415:
         from src.api.session_store import get_issue_scene
         _set_repo_scene("custom-dev-scene")
         _add_issue(811, scene_id="")
-        with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
             scene, uid = get_issue_scene(REPO, "#811")
         assert scene == "custom-dev-scene"
         assert uid == 0
@@ -149,7 +149,7 @@ class TestGetIssueSceneRegression415:
         from src.api.session_store import get_issue_scene
         _set_repo_scene("custom-dev-scene")
         _add_issue(812, scene_id="real-scene")
-        with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+        with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
             scene, _ = get_issue_scene(REPO, "#812")
         assert scene == "real-scene"
 
@@ -175,18 +175,18 @@ class TestPipelineRecommendEntry:
         _sess = lambda rk: TokenResult(token="SESSION_PAT", level="session",
                                        provider=MagicMock(), repo_key=RK)
         return captured, [
-            patch("src.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
+            patch("src.domains.mgmt.user.db.get_all_bot_usernames", return_value=["grape_bot"]),
             patch("src.token_resolver.TokenResolver.resolve_config_level", side_effect=_sess),
             patch("src.token_resolver.SessionTokenHandler.is_self_loop_actor", return_value=True),
-            patch("src.runtime.engine_select.pick_engine", return_value=0),
-            patch("src.runtime.engine_select.engine_name", return_value="opencode"),
-            patch("src.runtime.engine_select.get_scene_pool_engine_ids", return_value=""),
-            patch("src.runtime.engine_select._repo_user_id", return_value=1),
+            patch("src.domains.runtime.engine.engine_select.pick_engine", return_value=0),
+            patch("src.domains.runtime.engine.engine_select.engine_name", return_value="opencode"),
+            patch("src.domains.runtime.engine.engine_select.get_scene_pool_engine_ids", return_value=""),
+            patch("src.domains.runtime.engine.engine_select._repo_user_id", return_value=1),
             patch("src.api.event_pipeline.is_plugin_mode", return_value=True),
-            patch("src.runtime.service.get_execution_mode", return_value="remote"),
+            patch("src.domains.runtime.engine.service.get_execution_mode", return_value="remote"),
             patch("src.api.event_pipeline._enqueue_pipeline_task", side_effect=_fake_enqueue),
-            patch("src.user.db.get_agent_bot_token", return_value=""),
-            patch("src.project_info.builder.maybe_refresh_project_info", lambda *a, **k: None),
+            patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""),
+            patch("src.domains.runtime.project_info.builder.maybe_refresh_project_info", lambda *a, **k: None),
         ]
 
     @staticmethod
@@ -215,7 +215,7 @@ class TestPipelineRecommendEntry:
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+            with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
                 self._run(821)
         assert captured, "应派发 vod 推荐任务"
         assert captured[0]["agent_type"] == "vod"
@@ -231,7 +231,7 @@ class TestPipelineRecommendEntry:
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            with patch("src.user.db.get_repo_scene", return_value="custom-dev-scene"):
+            with patch("src.domains.mgmt.user.db.get_repo_scene", return_value="custom-dev-scene"):
                 self._run(831)
         assert captured, "已有真实绑定仍应派发 vod（正常流程）"
         assert captured[0]["is_scene_recommend"] is False, \
@@ -245,7 +245,7 @@ class TestPipelineRecommendEntry:
         with ExitStack() as stack:
             for p in patches:
                 stack.enter_context(p)
-            with patch("src.user.db.get_repo_scene", return_value=""):
+            with patch("src.domains.mgmt.user.db.get_repo_scene", return_value=""):
                 self._run(841)
         assert captured
         assert captured[0]["is_scene_recommend"] is True

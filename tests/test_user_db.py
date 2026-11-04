@@ -1,4 +1,4 @@
-"""用户/凭据/托管/技能/引擎 DB 层单元测试（src/user/db.py）。
+"""用户/凭据/托管/技能/引擎 DB 层单元测试（src/domains/mgmt/user/db.py）。
 
 覆盖：账户 CRUD、token、OAuth state、凭据与云主机、托管仓库与 bot token、
 技能、用户仓库缓存、meta、agent_runtimes 缓存与默认引擎。全部走真实测试库（conftest 会话重置）。

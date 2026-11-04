@@ -9,12 +9,12 @@
 """
 import pytest
 
-# M0 兼容层存在环形导入：src.agent/__init__ → base → src.runtime.__init__ → registry →
-# src.agent.executor → base（未初始化）。先导入 src.runtime 定序即可（应用侧同样先加载
-# src.runtime，此处与运行顺序保持一致）。
-import src.runtime  # noqa: F401
+# M0 兼容层存在环形导入：src.domains.runtime.agents/__init__ → base → src.domains.runtime.engine.__init__ → registry →
+# src.domains.runtime.agents.executor → base（未初始化）。先导入 src.domains.runtime.engine 定序即可（应用侧同样先加载
+# src.domains.runtime.engine，此处与运行顺序保持一致）。
+import src.domains.runtime.engine  # noqa: F401
 
-from src.agent import command_audit as ca
+from src.domains.runtime.agents import command_audit as ca
 
 HARD = "<<<<<<< HEAD"
 

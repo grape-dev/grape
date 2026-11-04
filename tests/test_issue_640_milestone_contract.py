@@ -11,7 +11,7 @@ from fastapi import HTTPException
 
 
 gra = importlib.import_module("src.api.git_repo_api")
-gitcode = importlib.import_module("src.vcs.providers.gitcode")
+gitcode = importlib.import_module("src.domains.runtime.vcs.providers.gitcode")
 
 
 def test_gitcode_rule_maps_milestone_id_to_upstream_milestone():

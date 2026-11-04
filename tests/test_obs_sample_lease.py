@@ -20,8 +20,8 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.observability import sample_lease  # noqa: E402
-from src.observability import rollup  # noqa: E402
+from src.domains.insight.observability import sample_lease  # noqa: E402
+from src.domains.insight.observability import rollup  # noqa: E402
 
 PREFIX = "obslease-test-"
 OTHER_HOLDER = "other-master-01"          # 模拟的另一台主控

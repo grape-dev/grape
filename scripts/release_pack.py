@@ -301,24 +301,24 @@ def pack_templates(ts):
     return out
 
 def pack_tools(ts):
-    """worker 运行时: src/runtime + src/agent + install-worker.sh + pyproject.toml"""
+    """worker 运行时: src/domains/runtime/engine + src/domains/runtime/agents + install-worker.sh + pyproject.toml"""
     out = os.path.join(OUT_DIR, f"staging/tools/grape-toolkit-{ts}.tar.gz")
     os.makedirs(os.path.dirname(out), exist_ok=True)
     items = []
     # worker 运行闭包（与 src/worker_package.py MANIFEST 一致）
     manifest_files = [
         "src/__init__.py", "src/config.py", "src/repo_key.py", "src/session_manager.py",
-        "src/mysql_compat.py", "src/user/__init__.py", "src/user/db.py",
+        "src/mysql_compat.py", "src/domains/mgmt/user/__init__.py", "src/domains/mgmt/user/db.py",
         "src/api/__init__.py", "src/api/routing.py", "src/api/time_utils.py",
         "src/api/event_store.py", "src/api/event_archive.py", "src/api/session_store.py",
-        "src/api/knowledge.py",
+        "src/api/knowledge.py", "src/api/merge_gate.py",
     ]
     for f in manifest_files:
         p = os.path.join(ROOT, f)
         if os.path.isfile(p):
             items.append((p, f))
     # 整目录
-    for d in ["src/agent", "src/runtime"]:
+    for d in ["src/domains/runtime/agents", "src/domains/runtime/engine"]:
         p = os.path.join(ROOT, d)
         if os.path.isdir(p):
             items.append((p, d))

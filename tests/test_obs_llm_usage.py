@@ -545,7 +545,7 @@ def test_hermes_missing_usage_table_falls_back_to_sessions(tmp_path, monkeypatch
     col._baseline = {"hermes": {"s1|glm-5.3|": {"input": 900, "output": 150,
                                                  "cache_read": 5000, "cache_write": 0,
                                                  "reasoning": 30}}}
-    with caplog.at_level(logging.WARNING, logger="src.runtime.usage_collect"):
+    with caplog.at_level(logging.WARNING, logger="src.domains.runtime.engine.usage_collect"):
         got = col.finish()
     assert len(got) == 1
     assert got[0]["input"] == 100 and got[0]["output"] == 50
@@ -555,7 +555,7 @@ def test_hermes_missing_usage_table_falls_back_to_sessions(tmp_path, monkeypatch
     caplog.clear()
     col2 = uc.UsageCollector("hermes", cwd="/whatever")
     col2._baseline = {"hermes": {}}
-    with caplog.at_level(logging.WARNING, logger="src.runtime.usage_collect"):
+    with caplog.at_level(logging.WARNING, logger="src.domains.runtime.engine.usage_collect"):
         col2.finish()
     assert not any("session_model_usage" in r.message for r in caplog.records)
 
@@ -584,7 +584,7 @@ def test_hermes_finish_is_idempotent_no_errno2(tmp_path, monkeypatch):
 def test_hermes_prompt_usage_extraction():
     """issue #727：hermes_acp._extract_prompt_usage 解析 PromptResponse result.usage，
     兼容多种 token 字段命名。"""
-    from src.agent.hermes_acp import _extract_prompt_usage
+    from src.domains.runtime.agents.hermes_acp import _extract_prompt_usage
     # snake_case 形态（usage 内含 model）
     rec = _extract_prompt_usage({"stopReason": "end_turn",
                                  "usage": {"model": "glm-5.3", "input_tokens": 100,

@@ -70,7 +70,7 @@ class TestScenesListPagination:
 
     def test_t1_01_full_list_without_params(self):
         """No page param -> full list (backward compatible), total present."""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         resp = list_scenes(user={"auth_type": "session_token"}, repo="test-scene-paging/repo")
         assert len(resp["scenes"]) == 25
@@ -78,7 +78,7 @@ class TestScenesListPagination:
 
     def test_t1_02_paged_first_page(self):
         """page=1&page_size=20 -> 20 items + total=25."""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         resp = list_scenes(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo",
@@ -91,7 +91,7 @@ class TestScenesListPagination:
 
     def test_t1_03_paged_last_page(self):
         """page=2&page_size=20 -> 5 remainder items."""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         resp = list_scenes(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo",
@@ -101,7 +101,7 @@ class TestScenesListPagination:
         assert resp["total"] == 25
 
     def test_t1_04_page_beyond_range_empty(self):
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         resp = list_scenes(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo",
@@ -116,7 +116,7 @@ class TestWithPipelinePagination:
 
     def test_t2_01_paged_with_pipeline(self):
         """with-pipeline honors page/page_size and returns total."""
-        from src.api.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
 
         resp = list_scenes_with_pipeline(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo",
@@ -129,7 +129,7 @@ class TestWithPipelinePagination:
             assert "pipeline" in s
 
     def test_t2_02_full_without_params(self):
-        from src.api.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
 
         resp = list_scenes_with_pipeline(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo"
@@ -143,7 +143,7 @@ class TestWithPipelinePagination:
         引擎在线状态改由按需接口 /scenes/{scene_id}/engine-status 提供，
         消费方只有需求中心弹窗（语义测试见 test_issue_404_...）。
         """
-        from src.api.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
 
         resp = list_scenes_with_pipeline(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo",
@@ -156,7 +156,7 @@ class TestWithPipelinePagination:
 
     def test_t2_04_engine_status_endpoint_reachable(self):
         """新按需探测接口可直达；种子场景 nodes 为空 → 降级不标记。"""
-        from src.api.routes.scenes import get_scene_engine_status
+        from src.domains.mgmt.routes.scenes import get_scene_engine_status
 
         st = get_scene_engine_status(
             "pg-001", user={"auth_type": "session_token"}, repo="test-scene-paging/repo")
@@ -237,7 +237,7 @@ class TestDeepReviewFixes:
 
     def test_t5_01_engine_status_unknown_scene_no_false_warning(self):
         """P1：不存在的场景 id 不得静默回退 default 流水线误报 sre_unbound。"""
-        from src.api.routes.scenes import get_scene_engine_status
+        from src.domains.mgmt.routes.scenes import get_scene_engine_status
 
         st = get_scene_engine_status(
             "no-such-scene-xyz", user={"auth_type": "session_token"}, repo="test-scene-paging/repo")
@@ -247,7 +247,7 @@ class TestDeepReviewFixes:
 
     def test_t5_02_with_pipeline_items_carry_scope(self):
         """优化点4：with-pipeline 补 scope 字段——前端下拉 scopeTag 不再是死代码。"""
-        from src.api.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
 
         resp = list_scenes_with_pipeline(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo",
@@ -285,7 +285,7 @@ class TestPagingIntegrity:
 
     def test_t1_05_all_pages_concat_equals_full_no_drift_no_overlap(self):
         """跨页完整性：按 page_size=7 翻完 25 条，拼接结果 == 全量列表（顺序、无缺、无重）。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         full = list_scenes(
             user={"auth_type": "session_token"}, repo="test-scene-paging/repo")["scenes"]
@@ -306,7 +306,7 @@ class TestPagingIntegrity:
     def test_t1_06_soft_deleted_rows_excluded_from_list_and_total(self):
         """软删（is_active=0）不计入列表也不计入 total——COUNT 与列表 WHERE 一致。"""
         from src.session_manager import db, db_lock
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         with db_lock:
             c = db.cursor()
@@ -334,7 +334,7 @@ class TestPagingIntegrity:
     def test_t1_07_repo_scope_isolation(self):
         """仓隔离：另一仓库的场景不出现在本仓列表，也不计入 total。"""
         from src.session_manager import db, db_lock
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         other = "gitcode:test-scene-paging/other-repo"
         with db_lock:
@@ -358,7 +358,7 @@ class TestPagingIntegrity:
 
     def test_t1_08_min_page_size_one(self):
         """page_size=1 最小边界：每页恰好 1 条，total 不变。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         r1 = list_scenes(user={"auth_type": "session_token"},
                          repo="test-scene-paging/repo", page=1, page_size=1)
@@ -373,7 +373,7 @@ class TestPagingIntegrity:
     def test_t2_05_paged_nodes_match_full_version(self):
         """分页 enrich 对齐：分页返回的某场景 nodes 与全量返回的同场景 nodes 完全一致。"""
         from src.session_manager import db, db_lock
-        from src.api.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
 
         nodes = [{"id": "n1", "tag": "vod", "skill": "skill-a", "enabled": True}]
         with db_lock:
@@ -418,7 +418,7 @@ class TestSceneSearch:
 
     def test_t6_01_q_hits_name_substring(self):
         """q 命中 name 子串：name-02* 共 6 条（020-025），total 同步为命中数。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         resp = list_scenes(user={"auth_type": "session_token"},
                            repo="test-scene-paging/repo", q="name-02")
@@ -428,7 +428,7 @@ class TestSceneSearch:
 
     def test_t6_02_q_hits_display_name_and_description(self):
         """q 命中 display_name / description 字段。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
         from src.session_manager import db, db_lock
 
         with db_lock:
@@ -452,7 +452,7 @@ class TestSceneSearch:
                 db.commit()
 
     def test_t6_03_q_no_hit_returns_empty_with_zero_total(self):
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         resp = list_scenes(user={"auth_type": "session_token"},
                            repo="test-scene-paging/repo", q="zzz-no-hit")
@@ -461,7 +461,7 @@ class TestSceneSearch:
 
     def test_t6_04_q_with_paging_combination(self):
         """q + page 组合：命中 6 条，page_size=4 → 第 1 页 4 条、第 2 页 2 条，页内不重不漏。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         p1 = list_scenes(user={"auth_type": "session_token"},
                          repo="test-scene-paging/repo", q="name-02", page=1, page_size=4)
@@ -476,7 +476,7 @@ class TestSceneSearch:
 
     def test_t6_05_with_pipeline_same_q_semantics(self):
         """with-pipeline 与 /scenes 同 q 语义：同命中集、同 total。"""
-        from src.api.routes.scenes import list_scenes, list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes, list_scenes_with_pipeline
 
         a = list_scenes(user={"auth_type": "session_token"},
                         repo="test-scene-paging/repo", q="name-02")
@@ -487,7 +487,7 @@ class TestSceneSearch:
 
     def test_t6_06_sort_latest_orders_by_created_at_desc(self):
         """sort=latest：按 created_at 倒序（fixture created_at 随 id 递增 → 逆序）；默认 id 序不受影响。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         r = list_scenes(user={"auth_type": "session_token"},
                         repo="test-scene-paging/repo", page=1, page_size=3, sort="latest")
@@ -591,7 +591,7 @@ class TestSingleSourceAndMinimal:
 
     def test_t9_01_with_pipeline_items_carry_icon(self):
         """A 前置：with-pipeline 补 icon——卡片渲染可完全改吃该接口。"""
-        from src.api.routes.scenes import list_scenes_with_pipeline
+        from src.domains.mgmt.routes.scenes import list_scenes_with_pipeline
         from src.session_manager import db, db_lock
 
         with db_lock:
@@ -613,7 +613,7 @@ class TestSingleSourceAndMinimal:
 
     def test_t9_02_scenes_fields_minimal_skips_nodes(self):
         """C：fields=minimal 时 items 不带 nodes（跳过 nodes_json 反序列化），total/字段面不变。"""
-        from src.api.routes.scenes import list_scenes
+        from src.domains.mgmt.routes.scenes import list_scenes
 
         r_min = list_scenes(user={"auth_type": "session_token"},
                             repo="test-scene-paging/repo", fields="minimal")

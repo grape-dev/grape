@@ -1,12 +1,12 @@
 """Issue #490：Worker 探针观测重复计数修复的单测。
 
 覆盖两块：
-1. 服务端心跳幂等去重（src/api/routes/runtime.py）：
+1. 服务端心跳幂等去重（src/domains/runtime/routes/runtime.py）：
    - 同一失败观测（相同 last_probe）连续 3 次心跳：probe_fail_count 只 +1
    - 两条 last_probe 不同的失败观测：计数达 2、Runtime 标记不健康
    - 新成功观测：计数清零、恢复健康
    - 旧 Worker 不带 last_probe（回退 now）：每条当作新观测，递增（不回归）
-2. Worker 启动时序（src/runtime/agent.py）：
+2. Worker 启动时序（src/domains/runtime/engine/agent.py）：
    - _worker_probe_loop() 首轮先 sleep _PROBE_INTERVAL 再探测
    - 心跳成功后未变化的观测不再重发（指纹去重）
 """

@@ -14,7 +14,7 @@ Rules:
   R5  no import cycles at module scope between
       kernel/domains (hard; deferred in-function imports excluded)
   R6  kernel/domains must not import legacy top-level
-      shim paths (src.config, src.runtime, ...)      (hard)
+      shim paths (src.config, src.api.jwt_utils, ...)             (hard)
 
 Usage:
   python scripts/check-arch.py            # print report, exit 1 on hard violations
@@ -37,28 +37,19 @@ KERNEL = "src/kernel"
 DOMAINS = "src/domains"
 DOMAIN_NAMES = ("mgmt", "runtime", "insight", "contracts")
 
-# Legacy top-level module paths that now exist only as re-export shims.
+# Legacy top-level module paths that still exist only as re-export shims.
+# Issue #699 cleanup: every legacy *directory* shim (src/auth, src/user,
+# src/runtime, src/agent, src/im, src/vcs, src/storage, src/observability,
+# src/admin, src/project_info, src/api/routes/*) has been removed once all
+# importers migrated to src.domains.*; only the thin top-level module shims
+# kept for external callers remain forbidden inside kernel/domains.
 LEGACY_SHIM_PREFIXES = (
     "src.config", "src.session_manager", "src.lock", "src.repo_key", "src.repo",
     "src.repo_cleanup", "src.repo_migrate", "src.mysql_compat", "src.token_service",
     "src.token_resolver", "src.prompt_builder", "src.worker_package", "src.localfs",
     "src.outbound_ledger", "src.scene_custom_env", "src.featured_order",
     "src.help_docs_sync", "src.help_page_gen",
-    "src.auth", "src.user", "src.admin",
-    "src.runtime", "src.agent", "src.im", "src.vcs", "src.storage",
-    "src.observability",
     "src.api.event_pipeline", "src.api.jwt_utils", "src.api.auth_token",
-    "src.api.routes.auth", "src.api.routes.grape_auth", "src.api.routes.orgs",
-    "src.api.routes.settings", "src.api.routes.feedback", "src.api.routes.scenes",
-    "src.api.routes.skills", "src.api.routes.templates", "src.api.routes.repos",
-    "src.api.routes.community", "src.api.routes.feishu_onboard",
-    "src.api.routes.feishu_card", "src.api.routes.autopilot",
-    "src.api.routes.agents", "src.api.routes.devstage",
-    "src.api.routes.webhook", "src.api.routes.events", "src.api.routes.issues",
-    "src.api.routes.runtime", "src.api.routes.tasks", "src.api.routes.chat",
-    "src.api.routes.pipeline", "src.api.routes.task_logs",
-    "src.api.routes.dashboard", "src.api.routes.observability",
-    "src.api.routes.search", "src.api.routes.latency", "src.api.routes.health",
 )
 
 # ── Whitelist: module -> {rule: reason} ────────────────────────────────────
@@ -101,8 +92,8 @@ WHITELIST: dict[str, dict[str, str]] = {
         "R1": "deferred secret/credential keys via mgmt.auth.security_config; Phase 5",
     },
     # R5: known import cycles inherited from the pre-Phase-1 layout.
-    # agents <-> engine: M0 compat forwarding layer (src.agent re-exported
-    #   src.runtime backends); importing src.agent before src.runtime fails
+    # agents <-> engine: M0 compat forwarding layer (src.domains.runtime.agents re-exported
+    #   src.domains.runtime.engine backends); importing src.domains.runtime.agents before src.domains.runtime.engine fails
     #   the same way on the pre-Phase-1 tree. Phase 3 dissolves the
     #   executor/base coupling when _execute_agent moves out.
     # vcs.providers <-> vcs.providers.base: small registration cycle in the

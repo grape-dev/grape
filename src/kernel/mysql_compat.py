@@ -303,7 +303,7 @@ def translate_sql(sql: str) -> str:
     sql = re.sub(r"\bINSERT\s+OR\s+IGNORE\s+INTO\b", "INSERT IGNORE INTO", sql, flags=re.I)
     # INSERT ... ON CONFLICT(<pk>) DO UPDATE SET <col>=... excluded.col ...（SQLite/PostgreSQL 方言）
     # → ON DUPLICATE KEY UPDATE <col>=... VALUES(col) ...（MySQL 方言，8.0.20 以下用 VALUES()）
-    # 关键引用：src/im/bot_lease.py heartbeat() 的实例心跳 UPSERT，缺失翻译会 1064（cluster-seq-11130 根因）。
+    # 关键引用：src/domains/runtime/im/bot_lease.py heartbeat() 的实例心跳 UPSERT，缺失翻译会 1064（cluster-seq-11130 根因）。
     sql = _CONFLICT_UPSERT_RE.sub(_mysql_upsert_repl, sql)
     # datetime('now') → CAST(NOW() AS CHAR)（仅无参形式；UTC 基线统一在
     # fix/time-utc-baseline 分支处理，本分支只修语法层方言）

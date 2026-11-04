@@ -14,8 +14,8 @@ import time as _time
 import pytest
 
 from src.session_manager import db, db_lock
-from src.runtime import engine_select as es
-from src.runtime import service
+from src.domains.runtime.engine import engine_select as es
+from src.domains.runtime.engine import service
 
 
 @pytest.fixture(autouse=True)

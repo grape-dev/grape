@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 from src.api.main import app
 from src.session_manager import db, db_lock
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -27,7 +27,7 @@ _headers = {}
 
 def _jwt_access_token(user_id, username="test592"):
     from src.api.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -223,14 +223,14 @@ class TestQueryEnginesLocalDefaultAll:
     """query_engines local 档无标签行默认 'all' 的单元级验证。"""
 
     def test_query_local_no_tags_returns_engine(self):
-        from src.runtime import engine_select as es
+        from src.domains.runtime.engine import engine_select as es
         rid = _mk_local_engine("test592_q_no_tag", healthy=1, installed=1, tags=None)
         cand = es.query_engines("org/test592", "local", agent_type="coding")
         ids = [e["runtime_id"] for e in cand]
         assert rid in ids
 
     def test_query_local_with_tag_returns_engine(self):
-        from src.runtime import engine_select as es
+        from src.domains.runtime.engine import engine_select as es
         rid = _mk_local_engine("test592_q_tag", healthy=1, installed=1, tags=["coding"])
         cand = es.query_engines("org/test592", "local", agent_type="coding")
         ids = [e["runtime_id"] for e in cand]

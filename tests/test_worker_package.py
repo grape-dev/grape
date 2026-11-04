@@ -41,10 +41,10 @@ class TestWorkerPackage:
         assert "grape-worker/VERSION" in names
         assert "grape-worker/SHA256SUMS" in names
         assert "grape-worker/src/config.py" in names
-        assert "grape-worker/src/runtime/agent.py" in names
+        assert "grape-worker/src/domains/runtime/engine/agent.py" in names
         assert "grape-worker/src/api/merge_gate.py" in names
-        assert "grape-worker/src/runtime/worktree_guard.py" in names
-        assert "grape-worker/src/agent/executor.py" in names
+        assert "grape-worker/src/domains/runtime/engine/worktree_guard.py" in names
+        assert "grape-worker/src/domains/runtime/agents/executor.py" in names
         assert "grape-worker/pyproject.toml" in names
         # 不应泄漏服务端代码 / 配置 / 静态资源（内置 Python stdlib 含 statistics.py 等，跳过）
         for n in names:
@@ -115,7 +115,7 @@ class TestWorkerPackage:
 
         背景（2026-10-14 五台 worker 心跳全断事故）：8908cadb1 给 src/config.py 加了
         顶层 ``from src.domains.mgmt.auth.security_config import ...``，config.py 在 worker 包里但
-        src/auth/ 不在 → runtime-agent 启动即 ModuleNotFoundError，systemd 无限重启。
+        src/domains/mgmt/auth/ 不在 → runtime-agent 启动即 ModuleNotFoundError，systemd 无限重启。
         当时的 test_build_package_contents 只防"多打文件"（服务端泄露），不防"漏打
         文件"（import 失败）——本测试补上后半边。
 
@@ -302,7 +302,7 @@ class TestInstallEndpoints:
         assert r.status_code == 200
         assert r.headers["content-type"] == "application/gzip"
         tf = tarfile.open(fileobj=io.BytesIO(r.content))
-        assert "grape-worker/src/runtime/agent.py" in tf.getnames()
+        assert "grape-worker/src/domains/runtime/engine/agent.py" in tf.getnames()
         tf.close()
 
     def test_bad_token_rejected(self):
@@ -513,7 +513,7 @@ class TestBundlePythonByArch:
 
 
 def test_manifest_covers_worktree_guard_deps():
-    """Issue #752：worktree_guard 随 src/runtime/ 整目录进 worker 包并在 worker 内执行，
+    """Issue #752：worktree_guard 随 src/domains/runtime/engine/ 整目录进 worker 包并在 worker 内执行，
     其 `from src.api.<mod> import ...` 依赖必须一并入包。
 
     历史教训：MANIFEST 漏列 time_utils 导致 worker 启动即崩（2026-08-17）；漏列
@@ -525,7 +525,7 @@ def test_manifest_covers_worktree_guard_deps():
 
     from src.worker_package import MANIFEST
 
-    txt = pathlib.Path("src/runtime/worktree_guard.py").read_text(encoding="utf-8")
+    txt = pathlib.Path("src/domains/runtime/engine/worktree_guard.py").read_text(encoding="utf-8")
     deps = set(re.findall(r"from\s+src\.api\.([a-zA-Z0-9_]+)\s+import", txt))
     assert deps, "worktree_guard 应至少懒加载一个 src.api 依赖（否则本守卫失效）"
     missing = [d for d in sorted(deps) if f"src/api/{d}.py" not in MANIFEST]

@@ -50,7 +50,7 @@ def _register_runtime_views() -> None:
       OpenAPI 契约不变（§4.1.1：A 进程落盘 openapi.json 供前端）；
     - 注册顺序按 runtime.py 源码顺序，与原 include 顺序一致。
     """
-    from src.api.routes import runtime as _rt
+    from src.domains.runtime.routes import runtime as _rt
 
     # (method, path, function_name, kwargs) —— 与 runtime.py 原定义一一对应
     _view_endpoints = [
@@ -149,5 +149,5 @@ def _register_runtime_views() -> None:
 
 _register_runtime_views()
 
-# 向后兼容：旧导入 `from src.api.routes.runtime_view import router`
+# 向后兼容：旧导入 `from src.domains.runtime.routes.runtime_view import router`
 router = view_router

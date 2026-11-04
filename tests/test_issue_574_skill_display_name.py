@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 from unittest.mock import patch
 
 from src.session_manager import db, db_lock
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 from src.api.jwt_utils import create_access_token
 
 ROOT = os.path.join(os.path.dirname(__file__), "..")
@@ -56,7 +56,7 @@ def _seed_event(seq, skill):
 
 
 def _jwt(user_id, username):
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user_id, username, get_token_version(user_id))
 
 
@@ -162,7 +162,7 @@ class TestAutopilotTaskDisplayName:
         _seed_task(57411, "autopilot-skill-i574")
         try:
             client = _ap_client()
-            with patch("src.api.routes.autopilot.check_repo_access", return_value=None):
+            with patch("src.domains.mgmt.routes.autopilot.check_repo_access", return_value=None):
                 r = client.get("/api/autopilot/tasks/57411")
             assert r.status_code == 200
             t = r.json()
@@ -179,7 +179,7 @@ class TestAutopilotTaskDisplayName:
         _seed_task(57412, "autopilot-skill-i574b")
         try:
             client = _ap_client()
-            with patch("src.api.routes.autopilot.check_repo_access", return_value=None):
+            with patch("src.domains.mgmt.routes.autopilot.check_repo_access", return_value=None):
                 r = client.get("/api/autopilot/tasks?repo_key=" + RK)
             assert r.status_code == 200
             tasks = r.json().get("tasks", [])
@@ -198,7 +198,7 @@ class TestAutopilotTaskDisplayName:
         _seed_task(57413, "autopilot-unknown-i574")
         try:
             client = _ap_client()
-            with patch("src.api.routes.autopilot.check_repo_access", return_value=None):
+            with patch("src.domains.mgmt.routes.autopilot.check_repo_access", return_value=None):
                 r = client.get("/api/autopilot/tasks/57413")
             assert r.status_code == 200
             t = r.json()

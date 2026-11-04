@@ -1,6 +1,6 @@
 """Agent Runtime 库：支持 opencode / codearts 等多 Agent CLI 执行引擎。
 
-由 src/agent 演进而来（M0 术语重构，见 agent-runtime-design.md §6）。
+由 src/domains/runtime/agents 演进而来（M0 术语重构，见 agent-runtime-design.md §6）。
 实现核心在 registry.py / executor.py，base/opencode/codearts 为 runtime 命名实现。
 """
 from .base import AgentRuntime

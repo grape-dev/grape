@@ -1,4 +1,4 @@
-"""RuntimeAgent 边端单元测试（src/runtime/agent.py）。
+"""RuntimeAgent 边端单元测试（src/domains/runtime/engine/agent.py）。
 
 覆盖：env 解析、cwd 路径映射、本机 CLI 发现、超时杀进程、worker 版本读取、
 重注册、主循环（claim 去重 / D9 串行冲突 / 并发上限 / 心跳失败自动重注册）。

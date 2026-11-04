@@ -9,8 +9,8 @@ import inspect
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from src.api.routes.scenes import EXPERIENCE_TEMPLATE_CREATE_TIMEOUT  # noqa: E402
-from src.api.routes import scenes as scenes_routes  # noqa: E402
+from src.domains.mgmt.routes.scenes import EXPERIENCE_TEMPLATE_CREATE_TIMEOUT  # noqa: E402
+from src.domains.mgmt.routes import scenes as scenes_routes  # noqa: E402
 
 
 class TestExperienceTimeoutGate:

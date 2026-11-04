@@ -668,7 +668,7 @@ def skill_md_content(object_key: str, skill_name: str) -> str | None:
 
 
 # 内置特殊技能：zip 包内目录名与 skill_name 不一致（_template 打包结构为 skills/_template/my-skill/，
-# 见 scripts/sync_skills.sh SKILL_AGENT_DIRS + src/storage/skill_sync.py _pack_skill_zip）。
+# 见 scripts/sync_skills.sh SKILL_AGENT_DIRS + src/domains/runtime/storage/skill_sync.py _pack_skill_zip）。
 # extract_skill_md 对这类技能启用兜底匹配；常规技能（上传/官方同步均规范化为 {skill_name}/）不启用。
 _BUILTIN_SPECIAL_SKILLS = {"_template"}
 
@@ -702,7 +702,7 @@ def extract_skill_md(zip_bytes: bytes, skill_name: str) -> str | None:
             if not candidates:
                 return None
             raw = zf.read(candidates[0])
-            return raw.decode("utf-8", errors="replace")
+            return raw.decode("utf-8-sig", errors="replace")  # 剥 BOM（#448/#856 技能包常见）
     except Exception as e:
         log.warning(f"extract_skill_md failed: {e}")
         return None
@@ -732,7 +732,7 @@ def list_zip_sub_skills(zip_bytes: bytes, skill_name: str) -> list:
                 if not sub_name or sub_name in (".", "..") or sub_name in subs:
                     continue
                 try:
-                    front = zf.read(n).decode("utf-8", errors="replace")[:500]
+                    front = zf.read(n).decode("utf-8-sig", errors="replace")[:500]
                 except Exception:
                     front = ""
                 display_name, description = sub_name, ""
@@ -776,7 +776,7 @@ def read_zip_sub_skill(zip_bytes: bytes, skill_name: str, sub_name: str) -> dict
             entry = f"{skill_name}/references/{sub_name}/SKILL.md"
             if entry not in names:
                 return None
-            content = zf.read(entry).decode("utf-8", errors="replace")
+            content = zf.read(entry).decode("utf-8-sig", errors="replace")
             refs = []
             ref_prefix = f"{skill_name}/references/{sub_name}/references/"
             for n in sorted(names):

@@ -64,7 +64,7 @@ class TestOriginalRefsHelper:
 
     def test_pending_boundary_running_task(self):
         """result pending 边界：原任务在途 → result_ref.status=pending，仅 task_ref 可轮询。"""
-        from src.api.routes.webhook import _duplicate_a2a_original_refs
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_original_refs
         _insert_event(7301, status="running", agent_type="coding")
         _insert_task("task-729-run", 7301, status="running", result_text="")
         refs = _duplicate_a2a_original_refs(REPO, 7301)
@@ -83,7 +83,7 @@ class TestOriginalRefsHelper:
 
     def test_available_with_summary(self):
         """原任务有结论 → available + 脱敏摘要。"""
-        from src.api.routes.webhook import _duplicate_a2a_original_refs
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_original_refs
         _insert_event(7302, status="running", agent_type="qa")
         _insert_task("task-729-done", 7302, status="completed",
                      result_text=json.dumps({"conclusion": "审查通过，可合并", "actions": []}))
@@ -94,7 +94,7 @@ class TestOriginalRefsHelper:
 
     def test_unavailable_when_no_task(self):
         """无关联任务 → task_ref/result_ref 显式 unavailable。"""
-        from src.api.routes.webhook import _duplicate_a2a_original_refs
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_original_refs
         _insert_event(7303, status="running")
         refs = _duplicate_a2a_original_refs(REPO, 7303)
         assert refs["seq"] == 7303
@@ -104,7 +104,7 @@ class TestOriginalRefsHelper:
 
     def test_event_missing_still_returns_unavailable(self):
         """事件缺失 → 不阻断，seq 保留 + unavailable 引用。"""
-        from src.api.routes.webhook import _duplicate_a2a_original_refs
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_original_refs
         refs = _duplicate_a2a_original_refs(REPO, 7399)
         assert refs["seq"] == 7399
         assert refs["task_ref"]["task_status"] == "unavailable"
@@ -112,7 +112,7 @@ class TestOriginalRefsHelper:
 
     def test_sensitive_token_redacted_in_summary(self):
         """摘要脱敏：token 类模式不出现在 result_ref.summary。"""
-        from src.api.routes.webhook import _duplicate_a2a_original_refs
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_original_refs
         _insert_event(7304, status="running")
         _insert_task("task-729-leak", 7304, status="completed",
                      result_text="done with token tk_abcdef1234567890abcd")
@@ -126,7 +126,7 @@ class TestSameAgentDedupResponse:
     """同 agent duplicate_a2a 拦截响应体：original_event 透传（向后兼容）。"""
 
     def test_skip_response_contains_original_event(self):
-        from src.api.routes.webhook import _duplicate_a2a_skip_response
+        from src.domains.runtime.routes.webhook import _duplicate_a2a_skip_response
         _insert_event(7305, status="running", agent_type="sre")
         _insert_task("task-729-sre", 7305, status="dispatched")
         resp = _duplicate_a2a_skip_response("sre", REPO, 7305)
@@ -146,7 +146,7 @@ class TestCrossPipelineDedup:
     """跨流水线 duplicate_handoff 拦截：返回值携带 original_event。"""
 
     def test_duplicate_handoff_returns_original_event(self):
-        from src.api.routes.webhook import _cross_pipeline_handoff
+        from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
         _insert_event(7306, status="running", agent_type="issue", scene_id="default")
         _insert_task("task-729-cross", 7306, status="completed",
                      result_text=json.dumps({"conclusion": "Spec 已确认，交办 coding"}))
@@ -164,7 +164,7 @@ class TestCrossPipelineDedup:
 
     def test_non_duplicate_handoff_unaffected(self):
         """无活跃事件 → 不走 duplicate 拦截分支（不携带 original_event 字段）。"""
-        from src.api.routes.webhook import _cross_pipeline_handoff
+        from src.domains.runtime.routes.webhook import _cross_pipeline_handoff
         _insert_event(7307, status="completed", agent_type="issue", scene_id="default")
         res = _cross_pipeline_handoff(
             REPO, "729", "default", "vod",

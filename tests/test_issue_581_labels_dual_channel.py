@@ -26,8 +26,8 @@ def _client(monkeypatch):
         lambda: {"id": UID, "username": "labels_tester", "auth_type": "session_token",
                  "agent_type": "vod", "user_id": 0, "session_key": "s1",
                  "repo_key": f"gitcode:{OWNER}/{REPO}"}
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
-    monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: BOT)
     yield TestClient(app)
     app.dependency_overrides.clear()
 
@@ -47,7 +47,7 @@ def gitcode_calls(monkeypatch):
         recorded.append({"method": method, "url": url, "token": token, "body": body})
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     return recorded
 
 
@@ -59,7 +59,7 @@ def github_calls(monkeypatch):
         recorded.append({"method": method, "url": url, "token": token, "body": body})
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
 
-    monkeypatch.setattr("src.user.repo_manager._github_req", _fake_gh_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _fake_gh_req)
     return recorded
 
 

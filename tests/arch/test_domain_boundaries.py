@@ -50,23 +50,32 @@ def test_auth_sdk_roundtrip():
 
 def test_domain_new_and_old_import_paths():
     from src.domains.mgmt.auth import audit as new_audit
-    from src.auth import audit as old_audit
-    assert new_audit is old_audit
+    assert new_audit is not None
     from src.domains.runtime.engine import service as new_service
-    from src.runtime import service as old_service
-    assert new_service is old_service
+    assert new_service is not None
     from src.domains.insight.observability import rollup as new_rollup
-    from src.observability import rollup as old_rollup
-    assert new_rollup is old_rollup
+    assert new_rollup is not None
 
 
-def test_legacy_route_shims():
-    from src.api.routes.auth import router as old_router
-    from src.domains.mgmt.routes.auth import router as new_router
-    assert old_router is new_router
-    from src.api.routes.health import router as old_health
-    from src.domains.insight.routes.health import router as new_health
-    assert old_health is new_health
+def test_legacy_dir_shims_removed():
+    """Issue #699 cleanup: legacy top-level shim dirs are gone; imports must fail."""
+    import importlib
+    import pytest
+    for legacy in ("src.auth", "src.user", "src.admin", "src.runtime", "src.agent",
+                   "src.im", "src.vcs", "src.storage", "src.observability",
+                   "src.project_info", "src.api.routes"):
+        with pytest.raises(ModuleNotFoundError):
+            importlib.import_module(legacy)
+
+
+def test_top_level_module_shims_still_work():
+    """Thin module-level compat shims kept for external callers."""
+    from src.config import log as old_log
+    from src.kernel.config import log as new_log
+    assert old_log is new_log
+    from src.api.jwt_utils import create_access_token as old_create
+    from src.kernel.auth_sdk.jwt_utils import create_access_token as new_create
+    assert old_create is new_create
 
 
 def test_app_loads():

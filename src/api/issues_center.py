@@ -1,6 +1,6 @@
 """需求中心（Issues Center）领域逻辑（issues_center）。
 
-从 src/api/routes/tasks.py 拆分（tasks-module-refactor-and-task-id-disambiguation-design.md）：
+从 src/domains/runtime/routes/tasks.py 拆分（tasks-module-refactor-and-task-id-disambiguation-design.md）：
 - issue 建档/状态流转/VCS 创建/附件/任务对话/平台映射/需求列表查询等「需求中心」领域函数集中于此，
 - routes/tasks.py 只保留「执行实例」动作（complete/current），其他路由与业务模块均从本模块导入，
 - 本模块为叶子：**不得 import routes.tasks / routes.issues**（防环形依赖）。
@@ -661,15 +661,15 @@ def _close_vcs_one_auto(repo_key: str, issue_number: int) -> str:
             return "skipped"
         token = ""
         if provider == "github":
-            from src.user.db import get_github_token as _get_gh
+            from src.domains.mgmt.user.db import get_github_token as _get_gh
             token = _get_gh(repo_key=repo_key) or ""
         else:
-            from src.user.db import get_repo_bot_token as _get_gc
+            from src.domains.mgmt.user.db import get_repo_bot_token as _get_gc
             token = _get_gc(repo_key=repo_key) or ""
         if not token:
             log.info(f"auto-finalize: no bot token for {repo_key}, skip VCS close")
             return "skipped"
-        from src.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.api_client import VcsApiClient
         client = VcsApiClient(provider, token, owner, repo)
         try:
             if client.get_issue_state(issue_number) == "closed":
@@ -1695,7 +1695,7 @@ def _dispatch_release_sre(repo_key: str, issue_number: int, sub_issue_number: in
     """
     import json as _json
     from src.repo_key import from_repo_key
-    from src.api.routes.webhook import a2a_endpoint, A2AHandoffBody
+    from src.domains.runtime.routes.webhook import a2a_endpoint, A2AHandoffBody
     _repository = from_repo_key(repo_key) or repo_key.split(":", 1)[-1]
     _account = _repository.split("/", 1)[0] if "/" in _repository else ""
     _context = (f"发布子单 #{sub_issue_number}：源需求 #{issue_number} 已完成 SRE 验收并经用户批准"
@@ -2626,7 +2626,7 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         # OBS 后端启用时按对象键重新签发长效链接（本地降级路径 URL 本身永久，无需处理）
         if _url:
             try:
-                from src.storage import get_storage
+                from src.domains.runtime.storage import get_storage
                 _storage = get_storage()
                 if _storage:
                     _safe_name = _url.rsplit("/", 1)[-1].split("?")[0]
@@ -2640,12 +2640,12 @@ def sync_issue_attachment_comment(repo_key: str, issue_number, attachment: dict)
         _md = _attachments_markdown_block([_att])
         if not _md:
             return False
-        from src.user.db import get_gitcode_token
+        from src.domains.mgmt.user.db import get_gitcode_token
         token = get_gitcode_token(repo_key=repo_key) or ""
         if not token:
             log.warning(f"attachment sync comment skipped: no repo token repo={repo_key}")
             return False
-        from src.vcs.api_client import VcsApiClient
+        from src.domains.runtime.vcs.api_client import VcsApiClient
         client = VcsApiClient("gitcode", token, owner, rname)
         client.post_issue_comment(int(issue_number), _md.strip())
         log.info(f"attachment sync comment posted: repo={repo_key} issue=#{issue_number}"

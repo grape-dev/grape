@@ -326,7 +326,7 @@ def test_direct_materialize_agent_type_fallback(skills_root, tmp_path, monkeypat
     monkeypatch.setattr(cfg, "resolve_official_skill_path",
                         lambda name: str(tmp_path / "official" / name / "SKILL.md")
                         if name == "grape-skill-validator" else "")
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     monkeypatch.setattr(udb, "resolve_official_checker_skill",
                         lambda at: ({"id": 2789, "skill_name": "grape-skill-validator",
                                      "skill_path": str(checker), "file_path": ""} if at == "qa"
@@ -429,7 +429,7 @@ def test_direct_materialize_ok_no_fallback(skills_root, tmp_path, monkeypatch):
 # ── Issue #607：worker 端 _materialize_worker_skill 兜底 ──
 
 def _mk_task(tmp_path, **kw):
-    from src.runtime import agent as ra
+    from src.domains.runtime.engine import agent as ra
     task = {"id": "t-607", "cwd": str(tmp_path), "skill": "demo-skill"}
     task.update(kw)
     skill_dir = os.path.join(str(tmp_path), ".skills")

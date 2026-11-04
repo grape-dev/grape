@@ -273,7 +273,7 @@ class TestIssue679SkipEmptyPosting:
     def test_service_handler_skips_empty_result_text(self):
         """service handler 发帖链：result_text 为空时不调用 post_issue_comment。"""
         import inspect
-        from src.runtime import service as _svc
+        from src.domains.runtime.engine import service as _svc
         src = inspect.getsource(_svc.complete_task)
         assert 'or "任务已完成。"' not in src, \
             "complete_task 不应再对 result_text 做「任务已完成。」兜底"

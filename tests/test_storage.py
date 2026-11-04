@@ -147,7 +147,7 @@ class TestExtract:
 
     def test_read_zip_sub_skill_with_bom(self):
         """Issue #608: 子技能 SKILL.md 带 BOM 时也应正确剥离。"""
-        from src.storage import read_zip_sub_skill
+        from src.domains.runtime.storage import read_zip_sub_skill
         buf = io.BytesIO()
         with zipfile.ZipFile(buf, "w") as zf:
             content = "---\nname: sub-bom\n---\n\n# Sub BOM"

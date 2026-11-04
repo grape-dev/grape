@@ -191,7 +191,7 @@ OBS_LOCAL_CACHE = os.environ.get("OBS_LOCAL_CACHE", "")
 # Cookie 安全——生产 HTTPS 默认 secure=True，开发 HTTP 配 COOKIE_SECURE=false
 COOKIE_SECURE = os.environ.get("COOKIE_SECURE", "true").lower() in ("1", "true", "yes")
 
-# 注意：此处禁止 import src.domains.mgmt.auth.*（worker 包含 config.py 但不含 src/auth/，
+# 注意：此处禁止 import src.domains.mgmt.auth.*（worker 包含 config.py 但不含 src/domains/mgmt/auth/，
 # 顶层 import 会直接打崩 runtime-agent 启动，2026-10-14 五台 worker 心跳全断事故根因）。
 # 服务端如需 is_production，直接 from src.domains.mgmt.auth.security_config import is_production。
 # IS_PRODUCTION 常量已删除：全库零消费（死代码）。
@@ -383,7 +383,7 @@ _WL_CACHE_TTL = 60.0  # 60s TTL—meta 配置变更频率极低
 
 # ====== 运行配置统一读取层（Issue #470：写死配置抽取） ======
 # 单一配置源：超时家族（RUNTIME_TASK_TIMEOUT，默认 3600s）与 DevStage 规格
-# 原先散布写死于 src/runtime/agent.py / src/agent/hermes_acp.py / hwcloud_acp.py /
+# 原先散布写死于 src/domains/runtime/engine/agent.py / src/domains/runtime/agents/hermes_acp.py / hwcloud_acp.py /
 # observability / dashboard / cleanup / devstage.py，现全部收敛到本节 getter。
 #
 # 优先级（Spec 验收标准）：env 覆盖 > 管理台值（DB meta）> 配置文件 > 代码默认值。

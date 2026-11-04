@@ -197,7 +197,7 @@ class TestT30HostRepoInvitePendingFallback:
     def test_t30_01_invite_pending_triggers_fallback(self):
         """T30-01: bot_status=invite_pending → 降级路径 B（代码验证）"""
         # 验证代码中包含 invite_pending 和 add_failed 的条件
-        with open("src/api/routes/repos.py") as f:
+        with open("src/domains/mgmt/routes/repos.py") as f:
             content = f.read()
         # 应该有 in ("error", "invite_pending", "add_failed") 的条件
         assert "invite_pending" in content
@@ -216,7 +216,7 @@ class TestT33RepairHostGithubAccept:
 
     def test_t33_01_repair_host_calls_accept(self):
         """T33-01: repair_host GitHub 分支调 accept_github_invite（代码验证）"""
-        with open("src/api/routes/repos.py") as f:
+        with open("src/domains/mgmt/routes/repos.py") as f:
             content = f.read()
         # repair_host 区域应该引用 accept_github_invite
         # 找到 repair_host 函数区域

@@ -1,6 +1,6 @@
 """回归测试（Issue #524）：场景 apply 按节点结构化回执。
 
-背景：src/api/routes/scenes.py apply_scene 旧实现中，目标引擎 online 但
+背景：src/domains/mgmt/routes/scenes.py apply_scene 旧实现中，目标引擎 online 但
 healthy=false 时不命中选择，静默回退 devops_agent_session 旧绑定（引擎 A），
 回执仍报 updated=N 全部成功，无跳过提示。
 

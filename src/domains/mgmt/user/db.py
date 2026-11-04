@@ -1269,17 +1269,26 @@ def resolve_skill_id(skill_name: str, owner_id: str = "",
 
 
 def get_skill_path(skill_id) -> str:
-    """按 skill_id 返回 skill 的实际 SKILL.md 绝对路径（official/user/repo scope 处理）"""
+    """按 skill_id 返回 skill 的实际 SKILL.md 绝对路径（official/user/repo scope 处理）
+
+    目录根按 scope 区分（与 ensure_skill_dir / ensure_repo_skill_dir 写入端一致）：
+      - user  → {SKILL_DIR}/{owner_id}/{skill_path}/SKILL.md  （自定义技能目录）
+      - repo  → {SKILL_DIR 同级}/repo/{owner}/{repo}/{skill_path}/SKILL.md
+      - official → SKILLS_DIR（.grape/skills）随仓库分发的官方技能
+    Issue #699 收口：写入端在 skills/custom，读取端曾误拼到 .grape/skills/custom →
+    本地技能恒判缺失（#630 物化闸门误拦），此处对齐。
+    """
     skill = get_skill_by_id(skill_id)
     if not skill:
         return ""
     from src.kernel.config import SKILLS_DIR
     sp = skill.get("skill_path") or skill.get("skill_name") or ""
     if skill.get("scope") == "user":
-        return os.path.join(SKILLS_DIR, "custom", skill.get("owner_id") or "", sp, "SKILL.md")
+        return os.path.join(SKILL_DIR, str(skill.get("owner_id") or ""), sp, "SKILL.md")
     if skill.get("scope") == "repo":
         from src.kernel.repo_key import from_repo_key
-        return os.path.join(SKILLS_DIR, "repo", from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
+        return os.path.join(os.path.dirname(SKILL_DIR), "repo",
+                            from_repo_key(skill.get("owner_id") or ""), sp, "SKILL.md")
     # 官方技能：优先按 configs/skill-description.json 的 path 解析（skills/<agent_type>/<skill>/SKILL.md），
     # 兼容旧平铺布局（skills/<skill>/SKILL.md）
     from src.kernel.config import resolve_official_skill_path

@@ -339,7 +339,7 @@ def _align_convergence_once(repo_key: str, issue_id: str) -> int:
     if not repo_key or not num.isdigit():
         return 0
     try:
-        from src.api.routes.issues import _sync_issue_pipeline_terminal
+        from src.domains.runtime.routes.issues import _sync_issue_pipeline_terminal
         return _sync_issue_pipeline_terminal(repo_key, int(num)) or 0
     except Exception as e:
         log.warning(f"[patrol-comp] align convergence failed (repo={repo_key} issue={issue_id}): {e}")
@@ -386,7 +386,7 @@ class DispatchHandler(Handler):
     name = "dispatch"
 
     async def handle(self, ctx: CompensateContext) -> bool:
-        from src.api.routes.webhook import A2AHandoffBody, a2a_endpoint
+        from src.domains.runtime.routes.webhook import A2AHandoffBody, a2a_endpoint
         from src.api import patrol as _p
         marker = f"patrol:{ctx.task_id}:{_now_iso()}"   # D5 硬约束：补偿标记必传
         repository = ctx.repo_key.split(":", 1)[1] if ":" in ctx.repo_key else ctx.repo_key

@@ -15,29 +15,29 @@ import inspect
 class TestDirectExecutorModule:
 
     def test_direct_executor_importable(self):
-        mod = importlib.import_module("src.runtime.direct_executor")
+        mod = importlib.import_module("src.domains.runtime.engine.direct_executor")
         assert mod is not None
 
     def test_direct_executor_has_pool_vars(self):
-        from src.runtime.direct_executor import _DIRECT_POOL, _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK
+        from src.domains.runtime.engine.direct_executor import _DIRECT_POOL, _DIRECT_FUTURES, _DIRECT_FUTURES_LOCK
         assert _DIRECT_POOL is not None
         assert _DIRECT_FUTURES is not None
         assert _DIRECT_FUTURES_LOCK is not None
 
     def test_direct_executor_has_start_direct_agent(self):
-        from src.runtime.direct_executor import start_direct_agent
+        from src.domains.runtime.engine.direct_executor import start_direct_agent
         assert callable(start_direct_agent)
 
     def test_direct_executor_has_execute_agent(self):
-        from src.runtime.direct_executor import _execute_agent
+        from src.domains.runtime.engine.direct_executor import _execute_agent
         assert callable(_execute_agent)
 
     def test_direct_executor_has_execute_agent_inner(self):
-        from src.runtime.direct_executor import _execute_agent_inner
+        from src.domains.runtime.engine.direct_executor import _execute_agent_inner
         assert callable(_execute_agent_inner)
 
     def test_no_module_level_event_pipeline_import(self):
-        import src.runtime.direct_executor as de
+        import src.domains.runtime.engine.direct_executor as de
         source = inspect.getsource(de)
         tree = ast.parse(source)
         for node in ast.iter_child_nodes(tree):
@@ -52,7 +52,7 @@ class TestDirectExecutorModule:
 class TestEventPipelineReExport:
 
     def test_re_export_same_objects(self):
-        from src.runtime.direct_executor import (
+        from src.domains.runtime.engine.direct_executor import (
             _DIRECT_POOL as de_pool, _DIRECT_FUTURES as de_futures,
             _DIRECT_FUTURES_LOCK as de_lock, start_direct_agent as de_sda,
             _execute_agent as de_ea, _execute_agent_inner as de_eai,
@@ -90,9 +90,9 @@ class TestEventPipelineReExport:
 class TestLocalClaimerImport:
 
     def test_local_claimer_imports_from_direct_executor(self):
-        import src.runtime.local_claimer as lc
+        import src.domains.runtime.engine.local_claimer as lc
         source = inspect.getsource(lc._execute_claimed_locally)
-        assert "from src.runtime.direct_executor import" in source
+        assert "from src.domains.runtime.engine.direct_executor import" in source
         assert "from src.api.event_pipeline import _execute_agent" not in source
 
 
@@ -112,7 +112,7 @@ class TestBackwardCompatibility:
         assert callable(start_direct_agent)
 
     def test_import_from_direct_executor_works(self):
-        from src.runtime.direct_executor import _execute_agent, start_direct_agent
+        from src.domains.runtime.engine.direct_executor import _execute_agent, start_direct_agent
         assert callable(_execute_agent)
         assert callable(start_direct_agent)
 
@@ -201,32 +201,32 @@ class TestFailureFinalizationRuntimePath:
 
         fake_modules = {
             "src.api.event_pipeline": ep,
-            "src.runtime.executor": mock.MagicMock(stream_devops_agent=fake_stream),
+            "src.domains.runtime.engine.executor": mock.MagicMock(stream_devops_agent=fake_stream),
             "src.prompt_builder": mock.MagicMock(
                 build_devops_agent_prompt=lambda *a, **k: "test prompt"
             ),
             "src.api.event_store": es,
-            "src.runtime.instances": mock.MagicMock(
+            "src.domains.runtime.engine.instances": mock.MagicMock(
                 runtime_instance_name=lambda *a, **k: "test-engine"
             ),
             "src.session_manager": sm,
             "src.token_service": ts,
             "src.repo_key": rk,
-            "src.user.db": udb,
-            "src.auth.grape_account_db": mock.MagicMock(),
+            "src.domains.mgmt.user.db": udb,
+            "src.domains.mgmt.auth.grape_account_db": mock.MagicMock(),
             "src.api.deps": mock.MagicMock(),
-            "src.runtime.repogit": mock.MagicMock(),
+            "src.domains.runtime.engine.repogit": mock.MagicMock(),
             "src.api.auth_token": mock.MagicMock(
                 issue_session_token=lambda *a, **k: "tk_test"
             ),
-            "src.observability.master_usage": mock.MagicMock(
+            "src.domains.insight.observability.master_usage": mock.MagicMock(
                 for_task=lambda *a, **k: _mu
             ),
-            "src.runtime.service": mock.MagicMock(),
+            "src.domains.runtime.engine.service": mock.MagicMock(),
             "src.api.session_store": mock.MagicMock(),
         }
 
-        from src.runtime import direct_executor as de
+        from src.domains.runtime.engine import direct_executor as de
         original = {k: sys.modules.get(k) for k in fake_modules}
         try:
             sys.modules.update(fake_modules)
@@ -260,7 +260,7 @@ class TestFailureFinalizationRuntimePath:
     def test_failure_finalization_imports_present_in_inner(self):
         """Verify lazy imports present in _execute_agent_inner source."""
         import inspect
-        from src.runtime.direct_executor import _execute_agent_inner
+        from src.domains.runtime.engine.direct_executor import _execute_agent_inner
         src = inspect.getsource(_execute_agent_inner)
         assert "from src.token_service import is_auth_401_error" in src, \
             "is_auth_401_error lazy import missing in _execute_agent_inner"

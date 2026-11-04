@@ -1,7 +1,7 @@
 """主控机内运行的引擎用量采集（chat / devops / im / wiki）。
 
-**为什么需要它**（审计 2026-10-17）：`src/runtime/usage_collect.py` 的采集器原本只在 **worker 侧**
-（`src/runtime/agent.py`）被调用 → 主控机内直接跑的引擎（chat agent、devops agent、IM bot、视频理解）
+**为什么需要它**（审计 2026-10-17）：`src/domains/runtime/engine/usage_collect.py` 的采集器原本只在 **worker 侧**
+（`src/domains/runtime/engine/agent.py`）被调用 → 主控机内直接跑的引擎（chat agent、devops agent、IM bot、视频理解）
 的 token 用量**一条都没进台账**。引擎原生账本（hermes `state.db`/hwcloud 日志/opencode `message.data`）
 在主控侧同样存在，采集代码也完全可复用，缺的只是"谁来调"。
 

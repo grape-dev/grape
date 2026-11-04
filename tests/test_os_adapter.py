@@ -218,7 +218,7 @@ class TestBunCacheDir:
 
 class TestOpencodeGetEnvBunCache:
     def _runtime(self):
-        from src.runtime.opencode import OpencodeRuntime
+        from src.domains.runtime.engine.opencode import OpencodeRuntime
         return OpencodeRuntime()
 
     def test_env_injects_resolved_cache_dir(self, tmp_path):
@@ -234,9 +234,9 @@ class TestOpencodeGetEnvBunCache:
         rt = self._runtime()
         fallback = tmp_path / "fallback"
         with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": str(tmp_path / "unwritable")}):
-            with patch("src.runtime.os_adapter.bun_cache_fallback_dir", return_value=str(fallback)):
+            with patch("src.domains.runtime.engine.os_adapter.bun_cache_fallback_dir", return_value=str(fallback)):
                 with patch("os.makedirs", side_effect=PermissionError("Operation not permitted")):
-                    with caplog.at_level(logging.WARNING, logger="src.runtime.opencode"):
+                    with caplog.at_level(logging.WARNING, logger="src.domains.runtime.engine.opencode"):
                         env = rt.get_env()
         assert any("Operation not permitted" in r.message for r in caplog.records)
         # makedirs 全部失败 → 不注入缓存变量，但 get_env 正常返回（不抛错）
@@ -258,9 +258,9 @@ class TestOpencodeGetEnvBunCache:
 
         rt = self._runtime()
         with patch.dict(os.environ, {"GRAPE_BUN_CACHE_DIR": str(primary)}):
-            with patch("src.runtime.os_adapter.bun_cache_fallback_dir", return_value=str(fallback)):
+            with patch("src.domains.runtime.engine.os_adapter.bun_cache_fallback_dir", return_value=str(fallback)):
                 with patch("os.makedirs", side_effect=fake_makedirs):
-                    with caplog.at_level(logging.WARNING, logger="src.runtime.opencode"):
+                    with caplog.at_level(logging.WARNING, logger="src.domains.runtime.engine.opencode"):
                         env = rt.get_env()
         assert env["BUN_RUNTIME_TRANSPILER_CACHE_PATH"] == str(fallback)
         assert any("falling back" in r.message for r in caplog.records)

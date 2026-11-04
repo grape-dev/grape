@@ -705,7 +705,7 @@ def create_pull(owner: str, repo: str, body: PRCreateBody, user: dict = Depends(
     # body 非空时，剥离代码块/行内反引号/引用块后提取 Issue 号（非语义语境的 #N
     # 不再被自动关联捕获；显式 related_issue_nums 优先，不受过滤影响）。
     if not related and _body:
-        from src.vcs.issue_ref_filter import extract_related_issue_nums
+        from src.domains.runtime.vcs.issue_ref_filter import extract_related_issue_nums
         related = extract_related_issue_nums(_body)
     neutral = {
         "title": body.title,

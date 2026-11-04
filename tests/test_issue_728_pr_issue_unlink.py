@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.api.deps import get_current_user_or_api_key
-from src.vcs.issue_ref_filter import (
+from src.domains.runtime.vcs.issue_ref_filter import (
     extract_related_issue_nums,
     strip_nonsemantic_context,
 )
@@ -34,8 +34,8 @@ def _client(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _token(monkeypatch):
-    monkeypatch.setattr("src.user.db.get_gitcode_token", lambda *a, **k: BOT)
-    monkeypatch.setattr("src.user.db.get_github_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_gitcode_token", lambda *a, **k: BOT)
+    monkeypatch.setattr("src.domains.mgmt.user.db.get_github_token", lambda *a, **k: BOT)
 
 
 def _override_user(repo_key: str):
@@ -109,7 +109,7 @@ def test_create_pull_auto_extract_filters_code_context(monkeypatch, _client):
         recorded.append({"method": method, "url": url, "body": body})
         return {"ok": True, "number": 9, "title": "t"}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     client = _client
     r = client.post(f"/api/git-repo/{OWNER}/{REPO}/pulls", json={
         "title": "feat: #42", "head": "feat/42", "base": "main",
@@ -129,7 +129,7 @@ def test_create_pull_explicit_related_takes_priority(monkeypatch, _client):
         recorded.append({"method": method, "url": url, "body": body})
         return {"ok": True, "number": 9, "title": "t"}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     client = _client
     r = client.post(f"/api/git-repo/{OWNER}/{REPO}/pulls", json={
         "title": "feat", "head": "feat/x", "base": "main",
@@ -147,7 +147,7 @@ def test_create_pull_no_issue_refs_no_inner_nums(monkeypatch, _client):
         recorded.append({"method": method, "url": url, "body": body})
         return {"ok": True, "number": 9, "title": "t"}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     client = _client
     r = client.post(f"/api/git-repo/{OWNER}/{REPO}/pulls", json={
         "title": "feat", "head": "feat/x", "base": "main",
@@ -171,7 +171,7 @@ def _unlink_fake_req(recorded, pr_issues):
 def test_unlink_linked_issue(monkeypatch, _client):
     """已关联：GET 校验 → PATCH 剩余 inner_issue_nums（去掉目标）。"""
     recorded = []
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         _unlink_fake_req(recorded, [{"number": 42}, {"number": 7}]))
     client = _client
     r = client.delete(f"/api/git-repo/{OWNER}/{REPO}/pulls/9/issues/42")
@@ -189,7 +189,7 @@ def test_unlink_linked_issue(monkeypatch, _client):
 def test_unlink_idempotent_when_not_associated(monkeypatch, _client):
     """幂等：关联不存在 → unlinked=false、不发 PATCH（重复调用安全）。"""
     recorded = []
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         _unlink_fake_req(recorded, [{"number": 42}]))
     client = _client
     r = client.delete(f"/api/git-repo/{OWNER}/{REPO}/pulls/9/issues/999")
@@ -201,7 +201,7 @@ def test_unlink_idempotent_when_not_associated(monkeypatch, _client):
 def test_unlink_last_issue_clears_association(monkeypatch, _client):
     """唯一关联被解除 → inner_issue_nums 传空串清空。"""
     recorded = []
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         _unlink_fake_req(recorded, [{"number": 42}]))
     client = _client
     r = client.delete(f"/api/git-repo/{OWNER}/{REPO}/pulls/9/issues/42")
@@ -219,7 +219,7 @@ def test_unlink_github_noop(monkeypatch, _client):
         recorded.append({"method": method, "url": url, "body": body})
         return {"ok": True}
 
-    monkeypatch.setattr("src.user.repo_manager._github_req", _fake_gh_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._github_req", _fake_gh_req)
     _override_user(f"github:{OWNER}/{REPO}")
     client = _client
     r = client.delete(f"/api/git-repo/{OWNER}/{REPO}/pulls/9/issues/42")

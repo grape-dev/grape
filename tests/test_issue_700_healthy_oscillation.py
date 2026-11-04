@@ -1,16 +1,16 @@
 """Issue #700：Windows hermes 引擎 healthy 震荡回归测试。
 
 覆盖三块：
-1. register 降级守卫（src/api/routes/runtime.py）：
+1. register 降级守卫（src/domains/runtime/routes/runtime.py）：
    - 已 healthy 且探活新鲜（probe_status='ok' 且 last probe 在新鲜窗口内）的行，
      re-register 上报 healthy=False 时 DB 不降级（防震荡核心）；
    - 探活过期 / 不新鲜 → 降级仍生效（不掩盖真实故障）；
    - 心跳连败 2 次真实降 0（守卫不掩盖心跳路径）；
    - re-register 上报 True → 无条件升 1（守卫不误伤升路径）；
    - 新引擎首次注册 healthy=False → INSERT 不受守卫影响。
-2. ACP_CHECK_TIMEOUT env 覆盖（src/runtime/acp_bootstrap.py）：
+2. ACP_CHECK_TIMEOUT env 覆盖（src/domains/runtime/engine/acp_bootstrap.py）：
    - 默认 ≥20；RUNTIME_ACP_CHECK_TIMEOUT 可覆盖；非法值回退默认。
-3. _hermes_venv_bin Windows 启动器解析（src/runtime/acp_bootstrap.py）：
+3. _hermes_venv_bin Windows 启动器解析（src/domains/runtime/engine/acp_bootstrap.py）：
    - .cmd（绝对路径引号形态 / @py -3 形态）/ .bat / .exe 返回有效 venv bin；
    - 解析失败返回空串（保持契约）。
 """
@@ -84,14 +84,14 @@ class _FakeRequest:
 
 def _do_register(runtimes: list, cid: int, device_name: str = "dev"):
     """直接调用 runtime_register（绕过 HTTP 鉴权，credential_id=cid）。"""
-    from src.api.routes.runtime import runtime_register, RuntimeRegBody
+    from src.domains.runtime.routes.runtime import runtime_register, RuntimeRegBody
     body = RuntimeRegBody(device_name=device_name, runtimes=runtimes)
     return runtime_register(body, _FakeRequest(), credential_id=cid)
 
 
 def _do_heartbeat(probe_results: dict, runtime_ids: list, cid: int):
     """直接调用 runtime_heartbeat（同 test_issue_490 先例）。"""
-    from src.api.routes.runtime import runtime_heartbeat, HeartbeatBody
+    from src.domains.runtime.routes.runtime import runtime_heartbeat, HeartbeatBody
     body = HeartbeatBody(runtime_ids=runtime_ids, probe_results=probe_results)
     return runtime_heartbeat(body, _FakeRequest(), credential_id=cid)
 
@@ -193,28 +193,28 @@ class TestAcpCheckTimeoutOverride:
     """ACP_CHECK_TIMEOUT 默认 ≥20s，RUNTIME_ACP_CHECK_TIMEOUT 可覆盖。"""
 
     def test_default_at_least_20s(self):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         assert ab.ACP_CHECK_TIMEOUT >= 20, (
             f"默认应 ≥20s（Windows 冷启动余量）, got {ab.ACP_CHECK_TIMEOUT}")
 
     def test_env_override(self, monkeypatch):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         monkeypatch.setenv("RUNTIME_ACP_CHECK_TIMEOUT", "30")
         assert ab._resolve_acp_check_timeout() == 30
 
     def test_env_override_float_rejected(self, monkeypatch):
         """非正整数（浮点串）→ 回退默认。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         monkeypatch.setenv("RUNTIME_ACP_CHECK_TIMEOUT", "3.5")
         assert ab._resolve_acp_check_timeout() == ab.ACP_CHECK_TIMEOUT_DEFAULT
 
     def test_env_override_garbage_rejected(self, monkeypatch):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         monkeypatch.setenv("RUNTIME_ACP_CHECK_TIMEOUT", "abc")
         assert ab._resolve_acp_check_timeout() == ab.ACP_CHECK_TIMEOUT_DEFAULT
 
     def test_env_override_nonpositive_rejected(self, monkeypatch):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         monkeypatch.setenv("RUNTIME_ACP_CHECK_TIMEOUT", "0")
         assert ab._resolve_acp_check_timeout() == ab.ACP_CHECK_TIMEOUT_DEFAULT
         monkeypatch.setenv("RUNTIME_ACP_CHECK_TIMEOUT", "-5")
@@ -233,7 +233,7 @@ class TestHermesVenvBinLinux:
 
     def test_env_shebang_launcher(self, tmp_path, monkeypatch):
         """`#!/usr/bin/env python3` shebang（pip console-script 最常见默认形态）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "bin"
         venv.mkdir(parents=True)
         py = venv / "python3"
@@ -250,7 +250,7 @@ class TestHermesVenvBinLinux:
     def test_env_shebang_launcher_system_python(self, tmp_path, monkeypatch):
         """env shebang 解析到系统 python（非 venv）——仍返回其目录（bin 目录本身可作
         pip 安装目标；与 Windows py-launcher 解析到 base python 的行为对齐）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         sysdir = tmp_path / "sys" / "bin"
         sysdir.mkdir(parents=True)
         py = sysdir / "python3"
@@ -263,7 +263,7 @@ class TestHermesVenvBinLinux:
 
     def test_bash_shim_exec_unquoted(self, tmp_path):
         """bash shim `exec /path/bin/hermes "$@"`（不带引号）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "bin"
         venv.mkdir(parents=True)
         (venv / "hermes").write_bytes(b"")
@@ -276,7 +276,7 @@ class TestHermesVenvBinLinux:
 
     def test_bash_shim_python_dash_m(self, tmp_path):
         """`exec ".../venv/bin/python" -m hermes` 形态（pipx/pdm 常见）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "bin"
         venv.mkdir(parents=True)
         py = venv / "python"
@@ -293,7 +293,7 @@ class TestHermesVenvBinWindows:
 
     def test_cmd_absolute_python_quoted(self, tmp_path):
         """.cmd 内 @\"...\\Scripts\\python.exe\" 形态（venv 模板标准引号形态）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -306,7 +306,7 @@ class TestHermesVenvBinWindows:
         assert os.path.isfile(os.path.join(out, "python.exe"))
 
     def test_cmd_absolute_python_unquoted(self, tmp_path):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -318,7 +318,7 @@ class TestHermesVenvBinWindows:
 
     def test_cmd_py_launcher_form(self, tmp_path, monkeypatch):
         """@py -3 形态：py launcher 解析出解释器，再由其定位 venv Scripts。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -336,7 +336,7 @@ class TestHermesVenvBinWindows:
         assert out and os.path.isfile(os.path.join(out, "python.exe"))
 
     def test_bat_absolute_python(self, tmp_path):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -348,7 +348,7 @@ class TestHermesVenvBinWindows:
 
     def test_exe_launcher(self, tmp_path):
         """.exe：launcher 所在目录即 venv Scripts（python.exe 同目录校验）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -358,7 +358,7 @@ class TestHermesVenvBinWindows:
         assert out and os.path.isfile(os.path.join(out, "python.exe"))
 
     def test_exe_without_python_returns_empty(self, tmp_path):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         d = tmp_path / "Scripts2"
         d.mkdir(parents=True)
         launcher = d / "hermes.exe"
@@ -367,14 +367,14 @@ class TestHermesVenvBinWindows:
 
     def test_garbage_cmd_returns_empty(self, tmp_path):
         """乱内容 .cmd（无 python 行）→ 空串（回退人工修复指引契约）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         launcher = tmp_path / "hermes.cmd"
         launcher.write_text("@echo off\nrem nothing here\n", encoding="utf-8")
         assert ab._hermes_venv_bin(str(launcher)) == ""
 
     def test_venv_python_windows_scripts_form(self, tmp_path):
         """_venv_python：Windows Scripts 目录（只含 python.exe）返回 python.exe。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -383,7 +383,7 @@ class TestHermesVenvBinWindows:
 
     def test_venv_python_unix_bin_form(self, tmp_path):
         """_venv_python：Unix bin 目录（只含 python）返回 python（回归）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "bin"
         venv.mkdir(parents=True)
         (venv / "python").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -392,7 +392,7 @@ class TestHermesVenvBinWindows:
 
     def test_linux_bash_shim_regression(self, tmp_path):
         """回归：Linux bash shim exec 行解析不受 Windows 分支影响。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv_bin = tmp_path / "venv" / "bin"
         venv_bin.mkdir(parents=True)
         (venv_bin / "hermes").write_text("#!/bin/sh\n", encoding="utf-8")
@@ -420,7 +420,7 @@ class TestResolvePyLauncherPython:
 
     def test_prefers_sys_executable_over_base(self, monkeypatch):
         """注入的 py -3 代码串优先 sys.executable：base python 下不再 AttributeError。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         captured = {}
 
         def _fake_run(cmd, **kw):
@@ -436,7 +436,7 @@ class TestResolvePyLauncherPython:
         assert "sys._base_executable or" not in code
 
     def test_returns_empty_on_failure(self, monkeypatch):
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
 
         def _fake_run(cmd, **kw):
             return _FakeRunResult(returncode=1, stderr="py: not found")
@@ -446,7 +446,7 @@ class TestResolvePyLauncherPython:
     def test_cli_dir_dead_param_removed(self):
         """cli_dir 死参数已移除（#837 Suggested-3）：无参调用即可。"""
         import inspect
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         assert len(inspect.signature(ab._resolve_py_launcher_python).parameters) == 0
 
 
@@ -457,7 +457,7 @@ class TestCmdDp0Wrapper:
 
     def test_cmd_python_candidates_dp0_expansion(self, tmp_path):
         """%~dp0 展开为 launcher 所在目录。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         cands = ab._cmd_python_candidates(
             '"%~dp0\\python.exe" "%~dp0\\hermes-script.py" %*\n', str(tmp_path))
         expected = os.path.join(str(tmp_path), "python.exe").replace("\\", "/")
@@ -466,7 +466,7 @@ class TestCmdDp0Wrapper:
     def test_hermes_venv_bin_dp0_form(self, tmp_path):
         """复现 #837 场景：Scripts 目录含 python.exe、launcher 为 %~dp0 形态
         → _hermes_venv_bin 必须返回 venv Scripts（此前返回空串）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         script_dir = tmp_path / "venv" / "Scripts"
         script_dir.mkdir(parents=True)
         (script_dir / "python.exe").write_bytes(b"")
@@ -481,7 +481,7 @@ class TestCmdDp0Wrapper:
 
     def test_hermes_venv_bin_dp0_unquoted(self, tmp_path):
         """无引号 @%~dp0\\python.exe 形态（distlib 旧模板）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         script_dir = tmp_path / "venv" / "Scripts"
         script_dir.mkdir(parents=True)
         (script_dir / "python.exe").write_bytes(b"")
@@ -492,7 +492,7 @@ class TestCmdDp0Wrapper:
 
     def test_hermes_venv_bin_same_dir_fallback(self, tmp_path):
         """内容解析失败 + launcher 同目录 python.exe → 返回该目录（与 .exe 分支一致）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         script_dir = tmp_path / "venv" / "Scripts"
         script_dir.mkdir(parents=True)
         (script_dir / "python.exe").write_bytes(b"")
@@ -504,7 +504,7 @@ class TestCmdDp0Wrapper:
 
     def test_hermes_venv_bin_py_form_remote_venv(self, tmp_path, monkeypatch):
         """@py -3 形态 + launcher 无同目录 python.exe → 仍走 py launcher 子进程定位。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv" / "Scripts"
         venv.mkdir(parents=True)
         (venv / "python.exe").write_bytes(b"")
@@ -529,7 +529,7 @@ class TestCmdDp0Wrapper:
 class TestPyvenvScriptsDirFix:
     def test_unix_venv_bin_dir(self, tmp_path):
         """Unix venv（pyvenv.cfg + bin/）：返回 venv/bin（bin 是目录，按 isdir 判定）。"""
-        import src.runtime.acp_bootstrap as ab
+        import src.domains.runtime.engine.acp_bootstrap as ab
         venv = tmp_path / "venv"
         (venv / "bin").mkdir(parents=True)
         (venv / "pyvenv.cfg").write_text("home = /usr\n", encoding="utf-8")
@@ -544,38 +544,38 @@ class TestProbeFreshWindowValidation:
     """RUNTIME_PROBE_INTERVAL / RUNTIME_PROBE_FRESH_WINDOW 非法值不得静默失效守卫。"""
 
     def test_default_window(self, monkeypatch):
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.delenv("RUNTIME_PROBE_INTERVAL", raising=False)
         monkeypatch.delenv("RUNTIME_PROBE_FRESH_WINDOW", raising=False)
         assert rt._resolve_probe_fresh_window() == 1200
 
     def test_interval_override(self, monkeypatch):
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.setenv("RUNTIME_PROBE_INTERVAL", "300")
         monkeypatch.delenv("RUNTIME_PROBE_FRESH_WINDOW", raising=False)
         assert rt._resolve_probe_fresh_window() == 600
 
     def test_fresh_window_override(self, monkeypatch):
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.delenv("RUNTIME_PROBE_INTERVAL", raising=False)
         monkeypatch.setenv("RUNTIME_PROBE_FRESH_WINDOW", "60")
         assert rt._resolve_probe_fresh_window() == 60
 
     def test_interval_garbage_falls_back(self, monkeypatch):
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.setenv("RUNTIME_PROBE_INTERVAL", "abc")
         monkeypatch.delenv("RUNTIME_PROBE_FRESH_WINDOW", raising=False)
         assert rt._resolve_probe_fresh_window() == 1200
 
     def test_interval_zero_falls_back(self, monkeypatch):
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.setenv("RUNTIME_PROBE_INTERVAL", "0")
         monkeypatch.delenv("RUNTIME_PROBE_FRESH_WINDOW", raising=False)
         assert rt._resolve_probe_fresh_window() == 1200
 
     def test_fresh_window_zero_clamped(self, monkeypatch):
         """0/负数不再静默禁用守卫：钳制回退默认。"""
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.delenv("RUNTIME_PROBE_INTERVAL", raising=False)
         monkeypatch.setenv("RUNTIME_PROBE_FRESH_WINDOW", "0")
         assert rt._resolve_probe_fresh_window() == 1200
@@ -583,13 +583,13 @@ class TestProbeFreshWindowValidation:
         assert rt._resolve_probe_fresh_window() == 1200
 
     def test_fresh_window_garbage_falls_back(self, monkeypatch):
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.setenv("RUNTIME_PROBE_FRESH_WINDOW", "abc")
         assert rt._resolve_probe_fresh_window() == 1200
 
     def test_zero_fresh_window_guard_still_works(self, monkeypatch):
         """集成：RUNTIME_PROBE_FRESH_WINDOW=0 时守卫仍生效（探活新鲜不降级）。"""
-        import src.api.routes.runtime as rt
+        import src.domains.runtime.routes.runtime as rt
         monkeypatch.setenv("RUNTIME_PROBE_FRESH_WINDOW", "0")
         cid = _insert_credential()
         fresh = (datetime.now(timezone.utc) - timedelta(seconds=60)).isoformat()

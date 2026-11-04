@@ -20,9 +20,9 @@ os.environ.setdefault("DEVOPS_DB_PATH", os.path.join(ROOT, "data", "test_session
 import pytest
 from src.session_manager import db, db_lock
 
-import src.runtime  # 环形导入防护（src.agent.* / routes 侧导入顺序）
-import src.api.routes.issues as iss
-import src.runtime.engine_model as em
+import src.domains.runtime.engine  # 环形导入防护（src.domains.runtime.agents.* / routes 侧导入顺序）
+import src.domains.runtime.routes.issues as iss
+import src.domains.runtime.engine.engine_model as em
 
 REPO = "gitcode:owner/perf-mys-test"
 

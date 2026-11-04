@@ -1,4 +1,4 @@
-"""Agent 路由测试（src/api/routes/agents.py）。
+"""Agent 路由测试（src/domains/mgmt/routes/agents.py）。
 
 覆盖：类型列表、Agent 详情（session/事件/VOD 群）、clean、配置（backend/pool/vod/技能）。
 """

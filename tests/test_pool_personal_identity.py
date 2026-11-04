@@ -38,7 +38,7 @@ class PersonalPoolIdentityTests(unittest.TestCase):
         modules = patch.dict(sys.modules, {'src.kernel.repo_key': repo, 'src.domains.runtime.engine.health': health})
         modules.start()
         self.addCleanup(modules.stop)
-        source = Path(__file__).resolve().parents[1] / 'src/runtime/service.py'
+        source = Path(__file__).resolve().parents[1] / 'src/domains/runtime/engine/service.py'
         tree = ast.parse(source.read_text())
         function = next(n for n in tree.body if isinstance(n, ast.FunctionDef)
                         and n.name == '_check_pool_engines_reachable')

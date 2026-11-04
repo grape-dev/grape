@@ -13,7 +13,7 @@ from pydantic import BaseModel
 
 from src.api.deps import require_no_session_token
 from src.api.patrol import PatrolScanInProgress, run_patrol_once
-from src.session_manager import db, db_lock
+from src.kernel.session_manager import db, db_lock
 
 router = APIRouter(prefix="/api/patrol", tags=["patrol"])
 

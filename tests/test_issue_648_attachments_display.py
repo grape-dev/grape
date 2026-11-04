@@ -70,8 +70,8 @@ class TestMarkdownBlock:
 class TestSyncComment:
     def _run(self, monkeypatch, provider="gitcode", token="tok", client_impl=None):
         import src.api.issues_center as ic
-        import src.user.db as udb
-        import src.vcs.api_client as vac
+        import src.domains.mgmt.user.db as udb
+        import src.domains.runtime.vcs.api_client as vac
         calls = []
         if client_impl is None:
             client_impl = type("C", (), {
@@ -107,9 +107,9 @@ class TestSyncComment:
     def test_obs_url_resigned_long_lived(self, monkeypatch):
         # Issue #648 Required: 同步评论不得写 7 天签名 URL；OBS 启用时按对象键重签长效链接
         import src.api.issues_center as ic
-        import src.storage as storage_mod
-        import src.user.db as udb
-        import src.vcs.api_client as vac
+        import src.domains.runtime.storage as storage_mod
+        import src.domains.mgmt.user.db as udb
+        import src.domains.runtime.vcs.api_client as vac
         resign_calls = []
 
         class FakeStorage:
@@ -138,9 +138,9 @@ class TestSyncComment:
     def test_resign_failure_falls_back_to_original_url(self, monkeypatch):
         # 重签异常降级：仍用原 URL 发评论（best-effort 不阻塞）
         import src.api.issues_center as ic
-        import src.storage as storage_mod
-        import src.user.db as udb
-        import src.vcs.api_client as vac
+        import src.domains.runtime.storage as storage_mod
+        import src.domains.mgmt.user.db as udb
+        import src.domains.runtime.vcs.api_client as vac
 
         class BoomStorage:
             def temporary_url(self, key, expires=300):
@@ -165,7 +165,7 @@ class TestSyncComment:
 class TestIssueAttachmentsHelper:
     def test_aggregate(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         monkeypatch.setattr(ic, "_attach_list",
                             lambda o, r, n: [{"filename": f"{n}.md", "url": "http://u", "size": 5,
                                                "is_image": False}] if n == "85" else [])
@@ -174,7 +174,7 @@ class TestIssueAttachmentsHelper:
 
     def test_first_repo_key_hit(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         monkeypatch.setattr(ic, "_attach_list",
                             lambda o, r, n: [{"filename": "x", "url": "http://x", "size": 1,
                                                "is_image": True}] if r == "repo648" else [])
@@ -182,14 +182,14 @@ class TestIssueAttachmentsHelper:
 
     def test_exception_degrades_to_empty(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         def boom(o, r, n):
             raise RuntimeError("storage down")
         monkeypatch.setattr(ic, "_attach_list", boom)
         assert ri._issue_attachments([REPO], 85) == []
 
     def test_empty_number(self):
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         assert ri._issue_attachments([REPO], None) == []
         assert ri._issue_attachments([REPO], "") == []
 
@@ -199,7 +199,7 @@ class TestIssueAttachmentsHelper:
 class TestDetailEndpoint:
     def test_detail_has_attachments(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         import src.api.pipeline_status as ps
         monkeypatch.setattr(ri, "_repo_keys_of", lambda o, r: [REPO])
         monkeypatch.setattr(ri, "_enforce_session_repo_scope", lambda u, ks: None)
@@ -223,7 +223,7 @@ class TestDetailEndpoint:
 
     def test_detail_no_attachments(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         import src.api.pipeline_status as ps
         monkeypatch.setattr(ri, "_repo_keys_of", lambda o, r: [REPO])
         monkeypatch.setattr(ri, "_enforce_session_repo_scope", lambda u, ks: None)
@@ -248,8 +248,8 @@ class TestDetailEndpoint:
 class TestListEndpoint:
     def _patch(self, monkeypatch, items, atts):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
-        import src.user.org_db as orgdb
+        import src.domains.runtime.routes.issues as ri
+        import src.domains.mgmt.user.org_db as orgdb
         monkeypatch.setattr(ri, "_repo_keys_of", lambda o, r: [REPO])
         monkeypatch.setattr(ri, "_group_events_by_issue", lambda ks, numbers=None: {})
         monkeypatch.setattr(ri, "_issue_stage_map", lambda ks, numbers=None: {})
@@ -261,7 +261,7 @@ class TestListEndpoint:
         monkeypatch.setattr(ic, "_attach_list", lambda o, r, n: list(atts) if n == "85" else [])
 
     def test_list_cards_have_attachments(self, monkeypatch):
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         items = [{"id": 11, "repo_key": REPO, "issue_number": 85, "status": "active",
                   "created_at": "2026-11-02 00:00:00"},
                  {"id": 12, "repo_key": REPO, "issue_number": 90, "status": "active",
@@ -276,7 +276,7 @@ class TestListEndpoint:
         assert by_num[90]["attachments"] == []
 
     def test_list_no_attachments_empty(self, monkeypatch):
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         items = [{"id": 11, "repo_key": REPO, "issue_number": 85, "status": "active",
                   "created_at": "2026-11-02 00:00:00"}]
         self._patch(monkeypatch, items, [])
@@ -288,7 +288,7 @@ class TestListEndpoint:
     def test_pr_cards_skip_attachments_injection(self, monkeypatch):
         # Issue #648 Required: PR 订阅伪卡片（is_pr_event）不得注入 issue 附件
         # （PR 号与同仓 issue 编号重合时会命中错误附件目录）
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         items = [{"id": 11, "repo_key": REPO, "issue_number": 85, "status": "active",
                   "created_at": "2026-11-02 00:00:00"},
                  {"id": 12, "repo_key": REPO, "issue_number": 85, "status": "active",
@@ -304,7 +304,7 @@ class TestListEndpoint:
 
     def test_pr_subscription_cards_carry_empty_attachments(self, monkeypatch):
         # PR 订阅伪卡片混入列表时 attachments 兜底恒为 []（前端免回退请求、防错配）
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         items = [{"id": 11, "repo_key": REPO, "issue_number": 90, "status": "active",
                   "created_at": "2026-11-02 00:00:00"}]
         pr_card = {"id": -85, "issue_number": 85, "title": "PR #85", "status": "running",
@@ -338,7 +338,7 @@ class TestUploadSync:
 
     def test_sync_called_for_created_issue(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         issue_id = self._insert_issue(85)
         monkeypatch.setattr(ic, "_attach_save", lambda o, r, d, f, content: "http://u/85/doc.md")
         sync_calls = []
@@ -352,7 +352,7 @@ class TestUploadSync:
 
     def test_pending_path_no_sync(self, monkeypatch):
         import src.api.issues_center as ic
-        import src.api.routes.issues as ri
+        import src.domains.runtime.routes.issues as ri
         issue_id = self._insert_issue(0)
         monkeypatch.setattr(ic, "_attach_save", lambda o, r, d, f, content: "http://u/p/doc.md")
         sync_calls = []

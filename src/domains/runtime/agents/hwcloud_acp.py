@@ -63,7 +63,7 @@ def _note_bwrap_fail_once(message: str) -> None:
 def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hwcloud ACP 内循环全局墙钟上限（#282 对齐，与 hermes_acp 同一配置源）。
 
-    取 RUNTIME_TASK_TIMEOUT（与 src/runtime/agent.py 任务级看门狗同源、同默认值），
+    取 RUNTIME_TASK_TIMEOUT（与 src/domains/runtime/engine/agent.py 任务级看门狗同源、同默认值），
     下限保护 max_exec_seconds。
 
     Issue #470：任务级 env 优先（服务端经 env_extra 注入的统一配置值），

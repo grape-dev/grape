@@ -77,7 +77,7 @@ class TestT39CallSitesSwitched:
 
     def test_t39_01_scenes_py_uses_unified_entry(self):
         """T39-01: scenes.py 不再直接调 get_bot_token_by_repo"""
-        with open("src/api/routes/scenes.py") as f:
+        with open("src/domains/mgmt/routes/scenes.py") as f:
             content = f.read()
         # 不应该有 get_bot_token_by_repo 调用（import 不算）
         lines = [l for l in content.split('\n') if 'get_bot_token_by_repo' in l and 'import' not in l]
@@ -87,14 +87,14 @@ class TestT39CallSitesSwitched:
 
     def test_t39_02_chat_py_uses_unified_entry(self):
         """T39-02: chat.py 不再直接调 get_bot_token_by_repo"""
-        with open("src/api/routes/chat.py") as f:
+        with open("src/domains/runtime/routes/chat.py") as f:
             content = f.read()
         lines = [l for l in content.split('\n') if 'get_bot_token_by_repo' in l and 'import' not in l]
         assert len(lines) == 0, f"chat.py should not call get_bot_token_by_repo directly: {lines}"
 
     def test_t39_03_agents_py_uses_unified_entry(self):
         """T39-03: agents.py 不再直接调 get_bot_token_by_repo"""
-        with open("src/api/routes/agents.py") as f:
+        with open("src/domains/mgmt/routes/agents.py") as f:
             content = f.read()
         lines = [l for l in content.split('\n') if 'get_bot_token_by_repo' in l and 'import' not in l]
         assert len(lines) == 0, f"agents.py should not call get_bot_token_by_repo directly: {lines}"
@@ -108,7 +108,7 @@ class TestT39CallSitesSwitched:
 
     def test_t39_05_settings_py_uses_unified_entry(self):
         """T39-05: settings.py 不再直接调 get_bot_token_by_repo"""
-        with open("src/api/routes/settings.py") as f:
+        with open("src/domains/mgmt/routes/settings.py") as f:
             content = f.read()
         lines = [l for l in content.split('\n') if 'get_bot_token_by_repo' in l and 'import' not in l]
         assert len(lines) == 0, f"settings.py should not call get_bot_token_by_repo directly: {lines}"
@@ -125,7 +125,7 @@ class TestT39CallSitesSwitched:
 
     def test_t39_07_repo_manager_uses_unified_entry(self):
         """T39-07: repo_manager.py setup_webhook 不再调 get_bot_token_by_repo"""
-        with open("src/user/repo_manager.py") as f:
+        with open("src/domains/mgmt/user/repo_manager.py") as f:
             content = f.read()
         idx = content.find("def setup_webhook(")
         assert idx >= 0
@@ -134,7 +134,7 @@ class TestT39CallSitesSwitched:
 
     def test_t39_08_feishu_async_uses_unified_entry(self):
         """T39-08: feishu_async.py 不再调 get_bot_token_by_repo"""
-        with open("src/im/feishu_async.py") as f:
+        with open("src/domains/runtime/im/feishu_async.py") as f:
             content = f.read()
         lines = [l for l in content.split('\n') if 'get_bot_token_by_repo' in l and 'import' not in l and '-' not in l.split('get_bot_token_by_repo')[0]]
         assert len(lines) == 0, f"feishu_async.py should not call get_bot_token_by_repo directly: {lines}"

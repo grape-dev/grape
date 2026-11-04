@@ -57,7 +57,7 @@ def _cleanup(cid: int, rids):
 
 
 def _overview_runtimes():
-    from src.api.routes.dashboard import get_ops_overview
+    from src.domains.insight.routes.dashboard import get_ops_overview
     user = {"id": 1, "username": "tester", "org_id": 0}
     data = get_ops_overview(repo="", user=user)
     return {rt["id"]: rt for rt in data["runtimes"]["list"]}
@@ -102,7 +102,7 @@ class TestWorkerNameDisplayUnification:
 
     def test_task_logs_info_device_name_uses_credential_name(self):
         """task-logs info：device_name 字段下发 rc.name（原为 rc.device_name）。"""
-        from src.api.routes.task_logs import get_task_runtime_info
+        from src.domains.runtime.routes.task_logs import get_task_runtime_info
         cid = _insert_credential(name="任务执行机", device_name="task-os-host")
         rid = _insert_runtime(cid)
         task_id = f"t_{uuid.uuid4().hex[:8]}"
@@ -127,7 +127,7 @@ class TestWorkerNameDisplayUnification:
 
     def test_task_logs_info_empty_credential_name_yields_empty_string(self):
         """task-logs info：rc.name 为空 → device_name 下发空串，不回退。"""
-        from src.api.routes.task_logs import get_task_runtime_info
+        from src.domains.runtime.routes.task_logs import get_task_runtime_info
         cid = _insert_credential(name="", device_name="task-os-host")
         rid = _insert_runtime(cid)
         task_id = f"t_{uuid.uuid4().hex[:8]}"
@@ -152,7 +152,7 @@ class TestWorkerNameDisplayUnification:
 
     def test_event_detail_engine_device_uses_credential_name(self):
         """events 事件详情：engine_device 下发 rc.name（原为 rc.device_name）。"""
-        from src.api.routes.events import get_event_detail
+        from src.domains.runtime.routes.events import get_event_detail
         cid = _insert_credential(name="事件执行机", device_name="evt-os-host")
         rid = _insert_runtime(cid)
         seq = None

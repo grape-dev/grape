@@ -17,7 +17,7 @@ from src.kernel.session_manager import db, db_lock
 from src.kernel.config import log
 
 # 官方技能仓库（owner 唯一固定、无其它值；无 env 覆盖——反馈目标恒为官方技能仓。
-# 与 src/storage/scene_sync.py 同源：grape-dev/grape-skills）
+# 与 src/domains/runtime/storage/scene_sync.py 同源：grape-dev/grape-skills）
 _OFFICIAL_SKILLS_REPO = "grape-dev/grape-skills"
 # 项目自身组件反馈标识（CLI / 平台）→ 一律进官方技能仓（official-repo-config-unify-design.md §3.2）
 _OFFICIAL_COMPONENT_KINDS = {"cli", "platform"}

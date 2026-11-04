@@ -14,7 +14,7 @@ os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
 
 class TestServerSideProbeCommands:
-    """服务端探活（src/observability/engine_probe.py）。"""
+    """服务端探活（src/domains/insight/observability/engine_probe.py）。"""
 
     def test_codex_in_probe_commands(self):
         from src.domains.insight.observability.engine_probe import _PROBE_COMMANDS
@@ -49,7 +49,7 @@ class TestServerSideProbeCommands:
 
 
 class TestWorkerSideProbeCommands:
-    """Worker 端探活（src/runtime/agent.py）。"""
+    """Worker 端探活（src/domains/runtime/engine/agent.py）。"""
 
     def test_codex_in_worker_probe_commands(self):
         from src.domains.runtime.engine.agent import _PROBE_COMMANDS

@@ -529,21 +529,33 @@ def download_skill_zip_by_id(skill_id: int, user: dict = Depends(require_no_sess
 
 
 @router.get("/by-id/{skill_id}", operation_id="skills_detail", summary="Skill detail (incl. SKILL.md)", description="Skill detail including SKILL.md. Access: official public, user=owner, repo=managed by caller.")
-def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_or_api_key),
+def get_skill_detail_by_id(skill_id: str, user: dict = Depends(get_current_user_or_api_key),
                                  repo: str = ""):
-    """返回技能详情（含 SKILL.md 内容）——按技能 id 精确查询，查到后校验归属权限。
+    """返回技能详情（含 SKILL.md 内容）——支持技能 id 或技能名（Issue #630）。
 
-    权限校验：official 可见；user 需本人；repo 需当前用户托管该仓库。
+    - 纯数字：按 id 精确查询；
+    - 非数字：按 skill_name 解析（本人 user 技能 > 可见 repo 技能 > official），
+      未知名称返回 404 而非 422，避免把「名称当 id 解析失败」暴露成参数错误。
+    查到后按 scope 校验归属权限：official 可见；user 需本人；repo 需当前用户托管。
     """
     from src.kernel.session_manager import db, db_lock
-    from src.kernel.config import SKILLS_DIR
 
+    _raw = str(skill_id or "").strip()
     with db_lock:
         c = db.cursor()
-        c.execute(
-            "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1",
-            (skill_id,)
-        )
+        if _raw.isdigit():
+            c.execute(
+                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id FROM skill WHERE id=? AND is_active=1",
+                (int(_raw),)
+            )
+        else:
+            c.execute(
+                "SELECT skill_name, display_name, description, agent_type, skill_path, scope, owner_id, id, is_featured, like_count, sub_scene, category_id "
+                "FROM skill WHERE skill_name=? AND is_active=1 "
+                "AND (scope='official' OR (scope='user' AND owner_id=?) OR scope='repo') "
+                "ORDER BY CASE scope WHEN 'user' THEN 0 WHEN 'repo' THEN 1 ELSE 2 END, id DESC LIMIT 1",
+                (_raw, str(user.get("id") or ""))
+            )
         row = c.fetchone()
 
     if not row:
@@ -572,11 +584,12 @@ def get_skill_detail_by_id(skill_id: int, user: dict = Depends(get_current_user_
 
     # 扩展字段：liked_by_me + 所属场景
     from src.domains.mgmt.user.db import is_skill_liked, get_skill_scenes
-    liked_by_me = is_skill_liked(user.get("id", 0), skill_id)
+    liked_by_me = is_skill_liked(user.get("id", 0), row[7])
     scenes = get_skill_scenes(row[7])  # row[7] = skill.id
 
     skill_dir = row[4] or row[0]
     current_id = row[7]
+    from src.kernel.config import SKILLS_DIR  # 本地兜底分支按官方技能根解析
     # ===== 存储分支（N5）：两级缓存 + 内存解压提取 + zip_url 临时地址/local 直接读 =====
     from src.domains.runtime.storage import get_skill_storage
     storage = get_skill_storage()

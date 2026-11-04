@@ -21,7 +21,7 @@ import hashlib
 import json
 import os
 
-from src.config import log
+from src.kernel.config import log
 
 BASELINE_SUFFIX = ".fidelity.json"
 
@@ -74,7 +74,7 @@ def _scan_staged_blob(wt_dir: str, name: str, token: str) -> dict | None:
     `git show :name` 失败（如 unmerged 路径多 stage）→ 返回 None，调用方降级扫磁盘。
     """
     try:
-        from src.runtime.repogit import _run_git
+        from src.domains.runtime.engine.repogit import _run_git
         b = _run_git(["-C", wt_dir, "show", f":{name}"], token=token)
         if b is None or b.returncode != 0:
             return None
@@ -141,7 +141,7 @@ def _staged_and_unmerged(wt_dir: str, token: str = "") -> tuple[list, set | None
     - `--untracked-files=no`：避免大仓未跟踪文件拖慢（守卫不关心未跟踪）。
     """
     try:
-        from src.runtime.repogit import _run_git
+        from src.domains.runtime.engine.repogit import _run_git
         r = _run_git(["-C", wt_dir, "status", "--porcelain=v1", "-z", "--untracked-files=no"],
                      token=token)
         if r is None or r.returncode != 0:
@@ -196,7 +196,7 @@ def _grep_cached_markers(wt_dir: str, changed: set, token: str = "") -> tuple | 
     变更文件数 ≤ _MAX_PATHSPEC 时用 pathspec 只扫这些文件（小推送更快）；超过则扫
     全 index 后按变更集合取交集。执行失败/异常 → None（调用方回退旧实现）。
     """
-    from src.runtime.repogit import _run_git
+    from src.domains.runtime.engine.repogit import _run_git
     whole_index = len(changed) > _MAX_PATHSPEC
     args = ["-C", wt_dir, "grep", "--cached", "-n", "-I", "-E", _MARKERS_ERE, "--"]
     if not whole_index:
@@ -236,7 +236,7 @@ def _scan_staged_files_legacy(wt_dir: str, token: str = "") -> dict:
     hard: dict = {}
     soft: dict = {}
     try:
-        from src.runtime.repogit import _run_git
+        from src.domains.runtime.engine.repogit import _run_git
         r = _run_git(["-C", wt_dir, "diff", "--cached", "--name-only", "-z"], token=token)
         if r is None or r.returncode != 0:
             return {"hard": hard, "soft": soft}
@@ -262,7 +262,7 @@ def snapshot_functional_files(wt_dir: str, token: str = "") -> dict:
     """非产物功能文件指纹快照：git ls-files 列 tracked 文件，排除产物白名单。"""
     out: dict = {}
     try:
-        from src.runtime.repogit import _run_git
+        from src.domains.runtime.engine.repogit import _run_git
         r = _run_git(["-C", wt_dir, "ls-files", "-z"], token=token)
         if r is None or r.returncode != 0:
             return out

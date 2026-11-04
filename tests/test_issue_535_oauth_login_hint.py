@@ -427,7 +427,7 @@ class TestUC14ExchangeCodeTTL:
 
     def test_uc14_ttl_60s_on_both_insert_paths(self):
         """UC14: 两条 INSERT 路径（首插 + 冲突重试）都写 now+60。"""
-        src = _read_src("src/user/db.py")
+        src = _read_src("src/domains/mgmt/user/db.py")
         idx = src.find("def save_exchange_code")
         func = src[idx:idx + 2500]
         assert func.count("_t.time() + 60") == 2, \
@@ -436,7 +436,7 @@ class TestUC14ExchangeCodeTTL:
 
     def test_uc14_atomic_consume_keeps_expiry_guard(self):
         """UC14: 一次性原子消费不变——DELETE 带 expires > now 条件。"""
-        src = _read_src("src/user/db.py")
+        src = _read_src("src/domains/mgmt/user/db.py")
         idx = src.find("def validate_exchange_code")
         func = src[idx:idx + 1500]
         assert "DELETE FROM exchange_codes WHERE code=? AND expires > ?" in func, \
@@ -652,7 +652,7 @@ class TestUC16JwtSecretPersistence:
 
     def test_uc16_security_config_prefers_file_over_env(self):
         """UC16a: security.json 文件通道优先于环境变量（配置层级与 spec 一致）。"""
-        src = _read_src("src/auth/security_config.py")
+        src = _read_src("src/domains/mgmt/auth/security_config.py")
         idx = src.find("def get_credential_keys")
         func = src[idx:idx + 800]
         # 代码顺序：先取 cfg.get(...credential_keys)（文件），val 为空才走 JWT_SECRET 派生

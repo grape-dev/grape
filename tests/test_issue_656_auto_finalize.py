@@ -85,7 +85,7 @@ def test_auto_done_when_all_nodes_completed():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="processing", stage="sre")
     _seed_events(_ALL_COMPLETED)
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _inst = _cli.return_value
         _inst.get_issue_state.return_value = "open"
         _inst.close_issue.return_value = {"ok": True}
@@ -103,7 +103,7 @@ def test_failed_node_falls_back_pending_review():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="processing", stage="sre")
     _seed_events({**_ALL_COMPLETED, "qa": "failed"})
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res == "pending_review_fallback", _res
         _cli.return_value.close_issue.assert_not_called()
@@ -117,7 +117,7 @@ def test_running_event_noop():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="processing", stage="sre")
     _seed_events({**_ALL_COMPLETED, "sre": "running"})
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res.startswith("noop:node_running"), _res
         _cli.return_value.close_issue.assert_not_called()
@@ -128,7 +128,7 @@ def test_pending_review_status_not_auto_finalized():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="pending_review", stage="sre")
     _seed_events(_ALL_COMPLETED)
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res == "noop:pending_review", _res
         _cli.return_value.close_issue.assert_not_called()
@@ -148,7 +148,7 @@ def test_terminal_idempotent():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="completed", stage="done")
     _seed_events(_ALL_COMPLETED)
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res == "noop:terminal", _res
         _cli.return_value.close_issue.assert_not_called()
@@ -184,7 +184,7 @@ def test_github_mirror_issue_closed_on_auto_finalize():
     try:
         _seed(status="processing", stage="sre")
         _seed_events(_ALL_COMPLETED)
-        with patch("src.vcs.api_client.VcsApiClient") as _cli:
+        with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
             _inst = _cli.return_value
             _inst.get_issue_state.return_value = "open"
             _inst.close_issue.return_value = {"ok": True}
@@ -208,7 +208,7 @@ def test_no_github_mirror_closes_only_gitcode():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="processing", stage="sre")
     _seed_events(_ALL_COMPLETED)
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _inst = _cli.return_value
         _inst.get_issue_state.return_value = "open"
         _inst.close_issue.return_value = {"ok": True}
@@ -238,7 +238,7 @@ def test_terminal_compensates_stage_alignment():
     from src.api.issues_center import auto_finalize_issue_on_last_node
     _seed(status="completed", stage="sre")   # 模拟 set_issue_stage 历史失败残留
     _seed_events(_ALL_COMPLETED)
-    with patch("src.vcs.api_client.VcsApiClient") as _cli:
+    with patch("src.domains.runtime.vcs.api_client.VcsApiClient") as _cli:
         _res = auto_finalize_issue_on_last_node(_REPO, f"#{_NUM}", "sre", source="test")
         assert _res == "noop:terminal", _res
         _cli.return_value.close_issue.assert_not_called()

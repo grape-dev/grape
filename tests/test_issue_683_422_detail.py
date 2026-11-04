@@ -15,7 +15,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -32,7 +32,7 @@ def setup_module():
     if not uid:
         uid = grape_account_db.get_grape_account_by_username("test_issues_683")
     from src.api.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     token = create_access_token(uid["id"], uid["username"], get_token_version(uid["id"]))
     _headers["Authorization"] = f"Bearer {token}"
 

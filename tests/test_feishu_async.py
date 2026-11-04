@@ -1,4 +1,4 @@
-"""飞书异步封装单元测试（src/im/feishu_async.py）。
+"""飞书异步封装单元测试（src/domains/runtime/im/feishu_async.py）。
 
 覆盖：seen 消息去重持久化、BotState/BotMetrics/BotContext、GitCode 协作者拉取、
 WS 消息解析（parse_ws_message / _parse_event）、ack 帧构造、BotManager 编排。

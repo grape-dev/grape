@@ -1,6 +1,6 @@
 """Issue #757 消费方接线：服务端 bash 命令「写目标」审计（默认关闭）。
 
-背景：`src/agent/command_paths.extract_write_targets` 是语法感知的写目标提取实现，
+背景：`src/domains/runtime/agents/command_paths.extract_write_targets` 是语法感知的写目标提取实现，
 但合入后没有任何运行时调用方（只有单测）。本模块把它接到服务端工具事件流上，让实现
 真正被消费，服务于「命令审计」这一加法能力，**不改变任何任务判定语义**：
 
@@ -17,8 +17,8 @@ from __future__ import annotations
 import os
 import re
 
-from src.agent.command_paths import extract_write_targets
-from src.config import log
+from src.domains.runtime.agents.command_paths import extract_write_targets
+from src.kernel.config import log
 
 _MAX_AUDIT_CHARS = 256 * 1024
 

@@ -1291,7 +1291,7 @@ def submit_feedback(body: FeedbackBody, user: dict = Depends(require_no_session_
 def _chat_dedupe_backends(backends: list[dict]) -> list[dict]:
     """按引擎唯一键去重（Issue #400）：个人机器 user/repo 双档或历史重复行合并为单条。
 
-    键语义与 src/runtime/engine_select.engine_unique_key 对齐（本机直连以
+    键语义与 src/domains/runtime/engine/engine_select.engine_unique_key 对齐（本机直连以
     **类型名+runtime_id** 为键——多主控机同名直连引擎是两台不同机器，不能按类型名
     互并，否则前端下拉只剩一台 master 的引擎；个人/远端以实例名为键）；
     保留首个出现项（查询 id 排序下的权威行）。

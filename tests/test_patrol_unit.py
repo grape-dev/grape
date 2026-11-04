@@ -694,7 +694,7 @@ def test_dispatch_conclusion_and_key_and_marker():
         caller_user={"id": 9, "auth_type": "jwt", "username": "u9"},
         mode_payload={"is_subtask_mode": True, "parent_issue": "#P", "carried_context": {"k": 1}})
     rec = []
-    with patch("src.api.routes.webhook.a2a_endpoint", fake_endpoint), \
+    with patch("src.domains.runtime.routes.webhook.a2a_endpoint", fake_endpoint), \
          patch.object(pc, "_set_finding", lambda fid, status, meta: rec.append((status, meta))):
         import asyncio
         ok = asyncio.run(pc.DispatchHandler().handle(ctx))
@@ -747,7 +747,7 @@ def test_dispatch_verdict_buckets():
             (_boom, "dispatch_error", "open")):
         rec = []
         ctx = _ctx()
-        with patch("src.api.routes.webhook.a2a_endpoint", fake), \
+        with patch("src.domains.runtime.routes.webhook.a2a_endpoint", fake), \
              patch.object(pc, "_set_finding", lambda fid, status, meta: rec.append(status)):
             asyncio.run(pc.DispatchHandler().handle(ctx))
         assert ctx.verdict == want_verdict, f"{fake} → {ctx.verdict}"
@@ -846,7 +846,7 @@ def test_t15_patrol_module_has_no_terminal_write():
 def test_s23_1_a6_table_name_and_unconditional_reclaim():
     # A6：主控新增表必须 grape_t_ 前缀（源码零裸名引用）
     for f in ("src/api/patrol.py", "src/api/patrol_compensate.py",
-              "src/api/routes/patrol.py", "src/api/db_setup.py"):
+              "src/domains/mgmt/routes/patrol.py", "src/api/db_setup.py"):
         src = open(os.path.join(ROOT, f), encoding="utf-8").read()
         bad = re.findall(r"(FROM|INTO|UPDATE|TABLE)\s+(?:IF NOT EXISTS\s+)?patrol_findings\b", src)
         assert not bad, f"{f} 存在裸名表引用: {bad[:3]}"
@@ -887,7 +887,7 @@ def test_s24_1_first_cycle_immediate():
 def test_s24_2_findings_list_stable_order():
     # UC24-2：清单排序钉死——unowned 置顶之外必须按 created_at 倒序；
     # id 是 UUID，按 id 排序=每次刷新随机序（SQL 文本守卫，先例：批处理 FIFO 钉法）。
-    src = open(os.path.join(ROOT, "src/api/routes/patrol.py"), encoding="utf-8").read()
+    src = open(os.path.join(ROOT, "src/domains/mgmt/routes/patrol.py"), encoding="utf-8").read()
     assert "ORDER BY (owner=0) DESC, created_at DESC" in src, \
         "findings 清单必须按 created_at 倒序（id 仅兜底）"
 
@@ -974,7 +974,7 @@ def _finding_row(fid, kind="broken_chain", owner=0, status="open", created="2026
 def test_s25_1_list_findings_contract_and_unowned_pin():
     # UC25-1（S38 后为 admin 视角）：成功面字段契约 + unowned 置顶 + owner 归一
     # （非 int → 0）。admin 全量可见（管理页口径），非 admin 过滤见 test_s38_1。
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     # 行序模拟 ORDER BY (owner=0) DESC 的返回（unowned 在前；SQL 钉死见 UC24-2）
     rows = [_finding_row("f-unowned", owner=0),
             _finding_row("f-str", owner="9"),       # MySQL 兼容层可能返回 str
@@ -996,7 +996,7 @@ def test_s25_1_list_findings_contract_and_unowned_pin():
 
 def test_s25_2_list_findings_filters():
     # UC25-2：status/kind 过滤参数进入 WHERE（脚本行按片段命中）
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     rows = [_finding_row("f2", kind="zombie_queued_dead", status="open")]
     fake = _RouteDb([("status=? AND kind=? AND owner=?", rows)])  # S38：非 admin 过滤进 WHERE
     with patch.object(routes_mod, "db", fake), \
@@ -1009,7 +1009,7 @@ def test_s25_2_list_findings_filters():
 def test_s25_3_dismiss_ok_then_404():
     # UC25-3：open → 200 dismissed；已收敛（rowcount=0）→ 404（PR #802 N2 BLOCK 闭口）
     # S30：归属校验进链——SELECT owner → 归属人/ admin 放行，非归属非 admin → 403
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     import pytest
     # 归属人本人（owner=1，user id=1）dismiss → 200；再 dismiss（rowcount=0）→ 404
     fake = _RouteDb([("SELECT owner FROM grape_t_patrol_findings", [(1,)])], updates=[1, 0])
@@ -1218,7 +1218,7 @@ def test_s29_2_batch_cooldown_excludes_recent_failures():
 def test_s30_1_dismiss_owner_or_admin_only():
     # UC30-1：非归属人非 admin → 403（unowned 高危项不能被任意登录用户消音）
     # 见 test_s25_3 第二段（403 路径）；此处补 admin 放行分支
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     import threading
     fake = _RouteDb([("SELECT owner FROM grape_t_patrol_findings", [(7,)]),
                      ("FROM admin_accounts WHERE id=?", [(1,)])], updates=[1])
@@ -1289,7 +1289,7 @@ def test_s33_1_race_detected_aligns_and_records():
     # UC33-1：派发成功后 issue 已终态（completed）→ race_detected 回执 +
     # 对齐收敛调用 _sync_issue_pipeline_terminal（打点验证）+ 延迟二次扫排程
     import asyncio
-    import src.api.routes.issues as issues_mod
+    import src.domains.runtime.routes.issues as issues_mod
 
     async def _ok_endpoint(*a, **k):
         return {"status": "ok"}
@@ -1306,7 +1306,7 @@ def test_s33_1_race_detected_aligns_and_records():
             return 0
         return _noop()
 
-    with patch("src.api.routes.webhook.a2a_endpoint", _ok_endpoint), \
+    with patch("src.domains.runtime.routes.webhook.a2a_endpoint", _ok_endpoint), \
          patch.object(issues_mod, "_sync_issue_pipeline_terminal",
                       lambda rk, num: calls.append((rk, num)) or 2), \
          patch.object(pc, "_align_convergence_delayed", _fake_delayed), \
@@ -1327,7 +1327,7 @@ def test_s33_1_race_detected_aligns_and_records():
 def test_s33_2_non_terminal_zero_action():
     # UC33-2：派发成功且 issue 非终态 → 无 race 回执、对齐收敛零调用
     import asyncio
-    import src.api.routes.issues as issues_mod
+    import src.domains.runtime.routes.issues as issues_mod
 
     async def _ok_endpoint(*a, **k):
         return {"status": "ok"}
@@ -1344,7 +1344,7 @@ def test_s33_2_non_terminal_zero_action():
             return 0
         return _noop()
 
-    with patch("src.api.routes.webhook.a2a_endpoint", _ok_endpoint), \
+    with patch("src.domains.runtime.routes.webhook.a2a_endpoint", _ok_endpoint), \
          patch.object(issues_mod, "_sync_issue_pipeline_terminal",
                       lambda rk, num: calls.append((rk, num)) or 0), \
          patch.object(pc, "_align_convergence_delayed", _fake_delayed), \
@@ -1360,7 +1360,7 @@ def test_s33_2_non_terminal_zero_action():
 def test_s33_3_align_delegates_to_sync_and_guards():
     # UC33-3：_align_convergence_once 委托 _sync（语义单 owner，patrol 零
     # agent_tasks SQL——D18 结构断言保住）；issue_id 非数字（如 #pr_123）→ 零调用
-    import src.api.routes.issues as issues_mod
+    import src.domains.runtime.routes.issues as issues_mod
     calls = []
     with patch.object(issues_mod, "_sync_issue_pipeline_terminal",
                       lambda rk, num: calls.append((rk, num)) or 1):
@@ -1383,7 +1383,7 @@ def test_s33_4_delayed_resweep_runs_and_idempotent():
     # UC33-4：延迟二次扫（delay=0 直跑）委托同一 _sync 通道——异步晚生任务
     # 的兜底收回；_sync 幂等（谓词只动 queued/dispatched/running），重复扫零副作用
     import asyncio
-    import src.api.routes.issues as issues_mod
+    import src.domains.runtime.routes.issues as issues_mod
     calls = []
     with patch.object(issues_mod, "_sync_issue_pipeline_terminal",
                       lambda rk, num: calls.append((rk, num)) or 1):
@@ -1466,7 +1466,7 @@ def test_s35_1_scan_endpoint_contract_and_offload():
     # UC35-1：POST /api/patrol/scan 触发一轮（to_thread 卸载），回显 scan 统计
     # 契约；手动轮刻意只做检测面（不补偿不抢主——补偿仍走选主门控自动循环）。
     import asyncio
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     called = []
 
     def _fake_scan(mode=""):
@@ -1480,14 +1480,14 @@ def test_s35_1_scan_endpoint_contract_and_offload():
     assert res["scan"]["broken"] == 1 and res["scan"]["purged"] == 2
     assert called == [""], "手动轮必须以空 mode（运行真源档）触发一轮扫描"
     # D23 结构断言：路由内扫描经 to_thread 卸载（同步全表扫描不冻事件循环）
-    src = open(os.path.join(ROOT, "src/api/routes/patrol.py"), encoding="utf-8").read()
+    src = open(os.path.join(ROOT, "src/domains/mgmt/routes/patrol.py"), encoding="utf-8").read()
     assert "asyncio.to_thread(run_patrol_once" in src
 
 
 def test_s35_2_scan_endpoint_failure_isolated():
     # UC35-2：扫描异常 → 500 收口，绝不外溢进事件循环（S5 巡检自身故障不伤主链同款）
     import asyncio
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     from fastapi import HTTPException
 
     def _boom(mode=""):
@@ -1551,7 +1551,7 @@ def test_s37_3_handoff_key_none_rejected():
 def test_s38_1_non_admin_sees_own_rows_only():
     # UC38-1：非 admin → WHERE owner=? 进 SQL，只见自己的行；
     # unowned（owner=0，"无人知晓"高危项）对非 admin 不可见（仅 admin 收敛口径同 S30）
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
     rows = [_finding_row("f-mine", owner=7)]
     fake = _RouteDb([("owner=?", rows)])   # 仅在 owner 过滤拼进 WHERE 时命中
     with patch.object(routes_mod, "db", fake), \
@@ -1565,7 +1565,7 @@ def test_s38_1_non_admin_sees_own_rows_only():
 
 def test_s38_2_admin_gate_query_failure_degrades_to_owner_filter():
     # UC38-2：admin 台账查询异常 → fail-safe 收敛为归属过滤（宁可少看不可多看）
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
 
     class _BoomDb:
         def cursor(self):
@@ -1607,7 +1607,7 @@ def test_s39_1_concurrent_scan_second_gets_409():
     import asyncio
     import time as _time
     from fastapi import HTTPException
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
 
     def _slow_scan(mode=""):
         _time.sleep(0.25)
@@ -1633,7 +1633,7 @@ def test_s39_2_gate_released_on_error():
     # UC39-2：扫描异常 → 500 收口且 finally 释放闸（闸不死锁）→ 下一轮可正常触发
     import asyncio
     from fastapi import HTTPException
-    from src.api.routes import patrol as routes_mod
+    from src.domains.mgmt.routes import patrol as routes_mod
 
     calls = []
 
@@ -2280,7 +2280,7 @@ def test_s50_2_seed_skips_existing_meta_keys():
     # UC50-2：文件 seed 只写 meta 空键——已有键不覆盖（S13/login-whitelist
     # 先例语义首次有断言）；bool 序列化为小写字符串
     set_calls = []
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
 
     def _get(mkey):
         return {"patrol:interval_seconds": "999"}.get(mkey, "")
@@ -2304,7 +2304,7 @@ def test_s50_2_seed_skips_existing_meta_keys():
 
 def test_s50_3_seed_failure_swallowed():
     # UC50-3：meta 读写异常吞掉返回 0（继续以代码默认+meta 为准，不炸启动）
-    import src.user.db as udb
+    import src.domains.mgmt.user.db as udb
     with patch.object(udb, "get_meta_value",
                       lambda mkey: (_ for _ in ()).throw(RuntimeError("db gone"))), \
          patch.object(patrol_mod, "_cfg", {"interval_seconds": 300}):
@@ -2435,16 +2435,17 @@ def test_s52_3_meta_mode_bad_value_falls_back():
 
 def test_s53_1_main_shutdown_cancels_patrol_task():
     # UC53-1：进程关闭必须 cancel patrol 后台任务——main.py 742 行注释记录过
-    # 同类真实事故（漏 cancel → 循环残留后台继续写库 → 用例成片假失败），
-    # patrol_loop 是无限循环写库任务，复发封口（结构断言，先例 test_s24_1 钉法）
-    src = open(os.path.join(ROOT, "src/api/main.py"), encoding="utf-8").read()
+    # 同类真实事故（漏 cancel → 循环残留后台继续写库 → 用例成片假失败）。
+    # Issue #699 四进程拆分后 patrol 的启动/收口统一收敛到 server_tasks.start/stop_mgmt_tasks
+    # （main.py 单进程模式同样经由此函数），结构断言改钉收敛后的唯一事实源。
+    src = open(os.path.join(ROOT, "src/api/server_tasks.py"), encoding="utf-8").read()
     i_task = src.find("_patrol_task = asyncio.create_task(patrol_loop())")
     i_cancel = src.find("_patrol_task.cancel()")
     i_wait = src.find("wait_for(_patrol_task, timeout=5)")
     assert 0 < i_task < i_cancel, "启动创建的 patrol 任务必须在 shutdown 被 cancel"
     assert 0 < i_cancel < i_wait, "cancel 后必须等待收口（同 obs 三循环口径）"
-    # shutdown 段而非启动段：cancel 必须出现在 yield 之后的清理段
-    assert src.find("yield") < i_cancel, "cancel 必须在 lifespan 清理段"
+    # 收口必须在 stop_mgmt_tasks（关闭段）内
+    assert src.find("async def stop_mgmt_tasks") < i_cancel, "cancel 必须在关闭段"
 
 
 def test_s53_2_compensate_sync_chain_offloaded():

@@ -129,12 +129,12 @@ def _app_paths(app) -> list[str]:
 
 class TestRuntimeViewRouter:
     def test_runtime_view_router_importable(self):
-        from src.api.routes import runtime_view
+        from src.domains.runtime.routes import runtime_view
         assert runtime_view.view_router is not None
         assert runtime_view.router is runtime_view.view_router  # backward-compat alias
 
     def test_runtime_view_has_user_facing_get_endpoints(self):
-        from src.api.routes import runtime_view
+        from src.domains.runtime.routes import runtime_view
         paths = {(r.path, tuple(sorted(r.methods))) for r in runtime_view.view_router.routes}
         expected = {
             ("/api/runtime/admin/machine-health", ("GET",)),
@@ -150,7 +150,7 @@ class TestRuntimeViewRouter:
             assert (path, methods) in paths, f"runtime_view missing {path}"
 
     def test_runtime_view_has_user_facing_put_endpoints(self):
-        from src.api.routes import runtime_view
+        from src.domains.runtime.routes import runtime_view
         paths = {(r.path, tuple(sorted(r.methods))) for r in runtime_view.view_router.routes}
         for path in ("/api/runtime/runtimes/{runtime_id}/tags",
                      "/api/runtime/runtimes/{runtime_id}/max-concurrent",
@@ -160,7 +160,7 @@ class TestRuntimeViewRouter:
 
     def test_runtime_view_excludes_worker_protocol_endpoints(self):
         """Worker 协议 POST 端点不在 runtime_view（归 runtime.py / C 进程）。"""
-        from src.api.routes import runtime_view
+        from src.domains.runtime.routes import runtime_view
         paths = {r.path for r in runtime_view.view_router.routes}
         assert "/api/runtime/register" not in paths
         assert "/api/runtime/heartbeat" not in paths
@@ -170,7 +170,7 @@ class TestRuntimeViewRouter:
 
     def test_runtime_view_registers_original_functions(self):
         """视图端点复用 runtime.py 原函数对象（单一实现源）。"""
-        from src.api.routes import runtime_view, runtime
+        from src.domains.runtime.routes import runtime_view, runtime
         by_path = {r.path: r.endpoint for r in runtime_view.view_router.routes}
         for path, fn_name in (
             ("/api/runtime/admin/machine-health", "machine_health_overview"),
@@ -183,7 +183,7 @@ class TestRuntimeViewRouter:
 
     def test_a_process_includes_runtime_view_router(self):
         from src.api import grape_server
-        from src.api.routes import runtime_view
+        from src.domains.runtime.routes import runtime_view
         # include_router copies route objects, so compare (path, methods, endpoint)
         view = {(getattr(r, "path", ""), tuple(sorted(getattr(r, "methods", ()))),
                  id(getattr(r, "endpoint", None))) for r in runtime_view.view_router.routes}
@@ -205,12 +205,12 @@ class TestRuntimeViewRouter:
 
 class TestEventsOpsRouter:
     def test_events_module_exposes_ops_router(self):
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         assert events.ops_router is not None
         assert events.router is not None  # 单进程模式完整 router 保留
 
     def test_ops_router_contains_operation_endpoints(self):
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         got = {(r.path, tuple(sorted(r.methods))) for r in events.ops_router.routes}
         expected = {
             ("/api/events/{seq}/terminate", ("POST",)),
@@ -228,26 +228,26 @@ class TestEventsOpsRouter:
 
     def test_ops_router_excludes_view_endpoints(self):
         """GET 查看端点不在 ops_router（归 A 的完整 router）。"""
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         for r in events.ops_router.routes:
             assert "GET" not in r.methods, f"ops_router must not serve GET {r.path}"
 
     def test_ops_router_reuses_original_functions(self):
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         by_path = {r.path: r.endpoint for r in events.ops_router.routes}
         assert by_path.get("/api/events/{seq}/terminate") is events.terminate_event
         assert by_path.get("/api/events/{seq}/redispatch") is events.redispatch_event
 
     def test_full_router_still_has_both_view_and_ops(self):
         """单进程完整 router 同时含 GET 详情与操作端点（兼容不变）。"""
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         full = {(r.path, tuple(sorted(r.methods))) for r in events.router.routes}
         assert ("/api/events/detail/{seq}", ("GET",)) in full
         assert ("/api/events/{seq}/terminate", ("POST",)) in full
 
     def test_b_process_includes_ops_router_not_full(self):
         from src.api import grape_event_server
-        from src.api.routes import events
+        from src.domains.runtime.routes import events
         # include_router copies route objects, so compare (path, methods, endpoint)
         def _route_ids(routes):
             return {(getattr(r, "path", ""), tuple(sorted(getattr(r, "methods", ()))),
@@ -363,7 +363,7 @@ class TestSystemdUnits:
 
 class TestSweepSplit:
     def test_cleanup_exports_split_symbols(self):
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         for name in ("sweep_events_once", "sweep_tasks_once",
                      "sweep_events_loop", "sweep_tasks_loop", "sweep_loop", "sweep_once"):
             assert hasattr(cleanup, name), f"cleanup missing {name}"
@@ -371,7 +371,7 @@ class TestSweepSplit:
     def test_sweep_once_composition(self):
         """sweep_once（单进程兼容）= B 维度 + C 维度清理全集。"""
         import inspect
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         src_once = inspect.getsource(cleanup.sweep_once)
         assert "sweep_stuck_events_once" in src_once
         assert "sweep_stuck_agent_tasks_once" in src_once
@@ -379,7 +379,7 @@ class TestSweepSplit:
     def test_sweep_events_once_scope(self):
         """sweep_events_once（B 维度）含事件回收，不含 agent_tasks 回收。"""
         import inspect
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         src_b = inspect.getsource(cleanup.sweep_events_once)
         assert "sweep_stuck_events_once" in src_b
         assert "purge_stale_instances" in src_b
@@ -389,7 +389,7 @@ class TestSweepSplit:
     def test_sweep_tasks_once_scope(self):
         """sweep_tasks_once（C 维度）只回收悬空 agent_tasks。"""
         import inspect
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         src_c = inspect.getsource(cleanup.sweep_tasks_once)
         assert "sweep_stuck_agent_tasks_once" in src_c
         assert "sweep_stuck_events_once" not in src_c, \
@@ -398,14 +398,14 @@ class TestSweepSplit:
     def test_sweep_loops_use_shared_interval(self):
         """两个 loop 保持 15min（_SWEEP_INTERVAL，SWEEPER_INTERVAL_SECONDS 可配）。"""
         import inspect
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         for loop in (cleanup.sweep_events_loop, cleanup.sweep_tasks_loop):
             assert asyncio.iscoroutinefunction(loop)
             src = inspect.getsource(loop)
             assert "_SWEEP_INTERVAL" in src
 
     def test_sweep_tasks_once_returns_int(self):
-        from src.runtime import cleanup
+        from src.domains.runtime.engine import cleanup
         # 无 DB 任务时应安全返回 0（worker 端无表场景 try/except 兜底）
         result = cleanup.sweep_tasks_once()
         assert isinstance(result, int)
@@ -590,10 +590,10 @@ class TestReviewFixBotManagerMigration:
     """审查 Required #1：多进程下 IM 动态增删 bot 的调用点必须走 registry。"""
 
     CALL_SITES = [
-        ("src/api/routes/feishu_card.py", 2),
-        ("src/api/routes/feishu_onboard.py", 1),
-        ("src/api/routes/chat.py", 1),
-        ("src/api/routes/agents.py", 2),
+        ("src/domains/mgmt/routes/feishu_card.py", 2),
+        ("src/domains/mgmt/routes/feishu_onboard.py", 1),
+        ("src/domains/runtime/routes/chat.py", 1),
+        ("src/domains/mgmt/routes/agents.py", 2),
     ]
 
     def test_no_route_file_imports_bot_manager_from_main(self):
@@ -627,8 +627,8 @@ class TestReviewFixBotManagerMigration:
 class TestReviewFixDirectTerminateStateDriven:
     """审查 Required #2：direct 模式跨进程终止改为状态驱动取消（C 侧探测杀引擎）。"""
 
-    SRC = REPO_ROOT / "src/runtime/direct_executor.py"
-    EVENTS = REPO_ROOT / "src/api/routes/events.py"
+    SRC = REPO_ROOT / "src/domains/runtime/engine/direct_executor.py"
+    EVENTS = REPO_ROOT / "src/domains/runtime/routes/events.py"
 
     def test_direct_executor_has_external_terminal_probe(self):
         src = self.SRC.read_text(encoding="utf-8")

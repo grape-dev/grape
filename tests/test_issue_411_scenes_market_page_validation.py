@@ -1,7 +1,7 @@
 """Issue #411（AT-VAL-06）：GET /api/scenes/market 非正分页参数返回 500 并回显数据库错误原文。
 
 缺陷：list_scenes_market 端点 page/page_size 无 ge=1 约束，负数/零值经 list_scene_market
-进入 SQL `LIMIT {page_size} OFFSET {(page-1)*page_size}`（src/user/db.py:3655）触发 SQLite
+进入 SQL `LIMIT {page_size} OFFSET {(page-1)*page_size}`（src/domains/mgmt/user/db.py:3655）触发 SQLite
 语法错误 → 500 + 数据库错误原文回显。
 
 修复期望（Acceptance Criteria）：

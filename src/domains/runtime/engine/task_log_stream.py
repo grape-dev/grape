@@ -3,7 +3,7 @@
 设计（对齐 multica TaskMessage 广播模型，grape 用 SSE 而非 WS）：
 - 服务端进程内维护 task_id → set[asyncio.Queue] 订阅表
 - worker 上报消息落库后 fanout 到订阅队列（队列满丢弃保活，SSE 重连靠 ?since= 补数据）
-- SSE 端点（src/api/routes/task_logs.py）先发存量、再阻塞读队列
+- SSE 端点（src/domains/runtime/routes/task_logs.py）先发存量、再阻塞读队列
 - DB 是唯一事实源，实时推送只是加速；断线/新开页用 GET /messages?since= 增量回源
 """
 import asyncio

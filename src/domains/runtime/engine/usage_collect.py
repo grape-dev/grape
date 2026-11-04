@@ -38,7 +38,7 @@ log = logging.getLogger(__name__)
 # ---------------------------------------------------------------- 路径解析
 
 def _cwd_hash(cwd: str) -> str:
-    """与 src/agent/{hermes,hwcloud}_acp.py 的隔离目录算法保持一致。"""
+    """与 src/domains/runtime/agents/{hermes,hwcloud}_acp.py 的隔离目录算法保持一致。"""
     return hashlib.md5((cwd or ".").encode()).hexdigest()[:12]
 
 

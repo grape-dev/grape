@@ -1,7 +1,7 @@
 """复现「worker 事件循环被同步生成器阻塞」根因（见 worker-event-loop-block-rootcause.md）。
 
 真实故障（gitcode-pr-assistant #8 seq499 卡 dispatched）：
-- `_execute_task`（src/runtime/agent.py:105-129）用同步 `for` 迭代 `stream_runtime`（同步生成器），
+- `_execute_task`（src/domains/runtime/engine/agent.py:105-129）用同步 `for` 迭代 `stream_runtime`（同步生成器），
   且仅 batch≥50 才 `await`；
 - 长任务执行期间（batch < 50 且无网络 await 时）整个 asyncio 事件循环被同步 for 循环占住；
 - `_run_loop` 的 claim / heartbeat 无法调度 → 新任务无法领取（卡 dispatched）、心跳中断。

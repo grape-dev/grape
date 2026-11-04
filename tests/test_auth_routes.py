@@ -1,4 +1,4 @@
-"""认证路由测试（src/api/routes/auth.py）：OAuth 发起 / 回调全流程 / 错误分支。
+"""认证路由测试（src/domains/mgmt/routes/auth.py）：OAuth 发起 / 回调全流程 / 错误分支。
 
 mock urllib 网络调用与 meta 配置，不触真实 gitcode.com；state 走真实 DB 校验。
 """

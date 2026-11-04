@@ -11,6 +11,18 @@ def whitelist_path(tmp_path, monkeypatch):
     import src.kernel.config as cfg
     p = tmp_path / "login-whitelist.json"
     monkeypatch.setattr(cfg, "LOGIN_WHITELIST_PATH", str(p))
+    # 测试库 login_whitelist 表清空（启动同步会把 configs/login-whitelist.json 灌入 DB，
+    # 残留行会触发「隐式启用」导致文件降级分支不可达 → 用例随库状态漂移）。
+    # 仅作用于测试 SQLite 库（conftest 强制 DEVOPS_DB_BACKEND=sqlite），不触碰任何 RDS。
+    from src.kernel.session_manager import db, db_lock
+    with db_lock:
+        c = db.cursor()
+        c.execute("DELETE FROM login_whitelist WHERE id > 0")
+        db.commit()
+    # 清缓存，避免上一用例的隐式启用结果被复用（60s TTL）
+    import src.kernel.config as _kcfg
+    _kcfg._WL_ENABLED_CACHE = None
+    _kcfg._WL_CACHE_TS = 0
     return p
 
 

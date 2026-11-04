@@ -74,14 +74,14 @@ def wdb(tmp_path, monkeypatch):
     db_obj = _DB(sqlite3_conn)
     db_lock = threading.Lock()
     import src.session_manager as sm
-    import src.user.db as user_db
+    import src.domains.mgmt.user.db as user_db
     monkeypatch.setattr(sm, "db", db_obj)
     monkeypatch.setattr(sm, "db_lock", db_lock)
     monkeypatch.setattr(user_db, "db", db_obj)
     monkeypatch.setattr(user_db, "db_lock", db_lock)
 
     storage = _MemStorage()
-    import src.storage as storage_mod
+    import src.domains.runtime.storage as storage_mod
     monkeypatch.setattr(storage_mod, "get_skill_storage", lambda: storage)
     monkeypatch.setattr(storage_mod, "ZIP_CACHE_DIR", str(tmp_path / "zipcache"))
     monkeypatch.setattr(storage_mod, "ZIP_CACHE_INDEX", str(tmp_path / "zipcache" / "index.json"))
@@ -101,7 +101,7 @@ def _make_zip(skill_name: str, content: str = "# v") -> bytes:
 
 
 def _call_upload(wdb, zip_bytes, filename, user_id=7):
-    from src.api.routes.skills import upload_skill
+    from src.domains.mgmt.routes.skills import upload_skill
     from fastapi import UploadFile
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=filename)
     user = {"id": user_id, "auth_type": "api_key"}
@@ -110,7 +110,7 @@ def _call_upload(wdb, zip_bytes, filename, user_id=7):
 
 
 def _call_update(wdb, skill_id, zip_bytes, filename, user_id=7):
-    from src.api.routes.skills import update_skill_by_id
+    from src.domains.mgmt.routes.skills import update_skill_by_id
     from fastapi import UploadFile
     uf = UploadFile(file=io.BytesIO(zip_bytes), filename=filename)
     user = {"id": user_id, "auth_type": "api_key"}
@@ -122,7 +122,7 @@ def _seed_skill(wdb, user_id=7, name="my-skill"):
     conn = wdb["conn"]
     zip_bytes = _make_zip(name)
     h = hashlib.sha256(zip_bytes).hexdigest()
-    from src.storage import skill_key
+    from src.domains.runtime.storage import skill_key
     key = skill_key("custom", str(user_id), name)
     cur = conn.execute(
         "INSERT INTO skill (skill_name, display_name, description, agent_type, file_path, scope, owner_id, is_active, content_hash) "
@@ -219,7 +219,7 @@ def test_update_normal_filename_ok(wdb):
 # ---------------------------------------------------------------------------
 
 def test_safe_zip_name_unit():
-    from src.api.routes.skills import _safe_zip_name
+    from src.domains.mgmt.routes.skills import _safe_zip_name
     assert _safe_zip_name(None) == "skill.zip"
     assert _safe_zip_name("") == "skill.zip"
     assert _safe_zip_name("  ") == "skill.zip"
@@ -241,7 +241,7 @@ def test_safe_zip_name_unit():
 # ---------------------------------------------------------------------------
 
 def test_restore_zip_permissions_skips_escaping_member(tmp_path):
-    from src.api.routes.skills import _restore_zip_permissions
+    from src.domains.mgmt.routes.skills import _restore_zip_permissions
     extract_dir = str(tmp_path / "ex")
     os.makedirs(extract_dir)
     victim = str(tmp_path / "victim.txt")

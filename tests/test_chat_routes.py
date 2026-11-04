@@ -1,4 +1,4 @@
-"""Chat Agent 路由测试（src/api/routes/chat.py）。
+"""Chat Agent 路由测试（src/domains/runtime/routes/chat.py）。
 
 覆盖：会话 CRUD、send/send-stream 各路径（无引擎/direct/queue/任务会话）、
 反馈、chat 配置（GET/PUT、app_id 占用校验、技能解析）、内部辅助函数。

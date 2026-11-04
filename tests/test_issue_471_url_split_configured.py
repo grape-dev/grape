@@ -120,7 +120,7 @@ class TestRuntimeServerUrlWorkerFace:
     """Suggested：register 响应的 server_url 对齐 worker 回连地址。"""
 
     def test_runtime_server_url_uses_worker_connect(self):
-        src = _src_text("src/api/routes/runtime.py")
+        src = _src_text("src/domains/runtime/routes/runtime.py")
         assert "get_worker_connect_url" in src
         assert "def _server_url" in src
 

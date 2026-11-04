@@ -17,7 +17,7 @@ os.environ.setdefault("GITCODE_API_TOKEN", "test_token")
 
 
 class TestOsAdapter:
-    """src/runtime/os_adapter.py 路径抽象层。"""
+    """src/domains/runtime/engine/os_adapter.py 路径抽象层。"""
 
     def test_is_windows_returns_bool(self):
         from src.domains.runtime.engine.os_adapter import is_windows

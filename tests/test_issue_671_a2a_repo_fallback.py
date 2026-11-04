@@ -89,19 +89,19 @@ class TestA2ARepoFallback:
     # ── 回退 verdict 判定（_a2a_repo_fallback_check） ──────────────────────
 
     def test_fallback_check_verdicts(self, monkeypatch):
-        from src.api.routes.webhook import _a2a_repo_fallback_check
+        from src.domains.runtime.routes.webhook import _a2a_repo_fallback_check
         monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {})
         assert _a2a_repo_fallback_check(REPO_KEY) == "ok"
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 404", "status_code": 404})
         assert _a2a_repo_fallback_check(REPO_KEY) == "not_found"
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 403", "status_code": 403})
         assert _a2a_repo_fallback_check(REPO_KEY) == "no_permission"
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "conn timeout"})
         assert _a2a_repo_fallback_check(REPO_KEY) == "unreachable"
         monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
@@ -111,7 +111,7 @@ class TestA2ARepoFallback:
     # ── 幂等补录（_a2a_register_repo） ─────────────────────────────────────
 
     def test_register_repo_idempotent(self):
-        from src.api.routes.webhook import _a2a_register_repo
+        from src.domains.runtime.routes.webhook import _a2a_register_repo
         self._clean()
         assert _a2a_register_repo(REPO_KEY) is True
         assert _a2a_register_repo(REPO_KEY) is True
@@ -127,7 +127,7 @@ class TestA2ARepoFallback:
 
         def _no_call(*a, **kw):
             raise AssertionError("registered repo must not trigger fallback")
-        monkeypatch.setattr("src.api.routes.webhook._a2a_repo_fallback_check", _no_call)
+        monkeypatch.setattr("src.domains.runtime.routes.webhook._a2a_repo_fallback_check", _no_call)
         r = self._client().post("/api/a2a", json=self._body())
         assert r.status_code == 200 and r.json().get("seq", 0) > 0, r.text
         self._clean()
@@ -138,7 +138,7 @@ class TestA2ARepoFallback:
 
         def _no_call(*a, **kw):
             raise AssertionError("unauthenticated caller must not trigger fallback probe")
-        monkeypatch.setattr("src.api.routes.webhook._a2a_repo_fallback_check", _no_call)
+        monkeypatch.setattr("src.domains.runtime.routes.webhook._a2a_repo_fallback_check", _no_call)
         r = self._client().post("/api/a2a", json=self._body())
         assert r.status_code == 400, (r.status_code, r.text)
         assert "not hosted" in r.text
@@ -149,7 +149,7 @@ class TestA2ARepoFallback:
         self._clean()
         monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {})
         token = self._session_token()
         client = self._client()
@@ -168,7 +168,7 @@ class TestA2ARepoFallback:
         self._clean()
         monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 404", "status_code": 404})
         token = self._session_token()
         r = self._client().post("/api/a2a", json=self._body(),
@@ -181,7 +181,7 @@ class TestA2ARepoFallback:
         self._clean()
         monkeypatch.setattr("src.token_resolver.TokenResolver.get_token",
                             lambda self, rk: "tok-671")
-        monkeypatch.setattr("src.vcs.api_client.VcsApiClient.get_repo_info",
+        monkeypatch.setattr("src.domains.runtime.vcs.api_client.VcsApiClient.get_repo_info",
                             lambda self: {"error": "HTTP 403", "status_code": 403})
         token = self._session_token()
         r = self._client().post("/api/a2a", json=self._body(),
@@ -218,14 +218,14 @@ class TestCreateRepoFallbackRegistration:
 
     def test_create_host_missing_registers_minimal_row(self, monkeypatch):
         self._clean()
-        from src.api.routes.repos import create_new_repo, CreateRepoBody
-        monkeypatch.setattr("src.api.routes.repos.get_user_token_with_refresh",
+        from src.domains.mgmt.routes.repos import create_new_repo, CreateRepoBody
+        monkeypatch.setattr("src.domains.mgmt.routes.repos.get_user_token_with_refresh",
                             lambda username, user_id=0, **kw: "tok-u")
-        monkeypatch.setattr("src.api.routes.repos.create_repo",
+        monkeypatch.setattr("src.domains.mgmt.routes.repos.create_repo",
                             lambda api_token, name, description="", private=False, **kw: {
                                 "full_name": "owner/newrepo671", "owner": "owner", "name": name})
-        monkeypatch.setattr("src.user.db.get_webhook_url", lambda: "")
-        monkeypatch.setattr("src.api.routes.repos._fetch_and_cache", lambda *a, **kw: [])
+        monkeypatch.setattr("src.domains.mgmt.user.db.get_webhook_url", lambda: "")
+        monkeypatch.setattr("src.domains.mgmt.routes.repos._fetch_and_cache", lambda *a, **kw: [])
         user = {"id": 1, "username": "u671", "auth_type": "jwt"}
         body = CreateRepoBody(name="newrepo671", provider="gitcode", host_after_create=True)
         out = create_new_repo(body, user)
@@ -236,12 +236,12 @@ class TestCreateRepoFallbackRegistration:
                 "WHERE repo_key='gitcode:owner/newrepo671'").fetchone()
         assert row is not None, "托管未完成也应进入 managed_repos（注册链路兜底）"
         assert row[0] == "owner" and row[1] == "newrepo671" and row[2] == "webhook_missing"
-        from src.user.db import managed_repo_exists
+        from src.domains.mgmt.user.db import managed_repo_exists
         assert managed_repo_exists("gitcode:owner/newrepo671") is True
         self._clean()
 
     def test_managed_repo_exists_helper(self):
-        from src.user.db import managed_repo_exists
+        from src.domains.mgmt.user.db import managed_repo_exists
         self._clean()
         assert managed_repo_exists("gitcode:owner/newrepo671") is False
         assert managed_repo_exists("") is False

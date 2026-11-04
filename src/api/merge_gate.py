@@ -20,7 +20,8 @@ from src.config import log
 
 # 行首锚定：仅识别冲突标记形态，避免正文提及 ">>>>>>>" 字样误报
 _CONFLICT_START_RE = re.compile(r"^<{7}( .*)?$")   # <<<<<<< HEAD / <<<<<<< feat/issue-N
-_CONFLICT_END_RE = re.compile(r"^>{7}( .*)?$")     # _CONFLICT_SEP_RE = re.compile(r"^={7}$")           # =======(孤立分隔行，markdown 下划线同形 → 软命中)
+_CONFLICT_END_RE = re.compile(r"^>{7}( .*)?$")     # >>>>>>> dev / >>>>>>> origin/main
+_CONFLICT_SEP_RE = re.compile(r"^={7}$")           # =======(孤立分隔行，markdown 下划线同形 → 软命中)
 
 _MAX_SCAN_BYTES = 5 * 1024 * 1024  # 单文件扫描上限（超大文件截断扫描，防内存放大）
 _MAX_FILES_PAGES = 20             # PR files 翻页上限（20 页 × 100 = 2000 文件，防无限循环）

@@ -304,7 +304,7 @@ def test_pulls_comments_update_hex_id_compat(monkeypatch, _client):
             return {"id": 421, "body": "old"}
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
 
     r = client.patch(f"{base}/pulls/9/comments/0df1a2", json={"body": "corrected"})
     assert r.status_code == 200
@@ -331,7 +331,7 @@ def test_pulls_comments_update_hex_id_fallback_list(monkeypatch, _client):
                     {"id": 78, "discussion_id": "00ff00", "body": "other"}]
         return {"ok": True, "echo": {"method": method, "url": url, "body": body}}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
 
     r = client.patch(f"{base}/pulls/9/comments/0df1a2", json={"body": "corrected"})
     assert r.status_code == 200
@@ -362,7 +362,7 @@ def test_pulls_comments_update_hex_id_unresolvable_422(monkeypatch, _client):
             return []
         return {"ok": True}
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
 
     r = client.patch(f"{base}/pulls/9/comments/abcdef", json={"body": "x"})
     assert r.status_code == 422
@@ -855,7 +855,7 @@ def test_json_out_control_chars_parseable(monkeypatch, _client):
     raw_body = "line1\nline2\x01\x1f\x7f end \ud800"
     def _fake_req(method, url, token="", body=None):
         return [{"id": 1, "title": "t", "body": raw_body, "state": "opened"}]
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/pulls")
     assert r.status_code == 200
     assert b"\x01" not in r.content  # 原始控制字符不落字节流
@@ -881,7 +881,7 @@ def test_commits_control_chars_big_page_parseable(monkeypatch, _client):
     def _fake_req(method, url, token="", body=None):
         calls.append(url)
         return [dict(c) for c in upstream]
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _client.get(f"/api/git-repo/{OWNER}/{REPO}/commits?per_page=60")
     assert r.status_code == 200
     assert "per_page=60" in calls[-1]  # 大分页参数如实透传上游
@@ -905,7 +905,7 @@ def test_milestones_state_normalized(monkeypatch, _client):
                     {"id": 2, "title": "v2", "state": "closed"},
                     {"id": 3, "title": "v3", "state": "opened"}]
         return {"id": 9, "title": "v9", "state": "active"}
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     base = f"/api/git-repo/{OWNER}/{REPO}"
     r = _client.get(f"{base}/milestones?state=all")
     assert r.status_code == 200
@@ -949,7 +949,7 @@ def test_pulls_files_diff_normalization(monkeypatch, _client):
     def _fake_req(method, url, token="", body=None):
         return [dict(f) for f in upstream]
 
-    monkeypatch.setattr("src.user.repo_manager._req", _fake_req)
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req", _fake_req)
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200
     files = r.json()
@@ -975,7 +975,7 @@ def test_pulls_files_diff_patch_string_form(monkeypatch, _client):
     base = f"/api/git-repo/{OWNER}/{REPO}"
     upstream = [{"filename": "src/a.py", "status": "modified", "patch": "@@ -1 +1 @@\n+a"}]
 
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         lambda m, u, token="", body=None: [dict(f) for f in upstream])
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200
@@ -986,7 +986,7 @@ def test_pulls_files_diff_patch_string_form(monkeypatch, _client):
 def test_pulls_files_diff_non_list_passthrough(monkeypatch, _client):
     """Issue #731：非 list 出参（如错误回显 dict）不做归一化，原样透传。"""
     base = f"/api/git-repo/{OWNER}/{REPO}"
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         lambda m, u, token="", body=None: {"ok": True})
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200 and r.json() == {"ok": True}
@@ -999,7 +999,7 @@ def test_pulls_files_diff_double_encoded_patch_decoded(monkeypatch, _client):
     upstream = [{"filename": "src/a.py", "status": "modified",
                  "patch": json.dumps({"diff": raw_diff})}]
 
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         lambda m, u, token="", body=None: [dict(f) for f in upstream])
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200
@@ -1014,7 +1014,7 @@ def test_pulls_files_diff_raw_patch_string_wrapped(monkeypatch, _client):
     raw_diff = "@@ -1,2 +1,3 @@\n context\n-old\n+new\n+line"
     upstream = [{"filename": "src/b.py", "status": "modified", "patch": raw_diff}]
 
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         lambda m, u, token="", body=None: [dict(f) for f in upstream])
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200
@@ -1028,7 +1028,7 @@ def test_pulls_files_diff_json_string_without_diff_key_wrapped(monkeypatch, _cli
     upstream = [{"filename": "src/c.py", "status": "modified",
                  "patch": json.dumps({"text": "@@ -1 +1 @@\n+x"})}]
 
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         lambda m, u, token="", body=None: [dict(f) for f in upstream])
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200
@@ -1043,7 +1043,7 @@ def test_pulls_files_diff_json_string_with_empty_diff_wrapped(monkeypatch, _clie
     payload = json.dumps({"diff": ""})
     upstream = [{"filename": "src/d.py", "status": "modified", "patch": payload}]
 
-    monkeypatch.setattr("src.user.repo_manager._req",
+    monkeypatch.setattr("src.domains.mgmt.user.repo_manager._req",
                         lambda m, u, token="", body=None: [dict(f) for f in upstream])
     r = _get(_client, f"{base}/pulls/9/files")
     assert r.status_code == 200

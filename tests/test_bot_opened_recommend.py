@@ -180,7 +180,7 @@ def _dispatch_patches(handler_self_loop=True):
         patch("src.domains.runtime.pipeline.event_pipeline._enqueue_pipeline_task",
               side_effect=_fake_enqueue),
         patch("src.domains.mgmt.user.db.get_agent_bot_token", return_value=""),
-        patch("src.project_info.builder.maybe_refresh_project_info", lambda *a, **k: None),
+        patch("src.domains.runtime.project_info.builder.maybe_refresh_project_info", lambda *a, **k: None),
     ]
 
 

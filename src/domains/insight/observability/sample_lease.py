@@ -27,7 +27,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional
 
-from src.config import log
+from src.kernel.config import log
 
 #: 采样全局租约 key（分布式锁表 distributed_locks 的 lock_key）
 LEASE_KEY = "obs_runtime_sampler"
@@ -45,7 +45,7 @@ def acquire_lease() -> bool:
     - 锁表异常 → False（fail-safe 降级：采样暂停，不放大写入，读侧不受影响）。
     """
     try:
-        from src.lock import acquire_lock
+        from src.kernel.lock import acquire_lock
         return bool(acquire_lock(LEASE_KEY, ttl=LEASE_TTL_SEC))
     except Exception as e:
         log.warning(f"obs sample lease acquire degraded (skip this tick): {e}")
@@ -60,7 +60,7 @@ def renew_lease() -> bool:
     ≤ 60s + 一轮周期，满足"10min 内接管"的验收要求。
     """
     try:
-        from src.lock import renew_lock
+        from src.kernel.lock import renew_lock
         return bool(renew_lock(LEASE_KEY, ttl=LEASE_TTL_SEC))
     except Exception as e:
         log.warning(f"obs sample lease renew degraded (lease may be taken over): {e}")
@@ -70,7 +70,7 @@ def renew_lease() -> bool:
 def release_lease() -> None:
     """释放采样租约（只删自己持有的行；异常静默——TTL 兜底自动过期）。"""
     try:
-        from src.lock import release_lock
+        from src.kernel.lock import release_lock
         release_lock(LEASE_KEY)
     except Exception as e:
         log.warning(f"obs sample lease release failed (TTL will expire it): {e}")
@@ -79,7 +79,7 @@ def release_lease() -> None:
 def lease_status() -> Optional[Dict[str, Any]]:
     """查看租约当前状态（排查/测试用）：holder 与到期时间戳（秒）；无锁返回 None。"""
     try:
-        from src.session_manager import db, db_lock
+        from src.kernel.session_manager import db, db_lock
         with db_lock:
             c = db.cursor()
             row = c.execute(

@@ -41,7 +41,7 @@ def _get_event(seq):
 # UT-1：原 failed 事件经 _mark_event_redispatched → cancelled + 接管说明
 
 def test_mark_redispatched_converts_failed_to_cancelled():
-    from src.api.routes.events import _mark_event_redispatched
+    from src.domains.runtime.routes.events import _mark_event_redispatched
     _seed_event(9201, status="failed", result="旧失败")
     _mark_event_redispatched(9201, 9202, "A2A")
     st, result = _get_event(9201)
@@ -55,7 +55,7 @@ def test_mark_redispatched_converts_failed_to_cancelled():
 def test_node_status_follows_latest_event_after_redispatch():
     from src.api.pipeline_status import compute_node_statuses
     _seed_event(9203, status="failed")
-    from src.api.routes.events import _mark_event_redispatched
+    from src.domains.runtime.routes.events import _mark_event_redispatched
     _mark_event_redispatched(9203, 9204, "A2A")
     _seed_event(9204, status="completed")
     nodes = [{"id": "qa"}]

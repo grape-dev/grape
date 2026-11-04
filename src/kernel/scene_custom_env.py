@@ -1,7 +1,7 @@
 """场景自定义环境变量（custom_fields）共享校验规则（Issue #236）。
 
 单元供两处复用：
-- src/api/routes/scenes.py 保存/读取时校验与掩码；
+- src/domains/mgmt/routes/scenes.py 保存/读取时校验与掩码；
 - src/api/event_pipeline.py 注入 agent env 时兜底校验。
 
 规则：

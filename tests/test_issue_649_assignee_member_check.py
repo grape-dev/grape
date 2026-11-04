@@ -17,7 +17,7 @@ os.environ["DEVOPS_DB_PATH"] = os.path.join(
 from unittest.mock import patch
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -35,7 +35,7 @@ def setup_module():
     if not _uid:
         _uid = grape_account_db.get_grape_account_by_username("test_649")
     from src.api.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     _token = create_access_token(_uid["id"], _uid["username"], get_token_version(_uid["id"]))
     _headers = {"Authorization": f"Bearer {_token}"}
     try:

@@ -1,9 +1,9 @@
 """Issue #470: 服务端派生阈值 getter 化失败测试（红）。
 
 stuck 预警（22min）/ 孤儿回收（6h）原先独立写死于：
-- src/observability/__init__.py:462 `_STUCK_MINUTES = 22`
-- src/api/routes/dashboard.py:134 `timedelta(minutes=22)`
-- src/runtime/cleanup.py:23 `_LONG_RUNNING_MINUTES = 360`（env 兜底保留）
+- src/domains/insight/observability/__init__.py:462 `_STUCK_MINUTES = 22`
+- src/domains/insight/routes/dashboard.py:134 `timedelta(minutes=22)`
+- src/domains/runtime/engine/cleanup.py:23 `_LONG_RUNNING_MINUTES = 360`（env 兜底保留）
 
 改造后均从 src/config.get_stuck_threshold_minutes() / get_orphan_threshold_minutes()
 派生（随统一超时配置缩放）。本文件断言各模块暴露的取值入口跟随配置变化。

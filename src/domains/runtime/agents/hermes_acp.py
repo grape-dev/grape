@@ -51,7 +51,7 @@ def _note_bwrap_fail_once(message: str) -> None:
 def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> float:
     """hermes ACP 内循环全局墙钟上限（#282 对齐修复）。
 
-    取 RUNTIME_TASK_TIMEOUT（与 src/runtime/agent.py 任务级看门狗同一配置源、
+    取 RUNTIME_TASK_TIMEOUT（与 src/domains/runtime/engine/agent.py 任务级看门狗同一配置源、
     同默认值），下限保护 max_exec_seconds——全局上限始终 ≥ 静默超时窗口，
     防止配置异常把全局上限压到静默超时之下。
     旧逻辑 `max_exec_seconds * 2`（=1200s 写死倍率）会在长任务 20 分钟处
@@ -71,7 +71,7 @@ def _global_timeout_for(max_exec_seconds: float, env: dict | None = None) -> flo
 
 # 「疑似提前结束」标记：模型输出 text 后静默超过文本静默上限、且累计输出里没有收尾记录
 # （actions/conclusion）时打上。语义 = 任务被放行（exit 0）但工作可能没做完；
-# 平台侧靠这个标记做可见性（src/runtime/service.py::complete_task 会把它落到
+# 平台侧靠这个标记做可见性（src/domains/runtime/engine/service.py::complete_task 会把它落到
 # agent_tasks.errors + 事件 result 前缀），不降 failed、不触发重跑。
 PREMATURE_END_MARKER = "[PREMATURE_END_TURN]"
 
@@ -98,7 +98,7 @@ def _silent_timeout_for(env: dict | None = None) -> float:
     """hermes ACP 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）。
 
     与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
-    （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
+    （src/domains/runtime/engine/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
     env 优先（任务级），os.environ 次之（手动调参/测试），默认 300s。
     """
     _silent_src = (env or {}).get("HERMES_SILENT_TIMEOUT") or \
@@ -562,7 +562,7 @@ class HermesACPBackend:
             _global_start = time.time()
             # 工具静默超时（HERMES_SILENT_TIMEOUT env 可调，默认 300s）：
             # 与 hwcloud_acp RUNTIME_TOOL_SILENT_TIMEOUT 同模式——任务级 env 注入
-            # （src/runtime/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
+            # （src/domains/runtime/engine/agent.py _execute_task 按 agent_type setdefault，coding/qa=1200s）。
             _SILENT_TIMEOUT = _silent_timeout_for(env)
             _TEXT_SILENT_TIMEOUT = 60  # text 输出后静默 60s → 先做一次「完成证据」检查
             _TEXT_INCOMPLETE_TIMEOUT = _text_incomplete_timeout_for()  # 无证据时最多再等到这里 → 按疑似提前结束收尾

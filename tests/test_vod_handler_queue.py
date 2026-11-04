@@ -1,6 +1,6 @@
 """飞书 VOD bot：非 direct 模式应入队由 RuntimeAgent 执行，direct 保持本地流式。
 
-见 multi-runtime-instance-design 配套 / src/im/vod_handler_async.py._execute_vod_agent。
+见 multi-runtime-instance-design 配套 / src/domains/runtime/im/vod_handler_async.py._execute_vod_agent。
 """
 import asyncio
 import os

@@ -104,7 +104,7 @@ class _FakeRequest:
 
 
 def _register(cid, engines=("t654-opencode",)):
-    from src.api.routes.runtime import runtime_register, RuntimeRegBody
+    from src.domains.runtime.routes.runtime import runtime_register, RuntimeRegBody
     body = RuntimeRegBody(device_name="t654-dev", runtimes=[{"name": n, "version": "v1"} for n in engines])
     return runtime_register(body, _FakeRequest(), credential_id=cid)
 
@@ -132,7 +132,7 @@ class TestScopeRoundtripEngineStability:
     """验收 1/2：scope repo→user→repo 往返后引擎 id / priority / 标签不变。"""
 
     def test_roundtrip_keeps_engine_id_and_priority(self):
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_cred(scope="repo")
         rid = _register(cid)["runtimes"][0]["id"]
         _set_priority(rid, priority=100)
@@ -152,7 +152,7 @@ class TestScopeRoundtripEngineStability:
         assert cnt == 1, f"往返后不应产生重复引擎行，实际 {cnt} 行"
 
     def test_roundtrip_keeps_tags_user_set(self):
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid = _create_cred(scope="repo")
         rid = _register(cid)["runtimes"][0]["id"]
         _set_priority(rid, priority=100, tags_user_set=1)
@@ -225,7 +225,7 @@ class TestEngineRowReplacementMigration:
         return cid, old_rid, new_rid
 
     def test_replacement_migrates_capabilities_and_remaps_references(self, caplog):
-        from src.api.routes.settings import change_credential_scope, CredScopeBody
+        from src.domains.mgmt.routes.settings import change_credential_scope, CredScopeBody
         cid, old_rid, new_rid = self._seed_dirty_state()
         with caplog.at_level("INFO"):
             change_credential_scope(cid, CredScopeBody(scope="user"), user=_user())

@@ -24,7 +24,7 @@ from fastapi.testclient import TestClient
 
 from src.api.main import app
 from src.session_manager import db, db_lock
-from src.auth import grape_account_db
+from src.domains.mgmt.auth import grape_account_db
 
 client = TestClient(app)
 
@@ -50,7 +50,7 @@ _patcher = None
 
 def _jwt(user):
     from src.api.jwt_utils import create_access_token
-    from src.auth.grape_account_db import get_token_version
+    from src.domains.mgmt.auth.grape_account_db import get_token_version
     return create_access_token(user["id"], user["username"], get_token_version(user["id"]))
 
 
@@ -463,7 +463,7 @@ class TestBackfillIntegration:
         """为发布子单建 sre 事件 + agent_tasks 行（普通 sre 任务，无旁路锚点）。"""
         import json as _json
         from src.api.event_store import append_event
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         _seq = append_event(
             repo_key=REPO_KEY, event_type="a2a_event", title=f"Sub #{sub_num}",
             issue_id=f"#{sub_num}", source="a2a", agent_type="sre", actor="",
@@ -481,7 +481,7 @@ class TestBackfillIntegration:
 
     def test_complete_task_backfills_deployed_success(self):
         """exit 0 + deploy_url 证据 → 发布子单 deployed_success（钩子链路）。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         _clean()
         _seed_issue(status="completed", number=150)
         _seed_sre_event(number=150, sha=_SHA)
@@ -498,7 +498,7 @@ class TestBackfillIntegration:
 
     def test_complete_task_backfills_deploy_failed(self):
         """exit != 0 → deploy_failed（失败原因可查询）。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         _clean()
         _seed_issue(status="completed", number=151)
         _seed_sre_event(number=151, sha=_SHA)
@@ -513,7 +513,7 @@ class TestBackfillIntegration:
 
     def test_complete_task_backfills_not_executed(self):
         """exit 0 但无部署证据 → not_executed（completed ≠ 发布成功）。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         _clean()
         _seed_issue(status="completed", number=152)
         _seed_sre_event(number=152, sha=_SHA)
@@ -526,9 +526,9 @@ class TestBackfillIntegration:
 
     def test_normal_sre_task_unaffected(self):
         """普通 sre 任务（非发布子单）→ 钩子零影响（不报错不回填）。"""
-        from src.runtime.service import complete_task
+        from src.domains.runtime.engine.service import complete_task
         from src.api.event_store import append_event
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         _clean()
         # 普通需求（无 release 字段）走正常 sre
         _seed_issue(status="completed", number=153)
@@ -600,7 +600,7 @@ class TestReviewFixesPR799:
 
     def test_r2_fail_task_backfills_deploy_failed(self):
         """R2：worker 失败上报终态（fail_task）→ 发布子单回填 deploy_failed。"""
-        from src.runtime.service import fail_task
+        from src.domains.runtime.engine.service import fail_task
         _clean()
         _seed_issue(status="completed", number=162)
         _seed_sre_event(number=162, sha=_SHA)
@@ -614,7 +614,7 @@ class TestReviewFixesPR799:
 
     def test_r2_fail_task_backfills_then_complete_no_override(self):
         """R2 幂等：fail_task 回填 deploy_failed 后，迟到 complete_task 不得覆盖结果。"""
-        from src.runtime.service import fail_task, complete_task
+        from src.domains.runtime.engine.service import fail_task, complete_task
         _clean()
         _seed_issue(status="completed", number=163)
         _seed_sre_event(number=163, sha=_SHA)
@@ -628,9 +628,9 @@ class TestReviewFixesPR799:
 
     def test_r2_fail_task_normal_sre_unaffected(self):
         """R2 保险：普通 sre 任务（非发布子单）fail_task 零影响。"""
-        from src.runtime.service import fail_task
+        from src.domains.runtime.engine.service import fail_task
         from src.api.event_store import append_event
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         _clean()
         _seed_issue(status="completed", number=164)
         _seed_sre_event(number=164, sha=_SHA)
@@ -659,14 +659,14 @@ class TestReviewFixesPR799:
     def test_r4_create_endpoint_is_sync(self):
         """R4：创建端点为同步 def（线程池执行），不在事件循环内同步阻塞等待 a2a 派发。"""
         import inspect
-        from src.api.routes.issues import create_production_release_endpoint
+        from src.domains.runtime.routes.issues import create_production_release_endpoint
         assert not inspect.iscoroutinefunction(create_production_release_endpoint), \
             "创建端点应改为同步 def，避免 ThreadPoolExecutor+asyncio.run 阻塞事件循环"
 
     def _mk_sre_task_for_subissue(self, sub_num):
         """建带发布子单上下文的 sre 事件 + agent_tasks 行（同 TestBackfillIntegration）。"""
         from src.api.event_store import append_event
-        from src.runtime.service import enqueue_task
+        from src.domains.runtime.engine.service import enqueue_task
         _seq = append_event(
             repo_key=REPO_KEY, event_type="a2a_event", title=f"Sub #{sub_num}",
             issue_id=f"#{sub_num}", source="a2a", agent_type="sre", actor="",

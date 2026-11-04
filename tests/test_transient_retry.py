@@ -531,28 +531,28 @@ def test_do_requeue_no_record_when_requeue_succeeds():
 def test_worker_manifest_covers_transient_retry_deps():
     """UC6-1：MANIFEST 覆盖 transient_retry 全部依赖（目录或显式文件）。
 
-    - src/runtime/ 整目录条目 → transient_retry.py 本体随目录打包；
+    - src/domains/runtime/engine/ 整目录条目 → transient_retry.py 本体随目录打包；
     - 模块级/函数级依赖（config/session_manager/event_store/token_service）逐一在列；
     - 若未来清单改为文件枚举去掉目录条目，本测试逼着维护者显式补
-      src/runtime/transient_retry.py。
+      src/domains/runtime/engine/transient_retry.py。
     """
     import src.kernel.worker_package as wp
     manifest_src = open("src/kernel/worker_package.py", encoding="utf-8").read()
     # MANIFEST 条目（含目录形式）
     entries = set(re.findall(r'"(src/[^"]+)"', manifest_src))
     deps = [
-        "src/runtime/transient_retry.py",   # 本体（经目录条目或显式）
+        "src/domains/runtime/engine/transient_retry.py",   # 本体（经目录条目或显式）
         "src/config.py",
         "src/session_manager.py",
         "src/api/event_store.py",
         "src/token_service.py",
     ]
-    runtime_dir_covered = "src/runtime/" in entries or any(
-        e.startswith("src/runtime/") for e in entries)
+    runtime_dir_covered = "src/domains/runtime/engine/" in entries or any(
+        e.startswith("src/domains/runtime/engine/") for e in entries)
     for d in deps:
-        if d == "src/runtime/transient_retry.py":
+        if d == "src/domains/runtime/engine/transient_retry.py":
             assert runtime_dir_covered or d in entries, (
-                f"worker MANIFEST misses {d}: add it or keep the src/runtime/ dir entry")
+                f"worker MANIFEST misses {d}: add it or keep the src/domains/runtime/engine/ dir entry")
         else:
             assert d in entries, f"worker MANIFEST misses dependency {d}"
     # MANIFEST 对象本身可导入（清单语法漂移早暴露）

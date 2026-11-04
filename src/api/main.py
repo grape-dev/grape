@@ -14,8 +14,8 @@ from src.api import server_common
 from src.domains.mgmt.routes import auth, grape_auth, repos, agents, settings, skills, scenes, templates, feishu_onboard, feishu_card, devstage, feedback, autopilot, orgs, community
 from src.domains.runtime.routes import events, chat, pipeline, webhook, tasks, runtime, task_logs, issues
 from src.domains.insight.routes import dashboard, search, health, latency, observability
-from src.api.routes import knowledge
-from src.api.routes import patrol
+from src.domains.mgmt.routes import knowledge
+from src.domains.mgmt.routes import patrol
 
 
 bot_manager = None
@@ -203,9 +203,9 @@ def _start_server_metrics_task():
 def _start_obs_alert_task():
     """可观测性告警中心循环（30s + SLO 独立周期）——启动并返回 task。"""
     from src.config import log
-    from src.observability import alerts as _obs_alerts
-    from src.observability import slo as _obs_slo
-    from src.observability import loops as _obs_loops
+    from src.domains.insight.observability import alerts as _obs_alerts
+    from src.domains.insight.observability import slo as _obs_slo
+    from src.domains.insight.observability import loops as _obs_loops
 
     _obs_seeded = _obs_alerts.seed_rules()
     _obs_slo_seeded = _obs_slo.seed_defaults()      # P2-1：三条默认 SLO（幂等）
@@ -259,9 +259,9 @@ def _start_obs_alert_task():
 def _start_obs_rollup_task():
     """业务指标聚合循环（60s）——启动并返回 task。"""
     from src.config import log
-    from src.observability import metric_rollup as _obs_mrollup
-    from src.observability import llm_usage as _obs_llm_usage
-    from src.observability import loops as _obs_loops
+    from src.domains.insight.observability import metric_rollup as _obs_mrollup
+    from src.domains.insight.observability import llm_usage as _obs_llm_usage
+    from src.domains.insight.observability import loops as _obs_loops
 
     async def _obs_rollup_loop():
         _tick = 0
@@ -292,9 +292,9 @@ def _start_obs_rollup_task():
 def _start_obs_sample_task():
     """设备资源采样循环（60s）——启动并返回 task。"""
     from src.config import log
-    from src.observability import rollup as _obs_rollup
-    from src.observability import logs as _obs_logs
-    from src.observability import loops as _obs_loops
+    from src.domains.insight.observability import rollup as _obs_rollup
+    from src.domains.insight.observability import logs as _obs_logs
+    from src.domains.insight.observability import loops as _obs_loops
 
     async def _obs_sample_loop():
         while True:
@@ -322,7 +322,7 @@ def _start_active_user_tracker_task():
     from src.config import log
     async def _active_user_tracker():
         from src.api.deps import get_pending_active
-        from src.user import db as user_db
+        from src.domains.mgmt.user import db as user_db
         _purge_i = 0
         while True:
             await asyncio.sleep(30)
@@ -399,7 +399,7 @@ async def lifespan(app: FastAPI):
                         cleanup_old_agent_tasks_fields()
                         delete_old_agent_tasks()
                     async with run_with_distributed_lock("table_maintenance_messages", ttl=3600):
-                        from src.runtime.table_maintenance import cleanup_old_task_messages
+                        from src.domains.runtime.engine.table_maintenance import cleanup_old_task_messages
                         cleanup_old_task_messages()
                 except asyncio.CancelledError:
                     raise

@@ -80,7 +80,7 @@ def install_request_middleware(app: FastAPI) -> None:
                 if _payload and _payload.get("sub"):
                     _uid = str(_payload["sub"])
                 else:
-                    from src.user.db import validate_token
+                    from src.domains.mgmt.user.db import validate_token
                     _uid_val = validate_token(_auth[7:])
                     if _uid_val:
                         _uid = str(_uid_val)
@@ -91,7 +91,7 @@ def install_request_middleware(app: FastAPI) -> None:
         # Issue #372 §14.2.2: 已认证请求到达时从 Host 头推导 webhook_url / server_base_url
         if _uid:
             try:
-                from src.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
+                from src.domains.mgmt.user.db import get_meta_value, set_meta_value, detect_webhook_from_host
                 _host = request.headers.get("host", "")
                 _fwd_host = request.headers.get("x-forwarded-host", "")
                 _fwd_proto = request.headers.get("x-forwarded-proto", "")

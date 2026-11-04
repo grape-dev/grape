@@ -158,11 +158,11 @@ rm -f "$TMP_PKG"
 # 注意：全新安装（无旧代码）时冒烟失败同样 fail，避免装出必死的实例。
 _smoke_check() {
   [ -x "$VENV/bin/python" ] || return 0   # venv 未建（首次安装后续步骤才建）：跳过，由第 6 步启动验证兜底
-  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" >/dev/null 2>&1; then
+  if "$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.domains.runtime.engine.agent" >/dev/null 2>&1; then
     log "New code import smoke check passed"
     return 0
   else
-    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.runtime.agent" 2>&1 | tail -1)"
+    _smoke_err="$("$VENV/bin/python" -c "import sys; sys.path.insert(0, '$INSTALL_DIR'); import src.config; import src.domains.runtime.engine.agent" 2>&1 | tail -1)"
     log "!!! New code import smoke check failed: $_smoke_err"
     log "!!! Upgrade rejected (old code untouched, worker keeps running the current version) -- please report this log to the controller maintainer"
     return 1
@@ -510,7 +510,7 @@ install_engine
 # 目录直接 exit 1。把 worker 安装目录与 codearts tasks 目录合并进
 # ~/.codeartsdoer/cli-data/settings.json 的 trustedFolders（保留已有配置）。
 # ⚠️ Issue #471 QA S4：合并语义（保留 enabled 标志、trustedFolders 并入、
-# 保留其它顶层键）与 src/runtime/codearts.write_trust_settings 逐条对齐——
+# 保留其它顶层键）与 src/domains/runtime/agents/codearts.write_trust_settings 逐条对齐——
 # 修改任意一处必须同步另一处（worker 运行态用 Python 版，安装态用本段自包含实现）。
 provision_codearts_trust() {
   command -v codearts >/dev/null 2>&1 || return 0
@@ -522,7 +522,7 @@ provision_codearts_trust() {
     "$VENV/bin/python" -c "
 import sys
 sys.path.insert(0, '$INSTALL_DIR')
-from src.runtime.codearts import write_trust_settings
+from src.domains.runtime.agents.codearts import write_trust_settings
 write_trust_settings('$_oc_data', ['$INSTALL_DIR', '$_oc_tasks'])
 " && log "codearts folder trust configured (write_trust_settings: trustedFolders += $INSTALL_DIR)" && return 0
   fi
@@ -575,7 +575,7 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=$INSTALL_DIR
-ExecStart=$VENV/bin/python -m src.runtime.agent
+ExecStart=$VENV/bin/python -m src.domains.runtime.engine.agent
 Restart=always
 RestartSec=5
 Environment=PYTHONUNBUFFERED=1
@@ -663,7 +663,7 @@ fi
 cd "$INSTALL_DIR"
 export PATH="$INSTALL_DIR/.venv/bin:\$HOME/.opencode/bin:\$HOME/.local/bin:\$HOME/.local/npm-global/bin:\$PATH"
 set -a; . "$ENV_FILE"; set +a
-exec "$VENV/bin/python" -m src.runtime.agent
+exec "$VENV/bin/python" -m src.domains.runtime.engine.agent
 EOF
   chmod +x "$START_SCRIPT"
   # 停掉旧 daemon（start-worker.sh 的 bash 进程），防止旧 daemon 重启被杀的 worker → 双 daemon 循环竞争
@@ -675,10 +675,10 @@ EOF
   pkill -f "$_daemon_pat" >/dev/null 2>&1 || true
   sleep 1
   # 停掉旧 worker——限定到本安装目录自己的实例（按 venv python 路径匹配）
-  # ⚠️ 不能用裸 "python -m src.runtime.agent" 匹配：会误杀同机其他安装目录/其他用户
+  # ⚠️ 不能用裸 "python -m src.domains.runtime.engine.agent" 匹配：会误杀同机其他安装目录/其他用户
   #    的 worker（2026-10-08 实测：root 升级 /opt/grape 时误杀 liufei ~/grape-worker 的
   #    实例，恰好只因为 root 侧 cmdline 带 -u 才躲过反向误杀）。
-  #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.runtime.agent
+  #    匹配本实例实际启动命令的前缀："$VENV/bin/python" ... -m src.domains.runtime.engine.agent
   #    （$VENV 展开为绝对路径，跨目录/跨用户天然隔离；pgrep -f 按子串匹配含路径）
   _pat="$(printf '%s' "$VENV/bin/python" | sed 's/[.[\*^$]/\\&/g')"
   pkill -f "${_pat}.*-m src\.runtime\.agent" >/dev/null 2>&1 || true

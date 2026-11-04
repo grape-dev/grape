@@ -32,7 +32,7 @@ _CODEARTS_ALLOW_PERMS = [
 
 from src.kernel.config import log, CHAT_CWD_BASE
 from src.domains.runtime.engine.client import CredentialRevokedError
-# R11.4: _get_task_token 抽取到 src/user/db.py，统一调用。
+# R11.4: _get_task_token 抽取到 src/domains/mgmt/user/db.py，统一调用。
 # （2026-10-21 恢复：fbc499c4a 曾把调用点换成裸 task.get("repo_gitcode_token")，
 #   丢失路径 B 托管仓库的实时获取+自动刷新回退，6/29 近期任务 token 为空会受影响。）
 from src.domains.mgmt.user.db import get_task_token as _get_task_token
@@ -2709,7 +2709,7 @@ async def _run_loop(client, runtime_ids, poll_interval, heartbeat_interval, max_
             async def _wrap(t=task, _tid=tid, s=sid, e=engine_by_rid.get(rid, "")):
                 nonlocal hermes_active
                 # Issue #516 M1：超时上限配置化——读取链 per-skill > per-repo > agent 默认
-                # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/runtime/task_timeout.py。
+                # （coding=7200）> 全局 env RUNTIME_TASK_TIMEOUT > 3600，见 src/domains/runtime/engine/task_timeout.py。
                 # （#470 任务级 env_extra 优先语义已包含：链条第 1 优先级即任务级显式 env。）
                 from src.domains.runtime.engine.task_timeout import (resolve_task_timeout, timeout_retry_count,
                                                       retry_backoff_sec)

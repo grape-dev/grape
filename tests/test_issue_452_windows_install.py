@@ -73,7 +73,7 @@ class TestOpenEncodingFix:
         assert 'encoding="utf-8"' in source, "run.py 的 open() 应包含 encoding=utf-8"
 
     def test_executor_py_source_has_encoding(self):
-        """验证 src/agent/executor.py 源码中 open() 包含 encoding 参数"""
+        """验证 src/domains/runtime/agents/executor.py 源码中 open() 包含 encoding 参数"""
         executor_path = os.path.join(_PROJECT_ROOT, "src", "domains", "runtime", "agents", "executor.py")
         with open(executor_path, "r", encoding="utf-8") as f:
             source = f.read()
@@ -81,7 +81,7 @@ class TestOpenEncodingFix:
         assert 'encoding="utf-8"' in source, "executor.py 的 open() 应包含 encoding=utf-8"
 
     def test_image_understanding_source_has_encoding(self):
-        """验证 src/agent/image_understanding.py 源码中 open() 包含 encoding 参数"""
+        """验证 src/domains/runtime/agents/image_understanding.py 源码中 open() 包含 encoding 参数"""
         iu_path = os.path.join(_PROJECT_ROOT, "src", "domains", "runtime", "agents", "image_understanding.py")
         with open(iu_path, "r", encoding="utf-8") as f:
             source = f.read()

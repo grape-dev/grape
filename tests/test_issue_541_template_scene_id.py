@@ -26,7 +26,7 @@ if os.environ["DEVOPS_DB_PATH"] not in sys.path[:0]:
     pass
 
 from src.session_manager import db, db_lock  # noqa: E402
-from src.user.db import add_managed_repo, get_repo_scene, set_repo_scene  # noqa: E402
+from src.domains.mgmt.user.db import add_managed_repo, get_repo_scene, set_repo_scene  # noqa: E402
 from src.api.pipeline_config import (  # noqa: E402
     apply_market_scene_by_name, create_custom_scene, invalidate_scene_cache)
 from src.api.session_store import set_issue_scene  # noqa: E402
@@ -123,7 +123,7 @@ class TestTemplateSceneOverride:
         market_id = _insert_market_scene(name)
         add_managed_repo(repo_key, "test541", repo, dev_scene="default-scene")
         try:
-            from src.api.routes.templates import _apply_template_scene
+            from src.domains.mgmt.routes.templates import _apply_template_scene
             real_id = _apply_template_scene(repo_key, name, 0)
             assert real_id and real_id.startswith("custom-")
             assert get_repo_scene(repo_key) == real_id, "dev_scene 应为仓内副本真实 ID"
@@ -136,7 +136,7 @@ class TestTemplateSceneOverride:
         repo_key = f"gitcode:test541/{repo}"
         add_managed_repo(repo_key, "test541", repo, dev_scene="keep-default")
         try:
-            from src.api.routes.templates import _apply_template_scene
+            from src.domains.mgmt.routes.templates import _apply_template_scene
             ret = _apply_template_scene(repo_key, _unique_name("nope"), 0)
             assert ret == ""
             assert get_repo_scene(repo_key) == "keep-default", "失败应保留默认场景"
@@ -192,7 +192,7 @@ class TestDispatchFailureReason:
 
     def test_reason_scene_not_in_repo(self):
         """仓内不存在的 scene_id → 报「仓内不存在」，不再笼统报全部离线。"""
-        from src.runtime.engine_select import scene_dispatch_failure_reason
+        from src.domains.runtime.engine.engine_select import scene_dispatch_failure_reason
         repo_key = f"gitcode:test541/{_unique_repo()}"
         ghost = _unique_name("ghost541")
         reason = scene_dispatch_failure_reason(ghost, "sre", repo_key=repo_key)
@@ -201,7 +201,7 @@ class TestDispatchFailureReason:
 
     def test_reason_scene_unbound(self):
         """场景仓内存在但 sre 节点未绑引擎 → 报「未绑定引擎」。"""
-        from src.runtime.engine_select import scene_dispatch_failure_reason
+        from src.domains.runtime.engine.engine_select import scene_dispatch_failure_reason
         repo_key = f"gitcode:test541/{_unique_repo()}"
         scene_id = self._scene_with_sre_node(repo_key, [])
         try:
@@ -212,7 +212,7 @@ class TestDispatchFailureReason:
 
     def test_reason_all_offline(self):
         """场景绑定了不存在的引擎 id → Issue #653 起报「已注销或不存在」（原笼统报全部离线）。"""
-        from src.runtime.engine_select import scene_dispatch_failure_reason
+        from src.domains.runtime.engine.engine_select import scene_dispatch_failure_reason
         repo_key = f"gitcode:test541/{_unique_repo()}"
         scene_id = self._scene_with_sre_node(repo_key, [987654])
         try:
@@ -225,7 +225,7 @@ class TestDispatchFailureReason:
 
     def test_sre_pool_none_when_scene_not_in_repo(self):
         """SRE：仓内未命中 → None（不静默回退全局模板行绑定）。"""
-        from src.runtime.engine_select import get_scene_pool_engine_ids
+        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
         repo_key = f"gitcode:test541/{_unique_repo()}"
         ghost = _unique_name("ghost541")
         # 兜底：全局行也不存在，避免依赖全局数据
@@ -233,7 +233,7 @@ class TestDispatchFailureReason:
 
     def test_sre_pool_none_when_scene_unbound(self):
         """SRE：仓内场景未绑引擎 → None（空 = 无引擎，不广播）。"""
-        from src.runtime.engine_select import get_scene_pool_engine_ids
+        from src.domains.runtime.engine.engine_select import get_scene_pool_engine_ids
         repo_key = f"gitcode:test541/{_unique_repo()}"
         scene_id = self._scene_with_sre_node(repo_key, [])
         try:

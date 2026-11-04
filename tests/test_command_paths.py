@@ -10,8 +10,8 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "src")))
 
-import src.runtime  # noqa: F401  # 先初始化 runtime，规避 src.agent 包循环导入顺序
-from src.agent.command_paths import (
+import src.domains.runtime.engine  # noqa: F401  # 先初始化 runtime，规避 src.domains.runtime.agents 包循环导入顺序
+from src.domains.runtime.agents.command_paths import (
     extract_write_targets,
     mask_heredoc_bodies,
     mask_python_c_literals,

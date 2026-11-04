@@ -3,7 +3,7 @@
 覆盖：seed 幂等 / 三类 SLI 的桶比例法与预算状态 / L2-only 边界 / 可见范围为空不降级 /
 配置校验 / 快照幂等与清理 / 燃尽曲线累计与抽稀。
 
-口径（与 `src/observability/slo.py` 模块注释一致）：
+口径（与 `src/domains/insight/observability/slo.py` 模块注释一致）：
   坏桶 = 桶内自身比例 < target 的小时桶；错误预算 = (1-target) × 有数据的桶数；
   消耗比例 ≥ 0.75 → warning，≥ 1.0 → breached。
 """

@@ -23,11 +23,11 @@ from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from src.api.main import app
-from src.user import db as user_db
+from src.domains.mgmt.user import db as user_db
 from src.session_manager import db, db_lock
-from src.runtime.service import verify_skill_materializable
+from src.domains.runtime.engine.service import verify_skill_materializable
 
-from src.auth.password import hash_password as _hash_pw
+from src.domains.mgmt.auth.password import hash_password as _hash_pw
 
 client = TestClient(app)
 
@@ -96,7 +96,7 @@ class TestVerifySkillMaterializable:
                 def read_bytes(self, key):
                     return b"zip"
 
-            with patch("src.storage.get_skill_storage", return_value=_FakeStorage()):
+            with patch("src.domains.runtime.storage.get_skill_storage", return_value=_FakeStorage()):
                 ok, reason, _ = verify_skill_materializable(sname, skill_id=sid)
             assert ok and "obs object ok" in reason, reason
         finally:
@@ -126,7 +126,7 @@ class TestVerifySkillMaterializable:
         sid = _mk_skill_row(scope="user", owner="8", sname=sname,
                             file_path="skills/custom/8/%s.zip" % sname)
         try:
-            with patch("src.storage.get_skill_storage", return_value=None):
+            with patch("src.domains.runtime.storage.get_skill_storage", return_value=None):
                 ok, reason, _ = verify_skill_materializable(sname, skill_id=sid)
             assert not ok, "storage 不可用时不得 fail-open 放行"
             assert "storage unavailable" in reason, reason
@@ -148,7 +148,7 @@ class TestVerifySkillMaterializable:
         try:
             sid = _mk_skill_row(scope="user", owner="9", sname=sname,
                                 file_path="skills/custom/9/%s.zip" % sname)
-            with patch("src.storage.get_skill_storage", return_value=None):
+            with patch("src.domains.runtime.storage.get_skill_storage", return_value=None):
                 ok, reason, _ = verify_skill_materializable(sname, skill_id=sid)
             assert ok, reason
             assert "local skill dir ok" in reason
@@ -187,16 +187,16 @@ class TestSkillsByIdNameResolution:
                 def temporary_url(self, key):
                     return ""
 
-            with patch("src.storage.get_skill_storage", return_value=_FakeStorage()), \
-                 patch("src.storage.skill_md_content", return_value="# skill md"):
+            with patch("src.domains.runtime.storage.get_skill_storage", return_value=_FakeStorage()), \
+                 patch("src.domains.runtime.storage.skill_md_content", return_value="# skill md"):
                 r = client.get(f"/api/skills/by-id/{sname}", headers=self._headers(uid, uname))
             assert r.status_code == 200, f"{r.status_code}: {r.text[:200]}"
             body = r.json()
             assert body.get("id") == sid
             assert body.get("name") == sname
             # 数字 id 路径行为不变
-            with patch("src.storage.get_skill_storage", return_value=_FakeStorage()), \
-                 patch("src.storage.skill_md_content", return_value="# skill md"):
+            with patch("src.domains.runtime.storage.get_skill_storage", return_value=_FakeStorage()), \
+                 patch("src.domains.runtime.storage.skill_md_content", return_value="# skill md"):
                 r2 = client.get(f"/api/skills/by-id/{sid}", headers=self._headers(uid, uname))
             assert r2.status_code == 200 and r2.json().get("id") == sid
         finally:
@@ -270,7 +270,7 @@ class TestPipelineEnqueueGate:
             monkeypatch.setattr(ep, "_fail_event",
                                 lambda seq, msg, **k: failed.append((seq, msg)))
             _enqueued = []
-            monkeypatch.setattr("src.runtime.service.enqueue_task",
+            monkeypatch.setattr("src.domains.runtime.engine.service.enqueue_task",
                                 lambda **k: _enqueued.append(k) or "t_never")
             ep._enqueue_pipeline_task(
                 "gitcode:org/gate630", 9001, "vod", "opencode", sname,
@@ -300,13 +300,13 @@ class TestPipelineEnqueueGate:
         monkeypatch.setattr("src.api.session_store.guard_issue_session_pointer",
                             lambda *a, **k: None)
         monkeypatch.setattr("src.api.event_store.update_event_config", lambda *a, **k: None)
-        monkeypatch.setattr("src.runtime.instances.runtime_instance_name", lambda *a, **k: "opencode-1")
+        monkeypatch.setattr("src.domains.runtime.engine.instances.runtime_instance_name", lambda *a, **k: "opencode-1")
         monkeypatch.setattr("src.prompt_builder.build_devops_agent_prompt", lambda *a, **k: "prompt-630")
         monkeypatch.setattr("src.prompt_builder._resolve_server_url", lambda *a, **k: "http://srv")
         _enqueued = []
-        monkeypatch.setattr("src.runtime.service.enqueue_task",
+        monkeypatch.setattr("src.domains.runtime.engine.service.enqueue_task",
                             lambda **k: _enqueued.append(k) or "t_ok630")
-        monkeypatch.setattr("src.runtime.service.collect_knowledge_files",
+        monkeypatch.setattr("src.domains.runtime.engine.service.collect_knowledge_files",
                             lambda *a, **k: {"project_info": {}, "meta": {}, "knowledge": {}})
         try:
             ep._enqueue_pipeline_task(
