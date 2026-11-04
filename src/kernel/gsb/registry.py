@@ -6,6 +6,10 @@
 关闭时注销。其他域通过 discover_service() 发现服务地址。
 
 注册表表名不走 TABLE_REGISTRY（GSB 基础设施表，不参与分 Schema 前缀）。
+
+2026-11 补齐：新增 list_all_services()（运维全量视图，含离线/过期行）与
+purge_stale()（把心跳超时的 online 行标为 offline），供 /internal/gsb/services
+与巡检脚本使用；register/discover 行为保持设计稿语义不变。
 """
 from __future__ import annotations
 
@@ -38,28 +42,41 @@ def _ensure_table():
         session_manager.db.commit()
 
 
+def _rows_to_dicts(c, rows: list) -> list[dict]:
+    """统一把 cursor 结果转 dict（SQLite Row 工厂 / MySQL DictCursor 均可）。"""
+    if not rows:
+        return []
+    if hasattr(rows[0], "keys"):
+        return [dict(r) for r in rows]
+    cols = [d[0] for d in c.description] if c.description else []
+    return [dict(zip(cols, r)) for r in rows] if cols else []
+
+
 def register_service(
     name: str,
     base_url: str,
     health_url: str = "/api/health",
     metadata: dict | None = None,
+    version: str | None = None,
 ) -> None:
     """服务启动时注册自己。
 
     Args:
-        name: 服务名（mgmt / runtime / insight / future-service）
-        base_url: 服务基础 URL（如 http://localhost:38080）
+        name: 服务名（mgmt / event / runtime / insight / future-service）
+        base_url: 服务基础 URL（如 http://127.0.0.1:38081）
         health_url: 健康检查路径（默认 /api/health）
-        metadata: 额外元数据（description, endpoints, ...）
+        metadata: 额外元数据（role, port, pid, started_at, ...）
+        version: 服务版本（写入 version 列，便于灰度期间比对）
     """
     _ensure_table()
+    payload = json.dumps(metadata or {}, ensure_ascii=False)
     with session_manager.db_lock:
         c = session_manager.db.cursor()
         c.execute(
             "INSERT OR REPLACE INTO gsb_service_registry "
-            "(service_name, base_url, health_url, status, last_heartbeat, metadata) "
-            "VALUES (?, ?, ?, 'online', ?, ?)",
-            (name, base_url, health_url, time.time(), json.dumps(metadata or {})),
+            "(service_name, base_url, health_url, version, status, last_heartbeat, metadata) "
+            "VALUES (?, ?, ?, ?, 'online', ?, ?)",
+            (name, base_url, health_url, version or "1", time.time(), payload),
         )
         session_manager.db.commit()
 
@@ -116,12 +133,49 @@ def list_services() -> list:
             "ORDER BY service_name",
             (time.time() - HEARTBEAT_TIMEOUT,),
         )
-        rows = c.fetchall()
-        if rows and hasattr(rows[0], "keys"):
-            return [dict(r) for r in rows]
-        # Fallback: manually build dicts
-        cols = [d[0] for d in c.description] if c.description else []
-        return [dict(zip(cols, r)) for r in rows] if cols else []
+        return _rows_to_dicts(c, c.fetchall())
+
+
+def list_all_services(include_offline: bool = True) -> list:
+    """列出注册表全部行（运维视角，含离线与心跳过期行）。
+
+    与 list_services() 的区别：不做心跳过滤，额外返回 age_seconds / alive
+    两个派生字段，方便一眼看出"注册了但已经死掉"的服务。
+    """
+    _ensure_table()
+    where = "" if include_offline else " WHERE status='online'"
+    with session_manager.db_lock:
+        c = session_manager.db.cursor()
+        c.execute(
+            "SELECT * FROM gsb_service_registry" + where + " ORDER BY service_name"
+        )
+        rows = _rows_to_dicts(c, c.fetchall())
+
+    now = time.time()
+    for r in rows:
+        age = max(0.0, now - float(r.get("last_heartbeat") or 0))
+        r["age_seconds"] = round(age, 1)
+        r["alive"] = bool(r.get("status") == "online" and age <= HEARTBEAT_TIMEOUT)
+    return rows
+
+
+def purge_stale(ttl: float = HEARTBEAT_TIMEOUT) -> int:
+    """把心跳超时的 online 行标记为 offline，返回受影响行数。
+
+    仅做状态收敛，不删除行——保留 base_url / metadata 便于事后排查。
+    """
+    _ensure_table()
+    cutoff = time.time() - ttl
+    with session_manager.db_lock:
+        c = session_manager.db.cursor()
+        c.execute(
+            "UPDATE gsb_service_registry SET status='offline' "
+            "WHERE status='online' AND last_heartbeat < ?",
+            (cutoff,),
+        )
+        affected = c.rowcount if c.rowcount and c.rowcount > 0 else 0
+        session_manager.db.commit()
+    return affected
 
 
 def deregister_service(name: str) -> None:

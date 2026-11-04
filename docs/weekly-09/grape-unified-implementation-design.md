@@ -2647,6 +2647,46 @@ grape-admin（Spring Boot + Vue3）是最先需要接入的非 Python 服务：
 
 ---
 
+#### 7.8.12 落地状态（2026-11-04，weekly-09-ljt）
+
+此前 GSB 只有实现、没有接线：`register_service()` 的唯一调用点是 `GsbService.mount()`，
+而四个进程入口从未实例化 `GsbService`，因此注册表连建表都没跑过（`gsb_service_registry`
+不存在），服务发现实际靠 `.env` 静态 URL + `/health` 探活。
+
+本分支已完成接线（commit `feat(gsb): 接线服务总线…`）：
+
+| 项目 | 落地内容 |
+|------|---------|
+| 进程接线 | `mgmt` / `event` / `worker`(服务名 `runtime`) / `insight` 四个入口在 import 期调用 `init_gsb(app, role)`，lifespan 里 `await gsb.startup()` / `await gsb.shutdown()` |
+| 注册地址 | `base_url` 支持 `GRAPE_GSB_BASE_URL` > `GRAPE_{MGMT,EVENT,RUNTIME,INSIGHT}_URL` > `http://127.0.0.1:<实际端口>`；端口支持 `GRAPE_GSB_PORT` 覆盖，不再写死 localhost:38080 |
+| 健康语义 | `health_url` 默认 `/api/ping`（全进程可达、免鉴权、不查库），避开 `/health` 的 loopback-only 限制 |
+| 自愈 | 注册失败只告警、不阻断进程启动；下一次心跳（30s）自动重试注册 |
+| 运维端点 | `GET /internal/gsb/services`（全量 + `age_seconds` / `alive`）、`GET /internal/gsb/services/{name}`（单服务发现，过期返回 404），集群模式走 `X-Service-Token` 认证 |
+| 注册表能力 | 新增 `list_all_services()`（含离线/过期行）与 `purge_stale()`（心跳超时收敛为 offline，保留行便于排查） |
+| 客户端 | 新增 `event` 映射与四进程实际端口回退；传输层故障（ConnectError/超时/协议错）按 `env → 注册表 → 本机` 顺序切换候选地址，HTTP 4xx/5xx 不重试 |
+| 测试 | `tests/test_gsb_registry.py` + `tests/test_gsb_service.py`，共 17 例（注册/心跳/超时/注销/端点/地址解析/故障切换） |
+
+实测（本机四进程重启后）：
+
+```
+service    base_url                  health     version  status  age
+event      http://127.0.0.1:38082    /api/ping  2.2.0    online  <30s
+insight    http://127.0.0.1:38084    /api/ping  2.2.0    online  <30s
+mgmt       http://127.0.0.1:38081    /api/ping  2.2.0    online  <30s
+runtime    http://127.0.0.1:38083    /api/ping  2.2.0    online  <30s
+```
+
+`/internal/gsb/services` 无令牌返回 401，带 HMAC 令牌返回 4 条 online 记录；
+SIGINT 关闭时打印 `GSB deregistered` 并把行置为 offline，重启后重新 online。
+
+**已知限制（多节点共用一套 DB 时）**：注册表主键是 `service_name`，两个节点
+（如本机与兄弟机）同时注册同名服务时会互相覆盖，只剩最后一次心跳。多实例部署前
+需要把主键扩为 `(service_name, instance_id)`（`instance_id` = `host:port`），
+发现接口按 `local-first → 同机房 → 轮询` 选择实例。本分支尚未改动该语义，
+兄弟机也仍是未接线版本。
+
+---
+
 ## 8. sweep_loop 拆分
 
 ### 8.1 当前结构

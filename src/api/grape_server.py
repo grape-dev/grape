@@ -97,6 +97,11 @@ async def lifespan(app: FastAPI):
     except SystemExit as e:
         raise
 
+    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 mgmt 启动）
+    _gsb = getattr(app.state, "gsb", None)
+    if _gsb is not None:
+        await _gsb.startup()
+
     # Mgmt 进程定时任务（设计 §5.1）
     _mgmt_h = await server_tasks.start_mgmt_tasks(app)
     bot_manager = _mgmt_h.get("bot_manager")
@@ -104,6 +109,8 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    if _gsb is not None:
+        await _gsb.shutdown()
     await server_tasks.stop_mgmt_tasks(app, _mgmt_h)
     log.info("Grape Mgmt Server lifespan stopped")
 
@@ -172,6 +179,10 @@ server_common.init_process_db()
 
 # /internal/* 端点——供集群模式 RemoteProvider 调用（Phase 5）
 server_common.attach_internal_routes(app, "mgmt")
+
+# GSB 服务注册表端点（/internal/gsb/*）
+from src.kernel.gsb.router import init_gsb
+init_gsb(app, "mgmt")
 
 server_common.attach_health(app, service_name="server", readiness=True)
 server_common.attach_frontend(app)

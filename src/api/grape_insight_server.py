@@ -25,12 +25,19 @@ from src.api import server_common, server_tasks
 async def lifespan(app: FastAPI):
     from src.kernel.config import log
 
+    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 insight 启动）
+    _gsb = getattr(app.state, "gsb", None)
+    if _gsb is not None:
+        await _gsb.startup()
+
     # Insight 进程定时任务（设计 §5.4）
     _insight_h = await server_tasks.start_insight_tasks(app)
     log.info("Grape Insight Server lifespan started")
 
     yield
 
+    if _gsb is not None:
+        await _gsb.shutdown()
     await server_tasks.stop_insight_tasks(app, _insight_h)
     log.info("Grape Insight Server lifespan stopped")
 
@@ -53,5 +60,9 @@ server_common.init_process_db()
 
 # /internal/* 端点——供集群模式 RemoteProvider 调用（Phase 5）
 server_common.attach_internal_routes(app, "insight")
+
+# GSB 服务注册表端点（/internal/gsb/*）
+from src.kernel.gsb.router import init_gsb
+init_gsb(app, "insight")
 
 server_common.attach_health(app, service_name="insight-server", readiness=False)

@@ -24,12 +24,19 @@ from src.api import server_common, server_tasks
 async def lifespan(app: FastAPI):
     from src.kernel.config import log
 
+    # GSB：注册本进程（服务名 runtime）+ 起 30s 心跳
+    _gsb = getattr(app.state, "gsb", None)
+    if _gsb is not None:
+        await _gsb.startup()
+
     # Worker 进程定时任务（设计 §5.3）
     _worker_h = await server_tasks.start_worker_tasks(app)
     log.info("Grape Worker Server lifespan started")
 
     yield
 
+    if _gsb is not None:
+        await _gsb.shutdown()
     await server_tasks.stop_worker_tasks(app, _worker_h)
     log.info("Grape Worker Server lifespan stopped")
 
@@ -54,5 +61,9 @@ server_common.init_process_db()
 
 # /internal/* 端点——供集群模式 RemoteProvider 调用（Phase 5）
 server_common.attach_internal_routes(app, "runtime")
+
+# GSB 服务注册表端点（/internal/gsb/*）
+from src.kernel.gsb.router import init_gsb
+init_gsb(app, "worker")
 
 server_common.attach_health(app, service_name="worker-server", readiness=False)

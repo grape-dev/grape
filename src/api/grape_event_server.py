@@ -24,12 +24,19 @@ from src.api import server_common, server_tasks
 async def lifespan(app: FastAPI):
     from src.kernel.config import log
 
+    # GSB：注册本进程 + 起 30s 心跳（失败只告警，不影响 event 启动）
+    _gsb = getattr(app.state, "gsb", None)
+    if _gsb is not None:
+        await _gsb.startup()
+
     # Event 进程定时任务（设计 §5.2）
     _event_h = await server_tasks.start_event_tasks(app)
     log.info("Grape Event Server lifespan started")
 
     yield
 
+    if _gsb is not None:
+        await _gsb.shutdown()
     await server_tasks.stop_event_tasks(app, _event_h)
     log.info("Grape Event Server lifespan stopped")
 
@@ -51,5 +58,9 @@ server_common.include_selected(app, events.router, methods={"POST"}, paths=("/te
 server_common.include_selected(app, issues.router, methods={"POST"}, paths=("/api/issues/{owner}/{repo}",))
 
 server_common.init_process_db()
+
+# GSB 服务注册表端点（/internal/gsb/*；event 进程同样参与服务发现）
+from src.kernel.gsb.router import init_gsb
+init_gsb(app, "event")
 
 server_common.attach_health(app, service_name="event-server", readiness=False)
