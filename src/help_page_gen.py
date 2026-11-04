@@ -588,12 +588,30 @@ def write_openapi_contract(schema: dict, help_path: Path | None = None, static_p
 
     规范副本写 help/api/openapi.json（需求要求），提供副本写 static 目录供下载。
     返回架构 paths 数。
+
+    三进程拆分（Issue #596）防护（2026-11-04 事故）：A 进程（grape_server）按设计
+    不加载 webhook/B、C 路由，其 schema 缺 /api/a2a、/api/tasks/* 等端点；此前
+    无条件覆盖会把 static 契约缩水成 243 路径，全平台 worker CLI 契约缺 a2a/tasks
+    命令、任务收尾 A2A 集体断链。保护规则：**磁盘契约里存在本次 schema 缺的端点
+    时不覆盖**——缺路由的进程不缩小契约；端点更多、同集合定义更新、磁盘无契约
+    或损坏时正常写入。
     """
     import json as _json
 
     text = _json.dumps(schema, ensure_ascii=False, indent=2)
+    _new_paths = set((schema.get("paths") or {}).keys())
     for p in (help_path or OPENAPI_HELP_PATH, static_path or OPENAPI_STATIC_PATH):
         p.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if p.exists():
+                _existing = _json.loads(p.read_text(encoding="utf-8"))
+                _existing_paths = set((_existing.get("paths") or {}).keys())
+                if _existing_paths - _new_paths:
+                    # 磁盘契约里有本次 schema 缺的端点（本进程不加载该路由，
+                    # 如 A 进程缺 B/C 的 a2a/tasks）→ 不缩小契约，保留全量版本
+                    continue
+        except Exception:
+            pass  # 磁盘文件损坏/不可解析时按无契约处理，正常写入
         p.write_text(text, encoding="utf-8")
     return len(schema.get("paths", {}))
 
